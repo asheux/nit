@@ -77,6 +77,7 @@ fn run_loop(
     let mut input_state = InputState::new();
     let mut system_stats = SystemStats::new();
     let mut clipboard = Clipboard::new().ok();
+    tracing::info!("SECURITY: no plugins, no network, no shell execution");
     loop {
         if let Some(deferred) = input_state.take_deferred() {
             if let Some(action) = map_key_to_action(deferred, state, &mut input_state) {
@@ -370,6 +371,11 @@ fn map_key_to_action(key: KeyEvent, state: &AppState, input: &mut InputState) ->
             Action::ShowHelp
         }),
         KeyEvent {
+            code: KeyCode::Char('b') | KeyCode::Char('B'),
+            modifiers: KeyModifiers::CONTROL,
+            ..
+        } => Some(Action::ToggleDebug),
+        KeyEvent {
             code: KeyCode::Tab,
             modifiers: KeyModifiers::SHIFT,
             ..
@@ -551,11 +557,16 @@ fn apply_action_with_syntax(
     syntax: &mut SyntaxRuntime,
     action: Action,
 ) -> nit_core::state::ActionOutcome {
+    let before_focus = state.focus;
+    let before_mode = state.mode;
+    let before_debug = state.debug;
     let editor_id = state.active_editor_buffer_id;
     let notes_id = state.notes_buffer_id;
     let editor_version = state.editor_buffer().version();
     let notes_version = state.notes_buffer().version();
     let outcome = apply_action(state, action.clone());
+
+    log_action(state, &action, before_focus, before_mode, before_debug);
 
     if state.editor_buffer().version() != editor_version {
         let buf = state.editor_buffer_mut();
@@ -573,6 +584,51 @@ fn apply_action_with_syntax(
     }
 
     outcome
+}
+
+fn log_action(
+    state: &AppState,
+    action: &Action,
+    before_focus: PaneId,
+    before_mode: Mode,
+    before_debug: bool,
+) {
+    match action {
+        Action::ToggleDebug => {
+            tracing::info!(
+                "DEBUG mode {}",
+                if state.debug { "ENABLED" } else { "DISABLED" }
+            );
+        }
+        Action::Save | Action::SaveAndNormal => {
+            if let Some(status) = &state.status {
+                if status.contains("Save failed") || status.contains("No path") {
+                    tracing::warn!("SAVE {}", status);
+                } else {
+                    tracing::info!("SAVE {}", status);
+                }
+            }
+        }
+        Action::ConfirmQuitYes => tracing::info!("QUIT confirmed"),
+        Action::ConfirmQuitNo => tracing::info!("QUIT canceled"),
+        _ => {}
+    }
+
+    if !state.debug {
+        return;
+    }
+
+    if before_focus != state.focus {
+        tracing::info!("DEBUG focus {:?} -> {:?}", before_focus, state.focus);
+    }
+    if before_mode != state.mode {
+        tracing::info!("DEBUG mode {:?} -> {:?}", before_mode, state.mode);
+    }
+    if before_debug != state.debug {
+        tracing::info!("DEBUG toggle {}", state.debug);
+    }
+
+    tracing::info!("DEBUG action {:?}", action);
 }
 
 fn handle_clipboard_copy(state: &AppState, clipboard: &mut Option<Clipboard>, action: &Action) {

@@ -30,6 +30,7 @@ fn main() -> anyhow::Result<()> {
 
     let (log_tx, log_rx) = mpsc::channel::<String>();
     init_tracing(log_tx)?;
+    install_panic_hook();
 
     let mut state = nit_core::AppState::new(workspace_root, editor, notes);
     let seed = stable_hash_bytes(state.editor_buffer().content_as_string().as_bytes());
@@ -110,6 +111,14 @@ fn init_tracing(tx: mpsc::Sender<String>) -> anyhow::Result<()> {
         .try_init()
         .ok();
     Ok(())
+}
+
+fn install_panic_hook() {
+    std::panic::set_hook(Box::new(|info| {
+        tracing::error!("PANIC: {info}");
+        let bt = std::backtrace::Backtrace::force_capture();
+        tracing::error!("BACKTRACE: {bt:?}");
+    }));
 }
 
 #[derive(Clone)]

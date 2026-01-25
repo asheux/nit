@@ -51,4 +51,5 @@ pub enum Action {
     ShowHelp,
     HideHelp,
     ToggleSyntax,
+    ToggleDebug,
 }

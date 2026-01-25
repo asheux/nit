@@ -117,6 +117,10 @@ pub fn render(frame: &mut Frame, area: Rect, theme: &Theme) {
             Span::raw(" toggle syntax highlight"),
         ]),
         Line::from(vec![
+            Span::styled("Ctrl+B", Style::default().fg(theme.accent)),
+            Span::raw(" toggle debug mode"),
+        ]),
+        Line::from(vec![
             Span::styled("Ctrl+G", Style::default().fg(theme.accent)),
             Span::raw(" toggle help"),
         ]),

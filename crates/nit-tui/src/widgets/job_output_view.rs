@@ -72,13 +72,32 @@ pub fn render(frame: &mut Frame, area: ratatui::layout::Rect, state: &AppState, 
     let logs: Vec<_> = state.logs.iter().rev().take(height).cloned().collect();
     let mut lines: Vec<Line> = Vec::new();
     for line in logs.into_iter().rev() {
-        lines.push(Line::from(Span::styled(
-            line,
-            Style::default().fg(theme.foreground),
-        )));
+        let style = log_style(&line, theme);
+        lines.push(Line::from(Span::styled(line, style)));
     }
 
     let paragraph =
         Paragraph::new(lines).style(Style::default().bg(theme.background).fg(theme.foreground));
     frame.render_widget(paragraph, chunks[1]);
+}
+
+fn log_style(line: &str, theme: &Theme) -> Style {
+    let upper = line.to_ascii_uppercase();
+    if upper.contains("PANIC") || upper.contains("ERROR") {
+        Style::default()
+            .fg(theme.error)
+            .add_modifier(Modifier::BOLD)
+    } else if upper.contains("WARN") {
+        Style::default()
+            .fg(theme.warning)
+            .add_modifier(Modifier::BOLD)
+    } else if upper.contains("SECURITY") {
+        Style::default().fg(theme.accent)
+    } else if upper.contains("DEBUG") {
+        Style::default()
+            .fg(theme.border)
+            .add_modifier(Modifier::DIM)
+    } else {
+        Style::default().fg(theme.foreground)
+    }
 }

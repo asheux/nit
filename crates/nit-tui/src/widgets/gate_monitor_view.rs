@@ -62,6 +62,10 @@ pub fn render(
             }),
         ]),
         Row::new(vec![
+            Cell::from("Debug"),
+            Cell::from(if state.debug { "ON" } else { "OFF" }),
+        ]),
+        Row::new(vec![
             Cell::from("Ln/Col"),
             Cell::from(format!("{ln}/{col}")),
         ]),

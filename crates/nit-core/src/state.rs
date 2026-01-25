@@ -72,6 +72,7 @@ pub struct AppState {
     pub show_help: bool,
     pub status: Option<String>,
     pub settings: Settings,
+    pub debug: bool,
     #[serde(skip)]
     pub yank: Option<String>,
     #[serde(skip)]
@@ -117,6 +118,7 @@ impl AppState {
             show_help: false,
             status: None,
             settings: Settings::default(),
+            debug: false,
             yank: None,
             yank_kind: YankKind::Char,
         }
@@ -517,6 +519,14 @@ pub fn apply_action(state: &mut AppState, action: Action) -> ActionOutcome {
         }
         Action::ToggleSyntax => {
             state.settings.highlight.enabled = !state.settings.highlight.enabled;
+        }
+        Action::ToggleDebug => {
+            state.debug = !state.debug;
+            state.status = Some(if state.debug {
+                "Debug ON".into()
+            } else {
+                "Debug OFF".into()
+            });
         }
         Action::ShowHelp => state.show_help = true,
         Action::HideHelp => state.show_help = false,

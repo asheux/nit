@@ -37,6 +37,7 @@ pub fn render(frame: &mut Frame, area: ratatui::layout::Rect, state: &AppState, 
         "Ctrl+G Help",
         "Ctrl+N Clear",
         "Ctrl+Shift+S Syntax",
+        "Ctrl+B Debug",
         "Ctrl+R Seed",
         "Ctrl+A Apply",
     ];
