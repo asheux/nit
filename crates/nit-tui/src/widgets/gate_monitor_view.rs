@@ -37,6 +37,7 @@ pub fn render(
         .borders(Borders::ALL)
         .border_style(border_style)
         .border_type(border_type)
+        .style(Style::default().bg(theme.background))
         .title(Span::styled(
             "GATE MONITOR",
             Style::default()

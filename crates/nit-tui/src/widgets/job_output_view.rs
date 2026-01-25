@@ -36,7 +36,8 @@ pub fn render(frame: &mut Frame, area: ratatui::layout::Rect, state: &AppState, 
                 .add_modifier(Modifier::BOLD),
         ))
         .border_style(border_style)
-        .border_type(border_type);
+        .border_type(border_type)
+        .style(Style::default().bg(theme.background));
 
     let inner = block.inner(area);
 
@@ -47,7 +48,7 @@ pub fn render(frame: &mut Frame, area: ratatui::layout::Rect, state: &AppState, 
 
     // Progress gauge
     let gauge = Gauge::default()
-        .block(Block::default())
+        .block(Block::default().style(Style::default().bg(theme.background)))
         .gauge_style(
             Style::default()
                 .fg(theme.accent)

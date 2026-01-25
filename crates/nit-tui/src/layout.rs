@@ -16,7 +16,7 @@ pub fn split(frame: Rect) -> MainLayout {
         .constraints([
             Constraint::Length(3),
             Constraint::Min(5),
-            Constraint::Length(1),
+            Constraint::Length(2),
         ])
         .split(frame);
 
