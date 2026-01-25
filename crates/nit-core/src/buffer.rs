@@ -5,6 +5,17 @@ use unicode_segmentation::UnicodeSegmentation;
 
 const UNDO_LIMIT: usize = 256;
 
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum EditKind {
+    Insert,
+}
+
+#[derive(Copy, Clone, Debug)]
+struct EditMeta {
+    kind: EditKind,
+    cursor_index: usize,
+}
+
 #[derive(Clone, Debug)]
 struct Snapshot {
     rope: Rope,
@@ -23,6 +34,8 @@ pub struct Buffer {
     #[serde(skip)]
     redo: Vec<Snapshot>,
     #[serde(skip)]
+    last_edit: Option<EditMeta>,
+    #[serde(skip)]
     selection_anchor: Option<usize>,
     pub cursor: Cursor,
     pub viewport: Viewport,
@@ -37,6 +50,7 @@ impl Buffer {
             rope: content,
             undo: Vec::new(),
             redo: Vec::new(),
+            last_edit: None,
             selection_anchor: None,
             cursor: Cursor::default(),
             viewport: Viewport::default(),
@@ -253,6 +267,7 @@ impl Buffer {
     }
 
     pub fn delete_selection(&mut self) -> bool {
+        self.end_edit_group();
         let (start, end) = match self.selection_range() {
             Some(range) => range,
             None => return false,
@@ -272,8 +287,8 @@ impl Buffer {
         if s.is_empty() {
             return;
         }
-        self.push_undo();
         let idx = self.char_index();
+        self.begin_insert_group(idx);
         self.rope.insert(idx, s);
         let mut line = self.cursor.line;
         let mut col = self.cursor.col;
@@ -288,15 +303,38 @@ impl Buffer {
         self.cursor.line = line;
         self.cursor.col = col;
         self.dirty = true;
+        self.finish_insert_group();
+    }
+
+    pub fn open_line_below(&mut self) {
+        self.end_edit_group();
+        self.push_undo();
+        let line = self.cursor.line.min(self.rope.len_lines().saturating_sub(1));
+        let indent = self.line_indent(line);
+        let insert_at = self.rope.line_to_char(line) + self.line_char_len(line);
+        let mut text = String::from("\n");
+        text.push_str(&indent);
+        self.rope.insert(insert_at, &text);
+        self.cursor.line = line + 1;
+        self.cursor.col = indent.chars().count();
+        self.dirty = true;
     }
 
     pub fn open_line_above(&mut self) {
+        self.end_edit_group();
         self.push_undo();
         let line = self.cursor.line.min(self.rope.len_lines().saturating_sub(1));
+        let indent = if line > 0 {
+            self.line_indent(line.saturating_sub(1))
+        } else {
+            String::new()
+        };
         let idx = self.rope.line_to_char(line);
-        self.rope.insert_char(idx, '\n');
+        let mut text = indent.clone();
+        text.push('\n');
+        self.rope.insert(idx, &text);
         self.cursor.line = line;
-        self.cursor.col = 0;
+        self.cursor.col = indent.chars().count();
         self.dirty = true;
     }
 
@@ -304,6 +342,7 @@ impl Buffer {
         if text.is_empty() {
             return;
         }
+        self.end_edit_group();
         self.push_undo();
         let line = self.cursor.line.min(self.rope.len_lines().saturating_sub(1));
         let idx = self.rope.line_to_char(line);
@@ -314,7 +353,50 @@ impl Buffer {
         self.clamp_col();
     }
 
+    pub fn paste_line_below(&mut self, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+        self.end_edit_group();
+        self.push_undo();
+        let total = self.rope.len_lines();
+        let line = self.cursor.line.min(total.saturating_sub(1));
+        let mut idx = if line + 1 < total {
+            self.rope.line_to_char(line + 1)
+        } else {
+            self.rope.len_chars()
+        };
+        if idx > 0 && self.rope.char(idx.saturating_sub(1)) != '\n' {
+            self.rope.insert_char(idx, '\n');
+            idx += 1;
+        }
+        self.rope.insert(idx, text);
+        self.cursor.line = (line + 1).min(self.rope.len_lines().saturating_sub(1));
+        self.cursor.col = 0;
+        self.dirty = true;
+        self.clamp_col();
+    }
+
+    fn line_indent(&self, line: usize) -> String {
+        if line >= self.rope.len_lines() {
+            return String::new();
+        }
+        let mut indent = String::new();
+        for ch in self.rope.line(line).chars() {
+            if ch == '\n' {
+                break;
+            }
+            if ch == ' ' || ch == '\t' {
+                indent.push(ch);
+            } else {
+                break;
+            }
+        }
+        indent
+    }
+
     pub fn exit_insert_mode(&mut self) {
+        self.end_edit_group();
         if self.is_line_blank(self.cursor.line) {
             self.cursor.col = 0;
         } else if self.cursor.col > 0 {
@@ -393,11 +475,12 @@ impl Buffer {
     }
 
     pub fn insert_char(&mut self, c: char) {
-        self.push_undo();
         let idx = self.char_index();
+        self.begin_insert_group(idx);
         self.rope.insert_char(idx, c);
         self.cursor.col += 1;
         self.dirty = true;
+        self.finish_insert_group();
     }
 
     pub fn insert_tab(&mut self) {
@@ -405,15 +488,17 @@ impl Buffer {
     }
 
     pub fn insert_newline(&mut self) {
-        self.push_undo();
         let idx = self.char_index();
+        self.begin_insert_group(idx);
         self.rope.insert_char(idx, '\n');
         self.cursor.line += 1;
         self.cursor.col = 0;
         self.dirty = true;
+        self.finish_insert_group();
     }
 
     pub fn backspace(&mut self) {
+        self.end_edit_group();
         if self.cursor.col > 0 {
             let idx = self.char_index();
             if idx > 0 {
@@ -436,6 +521,7 @@ impl Buffer {
     }
 
     pub fn delete_forward(&mut self) {
+        self.end_edit_group();
         let idx = self.char_index();
         let line_len = self.line_char_len(self.cursor.line);
         if self.cursor.col < line_len {
@@ -451,6 +537,7 @@ impl Buffer {
     }
 
     pub fn delete_line(&mut self) {
+        self.end_edit_group();
         let total = self.rope.len_lines();
         if total == 0 {
             return;
@@ -491,6 +578,7 @@ impl Buffer {
 
     pub fn undo(&mut self) -> bool {
         if let Some(snapshot) = self.undo.pop() {
+            self.end_edit_group();
             self.push_redo();
             self.rope = snapshot.rope;
             self.cursor = snapshot.cursor;
@@ -514,6 +602,7 @@ impl Buffer {
 
     pub fn redo(&mut self) -> bool {
         if let Some(snapshot) = self.redo.pop() {
+            self.end_edit_group();
             self.push_undo_without_clearing_redo();
             self.rope = snapshot.rope;
             self.cursor = snapshot.cursor;
@@ -543,6 +632,28 @@ impl Buffer {
             cursor: self.cursor,
             dirty: self.dirty,
         });
+    }
+
+    fn begin_insert_group(&mut self, idx: usize) {
+        let start_new = match self.last_edit {
+            Some(meta) => meta.kind != EditKind::Insert || meta.cursor_index != idx,
+            None => true,
+        };
+        if start_new {
+            self.push_undo();
+        }
+    }
+
+    fn finish_insert_group(&mut self) {
+        let cursor_index = self.char_index();
+        self.last_edit = Some(EditMeta {
+            kind: EditKind::Insert,
+            cursor_index,
+        });
+    }
+
+    fn end_edit_group(&mut self) {
+        self.last_edit = None;
     }
 
     fn set_cursor_from_char_index(&mut self, idx: usize) {

@@ -9,7 +9,7 @@ use crossterm::{
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
-use nit_core::{actions::Action, apply_action, AppState, Mode, PaneId, Prompt, Viewport};
+use nit_core::{actions::Action, apply_action, AppState, Mode, PaneId, Prompt, Viewport, YankKind};
 use ratatui::{
     backend::CrosstermBackend,
     style::Style,
@@ -482,7 +482,7 @@ fn map_key_to_action(key: KeyEvent, state: &AppState, input: &mut InputState) ->
 }
 
 fn handle_clipboard_copy(state: &AppState, clipboard: &mut Option<Clipboard>, action: &Action) {
-    if !matches!(action, Action::YankSelection) {
+    if !matches!(action, Action::YankSelection | Action::YankLine) {
         return;
     }
     if let (Some(text), Some(cb)) = (state.yank.as_ref(), clipboard.as_mut()) {
@@ -495,13 +495,18 @@ fn prepare_clipboard_paste(
     clipboard: &mut Option<Clipboard>,
     action: &Action,
 ) {
-    if !matches!(action, Action::Paste) || state.yank.is_some() {
+    if !matches!(action, Action::Paste | Action::PasteLineAbove) || state.yank.is_some() {
         return;
     }
     if let Some(cb) = clipboard.as_mut() {
         if let Ok(text) = cb.get_text() {
             if !text.is_empty() {
                 state.yank = Some(text);
+                state.yank_kind = if state.yank.as_ref().map_or(false, |t| t.contains('\n')) {
+                    YankKind::Line
+                } else {
+                    YankKind::Char
+                };
             }
         }
     }

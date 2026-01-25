@@ -17,5 +17,5 @@ pub use io::{load_to_string, save_buffer};
 pub use mode::Mode;
 pub use pane::PaneId;
 pub use prompt::Prompt;
-pub use state::{apply_action, AppState, JobState, LogBuffer, Metrics, VisualizerState};
+pub use state::{apply_action, AppState, JobState, LogBuffer, Metrics, VisualizerState, YankKind};
 pub use viewport::Viewport;

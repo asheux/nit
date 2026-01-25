@@ -73,6 +73,15 @@ pub struct AppState {
     pub status: Option<String>,
     #[serde(skip)]
     pub yank: Option<String>,
+    #[serde(skip)]
+    pub yank_kind: YankKind,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Default)]
+pub enum YankKind {
+    #[default]
+    Char,
+    Line,
 }
 
 pub struct ActionOutcome {
@@ -107,6 +116,7 @@ impl AppState {
             show_help: false,
             status: None,
             yank: None,
+            yank_kind: YankKind::Char,
         }
     }
 
@@ -295,12 +305,23 @@ pub fn apply_action(state: &mut AppState, action: Action) -> ActionOutcome {
             } else {
                 None
             };
-            state.yank = yank;
+            if let Some(text) = yank {
+                state.yank_kind = if text.contains('\n') {
+                    YankKind::Line
+                } else {
+                    YankKind::Char
+                };
+                state.yank = Some(text);
+            } else {
+                state.yank = None;
+                state.yank_kind = YankKind::Char;
+            }
             state.mode = Mode::Normal;
         }
         Action::YankLine => {
             if let Some(buf) = state.focused_buffer_mut() {
                 state.yank = Some(buf.yank_line());
+                state.yank_kind = YankKind::Line;
             }
         }
         Action::DeleteSelection => {
@@ -314,18 +335,32 @@ pub fn apply_action(state: &mut AppState, action: Action) -> ActionOutcome {
         Action::Paste => {
             let yank = state.yank.clone();
             let is_normal = state.mode == Mode::Normal;
+            let yank_kind = state.yank_kind;
             if let (Some(yank), Some(buf)) = (yank, state.focused_buffer_mut()) {
-                if is_normal {
-                    buf.append();
+                if is_normal && yank_kind == YankKind::Line {
+                    buf.paste_line_below(&yank);
+                } else {
+                    if is_normal {
+                        buf.append();
+                    }
+                    buf.insert_str(&yank);
                 }
-                buf.insert_str(&yank);
                 buf.ensure_visible();
             }
         }
         Action::PasteLineAbove => {
             let yank = state.yank.clone();
+            let yank_kind = state.yank_kind;
             if let (Some(yank), Some(buf)) = (yank, state.focused_buffer_mut()) {
-                buf.paste_line_above(&yank);
+                if yank_kind == YankKind::Line {
+                    buf.paste_line_above(&yank);
+                } else {
+                    let mut text = yank;
+                    if !text.ends_with('\n') {
+                        text.push('\n');
+                    }
+                    buf.paste_line_above(&text);
+                }
                 buf.ensure_visible();
             }
         }
@@ -437,8 +472,7 @@ pub fn apply_action(state: &mut AppState, action: Action) -> ActionOutcome {
         }
         Action::OpenLineBelow => {
             if let Some(buf) = state.focused_buffer_mut() {
-                buf.move_end();
-                buf.insert_newline();
+                buf.open_line_below();
                 buf.ensure_visible();
                 state.mode = Mode::Insert;
             }
