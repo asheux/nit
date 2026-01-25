@@ -1,0 +1,10 @@
+[package]
+name = "nit-utils"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[dependencies]
+directories = { workspace = true }
+blake3 = { workspace = true }
+

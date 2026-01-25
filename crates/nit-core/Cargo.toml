@@ -1,0 +1,14 @@
+[package]
+name = "nit-core"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[dependencies]
+ropey = { workspace = true }
+unicode-segmentation = { workspace = true }
+unicode-width = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+nit-utils = { path = "../nit-utils" }
+

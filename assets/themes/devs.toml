@@ -1,0 +1,13 @@
+background = "#08131f"
+foreground = "#d7e5ff"
+border = "#2a8f9c"
+border_focused = "#6deefc"
+title = "#4ed0d0"
+title_focused = "#7ffcff"
+cursor = "#ffd166"
+cursor_line_bg = "#10253a"
+selection_bg = "#1b3f5c"
+warning = "#f2a541"
+error = "#f25f5c"
+accent = "#ffd166"
+

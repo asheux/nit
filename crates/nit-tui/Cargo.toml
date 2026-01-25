@@ -1,0 +1,16 @@
+[package]
+name = "nit-tui"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[dependencies]
+ratatui = { workspace = true }
+crossterm = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+toml = { workspace = true }
+tracing = { workspace = true }
+nit-core = { path = "../nit-core" }
+nit-utils = { path = "../nit-utils" }
+unicode-width = { workspace = true }
+
