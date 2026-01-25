@@ -50,4 +50,5 @@ pub enum Action {
     VisualizerApply,
     ShowHelp,
     HideHelp,
+    ToggleSyntax,
 }

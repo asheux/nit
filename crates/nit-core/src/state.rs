@@ -1,6 +1,6 @@
 use crate::{
-    actions::Action, buffer::Buffer, io, mode::Mode, pane::PaneId, prompt::Prompt,
-    viewport::Viewport,
+    actions::Action, buffer::Buffer, config::Settings, io, mode::Mode, pane::PaneId,
+    prompt::Prompt, viewport::Viewport,
 };
 use std::collections::VecDeque;
 use std::path::PathBuf;
@@ -71,6 +71,7 @@ pub struct AppState {
     pub prompt: Option<Prompt>,
     pub show_help: bool,
     pub status: Option<String>,
+    pub settings: Settings,
     #[serde(skip)]
     pub yank: Option<String>,
     #[serde(skip)]
@@ -115,6 +116,7 @@ impl AppState {
             prompt: None,
             show_help: false,
             status: None,
+            settings: Settings::default(),
             yank: None,
             yank_kind: YankKind::Char,
         }
@@ -512,6 +514,9 @@ pub fn apply_action(state: &mut AppState, action: Action) -> ActionOutcome {
         }
         Action::VisualizerApply => {
             state.visualizer.variant = state.visualizer.variant.wrapping_add(1);
+        }
+        Action::ToggleSyntax => {
+            state.settings.highlight.enabled = !state.settings.highlight.enabled;
         }
         Action::ShowHelp => state.show_help = true,
         Action::HideHelp => state.show_help = false,

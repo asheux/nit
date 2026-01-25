@@ -107,6 +107,10 @@ pub fn render(frame: &mut Frame, area: Rect, theme: &Theme) {
             Span::raw(" clear logs"),
         ]),
         Line::from(vec![
+            Span::styled("Ctrl+Shift+H", Style::default().fg(theme.accent)),
+            Span::raw(" toggle syntax highlight"),
+        ]),
+        Line::from(vec![
             Span::styled("Ctrl+R", Style::default().fg(theme.accent)),
             Span::raw(" reseed visualizer"),
         ]),

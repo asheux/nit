@@ -9,7 +9,13 @@ use ratatui::{
 
 use crate::theme::Theme;
 
-pub fn render(frame: &mut Frame, area: ratatui::layout::Rect, state: &AppState, theme: &Theme) {
+pub fn render(
+    frame: &mut Frame,
+    area: ratatui::layout::Rect,
+    state: &AppState,
+    theme: &Theme,
+    syntax_status: &str,
+) {
     let focused = state.focus == PaneId::GateMonitor;
     let border_style = if focused {
         Style::default().fg(theme.border_focused)
@@ -78,6 +84,7 @@ pub fn render(frame: &mut Frame, area: ratatui::layout::Rect, state: &AppState, 
             Cell::from("Viz Seed"),
             Cell::from(format!("{}", state.visualizer.seed)),
         ]),
+        Row::new(vec![Cell::from("Syntax"), Cell::from(syntax_status)]),
         Row::new(vec![
             Cell::from("Job paused"),
             Cell::from(format!("{}", state.job.paused)),

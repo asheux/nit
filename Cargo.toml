@@ -1,5 +1,11 @@
 [workspace]
-members = ["crates/nit", "crates/nit-core", "crates/nit-tui", "crates/nit-utils"]
+members = [
+    "crates/nit",
+    "crates/nit-core",
+    "crates/nit-syntax",
+    "crates/nit-tui",
+    "crates/nit-utils",
+]
 resolver = "2"
 
 [workspace.package]
@@ -29,4 +35,3 @@ unicode-width = "0.1"
 [profile.release]
 debug = true
 lto = "thin"
-

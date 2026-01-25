@@ -2,9 +2,10 @@
 
 ## Overview
 
-nit is a terminal-first editor composed of three crates:
+nit is a terminal-first editor composed of four crates:
 
 - `nit-core`: state, actions, text buffers, and IO (no terminal dependencies).
+- `nit-syntax`: syntax highlighting engine and language registry (tree-sitter + fallback).
 - `nit-tui`: rendering, layout, event loop, and key mapping using ratatui + crossterm.
 - `nit`: binary entrypoint wiring CLI args, tracing, and running the TUI.
 
@@ -56,3 +57,28 @@ Atomic save in `io.rs`:
 - All crates forbid unsafe code.
 - Terminal restoration uses guard structs and panic hooks to exit raw/alt screen cleanly.
 
+## Syntax Highlighting
+
+nit uses a dedicated crate (`nit-syntax`) to provide fast, incremental, tree-sitter‑based
+highlighting with a plain‑text fallback. The pipeline is intentionally split so future
+semantic tokens (LSP) can layer on top of syntactic tokens without rewriting UI code.
+
+**Pipeline**
+- Buffer edits in `nit-core` record byte/point edits and bump the buffer version.
+- The TUI collects edits, debounces updates, and schedules background highlight jobs.
+- `nit-syntax` runs tree-sitter parsing and highlight queries off the UI thread.
+- Results are versioned; stale highlights are discarded.
+- Rendering layers: base style → syntax spans → selection → cursor-line background.
+
+**Fallbacks**
+- If highlighting is disabled or file size exceeds `highlight.max_file_bytes`, the
+  engine switches to a plain-text snapshot (no spans) and reports status in Gate Monitor.
+
+**Config knobs**
+- `highlight.enabled`, `highlight.engine`, `highlight.debounce_ms`
+- `highlight.max_file_bytes`, `highlight.max_spans_per_line`
+- `editor.tab_width`
+
+**Extensibility**
+- Language detection is centralized in a registry (extension, filename, shebang).
+- Queries live in `crates/nit-syntax/queries` and can be swapped without touching TUI code.

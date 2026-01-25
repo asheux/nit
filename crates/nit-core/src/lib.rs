@@ -2,6 +2,7 @@
 
 pub mod actions;
 pub mod buffer;
+pub mod config;
 pub mod cursor;
 pub mod io;
 pub mod mode;
@@ -12,6 +13,8 @@ pub mod viewport;
 
 pub use actions::Action;
 pub use buffer::Buffer;
+pub use buffer::{BufferEdit, BufferPoint};
+pub use config::{EditorConfig, HighlightConfig, HighlightEngine, Settings};
 pub use cursor::Cursor;
 pub use io::{load_to_string, save_buffer};
 pub use mode::Mode;

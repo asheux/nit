@@ -6,6 +6,22 @@ use unicode_segmentation::UnicodeSegmentation;
 const UNDO_LIMIT: usize = 256;
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct BufferPoint {
+    pub row: usize,
+    pub column: usize,
+}
+
+#[derive(Clone, Debug)]
+pub struct BufferEdit {
+    pub start_byte: usize,
+    pub old_end_byte: usize,
+    pub new_end_byte: usize,
+    pub start_point: BufferPoint,
+    pub old_end_point: BufferPoint,
+    pub new_end_point: BufferPoint,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
 enum EditKind {
     Insert,
 }
@@ -36,6 +52,12 @@ pub struct Buffer {
     #[serde(skip)]
     last_edit: Option<EditMeta>,
     #[serde(skip)]
+    pending_edits: Vec<BufferEdit>,
+    #[serde(skip)]
+    full_reparse: bool,
+    #[serde(skip)]
+    version: u64,
+    #[serde(skip)]
     selection_anchor: Option<usize>,
     pub cursor: Cursor,
     pub viewport: Viewport,
@@ -51,6 +73,9 @@ impl Buffer {
             undo: Vec::new(),
             redo: Vec::new(),
             last_edit: None,
+            pending_edits: Vec::new(),
+            full_reparse: false,
+            version: 0,
             selection_anchor: None,
             cursor: Cursor::default(),
             viewport: Viewport::default(),
@@ -87,6 +112,20 @@ impl Buffer {
         self.dirty
     }
 
+    pub fn version(&self) -> u64 {
+        self.version
+    }
+
+    pub fn take_pending_edits(&mut self) -> Vec<BufferEdit> {
+        std::mem::take(&mut self.pending_edits)
+    }
+
+    pub fn take_full_reparse(&mut self) -> bool {
+        let flag = self.full_reparse;
+        self.full_reparse = false;
+        flag
+    }
+
     pub fn bytes_len(&self) -> usize {
         self.rope.len_bytes()
     }
@@ -97,6 +136,17 @@ impl Buffer {
 
     pub fn content_as_string(&self) -> String {
         self.rope.to_string()
+    }
+
+    pub fn first_line(&self) -> Option<String> {
+        if self.rope.len_lines() == 0 {
+            return None;
+        }
+        let mut line = self.rope.line(0).to_string();
+        if line.ends_with('\n') {
+            line.pop();
+        }
+        Some(line)
     }
 
     pub fn grapheme_width_at_line(&self, line: usize) -> usize {
@@ -275,6 +325,7 @@ impl Buffer {
         if start >= end {
             return false;
         }
+        self.record_delete(start, end);
         self.push_undo();
         self.rope.remove(start..end);
         self.set_cursor_from_char_index(start.min(self.rope.len_chars()));
@@ -288,6 +339,7 @@ impl Buffer {
             return;
         }
         let idx = self.char_index();
+        self.record_insert(idx, s);
         self.begin_insert_group(idx);
         self.rope.insert(idx, s);
         let mut line = self.cursor.line;
@@ -314,6 +366,7 @@ impl Buffer {
         let insert_at = self.rope.line_to_char(line) + self.line_char_len(line);
         let mut text = String::from("\n");
         text.push_str(&indent);
+        self.record_insert(insert_at, &text);
         self.rope.insert(insert_at, &text);
         self.cursor.line = line + 1;
         self.cursor.col = indent.chars().count();
@@ -332,6 +385,7 @@ impl Buffer {
         let idx = self.rope.line_to_char(line);
         let mut text = indent.clone();
         text.push('\n');
+        self.record_insert(idx, &text);
         self.rope.insert(idx, &text);
         self.cursor.line = line;
         self.cursor.col = indent.chars().count();
@@ -346,6 +400,7 @@ impl Buffer {
         self.push_undo();
         let line = self.cursor.line.min(self.rope.len_lines().saturating_sub(1));
         let idx = self.rope.line_to_char(line);
+        self.record_insert(idx, text);
         self.rope.insert(idx, text);
         self.cursor.line = line;
         self.cursor.col = 0;
@@ -361,16 +416,18 @@ impl Buffer {
         self.push_undo();
         let total = self.rope.len_lines();
         let line = self.cursor.line.min(total.saturating_sub(1));
-        let mut idx = if line + 1 < total {
+        let idx = if line + 1 < total {
             self.rope.line_to_char(line + 1)
         } else {
             self.rope.len_chars()
         };
+        let mut insert_text = String::new();
         if idx > 0 && self.rope.char(idx.saturating_sub(1)) != '\n' {
-            self.rope.insert_char(idx, '\n');
-            idx += 1;
+            insert_text.push('\n');
         }
-        self.rope.insert(idx, text);
+        insert_text.push_str(text);
+        self.record_insert(idx, &insert_text);
+        self.rope.insert(idx, &insert_text);
         self.cursor.line = (line + 1).min(self.rope.len_lines().saturating_sub(1));
         self.cursor.col = 0;
         self.dirty = true;
@@ -476,6 +533,9 @@ impl Buffer {
 
     pub fn insert_char(&mut self, c: char) {
         let idx = self.char_index();
+        let mut buf = [0u8; 4];
+        let s = c.encode_utf8(&mut buf);
+        self.record_insert(idx, s);
         self.begin_insert_group(idx);
         self.rope.insert_char(idx, c);
         self.cursor.col += 1;
@@ -489,6 +549,7 @@ impl Buffer {
 
     pub fn insert_newline(&mut self) {
         let idx = self.char_index();
+        self.record_insert(idx, "\n");
         self.begin_insert_group(idx);
         self.rope.insert_char(idx, '\n');
         self.cursor.line += 1;
@@ -502,6 +563,7 @@ impl Buffer {
         if self.cursor.col > 0 {
             let idx = self.char_index();
             if idx > 0 {
+                self.record_delete(idx - 1, idx);
                 self.push_undo();
                 self.rope.remove(idx - 1..idx);
                 self.cursor.col -= 1;
@@ -511,6 +573,7 @@ impl Buffer {
             let prev_len = self.line_char_len(self.cursor.line - 1);
             let idx = self.char_index();
             if idx > 0 {
+                self.record_delete(idx - 1, idx);
                 self.push_undo();
                 self.rope.remove(idx - 1..idx);
                 self.cursor.line -= 1;
@@ -525,11 +588,13 @@ impl Buffer {
         let idx = self.char_index();
         let line_len = self.line_char_len(self.cursor.line);
         if self.cursor.col < line_len {
+            self.record_delete(idx, idx + 1);
             self.push_undo();
             self.rope.remove(idx..idx + 1);
             self.dirty = true;
         } else if self.cursor.line + 1 < self.rope.len_lines() {
             // delete the newline
+            self.record_delete(idx, idx + 1);
             self.push_undo();
             self.rope.remove(idx..idx + 1);
             self.dirty = true;
@@ -551,6 +616,7 @@ impl Buffer {
             self.rope.len_chars()
         };
         if end > start {
+            self.record_delete(start, end);
             self.rope.remove(start..end);
         }
         let new_total = self.rope.len_lines();
@@ -583,6 +649,7 @@ impl Buffer {
             self.rope = snapshot.rope;
             self.cursor = snapshot.cursor;
             self.dirty = snapshot.dirty;
+            self.record_full_reparse();
             return true;
         }
         false
@@ -607,6 +674,7 @@ impl Buffer {
             self.rope = snapshot.rope;
             self.cursor = snapshot.cursor;
             self.dirty = snapshot.dirty;
+            self.record_full_reparse();
             return true;
         }
         false
@@ -656,6 +724,65 @@ impl Buffer {
         self.last_edit = None;
     }
 
+    fn record_insert(&mut self, start_char: usize, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+        let start_byte = self.rope.char_to_byte(start_char);
+        let start_point = self.point_from_char_index(start_char);
+        let (new_end_byte, new_end_point) = advance_point(start_byte, start_point, text);
+        let edit = BufferEdit {
+            start_byte,
+            old_end_byte: start_byte,
+            new_end_byte,
+            start_point,
+            old_end_point: start_point,
+            new_end_point,
+        };
+        self.push_edit(edit);
+    }
+
+    fn record_delete(&mut self, start_char: usize, end_char: usize) {
+        if start_char >= end_char {
+            return;
+        }
+        let start_byte = self.rope.char_to_byte(start_char);
+        let old_end_byte = self.rope.char_to_byte(end_char);
+        let start_point = self.point_from_char_index(start_char);
+        let old_end_point = self.point_from_char_index(end_char);
+        let edit = BufferEdit {
+            start_byte,
+            old_end_byte,
+            new_end_byte: start_byte,
+            start_point,
+            old_end_point,
+            new_end_point: start_point,
+        };
+        self.push_edit(edit);
+    }
+
+    fn push_edit(&mut self, edit: BufferEdit) {
+        self.pending_edits.push(edit);
+        self.version = self.version.wrapping_add(1);
+    }
+
+    fn record_full_reparse(&mut self) {
+        self.pending_edits.clear();
+        self.full_reparse = true;
+        self.version = self.version.wrapping_add(1);
+    }
+
+    fn point_from_char_index(&self, idx: usize) -> BufferPoint {
+        let line = self.rope.char_to_line(idx);
+        let line_start_char = self.rope.line_to_char(line);
+        let line_start_byte = self.rope.char_to_byte(line_start_char);
+        let byte = self.rope.char_to_byte(idx);
+        BufferPoint {
+            row: line,
+            column: byte.saturating_sub(line_start_byte),
+        }
+    }
+
     fn set_cursor_from_char_index(&mut self, idx: usize) {
         let line = self.rope.char_to_line(idx);
         let line_start = self.rope.line_to_char(line);
@@ -671,4 +798,24 @@ impl Buffer {
         let text = self.rope.line(line).to_string();
         text.trim_end_matches('\n').trim().is_empty()
     }
+}
+
+fn advance_point(
+    start_byte: usize,
+    start_point: BufferPoint,
+    text: &str,
+) -> (usize, BufferPoint) {
+    let mut row = start_point.row;
+    let mut column = start_point.column;
+    let mut byte = start_byte;
+    for b in text.bytes() {
+        byte += 1;
+        if b == b'\n' {
+            row += 1;
+            column = 0;
+        } else {
+            column += 1;
+        }
+    }
+    (byte, BufferPoint { row, column })
 }

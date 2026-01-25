@@ -6,6 +6,7 @@
 - Tab / Shift+Tab: Cycle pane focus
 - Ctrl+H/J/K/L: Focus panes (vim/tmux style: left/down/up/right)
 - F1: Toggle help overlay
+- Ctrl+Shift+H: Toggle syntax highlighting
 
 ## Editor & Notes (focused)
 - Arrow keys / PageUp / PageDown / Home / End: Move cursor/scroll

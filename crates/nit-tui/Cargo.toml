@@ -11,6 +11,7 @@ serde = { workspace = true, features = ["derive"] }
 toml = { workspace = true }
 tracing = { workspace = true }
 nit-core = { path = "../nit-core" }
+nit-syntax = { path = "../nit-syntax" }
 nit-utils = { path = "../nit-utils" }
 unicode-width = { workspace = true }
 arboard = "3.2"

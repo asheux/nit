@@ -20,6 +20,7 @@ use tracing::info;
 
 use crate::{
     layout,
+    syntax::SyntaxRuntime,
     theme::Theme,
     widgets::{
         bottom_bar, editor_view, gate_monitor_view, help_overlay, job_output_view, notes_view,
@@ -41,7 +42,13 @@ pub fn run(mut state: AppState, theme: Theme, log_rx: Receiver<String>) -> io::R
     let mut terminal = Terminal::new(backend)?;
     terminal.hide_cursor()?;
 
-    let result = run_loop(&mut terminal, &mut state, &theme, log_rx);
+    let mut syntax = SyntaxRuntime::new(state.settings.highlight.clone());
+    let editor_id = state.active_editor_buffer_id;
+    let notes_id = state.notes_buffer_id;
+    syntax.prime_buffer(editor_id, state.editor_buffer());
+    syntax.prime_buffer(notes_id, state.notes_buffer());
+
+    let result = run_loop(&mut terminal, &mut state, &theme, &mut syntax, log_rx);
 
     terminal.show_cursor()?;
     execute!(io::stdout(), SetCursorStyle::DefaultUserShape)?;
@@ -55,6 +62,7 @@ fn run_loop(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     state: &mut AppState,
     theme: &Theme,
+    syntax: &mut SyntaxRuntime,
     log_rx: Receiver<String>,
 ) -> io::Result<()> {
     let mut last_tick = Instant::now();
@@ -68,7 +76,7 @@ fn run_loop(
             if let Some(action) = map_key_to_action(deferred, state, &mut input_state) {
                 prepare_clipboard_paste(state, &mut clipboard, &action);
                 let action_copy = action.clone();
-                let outcome = apply_action(state, action);
+                let outcome = apply_action_with_syntax(state, syntax, action);
                 handle_clipboard_copy(state, &mut clipboard, &action_copy);
                 if outcome.should_exit {
                     break;
@@ -87,7 +95,7 @@ fn run_loop(
                 if let Some(action) = map_key_to_action(key, state, &mut input_state) {
                     prepare_clipboard_paste(state, &mut clipboard, &action);
                     let action_copy = action.clone();
-                    let outcome = apply_action(state, action);
+                    let outcome = apply_action_with_syntax(state, syntax, action);
                     handle_clipboard_copy(state, &mut clipboard, &action_copy);
                     if outcome.should_exit {
                         break;
@@ -101,7 +109,7 @@ fn run_loop(
             if let Some(action) = input_state.flush_insert_timeout() {
                 prepare_clipboard_paste(state, &mut clipboard, &action);
                 let action_copy = action.clone();
-                let outcome = apply_action(state, action);
+                let outcome = apply_action_with_syntax(state, syntax, action);
                 handle_clipboard_copy(state, &mut clipboard, &action_copy);
                 if outcome.should_exit {
                     break;
@@ -132,9 +140,17 @@ fn run_loop(
             needs_redraw = true;
         }
 
+        // syntax ticks
+        let editor_id = state.active_editor_buffer_id;
+        let notes_id = state.notes_buffer_id;
+        syntax.tick(editor_id, state.editor_buffer());
+        syntax.tick(notes_id, state.notes_buffer());
+        syntax.poll_results(editor_id, state.editor_buffer().version());
+        syntax.poll_results(notes_id, state.notes_buffer().version());
+
         // redraw
         if needs_redraw || last_tick.elapsed() >= TICK_RATE {
-            draw(terminal, state, theme)?;
+            draw(terminal, state, theme, syntax)?;
             needs_redraw = false;
             last_tick = Instant::now();
         }
@@ -146,6 +162,7 @@ fn draw(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     state: &mut AppState,
     theme: &Theme,
+    syntax: &SyntaxRuntime,
 ) -> io::Result<()> {
     let start = Instant::now();
     terminal.draw(|f| {
@@ -185,26 +202,41 @@ fn draw(
         state.editor_buffer_mut().ensure_visible();
         state.notes_buffer_mut().ensure_visible();
 
+        let editor_id = state.active_editor_buffer_id;
+        let notes_id = state.notes_buffer_id;
+        let editor_snapshot = syntax.snapshot_for(editor_id, state.editor_buffer().version());
+        let notes_snapshot = syntax.snapshot_for(notes_id, state.notes_buffer().version());
+
         top_bar::render(f, layout.top, state, theme);
         let editor_cursor = editor_view::render_editor(
             f,
             layout.editor,
             state.editor_buffer(),
+            editor_snapshot,
             state.focus,
             state.mode,
             theme,
+            state.settings.editor.tab_width as usize,
         );
         let notes_cursor = notes_view::render_notes(
             f,
             layout.notes,
             state.notes_buffer(),
+            notes_snapshot,
             state.focus,
             state.mode,
             theme,
+            state.settings.editor.tab_width as usize,
         );
         job_output_view::render(f, layout.job, state, theme);
         visualizer_view::render(f, layout.visualizer, state, theme);
-        gate_monitor_view::render(f, layout.gate, state, theme);
+        gate_monitor_view::render(
+            f,
+            layout.gate,
+            state,
+            theme,
+            &syntax.status_label(editor_id),
+        );
         bottom_bar::render(f, layout.bottom, state, theme);
 
         if state.show_help {
@@ -304,6 +336,11 @@ fn map_key_to_action(key: KeyEvent, state: &AppState, input: &mut InputState) ->
         } else {
             Action::ShowHelp
         }),
+        KeyEvent {
+            code: KeyCode::Char('H'),
+            modifiers: KeyModifiers::CONTROL,
+            ..
+        } => Some(Action::ToggleSyntax),
         KeyEvent {
             code: KeyCode::Tab,
             modifiers: KeyModifiers::SHIFT,
@@ -479,6 +516,35 @@ fn map_key_to_action(key: KeyEvent, state: &AppState, input: &mut InputState) ->
         }
         _ => None,
     }
+}
+
+fn apply_action_with_syntax(
+    state: &mut AppState,
+    syntax: &mut SyntaxRuntime,
+    action: Action,
+) -> nit_core::state::ActionOutcome {
+    let editor_id = state.active_editor_buffer_id;
+    let notes_id = state.notes_buffer_id;
+    let editor_version = state.editor_buffer().version();
+    let notes_version = state.notes_buffer().version();
+    let outcome = apply_action(state, action.clone());
+
+    if state.editor_buffer().version() != editor_version {
+        let buf = state.editor_buffer_mut();
+        syntax.note_buffer_change(editor_id, buf);
+    }
+    if state.notes_buffer().version() != notes_version {
+        let buf = state.notes_buffer_mut();
+        syntax.note_buffer_change(notes_id, buf);
+    }
+
+    if matches!(action, Action::ToggleSyntax) {
+        syntax.update_config(state.settings.highlight.clone());
+        syntax.prime_buffer(editor_id, state.editor_buffer());
+        syntax.prime_buffer(notes_id, state.notes_buffer());
+    }
+
+    outcome
 }
 
 fn handle_clipboard_copy(state: &AppState, clipboard: &mut Option<Clipboard>, action: &Action) {

@@ -1,3 +1,5 @@
+use nit_syntax::HighlightGroup;
+use ratatui::style::{Modifier, Style};
 use ratatui::style::Color;
 use serde::Deserialize;
 use std::fs;
@@ -17,6 +19,40 @@ struct ThemeFile {
     warning: Option<String>,
     error: Option<String>,
     accent: Option<String>,
+    hl: Option<HighlightThemeFile>,
+}
+
+#[derive(Debug, Deserialize)]
+struct HighlightThemeFile {
+    comment: Option<String>,
+    doc_comment: Option<String>,
+    string: Option<String>,
+    char: Option<String>,
+    number: Option<String>,
+    boolean: Option<String>,
+    keyword: Option<String>,
+    keyword_control: Option<String>,
+    keyword_operator: Option<String>,
+    r#type: Option<String>,
+    type_builtin: Option<String>,
+    function: Option<String>,
+    method: Option<String>,
+    #[serde(rename = "macro")]
+    macro_token: Option<String>,
+    attribute: Option<String>,
+    namespace: Option<String>,
+    variable: Option<String>,
+    parameter: Option<String>,
+    property: Option<String>,
+    constant: Option<String>,
+    operator: Option<String>,
+    punctuation: Option<String>,
+    tag: Option<String>,
+    heading: Option<String>,
+    emphasis: Option<String>,
+    link: Option<String>,
+    error: Option<String>,
+    warning: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -33,6 +69,39 @@ pub struct Theme {
     pub warning: Color,
     pub error: Color,
     pub accent: Color,
+    pub hl: HighlightTheme,
+}
+
+#[derive(Clone, Debug)]
+pub struct HighlightTheme {
+    pub comment: Color,
+    pub doc_comment: Color,
+    pub string: Color,
+    pub char: Color,
+    pub number: Color,
+    pub boolean: Color,
+    pub keyword: Color,
+    pub keyword_control: Color,
+    pub keyword_operator: Color,
+    pub r#type: Color,
+    pub type_builtin: Color,
+    pub function: Color,
+    pub method: Color,
+    pub macro_token: Color,
+    pub attribute: Color,
+    pub namespace: Color,
+    pub variable: Color,
+    pub parameter: Color,
+    pub property: Color,
+    pub constant: Color,
+    pub operator: Color,
+    pub punctuation: Color,
+    pub tag: Color,
+    pub heading: Color,
+    pub emphasis: Color,
+    pub link: Color,
+    pub error: Color,
+    pub warning: Color,
 }
 
 impl Theme {
@@ -62,11 +131,59 @@ impl Theme {
                         warning: color_or_default(cfg.warning, Color::Rgb(242, 165, 65)),
                         error: color_or_default(cfg.error, Color::Rgb(242, 95, 92)),
                         accent: color_or_default(cfg.accent, Color::Rgb(255, 209, 102)),
+                        hl: HighlightTheme::from_file(cfg.hl, Color::Rgb(215, 229, 255)),
                     };
                 }
             }
         }
         Theme::default()
+    }
+
+    pub fn highlight_style(&self, group: HighlightGroup) -> Style {
+        let color = match group {
+            HighlightGroup::Comment => self.hl.comment,
+            HighlightGroup::DocComment => self.hl.doc_comment,
+            HighlightGroup::String => self.hl.string,
+            HighlightGroup::Char => self.hl.char,
+            HighlightGroup::Number => self.hl.number,
+            HighlightGroup::Boolean => self.hl.boolean,
+            HighlightGroup::Keyword => self.hl.keyword,
+            HighlightGroup::KeywordControl => self.hl.keyword_control,
+            HighlightGroup::KeywordOperator => self.hl.keyword_operator,
+            HighlightGroup::Type => self.hl.r#type,
+            HighlightGroup::TypeBuiltin => self.hl.type_builtin,
+            HighlightGroup::Function => self.hl.function,
+            HighlightGroup::Method => self.hl.method,
+            HighlightGroup::Macro => self.hl.macro_token,
+            HighlightGroup::Attribute => self.hl.attribute,
+            HighlightGroup::Namespace => self.hl.namespace,
+            HighlightGroup::Variable => self.hl.variable,
+            HighlightGroup::Parameter => self.hl.parameter,
+            HighlightGroup::Property => self.hl.property,
+            HighlightGroup::Constant => self.hl.constant,
+            HighlightGroup::Operator => self.hl.operator,
+            HighlightGroup::Punctuation => self.hl.punctuation,
+            HighlightGroup::Tag => self.hl.tag,
+            HighlightGroup::Heading => self.hl.heading,
+            HighlightGroup::Emphasis => self.hl.emphasis,
+            HighlightGroup::Link => self.hl.link,
+            HighlightGroup::Error => self.hl.error,
+            HighlightGroup::Warning => self.hl.warning,
+            HighlightGroup::DiffAdd | HighlightGroup::DiffRemove | HighlightGroup::Normal => {
+                self.foreground
+            }
+        };
+        let mut style = Style::default().fg(color);
+        if matches!(group, HighlightGroup::Comment | HighlightGroup::DocComment) {
+            style = style.add_modifier(Modifier::DIM);
+        }
+        if matches!(group, HighlightGroup::Emphasis) {
+            style = style.add_modifier(Modifier::ITALIC);
+        }
+        if matches!(group, HighlightGroup::Heading) {
+            style = style.add_modifier(Modifier::BOLD);
+        }
+        style
     }
 }
 
@@ -85,6 +202,80 @@ impl Default for Theme {
             warning: Color::Rgb(242, 165, 65),
             error: Color::Rgb(242, 95, 92),
             accent: Color::Rgb(255, 209, 102),
+            hl: HighlightTheme::default(),
+        }
+    }
+}
+
+impl HighlightTheme {
+    fn from_file(file: Option<HighlightThemeFile>, foreground: Color) -> Self {
+        let Some(file) = file else {
+            return HighlightTheme::default();
+        };
+        HighlightTheme {
+            comment: color_or_default(file.comment, Color::Rgb(84, 117, 150)),
+            doc_comment: color_or_default(file.doc_comment, Color::Rgb(122, 193, 255)),
+            string: color_or_default(file.string, Color::Rgb(154, 216, 143)),
+            char: color_or_default(file.char, Color::Rgb(177, 235, 143)),
+            number: color_or_default(file.number, Color::Rgb(242, 165, 65)),
+            boolean: color_or_default(file.boolean, Color::Rgb(245, 201, 111)),
+            keyword: color_or_default(file.keyword, Color::Rgb(127, 252, 255)),
+            keyword_control: color_or_default(file.keyword_control, Color::Rgb(255, 159, 28)),
+            keyword_operator: color_or_default(file.keyword_operator, Color::Rgb(255, 209, 102)),
+            r#type: color_or_default(file.r#type, Color::Rgb(122, 201, 255)),
+            type_builtin: color_or_default(file.type_builtin, Color::Rgb(78, 208, 208)),
+            function: color_or_default(file.function, Color::Rgb(255, 209, 102)),
+            method: color_or_default(file.method, Color::Rgb(255, 204, 140)),
+            macro_token: color_or_default(file.macro_token, Color::Rgb(210, 155, 255)),
+            attribute: color_or_default(file.attribute, Color::Rgb(160, 196, 255)),
+            namespace: color_or_default(file.namespace, Color::Rgb(109, 238, 252)),
+            variable: color_or_default(file.variable, foreground),
+            parameter: color_or_default(file.parameter, Color::Rgb(255, 217, 102)),
+            property: color_or_default(file.property, Color::Rgb(78, 208, 208)),
+            constant: color_or_default(file.constant, Color::Rgb(255, 118, 118)),
+            operator: color_or_default(file.operator, Color::Rgb(196, 210, 223)),
+            punctuation: color_or_default(file.punctuation, Color::Rgb(108, 147, 177)),
+            tag: color_or_default(file.tag, Color::Rgb(78, 208, 208)),
+            heading: color_or_default(file.heading, Color::Rgb(127, 252, 255)),
+            emphasis: color_or_default(file.emphasis, Color::Rgb(255, 209, 102)),
+            link: color_or_default(file.link, Color::Rgb(87, 199, 255)),
+            error: color_or_default(file.error, Color::Rgb(242, 95, 92)),
+            warning: color_or_default(file.warning, Color::Rgb(242, 165, 65)),
+        }
+    }
+}
+
+impl Default for HighlightTheme {
+    fn default() -> Self {
+        HighlightTheme {
+            comment: Color::Rgb(84, 117, 150),
+            doc_comment: Color::Rgb(122, 193, 255),
+            string: Color::Rgb(154, 216, 143),
+            char: Color::Rgb(177, 235, 143),
+            number: Color::Rgb(242, 165, 65),
+            boolean: Color::Rgb(245, 201, 111),
+            keyword: Color::Rgb(127, 252, 255),
+            keyword_control: Color::Rgb(255, 159, 28),
+            keyword_operator: Color::Rgb(255, 209, 102),
+            r#type: Color::Rgb(122, 201, 255),
+            type_builtin: Color::Rgb(78, 208, 208),
+            function: Color::Rgb(255, 209, 102),
+            method: Color::Rgb(255, 204, 140),
+            macro_token: Color::Rgb(210, 155, 255),
+            attribute: Color::Rgb(160, 196, 255),
+            namespace: Color::Rgb(109, 238, 252),
+            variable: Color::Rgb(215, 229, 255),
+            parameter: Color::Rgb(255, 217, 102),
+            property: Color::Rgb(78, 208, 208),
+            constant: Color::Rgb(255, 118, 118),
+            operator: Color::Rgb(196, 210, 223),
+            punctuation: Color::Rgb(108, 147, 177),
+            tag: Color::Rgb(78, 208, 208),
+            heading: Color::Rgb(127, 252, 255),
+            emphasis: Color::Rgb(255, 209, 102),
+            link: Color::Rgb(87, 199, 255),
+            error: Color::Rgb(242, 95, 92),
+            warning: Color::Rgb(242, 165, 65),
         }
     }
 }
