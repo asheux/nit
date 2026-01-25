@@ -355,7 +355,8 @@ impl Buffer {
     }
 
     pub fn ensure_visible(&mut self) {
-        self.viewport.ensure_visible(self.cursor.line);
+        self.viewport
+            .ensure_visible(self.cursor.line, self.cursor.col);
     }
 
     pub fn mark_clean(&mut self) {

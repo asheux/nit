@@ -77,6 +77,7 @@ pub fn render_buffer(
     let start = buffer.viewport.offset_line;
     let height = buffer.viewport.height.max(1);
     let end = (start + height).min(total_lines);
+    let content_width = buffer.viewport.width.max(1);
 
     let mut lines: Vec<Line> = Vec::with_capacity(height);
     for i in start..end {
@@ -86,6 +87,14 @@ pub fn render_buffer(
             .replace('\r', "");
         if content.ends_with('\n') {
             content.pop();
+        }
+        let offset_col = buffer.viewport.offset_col;
+        if offset_col > 0 || content.chars().count() > content_width {
+            content = content
+                .chars()
+                .skip(offset_col)
+                .take(content_width)
+                .collect();
         }
         let ln = format!("{:>width$}", i + 1, width = line_num_width);
         let is_cursor_line = i == buffer.cursor.line;
@@ -118,7 +127,10 @@ pub fn render_buffer(
 
     if show_cursor && focused {
         let cursor_line = buffer.cursor.line.saturating_sub(start);
-        let cursor_col = buffer.cursor.col;
+        let cursor_col = buffer
+            .cursor
+            .col
+            .saturating_sub(buffer.viewport.offset_col);
         let y = area.y + 1 + cursor_line as u16;
         let x = area.x + 1 + gutter_width as u16 + cursor_col as u16;
         return Some(CursorPlacement { x, y });

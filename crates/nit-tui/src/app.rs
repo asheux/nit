@@ -140,21 +140,39 @@ fn draw(
     terminal.draw(|f| {
         let layout = layout::split(f.size());
 
-        // Update viewports
+        // Update viewports (account for gutters)
+        let editor_total = state.editor_buffer().lines_len().max(1);
+        let editor_line_width = editor_total.to_string().len().max(3) as u16;
+        let editor_gutter = editor_line_width + 4;
+        let editor_text_width = layout
+            .editor
+            .width
+            .saturating_sub(2)
+            .saturating_sub(editor_gutter);
         state.set_viewport(
             PaneId::Editor,
             Viewport::with_dims(
                 layout.editor.height.saturating_sub(2) as usize,
-                layout.editor.width.saturating_sub(2) as usize,
+                editor_text_width as usize,
             ),
         );
+        let notes_total = state.notes_buffer().lines_len().max(1);
+        let notes_line_width = notes_total.to_string().len().max(3) as u16;
+        let notes_gutter = notes_line_width + 4;
+        let notes_text_width = layout
+            .notes
+            .width
+            .saturating_sub(2)
+            .saturating_sub(notes_gutter);
         state.set_viewport(
             PaneId::Notes,
             Viewport::with_dims(
                 layout.notes.height.saturating_sub(2) as usize,
-                layout.notes.width.saturating_sub(2) as usize,
+                notes_text_width as usize,
             ),
         );
+        state.editor_buffer_mut().ensure_visible();
+        state.notes_buffer_mut().ensure_visible();
 
         top_bar::render(f, layout.top, state, theme);
         let editor_cursor = editor_view::render_editor(
