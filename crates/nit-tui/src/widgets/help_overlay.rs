@@ -40,11 +40,15 @@ pub fn render(frame: &mut Frame, area: Rect, theme: &Theme) {
         ]),
         Line::from(vec![
             Span::styled("JJ", Style::default().fg(theme.accent)),
-            Span::raw(" save in Insert mode"),
+            Span::raw(" save + Normal (Insert mode)"),
         ]),
         Line::from(vec![
             Span::styled("GG / Shift+G", Style::default().fg(theme.accent)),
             Span::raw(" top / bottom"),
+        ]),
+        Line::from(vec![
+            Span::styled("u", Style::default().fg(theme.accent)),
+            Span::raw(" undo (Normal mode)"),
         ]),
         Line::from(vec![
             Span::styled("$ / %", Style::default().fg(theme.accent)),

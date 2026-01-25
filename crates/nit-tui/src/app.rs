@@ -73,12 +73,14 @@ fn run_loop(
             continue;
         }
 
-        if let Some(action) = input_state.flush_insert_timeout() {
-            let outcome = apply_action(state, action);
-            if outcome.should_exit {
-                break;
+        if matches!(state.focus, PaneId::Editor) && state.mode == Mode::Insert {
+            if let Some(action) = input_state.flush_insert_timeout() {
+                let outcome = apply_action(state, action);
+                if outcome.should_exit {
+                    break;
+                }
+                needs_redraw = needs_redraw || outcome.state_changed;
             }
-            needs_redraw = needs_redraw || outcome.state_changed;
         }
 
         // Poll input with tick fallback
@@ -327,6 +329,10 @@ fn map_key_to_action(key: KeyEvent, state: &AppState, input: &mut InputState) ->
             code: KeyCode::Char('G'),
             ..
         } if is_normal_editing(state) => Some(Action::GoToBottom),
+        KeyEvent {
+            code: KeyCode::Char('u'),
+            ..
+        } if is_normal_editing(state) => Some(Action::Undo),
         KeyEvent {
             code: KeyCode::Char('$'),
             ..
@@ -584,10 +590,7 @@ fn handle_insert_chords(
         match key.code {
             KeyCode::Char('j') => {
                 input.reset_insert();
-                if state.focus == PaneId::Editor {
-                    return Some(Action::Save);
-                }
-                return Some(Action::InsertChar('j'));
+                return Some(Action::SaveAndNormal);
             }
             _ => {
                 input.defer_key(*key);

@@ -8,7 +8,7 @@ A terminal-first, multi-pane TUI editor inspired by _Devs_. Built in Rust with a
 cd nit
 cargo run -- path/to/file
 ```
-
+this is a tesstj
 - `nit <file>` opens the file in the editor.
 - `nit <dir>` sets the workspace root (opens an untitled buffer).
 - `nit` defaults to the current directory and an untitled buffer.

@@ -196,7 +196,7 @@ pub fn apply_action(state: &mut AppState, action: Action) -> ActionOutcome {
         Action::ConfirmQuitNo => {
             state.prompt = None;
         }
-        Action::Save => {
+        Action::Save | Action::SaveAndNormal => {
             let buf = state.editor_buffer_mut();
             if buf.path().is_none() {
                 state.status = Some("No path to save".into());
@@ -205,6 +205,12 @@ pub fn apply_action(state: &mut AppState, action: Action) -> ActionOutcome {
             } else {
                 buf.mark_clean();
                 state.status = Some("Saved".into());
+            }
+            if matches!(action, Action::SaveAndNormal) {
+                state.mode = Mode::Normal;
+                if let Some(buf) = state.focused_buffer_mut() {
+                    buf.exit_insert_mode();
+                }
             }
         }
         Action::FocusNextPane => {
@@ -224,8 +230,22 @@ pub fn apply_action(state: &mut AppState, action: Action) -> ActionOutcome {
         Action::FocusPane(p) => {
             state.focus = p;
         }
-        Action::SwitchMode(m) => state.mode = m,
-        Action::ToggleMode => state.mode = state.mode.toggle(),
+        Action::SwitchMode(m) => {
+            state.mode = m;
+            if m == Mode::Normal {
+                if let Some(buf) = state.focused_buffer_mut() {
+                    buf.exit_insert_mode();
+                }
+            }
+        }
+        Action::ToggleMode => {
+            state.mode = state.mode.toggle();
+            if state.mode == Mode::Normal {
+                if let Some(buf) = state.focused_buffer_mut() {
+                    buf.exit_insert_mode();
+                }
+            }
+        }
         Action::InsertChar(c) => {
             if let Some(buf) = state.focused_buffer_mut() {
                 buf.insert_char(c);
@@ -316,6 +336,13 @@ pub fn apply_action(state: &mut AppState, action: Action) -> ActionOutcome {
             if let Some(buf) = state.focused_buffer_mut() {
                 buf.go_to_bottom();
                 buf.ensure_visible();
+            }
+        }
+        Action::Undo => {
+            if let Some(buf) = state.focused_buffer_mut() {
+                if buf.undo() {
+                    buf.ensure_visible();
+                }
             }
         }
         Action::ScrollUp => {

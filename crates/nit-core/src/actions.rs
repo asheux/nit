@@ -4,6 +4,7 @@ use crate::{mode::Mode, pane::PaneId};
 pub enum Action {
     Quit,
     Save,
+    SaveAndNormal,
     ConfirmQuitYes,
     ConfirmQuitNo,
     FocusNextPane,
@@ -26,6 +27,7 @@ pub enum Action {
     End,
     GoToTop,
     GoToBottom,
+    Undo,
     ScrollUp,
     ScrollDown,
     ClearLogs,

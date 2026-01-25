@@ -3,12 +3,23 @@ use ropey::Rope;
 use std::path::PathBuf;
 use unicode_segmentation::UnicodeSegmentation;
 
+const UNDO_LIMIT: usize = 256;
+
+#[derive(Clone, Debug)]
+struct Snapshot {
+    rope: Rope,
+    cursor: Cursor,
+    dirty: bool,
+}
+
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Buffer {
     name: String,
     path: Option<PathBuf>,
     #[serde(skip)]
     rope: Rope,
+    #[serde(skip)]
+    undo: Vec<Snapshot>,
     pub cursor: Cursor,
     pub viewport: Viewport,
     dirty: bool,
@@ -20,6 +31,7 @@ impl Buffer {
             name: name.into(),
             path,
             rope: content,
+            undo: Vec::new(),
             cursor: Cursor::default(),
             viewport: Viewport::default(),
             dirty: false,
@@ -98,6 +110,10 @@ impl Buffer {
     }
 
     fn clamp_col(&mut self) {
+        if self.is_line_blank(self.cursor.line) {
+            self.cursor.col = 0;
+            return;
+        }
         let len = self.line_char_len(self.cursor.line);
         if self.cursor.col > len {
             self.cursor.col = len;
@@ -157,6 +173,14 @@ impl Buffer {
         self.cursor.col = self.line_char_len(self.cursor.line);
     }
 
+    pub fn exit_insert_mode(&mut self) {
+        if self.is_line_blank(self.cursor.line) {
+            self.cursor.col = 0;
+        } else if self.cursor.col > 0 {
+            self.cursor.col -= 1;
+        }
+    }
+
     pub fn go_to_top(&mut self) {
         self.cursor.line = 0;
         self.clamp_col();
@@ -169,6 +193,7 @@ impl Buffer {
     }
 
     pub fn insert_char(&mut self, c: char) {
+        self.push_undo();
         let idx = self.char_index();
         self.rope.insert_char(idx, c);
         self.cursor.col += 1;
@@ -180,6 +205,7 @@ impl Buffer {
     }
 
     pub fn insert_newline(&mut self) {
+        self.push_undo();
         let idx = self.char_index();
         self.rope.insert_char(idx, '\n');
         self.cursor.line += 1;
@@ -191,6 +217,7 @@ impl Buffer {
         if self.cursor.col > 0 {
             let idx = self.char_index();
             if idx > 0 {
+                self.push_undo();
                 self.rope.remove(idx - 1..idx);
                 self.cursor.col -= 1;
                 self.dirty = true;
@@ -199,6 +226,7 @@ impl Buffer {
             let prev_len = self.line_char_len(self.cursor.line - 1);
             let idx = self.char_index();
             if idx > 0 {
+                self.push_undo();
                 self.rope.remove(idx - 1..idx);
                 self.cursor.line -= 1;
                 self.cursor.col = prev_len;
@@ -211,10 +239,12 @@ impl Buffer {
         let idx = self.char_index();
         let line_len = self.line_char_len(self.cursor.line);
         if self.cursor.col < line_len {
+            self.push_undo();
             self.rope.remove(idx..idx + 1);
             self.dirty = true;
         } else if self.cursor.line + 1 < self.rope.len_lines() {
             // delete the newline
+            self.push_undo();
             self.rope.remove(idx..idx + 1);
             self.dirty = true;
         }
@@ -226,5 +256,34 @@ impl Buffer {
 
     pub fn mark_clean(&mut self) {
         self.dirty = false;
+    }
+
+    pub fn undo(&mut self) -> bool {
+        if let Some(snapshot) = self.undo.pop() {
+            self.rope = snapshot.rope;
+            self.cursor = snapshot.cursor;
+            self.dirty = snapshot.dirty;
+            return true;
+        }
+        false
+    }
+
+    fn push_undo(&mut self) {
+        if self.undo.len() >= UNDO_LIMIT {
+            self.undo.remove(0);
+        }
+        self.undo.push(Snapshot {
+            rope: self.rope.clone(),
+            cursor: self.cursor,
+            dirty: self.dirty,
+        });
+    }
+
+    fn is_line_blank(&self, line: usize) -> bool {
+        if line >= self.rope.len_lines() {
+            return true;
+        }
+        let text = self.rope.line(line).to_string();
+        text.trim_end_matches('\n').trim().is_empty()
     }
 }
