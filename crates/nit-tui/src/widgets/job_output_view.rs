@@ -97,6 +97,22 @@ fn log_style(line: &str, theme: &Theme) -> Style {
         Style::default()
             .fg(theme.border)
             .add_modifier(Modifier::DIM)
+    } else if upper.contains("HEARTBEAT") {
+        Style::default()
+            .fg(theme.border)
+            .add_modifier(Modifier::DIM)
+    } else if upper.contains("CYCLE") || upper.contains("FIXED POINT") || upper.contains("REPEAT") {
+        Style::default()
+            .fg(theme.title_focused)
+            .add_modifier(Modifier::BOLD)
+    } else if upper.contains("PAUSED") {
+        Style::default()
+            .fg(theme.warning)
+            .add_modifier(Modifier::BOLD)
+    } else if upper.contains("SNAPSHOT") {
+        Style::default().fg(theme.accent)
+    } else if upper.starts_with("JOB ") || upper.contains("JOB ") {
+        Style::default().fg(theme.title)
     } else {
         Style::default().fg(theme.foreground)
     }

@@ -1,4 +1,4 @@
-use nit_core::{AppState, PaneId};
+use nit_core::{AppState, GolSearchIntensity, PaneId};
 use nit_gol::{AttractorEvent, Rule};
 use ratatui::{
     layout::Constraint,
@@ -75,129 +75,259 @@ pub fn render(
         .as_deref()
         .map(|path| shorten_text(path, 30))
         .unwrap_or_else(|| "--".into());
-    let rows = vec![
-        Row::new(vec![Cell::from("Focus"), Cell::from(state.focus.title())]),
-        Row::new(vec![
-            Cell::from("Mode"),
-            Cell::from(format!("{:?}", state.mode)),
-        ]),
-        Row::new(vec![
-            Cell::from("Dirty"),
-            Cell::from(if state.editor_buffer().is_dirty() {
-                "Y"
-            } else {
-                "N"
-            }),
-        ]),
-        Row::new(vec![
-            Cell::from("Debug"),
-            Cell::from(if state.debug { "ON" } else { "OFF" }),
-        ]),
-        Row::new(vec![
-            Cell::from("Ln/Col"),
-            Cell::from(format!("{ln}/{col}")),
-        ]),
-        Row::new(vec![
-            Cell::from("Bytes"),
-            Cell::from(state.editor_buffer().bytes_len().to_string()),
-        ]),
-        Row::new(vec![
-            Cell::from("Render(ms)"),
-            Cell::from(state.metrics.last_render_ms.to_string()),
-        ]),
-        Row::new(vec![
-            Cell::from("Frame"),
-            Cell::from(state.metrics.frame_count.to_string()),
-        ]),
-        Row::new(vec![
-            Cell::from("Workspace"),
-            Cell::from(shorten_path(&state.workspace_root, 30)),
-        ]),
-        Row::new(vec![
-            Cell::from("Viz Mode"),
-            Cell::from(viz_mode),
-        ]),
-        Row::new(vec![
-            Cell::from("Seed Source"),
-            Cell::from(format!("{:?}", state.visualizer.seed_source)),
-        ]),
-        Row::new(vec![
-            Cell::from("Search Int"),
-            Cell::from(search_intensity),
-        ]),
-        Row::new(vec![
-            Cell::from("Viz Rule"),
-            Cell::from(state.visualizer.rule.clone()),
-        ]),
-        Row::new(vec![
-            Cell::from("Rule Bits"),
-            Cell::from(rule_bits(&state.visualizer.rule)),
-        ]),
-        Row::new(vec![
-            Cell::from("Viz Gen"),
-            Cell::from(state.visualizer.generation.to_string()),
-        ]),
-        Row::new(vec![
-            Cell::from("Viz Alive"),
-            Cell::from(state.visualizer.alive.to_string()),
-        ]),
-        Row::new(vec![
-            Cell::from("Viz Period"),
-            Cell::from(viz_period),
-        ]),
-        Row::new(vec![
-            Cell::from("Viz AutoStop"),
-            Cell::from(viz_autostop),
-        ]),
-        Row::new(vec![
-            Cell::from("Viz Attractor"),
-            Cell::from(viz_attractor),
-        ]),
-        Row::new(vec![
-            Cell::from("Viz PausedBy"),
-            Cell::from(viz_pause_reason),
-        ]),
-        Row::new(vec![
-            Cell::from("Viz Wrap"),
-            Cell::from(if state.visualizer.wrap { "Torus" } else { "Dead" }),
-        ]),
-        Row::new(vec![
-            Cell::from("Viz Speed"),
-            Cell::from(format!("{}ms", state.visualizer.tick_ms)),
-        ]),
-        Row::new(vec![
-            Cell::from("Search RPS"),
-            Cell::from(state.visualizer.search_rps.to_string()),
-        ]),
-        Row::new(vec![
-            Cell::from("Viz Seed"),
-            Cell::from(state.visualizer.seed.to_string()),
-        ]),
-        Row::new(vec![
-            Cell::from("Snap Written"),
-            Cell::from(state.visualizer.snapshots_written.to_string()),
-        ]),
-        Row::new(vec![
-            Cell::from("Snap Dropped"),
-            Cell::from(state.visualizer.snapshots_dropped.to_string()),
-        ]),
-        Row::new(vec![
-            Cell::from("Snap Queue"),
-            Cell::from(state.visualizer.snapshot_queue_depth.to_string()),
-        ]),
-        Row::new(vec![Cell::from("Snap Last"), Cell::from(last_snapshot)]),
-        Row::new(vec![Cell::from("Syntax"), Cell::from(syntax_status)]),
-        Row::new(vec![
-            Cell::from("Job paused"),
-            Cell::from(format!("{}", state.job.paused)),
-        ]),
-    ];
+    let label_style = Style::default()
+        .fg(theme.title)
+        .add_modifier(Modifier::DIM);
+    let value_style = Style::default().fg(theme.foreground);
+    let dim_style = Style::default()
+        .fg(theme.border)
+        .add_modifier(Modifier::DIM);
 
-    let mut rows = rows;
+    let mut rows = Vec::new();
+    rows.push(row(
+        "Focus",
+        state.focus.title().to_string(),
+        label_style,
+        Style::default().fg(theme.title_focused),
+    ));
+    rows.push(row(
+        "Mode",
+        format!("{:?}", state.mode),
+        label_style,
+        mode_style(state.mode, theme),
+    ));
+    rows.push(row(
+        "Dirty",
+        if state.editor_buffer().is_dirty() {
+            "Y".to_string()
+        } else {
+            "N".to_string()
+        },
+        label_style,
+        if state.editor_buffer().is_dirty() {
+            Style::default()
+                .fg(theme.warning)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            dim_style
+        },
+    ));
+    rows.push(row(
+        "Debug",
+        if state.debug { "ON" } else { "OFF" }.to_string(),
+        label_style,
+        if state.debug {
+            Style::default().fg(theme.warning)
+        } else {
+            dim_style
+        },
+    ));
+    rows.push(row(
+        "Ln/Col",
+        format!("{ln}/{col}"),
+        label_style,
+        value_style,
+    ));
+    rows.push(row(
+        "Bytes",
+        state.editor_buffer().bytes_len().to_string(),
+        label_style,
+        value_style,
+    ));
+    rows.push(row(
+        "Render(ms)",
+        state.metrics.last_render_ms.to_string(),
+        label_style,
+        render_ms_style(state.metrics.last_render_ms, theme),
+    ));
+    rows.push(row(
+        "Frame",
+        state.metrics.frame_count.to_string(),
+        label_style,
+        dim_style,
+    ));
+    rows.push(row(
+        "Workspace",
+        shorten_path(&state.workspace_root, 30),
+        label_style,
+        value_style,
+    ));
+    rows.push(row(
+        "Viz Mode",
+        viz_mode.to_string(),
+        label_style,
+        match state.visualizer.mode {
+            nit_core::VisualizerMode::Search => Style::default().fg(theme.accent),
+            nit_core::VisualizerMode::SimOnly => Style::default().fg(theme.title_focused),
+        },
+    ));
+    rows.push(row(
+        "Seed Source",
+        format!("{:?}", state.visualizer.seed_source),
+        label_style,
+        match state.visualizer.seed_source {
+            nit_core::GolSeedSource::Editor => Style::default().fg(theme.title),
+            nit_core::GolSeedSource::Notes => Style::default().fg(theme.title_focused),
+        },
+    ));
+    rows.push(row(
+        "Search Int",
+        search_intensity,
+        label_style,
+        intensity_style(state.settings.gol.search.intensity, theme),
+    ));
+    rows.push(row(
+        "Viz Rule",
+        state.visualizer.rule.clone(),
+        label_style,
+        value_style,
+    ));
+    rows.push(row(
+        "Rule Bits",
+        rule_bits(&state.visualizer.rule),
+        label_style,
+        dim_style,
+    ));
+    rows.push(row(
+        "Viz Gen",
+        state.visualizer.generation.to_string(),
+        label_style,
+        value_style,
+    ));
+    rows.push(row(
+        "Viz Alive",
+        state.visualizer.alive.to_string(),
+        label_style,
+        if state.visualizer.alive > 0 {
+            Style::default().fg(theme.title_focused)
+        } else {
+            dim_style
+        },
+    ));
+    rows.push(row(
+        "Viz Period",
+        viz_period,
+        label_style,
+        if state.visualizer.period.is_some() {
+            Style::default().fg(theme.title)
+        } else {
+            dim_style
+        },
+    ));
+    rows.push(row(
+        "Viz AutoStop",
+        viz_autostop,
+        label_style,
+        autostop_style(state.visualizer.auto_stop_policy, theme),
+    ));
+    rows.push(row(
+        "Viz Attractor",
+        viz_attractor,
+        label_style,
+        attractor_style(state.visualizer.last_attractor.as_ref(), theme, dim_style),
+    ));
+    rows.push(row(
+        "Viz PausedBy",
+        viz_pause_reason.to_string(),
+        label_style,
+        paused_by_style(state.visualizer.paused, state.visualizer.paused_by_attractor, theme, dim_style),
+    ));
+    rows.push(row(
+        "Viz Wrap",
+        if state.visualizer.wrap { "Torus" } else { "Dead" }.to_string(),
+        label_style,
+        if state.visualizer.wrap {
+            Style::default().fg(theme.title)
+        } else {
+            dim_style
+        },
+    ));
+    rows.push(row(
+        "Viz Speed",
+        format!("{}ms", state.visualizer.tick_ms),
+        label_style,
+        tick_ms_style(state.visualizer.tick_ms, theme),
+    ));
+    rows.push(row(
+        "Search RPS",
+        state.visualizer.search_rps.to_string(),
+        label_style,
+        if state.visualizer.search_rps > 0 {
+            Style::default().fg(theme.accent)
+        } else {
+            dim_style
+        },
+    ));
+    rows.push(row(
+        "Viz Seed",
+        state.visualizer.seed.to_string(),
+        label_style,
+        value_style,
+    ));
+    rows.push(row(
+        "Snap Written",
+        state.visualizer.snapshots_written.to_string(),
+        label_style,
+        if state.visualizer.snapshots_written > 0 {
+            Style::default().fg(theme.title)
+        } else {
+            dim_style
+        },
+    ));
+    rows.push(row(
+        "Snap Dropped",
+        state.visualizer.snapshots_dropped.to_string(),
+        label_style,
+        if state.visualizer.snapshots_dropped > 0 {
+            Style::default()
+                .fg(theme.error)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            dim_style
+        },
+    ));
+    rows.push(row(
+        "Snap Queue",
+        state.visualizer.snapshot_queue_depth.to_string(),
+        label_style,
+        if state.visualizer.snapshot_queue_depth > 0 {
+            Style::default().fg(theme.warning)
+        } else {
+            dim_style
+        },
+    ));
+    rows.push(row(
+        "Snap Last",
+        last_snapshot,
+        label_style,
+        if state.visualizer.last_snapshot_path.is_some() {
+            Style::default().fg(theme.accent)
+        } else {
+            dim_style
+        },
+    ));
+    rows.push(row(
+        "Syntax",
+        syntax_status.to_string(),
+        label_style,
+        syntax_style(syntax_status, theme, dim_style),
+    ));
+    rows.push(row(
+        "Job paused",
+        format!("{}", state.job.paused),
+        label_style,
+        if state.job.paused {
+            Style::default().fg(theme.warning)
+        } else {
+            dim_style
+        },
+    ));
+
     for (idx, entry) in state.visualizer.leaderboard.iter().take(3).enumerate() {
         rows.push(Row::new(vec![
-            Cell::from(format!("Rule {}", idx + 1)),
-            Cell::from(format!("{} ({:.1})", entry.rule, entry.score)),
+            Cell::from(format!("Rule {}", idx + 1)).style(label_style),
+            Cell::from(format!("{} ({:.1})", entry.rule, entry.score))
+                .style(leaderboard_style(idx, theme, value_style)),
         ]));
     }
 
@@ -258,5 +388,118 @@ fn attractor_detail(event: Option<&AttractorEvent>) -> String {
             ..
         }) => format!("Cycle p={period} t={transient} @gen={gen}"),
         None => "--".into(),
+    }
+}
+
+fn row<L: Into<String>, V: Into<String>>(
+    label: L,
+    value: V,
+    label_style: Style,
+    value_style: Style,
+) -> Row<'static> {
+    Row::new(vec![
+        Cell::from(label.into()).style(label_style),
+        Cell::from(value.into()).style(value_style),
+    ])
+}
+
+fn mode_style(mode: nit_core::Mode, theme: &Theme) -> Style {
+    match mode {
+        nit_core::Mode::Insert => Style::default()
+            .fg(theme.accent)
+            .add_modifier(Modifier::BOLD),
+        nit_core::Mode::Visual => Style::default().fg(theme.warning),
+        nit_core::Mode::Normal => Style::default().fg(theme.foreground),
+    }
+}
+
+fn intensity_style(intensity: GolSearchIntensity, theme: &Theme) -> Style {
+    match intensity {
+        GolSearchIntensity::Low => Style::default().fg(theme.border).add_modifier(Modifier::DIM),
+        GolSearchIntensity::Med => Style::default().fg(theme.title),
+        GolSearchIntensity::High => Style::default().fg(theme.warning),
+    }
+}
+
+fn autostop_style(policy: nit_gol::AutoStopPolicy, theme: &Theme) -> Style {
+    match policy {
+        nit_gol::AutoStopPolicy::Off => Style::default().fg(theme.border).add_modifier(Modifier::DIM),
+        nit_gol::AutoStopPolicy::Fixed => Style::default().fg(theme.title),
+        nit_gol::AutoStopPolicy::Repeat => Style::default().fg(theme.warning),
+    }
+}
+
+fn attractor_style(
+    event: Option<&AttractorEvent>,
+    theme: &Theme,
+    dim_style: Style,
+) -> Style {
+    match event {
+        Some(AttractorEvent::FixedPoint { .. }) => Style::default().fg(theme.title_focused),
+        Some(AttractorEvent::Cycle { .. }) => Style::default().fg(theme.warning),
+        None => dim_style,
+    }
+}
+
+fn paused_by_style(paused: bool, by_attractor: bool, theme: &Theme, dim_style: Style) -> Style {
+    if !paused {
+        return dim_style;
+    }
+    if by_attractor {
+        Style::default().fg(theme.warning)
+    } else {
+        Style::default().fg(theme.accent)
+    }
+}
+
+fn render_ms_style(ms: u128, theme: &Theme) -> Style {
+    if ms >= 60 {
+        Style::default()
+            .fg(theme.error)
+            .add_modifier(Modifier::BOLD)
+    } else if ms >= 33 {
+        Style::default().fg(theme.warning)
+    } else if ms >= 16 {
+        Style::default().fg(theme.title)
+    } else {
+        Style::default().fg(theme.title_focused)
+    }
+}
+
+fn tick_ms_style(ms: u64, theme: &Theme) -> Style {
+    if ms <= 60 {
+        Style::default().fg(theme.accent)
+    } else if ms <= 120 {
+        Style::default().fg(theme.title)
+    } else if ms <= 300 {
+        Style::default().fg(theme.foreground)
+    } else {
+        Style::default().fg(theme.warning)
+    }
+}
+
+fn syntax_style(status: &str, theme: &Theme, dim_style: Style) -> Style {
+    let upper = status.to_ascii_uppercase();
+    if upper.contains("ERROR") {
+        Style::default()
+            .fg(theme.error)
+            .add_modifier(Modifier::BOLD)
+    } else if upper.contains("DISABLED") || upper.contains("OFF") {
+        dim_style
+    } else if upper.contains("PENDING") {
+        Style::default().fg(theme.warning)
+    } else if upper.contains("READY") || upper.contains("ON") {
+        Style::default().fg(theme.title_focused)
+    } else {
+        Style::default().fg(theme.foreground)
+    }
+}
+
+fn leaderboard_style(idx: usize, theme: &Theme, value_style: Style) -> Style {
+    match idx {
+        0 => Style::default().fg(theme.accent),
+        1 => Style::default().fg(theme.title),
+        2 => Style::default().fg(theme.border),
+        _ => value_style,
     }
 }
