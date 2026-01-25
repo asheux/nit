@@ -20,6 +20,7 @@ use tracing::info;
 
 use crate::{
     layout,
+    system_stats::SystemStats,
     syntax::SyntaxRuntime,
     theme::Theme,
     widgets::{
@@ -70,6 +71,7 @@ fn run_loop(
     let mut last_log = Instant::now();
     let mut needs_redraw = true;
     let mut input_state = InputState::new();
+    let mut system_stats = SystemStats::new();
     let mut clipboard = Clipboard::new().ok();
     loop {
         if let Some(deferred) = input_state.take_deferred() {
@@ -150,7 +152,8 @@ fn run_loop(
 
         // redraw
         if needs_redraw || last_tick.elapsed() >= TICK_RATE {
-            draw(terminal, state, theme, syntax)?;
+            system_stats.refresh_if_needed();
+            draw(terminal, state, theme, syntax, &system_stats)?;
             needs_redraw = false;
             last_tick = Instant::now();
         }
@@ -163,6 +166,7 @@ fn draw(
     state: &mut AppState,
     theme: &Theme,
     syntax: &SyntaxRuntime,
+    system_stats: &SystemStats,
 ) -> io::Result<()> {
     let start = Instant::now();
     terminal.draw(|f| {
@@ -237,7 +241,7 @@ fn draw(
             theme,
             &syntax.status_label(editor_id),
         );
-        bottom_bar::render(f, layout.bottom, state, theme);
+        bottom_bar::render(f, layout.bottom, state, theme, system_stats);
 
         if state.show_help {
             let area = centered_rect(60, 40, f.size());
