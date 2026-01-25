@@ -97,33 +97,29 @@ pub fn render_buffer(
         let line_len = content.chars().count();
         let offset_col = buffer.viewport.offset_col;
         let is_cursor_line = i == buffer.cursor.line;
-        let line_content_width = if is_cursor_line {
-            content_width.saturating_sub(1)
-        } else {
-            content_width
-        };
+        let line_content_width = content_width;
         let visible_start = offset_col.min(line_len);
         let visible_end = (offset_col + line_content_width).min(line_len);
         let ln = format!("{:>width$}", i + 1, width = line_num_width);
+        let cursor_style = Style::default()
+            .fg(theme.foreground)
+            .bg(theme.cursor_line_bg)
+            .add_modifier(Modifier::UNDERLINED);
         let mut spans = vec![
             Span::styled(
                 format!(" {ln} "),
                 if is_cursor_line {
                     Style::default()
                         .fg(theme.border_focused)
-                        .bg(theme.cursor_line_bg)
-                        .add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
+                        .add_modifier(Modifier::BOLD)
                 } else {
                     Style::default().fg(theme.border)
                 },
             ),
             Span::styled(
-                if is_cursor_line { "▌ " } else { "│ " },
+                "│ ",
                 if is_cursor_line {
-                    Style::default()
-                        .fg(theme.border_focused)
-                        .bg(theme.cursor_line_bg)
-                        .add_modifier(Modifier::UNDERLINED)
+                    Style::default().fg(theme.border_focused)
                 } else {
                     Style::default().fg(theme.border)
                 },
@@ -131,9 +127,7 @@ pub fn render_buffer(
         ];
         let mut base_style = Style::default().fg(theme.foreground);
         if is_cursor_line {
-            base_style = base_style
-                .bg(theme.cursor_line_bg)
-                .add_modifier(Modifier::UNDERLINED);
+            base_style = cursor_style;
         }
         let (chars, mut styles) = styled_line(&content, language, base_style, theme);
         if let Some((start, end)) = selection.and_then(|(start, end)| {
@@ -169,15 +163,6 @@ pub fn render_buffer(
         ));
         if line_len == 0 {
             spans.push(Span::styled("", base_style));
-        }
-        if is_cursor_line {
-            spans.push(Span::styled(
-                "▐",
-                Style::default()
-                    .fg(theme.border_focused)
-                    .bg(theme.cursor_line_bg)
-                    .add_modifier(Modifier::UNDERLINED),
-            ));
         }
         lines.push(Line::from(spans));
     }
