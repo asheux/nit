@@ -19,9 +19,58 @@ pub struct EditorConfig {
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct GolConfig {
+    pub enabled: bool,
+    pub tick_ms: u64,
+    pub wrap: bool,
+    pub seed_source: GolSeedSource,
+    pub search: GolSearchConfig,
+    pub snapshots: GolSnapshotsConfig,
+}
+
+#[derive(Copy, Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub enum GolSeedSource {
+    Editor,
+    Notes,
+}
+
+#[derive(Copy, Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub enum GolSearchIntensity {
+    Low,
+    Med,
+    High,
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct GolSearchConfig {
+    pub enabled: bool,
+    pub intensity: GolSearchIntensity,
+    pub rules_per_second: u32,
+    pub max_generations: u32,
+    pub time_budget_ms_per_tick: u32,
+    pub candidate_pool_size: usize,
+    pub leaderboard_size: usize,
+}
+
+#[derive(Copy, Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub enum SnapshotPrunePolicy {
+    Oldest,
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct GolSnapshotsConfig {
+    pub enabled: bool,
+    pub max_files: usize,
+    pub prune_policy: SnapshotPrunePolicy,
+    pub min_period: u32,
+    pub min_transient: u32,
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Settings {
     pub highlight: HighlightConfig,
     pub editor: EditorConfig,
+    pub gol: GolConfig,
 }
 
 impl Default for HighlightConfig {
@@ -42,11 +91,51 @@ impl Default for EditorConfig {
     }
 }
 
+impl Default for GolConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            tick_ms: 120,
+            wrap: false,
+            seed_source: GolSeedSource::Editor,
+            search: GolSearchConfig::default(),
+            snapshots: GolSnapshotsConfig::default(),
+        }
+    }
+}
+
+impl Default for GolSearchConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            intensity: GolSearchIntensity::Low,
+            rules_per_second: 0,
+            max_generations: 300,
+            time_budget_ms_per_tick: 8,
+            candidate_pool_size: 32,
+            leaderboard_size: 10,
+        }
+    }
+}
+
+impl Default for GolSnapshotsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            max_files: 500,
+            prune_policy: SnapshotPrunePolicy::Oldest,
+            min_period: 6,
+            min_transient: 20,
+        }
+    }
+}
+
 impl Default for Settings {
     fn default() -> Self {
         Self {
             highlight: HighlightConfig::default(),
             editor: EditorConfig::default(),
+            gol: GolConfig::default(),
         }
     }
 }

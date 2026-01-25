@@ -47,6 +47,15 @@ pub fn render(
 
     let inner = block.inner(area);
     let (ln, col) = state.line_col();
+    let viz_mode = match state.visualizer.mode {
+        nit_core::VisualizerMode::SimOnly => "SIM",
+        nit_core::VisualizerMode::Search => "SEARCH",
+    };
+    let viz_period = state
+        .visualizer
+        .period
+        .map(|p| p.to_string())
+        .unwrap_or_else(|| "--".into());
     let rows = vec![
         Row::new(vec![Cell::from("Focus"), Cell::from(state.focus.title())]),
         Row::new(vec![
@@ -86,8 +95,40 @@ pub fn render(
             Cell::from(shorten_path(&state.workspace_root, 30)),
         ]),
         Row::new(vec![
+            Cell::from("Viz Mode"),
+            Cell::from(viz_mode),
+        ]),
+        Row::new(vec![
+            Cell::from("Viz Rule"),
+            Cell::from(state.visualizer.rule.clone()),
+        ]),
+        Row::new(vec![
+            Cell::from("Viz Gen"),
+            Cell::from(state.visualizer.generation.to_string()),
+        ]),
+        Row::new(vec![
+            Cell::from("Viz Alive"),
+            Cell::from(state.visualizer.alive.to_string()),
+        ]),
+        Row::new(vec![
+            Cell::from("Viz Period"),
+            Cell::from(viz_period),
+        ]),
+        Row::new(vec![
+            Cell::from("Viz Wrap"),
+            Cell::from(if state.visualizer.wrap { "Torus" } else { "Dead" }),
+        ]),
+        Row::new(vec![
+            Cell::from("Viz Speed"),
+            Cell::from(format!("{}ms", state.visualizer.tick_ms)),
+        ]),
+        Row::new(vec![
+            Cell::from("Search RPS"),
+            Cell::from(state.visualizer.search_rps.to_string()),
+        ]),
+        Row::new(vec![
             Cell::from("Viz Seed"),
-            Cell::from(format!("{}", state.visualizer.seed)),
+            Cell::from(state.visualizer.seed.to_string()),
         ]),
         Row::new(vec![Cell::from("Syntax"), Cell::from(syntax_status)]),
         Row::new(vec![
@@ -95,6 +136,14 @@ pub fn render(
             Cell::from(format!("{}", state.job.paused)),
         ]),
     ];
+
+    let mut rows = rows;
+    for (idx, entry) in state.visualizer.leaderboard.iter().take(3).enumerate() {
+        rows.push(Row::new(vec![
+            Cell::from(format!("Rule {}", idx + 1)),
+            Cell::from(format!("{} ({:.1})", entry.rule, entry.score)),
+        ]));
+    }
 
     let table = Table::new(rows, [Constraint::Length(14), Constraint::Min(5)])
         .column_spacing(1)

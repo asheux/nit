@@ -5,8 +5,8 @@
 - Ctrl+S: Save
 - Tab / Shift+Tab: Cycle pane focus
 - Ctrl+H/J/K/L: Focus panes (vim/tmux style: left/down/up/right)
-- F1: Toggle help overlay
-- Ctrl+Shift+H: Toggle syntax highlighting
+- F1 / ?: Toggle help overlay
+- Ctrl+Shift+S: Toggle syntax highlighting
 
 ## Editor & Notes (focused)
 - Arrow keys / PageUp / PageDown / Home / End: Move cursor/scroll
@@ -37,12 +37,17 @@
 - Esc: Switch to Normal mode
 
 ## Job Output
-- Ctrl+Shift+L: Clear logs
+- Ctrl+L: Clear logs
 - Ctrl+Space: Pause/resume job updates
 
 ## Visualizer
 - Ctrl+R: Reseed pattern (SEED)
-- Ctrl+A: Apply variant toggle (APPLY)
+- Ctrl+A: Apply best rule / variant (APPLY)
+- Ctrl+G: Toggle search mode
+- Ctrl+T: Toggle wrap mode
+- Ctrl+N: Snapshot (SNAP)
+- Space: Pause/resume simulation (Visualizer focus)
+- + / -: Speed up/down (Visualizer focus)
 
 ## Command/Prompts
 - Y / N to confirm quit when prompted

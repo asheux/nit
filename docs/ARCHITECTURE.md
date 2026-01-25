@@ -2,9 +2,10 @@
 
 ## Overview
 
-nit is a terminal-first editor composed of four crates:
+nit is a terminal-first editor composed of five crates:
 
 - `nit-core`: state, actions, text buffers, and IO (no terminal dependencies).
+- `nit-gol`: Conway’s Game of Life engine, rule evaluation, and snapshot encoding.
 - `nit-syntax`: syntax highlighting engine and language registry (tree-sitter + fallback).
 - `nit-tui`: rendering, layout, event loop, and key mapping using ratatui + crossterm.
 - `nit`: binary entrypoint wiring CLI args, tracing, and running the TUI.
@@ -27,7 +28,7 @@ The app redraws only when state changes or the terminal resizes.
 - Mode (Insert/Normal)
 - Focused pane
 - Logs ring buffer and job progress/paused flag
-- Visualizer seed + variant
+- Visualizer state (seed, rule, mode, pause, wrap, generation, period, leaderboard)
 - Metrics: last render time, frame count, last action
 - Optional prompt (e.g., confirm quit)
 
@@ -82,3 +83,19 @@ semantic tokens (LSP) can layer on top of syntactic tokens without rewriting UI 
 **Extensibility**
 - Language detection is centralized in a registry (extension, filename, shebang).
 - Queries live in `crates/nit-syntax/queries` and can be swapped without touching TUI code.
+
+## Visualizer (Game of Life)
+
+The Visualizer pane runs a Conway’s Game of Life simulation seeded from visible editor/notes
+text. The TUI drives a lightweight tick loop for simulation, while heavier work (rule search
+and snapshot I/O) runs in a background worker thread.
+
+**Pipeline**
+- Seed text (viewport) → ASCII-to-grid mapping → GoL simulation (nit-gol).
+- Rule search evaluates Life-like rules asynchronously and reports a leaderboard.
+- Visualizer state (rule, generation, alive count, period, mode) is rendered in the pane
+  and summarized in Gate Monitor.
+
+**Snapshots**
+- Stored under `gol-snapshots/` in the workspace root as RLE + JSON metadata.
+- Deduped by grid hash and pruned by max file count.

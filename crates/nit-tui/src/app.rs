@@ -26,6 +26,7 @@ use crate::{
     system_stats::SystemStats,
     syntax::SyntaxRuntime,
     theme::Theme,
+    visualizer::VisualizerRuntime,
     widgets::{
         bottom_bar, editor_view, gate_monitor_view, help_overlay, job_output_view, notes_view,
         top_bar, visualizer_view,
@@ -77,6 +78,7 @@ fn run_loop(
     let mut input_state = InputState::new();
     let mut system_stats = SystemStats::new();
     let mut clipboard = Clipboard::new().ok();
+    let mut visualizer = VisualizerRuntime::new(state);
     tracing::info!("SECURITY: no plugins, no network, no shell execution");
     loop {
         if let Some(deferred) = input_state.take_deferred() {
@@ -155,10 +157,12 @@ fn run_loop(
         syntax.poll_results(editor_id, state.editor_buffer().version());
         syntax.poll_results(notes_id, state.notes_buffer().version());
 
+        visualizer.tick(state);
+
         // redraw
         if needs_redraw || last_tick.elapsed() >= TICK_RATE {
             system_stats.refresh_if_needed();
-            draw(terminal, state, theme, syntax, &system_stats)?;
+            draw(terminal, state, theme, syntax, &system_stats, &mut visualizer)?;
             needs_redraw = false;
             last_tick = Instant::now();
         }
@@ -172,6 +176,7 @@ fn draw(
     theme: &Theme,
     syntax: &SyntaxRuntime,
     system_stats: &SystemStats,
+    visualizer: &mut VisualizerRuntime,
 ) -> io::Result<()> {
     let start = Instant::now();
     terminal.draw(|f| {
@@ -238,7 +243,11 @@ fn draw(
             state.settings.editor.tab_width as usize,
         );
         job_output_view::render(f, layout.job, state, theme);
-        visualizer_view::render(f, layout.visualizer, state, theme);
+        let viz_inner_width = layout.visualizer.width.saturating_sub(2) as usize;
+        let viz_inner_height = layout.visualizer.height.saturating_sub(2);
+        let viz_grid_height = viz_inner_height.saturating_sub(1) as usize;
+        visualizer.ensure_size(viz_inner_width, viz_grid_height, state);
+        visualizer_view::render(f, layout.visualizer, state, theme, visualizer.grid());
         gate_monitor_view::render(
             f,
             layout.gate,
@@ -353,6 +362,21 @@ fn map_key_to_action(key: KeyEvent, state: &AppState, input: &mut InputState) ->
             Action::ShowHelp
         }),
         KeyEvent {
+            code: KeyCode::Char('?'),
+            modifiers,
+            ..
+        } if modifiers.is_empty() || modifiers == KeyModifiers::SHIFT => {
+            if state.mode != Mode::Insert {
+                Some(if state.show_help {
+                    Action::HideHelp
+                } else {
+                    Action::ShowHelp
+                })
+            } else {
+                None
+            }
+        }
+        KeyEvent {
             code: KeyCode::Char('s') | KeyCode::Char('S'),
             modifiers,
             ..
@@ -365,11 +389,17 @@ fn map_key_to_action(key: KeyEvent, state: &AppState, input: &mut InputState) ->
             code: KeyCode::Char('g'),
             modifiers: KeyModifiers::CONTROL,
             ..
-        } => Some(if state.show_help {
-            Action::HideHelp
-        } else {
-            Action::ShowHelp
-        }),
+        } => Some(Action::VisualizerToggleSearch),
+        KeyEvent {
+            code: KeyCode::Char('t'),
+            modifiers: KeyModifiers::CONTROL,
+            ..
+        } => Some(Action::VisualizerToggleWrap),
+        KeyEvent {
+            code: KeyCode::Char('n'),
+            modifiers: KeyModifiers::CONTROL,
+            ..
+        } => Some(Action::VisualizerSnapshot),
         KeyEvent {
             code: KeyCode::Char('b') | KeyCode::Char('B'),
             modifiers: KeyModifiers::CONTROL,
@@ -538,6 +568,29 @@ fn map_key_to_action(key: KeyEvent, state: &AppState, input: &mut InputState) ->
             modifiers: KeyModifiers::CONTROL,
             ..
         } => Some(Action::VisualizerApply),
+        KeyEvent {
+            code: KeyCode::Char(' '),
+            modifiers: KeyModifiers::NONE,
+            ..
+        } if state.focus == PaneId::Visualizer => Some(Action::VisualizerPause),
+        KeyEvent {
+            code: KeyCode::Char('+') | KeyCode::Char('='),
+            modifiers,
+            ..
+        } if state.focus == PaneId::Visualizer
+            && (modifiers.is_empty() || modifiers == KeyModifiers::SHIFT) =>
+        {
+            Some(Action::VisualizerSpeedUp)
+        }
+        KeyEvent {
+            code: KeyCode::Char('-'),
+            modifiers,
+            ..
+        } if state.focus == PaneId::Visualizer
+            && (modifiers.is_empty() || modifiers == KeyModifiers::SHIFT) =>
+        {
+            Some(Action::VisualizerSpeedDown)
+        }
         KeyEvent {
             code: KeyCode::Char(c),
             modifiers,
@@ -899,7 +952,7 @@ fn is_clear_logs_key(key: &KeyEvent) -> bool {
     matches!(
         key,
         KeyEvent {
-            code: KeyCode::Char('n') | KeyCode::Char('N'),
+            code: KeyCode::Char('l') | KeyCode::Char('L'),
             modifiers,
             ..
         } if modifiers.contains(KeyModifiers::CONTROL)

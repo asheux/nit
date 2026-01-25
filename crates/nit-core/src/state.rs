@@ -1,6 +1,12 @@
 use crate::{
-    actions::Action, buffer::Buffer, config::Settings, io, mode::Mode, pane::PaneId,
-    prompt::Prompt, viewport::Viewport,
+    actions::Action,
+    buffer::Buffer,
+    config::{GolSeedSource, Settings},
+    io,
+    mode::Mode,
+    pane::PaneId,
+    prompt::Prompt,
+    viewport::Viewport,
 };
 use std::collections::VecDeque;
 use std::path::PathBuf;
@@ -43,10 +49,41 @@ pub struct JobState {
     pub progress: f32,
 }
 
-#[derive(Copy, Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Copy, Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub enum VisualizerMode {
+    SimOnly,
+    Search,
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct VisualizerRuleEntry {
+    pub rule: String,
+    pub score: f32,
+    pub period: Option<u32>,
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct VisualizerState {
     pub seed: u64,
     pub variant: u8,
+    pub mode: VisualizerMode,
+    pub paused: bool,
+    pub wrap: bool,
+    pub rule: String,
+    pub generation: u64,
+    pub alive: usize,
+    pub period: Option<u32>,
+    pub tick_ms: u64,
+    pub seed_source: GolSeedSource,
+    pub search_rps: u32,
+    pub leaderboard: Vec<VisualizerRuleEntry>,
+    pub last_score: Option<f32>,
+    #[serde(skip)]
+    pub pending_reseed: bool,
+    #[serde(skip)]
+    pub pending_apply: bool,
+    #[serde(skip)]
+    pub pending_snapshot: bool,
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -93,6 +130,7 @@ pub struct ActionOutcome {
 
 impl AppState {
     pub fn new(workspace_root: PathBuf, editor: Buffer, notes: Buffer) -> Self {
+        let settings = Settings::default();
         Self {
             workspace_root,
             buffers: vec![editor, notes],
@@ -108,6 +146,21 @@ impl AppState {
             visualizer: VisualizerState {
                 seed: 1,
                 variant: 0,
+                mode: VisualizerMode::SimOnly,
+                paused: false,
+                wrap: settings.gol.wrap,
+                rule: "B3/S23".to_string(),
+                generation: 0,
+                alive: 0,
+                period: None,
+                tick_ms: settings.gol.tick_ms,
+                seed_source: settings.gol.seed_source,
+                search_rps: 0,
+                leaderboard: Vec::new(),
+                last_score: None,
+                pending_reseed: false,
+                pending_apply: false,
+                pending_snapshot: false,
             },
             metrics: Metrics {
                 last_render_ms: 0,
@@ -117,7 +170,7 @@ impl AppState {
             prompt: None,
             show_help: false,
             status: None,
-            settings: Settings::default(),
+            settings,
             debug: false,
             yank: None,
             yank_kind: YankKind::Char,
@@ -513,9 +566,39 @@ pub fn apply_action(state: &mut AppState, action: Action) -> ActionOutcome {
         }
         Action::VisualizerReseed => {
             state.visualizer.seed = state.visualizer.seed.wrapping_add(1);
+            state.visualizer.pending_reseed = true;
+            state.visualizer.seed_source = match state.focus {
+                PaneId::Notes => GolSeedSource::Notes,
+                _ => GolSeedSource::Editor,
+            };
         }
         Action::VisualizerApply => {
-            state.visualizer.variant = state.visualizer.variant.wrapping_add(1);
+            if state.visualizer.mode == VisualizerMode::Search {
+                state.visualizer.pending_apply = true;
+            } else {
+                state.visualizer.variant = state.visualizer.variant.wrapping_add(1);
+            }
+        }
+        Action::VisualizerToggleSearch => {
+            state.visualizer.mode = match state.visualizer.mode {
+                VisualizerMode::SimOnly => VisualizerMode::Search,
+                VisualizerMode::Search => VisualizerMode::SimOnly,
+            };
+        }
+        Action::VisualizerToggleWrap => {
+            state.visualizer.wrap = !state.visualizer.wrap;
+        }
+        Action::VisualizerSnapshot => {
+            state.visualizer.pending_snapshot = true;
+        }
+        Action::VisualizerPause => {
+            state.visualizer.paused = !state.visualizer.paused;
+        }
+        Action::VisualizerSpeedUp => {
+            state.visualizer.tick_ms = state.visualizer.tick_ms.saturating_sub(10).max(30);
+        }
+        Action::VisualizerSpeedDown => {
+            state.visualizer.tick_ms = (state.visualizer.tick_ms + 10).min(1000);
         }
         Action::ToggleSyntax => {
             state.settings.highlight.enabled = !state.settings.highlight.enabled;

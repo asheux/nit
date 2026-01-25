@@ -18,7 +18,8 @@ cargo run -- path/to/file
 - Rigid multi-pane layout: Notes, Job Output, Editor, Visualizer, Gate Monitor, and bottom status bar.
 - Insert/edit text with ropey-based buffers; Notes is a separate editable scratch buffer.
 - Pane focus cycling via Tab / Shift+Tab with focus highlighting.
-- Deterministic ASCII visualizer derived from buffer hash; reseed/apply toggles.
+- Visualizer runs Conway’s Game of Life seeded from editor/notes text, with optional rule search.
+- Visualizer snapshots saved under `gol-snapshots/` (RLE + JSON metadata).
 - Job output ring buffer fed by tracing logs; clear/pause controls.
 - Gate Monitor dashboard with editor metrics (dirty flag, Ln/Col, bytes, render ms, focus, seed, etc.).
 - Tree-sitter syntax highlighting with background parsing and plain-text fallback.

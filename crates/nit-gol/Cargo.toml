@@ -1,0 +1,12 @@
+[package]
+name = "nit-gol"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[dependencies]
+blake3 = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+time = { workspace = true, features = ["formatting"] }

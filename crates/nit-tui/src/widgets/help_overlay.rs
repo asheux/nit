@@ -25,6 +25,10 @@ pub fn render(frame: &mut Frame, area: Rect, theme: &Theme) {
             Span::raw(" save"),
         ]),
         Line::from(vec![
+            Span::styled("F1 / ?", Style::default().fg(theme.accent)),
+            Span::raw(" toggle help"),
+        ]),
+        Line::from(vec![
             Span::styled("Tab/Shift+Tab", Style::default().fg(theme.accent)),
             Span::raw(" focus panes"),
         ]),
@@ -109,7 +113,7 @@ pub fn render(frame: &mut Frame, area: Rect, theme: &Theme) {
             Span::raw(" end / start of line"),
         ]),
         Line::from(vec![
-            Span::styled("Ctrl+N", Style::default().fg(theme.accent)),
+            Span::styled("Ctrl+L", Style::default().fg(theme.accent)),
             Span::raw(" clear logs (Job Output)"),
         ]),
         Line::from(vec![
@@ -121,16 +125,32 @@ pub fn render(frame: &mut Frame, area: Rect, theme: &Theme) {
             Span::raw(" toggle debug mode"),
         ]),
         Line::from(vec![
-            Span::styled("Ctrl+G", Style::default().fg(theme.accent)),
-            Span::raw(" toggle help"),
-        ]),
-        Line::from(vec![
             Span::styled("Ctrl+R", Style::default().fg(theme.accent)),
             Span::raw(" reseed visualizer"),
         ]),
         Line::from(vec![
             Span::styled("Ctrl+A", Style::default().fg(theme.accent)),
-            Span::raw(" apply visual variant"),
+            Span::raw(" apply best rule / variant"),
+        ]),
+        Line::from(vec![
+            Span::styled("Ctrl+G", Style::default().fg(theme.accent)),
+            Span::raw(" toggle visualizer search"),
+        ]),
+        Line::from(vec![
+            Span::styled("Ctrl+T", Style::default().fg(theme.accent)),
+            Span::raw(" toggle wrap mode"),
+        ]),
+        Line::from(vec![
+            Span::styled("Ctrl+N", Style::default().fg(theme.accent)),
+            Span::raw(" snapshot visualizer"),
+        ]),
+        Line::from(vec![
+            Span::styled("Space", Style::default().fg(theme.accent)),
+            Span::raw(" pause/resume (Visualizer focus)"),
+        ]),
+        Line::from(vec![
+            Span::styled("+ / -", Style::default().fg(theme.accent)),
+            Span::raw(" speed up/down (Visualizer focus)"),
         ]),
     ];
 
