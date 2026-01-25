@@ -122,7 +122,7 @@ pub fn render(frame: &mut Frame, area: Rect, theme: &Theme) {
         ]),
         Line::from(vec![
             Span::styled("Ctrl+B", Style::default().fg(theme.accent)),
-            Span::raw(" toggle debug mode"),
+            Span::raw(" toggle debug mode (non-Visualizer focus)"),
         ]),
         Line::from(vec![
             Span::styled("Ctrl+R", Style::default().fg(theme.accent)),
@@ -151,6 +151,30 @@ pub fn render(frame: &mut Frame, area: Rect, theme: &Theme) {
         Line::from(vec![
             Span::styled("Ctrl+N", Style::default().fg(theme.accent)),
             Span::raw(" snapshot visualizer"),
+        ]),
+        Line::from(vec![
+            Span::styled("Ctrl+M", Style::default().fg(theme.accent)),
+            Span::raw(" cycle render mode (Visualizer focus)"),
+        ]),
+        Line::from(vec![
+            Span::styled("Ctrl+J", Style::default().fg(theme.accent)),
+            Span::raw(" toggle age shading (Visualizer focus)"),
+        ]),
+        Line::from(vec![
+            Span::styled("Ctrl+K", Style::default().fg(theme.accent)),
+            Span::raw(" toggle trails (Visualizer focus)"),
+        ]),
+        Line::from(vec![
+            Span::styled("Ctrl+B", Style::default().fg(theme.accent)),
+            Span::raw(" toggle bbox overlay (Visualizer focus)"),
+        ]),
+        Line::from(vec![
+            Span::styled("Ctrl+H", Style::default().fg(theme.accent)),
+            Span::raw(" toggle heat overlay (Visualizer focus)"),
+        ]),
+        Line::from(vec![
+            Span::styled("Ctrl+L", Style::default().fg(theme.accent)),
+            Span::raw(" toggle scanlines (Visualizer focus)"),
         ]),
         Line::from(vec![
             Span::styled("Space", Style::default().fg(theme.accent)),

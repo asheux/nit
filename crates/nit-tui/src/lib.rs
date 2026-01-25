@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 pub mod app;
+pub mod gol_render;
 pub mod layout;
 pub mod system_stats;
 pub mod syntax;

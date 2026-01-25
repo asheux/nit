@@ -5,8 +5,8 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime};
 
 use nit_core::{
-    AppState, GolSearchConfig, GolSearchIntensity, GolSeedSource, GolSnapshotsConfig,
-    VisualizerMode, VisualizerRuleEntry,
+    AppState, GolRenderMode, GolSearchConfig, GolSearchIntensity, GolSeedSource,
+    GolSnapshotsConfig, VisualizerMode, VisualizerRuleEntry,
 };
 use nit_gol::{
     analyze::{evaluate_rule, RuleEvaluation, RuleScore},
@@ -21,6 +21,8 @@ use nit_gol::{
 };
 use nit_utils::hashing::{stable_hash_bytes, XorShift64};
 use tracing::{info, warn};
+
+use crate::gol_render::GolRenderState;
 
 const DEFAULT_LIVE_CHARS: &[char] = &['#', '@', '█', '▓', '▒', '░', '*', '+', 'x', 'X', '%', '&'];
 
@@ -38,6 +40,7 @@ pub struct VisualizerRuntime {
     last_tick_ms: u64,
     last_seed_source: GolSeedSource,
     last_auto_stop_policy: AutoStopPolicy,
+    last_render_mode: GolRenderMode,
     rules_log_path: PathBuf,
     leaderboard: Vec<RuleScore>,
     leaderboard_limit: usize,
@@ -47,6 +50,8 @@ pub struct VisualizerRuntime {
     last_attractor_hash: Option<[u64; 2]>,
     attractor: AttractorDetector,
     search_paused_for_stability: bool,
+    render_state: GolRenderState,
+    title_cache: String,
     search: SearchWorker,
     snapshot: SnapshotManager,
     events: Receiver<WorkerEvent>,
@@ -68,6 +73,12 @@ impl VisualizerRuntime {
             min_interval_ms: state.settings.gol.snapshots.min_interval_ms,
             queue_capacity: snapshot_queue_capacity(),
         };
+        let render_mode = state
+            .visualizer
+            .render_mode
+            .effective(state.settings.gol.braille_enabled);
+        let mut title_cache = String::with_capacity(64);
+        build_title(&mut title_cache, render_mode);
         Self {
             size: (0, 0),
             grid: Grid::new(0, 0),
@@ -82,6 +93,7 @@ impl VisualizerRuntime {
             last_tick_ms: state.visualizer.tick_ms,
             last_seed_source: state.visualizer.seed_source,
             last_auto_stop_policy: state.visualizer.auto_stop_policy,
+            last_render_mode: render_mode,
             rules_log_path,
             leaderboard: Vec::new(),
             leaderboard_limit: 10,
@@ -91,6 +103,8 @@ impl VisualizerRuntime {
             last_attractor_hash: None,
             attractor,
             search_paused_for_stability: false,
+            render_state: GolRenderState::new(),
+            title_cache,
             search: SearchWorker::spawn(event_tx.clone()),
             snapshot: SnapshotManager::new(snapshot_config),
             events,
@@ -103,6 +117,7 @@ impl VisualizerRuntime {
         }
         self.size = (width, height);
         self.grid = Grid::new(width, height);
+        self.render_state.resize(width, height);
         self.reset_simulation(self.current_edge(state));
         if width > 0 && height > 0 {
             let _ = self.reseed(state);
@@ -122,6 +137,14 @@ impl VisualizerRuntime {
         } else {
             Some(&self.grid)
         }
+    }
+
+    pub fn render_state(&self) -> &GolRenderState {
+        &self.render_state
+    }
+
+    pub fn title_text(&self) -> &str {
+        &self.title_cache
     }
 
     fn apply_state_changes(&mut self, state: &mut AppState) {
@@ -150,6 +173,15 @@ impl VisualizerRuntime {
 
         if state.visualizer.tick_ms != self.last_tick_ms {
             self.last_tick_ms = state.visualizer.tick_ms;
+        }
+
+        let render_mode = state
+            .visualizer
+            .render_mode
+            .effective(state.settings.gol.braille_enabled);
+        if render_mode != self.last_render_mode {
+            self.last_render_mode = render_mode;
+            build_title(&mut self.title_cache, render_mode);
         }
 
         if state.visualizer.seed_source != self.last_seed_source {
@@ -221,9 +253,10 @@ impl VisualizerRuntime {
         let event = self
             .attractor
             .observe(&self.grid, &next, next_gen, self.rule, edge);
+        let (alive, _) = self.render_state.update_from_step(&self.grid, &next);
         self.grid = next;
         self.generation = next_gen;
-        self.alive = self.grid.alive_count();
+        self.alive = alive;
         if let Some(event) = event {
             self.handle_attractor_event(state, event);
         }
@@ -266,7 +299,7 @@ impl VisualizerRuntime {
         self.grid = grid;
         self.last_seed_hash = seed_hash;
         self.reset_simulation(self.current_edge(state));
-        self.alive = self.grid.alive_count();
+        self.alive = self.render_state.seed_from_grid(&self.grid);
         true
     }
 
@@ -598,6 +631,13 @@ enum SnapshotTrigger {
     Manual,
     BestRule,
     Attractor(AttractorEvent),
+}
+
+fn build_title(out: &mut String, mode: GolRenderMode) {
+    out.clear();
+    out.push_str("VISUALIZER (");
+    out.push_str(mode.label());
+    out.push_str(")  [ APPLY ] [ SEED ] [ SNAP ] [ SEARCH ]");
 }
 
 fn build_seed_grid(

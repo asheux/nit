@@ -48,6 +48,12 @@
 - Ctrl+O: Cycle auto-stop policy (Off → Fixed → Repeat)
 - Ctrl+T: Toggle wrap mode
 - Ctrl+N: Snapshot (SNAP)
+- Ctrl+M: Cycle render mode (Solid → Half → Braille) (Visualizer focus)
+- Ctrl+J: Toggle age shading (Visualizer focus)
+- Ctrl+K: Toggle decay trails (Visualizer focus)
+- Ctrl+B: Toggle bounding box overlay (Visualizer focus)
+- Ctrl+H: Toggle heat overlay (Visualizer focus)
+- Ctrl+L: Toggle scanlines overlay (Visualizer focus)
 - Space: Pause/resume simulation (Visualizer focus)
 - + / -: Speed up/down (Visualizer focus)
 

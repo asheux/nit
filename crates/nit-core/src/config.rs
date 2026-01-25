@@ -26,6 +26,7 @@ pub struct GolConfig {
     pub seed_source: GolSeedSource,
     pub seed_live_chars: String,
     pub seed_other_live_percent: u8,
+    pub braille_enabled: bool,
     pub search: GolSearchConfig,
     pub snapshots: GolSnapshotsConfig,
 }
@@ -104,6 +105,7 @@ impl Default for GolConfig {
             seed_source: GolSeedSource::Editor,
             seed_live_chars: "#@█▓▒░*+xX%&".to_string(),
             seed_other_live_percent: 50,
+            braille_enabled: true,
             search: GolSearchConfig::default(),
             snapshots: GolSnapshotsConfig::default(),
         }

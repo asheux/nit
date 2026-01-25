@@ -56,6 +56,44 @@ pub enum VisualizerMode {
     Search,
 }
 
+#[derive(Copy, Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub enum GolRenderMode {
+    Solid,
+    HalfBlock,
+    Braille,
+}
+
+impl GolRenderMode {
+    pub fn next(self, braille_enabled: bool) -> Self {
+        match self {
+            GolRenderMode::Solid => GolRenderMode::HalfBlock,
+            GolRenderMode::HalfBlock => {
+                if braille_enabled {
+                    GolRenderMode::Braille
+                } else {
+                    GolRenderMode::Solid
+                }
+            }
+            GolRenderMode::Braille => GolRenderMode::Solid,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            GolRenderMode::Solid => "SOLID",
+            GolRenderMode::HalfBlock => "HALF",
+            GolRenderMode::Braille => "BRAILLE",
+        }
+    }
+
+    pub fn effective(self, braille_enabled: bool) -> Self {
+        match self {
+            GolRenderMode::Braille if !braille_enabled => GolRenderMode::HalfBlock,
+            _ => self,
+        }
+    }
+}
+
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct VisualizerRuleEntry {
     pub rule: String,
@@ -68,6 +106,12 @@ pub struct VisualizerState {
     pub seed: u64,
     pub variant: u8,
     pub mode: VisualizerMode,
+    pub render_mode: GolRenderMode,
+    pub age_shading: bool,
+    pub trails: bool,
+    pub overlay_bbox: bool,
+    pub overlay_heat: bool,
+    pub scanlines: bool,
     pub paused: bool,
     pub paused_by_attractor: bool,
     pub wrap: bool,
@@ -155,6 +199,12 @@ impl AppState {
                 seed: 1,
                 variant: 0,
                 mode: VisualizerMode::SimOnly,
+                render_mode: GolRenderMode::HalfBlock,
+                age_shading: true,
+                trails: true,
+                overlay_bbox: false,
+                overlay_heat: false,
+                scanlines: false,
                 paused: false,
                 paused_by_attractor: false,
                 wrap: settings.gol.wrap,
@@ -634,6 +684,49 @@ pub fn apply_action(state: &mut AppState, action: Action) -> ActionOutcome {
         }
         Action::VisualizerSpeedDown => {
             state.visualizer.tick_ms = (state.visualizer.tick_ms + 10).min(1000);
+        }
+        Action::VisualizerCycleRenderMode => {
+            let next = state
+                .visualizer
+                .render_mode
+                .next(state.settings.gol.braille_enabled);
+            state.visualizer.render_mode = next;
+            state.status = Some(format!("Render: {}", next.label()));
+        }
+        Action::VisualizerToggleAgeShading => {
+            state.visualizer.age_shading = !state.visualizer.age_shading;
+            state.status = Some(format!(
+                "Age shading: {}",
+                if state.visualizer.age_shading { "ON" } else { "OFF" }
+            ));
+        }
+        Action::VisualizerToggleTrails => {
+            state.visualizer.trails = !state.visualizer.trails;
+            state.status = Some(format!(
+                "Trails: {}",
+                if state.visualizer.trails { "ON" } else { "OFF" }
+            ));
+        }
+        Action::VisualizerToggleBBox => {
+            state.visualizer.overlay_bbox = !state.visualizer.overlay_bbox;
+            state.status = Some(format!(
+                "BBox: {}",
+                if state.visualizer.overlay_bbox { "ON" } else { "OFF" }
+            ));
+        }
+        Action::VisualizerToggleHeat => {
+            state.visualizer.overlay_heat = !state.visualizer.overlay_heat;
+            state.status = Some(format!(
+                "Heat: {}",
+                if state.visualizer.overlay_heat { "ON" } else { "OFF" }
+            ));
+        }
+        Action::VisualizerToggleScanlines => {
+            state.visualizer.scanlines = !state.visualizer.scanlines;
+            state.status = Some(format!(
+                "Scanlines: {}",
+                if state.visualizer.scanlines { "ON" } else { "OFF" }
+            ));
         }
         Action::ToggleSyntax => {
             state.settings.highlight.enabled = !state.settings.highlight.enabled;

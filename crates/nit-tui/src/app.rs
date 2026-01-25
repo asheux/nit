@@ -252,10 +252,16 @@ fn draw(
         );
         job_output_view::render(f, layout.job, state, theme);
         let viz_inner_width = layout.visualizer.width.saturating_sub(2) as usize;
-        let viz_inner_height = layout.visualizer.height.saturating_sub(2);
-        let viz_grid_height = viz_inner_height.saturating_sub(1) as usize;
-        visualizer.ensure_size(viz_inner_width, viz_grid_height, state);
-        visualizer_view::render(f, layout.visualizer, state, theme, visualizer.grid());
+        let viz_inner_height = layout.visualizer.height.saturating_sub(2) as usize;
+        let viz_grid_rows = viz_inner_height.saturating_sub(1);
+        let render_mode = state
+            .visualizer
+            .render_mode
+            .effective(state.settings.gol.braille_enabled);
+        let (grid_w, grid_h) =
+            crate::gol_render::grid_size_for_mode(viz_inner_width, viz_grid_rows, render_mode);
+        visualizer.ensure_size(grid_w, grid_h, state);
+        visualizer_view::render(f, layout.visualizer, state, theme, visualizer);
         gate_monitor_view::render(
             f,
             layout.gate,
@@ -315,6 +321,10 @@ fn map_key_to_action(key: KeyEvent, state: &AppState, input: &mut InputState) ->
 
     if state.focus == PaneId::JobOutput && is_clear_logs_key(&key) {
         return Some(Action::ClearLogs);
+    }
+
+    if let Some(action) = visualizer_ctrl_action(&key, state) {
+        return Some(action);
     }
 
     if let Some(dir) = ctrl_nav_dir(&key) {
@@ -967,6 +977,27 @@ fn handle_insert_chords(
             input.set_pending_insert('j', Instant::now());
             None
         }
+        _ => None,
+    }
+}
+
+fn visualizer_ctrl_action(key: &KeyEvent, state: &AppState) -> Option<Action> {
+    if state.focus != PaneId::Visualizer {
+        return None;
+    }
+    if !key.modifiers.contains(KeyModifiers::CONTROL) {
+        return None;
+    }
+    if key.modifiers.contains(KeyModifiers::SHIFT) {
+        return None;
+    }
+    match key.code {
+        KeyCode::Char('m') | KeyCode::Char('M') => Some(Action::VisualizerCycleRenderMode),
+        KeyCode::Char('j') | KeyCode::Char('J') => Some(Action::VisualizerToggleAgeShading),
+        KeyCode::Char('k') | KeyCode::Char('K') => Some(Action::VisualizerToggleTrails),
+        KeyCode::Char('b') | KeyCode::Char('B') => Some(Action::VisualizerToggleBBox),
+        KeyCode::Char('h') | KeyCode::Char('H') => Some(Action::VisualizerToggleHeat),
+        KeyCode::Char('l') | KeyCode::Char('L') => Some(Action::VisualizerToggleScanlines),
         _ => None,
     }
 }

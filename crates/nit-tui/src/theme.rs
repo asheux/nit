@@ -20,6 +20,7 @@ struct ThemeFile {
     error: Option<String>,
     accent: Option<String>,
     hl: Option<HighlightThemeFile>,
+    gol: Option<GolThemeFile>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -55,6 +56,20 @@ struct HighlightThemeFile {
     warning: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+struct GolThemeFile {
+    bg: Option<String>,
+    live_new: Option<String>,
+    live: Option<String>,
+    live_old: Option<String>,
+    trail_1: Option<String>,
+    trail_2: Option<String>,
+    trail_3: Option<String>,
+    bbox: Option<String>,
+    hud_dim: Option<String>,
+    hud_text: Option<String>,
+}
+
 #[derive(Clone, Debug)]
 pub struct Theme {
     pub background: Color,
@@ -70,6 +85,21 @@ pub struct Theme {
     pub error: Color,
     pub accent: Color,
     pub hl: HighlightTheme,
+    pub gol: GolTheme,
+}
+
+#[derive(Clone, Debug)]
+pub struct GolTheme {
+    pub bg: Color,
+    pub live_new: Color,
+    pub live: Color,
+    pub live_old: Color,
+    pub trail_1: Color,
+    pub trail_2: Color,
+    pub trail_3: Color,
+    pub bbox: Color,
+    pub hud_dim: Color,
+    pub hud_text: Color,
 }
 
 #[derive(Clone, Debug)]
@@ -132,6 +162,7 @@ impl Theme {
                         error: color_or_default(cfg.error, Color::Rgb(242, 95, 92)),
                         accent: color_or_default(cfg.accent, Color::Rgb(255, 209, 102)),
                         hl: HighlightTheme::from_file(cfg.hl, Color::Rgb(215, 229, 255)),
+                        gol: GolTheme::from_file(cfg.gol),
                     };
                 }
             }
@@ -203,6 +234,44 @@ impl Default for Theme {
             error: Color::Rgb(242, 95, 92),
             accent: Color::Rgb(255, 209, 102),
             hl: HighlightTheme::default(),
+            gol: GolTheme::default(),
+        }
+    }
+}
+
+impl GolTheme {
+    fn from_file(file: Option<GolThemeFile>) -> Self {
+        let Some(file) = file else {
+            return GolTheme::default();
+        };
+        GolTheme {
+            bg: color_or_default(file.bg, Color::Rgb(7, 20, 32)),
+            live_new: color_or_default(file.live_new, Color::Rgb(168, 255, 247)),
+            live: color_or_default(file.live, Color::Rgb(0, 246, 255)),
+            live_old: color_or_default(file.live_old, Color::Rgb(0, 179, 192)),
+            trail_1: color_or_default(file.trail_1, Color::Rgb(10, 74, 87)),
+            trail_2: color_or_default(file.trail_2, Color::Rgb(8, 56, 69)),
+            trail_3: color_or_default(file.trail_3, Color::Rgb(6, 39, 52)),
+            bbox: color_or_default(file.bbox, Color::Rgb(26, 214, 214)),
+            hud_dim: color_or_default(file.hud_dim, Color::Rgb(58, 169, 179)),
+            hud_text: color_or_default(file.hud_text, Color::Rgb(127, 252, 255)),
+        }
+    }
+}
+
+impl Default for GolTheme {
+    fn default() -> Self {
+        GolTheme {
+            bg: Color::Rgb(7, 20, 32),
+            live_new: Color::Rgb(168, 255, 247),
+            live: Color::Rgb(0, 246, 255),
+            live_old: Color::Rgb(0, 179, 192),
+            trail_1: Color::Rgb(10, 74, 87),
+            trail_2: Color::Rgb(8, 56, 69),
+            trail_3: Color::Rgb(6, 39, 52),
+            bbox: Color::Rgb(26, 214, 214),
+            hud_dim: Color::Rgb(58, 169, 179),
+            hud_text: Color::Rgb(127, 252, 255),
         }
     }
 }

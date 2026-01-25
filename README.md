@@ -48,6 +48,12 @@ For details see `SECURITY.md`.
 - Cycle auto-stop policy: `Ctrl+O` (Off → Fixed → Repeat)
 - Toggle seed source (Editor/Notes): `Ctrl+Y`
 - Force snapshot: `Ctrl+N`
+- Cycle render mode: `Ctrl+M` (Solid → Half → Braille)
+- Toggle age shading: `Ctrl+J`
+- Toggle decay trails: `Ctrl+K`
+- Toggle bounding box overlay: `Ctrl+B`
+- Toggle heat overlay: `Ctrl+H`
+- Toggle scanlines overlay: `Ctrl+L`
 - Snapshots land in `gol-snapshots/`:
   - `<timestamp>__event-CYCLE__rule-B3S23__gen-00042__hash-abcdef.rle`
   - matching `.json` with metadata

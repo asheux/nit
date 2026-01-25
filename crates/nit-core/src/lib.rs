@@ -24,7 +24,7 @@ pub use mode::Mode;
 pub use pane::PaneId;
 pub use prompt::Prompt;
 pub use state::{
-    apply_action, AppState, JobState, LogBuffer, Metrics, VisualizerMode, VisualizerRuleEntry,
-    VisualizerState, YankKind,
+    apply_action, AppState, GolRenderMode, JobState, LogBuffer, Metrics, VisualizerMode,
+    VisualizerRuleEntry, VisualizerState, YankKind,
 };
 pub use viewport::Viewport;
