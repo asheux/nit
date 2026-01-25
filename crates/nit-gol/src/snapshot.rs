@@ -1,5 +1,5 @@
 use std::fs::{self, File};
-use std::io::{self, Write};
+use std::io::{self, BufWriter, Write};
 use std::path::{Path, PathBuf};
 
 use time::format_description::well_known::Rfc3339;
@@ -50,12 +50,8 @@ pub fn write_snapshot(
     ensure_dir(dir)?;
     let rle_path = dir.join(format!("{name_base}.rle"));
     let json_path = dir.join(format!("{name_base}.json"));
-    let rle = encode_rle(grid, rule);
-    snapshot_debug(|| format!("rle bytes={}", rle.len()));
-    write_atomic(&rle_path, rle.as_bytes())?;
-    let json = serde_json::to_vec_pretty(meta).map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
-    snapshot_debug(|| format!("json bytes={}", json.len()));
-    write_atomic(&json_path, &json)?;
+    write_atomic(&rle_path, |writer| write_rle(writer, grid, rule))?;
+    write_metadata_atomic(&json_path, meta)?;
     snapshot_debug(|| {
         format!(
             "done rle_path={} json_path={}",
@@ -67,39 +63,9 @@ pub fn write_snapshot(
 }
 
 pub fn encode_rle(grid: &Grid, rule: Rule) -> String {
-    let mut out = String::new();
-    out.push_str(&format!(
-        "x = {}, y = {}, rule = {}\n",
-        grid.width(),
-        grid.height(),
-        rule
-    ));
-    if grid.width() == 0 || grid.height() == 0 {
-        out.push('!');
-        return out;
-    }
-    let mut line = String::new();
-    for y in 0..grid.height() {
-        let mut run_char = if grid.get(0, y) { 'o' } else { 'b' };
-        let mut run_len = 1usize;
-        for x in 1..grid.width() {
-            let cell = if grid.get(x, y) { 'o' } else { 'b' };
-            if cell == run_char {
-                run_len += 1;
-            } else {
-                push_run(&mut line, run_len, run_char);
-                run_char = cell;
-                run_len = 1;
-            }
-        }
-        push_run(&mut line, run_len, run_char);
-        if y + 1 < grid.height() {
-            line.push('$');
-        }
-    }
-    line.push('!');
-    wrap_rle(&mut out, &line);
-    out
+    let mut out = Vec::new();
+    let _ = write_rle(&mut out, grid, rule);
+    String::from_utf8(out).unwrap_or_default()
 }
 
 pub fn default_name(rule: Rule, generation: u64, hash: u64) -> String {
@@ -126,9 +92,13 @@ pub fn prune_oldest(dir: &Path, max_files: usize) -> io::Result<()> {
     let mut entries: Vec<_> = fs::read_dir(dir)?
         .filter_map(|e| e.ok())
         .filter_map(|e| {
+            let path = e.path();
+            if path.extension().and_then(|ext| ext.to_str()) != Some("rle") {
+                return None;
+            }
             let meta = e.metadata().ok()?;
             let modified = meta.modified().ok()?;
-            Some((modified, e.path()))
+            Some((modified, path))
         })
         .collect();
     if entries.len() <= max_files {
@@ -137,32 +107,100 @@ pub fn prune_oldest(dir: &Path, max_files: usize) -> io::Result<()> {
     entries.sort_by_key(|(time, _)| *time);
     let remove_count = entries.len().saturating_sub(max_files);
     for (_, path) in entries.into_iter().take(remove_count) {
-        let _ = fs::remove_file(path);
+        let _ = fs::remove_file(&path);
+        let json_path = path.with_extension("json");
+        let _ = fs::remove_file(json_path);
     }
     Ok(())
 }
 
-fn push_run(line: &mut String, len: usize, ch: char) {
-    if len > 1 {
-        line.push_str(&len.to_string());
+pub fn write_rle<W: Write>(writer: &mut W, grid: &Grid, rule: Rule) -> io::Result<()> {
+    write!(
+        writer,
+        "x = {}, y = {}, rule = {}\n",
+        grid.width(),
+        grid.height(),
+        rule
+    )?;
+    if grid.width() == 0 || grid.height() == 0 {
+        writer.write_all(b"!")?;
+        return Ok(());
     }
-    line.push(ch);
+    for y in 0..grid.height() {
+        let mut run_char = if grid.get(0, y) { 'o' } else { 'b' };
+        let mut run_len = 1usize;
+        for x in 1..grid.width() {
+            let cell = if grid.get(x, y) { 'o' } else { 'b' };
+            if cell == run_char {
+                run_len += 1;
+            } else {
+                write_run(writer, run_len, run_char)?;
+                run_char = cell;
+                run_len = 1;
+            }
+        }
+        write_run(writer, run_len, run_char)?;
+        if y + 1 < grid.height() {
+            writer.write_all(b"$\n")?;
+        }
+    }
+    writer.write_all(b"!")?;
+    Ok(())
 }
 
-fn wrap_rle(out: &mut String, data: &str) {
-    let mut count = 0usize;
-    for ch in data.chars() {
-        out.push(ch);
-        count += 1;
-        if count >= 70 && ch != '$' && ch != '!' {
-            out.push('\n');
-            count = 0;
+pub fn write_rle_bits<W: Write>(
+    writer: &mut W,
+    width: u16,
+    height: u16,
+    rule: &str,
+    bits: &[u64],
+) -> io::Result<()> {
+    let width = width as usize;
+    let height = height as usize;
+    let total = width.saturating_mul(height);
+    let needed_words = (total + 63) / 64;
+    if bits.len() < needed_words {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "grid bitset too small",
+        ));
+    }
+    write!(writer, "x = {}, y = {}, rule = {}\n", width, height, rule)?;
+    if width == 0 || height == 0 {
+        writer.write_all(b"!")?;
+        return Ok(());
+    }
+    for y in 0..height {
+        let mut run_char = if bit_at(bits, y * width) { 'o' } else { 'b' };
+        let mut run_len = 1usize;
+        for x in 1..width {
+            let idx = y * width + x;
+            let cell = if bit_at(bits, idx) { 'o' } else { 'b' };
+            if cell == run_char {
+                run_len += 1;
+            } else {
+                write_run(writer, run_len, run_char)?;
+                run_char = cell;
+                run_len = 1;
+            }
         }
-        if ch == '$' {
-            out.push('\n');
-            count = 0;
+        write_run(writer, run_len, run_char)?;
+        if y + 1 < height {
+            writer.write_all(b"$\n")?;
         }
     }
+    writer.write_all(b"!")?;
+    Ok(())
+}
+
+pub fn write_rle_bits_atomic(
+    path: &Path,
+    width: u16,
+    height: u16,
+    rule: &str,
+    bits: &[u64],
+) -> io::Result<()> {
+    write_atomic(path, |writer| write_rle_bits(writer, width, height, rule, bits))
 }
 
 fn ensure_dir(dir: &Path) -> io::Result<()> {
@@ -180,13 +218,41 @@ fn ensure_dir(dir: &Path) -> io::Result<()> {
     fs::create_dir_all(dir)
 }
 
-fn write_atomic(path: &Path, data: &[u8]) -> io::Result<()> {
+pub fn write_metadata_atomic(path: &Path, meta: &SnapshotMetadata) -> io::Result<()> {
+    write_atomic(path, |writer| {
+        serde_json::to_writer(writer, meta)
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))
+    })
+}
+
+fn write_atomic<F>(path: &Path, write_fn: F) -> io::Result<()>
+where
+    F: FnOnce(&mut BufWriter<File>) -> io::Result<()>,
+{
     let tmp_path = path.with_extension("tmp");
-    let mut file = File::create(&tmp_path)?;
-    file.write_all(data)?;
-    file.sync_all()?;
+    let file = File::create(&tmp_path)?;
+    let mut writer = BufWriter::new(file);
+    write_fn(&mut writer)?;
+    writer.flush()?;
+    writer.get_ref().sync_all()?;
     fs::rename(tmp_path, path)?;
     Ok(())
+}
+
+fn write_run<W: Write>(writer: &mut W, len: usize, ch: char) -> io::Result<()> {
+    if len > 1 {
+        write!(writer, "{len}")?;
+    }
+    let mut buf = [0u8; 4];
+    let s = ch.encode_utf8(&mut buf);
+    writer.write_all(s.as_bytes())?;
+    Ok(())
+}
+
+fn bit_at(bits: &[u64], idx: usize) -> bool {
+    let word = bits[idx / 64];
+    let mask = 1u64 << (idx % 64);
+    (word & mask) != 0
 }
 
 fn snapshot_debug<F>(msg: F)

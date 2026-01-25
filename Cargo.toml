@@ -33,6 +33,7 @@ time = { version = "0.3", features = ["formatting"] }
 toml = "0.8"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt", "ansi", "env-filter", "time"] }
+crossbeam-channel = "0.5"
 unicode-segmentation = "1.10"
 unicode-width = "0.1"
 sysinfo = "0.29.11"

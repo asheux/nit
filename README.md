@@ -49,9 +49,10 @@ For details see `SECURITY.md`.
 - Toggle seed source (Editor/Notes): `Ctrl+Y`
 - Force snapshot: `Ctrl+N`
 - Snapshots land in `gol-snapshots/`:
-  - `<timestamp>__rule-B3S23__gen-00042__hash-abcdef.rle`
+  - `<timestamp>__event-CYCLE__rule-B3S23__gen-00042__hash-abcdef.rle`
   - matching `.json` with metadata
   - `rules.ndjson` append-only best-rule log
+- Snapshotting is async, bounded, and deduped to avoid repeat storms.
 - Search intensity and limits are controlled in settings (defaults in `crates/nit-core/src/config.rs`).
 
 ## Known limitations (MVP)

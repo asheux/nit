@@ -73,7 +73,9 @@ impl Rule {
 
 impl std::fmt::Display for Rule {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.to_string())
+        let births = digits_from_mask(self.births);
+        let survives = digits_from_mask(self.survives);
+        write!(f, "B{}/S{}", births, survives)
     }
 }
 

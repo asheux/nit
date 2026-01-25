@@ -93,6 +93,30 @@ fn rle_basic_sanity() {
 }
 
 #[test]
+fn rle_2x2_exact() {
+    let mut grid = Grid::new(2, 2);
+    grid.set(0, 0, true);
+    grid.set(1, 0, true);
+    grid.set(1, 1, true);
+    let mut out = Vec::new();
+    crate::snapshot::write_rle(&mut out, &grid, Rule::conway()).unwrap();
+    let rle = String::from_utf8(out).unwrap();
+    let expected = "x = 2, y = 2, rule = B3/S23\n2o$\nbo!";
+    assert_eq!(rle, expected);
+}
+
+#[test]
+fn rle_5x5_exact() {
+    let mut grid = Grid::new(5, 5);
+    grid.set(2, 2, true);
+    let mut out = Vec::new();
+    crate::snapshot::write_rle(&mut out, &grid, Rule::conway()).unwrap();
+    let rle = String::from_utf8(out).unwrap();
+    let expected = "x = 5, y = 5, rule = B3/S23\n5b$\n5b$\n2bo2b$\n5b$\n5b!";
+    assert_eq!(rle, expected);
+}
+
+#[test]
 fn attractor_still_life_fixed_point() {
     let mut grid = Grid::new(4, 4);
     grid.set(1, 1, true);

@@ -82,6 +82,10 @@ pub struct VisualizerState {
     pub search_rps: u32,
     pub leaderboard: Vec<VisualizerRuleEntry>,
     pub last_score: Option<f32>,
+    pub snapshots_written: u64,
+    pub snapshots_dropped: u64,
+    pub snapshot_queue_depth: usize,
+    pub last_snapshot_path: Option<String>,
     #[serde(skip)]
     pub pending_reseed: bool,
     #[serde(skip)]
@@ -165,6 +169,10 @@ impl AppState {
                 search_rps: 0,
                 leaderboard: Vec::new(),
                 last_score: None,
+                snapshots_written: 0,
+                snapshots_dropped: 0,
+                snapshot_queue_depth: 0,
+                last_snapshot_path: None,
                 pending_reseed: false,
                 pending_apply: false,
                 pending_snapshot: false,

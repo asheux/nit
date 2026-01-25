@@ -69,6 +69,12 @@ pub fn render(
     } else {
         "No"
     };
+    let last_snapshot = state
+        .visualizer
+        .last_snapshot_path
+        .as_deref()
+        .map(|path| shorten_text(path, 30))
+        .unwrap_or_else(|| "--".into());
     let rows = vec![
         Row::new(vec![Cell::from("Focus"), Cell::from(state.focus.title())]),
         Row::new(vec![
@@ -167,6 +173,19 @@ pub fn render(
             Cell::from("Viz Seed"),
             Cell::from(state.visualizer.seed.to_string()),
         ]),
+        Row::new(vec![
+            Cell::from("Snap Written"),
+            Cell::from(state.visualizer.snapshots_written.to_string()),
+        ]),
+        Row::new(vec![
+            Cell::from("Snap Dropped"),
+            Cell::from(state.visualizer.snapshots_dropped.to_string()),
+        ]),
+        Row::new(vec![
+            Cell::from("Snap Queue"),
+            Cell::from(state.visualizer.snapshot_queue_depth.to_string()),
+        ]),
+        Row::new(vec![Cell::from("Snap Last"), Cell::from(last_snapshot)]),
         Row::new(vec![Cell::from("Syntax"), Cell::from(syntax_status)]),
         Row::new(vec![
             Cell::from("Job paused"),
@@ -197,6 +216,14 @@ fn shorten_path(path: &std::path::Path, max: usize) -> String {
         s
     } else {
         format!("…{}", &s[s.len() - (max - 1)..])
+    }
+}
+
+fn shorten_text(text: &str, max: usize) -> String {
+    if text.len() <= max {
+        text.to_string()
+    } else {
+        format!("…{}", &text[text.len() - (max - 1)..])
     }
 }
 

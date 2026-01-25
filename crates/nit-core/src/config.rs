@@ -66,6 +66,7 @@ pub struct GolSnapshotsConfig {
     pub prune_policy: SnapshotPrunePolicy,
     pub min_period: u32,
     pub min_transient: u32,
+    pub min_interval_ms: u64,
     pub snapshot_on_attractor: bool,
 }
 
@@ -131,6 +132,7 @@ impl Default for GolSnapshotsConfig {
             prune_policy: SnapshotPrunePolicy::Oldest,
             min_period: 6,
             min_transient: 20,
+            min_interval_ms: 1000,
             snapshot_on_attractor: true,
         }
     }

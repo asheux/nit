@@ -1,9 +1,8 @@
-use std::collections::{HashSet, VecDeque};
-use std::io::Write;
-use std::path::{Path, PathBuf};
-use std::sync::mpsc::{self, Receiver, Sender, SyncSender};
+use std::collections::HashSet;
+use std::path::PathBuf;
+use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread::{self, JoinHandle};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use nit_core::{
     AppState, GolSearchConfig, GolSearchIntensity, GolSeedSource, GolSnapshotsConfig,
@@ -12,7 +11,11 @@ use nit_core::{
 use nit_gol::{
     analyze::{evaluate_rule, RuleEvaluation, RuleScore},
     attractor::{AttractorConfig, AttractorDetector, AttractorEvent, AutoStopPolicy},
-    snapshot::{default_name, now_iso8601, prune_oldest, write_snapshot, SnapshotMetadata},
+    snapshot::{now_iso8601, SnapshotMetadata},
+    snapshot_manager::{
+        grid_fingerprint, pack_grid_bits, snapshot_queue_capacity, RuleLogEntry,
+        SnapshotEventKind, SnapshotManager, SnapshotManagerConfig, SnapshotRequest,
+    },
     step::step,
     EdgeMode, Grid, Rule,
 };
@@ -35,18 +38,17 @@ pub struct VisualizerRuntime {
     last_tick_ms: u64,
     last_seed_source: GolSeedSource,
     last_auto_stop_policy: AutoStopPolicy,
-    snapshot_dir: PathBuf,
     rules_log_path: PathBuf,
-    deduper: SnapshotDeduper,
     leaderboard: Vec<RuleScore>,
     leaderboard_limit: usize,
     best_score: f32,
     search_rps: u32,
     last_attractor: Option<AttractorEvent>,
+    last_attractor_hash: Option<[u64; 2]>,
     attractor: AttractorDetector,
     search_paused_for_stability: bool,
     search: SearchWorker,
-    io: SnapshotWorker,
+    snapshot: SnapshotManager,
     events: Receiver<WorkerEvent>,
 }
 
@@ -60,6 +62,12 @@ impl VisualizerRuntime {
             policy: state.visualizer.auto_stop_policy,
             ..AttractorConfig::default()
         });
+        let snapshot_config = SnapshotManagerConfig {
+            dir: snapshot_dir.clone(),
+            max_files: state.settings.gol.snapshots.max_files,
+            min_interval_ms: state.settings.gol.snapshots.min_interval_ms,
+            queue_capacity: snapshot_queue_capacity(),
+        };
         Self {
             size: (0, 0),
             grid: Grid::new(0, 0),
@@ -74,18 +82,17 @@ impl VisualizerRuntime {
             last_tick_ms: state.visualizer.tick_ms,
             last_seed_source: state.visualizer.seed_source,
             last_auto_stop_policy: state.visualizer.auto_stop_policy,
-            snapshot_dir,
             rules_log_path,
-            deduper: SnapshotDeduper::new(128),
             leaderboard: Vec::new(),
             leaderboard_limit: 10,
             best_score: f32::MIN,
             search_rps: 0,
             last_attractor: None,
+            last_attractor_hash: None,
             attractor,
             search_paused_for_stability: false,
             search: SearchWorker::spawn(event_tx.clone()),
-            io: SnapshotWorker::spawn(event_tx),
+            snapshot: SnapshotManager::new(snapshot_config),
             events,
         }
     }
@@ -183,19 +190,20 @@ impl VisualizerRuntime {
 
         if state.visualizer.pending_snapshot {
             state.visualizer.pending_snapshot = false;
-            self.queue_snapshot(
-                state,
-                SnapshotTrigger::Manual,
-                self.grid.clone(),
-                self.rule,
-                self.generation,
-                self.period.map(|value| value as u64),
-                self.alive,
-                None,
-                None,
-                false,
-            );
-        }
+                self.queue_snapshot(
+                    state,
+                    SnapshotTrigger::Manual,
+                    self.grid.clone(),
+                    self.rule,
+                    self.generation,
+                    self.period.map(|value| value as u64),
+                    self.alive,
+                    None,
+                    None,
+                    false,
+                    None,
+                );
+            }
     }
 
     fn step_if_due(&mut self, state: &mut AppState) {
@@ -239,6 +247,12 @@ impl VisualizerRuntime {
                 period: entry.period,
             })
             .collect();
+        let stats = self.snapshot.stats();
+        state.visualizer.snapshots_written = stats.written;
+        state.visualizer.snapshots_dropped = stats.dropped;
+        state.visualizer.snapshot_queue_depth = stats.queue_len;
+        state.visualizer.last_snapshot_path =
+            stats.last_path.map(|path| path.display().to_string());
     }
 
     fn reseed(&mut self, state: &AppState) -> bool {
@@ -260,6 +274,7 @@ impl VisualizerRuntime {
         self.generation = 0;
         self.period = None;
         self.last_attractor = None;
+        self.last_attractor_hash = None;
         self.attractor.reset();
         self.attractor.seed(&self.grid, self.generation, self.rule, edge);
         self.last_step = Instant::now();
@@ -267,6 +282,7 @@ impl VisualizerRuntime {
 
     fn reset_attractor(&mut self, edge: EdgeMode) {
         self.last_attractor = None;
+        self.last_attractor_hash = None;
         self.attractor.reset();
         self.attractor.seed(&self.grid, self.generation, self.rule, edge);
     }
@@ -314,8 +330,16 @@ impl VisualizerRuntime {
             });
         }
 
+        let grid_hash = grid_fingerprint(&self.grid);
+        let is_new_attractor = self
+            .last_attractor_hash
+            .map_or(true, |prev| prev != grid_hash);
+        self.last_attractor_hash = Some(grid_hash);
+
         let snapshot_event = event.clone();
-        if should_pause || attractor_snapshots_enabled(&state.settings.gol.snapshots, &event) {
+        if is_new_attractor
+            && (should_pause || attractor_snapshots_enabled(&state.settings.gol.snapshots, &event))
+        {
             self.queue_snapshot(
                 state,
                 SnapshotTrigger::Attractor(snapshot_event),
@@ -327,6 +351,7 @@ impl VisualizerRuntime {
                 None,
                 Some(event.clone()),
                 should_pause,
+                Some(grid_hash),
             );
         }
 
@@ -421,23 +446,18 @@ impl VisualizerRuntime {
                         Some(eval.score),
                         None,
                         false,
+                        None,
                     );
-                    if !self.io.try_send(IoCommand::RecordRule(RuleLogEntry::from_eval(
+                    if !self.snapshot.record_rule(RuleLogEntry::from_eval(
                         &eval,
                         self.last_seed_hash,
                         &self.rules_log_path,
-                    ))) {
+                    )) {
                         warn!("Snapshot queue full; dropping rule log entry");
                     }
                 }
                 WorkerEvent::Leaderboard(entries) => {
                     self.leaderboard = entries;
-                }
-                WorkerEvent::SnapshotSaved(path) => {
-                    info!("Snapshot saved: {}", path.display());
-                }
-                WorkerEvent::Error(msg) => {
-                    warn!("Visualizer worker error: {}", msg);
                 }
             }
         }
@@ -473,6 +493,7 @@ impl VisualizerRuntime {
         score: Option<f32>,
         attractor: Option<AttractorEvent>,
         force: bool,
+        grid_hash_override: Option<[u64; 2]>,
     ) {
         if !state.settings.gol.snapshots.enabled {
             return;
@@ -495,11 +516,20 @@ impl VisualizerRuntime {
                 }
             }
         }
-        let hash = grid.hash();
-        if !self.deduper.insert(hash) {
+        if grid.width() > u16::MAX as usize || grid.height() > u16::MAX as usize {
+            warn!("Snapshot skipped; grid too large ({}x{})", grid.width(), grid.height());
             return;
         }
-        let name_base = default_name(rule, generation, hash);
+        let grid_hash = grid_hash_override.unwrap_or_else(|| grid_fingerprint(&grid));
+        let grid_bits = pack_grid_bits(&grid);
+        let event_kind = match &trigger {
+            SnapshotTrigger::Manual => SnapshotEventKind::Manual,
+            SnapshotTrigger::BestRule => SnapshotEventKind::NewBestRule,
+            SnapshotTrigger::Attractor(AttractorEvent::FixedPoint { .. }) => {
+                SnapshotEventKind::FixedPoint
+            }
+            SnapshotTrigger::Attractor(AttractorEvent::Cycle { .. }) => SnapshotEventKind::Cycle,
+        };
         let meta = SnapshotMetadata {
             timestamp: now_iso8601(),
             workspace_root: Some(state.workspace_root.display().to_string()),
@@ -523,16 +553,34 @@ impl VisualizerRuntime {
             attractor,
         };
         let req = SnapshotRequest {
-            dir: self.snapshot_dir.clone(),
-            name_base,
-            grid,
-            rule,
+            event: event_kind,
+            timestamp: SystemTime::now(),
+            gen: generation,
+            rule: rule.to_string(),
+            width: grid.width() as u16,
+            height: grid.height() as u16,
+            wrap: if state.visualizer.wrap {
+                EdgeMode::Toroid
+            } else {
+                EdgeMode::Dead
+            },
+            seed_hash: self.last_seed_hash,
+            grid_hash,
+            grid_bits,
+            period,
+            transient: match &trigger {
+                SnapshotTrigger::Attractor(AttractorEvent::Cycle { transient, .. }) => {
+                    Some(*transient)
+                }
+                SnapshotTrigger::BestRule => Some(generation),
+                _ => None,
+            },
+            score,
             meta,
-            max_files: state.settings.gol.snapshots.max_files,
         };
-        if !self.io.try_send(IoCommand::Snapshot(req)) {
-            state.status = Some("Snapshot queue full; dropping".into());
-            warn!("Snapshot queue full; dropping snapshot");
+        let enqueued = self.snapshot.enqueue(req);
+        if !enqueued && matches!(trigger, SnapshotTrigger::Manual) {
+            state.status = Some("Snapshot dropped".into());
         }
     }
 }
@@ -540,9 +588,8 @@ impl VisualizerRuntime {
 impl Drop for VisualizerRuntime {
     fn drop(&mut self) {
         self.search.send(SearchCommand::Shutdown);
-        let _ = self.io.try_send(IoCommand::Shutdown);
         self.search.join();
-        self.io.join();
+        self.snapshot.shutdown();
     }
 }
 
@@ -618,13 +665,6 @@ fn build_live_chars(configured: &str) -> HashSet<char> {
     configured.chars().collect()
 }
 
-fn snapshot_queue_capacity() -> usize {
-    let from_env = std::env::var("NIT_SNAPSHOT_QUEUE")
-        .ok()
-        .and_then(|value| value.parse::<usize>().ok());
-    from_env.unwrap_or(32).max(4)
-}
-
 fn attractor_snapshots_enabled(settings: &GolSnapshotsConfig, event: &AttractorEvent) -> bool {
     if settings.snapshot_on_attractor {
         return true;
@@ -655,36 +695,6 @@ fn map_char(
     }
     let roll = (rng.next_u64() % 100) as u8;
     roll < other_live_percent
-}
-
-struct SnapshotDeduper {
-    seen: HashSet<u64>,
-    order: VecDeque<u64>,
-    capacity: usize,
-}
-
-impl SnapshotDeduper {
-    fn new(capacity: usize) -> Self {
-        Self {
-            seen: HashSet::new(),
-            order: VecDeque::new(),
-            capacity,
-        }
-    }
-
-    fn insert(&mut self, hash: u64) -> bool {
-        if self.seen.contains(&hash) {
-            return false;
-        }
-        self.seen.insert(hash);
-        self.order.push_back(hash);
-        if self.order.len() > self.capacity {
-            if let Some(old) = self.order.pop_front() {
-                self.seen.remove(&old);
-            }
-        }
-        true
-    }
 }
 
 #[derive(Clone)]
@@ -719,33 +729,6 @@ impl SearchConfig {
     }
 }
 
-#[derive(Clone, serde::Serialize)]
-struct RuleLogEntry {
-    rule: String,
-    score: f32,
-    discovered_at: String,
-    seed_hash: u64,
-    notes: String,
-    #[serde(skip)]
-    path: PathBuf,
-}
-
-impl RuleLogEntry {
-    fn from_eval(eval: &RuleEvaluation, seed_hash: u64, path: &Path) -> Self {
-        Self {
-            rule: eval.rule.to_string(),
-            score: eval.score,
-            discovered_at: now_iso8601(),
-            seed_hash,
-            notes: format!(
-                "period={:?} transient={} alive_end={}",
-                eval.period, eval.transient, eval.alive_end
-            ),
-            path: path.to_path_buf(),
-        }
-    }
-}
-
 struct SearchWorker {
     tx: Sender<SearchCommand>,
     handle: Option<JoinHandle<()>>,
@@ -776,51 +759,7 @@ impl SearchWorker {
     }
 }
 
-struct SnapshotWorker {
-    tx: SyncSender<IoCommand>,
-    handle: Option<JoinHandle<()>>,
-}
-
-impl SnapshotWorker {
-    fn spawn(event_tx: Sender<WorkerEvent>) -> Self {
-        let (tx, cmd_rx) = mpsc::sync_channel(snapshot_queue_capacity());
-        let handle = thread::Builder::new()
-            .name("nit-gol-io".into())
-            .stack_size(io_worker_stack_bytes())
-            .spawn(move || snapshot_worker_loop(cmd_rx, event_tx))
-            .expect("spawn snapshot worker");
-        Self {
-            tx,
-            handle: Some(handle),
-        }
-    }
-
-    fn try_send(&self, cmd: IoCommand) -> bool {
-        match self.tx.try_send(cmd) {
-            Ok(()) => true,
-            Err(mpsc::TrySendError::Full(_)) => false,
-            Err(mpsc::TrySendError::Disconnected(_)) => false,
-        }
-    }
-
-    fn join(&mut self) {
-        if let Some(handle) = self.handle.take() {
-            let _ = handle.join();
-        }
-    }
-}
-
 fn search_worker_stack_bytes() -> usize {
-    worker_stack_bytes("NIT_GOL_STACK_MB", 256, 32)
-}
-
-fn io_worker_stack_bytes() -> usize {
-    let override_mb = std::env::var("NIT_GOL_IO_STACK_MB")
-        .ok()
-        .and_then(|value| value.parse::<usize>().ok());
-    if let Some(mb) = override_mb {
-        return worker_stack_bytes("NIT_GOL_IO_STACK_MB", mb, 32);
-    }
     worker_stack_bytes("NIT_GOL_STACK_MB", 256, 32)
 }
 
@@ -830,16 +769,6 @@ fn worker_stack_bytes(env_key: &str, default_mb: usize, min_mb: usize) -> usize 
         .and_then(|value| value.parse::<usize>().ok());
     let mb = from_env.unwrap_or(default_mb).max(min_mb);
     mb.saturating_mul(1024 * 1024)
-}
-
-#[derive(Clone)]
-struct SnapshotRequest {
-    dir: PathBuf,
-    name_base: String,
-    grid: Grid,
-    rule: Rule,
-    meta: SnapshotMetadata,
-    max_files: usize,
 }
 
 enum SearchCommand {
@@ -855,17 +784,9 @@ enum SearchCommand {
     Shutdown,
 }
 
-enum IoCommand {
-    Snapshot(SnapshotRequest),
-    RecordRule(RuleLogEntry),
-    Shutdown,
-}
-
 enum WorkerEvent {
     BestRule(RuleEvaluation),
     Leaderboard(Vec<RuleScore>),
-    SnapshotSaved(PathBuf),
-    Error(String),
 }
 
 fn search_worker_loop(cmd_rx: Receiver<SearchCommand>, event_tx: Sender<WorkerEvent>) {
@@ -1010,59 +931,6 @@ fn handle_search_command(
         SearchCommand::Shutdown => return true,
     }
     false
-}
-
-fn snapshot_worker_loop(cmd_rx: Receiver<IoCommand>, event_tx: Sender<WorkerEvent>) {
-    loop {
-        match cmd_rx.recv() {
-            Ok(cmd) => {
-                if handle_io_command(cmd, &event_tx) {
-                    break;
-                }
-            }
-            Err(_) => break,
-        }
-    }
-}
-
-fn handle_io_command(cmd: IoCommand, event_tx: &Sender<WorkerEvent>) -> bool {
-    match cmd {
-        IoCommand::Snapshot(req) => {
-            let res = write_snapshot(&req.dir, &req.name_base, &req.grid, req.rule, &req.meta);
-            if let Err(err) = res {
-                let _ = event_tx.send(WorkerEvent::Error(err.to_string()));
-            } else {
-                let _ = prune_oldest(&req.dir, req.max_files);
-                let _ = event_tx.send(WorkerEvent::SnapshotSaved(req.dir.join(format!(
-                    "{}.rle",
-                    req.name_base
-                ))));
-            }
-        }
-        IoCommand::RecordRule(entry) => {
-            if let Err(err) = append_rule_entry(entry) {
-                let _ = event_tx.send(WorkerEvent::Error(err.to_string()));
-            }
-        }
-        IoCommand::Shutdown => return true,
-    }
-    false
-}
-
-fn append_rule_entry(entry: RuleLogEntry) -> std::io::Result<()> {
-    if let Some(parent) = entry.path.parent() {
-        if !parent.exists() {
-            std::fs::create_dir_all(parent)?;
-        }
-    }
-    let mut file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&entry.path)?;
-    let json = serde_json::to_string(&entry)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
-    writeln!(file, "{}", json)?;
-    Ok(())
 }
 
 fn sample_rule(rng: &mut XorShift64, base_rule: Rule) -> Rule {
