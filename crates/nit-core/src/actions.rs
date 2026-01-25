@@ -27,6 +27,7 @@ pub enum Action {
     End,
     GoToTop,
     GoToBottom,
+    OpenLineBelow,
     Undo,
     ScrollUp,
     ScrollDown,

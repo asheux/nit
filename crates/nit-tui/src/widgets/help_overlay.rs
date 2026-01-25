@@ -39,6 +39,10 @@ pub fn render(frame: &mut Frame, area: Rect, theme: &Theme) {
             Span::raw(" enter Insert mode"),
         ]),
         Line::from(vec![
+            Span::styled("o", Style::default().fg(theme.accent)),
+            Span::raw(" open line below + Insert (Normal mode)"),
+        ]),
+        Line::from(vec![
             Span::styled("JJ", Style::default().fg(theme.accent)),
             Span::raw(" save + Normal (Insert mode)"),
         ]),

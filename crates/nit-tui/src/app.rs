@@ -334,6 +334,11 @@ fn map_key_to_action(key: KeyEvent, state: &AppState, input: &mut InputState) ->
             ..
         } if is_normal_editing(state) => Some(Action::Undo),
         KeyEvent {
+            code: KeyCode::Char('o'),
+            modifiers: KeyModifiers::NONE,
+            ..
+        } if is_normal_editing(state) => Some(Action::OpenLineBelow),
+        KeyEvent {
             code: KeyCode::Char('$'),
             ..
         } if is_normal_editing(state) => Some(Action::End),

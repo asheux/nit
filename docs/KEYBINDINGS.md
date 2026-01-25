@@ -11,6 +11,7 @@
 - Arrow keys / PageUp / PageDown / Home / End: Move cursor/scroll
 - H/J/K/L (Normal mode): Move cursor
 - I (Normal mode): Enter Insert mode
+- o (Normal mode): Open line below + Insert mode
 - JJ (Insert mode): Save + switch to Normal
 - GG (Normal mode): Go to top
 - Shift+G (Normal mode): Go to bottom

@@ -14,7 +14,7 @@ pub fn split(frame: Rect) -> MainLayout {
     let vertical = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(4),
+            Constraint::Length(3),
             Constraint::Min(5),
             Constraint::Length(1),
         ])

@@ -3,7 +3,7 @@
 A terminal-first, multi-pane TUI editor inspired by _Devs_. Built in Rust with a secure-by-default posture and responsive, event-driven rendering.
 
 ## Quick start
-
+j
 ```bash
 cd nit
 cargo run -- path/to/file

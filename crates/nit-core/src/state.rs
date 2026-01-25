@@ -338,6 +338,14 @@ pub fn apply_action(state: &mut AppState, action: Action) -> ActionOutcome {
                 buf.ensure_visible();
             }
         }
+        Action::OpenLineBelow => {
+            if let Some(buf) = state.focused_buffer_mut() {
+                buf.move_end();
+                buf.insert_newline();
+                buf.ensure_visible();
+                state.mode = Mode::Insert;
+            }
+        }
         Action::Undo => {
             if let Some(buf) = state.focused_buffer_mut() {
                 if buf.undo() {
