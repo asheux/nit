@@ -8,6 +8,12 @@ use ratatui::{
 
 use crate::theme::Theme;
 
+pub fn preferred_size(screen: Rect) -> (u16, u16) {
+    let width = (screen.width.saturating_sub(4)).min(80).max(30);
+    let height = (screen.height.saturating_sub(6)).min(24).max(10);
+    (width, height)
+}
+
 pub fn render(frame: &mut Frame, area: Rect, theme: &Theme) {
     let lines = vec![
         Line::from(vec![
@@ -103,16 +109,16 @@ pub fn render(frame: &mut Frame, area: Rect, theme: &Theme) {
             Span::raw(" end / start of line"),
         ]),
         Line::from(vec![
-            Span::styled("Ctrl+Shift+L", Style::default().fg(theme.accent)),
-            Span::raw(" clear logs"),
+            Span::styled("Ctrl+N", Style::default().fg(theme.accent)),
+            Span::raw(" clear logs (Job Output)"),
+        ]),
+        Line::from(vec![
+            Span::styled("Ctrl+Shift+S", Style::default().fg(theme.accent)),
+            Span::raw(" toggle syntax highlight"),
         ]),
         Line::from(vec![
             Span::styled("Ctrl+G", Style::default().fg(theme.accent)),
             Span::raw(" toggle help"),
-        ]),
-        Line::from(vec![
-            Span::styled("Ctrl+Shift+H", Style::default().fg(theme.accent)),
-            Span::raw(" toggle syntax highlight"),
         ]),
         Line::from(vec![
             Span::styled("Ctrl+R", Style::default().fg(theme.accent)),
@@ -133,7 +139,7 @@ pub fn render(frame: &mut Frame, area: Rect, theme: &Theme) {
                 .fg(theme.title_focused)
                 .add_modifier(Modifier::BOLD),
         ))
-        .style(Style::default().bg(theme.background).fg(theme.foreground));
+        .style(Style::default().bg(theme.selection_bg).fg(theme.foreground));
 
     let inner = Layout::default()
         .direction(Direction::Vertical)
@@ -141,7 +147,7 @@ pub fn render(frame: &mut Frame, area: Rect, theme: &Theme) {
         .split(block.inner(area))[0];
 
     let para =
-        Paragraph::new(lines).style(Style::default().bg(theme.background).fg(theme.foreground));
+        Paragraph::new(lines).style(Style::default().bg(theme.selection_bg).fg(theme.foreground));
 
     frame.render_widget(Clear, area);
     frame.render_widget(block, area);

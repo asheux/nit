@@ -244,13 +244,20 @@ fn draw(
         bottom_bar::render(f, layout.bottom, state, theme, system_stats);
 
         if state.show_help {
-            let area = centered_rect(60, 40, f.size());
+            let area = dynamic_popup_rect(
+                f.size(),
+                help_overlay::preferred_size(f.size()),
+            );
             help_overlay::render(f, area, theme);
         }
 
         if let Some(Prompt::ConfirmQuit) = state.prompt {
-            let area = centered_rect(50, 20, f.size());
-            render_prompt(f, area, theme, "Quit without saving? (Y/N)");
+            let message = "Quit without saving? (Y/N)";
+            let area = dynamic_popup_rect(
+                f.size(),
+                prompt_size(message),
+            );
+            render_prompt(f, area, theme, message);
         }
 
         // cursor
@@ -341,6 +348,15 @@ fn map_key_to_action(key: KeyEvent, state: &AppState, input: &mut InputState) ->
             Action::ShowHelp
         }),
         KeyEvent {
+            code: KeyCode::Char('s') | KeyCode::Char('S'),
+            modifiers,
+            ..
+        } if modifiers.contains(KeyModifiers::CONTROL)
+            && modifiers.contains(KeyModifiers::SHIFT) =>
+        {
+            Some(Action::ToggleSyntax)
+        }
+        KeyEvent {
             code: KeyCode::Char('g'),
             modifiers: KeyModifiers::CONTROL,
             ..
@@ -349,11 +365,6 @@ fn map_key_to_action(key: KeyEvent, state: &AppState, input: &mut InputState) ->
         } else {
             Action::ShowHelp
         }),
-        KeyEvent {
-            code: KeyCode::Char('H'),
-            modifiers: KeyModifiers::CONTROL,
-            ..
-        } => Some(Action::ToggleSyntax),
         KeyEvent {
             code: KeyCode::Tab,
             modifiers: KeyModifiers::SHIFT,
@@ -825,18 +836,21 @@ fn handle_insert_chords(
 }
 
 fn is_clear_logs_key(key: &KeyEvent) -> bool {
-    if !key.modifiers.contains(KeyModifiers::CONTROL) {
-        return false;
-    }
-    match key.code {
-        KeyCode::Char('L') => true,
-        KeyCode::Char('l') if key.modifiers.contains(KeyModifiers::SHIFT) => true,
-        _ => false,
-    }
+    matches!(
+        key,
+        KeyEvent {
+            code: KeyCode::Char('n') | KeyCode::Char('N'),
+            modifiers,
+            ..
+        } if modifiers.contains(KeyModifiers::CONTROL)
+    )
 }
 
 fn ctrl_nav_dir(key: &KeyEvent) -> Option<FocusDir> {
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    if !ctrl || key.modifiers.contains(KeyModifiers::SHIFT) {
+        return None;
+    }
     match key.code {
         KeyCode::Char('h') if ctrl => Some(FocusDir::Left),
         KeyCode::Char('j') if ctrl => Some(FocusDir::Down),
@@ -852,35 +866,37 @@ fn ctrl_nav_dir(key: &KeyEvent) -> Option<FocusDir> {
     }
 }
 
-fn centered_rect(
-    percent_x: u16,
-    percent_y: u16,
-    r: ratatui::layout::Rect,
+fn dynamic_popup_rect(
+    screen: ratatui::layout::Rect,
+    desired: (u16, u16),
 ) -> ratatui::layout::Rect {
     use ratatui::layout::{Constraint, Direction, Layout};
-    let popup_layout = Layout::default()
+    let max_w = screen.width.saturating_sub(4).max(10);
+    let max_h = screen.height.saturating_sub(2).max(5);
+    let width = desired.0.min(max_w);
+    let height = desired.1.min(max_h);
+    let vertical = Layout::default()
         .direction(Direction::Vertical)
-        .constraints(
-            [
-                Constraint::Percentage((100 - percent_y) / 2),
-                Constraint::Percentage(percent_y),
-                Constraint::Percentage((100 - percent_y) / 2),
-            ]
-            .as_ref(),
-        )
-        .split(r);
-    let vertical = popup_layout[1];
+        .constraints([
+            Constraint::Length((screen.height.saturating_sub(height)) / 2),
+            Constraint::Length(height),
+            Constraint::Min(0),
+        ])
+        .split(screen)[1];
     Layout::default()
         .direction(Direction::Horizontal)
-        .constraints(
-            [
-                Constraint::Percentage((100 - percent_x) / 2),
-                Constraint::Percentage(percent_x),
-                Constraint::Percentage((100 - percent_x) / 2),
-            ]
-            .as_ref(),
-        )
+        .constraints([
+            Constraint::Length((screen.width.saturating_sub(width)) / 2),
+            Constraint::Length(width),
+            Constraint::Min(0),
+        ])
         .split(vertical)[1]
+}
+
+fn prompt_size(message: &str) -> (u16, u16) {
+    let width = message.chars().count().max(12) as u16 + 4;
+    let height = 3;
+    (width, height)
 }
 
 fn render_prompt(
@@ -892,9 +908,10 @@ fn render_prompt(
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme.border_focused))
-        .title("CONFIRM");
+        .title("CONFIRM")
+        .style(Style::default().bg(theme.selection_bg));
     let paragraph = Paragraph::new(message)
-        .style(Style::default().bg(theme.background).fg(theme.foreground))
+        .style(Style::default().bg(theme.selection_bg).fg(theme.foreground))
         .block(block);
     frame.render_widget(Clear, area);
     frame.render_widget(paragraph, area);

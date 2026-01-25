@@ -43,7 +43,7 @@ pub fn render(frame: &mut Frame, area: ratatui::layout::Rect, state: &AppState, 
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(3), Constraint::Min(1)])
+        .constraints([Constraint::Length(1), Constraint::Min(1)])
         .split(inner);
 
     // Progress gauge
@@ -51,7 +51,7 @@ pub fn render(frame: &mut Frame, area: ratatui::layout::Rect, state: &AppState, 
         .block(Block::default().style(Style::default().bg(theme.background)))
         .gauge_style(
             Style::default()
-                .fg(theme.accent)
+                .fg(theme.title_focused)
                 .bg(theme.background)
                 .add_modifier(Modifier::BOLD),
         )

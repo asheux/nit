@@ -112,15 +112,34 @@ struct ChannelWriter {
 impl Write for ChannelWriter {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         self.buf.extend_from_slice(buf);
+        self.drain_lines();
         Ok(buf.len())
     }
 
     fn flush(&mut self) -> io::Result<()> {
+        self.drain_lines();
         if !self.buf.is_empty() {
-            let msg = String::from_utf8_lossy(&self.buf).to_string();
-            let _ = self.tx.send(msg);
+            let msg = String::from_utf8_lossy(&self.buf).trim().to_string();
+            if !msg.is_empty() {
+                let _ = self.tx.send(msg);
+            }
             self.buf.clear();
         }
         Ok(())
+    }
+}
+
+impl ChannelWriter {
+    fn drain_lines(&mut self) {
+        loop {
+            let Some(pos) = self.buf.iter().position(|b| *b == b'\n') else {
+                break;
+            };
+            let line_bytes: Vec<u8> = self.buf.drain(..=pos).collect();
+            let line = String::from_utf8_lossy(&line_bytes).trim().to_string();
+            if !line.is_empty() {
+                let _ = self.tx.send(line);
+            }
+        }
     }
 }
