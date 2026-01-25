@@ -14,6 +14,7 @@
 - a (Normal mode): Append + Insert mode
 - v (Normal mode): Visual mode
 - o (Normal mode): Open line below + Insert mode
+- Shift+O (Normal mode): Open line above + Insert mode
 - JJ (Insert mode): Save + switch to Normal
 - GG (Normal mode): Go to top
 - Shift+G (Normal mode): Go to bottom
@@ -22,6 +23,8 @@
 - y (Visual mode): Yank selection
 - d (Visual mode): Delete selection
 - p (Normal mode): Paste
+- Shift+P (Normal mode): Paste above
+- yy (Normal mode): Yank line
 - $ (Normal mode): End of line
 - % (Normal mode): Beginning of line
 - u (Normal mode): Undo

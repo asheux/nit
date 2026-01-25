@@ -298,6 +298,11 @@ pub fn apply_action(state: &mut AppState, action: Action) -> ActionOutcome {
             state.yank = yank;
             state.mode = Mode::Normal;
         }
+        Action::YankLine => {
+            if let Some(buf) = state.focused_buffer_mut() {
+                state.yank = Some(buf.yank_line());
+            }
+        }
         Action::DeleteSelection => {
             if let Some(buf) = state.focused_buffer_mut() {
                 if buf.delete_selection() {
@@ -314,6 +319,13 @@ pub fn apply_action(state: &mut AppState, action: Action) -> ActionOutcome {
                     buf.append();
                 }
                 buf.insert_str(&yank);
+                buf.ensure_visible();
+            }
+        }
+        Action::PasteLineAbove => {
+            let yank = state.yank.clone();
+            if let (Some(yank), Some(buf)) = (yank, state.focused_buffer_mut()) {
+                buf.paste_line_above(&yank);
                 buf.ensure_visible();
             }
         }
@@ -414,6 +426,13 @@ pub fn apply_action(state: &mut AppState, action: Action) -> ActionOutcome {
             if let Some(buf) = state.focused_buffer_mut() {
                 buf.go_to_bottom();
                 buf.ensure_visible();
+            }
+        }
+        Action::OpenLineAbove => {
+            if let Some(buf) = state.focused_buffer_mut() {
+                buf.open_line_above();
+                buf.ensure_visible();
+                state.mode = Mode::Insert;
             }
         }
         Action::OpenLineBelow => {

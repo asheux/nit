@@ -51,6 +51,10 @@ pub fn render(frame: &mut Frame, area: Rect, theme: &Theme) {
             Span::raw(" open line below + Insert (Normal mode)"),
         ]),
         Line::from(vec![
+            Span::styled("Shift+O", Style::default().fg(theme.accent)),
+            Span::raw(" open line above + Insert (Normal mode)"),
+        ]),
+        Line::from(vec![
             Span::styled("JJ", Style::default().fg(theme.accent)),
             Span::raw(" save + Normal (Insert mode)"),
         ]),
@@ -75,12 +79,20 @@ pub fn render(frame: &mut Frame, area: Rect, theme: &Theme) {
             Span::raw(" yank selection (Visual mode)"),
         ]),
         Line::from(vec![
+            Span::styled("yy", Style::default().fg(theme.accent)),
+            Span::raw(" yank line (Normal mode)"),
+        ]),
+        Line::from(vec![
             Span::styled("d", Style::default().fg(theme.accent)),
             Span::raw(" delete selection (Visual mode)"),
         ]),
         Line::from(vec![
             Span::styled("p", Style::default().fg(theme.accent)),
             Span::raw(" paste (Normal mode)"),
+        ]),
+        Line::from(vec![
+            Span::styled("Shift+P", Style::default().fg(theme.accent)),
+            Span::raw(" paste above (Normal mode)"),
         ]),
         Line::from(vec![
             Span::styled("dd", Style::default().fg(theme.accent)),

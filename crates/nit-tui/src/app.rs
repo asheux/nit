@@ -404,6 +404,10 @@ fn map_key_to_action(key: KeyEvent, state: &AppState, input: &mut InputState) ->
             ..
         } if is_normal_mode(state) => Some(Action::OpenLineBelow),
         KeyEvent {
+            code: KeyCode::Char('O'),
+            ..
+        } if is_normal_mode(state) => Some(Action::OpenLineAbove),
+        KeyEvent {
             code: KeyCode::Char('$'),
             ..
         } if is_motion_mode(state) => Some(Action::End),
@@ -416,6 +420,10 @@ fn map_key_to_action(key: KeyEvent, state: &AppState, input: &mut InputState) ->
             modifiers: KeyModifiers::NONE,
             ..
         } if is_normal_mode(state) => Some(Action::Paste),
+        KeyEvent {
+            code: KeyCode::Char('P'),
+            ..
+        } if is_normal_mode(state) => Some(Action::PasteLineAbove),
         KeyEvent {
             code: KeyCode::Char('h'),
             modifiers: KeyModifiers::NONE,
@@ -669,6 +677,13 @@ fn handle_normal_chords(
         KeyCode::Char('g') => {
             if input.chord_normal('g', now) {
                 Some(Action::GoToTop)
+            } else {
+                None
+            }
+        }
+        KeyCode::Char('y') => {
+            if is_normal_mode(state) && input.chord_normal('y', now) {
+                Some(Action::YankLine)
             } else {
                 None
             }

@@ -237,6 +237,21 @@ impl Buffer {
         Some(self.rope.slice(start..end).to_string())
     }
 
+    pub fn yank_line(&self) -> String {
+        let line = self.cursor.line.min(self.rope.len_lines().saturating_sub(1));
+        let start = self.rope.line_to_char(line);
+        let end = if line + 1 < self.rope.len_lines() {
+            self.rope.line_to_char(line + 1)
+        } else {
+            self.rope.len_chars()
+        };
+        let mut text = self.rope.slice(start..end).to_string();
+        if !text.ends_with('\n') {
+            text.push('\n');
+        }
+        text
+    }
+
     pub fn delete_selection(&mut self) -> bool {
         let (start, end) = match self.selection_range() {
             Some(range) => range,
@@ -273,6 +288,30 @@ impl Buffer {
         self.cursor.line = line;
         self.cursor.col = col;
         self.dirty = true;
+    }
+
+    pub fn open_line_above(&mut self) {
+        self.push_undo();
+        let line = self.cursor.line.min(self.rope.len_lines().saturating_sub(1));
+        let idx = self.rope.line_to_char(line);
+        self.rope.insert_char(idx, '\n');
+        self.cursor.line = line;
+        self.cursor.col = 0;
+        self.dirty = true;
+    }
+
+    pub fn paste_line_above(&mut self, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+        self.push_undo();
+        let line = self.cursor.line.min(self.rope.len_lines().saturating_sub(1));
+        let idx = self.rope.line_to_char(line);
+        self.rope.insert(idx, text);
+        self.cursor.line = line;
+        self.cursor.col = 0;
+        self.dirty = true;
+        self.clamp_col();
     }
 
     pub fn exit_insert_mode(&mut self) {
