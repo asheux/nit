@@ -129,12 +129,20 @@ pub fn render(frame: &mut Frame, area: Rect, theme: &Theme) {
             Span::raw(" reseed visualizer"),
         ]),
         Line::from(vec![
+            Span::styled("Ctrl+Y", Style::default().fg(theme.accent)),
+            Span::raw(" toggle seed source (Editor/Notes)"),
+        ]),
+        Line::from(vec![
             Span::styled("Ctrl+A", Style::default().fg(theme.accent)),
             Span::raw(" apply best rule / variant"),
         ]),
         Line::from(vec![
             Span::styled("Ctrl+G", Style::default().fg(theme.accent)),
             Span::raw(" toggle visualizer search"),
+        ]),
+        Line::from(vec![
+            Span::styled("Ctrl+O", Style::default().fg(theme.accent)),
+            Span::raw(" cycle visualizer auto-stop"),
         ]),
         Line::from(vec![
             Span::styled("Ctrl+T", Style::default().fg(theme.accent)),

@@ -157,7 +157,15 @@ fn run_loop(
         syntax.poll_results(editor_id, state.editor_buffer().version());
         syntax.poll_results(notes_id, state.notes_buffer().version());
 
-        visualizer.tick(state);
+        let tick_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            visualizer.tick(state);
+        }));
+        if let Err(err) = tick_result {
+            tracing::error!("Visualizer panic: {:?}", err);
+            state.visualizer.paused = true;
+            state.visualizer.paused_by_attractor = false;
+            state.status = Some("Visualizer paused (error)".into());
+        }
 
         // redraw
         if needs_redraw || last_tick.elapsed() >= TICK_RATE {
@@ -390,6 +398,21 @@ fn map_key_to_action(key: KeyEvent, state: &AppState, input: &mut InputState) ->
             modifiers: KeyModifiers::CONTROL,
             ..
         } => Some(Action::VisualizerToggleSearch),
+        KeyEvent {
+            code: KeyCode::Char('o'),
+            modifiers: KeyModifiers::CONTROL,
+            ..
+        } => Some(Action::VisualizerCycleAutoStop),
+        KeyEvent {
+            code: KeyCode::Char('y'),
+            modifiers: KeyModifiers::CONTROL,
+            ..
+        }
+        | KeyEvent {
+            code: KeyCode::Char('\u{19}'),
+            modifiers: KeyModifiers::NONE,
+            ..
+        } => Some(Action::VisualizerToggleSeedSource),
         KeyEvent {
             code: KeyCode::Char('t'),
             modifiers: KeyModifiers::CONTROL,

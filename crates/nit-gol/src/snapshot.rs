@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
 
-use crate::{Grid, Rule};
+use crate::{attractor::AttractorEvent, Grid, Rule};
 
 #[derive(Clone, Debug, serde::Serialize)]
 pub struct SnapshotMetadata {
@@ -17,10 +17,11 @@ pub struct SnapshotMetadata {
     pub rule: String,
     pub generation: u64,
     pub alive_count: usize,
-    pub period: Option<u32>,
+    pub period: Option<u64>,
     pub score: Option<f32>,
     pub wrap_mode: String,
     pub tick_ms: u64,
+    pub attractor: Option<AttractorEvent>,
 }
 
 #[derive(Clone, Debug)]
@@ -36,13 +37,32 @@ pub fn write_snapshot(
     rule: Rule,
     meta: &SnapshotMetadata,
 ) -> io::Result<SnapshotPaths> {
+    snapshot_debug(|| {
+        format!(
+            "start name={} dir={} grid={}x{} rule={}",
+            name_base,
+            dir.display(),
+            grid.width(),
+            grid.height(),
+            rule
+        )
+    });
     ensure_dir(dir)?;
     let rle_path = dir.join(format!("{name_base}.rle"));
     let json_path = dir.join(format!("{name_base}.json"));
     let rle = encode_rle(grid, rule);
+    snapshot_debug(|| format!("rle bytes={}", rle.len()));
     write_atomic(&rle_path, rle.as_bytes())?;
     let json = serde_json::to_vec_pretty(meta).map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+    snapshot_debug(|| format!("json bytes={}", json.len()));
     write_atomic(&json_path, &json)?;
+    snapshot_debug(|| {
+        format!(
+            "done rle_path={} json_path={}",
+            rle_path.display(),
+            json_path.display()
+        )
+    });
     Ok(SnapshotPaths { rle_path, json_path })
 }
 
@@ -167,4 +187,14 @@ fn write_atomic(path: &Path, data: &[u8]) -> io::Result<()> {
     file.sync_all()?;
     fs::rename(tmp_path, path)?;
     Ok(())
+}
+
+fn snapshot_debug<F>(msg: F)
+where
+    F: FnOnce() -> String,
+{
+    if std::env::var_os("NIT_SNAPSHOT_DEBUG").is_none() {
+        return;
+    }
+    eprintln!("[nit snapshot] {}", msg());
 }

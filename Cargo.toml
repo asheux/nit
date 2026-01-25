@@ -7,6 +7,7 @@ members = [
     "crates/nit-tui",
     "crates/nit-utils",
 ]
+default-members = ["crates/nit"]
 resolver = "2"
 
 [workspace.package]

@@ -8,6 +8,7 @@ use crate::{
     prompt::Prompt,
     viewport::Viewport,
 };
+use nit_gol::{AttractorEvent, AutoStopPolicy};
 use std::collections::VecDeque;
 use std::path::PathBuf;
 
@@ -68,11 +69,14 @@ pub struct VisualizerState {
     pub variant: u8,
     pub mode: VisualizerMode,
     pub paused: bool,
+    pub paused_by_attractor: bool,
     pub wrap: bool,
     pub rule: String,
     pub generation: u64,
     pub alive: usize,
     pub period: Option<u32>,
+    pub auto_stop_policy: AutoStopPolicy,
+    pub last_attractor: Option<AttractorEvent>,
     pub tick_ms: u64,
     pub seed_source: GolSeedSource,
     pub search_rps: u32,
@@ -148,11 +152,14 @@ impl AppState {
                 variant: 0,
                 mode: VisualizerMode::SimOnly,
                 paused: false,
+                paused_by_attractor: false,
                 wrap: settings.gol.wrap,
                 rule: "B3/S23".to_string(),
                 generation: 0,
                 alive: 0,
                 period: None,
+                auto_stop_policy: AutoStopPolicy::Fixed,
+                last_attractor: None,
                 tick_ms: settings.gol.tick_ms,
                 seed_source: settings.gol.seed_source,
                 search_rps: 0,
@@ -567,10 +574,6 @@ pub fn apply_action(state: &mut AppState, action: Action) -> ActionOutcome {
         Action::VisualizerReseed => {
             state.visualizer.seed = state.visualizer.seed.wrapping_add(1);
             state.visualizer.pending_reseed = true;
-            state.visualizer.seed_source = match state.focus {
-                PaneId::Notes => GolSeedSource::Notes,
-                _ => GolSeedSource::Editor,
-            };
         }
         Action::VisualizerApply => {
             if state.visualizer.mode == VisualizerMode::Search {
@@ -580,19 +583,43 @@ pub fn apply_action(state: &mut AppState, action: Action) -> ActionOutcome {
             }
         }
         Action::VisualizerToggleSearch => {
-            state.visualizer.mode = match state.visualizer.mode {
-                VisualizerMode::SimOnly => VisualizerMode::Search,
-                VisualizerMode::Search => VisualizerMode::SimOnly,
-            };
+            if !state.settings.gol.search.enabled {
+                state.visualizer.mode = VisualizerMode::SimOnly;
+                state.status = Some("Search disabled (config)".into());
+            } else {
+                state.visualizer.mode = match state.visualizer.mode {
+                    VisualizerMode::SimOnly => VisualizerMode::Search,
+                    VisualizerMode::Search => VisualizerMode::SimOnly,
+                };
+            }
         }
         Action::VisualizerToggleWrap => {
             state.visualizer.wrap = !state.visualizer.wrap;
+        }
+        Action::VisualizerToggleSeedSource => {
+            state.visualizer.seed_source = match state.visualizer.seed_source {
+                GolSeedSource::Editor => GolSeedSource::Notes,
+                GolSeedSource::Notes => GolSeedSource::Editor,
+            };
+            state.visualizer.pending_reseed = true;
+            state.status = Some(format!(
+                "Seed source: {:?}",
+                state.visualizer.seed_source
+            ));
         }
         Action::VisualizerSnapshot => {
             state.visualizer.pending_snapshot = true;
         }
         Action::VisualizerPause => {
             state.visualizer.paused = !state.visualizer.paused;
+            state.visualizer.paused_by_attractor = false;
+        }
+        Action::VisualizerCycleAutoStop => {
+            state.visualizer.auto_stop_policy = state.visualizer.auto_stop_policy.next();
+            state.status = Some(format!(
+                "Auto-stop: {}",
+                state.visualizer.auto_stop_policy
+            ));
         }
         Action::VisualizerSpeedUp => {
             state.visualizer.tick_ms = state.visualizer.tick_ms.saturating_sub(10).max(30);

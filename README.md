@@ -13,18 +13,7 @@ cargo run -- path/to/file
 - `nit <dir>` sets the workspace root (opens an untitled buffer).
 - `nit` defaults to the current directory and an untitled buffer.
 
-## Features (MVP)
 
-- Rigid multi-pane layout: Notes, Job Output, Editor, Visualizer, Gate Monitor, and bottom status bar.
-- Insert/edit text with ropey-based buffers; Notes is a separate editable scratch buffer.
-- Pane focus cycling via Tab / Shift+Tab with focus highlighting.
-- Visualizer runs Conway’s Game of Life seeded from editor/notes text, with optional rule search.
-- Visualizer snapshots saved under `gol-snapshots/` (RLE + JSON metadata).
-- Job output ring buffer fed by tracing logs; clear/pause controls.
-- Gate Monitor dashboard with editor metrics (dirty flag, Ln/Col, bytes, render ms, focus, seed, etc.).
-- Tree-sitter syntax highlighting with background parsing and plain-text fallback.
-- Safe atomic saves; confirm prompt on quit when dirty.
-- Help overlay (F1) and keyboard hints in the bottom bar.
 
 ## Development
 
@@ -52,6 +41,18 @@ For details see `SECURITY.md`.
 
 - `docs/ARCHITECTURE.md` — state model, rendering pipeline.
 - `docs/KEYBINDINGS.md` — full keymap.
+
+## Visualizer quick notes
+
+- Toggle search mode: `Ctrl+G`
+- Cycle auto-stop policy: `Ctrl+O` (Off → Fixed → Repeat)
+- Toggle seed source (Editor/Notes): `Ctrl+Y`
+- Force snapshot: `Ctrl+N`
+- Snapshots land in `gol-snapshots/`:
+  - `<timestamp>__rule-B3S23__gen-00042__hash-abcdef.rle`
+  - matching `.json` with metadata
+  - `rules.ndjson` append-only best-rule log
+- Search intensity and limits are controlled in settings (defaults in `crates/nit-core/src/config.rs`).
 
 ## Known limitations (MVP)
 

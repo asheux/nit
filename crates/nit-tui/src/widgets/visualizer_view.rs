@@ -1,5 +1,5 @@
 use nit_core::{AppState, PaneId, VisualizerMode};
-use nit_gol::Grid;
+use nit_gol::{AttractorEvent, Grid};
 use ratatui::{
     style::{Modifier, Style},
     text::{Line, Span},
@@ -85,21 +85,27 @@ fn build_header(state: &AppState) -> String {
         VisualizerMode::SimOnly => "SIM",
         VisualizerMode::Search => "SEARCH",
     };
-    let period = state
-        .visualizer
-        .period
-        .map(|p| p.to_string())
-        .unwrap_or_else(|| "--".to_string());
+    let attractor = attractor_summary(state.visualizer.last_attractor.as_ref());
     let paused = if state.visualizer.paused { " PAUSED" } else { "" };
     format!(
-        "Rule: {} | Gen: {:05} | Alive: {:04} | Period: {} | Mode: {}{}",
+        "Rule: {} | Gen: {:05} | Alive: {:04} | Attractor: {} | Mode: {}{}",
         state.visualizer.rule,
         state.visualizer.generation,
         state.visualizer.alive,
-        period,
+        attractor,
         mode,
         paused
     )
+}
+
+fn attractor_summary(event: Option<&AttractorEvent>) -> String {
+    match event {
+        Some(AttractorEvent::FixedPoint { .. }) => "FIXED".into(),
+        Some(AttractorEvent::Cycle { period, transient, .. }) => {
+            format!("P={period} (T={transient})")
+        }
+        None => "--".into(),
+    }
 }
 
 fn build_grid_line(

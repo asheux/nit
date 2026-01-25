@@ -42,8 +42,10 @@
 
 ## Visualizer
 - Ctrl+R: Reseed pattern (SEED)
+- Ctrl+Y: Toggle seed source (Editor/Notes)
 - Ctrl+A: Apply best rule / variant (APPLY)
 - Ctrl+G: Toggle search mode
+- Ctrl+O: Cycle auto-stop policy (Off → Fixed → Repeat)
 - Ctrl+T: Toggle wrap mode
 - Ctrl+N: Snapshot (SNAP)
 - Space: Pause/resume simulation (Visualizer focus)

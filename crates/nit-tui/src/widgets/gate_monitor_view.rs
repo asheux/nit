@@ -1,4 +1,5 @@
 use nit_core::{AppState, PaneId};
+use nit_gol::{AttractorEvent, Rule};
 use ratatui::{
     layout::Constraint,
     style::{Modifier, Style},
@@ -51,11 +52,23 @@ pub fn render(
         nit_core::VisualizerMode::SimOnly => "SIM",
         nit_core::VisualizerMode::Search => "SEARCH",
     };
+    let search_intensity = format!("{:?}", state.settings.gol.search.intensity);
     let viz_period = state
         .visualizer
         .period
         .map(|p| p.to_string())
         .unwrap_or_else(|| "--".into());
+    let viz_autostop = state.visualizer.auto_stop_policy.to_string();
+    let viz_attractor = attractor_detail(state.visualizer.last_attractor.as_ref());
+    let viz_pause_reason = if state.visualizer.paused {
+        if state.visualizer.paused_by_attractor {
+            "Attractor"
+        } else {
+            "User"
+        }
+    } else {
+        "No"
+    };
     let rows = vec![
         Row::new(vec![Cell::from("Focus"), Cell::from(state.focus.title())]),
         Row::new(vec![
@@ -99,8 +112,20 @@ pub fn render(
             Cell::from(viz_mode),
         ]),
         Row::new(vec![
+            Cell::from("Seed Source"),
+            Cell::from(format!("{:?}", state.visualizer.seed_source)),
+        ]),
+        Row::new(vec![
+            Cell::from("Search Int"),
+            Cell::from(search_intensity),
+        ]),
+        Row::new(vec![
             Cell::from("Viz Rule"),
             Cell::from(state.visualizer.rule.clone()),
+        ]),
+        Row::new(vec![
+            Cell::from("Rule Bits"),
+            Cell::from(rule_bits(&state.visualizer.rule)),
         ]),
         Row::new(vec![
             Cell::from("Viz Gen"),
@@ -113,6 +138,18 @@ pub fn render(
         Row::new(vec![
             Cell::from("Viz Period"),
             Cell::from(viz_period),
+        ]),
+        Row::new(vec![
+            Cell::from("Viz AutoStop"),
+            Cell::from(viz_autostop),
+        ]),
+        Row::new(vec![
+            Cell::from("Viz Attractor"),
+            Cell::from(viz_attractor),
+        ]),
+        Row::new(vec![
+            Cell::from("Viz PausedBy"),
+            Cell::from(viz_pause_reason),
         ]),
         Row::new(vec![
             Cell::from("Viz Wrap"),
@@ -160,5 +197,39 @@ fn shorten_path(path: &std::path::Path, max: usize) -> String {
         s
     } else {
         format!("…{}", &s[s.len() - (max - 1)..])
+    }
+}
+
+fn rule_bits(rule_text: &str) -> String {
+    let Ok(rule) = Rule::parse(rule_text) else {
+        return "invalid".into();
+    };
+    let births = mask_bits(rule.births_mask());
+    let survives = mask_bits(rule.survives_mask());
+    format!("B:{births} S:{survives}")
+}
+
+fn mask_bits(mask: u16) -> String {
+    let mut out = String::with_capacity(9);
+    for i in 0..=8u8 {
+        if (mask & (1 << i)) != 0 {
+            out.push('1');
+        } else {
+            out.push('0');
+        }
+    }
+    out
+}
+
+fn attractor_detail(event: Option<&AttractorEvent>) -> String {
+    match event {
+        Some(AttractorEvent::FixedPoint { gen }) => format!("Fixed @gen={gen}"),
+        Some(AttractorEvent::Cycle {
+            gen,
+            period,
+            transient,
+            ..
+        }) => format!("Cycle p={period} t={transient} @gen={gen}"),
+        None => "--".into(),
     }
 }

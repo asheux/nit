@@ -1,5 +1,3 @@
-use blake3::Hasher;
-
 #[derive(Copy, Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum EdgeMode {
     Dead,
@@ -59,13 +57,17 @@ impl Grid {
     }
 
     pub fn hash(&self) -> u64 {
-        let mut hasher = Hasher::new();
-        hasher.update(&self.width.to_le_bytes());
-        hasher.update(&self.height.to_le_bytes());
-        hasher.update(&self.cells);
-        let mut out = [0u8; 8];
-        out.copy_from_slice(&hasher.finalize().as_bytes()[..8]);
-        u64::from_le_bytes(out)
+        // Simple 64-bit FNV-1a over dimensions + cells. Fast, stable, and low-stack.
+        const FNV_OFFSET: u64 = 0xcbf29ce484222325;
+        const FNV_PRIME: u64 = 0x100000001b3;
+        let mut hash = FNV_OFFSET;
+        hash = fnv1a(hash, &self.width.to_le_bytes());
+        hash = fnv1a(hash, &self.height.to_le_bytes());
+        for &byte in &self.cells {
+            hash ^= byte as u64;
+            hash = hash.wrapping_mul(FNV_PRIME);
+        }
+        hash
     }
 
     pub fn clone_with_size(&self, width: usize, height: usize) -> Grid {
@@ -84,4 +86,13 @@ impl Grid {
     fn index(&self, x: usize, y: usize) -> usize {
         y * self.width + x
     }
+}
+
+fn fnv1a(mut hash: u64, bytes: &[u8]) -> u64 {
+    const FNV_PRIME: u64 = 0x100000001b3;
+    for &byte in bytes {
+        hash ^= byte as u64;
+        hash = hash.wrapping_mul(FNV_PRIME);
+    }
+    hash
 }

@@ -93,8 +93,9 @@ and snapshot I/O) runs in a background worker thread.
 **Pipeline**
 - Seed text (viewport) → ASCII-to-grid mapping → GoL simulation (nit-gol).
 - Rule search evaluates Life-like rules asynchronously and reports a leaderboard.
-- Visualizer state (rule, generation, alive count, period, mode) is rendered in the pane
-  and summarized in Gate Monitor.
+- Visualizer state (rule, generation, alive count, attractor, auto-stop policy, mode) is rendered
+  in the pane and summarized in Gate Monitor.
+- The simulation can auto-pause on fixed points or repeats based on the auto-stop policy.
 
 **Snapshots**
 - Stored under `gol-snapshots/` in the workspace root as RLE + JSON metadata.

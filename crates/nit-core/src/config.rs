@@ -24,6 +24,8 @@ pub struct GolConfig {
     pub tick_ms: u64,
     pub wrap: bool,
     pub seed_source: GolSeedSource,
+    pub seed_live_chars: String,
+    pub seed_other_live_percent: u8,
     pub search: GolSearchConfig,
     pub snapshots: GolSnapshotsConfig,
 }
@@ -64,6 +66,7 @@ pub struct GolSnapshotsConfig {
     pub prune_policy: SnapshotPrunePolicy,
     pub min_period: u32,
     pub min_transient: u32,
+    pub snapshot_on_attractor: bool,
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -98,6 +101,8 @@ impl Default for GolConfig {
             tick_ms: 120,
             wrap: false,
             seed_source: GolSeedSource::Editor,
+            seed_live_chars: "#@█▓▒░*+xX%&".to_string(),
+            seed_other_live_percent: 50,
             search: GolSearchConfig::default(),
             snapshots: GolSnapshotsConfig::default(),
         }
@@ -126,6 +131,7 @@ impl Default for GolSnapshotsConfig {
             prune_policy: SnapshotPrunePolicy::Oldest,
             min_period: 6,
             min_transient: 20,
+            snapshot_on_attractor: true,
         }
     }
 }
