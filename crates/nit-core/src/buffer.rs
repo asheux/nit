@@ -22,6 +22,8 @@ pub struct Buffer {
     undo: Vec<Snapshot>,
     #[serde(skip)]
     redo: Vec<Snapshot>,
+    #[serde(skip)]
+    selection_anchor: Option<usize>,
     pub cursor: Cursor,
     pub viewport: Viewport,
     dirty: bool,
@@ -35,6 +37,7 @@ impl Buffer {
             rope: content,
             undo: Vec::new(),
             redo: Vec::new(),
+            selection_anchor: None,
             cursor: Cursor::default(),
             viewport: Viewport::default(),
             dirty: false,
@@ -89,6 +92,22 @@ impl Buffer {
 
     pub fn line_as_string(&self, line: usize) -> String {
         self.line_as_str(line)
+    }
+
+    pub fn line_char_start(&self, line: usize) -> usize {
+        self.rope.line_to_char(line)
+    }
+
+    pub fn line_char_end(&self, line: usize) -> usize {
+        if line + 1 < self.rope.len_lines() {
+            self.rope.line_to_char(line + 1)
+        } else {
+            self.rope.len_chars()
+        }
+    }
+
+    pub fn cursor_index(&self) -> usize {
+        self.char_index()
     }
 
     fn line_as_str(&self, line: usize) -> String {
@@ -186,6 +205,74 @@ impl Buffer {
         if self.cursor.col < len {
             self.cursor.col += 1;
         }
+    }
+
+    pub fn set_selection_anchor(&mut self) {
+        self.selection_anchor = Some(self.char_index());
+    }
+
+    pub fn clear_selection(&mut self) {
+        self.selection_anchor = None;
+    }
+
+    pub fn selection_range(&self) -> Option<(usize, usize)> {
+        let anchor = self.selection_anchor?;
+        let cursor = self.char_index();
+        let len = self.rope.len_chars();
+        let (start, end) = if anchor <= cursor {
+            (anchor, cursor)
+        } else {
+            (cursor, anchor)
+        };
+        let end = if end < len { end + 1 } else { len };
+        if start >= len || end <= start {
+            None
+        } else {
+            Some((start, end))
+        }
+    }
+
+    pub fn yank_selection(&self) -> Option<String> {
+        let (start, end) = self.selection_range()?;
+        Some(self.rope.slice(start..end).to_string())
+    }
+
+    pub fn delete_selection(&mut self) -> bool {
+        let (start, end) = match self.selection_range() {
+            Some(range) => range,
+            None => return false,
+        };
+        if start >= end {
+            return false;
+        }
+        self.push_undo();
+        self.rope.remove(start..end);
+        self.set_cursor_from_char_index(start.min(self.rope.len_chars()));
+        self.dirty = true;
+        self.clear_selection();
+        true
+    }
+
+    pub fn insert_str(&mut self, s: &str) {
+        if s.is_empty() {
+            return;
+        }
+        self.push_undo();
+        let idx = self.char_index();
+        self.rope.insert(idx, s);
+        let mut line = self.cursor.line;
+        let mut col = self.cursor.col;
+        for ch in s.chars() {
+            if ch == '\n' {
+                line += 1;
+                col = 0;
+            } else {
+                col += 1;
+            }
+        }
+        self.cursor.line = line;
+        self.cursor.col = col;
+        self.dirty = true;
     }
 
     pub fn exit_insert_mode(&mut self) {

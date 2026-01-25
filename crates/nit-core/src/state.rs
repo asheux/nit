@@ -71,6 +71,8 @@ pub struct AppState {
     pub prompt: Option<Prompt>,
     pub show_help: bool,
     pub status: Option<String>,
+    #[serde(skip)]
+    pub yank: Option<String>,
 }
 
 pub struct ActionOutcome {
@@ -104,6 +106,7 @@ impl AppState {
             prompt: None,
             show_help: false,
             status: None,
+            yank: None,
         }
     }
 
@@ -210,6 +213,7 @@ pub fn apply_action(state: &mut AppState, action: Action) -> ActionOutcome {
                 state.mode = Mode::Normal;
                 if let Some(buf) = state.focused_buffer_mut() {
                     buf.exit_insert_mode();
+                    buf.clear_selection();
                 }
             }
         }
@@ -232,18 +236,25 @@ pub fn apply_action(state: &mut AppState, action: Action) -> ActionOutcome {
         }
         Action::SwitchMode(m) => {
             state.mode = m;
-            if m == Mode::Normal {
-                if let Some(buf) = state.focused_buffer_mut() {
+            if let Some(buf) = state.focused_buffer_mut() {
+                if m == Mode::Normal {
                     buf.exit_insert_mode();
+                    buf.clear_selection();
+                } else if m == Mode::Visual {
+                    buf.set_selection_anchor();
+                } else {
+                    buf.clear_selection();
                 }
             }
         }
         Action::ToggleMode => {
             state.mode = state.mode.toggle();
-            if state.mode == Mode::Normal {
-                if let Some(buf) = state.focused_buffer_mut() {
+            let mode = state.mode;
+            if let Some(buf) = state.focused_buffer_mut() {
+                if mode == Mode::Normal {
                     buf.exit_insert_mode();
                 }
+                buf.clear_selection();
             }
         }
         Action::InsertChar(c) => {
@@ -261,6 +272,48 @@ pub fn apply_action(state: &mut AppState, action: Action) -> ActionOutcome {
         Action::InsertTab => {
             if let Some(buf) = state.focused_buffer_mut() {
                 buf.insert_tab();
+                buf.ensure_visible();
+            }
+        }
+        Action::EnterVisual => {
+            state.mode = Mode::Visual;
+            if let Some(buf) = state.focused_buffer_mut() {
+                buf.set_selection_anchor();
+            }
+        }
+        Action::ExitVisual => {
+            state.mode = Mode::Normal;
+            if let Some(buf) = state.focused_buffer_mut() {
+                buf.clear_selection();
+            }
+        }
+        Action::YankSelection => {
+            let yank = if let Some(buf) = state.focused_buffer_mut() {
+                let yank = buf.yank_selection();
+                buf.clear_selection();
+                yank
+            } else {
+                None
+            };
+            state.yank = yank;
+            state.mode = Mode::Normal;
+        }
+        Action::DeleteSelection => {
+            if let Some(buf) = state.focused_buffer_mut() {
+                if buf.delete_selection() {
+                    buf.ensure_visible();
+                }
+            }
+            state.mode = Mode::Normal;
+        }
+        Action::Paste => {
+            let yank = state.yank.clone();
+            let is_normal = state.mode == Mode::Normal;
+            if let (Some(yank), Some(buf)) = (yank, state.focused_buffer_mut()) {
+                if is_normal {
+                    buf.append();
+                }
+                buf.insert_str(&yank);
                 buf.ensure_visible();
             }
         }

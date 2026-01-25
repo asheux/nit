@@ -43,6 +43,10 @@ pub fn render(frame: &mut Frame, area: Rect, theme: &Theme) {
             Span::raw(" append + Insert (Normal mode)"),
         ]),
         Line::from(vec![
+            Span::styled("v", Style::default().fg(theme.accent)),
+            Span::raw(" Visual mode (Normal mode)"),
+        ]),
+        Line::from(vec![
             Span::styled("o", Style::default().fg(theme.accent)),
             Span::raw(" open line below + Insert (Normal mode)"),
         ]),
@@ -65,6 +69,18 @@ pub fn render(frame: &mut Frame, area: Rect, theme: &Theme) {
         Line::from(vec![
             Span::styled("e / b", Style::default().fg(theme.accent)),
             Span::raw(" word end / word back (Normal mode)"),
+        ]),
+        Line::from(vec![
+            Span::styled("y", Style::default().fg(theme.accent)),
+            Span::raw(" yank selection (Visual mode)"),
+        ]),
+        Line::from(vec![
+            Span::styled("d", Style::default().fg(theme.accent)),
+            Span::raw(" delete selection (Visual mode)"),
+        ]),
+        Line::from(vec![
+            Span::styled("p", Style::default().fg(theme.accent)),
+            Span::raw(" paste (Normal mode)"),
         ]),
         Line::from(vec![
             Span::styled("dd", Style::default().fg(theme.accent)),

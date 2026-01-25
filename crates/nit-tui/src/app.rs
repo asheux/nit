@@ -2,6 +2,7 @@ use std::io::{self, Stdout};
 use std::sync::mpsc::Receiver;
 use std::time::{Duration, Instant};
 
+use arboard::Clipboard;
 use crossterm::{
     cursor::SetCursorStyle,
     event::{self, Event, KeyCode, KeyEvent, KeyModifiers},
@@ -61,10 +62,14 @@ fn run_loop(
     let mut last_log = Instant::now();
     let mut needs_redraw = true;
     let mut input_state = InputState::new();
+    let mut clipboard = Clipboard::new().ok();
     loop {
         if let Some(deferred) = input_state.take_deferred() {
             if let Some(action) = map_key_to_action(deferred, state, &mut input_state) {
+                prepare_clipboard_paste(state, &mut clipboard, &action);
+                let action_copy = action.clone();
                 let outcome = apply_action(state, action);
+                handle_clipboard_copy(state, &mut clipboard, &action_copy);
                 if outcome.should_exit {
                     break;
                 }
@@ -80,7 +85,10 @@ fn run_loop(
             if let Event::Key(key) = event::read()? {
                 handled_input = true;
                 if let Some(action) = map_key_to_action(key, state, &mut input_state) {
+                    prepare_clipboard_paste(state, &mut clipboard, &action);
+                    let action_copy = action.clone();
                     let outcome = apply_action(state, action);
+                    handle_clipboard_copy(state, &mut clipboard, &action_copy);
                     if outcome.should_exit {
                         break;
                     }
@@ -91,7 +99,10 @@ fn run_loop(
 
         if !handled_input && matches!(state.focus, PaneId::Editor) && state.mode == Mode::Insert {
             if let Some(action) = input_state.flush_insert_timeout() {
+                prepare_clipboard_paste(state, &mut clipboard, &action);
+                let action_copy = action.clone();
                 let outcome = apply_action(state, action);
+                handle_clipboard_copy(state, &mut clipboard, &action_copy);
                 if outcome.should_exit {
                     break;
                 }
@@ -219,7 +230,7 @@ fn draw(
     })?;
     let cursor_style = match state.mode {
         Mode::Insert => SetCursorStyle::SteadyBar,
-        Mode::Normal => SetCursorStyle::SteadyBlock,
+        Mode::Normal | Mode::Visual => SetCursorStyle::SteadyBlock,
     };
     execute!(terminal.backend_mut(), cursor_style)?;
     state.metrics.last_render_ms = start.elapsed().as_millis();
@@ -254,6 +265,15 @@ fn map_key_to_action(key: KeyEvent, state: &AppState, input: &mut InputState) ->
         && input.pending_insert_matches(&key)
     {
         return None;
+    }
+
+    if is_visual_mode(state) {
+        match key.code {
+            KeyCode::Char('y') => return Some(Action::YankSelection),
+            KeyCode::Char('d') => return Some(Action::DeleteSelection),
+            KeyCode::Char('v') => return Some(Action::ExitVisual),
+            _ => {}
+        }
     }
 
     if let Some(action) = handle_normal_chords(&key, state, input) {
@@ -305,16 +325,17 @@ fn map_key_to_action(key: KeyEvent, state: &AppState, input: &mut InputState) ->
             code: KeyCode::Char('i'),
             modifiers: KeyModifiers::NONE,
             ..
-        } if matches!(state.focus, PaneId::Editor | PaneId::Notes)
-            && state.mode == Mode::Normal =>
-        {
-            Some(Action::SwitchMode(Mode::Insert))
-        }
+        } if is_normal_mode(state) => Some(Action::SwitchMode(Mode::Insert)),
+        KeyEvent {
+            code: KeyCode::Char('v'),
+            modifiers: KeyModifiers::NONE,
+            ..
+        } if is_normal_mode(state) => Some(Action::EnterVisual),
         KeyEvent {
             code: KeyCode::Char('a'),
             modifiers: KeyModifiers::NONE,
             ..
-        } if is_normal_editing(state) => Some(Action::Append),
+        } if is_normal_mode(state) => Some(Action::Append),
         KeyEvent {
             code: KeyCode::Enter,
             ..
@@ -360,70 +381,67 @@ fn map_key_to_action(key: KeyEvent, state: &AppState, input: &mut InputState) ->
         KeyEvent {
             code: KeyCode::Char('G'),
             ..
-        } if is_normal_editing(state) => Some(Action::GoToBottom),
+        } if is_motion_mode(state) => Some(Action::GoToBottom),
         KeyEvent {
             code: KeyCode::Char('e'),
             ..
-        } if is_normal_editing(state) => Some(Action::MoveWordEnd),
+        } if is_motion_mode(state) => Some(Action::MoveWordEnd),
         KeyEvent {
             code: KeyCode::Char('b'),
             ..
-        } if is_normal_editing(state) => Some(Action::MoveWordBack),
+        } if is_motion_mode(state) => Some(Action::MoveWordBack),
         KeyEvent {
             code: KeyCode::Char('u'),
             ..
-        } if is_normal_editing(state) => Some(Action::Undo),
+        } if is_normal_mode(state) => Some(Action::Undo),
         KeyEvent {
             code: KeyCode::Char('R'),
             ..
-        } if is_normal_editing(state) => Some(Action::Redo),
+        } if is_normal_mode(state) => Some(Action::Redo),
         KeyEvent {
             code: KeyCode::Char('o'),
             modifiers: KeyModifiers::NONE,
             ..
-        } if is_normal_editing(state) => Some(Action::OpenLineBelow),
+        } if is_normal_mode(state) => Some(Action::OpenLineBelow),
         KeyEvent {
             code: KeyCode::Char('$'),
             ..
-        } if is_normal_editing(state) => Some(Action::End),
+        } if is_motion_mode(state) => Some(Action::End),
         KeyEvent {
             code: KeyCode::Char('%'),
             ..
-        } if is_normal_editing(state) => Some(Action::Home),
+        } if is_motion_mode(state) => Some(Action::Home),
+        KeyEvent {
+            code: KeyCode::Char('p'),
+            modifiers: KeyModifiers::NONE,
+            ..
+        } if is_normal_mode(state) => Some(Action::Paste),
         KeyEvent {
             code: KeyCode::Char('h'),
             modifiers: KeyModifiers::NONE,
             ..
-        } if matches!(state.focus, PaneId::Editor | PaneId::Notes)
-            && state.mode == Mode::Normal =>
-        {
+        } if is_motion_mode(state) => {
             Some(Action::MoveLeft)
         }
         KeyEvent {
             code: KeyCode::Char('j'),
             modifiers: KeyModifiers::NONE,
             ..
-        } if matches!(state.focus, PaneId::Editor | PaneId::Notes)
-            && state.mode == Mode::Normal =>
-        {
+        } if is_motion_mode(state) => {
             Some(Action::MoveDown)
         }
         KeyEvent {
             code: KeyCode::Char('k'),
             modifiers: KeyModifiers::NONE,
             ..
-        } if matches!(state.focus, PaneId::Editor | PaneId::Notes)
-            && state.mode == Mode::Normal =>
-        {
+        } if is_motion_mode(state) => {
             Some(Action::MoveUp)
         }
         KeyEvent {
             code: KeyCode::Char('l'),
             modifiers: KeyModifiers::NONE,
             ..
-        } if matches!(state.focus, PaneId::Editor | PaneId::Notes)
-            && state.mode == Mode::Normal =>
-        {
+        } if is_motion_mode(state) => {
             Some(Action::MoveRight)
         }
         KeyEvent {
@@ -452,6 +470,32 @@ fn map_key_to_action(key: KeyEvent, state: &AppState, input: &mut InputState) ->
             Some(Action::InsertChar(c))
         }
         _ => None,
+    }
+}
+
+fn handle_clipboard_copy(state: &AppState, clipboard: &mut Option<Clipboard>, action: &Action) {
+    if !matches!(action, Action::YankSelection) {
+        return;
+    }
+    if let (Some(text), Some(cb)) = (state.yank.as_ref(), clipboard.as_mut()) {
+        let _ = cb.set_text(text.clone());
+    }
+}
+
+fn prepare_clipboard_paste(
+    state: &mut AppState,
+    clipboard: &mut Option<Clipboard>,
+    action: &Action,
+) {
+    if !matches!(action, Action::Paste) || state.yank.is_some() {
+        return;
+    }
+    if let Some(cb) = clipboard.as_mut() {
+        if let Ok(text) = cb.get_text() {
+            if !text.is_empty() {
+                state.yank = Some(text);
+            }
+        }
     }
 }
 
@@ -588,8 +632,17 @@ impl InputState {
     }
 }
 
-fn is_normal_editing(state: &AppState) -> bool {
+fn is_normal_mode(state: &AppState) -> bool {
     matches!(state.focus, PaneId::Editor | PaneId::Notes) && state.mode == Mode::Normal
+}
+
+fn is_visual_mode(state: &AppState) -> bool {
+    matches!(state.focus, PaneId::Editor | PaneId::Notes) && state.mode == Mode::Visual
+}
+
+fn is_motion_mode(state: &AppState) -> bool {
+    matches!(state.focus, PaneId::Editor | PaneId::Notes)
+        && matches!(state.mode, Mode::Normal | Mode::Visual)
 }
 
 fn is_insert_editing(state: &AppState) -> bool {
@@ -601,7 +654,7 @@ fn handle_normal_chords(
     state: &AppState,
     input: &mut InputState,
 ) -> Option<Action> {
-    if !is_normal_editing(state) {
+    if !is_motion_mode(state) {
         input.reset_normal();
         return None;
     }
@@ -621,7 +674,7 @@ fn handle_normal_chords(
             }
         }
         KeyCode::Char('d') => {
-            if input.chord_normal('d', now) {
+            if is_normal_mode(state) && input.chord_normal('d', now) {
                 Some(Action::DeleteLine)
             } else {
                 None
