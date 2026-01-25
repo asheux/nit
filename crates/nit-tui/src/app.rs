@@ -341,6 +341,15 @@ fn map_key_to_action(key: KeyEvent, state: &AppState, input: &mut InputState) ->
             Action::ShowHelp
         }),
         KeyEvent {
+            code: KeyCode::Char('g'),
+            modifiers: KeyModifiers::CONTROL,
+            ..
+        } => Some(if state.show_help {
+            Action::HideHelp
+        } else {
+            Action::ShowHelp
+        }),
+        KeyEvent {
             code: KeyCode::Char('H'),
             modifiers: KeyModifiers::CONTROL,
             ..
