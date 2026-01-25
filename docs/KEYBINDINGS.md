@@ -11,14 +11,18 @@
 - Arrow keys / PageUp / PageDown / Home / End: Move cursor/scroll
 - H/J/K/L (Normal mode): Move cursor
 - I (Normal mode): Enter Insert mode
+- a (Normal mode): Append + Insert mode
 - o (Normal mode): Open line below + Insert mode
 - JJ (Insert mode): Save + switch to Normal
 - GG (Normal mode): Go to top
 - Shift+G (Normal mode): Go to bottom
+- e (Normal mode): Move to end of word
+- b (Normal mode): Move to beginning of word
 - $ (Normal mode): End of line
 - % (Normal mode): Beginning of line
 - u (Normal mode): Undo
 - Shift+R (Normal mode): Redo
+- dd (Normal mode): Delete line
 - Enter: Newline
 - Tab: Insert tab when in Insert mode (otherwise pane cycle)
 - Backspace / Delete: Delete

@@ -73,20 +73,12 @@ fn run_loop(
             continue;
         }
 
-        if matches!(state.focus, PaneId::Editor) && state.mode == Mode::Insert {
-            if let Some(action) = input_state.flush_insert_timeout() {
-                let outcome = apply_action(state, action);
-                if outcome.should_exit {
-                    break;
-                }
-                needs_redraw = needs_redraw || outcome.state_changed;
-            }
-        }
-
         // Poll input with tick fallback
         let timeout = TICK_RATE;
+        let mut handled_input = false;
         if event::poll(timeout)? {
             if let Event::Key(key) = event::read()? {
+                handled_input = true;
                 if let Some(action) = map_key_to_action(key, state, &mut input_state) {
                     let outcome = apply_action(state, action);
                     if outcome.should_exit {
@@ -94,6 +86,16 @@ fn run_loop(
                     }
                     needs_redraw = needs_redraw || outcome.state_changed;
                 }
+            }
+        }
+
+        if !handled_input && matches!(state.focus, PaneId::Editor) && state.mode == Mode::Insert {
+            if let Some(action) = input_state.flush_insert_timeout() {
+                let outcome = apply_action(state, action);
+                if outcome.should_exit {
+                    break;
+                }
+                needs_redraw = needs_redraw || outcome.state_changed;
             }
         }
 
@@ -291,6 +293,11 @@ fn map_key_to_action(key: KeyEvent, state: &AppState, input: &mut InputState) ->
             Some(Action::SwitchMode(Mode::Insert))
         }
         KeyEvent {
+            code: KeyCode::Char('a'),
+            modifiers: KeyModifiers::NONE,
+            ..
+        } if is_normal_editing(state) => Some(Action::Append),
+        KeyEvent {
             code: KeyCode::Enter,
             ..
         } => Some(Action::InsertNewline),
@@ -336,6 +343,14 @@ fn map_key_to_action(key: KeyEvent, state: &AppState, input: &mut InputState) ->
             code: KeyCode::Char('G'),
             ..
         } if is_normal_editing(state) => Some(Action::GoToBottom),
+        KeyEvent {
+            code: KeyCode::Char('e'),
+            ..
+        } if is_normal_editing(state) => Some(Action::MoveWordEnd),
+        KeyEvent {
+            code: KeyCode::Char('b'),
+            ..
+        } if is_normal_editing(state) => Some(Action::MoveWordBack),
         KeyEvent {
             code: KeyCode::Char('u'),
             ..
@@ -583,6 +598,13 @@ fn handle_normal_chords(
         KeyCode::Char('g') => {
             if input.chord_normal('g', now) {
                 Some(Action::GoToTop)
+            } else {
+                None
+            }
+        }
+        KeyCode::Char('d') => {
+            if input.chord_normal('d', now) {
+                Some(Action::DeleteLine)
             } else {
                 None
             }

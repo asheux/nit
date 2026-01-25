@@ -181,6 +181,13 @@ impl Buffer {
         self.cursor.col = self.line_char_len(self.cursor.line);
     }
 
+    pub fn append(&mut self) {
+        let len = self.line_char_len(self.cursor.line);
+        if self.cursor.col < len {
+            self.cursor.col += 1;
+        }
+    }
+
     pub fn exit_insert_mode(&mut self) {
         if self.is_line_blank(self.cursor.line) {
             self.cursor.col = 0;
@@ -198,6 +205,65 @@ impl Buffer {
         let last = self.rope.len_lines().saturating_sub(1);
         self.cursor.line = last;
         self.clamp_col();
+    }
+
+    pub fn move_word_end(&mut self) {
+        let len = self.rope.len_chars();
+        if len == 0 {
+            return;
+        }
+        let mut idx = self.char_index();
+        if idx >= len {
+            return;
+        }
+        let is_word = |c: char| c.is_alphanumeric() || c == '_';
+        if is_word(self.rope.char(idx)) {
+            if idx + 1 < len && !is_word(self.rope.char(idx + 1)) {
+                idx += 1;
+            }
+        }
+        while idx < len && !is_word(self.rope.char(idx)) {
+            idx += 1;
+        }
+        if idx >= len {
+            return;
+        }
+        while idx + 1 < len && is_word(self.rope.char(idx + 1)) {
+            idx += 1;
+        }
+        self.set_cursor_from_char_index(idx);
+    }
+
+    pub fn move_word_back(&mut self) {
+        let len = self.rope.len_chars();
+        if len == 0 {
+            return;
+        }
+        let mut idx = self.char_index();
+        if idx == 0 {
+            return;
+        }
+        if idx >= len {
+            idx = len.saturating_sub(1);
+        }
+        let is_word = |c: char| c.is_alphanumeric() || c == '_';
+        if is_word(self.rope.char(idx)) {
+            if idx > 0 && !is_word(self.rope.char(idx - 1)) {
+                idx = idx.saturating_sub(1);
+            }
+        } else {
+            idx = idx.saturating_sub(1);
+        }
+        while idx > 0 && !is_word(self.rope.char(idx)) {
+            idx = idx.saturating_sub(1);
+        }
+        if !is_word(self.rope.char(idx)) {
+            return;
+        }
+        while idx > 0 && is_word(self.rope.char(idx - 1)) {
+            idx = idx.saturating_sub(1);
+        }
+        self.set_cursor_from_char_index(idx);
     }
 
     pub fn insert_char(&mut self, c: char) {
@@ -256,6 +322,36 @@ impl Buffer {
             self.rope.remove(idx..idx + 1);
             self.dirty = true;
         }
+    }
+
+    pub fn delete_line(&mut self) {
+        let total = self.rope.len_lines();
+        if total == 0 {
+            return;
+        }
+        self.push_undo();
+        let line = self.cursor.line.min(total.saturating_sub(1));
+        let start = self.rope.line_to_char(line);
+        let end = if line + 1 < total {
+            self.rope.line_to_char(line + 1)
+        } else {
+            self.rope.len_chars()
+        };
+        if end > start {
+            self.rope.remove(start..end);
+        }
+        let new_total = self.rope.len_lines();
+        if new_total == 0 {
+            self.cursor.line = 0;
+            self.cursor.col = 0;
+        } else if self.cursor.line >= new_total {
+            self.cursor.line = new_total.saturating_sub(1);
+            self.cursor.col = 0;
+        } else {
+            self.cursor.col = 0;
+        }
+        self.dirty = true;
+        self.clamp_col();
     }
 
     pub fn ensure_visible(&mut self) {
@@ -320,6 +416,14 @@ impl Buffer {
             cursor: self.cursor,
             dirty: self.dirty,
         });
+    }
+
+    fn set_cursor_from_char_index(&mut self, idx: usize) {
+        let line = self.rope.char_to_line(idx);
+        let line_start = self.rope.line_to_char(line);
+        self.cursor.line = line;
+        self.cursor.col = idx.saturating_sub(line_start);
+        self.clamp_col();
     }
 
     fn is_line_blank(&self, line: usize) -> bool {

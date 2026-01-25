@@ -264,6 +264,13 @@ pub fn apply_action(state: &mut AppState, action: Action) -> ActionOutcome {
                 buf.ensure_visible();
             }
         }
+        Action::Append => {
+            if let Some(buf) = state.focused_buffer_mut() {
+                buf.append();
+                buf.ensure_visible();
+                state.mode = Mode::Insert;
+            }
+        }
         Action::Backspace => {
             if let Some(buf) = state.focused_buffer_mut() {
                 buf.backspace();
@@ -273,6 +280,12 @@ pub fn apply_action(state: &mut AppState, action: Action) -> ActionOutcome {
         Action::Delete => {
             if let Some(buf) = state.focused_buffer_mut() {
                 buf.delete_forward();
+                buf.ensure_visible();
+            }
+        }
+        Action::DeleteLine => {
+            if let Some(buf) = state.focused_buffer_mut() {
+                buf.delete_line();
                 buf.ensure_visible();
             }
         }
@@ -323,6 +336,18 @@ pub fn apply_action(state: &mut AppState, action: Action) -> ActionOutcome {
         Action::End => {
             if let Some(buf) = state.focused_buffer_mut() {
                 buf.move_end();
+                buf.ensure_visible();
+            }
+        }
+        Action::MoveWordEnd => {
+            if let Some(buf) = state.focused_buffer_mut() {
+                buf.move_word_end();
+                buf.ensure_visible();
+            }
+        }
+        Action::MoveWordBack => {
+            if let Some(buf) = state.focused_buffer_mut() {
+                buf.move_word_back();
                 buf.ensure_visible();
             }
         }
