@@ -32,7 +32,7 @@ fn main() -> anyhow::Result<()> {
     let mut state = nit_core::AppState::new(workspace_root, editor, notes);
     let seed = stable_hash_bytes(state.editor_buffer().content_as_string().as_bytes());
     state.visualizer.seed = seed;
-    state.mode = Mode::Insert;
+    state.mode = Mode::Normal;
 
     run(state, theme, log_rx)?;
     Ok(())

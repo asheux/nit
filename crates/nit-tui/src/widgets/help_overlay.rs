@@ -24,11 +24,11 @@ pub fn render(frame: &mut Frame, area: Rect, theme: &Theme) {
         ]),
         Line::from(vec![
             Span::styled("Ctrl+H/J/K/L", Style::default().fg(theme.accent)),
-            Span::raw(" focus panes (vim/tmux)"),
+            Span::raw(" focus panes (left/down/up/right)"),
         ]),
         Line::from(vec![
             Span::styled("Esc", Style::default().fg(theme.accent)),
-            Span::raw(" toggle normal/insert"),
+            Span::raw(" switch to Normal mode"),
         ]),
         Line::from(vec![
             Span::styled("H/J/K/L", Style::default().fg(theme.accent)),
@@ -39,7 +39,19 @@ pub fn render(frame: &mut Frame, area: Rect, theme: &Theme) {
             Span::raw(" enter Insert mode"),
         ]),
         Line::from(vec![
-            Span::styled("Ctrl+L", Style::default().fg(theme.accent)),
+            Span::styled("JJ", Style::default().fg(theme.accent)),
+            Span::raw(" save in Insert mode"),
+        ]),
+        Line::from(vec![
+            Span::styled("GG / Shift+G", Style::default().fg(theme.accent)),
+            Span::raw(" top / bottom"),
+        ]),
+        Line::from(vec![
+            Span::styled("$ / %", Style::default().fg(theme.accent)),
+            Span::raw(" end / start of line"),
+        ]),
+        Line::from(vec![
+            Span::styled("Ctrl+Shift+L", Style::default().fg(theme.accent)),
             Span::raw(" clear logs"),
         ]),
         Line::from(vec![

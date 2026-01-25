@@ -157,6 +157,17 @@ impl Buffer {
         self.cursor.col = self.line_char_len(self.cursor.line);
     }
 
+    pub fn go_to_top(&mut self) {
+        self.cursor.line = 0;
+        self.clamp_col();
+    }
+
+    pub fn go_to_bottom(&mut self) {
+        let last = self.rope.len_lines().saturating_sub(1);
+        self.cursor.line = last;
+        self.clamp_col();
+    }
+
     pub fn insert_char(&mut self, c: char) {
         let idx = self.char_index();
         self.rope.insert_char(idx, c);

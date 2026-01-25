@@ -85,7 +85,7 @@ impl AppState {
             buffers: vec![editor, notes],
             active_editor_buffer_id: 0,
             notes_buffer_id: 1,
-            mode: Mode::Insert,
+            mode: Mode::Normal,
             focus: PaneId::Editor,
             logs: LogBuffer::new(DEFAULT_LOG_CAPACITY),
             job: JobState {
@@ -303,6 +303,18 @@ pub fn apply_action(state: &mut AppState, action: Action) -> ActionOutcome {
         Action::End => {
             if let Some(buf) = state.focused_buffer_mut() {
                 buf.move_end();
+                buf.ensure_visible();
+            }
+        }
+        Action::GoToTop => {
+            if let Some(buf) = state.focused_buffer_mut() {
+                buf.go_to_top();
+                buf.ensure_visible();
+            }
+        }
+        Action::GoToBottom => {
+            if let Some(buf) = state.focused_buffer_mut() {
+                buf.go_to_bottom();
                 buf.ensure_visible();
             }
         }

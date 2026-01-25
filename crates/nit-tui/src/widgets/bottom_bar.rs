@@ -15,7 +15,7 @@ pub fn render(frame: &mut Frame, area: ratatui::layout::Rect, state: &AppState, 
         hint("Tab", "Focus", theme),
         hint("Ctrl+HJKL", "Pane", theme),
         hint("F1", "Help", theme),
-        hint("Ctrl+L", "Clear Logs", theme),
+        hint("Ctrl+Shift+L", "Clear Logs", theme),
         hint("Ctrl+R", "Seed", theme),
         hint("Ctrl+A", "Apply", theme),
     ];

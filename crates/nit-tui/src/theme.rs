@@ -56,7 +56,7 @@ impl Theme {
                         cursor: color_or_default(cfg.cursor, Color::Rgb(255, 209, 102)),
                         cursor_line_bg: color_or_default(
                             cfg.cursor_line_bg,
-                            Color::Rgb(16, 37, 58),
+                            Color::Rgb(20, 52, 77),
                         ),
                         selection_bg: color_or_default(cfg.selection_bg, Color::Rgb(27, 63, 92)),
                         warning: color_or_default(cfg.warning, Color::Rgb(242, 165, 65)),
@@ -80,7 +80,7 @@ impl Default for Theme {
             title: Color::Rgb(78, 208, 208),
             title_focused: Color::Rgb(127, 252, 255),
             cursor: Color::Rgb(255, 209, 102),
-            cursor_line_bg: Color::Rgb(16, 37, 58),
+            cursor_line_bg: Color::Rgb(20, 52, 77),
             selection_bg: Color::Rgb(27, 63, 92),
             warning: Color::Rgb(242, 165, 65),
             error: Color::Rgb(242, 95, 92),

@@ -18,6 +18,7 @@ pub fn render_notes(
         frame,
         area,
         buffer,
+        PaneId::Notes,
         focus,
         "NOTES  [ SCRATCH ]",
         theme,

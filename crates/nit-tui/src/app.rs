@@ -3,6 +3,7 @@ use std::sync::mpsc::Receiver;
 use std::time::{Duration, Instant};
 
 use crossterm::{
+    cursor::SetCursorStyle,
     event::{self, Event, KeyCode, KeyEvent, KeyModifiers},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
@@ -28,6 +29,7 @@ use crate::{
 const TICK_RATE: Duration = Duration::from_millis(50);
 const JOB_TICK: Duration = Duration::from_millis(120);
 const LOG_TICK: Duration = Duration::from_millis(900);
+const CHORD_TIMEOUT: Duration = Duration::from_millis(300);
 
 pub fn run(mut state: AppState, theme: Theme, log_rx: Receiver<String>) -> io::Result<()> {
     enable_raw_mode()?;
@@ -41,6 +43,7 @@ pub fn run(mut state: AppState, theme: Theme, log_rx: Receiver<String>) -> io::R
     let result = run_loop(&mut terminal, &mut state, &theme, log_rx);
 
     terminal.show_cursor()?;
+    execute!(io::stdout(), SetCursorStyle::DefaultUserShape)?;
     disable_raw_mode()?;
     execute!(io::stdout(), LeaveAlternateScreen)?;
     guard.active = false;
@@ -57,12 +60,32 @@ fn run_loop(
     let mut last_job = Instant::now();
     let mut last_log = Instant::now();
     let mut needs_redraw = true;
+    let mut input_state = InputState::new();
     loop {
+        if let Some(deferred) = input_state.take_deferred() {
+            if let Some(action) = map_key_to_action(deferred, state, &mut input_state) {
+                let outcome = apply_action(state, action);
+                if outcome.should_exit {
+                    break;
+                }
+                needs_redraw = needs_redraw || outcome.state_changed;
+            }
+            continue;
+        }
+
+        if let Some(action) = input_state.flush_insert_timeout() {
+            let outcome = apply_action(state, action);
+            if outcome.should_exit {
+                break;
+            }
+            needs_redraw = needs_redraw || outcome.state_changed;
+        }
+
         // Poll input with tick fallback
         let timeout = TICK_RATE;
         if event::poll(timeout)? {
             if let Event::Key(key) = event::read()? {
-                if let Some(action) = map_key_to_action(key, state) {
+                if let Some(action) = map_key_to_action(key, state, &mut input_state) {
                     let outcome = apply_action(state, action);
                     if outcome.should_exit {
                         break;
@@ -172,12 +195,17 @@ fn draw(
             f.set_cursor(f.size().x, f.size().y);
         }
     })?;
+    let cursor_style = match state.mode {
+        Mode::Insert => SetCursorStyle::SteadyBar,
+        Mode::Normal => SetCursorStyle::SteadyBlock,
+    };
+    execute!(terminal.backend_mut(), cursor_style)?;
     state.metrics.last_render_ms = start.elapsed().as_millis();
     state.metrics.frame_count += 1;
     Ok(())
 }
 
-fn map_key_to_action(key: KeyEvent, state: &AppState) -> Option<Action> {
+fn map_key_to_action(key: KeyEvent, state: &AppState, input: &mut InputState) -> Option<Action> {
     // Prompt confirm takes precedence
     if let Some(Prompt::ConfirmQuit) = state.prompt {
         return match key.code {
@@ -185,6 +213,22 @@ fn map_key_to_action(key: KeyEvent, state: &AppState) -> Option<Action> {
             KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => Some(Action::ConfirmQuitNo),
             _ => None,
         };
+    }
+
+    if state.focus == PaneId::JobOutput && is_clear_logs_key(&key) {
+        return Some(Action::ClearLogs);
+    }
+
+    if let Some(dir) = ctrl_nav_dir(&key) {
+        return Some(Action::FocusPane(focus_by_direction(state, dir)));
+    }
+
+    if let Some(action) = handle_insert_chords(&key, state, input) {
+        return Some(action);
+    }
+
+    if let Some(action) = handle_normal_chords(&key, state, input) {
+        return Some(action);
     }
 
     match key {
@@ -227,7 +271,16 @@ fn map_key_to_action(key: KeyEvent, state: &AppState) -> Option<Action> {
         }
         KeyEvent {
             code: KeyCode::Esc, ..
-        } => Some(Action::ToggleMode),
+        } => Some(Action::SwitchMode(Mode::Normal)),
+        KeyEvent {
+            code: KeyCode::Char('i'),
+            modifiers: KeyModifiers::NONE,
+            ..
+        } if matches!(state.focus, PaneId::Editor | PaneId::Notes)
+            && state.mode == Mode::Normal =>
+        {
+            Some(Action::SwitchMode(Mode::Insert))
+        }
         KeyEvent {
             code: KeyCode::Enter,
             ..
@@ -271,10 +324,53 @@ fn map_key_to_action(key: KeyEvent, state: &AppState) -> Option<Action> {
             code: KeyCode::End, ..
         } => Some(Action::End),
         KeyEvent {
-            code: KeyCode::Char('l'),
-            modifiers: KeyModifiers::CONTROL,
+            code: KeyCode::Char('G'),
             ..
-        } => Some(Action::ClearLogs),
+        } if is_normal_editing(state) => Some(Action::GoToBottom),
+        KeyEvent {
+            code: KeyCode::Char('$'),
+            ..
+        } if is_normal_editing(state) => Some(Action::End),
+        KeyEvent {
+            code: KeyCode::Char('%'),
+            ..
+        } if is_normal_editing(state) => Some(Action::Home),
+        KeyEvent {
+            code: KeyCode::Char('h'),
+            modifiers: KeyModifiers::NONE,
+            ..
+        } if matches!(state.focus, PaneId::Editor | PaneId::Notes)
+            && state.mode == Mode::Normal =>
+        {
+            Some(Action::MoveLeft)
+        }
+        KeyEvent {
+            code: KeyCode::Char('j'),
+            modifiers: KeyModifiers::NONE,
+            ..
+        } if matches!(state.focus, PaneId::Editor | PaneId::Notes)
+            && state.mode == Mode::Normal =>
+        {
+            Some(Action::MoveDown)
+        }
+        KeyEvent {
+            code: KeyCode::Char('k'),
+            modifiers: KeyModifiers::NONE,
+            ..
+        } if matches!(state.focus, PaneId::Editor | PaneId::Notes)
+            && state.mode == Mode::Normal =>
+        {
+            Some(Action::MoveUp)
+        }
+        KeyEvent {
+            code: KeyCode::Char('l'),
+            modifiers: KeyModifiers::NONE,
+            ..
+        } if matches!(state.focus, PaneId::Editor | PaneId::Notes)
+            && state.mode == Mode::Normal =>
+        {
+            Some(Action::MoveRight)
+        }
         KeyEvent {
             code: KeyCode::Char(' '),
             modifiers: KeyModifiers::CONTROL,
@@ -300,6 +396,240 @@ fn map_key_to_action(key: KeyEvent, state: &AppState) -> Option<Action> {
         {
             Some(Action::InsertChar(c))
         }
+        _ => None,
+    }
+}
+
+#[derive(Copy, Clone, Debug)]
+enum FocusDir {
+    Left,
+    Right,
+    Up,
+    Down,
+}
+
+fn focus_by_direction(state: &AppState, dir: FocusDir) -> PaneId {
+    use FocusDir::*;
+    match state.focus {
+        PaneId::Notes => match dir {
+            Left => PaneId::Notes,
+            Right => PaneId::Editor,
+            Up => PaneId::Notes,
+            Down => PaneId::JobOutput,
+        },
+        PaneId::JobOutput => match dir {
+            Left => PaneId::JobOutput,
+            Right => PaneId::Editor,
+            Up => PaneId::Notes,
+            Down => PaneId::JobOutput,
+        },
+        PaneId::Visualizer => match dir {
+            Left => PaneId::Editor,
+            Right => PaneId::Visualizer,
+            Up => PaneId::Visualizer,
+            Down => PaneId::GateMonitor,
+        },
+        PaneId::GateMonitor => match dir {
+            Left => PaneId::Editor,
+            Right => PaneId::GateMonitor,
+            Up => PaneId::Visualizer,
+            Down => PaneId::GateMonitor,
+        },
+        PaneId::Editor => {
+            let buf = state.editor_buffer();
+            let cursor_line = buf.cursor.line.saturating_sub(buf.viewport.offset_line);
+            let top_half = cursor_line < buf.viewport.height.saturating_div(2).max(1);
+            match dir {
+                Left => {
+                    if top_half {
+                        PaneId::Notes
+                    } else {
+                        PaneId::JobOutput
+                    }
+                }
+                Right => {
+                    if top_half {
+                        PaneId::Visualizer
+                    } else {
+                        PaneId::GateMonitor
+                    }
+                }
+                Up => PaneId::Notes,
+                Down => PaneId::JobOutput,
+            }
+        }
+    }
+}
+
+struct InputState {
+    normal_last_char: Option<char>,
+    normal_last_time: Instant,
+    pending_insert: Option<(char, Instant)>,
+    deferred_key: Option<KeyEvent>,
+}
+
+impl InputState {
+    fn new() -> Self {
+        Self {
+            normal_last_char: None,
+            normal_last_time: Instant::now(),
+            pending_insert: None,
+            deferred_key: None,
+        }
+    }
+
+    fn reset_normal(&mut self) {
+        self.normal_last_char = None;
+    }
+
+    fn reset_insert(&mut self) {
+        self.pending_insert = None;
+    }
+
+    fn chord_normal(&mut self, c: char, now: Instant) -> bool {
+        if self.normal_last_char == Some(c)
+            && now.duration_since(self.normal_last_time) <= CHORD_TIMEOUT
+        {
+            self.normal_last_char = None;
+            true
+        } else {
+            self.normal_last_char = Some(c);
+            self.normal_last_time = now;
+            false
+        }
+    }
+
+    fn set_pending_insert(&mut self, c: char, now: Instant) {
+        self.pending_insert = Some((c, now));
+    }
+
+    fn take_pending_insert(&mut self) -> Option<char> {
+        self.pending_insert.take().map(|(c, _)| c)
+    }
+
+    fn flush_insert_timeout(&mut self) -> Option<Action> {
+        if let Some((c, t)) = self.pending_insert {
+            if Instant::now().duration_since(t) >= CHORD_TIMEOUT {
+                self.pending_insert = None;
+                return Some(Action::InsertChar(c));
+            }
+        }
+        None
+    }
+
+    fn defer_key(&mut self, key: KeyEvent) {
+        self.deferred_key = Some(key);
+    }
+
+    fn take_deferred(&mut self) -> Option<KeyEvent> {
+        self.deferred_key.take()
+    }
+}
+
+fn is_normal_editing(state: &AppState) -> bool {
+    matches!(state.focus, PaneId::Editor | PaneId::Notes) && state.mode == Mode::Normal
+}
+
+fn is_insert_editing(state: &AppState) -> bool {
+    matches!(state.focus, PaneId::Editor | PaneId::Notes) && state.mode == Mode::Insert
+}
+
+fn handle_normal_chords(
+    key: &KeyEvent,
+    state: &AppState,
+    input: &mut InputState,
+) -> Option<Action> {
+    if !is_normal_editing(state) {
+        input.reset_normal();
+        return None;
+    }
+
+    if !key.modifiers.is_empty() && key.modifiers != KeyModifiers::SHIFT {
+        input.reset_normal();
+        return None;
+    }
+
+    let now = Instant::now();
+    match key.code {
+        KeyCode::Char('g') => {
+            if input.chord_normal('g', now) {
+                Some(Action::GoToTop)
+            } else {
+                None
+            }
+        }
+        _ => {
+            input.reset_normal();
+            None
+        }
+    }
+}
+
+fn handle_insert_chords(
+    key: &KeyEvent,
+    state: &AppState,
+    input: &mut InputState,
+) -> Option<Action> {
+    if !is_insert_editing(state) || state.focus != PaneId::Editor {
+        input.reset_insert();
+        return None;
+    }
+
+    if !key.modifiers.is_empty() && key.modifiers != KeyModifiers::SHIFT {
+        input.reset_insert();
+        return None;
+    }
+
+    if let Some((pending, _)) = input.pending_insert {
+        match key.code {
+            KeyCode::Char('j') => {
+                input.reset_insert();
+                if state.focus == PaneId::Editor {
+                    return Some(Action::Save);
+                }
+                return Some(Action::InsertChar('j'));
+            }
+            _ => {
+                input.defer_key(*key);
+                let c = input.take_pending_insert().unwrap_or(pending);
+                return Some(Action::InsertChar(c));
+            }
+        }
+    }
+
+    match key.code {
+        KeyCode::Char('j') => {
+            input.set_pending_insert('j', Instant::now());
+            None
+        }
+        _ => None,
+    }
+}
+
+fn is_clear_logs_key(key: &KeyEvent) -> bool {
+    if !key.modifiers.contains(KeyModifiers::CONTROL) {
+        return false;
+    }
+    match key.code {
+        KeyCode::Char('L') => true,
+        KeyCode::Char('l') if key.modifiers.contains(KeyModifiers::SHIFT) => true,
+        _ => false,
+    }
+}
+
+fn ctrl_nav_dir(key: &KeyEvent) -> Option<FocusDir> {
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    match key.code {
+        KeyCode::Char('h') if ctrl => Some(FocusDir::Left),
+        KeyCode::Char('j') if ctrl => Some(FocusDir::Down),
+        KeyCode::Char('k') if ctrl => Some(FocusDir::Up),
+        KeyCode::Char('l') if ctrl => Some(FocusDir::Right),
+        KeyCode::Backspace if ctrl => Some(FocusDir::Left),
+        KeyCode::Enter if ctrl => Some(FocusDir::Down),
+        KeyCode::Char('\u{8}') => Some(FocusDir::Left),
+        KeyCode::Char('\n') => Some(FocusDir::Down),
+        KeyCode::Char('\u{0b}') => Some(FocusDir::Up),
+        KeyCode::Char('\u{0c}') => Some(FocusDir::Right),
         _ => None,
     }
 }
@@ -360,6 +690,7 @@ impl Drop for TerminalGuard {
     fn drop(&mut self) {
         if self.active {
             let _ = disable_raw_mode();
+            let _ = execute!(io::stdout(), SetCursorStyle::DefaultUserShape);
             let _ = execute!(io::stdout(), LeaveAlternateScreen);
         }
     }

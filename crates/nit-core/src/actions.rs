@@ -24,6 +24,8 @@ pub enum Action {
     PageDown,
     Home,
     End,
+    GoToTop,
+    GoToBottom,
     ScrollUp,
     ScrollDown,
     ClearLogs,

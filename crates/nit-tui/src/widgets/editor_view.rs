@@ -21,19 +21,29 @@ pub fn render_editor(
     _mode: Mode,
     theme: &Theme,
 ) -> Option<CursorPlacement> {
-    render_buffer(frame, area, buffer, focus, "EDITOR  [ SAVE ]", theme, true)
+    render_buffer(
+        frame,
+        area,
+        buffer,
+        PaneId::Editor,
+        focus,
+        "EDITOR  [ SAVE ]",
+        theme,
+        true,
+    )
 }
 
 pub fn render_buffer(
     frame: &mut Frame,
     area: Rect,
     buffer: &Buffer,
+    pane_id: PaneId,
     focus: PaneId,
     title: &str,
     theme: &Theme,
     show_cursor: bool,
 ) -> Option<CursorPlacement> {
-    let focused = matches!(focus, PaneId::Editor | PaneId::Notes);
+    let focused = focus == pane_id;
     let border_style = if focused {
         Style::default().fg(theme.border_focused)
     } else {
