@@ -18,6 +18,7 @@
 - $ (Normal mode): End of line
 - % (Normal mode): Beginning of line
 - u (Normal mode): Undo
+- Shift+R (Normal mode): Redo
 - Enter: Newline
 - Tab: Insert tab when in Insert mode (otherwise pane cycle)
 - Backspace / Delete: Delete

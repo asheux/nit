@@ -55,6 +55,10 @@ pub fn render(frame: &mut Frame, area: Rect, theme: &Theme) {
             Span::raw(" undo (Normal mode)"),
         ]),
         Line::from(vec![
+            Span::styled("Shift+R", Style::default().fg(theme.accent)),
+            Span::raw(" redo (Normal mode)"),
+        ]),
+        Line::from(vec![
             Span::styled("$ / %", Style::default().fg(theme.accent)),
             Span::raw(" end / start of line"),
         ]),

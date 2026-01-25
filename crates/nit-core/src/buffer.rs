@@ -20,6 +20,8 @@ pub struct Buffer {
     rope: Rope,
     #[serde(skip)]
     undo: Vec<Snapshot>,
+    #[serde(skip)]
+    redo: Vec<Snapshot>,
     pub cursor: Cursor,
     pub viewport: Viewport,
     dirty: bool,
@@ -32,6 +34,7 @@ impl Buffer {
             path,
             rope: content,
             undo: Vec::new(),
+            redo: Vec::new(),
             cursor: Cursor::default(),
             viewport: Viewport::default(),
             dirty: false,
@@ -99,7 +102,12 @@ impl Buffer {
         if line >= self.rope.len_lines() {
             0
         } else {
-            self.rope.line(line).chars().count()
+            let slice = self.rope.line(line);
+            let mut len = slice.len_chars();
+            if len > 0 && slice.chars().last() == Some('\n') {
+                len = len.saturating_sub(1);
+            }
+            len
         }
     }
 
@@ -260,6 +268,7 @@ impl Buffer {
 
     pub fn undo(&mut self) -> bool {
         if let Some(snapshot) = self.undo.pop() {
+            self.push_redo();
             self.rope = snapshot.rope;
             self.cursor = snapshot.cursor;
             self.dirty = snapshot.dirty;
@@ -269,6 +278,40 @@ impl Buffer {
     }
 
     fn push_undo(&mut self) {
+        if self.undo.len() >= UNDO_LIMIT {
+            self.undo.remove(0);
+        }
+        self.undo.push(Snapshot {
+            rope: self.rope.clone(),
+            cursor: self.cursor,
+            dirty: self.dirty,
+        });
+        self.redo.clear();
+    }
+
+    pub fn redo(&mut self) -> bool {
+        if let Some(snapshot) = self.redo.pop() {
+            self.push_undo_without_clearing_redo();
+            self.rope = snapshot.rope;
+            self.cursor = snapshot.cursor;
+            self.dirty = snapshot.dirty;
+            return true;
+        }
+        false
+    }
+
+    fn push_redo(&mut self) {
+        if self.redo.len() >= UNDO_LIMIT {
+            self.redo.remove(0);
+        }
+        self.redo.push(Snapshot {
+            rope: self.rope.clone(),
+            cursor: self.cursor,
+            dirty: self.dirty,
+        });
+    }
+
+    fn push_undo_without_clearing_redo(&mut self) {
         if self.undo.len() >= UNDO_LIMIT {
             self.undo.remove(0);
         }

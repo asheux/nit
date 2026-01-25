@@ -229,6 +229,13 @@ fn map_key_to_action(key: KeyEvent, state: &AppState, input: &mut InputState) ->
         return Some(action);
     }
 
+    if state.focus == PaneId::Editor
+        && state.mode == Mode::Insert
+        && input.pending_insert_matches(&key)
+    {
+        return None;
+    }
+
     if let Some(action) = handle_normal_chords(&key, state, input) {
         return Some(action);
     }
@@ -333,6 +340,10 @@ fn map_key_to_action(key: KeyEvent, state: &AppState, input: &mut InputState) ->
             code: KeyCode::Char('u'),
             ..
         } if is_normal_editing(state) => Some(Action::Undo),
+        KeyEvent {
+            code: KeyCode::Char('R'),
+            ..
+        } if is_normal_editing(state) => Some(Action::Redo),
         KeyEvent {
             code: KeyCode::Char('o'),
             modifiers: KeyModifiers::NONE,
@@ -526,6 +537,13 @@ impl InputState {
             }
         }
         None
+    }
+
+    fn pending_insert_matches(&self, key: &KeyEvent) -> bool {
+        match (self.pending_insert, key.code) {
+            (Some((pending, _)), KeyCode::Char(c)) => pending == c,
+            _ => false,
+        }
     }
 
     fn defer_key(&mut self, key: KeyEvent) {

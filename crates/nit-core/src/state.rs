@@ -353,6 +353,13 @@ pub fn apply_action(state: &mut AppState, action: Action) -> ActionOutcome {
                 }
             }
         }
+        Action::Redo => {
+            if let Some(buf) = state.focused_buffer_mut() {
+                if buf.redo() {
+                    buf.ensure_visible();
+                }
+            }
+        }
         Action::ScrollUp => {
             if let Some(buf) = state.focused_buffer_mut() {
                 buf.viewport.offset_line = buf.viewport.offset_line.saturating_sub(1);
