@@ -3,12 +3,14 @@
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
+use std::fs;
 
 use anyhow::Context;
 use clap::Parser;
 use nit_core::{io as core_io, Buffer, Mode};
 use nit_tui::{run, Theme};
 use nit_utils::hashing::stable_hash_bytes;
+use nit_utils::paths;
 use tracing_subscriber::fmt::MakeWriter;
 
 #[derive(Parser, Debug)]
@@ -21,7 +23,7 @@ struct Cli {
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     let (workspace_root, editor) = open_target(cli.path.as_deref())?;
-    let notes = Buffer::empty("notes", None);
+    let notes = load_notes(&workspace_root);
 
     let theme_path = find_theme();
     let theme = Theme::load(theme_path.as_deref());
@@ -75,6 +77,28 @@ fn find_theme() -> Option<PathBuf> {
         return Some(local);
     }
     None
+}
+
+fn load_notes(workspace_root: &Path) -> Buffer {
+    let Some(path) = notes_path_for_workspace(workspace_root) else {
+        return Buffer::empty("notes", None);
+    };
+    if path.exists() {
+        if let Ok(content) = core_io::load_to_string(&path) {
+            return Buffer::from_str("notes", &content, Some(path));
+        }
+    }
+    Buffer::empty("notes", Some(path))
+}
+
+fn notes_path_for_workspace(workspace_root: &Path) -> Option<PathBuf> {
+    let base = paths::state_dir().or_else(paths::data_dir)?;
+    let notes_dir = base.join("notes");
+    let _ = fs::create_dir_all(&notes_dir);
+    let key = workspace_root.to_string_lossy();
+    let hash = stable_hash_bytes(key.as_bytes());
+    let filename = format!("{:016x}.md", hash);
+    Some(notes_dir.join(filename))
 }
 
 fn init_tracing(tx: mpsc::Sender<String>) -> anyhow::Result<()> {

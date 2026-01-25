@@ -9,7 +9,10 @@ use crossterm::{
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
-use nit_core::{actions::Action, apply_action, AppState, Mode, PaneId, Prompt, Viewport, YankKind};
+use nit_core::{
+    actions::Action, apply_action, io as core_io, AppState, Mode, PaneId, Prompt, Viewport,
+    YankKind,
+};
 use ratatui::{
     backend::CrosstermBackend,
     style::Style,
@@ -56,6 +59,7 @@ pub fn run(mut state: AppState, theme: Theme, log_rx: Receiver<String>) -> io::R
     disable_raw_mode()?;
     execute!(io::stdout(), LeaveAlternateScreen)?;
     guard.active = false;
+    let _ = save_notes_on_exit(&state);
     result
 }
 
@@ -915,6 +919,17 @@ fn render_prompt(
         .block(block);
     frame.render_widget(Clear, area);
     frame.render_widget(paragraph, area);
+}
+
+fn save_notes_on_exit(state: &AppState) -> core_io::Result<()> {
+    let buffer = state.notes_buffer();
+    if buffer.path().is_none() {
+        return Ok(());
+    }
+    if !buffer.is_dirty() {
+        return Ok(());
+    }
+    core_io::save_buffer(buffer)
 }
 
 struct TerminalGuard {

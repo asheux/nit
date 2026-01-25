@@ -17,6 +17,10 @@ pub fn data_dir() -> Option<PathBuf> {
     project_dirs().map(|p| p.data_dir().to_path_buf())
 }
 
+pub fn state_dir() -> Option<PathBuf> {
+    project_dirs().and_then(|p| p.state_dir().map(|d| d.to_path_buf()))
+}
+
 pub fn cache_dir() -> Option<PathBuf> {
     project_dirs().map(|p| p.cache_dir().to_path_buf())
 }
