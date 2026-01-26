@@ -45,11 +45,12 @@
 
 ## Visualizer
 - Ctrl+E: Cycle seed encoder
-- Ctrl+R: Cycle seed preview (grid/matrix/motif)
+- Ctrl+R: Cycle seed view (solid/half/braille/tissue/heat/matrix/motif)
 - Ctrl+Y: Toggle seed source (Editor/Notes)
 - Ctrl+A: Apply seed search proposal
 - Ctrl+G: Toggle seed search
 - Ctrl+N: Snapshot seed (SNAP)
+- Ctrl+Shift+V: Cycle seed overlays
 
 ## Petri Dish (Popup)
 - Esc: Close popup

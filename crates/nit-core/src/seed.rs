@@ -39,6 +39,10 @@ impl SeedEncoderId {
 #[derive(Copy, Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum SeedPreviewMode {
     BitGrid,
+    HalfBlock,
+    Braille,
+    Tissue,
+    Heatmap,
     Matrix,
     Motif,
 }
@@ -46,7 +50,11 @@ pub enum SeedPreviewMode {
 impl SeedPreviewMode {
     pub fn next(self) -> Self {
         match self {
-            SeedPreviewMode::BitGrid => SeedPreviewMode::Matrix,
+            SeedPreviewMode::BitGrid => SeedPreviewMode::HalfBlock,
+            SeedPreviewMode::HalfBlock => SeedPreviewMode::Braille,
+            SeedPreviewMode::Braille => SeedPreviewMode::Tissue,
+            SeedPreviewMode::Tissue => SeedPreviewMode::Heatmap,
+            SeedPreviewMode::Heatmap => SeedPreviewMode::Matrix,
             SeedPreviewMode::Matrix => SeedPreviewMode::Motif,
             SeedPreviewMode::Motif => SeedPreviewMode::BitGrid,
         }
@@ -54,7 +62,11 @@ impl SeedPreviewMode {
 
     pub fn label(self) -> &'static str {
         match self {
-            SeedPreviewMode::BitGrid => "GRID",
+            SeedPreviewMode::BitGrid => "SOLID",
+            SeedPreviewMode::HalfBlock => "HALF",
+            SeedPreviewMode::Braille => "BRAILLE",
+            SeedPreviewMode::Tissue => "TISSUE",
+            SeedPreviewMode::Heatmap => "HEAT",
             SeedPreviewMode::Matrix => "MATRIX",
             SeedPreviewMode::Motif => "MOTIF",
         }

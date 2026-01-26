@@ -50,7 +50,8 @@ For details see `SECURITY.md`.
 - Command prompt (Normal mode): `:gol run` / `:run gol` / `:life run`
 - Seed controls (Visualizer focus):
   - Cycle encoder: `Ctrl+E`
-  - Cycle seed preview: `Ctrl+R` (grid/matrix/motif)
+  - Cycle seed view: `Ctrl+R` (solid/half/braille/tissue/heat/matrix/motif)
+  - Cycle seed overlays: `Ctrl+Shift+V`
   - Toggle seed source (Editor/Notes): `Ctrl+Y`
   - Toggle seed search: `Ctrl+G`
   - Apply seed proposal: `Ctrl+A`

@@ -8,7 +8,7 @@ use ratatui::{
 };
 
 use crate::{
-    gol_render::{GolPalette, GolRenderConfig, GolWidget},
+    seed_render::{render_seed, SeedPalette, SeedRenderConfig},
     seed_runtime::SeedRuntime,
     theme::Theme,
 };
@@ -37,7 +37,7 @@ pub fn render(
         theme.title
     };
 
-    let palette = GolPalette::from_theme(theme);
+    let palette = SeedPalette::from_theme(theme);
 
     let block = Block::default()
         .borders(Borders::ALL)
@@ -58,47 +58,60 @@ pub fn render(
     }
 
     let header = build_seed_hud(state, seed_runtime);
-    match state.visualizer.seed_preview {
-        SeedPreviewMode::BitGrid => {
-            if let Some(seed) = seed_runtime.encoded() {
-                let cfg = GolRenderConfig {
-                    mode: state.visualizer.render_mode,
-                    age_shading: false,
-                    trails: false,
-                    overlay_bbox: false,
-                    overlay_heat: false,
-                    scanlines: false,
-                    braille_enabled: state.settings.gol.braille_enabled,
-                };
-                let widget = GolWidget {
-                    grid: &seed.grid,
-                    state: seed_runtime.render_state(),
-                    cfg,
-                    palette,
-                    hud: crate::gol_render::GolHudState {
-                        rule: "",
-                        generation: 0,
-                        alive: 0,
-                        period: None,
-                        mode: state.visualizer.mode,
-                        paused: true,
-                        delta: 0,
-                        history: seed_runtime.render_state().hud_metrics().history(),
-                    },
-                };
-                frame.render_widget(widget, inner);
-                draw_header(frame.buffer_mut(), inner, &header, palette.hud_text, palette.bg);
-            } else {
-                draw_header(frame.buffer_mut(), inner, &header, palette.hud_text, palette.bg);
-            }
+    let render_area = if inner.height > 1 {
+        ratatui::layout::Rect {
+            x: inner.x,
+            y: inner.y + 1,
+            width: inner.width,
+            height: inner.height - 1,
         }
+    } else {
+        inner
+    };
+    fill_bg(frame.buffer_mut(), render_area, palette.bg);
+    match state.visualizer.seed_preview {
         SeedPreviewMode::Matrix => {
-            render_matrix(frame.buffer_mut(), inner, seed_runtime, palette, &header);
+            render_matrix(frame.buffer_mut(), render_area, seed_runtime, &palette);
         }
         SeedPreviewMode::Motif => {
-            render_motif(frame.buffer_mut(), inner, seed_runtime, palette, &header);
+            render_motif(frame.buffer_mut(), render_area, seed_runtime, &palette);
+        }
+        _ => {
+            if let Some(seed) = seed_runtime.encoded() {
+                let cfg = SeedRenderConfig {
+                    mode: state.visualizer.seed_preview,
+                    show_grid: state.visualizer.seed_show_grid,
+                    show_bbox: state.visualizer.seed_show_bbox,
+                    show_halo: state.visualizer.seed_show_halo,
+                    show_components: state.visualizer.seed_show_components
+                        || state.visualizer.seed_preview == SeedPreviewMode::Tissue,
+                    show_inset_genome: state.visualizer.seed_show_inset,
+                    scanline: state.visualizer.seed_scanline,
+                    zoom: state.visualizer.seed_zoom,
+                };
+                render_seed(
+                    render_area,
+                    frame.buffer_mut(),
+                    seed,
+                    &cfg,
+                    seed_runtime.render_cache(),
+                    &palette,
+                );
+            }
         }
     }
+    draw_header(
+        frame.buffer_mut(),
+        ratatui::layout::Rect {
+            x: inner.x,
+            y: inner.y,
+            width: inner.width,
+            height: 1,
+        },
+        &header,
+        palette.hud_text,
+        palette.bg,
+    );
 }
 
 fn build_seed_hud(state: &AppState, seed_runtime: &SeedRuntime) -> String {
@@ -111,12 +124,13 @@ fn build_seed_hud(state: &AppState, seed_runtime: &SeedRuntime) -> String {
     let components = state.visualizer.seed_stats.components;
     let enc = state.visualizer.seed_encoder.as_str();
     let view = state.visualizer.seed_preview.label();
+    let overlays = overlay_label(state);
     if seed_runtime.encoded().is_some() {
         format!(
-            "ENC:{enc} | SeedHash:{seed_hash} | Density:{density:.2} | Comp:{components} | View:{view}"
+            "ENC:{enc} | SeedHash:{seed_hash} | Density:{density:.2} | Comp:{components} | View:{view} | OVR:{overlays}"
         )
     } else {
-        format!("ENC:{enc} | SeedHash:{seed_hash} | View:{view}")
+        format!("ENC:{enc} | SeedHash:{seed_hash} | View:{view} | OVR:{overlays}")
     }
 }
 
@@ -148,26 +162,18 @@ fn render_matrix(
     buf: &mut Buffer,
     area: ratatui::layout::Rect,
     seed_runtime: &SeedRuntime,
-    palette: GolPalette,
-    header: &str,
+    palette: &SeedPalette,
 ) {
     fill_bg(buf, area, palette.bg);
-    draw_header(buf, area, header, palette.hud_text, palette.bg);
     let Some(seed) = seed_runtime.encoded() else {
         return;
     };
-    let content = ratatui::layout::Rect {
-        x: area.x,
-        y: area.y.saturating_add(1),
-        width: area.width,
-        height: area.height.saturating_sub(1),
-    };
     let w = seed.base_bits.width();
     let h = seed.base_bits.height();
-    let max_cols = content.width as usize;
-    let max_rows = content.height as usize;
-    let x0 = content.x + content.width.saturating_sub(w as u16).min(content.width) / 2;
-    let y0 = content.y + content.height.saturating_sub(h as u16).min(content.height) / 2;
+    let max_cols = area.width as usize;
+    let max_rows = area.height as usize;
+    let x0 = area.x + area.width.saturating_sub(w as u16).min(area.width) / 2;
+    let y0 = area.y + area.height.saturating_sub(h as u16).min(area.height) / 2;
     let rows = h.min(max_rows);
     let cols = w.min(max_cols);
     for y in 0..rows {
@@ -185,27 +191,19 @@ fn render_motif(
     buf: &mut Buffer,
     area: ratatui::layout::Rect,
     seed_runtime: &SeedRuntime,
-    palette: GolPalette,
-    header: &str,
+    palette: &SeedPalette,
 ) {
     fill_bg(buf, area, palette.bg);
-    draw_header(buf, area, header, palette.hud_text, palette.bg);
     let Some(seed) = seed_runtime.encoded() else {
         return;
-    };
-    let content = ratatui::layout::Rect {
-        x: area.x,
-        y: area.y.saturating_add(1),
-        width: area.width,
-        height: area.height.saturating_sub(1),
     };
     let motifs = [' ', '.', ':', '-', '=', '+', '*', '#', '%', '@'];
     let w = seed.base_values.width();
     let h = seed.base_values.height();
-    let max_cols = content.width as usize;
-    let max_rows = content.height as usize;
-    let x0 = content.x + content.width.saturating_sub(w as u16).min(content.width) / 2;
-    let y0 = content.y + content.height.saturating_sub(h as u16).min(content.height) / 2;
+    let max_cols = area.width as usize;
+    let max_rows = area.height as usize;
+    let x0 = area.x + area.width.saturating_sub(w as u16).min(area.width) / 2;
+    let y0 = area.y + area.height.saturating_sub(h as u16).min(area.height) / 2;
     let rows = h.min(max_rows);
     let cols = w.min(max_cols);
     for y in 0..rows {
@@ -234,5 +232,29 @@ fn fill_bg(buf: &mut Buffer, area: ratatui::layout::Rect, bg: ratatui::style::Co
             x = x.saturating_add(1);
         }
         y = y.saturating_add(1);
+    }
+}
+
+fn overlay_label(state: &AppState) -> String {
+    let mut parts = Vec::new();
+    if state.visualizer.seed_show_grid {
+        parts.push("GRID");
+    }
+    if state.visualizer.seed_show_halo {
+        parts.push("HALO");
+    }
+    if state.visualizer.seed_show_components {
+        parts.push("COMP");
+    }
+    if state.visualizer.seed_show_bbox {
+        parts.push("BBOX");
+    }
+    if state.visualizer.seed_show_inset {
+        parts.push("INSET");
+    }
+    if parts.is_empty() {
+        "OFF".into()
+    } else {
+        parts.join("+")
     }
 }

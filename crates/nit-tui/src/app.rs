@@ -293,12 +293,11 @@ fn draw(
         let viz_inner_width = layout.visualizer.width.saturating_sub(2) as usize;
         let viz_inner_height = layout.visualizer.height.saturating_sub(2) as usize;
         let viz_grid_rows = viz_inner_height.saturating_sub(1);
-        let render_mode = state
-            .visualizer
-            .render_mode
-            .effective(state.settings.gol.braille_enabled);
-        let (grid_w, grid_h) =
-            crate::gol_render::grid_size_for_mode(viz_inner_width, viz_grid_rows, render_mode);
+        let (grid_w, grid_h) = crate::seed_render::grid_size_for_mode(
+            viz_inner_width,
+            viz_grid_rows,
+            state.visualizer.seed_preview,
+        );
         seed_runtime.ensure_size(grid_w, grid_h, state);
         visualizer_view::render(f, layout.visualizer, state, theme, seed_runtime);
         gate_monitor_view::render(
@@ -1031,7 +1030,10 @@ fn visualizer_ctrl_action(key: &KeyEvent, state: &AppState) -> Option<Action> {
         return None;
     }
     if key.modifiers.contains(KeyModifiers::SHIFT) {
-        return None;
+        return match key.code {
+            KeyCode::Char('v') | KeyCode::Char('V') => Some(Action::VisualizerCycleSeedOverlays),
+            _ => None,
+        };
     }
     match key.code {
         KeyCode::Char('r') | KeyCode::Char('R') => Some(Action::VisualizerCycleSeedView),
@@ -1040,7 +1042,6 @@ fn visualizer_ctrl_action(key: &KeyEvent, state: &AppState) -> Option<Action> {
         KeyCode::Char('g') | KeyCode::Char('G') => Some(Action::VisualizerToggleSearch),
         KeyCode::Char('y') | KeyCode::Char('Y') => Some(Action::VisualizerToggleSeedSource),
         KeyCode::Char('n') | KeyCode::Char('N') => Some(Action::VisualizerSnapshot),
-        KeyCode::Char('m') | KeyCode::Char('M') => Some(Action::VisualizerCycleRenderMode),
         KeyCode::Char('j') | KeyCode::Char('J') => Some(Action::VisualizerToggleAgeShading),
         KeyCode::Char('k') | KeyCode::Char('K') => Some(Action::VisualizerToggleTrails),
         KeyCode::Char('b') | KeyCode::Char('B') => Some(Action::VisualizerToggleBBox),

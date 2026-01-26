@@ -21,6 +21,7 @@ struct ThemeFile {
     accent: Option<String>,
     hl: Option<HighlightThemeFile>,
     gol: Option<GolThemeFile>,
+    seed: Option<SeedThemeFile>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -71,6 +72,20 @@ struct GolThemeFile {
     hud_spark: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+struct SeedThemeFile {
+    bg: Option<String>,
+    live: Option<String>,
+    live_dim: Option<String>,
+    halo_1: Option<String>,
+    halo_2: Option<String>,
+    grid: Option<String>,
+    bbox: Option<String>,
+    hud_text: Option<String>,
+    hud_dim: Option<String>,
+    tissue_palette: Option<Vec<String>>,
+}
+
 #[derive(Clone, Debug)]
 pub struct Theme {
     pub background: Color,
@@ -87,6 +102,7 @@ pub struct Theme {
     pub accent: Color,
     pub hl: HighlightTheme,
     pub gol: GolTheme,
+    pub seed: SeedTheme,
 }
 
 #[derive(Clone, Debug)]
@@ -102,6 +118,20 @@ pub struct GolTheme {
     pub hud_dim: Color,
     pub hud_text: Color,
     pub hud_spark: Color,
+}
+
+#[derive(Clone, Debug)]
+pub struct SeedTheme {
+    pub bg: Color,
+    pub live: Color,
+    pub live_dim: Color,
+    pub halo_1: Color,
+    pub halo_2: Color,
+    pub grid: Color,
+    pub bbox: Color,
+    pub hud_text: Color,
+    pub hud_dim: Color,
+    pub tissue_palette: Vec<Color>,
 }
 
 #[derive(Clone, Debug)]
@@ -165,6 +195,7 @@ impl Theme {
                         accent: color_or_default(cfg.accent, Color::Rgb(255, 209, 102)),
                         hl: HighlightTheme::from_file(cfg.hl, Color::Rgb(215, 229, 255)),
                         gol: GolTheme::from_file(cfg.gol),
+                        seed: SeedTheme::from_file(cfg.seed),
                     };
                 }
             }
@@ -237,6 +268,7 @@ impl Default for Theme {
             accent: Color::Rgb(255, 209, 102),
             hl: HighlightTheme::default(),
             gol: GolTheme::default(),
+            seed: SeedTheme::default(),
         }
     }
 }
@@ -258,6 +290,63 @@ impl GolTheme {
             hud_dim: color_or_default(file.hud_dim, Color::Rgb(58, 169, 179)),
             hud_text: color_or_default(file.hud_text, Color::Rgb(127, 252, 255)),
             hud_spark: color_or_default(file.hud_spark, Color::Rgb(255, 209, 102)),
+        }
+    }
+}
+
+impl SeedTheme {
+    fn from_file(file: Option<SeedThemeFile>) -> Self {
+        let Some(file) = file else {
+            return SeedTheme::default();
+        };
+        let palette = file
+            .tissue_palette
+            .as_ref()
+            .map(|values| {
+                values
+                    .iter()
+                    .filter_map(|value| parse_color(value))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        SeedTheme {
+            bg: color_or_default(file.bg, Color::Rgb(7, 20, 32)),
+            live: color_or_default(file.live, Color::Rgb(0, 246, 255)),
+            live_dim: color_or_default(file.live_dim, Color::Rgb(0, 179, 192)),
+            halo_1: color_or_default(file.halo_1, Color::Rgb(6, 48, 64)),
+            halo_2: color_or_default(file.halo_2, Color::Rgb(8, 69, 90)),
+            grid: color_or_default(file.grid, Color::Rgb(11, 47, 61)),
+            bbox: color_or_default(file.bbox, Color::Rgb(26, 214, 214)),
+            hud_text: color_or_default(file.hud_text, Color::Rgb(127, 252, 255)),
+            hud_dim: color_or_default(file.hud_dim, Color::Rgb(58, 169, 179)),
+            tissue_palette: if palette.is_empty() {
+                SeedTheme::default().tissue_palette
+            } else {
+                palette
+            },
+        }
+    }
+}
+
+impl Default for SeedTheme {
+    fn default() -> Self {
+        SeedTheme {
+            bg: Color::Rgb(7, 20, 32),
+            live: Color::Rgb(0, 246, 255),
+            live_dim: Color::Rgb(0, 179, 192),
+            halo_1: Color::Rgb(6, 48, 64),
+            halo_2: Color::Rgb(8, 69, 90),
+            grid: Color::Rgb(11, 47, 61),
+            bbox: Color::Rgb(26, 214, 214),
+            hud_text: Color::Rgb(127, 252, 255),
+            hud_dim: Color::Rgb(58, 169, 179),
+            tissue_palette: vec![
+                Color::Rgb(0, 246, 255),
+                Color::Rgb(0, 215, 255),
+                Color::Rgb(0, 179, 192),
+                Color::Rgb(26, 214, 214),
+                Color::Rgb(42, 176, 255),
+            ],
         }
     }
 }
@@ -358,6 +447,10 @@ fn color_or_default(value: Option<String>, default: Color) -> Color {
         .as_deref()
         .and_then(parse_hex_color)
         .unwrap_or(default)
+}
+
+fn parse_color(value: &str) -> Option<Color> {
+    parse_hex_color(value)
 }
 
 fn parse_hex_color(s: &str) -> Option<Color> {

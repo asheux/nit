@@ -166,7 +166,7 @@ pub fn render(frame: &mut Frame, area: Rect, theme: &Theme) {
     ]));
     lines.push(Line::from(vec![
         Span::styled("Ctrl+R", Style::default().fg(theme.accent)),
-        Span::raw(" cycle seed preview"),
+        Span::raw(" cycle seed view (solid/half/braille/tissue/heat/matrix/motif)"),
     ]));
     lines.push(Line::from(vec![
         Span::styled("Ctrl+Y", Style::default().fg(theme.accent)),
@@ -183,6 +183,10 @@ pub fn render(frame: &mut Frame, area: Rect, theme: &Theme) {
     lines.push(Line::from(vec![
         Span::styled("Ctrl+N", Style::default().fg(theme.accent)),
         Span::raw(" snapshot seed"),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("Ctrl+Shift+V", Style::default().fg(theme.accent)),
+        Span::raw(" cycle seed overlays"),
     ]));
 
     lines.push(Line::from(vec![Span::styled(

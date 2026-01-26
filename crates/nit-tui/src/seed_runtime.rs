@@ -3,11 +3,14 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use nit_core::{encode_seed, AppState, EncodedSeed, GolSeedSource, SeedEncoderId, SeedParams};
+use nit_core::{
+    encode_seed, AppState, EncodedSeed, GolSeedSource, PaneId, SeedEncoderId, SeedParams,
+};
 use nit_core::seed::SeedInput;
 use nit_utils::hashing::XorShift64;
 
 use crate::gol_render::GolRenderState;
+use crate::seed_render::SeedRenderCache;
 use crate::seed_snapshot::{
     pack_grid_bits, seed_snapshot_name_base, SeedSnapshotManager, SeedSnapshotManagerConfig,
     SeedSnapshotMetadata, SeedSnapshotRequest,
@@ -33,6 +36,11 @@ pub struct SeedRuntime {
     search_best: Option<SeedSearchProposal>,
     search_active: bool,
     snapshot: SeedSnapshotManager,
+    render_cache: SeedRenderCache,
+    last_cache_hash: u64,
+    last_cache_size: (usize, usize),
+    scanline_phase: u16,
+    last_scanline: Instant,
 }
 
 impl SeedRuntime {
@@ -62,6 +70,11 @@ impl SeedRuntime {
             search_best: None,
             search_active: false,
             snapshot: SeedSnapshotManager::new(snapshot_config),
+            render_cache: SeedRenderCache::default(),
+            last_cache_hash: 0,
+            last_cache_size: (0, 0),
+            scanline_phase: 0,
+            last_scanline: Instant::now(),
         }
     }
 
@@ -80,6 +93,7 @@ impl SeedRuntime {
         self.handle_search_events(state);
         self.apply_state_changes(state);
         self.recompute_if_due(state);
+        self.tick_scanline(state);
         self.sync_snapshot_stats(state);
     }
 
@@ -89,6 +103,10 @@ impl SeedRuntime {
 
     pub fn render_state(&self) -> &GolRenderState {
         &self.render_state
+    }
+
+    pub fn render_cache(&self) -> &SeedRenderCache {
+        &self.render_cache
     }
 
     pub fn encode_now(&mut self, state: &mut AppState) -> Option<&EncodedSeed> {
@@ -247,6 +265,12 @@ impl SeedRuntime {
         state.visualizer.input_hash = seed.input_hash;
         state.visualizer.seed_stats = seed.stats.clone();
         self.render_state.seed_from_grid(&seed.grid);
+        let size = (seed.grid.width(), seed.grid.height());
+        if self.last_cache_hash != seed.seed_hash || self.last_cache_size != size {
+            self.render_cache.update(seed);
+            self.last_cache_hash = seed.seed_hash;
+            self.last_cache_size = size;
+        }
     }
 
     fn queue_snapshot(&mut self, state: &mut AppState, seed: &EncodedSeed) {
@@ -351,6 +375,21 @@ impl SeedRuntime {
                 }
             }
         }
+    }
+
+    fn tick_scanline(&mut self, state: &AppState) {
+        if !state.visualizer.seed_scanline {
+            return;
+        }
+        if state.focus != PaneId::Visualizer {
+            return;
+        }
+        if self.last_scanline.elapsed() < Duration::from_millis(250) {
+            return;
+        }
+        self.last_scanline = Instant::now();
+        self.scanline_phase = self.scanline_phase.wrapping_add(1);
+        self.render_cache.scanline_phase = self.scanline_phase;
     }
 }
 

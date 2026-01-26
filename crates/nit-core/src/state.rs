@@ -136,6 +136,13 @@ pub struct VisualizerState {
     pub search_rps: u32,
     pub leaderboard: Vec<VisualizerRuleEntry>,
     pub last_score: Option<f32>,
+    pub seed_show_grid: bool,
+    pub seed_show_bbox: bool,
+    pub seed_show_halo: bool,
+    pub seed_show_components: bool,
+    pub seed_show_inset: bool,
+    pub seed_scanline: bool,
+    pub seed_zoom: u8,
     pub seed_snapshots_written: u64,
     pub seed_snapshots_dropped: u64,
     pub seed_snapshot_queue_depth: usize,
@@ -267,6 +274,13 @@ impl AppState {
                 search_rps: 0,
                 leaderboard: Vec::new(),
                 last_score: None,
+                seed_show_grid: false,
+                seed_show_bbox: false,
+                seed_show_halo: true,
+                seed_show_components: false,
+                seed_show_inset: true,
+                seed_scanline: false,
+                seed_zoom: 1,
                 seed_snapshots_written: 0,
                 seed_snapshots_dropped: 0,
                 seed_snapshot_queue_depth: 0,
@@ -776,12 +790,11 @@ pub fn apply_action(state: &mut AppState, action: Action) -> ActionOutcome {
             state.status = Some("Petri dish showing".into());
         }
         Action::VisualizerCycleRenderMode => {
-            let next = state
-                .visualizer
-                .render_mode
-                .next(state.settings.gol.braille_enabled);
-            state.visualizer.render_mode = next;
-            state.status = Some(format!("Render: {}", next.label()));
+            state.visualizer.seed_preview = state.visualizer.seed_preview.next();
+            state.status = Some(format!(
+                "Seed view: {}",
+                state.visualizer.seed_preview.label()
+            ));
         }
         Action::VisualizerToggleAgeShading => {
             state.visualizer.age_shading = !state.visualizer.age_shading;
@@ -820,7 +833,17 @@ pub fn apply_action(state: &mut AppState, action: Action) -> ActionOutcome {
         }
         Action::VisualizerCycleSeedView => {
             state.visualizer.seed_preview = state.visualizer.seed_preview.next();
-            state.visualizer.pending_reseed = true;
+            state.status = Some(format!(
+                "Seed view: {}",
+                state.visualizer.seed_preview.label()
+            ));
+        }
+        Action::VisualizerCycleSeedOverlays => {
+            cycle_seed_overlays(&mut state.visualizer);
+            state.status = Some(format!(
+                "Overlays: {}",
+                seed_overlay_label(&state.visualizer)
+            ));
         }
         Action::VisualizerCycleEncoder => {
             state.visualizer.seed_encoder = state.visualizer.seed_encoder.next();
@@ -890,5 +913,57 @@ fn handle_command_line(state: &mut AppState, input: &str) {
         other => {
             state.status = Some(format!("Unknown command: {other}"));
         }
+    }
+}
+
+fn cycle_seed_overlays(state: &mut VisualizerState) {
+    const PRESETS: &[(bool, bool, bool, bool, bool)] = &[
+        (false, false, false, false, false),
+        (true, false, false, false, false),
+        (true, false, true, false, false),
+        (true, false, true, true, false),
+        (true, true, true, true, false),
+        (true, true, true, true, true),
+    ];
+    let current = (
+        state.seed_show_grid,
+        state.seed_show_bbox,
+        state.seed_show_halo,
+        state.seed_show_components,
+        state.seed_show_inset,
+    );
+    let idx = PRESETS
+        .iter()
+        .position(|preset| *preset == current)
+        .unwrap_or(0);
+    let next = PRESETS[(idx + 1) % PRESETS.len()];
+    state.seed_show_grid = next.0;
+    state.seed_show_bbox = next.1;
+    state.seed_show_halo = next.2;
+    state.seed_show_components = next.3;
+    state.seed_show_inset = next.4;
+}
+
+fn seed_overlay_label(state: &VisualizerState) -> String {
+    let mut parts = Vec::new();
+    if state.seed_show_grid {
+        parts.push("GRID");
+    }
+    if state.seed_show_halo {
+        parts.push("HALO");
+    }
+    if state.seed_show_components {
+        parts.push("COMP");
+    }
+    if state.seed_show_bbox {
+        parts.push("BBOX");
+    }
+    if state.seed_show_inset {
+        parts.push("INSET");
+    }
+    if parts.is_empty() {
+        "OFF".into()
+    } else {
+        parts.join("+")
     }
 }

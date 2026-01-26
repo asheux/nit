@@ -53,3 +53,15 @@ bbox = "#1ad6d6"
 hud_dim = "#3aa9b3"
 hud_text = "#7ffcff"
 hud_spark = "#ffd166"
+
+[seed]
+bg = "#071420"
+live = "#00f6ff"
+live_dim = "#00b3c0"
+halo_1 = "#063040"
+halo_2 = "#08455a"
+grid = "#0b2f3d"
+bbox = "#1ad6d6"
+hud_text = "#7ffcff"
+hud_dim = "#3aa9b3"
+tissue_palette = ["#00f6ff", "#00d7ff", "#00b3c0", "#1ad6d6", "#2ab0ff"]
