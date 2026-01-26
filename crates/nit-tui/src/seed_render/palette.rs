@@ -13,6 +13,8 @@ pub struct SeedPalette {
     pub bbox: Color,
     pub hud_text: Color,
     pub hud_dim: Color,
+    pub accent: Color,
+    pub accent_2: Color,
     pub tissue: Vec<Color>,
 }
 
@@ -29,6 +31,8 @@ impl SeedPalette {
             bbox: seed.bbox,
             hud_text: seed.hud_text,
             hud_dim: seed.hud_dim,
+            accent: seed.accent,
+            accent_2: seed.accent_2,
             tissue: seed.tissue_palette.clone(),
         }
     }

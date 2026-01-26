@@ -36,6 +36,11 @@ pub struct SeedRenderCache {
     pub seed_hash: u64,
     pub grid_width: usize,
     pub grid_height: usize,
+    pub genome_live: usize,
+    pub genome_total: usize,
+    pub genome_density: f32,
+    pub ascii_printable: usize,
+    pub ascii_nonprintable: usize,
     pub component_map: Option<Vec<u16>>,
     pub component_bboxes: Vec<BBox>,
     pub local_density: Option<Vec<u8>>,
@@ -52,6 +57,11 @@ impl Default for SeedRenderCache {
             seed_hash: 0,
             grid_width: 0,
             grid_height: 0,
+            genome_live: 0,
+            genome_total: 0,
+            genome_density: 0.0,
+            ascii_printable: 0,
+            ascii_nonprintable: 0,
             component_map: None,
             component_bboxes: Vec::new(),
             local_density: None,
@@ -95,6 +105,35 @@ impl SeedRenderCache {
         } else {
             None
         };
+
+        let mut live = 0usize;
+        let mut total = 0usize;
+        for y in 0..seed.base_bits.height() {
+            for x in 0..seed.base_bits.width() {
+                total += 1;
+                if seed.base_bits.get(x, y) {
+                    live += 1;
+                }
+            }
+        }
+        self.genome_live = live;
+        self.genome_total = total.max(1);
+        self.genome_density = live as f32 / self.genome_total as f32;
+
+        let mut printable = 0usize;
+        let mut nonprintable = 0usize;
+        for y in 0..seed.base_values.height() {
+            for x in 0..seed.base_values.width() {
+                let v = seed.base_values.get(x, y);
+                if v >= 0x20 && v <= 0x7e {
+                    printable += 1;
+                } else {
+                    nonprintable += 1;
+                }
+            }
+        }
+        self.ascii_printable = printable;
+        self.ascii_nonprintable = nonprintable;
     }
 }
 
@@ -102,11 +141,10 @@ pub fn grid_size_for_mode(width: usize, height: usize, mode: SeedPreviewMode) ->
     match mode {
         SeedPreviewMode::HalfBlock => (width, height.saturating_mul(2)),
         SeedPreviewMode::Braille => (width.saturating_mul(2), height.saturating_mul(4)),
-        SeedPreviewMode::BitGrid
+        SeedPreviewMode::Solid
         | SeedPreviewMode::Tissue
         | SeedPreviewMode::Heatmap
-        | SeedPreviewMode::Matrix
-        | SeedPreviewMode::Motif => (width, height),
+        => (width, height),
     }
 }
 
@@ -122,7 +160,7 @@ pub fn render_seed(
         return;
     }
     match cfg.mode {
-        SeedPreviewMode::BitGrid => {
+        SeedPreviewMode::Solid => {
             solid::render(area, buf, seed, cfg, cache, palette);
         }
         SeedPreviewMode::HalfBlock => {
@@ -137,7 +175,6 @@ pub fn render_seed(
         SeedPreviewMode::Heatmap => {
             heatmap::render(area, buf, seed, cfg, cache, palette);
         }
-        SeedPreviewMode::Matrix | SeedPreviewMode::Motif => {}
     }
 
     overlays::render_overlays(area, buf, seed, cfg, cache, palette);

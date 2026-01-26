@@ -83,6 +83,8 @@ struct SeedThemeFile {
     bbox: Option<String>,
     hud_text: Option<String>,
     hud_dim: Option<String>,
+    accent: Option<String>,
+    accent_2: Option<String>,
     tissue_palette: Option<Vec<String>>,
 }
 
@@ -131,6 +133,8 @@ pub struct SeedTheme {
     pub bbox: Color,
     pub hud_text: Color,
     pub hud_dim: Color,
+    pub accent: Color,
+    pub accent_2: Color,
     pub tissue_palette: Vec<Color>,
 }
 
@@ -319,6 +323,8 @@ impl SeedTheme {
             bbox: color_or_default(file.bbox, Color::Rgb(26, 214, 214)),
             hud_text: color_or_default(file.hud_text, Color::Rgb(127, 252, 255)),
             hud_dim: color_or_default(file.hud_dim, Color::Rgb(58, 169, 179)),
+            accent: color_or_default(file.accent, Color::Rgb(255, 209, 102)),
+            accent_2: color_or_default(file.accent_2, Color::Rgb(179, 136, 255)),
             tissue_palette: if palette.is_empty() {
                 SeedTheme::default().tissue_palette
             } else {
@@ -340,6 +346,8 @@ impl Default for SeedTheme {
             bbox: Color::Rgb(26, 214, 214),
             hud_text: Color::Rgb(127, 252, 255),
             hud_dim: Color::Rgb(58, 169, 179),
+            accent: Color::Rgb(255, 209, 102),
+            accent_2: Color::Rgb(179, 136, 255),
             tissue_palette: vec![
                 Color::Rgb(0, 246, 255),
                 Color::Rgb(0, 215, 255),

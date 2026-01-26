@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 use nit_core::{
     encode_seed, AppState, EncodedSeed, GolSeedSource, PaneId, SeedEncoderId, SeedParams,
 };
+use nit_core::seed::SeedViewMode;
 use nit_core::seed::SeedInput;
 use nit_utils::hashing::XorShift64;
 
@@ -13,7 +14,7 @@ use crate::gol_render::GolRenderState;
 use crate::seed_render::SeedRenderCache;
 use crate::seed_snapshot::{
     pack_grid_bits, seed_snapshot_name_base, SeedSnapshotManager, SeedSnapshotManagerConfig,
-    SeedSnapshotMetadata, SeedSnapshotRequest,
+    SeedGenomePreview, SeedSnapshotMetadata, SeedSnapshotRequest,
 };
 use nit_gol::snapshot::now_iso8601;
 
@@ -301,6 +302,9 @@ impl SeedRuntime {
             components: seed.stats.components,
             width: seed.grid.width(),
             height: seed.grid.height(),
+            view_type: seed_view_type(state),
+            render_mode: seed_render_mode(state),
+            genome_preview: seed_genome_preview(seed),
         };
         let req = SeedSnapshotRequest {
             timestamp: std::time::SystemTime::now(),
@@ -716,4 +720,64 @@ fn mutate_params(base: &SeedParams, rng: &mut XorShift64) -> SeedParams {
         params.padding = pad as u8;
     }
     params
+}
+
+fn seed_view_type(state: &AppState) -> String {
+    match state.visualizer.seed_view {
+        SeedViewMode::Genome => "genome".into(),
+        SeedViewMode::Plate => "plate".into(),
+        SeedViewMode::Map => "map".into(),
+        SeedViewMode::Stats => "stats".into(),
+    }
+}
+
+fn seed_render_mode(state: &AppState) -> Option<String> {
+    if state.visualizer.seed_view != SeedViewMode::Plate {
+        return None;
+    }
+    let mode = match state.visualizer.seed_plate_mode {
+        nit_core::SeedPreviewMode::Solid => "solid",
+        nit_core::SeedPreviewMode::HalfBlock => "halfblock",
+        nit_core::SeedPreviewMode::Braille => "braille",
+        nit_core::SeedPreviewMode::Tissue => "tissue",
+        nit_core::SeedPreviewMode::Heatmap => "heatmap",
+    };
+    Some(mode.to_string())
+}
+
+fn seed_genome_preview(seed: &EncodedSeed) -> Option<SeedGenomePreview> {
+    match seed.encoder_id {
+        SeedEncoderId::Lifehash16 => {
+            if seed.base_bits.width() != 16 || seed.base_bits.height() != 16 {
+                return None;
+            }
+            let mut bits = Vec::with_capacity(16 * 16);
+            for y in 0..16usize {
+                for x in 0..16usize {
+                    bits.push(if seed.base_bits.get(x, y) { 1 } else { 0 });
+                }
+            }
+            Some(SeedGenomePreview {
+                lifehash16_bits: Some(bits),
+                hilbert_bits_prefix: None,
+            })
+        }
+        SeedEncoderId::HilbertBits => {
+            let w = seed.base_bits.width().max(1);
+            let h = seed.base_bits.height().max(1);
+            let total = w.saturating_mul(h);
+            let limit = total.min(128);
+            let mut bits = String::with_capacity(limit);
+            for i in 0..limit {
+                let x = i % w;
+                let y = i / w;
+                bits.push(if seed.base_bits.get(x, y) { '1' } else { '0' });
+            }
+            Some(SeedGenomePreview {
+                lifehash16_bits: None,
+                hilbert_bits_prefix: Some(bits),
+            })
+        }
+        SeedEncoderId::AsciiBytes => None,
+    }
 }

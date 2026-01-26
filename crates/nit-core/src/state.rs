@@ -6,7 +6,7 @@ use crate::{
     mode::Mode,
     pane::PaneId,
     prompt::Prompt,
-    seed::{SeedEncoderId, SeedParams, SeedPreviewMode, SeedStats},
+    seed::{SeedEncoderId, SeedParams, SeedPreviewMode, SeedStats, SeedViewMode},
     viewport::Viewport,
 };
 use nit_gol::{AttractorEvent, AutoStopPolicy};
@@ -108,7 +108,8 @@ pub struct VisualizerState {
     pub variant: u8,
     pub mode: VisualizerMode,
     pub seed_encoder: SeedEncoderId,
-    pub seed_preview: SeedPreviewMode,
+    pub seed_view: SeedViewMode,
+    pub seed_plate_mode: SeedPreviewMode,
     pub seed_params: SeedParams,
     pub seed_stats: SeedStats,
     pub seed_hash: u64,
@@ -246,7 +247,8 @@ impl AppState {
                 variant: 0,
                 mode: VisualizerMode::SimOnly,
                 seed_encoder: SeedEncoderId::AsciiBytes,
-                seed_preview: SeedPreviewMode::BitGrid,
+                seed_view: SeedViewMode::Genome,
+                seed_plate_mode: SeedPreviewMode::Solid,
                 seed_params: SeedParams::default(),
                 seed_stats: SeedStats::default(),
                 seed_hash: 0,
@@ -790,10 +792,10 @@ pub fn apply_action(state: &mut AppState, action: Action) -> ActionOutcome {
             state.status = Some("Petri dish showing".into());
         }
         Action::VisualizerCycleRenderMode => {
-            state.visualizer.seed_preview = state.visualizer.seed_preview.next();
+            state.visualizer.seed_plate_mode = state.visualizer.seed_plate_mode.next();
             state.status = Some(format!(
-                "Seed view: {}",
-                state.visualizer.seed_preview.label()
+                "Plate mode: {}",
+                state.visualizer.seed_plate_mode.label()
             ));
         }
         Action::VisualizerToggleAgeShading => {
@@ -832,10 +834,17 @@ pub fn apply_action(state: &mut AppState, action: Action) -> ActionOutcome {
             ));
         }
         Action::VisualizerCycleSeedView => {
-            state.visualizer.seed_preview = state.visualizer.seed_preview.next();
+            state.visualizer.seed_view = state.visualizer.seed_view.next();
             state.status = Some(format!(
                 "Seed view: {}",
-                state.visualizer.seed_preview.label()
+                state.visualizer.seed_view.label()
+            ));
+        }
+        Action::VisualizerToggleSeedView => {
+            state.visualizer.seed_view = state.visualizer.seed_view.toggle_plate();
+            state.status = Some(format!(
+                "Seed view: {}",
+                state.visualizer.seed_view.label()
             ));
         }
         Action::VisualizerCycleSeedOverlays => {
@@ -898,9 +907,11 @@ fn handle_command_line(state: &mut AppState, input: &str) {
             state.status = Some("Petri dish closing".into());
         }
         "gol seed" | "seed view" => {
-            state.visualizer.seed_preview = state.visualizer.seed_preview.next();
-            state.visualizer.pending_reseed = true;
-            state.status = Some("Seed preview toggled".into());
+            state.visualizer.seed_view = state.visualizer.seed_view.next();
+            state.status = Some(format!(
+                "Seed view: {}",
+                state.visualizer.seed_view.label()
+            ));
         }
         "gol encoder" | "seed encoder" => {
             state.visualizer.seed_encoder = state.visualizer.seed_encoder.next();

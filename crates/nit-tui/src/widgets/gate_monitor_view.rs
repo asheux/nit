@@ -1,4 +1,5 @@
 use nit_core::{AppState, GolSearchIntensity, PaneId};
+use nit_core::seed::SeedViewMode;
 use nit_gol::{AttractorEvent, Rule};
 use ratatui::{
     layout::Constraint,
@@ -73,6 +74,15 @@ pub fn render(
         "--".into()
     } else {
         format!("{:08x}", state.visualizer.seed_hash as u32)
+    };
+    let seed_view = match state.visualizer.seed_view {
+        SeedViewMode::Plate => {
+            format!(
+                "PLATE/{}",
+                state.visualizer.seed_plate_mode.label()
+            )
+        }
+        _ => state.visualizer.seed_view.label().to_string(),
     };
     let seed_last_snapshot = state
         .visualizer
@@ -184,6 +194,12 @@ pub fn render(
     rows.push(row(
         "Seed Sym",
         state.visualizer.seed_params.symmetry.label().to_string(),
+        label_style,
+        value_style,
+    ));
+    rows.push(row(
+        "Seed View",
+        seed_view,
         label_style,
         value_style,
     ));

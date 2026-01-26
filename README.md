@@ -44,13 +44,15 @@ For details see `SECURITY.md`.
 
 ## Visualizer quick notes
 
-- Visualizer pane shows the encoded seed (genome) only; simulation runs in a popup.
+- Visualizer pane defaults to GENOME (raw encoding); PLATE shows the sim seed grid.
 - Run Petri Dish popup: `Ctrl+Enter`
 - Show hidden Petri Dish: `Ctrl+^`
 - Command prompt (Normal mode): `:gol run` / `:run gol` / `:life run`
 - Seed controls (Visualizer focus):
   - Cycle encoder: `Ctrl+E`
-  - Cycle seed view: `Ctrl+R` (solid/half/braille/tissue/heat/matrix/motif)
+  - Toggle view (GENOME ↔ PLATE): `Ctrl+V`
+  - Cycle seed view (genome/plate/map/stats): `Ctrl+R`
+  - Cycle plate render (solid/half/braille/tissue/heat): `Ctrl+M`
   - Cycle seed overlays: `Ctrl+Shift+V`
   - Toggle seed source (Editor/Notes): `Ctrl+Y`
   - Toggle seed search: `Ctrl+G`

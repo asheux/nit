@@ -64,4 +64,6 @@ grid = "#0b2f3d"
 bbox = "#1ad6d6"
 hud_text = "#7ffcff"
 hud_dim = "#3aa9b3"
+accent = "#FFD166"
+accent_2 = "#B388FF"
 tissue_palette = ["#00f6ff", "#00d7ff", "#00b3c0", "#1ad6d6", "#2ab0ff"]

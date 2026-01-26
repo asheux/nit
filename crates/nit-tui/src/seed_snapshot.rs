@@ -35,6 +35,19 @@ pub struct SeedSnapshotMetadata {
     pub components: usize,
     pub width: usize,
     pub height: usize,
+    pub view_type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub render_mode: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub genome_preview: Option<SeedGenomePreview>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct SeedGenomePreview {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lifehash16_bits: Option<Vec<u8>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hilbert_bits_prefix: Option<String>,
 }
 
 #[derive(Clone, Debug)]

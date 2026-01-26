@@ -296,7 +296,7 @@ fn draw(
         let (grid_w, grid_h) = crate::seed_render::grid_size_for_mode(
             viz_inner_width,
             viz_grid_rows,
-            state.visualizer.seed_preview,
+            state.visualizer.seed_plate_mode,
         );
         seed_runtime.ensure_size(grid_w, grid_h, state);
         visualizer_view::render(f, layout.visualizer, state, theme, seed_runtime);
@@ -1036,12 +1036,14 @@ fn visualizer_ctrl_action(key: &KeyEvent, state: &AppState) -> Option<Action> {
         };
     }
     match key.code {
+        KeyCode::Char('v') | KeyCode::Char('V') => Some(Action::VisualizerToggleSeedView),
         KeyCode::Char('r') | KeyCode::Char('R') => Some(Action::VisualizerCycleSeedView),
         KeyCode::Char('e') | KeyCode::Char('E') => Some(Action::VisualizerCycleEncoder),
         KeyCode::Char('a') | KeyCode::Char('A') => Some(Action::VisualizerApply),
         KeyCode::Char('g') | KeyCode::Char('G') => Some(Action::VisualizerToggleSearch),
         KeyCode::Char('y') | KeyCode::Char('Y') => Some(Action::VisualizerToggleSeedSource),
         KeyCode::Char('n') | KeyCode::Char('N') => Some(Action::VisualizerSnapshot),
+        KeyCode::Char('m') | KeyCode::Char('M') => Some(Action::VisualizerCycleRenderMode),
         KeyCode::Char('j') | KeyCode::Char('J') => Some(Action::VisualizerToggleAgeShading),
         KeyCode::Char('k') | KeyCode::Char('K') => Some(Action::VisualizerToggleTrails),
         KeyCode::Char('b') | KeyCode::Char('B') => Some(Action::VisualizerToggleBBox),
@@ -1059,10 +1061,7 @@ fn is_global_run_key(key: &KeyEvent) -> bool {
             ..
         } if modifiers.contains(KeyModifiers::CONTROL) => true,
         KeyEvent {
-            code: KeyCode::Char('m')
-                | KeyCode::Char('M')
-                | KeyCode::Char('j')
-                | KeyCode::Char('J'),
+            code: KeyCode::Char('j') | KeyCode::Char('J'),
             modifiers,
             ..
         } if modifiers.contains(KeyModifiers::CONTROL) => true,

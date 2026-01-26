@@ -165,8 +165,16 @@ pub fn render(frame: &mut Frame, area: Rect, theme: &Theme) {
         Span::raw(" cycle encoder"),
     ]));
     lines.push(Line::from(vec![
+        Span::styled("Ctrl+V", Style::default().fg(theme.accent)),
+        Span::raw(" toggle view (GENOME ↔ PLATE)"),
+    ]));
+    lines.push(Line::from(vec![
         Span::styled("Ctrl+R", Style::default().fg(theme.accent)),
-        Span::raw(" cycle seed view (solid/half/braille/tissue/heat/matrix/motif)"),
+        Span::raw(" cycle seed view (genome/plate/map/stats)"),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("Ctrl+M", Style::default().fg(theme.accent)),
+        Span::raw(" cycle plate render (solid/half/braille/tissue/heat)"),
     ]));
     lines.push(Line::from(vec![
         Span::styled("Ctrl+Y", Style::default().fg(theme.accent)),

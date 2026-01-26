@@ -170,8 +170,6 @@ impl PetriDishRuntime {
                     | KeyCode::Char('\r')
                     | KeyCode::Char('j')
                     | KeyCode::Char('J')
-                    | KeyCode::Char('m')
-                    | KeyCode::Char('M')
             )
         {
             if session.paused {

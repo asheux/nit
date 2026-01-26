@@ -37,38 +37,68 @@ impl SeedEncoderId {
 }
 
 #[derive(Copy, Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub enum SeedPreviewMode {
-    BitGrid,
-    HalfBlock,
-    Braille,
-    Tissue,
-    Heatmap,
-    Matrix,
-    Motif,
+pub enum SeedViewMode {
+    Genome,
+    Plate,
+    Map,
+    Stats,
 }
 
-impl SeedPreviewMode {
+impl SeedViewMode {
     pub fn next(self) -> Self {
         match self {
-            SeedPreviewMode::BitGrid => SeedPreviewMode::HalfBlock,
-            SeedPreviewMode::HalfBlock => SeedPreviewMode::Braille,
-            SeedPreviewMode::Braille => SeedPreviewMode::Tissue,
-            SeedPreviewMode::Tissue => SeedPreviewMode::Heatmap,
-            SeedPreviewMode::Heatmap => SeedPreviewMode::Matrix,
-            SeedPreviewMode::Matrix => SeedPreviewMode::Motif,
-            SeedPreviewMode::Motif => SeedPreviewMode::BitGrid,
+            SeedViewMode::Genome => SeedViewMode::Plate,
+            SeedViewMode::Plate => SeedViewMode::Map,
+            SeedViewMode::Map => SeedViewMode::Stats,
+            SeedViewMode::Stats => SeedViewMode::Genome,
+        }
+    }
+
+    pub fn toggle_plate(self) -> Self {
+        match self {
+            SeedViewMode::Genome => SeedViewMode::Plate,
+            SeedViewMode::Plate => SeedViewMode::Genome,
+            other => other,
         }
     }
 
     pub fn label(self) -> &'static str {
         match self {
-            SeedPreviewMode::BitGrid => "SOLID",
+            SeedViewMode::Genome => "GENOME",
+            SeedViewMode::Plate => "PLATE",
+            SeedViewMode::Map => "MAP",
+            SeedViewMode::Stats => "STATS",
+        }
+    }
+}
+
+#[derive(Copy, Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum SeedPreviewMode {
+    Solid,
+    HalfBlock,
+    Braille,
+    Tissue,
+    Heatmap,
+}
+
+impl SeedPreviewMode {
+    pub fn next(self) -> Self {
+        match self {
+            SeedPreviewMode::Solid => SeedPreviewMode::HalfBlock,
+            SeedPreviewMode::HalfBlock => SeedPreviewMode::Braille,
+            SeedPreviewMode::Braille => SeedPreviewMode::Tissue,
+            SeedPreviewMode::Tissue => SeedPreviewMode::Heatmap,
+            SeedPreviewMode::Heatmap => SeedPreviewMode::Solid,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            SeedPreviewMode::Solid => "SOLID",
             SeedPreviewMode::HalfBlock => "HALF",
             SeedPreviewMode::Braille => "BRAILLE",
             SeedPreviewMode::Tissue => "TISSUE",
             SeedPreviewMode::Heatmap => "HEAT",
-            SeedPreviewMode::Matrix => "MATRIX",
-            SeedPreviewMode::Motif => "MOTIF",
         }
     }
 }

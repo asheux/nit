@@ -36,11 +36,7 @@ fn scale_for_mode(mode: SeedPreviewMode) -> (usize, usize) {
     match mode {
         SeedPreviewMode::HalfBlock => (1, 2),
         SeedPreviewMode::Braille => (2, 4),
-        SeedPreviewMode::BitGrid
-        | SeedPreviewMode::Tissue
-        | SeedPreviewMode::Heatmap
-        | SeedPreviewMode::Matrix
-        | SeedPreviewMode::Motif => (1, 1),
+        SeedPreviewMode::Solid | SeedPreviewMode::Tissue | SeedPreviewMode::Heatmap => (1, 1),
     }
 }
 

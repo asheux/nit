@@ -72,6 +72,7 @@ pub enum Action {
     VisualizerCycleSeedView,
     VisualizerCycleEncoder,
     VisualizerCycleSeedOverlays,
+    VisualizerToggleSeedView,
     PetriShow,
     ShowHelp,
     HideHelp,

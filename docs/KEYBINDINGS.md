@@ -45,7 +45,9 @@
 
 ## Visualizer
 - Ctrl+E: Cycle seed encoder
-- Ctrl+R: Cycle seed view (solid/half/braille/tissue/heat/matrix/motif)
+- Ctrl+V: Toggle view (GENOME ↔ PLATE)
+- Ctrl+R: Cycle seed view (genome/plate/map/stats)
+- Ctrl+M: Cycle plate render (solid/half/braille/tissue/heat)
 - Ctrl+Y: Toggle seed source (Editor/Notes)
 - Ctrl+A: Apply seed search proposal
 - Ctrl+G: Toggle seed search

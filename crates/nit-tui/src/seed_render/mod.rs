@@ -1,4 +1,5 @@
 mod braille;
+mod genome;
 mod halfblock;
 mod heatmap;
 mod overlays;
@@ -11,3 +12,4 @@ pub use palette::SeedPalette;
 pub use renderer::{
     grid_size_for_mode, render_seed, BBox, SeedRenderCache, SeedRenderConfig,
 };
+pub use genome::render_genome;
