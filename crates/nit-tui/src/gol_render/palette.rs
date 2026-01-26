@@ -14,6 +14,7 @@ pub struct GolPalette {
     pub bbox: Color,
     pub hud_dim: Color,
     pub hud_text: Color,
+    pub hud_spark: Color,
     pub scanline: Color,
 }
 
@@ -31,6 +32,7 @@ impl GolPalette {
                 bbox: theme.gol.bbox,
                 hud_dim: theme.gol.hud_dim,
                 hud_text: theme.gol.hud_text,
+                hud_spark: theme.gol.hud_spark,
                 scanline,
             }
         } else {
@@ -43,6 +45,7 @@ impl GolPalette {
                 bbox: Color::Cyan,
                 hud_dim: Color::DarkGray,
                 hud_text: Color::Gray,
+                hud_spark: Color::Yellow,
                 scanline: Color::Black,
             }
         }

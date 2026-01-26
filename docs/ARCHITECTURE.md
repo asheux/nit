@@ -32,6 +32,18 @@ The app redraws only when state changes or the terminal resizes.
 - Metrics: last render time, frame count, last action
 - Optional prompt (e.g., confirm quit)
 
+## Text Encoding (Editor + Notes)
+
+Both the editor and notes buffers are **UTF-8 only**:
+
+- Files are loaded with `read_to_string` (UTF-8 decode) and stored in `String`/`ropey::Rope`.
+- Saves write `String` bytes back out as UTF-8.
+
+**Why:** the terminal, `ropey`, and our cursor/selection logic all operate on Unicode text
+with UTF-8 indexing. Supporting multiple encodings would add detection/normalization
+complexity, ambiguity, and error cases without clear benefit for this UI. UTF‑8 keeps
+rendering and text‑measurement consistent, and avoids lossy conversions.
+
 ## Layout (nit-tui)
 
 - Top bar with title, path, mode, encoding, ln/col.
@@ -96,6 +108,12 @@ and snapshot I/O) runs in a background worker thread.
 - Visualizer state (rule, generation, alive count, attractor, auto-stop policy, mode) is rendered
   in the pane and summarized in Gate Monitor.
 - The simulation can auto-pause on fixed points or repeats based on the auto-stop policy.
+
+**Rule Model**
+- The simulation always runs **one active rule at a time**.
+- Default is **B3/S23 (Conway’s Life)** for familiarity and stable baseline behavior.
+- Search mode evaluates many rules in the background, but `Apply` swaps in a single rule
+  so the live grid remains deterministic and the step function stays simple and fast.
 
 **Snapshots**
 - Stored under `gol-snapshots/` in the workspace root as RLE + JSON metadata.

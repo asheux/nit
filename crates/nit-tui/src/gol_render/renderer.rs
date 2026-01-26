@@ -340,7 +340,7 @@ pub(crate) fn render_hud_line(
 
     if x < max_x.saturating_sub(2) {
         x = write_str(buf, x, y, max_x, sep_style, " | ");
-        let spark_style = Style::default().fg(palette.hud_text).bg(palette.bg);
+        let spark_style = Style::default().fg(palette.hud_spark).bg(palette.bg);
         let _ = write_sparkline(buf, x, y, max_x, spark_style, hud.history);
     }
 }

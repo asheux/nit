@@ -68,6 +68,7 @@ struct GolThemeFile {
     bbox: Option<String>,
     hud_dim: Option<String>,
     hud_text: Option<String>,
+    hud_spark: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -100,6 +101,7 @@ pub struct GolTheme {
     pub bbox: Color,
     pub hud_dim: Color,
     pub hud_text: Color,
+    pub hud_spark: Color,
 }
 
 #[derive(Clone, Debug)]
@@ -255,6 +257,7 @@ impl GolTheme {
             bbox: color_or_default(file.bbox, Color::Rgb(26, 214, 214)),
             hud_dim: color_or_default(file.hud_dim, Color::Rgb(58, 169, 179)),
             hud_text: color_or_default(file.hud_text, Color::Rgb(127, 252, 255)),
+            hud_spark: color_or_default(file.hud_spark, Color::Rgb(255, 209, 102)),
         }
     }
 }
@@ -272,6 +275,7 @@ impl Default for GolTheme {
             bbox: Color::Rgb(26, 214, 214),
             hud_dim: Color::Rgb(58, 169, 179),
             hud_text: Color::Rgb(127, 252, 255),
+            hud_spark: Color::Rgb(255, 209, 102),
         }
     }
 }
