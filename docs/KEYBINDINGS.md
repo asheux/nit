@@ -53,6 +53,12 @@
 - Ctrl+G: Toggle seed search
 - Ctrl+N: Snapshot seed (SNAP)
 - Ctrl+Shift+V: Cycle seed overlays
+- Arrows / HJKL: Move genome inspector (Visualizer focus)
+- Home / End: Inspector jump to edges
+- 0 / $: Inspector jump to edges (fallback)
+- G + digits + Enter: Jump to genome index
+- C: Center inspector
+- I: Toggle inspector
 
 ## Petri Dish (Popup)
 - Esc: Close popup

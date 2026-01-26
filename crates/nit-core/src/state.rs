@@ -144,6 +144,26 @@ pub struct VisualizerState {
     pub seed_show_inset: bool,
     pub seed_scanline: bool,
     pub seed_zoom: u8,
+    #[serde(skip)]
+    pub inspector_enabled: bool,
+    #[serde(skip)]
+    pub inspect_ascii_x: usize,
+    #[serde(skip)]
+    pub inspect_ascii_y: usize,
+    #[serde(skip)]
+    pub inspect_lifehash_x: usize,
+    #[serde(skip)]
+    pub inspect_lifehash_y: usize,
+    #[serde(skip)]
+    pub inspect_hilbert_x: usize,
+    #[serde(skip)]
+    pub inspect_hilbert_y: usize,
+    #[serde(skip)]
+    pub inspect_ascii_hash: u64,
+    #[serde(skip)]
+    pub inspect_lifehash_hash: u64,
+    #[serde(skip)]
+    pub inspect_hilbert_hash: u64,
     pub seed_snapshots_written: u64,
     pub seed_snapshots_dropped: u64,
     pub seed_snapshot_queue_depth: usize,
@@ -283,6 +303,16 @@ impl AppState {
                 seed_show_inset: true,
                 seed_scanline: false,
                 seed_zoom: 1,
+                inspector_enabled: true,
+                inspect_ascii_x: 0,
+                inspect_ascii_y: 0,
+                inspect_lifehash_x: 0,
+                inspect_lifehash_y: 0,
+                inspect_hilbert_x: 0,
+                inspect_hilbert_y: 0,
+                inspect_ascii_hash: 0,
+                inspect_lifehash_hash: 0,
+                inspect_hilbert_hash: 0,
                 seed_snapshots_written: 0,
                 seed_snapshots_dropped: 0,
                 seed_snapshot_queue_depth: 0,
@@ -854,6 +884,47 @@ pub fn apply_action(state: &mut AppState, action: Action) -> ActionOutcome {
                 seed_overlay_label(&state.visualizer)
             ));
         }
+        Action::VisualizerInspectLeft => {
+            move_inspector(state, -1, 0);
+        }
+        Action::VisualizerInspectRight => {
+            move_inspector(state, 1, 0);
+        }
+        Action::VisualizerInspectUp => {
+            move_inspector(state, 0, -1);
+        }
+        Action::VisualizerInspectDown => {
+            move_inspector(state, 0, 1);
+        }
+        Action::VisualizerInspectHome => {
+            set_inspector_pos(state, 0, 0);
+        }
+        Action::VisualizerInspectEnd => {
+            let (w, h) = inspector_dims(state);
+            if w > 0 && h > 0 {
+                set_inspector_pos(state, w - 1, h - 1);
+            }
+        }
+        Action::VisualizerInspectCenter => {
+            let (w, h) = inspector_dims(state);
+            if w > 0 && h > 0 {
+                set_inspector_pos(state, w / 2, h / 2);
+            }
+        }
+        Action::VisualizerInspectToggle => {
+            state.visualizer.inspector_enabled = !state.visualizer.inspector_enabled;
+            state.status = Some(format!(
+                "Inspector: {}",
+                if state.visualizer.inspector_enabled {
+                    "ON"
+                } else {
+                    "OFF"
+                }
+            ));
+        }
+        Action::VisualizerInspectJump(idx) => {
+            jump_inspector_to_index(state, idx);
+        }
         Action::VisualizerCycleEncoder => {
             state.visualizer.seed_encoder = state.visualizer.seed_encoder.next();
             state.visualizer.pending_reseed = true;
@@ -976,5 +1047,121 @@ fn seed_overlay_label(state: &VisualizerState) -> String {
         "OFF".into()
     } else {
         parts.join("+")
+    }
+}
+
+fn move_inspector(state: &mut AppState, dx: isize, dy: isize) {
+    let w = state.visualizer.seed_stats.base_width;
+    let h = state.visualizer.seed_stats.base_height;
+    if w == 0 || h == 0 {
+        return;
+    }
+    let (x, y) = match state.visualizer.seed_encoder {
+        SeedEncoderId::AsciiBytes => (
+            &mut state.visualizer.inspect_ascii_x,
+            &mut state.visualizer.inspect_ascii_y,
+        ),
+        SeedEncoderId::Lifehash16 => (
+            &mut state.visualizer.inspect_lifehash_x,
+            &mut state.visualizer.inspect_lifehash_y,
+        ),
+        SeedEncoderId::HilbertBits => (
+            &mut state.visualizer.inspect_hilbert_x,
+            &mut state.visualizer.inspect_hilbert_y,
+        ),
+    };
+    let nx = clamp_signed(*x as isize + dx, 0, (w - 1) as isize) as usize;
+    let ny = clamp_signed(*y as isize + dy, 0, (h - 1) as isize) as usize;
+    *x = nx;
+    *y = ny;
+}
+
+fn inspector_dims(state: &AppState) -> (usize, usize) {
+    (
+        state.visualizer.seed_stats.base_width,
+        state.visualizer.seed_stats.base_height,
+    )
+}
+
+fn set_inspector_pos(state: &mut AppState, x: usize, y: usize) {
+    match state.visualizer.seed_encoder {
+        SeedEncoderId::AsciiBytes => {
+            state.visualizer.inspect_ascii_x = x;
+            state.visualizer.inspect_ascii_y = y;
+        }
+        SeedEncoderId::Lifehash16 => {
+            state.visualizer.inspect_lifehash_x = x;
+            state.visualizer.inspect_lifehash_y = y;
+        }
+        SeedEncoderId::HilbertBits => {
+            state.visualizer.inspect_hilbert_x = x;
+            state.visualizer.inspect_hilbert_y = y;
+        }
+    }
+}
+
+fn jump_inspector_to_index(state: &mut AppState, idx: u64) {
+    let (w, h) = inspector_dims(state);
+    let total = w.saturating_mul(h).max(1) as u64;
+    let clamped = idx.min(total.saturating_sub(1));
+    match state.visualizer.seed_encoder {
+        SeedEncoderId::HilbertBits => {
+            let order = hilbert_order_for(w);
+            let (x, y) = hilbert_index_to_xy(order, clamped as u32);
+            set_inspector_pos(state, x as usize, y as usize);
+        }
+        _ => {
+            let x = (clamped as usize) % w;
+            let y = (clamped as usize) / w;
+            set_inspector_pos(state, x, y);
+        }
+    }
+}
+
+fn hilbert_order_for(size: usize) -> u32 {
+    let mut order = 0u32;
+    let mut n = 1usize;
+    while n < size {
+        n <<= 1;
+        order += 1;
+    }
+    order
+}
+
+fn hilbert_index_to_xy(order: u32, index: u32) -> (u32, u32) {
+    let mut x = 0u32;
+    let mut y = 0u32;
+    let mut t = index;
+    let mut s = 1u32;
+    let n = 1u32 << order;
+    while s < n {
+        let rx = (t / 2) & 1;
+        let ry = (t ^ rx) & 1;
+        let (nx, ny) = rot(s, x, y, rx, ry);
+        x = nx + s * rx;
+        y = ny + s * ry;
+        t /= 4;
+        s *= 2;
+    }
+    (x, y)
+}
+
+fn rot(n: u32, x: u32, y: u32, rx: u32, ry: u32) -> (u32, u32) {
+    if ry == 0 {
+        if rx == 1 {
+            return (n - 1 - x, n - 1 - y);
+        }
+        return (y, x);
+    }
+    (x, y)
+}
+
+fn clamp_signed(value: isize, min: isize, max: isize) -> isize {
+    if value < min {
+        min
+    } else if value > max {
+        max
+    } else {
+        value
     }
 }

@@ -196,6 +196,30 @@ pub fn render(frame: &mut Frame, area: Rect, theme: &Theme) {
         Span::styled("Ctrl+Shift+V", Style::default().fg(theme.accent)),
         Span::raw(" cycle seed overlays"),
     ]));
+    lines.push(Line::from(vec![
+        Span::styled("Arrows / HJKL", Style::default().fg(theme.accent)),
+        Span::raw(" move genome inspector (Visualizer focus)"),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("Home / End", Style::default().fg(theme.accent)),
+        Span::raw(" inspector jump to edges"),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("0 / $", Style::default().fg(theme.accent)),
+        Span::raw(" inspector jump to edges (fallback)"),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("G + digits + Enter", Style::default().fg(theme.accent)),
+        Span::raw(" jump to genome index"),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("C", Style::default().fg(theme.accent)),
+        Span::raw(" center inspector"),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("I", Style::default().fg(theme.accent)),
+        Span::raw(" toggle inspector"),
+    ]));
 
     lines.push(Line::from(vec![Span::styled(
         "PETRI DISH (POPUP)",

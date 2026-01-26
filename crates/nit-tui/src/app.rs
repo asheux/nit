@@ -41,6 +41,7 @@ const TICK_RATE: Duration = Duration::from_millis(50);
 const JOB_TICK: Duration = Duration::from_millis(120);
 const LOG_TICK: Duration = Duration::from_millis(900);
 const CHORD_TIMEOUT: Duration = Duration::from_millis(300);
+const INSPECTOR_JUMP_TIMEOUT: Duration = Duration::from_millis(1500);
 
 pub fn run(mut state: AppState, theme: Theme, log_rx: Receiver<String>) -> io::Result<()> {
     enable_raw_mode()?;
@@ -364,6 +365,7 @@ fn draw(
 }
 
 fn map_key_to_action(key: KeyEvent, state: &AppState, input: &mut InputState) -> Option<Action> {
+    input.expire_visualizer_jump();
     // Prompt confirm takes precedence
     if let Some(Prompt::ConfirmQuit) = state.prompt {
         return match key.code {
@@ -403,6 +405,12 @@ fn map_key_to_action(key: KeyEvent, state: &AppState, input: &mut InputState) ->
 
     if let Some(action) = visualizer_ctrl_action(&key, state) {
         return Some(action);
+    }
+
+    if state.focus == PaneId::Visualizer {
+        if let Some(action) = visualizer_inspector_action(&key, state, input) {
+            return Some(action);
+        }
     }
 
     if let Some(dir) = ctrl_nav_dir(&key) {
@@ -855,6 +863,7 @@ struct InputState {
     normal_last_time: Instant,
     pending_insert: Option<(char, Instant)>,
     deferred_key: Option<KeyEvent>,
+    visualizer_jump: Option<InspectorJump>,
 }
 
 impl InputState {
@@ -864,6 +873,7 @@ impl InputState {
             normal_last_time: Instant::now(),
             pending_insert: None,
             deferred_key: None,
+            visualizer_jump: None,
         }
     }
 
@@ -920,6 +930,62 @@ impl InputState {
     fn take_deferred(&mut self) -> Option<KeyEvent> {
         self.deferred_key.take()
     }
+
+    fn start_visualizer_jump(&mut self) {
+        self.visualizer_jump = Some(InspectorJump {
+            value: 0,
+            digits: 0,
+            started: Instant::now(),
+        });
+    }
+
+    fn clear_visualizer_jump(&mut self) {
+        self.visualizer_jump = None;
+    }
+
+    fn push_visualizer_digit(&mut self, digit: u8) {
+        if let Some(jump) = self.visualizer_jump.as_mut() {
+            if jump.digits >= 18 {
+                return;
+            }
+            jump.value = jump.value.saturating_mul(10).saturating_add(digit as u64);
+            jump.digits += 1;
+            jump.started = Instant::now();
+        }
+    }
+
+    fn pop_visualizer_digit(&mut self) {
+        if let Some(jump) = self.visualizer_jump.as_mut() {
+            if jump.digits == 0 {
+                return;
+            }
+            jump.value /= 10;
+            jump.digits -= 1;
+            jump.started = Instant::now();
+        }
+    }
+
+    fn visualizer_jump_value(&self) -> Option<u64> {
+        self.visualizer_jump.as_ref().map(|jump| jump.value)
+    }
+
+    fn visualizer_jump_active(&self) -> bool {
+        self.visualizer_jump.is_some()
+    }
+
+    fn expire_visualizer_jump(&mut self) {
+        if let Some(jump) = self.visualizer_jump.as_ref() {
+            if Instant::now().duration_since(jump.started) >= INSPECTOR_JUMP_TIMEOUT {
+                self.visualizer_jump = None;
+            }
+        }
+    }
+}
+
+struct InspectorJump {
+    value: u64,
+    digits: u8,
+    started: Instant,
 }
 
 fn is_normal_mode(state: &AppState) -> bool {
@@ -1051,6 +1117,84 @@ fn visualizer_ctrl_action(key: &KeyEvent, state: &AppState) -> Option<Action> {
         KeyCode::Char('l') | KeyCode::Char('L') => Some(Action::VisualizerToggleScanlines),
         _ => None,
     }
+}
+
+fn visualizer_inspector_action(
+    key: &KeyEvent,
+    state: &AppState,
+    input: &mut InputState,
+) -> Option<Action> {
+    if input.visualizer_jump_active() {
+        match key.code {
+            KeyCode::Char(c) if c.is_ascii_digit() && key.modifiers.is_empty() => {
+                input.push_visualizer_digit(c as u8 - b'0');
+                return None;
+            }
+            KeyCode::Backspace => {
+                input.pop_visualizer_digit();
+                return None;
+            }
+            KeyCode::Enter => {
+                let value = input.visualizer_jump_value().unwrap_or(0);
+                input.clear_visualizer_jump();
+                return Some(Action::VisualizerInspectJump(value));
+            }
+            KeyCode::Esc => {
+                input.clear_visualizer_jump();
+                return None;
+            }
+            _ => {
+                input.clear_visualizer_jump();
+                return None;
+            }
+        }
+    }
+
+    if !state.visualizer.inspector_enabled {
+        if matches!(key.code, KeyCode::Char('i') | KeyCode::Char('I'))
+            && (key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT)
+        {
+            return Some(Action::VisualizerInspectToggle);
+        }
+        return None;
+    }
+
+    match key.code {
+        KeyCode::Home => return Some(Action::VisualizerInspectHome),
+        KeyCode::End => return Some(Action::VisualizerInspectEnd),
+        _ => {}
+    }
+
+    if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT {
+        match key.code {
+            KeyCode::Left | KeyCode::Char('h') | KeyCode::Char('H') => {
+                return Some(Action::VisualizerInspectLeft)
+            }
+            KeyCode::Right | KeyCode::Char('l') | KeyCode::Char('L') => {
+                return Some(Action::VisualizerInspectRight)
+            }
+            KeyCode::Up | KeyCode::Char('k') | KeyCode::Char('K') => {
+                return Some(Action::VisualizerInspectUp)
+            }
+            KeyCode::Down | KeyCode::Char('j') | KeyCode::Char('J') => {
+                return Some(Action::VisualizerInspectDown)
+            }
+            KeyCode::Char('0') => return Some(Action::VisualizerInspectHome),
+            KeyCode::Char('$') => return Some(Action::VisualizerInspectEnd),
+            KeyCode::Char('c') | KeyCode::Char('C') => {
+                return Some(Action::VisualizerInspectCenter)
+            }
+            KeyCode::Char('i') | KeyCode::Char('I') => {
+                return Some(Action::VisualizerInspectToggle)
+            }
+            KeyCode::Char('g') | KeyCode::Char('G') => {
+                input.start_visualizer_jump();
+                return None;
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 fn is_global_run_key(key: &KeyEvent) -> bool {

@@ -265,6 +265,7 @@ impl SeedRuntime {
         state.visualizer.seed_hash = seed.seed_hash;
         state.visualizer.input_hash = seed.input_hash;
         state.visualizer.seed_stats = seed.stats.clone();
+        reset_inspector_if_seed_changed(state, seed);
         self.render_state.seed_from_grid(&seed.grid);
         let size = (seed.grid.width(), seed.grid.height());
         if self.last_cache_hash != seed.seed_hash || self.last_cache_size != size {
@@ -748,13 +749,13 @@ fn seed_render_mode(state: &AppState) -> Option<String> {
 fn seed_genome_preview(seed: &EncodedSeed) -> Option<SeedGenomePreview> {
     match seed.encoder_id {
         SeedEncoderId::Lifehash16 => {
-            if seed.base_bits.width() != 16 || seed.base_bits.height() != 16 {
+            if seed.base_bits_raw.width() != 16 || seed.base_bits_raw.height() != 16 {
                 return None;
             }
             let mut bits = Vec::with_capacity(16 * 16);
             for y in 0..16usize {
                 for x in 0..16usize {
-                    bits.push(if seed.base_bits.get(x, y) { 1 } else { 0 });
+                    bits.push(if seed.base_bits_raw.get(x, y) { 1 } else { 0 });
                 }
             }
             Some(SeedGenomePreview {
@@ -779,5 +780,37 @@ fn seed_genome_preview(seed: &EncodedSeed) -> Option<SeedGenomePreview> {
             })
         }
         SeedEncoderId::AsciiBytes => None,
+    }
+}
+
+fn reset_inspector_if_seed_changed(state: &mut AppState, seed: &EncodedSeed) {
+    let (w, h) = (seed.base_bits.width(), seed.base_bits.height());
+    if w == 0 || h == 0 {
+        return;
+    }
+    let cx = w / 2;
+    let cy = h / 2;
+    match seed.encoder_id {
+        SeedEncoderId::AsciiBytes => {
+            if state.visualizer.inspect_ascii_hash != seed.seed_hash {
+                state.visualizer.inspect_ascii_hash = seed.seed_hash;
+                state.visualizer.inspect_ascii_x = cx;
+                state.visualizer.inspect_ascii_y = cy;
+            }
+        }
+        SeedEncoderId::Lifehash16 => {
+            if state.visualizer.inspect_lifehash_hash != seed.seed_hash {
+                state.visualizer.inspect_lifehash_hash = seed.seed_hash;
+                state.visualizer.inspect_lifehash_x = cx;
+                state.visualizer.inspect_lifehash_y = cy;
+            }
+        }
+        SeedEncoderId::HilbertBits => {
+            if state.visualizer.inspect_hilbert_hash != seed.seed_hash {
+                state.visualizer.inspect_hilbert_hash = seed.seed_hash;
+                state.visualizer.inspect_hilbert_x = cx;
+                state.visualizer.inspect_hilbert_y = cy;
+            }
+        }
     }
 }

@@ -158,6 +158,7 @@ fn draw_inset(
             cell.set_style(Style::default().bg(if alive { palette.live } else { palette.bg }));
         }
     }
+    draw_inset_label(start_x, start_y, palette, buf);
     // tiny frame
     let style = Style::default().fg(palette.grid).add_modifier(Modifier::DIM);
     let right = start_x + inset_w;
@@ -178,6 +179,21 @@ fn draw_inset(
     buf.get_mut(right, start_y - 1).set_char('┐');
     buf.get_mut(start_x - 1, bottom).set_char('└');
     buf.get_mut(right, bottom).set_char('┘');
+}
+
+fn draw_inset_label(start_x: u16, start_y: u16, palette: &SeedPalette, buf: &mut Buffer) {
+    let label = "INSET";
+    let style = Style::default()
+        .fg(palette.hud_dim)
+        .add_modifier(Modifier::DIM);
+    let y = start_y.saturating_sub(1);
+    let mut x = start_x;
+    for ch in label.chars() {
+        let cell = buf.get_mut(x, y);
+        cell.set_char(ch);
+        cell.set_style(style);
+        x = x.saturating_add(1);
+    }
 }
 
 fn draw_scanline(area: Rect, buf: &mut Buffer, cache: &SeedRenderCache, palette: &SeedPalette) {

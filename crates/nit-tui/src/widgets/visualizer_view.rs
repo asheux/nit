@@ -9,7 +9,7 @@ use ratatui::{
 };
 
 use crate::{
-    seed_render::{render_genome, render_seed, SeedPalette, SeedRenderConfig},
+    seed_render::{ascii_layout, render_genome, render_seed, SeedPalette, SeedRenderConfig},
     seed_runtime::SeedRuntime,
     theme::Theme,
 };
@@ -58,17 +58,54 @@ pub fn render(
         return;
     }
 
-    let header = build_seed_hud(state, seed_runtime);
-    let render_area = if inner.height > 1 {
-        ratatui::layout::Rect {
-            x: inner.x,
-            y: inner.y + 1,
-            width: inner.width,
-            height: inner.height - 1,
-        }
-    } else {
-        inner
+    let hud_area = ratatui::layout::Rect {
+        x: inner.x,
+        y: inner.y,
+        width: inner.width,
+        height: 1,
     };
+    draw_hud_line(
+        frame.buffer_mut(),
+        hud_area,
+        state,
+        seed_runtime,
+        &palette,
+    );
+
+    let mut top = inner.y.saturating_add(1);
+    let legend_area = if inner.height >= 4 && state.visualizer.seed_view == SeedViewMode::Genome {
+        let area = ratatui::layout::Rect {
+            x: inner.x,
+            y: top,
+            width: inner.width,
+            height: 1,
+        };
+        top = top.saturating_add(1);
+        Some(area)
+    } else {
+        None
+    };
+
+    let show_inspector = state.visualizer.seed_view == SeedViewMode::Genome
+        && seed_runtime.encoded().is_some()
+        && inner.height >= 3;
+    let bottom_reserved = if show_inspector { 1 } else { 0 };
+    let used_top = top.saturating_sub(inner.y);
+    let render_height = inner
+        .height
+        .saturating_sub(used_top)
+        .saturating_sub(bottom_reserved);
+    let render_area = ratatui::layout::Rect {
+        x: inner.x,
+        y: top,
+        width: inner.width,
+        height: render_height,
+    };
+
+    if let Some(legend_area) = legend_area {
+        draw_legend_line(frame.buffer_mut(), legend_area, seed_runtime, render_area, &palette);
+    }
+
     fill_bg(frame.buffer_mut(), render_area, palette.bg);
     if let Some(seed) = seed_runtime.encoded() {
         match state.visualizer.seed_view {
@@ -80,6 +117,16 @@ pub fn render(
                     seed_runtime.render_cache(),
                     &palette,
                 );
+                if focused && state.visualizer.inspector_enabled {
+                    draw_genome_crosshair(
+                        frame.buffer_mut(),
+                        render_area,
+                        state,
+                        seed,
+                        seed_runtime,
+                        &palette,
+                    );
+                }
             }
             SeedViewMode::Plate => {
                 let cfg = SeedRenderConfig {
@@ -110,150 +157,403 @@ pub fn render(
             }
         }
     }
-    draw_header(
-        frame.buffer_mut(),
-        ratatui::layout::Rect {
+
+    if show_inspector {
+        let inspector_area = ratatui::layout::Rect {
             x: inner.x,
-            y: inner.y,
+            y: inner.y + inner.height - 1,
             width: inner.width,
             height: 1,
-        },
-        &header,
-        palette.hud_text,
-        palette.bg,
-    );
-}
-
-fn build_seed_hud(state: &AppState, seed_runtime: &SeedRuntime) -> String {
-    let seed_hash = if state.visualizer.seed_hash == 0 {
-        "--".to_string()
-    } else {
-        format!("{:08x}", state.visualizer.seed_hash as u32)
-    };
-    let density = state.visualizer.seed_stats.density;
-    let components = state.visualizer.seed_stats.components;
-    let enc = state.visualizer.seed_encoder.as_str();
-    let view = view_label(state);
-    let overlays = overlay_label(state, seed_runtime);
-    let mut out = String::with_capacity(128);
-    push_seg(&mut out, &format!("ENC:{enc}"));
-    push_seg(&mut out, &format!("SeedHash:{seed_hash}"));
-    if seed_runtime.encoded().is_some() {
-        push_seg(&mut out, &format!("Density:{density:.2}"));
-        push_seg(&mut out, &format!("Comp:{components}"));
-    }
-    push_seg(&mut out, &format!("VIEW:{view}"));
-    push_seg(&mut out, &format!("OVR:{overlays}"));
-    out
-}
-
-fn push_seg(buf: &mut String, segment: &str) {
-    if !buf.is_empty() {
-        buf.push_str(" | ");
-    }
-    buf.push_str(segment);
-}
-
-fn view_label(state: &AppState) -> String {
-    match state.visualizer.seed_view {
-        SeedViewMode::Genome => "GENOME".to_string(),
-        SeedViewMode::Plate => {
-            format!("PLATE/{}", state.visualizer.seed_plate_mode.label())
-        }
-        SeedViewMode::Map => "MAP".to_string(),
-        SeedViewMode::Stats => "STATS".to_string(),
+        };
+        draw_inspector_line(
+            frame.buffer_mut(),
+            inspector_area,
+            state,
+            seed_runtime,
+            &palette,
+        );
     }
 }
 
-fn overlay_label(state: &AppState, seed_runtime: &SeedRuntime) -> String {
-    match state.visualizer.seed_view {
-        SeedViewMode::Genome => {
-            if seed_runtime.encoded().is_none() {
-                return "OFF".into();
-            }
-            match state.visualizer.seed_encoder {
-                SeedEncoderId::Lifehash16 => {
-                    if state.visualizer.seed_params.symmetry != nit_core::SeedSymmetry::None {
-                        "SYM".into()
-                    } else {
-                        "OFF".into()
-                    }
-                }
-                SeedEncoderId::HilbertBits => "PATH".into(),
-                SeedEncoderId::AsciiBytes => "BYTE".into(),
-            }
-        }
-        SeedViewMode::Plate => {
-            let mut parts = Vec::new();
-            if state.visualizer.seed_show_grid {
-                parts.push("GRID");
-            }
-            if state.visualizer.seed_show_halo {
-                parts.push("HALO");
-            }
-            if state.visualizer.seed_show_components
-                || state.visualizer.seed_plate_mode == nit_core::SeedPreviewMode::Tissue
-            {
-                parts.push("COMP");
-            }
-            if state.visualizer.seed_show_bbox {
-                parts.push("BBOX");
-            }
-            if state.visualizer.seed_show_inset {
-                parts.push("INSET");
-            }
-            if parts.is_empty() {
-                "OFF".into()
-            } else {
-                parts.join("+")
-            }
-        }
-        SeedViewMode::Map | SeedViewMode::Stats => "OFF".into(),
-    }
-}
-
-fn draw_header(
+fn draw_hud_line(
     buf: &mut Buffer,
     area: ratatui::layout::Rect,
-    text: &str,
-    fg: ratatui::style::Color,
-    bg: ratatui::style::Color,
+    state: &AppState,
+    seed_runtime: &SeedRuntime,
+    palette: &SeedPalette,
+) {
+    let style = Style::default()
+        .fg(palette.hud_text)
+        .bg(palette.bg)
+        .add_modifier(Modifier::DIM);
+    let mut writer = LineWriter::new(buf, area, style);
+    writer.write_str("ENC:");
+    writer.write_str(state.visualizer.seed_encoder.as_str());
+    writer.write_sep();
+    writer.write_str("SeedHash:");
+    if state.visualizer.seed_hash == 0 {
+        writer.write_str("--");
+    } else {
+        writer.write_hex_u32(state.visualizer.seed_hash as u32);
+    }
+    if seed_runtime.encoded().is_some() {
+        let cache = seed_runtime.render_cache();
+        writer.write_sep();
+        writer.write_str("DenG:");
+        writer.write_f32_2(cache.genome_density);
+        writer.write_sep();
+        writer.write_str("DenP:");
+        writer.write_f32_2(state.visualizer.seed_stats.density);
+        writer.write_sep();
+        writer.write_str("CompP:");
+        writer.write_u32(state.visualizer.seed_stats.components as u32);
+    }
+    writer.write_sep();
+    writer.write_str("VIEW:");
+    write_view_label(&mut writer, state);
+    writer.write_sep();
+    writer.write_str("OVR:");
+    write_overlay_label(&mut writer, state, seed_runtime);
+    writer.finish();
+}
+
+fn draw_legend_line(
+    buf: &mut Buffer,
+    area: ratatui::layout::Rect,
+    seed_runtime: &SeedRuntime,
+    render_area: ratatui::layout::Rect,
+    palette: &SeedPalette,
+) {
+    let style = Style::default()
+        .fg(palette.hud_dim)
+        .bg(palette.bg)
+        .add_modifier(Modifier::DIM);
+    let mut writer = LineWriter::new(buf, area, style);
+    let Some(seed) = seed_runtime.encoded() else {
+        writer.finish();
+        return;
+    };
+    match seed.encoder_id {
+        SeedEncoderId::AsciiBytes => {
+            writer.write_str("BYTE: dec 0-255 | sep=8 bytes | printable marked");
+        }
+        SeedEncoderId::Lifehash16 => {
+            writer.write_str("16×16 base genome | SYM axis dotted | bit=1 violet");
+        }
+        SeedEncoderId::HilbertBits => {
+            writer.write_str("bitstream tape | sep=64 bits | PATH inset shows traversal");
+            if let Some(stream) = seed_runtime.render_cache().hilbert_stream.as_ref() {
+                let cols = render_area.width as usize;
+                if cols > 0 {
+                    let total = stream.len().max(1);
+                    let stride = (total + cols - 1) / cols;
+                    if stride > 1 {
+                        writer.write_sep();
+                        writer.write_str("stride=");
+                        writer.write_u32(stride as u32);
+                    }
+                }
+            }
+        }
+    }
+    writer.finish();
+}
+
+fn draw_inspector_line(
+    buf: &mut Buffer,
+    area: ratatui::layout::Rect,
+    state: &AppState,
+    seed_runtime: &SeedRuntime,
+    palette: &SeedPalette,
+) {
+    let style = Style::default()
+        .fg(palette.hud_dim)
+        .bg(palette.bg)
+        .add_modifier(Modifier::DIM);
+    let mut writer = LineWriter::new(buf, area, style);
+    let Some(seed) = seed_runtime.encoded() else {
+        writer.finish();
+        return;
+    };
+    if !state.visualizer.inspector_enabled {
+        writer.write_str("INSPECTOR OFF");
+        writer.finish();
+        return;
+    }
+    let (x, y) = clamp_inspector_pos(state, seed);
+    let w = seed.base_bits.width().max(1);
+    let idx = y.saturating_mul(w).saturating_add(x);
+    match seed.encoder_id {
+        SeedEncoderId::AsciiBytes => {
+            let value = seed.base_values.get(x, y) as u8;
+            writer.write_str("IDX:");
+            writer.write_u32(idx as u32);
+            writer.write_sep();
+            writer.write_str("XY:");
+            writer.write_u32(x as u32);
+            writer.write_char(',');
+            writer.write_u32(y as u32);
+            writer.write_sep();
+            writer.write_str("HEX:");
+            writer.write_hex_u8(value);
+            writer.write_sep();
+            writer.write_str("ASCII:");
+            if value >= 0x20 && value <= 0x7e {
+                writer.write_char(value as char);
+            } else {
+                writer.write_char('.');
+            }
+            writer.write_sep();
+            writer.write_str("CLASS:");
+            if matches!(value, b' ' | b'\t' | b'\n' | b'\r') {
+                writer.write_str("WS");
+            } else if value >= 0x20 && value <= 0x7e {
+                writer.write_str("PRINT");
+            } else {
+                writer.write_str("CTRL");
+            }
+        }
+        SeedEncoderId::Lifehash16 => {
+            let bit = seed.base_bits.get(x, y);
+            writer.write_str("IDX:");
+            writer.write_u32(idx as u32);
+            writer.write_sep();
+            writer.write_str("XY:");
+            writer.write_u32(x as u32);
+            writer.write_char(',');
+            writer.write_u32(y as u32);
+            writer.write_sep();
+            writer.write_str("BIT:");
+            writer.write_char(if bit { '1' } else { '0' });
+        }
+        SeedEncoderId::HilbertBits => {
+            let bit = seed.base_bits.get(x, y);
+            writer.write_str("IDX:");
+            if let Some(map) = seed_runtime.render_cache().hilbert_index_by_xy.as_ref() {
+                let idx_map = map[y.saturating_mul(w) + x];
+                writer.write_u32(idx_map);
+            } else {
+                writer.write_u32(idx as u32);
+            }
+            writer.write_sep();
+            writer.write_str("XY:");
+            writer.write_u32(x as u32);
+            writer.write_char(',');
+            writer.write_u32(y as u32);
+            writer.write_sep();
+            writer.write_str("BIT:");
+            writer.write_char(if bit { '1' } else { '0' });
+        }
+    }
+    writer.finish();
+}
+
+fn draw_genome_crosshair(
+    buf: &mut Buffer,
+    area: ratatui::layout::Rect,
+    state: &AppState,
+    seed: &nit_core::EncodedSeed,
+    seed_runtime: &SeedRuntime,
+    palette: &SeedPalette,
 ) {
     if area.width == 0 || area.height == 0 {
         return;
     }
-    let max_x = area.x.saturating_add(area.width);
-    let mut x = area.x;
-    let style = Style::default().fg(fg).bg(bg).add_modifier(Modifier::DIM);
-    let text_len = text.chars().count();
-    let width = area.width as usize;
-    let use_ellipsis = text_len > width && width > 0;
-    let max_chars = if use_ellipsis && width > 0 {
-        width.saturating_sub(1)
-    } else {
-        width
-    };
-    for ch in text.chars().take(max_chars) {
-        if x >= max_x {
-            break;
+    let (x, y) = clamp_inspector_pos(state, seed);
+    match seed.encoder_id {
+        SeedEncoderId::AsciiBytes => {
+            let w = seed.base_values.width().max(1);
+            let h = seed.base_values.height().max(1);
+            let (digits, gap, cols) = ascii_layout(area.width as usize, w);
+            if cols == 0 || digits == 0 {
+                return;
+            }
+            let rows = area.height as usize;
+            let cx = x.saturating_mul(cols) / w;
+            let cy = y.saturating_mul(rows.max(1)) / h;
+            let stride = digits + gap;
+            let start_x = area.x + (cx * stride) as u16;
+            let row_y = area.y + cy as u16;
+            for dx in 0..digits {
+                let cell = buf.get_mut(start_x + dx as u16, row_y);
+                cell.set_bg(palette.accent);
+            }
         }
-        let cell = buf.get_mut(x, area.y);
-        cell.set_char(ch);
-        cell.set_style(style);
-        x = x.saturating_add(1);
+        SeedEncoderId::Lifehash16 => {
+            if let Some((sx, sy)) = map_to_screen(area, x, y, seed.base_bits.width(), seed.base_bits.height()) {
+                let cell = buf.get_mut(sx, sy);
+                cell.set_char('+');
+                cell.set_fg(palette.accent);
+            }
+        }
+        SeedEncoderId::HilbertBits => {
+            let w = seed.base_bits.width().max(1);
+            let idx = if let Some(map) = seed_runtime.render_cache().hilbert_index_by_xy.as_ref() {
+                map[y.saturating_mul(w) + x] as usize
+            } else {
+                y.saturating_mul(w).saturating_add(x)
+            };
+            let cols = area.width as usize;
+            if let Some(stream) = seed_runtime.render_cache().hilbert_stream.as_ref() {
+                let total = stream.len().max(1);
+                if cols > 0 {
+                    let stride = (total + cols - 1) / cols;
+                    if stride > 0 {
+                        let col = idx / stride;
+                        if col < cols {
+                            let sx = area.x + col as u16;
+                            for yy in 0..area.height {
+                                let cell = buf.get_mut(sx, area.y + yy);
+                                cell.set_char('│');
+                                cell.set_fg(palette.accent);
+                            }
+                            draw_hilbert_inset_highlight(area, buf, seed, palette, x, y);
+                        }
+                    }
+                }
+            }
+        }
     }
-    if use_ellipsis && x < max_x {
-        let cell = buf.get_mut(x, area.y);
-        cell.set_char('…');
-        cell.set_style(style);
-        x = x.saturating_add(1);
+}
+
+fn draw_hilbert_inset_highlight(
+    area: ratatui::layout::Rect,
+    buf: &mut Buffer,
+    seed: &nit_core::EncodedSeed,
+    palette: &SeedPalette,
+    x: usize,
+    y: usize,
+) {
+    let inset_w = 16u16;
+    let inset_h = 16u16;
+    if area.width < inset_w || area.height < inset_h {
+        return;
     }
-    while x < max_x {
-        let cell = buf.get_mut(x, area.y);
-        cell.set_char(' ');
-        cell.set_style(style);
-        x = x.saturating_add(1);
+    let inset_x = area.x + area.width - inset_w;
+    let inset_y = area.y;
+    let w = seed.base_bits.width().max(1);
+    let h = seed.base_bits.height().max(1);
+    let ix = x.saturating_mul(16) / w;
+    let iy = y.saturating_mul(16) / h;
+    if ix >= 16 || iy >= 16 {
+        return;
     }
+    let cell = buf.get_mut(inset_x + ix as u16, inset_y + iy as u16);
+    cell.set_char('o');
+    cell.set_fg(palette.accent);
+}
+
+fn inspector_pos(state: &AppState) -> (usize, usize) {
+    match state.visualizer.seed_encoder {
+        SeedEncoderId::AsciiBytes => (state.visualizer.inspect_ascii_x, state.visualizer.inspect_ascii_y),
+        SeedEncoderId::Lifehash16 => (
+            state.visualizer.inspect_lifehash_x,
+            state.visualizer.inspect_lifehash_y,
+        ),
+        SeedEncoderId::HilbertBits => (
+            state.visualizer.inspect_hilbert_x,
+            state.visualizer.inspect_hilbert_y,
+        ),
+    }
+}
+
+fn clamp_inspector_pos(state: &AppState, seed: &nit_core::EncodedSeed) -> (usize, usize) {
+    let (mut x, mut y) = inspector_pos(state);
+    let w = seed.base_bits.width().max(1);
+    let h = seed.base_bits.height().max(1);
+    if x >= w {
+        x = w - 1;
+    }
+    if y >= h {
+        y = h - 1;
+    }
+    (x, y)
+}
+
+fn map_to_screen(
+    area: ratatui::layout::Rect,
+    x: usize,
+    y: usize,
+    grid_w: usize,
+    grid_h: usize,
+) -> Option<(u16, u16)> {
+    if grid_w == 0 || grid_h == 0 || area.width == 0 || area.height == 0 {
+        return None;
+    }
+    let left = x.saturating_mul(area.width as usize) / grid_w;
+    let right = (x + 1).saturating_mul(area.width as usize) / grid_w;
+    let top = y.saturating_mul(area.height as usize) / grid_h;
+    let bottom = (y + 1).saturating_mul(area.height as usize) / grid_h;
+    let sx = area.x + ((left + right) / 2) as u16;
+    let sy = area.y + ((top + bottom) / 2) as u16;
+    Some((sx, sy))
+}
+
+fn write_view_label(writer: &mut LineWriter<'_>, state: &AppState) {
+    match state.visualizer.seed_view {
+        SeedViewMode::Genome => writer.write_str("GENOME"),
+        SeedViewMode::Plate => {
+            writer.write_str("PLATE/");
+            writer.write_str(state.visualizer.seed_plate_mode.label());
+        }
+        SeedViewMode::Map => writer.write_str("MAP"),
+        SeedViewMode::Stats => writer.write_str("STATS"),
+    }
+}
+
+fn write_overlay_label(writer: &mut LineWriter<'_>, state: &AppState, seed_runtime: &SeedRuntime) {
+    match state.visualizer.seed_view {
+        SeedViewMode::Genome => {
+            if seed_runtime.encoded().is_none() {
+                writer.write_str("OFF");
+                return;
+            }
+            match state.visualizer.seed_encoder {
+                SeedEncoderId::Lifehash16 => {
+                    if state.visualizer.seed_params.symmetry != nit_core::SeedSymmetry::None {
+                        writer.write_str("SYM");
+                    } else {
+                        writer.write_str("OFF");
+                    }
+                }
+                SeedEncoderId::HilbertBits => writer.write_str("PATH"),
+                SeedEncoderId::AsciiBytes => writer.write_str("BYTE"),
+            }
+        }
+        SeedViewMode::Plate => {
+            let mut wrote = false;
+            if state.visualizer.seed_show_grid {
+                wrote = write_overlay_part(writer, "GRID", wrote);
+            }
+            if state.visualizer.seed_show_halo {
+                wrote = write_overlay_part(writer, "HALO", wrote);
+            }
+            if state.visualizer.seed_show_components
+                || state.visualizer.seed_plate_mode == nit_core::SeedPreviewMode::Tissue
+            {
+                wrote = write_overlay_part(writer, "COMP", wrote);
+            }
+            if state.visualizer.seed_show_bbox {
+                wrote = write_overlay_part(writer, "BBOX", wrote);
+            }
+            if state.visualizer.seed_show_inset {
+                wrote = write_overlay_part(writer, "INSET", wrote);
+            }
+            if !wrote {
+                writer.write_str("OFF");
+            }
+        }
+        SeedViewMode::Map | SeedViewMode::Stats => writer.write_str("OFF"),
+    }
+}
+
+fn write_overlay_part(writer: &mut LineWriter<'_>, label: &str, mut wrote: bool) -> bool {
+    if wrote {
+        writer.write_char('+');
+    }
+    writer.write_str(label);
+    wrote = true;
+    wrote
 }
 
 fn fill_bg(buf: &mut Buffer, area: ratatui::layout::Rect, bg: ratatui::style::Color) {
@@ -287,8 +587,7 @@ fn render_map(
     write_line(buf, area, y, "GENOME PROTOCOL", heading_style);
     y = y.saturating_add(1);
     let params = &seed.params;
-    let encoder = seed.encoder_id.as_str();
-    write_kv(buf, area, &mut y, "Encoder", encoder, label_style, value_style, max_y);
+    write_kv(buf, area, &mut y, "Encoder", seed.encoder_id.as_str(), label_style, value_style, max_y);
     write_kv(
         buf,
         area,
@@ -410,7 +709,7 @@ fn render_stats(
         buf,
         area,
         &mut y,
-        "Density",
+        "Plate dens",
         &format!("{:.2}", state.visualizer.seed_stats.density),
         label_style,
         value_style,
@@ -420,7 +719,7 @@ fn render_stats(
         buf,
         area,
         &mut y,
-        "Components",
+        "Plate comp",
         &format!("{}", state.visualizer.seed_stats.components),
         label_style,
         value_style,
@@ -540,4 +839,117 @@ fn write_kv(
         x = x.saturating_add(1);
     }
     *y = y.saturating_add(1);
+}
+
+struct LineWriter<'a> {
+    buf: &'a mut Buffer,
+    y: u16,
+    x: u16,
+    max_x: u16,
+    style: Style,
+    truncated: bool,
+}
+
+impl<'a> LineWriter<'a> {
+    fn new(buf: &'a mut Buffer, area: ratatui::layout::Rect, style: Style) -> Self {
+        let max_x = area.x.saturating_add(area.width);
+        Self {
+            buf,
+            y: area.y,
+            x: area.x,
+            max_x,
+            style,
+            truncated: false,
+        }
+    }
+
+    fn write_char(&mut self, ch: char) {
+        if self.x >= self.max_x {
+            self.truncated = true;
+            return;
+        }
+        let cell = self.buf.get_mut(self.x, self.y);
+        cell.set_char(ch);
+        cell.set_style(self.style);
+        self.x = self.x.saturating_add(1);
+    }
+
+    fn write_str(&mut self, text: &str) {
+        for ch in text.chars() {
+            if self.x >= self.max_x {
+                self.truncated = true;
+                return;
+            }
+            let cell = self.buf.get_mut(self.x, self.y);
+            cell.set_char(ch);
+            cell.set_style(self.style);
+            self.x = self.x.saturating_add(1);
+        }
+    }
+
+    fn write_sep(&mut self) {
+        self.write_str(" | ");
+    }
+
+    fn write_u32(&mut self, mut value: u32) {
+        let mut buf = [0u8; 10];
+        let mut i = 0usize;
+        if value == 0 {
+            self.write_char('0');
+            return;
+        }
+        while value > 0 && i < buf.len() {
+            buf[i] = (value % 10) as u8;
+            value /= 10;
+            i += 1;
+        }
+        while i > 0 {
+            i -= 1;
+            self.write_char((b'0' + buf[i]) as char);
+        }
+    }
+
+    fn write_hex_u32(&mut self, value: u32) {
+        for shift in (0..8).rev() {
+            let nibble = ((value >> (shift * 4)) & 0xF) as u8;
+            self.write_char(hex_digit(nibble));
+        }
+    }
+
+    fn write_hex_u8(&mut self, value: u8) {
+        self.write_char(hex_digit(value >> 4));
+        self.write_char(hex_digit(value & 0xF));
+    }
+
+    fn write_f32_2(&mut self, value: f32) {
+        let scaled = (value * 100.0).round().clamp(0.0, 9999.0) as u32;
+        let int_part = scaled / 100;
+        let frac = scaled % 100;
+        self.write_u32(int_part);
+        self.write_char('.');
+        self.write_char((b'0' + (frac / 10) as u8) as char);
+        self.write_char((b'0' + (frac % 10) as u8) as char);
+    }
+
+    fn finish(mut self) {
+        if self.truncated && self.max_x > 0 {
+            let ellip_x = self.max_x - 1;
+            let cell = self.buf.get_mut(ellip_x, self.y);
+            cell.set_char('…');
+            cell.set_style(self.style);
+        }
+        while self.x < self.max_x {
+            let cell = self.buf.get_mut(self.x, self.y);
+            cell.set_char(' ');
+            cell.set_style(self.style);
+            self.x = self.x.saturating_add(1);
+        }
+    }
+}
+
+fn hex_digit(value: u8) -> char {
+    match value & 0xF {
+        0..=9 => (b'0' + (value & 0xF)) as char,
+        v => (b'a' + (v - 10)) as char,
+    }
 }

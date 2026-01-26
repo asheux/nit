@@ -297,6 +297,7 @@ pub struct EncodedSeed {
     pub source: GolSeedSource,
     pub base_values: SeedValueGrid,
     pub base_bits: SeedBits,
+    pub base_bits_raw: SeedBits,
     pub grid: Grid,
     pub stats: SeedStats,
 }
@@ -324,13 +325,14 @@ pub fn encode_seed(
     let mut values = base_values.clone();
     apply_jitter(values.values_mut(), params.jitter, input_hash ^ seed_nonce ^ (variant as u64));
     let threshold = density_threshold(params.target_density);
-    let mut bits = SeedBits::new(values.width(), values.height());
+    let mut bits_raw = SeedBits::new(values.width(), values.height());
     for y in 0..values.height() {
         for x in 0..values.width() {
             let alive = values.get(x, y) >= threshold;
-            bits.set(x, y, alive);
+            bits_raw.set(x, y, alive);
         }
     }
+    let mut bits = bits_raw.clone();
     apply_symmetry(&mut bits, params.symmetry);
     let seed_hash = hash_seed(encoder, params, variant, &bits);
     let grid = map_bits_to_grid(&bits, target_width, target_height, params);
@@ -354,6 +356,7 @@ pub fn encode_seed(
         source: input.source,
         base_values: values,
         base_bits: bits,
+        base_bits_raw: bits_raw,
         grid,
         stats,
     }

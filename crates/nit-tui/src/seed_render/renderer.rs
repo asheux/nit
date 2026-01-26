@@ -2,7 +2,7 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::Style;
 
-use nit_core::{EncodedSeed, SeedPreviewMode};
+use nit_core::{EncodedSeed, SeedEncoderId, SeedPreviewMode};
 use nit_core::seed::SeedBits;
 use nit_gol::Grid;
 
@@ -48,6 +48,10 @@ pub struct SeedRenderCache {
     pub density_block: usize,
     pub halo_mask: Option<Vec<u8>>,
     pub inset_16x16: Option<SeedBits>,
+    pub hilbert_stream: Option<Vec<u8>>,
+    pub hilbert_index_by_xy: Option<Vec<u32>>,
+    pub hilbert_path_inset: Option<Vec<u8>>,
+    pub hilbert_order: u32,
     pub scanline_phase: u16,
 }
 
@@ -69,6 +73,10 @@ impl Default for SeedRenderCache {
             density_block: 4,
             halo_mask: None,
             inset_16x16: None,
+            hilbert_stream: None,
+            hilbert_index_by_xy: None,
+            hilbert_path_inset: None,
+            hilbert_order: 0,
             scanline_phase: 0,
         }
     }
@@ -98,20 +106,60 @@ impl SeedRenderCache {
         self.halo_mask = compute_halo(&seed.grid);
 
         self.inset_16x16 = if seed.encoder_id.as_str() == "lifehash16"
-            && seed.base_bits.width() == 16
-            && seed.base_bits.height() == 16
+            && seed.base_bits_raw.width() == 16
+            && seed.base_bits_raw.height() == 16
         {
-            Some(seed.base_bits.clone())
+            Some(seed.base_bits_raw.clone())
         } else {
             None
         };
 
+        self.hilbert_stream = None;
+        self.hilbert_index_by_xy = None;
+        self.hilbert_path_inset = None;
+        self.hilbert_order = 0;
+        if seed.encoder_id == SeedEncoderId::HilbertBits {
+            let w = seed.base_bits.width().max(1);
+            let h = seed.base_bits.height().max(1);
+            let total = w.saturating_mul(h);
+            let mut order = 0u32;
+            let mut size = 1usize;
+            while size < w {
+                size <<= 1;
+                order += 1;
+            }
+            let mut stream = vec![0u8; total];
+            let mut index_by_xy = vec![0u32; total];
+            let mut inset = vec![0u8; 16 * 16];
+            let denom = total.saturating_sub(1).max(1) as u32;
+            for idx in 0..total {
+                let (x, y) = hilbert_index_to_xy(order, idx as u32);
+                let xi = x as usize;
+                let yi = y as usize;
+                if xi < w && yi < h {
+                    stream[idx] = if seed.base_bits.get(xi, yi) { 1 } else { 0 };
+                    index_by_xy[yi * w + xi] = idx as u32;
+                    let ix = xi.saturating_mul(16) / w;
+                    let iy = yi.saturating_mul(16) / h;
+                    let v = ((idx as u32).saturating_mul(255) / denom) as u8;
+                    let inset_idx = iy.saturating_mul(16) + ix;
+                    if inset_idx < inset.len() && v > inset[inset_idx] {
+                        inset[inset_idx] = v;
+                    }
+                }
+            }
+            self.hilbert_stream = Some(stream);
+            self.hilbert_index_by_xy = Some(index_by_xy);
+            self.hilbert_path_inset = Some(inset);
+            self.hilbert_order = order;
+        }
+
         let mut live = 0usize;
         let mut total = 0usize;
-        for y in 0..seed.base_bits.height() {
-            for x in 0..seed.base_bits.width() {
+        for y in 0..seed.base_bits_raw.height() {
+            for x in 0..seed.base_bits_raw.width() {
                 total += 1;
-                if seed.base_bits.get(x, y) {
+                if seed.base_bits_raw.get(x, y) {
                     live += 1;
                 }
             }
@@ -135,6 +183,34 @@ impl SeedRenderCache {
         self.ascii_printable = printable;
         self.ascii_nonprintable = nonprintable;
     }
+}
+
+fn hilbert_index_to_xy(order: u32, index: u32) -> (u32, u32) {
+    let mut x = 0u32;
+    let mut y = 0u32;
+    let mut t = index;
+    let mut s = 1u32;
+    let n = 1u32 << order;
+    while s < n {
+        let rx = (t / 2) & 1;
+        let ry = (t ^ rx) & 1;
+        let (nx, ny) = rot(s, x, y, rx, ry);
+        x = nx + s * rx;
+        y = ny + s * ry;
+        t /= 4;
+        s *= 2;
+    }
+    (x, y)
+}
+
+fn rot(n: u32, x: u32, y: u32, rx: u32, ry: u32) -> (u32, u32) {
+    if ry == 0 {
+        if rx == 1 {
+            return (n - 1 - x, n - 1 - y);
+        }
+        return (y, x);
+    }
+    (x, y)
 }
 
 pub fn grid_size_for_mode(width: usize, height: usize, mode: SeedPreviewMode) -> (usize, usize) {
