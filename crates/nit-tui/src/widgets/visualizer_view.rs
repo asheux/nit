@@ -7,7 +7,7 @@ use ratatui::{
 };
 
 use crate::{
-    gol_render::{GolHudState, GolPalette, GolRenderConfig, GolWidget},
+    gol_render::{AsciiSeedWidget, GolHudState, GolPalette, GolRenderConfig, GolWidget},
     theme::Theme,
     visualizer::VisualizerRuntime,
 };
@@ -53,6 +53,28 @@ pub fn render(
     let inner = block.inner(area);
     frame.render_widget(block, area);
     if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+
+    if !state.visualizer.running {
+        let buffer = match state.visualizer.seed_source {
+            nit_core::GolSeedSource::Editor => state.editor_buffer(),
+            nit_core::GolSeedSource::Notes => state.notes_buffer(),
+        };
+        let header = match state.visualizer.seed_source {
+            nit_core::GolSeedSource::Editor => {
+                "ASCII SEED | Ctrl+Enter RUN | Ctrl+E ASCII | Source: EDITOR"
+            }
+            nit_core::GolSeedSource::Notes => {
+                "ASCII SEED | Ctrl+Enter RUN | Ctrl+E ASCII | Source: NOTES"
+            }
+        };
+        let widget = AsciiSeedWidget {
+            buffer,
+            palette,
+            header,
+        };
+        frame.render_widget(widget, inner);
         return;
     }
 

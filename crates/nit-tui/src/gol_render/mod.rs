@@ -9,6 +9,7 @@ pub use renderer::{
     grid_size_for_mode, AliveHistory, GolHudMetrics, GolHudState, GolRenderConfig, GolRenderPipeline,
     GolRenderState, HUD_HISTORY_LEN, MAX_AGE, MAX_DECAY,
 };
+pub use ascii_seed::AsciiSeedWidget;
 
 use ratatui::{buffer::Buffer, layout::Rect, widgets::Widget};
 
@@ -36,3 +37,4 @@ impl<'a> Widget for GolWidget<'a> {
         );
     }
 }
+pub mod ascii_seed;

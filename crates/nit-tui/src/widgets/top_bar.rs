@@ -1,4 +1,4 @@
-use nit_core::AppState;
+use nit_core::{AppState, PaneId};
 use ratatui::{
     layout::Alignment,
     style::{Modifier, Style},
@@ -11,7 +11,6 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use crate::theme::Theme;
 
 pub fn render(frame: &mut Frame, area: ratatui::layout::Rect, state: &AppState, theme: &Theme) {
-    let (line, col) = state.line_col();
     let mode = format!("{:?}", state.mode).to_uppercase();
     let file = state
         .editor_buffer()
@@ -29,28 +28,64 @@ pub fn render(frame: &mut Frame, area: ratatui::layout::Rect, state: &AppState, 
         .map(|s| format!("STATUS: {s}"))
         .unwrap_or_default();
 
-    let mut hint_labels = vec![
+    let mut hint_labels: Vec<&str> = Vec::new();
+    let global_hints = [
         "Ctrl+Q Quit",
         "Ctrl+S Save",
         "Tab Focus",
-        "Ctrl+HJKL Pane",
         "F1/? Help",
-        "Ctrl+L Clear/Scan",
-        "Ctrl+Shift+S Syntax",
-        "Ctrl+B BBox/Debug",
-        "Ctrl+G Search",
-        "Ctrl+Y SeedSrc",
-        "Ctrl+T Wrap",
-        "Ctrl+R Seed",
-        "Ctrl+A Apply",
-        "Ctrl+N Snap",
-        "Ctrl+M Render",
-        "Ctrl+J Age",
-        "Ctrl+K Trails",
-        "Ctrl+H Heat",
-        "Space Pause",
-        "+/- Speed",
+        "Ctrl+B Debug",
     ];
+    hint_labels.extend(global_hints);
+    if state.focus != PaneId::Visualizer {
+        hint_labels.push("Ctrl+HJKL Pane");
+    }
+
+    match state.focus {
+        PaneId::Editor => {
+            let edit_hints = [
+                "Esc Normal",
+                "I Insert",
+                "V Visual",
+                "JJ Save+Normal",
+                "HJKL Move",
+                "Shift+S Syntax",
+            ];
+            hint_labels.extend(edit_hints);
+        }
+        PaneId::Notes => {
+            let notes_hints = ["Esc Normal", "I Insert", "V Visual", "JJ Save+Normal", "HJKL Move"];
+            hint_labels.extend(notes_hints);
+        }
+        PaneId::JobOutput => {
+            let job_hints = ["Ctrl+L Clear", "Ctrl+Space Pause Jobs"];
+            hint_labels.extend(job_hints);
+        }
+        PaneId::Visualizer => {
+            let viz_hints = [
+                "Ctrl+Enter Run",
+                "Ctrl+E ASCII",
+                "Ctrl+M Render",
+                "Ctrl+J Age",
+                "Ctrl+K Trails",
+                "Ctrl+B BBox",
+                "Ctrl+H Heat",
+                "Ctrl+G Search",
+                "Ctrl+O AutoStop",
+                "Ctrl+T Wrap",
+                "Ctrl+R Seed",
+                "Ctrl+A Apply",
+                "Ctrl+N Snap",
+                "Space Pause",
+                "+/- Speed",
+            ];
+            hint_labels.extend(viz_hints);
+        }
+        PaneId::GateMonitor => {
+            let gate_hints = ["Ctrl+Enter Run", "Ctrl+G Search", "Ctrl+O AutoStop"];
+            hint_labels.extend(gate_hints);
+        }
+    }
 
     let inner_width = area.width.saturating_sub(2) as usize;
     let fixed_width = [
@@ -58,8 +93,7 @@ pub fn render(frame: &mut Frame, area: ratatui::layout::Rect, state: &AppState, 
         " | ",
         " | ",
         &mode,
-        " | UTF-8 | ",
-        &format!("Ln {}, Col {}", line, col),
+        " | UTF-8 ",
     ]
     .iter()
     .map(|s| s.width())
@@ -130,11 +164,7 @@ pub fn render(frame: &mut Frame, area: ratatui::layout::Rect, state: &AppState, 
         ),
         Span::styled(" | ", Style::default().fg(theme.border)),
         Span::styled(mode, Style::default().fg(theme.accent)),
-        Span::styled(" | UTF-8 | ", Style::default().fg(theme.border)),
-        Span::styled(
-            format!("Ln {}, Col {}", line, col),
-            Style::default().fg(theme.foreground),
-        ),
+        Span::styled(" | UTF-8 ", Style::default().fg(theme.border)),
     ];
 
     let block = Block::default()

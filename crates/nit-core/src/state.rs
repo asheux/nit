@@ -107,6 +107,8 @@ pub struct VisualizerState {
     pub variant: u8,
     pub mode: VisualizerMode,
     pub render_mode: GolRenderMode,
+    pub running: bool,
+    pub seed_ascii: bool,
     pub age_shading: bool,
     pub trails: bool,
     pub overlay_bbox: bool,
@@ -200,6 +202,8 @@ impl AppState {
                 variant: 0,
                 mode: VisualizerMode::SimOnly,
                 render_mode: GolRenderMode::HalfBlock,
+                running: false,
+                seed_ascii: true,
                 age_shading: true,
                 trails: true,
                 overlay_bbox: false,
@@ -684,6 +688,17 @@ pub fn apply_action(state: &mut AppState, action: Action) -> ActionOutcome {
         }
         Action::VisualizerSpeedDown => {
             state.visualizer.tick_ms = (state.visualizer.tick_ms + 10).min(1000);
+        }
+        Action::VisualizerRun => {
+            state.visualizer.running = true;
+            state.visualizer.paused = false;
+            state.visualizer.pending_reseed = true;
+            state.status = Some("Visualizer running".into());
+        }
+        Action::VisualizerStop => {
+            state.visualizer.running = false;
+            state.visualizer.paused = false;
+            state.status = Some("Visualizer ASCII view".into());
         }
         Action::VisualizerCycleRenderMode => {
             let next = state

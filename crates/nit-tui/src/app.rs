@@ -323,6 +323,14 @@ fn map_key_to_action(key: KeyEvent, state: &AppState, input: &mut InputState) ->
         return Some(Action::ClearLogs);
     }
 
+    if is_job_pause_key(&key) {
+        return Some(Action::ToggleJobPause);
+    }
+
+    if is_global_run_key(&key) {
+        return Some(Action::VisualizerRun);
+    }
+
     if let Some(action) = visualizer_ctrl_action(&key, state) {
         return Some(action);
     }
@@ -395,11 +403,12 @@ fn map_key_to_action(key: KeyEvent, state: &AppState, input: &mut InputState) ->
             }
         }
         KeyEvent {
-            code: KeyCode::Char('s') | KeyCode::Char('S'),
+            code: KeyCode::Char('S'),
             modifiers,
             ..
-        } if modifiers.contains(KeyModifiers::CONTROL)
-            && modifiers.contains(KeyModifiers::SHIFT) =>
+        } if state.focus == PaneId::Editor
+            && state.mode != Mode::Insert
+            && (modifiers.is_empty() || modifiers == KeyModifiers::SHIFT) =>
         {
             Some(Action::ToggleSyntax)
         }
@@ -985,6 +994,30 @@ fn visualizer_ctrl_action(key: &KeyEvent, state: &AppState) -> Option<Action> {
     if state.focus != PaneId::Visualizer {
         return None;
     }
+    if matches!(
+        key,
+        KeyEvent {
+            code: KeyCode::Enter | KeyCode::Char('\n') | KeyCode::Char('\r'),
+            modifiers,
+            ..
+        } if modifiers.is_empty() || *modifiers == KeyModifiers::SHIFT
+    ) {
+        if !state.visualizer.running {
+            return Some(Action::VisualizerRun);
+        }
+    }
+    if matches!(
+        key,
+        KeyEvent {
+            code: KeyCode::Char('e') | KeyCode::Char('E'),
+            modifiers,
+            ..
+        } if modifiers.contains(KeyModifiers::CONTROL)
+    ) {
+        if state.visualizer.running {
+            return Some(Action::VisualizerStop);
+        }
+    }
     if !key.modifiers.contains(KeyModifiers::CONTROL) {
         return None;
     }
@@ -1002,6 +1035,17 @@ fn visualizer_ctrl_action(key: &KeyEvent, state: &AppState) -> Option<Action> {
     }
 }
 
+fn is_global_run_key(key: &KeyEvent) -> bool {
+    matches!(
+        key,
+        KeyEvent {
+            code: KeyCode::Enter | KeyCode::Char('\n') | KeyCode::Char('\r'),
+            modifiers,
+            ..
+        } if modifiers.contains(KeyModifiers::CONTROL)
+    )
+}
+
 fn is_clear_logs_key(key: &KeyEvent) -> bool {
     matches!(
         key,
@@ -1010,6 +1054,24 @@ fn is_clear_logs_key(key: &KeyEvent) -> bool {
             modifiers,
             ..
         } if modifiers.contains(KeyModifiers::CONTROL)
+    )
+}
+
+fn is_job_pause_key(key: &KeyEvent) -> bool {
+    matches!(
+        key,
+        KeyEvent {
+            code: KeyCode::Char(' '),
+            modifiers,
+            ..
+        } if modifiers.contains(KeyModifiers::CONTROL)
+    ) || matches!(
+        key,
+        KeyEvent {
+            code: KeyCode::Char('\u{0}'),
+            modifiers,
+            ..
+        } if modifiers.is_empty()
     )
 }
 

@@ -25,6 +25,7 @@ use tracing::{info, warn};
 use crate::gol_render::GolRenderState;
 
 const DEFAULT_LIVE_CHARS: &[char] = &['#', '@', '█', '▓', '▒', '░', '*', '+', 'x', 'X', '%', '&'];
+const ASCII_SEED_LIVE_MIN: u8 = 6;
 
 pub struct VisualizerRuntime {
     size: (usize, usize),
@@ -239,6 +240,9 @@ impl VisualizerRuntime {
     }
 
     fn step_if_due(&mut self, state: &mut AppState) {
+        if !state.visualizer.running {
+            return;
+        }
         if state.visualizer.paused || self.size.0 == 0 || self.size.1 == 0 {
             return;
         }
@@ -637,10 +641,23 @@ fn build_title(out: &mut String, mode: GolRenderMode) {
     out.clear();
     out.push_str("VISUALIZER (");
     out.push_str(mode.label());
-    out.push_str(")  [ APPLY ] [ SEED ] [ SNAP ] [ SEARCH ]");
+    out.push_str(")  [ RUN ] [ ASCII ] [ APPLY ] [ SEED ] [ SNAP ] [ SEARCH ]");
 }
 
 fn build_seed_grid(
+    state: &AppState,
+    width: usize,
+    height: usize,
+    seed: u64,
+) -> (u64, Grid) {
+    if state.visualizer.seed_ascii {
+        build_seed_grid_ascii(state, width, height, seed)
+    } else {
+        build_seed_grid_text(state, width, height, seed)
+    }
+}
+
+fn build_seed_grid_text(
     state: &AppState,
     width: usize,
     height: usize,
@@ -695,6 +712,85 @@ fn build_seed_grid(
             grid.set(x, y, alive);
         }
     }
+    (seed_hash, grid)
+}
+
+fn build_seed_grid_ascii(
+    state: &AppState,
+    width: usize,
+    height: usize,
+    seed: u64,
+) -> (u64, Grid) {
+    if width == 0 || height == 0 {
+        let seed_hash = stable_hash_bytes(&seed.to_le_bytes());
+        return (seed_hash, Grid::new(width, height));
+    }
+    let buffer = match state.visualizer.seed_source {
+        GolSeedSource::Notes => state.notes_buffer(),
+        GolSeedSource::Editor => state.editor_buffer(),
+    };
+    let start_line = buffer.viewport.offset_line;
+    let start_col = buffer.viewport.offset_col;
+    let mut grid = Grid::new(width, height);
+    let mut seed_text = String::with_capacity(width.saturating_mul(height + 1));
+
+    for row in 0..height {
+        let line_idx = start_line + row;
+        let mut line = if line_idx < buffer.lines_len() {
+            buffer.line_as_string(line_idx)
+        } else {
+            String::new()
+        };
+        if line.ends_with('\n') {
+            line.pop();
+        }
+        let mut chars = line.chars();
+        for _ in 0..start_col {
+            if chars.next().is_none() {
+                break;
+            }
+        }
+
+        let mut x = 0usize;
+        while x < width {
+            let Some(ch) = chars.next() else {
+                break;
+            };
+            let code = if ch.is_ascii() { ch as u32 } else { 127 };
+            let digits = [
+                ((code / 100) % 10) as u8,
+                ((code / 10) % 10) as u8,
+                (code % 10) as u8,
+            ];
+            for digit in digits {
+                if x >= width {
+                    break;
+                }
+                seed_text.push((b'0' + digit) as char);
+                let offset = ((seed >> ((x + row) & 0x0f)) & 0x0f) as u8;
+                let value = (digit + offset) % 10;
+                if value >= ASCII_SEED_LIVE_MIN {
+                    grid.set(x, row, true);
+                }
+                x += 1;
+            }
+            if x < width {
+                seed_text.push(' ');
+                x += 1;
+            }
+        }
+
+        while x < width {
+            seed_text.push(' ');
+            x += 1;
+        }
+
+        if row + 1 < height {
+            seed_text.push('\n');
+        }
+    }
+
+    let seed_hash = stable_hash_bytes(seed_text.as_bytes());
     (seed_hash, grid)
 }
 

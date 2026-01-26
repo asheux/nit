@@ -6,7 +6,6 @@
 - Tab / Shift+Tab: Cycle pane focus
 - Ctrl+H/J/K/L: Focus panes (vim/tmux style: left/down/up/right)
 - F1 / ?: Toggle help overlay
-- Ctrl+Shift+S: Toggle syntax highlighting
 
 ## Editor & Notes (focused)
 - Arrow keys / PageUp / PageDown / Home / End: Move cursor/scroll
@@ -17,6 +16,7 @@
 - o (Normal mode): Open line below + Insert mode
 - Shift+O (Normal mode): Open line above + Insert mode
 - JJ (Insert mode): Save + switch to Normal
+- Shift+S (Editor focus): Toggle syntax highlighting
 - GG (Normal mode): Go to top
 - Shift+G (Normal mode): Go to bottom
 - e (Normal mode): Move to end of word
@@ -48,6 +48,8 @@
 - Ctrl+O: Cycle auto-stop policy (Off → Fixed → Repeat)
 - Ctrl+T: Toggle wrap mode
 - Ctrl+N: Snapshot (SNAP)
+- Ctrl+Enter: Run visualizer (start simulation)
+- Ctrl+E: Return to ASCII view (stop simulation)
 - Ctrl+M: Cycle render mode (Solid → Half → Braille) (Visualizer focus)
 - Ctrl+J: Toggle age shading (Visualizer focus)
 - Ctrl+K: Toggle decay trails (Visualizer focus)

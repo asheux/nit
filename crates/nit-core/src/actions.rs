@@ -56,6 +56,8 @@ pub enum Action {
     VisualizerCycleAutoStop,
     VisualizerSpeedUp,
     VisualizerSpeedDown,
+    VisualizerRun,
+    VisualizerStop,
     VisualizerCycleRenderMode,
     VisualizerToggleAgeShading,
     VisualizerToggleTrails,

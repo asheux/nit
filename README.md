@@ -48,6 +48,8 @@ For details see `SECURITY.md`.
 - Cycle auto-stop policy: `Ctrl+O` (Off → Fixed → Repeat)
 - Toggle seed source (Editor/Notes): `Ctrl+Y`
 - Force snapshot: `Ctrl+N`
+- Run visualizer: `Ctrl+Enter`
+- Return to ASCII view: `Ctrl+E`
 - Cycle render mode: `Ctrl+M` (Solid → Half → Braille)
 - Toggle age shading: `Ctrl+J`
 - Toggle decay trails: `Ctrl+K`

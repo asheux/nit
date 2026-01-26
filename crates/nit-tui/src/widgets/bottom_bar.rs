@@ -18,7 +18,8 @@ pub fn render(
     stats: &SystemStats,
 ) {
     let focus = format!("FOCUS: {}", focus_name(state.focus));
-    let metrics = build_metrics_line(stats, theme);
+    let (line, col) = state.line_col();
+    let metrics = build_metrics_line(stats, theme, line, col);
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme.border))
@@ -54,7 +55,7 @@ fn focus_name(pane: PaneId) -> &'static str {
     pane.title()
 }
 
-fn build_metrics_line(stats: &SystemStats, theme: &Theme) -> Line<'static> {
+fn build_metrics_line(stats: &SystemStats, theme: &Theme, line: usize, col: usize) -> Line<'static> {
     let cpu = stats.cpu_percent().round().clamp(0.0, 100.0) as u8;
     let mem_used = stats.mem_used_gb();
     let mem_total = stats.mem_total_gb();
@@ -65,8 +66,15 @@ fn build_metrics_line(stats: &SystemStats, theme: &Theme) -> Line<'static> {
     let cpu_style = Style::default().fg(theme.accent);
     let gpu_style = Style::default().fg(theme.title_focused);
     let mem_style = Style::default().fg(theme.warning);
+    let coord_style = Style::default().fg(theme.foreground);
 
     let mut spans = Vec::new();
+    spans.push(Span::styled("Ln ", label_style));
+    spans.push(Span::styled(format!("{}, ", line), coord_style));
+    spans.push(Span::styled("Col ", label_style));
+    spans.push(Span::styled(format!("{col}"), coord_style));
+    spans.push(Span::styled(" | ", sep_style));
+
     spans.push(Span::styled("CPU ", label_style));
     spans.push(Span::styled(format!("{:02}%", cpu), cpu_style));
 

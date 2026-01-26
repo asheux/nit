@@ -15,176 +15,207 @@ pub fn preferred_size(screen: Rect) -> (u16, u16) {
 }
 
 pub fn render(frame: &mut Frame, area: Rect, theme: &Theme) {
-    let lines = vec![
-        Line::from(vec![
-            Span::styled("Ctrl+Q", Style::default().fg(theme.accent)),
-            Span::raw(" quit (confirm if dirty)"),
-        ]),
-        Line::from(vec![
-            Span::styled("Ctrl+S", Style::default().fg(theme.accent)),
-            Span::raw(" save"),
-        ]),
-        Line::from(vec![
-            Span::styled("F1 / ?", Style::default().fg(theme.accent)),
-            Span::raw(" toggle help"),
-        ]),
-        Line::from(vec![
-            Span::styled("Tab/Shift+Tab", Style::default().fg(theme.accent)),
-            Span::raw(" focus panes"),
-        ]),
-        Line::from(vec![
-            Span::styled("Ctrl+H/J/K/L", Style::default().fg(theme.accent)),
-            Span::raw(" focus panes (left/down/up/right)"),
-        ]),
-        Line::from(vec![
-            Span::styled("Esc", Style::default().fg(theme.accent)),
-            Span::raw(" switch to Normal mode"),
-        ]),
-        Line::from(vec![
-            Span::styled("H/J/K/L", Style::default().fg(theme.accent)),
-            Span::raw(" move in Normal mode"),
-        ]),
-        Line::from(vec![
-            Span::styled("I", Style::default().fg(theme.accent)),
-            Span::raw(" enter Insert mode"),
-        ]),
-        Line::from(vec![
-            Span::styled("a", Style::default().fg(theme.accent)),
-            Span::raw(" append + Insert (Normal mode)"),
-        ]),
-        Line::from(vec![
-            Span::styled("v", Style::default().fg(theme.accent)),
-            Span::raw(" Visual mode (Normal mode)"),
-        ]),
-        Line::from(vec![
-            Span::styled("o", Style::default().fg(theme.accent)),
-            Span::raw(" open line below + Insert (Normal mode)"),
-        ]),
-        Line::from(vec![
-            Span::styled("Shift+O", Style::default().fg(theme.accent)),
-            Span::raw(" open line above + Insert (Normal mode)"),
-        ]),
-        Line::from(vec![
-            Span::styled("JJ", Style::default().fg(theme.accent)),
-            Span::raw(" save + Normal (Insert mode)"),
-        ]),
-        Line::from(vec![
-            Span::styled("GG / Shift+G", Style::default().fg(theme.accent)),
-            Span::raw(" top / bottom"),
-        ]),
-        Line::from(vec![
-            Span::styled("u", Style::default().fg(theme.accent)),
-            Span::raw(" undo (Normal mode)"),
-        ]),
-        Line::from(vec![
-            Span::styled("Shift+R", Style::default().fg(theme.accent)),
-            Span::raw(" redo (Normal mode)"),
-        ]),
-        Line::from(vec![
-            Span::styled("e / b", Style::default().fg(theme.accent)),
-            Span::raw(" word end / word back (Normal mode)"),
-        ]),
-        Line::from(vec![
-            Span::styled("y", Style::default().fg(theme.accent)),
-            Span::raw(" yank selection (Visual mode)"),
-        ]),
-        Line::from(vec![
-            Span::styled("yy", Style::default().fg(theme.accent)),
-            Span::raw(" yank line (Normal mode)"),
-        ]),
-        Line::from(vec![
-            Span::styled("d", Style::default().fg(theme.accent)),
-            Span::raw(" delete selection (Visual mode)"),
-        ]),
-        Line::from(vec![
-            Span::styled("p", Style::default().fg(theme.accent)),
-            Span::raw(" paste (Normal mode)"),
-        ]),
-        Line::from(vec![
-            Span::styled("Shift+P", Style::default().fg(theme.accent)),
-            Span::raw(" paste above (Normal mode)"),
-        ]),
-        Line::from(vec![
-            Span::styled("dd", Style::default().fg(theme.accent)),
-            Span::raw(" delete line (Normal mode)"),
-        ]),
-        Line::from(vec![
-            Span::styled("$ / %", Style::default().fg(theme.accent)),
-            Span::raw(" end / start of line"),
-        ]),
-        Line::from(vec![
-            Span::styled("Ctrl+L", Style::default().fg(theme.accent)),
-            Span::raw(" clear logs (Job Output)"),
-        ]),
-        Line::from(vec![
-            Span::styled("Ctrl+Shift+S", Style::default().fg(theme.accent)),
-            Span::raw(" toggle syntax highlight"),
-        ]),
-        Line::from(vec![
-            Span::styled("Ctrl+B", Style::default().fg(theme.accent)),
-            Span::raw(" toggle debug mode (non-Visualizer focus)"),
-        ]),
-        Line::from(vec![
-            Span::styled("Ctrl+R", Style::default().fg(theme.accent)),
-            Span::raw(" reseed visualizer"),
-        ]),
-        Line::from(vec![
-            Span::styled("Ctrl+Y", Style::default().fg(theme.accent)),
-            Span::raw(" toggle seed source (Editor/Notes)"),
-        ]),
-        Line::from(vec![
-            Span::styled("Ctrl+A", Style::default().fg(theme.accent)),
-            Span::raw(" apply best rule / variant"),
-        ]),
-        Line::from(vec![
-            Span::styled("Ctrl+G", Style::default().fg(theme.accent)),
-            Span::raw(" toggle visualizer search"),
-        ]),
-        Line::from(vec![
-            Span::styled("Ctrl+O", Style::default().fg(theme.accent)),
-            Span::raw(" cycle visualizer auto-stop"),
-        ]),
-        Line::from(vec![
-            Span::styled("Ctrl+T", Style::default().fg(theme.accent)),
-            Span::raw(" toggle wrap mode"),
-        ]),
-        Line::from(vec![
-            Span::styled("Ctrl+N", Style::default().fg(theme.accent)),
-            Span::raw(" snapshot visualizer"),
-        ]),
-        Line::from(vec![
-            Span::styled("Ctrl+M", Style::default().fg(theme.accent)),
-            Span::raw(" cycle render mode (Visualizer focus)"),
-        ]),
-        Line::from(vec![
-            Span::styled("Ctrl+J", Style::default().fg(theme.accent)),
-            Span::raw(" toggle age shading (Visualizer focus)"),
-        ]),
-        Line::from(vec![
-            Span::styled("Ctrl+K", Style::default().fg(theme.accent)),
-            Span::raw(" toggle trails (Visualizer focus)"),
-        ]),
-        Line::from(vec![
-            Span::styled("Ctrl+B", Style::default().fg(theme.accent)),
-            Span::raw(" toggle bbox overlay (Visualizer focus)"),
-        ]),
-        Line::from(vec![
-            Span::styled("Ctrl+H", Style::default().fg(theme.accent)),
-            Span::raw(" toggle heat overlay (Visualizer focus)"),
-        ]),
-        Line::from(vec![
-            Span::styled("Ctrl+L", Style::default().fg(theme.accent)),
-            Span::raw(" toggle scanlines (Visualizer focus)"),
-        ]),
-        Line::from(vec![
-            Span::styled("Space", Style::default().fg(theme.accent)),
-            Span::raw(" pause/resume (Visualizer focus)"),
-        ]),
-        Line::from(vec![
-            Span::styled("+ / -", Style::default().fg(theme.accent)),
-            Span::raw(" speed up/down (Visualizer focus)"),
-        ]),
-    ];
+    let heading_style = Style::default()
+        .fg(theme.title_focused)
+        .add_modifier(Modifier::BOLD);
+    let mut lines = Vec::new();
+
+    lines.push(Line::from(vec![Span::styled("GLOBAL", heading_style)]));
+    lines.push(Line::from(vec![
+        Span::styled("Ctrl+Q", Style::default().fg(theme.accent)),
+        Span::raw(" quit (confirm if dirty)"),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("Ctrl+S", Style::default().fg(theme.accent)),
+        Span::raw(" save"),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("F1 / ?", Style::default().fg(theme.accent)),
+        Span::raw(" toggle help"),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("Tab/Shift+Tab", Style::default().fg(theme.accent)),
+        Span::raw(" focus panes"),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("Ctrl+H/J/K/L", Style::default().fg(theme.accent)),
+        Span::raw(" focus panes (left/down/up/right; not in Visualizer)"),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("Ctrl+B", Style::default().fg(theme.accent)),
+        Span::raw(" toggle debug mode (non-Visualizer focus)"),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("Ctrl+Enter", Style::default().fg(theme.accent)),
+        Span::raw(" run visualizer (any focus)"),
+    ]));
+
+    lines.push(Line::from(vec![Span::styled(
+        "EDITOR / NOTES (FOCUSED)",
+        heading_style,
+    )]));
+    lines.push(Line::from(vec![
+        Span::styled("Esc", Style::default().fg(theme.accent)),
+        Span::raw(" switch to Normal mode"),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("H/J/K/L", Style::default().fg(theme.accent)),
+        Span::raw(" move in Normal mode"),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("I", Style::default().fg(theme.accent)),
+        Span::raw(" enter Insert mode"),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("a", Style::default().fg(theme.accent)),
+        Span::raw(" append + Insert (Normal mode)"),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("v", Style::default().fg(theme.accent)),
+        Span::raw(" Visual mode (Normal mode)"),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("o", Style::default().fg(theme.accent)),
+        Span::raw(" open line below + Insert (Normal mode)"),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("Shift+O", Style::default().fg(theme.accent)),
+        Span::raw(" open line above + Insert (Normal mode)"),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("JJ", Style::default().fg(theme.accent)),
+        Span::raw(" save + Normal (Insert mode)"),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("Shift+S", Style::default().fg(theme.accent)),
+        Span::raw(" toggle syntax highlight (Editor focus)"),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("GG / Shift+G", Style::default().fg(theme.accent)),
+        Span::raw(" top / bottom"),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("u", Style::default().fg(theme.accent)),
+        Span::raw(" undo (Normal mode)"),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("Shift+R", Style::default().fg(theme.accent)),
+        Span::raw(" redo (Normal mode)"),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("e / b", Style::default().fg(theme.accent)),
+        Span::raw(" word end / word back (Normal mode)"),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("y", Style::default().fg(theme.accent)),
+        Span::raw(" yank selection (Visual mode)"),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("yy", Style::default().fg(theme.accent)),
+        Span::raw(" yank line (Normal mode)"),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("d", Style::default().fg(theme.accent)),
+        Span::raw(" delete selection (Visual mode)"),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("p", Style::default().fg(theme.accent)),
+        Span::raw(" paste (Normal mode)"),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("Shift+P", Style::default().fg(theme.accent)),
+        Span::raw(" paste above (Normal mode)"),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("dd", Style::default().fg(theme.accent)),
+        Span::raw(" delete line (Normal mode)"),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("$ / %", Style::default().fg(theme.accent)),
+        Span::raw(" end / start of line"),
+    ]));
+
+    lines.push(Line::from(vec![Span::styled(
+        "JOB OUTPUT (FOCUSED)",
+        heading_style,
+    )]));
+    lines.push(Line::from(vec![
+        Span::styled("Ctrl+L", Style::default().fg(theme.accent)),
+        Span::raw(" clear logs"),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("Ctrl+Space", Style::default().fg(theme.accent)),
+        Span::raw(" pause/resume job updates"),
+    ]));
+
+    lines.push(Line::from(vec![Span::styled(
+        "VISUALIZER (FOCUSED)",
+        heading_style,
+    )]));
+    lines.push(Line::from(vec![
+        Span::styled("Ctrl+E", Style::default().fg(theme.accent)),
+        Span::raw(" return to ASCII view"),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("Ctrl+R", Style::default().fg(theme.accent)),
+        Span::raw(" reseed visualizer"),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("Ctrl+Y", Style::default().fg(theme.accent)),
+        Span::raw(" toggle seed source (Editor/Notes)"),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("Ctrl+A", Style::default().fg(theme.accent)),
+        Span::raw(" apply best rule / variant"),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("Ctrl+G", Style::default().fg(theme.accent)),
+        Span::raw(" toggle visualizer search"),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("Ctrl+O", Style::default().fg(theme.accent)),
+        Span::raw(" cycle visualizer auto-stop"),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("Ctrl+T", Style::default().fg(theme.accent)),
+        Span::raw(" toggle wrap mode"),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("Ctrl+N", Style::default().fg(theme.accent)),
+        Span::raw(" snapshot visualizer"),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("Ctrl+M", Style::default().fg(theme.accent)),
+        Span::raw(" cycle render mode"),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("Ctrl+J", Style::default().fg(theme.accent)),
+        Span::raw(" toggle age shading"),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("Ctrl+K", Style::default().fg(theme.accent)),
+        Span::raw(" toggle trails"),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("Ctrl+B", Style::default().fg(theme.accent)),
+        Span::raw(" toggle bbox overlay"),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("Ctrl+H", Style::default().fg(theme.accent)),
+        Span::raw(" toggle heat overlay"),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("Ctrl+L", Style::default().fg(theme.accent)),
+        Span::raw(" toggle scanlines"),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("Space", Style::default().fg(theme.accent)),
+        Span::raw(" pause/resume"),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("+ / -", Style::default().fg(theme.accent)),
+        Span::raw(" speed up/down"),
+    ]));
 
     let block = Block::default()
         .borders(Borders::ALL)
