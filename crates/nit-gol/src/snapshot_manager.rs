@@ -26,15 +26,6 @@ pub enum SnapshotEventKind {
 }
 
 impl SnapshotEventKind {
-    fn label(self) -> &'static str {
-        match self {
-            SnapshotEventKind::FixedPoint => "FIXED",
-            SnapshotEventKind::Cycle => "CYCLE",
-            SnapshotEventKind::NewBestRule => "BEST",
-            SnapshotEventKind::Manual => "MANUAL",
-        }
-    }
-
     fn is_manual(self) -> bool {
         matches!(self, SnapshotEventKind::Manual)
     }
@@ -345,8 +336,7 @@ fn snapshot_name_base(req: &SnapshotRequest) -> String {
     let rule_tag = req.rule.replace('/', "");
     let hash = req.grid_hash[0] as u32;
     format!(
-        "{timestamp}__event-{}__rule-{}__gen-{gen:05}__hash-{hash:08x}",
-        req.event.label(),
+        "sim__{timestamp}__rule-{}__gen-{gen:05}__hash-{hash:08x}",
         rule_tag,
         gen = req.gen
     )
@@ -482,6 +472,12 @@ mod tests {
             wrap_mode: "dead".into(),
             tick_ms: 1,
             attractor: None,
+            encoder_id: None,
+            encoder_params: None,
+            params_fingerprint: None,
+            input_hash: None,
+            seed_density: None,
+            seed_components: None,
         }
     }
 

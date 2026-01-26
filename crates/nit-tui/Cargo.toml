@@ -11,6 +11,7 @@ serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 toml = { workspace = true }
 tracing = { workspace = true }
+crossbeam-channel = { workspace = true }
 nit-core = { path = "../nit-core" }
 nit-gol = { path = "../nit-gol" }
 nit-syntax = { path = "../nit-syntax" }

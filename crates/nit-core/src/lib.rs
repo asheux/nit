@@ -8,6 +8,7 @@ pub mod io;
 pub mod mode;
 pub mod pane;
 pub mod prompt;
+pub mod seed;
 pub mod state;
 pub mod viewport;
 
@@ -23,6 +24,10 @@ pub use io::{load_to_string, save_buffer};
 pub use mode::Mode;
 pub use pane::PaneId;
 pub use prompt::Prompt;
+pub use seed::{
+    encode_seed, EncodedSeed, SeedEncoderId, SeedParams, SeedPlacement, SeedPreviewMode, SeedStats,
+    SeedSymmetry,
+};
 pub use state::{
     apply_action, AppState, GolRenderMode, JobState, LogBuffer, Metrics, VisualizerMode,
     VisualizerRuleEntry, VisualizerState, YankKind,

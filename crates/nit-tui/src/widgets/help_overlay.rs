@@ -47,7 +47,15 @@ pub fn render(frame: &mut Frame, area: Rect, theme: &Theme) {
     ]));
     lines.push(Line::from(vec![
         Span::styled("Ctrl+Enter", Style::default().fg(theme.accent)),
-        Span::raw(" run visualizer (any focus)"),
+        Span::raw(" run Petri Dish (any focus)"),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("Ctrl+^", Style::default().fg(theme.accent)),
+        Span::raw(" show hidden Petri Dish"),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled(":", Style::default().fg(theme.accent)),
+        Span::raw(" command prompt (Normal mode)"),
     ]));
 
     lines.push(Line::from(vec![Span::styled(
@@ -154,11 +162,11 @@ pub fn render(frame: &mut Frame, area: Rect, theme: &Theme) {
     )]));
     lines.push(Line::from(vec![
         Span::styled("Ctrl+E", Style::default().fg(theme.accent)),
-        Span::raw(" return to ASCII view"),
+        Span::raw(" cycle encoder"),
     ]));
     lines.push(Line::from(vec![
         Span::styled("Ctrl+R", Style::default().fg(theme.accent)),
-        Span::raw(" reseed visualizer"),
+        Span::raw(" cycle seed preview"),
     ]));
     lines.push(Line::from(vec![
         Span::styled("Ctrl+Y", Style::default().fg(theme.accent)),
@@ -166,55 +174,77 @@ pub fn render(frame: &mut Frame, area: Rect, theme: &Theme) {
     ]));
     lines.push(Line::from(vec![
         Span::styled("Ctrl+A", Style::default().fg(theme.accent)),
-        Span::raw(" apply best rule / variant"),
+        Span::raw(" apply seed proposal"),
     ]));
     lines.push(Line::from(vec![
         Span::styled("Ctrl+G", Style::default().fg(theme.accent)),
-        Span::raw(" toggle visualizer search"),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled("Ctrl+O", Style::default().fg(theme.accent)),
-        Span::raw(" cycle visualizer auto-stop"),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled("Ctrl+T", Style::default().fg(theme.accent)),
-        Span::raw(" toggle wrap mode"),
+        Span::raw(" toggle seed search"),
     ]));
     lines.push(Line::from(vec![
         Span::styled("Ctrl+N", Style::default().fg(theme.accent)),
-        Span::raw(" snapshot visualizer"),
+        Span::raw(" snapshot seed"),
     ]));
+
+    lines.push(Line::from(vec![Span::styled(
+        "PETRI DISH (POPUP)",
+        heading_style,
+    )]));
     lines.push(Line::from(vec![
-        Span::styled("Ctrl+M", Style::default().fg(theme.accent)),
-        Span::raw(" cycle render mode"),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled("Ctrl+J", Style::default().fg(theme.accent)),
-        Span::raw(" toggle age shading"),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled("Ctrl+K", Style::default().fg(theme.accent)),
-        Span::raw(" toggle trails"),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled("Ctrl+B", Style::default().fg(theme.accent)),
-        Span::raw(" toggle bbox overlay"),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled("Ctrl+H", Style::default().fg(theme.accent)),
-        Span::raw(" toggle heat overlay"),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled("Ctrl+L", Style::default().fg(theme.accent)),
-        Span::raw(" toggle scanlines"),
+        Span::styled("Esc", Style::default().fg(theme.accent)),
+        Span::raw(" close popup"),
     ]));
     lines.push(Line::from(vec![
         Span::styled("Space", Style::default().fg(theme.accent)),
         Span::raw(" pause/resume"),
     ]));
     lines.push(Line::from(vec![
+        Span::styled("Enter", Style::default().fg(theme.accent)),
+        Span::raw(" step one generation"),
+    ]));
+    lines.push(Line::from(vec![
         Span::styled("+ / -", Style::default().fg(theme.accent)),
         Span::raw(" speed up/down"),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("S", Style::default().fg(theme.accent)),
+        Span::raw(" snapshot sim"),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("Ctrl+R", Style::default().fg(theme.accent)),
+        Span::raw(" reseed from current code"),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("T", Style::default().fg(theme.accent)),
+        Span::raw(" toggle wrap mode"),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("O", Style::default().fg(theme.accent)),
+        Span::raw(" cycle auto-stop"),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("G", Style::default().fg(theme.accent)),
+        Span::raw(" toggle rule search"),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("A", Style::default().fg(theme.accent)),
+        Span::raw(" apply best rule"),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("H", Style::default().fg(theme.accent)),
+        Span::raw(" hide popup (sim keeps running)"),
+    ]));
+
+    lines.push(Line::from(vec![Span::styled(
+        "COMMAND PROMPT",
+        heading_style,
+    )]));
+    lines.push(Line::from(vec![
+        Span::styled(":gol hide", Style::default().fg(theme.accent)),
+        Span::raw(" hide Petri Dish (keep running)"),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled(":gol show", Style::default().fg(theme.accent)),
+        Span::raw(" show Petri Dish"),
     ]));
 
     let block = Block::default()

@@ -5,7 +5,10 @@ use std::time::{Duration, Instant};
 use arboard::Clipboard;
 use crossterm::{
     cursor::SetCursorStyle,
-    event::{self, Event, KeyCode, KeyEvent, KeyModifiers},
+    event::{
+        self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, KeyboardEnhancementFlags,
+        PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+    },
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -23,10 +26,11 @@ use tracing::info;
 
 use crate::{
     layout,
+    petri_dish::PetriDishRuntime,
+    seed_runtime::SeedRuntime,
     system_stats::SystemStats,
     syntax::SyntaxRuntime,
     theme::Theme,
-    visualizer::VisualizerRuntime,
     widgets::{
         bottom_bar, editor_view, gate_monitor_view, help_overlay, job_output_view, notes_view,
         top_bar, visualizer_view,
@@ -42,7 +46,17 @@ pub fn run(mut state: AppState, theme: Theme, log_rx: Receiver<String>) -> io::R
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
-    let mut guard = TerminalGuard { active: true };
+    let mut guard = TerminalGuard {
+        active: true,
+        keyboard_flags_pushed: false,
+    };
+    let keyboard_flags = KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+        | KeyboardEnhancementFlags::REPORT_EVENT_TYPES
+        | KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS
+        | KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES;
+    if execute!(stdout, PushKeyboardEnhancementFlags(keyboard_flags)).is_ok() {
+        guard.keyboard_flags_pushed = true;
+    }
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
     terminal.hide_cursor()?;
@@ -56,6 +70,10 @@ pub fn run(mut state: AppState, theme: Theme, log_rx: Receiver<String>) -> io::R
     let result = run_loop(&mut terminal, &mut state, &theme, &mut syntax, log_rx);
 
     terminal.show_cursor()?;
+    if guard.keyboard_flags_pushed {
+        let _ = execute!(io::stdout(), PopKeyboardEnhancementFlags);
+        guard.keyboard_flags_pushed = false;
+    }
     execute!(io::stdout(), SetCursorStyle::DefaultUserShape)?;
     disable_raw_mode()?;
     execute!(io::stdout(), LeaveAlternateScreen)?;
@@ -78,7 +96,8 @@ fn run_loop(
     let mut input_state = InputState::new();
     let mut system_stats = SystemStats::new();
     let mut clipboard = Clipboard::new().ok();
-    let mut visualizer = VisualizerRuntime::new(state);
+    let mut seed_runtime = SeedRuntime::new(state);
+    let mut petri = PetriDishRuntime::new(state);
     tracing::info!("SECURITY: no plugins, no network, no shell execution");
     loop {
         if let Some(deferred) = input_state.take_deferred() {
@@ -100,7 +119,17 @@ fn run_loop(
         let mut handled_input = false;
         if event::poll(timeout)? {
             if let Event::Key(key) = event::read()? {
+                if key.kind == KeyEventKind::Release {
+                    continue;
+                }
                 handled_input = true;
+                if petri.is_visible() {
+                    let screen = terminal.size().unwrap_or_default();
+                    if petri.handle_key(&key, state, &mut seed_runtime, screen) {
+                        needs_redraw = true;
+                        continue;
+                    }
+                }
                 if let Some(action) = map_key_to_action(key, state, &mut input_state) {
                     prepare_clipboard_paste(state, &mut clipboard, &action);
                     let action_copy = action.clone();
@@ -158,19 +187,28 @@ fn run_loop(
         syntax.poll_results(notes_id, state.notes_buffer().version());
 
         let tick_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            visualizer.tick(state);
+            seed_runtime.tick(state);
+            petri.tick(state);
         }));
         if let Err(err) = tick_result {
-            tracing::error!("Visualizer panic: {:?}", err);
+            tracing::error!("Runtime panic: {:?}", err);
             state.visualizer.paused = true;
             state.visualizer.paused_by_attractor = false;
-            state.status = Some("Visualizer paused (error)".into());
+            state.status = Some("Petri dish paused (error)".into());
         }
 
         // redraw
         if needs_redraw || last_tick.elapsed() >= TICK_RATE {
             system_stats.refresh_if_needed();
-            draw(terminal, state, theme, syntax, &system_stats, &mut visualizer)?;
+            draw(
+                terminal,
+                state,
+                theme,
+                syntax,
+                &system_stats,
+                &mut seed_runtime,
+                &mut petri,
+            )?;
             needs_redraw = false;
             last_tick = Instant::now();
         }
@@ -184,7 +222,8 @@ fn draw(
     theme: &Theme,
     syntax: &SyntaxRuntime,
     system_stats: &SystemStats,
-    visualizer: &mut VisualizerRuntime,
+    seed_runtime: &mut SeedRuntime,
+    petri: &mut PetriDishRuntime,
 ) -> io::Result<()> {
     let start = Instant::now();
     terminal.draw(|f| {
@@ -260,8 +299,8 @@ fn draw(
             .effective(state.settings.gol.braille_enabled);
         let (grid_w, grid_h) =
             crate::gol_render::grid_size_for_mode(viz_inner_width, viz_grid_rows, render_mode);
-        visualizer.ensure_size(grid_w, grid_h, state);
-        visualizer_view::render(f, layout.visualizer, state, theme, visualizer);
+        seed_runtime.ensure_size(grid_w, grid_h, state);
+        visualizer_view::render(f, layout.visualizer, state, theme, seed_runtime);
         gate_monitor_view::render(
             f,
             layout.gate,
@@ -288,8 +327,24 @@ fn draw(
             render_prompt(f, area, theme, message);
         }
 
+        if state.command_line.is_some() {
+            let cmd = state
+                .command_line
+                .as_ref()
+                .map(|c| c.input.as_str())
+                .unwrap_or("");
+            let message = format!(":{cmd}");
+            let area = dynamic_popup_rect(f.size(), prompt_size(&message));
+            render_command_prompt(f, area, theme, &message);
+        }
+
+        petri.handle_pending_requests(state, seed_runtime, f.size());
+        petri.render(f, f.size(), state, theme);
+
         // cursor
-        if let Some(pos) = if state.focus == PaneId::Editor {
+        if petri.is_visible() || state.command_line.is_some() {
+            f.set_cursor(f.size().x, f.size().y);
+        } else if let Some(pos) = if state.focus == PaneId::Editor {
             editor_cursor
         } else {
             notes_cursor
@@ -319,12 +374,28 @@ fn map_key_to_action(key: KeyEvent, state: &AppState, input: &mut InputState) ->
         };
     }
 
+    if state.command_line.is_some() {
+        return match key.code {
+            KeyCode::Esc => Some(Action::CommandPromptCancel),
+            KeyCode::Enter => Some(Action::CommandPromptExecute),
+            KeyCode::Backspace => Some(Action::CommandPromptBackspace),
+            KeyCode::Char(c) if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT => {
+                Some(Action::CommandPromptInput(c))
+            }
+            _ => None,
+        };
+    }
+
     if state.focus == PaneId::JobOutput && is_clear_logs_key(&key) {
         return Some(Action::ClearLogs);
     }
 
     if is_job_pause_key(&key) {
         return Some(Action::ToggleJobPause);
+    }
+
+    if is_petri_show_key(&key, state) {
+        return Some(Action::PetriShow);
     }
 
     if is_global_run_key(&key) {
@@ -418,11 +489,6 @@ fn map_key_to_action(key: KeyEvent, state: &AppState, input: &mut InputState) ->
             ..
         } => Some(Action::VisualizerToggleSearch),
         KeyEvent {
-            code: KeyCode::Char('o'),
-            modifiers: KeyModifiers::CONTROL,
-            ..
-        } => Some(Action::VisualizerCycleAutoStop),
-        KeyEvent {
             code: KeyCode::Char('y'),
             modifiers: KeyModifiers::CONTROL,
             ..
@@ -432,11 +498,6 @@ fn map_key_to_action(key: KeyEvent, state: &AppState, input: &mut InputState) ->
             modifiers: KeyModifiers::NONE,
             ..
         } => Some(Action::VisualizerToggleSeedSource),
-        KeyEvent {
-            code: KeyCode::Char('t'),
-            modifiers: KeyModifiers::CONTROL,
-            ..
-        } => Some(Action::VisualizerToggleWrap),
         KeyEvent {
             code: KeyCode::Char('n'),
             modifiers: KeyModifiers::CONTROL,
@@ -474,6 +535,11 @@ fn map_key_to_action(key: KeyEvent, state: &AppState, input: &mut InputState) ->
             modifiers: KeyModifiers::NONE,
             ..
         } if is_normal_mode(state) => Some(Action::EnterVisual),
+        KeyEvent {
+            code: KeyCode::Char(':'),
+            modifiers: KeyModifiers::NONE,
+            ..
+        } if is_normal_mode(state) => Some(Action::CommandPromptOpen),
         KeyEvent {
             code: KeyCode::Char('a'),
             modifiers: KeyModifiers::NONE,
@@ -600,39 +666,6 @@ fn map_key_to_action(key: KeyEvent, state: &AppState, input: &mut InputState) ->
             modifiers: KeyModifiers::CONTROL,
             ..
         } => Some(Action::ToggleJobPause),
-        KeyEvent {
-            code: KeyCode::Char('r'),
-            modifiers: KeyModifiers::CONTROL,
-            ..
-        } => Some(Action::VisualizerReseed),
-        KeyEvent {
-            code: KeyCode::Char('a'),
-            modifiers: KeyModifiers::CONTROL,
-            ..
-        } => Some(Action::VisualizerApply),
-        KeyEvent {
-            code: KeyCode::Char(' '),
-            modifiers: KeyModifiers::NONE,
-            ..
-        } if state.focus == PaneId::Visualizer => Some(Action::VisualizerPause),
-        KeyEvent {
-            code: KeyCode::Char('+') | KeyCode::Char('='),
-            modifiers,
-            ..
-        } if state.focus == PaneId::Visualizer
-            && (modifiers.is_empty() || modifiers == KeyModifiers::SHIFT) =>
-        {
-            Some(Action::VisualizerSpeedUp)
-        }
-        KeyEvent {
-            code: KeyCode::Char('-'),
-            modifiers,
-            ..
-        } if state.focus == PaneId::Visualizer
-            && (modifiers.is_empty() || modifiers == KeyModifiers::SHIFT) =>
-        {
-            Some(Action::VisualizerSpeedDown)
-        }
         KeyEvent {
             code: KeyCode::Char(c),
             modifiers,
@@ -994,30 +1027,6 @@ fn visualizer_ctrl_action(key: &KeyEvent, state: &AppState) -> Option<Action> {
     if state.focus != PaneId::Visualizer {
         return None;
     }
-    if matches!(
-        key,
-        KeyEvent {
-            code: KeyCode::Enter | KeyCode::Char('\n') | KeyCode::Char('\r'),
-            modifiers,
-            ..
-        } if modifiers.is_empty() || *modifiers == KeyModifiers::SHIFT
-    ) {
-        if !state.visualizer.running {
-            return Some(Action::VisualizerRun);
-        }
-    }
-    if matches!(
-        key,
-        KeyEvent {
-            code: KeyCode::Char('e') | KeyCode::Char('E'),
-            modifiers,
-            ..
-        } if modifiers.contains(KeyModifiers::CONTROL)
-    ) {
-        if state.visualizer.running {
-            return Some(Action::VisualizerStop);
-        }
-    }
     if !key.modifiers.contains(KeyModifiers::CONTROL) {
         return None;
     }
@@ -1025,6 +1034,12 @@ fn visualizer_ctrl_action(key: &KeyEvent, state: &AppState) -> Option<Action> {
         return None;
     }
     match key.code {
+        KeyCode::Char('r') | KeyCode::Char('R') => Some(Action::VisualizerCycleSeedView),
+        KeyCode::Char('e') | KeyCode::Char('E') => Some(Action::VisualizerCycleEncoder),
+        KeyCode::Char('a') | KeyCode::Char('A') => Some(Action::VisualizerApply),
+        KeyCode::Char('g') | KeyCode::Char('G') => Some(Action::VisualizerToggleSearch),
+        KeyCode::Char('y') | KeyCode::Char('Y') => Some(Action::VisualizerToggleSeedSource),
+        KeyCode::Char('n') | KeyCode::Char('N') => Some(Action::VisualizerSnapshot),
         KeyCode::Char('m') | KeyCode::Char('M') => Some(Action::VisualizerCycleRenderMode),
         KeyCode::Char('j') | KeyCode::Char('J') => Some(Action::VisualizerToggleAgeShading),
         KeyCode::Char('k') | KeyCode::Char('K') => Some(Action::VisualizerToggleTrails),
@@ -1036,14 +1051,36 @@ fn visualizer_ctrl_action(key: &KeyEvent, state: &AppState) -> Option<Action> {
 }
 
 fn is_global_run_key(key: &KeyEvent) -> bool {
-    matches!(
-        key,
+    match key {
         KeyEvent {
             code: KeyCode::Enter | KeyCode::Char('\n') | KeyCode::Char('\r'),
             modifiers,
             ..
-        } if modifiers.contains(KeyModifiers::CONTROL)
-    )
+        } if modifiers.contains(KeyModifiers::CONTROL) => true,
+        KeyEvent {
+            code: KeyCode::Char('m')
+                | KeyCode::Char('M')
+                | KeyCode::Char('j')
+                | KeyCode::Char('J'),
+            modifiers,
+            ..
+        } if modifiers.contains(KeyModifiers::CONTROL) => true,
+        _ => false,
+    }
+}
+
+fn is_petri_show_key(key: &KeyEvent, state: &AppState) -> bool {
+    if !state.visualizer.petri_hidden || !state.visualizer.running {
+        return false;
+    }
+    match key {
+        KeyEvent {
+            code: KeyCode::Char('^') | KeyCode::Char('6'),
+            modifiers,
+            ..
+        } if modifiers.contains(KeyModifiers::CONTROL) => true,
+        _ => false,
+    }
 }
 
 fn is_clear_logs_key(key: &KeyEvent) -> bool {
@@ -1146,6 +1183,24 @@ fn render_prompt(
     frame.render_widget(paragraph, area);
 }
 
+fn render_command_prompt(
+    frame: &mut ratatui::Frame,
+    area: ratatui::layout::Rect,
+    theme: &Theme,
+    message: &str,
+) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme.border_focused))
+        .title("COMMAND")
+        .style(Style::default().bg(theme.selection_bg));
+    let paragraph = Paragraph::new(message)
+        .style(Style::default().bg(theme.selection_bg).fg(theme.foreground))
+        .block(block);
+    frame.render_widget(Clear, area);
+    frame.render_widget(paragraph, area);
+}
+
 fn save_notes_on_exit(state: &AppState) -> core_io::Result<()> {
     let buffer = state.notes_buffer();
     if buffer.path().is_none() {
@@ -1159,11 +1214,15 @@ fn save_notes_on_exit(state: &AppState) -> core_io::Result<()> {
 
 struct TerminalGuard {
     active: bool,
+    keyboard_flags_pushed: bool,
 }
 
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
         if self.active {
+            if self.keyboard_flags_pushed {
+                let _ = execute!(io::stdout(), PopKeyboardEnhancementFlags);
+            }
             let _ = disable_raw_mode();
             let _ = execute!(io::stdout(), SetCursorStyle::DefaultUserShape);
             let _ = execute!(io::stdout(), LeaveAlternateScreen);

@@ -1,4 +1,4 @@
-use nit_core::{AppState, PaneId};
+use nit_core::AppState;
 use ratatui::{
     layout::Alignment,
     style::{Modifier, Style},
@@ -28,65 +28,6 @@ pub fn render(frame: &mut Frame, area: ratatui::layout::Rect, state: &AppState, 
         .map(|s| format!("STATUS: {s}"))
         .unwrap_or_default();
 
-    let mut hint_labels: Vec<&str> = Vec::new();
-    let global_hints = [
-        "Ctrl+Q Quit",
-        "Ctrl+S Save",
-        "Tab Focus",
-        "F1/? Help",
-        "Ctrl+B Debug",
-    ];
-    hint_labels.extend(global_hints);
-    if state.focus != PaneId::Visualizer {
-        hint_labels.push("Ctrl+HJKL Pane");
-    }
-
-    match state.focus {
-        PaneId::Editor => {
-            let edit_hints = [
-                "Esc Normal",
-                "I Insert",
-                "V Visual",
-                "JJ Save+Normal",
-                "HJKL Move",
-                "Shift+S Syntax",
-            ];
-            hint_labels.extend(edit_hints);
-        }
-        PaneId::Notes => {
-            let notes_hints = ["Esc Normal", "I Insert", "V Visual", "JJ Save+Normal", "HJKL Move"];
-            hint_labels.extend(notes_hints);
-        }
-        PaneId::JobOutput => {
-            let job_hints = ["Ctrl+L Clear", "Ctrl+Space Pause Jobs"];
-            hint_labels.extend(job_hints);
-        }
-        PaneId::Visualizer => {
-            let viz_hints = [
-                "Ctrl+Enter Run",
-                "Ctrl+E ASCII",
-                "Ctrl+M Render",
-                "Ctrl+J Age",
-                "Ctrl+K Trails",
-                "Ctrl+B BBox",
-                "Ctrl+H Heat",
-                "Ctrl+G Search",
-                "Ctrl+O AutoStop",
-                "Ctrl+T Wrap",
-                "Ctrl+R Seed",
-                "Ctrl+A Apply",
-                "Ctrl+N Snap",
-                "Space Pause",
-                "+/- Speed",
-            ];
-            hint_labels.extend(viz_hints);
-        }
-        PaneId::GateMonitor => {
-            let gate_hints = ["Ctrl+Enter Run", "Ctrl+G Search", "Ctrl+O AutoStop"];
-            hint_labels.extend(gate_hints);
-        }
-    }
-
     let inner_width = area.width.saturating_sub(2) as usize;
     let fixed_width = [
         " nit ",
@@ -99,6 +40,12 @@ pub fn render(frame: &mut Frame, area: ratatui::layout::Rect, state: &AppState, 
     .map(|s| s.width())
     .sum::<usize>();
 
+    let mut hint_labels = vec![
+        "Ctrl+Q Quit",
+        "Ctrl+S Save",
+        "Ctrl+Y Seed",
+        "Ctrl+E Encoder",
+    ];
     let mut hints_text = hints_join(&hint_labels);
     let mut hints_width = hints_text.width();
     let mut status_width = status_label.width();

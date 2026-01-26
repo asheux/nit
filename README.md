@@ -44,21 +44,25 @@ For details see `SECURITY.md`.
 
 ## Visualizer quick notes
 
-- Toggle search mode: `Ctrl+G`
-- Cycle auto-stop policy: `Ctrl+O` (Off → Fixed → Repeat)
-- Toggle seed source (Editor/Notes): `Ctrl+Y`
-- Force snapshot: `Ctrl+N`
-- Run visualizer: `Ctrl+Enter`
-- Return to ASCII view: `Ctrl+E`
-- Cycle render mode: `Ctrl+M` (Solid → Half → Braille)
-- Toggle age shading: `Ctrl+J`
-- Toggle decay trails: `Ctrl+K`
-- Toggle bounding box overlay: `Ctrl+B`
-- Toggle heat overlay: `Ctrl+H`
-- Toggle scanlines overlay: `Ctrl+L`
+- Visualizer pane shows the encoded seed (genome) only; simulation runs in a popup.
+- Run Petri Dish popup: `Ctrl+Enter`
+- Show hidden Petri Dish: `Ctrl+^`
+- Command prompt (Normal mode): `:gol run` / `:run gol` / `:life run`
+- Seed controls (Visualizer focus):
+  - Cycle encoder: `Ctrl+E`
+  - Cycle seed preview: `Ctrl+R` (grid/matrix/motif)
+  - Toggle seed source (Editor/Notes): `Ctrl+Y`
+  - Toggle seed search: `Ctrl+G`
+  - Apply seed proposal: `Ctrl+A`
+  - Snapshot seed: `Ctrl+N`
+- Petri Dish popup controls:
+  - `Esc` close, `Space` pause, `Enter` step
+  - `+/-` speed, `S` snapshot sim, `Ctrl+R` reseed from current code, `H` hide popup
+  - `T` wrap mode, `O` auto-stop, `G` rule search, `A` apply best rule
+  - Command prompt: `:gol hide` / `:gol show` to toggle visibility while sim runs
 - Snapshots land in `gol-snapshots/`:
-  - `<timestamp>__event-CYCLE__rule-B3S23__gen-00042__hash-abcdef.rle`
-  - matching `.json` with metadata
+  - Seed snapshots: `seed__<timestamp>__enc-<id>__seedhash-<hash>.json` (+ `.rle`)
+  - Sim snapshots: `sim__<timestamp>__rule-B3S23__gen-00145__hash-<hash>.rle` (+ `.json`)
   - `rules.ndjson` append-only best-rule log
 - Snapshotting is async, bounded, and deduped to avoid repeat storms.
 - Search intensity and limits are controlled in settings (defaults in `crates/nit-core/src/config.rs`).

@@ -6,6 +6,7 @@ use crate::{
     mode::Mode,
     pane::PaneId,
     prompt::Prompt,
+    seed::{SeedEncoderId, SeedParams, SeedPreviewMode, SeedStats},
     viewport::Viewport,
 };
 use nit_gol::{AttractorEvent, AutoStopPolicy};
@@ -106,9 +107,16 @@ pub struct VisualizerState {
     pub seed: u64,
     pub variant: u8,
     pub mode: VisualizerMode,
+    pub seed_encoder: SeedEncoderId,
+    pub seed_preview: SeedPreviewMode,
+    pub seed_params: SeedParams,
+    pub seed_stats: SeedStats,
+    pub seed_hash: u64,
+    pub input_hash: u64,
+    pub seed_search_active: bool,
+    pub seed_search_rps: u32,
     pub render_mode: GolRenderMode,
     pub running: bool,
-    pub seed_ascii: bool,
     pub age_shading: bool,
     pub trails: bool,
     pub overlay_bbox: bool,
@@ -128,16 +136,30 @@ pub struct VisualizerState {
     pub search_rps: u32,
     pub leaderboard: Vec<VisualizerRuleEntry>,
     pub last_score: Option<f32>,
+    pub seed_snapshots_written: u64,
+    pub seed_snapshots_dropped: u64,
+    pub seed_snapshot_queue_depth: usize,
+    pub seed_last_snapshot_path: Option<String>,
     pub snapshots_written: u64,
     pub snapshots_dropped: u64,
     pub snapshot_queue_depth: usize,
     pub last_snapshot_path: Option<String>,
+    #[serde(skip)]
+    pub petri_hidden: bool,
     #[serde(skip)]
     pub pending_reseed: bool,
     #[serde(skip)]
     pub pending_apply: bool,
     #[serde(skip)]
     pub pending_snapshot: bool,
+    #[serde(skip)]
+    pub pending_run: bool,
+    #[serde(skip)]
+    pub pending_close: bool,
+    #[serde(skip)]
+    pub pending_hide: bool,
+    #[serde(skip)]
+    pub pending_show: bool,
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -145,6 +167,19 @@ pub struct Metrics {
     pub last_render_ms: u128,
     pub frame_count: u64,
     pub last_action: Option<Action>,
+}
+
+#[derive(Clone, Debug)]
+pub struct CommandLine {
+    pub input: String,
+}
+
+impl CommandLine {
+    pub fn new() -> Self {
+        Self {
+            input: String::new(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -168,6 +203,8 @@ pub struct AppState {
     pub yank: Option<String>,
     #[serde(skip)]
     pub yank_kind: YankKind,
+    #[serde(skip)]
+    pub command_line: Option<CommandLine>,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Default)]
@@ -201,9 +238,16 @@ impl AppState {
                 seed: 1,
                 variant: 0,
                 mode: VisualizerMode::SimOnly,
+                seed_encoder: SeedEncoderId::AsciiBytes,
+                seed_preview: SeedPreviewMode::BitGrid,
+                seed_params: SeedParams::default(),
+                seed_stats: SeedStats::default(),
+                seed_hash: 0,
+                input_hash: 0,
+                seed_search_active: false,
+                seed_search_rps: 0,
                 render_mode: GolRenderMode::HalfBlock,
                 running: false,
-                seed_ascii: true,
                 age_shading: true,
                 trails: true,
                 overlay_bbox: false,
@@ -223,13 +267,22 @@ impl AppState {
                 search_rps: 0,
                 leaderboard: Vec::new(),
                 last_score: None,
+                seed_snapshots_written: 0,
+                seed_snapshots_dropped: 0,
+                seed_snapshot_queue_depth: 0,
+                seed_last_snapshot_path: None,
                 snapshots_written: 0,
                 snapshots_dropped: 0,
                 snapshot_queue_depth: 0,
                 last_snapshot_path: None,
+                petri_hidden: false,
                 pending_reseed: false,
                 pending_apply: false,
                 pending_snapshot: false,
+                pending_run: false,
+                pending_close: false,
+                pending_hide: false,
+                pending_show: false,
             },
             metrics: Metrics {
                 last_render_ms: 0,
@@ -243,6 +296,7 @@ impl AppState {
             debug: false,
             yank: None,
             yank_kind: YankKind::Char,
+            command_line: None,
         }
     }
 
@@ -633,27 +687,46 @@ pub fn apply_action(state: &mut AppState, action: Action) -> ActionOutcome {
         Action::ToggleJobPause => {
             state.job.paused = !state.job.paused;
         }
+        Action::CommandPromptOpen => {
+            state.command_line = Some(CommandLine::new());
+        }
+        Action::CommandPromptCancel => {
+            state.command_line = None;
+        }
+        Action::CommandPromptBackspace => {
+            if let Some(cmd) = state.command_line.as_mut() {
+                cmd.input.pop();
+            }
+        }
+        Action::CommandPromptExecute => {
+            if let Some(cmd) = state.command_line.take() {
+                handle_command_line(state, &cmd.input);
+            }
+        }
+        Action::CommandPromptInput(ch) => {
+            if let Some(cmd) = state.command_line.as_mut() {
+                cmd.input.push(ch);
+            }
+        }
         Action::VisualizerReseed => {
             state.visualizer.seed = state.visualizer.seed.wrapping_add(1);
             state.visualizer.pending_reseed = true;
         }
         Action::VisualizerApply => {
-            if state.visualizer.mode == VisualizerMode::Search {
+            if state.visualizer.seed_search_active {
                 state.visualizer.pending_apply = true;
             } else {
                 state.visualizer.variant = state.visualizer.variant.wrapping_add(1);
+                state.visualizer.pending_reseed = true;
             }
         }
         Action::VisualizerToggleSearch => {
-            if !state.settings.gol.search.enabled {
-                state.visualizer.mode = VisualizerMode::SimOnly;
-                state.status = Some("Search disabled (config)".into());
+            state.visualizer.seed_search_active = !state.visualizer.seed_search_active;
+            state.status = Some(if state.visualizer.seed_search_active {
+                "Seed search ON".into()
             } else {
-                state.visualizer.mode = match state.visualizer.mode {
-                    VisualizerMode::SimOnly => VisualizerMode::Search,
-                    VisualizerMode::Search => VisualizerMode::SimOnly,
-                };
-            }
+                "Seed search OFF".into()
+            });
         }
         Action::VisualizerToggleWrap => {
             state.visualizer.wrap = !state.visualizer.wrap;
@@ -690,15 +763,17 @@ pub fn apply_action(state: &mut AppState, action: Action) -> ActionOutcome {
             state.visualizer.tick_ms = (state.visualizer.tick_ms + 10).min(1000);
         }
         Action::VisualizerRun => {
-            state.visualizer.running = true;
-            state.visualizer.paused = false;
-            state.visualizer.pending_reseed = true;
-            state.status = Some("Visualizer running".into());
+            state.visualizer.pending_run = true;
+            state.visualizer.pending_snapshot = true;
+            state.status = Some("Petri dish queued".into());
         }
         Action::VisualizerStop => {
-            state.visualizer.running = false;
-            state.visualizer.paused = false;
-            state.status = Some("Visualizer ASCII view".into());
+            state.visualizer.pending_close = true;
+            state.status = Some("Petri dish closing".into());
+        }
+        Action::PetriShow => {
+            state.visualizer.pending_show = true;
+            state.status = Some("Petri dish showing".into());
         }
         Action::VisualizerCycleRenderMode => {
             let next = state
@@ -743,6 +818,18 @@ pub fn apply_action(state: &mut AppState, action: Action) -> ActionOutcome {
                 if state.visualizer.scanlines { "ON" } else { "OFF" }
             ));
         }
+        Action::VisualizerCycleSeedView => {
+            state.visualizer.seed_preview = state.visualizer.seed_preview.next();
+            state.visualizer.pending_reseed = true;
+        }
+        Action::VisualizerCycleEncoder => {
+            state.visualizer.seed_encoder = state.visualizer.seed_encoder.next();
+            state.visualizer.pending_reseed = true;
+            state.status = Some(format!(
+                "Encoder: {}",
+                state.visualizer.seed_encoder.label()
+            ));
+        }
         Action::ToggleSyntax => {
             state.settings.highlight.enabled = !state.settings.highlight.enabled;
         }
@@ -761,5 +848,47 @@ pub fn apply_action(state: &mut AppState, action: Action) -> ActionOutcome {
     ActionOutcome {
         should_exit,
         state_changed: changed,
+    }
+}
+
+fn handle_command_line(state: &mut AppState, input: &str) {
+    let cmd = input.trim().to_lowercase();
+    if cmd.is_empty() {
+        return;
+    }
+    match cmd.as_str() {
+        "gol run" | "run gol" | "life run" | "gol start" | "run life" => {
+            state.visualizer.pending_run = true;
+            state.visualizer.pending_snapshot = true;
+            state.status = Some("Petri dish queued".into());
+        }
+        "gol hide" | "hide gol" | "petri hide" | "hide petri" => {
+            state.visualizer.pending_hide = true;
+            state.status = Some("Petri dish hiding".into());
+        }
+        "gol show" | "show gol" | "petri show" | "show petri" => {
+            state.visualizer.pending_show = true;
+            state.status = Some("Petri dish showing".into());
+        }
+        "gol stop" | "run stop" | "life stop" => {
+            state.visualizer.pending_close = true;
+            state.status = Some("Petri dish closing".into());
+        }
+        "gol seed" | "seed view" => {
+            state.visualizer.seed_preview = state.visualizer.seed_preview.next();
+            state.visualizer.pending_reseed = true;
+            state.status = Some("Seed preview toggled".into());
+        }
+        "gol encoder" | "seed encoder" => {
+            state.visualizer.seed_encoder = state.visualizer.seed_encoder.next();
+            state.visualizer.pending_reseed = true;
+            state.status = Some(format!(
+                "Encoder: {}",
+                state.visualizer.seed_encoder.label()
+            ));
+        }
+        other => {
+            state.status = Some(format!("Unknown command: {other}"));
+        }
     }
 }

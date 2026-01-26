@@ -22,6 +22,18 @@ pub struct SnapshotMetadata {
     pub wrap_mode: String,
     pub tick_ms: u64,
     pub attractor: Option<AttractorEvent>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub encoder_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub encoder_params: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub params_fingerprint: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub input_hash: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub seed_density: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub seed_components: Option<usize>,
 }
 
 #[derive(Clone, Debug)]

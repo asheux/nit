@@ -48,19 +48,19 @@ pub fn render(
 
     let inner = block.inner(area);
     let (ln, col) = state.line_col();
-    let viz_mode = match state.visualizer.mode {
+    let petri_mode = match state.visualizer.mode {
         nit_core::VisualizerMode::SimOnly => "SIM",
         nit_core::VisualizerMode::Search => "SEARCH",
     };
     let search_intensity = format!("{:?}", state.settings.gol.search.intensity);
-    let viz_period = state
+    let petri_period = state
         .visualizer
         .period
         .map(|p| p.to_string())
         .unwrap_or_else(|| "--".into());
-    let viz_autostop = state.visualizer.auto_stop_policy.to_string();
-    let viz_attractor = attractor_detail(state.visualizer.last_attractor.as_ref());
-    let viz_pause_reason = if state.visualizer.paused {
+    let petri_autostop = state.visualizer.auto_stop_policy.to_string();
+    let petri_attractor = attractor_detail(state.visualizer.last_attractor.as_ref());
+    let petri_pause_reason = if state.visualizer.paused {
         if state.visualizer.paused_by_attractor {
             "Attractor"
         } else {
@@ -69,7 +69,18 @@ pub fn render(
     } else {
         "No"
     };
-    let last_snapshot = state
+    let seed_hash = if state.visualizer.seed_hash == 0 {
+        "--".into()
+    } else {
+        format!("{:08x}", state.visualizer.seed_hash as u32)
+    };
+    let seed_last_snapshot = state
+        .visualizer
+        .seed_last_snapshot_path
+        .as_deref()
+        .map(|path| shorten_text(path, 30))
+        .unwrap_or_else(|| "--".into());
+    let sim_last_snapshot = state
         .visualizer
         .last_snapshot_path
         .as_deref()
@@ -153,13 +164,28 @@ pub fn render(
         value_style,
     ));
     rows.push(row(
-        "Viz Mode",
-        viz_mode.to_string(),
+        "Seed Enc",
+        state.visualizer.seed_encoder.label().to_string(),
         label_style,
-        match state.visualizer.mode {
-            nit_core::VisualizerMode::Search => Style::default().fg(theme.accent),
-            nit_core::VisualizerMode::SimOnly => Style::default().fg(theme.title_focused),
-        },
+        Style::default().fg(theme.title_focused),
+    ));
+    rows.push(row(
+        "Seed Hash",
+        seed_hash,
+        label_style,
+        value_style,
+    ));
+    rows.push(row(
+        "Seed Dens",
+        format!("{:.2}", state.visualizer.seed_stats.density),
+        label_style,
+        value_style,
+    ));
+    rows.push(row(
+        "Seed Sym",
+        state.visualizer.seed_params.symmetry.label().to_string(),
+        label_style,
+        value_style,
     ));
     rows.push(row(
         "Seed Source",
@@ -171,13 +197,84 @@ pub fn render(
         },
     ));
     rows.push(row(
+        "Seed Search",
+        if state.visualizer.seed_search_active { "ON" } else { "OFF" }.to_string(),
+        label_style,
+        if state.visualizer.seed_search_active {
+            Style::default().fg(theme.accent)
+        } else {
+            dim_style
+        },
+    ));
+    rows.push(row(
+        "Seed Snap",
+        state.visualizer.seed_snapshots_written.to_string(),
+        label_style,
+        if state.visualizer.seed_snapshots_written > 0 {
+            Style::default().fg(theme.title)
+        } else {
+            dim_style
+        },
+    ));
+    rows.push(row(
+        "Seed Drop",
+        state.visualizer.seed_snapshots_dropped.to_string(),
+        label_style,
+        if state.visualizer.seed_snapshots_dropped > 0 {
+            Style::default()
+                .fg(theme.error)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            dim_style
+        },
+    ));
+    rows.push(row(
+        "Seed Queue",
+        state.visualizer.seed_snapshot_queue_depth.to_string(),
+        label_style,
+        if state.visualizer.seed_snapshot_queue_depth > 0 {
+            Style::default().fg(theme.warning)
+        } else {
+            dim_style
+        },
+    ));
+    rows.push(row(
+        "Seed Last",
+        seed_last_snapshot,
+        label_style,
+        if state.visualizer.seed_last_snapshot_path.is_some() {
+            Style::default().fg(theme.accent)
+        } else {
+            dim_style
+        },
+    ));
+    rows.push(row(
+        "Petri Open",
+        if state.visualizer.running { "Y" } else { "N" }.to_string(),
+        label_style,
+        if state.visualizer.running {
+            Style::default().fg(theme.title_focused)
+        } else {
+            dim_style
+        },
+    ));
+    rows.push(row(
+        "Petri Mode",
+        petri_mode.to_string(),
+        label_style,
+        match state.visualizer.mode {
+            nit_core::VisualizerMode::Search => Style::default().fg(theme.accent),
+            nit_core::VisualizerMode::SimOnly => Style::default().fg(theme.title_focused),
+        },
+    ));
+    rows.push(row(
         "Search Int",
         search_intensity,
         label_style,
         intensity_style(state.settings.gol.search.intensity, theme),
     ));
     rows.push(row(
-        "Viz Rule",
+        "Petri Rule",
         state.visualizer.rule.clone(),
         label_style,
         value_style,
@@ -189,13 +286,13 @@ pub fn render(
         dim_style,
     ));
     rows.push(row(
-        "Viz Gen",
+        "Petri Gen",
         state.visualizer.generation.to_string(),
         label_style,
         value_style,
     ));
     rows.push(row(
-        "Viz Alive",
+        "Petri Alive",
         state.visualizer.alive.to_string(),
         label_style,
         if state.visualizer.alive > 0 {
@@ -205,8 +302,8 @@ pub fn render(
         },
     ));
     rows.push(row(
-        "Viz Period",
-        viz_period,
+        "Petri Period",
+        petri_period,
         label_style,
         if state.visualizer.period.is_some() {
             Style::default().fg(theme.title)
@@ -215,25 +312,25 @@ pub fn render(
         },
     ));
     rows.push(row(
-        "Viz AutoStop",
-        viz_autostop,
+        "Petri Auto",
+        petri_autostop,
         label_style,
         autostop_style(state.visualizer.auto_stop_policy, theme),
     ));
     rows.push(row(
-        "Viz Attractor",
-        viz_attractor,
+        "Petri Attr",
+        petri_attractor,
         label_style,
         attractor_style(state.visualizer.last_attractor.as_ref(), theme, dim_style),
     ));
     rows.push(row(
-        "Viz PausedBy",
-        viz_pause_reason.to_string(),
+        "Petri Pause",
+        petri_pause_reason.to_string(),
         label_style,
         paused_by_style(state.visualizer.paused, state.visualizer.paused_by_attractor, theme, dim_style),
     ));
     rows.push(row(
-        "Viz Wrap",
+        "Petri Wrap",
         if state.visualizer.wrap { "Torus" } else { "Dead" }.to_string(),
         label_style,
         if state.visualizer.wrap {
@@ -243,7 +340,7 @@ pub fn render(
         },
     ));
     rows.push(row(
-        "Viz Speed",
+        "Petri Tick",
         format!("{}ms", state.visualizer.tick_ms),
         label_style,
         tick_ms_style(state.visualizer.tick_ms, theme),
@@ -259,13 +356,7 @@ pub fn render(
         },
     ));
     rows.push(row(
-        "Viz Seed",
-        state.visualizer.seed.to_string(),
-        label_style,
-        value_style,
-    ));
-    rows.push(row(
-        "Snap Written",
+        "Sim Snap",
         state.visualizer.snapshots_written.to_string(),
         label_style,
         if state.visualizer.snapshots_written > 0 {
@@ -275,7 +366,7 @@ pub fn render(
         },
     ));
     rows.push(row(
-        "Snap Dropped",
+        "Sim Drop",
         state.visualizer.snapshots_dropped.to_string(),
         label_style,
         if state.visualizer.snapshots_dropped > 0 {
@@ -287,7 +378,7 @@ pub fn render(
         },
     ));
     rows.push(row(
-        "Snap Queue",
+        "Sim Queue",
         state.visualizer.snapshot_queue_depth.to_string(),
         label_style,
         if state.visualizer.snapshot_queue_depth > 0 {
@@ -297,8 +388,8 @@ pub fn render(
         },
     ));
     rows.push(row(
-        "Snap Last",
-        last_snapshot,
+        "Sim Last",
+        sim_last_snapshot,
         label_style,
         if state.visualizer.last_snapshot_path.is_some() {
             Style::default().fg(theme.accent)

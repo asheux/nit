@@ -6,6 +6,9 @@
 - Tab / Shift+Tab: Cycle pane focus
 - Ctrl+H/J/K/L: Focus panes (vim/tmux style: left/down/up/right)
 - F1 / ?: Toggle help overlay
+- Ctrl+Enter: Run Petri Dish simulation popup
+- Ctrl+^: Show hidden Petri Dish
+- : (Normal mode): Command prompt
 
 ## Editor & Notes (focused)
 - Arrow keys / PageUp / PageDown / Home / End: Move cursor/scroll
@@ -41,23 +44,27 @@
 - Ctrl+Space: Pause/resume job updates
 
 ## Visualizer
-- Ctrl+R: Reseed pattern (SEED)
+- Ctrl+E: Cycle seed encoder
+- Ctrl+R: Cycle seed preview (grid/matrix/motif)
 - Ctrl+Y: Toggle seed source (Editor/Notes)
-- Ctrl+A: Apply best rule / variant (APPLY)
-- Ctrl+G: Toggle search mode
-- Ctrl+O: Cycle auto-stop policy (Off → Fixed → Repeat)
-- Ctrl+T: Toggle wrap mode
-- Ctrl+N: Snapshot (SNAP)
-- Ctrl+Enter: Run visualizer (start simulation)
-- Ctrl+E: Return to ASCII view (stop simulation)
-- Ctrl+M: Cycle render mode (Solid → Half → Braille) (Visualizer focus)
-- Ctrl+J: Toggle age shading (Visualizer focus)
-- Ctrl+K: Toggle decay trails (Visualizer focus)
-- Ctrl+B: Toggle bounding box overlay (Visualizer focus)
-- Ctrl+H: Toggle heat overlay (Visualizer focus)
-- Ctrl+L: Toggle scanlines overlay (Visualizer focus)
-- Space: Pause/resume simulation (Visualizer focus)
-- + / -: Speed up/down (Visualizer focus)
+- Ctrl+A: Apply seed search proposal
+- Ctrl+G: Toggle seed search
+- Ctrl+N: Snapshot seed (SNAP)
+
+## Petri Dish (Popup)
+- Esc: Close popup
+- Space: Pause/resume
+- Enter: Step one generation
+- + / -: Speed up/down
+- S: Snapshot sim state
+- Ctrl+R: Reseed from current code
+- H: Hide popup (sim keeps running)
+- T: Toggle wrap mode
+- O: Cycle auto-stop policy (Off → Fixed → Repeat)
+- G: Toggle rule search
+- A: Apply best rule
 
 ## Command/Prompts
 - Y / N to confirm quit when prompted
+- :gol hide / :petri hide: Hide Petri Dish (sim keeps running)
+- :gol show / :petri show: Show Petri Dish

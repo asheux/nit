@@ -67,6 +67,12 @@ fn run_stress(
             wrap_mode: "dead".into(),
             tick_ms: 120,
             attractor: None,
+            encoder_id: None,
+            encoder_params: None,
+            params_fingerprint: None,
+            input_hash: None,
+            seed_density: None,
+            seed_components: None,
         };
         write_snapshot(&dir, &name_base, &grid, rule, &meta)?;
         if max_files > 0 {
