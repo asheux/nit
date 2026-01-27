@@ -332,7 +332,7 @@ pub(crate) fn render_hud_line(
     x = write_str(buf, x, y, max_x, label_style, "Alive: ");
     x = write_usize(buf, x, y, max_x, value_style, hud.alive, 4);
     x = write_str(buf, x, y, max_x, sep_style, " | ");
-    x = write_str(buf, x, y, max_x, label_style, "Δ: ");
+    x = write_str(buf, x, y, max_x, label_style, "Δ (changes): ");
     x = write_u32(buf, x, y, max_x, value_style, hud.delta, 3);
     x = write_str(buf, x, y, max_x, sep_style, " | ");
     x = write_str(buf, x, y, max_x, label_style, "Period: ");
