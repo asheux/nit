@@ -2,6 +2,13 @@ use std::collections::{HashMap, VecDeque};
 
 use crate::{EdgeMode, Grid, Rule};
 
+#[derive(Copy, Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct AttractorExtra {
+    pub protocol_hash: u64,
+    pub phase_idx: u32,
+    pub step_in_phase: u32,
+}
+
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct Fingerprint([u64; 2]);
 
@@ -123,7 +130,8 @@ impl AttractorDetector {
     }
 
     pub fn seed(&mut self, grid: &Grid, gen: u64, rule: Rule, edge: EdgeMode) {
-        let (fingerprint, secondary) = fingerprint_with_secondary(grid, rule, edge, self.cfg.confirm_on_repeat);
+        let (fingerprint, secondary) =
+            fingerprint_with_secondary(grid, rule, edge, None, self.cfg.confirm_on_repeat);
         self.last = Some(fingerprint);
         self.seeded = true;
         self.completed = false;
@@ -141,27 +149,59 @@ impl AttractorDetector {
         rule: Rule,
         edge: EdgeMode,
     ) -> Option<AttractorEvent> {
+        self.observe_with_context(current, next, next_gen, rule, edge, None)
+    }
+
+    pub fn seed_with_context(
+        &mut self,
+        grid: &Grid,
+        gen: u64,
+        rule: Rule,
+        edge: EdgeMode,
+        extra: Option<AttractorExtra>,
+    ) {
+        let (fingerprint, secondary) =
+            fingerprint_with_secondary(grid, rule, edge, extra, self.cfg.confirm_on_repeat);
+        self.last = Some(fingerprint);
+        self.seeded = true;
+        self.completed = false;
+        if self.cfg.max_history == 0 {
+            return;
+        }
+        self.insert_entry(fingerprint, gen, secondary);
+    }
+
+    pub fn observe_with_context(
+        &mut self,
+        current: &Grid,
+        next: &Grid,
+        next_gen: u64,
+        rule: Rule,
+        edge: EdgeMode,
+        extra: Option<AttractorExtra>,
+    ) -> Option<AttractorEvent> {
         if self.completed {
             return None;
         }
         if !self.seeded {
             let seed_gen = next_gen.saturating_sub(1);
-            self.seed(current, seed_gen, rule, edge);
+            self.seed_with_context(current, seed_gen, rule, edge, extra);
         }
 
         if current == next {
             let event = AttractorEvent::FixedPoint { gen: next_gen };
-            self.last = Some(fingerprint(next, rule, edge));
+            self.last = Some(fingerprint(next, rule, edge, extra));
             self.completed = true;
             return Some(event);
         }
 
         if self.cfg.max_history == 0 {
-            self.last = Some(fingerprint(next, rule, edge));
+            self.last = Some(fingerprint(next, rule, edge, extra));
             return None;
         }
 
-        let (fingerprint, secondary) = fingerprint_with_secondary(next, rule, edge, self.cfg.confirm_on_repeat);
+        let (fingerprint, secondary) =
+            fingerprint_with_secondary(next, rule, edge, extra, self.cfg.confirm_on_repeat);
         if let Some(event) = self.check_repeat(fingerprint, secondary, next_gen) {
             self.last = Some(fingerprint);
             self.completed = true;
@@ -243,14 +283,15 @@ impl AttractorDetector {
     }
 }
 
-fn fingerprint(grid: &Grid, rule: Rule, edge: EdgeMode) -> Fingerprint {
-    fingerprint_with_secondary(grid, rule, edge, false).0
+fn fingerprint(grid: &Grid, rule: Rule, edge: EdgeMode, extra: Option<AttractorExtra>) -> Fingerprint {
+    fingerprint_with_secondary(grid, rule, edge, extra, false).0
 }
 
 fn fingerprint_with_secondary(
     grid: &Grid,
     rule: Rule,
     edge: EdgeMode,
+    extra: Option<AttractorExtra>,
     include_secondary: bool,
 ) -> (Fingerprint, Option<u64>) {
     let mut hasher = blake3::Hasher::new();
@@ -260,6 +301,12 @@ fn fingerprint_with_secondary(
     hasher.update(&rule.births_mask().to_le_bytes());
     hasher.update(&rule.survives_mask().to_le_bytes());
     hasher.update(&[edge_tag(edge)]);
+    if let Some(extra) = extra {
+        hasher.update(b"proto");
+        hasher.update(&extra.protocol_hash.to_le_bytes());
+        hasher.update(&extra.phase_idx.to_le_bytes());
+        hasher.update(&extra.step_in_phase.to_le_bytes());
+    }
     hasher.update(grid.cells());
     let hash = hasher.finalize();
     let bytes = hash.as_bytes();
@@ -269,14 +316,14 @@ fn fingerprint_with_secondary(
     b.copy_from_slice(&bytes[8..16]);
     let fingerprint = Fingerprint([u64::from_le_bytes(a), u64::from_le_bytes(b)]);
     let secondary = if include_secondary {
-        Some(secondary_hash(grid, rule, edge))
+        Some(secondary_hash(grid, rule, edge, extra))
     } else {
         None
     };
     (fingerprint, secondary)
 }
 
-fn secondary_hash(grid: &Grid, rule: Rule, edge: EdgeMode) -> u64 {
+fn secondary_hash(grid: &Grid, rule: Rule, edge: EdgeMode, extra: Option<AttractorExtra>) -> u64 {
     const FNV_OFFSET: u64 = 0xcbf29ce484222325;
     const FNV_PRIME: u64 = 0x100000001b3;
     let mut hash = FNV_OFFSET;
@@ -285,6 +332,12 @@ fn secondary_hash(grid: &Grid, rule: Rule, edge: EdgeMode) -> u64 {
     hash = fnv1a(hash, &rule.births_mask().to_le_bytes());
     hash = fnv1a(hash, &rule.survives_mask().to_le_bytes());
     hash = fnv1a(hash, &[edge_tag(edge)]);
+    if let Some(extra) = extra {
+        hash = fnv1a(hash, b"proto");
+        hash = fnv1a(hash, &extra.protocol_hash.to_le_bytes());
+        hash = fnv1a(hash, &extra.phase_idx.to_le_bytes());
+        hash = fnv1a(hash, &extra.step_in_phase.to_le_bytes());
+    }
     for &byte in grid.cells() {
         hash ^= byte as u64;
         hash = hash.wrapping_mul(FNV_PRIME);
@@ -361,5 +414,102 @@ impl AttractorDetector {
         a.copy_from_slice(&bytes[0..8]);
         b.copy_from_slice(&bytes[8..16]);
         Fingerprint([u64::from_le_bytes(a), u64::from_le_bytes(b)])
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::step::step;
+
+    #[test]
+    fn repeat_requires_matching_protocol_phase() {
+        let rule = Rule::conway();
+        let mut grid = Grid::new(5, 5);
+        grid.set(2, 1, true);
+        grid.set(2, 2, true);
+        grid.set(2, 3, true);
+
+        let g0 = grid.clone();
+        let g1 = step(&g0, rule, EdgeMode::Dead);
+        let g2 = step(&g1, rule, EdgeMode::Dead);
+        let g3 = step(&g2, rule, EdgeMode::Dead);
+        let g4 = step(&g3, rule, EdgeMode::Dead);
+
+        let mut detector = AttractorDetector::new(AttractorConfig {
+            policy: AutoStopPolicy::Repeat,
+            ..AttractorConfig::default()
+        });
+        let proto_hash = 0xabcdu64;
+        detector.seed_with_context(
+            &g0,
+            0,
+            rule,
+            EdgeMode::Dead,
+            Some(AttractorExtra {
+                protocol_hash: proto_hash,
+                phase_idx: 0,
+                step_in_phase: 0,
+            }),
+        );
+
+        let event1 = detector.observe_with_context(
+            &g0,
+            &g1,
+            1,
+            rule,
+            EdgeMode::Dead,
+            Some(AttractorExtra {
+                protocol_hash: proto_hash,
+                phase_idx: 1,
+                step_in_phase: 0,
+            }),
+        );
+        assert!(event1.is_none());
+
+        let event2 = detector.observe_with_context(
+            &g1,
+            &g2,
+            2,
+            rule,
+            EdgeMode::Dead,
+            Some(AttractorExtra {
+                protocol_hash: proto_hash,
+                phase_idx: 2,
+                step_in_phase: 0,
+            }),
+        );
+        assert!(event2.is_none());
+
+        let event3 = detector.observe_with_context(
+            &g2,
+            &g3,
+            3,
+            rule,
+            EdgeMode::Dead,
+            Some(AttractorExtra {
+                protocol_hash: proto_hash,
+                phase_idx: 3,
+                step_in_phase: 0,
+            }),
+        );
+        assert!(event3.is_none());
+
+        let event4 = detector.observe_with_context(
+            &g3,
+            &g4,
+            4,
+            rule,
+            EdgeMode::Dead,
+            Some(AttractorExtra {
+                protocol_hash: proto_hash,
+                phase_idx: 0,
+                step_in_phase: 0,
+            }),
+        );
+        assert!(matches!(
+            event4,
+            Some(AttractorEvent::Cycle { period, .. }) if period == 4
+        ));
     }
 }

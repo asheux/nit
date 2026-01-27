@@ -1,4 +1,4 @@
-use nit_core::{AppState, GolSearchIntensity, PaneId};
+use nit_core::{AppState, GolSearchIntensity, PaneId, RuleMode};
 use nit_core::seed::SeedViewMode;
 use nit_gol::{AttractorEvent, Rule};
 use ratatui::{
@@ -324,6 +324,38 @@ pub fn render(
         label_style,
         dim_style,
     ));
+    if let RuleMode::Protocol(protocol) = &state.visualizer.rule_mode {
+        let proto_name = state
+            .visualizer
+            .protocol_name
+            .clone()
+            .unwrap_or_else(|| "Protocol".into());
+        rows.push(row(
+            "Petri Proto",
+            proto_name,
+            label_style,
+            value_style,
+        ));
+        let phase_label = protocol
+            .current_phase()
+            .label
+            .clone()
+            .unwrap_or_else(|| "Phase".into());
+        let phase_text = format!(
+            "{}/{} \"{}\" t={}/{}",
+            protocol.phase_idx + 1,
+            protocol.phase_count(),
+            phase_label,
+            protocol.step_in_phase + 1,
+            protocol.current_phase().steps.max(1)
+        );
+        rows.push(row(
+            "Petri Phase",
+            phase_text,
+            label_style,
+            dim_style,
+        ));
+    }
     rows.push(row(
         "Rule Bits",
         rule_bits(&state.visualizer.rule),

@@ -6,6 +6,7 @@ pub mod config;
 pub mod cursor;
 pub mod io;
 pub mod gol_rules;
+pub mod rule_protocol;
 pub mod rule_config;
 pub mod mode;
 pub mod pane;
@@ -23,6 +24,10 @@ pub use config::{
     SnapshotPrunePolicy,
 };
 pub use gol_rules::{load_rule_catalog, NamedRule, RuleCatalog, RuleSelectError, SelectedRule};
+pub use rule_protocol::{
+    builtin_protocols, parse_protocol_spec, ProtocolPreset, RuleMode, RulePhase, RuleProtocol,
+    RuleRef,
+};
 pub use rule_config::{load_rule_config, persist_rule_selection, RuleConfigLoad, RulePersistence};
 pub use cursor::Cursor;
 pub use io::{load_to_string, save_buffer};

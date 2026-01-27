@@ -6,7 +6,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use nit_core::{
     AppState, GolRenderMode, GolSearchConfig, GolSearchIntensity, GolSeedSource,
-    GolSnapshotsConfig, VisualizerMode, VisualizerRuleEntry,
+    GolSnapshotsConfig, RuleMode, RuleRef, SelectedRule, VisualizerMode, VisualizerRuleEntry,
 };
 use nit_gol::{
     analyze::{evaluate_rule, RuleEvaluation, RuleScore},
@@ -17,7 +17,7 @@ use nit_gol::{
         SnapshotEventKind, SnapshotManager, SnapshotManagerConfig, SnapshotRequest,
     },
     step::step,
-    EdgeMode, Grid, Rule,
+    EdgeMode, Grid, Rule, AttractorExtra,
 };
 use nit_utils::hashing::{stable_hash_bytes, XorShift64};
 use tracing::{info, warn};
@@ -30,6 +30,7 @@ const ASCII_SEED_LIVE_MIN: u8 = 6;
 pub struct VisualizerRuntime {
     size: (usize, usize),
     grid: Grid,
+    rule_mode: RuleMode,
     rule: Rule,
     generation: u64,
     alive: usize,
@@ -60,7 +61,9 @@ pub struct VisualizerRuntime {
 
 impl VisualizerRuntime {
     pub fn new(state: &AppState) -> Self {
-        let rule = Rule::parse(&state.visualizer.rule).unwrap_or_else(|_| Rule::conway());
+        let mut rule_mode = state.visualizer.rule_mode.clone();
+        rule_mode.reset();
+        let rule = rule_mode.current_rule().rule;
         let snapshot_dir = state.workspace_root.join("gol-snapshots");
         let rules_log_path = snapshot_dir.join("rules.ndjson");
         let (event_tx, events) = mpsc::channel();
@@ -83,6 +86,7 @@ impl VisualizerRuntime {
         Self {
             size: (0, 0),
             grid: Grid::new(0, 0),
+            rule_mode,
             rule,
             generation: 0,
             alive: 0,
@@ -214,6 +218,14 @@ impl VisualizerRuntime {
             }
         }
 
+        if state.visualizer.pending_rule_change {
+            state.visualizer.pending_rule_change = false;
+            self.rule_mode = state.visualizer.rule_mode.clone();
+            self.rule_mode.reset();
+            self.rule = self.rule_mode.current_rule().rule;
+            self.reset_simulation(self.current_edge(state));
+        }
+
         if state.visualizer.pending_apply {
             state.visualizer.pending_apply = false;
             if state.visualizer.mode == VisualizerMode::Search {
@@ -252,15 +264,24 @@ impl VisualizerRuntime {
         }
 
         let edge = self.current_edge(state);
-        let next = step(&self.grid, self.rule, edge);
+        let current_rule = self.rule_mode.current_rule().rule;
+        let next = step(&self.grid, current_rule, edge);
         let next_gen = self.generation.saturating_add(1);
-        let event = self
-            .attractor
-            .observe(&self.grid, &next, next_gen, self.rule, edge);
+        self.rule_mode.advance_one_gen();
+        let next_rule = self.rule_mode.current_rule().rule;
+        let event = self.attractor.observe_with_context(
+            &self.grid,
+            &next,
+            next_gen,
+            next_rule,
+            edge,
+            protocol_extra(&self.rule_mode),
+        );
         let (alive, _) = self.render_state.update_from_step(&self.grid, &next);
         self.grid = next;
         self.generation = next_gen;
         self.alive = alive;
+        self.rule = next_rule;
         if let Some(event) = event {
             self.handle_attractor_event(state, event);
         }
@@ -270,6 +291,7 @@ impl VisualizerRuntime {
 
     fn sync_state(&mut self, state: &mut AppState) {
         state.visualizer.rule = self.rule.to_string();
+        state.visualizer.rule_mode = self.rule_mode.clone();
         state.visualizer.generation = self.generation;
         state.visualizer.alive = self.alive;
         state.visualizer.period = self.period;
@@ -300,6 +322,9 @@ impl VisualizerRuntime {
             warn!("Seed build panic; keeping previous grid");
             return false;
         };
+        self.rule_mode = state.visualizer.rule_mode.clone();
+        self.rule_mode.reset();
+        self.rule = self.rule_mode.current_rule().rule;
         self.grid = grid;
         self.last_seed_hash = seed_hash;
         self.reset_simulation(self.current_edge(state));
@@ -313,7 +338,13 @@ impl VisualizerRuntime {
         self.last_attractor = None;
         self.last_attractor_hash = None;
         self.attractor.reset();
-        self.attractor.seed(&self.grid, self.generation, self.rule, edge);
+        self.attractor.seed_with_context(
+            &self.grid,
+            self.generation,
+            self.rule,
+            edge,
+            protocol_extra(&self.rule_mode),
+        );
         self.last_step = Instant::now();
     }
 
@@ -321,7 +352,13 @@ impl VisualizerRuntime {
         self.last_attractor = None;
         self.last_attractor_hash = None;
         self.attractor.reset();
-        self.attractor.seed(&self.grid, self.generation, self.rule, edge);
+        self.attractor.seed_with_context(
+            &self.grid,
+            self.generation,
+            self.rule,
+            edge,
+            protocol_extra(&self.rule_mode),
+        );
     }
 
     fn current_edge(&self, state: &AppState) -> EdgeMode {
@@ -357,13 +394,44 @@ impl VisualizerRuntime {
         if should_pause {
             state.visualizer.paused = true;
             state.visualizer.paused_by_attractor = true;
-            state.status = Some(match &event {
-                AttractorEvent::FixedPoint { gen } => {
-                    format!("Visualizer paused (fixed point at gen={gen})")
+            let protocol_phase = match &self.rule_mode {
+                RuleMode::Protocol(protocol) => {
+                    let phase_label = protocol
+                        .current_phase()
+                        .label
+                        .clone()
+                        .unwrap_or_else(|| "Phase".into());
+                    Some(format!(
+                        "phase {}/{} \"{}\" t={}/{}",
+                        protocol.phase_idx + 1,
+                        protocol.phase_count(),
+                        phase_label,
+                        protocol.step_in_phase + 1,
+                        protocol.current_phase().steps.max(1)
+                    ))
                 }
-                AttractorEvent::Cycle { period, transient, gen, .. } => format!(
-                    "Visualizer paused (cycle p={period} t={transient} gen={gen})"
-                ),
+                _ => None,
+            };
+            state.status = Some(match &event {
+                AttractorEvent::FixedPoint { gen } => match protocol_phase {
+                    Some(phase) => {
+                        format!("Visualizer paused (fixed point at gen={gen}, {phase})")
+                    }
+                    None => format!("Visualizer paused (fixed point at gen={gen})"),
+                },
+                AttractorEvent::Cycle {
+                    period,
+                    transient,
+                    gen,
+                    ..
+                } => match protocol_phase {
+                    Some(phase) => format!(
+                        "Visualizer paused (cycle p={period} t={transient} gen={gen}, includes protocol phase; {phase})"
+                    ),
+                    None => format!(
+                        "Visualizer paused (cycle p={period} t={transient} gen={gen})"
+                    ),
+                },
             });
         }
 
@@ -450,9 +518,31 @@ impl VisualizerRuntime {
         self.search_paused_for_stability = false;
     }
 
-    fn apply_best_rule(&mut self, state: &AppState) {
+    fn apply_best_rule(&mut self, state: &mut AppState) {
         if let Some(best) = self.leaderboard.first() {
-            self.rule = best.rule;
+            let mut rule_ref = RuleRef {
+                id: None,
+                rule: best.rule,
+                name: None,
+            };
+            if let Some(named) = state.rule_catalog.find_by_rule(best.rule) {
+                rule_ref.id = Some(named.id.clone());
+                rule_ref.name = Some(named.name.clone());
+            }
+            self.rule_mode = RuleMode::Fixed(rule_ref.clone());
+            self.rule = rule_ref.rule;
+            state.visualizer.rule_mode = self.rule_mode.clone();
+            state.visualizer.rule = self.rule.to_string();
+            state.visualizer.protocol_name = None;
+            let mut selected = SelectedRule::from_rule(rule_ref.rule);
+            if let Some(named) = state.rule_catalog.find_by_rule(rule_ref.rule) {
+                selected.id = Some(named.id.clone());
+                selected.name = Some(named.name.clone());
+            } else {
+                selected.id = rule_ref.id;
+                selected.name = rule_ref.name;
+            }
+            state.gol_rule_selected = selected;
             info!(
                 "Applying best rule {} score={:.2}",
                 best.rule, best.score
@@ -581,6 +671,10 @@ impl VisualizerRuntime {
                 .rule_catalog
                 .find_by_rule(rule)
                 .map(|entry| entry.id.clone()),
+            protocol: protocol_snapshot_string(&self.rule_mode),
+            protocol_hash: protocol_snapshot_hash(&self.rule_mode),
+            protocol_phase_idx: protocol_snapshot_phase(&self.rule_mode).map(|value| value.0),
+            protocol_step_in_phase: protocol_snapshot_phase(&self.rule_mode).map(|value| value.1),
             generation,
             alive_count: alive,
             period,
@@ -646,6 +740,40 @@ fn build_title(out: &mut String, mode: GolRenderMode) {
     out.push_str("VISUALIZER (");
     out.push_str(mode.label());
     out.push_str(")  [ RUN ] [ ASCII ] [ APPLY ] [ SEED ] [ SNAP ] [ SEARCH ]");
+}
+
+fn protocol_extra(rule_mode: &RuleMode) -> Option<AttractorExtra> {
+    match rule_mode {
+        RuleMode::Protocol(protocol) => Some(AttractorExtra {
+            protocol_hash: protocol.hash(),
+            phase_idx: protocol.phase_idx as u32,
+            step_in_phase: protocol.step_in_phase,
+        }),
+        _ => None,
+    }
+}
+
+fn protocol_snapshot_string(rule_mode: &RuleMode) -> Option<String> {
+    match rule_mode {
+        RuleMode::Protocol(protocol) => Some(protocol.canonical_string()),
+        _ => None,
+    }
+}
+
+fn protocol_snapshot_hash(rule_mode: &RuleMode) -> Option<u64> {
+    match rule_mode {
+        RuleMode::Protocol(protocol) => Some(protocol.hash()),
+        _ => None,
+    }
+}
+
+fn protocol_snapshot_phase(rule_mode: &RuleMode) -> Option<(u32, u32)> {
+    match rule_mode {
+        RuleMode::Protocol(protocol) => {
+            Some((protocol.phase_idx as u32, protocol.step_in_phase))
+        }
+        _ => None,
+    }
 }
 
 fn build_seed_grid(

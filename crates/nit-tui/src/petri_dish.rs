@@ -4,9 +4,19 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use nit_core::{actions::Action, AppState, EncodedSeed, GolRenderMode, VisualizerMode};
+use nit_core::{
+    actions::Action,
+    AppState,
+    EncodedSeed,
+    GolRenderMode,
+    RuleMode,
+    RuleRef,
+    SelectedRule,
+    VisualizerMode,
+};
 use nit_gol::analyze::{evaluate_rule, RuleEvaluation, RuleScore};
 use nit_gol::attractor::{AttractorConfig, AttractorDetector, AttractorEvent, AutoStopPolicy};
+use nit_gol::AttractorExtra;
 use nit_gol::snapshot::SnapshotMetadata;
 use nit_gol::snapshot_manager::{
     grid_fingerprint, pack_grid_bits, snapshot_queue_capacity, RuleLogEntry, SnapshotEventKind,
@@ -25,7 +35,7 @@ use ratatui::{
 use tracing::{info, warn};
 
 use crate::gol_render::{grid_size_for_mode, GolHudState, GolPalette, GolRenderConfig, GolWidget};
-use crate::widgets::rule_picker;
+use crate::widgets::{protocol_picker, rule_picker};
 use crate::seed_runtime::SeedRuntime;
 use crate::theme::Theme;
 
@@ -61,6 +71,7 @@ pub struct SimSession {
     pub params_fingerprint: u64,
     pub params_summary: String,
     pub input_hash: u64,
+    pub rule_mode: RuleMode,
     pub rule: Rule,
     pub gen: u64,
     pub grid: Grid,
@@ -185,6 +196,10 @@ impl PetriDishRuntime {
             }
             KeyCode::F(2) => {
                 let _ = nit_core::apply_action(state, Action::OpenRulePicker);
+                true
+            }
+            KeyCode::Char('p') | KeyCode::Char('P') => {
+                let _ = nit_core::apply_action(state, Action::OpenProtocolPicker);
                 true
             }
             KeyCode::Char(' ') => {
@@ -331,6 +346,9 @@ impl PetriDishRuntime {
         if state.rule_picker.open {
             rule_picker::render(frame, screen, state, theme);
         }
+        if state.protocol_picker.open {
+            protocol_picker::render(frame, screen, state, theme);
+        }
     }
 
     fn open_or_reseed(
@@ -392,13 +410,15 @@ impl PetriDishRuntime {
     }
 
     fn start_session(&mut self, state: &mut AppState, seed: EncodedSeed) {
-        let rule = Rule::parse(&state.visualizer.rule).unwrap_or_else(|_| Rule::conway());
+        let mut rule_mode = state.visualizer.rule_mode.clone();
+        rule_mode.reset();
+        let rule = rule_mode.current_rule().rule;
         let edge = self.current_edge(state);
         let mut detector = AttractorDetector::new(AttractorConfig {
             policy: state.visualizer.auto_stop_policy,
             ..AttractorConfig::default()
         });
-        detector.seed(&seed.grid, 0, rule, edge);
+        detector.seed_with_context(&seed.grid, 0, rule, edge, Self::protocol_extra(&rule_mode));
         let alive = self.render_state.seed_from_grid(&seed.grid);
         let session = SimSession {
             seed_hash: seed.seed_hash,
@@ -406,6 +426,7 @@ impl PetriDishRuntime {
             params_fingerprint: seed.params.fingerprint(),
             params_summary: seed.params.summary(),
             input_hash: seed.input_hash,
+            rule_mode,
             rule,
             gen: 0,
             grid: seed.grid,
@@ -434,6 +455,9 @@ impl PetriDishRuntime {
         let Some(session) = self.session.as_mut() else {
             return;
         };
+        session.rule_mode = state.visualizer.rule_mode.clone();
+        session.rule_mode.reset();
+        session.rule = session.rule_mode.current_rule().rule;
         session.seed_hash = seed.seed_hash;
         session.encoder_id = seed.encoder_id.as_str().to_string();
         session.params_fingerprint = seed.params.fingerprint();
@@ -447,7 +471,7 @@ impl PetriDishRuntime {
         session.detector.reset();
         session
             .detector
-            .seed(&session.grid, session.gen, session.rule, edge);
+            .seed_with_context(&session.grid, session.gen, session.rule, edge, Self::protocol_extra(&session.rule_mode));
         state.visualizer.paused = false;
         state.visualizer.paused_by_attractor = false;
         self.last_attractor_hash = None;
@@ -470,6 +494,11 @@ impl PetriDishRuntime {
         state.rule_picker.open = false;
         state.rule_picker.query.clear();
         state.rule_picker.selected = 0;
+        state.protocol_picker.open = false;
+        state.protocol_picker.selected = 0;
+        state.protocol_picker.custom_input.clear();
+        state.protocol_picker.custom_error = None;
+        state.protocol_picker.custom_preview = None;
         state.status = Some("Petri dish closed".into());
     }
 
@@ -504,9 +533,13 @@ impl PetriDishRuntime {
             session.grid = session.grid.clone_with_size(width, height);
             session.alive = self.render_state.seed_from_grid(&session.grid);
             session.detector.reset();
-            session
-                .detector
-                .seed(&session.grid, session.gen, session.rule, edge);
+            session.detector.seed_with_context(
+                &session.grid,
+                session.gen,
+                session.rule,
+                edge,
+                Self::protocol_extra(&session.rule_mode),
+            );
         }
     }
 
@@ -526,9 +559,13 @@ impl PetriDishRuntime {
                 session.period = None;
                 session.last_attractor = None;
                 session.detector.reset();
-                session
-                    .detector
-                    .seed(&session.grid, session.gen, session.rule, edge);
+                session.detector.seed_with_context(
+                    &session.grid,
+                    session.gen,
+                    session.rule,
+                    edge,
+                    Self::protocol_extra(&session.rule_mode),
+                );
             }
             if state.visualizer.mode == VisualizerMode::Search {
                 self.restart_search(state);
@@ -567,15 +604,24 @@ impl PetriDishRuntime {
         if self.last_step.elapsed() < interval {
             return;
         }
-        let next = step(&session.grid, session.rule, edge);
+        let current_rule = session.rule_mode.current_rule().rule;
+        let next = step(&session.grid, current_rule, edge);
         let next_gen = session.gen.saturating_add(1);
-        let event = session
-            .detector
-            .observe(&session.grid, &next, next_gen, session.rule, edge);
+        session.rule_mode.advance_one_gen();
+        let next_rule = session.rule_mode.current_rule().rule;
+        let event = session.detector.observe_with_context(
+            &session.grid,
+            &next,
+            next_gen,
+            next_rule,
+            edge,
+            Self::protocol_extra(&session.rule_mode),
+        );
         let (alive, _) = self.render_state.update_from_step(&session.grid, &next);
         session.grid = next;
         session.gen = next_gen;
         session.alive = alive;
+        session.rule = next_rule;
         if let Some(event) = event {
             self.handle_attractor_event(state, event);
         }
@@ -587,15 +633,24 @@ impl PetriDishRuntime {
         let Some(session) = self.session.as_mut() else {
             return;
         };
-        let next = step(&session.grid, session.rule, edge);
+        let current_rule = session.rule_mode.current_rule().rule;
+        let next = step(&session.grid, current_rule, edge);
         let next_gen = session.gen.saturating_add(1);
-        let event = session
-            .detector
-            .observe(&session.grid, &next, next_gen, session.rule, edge);
+        session.rule_mode.advance_one_gen();
+        let next_rule = session.rule_mode.current_rule().rule;
+        let event = session.detector.observe_with_context(
+            &session.grid,
+            &next,
+            next_gen,
+            next_rule,
+            edge,
+            Self::protocol_extra(&session.rule_mode),
+        );
         let (alive, _) = self.render_state.update_from_step(&session.grid, &next);
         session.grid = next;
         session.gen = next_gen;
         session.alive = alive;
+        session.rule = next_rule;
         if let Some(event) = event {
             self.handle_attractor_event(state, event);
         }
@@ -604,7 +659,10 @@ impl PetriDishRuntime {
 
     fn sync_state(&mut self, state: &mut AppState) {
         if let Some(session) = self.session.as_ref() {
-            state.visualizer.rule = session.rule.to_string();
+            if !state.visualizer.pending_rule_change {
+                state.visualizer.rule = session.rule.to_string();
+                state.visualizer.rule_mode = session.rule_mode.clone();
+            }
             state.visualizer.generation = session.gen;
             state.visualizer.alive = session.alive;
             state.visualizer.period = session.period;
@@ -640,6 +698,40 @@ impl PetriDishRuntime {
         }
     }
 
+    fn protocol_extra(rule_mode: &RuleMode) -> Option<AttractorExtra> {
+        match rule_mode {
+            RuleMode::Protocol(protocol) => Some(AttractorExtra {
+                protocol_hash: protocol.hash(),
+                phase_idx: protocol.phase_idx as u32,
+                step_in_phase: protocol.step_in_phase,
+            }),
+            _ => None,
+        }
+    }
+
+    fn protocol_snapshot_string(rule_mode: &RuleMode) -> Option<String> {
+        match rule_mode {
+            RuleMode::Protocol(protocol) => Some(protocol.canonical_string()),
+            _ => None,
+        }
+    }
+
+    fn protocol_snapshot_hash(rule_mode: &RuleMode) -> Option<u64> {
+        match rule_mode {
+            RuleMode::Protocol(protocol) => Some(protocol.hash()),
+            _ => None,
+        }
+    }
+
+    fn protocol_snapshot_phase(rule_mode: &RuleMode) -> Option<(u32, u32)> {
+        match rule_mode {
+            RuleMode::Protocol(protocol) => {
+                Some((protocol.phase_idx as u32, protocol.step_in_phase))
+            }
+            _ => None,
+        }
+    }
+
     fn handle_attractor_event(&mut self, state: &mut AppState, event: AttractorEvent) {
         let Some(session) = self.session.as_mut() else {
             return;
@@ -669,13 +761,39 @@ impl PetriDishRuntime {
             session.paused = true;
             state.visualizer.paused = true;
             state.visualizer.paused_by_attractor = true;
+            let protocol_phase = match &session.rule_mode {
+                RuleMode::Protocol(protocol) => {
+                    let phase_label = protocol
+                        .current_phase()
+                        .label
+                        .clone()
+                        .unwrap_or_else(|| "Phase".into());
+                    Some(format!(
+                        "phase {}/{} \"{}\" t={}/{}",
+                        protocol.phase_idx + 1,
+                        protocol.phase_count(),
+                        phase_label,
+                        protocol.step_in_phase + 1,
+                        protocol.current_phase().steps.max(1)
+                    ))
+                }
+                _ => None,
+            };
             state.status = Some(match &event {
                 AttractorEvent::FixedPoint { gen } => {
-                    format!("Petri paused (fixed point at gen={gen})")
+                    match protocol_phase {
+                        Some(phase) => format!("Petri paused (fixed point at gen={gen}, {phase})"),
+                        None => format!("Petri paused (fixed point at gen={gen})"),
+                    }
                 }
-                AttractorEvent::Cycle { period, transient, gen, .. } => format!(
-                    "Petri paused (cycle p={period} t={transient} gen={gen})"
-                ),
+                AttractorEvent::Cycle { period, transient, gen, .. } => {
+                    match protocol_phase {
+                        Some(phase) => format!(
+                            "Petri paused (cycle p={period} t={transient} gen={gen}, includes protocol phase; {phase})"
+                        ),
+                        None => format!("Petri paused (cycle p={period} t={transient} gen={gen})"),
+                    }
+                }
             });
         }
 
@@ -738,7 +856,17 @@ impl PetriDishRuntime {
         if let Some(best) = self.leaderboard.first() {
             let edge = self.current_edge(state);
             if let Some(session) = self.session.as_mut() {
-                session.rule = best.rule;
+                let mut rule_ref = RuleRef {
+                    id: None,
+                    rule: best.rule,
+                    name: None,
+                };
+                if let Some(named) = state.rule_catalog.find_by_rule(best.rule) {
+                    rule_ref.id = Some(named.id.clone());
+                    rule_ref.name = Some(named.name.clone());
+                }
+                session.rule_mode = RuleMode::Fixed(rule_ref.clone());
+                session.rule = rule_ref.rule;
                 info!(
                     "Applying best rule {} score={:.2}",
                     best.rule, best.score
@@ -747,9 +875,25 @@ impl PetriDishRuntime {
                 session.period = None;
                 session.last_attractor = None;
                 session.detector.reset();
-                session
-                    .detector
-                    .seed(&session.grid, session.gen, session.rule, edge);
+                session.detector.seed_with_context(
+                    &session.grid,
+                    session.gen,
+                    session.rule,
+                    edge,
+                    Self::protocol_extra(&session.rule_mode),
+                );
+                let mut selected = SelectedRule::from_rule(rule_ref.rule);
+                if let Some(named) = state.rule_catalog.find_by_rule(rule_ref.rule) {
+                    selected.id = Some(named.id.clone());
+                    selected.name = Some(named.name.clone());
+                } else {
+                    selected.id = rule_ref.id;
+                    selected.name = rule_ref.name;
+                }
+                state.gol_rule_selected = selected;
+                state.visualizer.rule_mode = session.rule_mode.clone();
+                state.visualizer.rule = session.rule.to_string();
+                state.visualizer.protocol_name = None;
                 state.status = Some(format!("Rule applied {}", session.rule));
             }
         }
@@ -948,6 +1092,10 @@ impl PetriDishRuntime {
                 .rule_catalog
                 .find_by_rule(session.rule)
                 .map(|rule| rule.id.clone()),
+            protocol: Self::protocol_snapshot_string(&session.rule_mode),
+            protocol_hash: Self::protocol_snapshot_hash(&session.rule_mode),
+            protocol_phase_idx: Self::protocol_snapshot_phase(&session.rule_mode).map(|v| v.0),
+            protocol_step_in_phase: Self::protocol_snapshot_phase(&session.rule_mode).map(|v| v.1),
             generation,
             alive_count: alive,
             period,
@@ -1001,7 +1149,9 @@ impl PetriDishRuntime {
         let Some(session) = self.session.as_mut() else {
             return;
         };
-        session.rule = state.gol_rule_selected.rule;
+        session.rule_mode = state.visualizer.rule_mode.clone();
+        session.rule_mode.reset();
+        session.rule = session.rule_mode.current_rule().rule;
         self.reseed_from_current(state, seed_runtime, screen);
     }
 
@@ -1062,6 +1212,33 @@ fn render_metrics(
         Span::raw(" "),
         Span::styled(rule_label, value),
     ]));
+    if let RuleMode::Protocol(protocol) = &session.rule_mode {
+        let proto_name = state
+            .visualizer
+            .protocol_name
+            .clone()
+            .unwrap_or_else(|| "Protocol".into());
+        let phase = protocol.current_phase();
+        let phase_label = phase
+            .label
+            .clone()
+            .unwrap_or_else(|| "Phase".into());
+        let phase_idx = protocol.phase_idx + 1;
+        let phase_total = protocol.phase_count();
+        let step = protocol.step_in_phase.saturating_add(1);
+        let phase_steps = phase.steps.max(1);
+        lines.push(Line::from(vec![
+            Span::styled("Proto", label),
+            Span::raw(" "),
+            Span::styled(
+                format!(
+                    "{} | Phase {}/{} \"{}\" | t={}/{}",
+                    proto_name, phase_idx, phase_total, phase_label, step, phase_steps
+                ),
+                value,
+            ),
+        ]));
+    }
     lines.push(Line::from(vec![
         Span::styled("Gen", label),
         Span::raw(" "),
@@ -1130,7 +1307,7 @@ fn render_footer(frame: &mut Frame, area: Rect, theme: &Theme, session: &SimSess
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled(
-            "Esc close | Space pause | Enter step | S snapshot | Ctrl+R reseed | H hide | F2/Ctrl+P rules | G search | +/- speed | T wrap | O auto-stop",
+            "Esc close | Space pause | Enter step | S snapshot | Ctrl+R reseed | H hide | F2/Ctrl+P rules | P protocols | G search | +/- speed | T wrap | O auto-stop",
             Style::default().fg(theme.border).add_modifier(Modifier::DIM),
         ),
     ]);

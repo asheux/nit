@@ -7,3 +7,4 @@ pub mod notes_view;
 pub mod top_bar;
 pub mod visualizer_view;
 pub mod rule_picker;
+pub mod protocol_picker;

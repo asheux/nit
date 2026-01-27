@@ -7,6 +7,7 @@ use crate::{
     mode::Mode,
     pane::PaneId,
     prompt::Prompt,
+    rule_protocol::{RuleMode, RuleRef},
     seed::{SeedEncoderId, SeedParams, SeedPreviewMode, SeedStats, SeedViewMode},
     viewport::Viewport,
 };
@@ -129,6 +130,8 @@ pub struct VisualizerState {
     pub paused_by_attractor: bool,
     pub wrap: bool,
     pub rule: String,
+    pub rule_mode: RuleMode,
+    pub protocol_name: Option<String>,
     pub generation: u64,
     pub alive: usize,
     pub period: Option<u32>,
@@ -221,6 +224,15 @@ pub struct RulePickerState {
     pub selected: usize,
 }
 
+#[derive(Clone, Debug, Default)]
+pub struct ProtocolPickerState {
+    pub open: bool,
+    pub selected: usize,
+    pub custom_input: String,
+    pub custom_error: Option<String>,
+    pub custom_preview: Option<String>,
+}
+
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct AppState {
     pub workspace_root: PathBuf,
@@ -249,6 +261,8 @@ pub struct AppState {
     pub rule_catalog: RuleCatalog,
     #[serde(skip)]
     pub rule_picker: RulePickerState,
+    #[serde(skip)]
+    pub protocol_picker: ProtocolPickerState,
     #[serde(skip)]
     pub rule_persistence: crate::rule_config::RulePersistence,
 }
@@ -306,6 +320,12 @@ impl AppState {
                 paused_by_attractor: false,
                 wrap: settings.gol.wrap,
                 rule: "B3/S23".to_string(),
+                rule_mode: RuleMode::Fixed(RuleRef {
+                    id: None,
+                    rule: Rule::conway(),
+                    name: None,
+                }),
+                protocol_name: None,
                 generation: 0,
                 alive: 0,
                 period: None,
@@ -367,6 +387,7 @@ impl AppState {
             command_line: None,
             rule_catalog,
             rule_picker: RulePickerState::default(),
+            protocol_picker: ProtocolPickerState::default(),
             rule_persistence: crate::rule_config::RulePersistence::default(),
         }
     }
@@ -391,6 +412,8 @@ impl AppState {
         let changed = self.gol_rule_selected.rule != selected.rule;
         self.gol_rule_selected = selected;
         self.visualizer.rule = self.gol_rule_selected.rule.to_string();
+        self.visualizer.rule_mode = RuleMode::Fixed(RuleRef::from_selected(&self.gol_rule_selected));
+        self.visualizer.protocol_name = None;
         if changed {
             self.visualizer.pending_rule_change = true;
         }
@@ -1012,17 +1035,31 @@ pub fn apply_action(state: &mut AppState, action: Action) -> ActionOutcome {
             }
         }
         Action::OpenRulePicker => {
-            state.rule_picker.open = true;
-            state.rule_picker.query.clear();
-            state.rule_picker.selected = state
-                .rule_catalog
-                .index_of_selected(&state.gol_rule_selected)
-                .unwrap_or(0);
+            if matches!(state.visualizer.rule_mode, RuleMode::Protocol(_)) {
+                state.status = Some("Rule picker disabled in protocol mode".into());
+            } else {
+                state.rule_picker.open = true;
+                state.rule_picker.query.clear();
+                state.rule_picker.selected = state
+                    .rule_catalog
+                    .index_of_selected(&state.gol_rule_selected)
+                    .unwrap_or(0);
+            }
+        }
+        Action::OpenProtocolPicker => {
+            state.protocol_picker.open = true;
+            state.protocol_picker.selected = 0;
+            state.protocol_picker.custom_input.clear();
+            state.protocol_picker.custom_error = None;
+            state.protocol_picker.custom_preview = None;
         }
         Action::CloseModal => {
             state.rule_picker.open = false;
             state.rule_picker.query.clear();
             state.rule_picker.selected = 0;
+            state.protocol_picker.open = false;
+            state.protocol_picker.custom_error = None;
+            state.protocol_picker.custom_preview = None;
         }
         Action::ApplySelectedRuleFromPicker => {
             let matches = state.rule_catalog.filter_indices(&state.rule_picker.query);
@@ -1035,6 +1072,40 @@ pub fn apply_action(state: &mut AppState, action: Action) -> ActionOutcome {
                     apply_rule_selection(state, SelectedRule::from_named(named), true);
                 }
                 state.rule_picker.open = false;
+            }
+        }
+        Action::ApplySelectedProtocolFromPicker => {
+            let presets = crate::rule_protocol::builtin_protocols(&state.rule_catalog);
+            let idx = state
+                .protocol_picker
+                .selected
+                .min(presets.len().saturating_add(1).saturating_sub(1));
+            if idx < presets.len() {
+                let preset = &presets[idx];
+                apply_protocol_selection(state, preset.mode.clone(), Some(preset.name.clone()));
+                state.status = Some(format!("Protocol set to {}", preset.name));
+                state.protocol_picker.open = false;
+                state.protocol_picker.custom_error = None;
+            } else {
+                match crate::rule_protocol::parse_protocol_spec(
+                    &state.protocol_picker.custom_input,
+                    &state.rule_catalog,
+                ) {
+                    Ok(mut protocol) => {
+                        protocol.reset();
+                        apply_protocol_selection(
+                            state,
+                            RuleMode::Protocol(protocol),
+                            Some("Custom".into()),
+                        );
+                        state.status = Some("Protocol set to Custom".into());
+                        state.protocol_picker.open = false;
+                        state.protocol_picker.custom_error = None;
+                    }
+                    Err(err) => {
+                        state.protocol_picker.custom_error = Some(err);
+                    }
+                }
             }
         }
         Action::ToggleSyntax => {
@@ -1145,6 +1216,24 @@ fn apply_rule_selection(state: &mut AppState, selected: SelectedRule, persist: b
             state.status = Some(format!("GoL rule set to {label} (save failed: {err})"));
         }
     }
+}
+
+fn apply_protocol_selection(state: &mut AppState, mut mode: RuleMode, label: Option<String>) {
+    mode.reset();
+    state.visualizer.rule_mode = mode;
+    state.visualizer.protocol_name = label;
+    let rule_ref = state.visualizer.rule_mode.current_rule().clone();
+    state.visualizer.rule = rule_ref.rule.to_string();
+    let mut selected = SelectedRule::from_rule(rule_ref.rule);
+    if let Some(named) = state.rule_catalog.find_by_rule(rule_ref.rule) {
+        selected.id = Some(named.id.clone());
+        selected.name = Some(named.name.clone());
+    } else {
+        selected.id = rule_ref.id;
+        selected.name = rule_ref.name;
+    }
+    state.gol_rule_selected = selected;
+    state.visualizer.pending_rule_change = true;
 }
 
 fn log_rule_overview(state: &mut AppState) {

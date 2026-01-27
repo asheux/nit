@@ -17,6 +17,14 @@ pub struct SnapshotMetadata {
     pub rule: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rule_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub protocol: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub protocol_hash: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub protocol_phase_idx: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub protocol_step_in_phase: Option<u32>,
     pub generation: u64,
     pub alive_count: usize,
     pub period: Option<u64>,

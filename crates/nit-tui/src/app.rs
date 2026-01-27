@@ -33,7 +33,7 @@ use crate::{
     theme::Theme,
     widgets::{
         bottom_bar, editor_view, gate_monitor_view, help_overlay, job_output_view, notes_view,
-        rule_picker, top_bar, visualizer_view,
+        protocol_picker, rule_picker, top_bar, visualizer_view,
     },
 };
 
@@ -126,6 +126,12 @@ fn run_loop(
                 handled_input = true;
                 if state.rule_picker.open {
                     if rule_picker::handle_key(&key, state) {
+                        needs_redraw = true;
+                        continue;
+                    }
+                }
+                if state.protocol_picker.open {
+                    if protocol_picker::handle_key(&key, state) {
                         needs_redraw = true;
                         continue;
                     }
