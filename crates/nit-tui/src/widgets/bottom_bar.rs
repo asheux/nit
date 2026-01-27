@@ -7,8 +7,8 @@ use ratatui::{
     Frame,
 };
 
-use crate::theme::Theme;
 use crate::system_stats::{GpuSummary, SystemStats};
+use crate::theme::Theme;
 
 pub fn render(
     frame: &mut Frame,
@@ -55,7 +55,12 @@ fn focus_name(pane: PaneId) -> &'static str {
     pane.title()
 }
 
-fn build_metrics_line(stats: &SystemStats, theme: &Theme, line: usize, col: usize) -> Line<'static> {
+fn build_metrics_line(
+    stats: &SystemStats,
+    theme: &Theme,
+    line: usize,
+    col: usize,
+) -> Line<'static> {
     let cpu = stats.cpu_percent().round().clamp(0.0, 100.0) as u8;
     let mem_used = stats.mem_used_gb();
     let mem_total = stats.mem_total_gb();

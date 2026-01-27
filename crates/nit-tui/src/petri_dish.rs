@@ -5,24 +5,18 @@ use std::time::{Duration, Instant};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use nit_core::{
-    actions::Action,
-    AppState,
-    EncodedSeed,
-    GolRenderMode,
-    RuleMode,
-    RuleRef,
-    SelectedRule,
+    actions::Action, AppState, EncodedSeed, GolRenderMode, RuleMode, RuleRef, SelectedRule,
     VisualizerMode,
 };
 use nit_gol::analyze::{evaluate_rule, RuleEvaluation, RuleScore};
 use nit_gol::attractor::{AttractorConfig, AttractorDetector, AttractorEvent, AutoStopPolicy};
-use nit_gol::AttractorExtra;
 use nit_gol::snapshot::SnapshotMetadata;
 use nit_gol::snapshot_manager::{
     grid_fingerprint, pack_grid_bits, snapshot_queue_capacity, RuleLogEntry, SnapshotEventKind,
     SnapshotManager, SnapshotManagerConfig, SnapshotRequest,
 };
 use nit_gol::step::step;
+use nit_gol::AttractorExtra;
 use nit_gol::{EdgeMode, Grid, Rule};
 use nit_utils::hashing::XorShift64;
 use ratatui::{
@@ -35,9 +29,9 @@ use ratatui::{
 use tracing::{info, warn};
 
 use crate::gol_render::{grid_size_for_mode, GolHudState, GolPalette, GolRenderConfig, GolWidget};
-use crate::widgets::{protocol_picker, rule_picker};
 use crate::seed_runtime::SeedRuntime;
 use crate::theme::Theme;
+use crate::widgets::{protocol_picker, rule_picker};
 
 const MIN_WIDTH: u16 = 100;
 const MIN_HEIGHT: u16 = 30;
@@ -182,7 +176,12 @@ impl PetriDishRuntime {
             let _ = nit_core::apply_action(state, Action::OpenRulePicker);
             return true;
         }
-        if ctrl && matches!(key.code, KeyCode::Enter | KeyCode::Char('\n') | KeyCode::Char('\r')) {
+        if ctrl
+            && matches!(
+                key.code,
+                KeyCode::Enter | KeyCode::Char('\n') | KeyCode::Char('\r')
+            )
+        {
             if session.paused {
                 self.step_once(state);
             }
@@ -236,10 +235,7 @@ impl PetriDishRuntime {
             }
             KeyCode::Char('o') | KeyCode::Char('O') => {
                 state.visualizer.auto_stop_policy = state.visualizer.auto_stop_policy.next();
-                state.status = Some(format!(
-                    "Auto-stop: {}",
-                    state.visualizer.auto_stop_policy
-                ));
+                state.status = Some(format!("Auto-stop: {}", state.visualizer.auto_stop_policy));
                 true
             }
             KeyCode::Char('g') | KeyCode::Char('G') => {
@@ -358,9 +354,7 @@ impl PetriDishRuntime {
         screen: Rect,
     ) {
         if screen.width < MIN_WIDTH || screen.height < MIN_HEIGHT {
-            self.warning = Some(
-                "Terminal too small for Lab Simulator. Resize to run.".to_string(),
-            );
+            self.warning = Some("Terminal too small for Lab Simulator. Resize to run.".to_string());
             return;
         }
         let layout = self.layout(screen);
@@ -469,9 +463,13 @@ impl PetriDishRuntime {
         session.period = None;
         session.last_attractor = None;
         session.detector.reset();
-        session
-            .detector
-            .seed_with_context(&session.grid, session.gen, session.rule, edge, Self::protocol_extra(&session.rule_mode));
+        session.detector.seed_with_context(
+            &session.grid,
+            session.gen,
+            session.rule,
+            edge,
+            Self::protocol_extra(&session.rule_mode),
+        );
         state.visualizer.paused = false;
         state.visualizer.paused_by_attractor = false;
         self.last_attractor_hash = None;
@@ -750,9 +748,7 @@ impl PetriDishRuntime {
                 period,
                 transient,
                 ..
-            } => format!(
-                "Cycle detected: transient={transient}, period={period}, gen={gen}"
-            ),
+            } => format!("Cycle detected: transient={transient}, period={period}, gen={gen}"),
         };
         state.receive_log(log_line);
 
@@ -804,11 +800,10 @@ impl PetriDishRuntime {
         self.last_attractor_hash = Some(grid_hash);
 
         let snapshot_event = event.clone();
-        if is_new_attractor && (should_pause || attractor_snapshots_enabled(&state.settings.gol.snapshots, &event)) {
-            self.queue_snapshot(
-                state,
-                SnapshotTrigger::Attractor(snapshot_event),
-            );
+        if is_new_attractor
+            && (should_pause || attractor_snapshots_enabled(&state.settings.gol.snapshots, &event))
+        {
+            self.queue_snapshot(state, SnapshotTrigger::Attractor(snapshot_event));
         }
 
         if matches!(event, AttractorEvent::FixedPoint { .. })
@@ -867,10 +862,7 @@ impl PetriDishRuntime {
                 }
                 session.rule_mode = RuleMode::Fixed(rule_ref.clone());
                 session.rule = rule_ref.rule;
-                info!(
-                    "Applying best rule {} score={:.2}",
-                    best.rule, best.score
-                );
+                info!("Applying best rule {} score={:.2}", best.rule, best.score);
                 session.gen = 0;
                 session.period = None;
                 session.last_attractor = None;
@@ -937,7 +929,11 @@ impl PetriDishRuntime {
         };
         self.leaderboard.retain(|e| e.rule != eval.rule);
         self.leaderboard.push(entry);
-        self.leaderboard.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+        self.leaderboard.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         if self.leaderboard.len() > self.leaderboard_limit {
             self.leaderboard.truncate(self.leaderboard_limit);
         }
@@ -968,7 +964,11 @@ impl PetriDishRuntime {
         }
         let grid = session.grid.clone();
         if grid.width() > u16::MAX as usize || grid.height() > u16::MAX as usize {
-            warn!("Snapshot skipped; grid too large ({}x{})", grid.width(), grid.height());
+            warn!(
+                "Snapshot skipped; grid too large ({}x{})",
+                grid.width(),
+                grid.height()
+            );
             return;
         }
         let grid_hash = grid_fingerprint(&grid);
@@ -1154,7 +1154,6 @@ impl PetriDishRuntime {
         session.rule = session.rule_mode.current_rule().rule;
         self.reseed_from_current(state, seed_runtime, screen);
     }
-
 }
 
 impl Drop for PetriDishRuntime {
@@ -1178,9 +1177,13 @@ fn centered_rect(screen: Rect, pct_w: u16, pct_h: u16) -> Rect {
     let h = screen.height.saturating_mul(pct_h) / 100;
     let x = screen.x + screen.width.saturating_sub(w) / 2;
     let y = screen.y + screen.height.saturating_sub(h) / 2;
-    Rect { x, y, width: w, height: h }
+    Rect {
+        x,
+        y,
+        width: w,
+        height: h,
+    }
 }
-
 
 fn render_metrics(
     frame: &mut Frame,
@@ -1219,10 +1222,7 @@ fn render_metrics(
             .clone()
             .unwrap_or_else(|| "Protocol".into());
         let phase = protocol.current_phase();
-        let phase_label = phase
-            .label
-            .clone()
-            .unwrap_or_else(|| "Phase".into());
+        let phase_label = phase.label.clone().unwrap_or_else(|| "Phase".into());
         let phase_idx = protocol.phase_idx + 1;
         let phase_total = protocol.phase_count();
         let step = protocol.step_in_phase.saturating_add(1);
@@ -1252,7 +1252,14 @@ fn render_metrics(
     lines.push(Line::from(vec![
         Span::styled("Wrap", label),
         Span::raw(" "),
-        Span::styled(if state.visualizer.wrap { "Torus" } else { "Dead" }, value),
+        Span::styled(
+            if state.visualizer.wrap {
+                "Torus"
+            } else {
+                "Dead"
+            },
+            value,
+        ),
     ]));
     lines.push(Line::from(vec![
         Span::styled("AutoStop", label),
@@ -1284,7 +1291,11 @@ fn render_metrics(
     }
     let para = Paragraph::new(lines)
         .style(Style::default().bg(theme.background).fg(theme.foreground))
-        .block(Block::default().borders(Borders::LEFT).border_style(Style::default().fg(theme.border)));
+        .block(
+            Block::default()
+                .borders(Borders::LEFT)
+                .border_style(Style::default().fg(theme.border)),
+        );
     frame.render_widget(para, area);
 }
 
@@ -1311,8 +1322,8 @@ fn render_footer(frame: &mut Frame, area: Rect, theme: &Theme, session: &SimSess
             Style::default().fg(theme.border).add_modifier(Modifier::DIM),
         ),
     ]);
-    let para = Paragraph::new(line)
-        .style(Style::default().bg(theme.background).fg(theme.foreground));
+    let para =
+        Paragraph::new(line).style(Style::default().bg(theme.background).fg(theme.foreground));
     frame.render_widget(para, inner);
 
     draw_footer_separator(
@@ -1354,11 +1365,16 @@ enum SnapshotTrigger {
     Attractor(AttractorEvent),
 }
 
-fn attractor_snapshots_enabled(settings: &nit_core::GolSnapshotsConfig, event: &AttractorEvent) -> bool {
+fn attractor_snapshots_enabled(
+    settings: &nit_core::GolSnapshotsConfig,
+    event: &AttractorEvent,
+) -> bool {
     if settings.snapshot_on_attractor {
         return true;
     }
-    if matches!(event, AttractorEvent::Cycle { .. }) && std::env::var_os("NIT_SNAPSHOT_CYCLE").is_some() {
+    if matches!(event, AttractorEvent::Cycle { .. })
+        && std::env::var_os("NIT_SNAPSHOT_CYCLE").is_some()
+    {
         return true;
     }
     false
@@ -1543,7 +1559,11 @@ fn search_worker_loop(cmd_rx: Receiver<SearchCommand>, event_tx: Sender<WorkerEv
             }
         }
 
-        leaderboard.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+        leaderboard.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         leaderboard.dedup_by(|a, b| a.rule == b.rule);
         if leaderboard.len() > config.leaderboard_size {
             leaderboard.truncate(config.leaderboard_size);

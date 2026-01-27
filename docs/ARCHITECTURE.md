@@ -2,9 +2,10 @@
 
 ## Overview
 
-nit is a terminal-first editor composed of five crates:
+nit is a terminal-first editor composed of six crates:
 
 - `nit-core`: state, actions, text buffers, and IO (no terminal dependencies).
+- `nit-games`: games-between-programs engine and tournament logic.
 - `nit-gol`: Conway’s Game of Life engine, rule evaluation, and snapshot encoding.
 - `nit-syntax`: syntax highlighting engine and language registry (tree-sitter + fallback).
 - `nit-tui`: rendering, layout, event loop, and key mapping using ratatui + crossterm.
@@ -29,6 +30,7 @@ The app redraws only when state changes or the terminal resizes.
 - Focused pane
 - Logs ring buffer and job progress/paused flag
 - Visualizer state (seed, rule, mode, pause, wrap, generation, period, leaderboard)
+- App kind (GoL or Games) plus app-specific runtime state
 - Metrics: last render time, frame count, last action
 - Optional prompt (e.g., confirm quit)
 
@@ -49,6 +51,30 @@ rendering and text‑measurement consistent, and avoids lossy conversions.
 - Top bar with title, path, mode, encoding, ln/col.
 - Main grid: left (Notes + Job Output), center (Editor), right (Visualizer + Gate Monitor).
 - Bottom bar with key hints; overlay for help and prompts.
+
+## Multi-App Dispatch
+
+- The CLI supports `nit` (default GoL), `nit gol`, and `nit games` subcommands.
+- `AppKind` in `AppState` selects the active app and gates commands/keybindings.
+- The TUI instantiates app-specific runtimes:
+  - GoL: seed runtime + GoL Petri Dish + GoL visualizer widget.
+  - Games: Games Petri Dish + Games visualizer dashboard widget.
+- The `:run` command routes to the active app; namespaced commands (`:gol ...`, `:games ...`)
+  are always honored.
+
+## Games Config (Payoff Matrix)
+
+- Games configs support a payoff matrix under `[payoff]`.
+- `matrix` is a 2×2 grid where each cell is `[A_payoff, B_payoff]`.
+- When `matrix` is present, it is the source of truth; `R/S/T/P` must match it.
+
+## Games Output Logs
+
+- Summaries (`run__*.json`) include config + results + log file references.
+- Event logs (`events__*.ndjson`) capture tournament progress (optionally per-round).
+- History logs (`history__*.ndjson`) are per-match outcome strings when enabled.
+  Outcomes are encoded as digits from player A’s perspective:
+  `0=CC`, `1=CD`, `2=DC`, `3=DD`.
 
 ## Rendering Discipline
 

@@ -26,7 +26,12 @@ pub struct RuleScore {
     pub alive_end: u32,
 }
 
-pub fn evaluate_rule(seed: &Grid, rule: Rule, edge: EdgeMode, max_generations: u32) -> RuleEvaluation {
+pub fn evaluate_rule(
+    seed: &Grid,
+    rule: Rule,
+    edge: EdgeMode,
+    max_generations: u32,
+) -> RuleEvaluation {
     let mut grid = seed.clone();
     let mut seen: HashMap<u64, u32> = HashMap::new();
     let mut sum_population: u64 = 0;

@@ -85,20 +85,15 @@ fn draw_bboxes(
     if w == 0 || h == 0 {
         return;
     }
-    let style = Style::default().fg(palette.bbox).add_modifier(Modifier::DIM);
+    let style = Style::default()
+        .fg(palette.bbox)
+        .add_modifier(Modifier::DIM);
     for bbox in cache.component_bboxes.iter().take(4) {
         draw_bbox(area, buf, bbox, sx, sy, style);
     }
 }
 
-fn draw_bbox(
-    area: Rect,
-    buf: &mut Buffer,
-    bbox: &BBox,
-    sx: usize,
-    sy: usize,
-    style: Style,
-) {
+fn draw_bbox(area: Rect, buf: &mut Buffer, bbox: &BBox, sx: usize, sy: usize, style: Style) {
     let min_x = bbox.min_x / sx;
     let max_x = bbox.max_x / sx;
     let min_y = bbox.min_y / sy;
@@ -160,7 +155,9 @@ fn draw_inset(
     }
     draw_inset_label(start_x, start_y, palette, buf);
     // tiny frame
-    let style = Style::default().fg(palette.grid).add_modifier(Modifier::DIM);
+    let style = Style::default()
+        .fg(palette.grid)
+        .add_modifier(Modifier::DIM);
     let right = start_x + inset_w;
     let bottom = start_y + inset_h;
     for x in start_x..=right {

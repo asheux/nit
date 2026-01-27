@@ -12,6 +12,10 @@ use crate::theme::Theme;
 
 pub fn render(frame: &mut Frame, area: ratatui::layout::Rect, state: &AppState, theme: &Theme) {
     let mode = format!("{:?}", state.mode).to_uppercase();
+    let app_label = match state.app_kind {
+        nit_core::AppKind::Gol => "GOL",
+        nit_core::AppKind::Games => "GAMES",
+    };
     let file = state
         .editor_buffer()
         .path()
@@ -29,28 +33,34 @@ pub fn render(frame: &mut Frame, area: ratatui::layout::Rect, state: &AppState, 
         .unwrap_or_default();
 
     let inner_width = area.width.saturating_sub(2) as usize;
-    let fixed_width = [
-        " nit ",
-        " | ",
-        " | ",
-        &mode,
-        " | UTF-8 ",
-    ]
-    .iter()
-    .map(|s| s.width())
-    .sum::<usize>();
+    let fixed_width = [" nit ", " | ", " | ", &mode, " | ", app_label, " | UTF-8 "]
+        .iter()
+        .map(|s| s.width())
+        .sum::<usize>();
 
-    let mut hint_labels = vec![
-        "Ctrl+Q Quit",
-        "Ctrl+S Save",
-        "Ctrl+Y Seed",
-        "Ctrl+E Encoder",
-    ];
+    let mut hint_labels = match state.app_kind {
+        nit_core::AppKind::Gol => vec![
+            "Ctrl+Q Quit",
+            "Ctrl+S Save",
+            "Ctrl+Y Seed",
+            "Ctrl+E Encoder",
+        ],
+        nit_core::AppKind::Games => vec![
+            "Ctrl+Q Quit",
+            "Ctrl+S Save",
+            "Ctrl+Enter Run",
+            "Ctrl+^ Show",
+        ],
+    };
     let mut hints_text = hints_join(&hint_labels);
     let mut hints_width = hints_text.width();
     let mut status_width = status_label.width();
     let mut right_width = hints_width
-        + if hints_width > 0 && status_width > 0 { 2 } else { 0 }
+        + if hints_width > 0 && status_width > 0 {
+            2
+        } else {
+            0
+        }
         + status_width;
     let mut max_right = inner_width.saturating_sub(fixed_width);
     if right_width > 0 {
@@ -62,7 +72,11 @@ pub fn render(frame: &mut Frame, area: ratatui::layout::Rect, state: &AppState, 
         hints_text = hints_join(&hint_labels);
         hints_width = hints_text.width();
         right_width = hints_width
-            + if hints_width > 0 && status_width > 0 { 2 } else { 0 }
+            + if hints_width > 0 && status_width > 0 {
+                2
+            } else {
+                0
+            }
             + status_width;
     }
 
@@ -111,6 +125,8 @@ pub fn render(frame: &mut Frame, area: ratatui::layout::Rect, state: &AppState, 
         ),
         Span::styled(" | ", Style::default().fg(theme.border)),
         Span::styled(mode, Style::default().fg(theme.accent)),
+        Span::styled(" | ", Style::default().fg(theme.border)),
+        Span::styled(app_label, Style::default().fg(theme.accent)),
         Span::styled(" | UTF-8 ", Style::default().fg(theme.border)),
     ];
 
@@ -127,10 +143,7 @@ pub fn render(frame: &mut Frame, area: ratatui::layout::Rect, state: &AppState, 
         .style(Style::default().bg(theme.background));
 
     if right_width > 0 {
-        let left_width: usize = spans
-            .iter()
-            .map(|s| s.content.as_ref().width())
-            .sum();
+        let left_width: usize = spans.iter().map(|s| s.content.as_ref().width()).sum();
         let pad = inner_width
             .saturating_sub(left_width)
             .saturating_sub(right_width);

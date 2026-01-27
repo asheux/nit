@@ -1,0 +1,63 @@
+schema_version = 1
+game = "ipd"
+rounds = 20
+repetitions = 1
+self_play = false
+seed = 12345
+noise = 0.0
+
+[payoff]
+R = 3
+S = 0
+T = 5
+P = 1
+
+[history]
+enabled = true
+
+[[strategy]]
+id = "allc"
+type = "builtin"
+name = "Always Cooperate"
+
+[[strategy]]
+id = "alld"
+type = "builtin"
+name = "Always Defect"
+
+[[strategy]]
+id = "tft"
+type = "builtin"
+name = "Tit For Tat"
+
+[[strategy]]
+id = "grim"
+type = "builtin"
+name = "Grim Trigger"
+
+[[strategy]]
+id = "pavlov"
+type = "builtin"
+name = "Win Stay Lose Shift"
+
+[[strategy]]
+id = "rand50"
+type = "random"
+p_cooperate = 0.5
+
+[[strategy]]
+id = "fsm1"
+type = "fsm"
+start_state = 0
+output = ["C", "D"]
+transitions = [
+  [0, 1, 0, 1],
+  [1, 1, 0, 0],
+]
+
+[[strategy]]
+id = "mem1"
+type = "memory"
+n = 1
+initial = "C"
+table = ["C", "D", "D", "C"]

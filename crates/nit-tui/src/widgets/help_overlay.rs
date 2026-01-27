@@ -10,7 +10,7 @@ use crate::theme::Theme;
 
 pub fn preferred_size(screen: Rect) -> (u16, u16) {
     let width = (screen.width.saturating_sub(4)).min(80).max(30);
-    let height = (screen.height.saturating_sub(6)).min(24).max(10);
+    let height = (screen.height.saturating_sub(4)).min(36).max(12);
     (width, height)
 }
 
@@ -47,7 +47,7 @@ pub fn render(frame: &mut Frame, area: Rect, theme: &Theme) {
     ]));
     lines.push(Line::from(vec![
         Span::styled("Ctrl+Enter", Style::default().fg(theme.accent)),
-        Span::raw(" run Petri Dish (any focus)"),
+        Span::raw(" run Petri Dish (active app)"),
     ]));
     lines.push(Line::from(vec![
         Span::styled("Ctrl+^", Style::default().fg(theme.accent)),
@@ -56,6 +56,64 @@ pub fn render(frame: &mut Frame, area: Rect, theme: &Theme) {
     lines.push(Line::from(vec![
         Span::styled(":", Style::default().fg(theme.accent)),
         Span::raw(" command prompt (Normal mode)"),
+    ]));
+    lines.push(Line::from(vec![Span::styled(
+        "COMMANDS (:)",
+        heading_style,
+    )]));
+    lines.push(Line::from(vec![
+        Span::styled(":run", Style::default().fg(theme.accent)),
+        Span::raw(" run active app"),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled(":gol run|hide|show|stop", Style::default().fg(theme.accent)),
+        Span::raw(" GoL petri controls"),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled(":gol rule [id|B/S]", Style::default().fg(theme.accent)),
+        Span::raw(" set rule / show current"),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled(":gol rules", Style::default().fg(theme.accent)),
+        Span::raw(" list GoL rules"),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled(
+            ":gol seed | :gol encoder",
+            Style::default().fg(theme.accent),
+        ),
+        Span::raw(" cycle seed view/encoder"),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled(
+            ":games run|hide|show|status|export",
+            Style::default().fg(theme.accent),
+        ),
+        Span::raw(" games controls"),
+    ]));
+    lines.push(Line::from(vec![Span::styled(
+        "GAMES PETRI DISH (POPUP)",
+        heading_style,
+    )]));
+    lines.push(Line::from(vec![
+        Span::styled("Esc", Style::default().fg(theme.accent)),
+        Span::raw(" close tournament"),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("Space", Style::default().fg(theme.accent)),
+        Span::raw(" pause / resume"),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("Enter", Style::default().fg(theme.accent)),
+        Span::raw(" step (when paused)"),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("+ / -", Style::default().fg(theme.accent)),
+        Span::raw(" speed up / down"),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("H", Style::default().fg(theme.accent)),
+        Span::raw(" hide (continues running)"),
     ]));
 
     lines.push(Line::from(vec![Span::styled(

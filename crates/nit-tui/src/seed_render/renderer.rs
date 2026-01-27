@@ -2,12 +2,12 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::Style;
 
-use nit_core::{EncodedSeed, SeedEncoderId, SeedPreviewMode};
 use nit_core::seed::SeedBits;
+use nit_core::{EncodedSeed, SeedEncoderId, SeedPreviewMode};
 use nit_gol::Grid;
 
-use super::{braille, halfblock, heatmap, overlays, solid, tissue};
 use super::palette::SeedPalette;
+use super::{braille, halfblock, heatmap, overlays, solid, tissue};
 
 #[derive(Clone, Debug)]
 pub struct SeedRenderConfig {
@@ -217,10 +217,9 @@ pub fn grid_size_for_mode(width: usize, height: usize, mode: SeedPreviewMode) ->
     match mode {
         SeedPreviewMode::HalfBlock => (width, height.saturating_mul(2)),
         SeedPreviewMode::Braille => (width.saturating_mul(2), height.saturating_mul(4)),
-        SeedPreviewMode::Solid
-        | SeedPreviewMode::Tissue
-        | SeedPreviewMode::Heatmap
-        => (width, height),
+        SeedPreviewMode::Solid | SeedPreviewMode::Tissue | SeedPreviewMode::Heatmap => {
+            (width, height)
+        }
     }
 }
 

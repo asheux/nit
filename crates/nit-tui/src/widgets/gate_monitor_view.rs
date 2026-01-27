@@ -1,5 +1,5 @@
-use nit_core::{AppState, GolSearchIntensity, PaneId, RuleMode};
 use nit_core::seed::SeedViewMode;
+use nit_core::{AppKind, AppState, GamesStatus, GolSearchIntensity, PaneId, RuleMode};
 use nit_gol::{AttractorEvent, Rule};
 use ratatui::{
     layout::Constraint,
@@ -27,6 +27,9 @@ pub fn render(
     syntax_status: &str,
     syntax_debug: Option<SyntaxDebugInfo>,
 ) {
+    if state.app_kind == AppKind::Games {
+        return render_games(frame, area, state, theme, syntax_status, syntax_debug);
+    }
     let focused = state.focus == PaneId::GateMonitor;
     let border_style = if focused {
         Style::default().fg(theme.border_focused)
@@ -55,8 +58,8 @@ pub fn render(
                 .fg(title_color)
                 .add_modifier(Modifier::BOLD),
         ));
-
     let inner = block.inner(area);
+
     let (ln, col) = state.line_col();
     let petri_mode = match state.visualizer.mode {
         nit_core::VisualizerMode::SimOnly => "SIM",
@@ -86,10 +89,7 @@ pub fn render(
     };
     let seed_view = match state.visualizer.seed_view {
         SeedViewMode::Plate => {
-            format!(
-                "PLATE/{}",
-                state.visualizer.seed_plate_mode.label()
-            )
+            format!("PLATE/{}", state.visualizer.seed_plate_mode.label())
         }
         _ => state.visualizer.seed_view.label().to_string(),
     };
@@ -105,9 +105,7 @@ pub fn render(
         .as_deref()
         .map(|path| shorten_text(path, 30))
         .unwrap_or_else(|| "--".into());
-    let label_style = Style::default()
-        .fg(theme.title)
-        .add_modifier(Modifier::DIM);
+    let label_style = Style::default().fg(theme.title).add_modifier(Modifier::DIM);
     let value_style = Style::default().fg(theme.foreground);
     let dim_style = Style::default()
         .fg(theme.border)
@@ -188,12 +186,7 @@ pub fn render(
         label_style,
         Style::default().fg(theme.title_focused),
     ));
-    rows.push(row(
-        "Seed Hash",
-        seed_hash,
-        label_style,
-        value_style,
-    ));
+    rows.push(row("Seed Hash", seed_hash, label_style, value_style));
     rows.push(row(
         "Seed Dens",
         format!("{:.2}", state.visualizer.seed_stats.density),
@@ -206,12 +199,7 @@ pub fn render(
         label_style,
         value_style,
     ));
-    rows.push(row(
-        "Seed View",
-        seed_view,
-        label_style,
-        value_style,
-    ));
+    rows.push(row("Seed View", seed_view, label_style, value_style));
     rows.push(row(
         "Seed Source",
         format!("{:?}", state.visualizer.seed_source),
@@ -223,7 +211,12 @@ pub fn render(
     ));
     rows.push(row(
         "Seed Search",
-        if state.visualizer.seed_search_active { "ON" } else { "OFF" }.to_string(),
+        if state.visualizer.seed_search_active {
+            "ON"
+        } else {
+            "OFF"
+        }
+        .to_string(),
         label_style,
         if state.visualizer.seed_search_active {
             Style::default().fg(theme.accent)
@@ -330,12 +323,7 @@ pub fn render(
             .protocol_name
             .clone()
             .unwrap_or_else(|| "Protocol".into());
-        rows.push(row(
-            "Petri Proto",
-            proto_name,
-            label_style,
-            value_style,
-        ));
+        rows.push(row("Petri Proto", proto_name, label_style, value_style));
         let phase_label = protocol
             .current_phase()
             .label
@@ -349,12 +337,7 @@ pub fn render(
             protocol.step_in_phase + 1,
             protocol.current_phase().steps.max(1)
         );
-        rows.push(row(
-            "Petri Phase",
-            phase_text,
-            label_style,
-            dim_style,
-        ));
+        rows.push(row("Petri Phase", phase_text, label_style, dim_style));
     }
     rows.push(row(
         "Rule Bits",
@@ -404,11 +387,21 @@ pub fn render(
         "Petri Pause",
         petri_pause_reason.to_string(),
         label_style,
-        paused_by_style(state.visualizer.paused, state.visualizer.paused_by_attractor, theme, dim_style),
+        paused_by_style(
+            state.visualizer.paused,
+            state.visualizer.paused_by_attractor,
+            theme,
+            dim_style,
+        ),
     ));
     rows.push(row(
         "Petri Wrap",
-        if state.visualizer.wrap { "Torus" } else { "Dead" }.to_string(),
+        if state.visualizer.wrap {
+            "Torus"
+        } else {
+            "Dead"
+        }
+        .to_string(),
         label_style,
         if state.visualizer.wrap {
             Style::default().fg(theme.title)
@@ -529,8 +522,11 @@ pub fn render(
     for (idx, entry) in state.visualizer.leaderboard.iter().take(3).enumerate() {
         rows.push(Row::new(vec![
             Cell::from(format!("Rule {}", idx + 1)).style(label_style),
-            Cell::from(format!("{} ({:.1})", entry.rule, entry.score))
-                .style(leaderboard_style(idx, theme, value_style)),
+            Cell::from(format!("{} ({:.1})", entry.rule, entry.score)).style(leaderboard_style(
+                idx,
+                theme,
+                value_style,
+            )),
         ]));
     }
 
@@ -541,6 +537,239 @@ pub fn render(
 
     frame.render_widget(block, area);
     frame.render_widget(table, inner);
+}
+
+fn render_games(
+    frame: &mut Frame,
+    area: ratatui::layout::Rect,
+    state: &AppState,
+    theme: &Theme,
+    syntax_status: &str,
+    syntax_debug: Option<SyntaxDebugInfo>,
+) {
+    let focused = state.focus == PaneId::GateMonitor;
+    let border_style = if focused {
+        Style::default().fg(theme.border_focused)
+    } else {
+        Style::default().fg(theme.border)
+    };
+    let border_type = if focused {
+        BorderType::Thick
+    } else {
+        BorderType::Plain
+    };
+    let title_color = if focused {
+        theme.title_focused
+    } else {
+        theme.title
+    };
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(border_style)
+        .border_type(border_type)
+        .style(Style::default().bg(theme.background))
+        .title(Span::styled(
+            "GATE MONITOR",
+            Style::default()
+                .fg(title_color)
+                .add_modifier(Modifier::BOLD),
+        ));
+
+    let (ln, col) = state.line_col();
+    let label_style = Style::default().fg(theme.title).add_modifier(Modifier::DIM);
+    let value_style = Style::default().fg(theme.foreground);
+    let dim_style = Style::default()
+        .fg(theme.border)
+        .add_modifier(Modifier::DIM);
+
+    let mut rows = Vec::new();
+    rows.push(row(
+        "Focus",
+        state.focus.title().to_string(),
+        label_style,
+        Style::default().fg(theme.title_focused),
+    ));
+    rows.push(row(
+        "Mode",
+        format!("{:?}", state.mode),
+        label_style,
+        mode_style(state.mode, theme),
+    ));
+    rows.push(row(
+        "Dirty",
+        if state.editor_buffer().is_dirty() {
+            "Y"
+        } else {
+            "N"
+        }
+        .to_string(),
+        label_style,
+        if state.editor_buffer().is_dirty() {
+            Style::default()
+                .fg(theme.warning)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            dim_style
+        },
+    ));
+    rows.push(row(
+        "Ln/Col",
+        format!("{ln}/{col}"),
+        label_style,
+        value_style,
+    ));
+    rows.push(row(
+        "Bytes",
+        state.editor_buffer().bytes_len().to_string(),
+        label_style,
+        value_style,
+    ));
+    rows.push(row(
+        "Render(ms)",
+        state.metrics.last_render_ms.to_string(),
+        label_style,
+        render_ms_style(state.metrics.last_render_ms, theme),
+    ));
+    rows.push(row(
+        "Frame",
+        state.metrics.frame_count.to_string(),
+        label_style,
+        dim_style,
+    ));
+    rows.push(row(
+        "Workspace",
+        shorten_path(&state.workspace_root, 30),
+        label_style,
+        value_style,
+    ));
+    rows.push(row(
+        "Games",
+        format!("{:?}", state.games.status),
+        label_style,
+        games_status_style(state.games.status, theme),
+    ));
+    rows.push(row(
+        "Petri Open",
+        if state.games.running { "Y" } else { "N" }.to_string(),
+        label_style,
+        if state.games.running {
+            Style::default().fg(theme.accent)
+        } else {
+            dim_style
+        },
+    ));
+    rows.push(row(
+        "Petri Hidden",
+        if state.games.petri_hidden { "Y" } else { "N" }.to_string(),
+        label_style,
+        if state.games.petri_hidden {
+            Style::default().fg(theme.warning)
+        } else {
+            dim_style
+        },
+    ));
+    rows.push(row(
+        "Paused",
+        if state.games.paused { "Y" } else { "N" }.to_string(),
+        label_style,
+        if state.games.paused {
+            Style::default().fg(theme.warning)
+        } else {
+            dim_style
+        },
+    ));
+    rows.push(row(
+        "Steps/Tick",
+        state.games.steps_per_tick.to_string(),
+        label_style,
+        value_style,
+    ));
+    rows.push(row(
+        "Last Run",
+        state
+            .games
+            .last_run_path
+            .as_deref()
+            .map(|p| shorten_text(p, 30))
+            .unwrap_or_else(|| "--".into()),
+        label_style,
+        if state.games.last_run_path.is_some() {
+            Style::default().fg(theme.accent)
+        } else {
+            dim_style
+        },
+    ));
+    rows.push(row(
+        "Events",
+        state
+            .games
+            .last_event_path
+            .as_deref()
+            .map(|p| shorten_text(p, 30))
+            .unwrap_or_else(|| "--".into()),
+        label_style,
+        if state.games.last_event_path.is_some() {
+            Style::default().fg(theme.title)
+        } else {
+            dim_style
+        },
+    ));
+    rows.push(row(
+        "History",
+        state
+            .games
+            .last_history_path
+            .as_deref()
+            .map(|p| shorten_text(p, 30))
+            .unwrap_or_else(|| "--".into()),
+        label_style,
+        if state.games.last_history_path.is_some() {
+            Style::default().fg(theme.title)
+        } else {
+            dim_style
+        },
+    ));
+    rows.push(row(
+        "Syntax",
+        syntax_status.to_string(),
+        label_style,
+        syntax_style(syntax_status, theme, dim_style),
+    ));
+
+    if let Some(info) = syntax_debug {
+        rows.push(row(
+            "Syn Ver",
+            format!(
+                "{}/{}",
+                info.buffer_version,
+                info.snapshot_version
+                    .map(|v| v.to_string())
+                    .unwrap_or_else(|| "--".into())
+            ),
+            label_style,
+            value_style,
+        ));
+        rows.push(row(
+            "Syn Engine",
+            info.engine_state,
+            label_style,
+            value_style,
+        ));
+        rows.push(row(
+            "Syn Job",
+            info.last_job_ms
+                .map(|ms| format!("{ms}ms"))
+                .unwrap_or_else(|| "--".into()),
+            label_style,
+            value_style,
+        ));
+    }
+
+    let table = Table::new(rows, [Constraint::Length(12), Constraint::Min(10)])
+        .column_spacing(1)
+        .block(block);
+    frame.render_widget(table, area);
 }
 
 fn shorten_path(path: &std::path::Path, max: usize) -> String {
@@ -628,7 +857,9 @@ fn mode_style(mode: nit_core::Mode, theme: &Theme) -> Style {
 
 fn intensity_style(intensity: GolSearchIntensity, theme: &Theme) -> Style {
     match intensity {
-        GolSearchIntensity::Low => Style::default().fg(theme.border).add_modifier(Modifier::DIM),
+        GolSearchIntensity::Low => Style::default()
+            .fg(theme.border)
+            .add_modifier(Modifier::DIM),
         GolSearchIntensity::Med => Style::default().fg(theme.title),
         GolSearchIntensity::High => Style::default().fg(theme.warning),
     }
@@ -636,17 +867,31 @@ fn intensity_style(intensity: GolSearchIntensity, theme: &Theme) -> Style {
 
 fn autostop_style(policy: nit_gol::AutoStopPolicy, theme: &Theme) -> Style {
     match policy {
-        nit_gol::AutoStopPolicy::Off => Style::default().fg(theme.border).add_modifier(Modifier::DIM),
+        nit_gol::AutoStopPolicy::Off => Style::default()
+            .fg(theme.border)
+            .add_modifier(Modifier::DIM),
         nit_gol::AutoStopPolicy::Fixed => Style::default().fg(theme.title),
         nit_gol::AutoStopPolicy::Repeat => Style::default().fg(theme.warning),
     }
 }
 
-fn attractor_style(
-    event: Option<&AttractorEvent>,
-    theme: &Theme,
-    dim_style: Style,
-) -> Style {
+fn games_status_style(status: GamesStatus, theme: &Theme) -> Style {
+    match status {
+        GamesStatus::Idle => Style::default()
+            .fg(theme.border)
+            .add_modifier(Modifier::DIM),
+        GamesStatus::Running => Style::default()
+            .fg(theme.accent)
+            .add_modifier(Modifier::BOLD),
+        GamesStatus::Paused => Style::default().fg(theme.warning),
+        GamesStatus::Done => Style::default().fg(theme.title),
+        GamesStatus::Error => Style::default()
+            .fg(theme.error)
+            .add_modifier(Modifier::BOLD),
+    }
+}
+
+fn attractor_style(event: Option<&AttractorEvent>, theme: &Theme, dim_style: Style) -> Style {
     match event {
         Some(AttractorEvent::FixedPoint { .. }) => Style::default().fg(theme.title_focused),
         Some(AttractorEvent::Cycle { .. }) => Style::default().fg(theme.warning),

@@ -2,8 +2,8 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 
-use nit_core::{EncodedSeed, SeedEncoderId};
 use nit_core::seed::SeedBits;
+use nit_core::{EncodedSeed, SeedEncoderId};
 
 use super::palette::SeedPalette;
 use super::renderer::SeedRenderCache;
@@ -26,13 +26,7 @@ pub fn render_genome(
 }
 
 fn render_lifehash16(area: Rect, buf: &mut Buffer, seed: &EncodedSeed, palette: &SeedPalette) {
-    render_bitgrid_bits(
-        area,
-        buf,
-        &seed.base_bits_raw,
-        palette.accent_2,
-        palette.bg,
-    );
+    render_bitgrid_bits(area, buf, &seed.base_bits_raw, palette.accent_2, palette.bg);
     draw_symmetry(area, buf, seed, palette);
     draw_lifehash_inset(area, buf, seed, palette);
 }
@@ -72,7 +66,10 @@ fn render_hilbert_bits(
         } else {
             ' '
         };
-        let sep_style = Style::default().fg(palette.grid).bg(bg).add_modifier(Modifier::DIM);
+        let sep_style = Style::default()
+            .fg(palette.grid)
+            .bg(bg)
+            .add_modifier(Modifier::DIM);
         let fill_style = Style::default().bg(bg);
         for y in 0..rows {
             let cell = buf.get_mut(area.x + x as u16, area.y + y as u16);
@@ -120,14 +117,23 @@ fn render_ascii_bytes(area: Rect, buf: &mut Buffer, seed: &EncodedSeed, palette:
                 let cell = buf.get_mut(gap_x, area.y + y as u16);
                 if sx % 8 == 0 && x > 0 {
                     cell.set_char('┆');
-                    cell.set_style(Style::default().fg(palette.grid).bg(bg).add_modifier(Modifier::DIM));
+                    cell.set_style(
+                        Style::default()
+                            .fg(palette.grid)
+                            .bg(bg)
+                            .add_modifier(Modifier::DIM),
+                    );
                 } else {
                     cell.set_char(' ');
                     cell.set_style(Style::default().bg(bg));
                 }
             }
             let digits_arr = to_three_digits(value);
-            let fg = if printable { palette.accent } else { value_fg(value, palette) };
+            let fg = if printable {
+                palette.accent
+            } else {
+                value_fg(value, palette)
+            };
             let start_idx = match digits {
                 1 => 2,
                 2 => 1,
@@ -261,7 +267,9 @@ fn draw_lifehash_inset(area: Rect, buf: &mut Buffer, seed: &EncodedSeed, palette
 }
 
 fn draw_inset_grid(inset_x: u16, inset_y: u16, palette: &SeedPalette, buf: &mut Buffer) {
-    let style = Style::default().fg(palette.grid).add_modifier(Modifier::DIM);
+    let style = Style::default()
+        .fg(palette.grid)
+        .add_modifier(Modifier::DIM);
     for y in 0..16u16 {
         if y % 4 == 0 {
             for x in 0..16u16 {
@@ -301,7 +309,12 @@ fn draw_inset_label(inset_x: u16, inset_y: u16, palette: &SeedPalette, buf: &mut
     }
 }
 
-fn draw_hilbert_inset(area: Rect, buf: &mut Buffer, cache: &SeedRenderCache, palette: &SeedPalette) {
+fn draw_hilbert_inset(
+    area: Rect,
+    buf: &mut Buffer,
+    cache: &SeedRenderCache,
+    palette: &SeedPalette,
+) {
     let Some(inset) = cache.hilbert_path_inset.as_ref() else {
         return;
     };

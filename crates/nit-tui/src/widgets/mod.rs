@@ -1,10 +1,11 @@
 pub mod bottom_bar;
 pub mod editor_view;
+pub mod games_visualizer_view;
 pub mod gate_monitor_view;
 pub mod help_overlay;
 pub mod job_output_view;
 pub mod notes_view;
+pub mod protocol_picker;
+pub mod rule_picker;
 pub mod top_bar;
 pub mod visualizer_view;
-pub mod rule_picker;
-pub mod protocol_picker;

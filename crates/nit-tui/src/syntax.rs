@@ -3,7 +3,9 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use nit_core::{Buffer, BufferEdit, HighlightConfig, HighlightEngine};
-use nit_syntax::{Debouncer, HighlightRequest, HighlightSnapshot, LanguageId, SyntaxEngine, SyntaxManager};
+use nit_syntax::{
+    Debouncer, HighlightRequest, HighlightSnapshot, LanguageId, SyntaxEngine, SyntaxManager,
+};
 
 #[derive(Debug, Clone)]
 struct PendingSyntax {
@@ -115,8 +117,7 @@ impl SyntaxRuntime {
         if warmup {
             let deadline = Instant::now() + Duration::from_millis(INITIAL_HIGHLIGHT_WAIT_MS);
             loop {
-                if let Some(snapshot) =
-                    self.manager.try_get_highlights(buffer_id, buffer.version())
+                if let Some(snapshot) = self.manager.try_get_highlights(buffer_id, buffer.version())
                 {
                     self.snapshots.insert(buffer_id, snapshot);
                     self.trim_edits_since_snapshot(buffer_id);
@@ -259,11 +260,7 @@ impl SyntaxRuntime {
         self.snapshots.get(&buffer_id)
     }
 
-    pub fn render_snapshot_for(
-        &mut self,
-        buffer_id: usize,
-        buffer: &Buffer,
-    ) -> RenderSnapshot<'_> {
+    pub fn render_snapshot_for(&mut self, buffer_id: usize, buffer: &Buffer) -> RenderSnapshot<'_> {
         let buffer_version = buffer.version();
         let current_lines = buffer.lines_len();
         let snapshot_version = match self.snapshots.get(&buffer_id) {
@@ -293,7 +290,9 @@ impl SyntaxRuntime {
         let cache_hit = self
             .render_cache
             .get(&buffer_id)
-            .map(|cache| cache.buffer_version == buffer_version && cache.snapshot_version == snapshot_version)
+            .map(|cache| {
+                cache.buffer_version == buffer_version && cache.snapshot_version == snapshot_version
+            })
             .unwrap_or(false);
         if !cache_hit {
             let line_map = if self
@@ -376,7 +375,10 @@ impl SyntaxRuntime {
 
     pub fn status_label_for(&self, buffer_id: usize, buffer_version: u64) -> String {
         let status = self.manager.status_for(buffer_id);
-        if matches!(status, nit_syntax::SyntaxStatus::Ok(nit_syntax::EngineKind::TreeSitter)) {
+        if matches!(
+            status,
+            nit_syntax::SyntaxStatus::Ok(nit_syntax::EngineKind::TreeSitter)
+        ) {
             let lagging = self
                 .snapshots
                 .get(&buffer_id)
@@ -419,8 +421,13 @@ impl SyntaxRuntime {
         };
         if needs_rebuild {
             let hashes = compute_buffer_line_hashes(buffer);
-            self.line_hash_cache
-                .insert(buffer_id, CachedLineHashes { version, hashes: Arc::from(hashes) });
+            self.line_hash_cache.insert(
+                buffer_id,
+                CachedLineHashes {
+                    version,
+                    hashes: Arc::from(hashes),
+                },
+            );
         }
         self.line_hash_cache
             .get(&buffer_id)

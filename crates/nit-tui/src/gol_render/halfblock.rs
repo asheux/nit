@@ -127,7 +127,11 @@ impl GolRenderer for HalfBlockRenderer {
                             bg_bottom,
                         )
                     } else if top_alive {
-                        ('▀', live_color(top_age, top_neighbors, cfg, palette), bg_bottom)
+                        (
+                            '▀',
+                            live_color(top_age, top_neighbors, cfg, palette),
+                            bg_bottom,
+                        )
                     } else {
                         (
                             '▄',
@@ -194,8 +198,10 @@ impl GolRenderer for HalfBlockRenderer {
 #[cfg(test)]
 mod tests {
     use super::HalfBlockRenderer;
-    use crate::gol_render::{GolHudMetrics, GolHudState, GolPalette, GolRenderConfig, GolRenderState};
     use crate::gol_render::renderer::GolRenderer;
+    use crate::gol_render::{
+        GolHudMetrics, GolHudState, GolPalette, GolRenderConfig, GolRenderState,
+    };
     use crate::theme::Theme;
     use nit_core::{GolRenderMode, VisualizerMode};
     use nit_gol::Grid;

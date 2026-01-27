@@ -41,8 +41,7 @@ pub fn handle_key(key: &KeyEvent, state: &mut AppState) -> bool {
         }
         KeyCode::PageUp => {
             if total > 0 {
-                state.protocol_picker.selected =
-                    state.protocol_picker.selected.saturating_sub(6);
+                state.protocol_picker.selected = state.protocol_picker.selected.saturating_sub(6);
             }
             true
         }
@@ -181,17 +180,33 @@ pub fn render(frame: &mut Frame, screen: Rect, state: &AppState, theme: &Theme) 
     let footer_line = Line::from(vec![
         Span::styled(
             "Enter apply",
-            Style::default().fg(theme.accent).add_modifier(Modifier::DIM),
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::DIM),
         ),
-        Span::styled(" | ", Style::default().fg(theme.border).add_modifier(Modifier::DIM)),
+        Span::styled(
+            " | ",
+            Style::default()
+                .fg(theme.border)
+                .add_modifier(Modifier::DIM),
+        ),
         Span::styled(
             "Esc cancel",
-            Style::default().fg(theme.accent).add_modifier(Modifier::DIM),
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::DIM),
         ),
-        Span::styled(" | ", Style::default().fg(theme.border).add_modifier(Modifier::DIM)),
+        Span::styled(
+            " | ",
+            Style::default()
+                .fg(theme.border)
+                .add_modifier(Modifier::DIM),
+        ),
         Span::styled(
             "Type to edit custom",
-            Style::default().fg(theme.border).add_modifier(Modifier::DIM),
+            Style::default()
+                .fg(theme.border)
+                .add_modifier(Modifier::DIM),
         ),
     ]);
     let footer = Paragraph::new(footer_line).style(Style::default().bg(popup_bg));

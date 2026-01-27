@@ -81,7 +81,10 @@ pub fn write_snapshot(
             json_path.display()
         )
     });
-    Ok(SnapshotPaths { rle_path, json_path })
+    Ok(SnapshotPaths {
+        rle_path,
+        json_path,
+    })
 }
 
 pub fn encode_rle(grid: &Grid, rule: Rule) -> String {
@@ -222,7 +225,9 @@ pub fn write_rle_bits_atomic(
     rule: &str,
     bits: &[u64],
 ) -> io::Result<()> {
-    write_atomic(path, |writer| write_rle_bits(writer, width, height, rule, bits))
+    write_atomic(path, |writer| {
+        write_rle_bits(writer, width, height, rule, bits)
+    })
 }
 
 fn ensure_dir(dir: &Path) -> io::Result<()> {
@@ -242,8 +247,7 @@ fn ensure_dir(dir: &Path) -> io::Result<()> {
 
 pub fn write_metadata_atomic(path: &Path, meta: &SnapshotMetadata) -> io::Result<()> {
     write_atomic(path, |writer| {
-        serde_json::to_writer(writer, meta)
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))
+        serde_json::to_writer(writer, meta).map_err(|e| io::Error::new(io::ErrorKind::Other, e))
     })
 }
 

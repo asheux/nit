@@ -9,7 +9,9 @@ use crossbeam_channel::{bounded, Receiver, Sender, TrySendError};
 use tracing::{info, warn};
 
 use crate::analyze::RuleEvaluation;
-use crate::snapshot::{now_iso8601, write_metadata_atomic, write_rle_bits_atomic, SnapshotMetadata};
+use crate::snapshot::{
+    now_iso8601, write_metadata_atomic, write_rle_bits_atomic, SnapshotMetadata,
+};
 use crate::{EdgeMode, Grid};
 
 const DEFAULT_QUEUE_CAPACITY: usize = 64;
@@ -282,7 +284,10 @@ impl Drop for SnapshotManager {
     }
 }
 
-fn spawn_worker(rx: Receiver<IoCommand>, inner: Arc<SnapshotManagerInner>) -> Option<JoinHandle<()>> {
+fn spawn_worker(
+    rx: Receiver<IoCommand>,
+    inner: Arc<SnapshotManagerInner>,
+) -> Option<JoinHandle<()>> {
     let dir = inner.dir.clone();
     if let Err(err) = fs::create_dir_all(&dir) {
         warn!("Snapshot dir init failed: {}", err);
@@ -486,7 +491,11 @@ mod tests {
         }
     }
 
-    fn dummy_req(event: SnapshotEventKind, grid_hash: [u64; 2], period: Option<u64>) -> SnapshotRequest {
+    fn dummy_req(
+        event: SnapshotEventKind,
+        grid_hash: [u64; 2],
+        period: Option<u64>,
+    ) -> SnapshotRequest {
         SnapshotRequest {
             event,
             timestamp: SystemTime::now(),
@@ -510,8 +519,14 @@ mod tests {
         let req1 = dummy_req(SnapshotEventKind::Cycle, [1, 2], Some(2));
         let req2 = dummy_req(SnapshotEventKind::Cycle, [1, 2], Some(2));
         let req3 = dummy_req(SnapshotEventKind::Cycle, [1, 3], Some(2));
-        assert_eq!(SnapshotKey::from_request(&req1), SnapshotKey::from_request(&req2));
-        assert_ne!(SnapshotKey::from_request(&req1), SnapshotKey::from_request(&req3));
+        assert_eq!(
+            SnapshotKey::from_request(&req1),
+            SnapshotKey::from_request(&req2)
+        );
+        assert_ne!(
+            SnapshotKey::from_request(&req1),
+            SnapshotKey::from_request(&req3)
+        );
     }
 
     #[test]
@@ -529,7 +544,12 @@ mod tests {
             last_at: now,
         };
         let later = now + Duration::from_millis(10);
-        assert!(!gate.allows(&key, SnapshotEventKind::Cycle, later, Duration::from_millis(500)));
+        assert!(!gate.allows(
+            &key,
+            SnapshotEventKind::Cycle,
+            later,
+            Duration::from_millis(500)
+        ));
         let other_key = SnapshotKey {
             grid_hash: [3, 4],
             ..key

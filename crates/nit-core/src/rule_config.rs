@@ -158,8 +158,8 @@ fn read_toml(path: &Path) -> Result<toml::Value, String> {
 }
 
 fn write_toml_atomic(path: &Path, value: &toml::Value) -> std::io::Result<()> {
-    let contents =
-        toml::to_string_pretty(value).map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+    let contents = toml::to_string_pretty(value)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
     let tmp = temp_path(path);
     {
         let mut file = File::create(&tmp)?;
@@ -197,7 +197,9 @@ fn get_value<'a>(value: &'a toml::Value, path: &[&str]) -> Option<&'a toml::Valu
 }
 
 fn get_str(value: &toml::Value, path: &[&str]) -> Option<String> {
-    get_value(value, path).and_then(|v| v.as_str()).map(|s| s.to_string())
+    get_value(value, path)
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
 }
 
 fn get_bool(value: &toml::Value, path: &[&str]) -> Option<bool> {

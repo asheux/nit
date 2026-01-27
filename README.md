@@ -7,11 +7,14 @@ A terminal-first, multi-pane TUI editor inspired by _Devs_. Built in Rust with a
 ```bash
 cd nit
 cargo run -- path/to/file
+cargo run -- games
 ```
 
 - `nit <file>` opens the file in the editor.
 - `nit <dir>` sets the workspace root (opens an untitled buffer).
 - `nit` defaults to the current directory and an untitled buffer.
+- `nit gol [path]` explicitly launches GoL mode.
+- `nit games [path]` launches Games mode (games between programs).
 
 
 
@@ -76,6 +79,48 @@ For details see `SECURITY.md`.
   - `rules.ndjson` append-only best-rule log
 - Snapshotting is async, bounded, and deduped to avoid repeat storms.
 - Search intensity and limits are controlled in settings (defaults in `crates/nit-core/src/config.rs`).
+
+## Games quick notes
+
+- Launch: `nit games [path]` (opens `games.toml` by default).
+- Run tournament: `Ctrl+Enter` or `:games run`.
+- Hide/show: `H` in popup to hide, `Ctrl+^` to show.
+- Outputs: summaries, event logs, and optional history logs land in `games-runs/` under the workspace root.
+
+### Games config (payoff)
+
+You can define payoffs either with `R/S/T/P` or a full matrix. Matrix form is the
+source of truth if provided, and `R/S/T/P` must match it.
+
+```toml
+[payoff]
+R = 3
+S = 0
+T = 5
+P = 1
+matrix = [
+  [[3,3],[0,5]],
+  [[5,0],[1,1]],
+]
+```
+
+Matrix layout (rows = player A, cols = player B):
+- `matrix[0][0] = [R,R]` (C,C)
+- `matrix[0][1] = [S,T]` (C,D)
+- `matrix[1][0] = [T,S]` (D,C)
+- `matrix[1][1] = [P,P]` (D,D)
+
+### Games config (history)
+
+Enable per-match outcome history logging (NDJSON) for later graphing:
+
+```toml
+[history]
+enabled = true
+```
+
+Each history line encodes the match outcomes as digits from player A’s perspective:
+`0=CC`, `1=CD`, `2=DC`, `3=DD`.
 
 ## Known limitations (MVP)
 

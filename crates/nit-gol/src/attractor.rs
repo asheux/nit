@@ -14,7 +14,9 @@ pub struct Fingerprint([u64; 2]);
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum AttractorEvent {
-    FixedPoint { gen: u64 },
+    FixedPoint {
+        gen: u64,
+    },
     Cycle {
         gen: u64,
         first_seen: u64,
@@ -224,7 +226,9 @@ impl AttractorDetector {
             let Some(secondary) = secondary else {
                 return None;
             };
-            let entry = entries.iter().find(|entry| entry.secondary == Some(secondary))?;
+            let entry = entries
+                .iter()
+                .find(|entry| entry.secondary == Some(secondary))?;
             let first_seen = entry.first_seen;
             let period = next_gen.saturating_sub(first_seen);
             let transient = first_seen;
@@ -283,7 +287,12 @@ impl AttractorDetector {
     }
 }
 
-fn fingerprint(grid: &Grid, rule: Rule, edge: EdgeMode, extra: Option<AttractorExtra>) -> Fingerprint {
+fn fingerprint(
+    grid: &Grid,
+    rule: Rule,
+    edge: EdgeMode,
+    extra: Option<AttractorExtra>,
+) -> Fingerprint {
     fingerprint_with_secondary(grid, rule, edge, extra, false).0
 }
 
@@ -363,7 +372,12 @@ fn edge_tag(edge: EdgeMode) -> u8 {
 
 #[cfg(test)]
 impl AttractorDetector {
-    pub(crate) fn seed_with_fingerprint(&mut self, gen: u64, fingerprint: Fingerprint, secondary: Option<u64>) {
+    pub(crate) fn seed_with_fingerprint(
+        &mut self,
+        gen: u64,
+        fingerprint: Fingerprint,
+        secondary: Option<u64>,
+    ) {
         self.seeded = true;
         self.last = Some(fingerprint);
         self.completed = false;

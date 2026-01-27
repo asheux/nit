@@ -174,7 +174,11 @@ impl SeedParams {
         let mut bytes = Vec::with_capacity(16);
         bytes.push(self.symmetry as u8);
         bytes.push(self.placement as u8);
-        bytes.extend_from_slice(&(self.target_density.clamp(0.0, 1.0) * 1000.0).round().to_le_bytes());
+        bytes.extend_from_slice(
+            &(self.target_density.clamp(0.0, 1.0) * 1000.0)
+                .round()
+                .to_le_bytes(),
+        );
         bytes.extend_from_slice(&(self.jitter.clamp(0.0, 1.0) * 1000.0).round().to_le_bytes());
         bytes.push(self.padding);
         stable_hash_bytes(&bytes)
@@ -323,7 +327,11 @@ pub fn encode_seed(
         SeedEncoderId::HilbertBits => HilbertBitsEncoder.encode(input, seed_nonce, variant),
     };
     let mut values = base_values.clone();
-    apply_jitter(values.values_mut(), params.jitter, input_hash ^ seed_nonce ^ (variant as u64));
+    apply_jitter(
+        values.values_mut(),
+        params.jitter,
+        input_hash ^ seed_nonce ^ (variant as u64),
+    );
     let threshold = density_threshold(params.target_density);
     let mut bits_raw = SeedBits::new(values.width(), values.height());
     for y in 0..values.height() {
@@ -543,7 +551,8 @@ impl SeedEncoder for Lifehash16Encoder {
         let size = 16usize;
         let mut grid = SeedValueGrid::new(size, size);
         let bytes = input.text.as_bytes();
-        let mut rng = XorShift64::new(seed_nonce ^ stable_hash_bytes(bytes) ^ (variant as u64) ^ 0x16_u64);
+        let mut rng =
+            XorShift64::new(seed_nonce ^ stable_hash_bytes(bytes) ^ (variant as u64) ^ 0x16_u64);
         for idx in 0..size * size {
             let value = (rng.next_u64() & 0xff) as u8;
             let x = idx % size;
@@ -567,7 +576,8 @@ impl SeedEncoder for HilbertBitsEncoder {
         let mut grid = SeedValueGrid::new(size, size);
         let bytes = input.text.as_bytes();
         let len = bytes.len().max(1);
-        let mut rng = XorShift64::new(seed_nonce ^ stable_hash_bytes(bytes) ^ (variant as u64) ^ 0x5eed_u64);
+        let mut rng =
+            XorShift64::new(seed_nonce ^ stable_hash_bytes(bytes) ^ (variant as u64) ^ 0x5eed_u64);
         for idx in 0..size * size {
             let (x, y) = hilbert_index_to_xy(order, idx as u32);
             let base = bytes[idx % len];

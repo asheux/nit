@@ -12,4 +12,5 @@ thiserror = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 nit-utils = { path = "../nit-utils" }
 nit-gol = { path = "../nit-gol" }
+nit-games = { path = "../nit-games" }
 toml = { workspace = true }

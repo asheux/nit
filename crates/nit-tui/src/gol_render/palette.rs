@@ -55,7 +55,9 @@ impl GolPalette {
 fn supports_truecolor() -> bool {
     static SUPPORTS: OnceLock<bool> = OnceLock::new();
     *SUPPORTS.get_or_init(|| {
-        let colorterm = std::env::var("COLORTERM").unwrap_or_default().to_lowercase();
+        let colorterm = std::env::var("COLORTERM")
+            .unwrap_or_default()
+            .to_lowercase();
         let term = std::env::var("TERM").unwrap_or_default().to_lowercase();
         colorterm.contains("truecolor")
             || colorterm.contains("24bit")

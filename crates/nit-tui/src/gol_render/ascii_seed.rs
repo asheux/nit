@@ -108,14 +108,7 @@ impl<'a> Widget for AsciiSeedWidget<'a> {
     }
 }
 
-fn write_str(
-    buf: &mut FrameBuffer,
-    mut x: u16,
-    y: u16,
-    max_x: u16,
-    style: Style,
-    text: &str,
-) {
+fn write_str(buf: &mut FrameBuffer, mut x: u16, y: u16, max_x: u16, style: Style, text: &str) {
     for ch in text.chars() {
         if x >= max_x {
             break;

@@ -119,9 +119,7 @@ pub fn render_buffer(
             content.pop();
         }
         let is_cursor_line = line_idx == buffer.cursor.line;
-        let mut base_style = Style::default()
-            .fg(theme.foreground)
-            .bg(theme.background);
+        let mut base_style = Style::default().fg(theme.foreground).bg(theme.background);
         if is_cursor_line {
             base_style = base_style
                 .bg(theme.cursor_line_bg)
@@ -148,7 +146,8 @@ pub fn render_buffer(
                 }
                 if let Some(snapshot_line) = snapshot_line {
                     if let Some(hash) = snapshot.line_hashes.get(snapshot_line) {
-                        let hash_now = current_hash.unwrap_or_else(|| hash_line_bytes(content.as_bytes()));
+                        let hash_now =
+                            current_hash.unwrap_or_else(|| hash_line_bytes(content.as_bytes()));
                         if *hash != hash_now {
                             line_data.push(LineData {
                                 content,
@@ -250,9 +249,7 @@ pub fn render_buffer(
                 Style::default().fg(theme.border).patch(gutter_bg)
             };
             let sep_style = if data.is_cursor_line {
-                Style::default()
-                    .fg(theme.border_focused)
-                    .patch(gutter_bg)
+                Style::default().fg(theme.border_focused).patch(gutter_bg)
             } else {
                 Style::default().fg(theme.border).patch(gutter_bg)
             };
@@ -273,9 +270,7 @@ pub fn render_buffer(
                 Style::default().fg(theme.border).patch(gutter_bg)
             };
             let sep_style = if data.is_cursor_line {
-                Style::default()
-                    .fg(theme.border_focused)
-                    .patch(gutter_bg)
+                Style::default().fg(theme.border_focused).patch(gutter_bg)
             } else {
                 Style::default().fg(theme.border).patch(gutter_bg)
             };
@@ -308,10 +303,7 @@ pub fn render_buffer(
 
     if show_cursor && focused {
         let cursor_line = buffer.cursor.line.saturating_sub(start);
-        let cursor_line_index = buffer
-            .cursor
-            .line
-            .min(buffer.lines_len().saturating_sub(1));
+        let cursor_line_index = buffer.cursor.line.min(buffer.lines_len().saturating_sub(1));
         let line_str = buffer.line_as_string(cursor_line_index);
         let mut line = line_str.as_str();
         if line.ends_with('\n') {
@@ -319,14 +311,21 @@ pub fn render_buffer(
         }
         let cursor_display_col = display_col_for_char_idx(line, buffer.cursor.col, tab_width);
         let offset_display = display_col_for_char_idx(line, buffer.viewport.offset_col, tab_width);
-        let x = area.x + 1 + gutter_width as u16 + cursor_display_col.saturating_sub(offset_display) as u16;
+        let x = area.x
+            + 1
+            + gutter_width as u16
+            + cursor_display_col.saturating_sub(offset_display) as u16;
         let y = area.y + 1 + cursor_line as u16;
         return Some(CursorPlacement { x, y });
     }
     None
 }
 
-fn apply_syntax_spans(segments: &[nit_syntax::MappedLineSegment], styles: &mut [Style], theme: &Theme) {
+fn apply_syntax_spans(
+    segments: &[nit_syntax::MappedLineSegment],
+    styles: &mut [Style],
+    theme: &Theme,
+) {
     for seg in segments {
         if seg.start >= seg.end || seg.start >= styles.len() {
             continue;
@@ -375,7 +374,11 @@ fn build_spans(
     let mut col = 0;
     let visible_end = offset_col.saturating_add(width);
 
-    let push_char = |ch: char, style: Style, spans: &mut Vec<Span<'static>>, buffer: &mut String, current_style: &mut Style| {
+    let push_char = |ch: char,
+                     style: Style,
+                     spans: &mut Vec<Span<'static>>,
+                     buffer: &mut String,
+                     current_style: &mut Style| {
         if style != *current_style {
             if !buffer.is_empty() {
                 spans.push(Span::styled(buffer.clone(), *current_style));

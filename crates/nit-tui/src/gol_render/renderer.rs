@@ -276,12 +276,8 @@ impl GolRenderPipeline {
         hud: &GolHudState<'_>,
     ) {
         match cfg.effective_mode() {
-            GolRenderMode::Solid => self
-                .solid
-                .render(area, buf, grid, state, cfg, palette, hud),
-            GolRenderMode::HalfBlock => self
-                .half
-                .render(area, buf, grid, state, cfg, palette, hud),
+            GolRenderMode::Solid => self.solid.render(area, buf, grid, state, cfg, palette, hud),
+            GolRenderMode::HalfBlock => self.half.render(area, buf, grid, state, cfg, palette, hud),
             GolRenderMode::Braille => self
                 .braille
                 .render(area, buf, grid, state, cfg, palette, hud),
@@ -311,9 +307,15 @@ pub(crate) fn render_hud_line(
     }
     let y = area.y;
     let max_x = area.x.saturating_add(area.width);
-    let label_style = Style::default().fg(palette.hud_dim).bg(palette.bg).add_modifier(Modifier::DIM);
+    let label_style = Style::default()
+        .fg(palette.hud_dim)
+        .bg(palette.bg)
+        .add_modifier(Modifier::DIM);
     let value_style = Style::default().fg(palette.hud_text).bg(palette.bg);
-    let sep_style = Style::default().fg(palette.hud_dim).bg(palette.bg).add_modifier(Modifier::DIM);
+    let sep_style = Style::default()
+        .fg(palette.hud_dim)
+        .bg(palette.bg)
+        .add_modifier(Modifier::DIM);
 
     for x in area.x..max_x {
         let cell = buf.get_mut(x, y);
@@ -713,7 +715,13 @@ pub(crate) fn draw_bbox(
         let y = top;
         let bg = row_bg(y as usize, cfg, palette);
         let cell = buf.get_mut(grid_area.x + x, grid_area.y + y);
-        cell.set_char(if x == left { '┌' } else if x == right { '┐' } else { '─' });
+        cell.set_char(if x == left {
+            '┌'
+        } else if x == right {
+            '┐'
+        } else {
+            '─'
+        });
         cell.set_style(style);
         cell.set_bg(bg);
     }
@@ -723,7 +731,13 @@ pub(crate) fn draw_bbox(
             let y = bottom;
             let bg = row_bg(y as usize, cfg, palette);
             let cell = buf.get_mut(grid_area.x + x, grid_area.y + y);
-            cell.set_char(if x == left { '└' } else if x == right { '┘' } else { '─' });
+            cell.set_char(if x == left {
+                '└'
+            } else if x == right {
+                '┘'
+            } else {
+                '─'
+            });
             cell.set_style(style);
             cell.set_bg(bg);
         }
@@ -744,14 +758,7 @@ pub(crate) fn draw_bbox(
     }
 }
 
-fn write_str(
-    buf: &mut Buffer,
-    mut x: u16,
-    y: u16,
-    max_x: u16,
-    style: Style,
-    text: &str,
-) -> u16 {
+fn write_str(buf: &mut Buffer, mut x: u16, y: u16, max_x: u16, style: Style, text: &str) -> u16 {
     for ch in text.chars() {
         if x >= max_x {
             break;
@@ -890,8 +897,8 @@ mod tests {
     use super::{cell_bg_halves, gridline_flags, GolRenderConfig, RenderGeometry, RenderMode};
     use crate::gol_render::GolPalette;
     use nit_core::GolRenderMode;
-    use ratatui::style::Color;
     use ratatui::layout::Rect;
+    use ratatui::style::Color;
 
     #[test]
     fn gridlines_match_gol_bounds() {
@@ -902,7 +909,11 @@ mod tests {
             height: 10,
         };
         let spacing = 4u16;
-        for mode in [RenderMode::Solid, RenderMode::HalfBlock, RenderMode::Braille] {
+        for mode in [
+            RenderMode::Solid,
+            RenderMode::HalfBlock,
+            RenderMode::Braille,
+        ] {
             let geom = RenderGeometry::for_mode(mode, term_rect, 0, 0);
             for ty in 0..term_rect.height {
                 for tx in 0..term_rect.width {
@@ -953,7 +964,11 @@ mod tests {
             live_new: Color::Rgb(40, 40, 40),
             live: Color::Rgb(30, 30, 30),
             live_old: Color::Rgb(20, 20, 20),
-            trail: [Color::Rgb(12, 12, 12), Color::Rgb(11, 11, 11), Color::Rgb(10, 10, 10)],
+            trail: [
+                Color::Rgb(12, 12, 12),
+                Color::Rgb(11, 11, 11),
+                Color::Rgb(10, 10, 10),
+            ],
             bbox: Color::Rgb(50, 50, 50),
             hud_dim: Color::Rgb(60, 60, 60),
             hud_text: Color::Rgb(70, 70, 70),

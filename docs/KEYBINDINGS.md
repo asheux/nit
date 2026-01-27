@@ -6,7 +6,7 @@
 - Tab / Shift+Tab: Cycle pane focus
 - Ctrl+H/J/K/L: Focus panes (vim/tmux style: left/down/up/right)
 - F1 / ?: Toggle help overlay
-- Ctrl+Enter: Run Petri Dish simulation popup
+- Ctrl+Enter: Run Petri Dish simulation popup (active app)
 - Ctrl+^: Show hidden Petri Dish
 - : (Normal mode): Command prompt
 
@@ -43,7 +43,7 @@
 - Ctrl+L: Clear logs
 - Ctrl+Space: Pause/resume job updates
 
-## Visualizer
+## Visualizer (GoL)
 - Ctrl+E: Cycle seed encoder
 - Ctrl+V: Toggle view (GENOME ↔ PLATE)
 - Ctrl+R: Cycle seed view (genome/plate/map/stats)
@@ -60,7 +60,7 @@
 - C: Center inspector
 - I: Toggle inspector
 
-## Petri Dish (Popup)
+## Petri Dish (GoL popup)
 - Esc: Close popup
 - Space: Pause/resume
 - Enter: Step one generation
@@ -74,10 +74,23 @@
 - G: Toggle rule search
 - A: Apply best rule
 
+## Petri Dish (Games popup)
+- Esc: Close tournament
+- Space: Pause/resume
+- Enter: Step one round (when paused)
+- + / -: Speed up/down
+- H: Hide popup (tournament keeps running)
+
 ## Command/Prompts
 - Y / N to confirm quit when prompted
-- :gol hide / :petri hide: Hide Petri Dish (sim keeps running)
-- :gol show / :petri show: Show Petri Dish
+- :run: Run the active app
+- :gol hide / :petri hide: Hide GoL Petri Dish (sim keeps running)
+- :gol show / :petri show: Show GoL Petri Dish
 - :gol rule: Show current rule + built-ins
 - :gol rule <id|B/S>: Set rule by id or B/S string
 - :gol rules: List available rules
+- :games run: Run Games tournament
+- :games hide: Hide Games Petri Dish (tournament keeps running)
+- :games show: Show Games Petri Dish
+- :games status: Show tournament status
+- :games export: Re-emit last run summary (if present)

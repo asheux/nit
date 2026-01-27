@@ -13,8 +13,12 @@ pub mod step;
 mod tests;
 
 pub use analyze::{RuleEvaluation, RuleScore};
-pub use attractor::{AttractorConfig, AttractorDetector, AttractorEvent, AutoStopPolicy, AttractorExtra};
-pub use catalog::{RuleCatalog, RuleDefaultParams, RuleEntry, RuleOverlay, RuleSelectError, SelectedRule};
+pub use attractor::{
+    AttractorConfig, AttractorDetector, AttractorEvent, AttractorExtra, AutoStopPolicy,
+};
+pub use catalog::{
+    RuleCatalog, RuleDefaultParams, RuleEntry, RuleOverlay, RuleSelectError, SelectedRule,
+};
 pub use grid::{EdgeMode, Grid};
 pub use rule::{Rule, RuleParseError};
 pub use snapshot::{SnapshotMetadata, SnapshotPaths};

@@ -359,9 +359,9 @@ pub fn parse_protocol_spec(spec: &str, catalog: &RuleCatalog) -> Result<RuleProt
         if steps == 0 {
             return Err(format!("phase {} has steps=0", idx + 1));
         }
-        let selected = catalog.select(rule_text).map_err(|err| {
-            format!("invalid rule '{}' in phase {}: {}", rule_text, idx + 1, err)
-        })?;
+        let selected = catalog
+            .select(rule_text)
+            .map_err(|err| format!("invalid rule '{}' in phase {}: {}", rule_text, idx + 1, err))?;
         let rule_ref = RuleRef::from_selected(&selected);
         phases.push(RulePhase {
             rule: rule_ref,

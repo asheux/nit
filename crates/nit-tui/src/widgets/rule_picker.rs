@@ -26,7 +26,10 @@ pub fn handle_key(key: &KeyEvent, state: &mut AppState) -> bool {
             true
         }
         KeyCode::Up => {
-            let len = state.rule_catalog.filter_indices(&state.rule_picker.query).len();
+            let len = state
+                .rule_catalog
+                .filter_indices(&state.rule_picker.query)
+                .len();
             if len > 0 {
                 if state.rule_picker.selected == 0 {
                     state.rule_picker.selected = len - 1;
@@ -37,21 +40,30 @@ pub fn handle_key(key: &KeyEvent, state: &mut AppState) -> bool {
             true
         }
         KeyCode::Down => {
-            let len = state.rule_catalog.filter_indices(&state.rule_picker.query).len();
+            let len = state
+                .rule_catalog
+                .filter_indices(&state.rule_picker.query)
+                .len();
             if len > 0 {
                 state.rule_picker.selected = (state.rule_picker.selected + 1) % len;
             }
             true
         }
         KeyCode::PageUp => {
-            let len = state.rule_catalog.filter_indices(&state.rule_picker.query).len();
+            let len = state
+                .rule_catalog
+                .filter_indices(&state.rule_picker.query)
+                .len();
             if len > 0 {
                 state.rule_picker.selected = state.rule_picker.selected.saturating_sub(6);
             }
             true
         }
         KeyCode::PageDown => {
-            let len = state.rule_catalog.filter_indices(&state.rule_picker.query).len();
+            let len = state
+                .rule_catalog
+                .filter_indices(&state.rule_picker.query)
+                .len();
             if len > 0 {
                 state.rule_picker.selected = (state.rule_picker.selected + 6).min(len - 1);
             }
@@ -62,7 +74,10 @@ pub fn handle_key(key: &KeyEvent, state: &mut AppState) -> bool {
             true
         }
         KeyCode::End => {
-            let len = state.rule_catalog.filter_indices(&state.rule_picker.query).len();
+            let len = state
+                .rule_catalog
+                .filter_indices(&state.rule_picker.query)
+                .len();
             if len > 0 {
                 state.rule_picker.selected = len - 1;
             }
@@ -144,7 +159,10 @@ pub fn render(frame: &mut Frame, screen: Rect, state: &AppState, theme: &Theme) 
             }
         }
         let mut list_state = ListState::default();
-        let selected = state.rule_picker.selected.min(items.len().saturating_sub(1));
+        let selected = state
+            .rule_picker
+            .selected
+            .min(items.len().saturating_sub(1));
         list_state.select(Some(selected));
         let item_style = Style::default()
             .fg(ratatui::style::Color::Gray)
@@ -181,17 +199,33 @@ pub fn render(frame: &mut Frame, screen: Rect, state: &AppState, theme: &Theme) 
     let footer_line = Line::from(vec![
         Span::styled(
             "Enter apply",
-            Style::default().fg(theme.accent).add_modifier(Modifier::DIM),
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::DIM),
         ),
-        Span::styled(" | ", Style::default().fg(theme.border).add_modifier(Modifier::DIM)),
+        Span::styled(
+            " | ",
+            Style::default()
+                .fg(theme.border)
+                .add_modifier(Modifier::DIM),
+        ),
         Span::styled(
             "Esc cancel",
-            Style::default().fg(theme.accent).add_modifier(Modifier::DIM),
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::DIM),
         ),
-        Span::styled(" | ", Style::default().fg(theme.border).add_modifier(Modifier::DIM)),
+        Span::styled(
+            " | ",
+            Style::default()
+                .fg(theme.border)
+                .add_modifier(Modifier::DIM),
+        ),
         Span::styled(
             "Type to filter",
-            Style::default().fg(theme.border).add_modifier(Modifier::DIM),
+            Style::default()
+                .fg(theme.border)
+                .add_modifier(Modifier::DIM),
         ),
     ]);
     let footer = Paragraph::new(footer_line).style(Style::default().bg(popup_bg));
@@ -203,7 +237,12 @@ fn centered_rect_px(screen: Rect, width: u16, height: u16) -> Rect {
     let h = height.min(screen.height);
     let x = screen.x + screen.width.saturating_sub(w) / 2;
     let y = screen.y + screen.height.saturating_sub(h) / 2;
-    Rect { x, y, width: w, height: h }
+    Rect {
+        x,
+        y,
+        width: w,
+        height: h,
+    }
 }
 
 fn fixed_rect(screen: Rect) -> Rect {

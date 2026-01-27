@@ -3,18 +3,18 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
+use nit_core::seed::SeedInput;
+use nit_core::seed::SeedViewMode;
 use nit_core::{
     encode_seed, AppState, EncodedSeed, GolSeedSource, PaneId, SeedEncoderId, SeedParams,
 };
-use nit_core::seed::SeedViewMode;
-use nit_core::seed::SeedInput;
 use nit_utils::hashing::XorShift64;
 
 use crate::gol_render::GolRenderState;
 use crate::seed_render::SeedRenderCache;
 use crate::seed_snapshot::{
-    pack_grid_bits, seed_snapshot_name_base, SeedSnapshotManager, SeedSnapshotManagerConfig,
-    SeedGenomePreview, SeedSnapshotMetadata, SeedSnapshotRequest,
+    pack_grid_bits, seed_snapshot_name_base, SeedGenomePreview, SeedSnapshotManager,
+    SeedSnapshotManagerConfig, SeedSnapshotMetadata, SeedSnapshotRequest,
 };
 use nit_gol::snapshot::now_iso8601;
 
@@ -184,10 +184,7 @@ impl SeedRuntime {
                 self.last_params_fp = state.visualizer.seed_params.fingerprint();
                 self.pending_recompute = true;
                 self.last_edit = Instant::now();
-                state.status = Some(format!(
-                    "Applied seed params (score {:.2})",
-                    best.score
-                ));
+                state.status = Some(format!("Applied seed params (score {:.2})", best.score));
             } else {
                 state.status = Some("No seed proposal".into());
             }
@@ -288,9 +285,7 @@ impl SeedRuntime {
         let meta = SeedSnapshotMetadata {
             timestamp: now_iso8601(),
             workspace_root: Some(state.workspace_root.display().to_string()),
-            file_path: source_buffer
-                .path()
-                .map(|p| p.display().to_string()),
+            file_path: source_buffer.path().map(|p| p.display().to_string()),
             source: format!("{:?}", state.visualizer.seed_source),
             revision: self.input.version,
             encoder_id: seed.encoder_id.as_str().to_string(),

@@ -1,6 +1,6 @@
 use nit_syntax::HighlightGroup;
-use ratatui::style::{Modifier, Style};
 use ratatui::style::Color;
+use ratatui::style::{Modifier, Style};
 use serde::Deserialize;
 use std::fs;
 use std::path::Path;

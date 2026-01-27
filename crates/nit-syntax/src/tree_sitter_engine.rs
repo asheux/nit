@@ -1,17 +1,19 @@
-use std::collections::HashMap;
 use std::cmp;
+use std::collections::HashMap;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use nit_core::{BufferEdit, BufferPoint};
+use tracing::{error, warn};
 use tree_sitter::{InputEdit, Parser, Point, Query, QueryCursor, Tree};
 use tree_sitter_highlight::{HighlightConfiguration, HighlightEvent, Highlighter};
-use tracing::{error, warn};
 
 use crate::engine::{HighlightRequest, SyntaxEngine};
-use crate::highlight::{EngineKind, HighlightGroup, HighlightSnapshot, HighlightSpan, SyntaxStatus};
+use crate::highlight::{
+    EngineKind, HighlightGroup, HighlightSnapshot, HighlightSpan, SyntaxStatus,
+};
 use crate::registry::{LanguageId, LanguageRegistry};
 
 pub struct TreeSitterEngine {
@@ -223,7 +225,8 @@ fn highlight_job(
                     let end_byte = range.end_byte.saturating_sub(1);
                     let end_line = find_line(&line_start_bytes, end_byte);
                     let start_line = start_line.saturating_sub(1);
-                    let end_line = cmp::min(end_line.saturating_add(1), new_line_count.saturating_sub(1));
+                    let end_line =
+                        cmp::min(end_line.saturating_add(1), new_line_count.saturating_sub(1));
                     for line in start_line..=end_line {
                         dirty[line] = true;
                     }
@@ -452,12 +455,9 @@ fn full_highlight(
 ) -> anyhow::Result<HighlightSnapshot> {
     let mut spans = Vec::new();
     let mut stack: Vec<HighlightGroup> = Vec::new();
-    let mut iter = highlighter.highlight(
-        config,
-        job.text.as_bytes(),
-        None,
-        |name| LanguageRegistry::from_injection_name(name).and_then(|id| configs.get(&id)),
-    )?;
+    let mut iter = highlighter.highlight(config, job.text.as_bytes(), None, |name| {
+        LanguageRegistry::from_injection_name(name).and_then(|id| configs.get(&id))
+    })?;
     while let Some(event) = iter.next() {
         match event? {
             HighlightEvent::HighlightStart(s) => {
@@ -675,10 +675,7 @@ fn build_configs() -> HashMap<LanguageId, HighlightConfiguration> {
                     match HighlightConfiguration::new(ts_lang, highlights, "", "") {
                         Ok(cfg) => cfg,
                         Err(err) => {
-                            warn!(
-                                "failed to build highlight config for {:?}: {err}",
-                                lang
-                            );
+                            warn!("failed to build highlight config for {:?}: {err}", lang);
                             continue;
                         }
                     }

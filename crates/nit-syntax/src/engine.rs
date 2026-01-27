@@ -192,10 +192,7 @@ impl SyntaxEngine for SyntaxManager {
             EngineKind::Plain => self.plain.try_get_highlights(buffer_id, version),
         };
         if let Some(ref snap) = snapshot {
-            let keep_large = matches!(
-                self.status.get(&buffer_id),
-                Some(SyntaxStatus::LargeFile)
-            );
+            let keep_large = matches!(self.status.get(&buffer_id), Some(SyntaxStatus::LargeFile));
             if !keep_large {
                 self.status.insert(buffer_id, snap.status.clone());
             }

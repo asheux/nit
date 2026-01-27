@@ -11,12 +11,51 @@ use crate::{
     seed::{SeedEncoderId, SeedParams, SeedPreviewMode, SeedStats, SeedViewMode},
     viewport::Viewport,
 };
-use nit_gol::{AttractorEvent, AutoStopPolicy};
 use nit_gol::Rule;
+use nit_gol::{AttractorEvent, AutoStopPolicy};
 use std::collections::VecDeque;
 use std::path::PathBuf;
 
 const DEFAULT_LOG_CAPACITY: usize = 512;
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum AppKind {
+    Gol,
+    Games,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum GamesStatus {
+    Idle,
+    Running,
+    Paused,
+    Done,
+    Error,
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct GamesState {
+    pub status: GamesStatus,
+    pub running: bool,
+    pub paused: bool,
+    pub petri_hidden: bool,
+    pub steps_per_tick: u32,
+    pub last_error: Option<String>,
+    pub last_run: Option<nit_games::output::RunSummary>,
+    pub last_run_path: Option<String>,
+    pub last_event_path: Option<String>,
+    pub last_history_path: Option<String>,
+    #[serde(skip)]
+    pub pending_run: bool,
+    #[serde(skip)]
+    pub pending_close: bool,
+    #[serde(skip)]
+    pub pending_hide: bool,
+    #[serde(skip)]
+    pub pending_show: bool,
+    #[serde(skip)]
+    pub pending_export: bool,
+}
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct LogBuffer {
@@ -235,6 +274,7 @@ pub struct ProtocolPickerState {
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct AppState {
+    pub app_kind: AppKind,
     pub workspace_root: PathBuf,
     pub buffers: Vec<Buffer>,
     pub active_editor_buffer_id: usize,
@@ -251,6 +291,7 @@ pub struct AppState {
     pub settings: Settings,
     pub debug: bool,
     pub gol_rule_selected: SelectedRule,
+    pub games: GamesState,
     #[serde(skip)]
     pub yank: Option<String>,
     #[serde(skip)]
@@ -285,6 +326,7 @@ impl AppState {
         let rule_catalog = RuleCatalog::default();
         let gol_rule_selected = SelectedRule::default();
         Self {
+            app_kind: AppKind::Gol,
             workspace_root,
             buffers: vec![editor, notes],
             active_editor_buffer_id: 0,
@@ -382,6 +424,23 @@ impl AppState {
             settings,
             debug: false,
             gol_rule_selected,
+            games: GamesState {
+                status: GamesStatus::Idle,
+                running: false,
+                paused: false,
+                petri_hidden: false,
+                steps_per_tick: 1,
+                last_error: None,
+                last_run: None,
+                last_run_path: None,
+                last_event_path: None,
+                last_history_path: None,
+                pending_run: false,
+                pending_close: false,
+                pending_hide: false,
+                pending_show: false,
+                pending_export: false,
+            },
             yank: None,
             yank_kind: YankKind::Char,
             command_line: None,
@@ -404,15 +463,12 @@ impl AppState {
         self.visualizer.pending_rule_change = false;
     }
 
-    pub fn set_gol_rule(
-        &mut self,
-        selected: SelectedRule,
-        persist: bool,
-    ) -> Result<bool, String> {
+    pub fn set_gol_rule(&mut self, selected: SelectedRule, persist: bool) -> Result<bool, String> {
         let changed = self.gol_rule_selected.rule != selected.rule;
         self.gol_rule_selected = selected;
         self.visualizer.rule = self.gol_rule_selected.rule.to_string();
-        self.visualizer.rule_mode = RuleMode::Fixed(RuleRef::from_selected(&self.gol_rule_selected));
+        self.visualizer.rule_mode =
+            RuleMode::Fixed(RuleRef::from_selected(&self.gol_rule_selected));
         self.visualizer.protocol_name = None;
         if changed {
             self.visualizer.pending_rule_change = true;
@@ -862,10 +918,7 @@ pub fn apply_action(state: &mut AppState, action: Action) -> ActionOutcome {
                 GolSeedSource::Notes => GolSeedSource::Editor,
             };
             state.visualizer.pending_reseed = true;
-            state.status = Some(format!(
-                "Seed source: {:?}",
-                state.visualizer.seed_source
-            ));
+            state.status = Some(format!("Seed source: {:?}", state.visualizer.seed_source));
         }
         Action::VisualizerSnapshot => {
             state.visualizer.pending_snapshot = true;
@@ -876,10 +929,7 @@ pub fn apply_action(state: &mut AppState, action: Action) -> ActionOutcome {
         }
         Action::VisualizerCycleAutoStop => {
             state.visualizer.auto_stop_policy = state.visualizer.auto_stop_policy.next();
-            state.status = Some(format!(
-                "Auto-stop: {}",
-                state.visualizer.auto_stop_policy
-            ));
+            state.status = Some(format!("Auto-stop: {}", state.visualizer.auto_stop_policy));
         }
         Action::VisualizerSpeedUp => {
             state.visualizer.tick_ms = state.visualizer.tick_ms.saturating_sub(10).max(30);
@@ -896,6 +946,22 @@ pub fn apply_action(state: &mut AppState, action: Action) -> ActionOutcome {
             state.visualizer.pending_close = true;
             state.status = Some("Petri dish closing".into());
         }
+        Action::GamesRun => {
+            state.games.pending_run = true;
+            state.status = Some("Games tournament queued".into());
+        }
+        Action::GamesStop => {
+            state.games.pending_close = true;
+            state.status = Some("Games tournament closing".into());
+        }
+        Action::GamesHide => {
+            state.games.pending_hide = true;
+            state.status = Some("Games tournament hiding".into());
+        }
+        Action::GamesShow => {
+            state.games.pending_show = true;
+            state.status = Some("Games tournament showing".into());
+        }
         Action::PetriShow => {
             state.visualizer.pending_show = true;
             state.status = Some("Petri dish showing".into());
@@ -911,7 +977,11 @@ pub fn apply_action(state: &mut AppState, action: Action) -> ActionOutcome {
             state.visualizer.age_shading = !state.visualizer.age_shading;
             state.status = Some(format!(
                 "Age shading: {}",
-                if state.visualizer.age_shading { "ON" } else { "OFF" }
+                if state.visualizer.age_shading {
+                    "ON"
+                } else {
+                    "OFF"
+                }
             ));
         }
         Action::VisualizerToggleTrails => {
@@ -925,36 +995,42 @@ pub fn apply_action(state: &mut AppState, action: Action) -> ActionOutcome {
             state.visualizer.overlay_bbox = !state.visualizer.overlay_bbox;
             state.status = Some(format!(
                 "BBox: {}",
-                if state.visualizer.overlay_bbox { "ON" } else { "OFF" }
+                if state.visualizer.overlay_bbox {
+                    "ON"
+                } else {
+                    "OFF"
+                }
             ));
         }
         Action::VisualizerToggleHeat => {
             state.visualizer.overlay_heat = !state.visualizer.overlay_heat;
             state.status = Some(format!(
                 "Heat: {}",
-                if state.visualizer.overlay_heat { "ON" } else { "OFF" }
+                if state.visualizer.overlay_heat {
+                    "ON"
+                } else {
+                    "OFF"
+                }
             ));
         }
         Action::VisualizerToggleScanlines => {
             state.visualizer.scanlines = !state.visualizer.scanlines;
             state.status = Some(format!(
                 "Scanlines: {}",
-                if state.visualizer.scanlines { "ON" } else { "OFF" }
+                if state.visualizer.scanlines {
+                    "ON"
+                } else {
+                    "OFF"
+                }
             ));
         }
         Action::VisualizerCycleSeedView => {
             state.visualizer.seed_view = state.visualizer.seed_view.next();
-            state.status = Some(format!(
-                "Seed view: {}",
-                state.visualizer.seed_view.label()
-            ));
+            state.status = Some(format!("Seed view: {}", state.visualizer.seed_view.label()));
         }
         Action::VisualizerToggleSeedView => {
             state.visualizer.seed_view = state.visualizer.seed_view.toggle_plate();
-            state.status = Some(format!(
-                "Seed view: {}",
-                state.visualizer.seed_view.label()
-            ));
+            state.status = Some(format!("Seed view: {}", state.visualizer.seed_view.label()));
         }
         Action::VisualizerCycleSeedOverlays => {
             cycle_seed_overlays(&mut state.visualizer);
@@ -1019,21 +1095,19 @@ pub fn apply_action(state: &mut AppState, action: Action) -> ActionOutcome {
                 state.status = Some(format!("Unknown GoL rule id: {id}"));
             }
         }
-        Action::SetGolRuleByString(text) => {
-            match Rule::parse(&text) {
-                Ok(rule) => {
-                    let mut selected = SelectedRule::from_rule(rule);
-                    if let Some(named) = state.rule_catalog.find_by_rule(rule) {
-                        selected.id = Some(named.id.clone());
-                        selected.name = Some(named.name.clone());
-                    }
-                    apply_rule_selection(state, selected, true);
+        Action::SetGolRuleByString(text) => match Rule::parse(&text) {
+            Ok(rule) => {
+                let mut selected = SelectedRule::from_rule(rule);
+                if let Some(named) = state.rule_catalog.find_by_rule(rule) {
+                    selected.id = Some(named.id.clone());
+                    selected.name = Some(named.name.clone());
                 }
-                Err(err) => {
-                    state.status = Some(format!("Invalid GoL rule '{text}': {err}"));
-                }
+                apply_rule_selection(state, selected, true);
             }
-        }
+            Err(err) => {
+                state.status = Some(format!("Invalid GoL rule '{text}': {err}"));
+            }
+        },
         Action::OpenRulePicker => {
             if matches!(state.visualizer.rule_mode, RuleMode::Protocol(_)) {
                 state.status = Some("Rule picker disabled in protocol mode".into());
@@ -1067,7 +1141,10 @@ pub fn apply_action(state: &mut AppState, action: Action) -> ActionOutcome {
                 state.status = Some("No rules match filter".into());
                 state.rule_picker.open = false;
             } else {
-                let idx = state.rule_picker.selected.min(matches.len().saturating_sub(1));
+                let idx = state
+                    .rule_picker
+                    .selected
+                    .min(matches.len().saturating_sub(1));
                 if let Some(named) = state.rule_catalog.get(matches[idx]) {
                     apply_rule_selection(state, SelectedRule::from_named(named), true);
                 }
@@ -1136,32 +1213,78 @@ fn handle_command_line(state: &mut AppState, input: &str) {
         return;
     }
     let tokens: Vec<&str> = cmd.split_whitespace().collect();
-    match cmd.as_str() {
-        "gol run" | "run gol" | "life run" | "gol start" | "run life" => {
+    match tokens.as_slice() {
+        ["run"] => match state.app_kind {
+            AppKind::Gol => {
+                state.visualizer.pending_run = true;
+                state.visualizer.pending_snapshot = true;
+                state.status = Some("Petri dish queued".into());
+            }
+            AppKind::Games => {
+                state.games.pending_run = true;
+                state.status = Some("Games tournament queued".into());
+            }
+        },
+        ["gol", "run"] | ["run", "gol"] | ["life", "run"] | ["gol", "start"] | ["run", "life"] => {
             state.visualizer.pending_run = true;
             state.visualizer.pending_snapshot = true;
             state.status = Some("Petri dish queued".into());
         }
-        "gol hide" | "hide gol" | "petri hide" | "hide petri" => {
+        ["games", "run"] | ["run", "games"] => {
+            state.games.pending_run = true;
+            state.status = Some("Games tournament queued".into());
+        }
+        ["gol", "hide"] | ["hide", "gol"] => {
             state.visualizer.pending_hide = true;
             state.status = Some("Petri dish hiding".into());
         }
-        "gol show" | "show gol" | "petri show" | "show petri" => {
+        ["gol", "show"] | ["show", "gol"] => {
             state.visualizer.pending_show = true;
             state.status = Some("Petri dish showing".into());
         }
-        "gol stop" | "run stop" | "life stop" => {
+        ["gol", "stop"] | ["life", "stop"] => {
             state.visualizer.pending_close = true;
             state.status = Some("Petri dish closing".into());
         }
-        "gol seed" | "seed view" => {
+        ["run", "stop"] if state.app_kind == AppKind::Gol => {
+            state.visualizer.pending_close = true;
+            state.status = Some("Petri dish closing".into());
+        }
+        ["games", "hide"] | ["hide", "games"] => {
+            state.games.pending_hide = true;
+            state.status = Some("Games tournament hiding".into());
+        }
+        ["games", "show"] | ["show", "games"] => {
+            state.games.pending_show = true;
+            state.status = Some("Games tournament showing".into());
+        }
+        ["games", "stop"] | ["stop", "games"] => {
+            state.games.pending_close = true;
+            state.status = Some("Games tournament closing".into());
+        }
+        ["games", "status"] => {
+            state.status = Some(format!("Games status: {:?}", state.games.status));
+        }
+        ["games", "export"] => {
+            state.games.pending_export = true;
+        }
+        ["gol", "seed"] => {
             state.visualizer.seed_view = state.visualizer.seed_view.next();
+            state.status = Some(format!("Seed view: {}", state.visualizer.seed_view.label()));
+        }
+        ["seed", "view"] if state.app_kind == AppKind::Gol => {
+            state.visualizer.seed_view = state.visualizer.seed_view.next();
+            state.status = Some(format!("Seed view: {}", state.visualizer.seed_view.label()));
+        }
+        ["gol", "encoder"] => {
+            state.visualizer.seed_encoder = state.visualizer.seed_encoder.next();
+            state.visualizer.pending_reseed = true;
             state.status = Some(format!(
-                "Seed view: {}",
-                state.visualizer.seed_view.label()
+                "Encoder: {}",
+                state.visualizer.seed_encoder.label()
             ));
         }
-        "gol encoder" | "seed encoder" => {
+        ["seed", "encoder"] if state.app_kind == AppKind::Gol => {
             state.visualizer.seed_encoder = state.visualizer.seed_encoder.next();
             state.visualizer.pending_reseed = true;
             state.status = Some(format!(
@@ -1191,8 +1314,16 @@ fn handle_command_line(state: &mut AppState, input: &str) {
         _ if tokens.get(0) == Some(&"gol") && tokens.get(1) == Some(&"rules") => {
             log_rule_list(state);
         }
+        ["petri", "hide"] | ["hide", "petri"] if state.app_kind == AppKind::Gol => {
+            state.visualizer.pending_hide = true;
+            state.status = Some("Petri dish hiding".into());
+        }
+        ["petri", "show"] | ["show", "petri"] if state.app_kind == AppKind::Gol => {
+            state.visualizer.pending_show = true;
+            state.status = Some("Petri dish showing".into());
+        }
         other => {
-            state.status = Some(format!("Unknown command: {other}"));
+            state.status = Some(format!("Unknown command: {}", other.join(" ")));
         }
     }
 }
@@ -1255,10 +1386,7 @@ fn log_rule_overview(state: &mut AppState) {
 }
 
 fn log_rule_list(state: &mut AppState) {
-    state.receive_log(format!(
-        "GoL rules ({} total):",
-        state.rule_catalog.len()
-    ));
+    state.receive_log(format!("GoL rules ({} total):", state.rule_catalog.len()));
     let lines: Vec<String> = state
         .rule_catalog
         .iter()
@@ -1462,8 +1590,11 @@ mod tests {
     fn set_rule_by_id_updates_and_persists() {
         let root = temp_dir("rule-id");
         let config_path = root.join("config.toml");
-        let mut state =
-            AppState::new(root.clone(), Buffer::empty("x", None), Buffer::empty("n", None));
+        let mut state = AppState::new(
+            root.clone(),
+            Buffer::empty("x", None),
+            Buffer::empty("n", None),
+        );
         state.rule_persistence = RulePersistence {
             global_path: Some(config_path.clone()),
             workspace_path: None,
@@ -1480,8 +1611,11 @@ mod tests {
     #[test]
     fn set_rule_by_string_updates_state() {
         let root = temp_dir("rule-str");
-        let mut state =
-            AppState::new(root.clone(), Buffer::empty("x", None), Buffer::empty("n", None));
+        let mut state = AppState::new(
+            root.clone(),
+            Buffer::empty("x", None),
+            Buffer::empty("n", None),
+        );
         let rule = Rule::parse("B36/S23").unwrap();
         let selected = SelectedRule::from_rule(rule);
         state.set_gol_rule(selected, false).unwrap();
@@ -1491,8 +1625,11 @@ mod tests {
     #[test]
     fn rule_picker_apply_sets_rule() {
         let root = temp_dir("rule-picker");
-        let mut state =
-            AppState::new(root.clone(), Buffer::empty("x", None), Buffer::empty("n", None));
+        let mut state = AppState::new(
+            root.clone(),
+            Buffer::empty("x", None),
+            Buffer::empty("n", None),
+        );
         state.rule_picker.open = true;
         state.rule_picker.query = "highlife".into();
         state.rule_picker.selected = 0;

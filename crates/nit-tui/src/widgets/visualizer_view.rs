@@ -1,5 +1,5 @@
-use nit_core::{AppState, PaneId, SeedEncoderId};
 use nit_core::seed::SeedViewMode;
+use nit_core::{AppState, PaneId, SeedEncoderId};
 use ratatui::{
     buffer::Buffer,
     style::{Modifier, Style},
@@ -64,13 +64,7 @@ pub fn render(
         width: inner.width,
         height: 1,
     };
-    draw_hud_line(
-        frame.buffer_mut(),
-        hud_area,
-        state,
-        seed_runtime,
-        &palette,
-    );
+    draw_hud_line(frame.buffer_mut(), hud_area, state, seed_runtime, &palette);
 
     let mut top = inner.y.saturating_add(1);
     let legend_area = if inner.height >= 4 && state.visualizer.seed_view == SeedViewMode::Genome {
@@ -103,7 +97,13 @@ pub fn render(
     };
 
     if let Some(legend_area) = legend_area {
-        draw_legend_line(frame.buffer_mut(), legend_area, seed_runtime, render_area, &palette);
+        draw_legend_line(
+            frame.buffer_mut(),
+            legend_area,
+            seed_runtime,
+            render_area,
+            &palette,
+        );
     }
 
     fill_bg(frame.buffer_mut(), render_area, palette.bg);
@@ -156,7 +156,13 @@ pub fn render(
             render_map(frame.buffer_mut(), render_area, seed, &palette);
         }
         SeedViewMode::Stats => {
-            render_stats(frame.buffer_mut(), render_area, state, seed_runtime, &palette);
+            render_stats(
+                frame.buffer_mut(),
+                render_area,
+                state,
+                seed_runtime,
+                &palette,
+            );
         }
     }
 
@@ -251,7 +257,11 @@ fn loading_ratio() -> f64 {
     let millis = now.as_millis() as f64;
     let period = 1600.0;
     let phase = (millis % period) / period;
-    let tri = if phase <= 0.5 { phase * 2.0 } else { (1.0 - phase) * 2.0 };
+    let tri = if phase <= 0.5 {
+        phase * 2.0
+    } else {
+        (1.0 - phase) * 2.0
+    };
     tri.clamp(0.0, 1.0)
 }
 
@@ -418,7 +428,9 @@ fn draw_genome_crosshair(
             }
         }
         SeedEncoderId::Lifehash16 => {
-            if let Some((sx, sy)) = map_to_screen(area, x, y, seed.base_bits.width(), seed.base_bits.height()) {
+            if let Some((sx, sy)) =
+                map_to_screen(area, x, y, seed.base_bits.width(), seed.base_bits.height())
+            {
                 let cell = buf.get_mut(sx, sy);
                 cell.set_char('+');
                 cell.set_fg(palette.accent);
@@ -483,7 +495,10 @@ fn draw_hilbert_inset_highlight(
 
 fn inspector_pos(state: &AppState) -> (usize, usize) {
     match state.visualizer.seed_encoder {
-        SeedEncoderId::AsciiBytes => (state.visualizer.inspect_ascii_x, state.visualizer.inspect_ascii_y),
+        SeedEncoderId::AsciiBytes => (
+            state.visualizer.inspect_ascii_x,
+            state.visualizer.inspect_ascii_y,
+        ),
         SeedEncoderId::Lifehash16 => (
             state.visualizer.inspect_lifehash_x,
             state.visualizer.inspect_lifehash_y,
@@ -564,13 +579,26 @@ fn render_map(
     fill_bg(buf, area, palette.bg);
     let mut y = area.y;
     let max_y = area.y.saturating_add(area.height);
-    let label_style = Style::default().fg(palette.hud_dim).add_modifier(Modifier::DIM);
+    let label_style = Style::default()
+        .fg(palette.hud_dim)
+        .add_modifier(Modifier::DIM);
     let value_style = Style::default().fg(palette.hud_text);
-    let heading_style = Style::default().fg(palette.accent).add_modifier(Modifier::BOLD);
+    let heading_style = Style::default()
+        .fg(palette.accent)
+        .add_modifier(Modifier::BOLD);
     write_line(buf, area, y, "GENOME PROTOCOL", heading_style);
     y = y.saturating_add(1);
     let params = &seed.params;
-    write_kv(buf, area, &mut y, "Encoder", seed.encoder_id.as_str(), label_style, value_style, max_y);
+    write_kv(
+        buf,
+        area,
+        &mut y,
+        "Encoder",
+        seed.encoder_id.as_str(),
+        label_style,
+        value_style,
+        max_y,
+    );
     write_kv(
         buf,
         area,
@@ -653,9 +681,13 @@ fn render_stats(
     fill_bg(buf, area, palette.bg);
     let mut y = area.y;
     let max_y = area.y.saturating_add(area.height);
-    let label_style = Style::default().fg(palette.hud_dim).add_modifier(Modifier::DIM);
+    let label_style = Style::default()
+        .fg(palette.hud_dim)
+        .add_modifier(Modifier::DIM);
     let value_style = Style::default().fg(palette.hud_text);
-    let heading_style = Style::default().fg(palette.accent).add_modifier(Modifier::BOLD);
+    let heading_style = Style::default()
+        .fg(palette.accent)
+        .add_modifier(Modifier::BOLD);
     write_line(buf, area, y, "GENOME STATS", heading_style);
     y = y.saturating_add(1);
     let seed_hash = if state.visualizer.seed_hash == 0 {
@@ -753,13 +785,7 @@ fn render_stats(
     );
 }
 
-fn write_line(
-    buf: &mut Buffer,
-    area: ratatui::layout::Rect,
-    y: u16,
-    text: &str,
-    style: Style,
-) {
+fn write_line(buf: &mut Buffer, area: ratatui::layout::Rect, y: u16, text: &str, style: Style) {
     if y >= area.y.saturating_add(area.height) {
         return;
     }

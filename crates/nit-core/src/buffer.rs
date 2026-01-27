@@ -302,7 +302,10 @@ impl Buffer {
     }
 
     pub fn yank_line(&self) -> String {
-        let line = self.cursor.line.min(self.rope.len_lines().saturating_sub(1));
+        let line = self
+            .cursor
+            .line
+            .min(self.rope.len_lines().saturating_sub(1));
         let start = self.rope.line_to_char(line);
         let end = if line + 1 < self.rope.len_lines() {
             self.rope.line_to_char(line + 1)
@@ -361,7 +364,10 @@ impl Buffer {
     pub fn open_line_below(&mut self) {
         self.end_edit_group();
         self.push_undo();
-        let line = self.cursor.line.min(self.rope.len_lines().saturating_sub(1));
+        let line = self
+            .cursor
+            .line
+            .min(self.rope.len_lines().saturating_sub(1));
         let indent = self.line_indent(line);
         let insert_at = self.rope.line_to_char(line) + self.line_char_len(line);
         let mut text = String::from("\n");
@@ -376,7 +382,10 @@ impl Buffer {
     pub fn open_line_above(&mut self) {
         self.end_edit_group();
         self.push_undo();
-        let line = self.cursor.line.min(self.rope.len_lines().saturating_sub(1));
+        let line = self
+            .cursor
+            .line
+            .min(self.rope.len_lines().saturating_sub(1));
         let indent = if line > 0 {
             self.line_indent(line.saturating_sub(1))
         } else {
@@ -398,7 +407,10 @@ impl Buffer {
         }
         self.end_edit_group();
         self.push_undo();
-        let line = self.cursor.line.min(self.rope.len_lines().saturating_sub(1));
+        let line = self
+            .cursor
+            .line
+            .min(self.rope.len_lines().saturating_sub(1));
         let idx = self.rope.line_to_char(line);
         self.record_insert(idx, text);
         self.rope.insert(idx, text);
@@ -800,11 +812,7 @@ impl Buffer {
     }
 }
 
-fn advance_point(
-    start_byte: usize,
-    start_point: BufferPoint,
-    text: &str,
-) -> (usize, BufferPoint) {
+fn advance_point(start_byte: usize, start_point: BufferPoint, text: &str) -> (usize, BufferPoint) {
     let mut row = start_point.row;
     let mut column = start_point.column;
     let mut byte = start_byte;

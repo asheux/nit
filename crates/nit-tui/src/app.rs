@@ -13,8 +13,8 @@ use crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use nit_core::{
-    actions::Action, apply_action, io as core_io, AppState, Mode, PaneId, Prompt, Viewport,
-    YankKind,
+    actions::Action, apply_action, io as core_io, AppKind, AppState, Mode, PaneId, Prompt,
+    Viewport, YankKind,
 };
 use ratatui::{
     backend::CrosstermBackend,
@@ -25,15 +25,16 @@ use ratatui::{
 use tracing::info;
 
 use crate::{
+    games_petri_dish::GamesPetriDishRuntime,
     layout,
     petri_dish::PetriDishRuntime,
     seed_runtime::SeedRuntime,
-    system_stats::SystemStats,
     syntax::SyntaxRuntime,
+    system_stats::SystemStats,
     theme::Theme,
     widgets::{
-        bottom_bar, editor_view, gate_monitor_view, help_overlay, job_output_view, notes_view,
-        protocol_picker, rule_picker, top_bar, visualizer_view,
+        bottom_bar, editor_view, games_visualizer_view, gate_monitor_view, help_overlay,
+        job_output_view, notes_view, protocol_picker, rule_picker, top_bar, visualizer_view,
     },
 };
 
@@ -97,8 +98,21 @@ fn run_loop(
     let mut input_state = InputState::new();
     let mut system_stats = SystemStats::new();
     let mut clipboard = Clipboard::new().ok();
-    let mut seed_runtime = SeedRuntime::new(state);
-    let mut petri = PetriDishRuntime::new(state);
+    let mut seed_runtime = if state.app_kind == AppKind::Gol {
+        Some(SeedRuntime::new(state))
+    } else {
+        None
+    };
+    let mut gol_petri = if state.app_kind == AppKind::Gol {
+        Some(PetriDishRuntime::new(state))
+    } else {
+        None
+    };
+    let mut games_petri = if state.app_kind == AppKind::Games {
+        Some(GamesPetriDishRuntime::new(state))
+    } else {
+        None
+    };
     tracing::info!("SECURITY: no plugins, no network, no shell execution");
     loop {
         if let Some(deferred) = input_state.take_deferred() {
@@ -136,9 +150,31 @@ fn run_loop(
                         continue;
                     }
                 }
-                if petri.is_visible() && state.command_line.is_none() && state.prompt.is_none() {
+                let petri_visible = match state.app_kind {
+                    AppKind::Gol => gol_petri.as_ref().map(|p| p.is_visible()).unwrap_or(false),
+                    AppKind::Games => games_petri
+                        .as_ref()
+                        .map(|p| p.is_visible())
+                        .unwrap_or(false),
+                };
+                if petri_visible && state.command_line.is_none() && state.prompt.is_none() {
                     let screen = terminal.size().unwrap_or_default();
-                    if petri.handle_key(&key, state, &mut seed_runtime, screen) {
+                    let handled = match state.app_kind {
+                        AppKind::Gol => {
+                            if let (Some(petri), Some(seed_runtime)) =
+                                (gol_petri.as_mut(), seed_runtime.as_mut())
+                            {
+                                petri.handle_key(&key, state, seed_runtime, screen)
+                            } else {
+                                false
+                            }
+                        }
+                        AppKind::Games => games_petri
+                            .as_mut()
+                            .map(|petri| petri.handle_key(&key, state))
+                            .unwrap_or(false),
+                    };
+                    if handled {
                         needs_redraw = true;
                         continue;
                     }
@@ -200,14 +236,36 @@ fn run_loop(
         syntax.poll_results(notes_id, state.notes_buffer().version());
 
         let tick_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            seed_runtime.tick(state);
-            petri.tick(state);
+            if let Some(seed_runtime) = seed_runtime.as_mut() {
+                seed_runtime.tick(state);
+            }
+            match state.app_kind {
+                AppKind::Gol => {
+                    if let Some(petri) = gol_petri.as_mut() {
+                        petri.tick(state);
+                    }
+                }
+                AppKind::Games => {
+                    if let Some(petri) = games_petri.as_mut() {
+                        petri.tick(state);
+                    }
+                }
+            }
         }));
         if let Err(err) = tick_result {
             tracing::error!("Runtime panic: {:?}", err);
-            state.visualizer.paused = true;
-            state.visualizer.paused_by_attractor = false;
-            state.status = Some("Petri dish paused (error)".into());
+            match state.app_kind {
+                AppKind::Gol => {
+                    state.visualizer.paused = true;
+                    state.visualizer.paused_by_attractor = false;
+                    state.status = Some("Petri dish paused (error)".into());
+                }
+                AppKind::Games => {
+                    state.games.paused = true;
+                    state.games.status = nit_core::GamesStatus::Error;
+                    state.status = Some("Games tournament paused (error)".into());
+                }
+            }
         }
 
         // redraw
@@ -220,7 +278,8 @@ fn run_loop(
                 syntax,
                 &system_stats,
                 &mut seed_runtime,
-                &mut petri,
+                &mut gol_petri,
+                &mut games_petri,
             )?;
             needs_redraw = false;
             last_tick = Instant::now();
@@ -235,8 +294,9 @@ fn draw(
     theme: &Theme,
     syntax: &mut SyntaxRuntime,
     system_stats: &SystemStats,
-    seed_runtime: &mut SeedRuntime,
-    petri: &mut PetriDishRuntime,
+    seed_runtime: &mut Option<SeedRuntime>,
+    gol_petri: &mut Option<PetriDishRuntime>,
+    games_petri: &mut Option<GamesPetriDishRuntime>,
 ) -> io::Result<()> {
     let start = Instant::now();
     terminal.draw(|f| {
@@ -308,16 +368,25 @@ fn draw(
             )
         };
         job_output_view::render(f, layout.job, state, theme);
-        let viz_inner_width = layout.visualizer.width.saturating_sub(2) as usize;
-        let viz_inner_height = layout.visualizer.height.saturating_sub(2) as usize;
-        let viz_grid_rows = viz_inner_height.saturating_sub(1);
-        let (grid_w, grid_h) = crate::seed_render::grid_size_for_mode(
-            viz_inner_width,
-            viz_grid_rows,
-            state.visualizer.seed_plate_mode,
-        );
-        seed_runtime.ensure_size(grid_w, grid_h, state);
-        visualizer_view::render(f, layout.visualizer, state, theme, seed_runtime);
+        match state.app_kind {
+            AppKind::Gol => {
+                let viz_inner_width = layout.visualizer.width.saturating_sub(2) as usize;
+                let viz_inner_height = layout.visualizer.height.saturating_sub(2) as usize;
+                let viz_grid_rows = viz_inner_height.saturating_sub(1);
+                let (grid_w, grid_h) = crate::seed_render::grid_size_for_mode(
+                    viz_inner_width,
+                    viz_grid_rows,
+                    state.visualizer.seed_plate_mode,
+                );
+                if let Some(seed_runtime) = seed_runtime.as_mut() {
+                    seed_runtime.ensure_size(grid_w, grid_h, state);
+                    visualizer_view::render(f, layout.visualizer, state, theme, seed_runtime);
+                }
+            }
+            AppKind::Games => {
+                games_visualizer_view::render(f, layout.visualizer, state, theme);
+            }
+        }
         let syntax_status = syntax.status_label_for(editor_id, state.editor_buffer().version());
         let syntax_debug = {
             let latest = syntax.latest_snapshot_for(editor_id);
@@ -338,24 +407,32 @@ fn draw(
         );
         bottom_bar::render(f, layout.bottom, state, theme, system_stats);
 
-        petri.handle_pending_requests(state, seed_runtime, f.size());
-        petri.render(f, f.size(), state, theme);
+        match state.app_kind {
+            AppKind::Gol => {
+                if let (Some(petri), Some(seed_runtime)) =
+                    (gol_petri.as_mut(), seed_runtime.as_mut())
+                {
+                    petri.handle_pending_requests(state, seed_runtime, f.size());
+                    petri.render(f, f.size(), state, theme);
+                }
+            }
+            AppKind::Games => {
+                if let Some(petri) = games_petri.as_mut() {
+                    petri.handle_pending_requests(state);
+                    petri.render(f, f.size(), state, theme);
+                }
+            }
+        }
         if state.rule_picker.open {
             rule_picker::render(f, f.size(), state, theme);
         }
         if state.show_help {
-            let area = dynamic_popup_rect(
-                f.size(),
-                help_overlay::preferred_size(f.size()),
-            );
+            let area = dynamic_popup_rect(f.size(), help_overlay::preferred_size(f.size()));
             help_overlay::render(f, area, theme);
         }
         if let Some(Prompt::ConfirmQuit) = state.prompt {
             let message = "Quit without saving? (Y/N)";
-            let area = dynamic_popup_rect(
-                f.size(),
-                prompt_size(message),
-            );
+            let area = dynamic_popup_rect(f.size(), prompt_size(message));
             render_prompt(f, area, theme, message);
         }
         if state.command_line.is_some() {
@@ -370,7 +447,14 @@ fn draw(
         }
 
         // cursor
-        if petri.is_visible() || state.command_line.is_some() {
+        let petri_visible = match state.app_kind {
+            AppKind::Gol => gol_petri.as_ref().map(|p| p.is_visible()).unwrap_or(false),
+            AppKind::Games => games_petri
+                .as_ref()
+                .map(|p| p.is_visible())
+                .unwrap_or(false),
+        };
+        if petri_visible || state.command_line.is_some() {
             f.set_cursor(f.size().x, f.size().y);
         } else if let Some(pos) = if state.focus == PaneId::Editor {
             editor_cursor
@@ -408,7 +492,9 @@ fn map_key_to_action(key: KeyEvent, state: &AppState, input: &mut InputState) ->
             KeyCode::Esc => Some(Action::CommandPromptCancel),
             KeyCode::Enter => Some(Action::CommandPromptExecute),
             KeyCode::Backspace => Some(Action::CommandPromptBackspace),
-            KeyCode::Char(c) if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT => {
+            KeyCode::Char(c)
+                if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT =>
+            {
                 Some(Action::CommandPromptInput(c))
             }
             _ => None,
@@ -424,20 +510,28 @@ fn map_key_to_action(key: KeyEvent, state: &AppState, input: &mut InputState) ->
     }
 
     if is_petri_show_key(&key, state) {
-        return Some(Action::PetriShow);
+        return Some(match state.app_kind {
+            AppKind::Gol => Action::PetriShow,
+            AppKind::Games => Action::GamesShow,
+        });
     }
 
     if is_global_run_key(&key) {
-        return Some(Action::VisualizerRun);
+        return Some(match state.app_kind {
+            AppKind::Gol => Action::VisualizerRun,
+            AppKind::Games => Action::GamesRun,
+        });
     }
 
-    if let Some(action) = visualizer_ctrl_action(&key, state) {
-        return Some(action);
-    }
-
-    if state.focus == PaneId::Visualizer {
-        if let Some(action) = visualizer_inspector_action(&key, state, input) {
+    if state.app_kind == AppKind::Gol {
+        if let Some(action) = visualizer_ctrl_action(&key, state) {
             return Some(action);
+        }
+
+        if state.focus == PaneId::Visualizer {
+            if let Some(action) = visualizer_inspector_action(&key, state, input) {
+                return Some(action);
+            }
         }
     }
 
@@ -671,30 +765,22 @@ fn map_key_to_action(key: KeyEvent, state: &AppState, input: &mut InputState) ->
             code: KeyCode::Char('h'),
             modifiers: KeyModifiers::NONE,
             ..
-        } if is_motion_mode(state) => {
-            Some(Action::MoveLeft)
-        }
+        } if is_motion_mode(state) => Some(Action::MoveLeft),
         KeyEvent {
             code: KeyCode::Char('j'),
             modifiers: KeyModifiers::NONE,
             ..
-        } if is_motion_mode(state) => {
-            Some(Action::MoveDown)
-        }
+        } if is_motion_mode(state) => Some(Action::MoveDown),
         KeyEvent {
             code: KeyCode::Char('k'),
             modifiers: KeyModifiers::NONE,
             ..
-        } if is_motion_mode(state) => {
-            Some(Action::MoveUp)
-        }
+        } if is_motion_mode(state) => Some(Action::MoveUp),
         KeyEvent {
             code: KeyCode::Char('l'),
             modifiers: KeyModifiers::NONE,
             ..
-        } if is_motion_mode(state) => {
-            Some(Action::MoveRight)
-        }
+        } if is_motion_mode(state) => Some(Action::MoveRight),
         KeyEvent {
             code: KeyCode::Char(' '),
             modifiers: KeyModifiers::CONTROL,
@@ -1237,7 +1323,11 @@ fn is_global_run_key(key: &KeyEvent) -> bool {
 }
 
 fn is_petri_show_key(key: &KeyEvent, state: &AppState) -> bool {
-    if !state.visualizer.petri_hidden || !state.visualizer.running {
+    let (hidden, running) = match state.app_kind {
+        AppKind::Gol => (state.visualizer.petri_hidden, state.visualizer.running),
+        AppKind::Games => (state.games.petri_hidden, state.games.running),
+    };
+    if !hidden || !running {
         return false;
     }
     match key {
@@ -1299,10 +1389,7 @@ fn ctrl_nav_dir(key: &KeyEvent) -> Option<FocusDir> {
     }
 }
 
-fn dynamic_popup_rect(
-    screen: ratatui::layout::Rect,
-    desired: (u16, u16),
-) -> ratatui::layout::Rect {
+fn dynamic_popup_rect(screen: ratatui::layout::Rect, desired: (u16, u16)) -> ratatui::layout::Rect {
     use ratatui::layout::{Constraint, Direction, Layout};
     let max_w = screen.width.saturating_sub(4).max(10);
     let max_h = screen.height.saturating_sub(2).max(5);

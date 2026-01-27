@@ -7,3 +7,4 @@ target/
 .vscode/
 Cargo.lock
 gol-snapshots/
+games-runs/

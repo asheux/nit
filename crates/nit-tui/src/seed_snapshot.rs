@@ -224,7 +224,10 @@ impl Drop for SeedSnapshotManager {
     }
 }
 
-fn spawn_worker(rx: Receiver<SeedIoCommand>, inner: Arc<SeedSnapshotInner>) -> Option<JoinHandle<()>> {
+fn spawn_worker(
+    rx: Receiver<SeedIoCommand>,
+    inner: Arc<SeedSnapshotInner>,
+) -> Option<JoinHandle<()>> {
     thread::Builder::new()
         .name("nit-seed-io".into())
         .stack_size(IO_THREAD_STACK_BYTES)
@@ -245,7 +248,10 @@ fn seed_worker_loop(rx: Receiver<SeedIoCommand>, inner: Arc<SeedSnapshotInner>) 
     }
 }
 
-fn handle_seed_snapshot(req: SeedSnapshotRequest, inner: &SeedSnapshotInner) -> std::io::Result<()> {
+fn handle_seed_snapshot(
+    req: SeedSnapshotRequest,
+    inner: &SeedSnapshotInner,
+) -> std::io::Result<()> {
     ensure_dir(&inner.dir)?;
     let rle_path = inner.dir.join(format!("{}.rle", req.name_base));
     let json_path = inner.dir.join(format!("{}.json", req.name_base));
@@ -275,8 +281,7 @@ fn ensure_dir(dir: &Path) -> std::io::Result<()> {
 
 fn write_seed_metadata_atomic(path: &Path, meta: &SeedSnapshotMetadata) -> io::Result<()> {
     write_atomic(path, |writer| {
-        serde_json::to_writer(writer, meta)
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))
+        serde_json::to_writer(writer, meta).map_err(|e| io::Error::new(io::ErrorKind::Other, e))
     })
 }
 

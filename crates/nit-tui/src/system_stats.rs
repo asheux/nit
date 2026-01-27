@@ -115,7 +115,9 @@ impl SystemStats {
 fn gpu_label(info: Option<&GpuInfo>) -> String {
     match info {
         Some(info) => {
-            let usage = info.usage_percent.map(|u| u.round().clamp(0.0, 100.0) as u8);
+            let usage = info
+                .usage_percent
+                .map(|u| u.round().clamp(0.0, 100.0) as u8);
             let total_gb = info
                 .mem_total_bytes
                 .map(|b| b as f32 / 1024.0 / 1024.0 / 1024.0);

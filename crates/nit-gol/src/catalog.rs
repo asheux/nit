@@ -122,9 +122,7 @@ impl SelectedRule {
     }
 
     pub fn selector(&self) -> String {
-        self.id
-            .clone()
-            .unwrap_or_else(|| self.rule.to_string())
+        self.id.clone().unwrap_or_else(|| self.rule.to_string())
     }
 
     pub fn label(&self) -> String {
@@ -225,9 +223,11 @@ impl RuleCatalog {
             }
         }
         let key = rule_key(selected.rule);
-        self.rule_index
-            .get(&key)
-            .and_then(|idx| self.visible_indices.iter().position(|visible| *visible == *idx))
+        self.rule_index.get(&key).and_then(|idx| {
+            self.visible_indices
+                .iter()
+                .position(|visible| *visible == *idx)
+        })
     }
 
     pub fn filter_indices(&self, query: &str) -> Vec<usize> {
@@ -302,8 +302,8 @@ impl RuleCatalog {
     }
 
     fn load_builtin(warnings: &mut Vec<String>) -> Self {
-        let file: RuleFile = toml::from_str(DEFAULT_RULES_TOML)
-            .expect("builtin rules catalog parse");
+        let file: RuleFile =
+            toml::from_str(DEFAULT_RULES_TOML).expect("builtin rules catalog parse");
         let mut entries = Vec::new();
         let mut ids = HashSet::new();
         let mut rules = HashSet::new();
@@ -552,7 +552,10 @@ fn rule_key(rule: Rule) -> u32 {
     ((rule.births_mask() as u32) << 9) | (rule.survives_mask() as u32)
 }
 
-fn build_entry_from_file(entry: RuleFileEntry, source: RuleSource) -> Result<RuleEntry, RuleParseError> {
+fn build_entry_from_file(
+    entry: RuleFileEntry,
+    source: RuleSource,
+) -> Result<RuleEntry, RuleParseError> {
     let raw = entry.rulestring.trim().to_string();
     let (rule, canonical) = normalize_rulestring(&entry.rulestring)?;
     Ok(RuleEntry {

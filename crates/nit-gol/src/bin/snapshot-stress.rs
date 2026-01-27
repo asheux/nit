@@ -43,10 +43,7 @@ fn run_stress(
     let mut grid = Grid::new(width, height);
     for y in 0..height {
         for x in 0..width {
-            let v = ((x as u64).wrapping_mul(31)
-                ^ (y as u64).wrapping_mul(17)
-                ^ seed)
-                % 7;
+            let v = ((x as u64).wrapping_mul(31) ^ (y as u64).wrapping_mul(17) ^ seed) % 7;
             grid.set(x, y, v < 2);
         }
     }

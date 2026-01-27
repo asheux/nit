@@ -2,6 +2,7 @@
 members = [
     "crates/nit",
     "crates/nit-core",
+    "crates/nit-games",
     "crates/nit-gol",
     "crates/nit-syntax",
     "crates/nit-tui",
