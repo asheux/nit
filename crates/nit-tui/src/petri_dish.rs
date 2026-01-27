@@ -162,16 +162,7 @@ impl PetriDishRuntime {
             self.reseed_from_current(state, seed_runtime, screen);
             return true;
         }
-        if ctrl
-            && matches!(
-                key.code,
-                KeyCode::Enter
-                    | KeyCode::Char('\n')
-                    | KeyCode::Char('\r')
-                    | KeyCode::Char('j')
-                    | KeyCode::Char('J')
-            )
-        {
+        if ctrl && matches!(key.code, KeyCode::Enter | KeyCode::Char('\n') | KeyCode::Char('\r')) {
             if session.paused {
                 self.step_once(state);
             }
@@ -273,14 +264,14 @@ impl PetriDishRuntime {
         };
         let layout = self.layout(screen);
         frame.render_widget(Clear, layout.rect);
-        let title = "PETRI DISH — Game of Life Simulator  [Esc Close] [Space Pause] [Enter Step] [S Snapshot] [Ctrl+R Reseed] [H Hide] [G Search]";
+        let title = "PETRI DISH — Game of Life Simulator";
         let block = Block::default()
             .borders(Borders::ALL)
             .border_style(Style::default().fg(theme.border_focused))
             .title(Span::styled(
                 title,
                 Style::default()
-                    .fg(theme.title_focused)
+                    .fg(theme.accent)
                     .add_modifier(Modifier::BOLD),
             ))
             .style(Style::default().bg(theme.background));
@@ -305,6 +296,11 @@ impl PetriDishRuntime {
             overlay_bbox: state.visualizer.overlay_bbox,
             overlay_heat: state.visualizer.overlay_heat,
             scanlines: state.visualizer.scanlines,
+            grid_minor: None,
+            grid_major: None,
+            gol_origin_x: 0,
+            gol_origin_y: 0,
+            debug_overlay: state.debug,
             braille_enabled: state.settings.gol.braille_enabled,
         };
         let widget = GolWidget {
@@ -962,7 +958,7 @@ impl PetriDishRuntime {
             .split(inner);
         let cols = Layout::default()
             .direction(Direction::Horizontal)
-            .constraints([Constraint::Percentage(85), Constraint::Percentage(15)])
+            .constraints([Constraint::Percentage(90), Constraint::Percentage(10)])
             .split(rows[0]);
         PetriLayout {
             rect,
@@ -1095,7 +1091,7 @@ fn render_footer(frame: &mut Frame, area: Rect, theme: &Theme, session: &SimSess
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled(
-            "Ctrl+R reseed | H hide | +/- speed | T wrap | O auto-stop | S snapshot",
+            "Esc close | Space pause | Enter step | S snapshot | Ctrl+R reseed | H hide | G search | +/- speed | T wrap | O auto-stop",
             Style::default().fg(theme.border).add_modifier(Modifier::DIM),
         ),
     ]);

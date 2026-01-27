@@ -2,10 +2,11 @@ use ratatui::{buffer::Buffer, layout::Rect};
 
 use nit_gol::Grid;
 
+use super::geometry::{RenderGeometry, RenderMode};
 use super::palette::GolPalette;
 use super::renderer::{
-    draw_bbox, live_color, neighbor_count, render_hud_line, row_bg, trail_color, GolHudState,
-    GolRenderConfig, GolRenderState, GolRenderer,
+    cell_bg_halves, draw_bbox, live_color, maybe_draw_debug_overlay, neighbor_count,
+    render_hud_line, trail_color, GolHudState, GolRenderConfig, GolRenderState, GolRenderer,
 };
 
 #[derive(Default)]
@@ -38,25 +39,31 @@ impl GolRenderer for HalfBlockRenderer {
         let cells = grid.cells();
         let age = state.age();
         let decay = state.decay();
+        let geom = RenderGeometry::for_mode(
+            RenderMode::HalfBlock,
+            grid_area,
+            cfg.gol_origin_x,
+            cfg.gol_origin_y,
+        );
 
-        let mut min_x = usize::MAX;
-        let mut min_y = usize::MAX;
-        let mut max_x = 0usize;
-        let mut max_y = 0usize;
+        let mut min_x = i32::MAX;
+        let mut min_y = i32::MAX;
+        let mut max_x = i32::MIN;
+        let mut max_y = i32::MIN;
         let mut any_alive = false;
 
+        let use_checker = cfg.grid_minor == Some(1);
         for row in 0..grid_area.height as usize {
-            let y = grid_area.y + row as u16;
-            let bg = row_bg(row, cfg, palette);
-            let top_y = row.saturating_mul(2);
-            let bottom_y = top_y.saturating_add(1);
-            let top_in = top_y < grid_h;
-            let bottom_in = bottom_y < grid_h;
-            let top_row_start = if top_in { top_y.saturating_mul(grid_w) } else { 0 };
-            let bottom_row_start = if bottom_in { bottom_y.saturating_mul(grid_w) } else { 0 };
-
+            let ty = row as u16;
+            let y = grid_area.y + ty;
             for col in 0..grid_area.width as usize {
-                let x = grid_area.x + col as u16;
+                let tx = col as u16;
+                let x = grid_area.x + tx;
+                let (bg_top, bg_bottom) = cell_bg_halves(&geom, tx, ty, cfg, palette);
+                let (gx0, gy0, _gx1, _gy1) = geom.term_cell_bounds_in_gol(tx, ty);
+                let gx_local = gx0 - geom.gol_origin_x;
+                let top_y = gy0 - geom.gol_origin_y;
+                let bottom_y = top_y + 1;
 
                 let mut top_alive = false;
                 let mut bottom_alive = false;
@@ -67,88 +74,222 @@ impl GolRenderer for HalfBlockRenderer {
                 let mut top_neighbors = 0u8;
                 let mut bottom_neighbors = 0u8;
 
-                if top_in && col < grid_w {
-                    let idx = top_row_start + col;
-                    top_alive = cells[idx] != 0;
-                    top_age = age[idx];
-                    top_decay = decay[idx];
-                    if top_alive && cfg.overlay_heat {
-                        top_neighbors = neighbor_count(grid, col, top_y);
+                if gx_local >= 0 && (gx_local as usize) < grid_w {
+                    let gx = gx_local as usize;
+                    if top_y >= 0 && (top_y as usize) < grid_h {
+                        let gy = top_y as usize;
+                        let idx = gy.saturating_mul(grid_w) + gx;
+                        top_alive = cells[idx] != 0;
+                        top_age = age[idx];
+                        top_decay = decay[idx];
+                        if top_alive && cfg.overlay_heat {
+                            top_neighbors = neighbor_count(grid, gx, gy);
+                        }
                     }
-                }
-                if bottom_in && col < grid_w {
-                    let idx = bottom_row_start + col;
-                    bottom_alive = cells[idx] != 0;
-                    bottom_age = age[idx];
-                    bottom_decay = decay[idx];
-                    if bottom_alive && cfg.overlay_heat {
-                        bottom_neighbors = neighbor_count(grid, col, bottom_y);
+                    if bottom_y >= 0 && (bottom_y as usize) < grid_h {
+                        let gy = bottom_y as usize;
+                        let idx = gy.saturating_mul(grid_w) + gx;
+                        bottom_alive = cells[idx] != 0;
+                        bottom_age = age[idx];
+                        bottom_decay = decay[idx];
+                        if bottom_alive && cfg.overlay_heat {
+                            bottom_neighbors = neighbor_count(grid, gx, gy);
+                        }
                     }
                 }
 
                 if top_alive {
                     any_alive = true;
-                    min_x = min_x.min(col);
-                    min_y = min_y.min(top_y);
-                    max_x = max_x.max(col);
-                    max_y = max_y.max(top_y);
+                    min_x = min_x.min(gx0);
+                    min_y = min_y.min(gy0);
+                    max_x = max_x.max(gx0);
+                    max_y = max_y.max(gy0);
                 }
                 if bottom_alive {
                     any_alive = true;
-                    min_x = min_x.min(col);
-                    min_y = min_y.min(bottom_y);
-                    max_x = max_x.max(col);
-                    max_y = max_y.max(bottom_y);
+                    min_x = min_x.min(gx0);
+                    min_y = min_y.min(gy0 + 1);
+                    max_x = max_x.max(gx0);
+                    max_y = max_y.max(gy0 + 1);
                 }
 
-                let top_active = top_alive || (cfg.trails && top_decay > 0);
-                let bottom_active = bottom_alive || (cfg.trails && bottom_decay > 0);
-
-                let top_color = if top_alive {
-                    live_color(top_age, top_neighbors, cfg, palette)
-                } else if cfg.trails && top_decay > 0 {
-                    trail_color(top_decay, palette)
-                } else {
-                    bg
-                };
-
-                let bottom_color = if bottom_alive {
-                    live_color(bottom_age, bottom_neighbors, cfg, palette)
-                } else if cfg.trails && bottom_decay > 0 {
-                    trail_color(bottom_decay, palette)
-                } else {
-                    bg
-                };
-
-                let (ch, fg) = if top_active && bottom_active {
-                    if top_alive || bottom_alive {
-                        let max_age = top_age.max(bottom_age);
-                        let max_neighbors = top_neighbors.max(bottom_neighbors);
-                        ('█', live_color(max_age, max_neighbors, cfg, palette))
-                    } else {
-                        ('█', trail_color(top_decay.max(bottom_decay), palette))
-                    }
-                } else if top_active {
-                    ('▀', top_color)
-                } else if bottom_active {
-                    ('▄', bottom_color)
-                } else {
-                    (' ', bg)
-                };
+                let any_alive = top_alive || bottom_alive;
+                let any_trail = cfg.trails && (top_decay > 0 || bottom_decay > 0);
 
                 let cell = buf.get_mut(x, y);
-                cell.set_char(ch);
-                cell.set_fg(fg);
-                cell.set_bg(bg);
+                if any_alive {
+                    let (ch, fg, bg) = if top_alive && bottom_alive {
+                        let max_age = top_age.max(bottom_age);
+                        let max_neighbors = top_neighbors.max(bottom_neighbors);
+                        (
+                            '█',
+                            live_color(max_age, max_neighbors, cfg, palette),
+                            bg_bottom,
+                        )
+                    } else if top_alive {
+                        ('▀', live_color(top_age, top_neighbors, cfg, palette), bg_bottom)
+                    } else {
+                        (
+                            '▄',
+                            live_color(bottom_age, bottom_neighbors, cfg, palette),
+                            bg_top,
+                        )
+                    };
+                    cell.set_char(ch);
+                    cell.set_fg(fg);
+                    cell.set_bg(bg);
+                } else if any_trail {
+                    if top_decay > 0 && bottom_decay > 0 {
+                        let color = trail_color(top_decay.max(bottom_decay), palette);
+                        cell.set_char('█');
+                        cell.set_fg(color);
+                        cell.set_bg(bg_bottom);
+                    } else if top_decay > 0 {
+                        let color = trail_color(top_decay, palette);
+                        cell.set_char('▀');
+                        cell.set_fg(color);
+                        cell.set_bg(bg_bottom);
+                    } else {
+                        let color = trail_color(bottom_decay, palette);
+                        cell.set_char('▄');
+                        cell.set_fg(color);
+                        cell.set_bg(bg_top);
+                    }
+                } else {
+                    if use_checker {
+                        cell.set_char('▀');
+                        cell.set_fg(bg_top);
+                        cell.set_bg(bg_bottom);
+                    } else {
+                        cell.set_char(' ');
+                        cell.set_fg(bg_bottom);
+                        cell.set_bg(bg_bottom);
+                    }
+                }
             }
         }
 
         if cfg.overlay_bbox && any_alive {
-            let left = min_x;
-            let right = max_x;
-            let top = min_y / 2;
-            let bottom = max_y / 2;
-            draw_bbox(grid_area, buf, left, top, right, bottom, cfg, palette);
+            if let (Some((left, top)), Some((right, bottom))) = (
+                geom.gol_to_term(min_x, min_y),
+                geom.gol_to_term(max_x, max_y),
+            ) {
+                draw_bbox(
+                    grid_area,
+                    buf,
+                    left as usize,
+                    top as usize,
+                    right as usize,
+                    bottom as usize,
+                    cfg,
+                    palette,
+                );
+            }
         }
+
+        maybe_draw_debug_overlay(grid_area, buf, &geom, cfg, palette);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::HalfBlockRenderer;
+    use crate::gol_render::{GolHudMetrics, GolHudState, GolPalette, GolRenderConfig, GolRenderState};
+    use crate::theme::Theme;
+    use nit_core::{GolRenderMode, VisualizerMode};
+    use nit_gol::Grid;
+    use ratatui::{buffer::Buffer, layout::Rect};
+
+    #[test]
+    fn halfblock_uniform_pixels_use_half_block() {
+        let mut grid = Grid::new(1, 2);
+        grid.set(0, 0, true);
+        let mut state = GolRenderState::new();
+        state.seed_from_grid(&grid);
+        let palette = GolPalette::from_theme(&Theme::default());
+        let metrics = GolHudMetrics::new(1);
+        let hud = GolHudState {
+            rule: "B3/S23",
+            generation: 0,
+            alive: 1,
+            period: None,
+            mode: VisualizerMode::SimOnly,
+            paused: false,
+            delta: 0,
+            history: metrics.history(),
+        };
+        let cfg = GolRenderConfig {
+            mode: GolRenderMode::HalfBlock,
+            age_shading: false,
+            trails: false,
+            overlay_bbox: false,
+            overlay_heat: false,
+            scanlines: false,
+            grid_minor: None,
+            grid_major: None,
+            gol_origin_x: 0,
+            gol_origin_y: 0,
+            debug_overlay: false,
+            braille_enabled: true,
+        };
+        let area = Rect {
+            x: 0,
+            y: 0,
+            width: 1,
+            height: 2,
+        };
+        let mut buf = Buffer::empty(area);
+        let mut renderer = HalfBlockRenderer::default();
+        renderer.render(area, &mut buf, &grid, &state, &cfg, &palette, &hud);
+        let cell = buf.get(0, 1);
+        assert_eq!(cell.symbol(), "▀");
+        assert_ne!(cell.fg, cell.bg);
+    }
+
+    #[test]
+    fn halfblock_trails_use_half_block() {
+        let mut prev = Grid::new(1, 2);
+        prev.set(0, 0, true);
+        let next = Grid::new(1, 2);
+        let mut state = GolRenderState::new();
+        state.seed_from_grid(&prev);
+        state.update_from_step(&prev, &next);
+        let palette = GolPalette::from_theme(&Theme::default());
+        let metrics = GolHudMetrics::new(1);
+        let hud = GolHudState {
+            rule: "B3/S23",
+            generation: 1,
+            alive: 0,
+            period: None,
+            mode: VisualizerMode::SimOnly,
+            paused: false,
+            delta: 1,
+            history: metrics.history(),
+        };
+        let cfg = GolRenderConfig {
+            mode: GolRenderMode::HalfBlock,
+            age_shading: false,
+            trails: true,
+            overlay_bbox: false,
+            overlay_heat: false,
+            scanlines: false,
+            grid_minor: None,
+            grid_major: None,
+            gol_origin_x: 0,
+            gol_origin_y: 0,
+            debug_overlay: false,
+            braille_enabled: true,
+        };
+        let area = Rect {
+            x: 0,
+            y: 0,
+            width: 1,
+            height: 2,
+        };
+        let mut buf = Buffer::empty(area);
+        let mut renderer = HalfBlockRenderer::default();
+        renderer.render(area, &mut buf, &next, &state, &cfg, &palette, &hud);
+        let cell = buf.get(0, 1);
+        assert_eq!(cell.symbol(), "▀");
     }
 }

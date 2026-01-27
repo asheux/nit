@@ -1001,11 +1001,10 @@ fn handle_command_line(state: &mut AppState, input: &str) {
 fn cycle_seed_overlays(state: &mut VisualizerState) {
     const PRESETS: &[(bool, bool, bool, bool, bool)] = &[
         (false, false, false, false, false),
-        (true, false, false, false, false),
-        (true, false, true, false, false),
-        (true, false, true, true, false),
-        (true, true, true, true, false),
-        (true, true, true, true, true),
+        (false, false, true, false, false),
+        (false, false, true, true, false),
+        (false, true, true, true, false),
+        (false, true, true, true, true),
     ];
     let current = (
         state.seed_show_grid,
@@ -1028,9 +1027,6 @@ fn cycle_seed_overlays(state: &mut VisualizerState) {
 
 fn seed_overlay_label(state: &VisualizerState) -> String {
     let mut parts = Vec::new();
-    if state.seed_show_grid {
-        parts.push("GRID");
-    }
     if state.seed_show_halo {
         parts.push("HALO");
     }

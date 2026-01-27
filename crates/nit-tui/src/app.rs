@@ -1089,7 +1089,8 @@ fn handle_insert_chords(
 }
 
 fn visualizer_ctrl_action(key: &KeyEvent, state: &AppState) -> Option<Action> {
-    if state.focus != PaneId::Visualizer {
+    let petri_visible = state.visualizer.running && !state.visualizer.petri_hidden;
+    if state.focus != PaneId::Visualizer && !petri_visible {
         return None;
     }
     if !key.modifiers.contains(KeyModifiers::CONTROL) {
@@ -1201,11 +1202,6 @@ fn is_global_run_key(key: &KeyEvent) -> bool {
     match key {
         KeyEvent {
             code: KeyCode::Enter | KeyCode::Char('\n') | KeyCode::Char('\r'),
-            modifiers,
-            ..
-        } if modifiers.contains(KeyModifiers::CONTROL) => true,
-        KeyEvent {
-            code: KeyCode::Char('j') | KeyCode::Char('J'),
             modifiers,
             ..
         } if modifiers.contains(KeyModifiers::CONTROL) => true,

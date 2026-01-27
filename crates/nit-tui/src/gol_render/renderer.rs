@@ -7,7 +7,13 @@ use ratatui::{
 use nit_core::{GolRenderMode, VisualizerMode};
 use nit_gol::Grid;
 
-use super::{braille::BrailleRenderer, halfblock::HalfBlockRenderer, palette::GolPalette, solid::SolidRenderer};
+use super::{
+    braille::BrailleRenderer,
+    geometry::{RenderGeometry, RenderMode},
+    halfblock::HalfBlockRenderer,
+    palette::GolPalette,
+    solid::SolidRenderer,
+};
 
 pub const MAX_AGE: u8 = 12;
 pub const MAX_DECAY: u8 = 10;
@@ -21,6 +27,11 @@ pub struct GolRenderConfig {
     pub overlay_bbox: bool,
     pub overlay_heat: bool,
     pub scanlines: bool,
+    pub grid_minor: Option<u16>,
+    pub grid_major: Option<u16>,
+    pub gol_origin_x: i32,
+    pub gol_origin_y: i32,
+    pub debug_overlay: bool,
     pub braille_enabled: bool,
 }
 
@@ -279,11 +290,14 @@ impl GolRenderPipeline {
 }
 
 pub fn grid_size_for_mode(width: usize, height: usize, mode: GolRenderMode) -> (usize, usize) {
-    match mode {
-        GolRenderMode::Solid => (width, height),
-        GolRenderMode::HalfBlock => (width, height.saturating_mul(2)),
-        GolRenderMode::Braille => (width.saturating_mul(2), height.saturating_mul(4)),
-    }
+    let term_rect = Rect {
+        x: 0,
+        y: 0,
+        width: width.min(u16::MAX as usize) as u16,
+        height: height.min(u16::MAX as usize) as u16,
+    };
+    let geom = RenderGeometry::for_mode(RenderMode::from(mode), term_rect, 0, 0);
+    (geom.gol_w as usize, geom.gol_h as usize)
 }
 
 pub(crate) fn render_hud_line(
@@ -388,6 +402,256 @@ pub(crate) fn row_bg(row: usize, cfg: &GolRenderConfig, palette: &GolPalette) ->
         palette.scanline
     } else {
         palette.bg
+    }
+}
+
+fn darken_color(color: Color, factor: f32) -> Color {
+    match color {
+        Color::Rgb(r, g, b) => Color::Rgb(
+            ((r as f32) * factor) as u8,
+            ((g as f32) * factor) as u8,
+            ((b as f32) * factor) as u8,
+        ),
+        other => other,
+    }
+}
+
+fn spans_gridline(start: i32, count: u16, spacing: u16) -> bool {
+    if spacing == 0 {
+        return false;
+    }
+    let spacing = spacing as i32;
+    let mut offset = 0i32;
+    while offset < count as i32 {
+        let k = start + offset;
+        if k % spacing == 0 {
+            return true;
+        }
+        offset += 1;
+    }
+    false
+}
+
+pub(crate) fn gridline_flags(
+    geom: &RenderGeometry,
+    tx: u16,
+    ty: u16,
+    spacing: u16,
+) -> (bool, bool) {
+    if spacing == 0 {
+        return (false, false);
+    }
+    let (gx0, gy0, _gx1, _gy1) = geom.term_cell_bounds_in_gol(tx, ty);
+    let v = spans_gridline(gx0, geom.cell_per_term_x, spacing);
+    let h = spans_gridline(gy0, geom.cell_per_term_y, spacing);
+    (v, h)
+}
+
+pub(crate) fn cell_bg(
+    geom: &RenderGeometry,
+    tx: u16,
+    ty: u16,
+    cfg: &GolRenderConfig,
+    palette: &GolPalette,
+) -> Color {
+    let base = row_bg(ty as usize, cfg, palette);
+    if cfg.grid_minor == Some(1) {
+        let parity = ((tx as u32 + ty as u32) & 1) == 0;
+        let alt = if base == palette.bg {
+            palette.scanline
+        } else {
+            palette.bg
+        };
+        let mut bg = if parity { base } else { alt };
+        if let Some(spacing) = cfg.grid_major {
+            let (major_v, major_h) = gridline_flags(geom, tx, ty, spacing);
+            if major_v || major_h {
+                bg = alt;
+            }
+        }
+        return bg;
+    }
+    let minor = cfg.grid_minor;
+    let major = cfg.grid_major;
+    if minor.is_none() && major.is_none() {
+        return base;
+    }
+    let (minor_v, minor_h) = minor
+        .map(|spacing| gridline_flags(geom, tx, ty, spacing))
+        .unwrap_or((false, false));
+    let (major_v, major_h) = major
+        .map(|spacing| gridline_flags(geom, tx, ty, spacing))
+        .unwrap_or((false, false));
+    let v = minor_v || major_v;
+    let h = minor_h || major_h;
+    if !v && !h {
+        return base;
+    }
+    let strong = major_v || major_h || (v && h);
+    let factor = if strong { 0.82 } else { 0.9 };
+    darken_color(base, factor)
+}
+
+pub(crate) fn cell_bg_halves(
+    geom: &RenderGeometry,
+    tx: u16,
+    ty: u16,
+    cfg: &GolRenderConfig,
+    palette: &GolPalette,
+) -> (Color, Color) {
+    if cfg.grid_minor != Some(1) {
+        let bg = cell_bg(geom, tx, ty, cfg, palette);
+        return (bg, bg);
+    }
+
+    let base = row_bg(ty as usize, cfg, palette);
+    let alt = if base == palette.bg {
+        palette.scanline
+    } else {
+        palette.bg
+    };
+    let (gx0, gy0, _gx1, _gy1) = geom.term_cell_bounds_in_gol(tx, ty);
+    let cell_x = geom.cell_per_term_x.max(1);
+    let half_y = (geom.cell_per_term_y / 2).max(1);
+    let px = (gx0).div_euclid(cell_x as i32);
+    let py_top = (gy0).div_euclid(half_y as i32);
+    let py_bottom = (gy0 + half_y as i32).div_euclid(half_y as i32);
+
+    let mut top = if (px + py_top).rem_euclid(2) == 0 {
+        base
+    } else {
+        alt
+    };
+    let mut bottom = if (px + py_bottom).rem_euclid(2) == 0 {
+        base
+    } else {
+        alt
+    };
+
+    if let Some(spacing) = cfg.grid_major {
+        let major_v = spans_gridline(gx0, cell_x, spacing);
+        let major_h_top = spans_gridline(gy0, half_y, spacing);
+        let major_h_bottom = spans_gridline(gy0 + half_y as i32, half_y, spacing);
+        if major_v || major_h_top {
+            top = alt;
+        }
+        if major_v || major_h_bottom {
+            bottom = alt;
+        }
+    }
+
+    (top, bottom)
+}
+
+pub(crate) fn maybe_draw_debug_overlay(
+    grid_area: Rect,
+    buf: &mut Buffer,
+    geom: &RenderGeometry,
+    cfg: &GolRenderConfig,
+    palette: &GolPalette,
+) {
+    if !cfg.debug_overlay || grid_area.width == 0 || grid_area.height == 0 {
+        return;
+    }
+
+    let crosshair_style = Style::default()
+        .fg(palette.hud_text)
+        .add_modifier(Modifier::DIM);
+    let crosshairs = [(0i32, 0i32), (16i32, 16i32)];
+    for (gx, gy) in crosshairs {
+        if let Some((tx, ty)) = geom.gol_to_term(gx, gy) {
+            let x = grid_area.x.saturating_add(tx);
+            let y = grid_area.y.saturating_add(ty);
+            if x < grid_area.x.saturating_add(grid_area.width)
+                && y < grid_area.y.saturating_add(grid_area.height)
+            {
+                let cell = buf.get_mut(x, y);
+                let keep_bg = cell.bg;
+                cell.set_char('+');
+                cell.set_style(crosshair_style);
+                cell.set_bg(keep_bg);
+            }
+        }
+    }
+
+    let max_x = grid_area.x.saturating_add(grid_area.width);
+    let label_style = Style::default()
+        .fg(palette.hud_dim)
+        .add_modifier(Modifier::DIM);
+    let y0 = grid_area
+        .y
+        .saturating_add(grid_area.height.saturating_sub(2));
+    let y1 = grid_area
+        .y
+        .saturating_add(grid_area.height.saturating_sub(1));
+    let mut x = grid_area.x;
+    x = write_str(buf, x, y0, max_x, label_style, "GX:");
+    for gx in [0i32, 16, 32] {
+        x = write_str(buf, x, y0, max_x, label_style, " ");
+        x = write_u32(buf, x, y0, max_x, label_style, gx as u32, 0);
+        x = write_str(buf, x, y0, max_x, label_style, "->");
+        if let Some((tx, _)) = geom.gol_to_term(gx, geom.gol_origin_y) {
+            x = write_u32(buf, x, y0, max_x, label_style, tx as u32, 0);
+        } else {
+            x = write_str(buf, x, y0, max_x, label_style, "--");
+        }
+    }
+
+    let mut x = grid_area.x;
+    x = write_str(buf, x, y1, max_x, label_style, "GY:");
+    for gy in [0i32, 16, 32] {
+        x = write_str(buf, x, y1, max_x, label_style, " ");
+        x = write_u32(buf, x, y1, max_x, label_style, gy as u32, 0);
+        x = write_str(buf, x, y1, max_x, label_style, "->");
+        if let Some((_, ty)) = geom.gol_to_term(geom.gol_origin_x, gy) {
+            x = write_u32(buf, x, y1, max_x, label_style, ty as u32, 0);
+        } else {
+            x = write_str(buf, x, y1, max_x, label_style, "--");
+        }
+    }
+
+    draw_grid_intersection_marks(grid_area, buf, geom, cfg, palette);
+}
+
+fn draw_grid_intersection_marks(
+    grid_area: Rect,
+    buf: &mut Buffer,
+    geom: &RenderGeometry,
+    cfg: &GolRenderConfig,
+    palette: &GolPalette,
+) {
+    if cfg.grid_minor.is_none() && cfg.grid_major.is_none() {
+        return;
+    }
+    let mark_style = Style::default()
+        .fg(palette.hud_text)
+        .add_modifier(Modifier::DIM);
+    for ty in 0..grid_area.height {
+        for tx in 0..grid_area.width {
+            let (minor_v, minor_h) = cfg
+                .grid_minor
+                .map(|spacing| gridline_flags(geom, tx, ty, spacing))
+                .unwrap_or((false, false));
+            let (major_v, major_h) = cfg
+                .grid_major
+                .map(|spacing| gridline_flags(geom, tx, ty, spacing))
+                .unwrap_or((false, false));
+            let v = minor_v || major_v;
+            let h = minor_h || major_h;
+            if !(v && h) {
+                continue;
+            }
+            let x = grid_area.x.saturating_add(tx);
+            let y = grid_area.y.saturating_add(ty);
+            let cell = buf.get_mut(x, y);
+            let bg = cell_bg(geom, tx, ty, cfg, palette);
+            if cell.symbol() == " " && cell.bg == bg {
+                let keep_bg = cell.bg;
+                cell.set_char('.');
+                cell.set_style(mark_style);
+                cell.set_bg(keep_bg);
+            }
+        }
     }
 }
 
@@ -619,4 +883,100 @@ fn write_sparkline(
         x = x.saturating_add(1);
     }
     x
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{cell_bg_halves, gridline_flags, GolRenderConfig, RenderGeometry, RenderMode};
+    use crate::gol_render::GolPalette;
+    use nit_core::GolRenderMode;
+    use ratatui::style::Color;
+    use ratatui::layout::Rect;
+
+    #[test]
+    fn gridlines_match_gol_bounds() {
+        let term_rect = Rect {
+            x: 0,
+            y: 0,
+            width: 10,
+            height: 10,
+        };
+        let spacing = 4u16;
+        for mode in [RenderMode::Solid, RenderMode::HalfBlock, RenderMode::Braille] {
+            let geom = RenderGeometry::for_mode(mode, term_rect, 0, 0);
+            for ty in 0..term_rect.height {
+                for tx in 0..term_rect.width {
+                    let (v, h) = gridline_flags(&geom, tx, ty, spacing);
+                    let (gx0, gy0, gx1, gy1) = geom.term_cell_bounds_in_gol(tx, ty);
+                    let mut expected_v = false;
+                    let mut gx = gx0;
+                    while gx < gx1 {
+                        if gx % spacing as i32 == 0 {
+                            expected_v = true;
+                            break;
+                        }
+                        gx += 1;
+                    }
+                    let mut expected_h = false;
+                    let mut gy = gy0;
+                    while gy < gy1 {
+                        if gy % spacing as i32 == 0 {
+                            expected_h = true;
+                            break;
+                        }
+                        gy += 1;
+                    }
+                    assert_eq!(
+                        (v, h),
+                        (expected_v, expected_h),
+                        "mode={:?} tx={} ty={}",
+                        mode,
+                        tx,
+                        ty
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn square_pixel_grid_minor_1_checkerboard() {
+        let term_rect = Rect {
+            x: 0,
+            y: 0,
+            width: 2,
+            height: 1,
+        };
+        let geom = RenderGeometry::for_mode(RenderMode::HalfBlock, term_rect, 0, 0);
+        let palette = GolPalette {
+            bg: Color::Rgb(10, 10, 10),
+            live_new: Color::Rgb(40, 40, 40),
+            live: Color::Rgb(30, 30, 30),
+            live_old: Color::Rgb(20, 20, 20),
+            trail: [Color::Rgb(12, 12, 12), Color::Rgb(11, 11, 11), Color::Rgb(10, 10, 10)],
+            bbox: Color::Rgb(50, 50, 50),
+            hud_dim: Color::Rgb(60, 60, 60),
+            hud_text: Color::Rgb(70, 70, 70),
+            hud_spark: Color::Rgb(80, 80, 80),
+            scanline: Color::Rgb(9, 9, 9),
+        };
+        let cfg = GolRenderConfig {
+            mode: GolRenderMode::HalfBlock,
+            age_shading: false,
+            trails: false,
+            overlay_bbox: false,
+            overlay_heat: false,
+            scanlines: false,
+            grid_minor: Some(1),
+            grid_major: None,
+            gol_origin_x: 0,
+            gol_origin_y: 0,
+            debug_overlay: false,
+            braille_enabled: true,
+        };
+        let (top0, bottom0) = cell_bg_halves(&geom, 0, 0, &cfg, &palette);
+        let (top1, _bottom1) = cell_bg_halves(&geom, 1, 0, &cfg, &palette);
+        assert_ne!(top0, bottom0);
+        assert_ne!(top0, top1);
+    }
 }

@@ -29,10 +29,15 @@ pub fn render(
 
     for y in 0..h {
         for x in 0..w {
-            let mut mask = 0u8;
-            let mut color = palette.live;
-            let mut color_set = false;
-            let mut halo_max = 0u8;
+            let mut top_alive = false;
+            let mut bottom_alive = false;
+            let mut top_color = palette.live;
+            let mut bottom_color = palette.live;
+            let mut top_color_set = false;
+            let mut bottom_color_set = false;
+            let mut top_halo = 0u8;
+            let mut bottom_halo = 0u8;
+
             for dy in 0..4 {
                 let gy = y * 4 + dy;
                 if gy >= grid_h {
@@ -44,52 +49,72 @@ pub fn render(
                         continue;
                     }
                     if seed.grid.get(gx, gy) {
-                        mask |= braille_bit(dx, dy);
-                        if !color_set {
-                            color = live_color(gx, gy, seed, cfg, cache, palette);
-                            color_set = true;
+                        if dy < 2 {
+                            top_alive = true;
+                            if !top_color_set {
+                                top_color = live_color(gx, gy, seed, cfg, cache, palette);
+                                top_color_set = true;
+                            }
+                        } else {
+                            bottom_alive = true;
+                            if !bottom_color_set {
+                                bottom_color = live_color(gx, gy, seed, cfg, cache, palette);
+                                bottom_color_set = true;
+                            }
                         }
                     } else if cfg.show_halo {
                         if let Some(halo) = &cache.halo_mask {
                             let idx = gy * grid_w + gx;
                             if idx < halo.len() {
-                                halo_max = halo_max.max(halo[idx]);
+                                if dy < 2 {
+                                    top_halo = top_halo.max(halo[idx]);
+                                } else {
+                                    bottom_halo = bottom_halo.max(halo[idx]);
+                                }
                             }
                         }
                     }
                 }
             }
-            let (ch, fg, bg) = if mask == 0 {
-                let bg = if cfg.show_halo && halo_max > 0 {
-                    halo_color(halo_max, palette)
-                } else {
-                    palette.bg
-                };
-                (' ', palette.bg, bg)
+
+            let top_bg = if top_alive {
+                top_color
+            } else if cfg.show_halo && top_halo > 0 {
+                halo_color(top_halo, palette)
             } else {
-                (braille_char(mask), color, palette.bg)
+                palette.bg
+            };
+            let bottom_bg = if bottom_alive {
+                bottom_color
+            } else if cfg.show_halo && bottom_halo > 0 {
+                halo_color(bottom_halo, palette)
+            } else {
+                palette.bg
+            };
+
+            let (ch, fg, bg) = match (top_alive, bottom_alive) {
+                (true, true) => {
+                    if top_bg == bottom_bg {
+                        ('█', top_bg, top_bg)
+                    } else {
+                        ('▀', top_bg, bottom_bg)
+                    }
+                }
+                (true, false) => ('▀', top_bg, bottom_bg),
+                (false, true) => ('▄', bottom_bg, top_bg),
+                (false, false) => {
+                    let halo = top_halo.max(bottom_halo);
+                    let bg = if cfg.show_halo && halo > 0 {
+                        halo_color(halo, palette)
+                    } else {
+                        palette.bg
+                    };
+                    (' ', palette.bg, bg)
+                }
             };
             let cell = buf.get_mut(area.x + x as u16, area.y + y as u16);
             cell.set_char(ch);
             cell.set_style(Style::default().fg(fg).bg(bg));
         }
-    }
-}
-
-fn braille_char(mask: u8) -> char {
-    char::from_u32(0x2800 + mask as u32).unwrap_or(' ')
-}
-
-fn braille_bit(dx: usize, dy: usize) -> u8 {
-    match (dx, dy) {
-        (0, 0) => 0x01,
-        (0, 1) => 0x02,
-        (0, 2) => 0x04,
-        (1, 0) => 0x08,
-        (1, 1) => 0x10,
-        (1, 2) => 0x20,
-        (0, 3) => 0x40,
-        (1, 3) => 0x80,
-        _ => 0x00,
     }
 }

@@ -2,10 +2,11 @@ use ratatui::{buffer::Buffer, layout::Rect};
 
 use nit_gol::Grid;
 
+use super::geometry::{RenderGeometry, RenderMode};
 use super::palette::GolPalette;
 use super::renderer::{
-    draw_bbox, live_color, neighbor_count, render_hud_line, row_bg, trail_color, GolHudState,
-    GolRenderConfig, GolRenderState, GolRenderer,
+    cell_bg_halves, draw_bbox, live_color, maybe_draw_debug_overlay, neighbor_count,
+    render_hud_line, trail_color, GolHudState, GolRenderConfig, GolRenderState, GolRenderer,
 };
 
 #[derive(Default)]
@@ -38,25 +39,41 @@ impl GolRenderer for SolidRenderer {
         let cells = grid.cells();
         let age = state.age();
         let decay = state.decay();
+        let geom = RenderGeometry::for_mode(
+            RenderMode::Solid,
+            grid_area,
+            cfg.gol_origin_x,
+            cfg.gol_origin_y,
+        );
 
-        let mut min_x = usize::MAX;
-        let mut min_y = usize::MAX;
-        let mut max_x = 0usize;
-        let mut max_y = 0usize;
+        let mut min_x = i32::MAX;
+        let mut min_y = i32::MAX;
+        let mut max_x = i32::MIN;
+        let mut max_y = i32::MIN;
         let mut any_alive = false;
 
+        let use_checker = cfg.grid_minor == Some(1);
         for row in 0..grid_area.height as usize {
-            let y = grid_area.y + row as u16;
-            let bg = row_bg(row, cfg, palette);
-            let in_row = row < grid_h;
-            let row_start = if in_row { row.saturating_mul(grid_w) } else { 0 };
+            let ty = row as u16;
+            let y = grid_area.y + ty;
             for col in 0..grid_area.width as usize {
-                let x = grid_area.x + col as u16;
+                let tx = col as u16;
+                let x = grid_area.x + tx;
+                let (bg_top, bg_bottom) = cell_bg_halves(&geom, tx, ty, cfg, palette);
+                let (gx0, gy0, _gx1, _gy1) = geom.term_cell_bounds_in_gol(tx, ty);
+                let gx_local = gx0 - geom.gol_origin_x;
+                let gy_local = gy0 - geom.gol_origin_y;
                 let mut alive = false;
                 let mut age_val = 0u8;
                 let mut decay_val = 0u8;
-                if in_row && col < grid_w {
-                    let idx = row_start + col;
+                if gx_local >= 0
+                    && gy_local >= 0
+                    && (gx_local as usize) < grid_w
+                    && (gy_local as usize) < grid_h
+                {
+                    let gx = gx_local as usize;
+                    let gy = gy_local as usize;
+                    let idx = gy.saturating_mul(grid_w) + gx;
                     alive = cells[idx] != 0;
                     age_val = age[idx];
                     decay_val = decay[idx];
@@ -64,34 +81,175 @@ impl GolRenderer for SolidRenderer {
 
                 if alive {
                     any_alive = true;
-                    min_x = min_x.min(col);
-                    min_y = min_y.min(row);
-                    max_x = max_x.max(col);
-                    max_y = max_y.max(row);
+                    min_x = min_x.min(gx0);
+                    min_y = min_y.min(gy0);
+                    max_x = max_x.max(gx0);
+                    max_y = max_y.max(gy0);
                 }
 
-                let color = if alive {
+                let cell = buf.get_mut(x, y);
+                if alive {
                     let neighbors = if cfg.overlay_heat {
-                        neighbor_count(grid, col, row)
+                        neighbor_count(grid, gx_local as usize, gy_local as usize)
                     } else {
                         0
                     };
-                    live_color(age_val, neighbors, cfg, palette)
+                    let color = live_color(age_val, neighbors, cfg, palette);
+                    cell.set_char('▀');
+                    cell.set_fg(color);
+                    cell.set_bg(bg_bottom);
                 } else if cfg.trails && decay_val > 0 {
-                    trail_color(decay_val, palette)
+                    let color = trail_color(decay_val, palette);
+                    cell.set_char('▀');
+                    cell.set_fg(color);
+                    cell.set_bg(bg_bottom);
                 } else {
-                    bg
-                };
-
-                let cell = buf.get_mut(x, y);
-                cell.set_char(' ');
-                cell.set_bg(color);
-                cell.set_fg(color);
+                    if use_checker {
+                        cell.set_char('▀');
+                        cell.set_fg(bg_top);
+                        cell.set_bg(bg_bottom);
+                    } else {
+                        cell.set_char(' ');
+                        cell.set_fg(bg_bottom);
+                        cell.set_bg(bg_bottom);
+                    }
+                }
             }
         }
 
         if cfg.overlay_bbox && any_alive {
-            draw_bbox(grid_area, buf, min_x, min_y, max_x, max_y, cfg, palette);
+            if let (Some((left, top)), Some((right, bottom))) = (
+                geom.gol_to_term(min_x, min_y),
+                geom.gol_to_term(max_x, max_y),
+            ) {
+                draw_bbox(
+                    grid_area,
+                    buf,
+                    left as usize,
+                    top as usize,
+                    right as usize,
+                    bottom as usize,
+                    cfg,
+                    palette,
+                );
+            }
         }
+
+        maybe_draw_debug_overlay(grid_area, buf, &geom, cfg, palette);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SolidRenderer;
+    use crate::gol_render::{
+        cell_bg, GolHudMetrics, GolHudState, GolPalette, GolRenderConfig, GolRenderState,
+        RenderGeometry, RenderMode,
+    };
+    use crate::theme::Theme;
+    use nit_core::{GolRenderMode, VisualizerMode};
+    use nit_gol::Grid;
+    use ratatui::{buffer::Buffer, layout::Rect};
+
+    #[test]
+    fn solid_uniform_pixels_use_half_block() {
+        let mut grid = Grid::new(1, 1);
+        grid.set(0, 0, true);
+        let mut state = GolRenderState::new();
+        state.seed_from_grid(&grid);
+        let palette = GolPalette::from_theme(&Theme::default());
+        let metrics = GolHudMetrics::new(1);
+        let hud = GolHudState {
+            rule: "B3/S23",
+            generation: 0,
+            alive: 1,
+            period: None,
+            mode: VisualizerMode::SimOnly,
+            paused: false,
+            delta: 0,
+            history: metrics.history(),
+        };
+        let cfg = GolRenderConfig {
+            mode: GolRenderMode::Solid,
+            age_shading: false,
+            trails: false,
+            overlay_bbox: false,
+            overlay_heat: false,
+            scanlines: false,
+            grid_minor: None,
+            grid_major: None,
+            gol_origin_x: 0,
+            gol_origin_y: 0,
+            debug_overlay: false,
+            braille_enabled: true,
+        };
+        let area = Rect {
+            x: 0,
+            y: 0,
+            width: 1,
+            height: 2,
+        };
+        let mut buf = Buffer::empty(area);
+        let mut renderer = SolidRenderer::default();
+        renderer.render(area, &mut buf, &grid, &state, &cfg, &palette, &hud);
+        let grid_area = Rect {
+            x: area.x,
+            y: area.y + 1,
+            width: area.width,
+            height: area.height - 1,
+        };
+        let geom = RenderGeometry::for_mode(RenderMode::Solid, grid_area, 0, 0);
+        let bg = cell_bg(&geom, 0, 0, &cfg, &palette);
+        let cell = buf.get(0, 1);
+        assert_eq!(cell.symbol(), "▀");
+        assert_eq!(cell.bg, bg);
+        assert_ne!(cell.fg, cell.bg);
+    }
+
+    #[test]
+    fn solid_trails_do_not_use_half_block() {
+        let mut prev = Grid::new(1, 1);
+        prev.set(0, 0, true);
+        let next = Grid::new(1, 1);
+        let mut state = GolRenderState::new();
+        state.seed_from_grid(&prev);
+        state.update_from_step(&prev, &next);
+        let palette = GolPalette::from_theme(&Theme::default());
+        let metrics = GolHudMetrics::new(1);
+        let hud = GolHudState {
+            rule: "B3/S23",
+            generation: 1,
+            alive: 0,
+            period: None,
+            mode: VisualizerMode::SimOnly,
+            paused: false,
+            delta: 1,
+            history: metrics.history(),
+        };
+        let cfg = GolRenderConfig {
+            mode: GolRenderMode::Solid,
+            age_shading: false,
+            trails: true,
+            overlay_bbox: false,
+            overlay_heat: false,
+            scanlines: false,
+            grid_minor: None,
+            grid_major: None,
+            gol_origin_x: 0,
+            gol_origin_y: 0,
+            debug_overlay: false,
+            braille_enabled: true,
+        };
+        let area = Rect {
+            x: 0,
+            y: 0,
+            width: 1,
+            height: 2,
+        };
+        let mut buf = Buffer::empty(area);
+        let mut renderer = SolidRenderer::default();
+        renderer.render(area, &mut buf, &next, &state, &cfg, &palette, &hud);
+        let cell = buf.get(0, 1);
+        assert_eq!(cell.symbol(), "▀");
     }
 }

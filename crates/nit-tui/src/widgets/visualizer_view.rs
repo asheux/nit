@@ -4,7 +4,7 @@ use ratatui::{
     buffer::Buffer,
     style::{Modifier, Style},
     text::Span,
-    widgets::{Block, BorderType, Borders},
+    widgets::{Block, BorderType, Borders, Gauge},
     Frame,
 };
 
@@ -107,54 +107,56 @@ pub fn render(
     }
 
     fill_bg(frame.buffer_mut(), render_area, palette.bg);
-    if let Some(seed) = seed_runtime.encoded() {
-        match state.visualizer.seed_view {
-            SeedViewMode::Genome => {
-                render_genome(
-                    render_area,
+    let Some(seed) = seed_runtime.encoded() else {
+        draw_loading_bar(frame, render_area, &palette);
+        return;
+    };
+    match state.visualizer.seed_view {
+        SeedViewMode::Genome => {
+            render_genome(
+                render_area,
+                frame.buffer_mut(),
+                seed,
+                seed_runtime.render_cache(),
+                &palette,
+            );
+            if focused && state.visualizer.inspector_enabled {
+                draw_genome_crosshair(
                     frame.buffer_mut(),
-                    seed,
-                    seed_runtime.render_cache(),
-                    &palette,
-                );
-                if focused && state.visualizer.inspector_enabled {
-                    draw_genome_crosshair(
-                        frame.buffer_mut(),
-                        render_area,
-                        state,
-                        seed,
-                        seed_runtime,
-                        &palette,
-                    );
-                }
-            }
-            SeedViewMode::Plate => {
-                let cfg = SeedRenderConfig {
-                    mode: state.visualizer.seed_plate_mode,
-                    show_grid: state.visualizer.seed_show_grid,
-                    show_bbox: state.visualizer.seed_show_bbox,
-                    show_halo: state.visualizer.seed_show_halo,
-                    show_components: state.visualizer.seed_show_components
-                        || state.visualizer.seed_plate_mode == nit_core::SeedPreviewMode::Tissue,
-                    show_inset_genome: state.visualizer.seed_show_inset,
-                    scanline: state.visualizer.seed_scanline,
-                    zoom: state.visualizer.seed_zoom,
-                };
-                render_seed(
                     render_area,
-                    frame.buffer_mut(),
+                    state,
                     seed,
-                    &cfg,
-                    seed_runtime.render_cache(),
+                    seed_runtime,
                     &palette,
                 );
             }
-            SeedViewMode::Map => {
-                render_map(frame.buffer_mut(), render_area, seed, &palette);
-            }
-            SeedViewMode::Stats => {
-                render_stats(frame.buffer_mut(), render_area, state, seed_runtime, &palette);
-            }
+        }
+        SeedViewMode::Plate => {
+            let cfg = SeedRenderConfig {
+                mode: state.visualizer.seed_plate_mode,
+                show_grid: false,
+                show_bbox: state.visualizer.seed_show_bbox,
+                show_halo: state.visualizer.seed_show_halo,
+                show_components: state.visualizer.seed_show_components
+                    || state.visualizer.seed_plate_mode == nit_core::SeedPreviewMode::Tissue,
+                show_inset_genome: state.visualizer.seed_show_inset,
+                scanline: state.visualizer.seed_scanline,
+                zoom: state.visualizer.seed_zoom,
+            };
+            render_seed(
+                render_area,
+                frame.buffer_mut(),
+                seed,
+                &cfg,
+                seed_runtime.render_cache(),
+                &palette,
+            );
+        }
+        SeedViewMode::Map => {
+            render_map(frame.buffer_mut(), render_area, seed, &palette);
+        }
+        SeedViewMode::Stats => {
+            render_stats(frame.buffer_mut(), render_area, state, seed_runtime, &palette);
         }
     }
 
@@ -187,9 +189,6 @@ fn draw_hud_line(
         .bg(palette.bg)
         .add_modifier(Modifier::DIM);
     let mut writer = LineWriter::new(buf, area, style);
-    writer.write_str("ENC:");
-    writer.write_str(state.visualizer.seed_encoder.as_str());
-    writer.write_sep();
     writer.write_str("SeedHash:");
     if state.visualizer.seed_hash == 0 {
         writer.write_str("--");
@@ -215,6 +214,48 @@ fn draw_hud_line(
     writer.write_str("OVR:");
     write_overlay_label(&mut writer, state, seed_runtime);
     writer.finish();
+}
+
+fn draw_loading_bar(frame: &mut Frame, area: ratatui::layout::Rect, palette: &SeedPalette) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let y = area.y.saturating_add(area.height / 2);
+    let bar_area = ratatui::layout::Rect {
+        x: area.x,
+        y,
+        width: area.width,
+        height: 1,
+    };
+    let ratio = loading_ratio();
+    let gauge = Gauge::default()
+        .block(Block::default().style(Style::default().bg(palette.bg)))
+        .gauge_style(
+            Style::default()
+                .fg(palette.hud_text)
+                .bg(palette.bg)
+                .add_modifier(Modifier::BOLD),
+        )
+        .ratio(ratio)
+        .label(Span::styled(
+            "Genome loading",
+            Style::default()
+                .fg(palette.hud_text)
+                .add_modifier(Modifier::DIM),
+        ));
+    frame.render_widget(gauge, bar_area);
+}
+
+fn loading_ratio() -> f64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
+    let millis = now.as_millis() as f64;
+    let period = 1600.0;
+    let phase = (millis % period) / period;
+    let tri = if phase <= 0.5 { phase * 2.0 } else { (1.0 - phase) * 2.0 };
+    tri.clamp(0.0, 1.0)
 }
 
 fn draw_legend_line(
@@ -520,14 +561,11 @@ fn write_overlay_label(writer: &mut LineWriter<'_>, state: &AppState, seed_runti
                 SeedEncoderId::AsciiBytes => writer.write_str("BYTE"),
             }
         }
-        SeedViewMode::Plate => {
-            let mut wrote = false;
-            if state.visualizer.seed_show_grid {
-                wrote = write_overlay_part(writer, "GRID", wrote);
-            }
-            if state.visualizer.seed_show_halo {
-                wrote = write_overlay_part(writer, "HALO", wrote);
-            }
+            SeedViewMode::Plate => {
+                let mut wrote = false;
+                if state.visualizer.seed_show_halo {
+                    wrote = write_overlay_part(writer, "HALO", wrote);
+                }
             if state.visualizer.seed_show_components
                 || state.visualizer.seed_plate_mode == nit_core::SeedPreviewMode::Tissue
             {
