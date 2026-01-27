@@ -11,12 +11,21 @@ use ratatui::{
 
 use crate::theme::Theme;
 
+#[derive(Clone, Debug)]
+pub struct SyntaxDebugInfo {
+    pub buffer_version: u64,
+    pub snapshot_version: Option<u64>,
+    pub engine_state: String,
+    pub last_job_ms: Option<u128>,
+}
+
 pub fn render(
     frame: &mut Frame,
     area: ratatui::layout::Rect,
     state: &AppState,
     theme: &Theme,
     syntax_status: &str,
+    syntax_debug: Option<SyntaxDebugInfo>,
 ) {
     let focused = state.focus == PaneId::GateMonitor;
     let border_style = if focused {
@@ -439,6 +448,41 @@ pub fn render(
         label_style,
         syntax_style(syntax_status, theme, dim_style),
     ));
+    if state.debug {
+        if let Some(debug) = syntax_debug {
+            rows.push(row(
+                "Buf Ver",
+                debug.buffer_version.to_string(),
+                label_style,
+                value_style,
+            ));
+            rows.push(row(
+                "HL Ver",
+                debug
+                    .snapshot_version
+                    .map(|v| v.to_string())
+                    .unwrap_or_else(|| "--".to_string()),
+                label_style,
+                value_style,
+            ));
+            rows.push(row(
+                "HL Job(ms)",
+                debug
+                    .last_job_ms
+                    .map(|v| v.to_string())
+                    .unwrap_or_else(|| "--".to_string()),
+                label_style,
+                value_style,
+            ));
+            let engine_state_style = syntax_style(&debug.engine_state, theme, dim_style);
+            rows.push(row(
+                "HL State",
+                debug.engine_state,
+                label_style,
+                engine_state_style,
+            ));
+        }
+    }
     rows.push(row(
         "Job paused",
         format!("{}", state.job.paused),
@@ -621,11 +665,13 @@ fn syntax_style(status: &str, theme: &Theme, dim_style: Style) -> Style {
         Style::default()
             .fg(theme.error)
             .add_modifier(Modifier::BOLD)
+    } else if upper.contains("LAG") {
+        Style::default().fg(theme.warning)
     } else if upper.contains("DISABLED") || upper.contains("OFF") {
         dim_style
     } else if upper.contains("PENDING") {
         Style::default().fg(theme.warning)
-    } else if upper.contains("READY") || upper.contains("ON") {
+    } else if upper.contains("READY") || upper.contains("ON") || upper.contains("OK") {
         Style::default().fg(theme.title_focused)
     } else {
         Style::default().fg(theme.foreground)

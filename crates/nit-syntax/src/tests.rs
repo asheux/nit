@@ -3,7 +3,9 @@ use std::time::{Duration, Instant};
 use nit_core::Buffer;
 
 use crate::engine::{HighlightRequest, SyntaxEngine};
-use crate::highlight::{HighlightGroup, HighlightSnapshot, HighlightSpan};
+use crate::highlight::{
+    map_line_segments_to_chars, HighlightGroup, HighlightSnapshot, HighlightSpan, LineSegment,
+};
 use crate::registry::LanguageId;
 use crate::tree_sitter_engine::TreeSitterEngine;
 
@@ -116,6 +118,33 @@ fn markdown_highlights_heading() {
     engine.schedule_rehighlight(request);
     let snapshot = wait_for_snapshot(&mut engine, 3, 1);
     assert!(line_has_group(&snapshot, 0, HighlightGroup::Heading));
+}
+
+#[test]
+fn map_segments_handles_multibyte_and_tabs() {
+    let line = "a\té🙂b";
+    let start = line.find('é').unwrap();
+    let end = start + 'é'.len_utf8() + '🙂'.len_utf8();
+    let segments = vec![LineSegment {
+        start,
+        end,
+        group: HighlightGroup::String,
+    }];
+    let mapped = map_line_segments_to_chars(line, &segments).expect("map segments");
+    assert_eq!(mapped.len(), 1);
+    assert_eq!(mapped[0].start, 2);
+    assert_eq!(mapped[0].end, 4);
+}
+
+#[test]
+fn map_segments_rejects_mid_char_boundary() {
+    let line = "é";
+    let segments = vec![LineSegment {
+        start: 1,
+        end: 2,
+        group: HighlightGroup::String,
+    }];
+    assert!(map_line_segments_to_chars(line, &segments).is_err());
 }
 
 fn wait_for_snapshot(

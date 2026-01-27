@@ -1,4 +1,6 @@
 use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use nit_core::{Buffer, BufferEdit, HighlightConfig, HighlightEngine};
 use nit_syntax::{Debouncer, HighlightRequest, HighlightSnapshot, LanguageId, SyntaxEngine, SyntaxManager};
@@ -11,12 +13,28 @@ struct PendingSyntax {
     full_reparse: bool,
 }
 
+#[derive(Clone, Debug)]
+struct VersionedEdit {
+    version: u64,
+    edit: BufferEdit,
+}
+
+pub struct RenderSnapshot<'a> {
+    pub snapshot: Option<&'a HighlightSnapshot>,
+    pub line_map: Option<Vec<Option<usize>>>,
+}
+
 pub struct SyntaxRuntime {
     manager: SyntaxManager,
     debouncers: HashMap<usize, Debouncer>,
     pending: HashMap<usize, PendingSyntax>,
     snapshots: HashMap<usize, HighlightSnapshot>,
+    last_sent: HashMap<usize, u64>,
+    edits_since_snapshot: HashMap<usize, Vec<VersionedEdit>>,
+    full_reparse_pending: HashMap<usize, bool>,
 }
+
+const INITIAL_HIGHLIGHT_WAIT_MS: u64 = 1000;
 
 impl SyntaxRuntime {
     pub fn new(config: HighlightConfig) -> Self {
@@ -26,6 +44,9 @@ impl SyntaxRuntime {
             debouncers: HashMap::new(),
             pending: HashMap::new(),
             snapshots: HashMap::new(),
+            last_sent: HashMap::new(),
+            edits_since_snapshot: HashMap::new(),
+            full_reparse_pending: HashMap::new(),
         }
     }
 
@@ -38,28 +59,53 @@ impl SyntaxRuntime {
         if !self.manager.config().enabled {
             self.pending.clear();
             self.snapshots.clear();
+            self.last_sent.clear();
+            self.edits_since_snapshot.clear();
+            self.full_reparse_pending.clear();
         }
     }
 
-    pub fn prime_buffer(&mut self, buffer_id: usize, buffer: &Buffer) {
+    pub fn prime_buffer(&mut self, buffer_id: usize, buffer: &Buffer, warmup: bool) {
+        if !self.manager.config().enabled {
+            return;
+        }
         let first_line = buffer.first_line();
         let language = self.manager.detect_language(
             buffer.path().map(|p| p.as_path()),
             first_line.as_deref(),
             None,
         );
-        let pending = PendingSyntax {
+        let request = HighlightRequest {
+            buffer_id,
             version: buffer.version(),
             language,
+            text: buffer.content_as_string(),
             edits: Vec::new(),
             full_reparse: true,
+            max_spans_per_line: self.manager.config().max_spans_per_line,
         };
-        self.pending.insert(buffer_id, pending);
-        let debouncer = self
-            .debouncers
-            .entry(buffer_id)
-            .or_insert_with(|| Debouncer::new(self.manager.config().debounce_ms));
-        debouncer.mark();
+        self.last_sent.insert(buffer_id, request.version);
+        self.manager.schedule_rehighlight(request);
+        if let Some(debouncer) = self.debouncers.get_mut(&buffer_id) {
+            debouncer.clear();
+        }
+        self.pending.remove(&buffer_id);
+        if warmup {
+            let deadline = Instant::now() + Duration::from_millis(INITIAL_HIGHLIGHT_WAIT_MS);
+            loop {
+                if let Some(snapshot) =
+                    self.manager.try_get_highlights(buffer_id, buffer.version())
+                {
+                    self.snapshots.insert(buffer_id, snapshot);
+                    self.trim_edits_since_snapshot(buffer_id);
+                    break;
+                }
+                if Instant::now() >= deadline {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        }
     }
 
     pub fn note_buffer_change(&mut self, buffer_id: usize, buffer: &mut Buffer) {
@@ -67,6 +113,26 @@ impl SyntaxRuntime {
         let full_reparse = buffer.take_full_reparse();
         if edits.is_empty() && !full_reparse {
             return;
+        }
+        if !edits.is_empty() {
+            let current_version = buffer.version();
+            let start_version = current_version
+                .saturating_sub(edits.len() as u64)
+                .saturating_add(1);
+            let entry = self
+                .edits_since_snapshot
+                .entry(buffer_id)
+                .or_insert_with(Vec::new);
+            for (idx, edit) in edits.iter().enumerate() {
+                entry.push(VersionedEdit {
+                    version: start_version + idx as u64,
+                    edit: edit.clone(),
+                });
+            }
+        }
+        if full_reparse {
+            self.edits_since_snapshot.remove(&buffer_id);
+            self.full_reparse_pending.insert(buffer_id, true);
         }
         let first_line = buffer.first_line();
         let language = self.manager.detect_language(
@@ -101,6 +167,9 @@ impl SyntaxRuntime {
             if let Some(debouncer) = self.debouncers.get_mut(&buffer_id) {
                 debouncer.clear();
             }
+            self.last_sent.remove(&buffer_id);
+            self.edits_since_snapshot.remove(&buffer_id);
+            self.full_reparse_pending.remove(&buffer_id);
             return;
         }
         let Some(debouncer) = self.debouncers.get_mut(&buffer_id) else {
@@ -123,6 +192,16 @@ impl SyntaxRuntime {
             full_reparse: pending.full_reparse,
             max_spans_per_line: self.manager.config().max_spans_per_line,
         };
+        self.last_sent.insert(buffer_id, request.version);
+        log_rate_limited(&HIGHLIGHT_SCHEDULE_LOG, Duration::from_secs(1), || {
+            tracing::debug!(
+                buffer_id,
+                version = request.version,
+                edits = request.edits.len(),
+                full_reparse = request.full_reparse,
+                "schedule syntax highlight"
+            );
+        });
         self.manager.schedule_rehighlight(request);
         debouncer.clear();
     }
@@ -130,6 +209,16 @@ impl SyntaxRuntime {
     pub fn poll_results(&mut self, buffer_id: usize, version: u64) {
         if let Some(snapshot) = self.manager.try_get_highlights(buffer_id, version) {
             self.snapshots.insert(buffer_id, snapshot);
+            self.trim_edits_since_snapshot(buffer_id);
+            return;
+        }
+        if let Some(last_sent) = self.last_sent.get(&buffer_id).copied() {
+            if last_sent != version {
+                if let Some(snapshot) = self.manager.try_get_highlights(buffer_id, last_sent) {
+                    self.snapshots.insert(buffer_id, snapshot);
+                    self.trim_edits_since_snapshot(buffer_id);
+                }
+            }
         }
     }
 
@@ -139,8 +228,363 @@ impl SyntaxRuntime {
             .filter(|snap| snap.version == version)
     }
 
-    pub fn status_label(&self, buffer_id: usize) -> String {
-        self.manager.status_for(buffer_id).label()
+    pub fn latest_snapshot_for(&self, buffer_id: usize) -> Option<&HighlightSnapshot> {
+        self.snapshots.get(&buffer_id)
+    }
+
+    pub fn render_snapshot_for(
+        &self,
+        buffer_id: usize,
+        buffer: &Buffer,
+    ) -> RenderSnapshot<'_> {
+        let buffer_version = buffer.version();
+        let current_lines = buffer.lines_len();
+        let Some(snapshot) = self.snapshots.get(&buffer_id) else {
+            return RenderSnapshot {
+                snapshot: None,
+                line_map: None,
+            };
+        };
+        if snapshot.version == buffer_version {
+            return RenderSnapshot {
+                snapshot: Some(snapshot),
+                line_map: None,
+            };
+        }
+        if snapshot.version > buffer_version {
+            return RenderSnapshot {
+                snapshot: None,
+                line_map: None,
+            };
+        }
+        if self
+            .full_reparse_pending
+            .get(&buffer_id)
+            .copied()
+            .unwrap_or(false)
+        {
+            let current_hashes = compute_buffer_line_hashes(buffer);
+            let line_map = build_line_map_by_hash(&snapshot.line_hashes, &current_hashes);
+            return RenderSnapshot {
+                snapshot: Some(snapshot),
+                line_map: Some(line_map),
+            };
+        }
+        let edits = self
+            .edits_since_snapshot
+            .get(&buffer_id)
+            .map(|edits| {
+                edits
+                    .iter()
+                    .filter(|e| e.version > snapshot.version)
+                    .map(|e| e.edit.clone())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        if edits.is_empty() {
+            let current_hashes = compute_buffer_line_hashes(buffer);
+            if current_hashes.is_empty() {
+                return RenderSnapshot {
+                    snapshot: None,
+                    line_map: None,
+                };
+            }
+            let line_map = build_line_map_by_hash(&snapshot.line_hashes, &current_hashes);
+            return RenderSnapshot {
+                snapshot: Some(snapshot),
+                line_map: Some(line_map),
+            };
+        }
+        let line_map = build_line_map(snapshot.per_line.len(), &edits);
+        let mut current_to_snapshot = vec![None; current_lines];
+        for (old_idx, new_idx) in line_map.into_iter().enumerate() {
+            if let Some(new_idx) = new_idx {
+                if new_idx < current_to_snapshot.len() {
+                    current_to_snapshot[new_idx] = Some(old_idx);
+                }
+            }
+        }
+        RenderSnapshot {
+            snapshot: Some(snapshot),
+            line_map: Some(current_to_snapshot),
+        }
+    }
+
+    pub fn status_label_for(&self, buffer_id: usize, buffer_version: u64) -> String {
+        let status = self.manager.status_for(buffer_id);
+        if matches!(status, nit_syntax::SyntaxStatus::Ok(nit_syntax::EngineKind::TreeSitter)) {
+            let lagging = self
+                .snapshots
+                .get(&buffer_id)
+                .map(|snap| snap.version < buffer_version)
+                .unwrap_or(true);
+            if lagging {
+                return "TS(lag)".to_string();
+            }
+        }
+        status.label()
+    }
+
+    pub fn engine_state_label(&self, buffer_id: usize) -> String {
+        match self.manager.status_for(buffer_id) {
+            nit_syntax::SyntaxStatus::Ok(_) => "ok".to_string(),
+            nit_syntax::SyntaxStatus::Error(_) => "error".to_string(),
+            nit_syntax::SyntaxStatus::Disabled => "off".to_string(),
+            nit_syntax::SyntaxStatus::LargeFile => "plain".to_string(),
+        }
+    }
+
+    fn trim_edits_since_snapshot(&mut self, buffer_id: usize) {
+        let Some(snapshot) = self.snapshots.get(&buffer_id) else {
+            return;
+        };
+        if let Some(edits) = self.edits_since_snapshot.get_mut(&buffer_id) {
+            edits.retain(|e| e.version > snapshot.version);
+            if edits.is_empty() {
+                self.edits_since_snapshot.remove(&buffer_id);
+            }
+        }
+        self.full_reparse_pending.remove(&buffer_id);
+    }
+}
+
+fn build_line_map(old_lines: usize, edits: &[BufferEdit]) -> Vec<Option<usize>> {
+    let mut map: Vec<Option<usize>> = (0..old_lines).map(Some).collect();
+    for edit in edits {
+        let start = edit.start_point.row;
+        let old_end = edit.old_end_point.row;
+        let new_end = edit.new_end_point.row;
+        let delta = new_end as isize - old_end as isize;
+        for entry in map.iter_mut() {
+            let Some(line) = *entry else {
+                continue;
+            };
+            if line < start {
+                continue;
+            } else if line > old_end {
+                let shifted = line as isize + delta;
+                *entry = if shifted >= 0 {
+                    Some(shifted as usize)
+                } else {
+                    None
+                };
+            } else {
+                *entry = None;
+            }
+        }
+    }
+    map
+}
+
+fn build_line_map_by_hash(snapshot_hashes: &[u64], current_hashes: &[u64]) -> Vec<Option<usize>> {
+    let mut map = vec![None; current_hashes.len()];
+    let mut i = 0;
+    let mut j = 0;
+    const WINDOW: usize = 8;
+    while i < snapshot_hashes.len() && j < current_hashes.len() {
+        if snapshot_hashes[i] == current_hashes[j] {
+            map[j] = Some(i);
+            i += 1;
+            j += 1;
+            continue;
+        }
+        let mut next_i = None;
+        for di in 1..=WINDOW {
+            let idx = i + di;
+            if idx >= snapshot_hashes.len() {
+                break;
+            }
+            if snapshot_hashes[idx] == current_hashes[j] {
+                next_i = Some(idx);
+                break;
+            }
+        }
+        let mut next_j = None;
+        for dj in 1..=WINDOW {
+            let idx = j + dj;
+            if idx >= current_hashes.len() {
+                break;
+            }
+            if current_hashes[idx] == snapshot_hashes[i] {
+                next_j = Some(idx);
+                break;
+            }
+        }
+        match (next_i, next_j) {
+            (Some(ni), Some(nj)) => {
+                if ni - i <= nj - j {
+                    i = ni;
+                } else {
+                    j = nj;
+                }
+            }
+            (Some(ni), None) => {
+                i = ni;
+            }
+            (None, Some(nj)) => {
+                j = nj;
+            }
+            (None, None) => {
+                j += 1;
+            }
+        }
+    }
+    map
+}
+
+fn compute_buffer_line_hashes(buffer: &Buffer) -> Vec<u64> {
+    let mut hashes = Vec::with_capacity(buffer.lines_len());
+    for idx in 0..buffer.lines_len() {
+        let line = buffer.line_as_string(idx);
+        hashes.push(nit_syntax::hash_line_bytes(line.as_bytes()));
+    }
+    hashes
+}
+
+fn log_rate_limited(lock: &'static OnceLock<Mutex<Instant>>, interval: Duration, f: impl FnOnce()) {
+    let now = Instant::now();
+    let guard = lock.get_or_init(|| Mutex::new(now - interval));
+    let mut last = guard.lock().unwrap();
+    if now.duration_since(*last) >= interval {
+        *last = now;
+        f();
+    }
+}
+
+static HIGHLIGHT_SCHEDULE_LOG: OnceLock<Mutex<Instant>> = OnceLock::new();
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nit_core::{HighlightConfig, HighlightEngine};
+    use nit_syntax::{EngineKind, HighlightSnapshot, LanguageId, SyntaxStatus};
+
+    fn default_config() -> HighlightConfig {
+        HighlightConfig {
+            enabled: true,
+            engine: HighlightEngine::Plain,
+            debounce_ms: 10,
+            max_file_bytes: 10_000,
+            max_spans_per_line: 256,
+        }
+    }
+
+    #[test]
+    fn render_snapshot_maps_unchanged_lines() {
+        let mut buffer = Buffer::empty("test", None);
+        buffer.insert_str("a\nb\nc\n");
+        buffer.take_pending_edits();
+        let version = buffer.version();
+        let mut runtime = SyntaxRuntime::new(default_config());
+        let snapshot = HighlightSnapshot::plain(
+            1,
+            version,
+            LanguageId::PlainText,
+            EngineKind::Plain,
+            SyntaxStatus::Ok(EngineKind::Plain),
+            &buffer.content_as_string(),
+        );
+        runtime.snapshots.insert(1, snapshot);
+
+        buffer.cursor.line = 1;
+        buffer.cursor.col = 1;
+        buffer.insert_str("x");
+        runtime.note_buffer_change(1, &mut buffer);
+
+        let view = runtime.render_snapshot_for(1, &buffer);
+        let map = view.line_map.expect("line map");
+        assert_eq!(map.len(), 4);
+        assert_eq!(map[0], Some(0));
+        assert_eq!(map[1], None);
+        assert_eq!(map[2], Some(2));
+        assert_eq!(map[3], None);
+    }
+
+    #[test]
+    fn render_snapshot_maps_shifted_lines() {
+        let mut buffer = Buffer::empty("test", None);
+        buffer.insert_str("a\nb\nc\n");
+        buffer.take_pending_edits();
+        let version = buffer.version();
+        let mut runtime = SyntaxRuntime::new(default_config());
+        let snapshot = HighlightSnapshot::plain(
+            2,
+            version,
+            LanguageId::PlainText,
+            EngineKind::Plain,
+            SyntaxStatus::Ok(EngineKind::Plain),
+            &buffer.content_as_string(),
+        );
+        runtime.snapshots.insert(2, snapshot);
+
+        buffer.cursor.line = 0;
+        buffer.cursor.col = 0;
+        buffer.insert_str("\n");
+        runtime.note_buffer_change(2, &mut buffer);
+
+        let view = runtime.render_snapshot_for(2, &buffer);
+        let map = view.line_map.expect("line map");
+        assert_eq!(map.len(), 5);
+        assert_eq!(map[0], None);
+        assert_eq!(map[1], None);
+        assert_eq!(map[2], Some(1));
+        assert_eq!(map[3], Some(2));
+        assert_eq!(map[4], None);
+    }
+
+    #[test]
+    fn render_snapshot_allows_reuse_during_full_reparse() {
+        let mut buffer = Buffer::empty("test", None);
+        buffer.insert_str("a\nb\nc\n");
+        buffer.take_pending_edits();
+        let version = buffer.version();
+        let mut runtime = SyntaxRuntime::new(default_config());
+        let snapshot = HighlightSnapshot::plain(
+            3,
+            version,
+            LanguageId::PlainText,
+            EngineKind::Plain,
+            SyntaxStatus::Ok(EngineKind::Plain),
+            &buffer.content_as_string(),
+        );
+        runtime.snapshots.insert(3, snapshot);
+
+        runtime.full_reparse_pending.insert(3, true);
+        let view = runtime.render_snapshot_for(3, &buffer);
+        assert!(view.snapshot.is_some());
+    }
+
+    #[test]
+    fn render_snapshot_reuses_shifted_lines_on_full_reparse() {
+        let mut buffer = Buffer::empty("test", None);
+        buffer.insert_str("a\nb\nc\n");
+        buffer.take_pending_edits();
+        let version = buffer.version();
+        let mut runtime = SyntaxRuntime::new(default_config());
+        let snapshot = HighlightSnapshot::plain(
+            4,
+            version,
+            LanguageId::PlainText,
+            EngineKind::Plain,
+            SyntaxStatus::Ok(EngineKind::Plain),
+            &buffer.content_as_string(),
+        );
+        runtime.snapshots.insert(4, snapshot);
+
+        buffer.cursor.line = 0;
+        buffer.cursor.col = 0;
+        buffer.insert_str("\n");
+        buffer.take_pending_edits();
+        runtime.full_reparse_pending.insert(4, true);
+
+        let view = runtime.render_snapshot_for(4, &buffer);
+        let map = view.line_map.expect("line map");
+        assert_eq!(map.len(), 5);
+        assert_eq!(map[0], None);
+        assert_eq!(map[1], Some(0));
+        assert_eq!(map[2], Some(1));
+        assert_eq!(map[3], Some(2));
+        assert_eq!(map[4], None);
     }
 }
 

@@ -65,8 +65,8 @@ pub fn run(mut state: AppState, theme: Theme, log_rx: Receiver<String>) -> io::R
     let mut syntax = SyntaxRuntime::new(state.settings.highlight.clone());
     let editor_id = state.active_editor_buffer_id;
     let notes_id = state.notes_buffer_id;
-    syntax.prime_buffer(editor_id, state.editor_buffer());
-    syntax.prime_buffer(notes_id, state.notes_buffer());
+    syntax.prime_buffer(editor_id, state.editor_buffer(), true);
+    syntax.prime_buffer(notes_id, state.notes_buffer(), false);
 
     let result = run_loop(&mut terminal, &mut state, &theme, &mut syntax, log_rx);
 
@@ -272,15 +272,16 @@ fn draw(
 
         let editor_id = state.active_editor_buffer_id;
         let notes_id = state.notes_buffer_id;
-        let editor_snapshot = syntax.snapshot_for(editor_id, state.editor_buffer().version());
-        let notes_snapshot = syntax.snapshot_for(notes_id, state.notes_buffer().version());
+        let editor_render = syntax.render_snapshot_for(editor_id, state.editor_buffer());
+        let notes_render = syntax.render_snapshot_for(notes_id, state.notes_buffer());
 
         top_bar::render(f, layout.top, state, theme);
         let editor_cursor = editor_view::render_editor(
             f,
             layout.editor,
             state.editor_buffer(),
-            editor_snapshot,
+            editor_render.snapshot,
+            editor_render.line_map.as_deref(),
             state.focus,
             state.mode,
             theme,
@@ -290,7 +291,8 @@ fn draw(
             f,
             layout.notes,
             state.notes_buffer(),
-            notes_snapshot,
+            notes_render.snapshot,
+            notes_render.line_map.as_deref(),
             state.focus,
             state.mode,
             theme,
@@ -307,12 +309,23 @@ fn draw(
         );
         seed_runtime.ensure_size(grid_w, grid_h, state);
         visualizer_view::render(f, layout.visualizer, state, theme, seed_runtime);
+        let syntax_status = syntax.status_label_for(editor_id, state.editor_buffer().version());
+        let syntax_debug = {
+            let latest = syntax.latest_snapshot_for(editor_id);
+            gate_monitor_view::SyntaxDebugInfo {
+                buffer_version: state.editor_buffer().version(),
+                snapshot_version: latest.map(|s| s.version),
+                engine_state: syntax.engine_state_label(editor_id),
+                last_job_ms: latest.map(|s| s.duration_ms),
+            }
+        };
         gate_monitor_view::render(
             f,
             layout.gate,
             state,
             theme,
-            &syntax.status_label(editor_id),
+            &syntax_status,
+            Some(syntax_debug),
         );
         bottom_bar::render(f, layout.bottom, state, theme, system_stats);
 
@@ -719,8 +732,8 @@ fn apply_action_with_syntax(
 
     if matches!(action, Action::ToggleSyntax) {
         syntax.update_config(state.settings.highlight.clone());
-        syntax.prime_buffer(editor_id, state.editor_buffer());
-        syntax.prime_buffer(notes_id, state.notes_buffer());
+        syntax.prime_buffer(editor_id, state.editor_buffer(), true);
+        syntax.prime_buffer(notes_id, state.notes_buffer(), false);
     }
 
     outcome
