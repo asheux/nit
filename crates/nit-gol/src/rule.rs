@@ -2,8 +2,8 @@ use thiserror::Error;
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Rule {
-    births: u16,
-    survives: u16,
+    births_mask: u16,
+    survives_mask: u16,
 }
 
 impl Rule {
@@ -12,41 +12,59 @@ impl Rule {
     }
 
     pub fn new(births: u16, survives: u16) -> Self {
+        debug_assert!(is_valid_mask(births) && is_valid_mask(survives));
         Self {
-            births: births & 0x01ff,
-            survives: survives & 0x01ff,
+            births_mask: births & 0x01ff,
+            survives_mask: survives & 0x01ff,
         }
     }
 
     pub fn births_mask(&self) -> u16 {
-        self.births
+        self.births_mask
     }
 
     pub fn survives_mask(&self) -> u16 {
-        self.survives
+        self.survives_mask
     }
 
     pub fn is_birth(&self, neighbors: u8) -> bool {
-        neighbors <= 8 && (self.births & (1 << neighbors)) != 0
+        neighbors <= 8 && (self.births_mask & (1 << neighbors)) != 0
     }
 
     pub fn is_survive(&self, neighbors: u8) -> bool {
-        neighbors <= 8 && (self.survives & (1 << neighbors)) != 0
+        neighbors <= 8 && (self.survives_mask & (1 << neighbors)) != 0
     }
 
     pub fn parse(text: &str) -> Result<Self, RuleParseError> {
         let mut births = 0u16;
         let mut survives = 0u16;
         let mut mode: Option<char> = None;
+        let mut seen_section = false;
+        let mut seen_slash = false;
         let cleaned = text.trim().replace(' ', "");
         if cleaned.is_empty() {
             return Err(RuleParseError::Empty);
         }
         for ch in cleaned.chars() {
             match ch {
-                'B' | 'b' => mode = Some('B'),
-                'S' | 's' => mode = Some('S'),
-                '/' => {}
+                'B' | 'b' => {
+                    mode = Some('B');
+                    seen_section = true;
+                }
+                'S' | 's' => {
+                    mode = Some('S');
+                    seen_section = true;
+                }
+                '/' => {
+                    if seen_slash {
+                        return Err(RuleParseError::InvalidSeparator);
+                    }
+                    if !seen_section {
+                        return Err(RuleParseError::MissingSection);
+                    }
+                    seen_slash = true;
+                    mode = None;
+                }
                 '0'..='8' => {
                     let val = ch.to_digit(10).unwrap() as u8;
                     match mode {
@@ -65,16 +83,16 @@ impl Rule {
     }
 
     pub fn to_string(self) -> String {
-        let births = digits_from_mask(self.births);
-        let survives = digits_from_mask(self.survives);
+        let births = digits_from_mask(self.births_mask);
+        let survives = digits_from_mask(self.survives_mask);
         format!("B{}/S{}", births, survives)
     }
 }
 
 impl std::fmt::Display for Rule {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let births = digits_from_mask(self.births);
-        let survives = digits_from_mask(self.survives);
+        let births = digits_from_mask(self.births_mask);
+        let survives = digits_from_mask(self.survives_mask);
         write!(f, "B{}/S{}", births, survives)
     }
 }
@@ -99,12 +117,18 @@ fn mask_from_digits(digits: &[u8]) -> u16 {
     mask
 }
 
+fn is_valid_mask(mask: u16) -> bool {
+    mask & !0x01ff == 0
+}
+
 #[derive(Debug, Error)]
 pub enum RuleParseError {
     #[error("empty rule")]
     Empty,
     #[error("missing rule section")]
     MissingSection,
+    #[error("invalid rule separator")]
+    InvalidSeparator,
     #[error("invalid character {0}")]
     InvalidChar(char),
 }

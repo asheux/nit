@@ -13,6 +13,28 @@ fn parse_rule_roundtrip() {
 }
 
 #[test]
+fn parse_rule_masks() {
+    let rule = Rule::parse("B3/S23").expect("parse");
+    assert_eq!(rule.births_mask(), 1 << 3);
+    assert_eq!(rule.survives_mask(), (1 << 2) | (1 << 3));
+}
+
+#[test]
+fn parse_rule_empty_survive() {
+    let rule = Rule::parse("B2/S").expect("parse");
+    assert_eq!(rule.births_mask(), 1 << 2);
+    assert_eq!(rule.survives_mask(), 0);
+}
+
+#[test]
+fn parse_rule_invalid_cases() {
+    let invalid = ["B9/S23", "B3/S2x", "B3//S23", "B3/23", "B/S"];
+    for text in invalid {
+        assert!(Rule::parse(text).is_err(), "expected invalid: {text}");
+    }
+}
+
+#[test]
 fn block_still_life() {
     let mut grid = Grid::new(4, 4);
     grid.set(1, 1, true);

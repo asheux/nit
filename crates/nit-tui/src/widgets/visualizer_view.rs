@@ -210,9 +210,6 @@ fn draw_hud_line(
     writer.write_sep();
     writer.write_str("VIEW:");
     write_view_label(&mut writer, state);
-    writer.write_sep();
-    writer.write_str("OVR:");
-    write_overlay_label(&mut writer, state, seed_runtime);
     writer.finish();
 }
 
@@ -540,58 +537,6 @@ fn write_view_label(writer: &mut LineWriter<'_>, state: &AppState) {
         SeedViewMode::Map => writer.write_str("MAP"),
         SeedViewMode::Stats => writer.write_str("STATS"),
     }
-}
-
-fn write_overlay_label(writer: &mut LineWriter<'_>, state: &AppState, seed_runtime: &SeedRuntime) {
-    match state.visualizer.seed_view {
-        SeedViewMode::Genome => {
-            if seed_runtime.encoded().is_none() {
-                writer.write_str("OFF");
-                return;
-            }
-            match state.visualizer.seed_encoder {
-                SeedEncoderId::Lifehash16 => {
-                    if state.visualizer.seed_params.symmetry != nit_core::SeedSymmetry::None {
-                        writer.write_str("SYM");
-                    } else {
-                        writer.write_str("OFF");
-                    }
-                }
-                SeedEncoderId::HilbertBits => writer.write_str("PATH"),
-                SeedEncoderId::AsciiBytes => writer.write_str("BYTE"),
-            }
-        }
-            SeedViewMode::Plate => {
-                let mut wrote = false;
-                if state.visualizer.seed_show_halo {
-                    wrote = write_overlay_part(writer, "HALO", wrote);
-                }
-            if state.visualizer.seed_show_components
-                || state.visualizer.seed_plate_mode == nit_core::SeedPreviewMode::Tissue
-            {
-                wrote = write_overlay_part(writer, "COMP", wrote);
-            }
-            if state.visualizer.seed_show_bbox {
-                wrote = write_overlay_part(writer, "BBOX", wrote);
-            }
-            if state.visualizer.seed_show_inset {
-                wrote = write_overlay_part(writer, "INSET", wrote);
-            }
-            if !wrote {
-                writer.write_str("OFF");
-            }
-        }
-        SeedViewMode::Map | SeedViewMode::Stats => writer.write_str("OFF"),
-    }
-}
-
-fn write_overlay_part(writer: &mut LineWriter<'_>, label: &str, mut wrote: bool) -> bool {
-    if wrote {
-        writer.write_char('+');
-    }
-    writer.write_str(label);
-    wrote = true;
-    wrote
 }
 
 fn fill_bg(buf: &mut Buffer, area: ratatui::layout::Rect, bg: ratatui::style::Color) {

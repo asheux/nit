@@ -4,7 +4,7 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use nit_core::{AppState, EncodedSeed, GolRenderMode, VisualizerMode};
+use nit_core::{actions::Action, AppState, EncodedSeed, GolRenderMode, VisualizerMode};
 use nit_gol::analyze::{evaluate_rule, RuleEvaluation, RuleScore};
 use nit_gol::attractor::{AttractorConfig, AttractorDetector, AttractorEvent, AutoStopPolicy};
 use nit_gol::snapshot::SnapshotMetadata;
@@ -25,6 +25,7 @@ use ratatui::{
 use tracing::{info, warn};
 
 use crate::gol_render::{grid_size_for_mode, GolHudState, GolPalette, GolRenderConfig, GolWidget};
+use crate::widgets::rule_picker;
 use crate::seed_runtime::SeedRuntime;
 use crate::theme::Theme;
 
@@ -137,6 +138,10 @@ impl PetriDishRuntime {
             state.visualizer.pending_run = false;
             self.open_or_reseed(state, seed_runtime, screen);
         }
+        if state.visualizer.pending_rule_change {
+            state.visualizer.pending_rule_change = false;
+            self.apply_rule_change(state, seed_runtime, screen);
+        }
     }
 
     pub fn handle_key(
@@ -162,6 +167,10 @@ impl PetriDishRuntime {
             self.reseed_from_current(state, seed_runtime, screen);
             return true;
         }
+        if ctrl && matches!(key.code, KeyCode::Char('p') | KeyCode::Char('P')) {
+            let _ = nit_core::apply_action(state, Action::OpenRulePicker);
+            return true;
+        }
         if ctrl && matches!(key.code, KeyCode::Enter | KeyCode::Char('\n') | KeyCode::Char('\r')) {
             if session.paused {
                 self.step_once(state);
@@ -172,6 +181,10 @@ impl PetriDishRuntime {
         match key.code {
             KeyCode::Esc => {
                 self.close(state);
+                true
+            }
+            KeyCode::F(2) => {
+                let _ = nit_core::apply_action(state, Action::OpenRulePicker);
                 true
             }
             KeyCode::Char(' ') => {
@@ -271,16 +284,17 @@ impl PetriDishRuntime {
             .title(Span::styled(
                 title,
                 Style::default()
-                    .fg(theme.accent)
+                    .fg(ratatui::style::Color::Cyan)
                     .add_modifier(Modifier::BOLD),
             ))
             .style(Style::default().bg(theme.background));
         frame.render_widget(block, layout.rect);
 
         let palette = GolPalette::from_theme(theme);
+        let rule_label = state.rule_catalog.label_for_rule(session.rule);
         let hud_metrics = self.render_state.hud_metrics();
         let hud = GolHudState {
-            rule: &state.visualizer.rule,
+            rule: &rule_label,
             generation: session.gen,
             alive: session.alive,
             period: session.period,
@@ -314,6 +328,9 @@ impl PetriDishRuntime {
 
         render_metrics(frame, layout.metrics, state, theme, session, self);
         render_footer(frame, layout.footer, theme, session, layout.metrics.x);
+        if state.rule_picker.open {
+            rule_picker::render(frame, screen, state, theme);
+        }
     }
 
     fn open_or_reseed(
@@ -450,6 +467,9 @@ impl PetriDishRuntime {
         state.visualizer.petri_hidden = false;
         state.visualizer.paused = false;
         state.visualizer.paused_by_attractor = false;
+        state.rule_picker.open = false;
+        state.rule_picker.query.clear();
+        state.rule_picker.selected = 0;
         state.status = Some("Petri dish closed".into());
     }
 
@@ -967,6 +987,20 @@ impl PetriDishRuntime {
             footer: rows[1],
         }
     }
+
+    fn apply_rule_change(
+        &mut self,
+        state: &mut AppState,
+        seed_runtime: &mut SeedRuntime,
+        screen: Rect,
+    ) {
+        let Some(session) = self.session.as_mut() else {
+            return;
+        };
+        session.rule = state.gol_rule_selected.rule;
+        self.reseed_from_current(state, seed_runtime, screen);
+    }
+
 }
 
 impl Drop for PetriDishRuntime {
@@ -1018,10 +1052,11 @@ fn render_metrics(
         Span::raw(" "),
         Span::styled(session.encoder_id.clone(), value),
     ]));
+    let rule_label = state.rule_catalog.label_for_rule(session.rule);
     lines.push(Line::from(vec![
         Span::styled("Rule", label),
         Span::raw(" "),
-        Span::styled(state.visualizer.rule.clone(), value),
+        Span::styled(rule_label, value),
     ]));
     lines.push(Line::from(vec![
         Span::styled("Gen", label),
@@ -1091,7 +1126,7 @@ fn render_footer(frame: &mut Frame, area: Rect, theme: &Theme, session: &SimSess
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled(
-            "Esc close | Space pause | Enter step | S snapshot | Ctrl+R reseed | H hide | G search | +/- speed | T wrap | O auto-stop",
+            "Esc close | Space pause | Enter step | S snapshot | Ctrl+R reseed | H hide | F2/Ctrl+P rules | G search | +/- speed | T wrap | O auto-stop",
             Style::default().fg(theme.border).add_modifier(Modifier::DIM),
         ),
     ]);

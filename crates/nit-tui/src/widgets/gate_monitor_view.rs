@@ -284,6 +284,20 @@ pub fn render(
         },
     ));
     rows.push(row(
+        "Gol Rule",
+        format!(
+            "{} / {}",
+            state
+                .gol_rule_selected
+                .id
+                .clone()
+                .unwrap_or_else(|| "custom".into()),
+            state.gol_rule_selected.rule
+        ),
+        label_style,
+        value_style,
+    ));
+    rows.push(row(
         "Search Int",
         search_intensity,
         label_style,
@@ -294,6 +308,12 @@ pub fn render(
         state.visualizer.rule.clone(),
         label_style,
         value_style,
+    ));
+    rows.push(row(
+        "Petri RuleName",
+        rule_name(&state.visualizer.rule, &state.rule_catalog),
+        label_style,
+        dim_style,
     ));
     rows.push(row(
         "Rule Bits",
@@ -471,6 +491,16 @@ fn rule_bits(rule_text: &str) -> String {
     let births = mask_bits(rule.births_mask());
     let survives = mask_bits(rule.survives_mask());
     format!("B:{births} S:{survives}")
+}
+
+fn rule_name(rule_text: &str, catalog: &nit_core::RuleCatalog) -> String {
+    let Ok(rule) = Rule::parse(rule_text) else {
+        return "invalid".into();
+    };
+    catalog
+        .find_by_rule(rule)
+        .map(|entry| entry.name.clone())
+        .unwrap_or_else(|| "--".into())
 }
 
 fn mask_bits(mask: u16) -> String {

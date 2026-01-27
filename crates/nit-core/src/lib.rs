@@ -5,6 +5,8 @@ pub mod buffer;
 pub mod config;
 pub mod cursor;
 pub mod io;
+pub mod gol_rules;
+pub mod rule_config;
 pub mod mode;
 pub mod pane;
 pub mod prompt;
@@ -16,9 +18,12 @@ pub use actions::Action;
 pub use buffer::Buffer;
 pub use buffer::{BufferEdit, BufferPoint};
 pub use config::{
-    EditorConfig, GolConfig, GolSearchConfig, GolSearchIntensity, GolSeedSource, GolSnapshotsConfig,
-    HighlightConfig, HighlightEngine, Settings, SnapshotPrunePolicy,
+    EditorConfig, GolConfig, GolRuleConfig, GolRulesConfig, GolSearchConfig, GolSearchIntensity,
+    GolSeedSource, GolSnapshotsConfig, GolUserRule, HighlightConfig, HighlightEngine, Settings,
+    SnapshotPrunePolicy,
 };
+pub use gol_rules::{NamedRule, RuleCatalog, RuleSelectError, SelectedRule};
+pub use rule_config::{load_rule_config, persist_rule_selection, RuleConfigLoad, RulePersistence};
 pub use cursor::Cursor;
 pub use io::{load_to_string, save_buffer};
 pub use mode::Mode;

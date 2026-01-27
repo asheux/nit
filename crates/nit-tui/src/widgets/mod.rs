@@ -6,3 +6,4 @@ pub mod job_output_view;
 pub mod notes_view;
 pub mod top_bar;
 pub mod visualizer_view;
+pub mod rule_picker;

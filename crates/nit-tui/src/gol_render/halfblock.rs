@@ -195,6 +195,7 @@ impl GolRenderer for HalfBlockRenderer {
 mod tests {
     use super::HalfBlockRenderer;
     use crate::gol_render::{GolHudMetrics, GolHudState, GolPalette, GolRenderConfig, GolRenderState};
+    use crate::gol_render::renderer::GolRenderer;
     use crate::theme::Theme;
     use nit_core::{GolRenderMode, VisualizerMode};
     use nit_gol::Grid;

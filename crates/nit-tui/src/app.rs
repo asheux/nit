@@ -33,7 +33,7 @@ use crate::{
     theme::Theme,
     widgets::{
         bottom_bar, editor_view, gate_monitor_view, help_overlay, job_output_view, notes_view,
-        top_bar, visualizer_view,
+        rule_picker, top_bar, visualizer_view,
     },
 };
 
@@ -124,7 +124,13 @@ fn run_loop(
                     continue;
                 }
                 handled_input = true;
-                if petri.is_visible() {
+                if state.rule_picker.open {
+                    if rule_picker::handle_key(&key, state) {
+                        needs_redraw = true;
+                        continue;
+                    }
+                }
+                if petri.is_visible() && state.command_line.is_none() && state.prompt.is_none() {
                     let screen = terminal.size().unwrap_or_default();
                     if petri.handle_key(&key, state, &mut seed_runtime, screen) {
                         needs_redraw = true;
@@ -310,6 +316,11 @@ fn draw(
         );
         bottom_bar::render(f, layout.bottom, state, theme, system_stats);
 
+        petri.handle_pending_requests(state, seed_runtime, f.size());
+        petri.render(f, f.size(), state, theme);
+        if state.rule_picker.open {
+            rule_picker::render(f, f.size(), state, theme);
+        }
         if state.show_help {
             let area = dynamic_popup_rect(
                 f.size(),
@@ -317,7 +328,6 @@ fn draw(
             );
             help_overlay::render(f, area, theme);
         }
-
         if let Some(Prompt::ConfirmQuit) = state.prompt {
             let message = "Quit without saving? (Y/N)";
             let area = dynamic_popup_rect(
@@ -326,7 +336,6 @@ fn draw(
             );
             render_prompt(f, area, theme, message);
         }
-
         if state.command_line.is_some() {
             let cmd = state
                 .command_line
@@ -337,9 +346,6 @@ fn draw(
             let area = dynamic_popup_rect(f.size(), prompt_size(&message));
             render_command_prompt(f, area, theme, &message);
         }
-
-        petri.handle_pending_requests(state, seed_runtime, f.size());
-        petri.render(f, f.size(), state, theme);
 
         // cursor
         if petri.is_visible() || state.command_line.is_some() {
@@ -544,9 +550,8 @@ fn map_key_to_action(key: KeyEvent, state: &AppState, input: &mut InputState) ->
         } if is_normal_mode(state) => Some(Action::EnterVisual),
         KeyEvent {
             code: KeyCode::Char(':'),
-            modifiers: KeyModifiers::NONE,
             ..
-        } if is_normal_mode(state) => Some(Action::CommandPromptOpen),
+        } => Some(Action::CommandPromptOpen),
         KeyEvent {
             code: KeyCode::Char('a'),
             modifiers: KeyModifiers::NONE,

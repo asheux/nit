@@ -62,7 +62,13 @@ For details see `SECURITY.md`.
   - `Esc` close, `Space` pause, `Enter` step
   - `+/-` speed, `S` snapshot sim, `Ctrl+R` reseed from current code, `H` hide popup
   - `T` wrap mode, `O` auto-stop, `G` rule search, `A` apply best rule
+  - `F2` rule picker (built-ins + custom)
   - Command prompt: `:gol hide` / `:gol show` to toggle visibility while sim runs
+- GoL rule selection:
+  - Command: `:gol rule conway` or `:gol rule B36/S23`
+  - Built-ins: conway, highlife, seeds, life34, diamoeba, daynight, morley, replicator, labyrinth, anneal, serviettes
+  - Custom rules: use any B/S string (e.g. `B2/S` or `B3678/S34678`)
+  - Config: `~/.config/nit/config.toml` → `[gol.rule] default = "conway"`, `workspace_override = true`
 - Snapshots land in `gol-snapshots/`:
   - Seed snapshots: `seed__<timestamp>__enc-<id>__seedhash-<hash>.json` (+ `.rle`)
   - Sim snapshots: `sim__<timestamp>__rule-B3S23__gen-00145__hash-<hash>.rle` (+ `.json`)

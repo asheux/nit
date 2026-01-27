@@ -143,9 +143,10 @@ impl GolRenderer for SolidRenderer {
 mod tests {
     use super::SolidRenderer;
     use crate::gol_render::{
-        cell_bg, GolHudMetrics, GolHudState, GolPalette, GolRenderConfig, GolRenderState,
-        RenderGeometry, RenderMode,
+        GolHudMetrics, GolHudState, GolPalette, GolRenderConfig, GolRenderState, RenderGeometry,
+        RenderMode,
     };
+    use crate::gol_render::renderer::{cell_bg, GolRenderer};
     use crate::theme::Theme;
     use nit_core::{GolRenderMode, VisualizerMode};
     use nit_gol::Grid;

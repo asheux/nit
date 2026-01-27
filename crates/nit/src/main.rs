@@ -8,7 +8,7 @@ use std::fs;
 
 use anyhow::Context;
 use clap::Parser;
-use nit_core::{io as core_io, Buffer, Mode};
+use nit_core::{io as core_io, Buffer, Mode, RuleCatalog, SelectedRule};
 use nit_tui::{run, Theme};
 use nit_utils::hashing::stable_hash_bytes;
 use nit_utils::paths;
@@ -38,6 +38,39 @@ fn main() -> anyhow::Result<()> {
     let seed = stable_hash_bytes(state.editor_buffer().content_as_string().as_bytes());
     state.visualizer.seed = seed;
     state.mode = Mode::Normal;
+
+    let rule_config = nit_core::load_rule_config(&state.workspace_root);
+    let (catalog, mut rule_warnings) = RuleCatalog::new(&rule_config.rules.user);
+    rule_warnings.extend(rule_config.warnings.into_iter());
+    for warning in rule_warnings {
+        tracing::warn!("{warning}");
+    }
+    let selected_key = if rule_config.rule.workspace_override {
+        rule_config
+            .workspace_rule
+            .clone()
+            .unwrap_or_else(|| rule_config.rule.default.clone())
+    } else {
+        rule_config.rule.default.clone()
+    };
+    let selected = match catalog.select(&selected_key) {
+        Ok(selected) => selected,
+        Err(err) => {
+            tracing::warn!("Invalid configured GoL rule '{selected_key}': {err}");
+            SelectedRule::default()
+        }
+    };
+    state.settings.gol.rule = rule_config.rule.clone();
+    state.settings.gol.rules = rule_config.rules.clone();
+    state.init_rules(
+        catalog,
+        selected,
+        nit_core::RulePersistence {
+            global_path: rule_config.global_path,
+            workspace_path: rule_config.workspace_path,
+            workspace_override: rule_config.rule.workspace_override,
+        },
+    );
 
     run(state, theme, log_rx)?;
     Ok(())

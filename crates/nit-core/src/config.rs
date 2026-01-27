@@ -27,6 +27,8 @@ pub struct GolConfig {
     pub seed_live_chars: String,
     pub seed_other_live_percent: u8,
     pub braille_enabled: bool,
+    pub rule: GolRuleConfig,
+    pub rules: GolRulesConfig,
     pub search: GolSearchConfig,
     pub snapshots: GolSnapshotsConfig,
 }
@@ -72,6 +74,25 @@ pub struct GolSnapshotsConfig {
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct GolRuleConfig {
+    pub default: String,
+    pub workspace_override: bool,
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct GolRulesConfig {
+    pub user: Vec<GolUserRule>,
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct GolUserRule {
+    pub id: String,
+    pub name: String,
+    pub rule: String,
+    pub description: String,
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Settings {
     pub highlight: HighlightConfig,
     pub editor: EditorConfig,
@@ -106,6 +127,8 @@ impl Default for GolConfig {
             seed_live_chars: "#@█▓▒░*+xX%&".to_string(),
             seed_other_live_percent: 50,
             braille_enabled: true,
+            rule: GolRuleConfig::default(),
+            rules: GolRulesConfig::default(),
             search: GolSearchConfig::default(),
             snapshots: GolSnapshotsConfig::default(),
         }
@@ -137,6 +160,21 @@ impl Default for GolSnapshotsConfig {
             min_interval_ms: 1000,
             snapshot_on_attractor: true,
         }
+    }
+}
+
+impl Default for GolRuleConfig {
+    fn default() -> Self {
+        Self {
+            default: "conway".to_string(),
+            workspace_override: true,
+        }
+    }
+}
+
+impl Default for GolRulesConfig {
+    fn default() -> Self {
+        Self { user: Vec::new() }
     }
 }
 

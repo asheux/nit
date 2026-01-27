@@ -68,6 +68,7 @@
 - S: Snapshot sim state
 - Ctrl+R: Reseed from current code
 - H: Hide popup (sim keeps running)
+- F2 / Ctrl+P: Rule picker
 - T: Toggle wrap mode
 - O: Cycle auto-stop policy (Off → Fixed → Repeat)
 - G: Toggle rule search
@@ -77,3 +78,6 @@
 - Y / N to confirm quit when prompted
 - :gol hide / :petri hide: Hide Petri Dish (sim keeps running)
 - :gol show / :petri show: Show Petri Dish
+- :gol rule: Show current rule + built-ins
+- :gol rule <id|B/S>: Set rule by id or B/S string
+- :gol rules: List available rules

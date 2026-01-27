@@ -2,6 +2,7 @@ use crate::{
     actions::Action,
     buffer::Buffer,
     config::{GolSeedSource, Settings},
+    gol_rules::{RuleCatalog, SelectedRule},
     io,
     mode::Mode,
     pane::PaneId,
@@ -10,6 +11,7 @@ use crate::{
     viewport::Viewport,
 };
 use nit_gol::{AttractorEvent, AutoStopPolicy};
+use nit_gol::Rule;
 use std::collections::VecDeque;
 use std::path::PathBuf;
 
@@ -188,6 +190,8 @@ pub struct VisualizerState {
     pub pending_hide: bool,
     #[serde(skip)]
     pub pending_show: bool,
+    #[serde(skip)]
+    pub pending_rule_change: bool,
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -210,6 +214,13 @@ impl CommandLine {
     }
 }
 
+#[derive(Clone, Debug, Default)]
+pub struct RulePickerState {
+    pub open: bool,
+    pub query: String,
+    pub selected: usize,
+}
+
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct AppState {
     pub workspace_root: PathBuf,
@@ -227,12 +238,19 @@ pub struct AppState {
     pub status: Option<String>,
     pub settings: Settings,
     pub debug: bool,
+    pub gol_rule_selected: SelectedRule,
     #[serde(skip)]
     pub yank: Option<String>,
     #[serde(skip)]
     pub yank_kind: YankKind,
     #[serde(skip)]
     pub command_line: Option<CommandLine>,
+    #[serde(skip)]
+    pub rule_catalog: RuleCatalog,
+    #[serde(skip)]
+    pub rule_picker: RulePickerState,
+    #[serde(skip)]
+    pub rule_persistence: crate::rule_config::RulePersistence,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Default)]
@@ -250,6 +268,8 @@ pub struct ActionOutcome {
 impl AppState {
     pub fn new(workspace_root: PathBuf, editor: Buffer, notes: Buffer) -> Self {
         let settings = Settings::default();
+        let rule_catalog = RuleCatalog::default();
+        let gol_rule_selected = SelectedRule::default();
         Self {
             workspace_root,
             buffers: vec![editor, notes],
@@ -329,6 +349,7 @@ impl AppState {
                 pending_close: false,
                 pending_hide: false,
                 pending_show: false,
+                pending_rule_change: false,
             },
             metrics: Metrics {
                 last_render_ms: 0,
@@ -340,10 +361,45 @@ impl AppState {
             status: None,
             settings,
             debug: false,
+            gol_rule_selected,
             yank: None,
             yank_kind: YankKind::Char,
             command_line: None,
+            rule_catalog,
+            rule_picker: RulePickerState::default(),
+            rule_persistence: crate::rule_config::RulePersistence::default(),
         }
+    }
+
+    pub fn init_rules(
+        &mut self,
+        rule_catalog: RuleCatalog,
+        selected: SelectedRule,
+        persistence: crate::rule_config::RulePersistence,
+    ) {
+        self.rule_catalog = rule_catalog;
+        self.rule_persistence = persistence;
+        let _ = self.set_gol_rule(selected, false);
+        self.visualizer.pending_rule_change = false;
+    }
+
+    pub fn set_gol_rule(
+        &mut self,
+        selected: SelectedRule,
+        persist: bool,
+    ) -> Result<bool, String> {
+        let changed = self.gol_rule_selected.rule != selected.rule;
+        self.gol_rule_selected = selected;
+        self.visualizer.rule = self.gol_rule_selected.rule.to_string();
+        if changed {
+            self.visualizer.pending_rule_change = true;
+        }
+        if persist {
+            let canonical = self.gol_rule_selected.rule.to_string();
+            crate::persist_rule_selection(&self.rule_persistence, &canonical)
+                .map_err(|err| err.to_string())?;
+        }
+        Ok(changed)
     }
 
     pub fn buffer_mut(&mut self, id: usize) -> Option<&mut Buffer> {
@@ -933,6 +989,54 @@ pub fn apply_action(state: &mut AppState, action: Action) -> ActionOutcome {
                 state.visualizer.seed_encoder.label()
             ));
         }
+        Action::SetGolRuleById(id) => {
+            if let Some(named) = state.rule_catalog.find_by_id(&id) {
+                apply_rule_selection(state, SelectedRule::from_named(named), true);
+            } else {
+                state.status = Some(format!("Unknown GoL rule id: {id}"));
+            }
+        }
+        Action::SetGolRuleByString(text) => {
+            match Rule::parse(&text) {
+                Ok(rule) => {
+                    let mut selected = SelectedRule::from_rule(rule);
+                    if let Some(named) = state.rule_catalog.find_by_rule(rule) {
+                        selected.id = Some(named.id.clone());
+                        selected.name = Some(named.name.clone());
+                    }
+                    apply_rule_selection(state, selected, true);
+                }
+                Err(err) => {
+                    state.status = Some(format!("Invalid GoL rule '{text}': {err}"));
+                }
+            }
+        }
+        Action::OpenRulePicker => {
+            state.rule_picker.open = true;
+            state.rule_picker.query.clear();
+            state.rule_picker.selected = state
+                .rule_catalog
+                .index_of_selected(&state.gol_rule_selected)
+                .unwrap_or(0);
+        }
+        Action::CloseModal => {
+            state.rule_picker.open = false;
+            state.rule_picker.query.clear();
+            state.rule_picker.selected = 0;
+        }
+        Action::ApplySelectedRuleFromPicker => {
+            let matches = state.rule_catalog.filter_indices(&state.rule_picker.query);
+            if matches.is_empty() {
+                state.status = Some("No rules match filter".into());
+                state.rule_picker.open = false;
+            } else {
+                let idx = state.rule_picker.selected.min(matches.len().saturating_sub(1));
+                if let Some(named) = state.rule_catalog.get(matches[idx]) {
+                    apply_rule_selection(state, SelectedRule::from_named(named), true);
+                }
+                state.rule_picker.open = false;
+            }
+        }
         Action::ToggleSyntax => {
             state.settings.highlight.enabled = !state.settings.highlight.enabled;
         }
@@ -955,10 +1059,12 @@ pub fn apply_action(state: &mut AppState, action: Action) -> ActionOutcome {
 }
 
 fn handle_command_line(state: &mut AppState, input: &str) {
-    let cmd = input.trim().to_lowercase();
+    let trimmed = input.trim();
+    let cmd = trimmed.to_lowercase();
     if cmd.is_empty() {
         return;
     }
+    let tokens: Vec<&str> = cmd.split_whitespace().collect();
     match cmd.as_str() {
         "gol run" | "run gol" | "life run" | "gol start" | "run life" => {
             state.visualizer.pending_run = true;
@@ -992,10 +1098,93 @@ fn handle_command_line(state: &mut AppState, input: &str) {
                 state.visualizer.seed_encoder.label()
             ));
         }
+        _ if tokens.get(0) == Some(&"gol") && tokens.get(1) == Some(&"rule") => {
+            if tokens.len() == 2 {
+                log_rule_overview(state);
+            } else {
+                let selector = trimmed
+                    .split_whitespace()
+                    .skip(2)
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                match state.rule_catalog.select(&selector) {
+                    Ok(selected) => apply_rule_selection(state, selected, true),
+                    Err(err) => {
+                        state.status = Some(format!(
+                            "Invalid GoL rule '{selector}': {err}. Try B3/S23 or 'conway'."
+                        ));
+                    }
+                }
+            }
+        }
+        _ if tokens.get(0) == Some(&"gol") && tokens.get(1) == Some(&"rules") => {
+            log_rule_list(state);
+        }
         other => {
             state.status = Some(format!("Unknown command: {other}"));
         }
     }
+}
+
+fn apply_rule_selection(state: &mut AppState, selected: SelectedRule, persist: bool) {
+    let label = selected.name_first_label();
+    match state.set_gol_rule(selected, persist) {
+        Ok(changed) => {
+            if changed {
+                let suffix = if state.visualizer.running {
+                    " Restarting Petri Dish session."
+                } else {
+                    ""
+                };
+                state.status = Some(format!("GoL rule set to {label}.{suffix}"));
+            } else {
+                state.status = Some(format!("GoL rule unchanged: {label}."));
+            }
+        }
+        Err(err) => {
+            state.status = Some(format!("GoL rule set to {label} (save failed: {err})"));
+        }
+    }
+}
+
+fn log_rule_overview(state: &mut AppState) {
+    state.receive_log(format!(
+        "Current GoL rule: {}",
+        state.gol_rule_selected.label()
+    ));
+    let builtins: Vec<String> = state
+        .rule_catalog
+        .builtins()
+        .iter()
+        .map(|rule| format!("  {} — {} ({})", rule.id, rule.name, rule.rule))
+        .collect();
+    if !builtins.is_empty() {
+        state.receive_log("Built-in rules:".to_string());
+        for line in builtins {
+            state.receive_log(line);
+        }
+    }
+}
+
+fn log_rule_list(state: &mut AppState) {
+    state.receive_log(format!(
+        "GoL rules ({} total):",
+        state.rule_catalog.len()
+    ));
+    let lines: Vec<String> = state
+        .rule_catalog
+        .iter()
+        .map(|rule| format!("  {} — {} ({})", rule.id, rule.name, rule.rule))
+        .collect();
+    for line in lines {
+        state.receive_log(line);
+    }
+    state.rule_picker.open = true;
+    state.rule_picker.query.clear();
+    state.rule_picker.selected = state
+        .rule_catalog
+        .index_of_selected(&state.gol_rule_selected)
+        .unwrap_or(0);
 }
 
 fn cycle_seed_overlays(state: &mut VisualizerState) {
@@ -1159,5 +1348,67 @@ fn clamp_signed(value: isize, min: isize, max: isize) -> isize {
         max
     } else {
         value
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::buffer::Buffer;
+    use crate::rule_config::RulePersistence;
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_dir(label: &str) -> PathBuf {
+        let mut dir = std::env::temp_dir();
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        dir.push(format!("nit-test-{label}-{now}-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn set_rule_by_id_updates_and_persists() {
+        let root = temp_dir("rule-id");
+        let config_path = root.join("config.toml");
+        let mut state =
+            AppState::new(root.clone(), Buffer::empty("x", None), Buffer::empty("n", None));
+        state.rule_persistence = RulePersistence {
+            global_path: Some(config_path.clone()),
+            workspace_path: None,
+            workspace_override: false,
+        };
+        let named = state.rule_catalog.find_by_id("highlife").unwrap();
+        let selected = SelectedRule::from_named(named);
+        state.set_gol_rule(selected, true).unwrap();
+        assert_eq!(state.visualizer.rule, "B36/S23");
+        let contents = fs::read_to_string(config_path).unwrap();
+        assert!(contents.contains("default = \"B36/S23\""));
+    }
+
+    #[test]
+    fn set_rule_by_string_updates_state() {
+        let root = temp_dir("rule-str");
+        let mut state =
+            AppState::new(root.clone(), Buffer::empty("x", None), Buffer::empty("n", None));
+        let rule = Rule::parse("B36/S23").unwrap();
+        let selected = SelectedRule::from_rule(rule);
+        state.set_gol_rule(selected, false).unwrap();
+        assert_eq!(state.visualizer.rule, "B36/S23");
+    }
+
+    #[test]
+    fn rule_picker_apply_sets_rule() {
+        let root = temp_dir("rule-picker");
+        let mut state =
+            AppState::new(root.clone(), Buffer::empty("x", None), Buffer::empty("n", None));
+        state.rule_picker.open = true;
+        state.rule_picker.query = "highlife".into();
+        state.rule_picker.selected = 0;
+        let _ = apply_action(&mut state, Action::ApplySelectedRuleFromPicker);
+        assert_eq!(state.visualizer.rule, "B36/S23");
     }
 }
