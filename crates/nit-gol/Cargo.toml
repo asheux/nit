@@ -12,3 +12,5 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 time = { workspace = true, features = ["formatting"] }
 tracing = { workspace = true }
+toml = { workspace = true }
+nit-utils = { path = "../nit-utils" }

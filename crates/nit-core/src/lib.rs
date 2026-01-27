@@ -22,7 +22,7 @@ pub use config::{
     GolSeedSource, GolSnapshotsConfig, GolUserRule, HighlightConfig, HighlightEngine, Settings,
     SnapshotPrunePolicy,
 };
-pub use gol_rules::{NamedRule, RuleCatalog, RuleSelectError, SelectedRule};
+pub use gol_rules::{load_rule_catalog, NamedRule, RuleCatalog, RuleSelectError, SelectedRule};
 pub use rule_config::{load_rule_config, persist_rule_selection, RuleConfigLoad, RulePersistence};
 pub use cursor::Cursor;
 pub use io::{load_to_string, save_buffer};

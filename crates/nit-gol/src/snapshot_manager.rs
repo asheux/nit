@@ -465,6 +465,7 @@ mod tests {
             seed_source: "test".into(),
             seed_hash: 1,
             rule: "B3/S23".into(),
+            rule_id: None,
             generation: 1,
             alive_count: 0,
             period: None,

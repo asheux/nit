@@ -60,6 +60,7 @@ fn run_stress(
             seed_source: "stress".into(),
             seed_hash: seed,
             rule: rule.to_string(),
+            rule_id: None,
             generation: i as u64,
             alive_count: grid.alive_count(),
             period: None,

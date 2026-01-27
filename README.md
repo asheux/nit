@@ -66,8 +66,9 @@ For details see `SECURITY.md`.
   - Command prompt: `:gol hide` / `:gol show` to toggle visibility while sim runs
 - GoL rule selection:
   - Command: `:gol rule conway` or `:gol rule B36/S23`
-  - Built-ins: conway, highlife, seeds, life34, diamoeba, daynight, morley, replicator, labyrinth, anneal, serviettes
+  - Built-ins: curated catalog (see `crates/nit-gol/assets/rules.toml`) with classics, maze, no-death, texture, and literature rules
   - Custom rules: use any B/S string (e.g. `B2/S` or `B3678/S34678`)
+  - User overlay: `~/.config/nit/rules.toml` (add new rules or override tags/aliases/description)
   - Config: `~/.config/nit/config.toml` → `[gol.rule] default = "conway"`, `workspace_override = true`
 - Snapshots land in `gol-snapshots/`:
   - Seed snapshots: `seed__<timestamp>__enc-<id>__seedhash-<hash>.json` (+ `.rle`)

@@ -2,6 +2,7 @@
 
 pub mod analyze;
 pub mod attractor;
+pub mod catalog;
 pub mod grid;
 pub mod rule;
 pub mod snapshot;
@@ -13,6 +14,7 @@ mod tests;
 
 pub use analyze::{RuleEvaluation, RuleScore};
 pub use attractor::{AttractorConfig, AttractorDetector, AttractorEvent, AutoStopPolicy};
+pub use catalog::{RuleCatalog, RuleDefaultParams, RuleEntry, RuleOverlay, RuleSelectError, SelectedRule};
 pub use grid::{EdgeMode, Grid};
 pub use rule::{Rule, RuleParseError};
 pub use snapshot::{SnapshotMetadata, SnapshotPaths};

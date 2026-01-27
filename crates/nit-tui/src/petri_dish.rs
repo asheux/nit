@@ -944,6 +944,10 @@ impl PetriDishRuntime {
             seed_source: format!("{:?}", state.visualizer.seed_source),
             seed_hash: session.seed_hash,
             rule: session.rule.to_string(),
+            rule_id: state
+                .rule_catalog
+                .find_by_rule(session.rule)
+                .map(|rule| rule.id.clone()),
             generation,
             alive_count: alive,
             period,

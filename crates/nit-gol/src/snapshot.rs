@@ -15,6 +15,8 @@ pub struct SnapshotMetadata {
     pub seed_source: String,
     pub seed_hash: u64,
     pub rule: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rule_id: Option<String>,
     pub generation: u64,
     pub alive_count: usize,
     pub period: Option<u64>,

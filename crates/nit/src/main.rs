@@ -6,10 +6,9 @@ use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::fs;
 
-jkdajd
 use anyhow::Context;
 use clap::Parser;
-use nit_core::{io as core_io, Buffer, Mode, RuleCatalog, SelectedRule};
+use nit_core::{io as core_io, Buffer, Mode, SelectedRule};
 use nit_tui::{run, Theme};
 use nit_utils::hashing::stable_hash_bytes;
 use nit_utils::paths;
@@ -41,7 +40,7 @@ fn main() -> anyhow::Result<()> {
     state.mode = Mode::Normal;
 
     let rule_config = nit_core::load_rule_config(&state.workspace_root);
-    let (catalog, mut rule_warnings) = RuleCatalog::new(&rule_config.rules.user);
+    let (catalog, mut rule_warnings) = nit_core::load_rule_catalog(&rule_config.rules.user);
     rule_warnings.extend(rule_config.warnings.into_iter());
     for warning in rule_warnings {
         tracing::warn!("{warning}");

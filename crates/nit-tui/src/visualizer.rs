@@ -577,6 +577,10 @@ impl VisualizerRuntime {
             seed_source: format!("{:?}", state.visualizer.seed_source),
             seed_hash: self.last_seed_hash,
             rule: rule.to_string(),
+            rule_id: state
+                .rule_catalog
+                .find_by_rule(rule)
+                .map(|entry| entry.id.clone()),
             generation,
             alive_count: alive,
             period,

@@ -1155,7 +1155,6 @@ fn log_rule_overview(state: &mut AppState) {
     let builtins: Vec<String> = state
         .rule_catalog
         .builtins()
-        .iter()
         .map(|rule| format!("  {} — {} ({})", rule.id, rule.name, rule.rule))
         .collect();
     if !builtins.is_empty() {

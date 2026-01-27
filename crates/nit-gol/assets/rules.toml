@@ -1,0 +1,225 @@
+[[rules]]
+id = "conway"
+display_name = "Conway's Life"
+rulestring = "B3/S23"
+description = "Classic Life rule."
+tags = ["classic", "complex", "gliders", "spaceships"]
+aliases = ["life", "conway", "b3/s23"]
+
+[[rules]]
+id = "highlife"
+display_name = "HighLife"
+rulestring = "B36/S23"
+description = "Replicators and explosive growth."
+tags = ["replicator", "explosive", "classic-ish"]
+aliases = ["highlife", "b36/s23"]
+
+[[rules]]
+id = "two_x_two"
+display_name = "2x2"
+rulestring = "B36/S125"
+description = "Block-emulating Life-like rule with its own gliders and high-period oscillators."
+tags = ["classic-ish", "oscillators", "glider"]
+aliases = ["2x2", "b36/s125"]
+
+[[rules]]
+id = "seeds"
+display_name = "Seeds"
+rulestring = "B2/S"
+description = "No survival; only births."
+tags = ["explosive", "sparks", "no-survival"]
+aliases = ["seeds", "b2/s"]
+
+[[rules]]
+id = "life34"
+display_name = "34 Life"
+rulestring = "B34/S34"
+description = "Life with 3/4 births and survives."
+tags = ["classic-ish", "oscillators"]
+aliases = ["34life", "b34/s34"]
+
+[[rules]]
+id = "diamoeba"
+display_name = "Diamoeba"
+rulestring = "B35678/S5678"
+description = "Blobby, amoeba-like growth."
+tags = ["morphology", "growth", "blobs"]
+aliases = ["diamoeba", "b35678/s5678"]
+
+[[rules]]
+id = "daynight"
+display_name = "Day & Night"
+rulestring = "B3678/S34678"
+description = "Symmetric day/night behavior."
+tags = ["symmetry", "complex", "gliders"]
+aliases = ["daynight", "b3678/s34678"]
+
+[[rules]]
+id = "morley"
+display_name = "Morley"
+rulestring = "B368/S245"
+description = "High complexity patterns."
+tags = ["complex", "gliders"]
+aliases = ["morley", "b368/s245"]
+
+[[rules]]
+id = "replicator"
+display_name = "Replicator"
+rulestring = "B1357/S1357"
+description = "Self-replicating patterns."
+tags = ["replicator", "self-replication"]
+aliases = ["replicator", "b1357/s1357"]
+
+[[rules]]
+id = "labyrinth"
+display_name = "Labyrinth"
+rulestring = "B3/S12345"
+description = "Generates maze-like corridors and compartments."
+tags = ["maze", "corridors", "labyrinth"]
+aliases = ["labyrinth", "maze", "b3/s12345"]
+
+[[rules]]
+id = "mazectric"
+display_name = "Mazectric"
+rulestring = "B3/S1234"
+description = "A maze-like variant; tends to form corridor structures with different stability."
+tags = ["maze", "electric", "corridors"]
+aliases = ["b3/s1234"]
+
+[[rules]]
+id = "anneal"
+display_name = "Anneal"
+rulestring = "B4678/S35678"
+description = "Annealing behavior and stability."
+tags = ["stability", "morphology"]
+aliases = ["anneal", "b4678/s35678"]
+
+[[rules]]
+id = "serviettes"
+display_name = "Serviettes"
+rulestring = "B234/S"
+description = "Expanding lace patterns."
+tags = ["growth", "lace", "expanding"]
+aliases = ["serviettes", "b234/s"]
+
+[[rules]]
+id = "life_without_death"
+display_name = "Life without Death"
+rulestring = "B3/S012345678"
+description = "Cells never die once born; produces inkspot/flakes growth and monotonic accumulation."
+tags = ["no-death", "growth", "morphology"]
+aliases = ["inkspot", "flakes", "lifewithoutdeath", "b3/s012345678"]
+
+[[rules]]
+id = "coagulations"
+display_name = "Coagulations"
+rulestring = "B378/S235678"
+description = "Produces coagulating textures and supports glider-like objects in some regimes."
+tags = ["complex", "gliders", "texture"]
+aliases = ["b378/s235678"]
+
+[[rules]]
+id = "stains"
+display_name = "Stains"
+rulestring = "B3678/S235678"
+description = "Often grows irregularly and then halts ('stains'); interesting for stop/ash behavior."
+tags = ["rare", "stops", "texture"]
+aliases = ["b3678/s235678"]
+
+[[rules]]
+id = "assimilation"
+display_name = "Assimilation"
+rulestring = "B345/S4567"
+description = "A Life-like rule known for assimilation-like boundary dynamics and textured evolution."
+tags = ["texture", "complex"]
+aliases = ["b345/s4567"]
+
+[[rules]]
+id = "coral"
+display_name = "Coral"
+rulestring = "B3/S45678"
+description = "Coral/reef-like growth patterns; good for organic, boundary-heavy morphology."
+tags = ["morphology", "growth", "reef"]
+aliases = ["b3/s45678"]
+
+[[rules]]
+id = "walled_cities"
+display_name = "Walled Cities"
+rulestring = "B45678/S2345"
+description = "City/wall-like compartmental growth; good for 'fortified' structures."
+tags = ["morphology", "walls", "cities"]
+aliases = ["b45678/s2345", "walled"]
+
+[[rules]]
+id = "dot_life"
+display_name = "DotLife"
+rulestring = "B3/S023"
+description = "Sparse, 'dotty' evolution; often looks like flickering particulate dynamics."
+tags = ["phoenix-ish", "sparse", "odd"]
+aliases = ["dotlife", "b3/s023"]
+
+[[rules]]
+id = "dry_life"
+display_name = "DryLife"
+rulestring = "B37/S23"
+description = "Life-like with altered birth condition; produces a distinct dryness/sparseness."
+tags = ["life-variant", "growth"]
+aliases = ["drylife", "b37/s23"]
+
+[[rules]]
+id = "long_life"
+display_name = "LongLife"
+rulestring = "B345/S5"
+description = "Sparse long-lived structures; can sustain patterns differently than Life."
+tags = ["sparse", "long-lived"]
+aliases = ["longlife", "b345/s5"]
+
+[[rules]]
+id = "live_free_or_die"
+display_name = "Live Free or Die"
+rulestring = "B2/S0"
+description = "Extreme rule with survival only at 0 neighbors; highly non-Life-like behavior."
+tags = ["extreme", "weird", "warning"]
+aliases = ["b2/s0"]
+[rules.default_params]
+warning = "May behave wildly; consider auto-stop / small grid."
+
+[[rules]]
+id = "vote"
+display_name = "Vote"
+rulestring = "B5678/S45678"
+description = "Majority-vote style smoothing; useful as a morphological filter/denoiser."
+tags = ["smoothing", "morphology", "majority"]
+aliases = ["majority", "b5678/s45678"]
+
+[[rules]]
+id = "eight_life"
+display_name = "EightLife"
+rulestring = "B3/S238"
+description = "A Life-like rule cited in complexity studies; behavior differs from Conway while staying rich."
+tags = ["complexity", "literature"]
+aliases = ["eightlife", "b3/s238"]
+
+[[rules]]
+id = "honey_life"
+display_name = "HoneyLife"
+rulestring = "B38/S238"
+description = "A Life-like rule studied for complexity; distinct from EightLife by added birth at 8."
+tags = ["complexity", "literature"]
+aliases = ["honeylife", "b38/s238"]
+
+[[rules]]
+id = "low_death"
+display_name = "LowDeath"
+rulestring = "B368/S238"
+description = "A complexity-studied Life-like rule with altered birth/survival balance."
+tags = ["complexity", "literature"]
+aliases = ["lowdeath", "b368/s238"]
+
+[[rules]]
+id = "pedestrian_life"
+display_name = "PedestrianLife"
+rulestring = "B38/S23"
+description = "A Life-like rule from complexity studies; a close cousin to Life with altered births."
+tags = ["complexity", "literature"]
+aliases = ["pedestrianlife", "b38/s23"]
