@@ -64,7 +64,9 @@ struct Matchup {
 struct MatchSession {
     matchup: Matchup,
     history: History,
-    history_outcomes: String,
+    history_actions_a: String,
+    history_actions_b: String,
+    history_scores: String,
     round: u32,
     rounds_total: u32,
     a_total: i64,
@@ -304,6 +306,8 @@ impl TournamentRunner {
         };
         let a = self.strategies[session.matchup.a_idx].id.clone();
         let b = self.strategies[session.matchup.b_idx].id.clone();
+        let a_moves = session.history_actions_a.clone();
+        let b_moves = session.history_actions_b.clone();
         let record = MatchHistory {
             event: "match_history".into(),
             timestamp: EventWriter::timestamp(),
@@ -313,7 +317,15 @@ impl TournamentRunner {
             b,
             repetition: session.matchup.repetition + 1,
             rounds: session.rounds_total,
-            outcomes: session.history_outcomes.clone(),
+            a_moves: a_moves.clone(),
+            b_moves: b_moves.clone(),
+            a_incoming: b_moves,
+            b_incoming: a_moves,
+            score_idx: session.history_scores.clone(),
+            a_score: session.a_total,
+            b_score: session.b_total,
+            a_initial: session.history_actions_a.chars().next(),
+            b_initial: session.history_actions_b.chars().next(),
         };
         let _ = writer.write(&record);
     }
@@ -386,7 +398,9 @@ impl TournamentRunner {
         session.b_total += b_payoff as i64;
         session.history.push(a_action, b_action);
         if self.history_writer.is_some() {
-            session.history_outcomes.push(outcome_char(outcome));
+            session.history_actions_a.push(a_action.as_char());
+            session.history_actions_b.push(b_action.as_char());
+            session.history_scores.push(outcome_char(outcome));
         }
         session.round += 1;
 
@@ -458,7 +472,17 @@ impl MatchSession {
         Self {
             matchup,
             history: History::new(max_memory),
-            history_outcomes: if record_history {
+            history_actions_a: if record_history {
+                String::with_capacity(rounds_total as usize)
+            } else {
+                String::new()
+            },
+            history_actions_b: if record_history {
+                String::with_capacity(rounds_total as usize)
+            } else {
+                String::new()
+            },
+            history_scores: if record_history {
                 String::with_capacity(rounds_total as usize)
             } else {
                 String::new()
@@ -470,6 +494,15 @@ impl MatchSession {
             a_crashed: false,
             b_crashed: false,
         }
+    }
+}
+
+fn outcome_char(outcome: Outcome) -> char {
+    match outcome {
+        Outcome::CC => '0',
+        Outcome::CD => '1',
+        Outcome::DC => '2',
+        Outcome::DD => '3',
     }
 }
 
@@ -720,14 +753,5 @@ fn build_strategy(spec: &StrategySpec, seed: u64) -> Box<dyn Strategy> {
             *initial,
             table.clone(),
         )),
-    }
-}
-
-fn outcome_char(outcome: Outcome) -> char {
-    match outcome {
-        Outcome::CC => '0',
-        Outcome::CD => '1',
-        Outcome::DC => '2',
-        Outcome::DD => '3',
     }
 }

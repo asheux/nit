@@ -13,7 +13,15 @@ pub struct MatchHistory {
     pub b: String,
     pub repetition: u32,
     pub rounds: u32,
-    pub outcomes: String,
+    pub a_moves: String,
+    pub b_moves: String,
+    pub a_incoming: String,
+    pub b_incoming: String,
+    pub score_idx: String,
+    pub a_score: i64,
+    pub b_score: i64,
+    pub a_initial: Option<char>,
+    pub b_initial: Option<char>,
 }
 
 pub struct HistoryWriter {
