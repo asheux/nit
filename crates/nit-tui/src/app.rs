@@ -227,7 +227,7 @@ fn draw(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     state: &mut AppState,
     theme: &Theme,
-    syntax: &SyntaxRuntime,
+    syntax: &mut SyntaxRuntime,
     system_stats: &SystemStats,
     seed_runtime: &mut SeedRuntime,
     petri: &mut PetriDishRuntime,
@@ -272,32 +272,35 @@ fn draw(
 
         let editor_id = state.active_editor_buffer_id;
         let notes_id = state.notes_buffer_id;
-        let editor_render = syntax.render_snapshot_for(editor_id, state.editor_buffer());
-        let notes_render = syntax.render_snapshot_for(notes_id, state.notes_buffer());
-
         top_bar::render(f, layout.top, state, theme);
-        let editor_cursor = editor_view::render_editor(
-            f,
-            layout.editor,
-            state.editor_buffer(),
-            editor_render.snapshot,
-            editor_render.line_map.as_deref(),
-            state.focus,
-            state.mode,
-            theme,
-            state.settings.editor.tab_width as usize,
-        );
-        let notes_cursor = notes_view::render_notes(
-            f,
-            layout.notes,
-            state.notes_buffer(),
-            notes_render.snapshot,
-            notes_render.line_map.as_deref(),
-            state.focus,
-            state.mode,
-            theme,
-            state.settings.editor.tab_width as usize,
-        );
+        let editor_cursor = {
+            let editor_render = syntax.render_snapshot_for(editor_id, state.editor_buffer());
+            editor_view::render_editor(
+                f,
+                layout.editor,
+                state.editor_buffer(),
+                editor_render.snapshot,
+                editor_render.line_map,
+                state.focus,
+                state.mode,
+                theme,
+                state.settings.editor.tab_width as usize,
+            )
+        };
+        let notes_cursor = {
+            let notes_render = syntax.render_snapshot_for(notes_id, state.notes_buffer());
+            notes_view::render_notes(
+                f,
+                layout.notes,
+                state.notes_buffer(),
+                notes_render.snapshot,
+                notes_render.line_map,
+                state.focus,
+                state.mode,
+                theme,
+                state.settings.editor.tab_width as usize,
+            )
+        };
         job_output_view::render(f, layout.job, state, theme);
         let viz_inner_width = layout.visualizer.width.saturating_sub(2) as usize;
         let viz_inner_height = layout.visualizer.height.saturating_sub(2) as usize;
