@@ -9,17 +9,23 @@ pub mod output;
 pub mod strategy;
 pub mod tournament;
 
-pub use config::{ConfigError, GamesConfig, NormalizedConfig, StrategySpec};
+pub use config::{
+    ConfigError, EngineConfig, EngineMode, GamesConfig, NormalizedConfig, ParallelismConfig,
+    ParallelismMode, StrategySpec,
+};
 pub use events::{EventLogConfig, EventWriter, GameEvent};
 pub use game::{Action, Outcome, PayoffMatrix};
 pub use history::{History, RoundRecord};
 pub use history_log::{HistoryWriter, MatchHistory};
-pub use output::{RunSummary, TournamentResults};
+pub use output::{run_id_from_seed_config, RunPaths, RunSummary, TournamentResults};
 pub use strategy::{
     AlwaysCooperate, AlwaysDefect, FsmStrategy, GrimTrigger, MemoryStrategy, RandomStrategy,
     Strategy, StrategyKind, TitForTat, WinStayLoseShift,
 };
-pub use tournament::{MatchResult, TournamentProgress, TournamentRunner};
+pub use tournament::{
+    KernelRunMode, MatchResult, MatchSnapshot, Parallelism, TournamentKernel, TournamentProgress,
+    TournamentRunner,
+};
 
 #[cfg(test)]
 mod tests;

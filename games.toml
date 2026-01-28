@@ -1,6 +1,6 @@
 schema_version = 1
 game = "ipd"
-rounds = 20
+rounds = 2000000
 repetitions = 1
 self_play = false
 seed = 12345
@@ -14,6 +14,11 @@ P = 1
 
 [history]
 enabled = true
+
+[engine]
+mode = "interactive"
+parallelism = "auto"
+progress_interval_ms = 80
 
 [[strategy]]
 id = "allc"

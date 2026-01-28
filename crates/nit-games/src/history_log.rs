@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 pub struct MatchHistory {
     pub event: String,
     pub timestamp: String,
+    pub match_id: usize,
     pub match_index: usize,
     pub total_matches: usize,
     pub a: String,

@@ -85,12 +85,14 @@ For details see `SECURITY.md`.
 - Launch: `nit games [path]` (opens `games.toml` by default).
 - Run tournament: `Ctrl+Enter` or `:games run`.
 - Hide/show: `H` in popup to hide, `Ctrl+^` to show.
+- Inspector: `Tab` toggles tournament vs match inspector; `←/→` changes the window size.
 - Outputs: summaries, event logs, and optional history logs land in `games-runs/` under the workspace root.
+  Summary JSON includes `run_id`, `config_text`, and `paths` for summary/events/history.
 
 ### Games config (payoff)
 
 You can define payoffs either with `R/S/T/P` or a full matrix. Matrix form is the
-source of truth if provided, and `R/S/T/P` must match it.
+source of truth if provided. `R/S/T/P` are validated when the matrix is symmetric.
 
 ```toml
 [payoff]
@@ -105,10 +107,10 @@ matrix = [
 ```
 
 Matrix layout (rows = player A, cols = player B):
-- `matrix[0][0] = [R,R]` (C,C)
-- `matrix[0][1] = [S,T]` (C,D)
-- `matrix[1][0] = [T,S]` (D,C)
-- `matrix[1][1] = [P,P]` (D,D)
+- `matrix[0][0] = [A,B]` (C,C)
+- `matrix[0][1] = [A,B]` (C,D)
+- `matrix[1][0] = [A,B]` (D,C)
+- `matrix[1][1] = [A,B]` (D,D)
 
 ### Games config (history)
 

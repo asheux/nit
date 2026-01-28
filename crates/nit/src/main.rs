@@ -5,10 +5,17 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
+use std::thread;
 
 use anyhow::Context;
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use nit_core::{io as core_io, AppKind, Buffer, Mode, SelectedRule};
+use nit_games::config::EngineMode;
+use nit_games::events::{EventWriter, GameEvent};
+use nit_games::history_log::MatchHistory;
+use nit_games::output::{write_summary, RunPaths, RunSummary};
+use nit_games::tournament::{KernelRunMode, Parallelism, TournamentKernel};
+use nit_games::{run_id_from_seed_config, GamesConfig, HistoryWriter};
 use nit_tui::{run, Theme};
 use nit_utils::hashing::stable_hash_bytes;
 use nit_utils::paths;
@@ -39,14 +46,63 @@ enum Command {
     Games {
         /// File or directory to open
         path: Option<PathBuf>,
+        #[command(subcommand)]
+        command: Option<GamesCommand>,
     },
+}
+
+#[derive(Subcommand, Debug)]
+enum GamesCommand {
+    /// Headless batch runner for games
+    Run {
+        /// Config path (defaults to games.toml)
+        #[arg(long)]
+        config: Option<PathBuf>,
+        /// Output directory (defaults to ./output)
+        #[arg(long)]
+        out: Option<PathBuf>,
+        /// Override seed
+        #[arg(long)]
+        seed: Option<u64>,
+        /// Output format for stdout summary
+        #[arg(long, value_enum, default_value_t = OutputFormat::Pretty)]
+        format: OutputFormat,
+        /// Suppress stdout summary
+        #[arg(long)]
+        quiet: bool,
+        /// Verbose logging to stderr
+        #[arg(long)]
+        verbose: bool,
+    },
+}
+
+#[derive(Copy, Clone, Debug, ValueEnum)]
+enum OutputFormat {
+    Json,
+    Pretty,
 }
 
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
+    if let Some(Command::Games {
+        command:
+            Some(GamesCommand::Run {
+                config,
+                out,
+                seed,
+                format,
+                quiet,
+                verbose,
+            }),
+        ..
+    }) = cli.command
+    {
+        return run_games_headless(config, out, seed, format, quiet, verbose);
+    }
+
     let (app_kind, target) = match cli.command {
         Some(Command::Gol { path }) => (AppKind::Gol, path),
-        Some(Command::Games { path }) => (AppKind::Games, path),
+        Some(Command::Games { path, .. }) => (AppKind::Games, path),
         None => (AppKind::Gol, cli.path),
     };
     let (workspace_root, editor) = match app_kind {
@@ -194,6 +250,11 @@ P = 1
 [history]
 enabled = true
 
+[engine]
+mode = "interactive"
+parallelism = "auto"
+progress_interval_ms = 80
+
 [[strategy]]
 id = "allc"
 type = "builtin"
@@ -241,6 +302,222 @@ n = 1
 initial = "C"
 table = ["C", "D", "D", "C"]
 "#
+}
+
+fn run_games_headless(
+    config_path: Option<PathBuf>,
+    out_dir: Option<PathBuf>,
+    seed_override: Option<u64>,
+    format: OutputFormat,
+    quiet: bool,
+    verbose: bool,
+) -> anyhow::Result<()> {
+    let config_path = config_path.unwrap_or_else(|| PathBuf::from("games.toml"));
+    let config_text = core_io::load_to_string(&config_path)
+        .with_context(|| format!("failed to read {}", config_path.display()))?;
+    let mut config = GamesConfig::from_toml(&config_text).map_err(|err| anyhow::anyhow!(err))?;
+
+    if let Some(seed) = seed_override {
+        config.seed = Some(seed);
+    }
+    config.engine.mode = EngineMode::Batch;
+
+    let timestamp = EventWriter::timestamp();
+    let seed = config.seed.unwrap_or_else(|| {
+        stable_hash_bytes(format!("{timestamp}\n{config_text}").as_bytes())
+    });
+    config.seed = Some(seed);
+
+    let run_id = run_id_from_seed_config(seed, &config_text);
+    let run_hash = stable_hash_bytes(format!("{seed}:{config_text}").as_bytes());
+    let stamp = timestamp.replace(':', "-");
+
+    let cwd = std::env::current_dir()?;
+    let base_dir = config_path
+        .parent()
+        .map(|p| {
+            if p.is_absolute() {
+                p.to_path_buf()
+            } else {
+                cwd.join(p)
+            }
+        })
+        .unwrap_or(cwd);
+
+    let out_dir = out_dir.unwrap_or_else(|| PathBuf::from("output"));
+    let out_dir = if out_dir.is_absolute() {
+        out_dir
+    } else {
+        base_dir.join(out_dir)
+    };
+    fs::create_dir_all(&out_dir)
+        .with_context(|| format!("failed to create {}", out_dir.display()))?;
+
+    let summary_path = out_dir.join(format!("run__{stamp}__{run_hash:08x}.json"));
+    let event_path = out_dir.join(format!("events__{stamp}__{run_hash:08x}.ndjson"));
+    let history_path = out_dir.join(format!("history__{stamp}__{run_hash:08x}.ndjson"));
+
+    if verbose {
+        eprintln!("Games config: {}", config_path.display());
+        eprintln!("Games summary: {}", summary_path.display());
+    }
+
+    let kernel = TournamentKernel::new(config.clone());
+    let parallelism = Parallelism::from_config(&config.engine.parallelism);
+    let event_log_enabled = config.event_log.enabled;
+    let history_log_enabled = config.history.enabled;
+
+    let (results, event_log, history_log) = if matches!(parallelism, Parallelism::Off) {
+        let mut event_writer = if event_log_enabled {
+            Some(EventWriter::new(
+                event_path.clone(),
+                config.event_log.include_rounds,
+            )?)
+        } else {
+            None
+        };
+        let mut history_writer = if history_log_enabled {
+            Some(HistoryWriter::new(history_path.clone())?)
+        } else {
+            None
+        };
+        let results = kernel.run(KernelRunMode::Sequential {
+            event_writer: event_writer.as_mut(),
+            history_writer: history_writer.as_mut(),
+        });
+        let event_log = match event_writer {
+            Some(writer) => Some(
+                writer
+                    .finish()
+                    .with_context(|| "failed to finalize event log")?
+                    .to_string_lossy()
+                    .to_string(),
+            ),
+            None => None,
+        };
+        let history_log = match history_writer {
+            Some(writer) => Some(
+                writer
+                    .finish()
+                    .with_context(|| "failed to finalize history log")?
+                    .to_string_lossy()
+                    .to_string(),
+            ),
+            None => None,
+        };
+        (results, event_log, history_log)
+    } else {
+        let mut event_sender = None;
+        let mut history_sender = None;
+        let mut event_handle: Option<thread::JoinHandle<std::io::Result<PathBuf>>> = None;
+        let mut history_handle: Option<thread::JoinHandle<std::io::Result<PathBuf>>> = None;
+
+        if event_log_enabled {
+            let writer = EventWriter::new(event_path.clone(), config.event_log.include_rounds)?;
+            let (tx, rx) = mpsc::channel::<GameEvent>();
+            let handle = thread::spawn(move || {
+                let mut writer = writer;
+                for event in rx {
+                    if let Err(err) = writer.write(&event) {
+                        return Err(err);
+                    }
+                }
+                writer.finish()
+            });
+            event_sender = Some(tx);
+            event_handle = Some(handle);
+        }
+
+        if history_log_enabled {
+            let writer = HistoryWriter::new(history_path.clone())?;
+            let (tx, rx) = mpsc::channel::<MatchHistory>();
+            let handle = thread::spawn(move || {
+                let mut writer = writer;
+                for record in rx {
+                    if let Err(err) = writer.write(&record) {
+                        return Err(err);
+                    }
+                }
+                writer.finish()
+            });
+            history_sender = Some(tx);
+            history_handle = Some(handle);
+        }
+
+        let results = kernel.run(KernelRunMode::Parallel {
+            parallelism,
+            event_sender: event_sender.clone(),
+            include_rounds: config.event_log.include_rounds,
+            history_sender: history_sender.clone(),
+        });
+
+        drop(event_sender);
+        drop(history_sender);
+
+        let event_log = match event_handle {
+            Some(handle) => Some(
+                handle
+                    .join()
+                    .map_err(|_| anyhow::anyhow!("event log worker panicked"))?
+                    .with_context(|| "failed to finalize event log")?
+                    .to_string_lossy()
+                    .to_string(),
+            ),
+            None => None,
+        };
+        let history_log = match history_handle {
+            Some(handle) => Some(
+                handle
+                    .join()
+                    .map_err(|_| anyhow::anyhow!("history log worker panicked"))?
+                    .with_context(|| "failed to finalize history log")?
+                    .to_string_lossy()
+                    .to_string(),
+            ),
+            None => None,
+        };
+        (results, event_log, history_log)
+    };
+
+    let summary = RunSummary {
+        schema_version: config.schema_version,
+        timestamp,
+        run_id,
+        seed,
+        config_text: config_text.clone(),
+        config: config.clone(),
+        paths: RunPaths {
+            summary: Some(summary_path.display().to_string()),
+            events: event_log.clone(),
+            history: history_log.clone(),
+        },
+        strategies: kernel.definitions().to_vec(),
+        results,
+        event_log,
+        history_log,
+    };
+
+    write_summary(&summary_path, &summary)
+        .with_context(|| format!("failed to write {}", summary_path.display()))?;
+
+    if verbose {
+        if let Some(path) = summary.paths.events.as_ref() {
+            eprintln!("Events: {}", path);
+        }
+        if let Some(path) = summary.paths.history.as_ref() {
+            eprintln!("History: {}", path);
+        }
+    }
+
+    if !quiet {
+        let out = match format {
+            OutputFormat::Json => serde_json::to_string(&summary)?,
+            OutputFormat::Pretty => serde_json::to_string_pretty(&summary)?,
+        };
+        println!("{out}");
+    }
+
+    Ok(())
 }
 
 fn find_theme() -> Option<PathBuf> {

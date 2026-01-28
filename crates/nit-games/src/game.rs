@@ -64,24 +64,33 @@ pub struct PayoffMatrix {
     pub s: i32,
     pub t: i32,
     pub p: i32,
+    pub matrix: [[[i32; 2]; 2]; 2],
 }
 
 impl PayoffMatrix {
     pub fn default_pd() -> Self {
-        Self {
-            r: 3,
-            s: 0,
-            t: 5,
-            p: 1,
-        }
+        let matrix = [[[3, 3], [0, 5]], [[5, 0], [1, 1]]];
+        Self::from_matrix(matrix)
+    }
+
+    pub fn from_matrix(matrix: [[[i32; 2]; 2]; 2]) -> Self {
+        let r = matrix[0][0][0];
+        let s = matrix[0][1][0];
+        let t = matrix[1][0][0];
+        let p = matrix[1][1][0];
+        Self { r, s, t, p, matrix }
     }
 
     pub fn payoffs(self, a: Action, b: Action) -> (i32, i32) {
-        match (a, b) {
-            (Action::Cooperate, Action::Cooperate) => (self.r, self.r),
-            (Action::Cooperate, Action::Defect) => (self.s, self.t),
-            (Action::Defect, Action::Cooperate) => (self.t, self.s),
-            (Action::Defect, Action::Defect) => (self.p, self.p),
-        }
+        let a_idx = match a {
+            Action::Cooperate => 0,
+            Action::Defect => 1,
+        };
+        let b_idx = match b {
+            Action::Cooperate => 0,
+            Action::Defect => 1,
+        };
+        let cell = self.matrix[a_idx][b_idx];
+        (cell[0], cell[1])
     }
 }

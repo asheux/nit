@@ -112,6 +112,14 @@ pub fn render(frame: &mut Frame, area: Rect, theme: &Theme) {
         Span::raw(" speed up / down"),
     ]));
     lines.push(Line::from(vec![
+        Span::styled("Tab", Style::default().fg(theme.accent)),
+        Span::raw(" toggle tournament / inspector"),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("← / →", Style::default().fg(theme.accent)),
+        Span::raw(" adjust inspector window"),
+    ]));
+    lines.push(Line::from(vec![
         Span::styled("H", Style::default().fg(theme.accent)),
         Span::raw(" hide (continues running)"),
     ]));

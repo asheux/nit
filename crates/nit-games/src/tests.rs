@@ -2,7 +2,7 @@ use crate::config::GamesConfig;
 use crate::game::Action;
 use crate::history::History;
 use crate::strategy::{FsmStrategy, Strategy};
-use crate::tournament::TournamentRunner;
+use crate::tournament::{KernelRunMode, Parallelism, TournamentKernel, TournamentRunner};
 
 fn run_to_completion(mut runner: TournamentRunner) -> crate::output::TournamentResults {
     while !runner.is_done() {
@@ -147,4 +147,159 @@ name = "Always Cooperate"
         }
         _ => panic!("expected fsm"),
     }
+}
+
+#[test]
+fn run_id_is_stable_for_seed_and_config() {
+    let cfg = r#"
+schema_version = 1
+game = "ipd"
+rounds = 5
+repetitions = 1
+self_play = false
+
+[[strategy]]
+id = "allc"
+type = "builtin"
+name = "Always Cooperate"
+"#;
+    let run_a = crate::output::run_id_from_seed_config(42, cfg);
+    let run_b = crate::output::run_id_from_seed_config(42, cfg);
+    let run_c = crate::output::run_id_from_seed_config(43, cfg);
+    assert_eq!(run_a, run_b);
+    assert_ne!(run_a, run_c);
+}
+
+#[test]
+fn asymmetric_matrix_scoring_uses_cell_values() {
+    let cfg = r#"
+schema_version = 1
+game = "ipd"
+rounds = 1
+repetitions = 1
+self_play = false
+
+[payoff]
+matrix = [
+  [[3,1],[0,5]],
+  [[4,2],[1,0]],
+]
+
+[[strategy]]
+id = "allc"
+type = "builtin"
+name = "Always Cooperate"
+
+[[strategy]]
+id = "alld"
+type = "builtin"
+name = "Always Defect"
+"#;
+    let config = GamesConfig::from_toml(cfg).expect("config parse");
+    let results = run_to_completion(TournamentRunner::new(config));
+    let pair = results
+        .pairwise
+        .iter()
+        .find(|p| p.a == "allc" && p.b == "alld")
+        .expect("pairwise");
+    assert_eq!(pair.a_total, 0);
+    assert_eq!(pair.b_total, 5);
+}
+
+fn totals_by_id(results: &crate::output::TournamentResults) -> Vec<(String, i64)> {
+    let mut totals: Vec<(String, i64)> = results
+        .ranking
+        .iter()
+        .map(|entry| (entry.id.clone(), entry.total_payoff))
+        .collect();
+    totals.sort_by(|a, b| a.0.cmp(&b.0));
+    totals
+}
+
+#[test]
+fn kernel_reproducibility_same_seed() {
+    let cfg = r#"
+schema_version = 1
+game = "ipd"
+rounds = 25
+repetitions = 2
+self_play = false
+seed = 777
+noise = 0.15
+
+[[strategy]]
+id = "rand"
+type = "random"
+p_cooperate = 0.4
+
+[[strategy]]
+id = "tft"
+type = "builtin"
+name = "Tit For Tat"
+
+[[strategy]]
+id = "alld"
+type = "builtin"
+name = "Always Defect"
+"#;
+    let config = GamesConfig::from_toml(cfg).expect("config parse");
+    let kernel_a = TournamentKernel::new(config.clone());
+    let kernel_b = TournamentKernel::new(config);
+    let results_a = kernel_a.run(KernelRunMode::Sequential {
+        event_writer: None,
+        history_writer: None,
+    });
+    let results_b = kernel_b.run(KernelRunMode::Sequential {
+        event_writer: None,
+        history_writer: None,
+    });
+    assert_eq!(totals_by_id(&results_a), totals_by_id(&results_b));
+}
+
+#[test]
+fn kernel_parallel_matches_sequential_results() {
+    let cfg = r#"
+schema_version = 1
+game = "ipd"
+rounds = 40
+repetitions = 3
+self_play = true
+seed = 4242
+noise = 0.25
+
+[[strategy]]
+id = "rand"
+type = "random"
+p_cooperate = 0.55
+
+[[strategy]]
+id = "wsls"
+type = "builtin"
+name = "Win Stay Lose Shift"
+
+[[strategy]]
+id = "grim"
+type = "builtin"
+name = "Grim Trigger"
+
+[[strategy]]
+id = "mem1"
+type = "memory"
+n = 1
+initial = "C"
+table = ["C", "D", "D", "C"]
+"#;
+    let config = GamesConfig::from_toml(cfg).expect("config parse");
+    let kernel = TournamentKernel::new(config);
+    let sequential = kernel.run(KernelRunMode::Sequential {
+        event_writer: None,
+        history_writer: None,
+    });
+    let parallel = kernel.run(KernelRunMode::Parallel {
+        parallelism: Parallelism::Threads(4),
+        event_sender: None,
+        include_rounds: false,
+        history_sender: None,
+    });
+    assert_eq!(totals_by_id(&sequential), totals_by_id(&parallel));
 }

@@ -76,6 +76,11 @@ rendering and text‑measurement consistent, and avoids lossy conversions.
   Outcomes are encoded as digits from player A’s perspective:
   `0=CC`, `1=CD`, `2=DC`, `3=DD`.
 
+## Games Engine (Phase 2)
+
+See `docs/GAMES.md` for the engine split (kernel vs stepper), deterministic seeding,
+and parallel logging behavior.
+
 ## Rendering Discipline
 
 - Event-driven; no busy loop. Redraw when:

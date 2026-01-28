@@ -59,30 +59,23 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
 
     let config_text = state.editor_buffer().content_as_string();
     let config_result = GamesConfig::from_toml(&config_text);
-    let payoff_values = config_result.as_ref().ok().map(|config| {
-        (
-            config.payoff.r,
-            config.payoff.s,
-            config.payoff.t,
-            config.payoff.p,
-        )
-    });
     let mut show_payoff_side = false;
-    let (main_area, right_area) = if let Some((r, s, t, p)) = payoff_values {
-        let desired = payoff_panel_width(r, s, t, p) + 2;
-        let min_main = 44usize;
-        if inner.width as usize >= min_main + desired {
-            show_payoff_side = true;
-            let cols = Layout::default()
-                .direction(Direction::Horizontal)
-                .constraints([Constraint::Min(44), Constraint::Length(desired as u16)])
-                .split(inner);
-            (cols[0], cols[1])
-        } else {
-            (inner, Rect::default())
+    let (main_area, right_area) = match &config_result {
+        Ok(config) => {
+            let desired = payoff_panel_width(&config.payoff) + 2;
+            let min_main = 44usize;
+            if inner.width as usize >= min_main + desired {
+                show_payoff_side = true;
+                let cols = Layout::default()
+                    .direction(Direction::Horizontal)
+                    .constraints([Constraint::Min(44), Constraint::Length(desired as u16)])
+                    .split(inner);
+                (cols[0], cols[1])
+            } else {
+                (inner, Rect::default())
+            }
         }
-    } else {
-        (inner, Rect::default())
+        Err(_) => (inner, Rect::default()),
     };
 
     let mut lines = Vec::new();
@@ -151,10 +144,7 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
                 Span::styled(format!("{:.3}", config.noise), value_style),
             ]));
             lines.extend(payoff_lines(
-                config.payoff.r,
-                config.payoff.s,
-                config.payoff.t,
-                config.payoff.p,
+                &config.payoff,
                 main_area.width as usize,
                 value_style,
                 dim_style,
@@ -281,10 +271,7 @@ fn strategy_display_name_from_kind(kind: &StrategySpecKind) -> String {
 }
 
 fn payoff_lines(
-    r: i32,
-    s: i32,
-    t: i32,
-    p: i32,
+    payoff: &nit_games::game::PayoffMatrix,
     width: usize,
     value_style: Style,
     dim_style: Style,
@@ -293,14 +280,17 @@ fn payoff_lines(
     let mut lines = Vec::new();
     lines.push(Line::from(vec![
         Span::styled("payoff: ", label_style),
-        Span::styled(format!("R={r} S={s} T={t} P={p}"), value_style),
+        Span::styled(
+            format!(
+                "R={} S={} T={} P={}",
+                payoff.r, payoff.s, payoff.t, payoff.p
+            ),
+            value_style,
+        ),
     ]));
     lines.push(Line::from(vec![Span::styled("matrix:", label_style)]));
     lines.extend(render_payoff_matrix(
-        r,
-        s,
-        t,
-        p,
+        payoff,
         width,
         value_style,
         dim_style,
@@ -346,6 +336,10 @@ fn last_run_lines(
             Span::styled("seed: ", label_style),
             Span::styled(run.seed.to_string(), value_style),
         ]));
+        lines.push(Line::from(vec![
+            Span::styled("run_id: ", label_style),
+            Span::styled(run.run_id.clone(), value_style),
+        ]));
         lines.extend(render_last_run_table(
             run,
             width,
@@ -357,24 +351,34 @@ fn last_run_lines(
             loss_style,
             draw_style,
         ));
-        if let Some(path) = state.games.last_run_path.as_ref() {
+        let summary_path = run
+            .paths
+            .summary
+            .as_ref()
+            .or(state.games.last_run_path.as_ref());
+        let history_path = run
+            .paths
+            .history
+            .as_ref()
+            .or(state.games.last_history_path.as_ref());
+        let event_path = run
+            .paths
+            .events
+            .as_ref()
+            .or(state.games.last_event_path.as_ref());
+        if let Some(path) = summary_path {
             lines.push(Line::from(vec![
                 Span::styled("summary: ", label_style),
                 Span::styled(path.clone(), file_dim_style),
             ]));
         }
-        if let Some(path) = state
-            .games
-            .last_history_path
-            .as_ref()
-            .or(run.history_log.as_ref())
-        {
+        if let Some(path) = history_path.or(run.history_log.as_ref()) {
             lines.push(Line::from(vec![
                 Span::styled("history: ", label_style),
                 Span::styled(path.clone(), file_dim_style),
             ]));
         }
-        if let Some(path) = state.games.last_event_path.as_ref() {
+        if let Some(path) = event_path.or(run.event_log.as_ref()) {
             lines.push(Line::from(vec![
                 Span::styled("events: ", label_style),
                 Span::styled(path.clone(), file_dim_style),
@@ -484,19 +488,23 @@ fn render_last_run_table(
     lines
 }
 
-fn payoff_panel_width(r: i32, s: i32, t: i32, p: i32) -> usize {
-    let payoff_summary = format!("payoff: R={} S={} T={} P={}", r, s, t, p).len();
+fn payoff_panel_width(payoff: &nit_games::game::PayoffMatrix) -> usize {
+    let payoff_summary = format!(
+        "payoff: R={} S={} T={} P={}",
+        payoff.r, payoff.s, payoff.t, payoff.p
+    )
+    .len();
     let rs_line = "R= reward (C,C)  S= sucker (C,D)".len();
     let tp_line = "T= temptation (D,C)  P= punishment (D,D)".len();
-    let matrix_width = payoff_matrix_width(r, s, t, p);
+    let matrix_width = payoff_matrix_width(payoff);
     payoff_summary.max(rs_line).max(tp_line).max(matrix_width)
 }
 
-fn payoff_matrix_width(r: i32, s: i32, t: i32, p: i32) -> usize {
-    let cc = format!("({r},{r})");
-    let cd = format!("({s},{t})");
-    let dc = format!("({t},{s})");
-    let dd = format!("({p},{p})");
+fn payoff_matrix_width(payoff: &nit_games::game::PayoffMatrix) -> usize {
+    let cc = format!("({},{})", payoff.matrix[0][0][0], payoff.matrix[0][0][1]);
+    let cd = format!("({},{})", payoff.matrix[0][1][0], payoff.matrix[0][1][1]);
+    let dc = format!("({},{})", payoff.matrix[1][0][0], payoff.matrix[1][0][1]);
+    let dd = format!("({},{})", payoff.matrix[1][1][0], payoff.matrix[1][1][1]);
     let cell_width = [cc.len(), cd.len(), dc.len(), dd.len(), 1]
         .into_iter()
         .max()
@@ -507,19 +515,16 @@ fn payoff_matrix_width(r: i32, s: i32, t: i32, p: i32) -> usize {
 }
 
 fn render_payoff_matrix(
-    r: i32,
-    s: i32,
-    t: i32,
-    p: i32,
+    payoff: &nit_games::game::PayoffMatrix,
     width: usize,
     value_style: Style,
     dim_style: Style,
     label_style: Style,
 ) -> Vec<Line<'static>> {
-    let cc = format!("({r},{r})");
-    let cd = format!("({s},{t})");
-    let dc = format!("({t},{s})");
-    let dd = format!("({p},{p})");
+    let cc = format!("({},{})", payoff.matrix[0][0][0], payoff.matrix[0][0][1]);
+    let cd = format!("({},{})", payoff.matrix[0][1][0], payoff.matrix[0][1][1]);
+    let dc = format!("({},{})", payoff.matrix[1][0][0], payoff.matrix[1][0][1]);
+    let dd = format!("({},{})", payoff.matrix[1][1][0], payoff.matrix[1][1][1]);
     let cell_width = [cc.len(), cd.len(), dc.len(), dd.len(), 1]
         .into_iter()
         .max()

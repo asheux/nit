@@ -30,6 +30,7 @@ pub struct GamesConfig {
     pub strategy: Vec<StrategyConfig>,
     pub event_log: Option<EventLogConfig>,
     pub history: Option<HistoryConfig>,
+    pub engine: Option<EngineConfig>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -86,8 +87,66 @@ pub struct NormalizedConfig {
     pub strategies: Vec<StrategySpec>,
     pub event_log: EventLogConfig,
     pub history: HistoryConfig,
+    pub engine: EngineConfig,
     #[serde(skip)]
     pub max_memory_n: usize,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct EngineConfig {
+    #[serde(default)]
+    pub mode: EngineMode,
+    #[serde(default)]
+    pub parallelism: ParallelismConfig,
+    #[serde(default = "default_progress_interval_ms")]
+    pub progress_interval_ms: u64,
+}
+
+impl Default for EngineConfig {
+    fn default() -> Self {
+        Self {
+            mode: EngineMode::Interactive,
+            parallelism: ParallelismConfig::default(),
+            progress_interval_ms: default_progress_interval_ms(),
+        }
+    }
+}
+
+#[derive(Copy, Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum EngineMode {
+    Interactive,
+    Batch,
+}
+
+impl Default for EngineMode {
+    fn default() -> Self {
+        EngineMode::Interactive
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum ParallelismConfig {
+    Mode(ParallelismMode),
+    Threads { threads: usize },
+}
+
+impl Default for ParallelismConfig {
+    fn default() -> Self {
+        ParallelismConfig::Mode(ParallelismMode::Auto)
+    }
+}
+
+#[derive(Copy, Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ParallelismMode {
+    Auto,
+    Off,
+}
+
+fn default_progress_interval_ms() -> u64 {
+    80
 }
 
 #[derive(Copy, Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -187,6 +246,13 @@ impl GamesConfig {
             }
         }
 
+        let engine = self.engine.unwrap_or_default();
+        if let ParallelismConfig::Threads { threads } = engine.parallelism {
+            if threads == 0 {
+                errors.push("engine.parallelism.threads must be > 0".to_string());
+            }
+        }
+
         if !errors.is_empty() {
             return Err(ConfigError { errors });
         }
@@ -203,6 +269,7 @@ impl GamesConfig {
             strategies,
             event_log: self.event_log.unwrap_or_default(),
             history: self.history.unwrap_or_default(),
+            engine,
             max_memory_n,
         })
     }
@@ -442,45 +509,53 @@ fn payoff_from_config(config: PayoffConfig, errors: &mut Vec<String>) -> PayoffM
         let s = cells[0][1].0;
         let t = cells[1][0].0;
         let p = cells[1][1].0;
-        if cells[0][0].1 != r || cells[0][1].1 != t || cells[1][0].1 != s || cells[1][1].1 != p {
-            errors.push(
-                "payoff.matrix must be symmetric for players (CC=R,R; CD=S,T; DC=T,S; DD=P,P)"
-                    .into(),
-            );
-        }
-        if let Some(value) = config.r {
-            if value != r {
-                errors.push("payoff.R does not match payoff.matrix[0][0]".into());
+        let symmetric =
+            cells[0][0].1 == r && cells[0][1].1 == t && cells[1][0].1 == s && cells[1][1].1 == p;
+        if symmetric {
+            if let Some(value) = config.r {
+                if value != r {
+                    errors.push("payoff.R does not match payoff.matrix[0][0]".into());
+                }
+            }
+            if let Some(value) = config.s {
+                if value != s {
+                    errors.push("payoff.S does not match payoff.matrix[0][1]".into());
+                }
+            }
+            if let Some(value) = config.t {
+                if value != t {
+                    errors.push("payoff.T does not match payoff.matrix[1][0]".into());
+                }
+            }
+            if let Some(value) = config.p {
+                if value != p {
+                    errors.push("payoff.P does not match payoff.matrix[1][1]".into());
+                }
             }
         }
-        if let Some(value) = config.s {
-            if value != s {
-                errors.push("payoff.S does not match payoff.matrix[0][1]".into());
-            }
-        }
-        if let Some(value) = config.t {
-            if value != t {
-                errors.push("payoff.T does not match payoff.matrix[1][0]".into());
-            }
-        }
-        if let Some(value) = config.p {
-            if value != p {
-                errors.push("payoff.P does not match payoff.matrix[1][1]".into());
-            }
-        }
-        PayoffMatrix { r, s, t, p }
+        let matrix = [
+            [
+                [cells[0][0].0, cells[0][0].1],
+                [cells[0][1].0, cells[0][1].1],
+            ],
+            [
+                [cells[1][0].0, cells[1][0].1],
+                [cells[1][1].0, cells[1][1].1],
+            ],
+        ];
+        PayoffMatrix::from_matrix(matrix)
     } else {
         fallback_payoff(config)
     }
 }
 
 fn fallback_payoff(config: PayoffConfig) -> PayoffMatrix {
-    PayoffMatrix {
-        r: config.r.unwrap_or(3),
-        s: config.s.unwrap_or(0),
-        t: config.t.unwrap_or(5),
-        p: config.p.unwrap_or(1),
-    }
+    let r = config.r.unwrap_or(3);
+    let s = config.s.unwrap_or(0);
+    let t = config.t.unwrap_or(5);
+    let p = config.p.unwrap_or(1);
+    let matrix = [[[r, r], [s, t]], [[t, s], [p, p]]];
+    PayoffMatrix::from_matrix(matrix)
 }
 
 impl StrategySpec {

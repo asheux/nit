@@ -1,5 +1,9 @@
 use crate::config::{NormalizedConfig, StrategySpecKind};
+use nit_utils::fs::write_atomic;
+use nit_utils::hashing::stable_hash_bytes;
 use serde::{Deserialize, Serialize};
+use std::io;
+use std::path::Path;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct StrategyDefinition {
@@ -49,14 +53,46 @@ pub struct TournamentResults {
     pub dominance: Vec<DominanceEdge>,
 }
 
+impl TournamentResults {
+    pub fn empty() -> Self {
+        Self {
+            ranking: Vec::new(),
+            pairwise: Vec::new(),
+            dominance: Vec::new(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RunPaths {
+    pub summary: Option<String>,
+    pub events: Option<String>,
+    pub history: Option<String>,
+}
+
+pub fn run_id_from_seed_config(seed: u64, config_text: &str) -> String {
+    let hash = stable_hash_bytes(format!("{seed}:{config_text}").as_bytes());
+    format!("{hash:016x}")
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RunSummary {
     pub schema_version: u32,
     pub timestamp: String,
+    pub run_id: String,
     pub seed: u64,
+    pub config_text: String,
     pub config: NormalizedConfig,
+    pub paths: RunPaths,
     pub strategies: Vec<StrategyDefinition>,
     pub results: TournamentResults,
     pub event_log: Option<String>,
     pub history_log: Option<String>,
+}
+
+pub fn write_summary(path: &Path, summary: &RunSummary) -> io::Result<()> {
+    write_atomic(path, |writer| {
+        serde_json::to_writer_pretty(writer, summary)
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))
+    })
 }

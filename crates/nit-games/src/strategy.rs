@@ -82,7 +82,8 @@ impl Strategy for TitForTat {
 
     fn next_action(&mut self, history: &History, player_a: bool) -> Action {
         history
-            .last_opponent_action(player_a)
+            .last_actions_for(player_a)
+            .map(|(_, opp)| opp)
             .unwrap_or(Action::Cooperate)
     }
 }
@@ -113,8 +114,8 @@ impl Strategy for GrimTrigger {
 
     fn next_action(&mut self, history: &History, player_a: bool) -> Action {
         if !self.triggered {
-            if let Some(outcome) = history.last_outcome_for(player_a) {
-                if matches!(outcome, Outcome::CD | Outcome::DD) {
+            if let Some((_, opp)) = history.last_actions_for(player_a) {
+                if matches!(opp, Action::Defect) {
                     self.triggered = true;
                 }
             }
@@ -146,13 +147,11 @@ impl Strategy for WinStayLoseShift {
     fn reset(&mut self) {}
 
     fn next_action(&mut self, history: &History, player_a: bool) -> Action {
-        let Some(last) = history.last_outcome_for(player_a) else {
+        let Some((self_action, opp_action)) = history.last_actions_for(player_a) else {
             return Action::Cooperate;
         };
-        let last_self = match last {
-            Outcome::CC | Outcome::CD => Action::Cooperate,
-            Outcome::DC | Outcome::DD => Action::Defect,
-        };
+        let last_self = self_action;
+        let last = Outcome::from_actions(self_action, opp_action);
         match last {
             Outcome::CC | Outcome::DD => last_self,
             Outcome::CD | Outcome::DC => last_self.flip(),
@@ -229,8 +228,8 @@ impl Strategy for FsmStrategy {
     }
 
     fn next_action(&mut self, history: &History, player_a: bool) -> Action {
-        if let Some(outcome) = history.last_outcome_for(player_a) {
-            let idx = outcome.index();
+        if let Some((self_action, opp_action)) = history.last_actions_for(player_a) {
+            let idx = Outcome::from_actions(self_action, opp_action).index();
             if let Some(next) = self.transitions.get(self.state).and_then(|t| t.get(idx)) {
                 self.state = *next;
             }

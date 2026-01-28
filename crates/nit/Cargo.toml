@@ -13,4 +13,5 @@ tracing-subscriber = { workspace = true }
 nit-core = { path = "../nit-core" }
 nit-tui = { path = "../nit-tui" }
 nit-utils = { path = "../nit-utils" }
-
+nit-games = { path = "../nit-games" }
+serde_json = { workspace = true }

@@ -42,6 +42,16 @@ impl History {
         Some(Outcome::from_actions(self_action, opp_action))
     }
 
+    pub fn last_actions_for(&self, player_a: bool) -> Option<(Action, Action)> {
+        let last = self.last()?;
+        let (self_action, opp_action) = if player_a {
+            (last.a, last.b)
+        } else {
+            (last.b, last.a)
+        };
+        Some((self_action, opp_action))
+    }
+
     pub fn last_opponent_action(&self, player_a: bool) -> Option<Action> {
         let last = self.last()?;
         Some(if player_a { last.b } else { last.a })

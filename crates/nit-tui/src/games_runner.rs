@@ -1,0 +1,236 @@
+use std::path::PathBuf;
+use std::sync::mpsc::{self, Receiver, Sender};
+use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant};
+
+use nit_games::events::EventWriter;
+use nit_games::output::{write_summary, RunSummary, StrategyDefinition, TournamentResults};
+use nit_games::tournament::{MatchSnapshot, TournamentProgress, TournamentRunner};
+use nit_games::{HistoryWriter, NormalizedConfig};
+
+#[derive(Clone)]
+pub struct RunRequest {
+    pub config: NormalizedConfig,
+    pub config_text: String,
+    pub timestamp: String,
+    pub run_id: String,
+    pub summary_path: PathBuf,
+    pub event_path: Option<PathBuf>,
+    pub history_path: Option<PathBuf>,
+    pub progress_interval: Duration,
+    pub steps_per_tick: u32,
+}
+
+pub enum RunnerCommand {
+    StartRun(RunRequest),
+    Pause,
+    Resume,
+    StepOnce,
+    Cancel,
+    UpdateSpeed(u32),
+    Shutdown,
+}
+
+pub enum RunnerEvent {
+    Definitions(Vec<StrategyDefinition>),
+    Progress(TournamentProgress),
+    MatchPreview(MatchSnapshot),
+    PartialLeaderboard(TournamentResults),
+    Finished(RunSummary),
+    Cancelled,
+    Error(String),
+}
+
+pub struct GamesRunner {
+    cmd_tx: Sender<RunnerCommand>,
+    pub events: Receiver<RunnerEvent>,
+    handle: Option<JoinHandle<()>>,
+}
+
+impl GamesRunner {
+    pub fn spawn() -> Self {
+        let (cmd_tx, cmd_rx) = mpsc::channel();
+        let (event_tx, event_rx) = mpsc::channel();
+        let handle = thread::Builder::new()
+            .name("nit-games-runner".into())
+            .spawn(move || runner_loop(cmd_rx, event_tx))
+            .expect("spawn games runner");
+        Self {
+            cmd_tx,
+            events: event_rx,
+            handle: Some(handle),
+        }
+    }
+
+    pub fn send(&self, command: RunnerCommand) {
+        let _ = self.cmd_tx.send(command);
+    }
+
+    pub fn shutdown(&mut self) {
+        let _ = self.cmd_tx.send(RunnerCommand::Shutdown);
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+struct RunState {
+    runner: TournamentRunner,
+    config_text: String,
+    timestamp: String,
+    run_id: String,
+    summary_path: PathBuf,
+    steps_per_tick: u32,
+    progress_interval: Duration,
+    last_progress: Instant,
+    last_completed: usize,
+}
+
+fn runner_loop(cmd_rx: Receiver<RunnerCommand>, event_tx: Sender<RunnerEvent>) {
+    let mut state: Option<RunState> = None;
+    let mut paused = false;
+
+    loop {
+        if state.is_none() {
+            match cmd_rx.recv() {
+                Ok(RunnerCommand::StartRun(request)) => {
+                    match start_run(request, &event_tx) {
+                        Ok(run_state) => {
+                            state = Some(run_state);
+                            paused = false;
+                        }
+                        Err(err) => {
+                            let _ = event_tx.send(RunnerEvent::Error(err));
+                        }
+                    }
+                }
+                Ok(RunnerCommand::Shutdown) | Err(_) => break,
+                _ => {}
+            }
+            continue;
+        }
+
+        let mut step_once = false;
+        while let Ok(cmd) = cmd_rx.try_recv() {
+            match cmd {
+                RunnerCommand::Pause => paused = true,
+                RunnerCommand::Resume => paused = false,
+                RunnerCommand::StepOnce => step_once = true,
+                RunnerCommand::Cancel => {
+                    if let Some(run_state) = state.take() {
+                        finalize_cancel(run_state);
+                    }
+                    let _ = event_tx.send(RunnerEvent::Cancelled);
+                    paused = false;
+                }
+                RunnerCommand::UpdateSpeed(steps) => {
+                    if let Some(run_state) = state.as_mut() {
+                        run_state.steps_per_tick = steps.max(1);
+                    }
+                }
+                RunnerCommand::Shutdown => {
+                    if let Some(run_state) = state.take() {
+                        finalize_cancel(run_state);
+                    }
+                    return;
+                }
+                RunnerCommand::StartRun(_) => {}
+            }
+        }
+
+        if state.is_none() {
+            continue;
+        }
+
+        if paused && !step_once {
+            thread::sleep(Duration::from_millis(20));
+            continue;
+        }
+
+        let Some(run_state) = state.as_mut() else { continue };
+
+        let steps = if step_once { 1 } else { run_state.steps_per_tick };
+        run_state.runner.step_rounds(steps);
+
+        let completed = run_state.runner.completed_matches();
+        if completed > run_state.last_completed {
+            let results = run_state.runner.results();
+            let _ = event_tx.send(RunnerEvent::PartialLeaderboard(results));
+            run_state.last_completed = completed;
+        }
+
+        if run_state
+            .progress_interval
+            .is_zero()
+            || run_state.last_progress.elapsed() >= run_state.progress_interval
+        {
+            if let Some(progress) = run_state.runner.progress() {
+                let _ = event_tx.send(RunnerEvent::Progress(progress));
+            }
+            if let Some(snapshot) = run_state.runner.match_snapshot() {
+                let _ = event_tx.send(RunnerEvent::MatchPreview(snapshot));
+            }
+            run_state.last_progress = Instant::now();
+        }
+
+        if run_state.runner.is_done() {
+            match finalize_run(state.take().expect("run state")) {
+                Ok(summary) => {
+                    let _ = event_tx.send(RunnerEvent::Finished(summary));
+                }
+                Err(err) => {
+                    let _ = event_tx.send(RunnerEvent::Error(err));
+                }
+            }
+        }
+    }
+}
+
+fn start_run(request: RunRequest, event_tx: &Sender<RunnerEvent>) -> Result<RunState, String> {
+    let mut runner = TournamentRunner::new(request.config);
+    if let Some(path) = request.event_path {
+        let include_rounds = runner.config().event_log.include_rounds;
+        match EventWriter::new(path, include_rounds) {
+            Ok(writer) => runner = runner.with_event_writer(writer),
+            Err(err) => return Err(format!("Failed to create event log: {err}")),
+        }
+    }
+    if let Some(path) = request.history_path {
+        match HistoryWriter::new(path) {
+            Ok(writer) => runner = runner.with_history_writer(writer),
+            Err(err) => return Err(format!("Failed to create history log: {err}")),
+        }
+    }
+
+    let definitions = runner.definitions().to_vec();
+    let _ = event_tx.send(RunnerEvent::Definitions(definitions));
+
+    Ok(RunState {
+        runner,
+        config_text: request.config_text,
+        timestamp: request.timestamp,
+        run_id: request.run_id,
+        summary_path: request.summary_path,
+        steps_per_tick: request.steps_per_tick.max(1),
+        progress_interval: request.progress_interval,
+        last_progress: Instant::now(),
+        last_completed: 0,
+    })
+}
+
+fn finalize_run(state: RunState) -> Result<RunSummary, String> {
+    let mut summary = state.runner.finish(
+        state.timestamp.clone(),
+        state.run_id.clone(),
+        state.config_text.clone(),
+    );
+    summary.paths.summary = Some(state.summary_path.display().to_string());
+    write_summary(&state.summary_path, &summary).map_err(|err| err.to_string())?;
+    Ok(summary)
+}
+
+fn finalize_cancel(state: RunState) {
+    let _ = state
+        .runner
+        .finish(state.timestamp, state.run_id, state.config_text);
+}

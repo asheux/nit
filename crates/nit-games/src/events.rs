@@ -30,6 +30,7 @@ pub enum GameEvent {
     },
     MatchStart {
         timestamp: String,
+        match_id: usize,
         match_index: usize,
         total_matches: usize,
         a: String,
@@ -38,6 +39,7 @@ pub enum GameEvent {
     },
     Round {
         timestamp: String,
+        match_id: usize,
         match_index: usize,
         round: u32,
         a_action: char,
@@ -47,6 +49,7 @@ pub enum GameEvent {
     },
     MatchEnd {
         timestamp: String,
+        match_id: usize,
         match_index: usize,
         a_total: i64,
         b_total: i64,

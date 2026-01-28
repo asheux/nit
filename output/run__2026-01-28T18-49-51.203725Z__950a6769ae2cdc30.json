@@ -1,0 +1,635 @@
+{
+  "schema_version": 1,
+  "timestamp": "2026-01-28T18:49:51.203725Z",
+  "run_id": "950a6769ae2cdc30",
+  "seed": 12345,
+  "config_text": "schema_version = 1\ngame = \"ipd\"\nrounds = 200\nrepetitions = 1\nself_play = false\nseed = 12345\nnoise = 0.0\n\n[payoff]\nR = 3\nS = 0\nT = 5\nP = 1\n\n[history]\nenabled = true\n\n[engine]\nmode = \"interactive\"\nparallelism = \"auto\"\nprogress_interval_ms = 80\n\n[[strategy]]\nid = \"allc\"\ntype = \"builtin\"\nname = \"Always Cooperate\"\n\n[[strategy]]\nid = \"alld\"\ntype = \"builtin\"\nname = \"Always Defect\"\n\n[[strategy]]\nid = \"tft\"\ntype = \"builtin\"\nname = \"Tit For Tat\"\n\n[[strategy]]\nid = \"grim\"\ntype = \"builtin\"\nname = \"Grim Trigger\"\n\n[[strategy]]\nid = \"pavlov\"\ntype = \"builtin\"\nname = \"Win Stay Lose Shift\"\n\n[[strategy]]\nid = \"rand50\"\ntype = \"random\"\np_cooperate = 0.5\n\n[[strategy]]\nid = \"fsm1\"\ntype = \"fsm\"\nstart_state = 0\noutput = [\"C\", \"D\"]\ntransitions = [\n  [0, 1, 0, 1],\n  [1, 1, 0, 0],\n]\n\n[[strategy]]\nid = \"mem1\"\ntype = \"memory\"\nn = 1\ninitial = \"C\"\ntable = [\"C\", \"D\", \"D\", \"C\"]\n",
+  "config": {
+    "schema_version": 1,
+    "game": "ipd",
+    "rounds": 200,
+    "repetitions": 1,
+    "self_play": false,
+    "seed": 12345,
+    "noise": 0.0,
+    "payoff": {
+      "r": 3,
+      "s": 0,
+      "t": 5,
+      "p": 1,
+      "matrix": [
+        [
+          [
+            3,
+            3
+          ],
+          [
+            0,
+            5
+          ]
+        ],
+        [
+          [
+            5,
+            0
+          ],
+          [
+            1,
+            1
+          ]
+        ]
+      ]
+    },
+    "strategies": [
+      {
+        "id": "allc",
+        "name": "Always Cooperate",
+        "type": "builtin",
+        "builtin": "all_c"
+      },
+      {
+        "id": "alld",
+        "name": "Always Defect",
+        "type": "builtin",
+        "builtin": "all_d"
+      },
+      {
+        "id": "tft",
+        "name": "Tit For Tat",
+        "type": "builtin",
+        "builtin": "tit_for_tat"
+      },
+      {
+        "id": "grim",
+        "name": "Grim Trigger",
+        "type": "builtin",
+        "builtin": "grim_trigger"
+      },
+      {
+        "id": "pavlov",
+        "name": "Win Stay Lose Shift",
+        "type": "builtin",
+        "builtin": "win_stay_lose_shift"
+      },
+      {
+        "id": "rand50",
+        "name": null,
+        "type": "random",
+        "p_cooperate": 0.5
+      },
+      {
+        "id": "fsm1",
+        "name": null,
+        "type": "fsm",
+        "start_state": 0,
+        "input_index_base": 0,
+        "output": [
+          "Cooperate",
+          "Defect"
+        ],
+        "transitions": [
+          [
+            0,
+            1,
+            0,
+            1
+          ],
+          [
+            1,
+            1,
+            0,
+            0
+          ]
+        ]
+      },
+      {
+        "id": "mem1",
+        "name": null,
+        "type": "memory",
+        "n": 1,
+        "initial": "Cooperate",
+        "table": [
+          "Cooperate",
+          "Defect",
+          "Defect",
+          "Cooperate"
+        ]
+      }
+    ],
+    "event_log": {
+      "enabled": true,
+      "include_rounds": false
+    },
+    "history": {
+      "enabled": true
+    },
+    "engine": {
+      "mode": "batch",
+      "parallelism": "auto",
+      "progress_interval_ms": 80
+    }
+  },
+  "paths": {
+    "summary": "/Users/nitrika/Projects/Configs/nit/output/run__2026-01-28T18-49-51.203725Z__950a6769ae2cdc30.json",
+    "events": "/Users/nitrika/Projects/Configs/nit/output/events__2026-01-28T18-49-51.203725Z__950a6769ae2cdc30.ndjson",
+    "history": "/Users/nitrika/Projects/Configs/nit/output/history__2026-01-28T18-49-51.203725Z__950a6769ae2cdc30.ndjson"
+  },
+  "strategies": [
+    {
+      "id": "allc",
+      "name": "Always Cooperate",
+      "type": "builtin",
+      "builtin": "all_c",
+      "rng_seed_a": null,
+      "rng_seed_b": null
+    },
+    {
+      "id": "alld",
+      "name": "Always Defect",
+      "type": "builtin",
+      "builtin": "all_d",
+      "rng_seed_a": null,
+      "rng_seed_b": null
+    },
+    {
+      "id": "tft",
+      "name": "Tit For Tat",
+      "type": "builtin",
+      "builtin": "tit_for_tat",
+      "rng_seed_a": null,
+      "rng_seed_b": null
+    },
+    {
+      "id": "grim",
+      "name": "Grim Trigger",
+      "type": "builtin",
+      "builtin": "grim_trigger",
+      "rng_seed_a": null,
+      "rng_seed_b": null
+    },
+    {
+      "id": "pavlov",
+      "name": "Win Stay Lose Shift",
+      "type": "builtin",
+      "builtin": "win_stay_lose_shift",
+      "rng_seed_a": null,
+      "rng_seed_b": null
+    },
+    {
+      "id": "rand50",
+      "name": null,
+      "type": "random",
+      "p_cooperate": 0.5,
+      "rng_seed_a": 10091911311978242052,
+      "rng_seed_b": 14318310363035724349
+    },
+    {
+      "id": "fsm1",
+      "name": null,
+      "type": "fsm",
+      "start_state": 0,
+      "input_index_base": 0,
+      "output": [
+        "Cooperate",
+        "Defect"
+      ],
+      "transitions": [
+        [
+          0,
+          1,
+          0,
+          1
+        ],
+        [
+          1,
+          1,
+          0,
+          0
+        ]
+      ],
+      "rng_seed_a": null,
+      "rng_seed_b": null
+    },
+    {
+      "id": "mem1",
+      "name": null,
+      "type": "memory",
+      "n": 1,
+      "initial": "Cooperate",
+      "table": [
+        "Cooperate",
+        "Defect",
+        "Defect",
+        "Cooperate"
+      ],
+      "rng_seed_a": null,
+      "rng_seed_b": null
+    }
+  ],
+  "results": {
+    "ranking": [
+      {
+        "id": "grim",
+        "name": "Grim Trigger",
+        "total_payoff": 3792,
+        "average_payoff": 541.7142857142857,
+        "matches": 7,
+        "wins": 1,
+        "losses": 1,
+        "draws": 5,
+        "crashed": false,
+        "crash_count": 0
+      },
+      {
+        "id": "tft",
+        "name": "Tit For Tat",
+        "total_payoff": 3652,
+        "average_payoff": 521.7142857142857,
+        "matches": 7,
+        "wins": 0,
+        "losses": 1,
+        "draws": 6,
+        "crashed": false,
+        "crash_count": 0
+      },
+      {
+        "id": "pavlov",
+        "name": "Win Stay Lose Shift",
+        "total_payoff": 3630,
+        "average_payoff": 518.5714285714286,
+        "matches": 7,
+        "wins": 0,
+        "losses": 2,
+        "draws": 5,
+        "crashed": false,
+        "crash_count": 0
+      },
+      {
+        "id": "mem1",
+        "name": null,
+        "total_payoff": 3585,
+        "average_payoff": 512.1428571428571,
+        "matches": 7,
+        "wins": 1,
+        "losses": 1,
+        "draws": 5,
+        "crashed": false,
+        "crash_count": 0
+      },
+      {
+        "id": "fsm1",
+        "name": null,
+        "total_payoff": 3502,
+        "average_payoff": 500.2857142857143,
+        "matches": 7,
+        "wins": 0,
+        "losses": 2,
+        "draws": 5,
+        "crashed": false,
+        "crash_count": 0
+      },
+      {
+        "id": "alld",
+        "name": "Always Defect",
+        "total_payoff": 3412,
+        "average_payoff": 487.42857142857144,
+        "matches": 7,
+        "wins": 7,
+        "losses": 0,
+        "draws": 0,
+        "crashed": false,
+        "crash_count": 0
+      },
+      {
+        "id": "allc",
+        "name": "Always Cooperate",
+        "total_payoff": 3273,
+        "average_payoff": 467.57142857142856,
+        "matches": 7,
+        "wins": 0,
+        "losses": 2,
+        "draws": 5,
+        "crashed": false,
+        "crash_count": 0
+      },
+      {
+        "id": "rand50",
+        "name": null,
+        "total_payoff": 2922,
+        "average_payoff": 417.42857142857144,
+        "matches": 7,
+        "wins": 3,
+        "losses": 3,
+        "draws": 1,
+        "crashed": false,
+        "crash_count": 0
+      }
+    ],
+    "pairwise": [
+      {
+        "a": "allc",
+        "b": "alld",
+        "a_total": 0,
+        "b_total": 1000,
+        "a_wins": 0,
+        "b_wins": 1,
+        "draws": 0
+      },
+      {
+        "a": "allc",
+        "b": "tft",
+        "a_total": 600,
+        "b_total": 600,
+        "a_wins": 0,
+        "b_wins": 0,
+        "draws": 1
+      },
+      {
+        "a": "allc",
+        "b": "grim",
+        "a_total": 600,
+        "b_total": 600,
+        "a_wins": 0,
+        "b_wins": 0,
+        "draws": 1
+      },
+      {
+        "a": "allc",
+        "b": "pavlov",
+        "a_total": 600,
+        "b_total": 600,
+        "a_wins": 0,
+        "b_wins": 0,
+        "draws": 1
+      },
+      {
+        "a": "allc",
+        "b": "rand50",
+        "a_total": 273,
+        "b_total": 818,
+        "a_wins": 0,
+        "b_wins": 1,
+        "draws": 0
+      },
+      {
+        "a": "allc",
+        "b": "fsm1",
+        "a_total": 600,
+        "b_total": 600,
+        "a_wins": 0,
+        "b_wins": 0,
+        "draws": 1
+      },
+      {
+        "a": "allc",
+        "b": "mem1",
+        "a_total": 600,
+        "b_total": 600,
+        "a_wins": 0,
+        "b_wins": 0,
+        "draws": 1
+      },
+      {
+        "a": "alld",
+        "b": "tft",
+        "a_total": 204,
+        "b_total": 199,
+        "a_wins": 1,
+        "b_wins": 0,
+        "draws": 0
+      },
+      {
+        "a": "alld",
+        "b": "grim",
+        "a_total": 204,
+        "b_total": 199,
+        "a_wins": 1,
+        "b_wins": 0,
+        "draws": 0
+      },
+      {
+        "a": "alld",
+        "b": "pavlov",
+        "a_total": 204,
+        "b_total": 199,
+        "a_wins": 1,
+        "b_wins": 0,
+        "draws": 0
+      },
+      {
+        "a": "alld",
+        "b": "rand50",
+        "a_total": 600,
+        "b_total": 100,
+        "a_wins": 1,
+        "b_wins": 0,
+        "draws": 0
+      },
+      {
+        "a": "alld",
+        "b": "fsm1",
+        "a_total": 600,
+        "b_total": 100,
+        "a_wins": 1,
+        "b_wins": 0,
+        "draws": 0
+      },
+      {
+        "a": "alld",
+        "b": "mem1",
+        "a_total": 600,
+        "b_total": 100,
+        "a_wins": 1,
+        "b_wins": 0,
+        "draws": 0
+      },
+      {
+        "a": "tft",
+        "b": "grim",
+        "a_total": 600,
+        "b_total": 600,
+        "a_wins": 0,
+        "b_wins": 0,
+        "draws": 1
+      },
+      {
+        "a": "tft",
+        "b": "pavlov",
+        "a_total": 600,
+        "b_total": 600,
+        "a_wins": 0,
+        "b_wins": 0,
+        "draws": 1
+      },
+      {
+        "a": "tft",
+        "b": "rand50",
+        "a_total": 453,
+        "b_total": 453,
+        "a_wins": 0,
+        "b_wins": 0,
+        "draws": 1
+      },
+      {
+        "a": "tft",
+        "b": "fsm1",
+        "a_total": 600,
+        "b_total": 600,
+        "a_wins": 0,
+        "b_wins": 0,
+        "draws": 1
+      },
+      {
+        "a": "tft",
+        "b": "mem1",
+        "a_total": 600,
+        "b_total": 600,
+        "a_wins": 0,
+        "b_wins": 0,
+        "draws": 1
+      },
+      {
+        "a": "grim",
+        "b": "pavlov",
+        "a_total": 600,
+        "b_total": 600,
+        "a_wins": 0,
+        "b_wins": 0,
+        "draws": 1
+      },
+      {
+        "a": "grim",
+        "b": "rand50",
+        "a_total": 593,
+        "b_total": 108,
+        "a_wins": 1,
+        "b_wins": 0,
+        "draws": 0
+      },
+      {
+        "a": "grim",
+        "b": "fsm1",
+        "a_total": 600,
+        "b_total": 600,
+        "a_wins": 0,
+        "b_wins": 0,
+        "draws": 1
+      },
+      {
+        "a": "grim",
+        "b": "mem1",
+        "a_total": 600,
+        "b_total": 600,
+        "a_wins": 0,
+        "b_wins": 0,
+        "draws": 1
+      },
+      {
+        "a": "pavlov",
+        "b": "rand50",
+        "a_total": 431,
+        "b_total": 436,
+        "a_wins": 0,
+        "b_wins": 1,
+        "draws": 0
+      },
+      {
+        "a": "pavlov",
+        "b": "fsm1",
+        "a_total": 600,
+        "b_total": 600,
+        "a_wins": 0,
+        "b_wins": 0,
+        "draws": 1
+      },
+      {
+        "a": "pavlov",
+        "b": "mem1",
+        "a_total": 600,
+        "b_total": 600,
+        "a_wins": 0,
+        "b_wins": 0,
+        "draws": 1
+      },
+      {
+        "a": "rand50",
+        "b": "fsm1",
+        "a_total": 567,
+        "b_total": 402,
+        "a_wins": 1,
+        "b_wins": 0,
+        "draws": 0
+      },
+      {
+        "a": "rand50",
+        "b": "mem1",
+        "a_total": 440,
+        "b_total": 485,
+        "a_wins": 0,
+        "b_wins": 1,
+        "draws": 0
+      },
+      {
+        "a": "fsm1",
+        "b": "mem1",
+        "a_total": 600,
+        "b_total": 600,
+        "a_wins": 0,
+        "b_wins": 0,
+        "draws": 1
+      }
+    ],
+    "dominance": [
+      {
+        "winner": "alld",
+        "loser": "allc"
+      },
+      {
+        "winner": "rand50",
+        "loser": "allc"
+      },
+      {
+        "winner": "alld",
+        "loser": "tft"
+      },
+      {
+        "winner": "alld",
+        "loser": "grim"
+      },
+      {
+        "winner": "alld",
+        "loser": "pavlov"
+      },
+      {
+        "winner": "alld",
+        "loser": "rand50"
+      },
+      {
+        "winner": "alld",
+        "loser": "fsm1"
+      },
+      {
+        "winner": "alld",
+        "loser": "mem1"
+      },
+      {
+        "winner": "grim",
+        "loser": "rand50"
+      },
+      {
+        "winner": "rand50",
+        "loser": "pavlov"
+      },
+      {
+        "winner": "rand50",
+        "loser": "fsm1"
+      },
+      {
+        "winner": "mem1",
+        "loser": "rand50"
+      }
+    ]
+  },
+  "event_log": "/Users/nitrika/Projects/Configs/nit/output/events__2026-01-28T18-49-51.203725Z__950a6769ae2cdc30.ndjson",
+  "history_log": "/Users/nitrika/Projects/Configs/nit/output/history__2026-01-28T18-49-51.203725Z__950a6769ae2cdc30.ndjson"
+}

@@ -1,5 +1,4 @@
 use std::fs;
-use std::path::PathBuf;
 use std::time::Instant;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -7,11 +6,11 @@ use nit_core::{AppState, GamesStatus};
 use nit_games::{
     config::GamesConfig,
     events::EventWriter,
-    output::RunSummary,
-    tournament::{TournamentProgress, TournamentRunner},
-    HistoryWriter,
+    output::TournamentResults,
+    run_id_from_seed_config,
+    MatchSnapshot, TournamentProgress,
 };
-use nit_utils::fs::write_atomic;
+use nit_games::output::StrategyDefinition;
 use nit_utils::hashing::stable_hash_bytes;
 use ratatui::{
     layout::Rect,
@@ -20,34 +19,49 @@ use ratatui::{
     widgets::{Block, Borders, Clear, Paragraph},
     Frame,
 };
-use tracing::{info, warn};
+use tracing::info;
 
 use crate::theme::Theme;
+use crate::games_runner::{GamesRunner, RunRequest, RunnerCommand, RunnerEvent};
 use crate::widgets::games_visualizer_view::strategy_display_name_from_def;
 
 const MIN_WIDTH: u16 = 88;
 const MIN_HEIGHT: u16 = 22;
 
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum PetriView {
+    Tournament,
+    Inspector,
+}
+
 pub struct GamesPetriDishRuntime {
+    runner: GamesRunner,
     session: Option<GameSession>,
     hidden: bool,
     warning: Option<String>,
     last_tick: Instant,
+    view: PetriView,
+    inspector_window: usize,
 }
 
 struct GameSession {
-    runner: TournamentRunner,
-    timestamp: String,
-    summary_path: PathBuf,
+    config: nit_games::NormalizedConfig,
+    progress: Option<TournamentProgress>,
+    snapshot: Option<MatchSnapshot>,
+    results: TournamentResults,
+    definitions: Vec<StrategyDefinition>,
 }
 
 impl GamesPetriDishRuntime {
     pub fn new(_state: &AppState) -> Self {
         Self {
+            runner: GamesRunner::spawn(),
             session: None,
             hidden: false,
             warning: None,
             last_tick: Instant::now(),
+            view: PetriView::Tournament,
+            inspector_window: 50,
         }
     }
 
@@ -102,12 +116,35 @@ impl GamesPetriDishRuntime {
             )
         {
             if state.games.paused {
-                self.step_once(state);
+                self.runner.send(RunnerCommand::StepOnce);
             }
             return true;
         }
 
         match key.code {
+            KeyCode::Tab => {
+                self.view = match self.view {
+                    PetriView::Tournament => PetriView::Inspector,
+                    PetriView::Inspector => PetriView::Tournament,
+                };
+                true
+            }
+            KeyCode::Left => {
+                if self.view == PetriView::Inspector {
+                    self.adjust_inspector_window(-1);
+                    true
+                } else {
+                    false
+                }
+            }
+            KeyCode::Right => {
+                if self.view == PetriView::Inspector {
+                    self.adjust_inspector_window(1);
+                    true
+                } else {
+                    false
+                }
+            }
             KeyCode::Esc => {
                 self.close(state);
                 true
@@ -119,11 +156,16 @@ impl GamesPetriDishRuntime {
                 } else {
                     GamesStatus::Running
                 };
+                if state.games.paused {
+                    self.runner.send(RunnerCommand::Pause);
+                } else {
+                    self.runner.send(RunnerCommand::Resume);
+                }
                 true
             }
             KeyCode::Enter => {
                 if state.games.paused {
-                    self.step_once(state);
+                    self.runner.send(RunnerCommand::StepOnce);
                 }
                 true
             }
@@ -133,10 +175,14 @@ impl GamesPetriDishRuntime {
             }
             KeyCode::Char('+') | KeyCode::Char('=') => {
                 state.games.steps_per_tick = (state.games.steps_per_tick + 1).min(200);
+                self.runner
+                    .send(RunnerCommand::UpdateSpeed(state.games.steps_per_tick));
                 true
             }
             KeyCode::Char('-') | KeyCode::Char('_') => {
                 state.games.steps_per_tick = state.games.steps_per_tick.saturating_sub(1).max(1);
+                self.runner
+                    .send(RunnerCommand::UpdateSpeed(state.games.steps_per_tick));
                 true
             }
             _ => false,
@@ -144,20 +190,65 @@ impl GamesPetriDishRuntime {
     }
 
     pub fn tick(&mut self, state: &mut AppState) {
-        if self.session.is_none() {
-            return;
-        }
-        if state.games.paused {
-            return;
-        }
-        let steps = state.games.steps_per_tick.max(1);
-        if let Some(session) = self.session.as_mut() {
-            session.runner.step_rounds(steps);
-            if session.runner.is_done() {
-                self.finish_session(state);
+        self.handle_runner_events(state);
+        self.last_tick = Instant::now();
+    }
+
+    fn handle_runner_events(&mut self, state: &mut AppState) {
+        while let Ok(event) = self.runner.events.try_recv() {
+            match event {
+                RunnerEvent::Definitions(defs) => {
+                    if let Some(session) = self.session.as_mut() {
+                        session.definitions = defs;
+                    }
+                }
+                RunnerEvent::Progress(progress) => {
+                    if let Some(session) = self.session.as_mut() {
+                        session.progress = Some(progress);
+                    }
+                }
+                RunnerEvent::MatchPreview(snapshot) => {
+                    if let Some(session) = self.session.as_mut() {
+                        session.snapshot = Some(snapshot);
+                    }
+                }
+                RunnerEvent::PartialLeaderboard(results) => {
+                    if let Some(session) = self.session.as_mut() {
+                        session.results = results;
+                    }
+                }
+                RunnerEvent::Finished(summary) => {
+                    self.session = None;
+                    state.games.last_error = None;
+                    state.games.last_run_path = summary.paths.summary.clone();
+                    state.games.last_event_path = summary.event_log.clone();
+                    state.games.last_history_path = summary.history_log.clone();
+                    state.games.last_run = Some(summary);
+                    state.games.status = GamesStatus::Done;
+                    state.games.running = false;
+                    state.games.paused = false;
+                    state.games.petri_hidden = false;
+                    state.status = Some("Games tournament completed".into());
+                }
+                RunnerEvent::Cancelled => {
+                    self.session = None;
+                    state.games.last_error = None;
+                    state.games.running = false;
+                    state.games.paused = false;
+                    state.games.status = GamesStatus::Idle;
+                    state.games.petri_hidden = false;
+                    state.status = Some("Games tournament cancelled".into());
+                }
+                RunnerEvent::Error(err) => {
+                    self.session = None;
+                    state.games.running = false;
+                    state.games.paused = false;
+                    state.games.status = GamesStatus::Error;
+                    state.games.last_error = Some(err.clone());
+                    state.status = Some(err);
+                }
             }
         }
-        self.last_tick = Instant::now();
     }
 
     pub fn render(&mut self, frame: &mut Frame, screen: Rect, state: &AppState, theme: &Theme) {
@@ -220,36 +311,54 @@ impl GamesPetriDishRuntime {
                 Style::default().fg(theme.warning),
             )));
         } else if let Some(session) = self.session.as_ref() {
-            let progress = session.runner.progress();
-            lines.extend(render_progress(
-                progress,
-                state,
-                label_style,
-                value_style,
-                number_style,
-                dim_style,
-                status_style(state, theme),
-            ));
-            lines.push(Line::from(""));
-            let results = session.runner.results();
-            let definitions = session.runner.definitions();
-            let (rank_w, score_w, wld_w) = top_table_widths(&session.runner);
-            lines.extend(render_top_table(
-                &results,
-                definitions,
-                inner.width as usize,
-                header_style,
-                label_style,
-                value_style,
-                number_style,
-                win_style,
-                loss_style,
-                draw_style,
-                dim_style,
-                rank_w,
-                score_w,
-                wld_w,
-            ));
+            match self.view {
+                PetriView::Tournament => {
+                    let progress = session.progress.clone();
+                    lines.extend(render_progress(
+                        progress,
+                        state,
+                        label_style,
+                        value_style,
+                        number_style,
+                        dim_style,
+                        status_style(state, theme),
+                    ));
+                    lines.push(Line::from(""));
+                    let results = &session.results;
+                    let definitions = &session.definitions;
+                    let (rank_w, score_w, wld_w) = top_table_widths(&session.config);
+                    lines.extend(render_top_table(
+                        results,
+                        definitions,
+                        inner.width as usize,
+                        header_style,
+                        label_style,
+                        value_style,
+                        number_style,
+                        win_style,
+                        loss_style,
+                        draw_style,
+                        dim_style,
+                        rank_w,
+                        score_w,
+                        wld_w,
+                    ));
+                }
+                PetriView::Inspector => {
+                    let snapshot = session.snapshot.clone();
+                    lines.extend(render_match_inspector(
+                        snapshot,
+                        self.inspector_window,
+                        inner.width as usize,
+                        header_style,
+                        label_style,
+                        value_style,
+                        number_style,
+                        dim_style,
+                        loss_style,
+                    ));
+                }
+            }
             lines.push(Line::from(""));
             let paused_style = if state.games.paused {
                 Style::default()
@@ -265,18 +374,38 @@ impl GamesPetriDishRuntime {
                 Span::styled("paused: ", label_style),
                 Span::styled(if state.games.paused { "yes" } else { "no" }, paused_style),
             ]));
-            lines.push(Line::from(vec![
-                Span::styled("Esc", key_style),
-                Span::styled(" close | ", help_style),
-                Span::styled("Space", key_style),
-                Span::styled(" pause | ", help_style),
-                Span::styled("Enter", key_style),
-                Span::styled(" step | ", help_style),
-                Span::styled("+/-", key_style),
-                Span::styled(" speed | ", help_style),
-                Span::styled("H", key_style),
-                Span::styled(" hide", help_style),
-            ]));
+            lines.push(Line::from(match self.view {
+                PetriView::Tournament => vec![
+                    Span::styled("Esc", key_style),
+                    Span::styled(" close | ", help_style),
+                    Span::styled("Space", key_style),
+                    Span::styled(" pause | ", help_style),
+                    Span::styled("Enter", key_style),
+                    Span::styled(" step | ", help_style),
+                    Span::styled("+/-", key_style),
+                    Span::styled(" speed | ", help_style),
+                    Span::styled("Tab", key_style),
+                    Span::styled(" inspect | ", help_style),
+                    Span::styled("H", key_style),
+                    Span::styled(" hide", help_style),
+                ],
+                PetriView::Inspector => vec![
+                    Span::styled("Esc", key_style),
+                    Span::styled(" close | ", help_style),
+                    Span::styled("Space", key_style),
+                    Span::styled(" pause | ", help_style),
+                    Span::styled("Enter", key_style),
+                    Span::styled(" step | ", help_style),
+                    Span::styled("+/-", key_style),
+                    Span::styled(" speed | ", help_style),
+                    Span::styled("Tab", key_style),
+                    Span::styled(" tournament | ", help_style),
+                    Span::styled("←/→", key_style),
+                    Span::styled(" window | ", help_style),
+                    Span::styled("H", key_style),
+                    Span::styled(" hide", help_style),
+                ],
+            }));
         }
 
         let paragraph = Paragraph::new(lines)
@@ -286,6 +415,10 @@ impl GamesPetriDishRuntime {
     }
 
     fn start_session(&mut self, state: &mut AppState) {
+        if self.session.is_some() {
+            self.warning = Some("Games tournament already running".into());
+            return;
+        }
         let config_text = state.editor_buffer().content_as_string();
         let mut config = match GamesConfig::from_toml(&config_text) {
             Ok(config) => config,
@@ -298,6 +431,8 @@ impl GamesPetriDishRuntime {
             }
         };
 
+        config.engine.mode = nit_games::EngineMode::Interactive;
+
         let timestamp = EventWriter::timestamp();
         let seed = config
             .seed
@@ -305,6 +440,7 @@ impl GamesPetriDishRuntime {
         config.seed = Some(seed);
 
         let run_hash = stable_hash_bytes(format!("{seed}:{config_text}").as_bytes());
+        let run_id = run_id_from_seed_config(seed, &config_text);
         let stamp = timestamp.replace(':', "-");
         let run_dir = state.workspace_root.join("games-runs");
         if let Err(err) = fs::create_dir_all(&run_dir) {
@@ -316,7 +452,6 @@ impl GamesPetriDishRuntime {
         }
 
         let event_log_enabled = config.event_log.enabled;
-        let include_rounds = config.event_log.include_rounds;
         let history_log_enabled = config.history.enabled;
         let summary_path = run_dir.join(format!("run__{stamp}__{run_hash:08x}.json"));
         let event_path = run_dir.join(format!("events__{stamp}__{run_hash:08x}.ndjson"));
@@ -328,24 +463,27 @@ impl GamesPetriDishRuntime {
         if history_log_enabled {
             info!("Games history log path: {}", history_path.display());
         }
-        let mut runner = TournamentRunner::new(config);
-        if event_log_enabled {
-            match EventWriter::new(event_path.clone(), include_rounds) {
-                Ok(writer) => runner = runner.with_event_writer(writer),
-                Err(err) => warn!("Failed to create event log: {err}"),
-            }
-        }
-        if history_log_enabled {
-            match HistoryWriter::new(history_path.clone()) {
-                Ok(writer) => runner = runner.with_history_writer(writer),
-                Err(err) => warn!("Failed to create history log: {err}"),
-            }
-        }
+        let progress_interval =
+            std::time::Duration::from_millis(config.engine.progress_interval_ms);
+        let request = RunRequest {
+            config: config.clone(),
+            config_text: config_text.clone(),
+            timestamp: timestamp.clone(),
+            run_id: run_id.clone(),
+            summary_path: summary_path.clone(),
+            event_path: event_log_enabled.then_some(event_path),
+            history_path: history_log_enabled.then_some(history_path),
+            progress_interval,
+            steps_per_tick: state.games.steps_per_tick.max(1),
+        };
 
+        self.runner.send(RunnerCommand::StartRun(request));
         self.session = Some(GameSession {
-            runner,
-            timestamp,
-            summary_path,
+            config,
+            progress: None,
+            snapshot: None,
+            results: TournamentResults::empty(),
+            definitions: Vec::new(),
         });
         self.hidden = false;
         state.games.petri_hidden = false;
@@ -357,29 +495,10 @@ impl GamesPetriDishRuntime {
         info!("Games tournament started");
     }
 
-    fn finish_session(&mut self, state: &mut AppState) {
-        let Some(session) = self.session.take() else {
-            return;
-        };
-        let summary = session.runner.finish(session.timestamp.clone());
-        if let Err(err) = write_summary(&session.summary_path, &summary) {
-            warn!("Failed to write games summary: {err}");
-            state.games.last_error = Some(err.to_string());
-        } else {
-            state.games.last_run_path = Some(session.summary_path.display().to_string());
-            state.games.last_event_path = summary.event_log.clone();
-            state.games.last_history_path = summary.history_log.clone();
-        }
-        state.games.last_run = Some(summary);
-        state.games.status = GamesStatus::Done;
-        state.games.running = false;
-        state.games.paused = false;
-        state.games.petri_hidden = false;
-        state.status = Some("Games tournament completed".into());
-        info!("Games tournament completed");
-    }
-
     fn close(&mut self, state: &mut AppState) {
+        if self.session.is_some() {
+            self.runner.send(RunnerCommand::Cancel);
+        }
         self.session = None;
         self.hidden = false;
         state.games.running = false;
@@ -402,13 +521,16 @@ impl GamesPetriDishRuntime {
         }
     }
 
-    fn step_once(&mut self, state: &mut AppState) {
-        if let Some(session) = self.session.as_mut() {
-            session.runner.step_rounds(1);
-            if session.runner.is_done() {
-                self.finish_session(state);
-            }
+    fn adjust_inspector_window(&mut self, delta: i32) {
+        const WINDOWS: [usize; 4] = [20, 50, 100, 200];
+        let current = self.inspector_window;
+        let mut idx = WINDOWS.iter().position(|v| *v == current).unwrap_or(1);
+        if delta.is_positive() {
+            idx = (idx + 1).min(WINDOWS.len() - 1);
+        } else if delta.is_negative() {
+            idx = idx.saturating_sub(1);
         }
+        self.inspector_window = WINDOWS[idx];
     }
 
     fn export_last_run(&mut self, state: &mut AppState) {
@@ -425,7 +547,9 @@ impl GamesPetriDishRuntime {
             return;
         }
         let summary_path = run_dir.join(format!("run__{stamp}__{run_hash:08x}.json"));
-        if let Err(err) = write_summary(&summary_path, run) {
+        let mut export_run = run.clone();
+        export_run.paths.summary = Some(summary_path.display().to_string());
+        if let Err(err) = nit_games::output::write_summary(&summary_path, &export_run) {
             state.status = Some(format!("Failed to export summary: {err}"));
         } else {
             state.games.last_run_path = Some(summary_path.display().to_string());
@@ -434,6 +558,12 @@ impl GamesPetriDishRuntime {
                 summary_path.display()
             ));
         }
+    }
+}
+
+impl Drop for GamesPetriDishRuntime {
+    fn drop(&mut self) {
+        self.runner.shutdown();
     }
 }
 
@@ -476,14 +606,20 @@ fn render_progress(
             Span::styled(" vs ", dim_style),
             Span::styled(progress.b, value_style),
         ]));
-        if let (Some(a), Some(b)) = (progress.last_action_a, progress.last_action_b) {
-            lines.push(Line::from(vec![
-                Span::styled("Last: ", label_style),
-                Span::styled(a.as_char().to_string(), number_style),
-                Span::styled(" / ", dim_style),
-                Span::styled(b.as_char().to_string(), number_style),
-            ]));
-        }
+        lines.push(Line::from(
+            match (progress.last_action_a, progress.last_action_b) {
+                (Some(a), Some(b)) => vec![
+                    Span::styled("Last: ", label_style),
+                    Span::styled(a.as_char().to_string(), number_style),
+                    Span::styled(" / ", dim_style),
+                    Span::styled(b.as_char().to_string(), number_style),
+                ],
+                _ => vec![
+                    Span::styled("Last: ", label_style),
+                    Span::styled("Waiting for tournament...", dim_style),
+                ],
+            },
+        ));
         if let (Some(pa), Some(pb)) = (progress.last_payoff_a, progress.last_payoff_b) {
             lines.push(Line::from(vec![
                 Span::styled("Payoff: ", label_style),
@@ -518,6 +654,224 @@ fn render_progress(
     lines
 }
 
+fn render_match_inspector(
+    snapshot: Option<MatchSnapshot>,
+    window: usize,
+    width: usize,
+    header_style: Style,
+    label_style: Style,
+    value_style: Style,
+    number_style: Style,
+    dim_style: Style,
+    warn_style: Style,
+) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    lines.push(Line::from(Span::styled("Match Inspector", header_style)));
+    lines.push(Line::from(vec![
+        Span::styled("window: ", label_style),
+        Span::styled(window.to_string(), number_style),
+        Span::styled(" rounds", dim_style),
+    ]));
+
+    if let Some(snapshot) = snapshot {
+        lines.push(Line::from(vec![
+            Span::styled("Match: ", label_style),
+            Span::styled(snapshot.match_index.to_string(), number_style),
+            Span::styled("/", dim_style),
+            Span::styled(snapshot.total_matches.to_string(), number_style),
+            Span::styled(" (round ", dim_style),
+            Span::styled(snapshot.round.to_string(), number_style),
+            Span::styled("/", dim_style),
+            Span::styled(snapshot.rounds.to_string(), number_style),
+            Span::styled(")", dim_style),
+        ]));
+        lines.push(Line::from(vec![
+            Span::styled("Pair: ", label_style),
+            Span::styled(snapshot.a.clone(), value_style),
+            Span::styled(" vs ", dim_style),
+            Span::styled(snapshot.b.clone(), value_style),
+        ]));
+        lines.push(Line::from(vec![
+            Span::styled("Score: ", label_style),
+            Span::styled(snapshot.a_score.to_string(), number_style),
+            Span::styled(" / ", dim_style),
+            Span::styled(snapshot.b_score.to_string(), number_style),
+        ]));
+        lines.push(Line::from(vec![
+            Span::styled("Outcomes: ", label_style),
+            Span::styled("0=CC 1=CD 2=DC 3=DD", dim_style),
+        ]));
+        lines.extend(render_match_strip(
+            &snapshot,
+            window,
+            width,
+            label_style,
+            value_style,
+            number_style,
+            dim_style,
+            warn_style,
+        ));
+    } else {
+        lines.push(Line::from(vec![
+            Span::styled("Match: ", label_style),
+            Span::styled("Waiting for tournament...", dim_style),
+        ]));
+        lines.push(Line::from(vec![
+            Span::styled("Pair: ", label_style),
+            Span::styled("Waiting for tournament...", dim_style),
+        ]));
+        lines.push(Line::from(vec![
+            Span::styled("Score: ", label_style),
+            Span::styled("Waiting for tournament...", dim_style),
+        ]));
+        lines.push(Line::from(vec![
+            Span::styled("Outcomes: ", label_style),
+            Span::styled("Waiting for tournament...", dim_style),
+        ]));
+    }
+    lines
+}
+
+fn render_match_strip(
+    snapshot: &MatchSnapshot,
+    window: usize,
+    width: usize,
+    label_style: Style,
+    value_style: Style,
+    number_style: Style,
+    dim_style: Style,
+    warn_style: Style,
+) -> Vec<Line<'static>> {
+    let total = snapshot.outcomes.len().min(snapshot.payoffs.len());
+    if total == 0 || window == 0 {
+        return vec![Line::from(vec![
+            Span::styled("  ", dim_style),
+            Span::styled("--", dim_style),
+        ])];
+    }
+    let mut cumulative = Vec::with_capacity(total);
+    let mut a_total = 0i64;
+    let mut b_total = 0i64;
+    for payoff in snapshot.payoffs.iter().take(total) {
+        a_total += payoff[0] as i64;
+        b_total += payoff[1] as i64;
+        cumulative.push((a_total, b_total));
+    }
+
+    let label_w = 3usize;
+    let prefix_len = label_w + 2;
+    let available = width.saturating_sub(prefix_len);
+    let mut max_len = 3usize;
+    let window_start = total.saturating_sub(window);
+    for i in window_start..total {
+        let round_len = (i + 1).to_string().chars().count();
+        let idx_char = snapshot.outcomes.as_bytes()[i] as char;
+        let out_len = match idx_char {
+            '0' | '1' | '2' | '3' => 3,
+            _ => 2,
+        };
+        let payoff = snapshot.payoffs[i];
+        let payoff_len = format!("{}/{}", payoff[0], payoff[1]).chars().count();
+        let total_len = format!("{}/{}", cumulative[i].0, cumulative[i].1)
+            .chars()
+            .count();
+        max_len = max_len
+            .max(round_len)
+            .max(out_len)
+            .max(payoff_len)
+            .max(total_len);
+    }
+    let col_w = (max_len + 1).max(4);
+    let max_cols = (available / col_w).max(1);
+    let visible = window.min(total).min(max_cols);
+    let start = total.saturating_sub(visible);
+
+    let fit_right = |value: &str| -> String {
+        if col_w == 0 {
+            return String::new();
+        }
+        let len = value.chars().count();
+        let trimmed: String = if len > col_w - 1 {
+            value.chars().skip(len.saturating_sub(col_w - 1)).collect()
+        } else {
+            value.to_string()
+        };
+        format!("{:>width$} ", trimmed, width = col_w - 1)
+    };
+    let mut idx_line = String::new();
+    let mut out_spans = Vec::new();
+    let mut pay_line = String::new();
+    let mut total_line = String::new();
+    out_spans.push(Span::styled(
+        format!("{:>label_w$}: ", "Out", label_w = label_w),
+        label_style,
+    ));
+    for i in start..total {
+        idx_line.push_str(&fit_right(&(i + 1).to_string()));
+        let idx_char = snapshot.outcomes.as_bytes()[i] as char;
+        let outcome = match idx_char {
+            '0' => "C/C",
+            '1' => "C/D",
+            '2' => "D/C",
+            '3' => "D/D",
+            _ => "--",
+        };
+        let outcome_style = match idx_char {
+            '0' => number_style,
+            '1' => value_style,
+            '2' => warn_style,
+            '3' => dim_style,
+            _ => dim_style,
+        };
+        out_spans.push(Span::styled(fit_right(outcome), outcome_style));
+        let payoff = snapshot.payoffs[i];
+        pay_line.push_str(&fit_right(&format!("{}/{}", payoff[0], payoff[1])));
+        total_line.push_str(&fit_right(&format!(
+            "{}/{}",
+            cumulative[i].0, cumulative[i].1
+        )));
+    }
+
+    let separator = "-".repeat(width.min(prefix_len + visible * col_w));
+    let legend = Line::from(vec![
+        Span::styled("Legend: ", label_style),
+        Span::styled("CC", number_style),
+        Span::styled(" ", dim_style),
+        Span::styled("CD", value_style),
+        Span::styled(" ", dim_style),
+        Span::styled("DC", warn_style),
+        Span::styled(" ", dim_style),
+        Span::styled("DD", dim_style),
+    ]);
+
+    vec![
+        legend,
+        Line::from(vec![
+            Span::styled(
+                format!("{:>label_w$}: ", "Idx", label_w = label_w),
+                label_style,
+            ),
+            Span::styled(idx_line, number_style),
+        ]),
+        Line::from(out_spans),
+        Line::from(vec![
+            Span::styled(
+                format!("{:>label_w$}: ", "Pay", label_w = label_w),
+                label_style,
+            ),
+            Span::styled(pay_line, number_style),
+        ]),
+        Line::from(vec![
+            Span::styled(
+                format!("{:>label_w$}: ", "Tot", label_w = label_w),
+                label_style,
+            ),
+            Span::styled(total_line, number_style),
+        ]),
+        Line::from(Span::styled(separator, dim_style)),
+    ]
+}
+
 fn status_style(state: &AppState, theme: &Theme) -> Style {
     match state.games.status {
         GamesStatus::Idle => Style::default()
@@ -536,15 +890,7 @@ fn status_style(state: &AppState, theme: &Theme) -> Style {
     }
 }
 
-fn write_summary(path: &PathBuf, summary: &RunSummary) -> std::io::Result<()> {
-    write_atomic(path, |writer| {
-        serde_json::to_writer_pretty(writer, summary)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
-    })
-}
-
-fn top_table_widths(runner: &TournamentRunner) -> (usize, usize, usize) {
-    let config = runner.config();
+fn top_table_widths(config: &nit_games::NormalizedConfig) -> (usize, usize, usize) {
     let n = config.strategies.len().max(1);
     let matches_per = if config.self_play {
         n
@@ -553,14 +899,18 @@ fn top_table_widths(runner: &TournamentRunner) -> (usize, usize, usize) {
     };
     let matches_per = matches_per.saturating_mul(config.repetitions.max(1) as usize);
     let rounds = config.rounds.max(1) as i64;
-    let payoffs = [
-        config.payoff.r,
-        config.payoff.s,
-        config.payoff.t,
-        config.payoff.p,
-    ];
-    let max_payoff = payoffs.iter().copied().max().unwrap_or(0) as i64;
-    let min_payoff = payoffs.iter().copied().min().unwrap_or(0) as i64;
+    let mut max_payoff = i32::MIN;
+    let mut min_payoff = i32::MAX;
+    for row in config.payoff.matrix.iter() {
+        for cell in row.iter() {
+            for value in cell.iter() {
+                max_payoff = max_payoff.max(*value);
+                min_payoff = min_payoff.min(*value);
+            }
+        }
+    }
+    let max_payoff = max_payoff as i64;
+    let min_payoff = min_payoff as i64;
     let max_abs = max_payoff.abs().max(min_payoff.abs());
     let max_total = max_abs
         .saturating_mul(matches_per as i64)
