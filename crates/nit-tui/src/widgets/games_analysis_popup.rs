@@ -41,7 +41,7 @@ pub fn build_lines(state: &AppState, theme: &Theme, inner_width: u16) -> Vec<Lin
     let max_width = inner_width.max(1) as usize;
     let mut lines: Vec<Line<'static>> = Vec::new();
 
-    lines.push(Line::from(Span::styled("Games Analysis", header_style)));
+    // Title is already in the popup border; avoid duplicate header line.
     lines.push(Line::from(vec![
         Span::styled("status: ", label_style),
         Span::styled(

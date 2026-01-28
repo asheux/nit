@@ -17,6 +17,7 @@ use nit_core::{
     actions::Action, apply_action, io as core_io, AppKind, AppState, Mode, PaneId, Prompt,
     UiSelection, UiSelectionPane, Viewport, YankKind,
 };
+use nit_games::config::GamesConfig;
 use ratatui::{
     backend::CrosstermBackend,
     style::Style,
@@ -435,21 +436,16 @@ fn draw(
         let syntax_status = syntax.status_label_for(editor_id, state.editor_buffer().version());
         let syntax_debug = {
             let latest = syntax.latest_snapshot_for(editor_id);
-            gate_monitor_view::SyntaxDebugInfo {
+            nit_core::SyntaxDebugInfo {
                 buffer_version: state.editor_buffer().version(),
                 snapshot_version: latest.map(|s| s.version),
                 engine_state: syntax.engine_state_label(editor_id),
                 last_job_ms: latest.map(|s| s.duration_ms),
             }
         };
-        gate_monitor_view::render(
-            f,
-            layout.gate,
-            state,
-            theme,
-            &syntax_status,
-            Some(syntax_debug),
-        );
+        state.syntax_status = syntax_status.clone();
+        state.syntax_debug = Some(syntax_debug.clone());
+        gate_monitor_view::render(f, layout.gate, state, theme);
         bottom_bar::render(f, layout.bottom, state, theme, system_stats);
 
         match state.app_kind {
@@ -484,15 +480,12 @@ fn draw(
             let area = dynamic_popup_rect(f.size(), prompt_size(message));
             render_prompt(f, area, theme, message);
         }
-        if state.command_line.is_some() {
-            let cmd = state
-                .command_line
-                .as_ref()
-                .map(|c| c.input.as_str())
-                .unwrap_or("");
-            let message = format!(":{cmd}");
+        let mut command_cursor = None;
+        if let Some(cmd) = state.command_line.as_ref() {
+            let message = format!(":{}", cmd.input);
             let area = dynamic_popup_rect(f.size(), prompt_size(&message));
             render_command_prompt(f, area, theme, &message);
+            command_cursor = command_prompt_cursor(area, &message);
         }
 
         // cursor
@@ -503,7 +496,9 @@ fn draw(
                 .map(|p| p.is_visible())
                 .unwrap_or(false),
         };
-        if petri_visible || state.command_line.is_some() {
+        if let Some((x, y)) = command_cursor {
+            f.set_cursor(x, y);
+        } else if petri_visible || state.command_line.is_some() {
             f.set_cursor(f.size().x, f.size().y);
         } else if let Some(pos) = if state.focus == PaneId::Editor {
             editor_cursor
@@ -1463,6 +1458,10 @@ fn is_petri_show_key(key: &KeyEvent, state: &AppState) -> bool {
     }
 }
 
+fn games_petri_visible(state: &AppState) -> bool {
+    state.app_kind == AppKind::Games && state.games.running && !state.games.petri_hidden
+}
+
 fn is_clear_logs_key(key: &KeyEvent) -> bool {
     matches!(
         key,
@@ -1580,6 +1579,10 @@ fn handle_mouse_event(
                 if point_in_rect(mouse.column, mouse.row, area) {
                     bump_scroll(&mut state.games.analysis.scroll_offset, delta);
                 }
+                return true;
+            }
+
+            if games_petri_visible(state) {
                 return true;
             }
 
@@ -1735,6 +1738,154 @@ fn map_analysis_popup_mouse(
         text_area,
         &text_lines,
         scroll,
+        state.settings.editor.tab_width as usize,
+        clamp,
+    )?;
+    Some((line_idx, col, text_lines))
+}
+
+fn map_games_petri_mouse(
+    mouse: MouseEvent,
+    screen: ratatui::layout::Rect,
+    state: &AppState,
+    clamp: bool,
+) -> Option<(usize, usize, Vec<String>)> {
+    if !games_petri_visible(state) {
+        return None;
+    }
+    let area = crate::games_petri_dish::petri_rect(screen);
+    let text_area = Block::default().borders(Borders::ALL).inner(area);
+    if !point_in_rect(mouse.column, mouse.row, text_area) && !clamp {
+        return None;
+    }
+    let lines = state.games.petri_lines.clone();
+    if lines.is_empty() {
+        return None;
+    }
+    let (line_idx, col) = map_mouse_to_line_col(
+        mouse,
+        text_area,
+        &lines,
+        0,
+        state.settings.editor.tab_width as usize,
+        clamp,
+    )?;
+    Some((line_idx, col, lines))
+}
+
+fn map_visualizer_main_mouse(
+    mouse: MouseEvent,
+    screen: ratatui::layout::Rect,
+    state: &AppState,
+    theme: &Theme,
+    clamp: bool,
+) -> Option<(usize, usize, Vec<String>)> {
+    if state.app_kind != AppKind::Games {
+        return None;
+    }
+    let layout = layout::split(screen);
+    let inner = Block::default().borders(Borders::ALL).inner(layout.visualizer);
+    if inner.width == 0 || inner.height == 0 {
+        return None;
+    }
+    let config_text = state.editor_buffer().content_as_string();
+    let config_result = GamesConfig::from_toml(&config_text);
+    let layout_info = games_visualizer_view::layout_for_config(inner, config_result.as_ref().ok());
+    let area = layout_info.main;
+    if !point_in_rect(mouse.column, mouse.row, area) && !clamp {
+        return None;
+    }
+    let lines = games_visualizer_view::build_main_lines(
+        state,
+        theme,
+        &config_result,
+        layout_info.show_payoff_side,
+        area.width as usize,
+    );
+    let text_lines = lines_to_strings(&lines);
+    if text_lines.is_empty() {
+        return None;
+    }
+    let (line_idx, col) = map_mouse_to_line_col(
+        mouse,
+        area,
+        &text_lines,
+        0,
+        state.settings.editor.tab_width as usize,
+        clamp,
+    )?;
+    Some((line_idx, col, text_lines))
+}
+
+fn map_visualizer_side_mouse(
+    mouse: MouseEvent,
+    screen: ratatui::layout::Rect,
+    state: &AppState,
+    theme: &Theme,
+    clamp: bool,
+) -> Option<(usize, usize, Vec<String>)> {
+    if state.app_kind != AppKind::Games {
+        return None;
+    }
+    let layout = layout::split(screen);
+    let inner = Block::default().borders(Borders::ALL).inner(layout.visualizer);
+    if inner.width == 0 || inner.height == 0 {
+        return None;
+    }
+    let config_text = state.editor_buffer().content_as_string();
+    let config_result = GamesConfig::from_toml(&config_text);
+    let layout_info = games_visualizer_view::layout_for_config(inner, config_result.as_ref().ok());
+    let Some(side_area) = layout_info.side else {
+        return None;
+    };
+    let side_inner = Block::default().borders(Borders::ALL).inner(side_area);
+    if side_inner.width == 0 || side_inner.height == 0 {
+        return None;
+    }
+    if !point_in_rect(mouse.column, mouse.row, side_inner) && !clamp {
+        return None;
+    }
+    let lines = games_visualizer_view::build_side_lines(state, theme, side_inner.width as usize);
+    let text_lines = lines_to_strings(&lines);
+    if text_lines.is_empty() {
+        return None;
+    }
+    let (line_idx, col) = map_mouse_to_line_col(
+        mouse,
+        side_inner,
+        &text_lines,
+        0,
+        state.settings.editor.tab_width as usize,
+        clamp,
+    )?;
+    Some((line_idx, col, text_lines))
+}
+
+fn map_gate_monitor_mouse(
+    mouse: MouseEvent,
+    screen: ratatui::layout::Rect,
+    state: &AppState,
+    theme: &Theme,
+    clamp: bool,
+) -> Option<(usize, usize, Vec<String>)> {
+    let layout = layout::split(screen);
+    let inner = Block::default().borders(Borders::ALL).inner(layout.gate);
+    if inner.width == 0 || inner.height == 0 {
+        return None;
+    }
+    if !point_in_rect(mouse.column, mouse.row, inner) && !clamp {
+        return None;
+    }
+    let lines = gate_monitor_view::build_lines(state, theme, inner.width as usize);
+    let text_lines = lines_to_strings(&lines);
+    if text_lines.is_empty() {
+        return None;
+    }
+    let (line_idx, col) = map_mouse_to_line_col(
+        mouse,
+        inner,
+        &text_lines,
+        0,
         state.settings.editor.tab_width as usize,
         clamp,
     )?;
@@ -1966,6 +2117,33 @@ fn handle_mouse_down(
         }
         return true;
     }
+    if games_petri_visible(state) {
+        if let Some((line_idx, col, lines)) =
+            map_games_petri_mouse(mouse, screen, state, false)
+        {
+            reset_ui_selection(state, input_state);
+            state.ui_selection = Some(UiSelection {
+                pane: UiSelectionPane::GamesPetriDish,
+                start_line: line_idx,
+                start_col: col,
+                end_line: line_idx,
+                end_col: col,
+            });
+            input_state.mouse_select_anchor = Some(MouseSelectAnchor {
+                target: MouseSelectTarget::Ui(UiSelectionPane::GamesPetriDish),
+                line: line_idx,
+                col,
+            });
+            update_ui_selection_text(
+                state,
+                UiSelectionPane::GamesPetriDish,
+                &lines,
+                clipboard,
+                input_state,
+            );
+        }
+        return true;
+    }
     reset_ui_selection(state, input_state);
     let layout = layout::split(screen);
     if point_in_rect(mouse.column, mouse.row, layout.editor) {
@@ -2006,6 +2184,81 @@ fn handle_mouse_down(
             line: state.notes_buffer().cursor.line,
             col: state.notes_buffer().cursor.col,
         });
+        return true;
+    }
+    if let Some((line_idx, col, lines)) =
+        map_visualizer_side_mouse(mouse, screen, state, theme, false)
+    {
+        state.focus = PaneId::Visualizer;
+        state.ui_selection = Some(UiSelection {
+            pane: UiSelectionPane::VisualizerSide,
+            start_line: line_idx,
+            start_col: col,
+            end_line: line_idx,
+            end_col: col,
+        });
+        input_state.mouse_select_anchor = Some(MouseSelectAnchor {
+            target: MouseSelectTarget::Ui(UiSelectionPane::VisualizerSide),
+            line: line_idx,
+            col,
+        });
+        update_ui_selection_text(
+            state,
+            UiSelectionPane::VisualizerSide,
+            &lines,
+            clipboard,
+            input_state,
+        );
+        return true;
+    }
+    if let Some((line_idx, col, lines)) =
+        map_visualizer_main_mouse(mouse, screen, state, theme, false)
+    {
+        state.focus = PaneId::Visualizer;
+        state.ui_selection = Some(UiSelection {
+            pane: UiSelectionPane::VisualizerMain,
+            start_line: line_idx,
+            start_col: col,
+            end_line: line_idx,
+            end_col: col,
+        });
+        input_state.mouse_select_anchor = Some(MouseSelectAnchor {
+            target: MouseSelectTarget::Ui(UiSelectionPane::VisualizerMain),
+            line: line_idx,
+            col,
+        });
+        update_ui_selection_text(
+            state,
+            UiSelectionPane::VisualizerMain,
+            &lines,
+            clipboard,
+            input_state,
+        );
+        return true;
+    }
+    if let Some((line_idx, col, lines)) =
+        map_gate_monitor_mouse(mouse, screen, state, theme, false)
+    {
+        state.focus = PaneId::GateMonitor;
+        state.ui_selection = Some(UiSelection {
+            pane: UiSelectionPane::GateMonitor,
+            start_line: line_idx,
+            start_col: col,
+            end_line: line_idx,
+            end_col: col,
+        });
+        input_state.mouse_select_anchor = Some(MouseSelectAnchor {
+            target: MouseSelectTarget::Ui(UiSelectionPane::GateMonitor),
+            line: line_idx,
+            col,
+        });
+        update_ui_selection_text(
+            state,
+            UiSelectionPane::GateMonitor,
+            &lines,
+            clipboard,
+            input_state,
+        );
         return true;
     }
     if let Some((line_idx, col, lines)) =
@@ -2080,6 +2333,22 @@ fn handle_mouse_drag(
             let result = match pane {
                 UiSelectionPane::JobOutput => map_job_output_mouse(mouse, screen, state, true)
                     .map(|(line_idx, col, lines)| (line_idx, col, lines)),
+                UiSelectionPane::GamesPetriDish => {
+                    map_games_petri_mouse(mouse, screen, state, true)
+                        .map(|(line_idx, col, lines)| (line_idx, col, lines))
+                }
+                UiSelectionPane::VisualizerMain => {
+                    map_visualizer_main_mouse(mouse, screen, state, theme, true)
+                        .map(|(line_idx, col, lines)| (line_idx, col, lines))
+                }
+                UiSelectionPane::VisualizerSide => {
+                    map_visualizer_side_mouse(mouse, screen, state, theme, true)
+                        .map(|(line_idx, col, lines)| (line_idx, col, lines))
+                }
+                UiSelectionPane::GateMonitor => {
+                    map_gate_monitor_mouse(mouse, screen, state, theme, true)
+                        .map(|(line_idx, col, lines)| (line_idx, col, lines))
+                }
                 UiSelectionPane::HelpPopup => {
                     map_help_popup_mouse(mouse, screen, state, theme, true)
                         .map(|(line_idx, col, lines)| (line_idx, col, lines))
@@ -2125,6 +2394,12 @@ fn mouse_drag_allowed(state: &AppState, anchor: MouseSelectAnchor) -> bool {
         return matches!(
             anchor.target,
             MouseSelectTarget::Ui(UiSelectionPane::GamesAnalysisPopup)
+        );
+    }
+    if games_petri_visible(state) {
+        return matches!(
+            anchor.target,
+            MouseSelectTarget::Ui(UiSelectionPane::GamesPetriDish)
         );
     }
     true
@@ -2293,6 +2568,25 @@ fn prompt_size(message: &str) -> (u16, u16) {
     let width = message.chars().count().max(12) as u16 + 4;
     let height = 3;
     (width, height)
+}
+
+fn command_prompt_cursor(area: ratatui::layout::Rect, message: &str) -> Option<(u16, u16)> {
+    if area.width < 3 || area.height < 3 {
+        return None;
+    }
+    let inner_width = area.width.saturating_sub(2);
+    if inner_width == 0 {
+        return None;
+    }
+    let inner_x = area.x.saturating_add(1);
+    let inner_y = area.y.saturating_add(1);
+    let width = unicode_width::UnicodeWidthStr::width(message);
+    let mut col = inner_x.saturating_add(width as u16);
+    let max_col = inner_x.saturating_add(inner_width.saturating_sub(1));
+    if col > max_col {
+        col = max_col;
+    }
+    Some((col, inner_y))
 }
 
 fn render_prompt(

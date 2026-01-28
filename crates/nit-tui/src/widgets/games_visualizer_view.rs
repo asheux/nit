@@ -1,4 +1,4 @@
-use nit_core::{AppState, GamesStatus, PaneId};
+use nit_core::{AppState, GamesStatus, PaneId, UiSelectionPane};
 use nit_games::config::{BuiltinKind, GamesConfig, StrategySpecKind};
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
@@ -9,15 +9,48 @@ use ratatui::{
 };
 
 use crate::theme::Theme;
+use crate::widgets::text_selection::apply_ui_selection;
 
-pub fn render(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
-    let focused = state.focus == PaneId::Visualizer;
-    let border = if focused {
-        Style::default().fg(theme.title_focused)
+pub struct VisualizerLayout {
+    pub main: Rect,
+    pub side: Option<Rect>,
+    pub show_payoff_side: bool,
+}
+
+pub fn layout_for_config(inner: Rect, config: Option<&nit_games::config::NormalizedConfig>) -> VisualizerLayout {
+    let mut show_payoff_side = false;
+    let (main_area, right_area) = if let Some(config) = config {
+        let desired = payoff_panel_width(&config.payoff) + 2;
+        let min_main = 44usize;
+        if inner.width as usize >= min_main + desired {
+            show_payoff_side = true;
+            let cols = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([Constraint::Min(44), Constraint::Length(desired as u16)])
+                .split(inner);
+            (cols[0], cols[1])
+        } else {
+            (inner, Rect::default())
+        }
     } else {
-        Style::default().fg(theme.border)
+        (inner, Rect::default())
     };
-    let title_color = if focused {
+    let side = if show_payoff_side { Some(right_area) } else { None };
+    VisualizerLayout {
+        main: main_area,
+        side,
+        show_payoff_side,
+    }
+}
+
+pub fn build_main_lines(
+    state: &AppState,
+    theme: &Theme,
+    config_result: &Result<nit_games::config::NormalizedConfig, nit_games::config::ConfigError>,
+    show_payoff_side: bool,
+    width: usize,
+) -> Vec<Line<'static>> {
+    let title_color = if state.focus == PaneId::Visualizer {
         theme.title_focused
     } else {
         theme.title
@@ -43,40 +76,6 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
         .fg(theme.warning)
         .add_modifier(Modifier::BOLD);
     let draw_style = Style::default().fg(theme.title);
-
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(border)
-        .style(Style::default().bg(theme.background))
-        .title(Span::styled(
-            " VISUALIZER ",
-            Style::default()
-                .fg(title_color)
-                .add_modifier(Modifier::BOLD),
-        ));
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-
-    let config_text = state.editor_buffer().content_as_string();
-    let config_result = GamesConfig::from_toml(&config_text);
-    let mut show_payoff_side = false;
-    let (main_area, right_area) = match &config_result {
-        Ok(config) => {
-            let desired = payoff_panel_width(&config.payoff) + 2;
-            let min_main = 44usize;
-            if inner.width as usize >= min_main + desired {
-                show_payoff_side = true;
-                let cols = Layout::default()
-                    .direction(Direction::Horizontal)
-                    .constraints([Constraint::Min(44), Constraint::Length(desired as u16)])
-                    .split(inner);
-                (cols[0], cols[1])
-            } else {
-                (inner, Rect::default())
-            }
-        }
-        Err(_) => (inner, Rect::default()),
-    };
 
     let mut lines = Vec::new();
     lines.push(Line::from(vec![
@@ -109,7 +108,7 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
             win_style,
             loss_style,
             draw_style,
-            main_area.width as usize,
+            width,
         ));
     }
 
@@ -120,7 +119,7 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
         Ok(config) => {
             lines.push(Line::from(vec![
                 Span::styled("game: ", label_style),
-                Span::styled(config.game, value_style),
+                Span::styled(config.game.clone(), value_style),
             ]));
             lines.push(Line::from(vec![
                 Span::styled("rounds: ", label_style),
@@ -145,7 +144,7 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
             ]));
             lines.extend(payoff_lines(
                 &config.payoff,
-                main_area.width as usize,
+                width,
                 value_style,
                 dim_style,
                 label_style,
@@ -196,12 +195,104 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
         }
     }
 
+    lines
+}
+
+pub fn build_side_lines(
+    state: &AppState,
+    theme: &Theme,
+    width: usize,
+) -> Vec<Line<'static>> {
+    let title_color = if state.focus == PaneId::Visualizer {
+        theme.title_focused
+    } else {
+        theme.title
+    };
+    let header_style = Style::default()
+        .fg(title_color)
+        .add_modifier(Modifier::BOLD);
+    let label_style = Style::default().fg(theme.title).add_modifier(Modifier::DIM);
+    let value_style = Style::default().fg(theme.foreground);
+    let dim_style = Style::default()
+        .fg(theme.border)
+        .add_modifier(Modifier::DIM);
+    let file_dim_style = Style::default()
+        .fg(theme.foreground)
+        .add_modifier(Modifier::DIM);
+    let number_style = Style::default()
+        .fg(theme.accent)
+        .add_modifier(Modifier::BOLD);
+    let win_style = Style::default()
+        .fg(theme.accent)
+        .add_modifier(Modifier::BOLD);
+    let loss_style = Style::default()
+        .fg(theme.warning)
+        .add_modifier(Modifier::BOLD);
+    let draw_style = Style::default().fg(theme.title);
+    last_run_lines(
+        state,
+        header_style,
+        label_style,
+        value_style,
+        dim_style,
+        file_dim_style,
+        number_style,
+        win_style,
+        loss_style,
+        draw_style,
+        width,
+    )
+}
+
+pub fn render(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
+    let focused = state.focus == PaneId::Visualizer;
+    let border = if focused {
+        Style::default().fg(theme.title_focused)
+    } else {
+        Style::default().fg(theme.border)
+    };
+    let title_color = if focused {
+        theme.title_focused
+    } else {
+        theme.title
+    };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(border)
+        .style(Style::default().bg(theme.background))
+        .title(Span::styled(
+            " VISUALIZER ",
+            Style::default()
+                .fg(title_color)
+                .add_modifier(Modifier::BOLD),
+        ));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let config_text = state.editor_buffer().content_as_string();
+    let config_result = GamesConfig::from_toml(&config_text);
+    let layout = layout_for_config(inner, config_result.as_ref().ok());
+
+    let mut lines = build_main_lines(
+        state,
+        theme,
+        &config_result,
+        layout.show_payoff_side,
+        layout.main.width as usize,
+    );
+    lines = apply_ui_selection(
+        lines,
+        state.ui_selection.as_ref(),
+        UiSelectionPane::VisualizerMain,
+        theme.selection_bg,
+        0,
+    );
     let paragraph = Paragraph::new(lines)
         .style(Style::default().fg(theme.foreground).bg(theme.background))
         .wrap(Wrap { trim: true });
-    frame.render_widget(paragraph, main_area);
+    frame.render_widget(paragraph, layout.main);
 
-    if show_payoff_side {
+    if let Some(right_area) = layout.side {
         let right_block = Block::default()
             .borders(Borders::ALL)
             .border_style(border)
@@ -209,20 +300,15 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
         let right_inner = right_block.inner(right_area);
         frame.render_widget(right_block, right_area);
         if right_inner.width > 0 && right_inner.height > 0 {
-            let mut side_lines = Vec::new();
-            side_lines.extend(last_run_lines(
-                state,
-                header_style,
-                label_style,
-                value_style,
-                dim_style,
-                file_dim_style,
-                number_style,
-                win_style,
-                loss_style,
-                draw_style,
-                right_inner.width as usize,
-            ));
+            let mut side_lines =
+                build_side_lines(state, theme, right_inner.width as usize);
+            side_lines = apply_ui_selection(
+                side_lines,
+                state.ui_selection.as_ref(),
+                UiSelectionPane::VisualizerSide,
+                theme.selection_bg,
+                0,
+            );
             let right_paragraph = Paragraph::new(side_lines)
                 .style(Style::default().fg(theme.foreground).bg(theme.background))
                 .wrap(Wrap { trim: true });

@@ -40,7 +40,7 @@ pub use seed::{
 };
 pub use state::{
     apply_action, AppKind, AppState, GamesAnalysisRequest, GamesAnalysisState, GamesState,
-    GamesStatus, GolRenderMode, JobState, LogBuffer, Metrics, UiSelection, UiSelectionPane,
-    VisualizerMode, VisualizerRuleEntry, VisualizerState, YankKind,
+    GamesStatus, GolRenderMode, JobState, LogBuffer, Metrics, SyntaxDebugInfo, UiSelection,
+    UiSelectionPane, VisualizerMode, VisualizerRuleEntry, VisualizerState, YankKind,
 };
 pub use viewport::Viewport;

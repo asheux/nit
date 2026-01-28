@@ -58,6 +58,10 @@ pub struct GamesAnalysisState {
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum UiSelectionPane {
     JobOutput,
+    VisualizerMain,
+    VisualizerSide,
+    GateMonitor,
+    GamesPetriDish,
     HelpPopup,
     GamesAnalysisPopup,
 }
@@ -84,6 +88,8 @@ pub struct GamesState {
     pub last_event_path: Option<String>,
     pub last_history_path: Option<String>,
     pub analysis: GamesAnalysisState,
+    #[serde(skip)]
+    pub petri_lines: Vec<String>,
     #[serde(skip)]
     pub pending_run: bool,
     #[serde(skip)]
@@ -292,6 +298,14 @@ pub struct Metrics {
     pub last_action: Option<Action>,
 }
 
+#[derive(Clone, Debug, Default)]
+pub struct SyntaxDebugInfo {
+    pub buffer_version: u64,
+    pub snapshot_version: Option<u64>,
+    pub engine_state: String,
+    pub last_job_ms: Option<u128>,
+}
+
 #[derive(Clone, Debug)]
 pub struct CommandLine {
     pub input: String,
@@ -353,6 +367,10 @@ pub struct AppState {
     pub help_scroll: usize,
     #[serde(skip)]
     pub logs_scroll: usize,
+    #[serde(skip)]
+    pub syntax_status: String,
+    #[serde(skip)]
+    pub syntax_debug: Option<SyntaxDebugInfo>,
     #[serde(skip)]
     pub rule_catalog: RuleCatalog,
     #[serde(skip)]
@@ -499,6 +517,7 @@ impl AppState {
                     preview: None,
                     scroll_offset: 0,
                 },
+                petri_lines: Vec::new(),
                 pending_run: false,
                 pending_close: false,
                 pending_hide: false,
@@ -512,6 +531,8 @@ impl AppState {
             ui_selection: None,
             help_scroll: 0,
             logs_scroll: 0,
+            syntax_status: String::new(),
+            syntax_debug: None,
             rule_catalog,
             rule_picker: RulePickerState::default(),
             protocol_picker: ProtocolPickerState::default(),

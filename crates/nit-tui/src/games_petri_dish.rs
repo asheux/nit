@@ -2,7 +2,7 @@ use std::fs;
 use std::time::Instant;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use nit_core::{AppState, GamesAnalysisRequest, GamesStatus};
+use nit_core::{AppState, GamesAnalysisRequest, GamesStatus, UiSelectionPane};
 use nit_games::{
     config::GamesConfig,
     events::EventWriter,
@@ -25,9 +25,21 @@ use crate::theme::Theme;
 use crate::games_analysis::{AnalysisCommand, AnalysisEvent, AnalysisRequest, GamesAnalysisRunner};
 use crate::games_runner::{GamesRunner, RunRequest, RunnerCommand, RunnerEvent};
 use crate::widgets::games_visualizer_view::strategy_display_name_from_def;
+use crate::widgets::text_selection::apply_ui_selection;
 
 const MIN_WIDTH: u16 = 88;
 const MIN_HEIGHT: u16 = 22;
+
+pub fn petri_rect(screen: Rect) -> Rect {
+    let width = screen.width.min(MIN_WIDTH).max(60);
+    let height = screen.height.min(MIN_HEIGHT).max(16);
+    Rect {
+        x: screen.x + (screen.width.saturating_sub(width)) / 2,
+        y: screen.y + (screen.height.saturating_sub(height)) / 2,
+        width,
+        height,
+    }
+}
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 enum PetriView {
@@ -261,6 +273,7 @@ impl GamesPetriDishRuntime {
                     state.games.running = false;
                     state.games.paused = false;
                     state.games.petri_hidden = false;
+                    state.games.petri_lines.clear();
                     state.status = Some("Games tournament completed".into());
                 }
                 RunnerEvent::Cancelled => {
@@ -270,6 +283,7 @@ impl GamesPetriDishRuntime {
                     state.games.paused = false;
                     state.games.status = GamesStatus::Idle;
                     state.games.petri_hidden = false;
+                    state.games.petri_lines.clear();
                     state.status = Some("Games tournament cancelled".into());
                 }
                 RunnerEvent::Error(err) => {
@@ -278,24 +292,18 @@ impl GamesPetriDishRuntime {
                     state.games.paused = false;
                     state.games.status = GamesStatus::Error;
                     state.games.last_error = Some(err.clone());
+                    state.games.petri_lines.clear();
                     state.status = Some(err);
                 }
             }
         }
     }
 
-    pub fn render(&mut self, frame: &mut Frame, screen: Rect, state: &AppState, theme: &Theme) {
+    pub fn render(&mut self, frame: &mut Frame, screen: Rect, state: &mut AppState, theme: &Theme) {
         if !self.is_visible() {
             return;
         }
-        let width = screen.width.min(MIN_WIDTH).max(60);
-        let height = screen.height.min(MIN_HEIGHT).max(16);
-        let area = Rect {
-            x: screen.x + (screen.width.saturating_sub(width)) / 2,
-            y: screen.y + (screen.height.saturating_sub(height)) / 2,
-            width,
-            height,
-        };
+        let area = petri_rect(screen);
         frame.render_widget(Clear, area);
 
         let border_style = Style::default().fg(theme.border);
@@ -441,6 +449,14 @@ impl GamesPetriDishRuntime {
             }));
         }
 
+        state.games.petri_lines = lines_to_strings(&lines);
+        let lines = apply_ui_selection(
+            lines,
+            state.ui_selection.as_ref(),
+            UiSelectionPane::GamesPetriDish,
+            theme.selection_bg,
+            0,
+        );
         let paragraph = Paragraph::new(lines)
             .style(Style::default().fg(theme.foreground).bg(theme.background))
             .block(Block::default().style(Style::default().bg(theme.background)));
@@ -600,12 +616,23 @@ impl GamesPetriDishRuntime {
         state.games.paused = false;
         state.games.status = GamesStatus::Idle;
         state.games.petri_hidden = false;
+        state.games.petri_lines.clear();
+        if let Some(selection) = state.ui_selection {
+            if matches!(selection.pane, UiSelectionPane::GamesPetriDish) {
+                state.ui_selection = None;
+            }
+        }
     }
 
     fn hide(&mut self, state: &mut AppState) {
         if self.session.is_some() {
             self.hidden = true;
             state.games.petri_hidden = true;
+            if let Some(selection) = state.ui_selection {
+                if matches!(selection.pane, UiSelectionPane::GamesPetriDish) {
+                    state.ui_selection = None;
+                }
+            }
         }
     }
 
@@ -996,6 +1023,13 @@ fn status_style(state: &AppState, theme: &Theme) -> Style {
     }
 }
 
+fn lines_to_strings(lines: &[Line<'_>]) -> Vec<String> {
+    lines
+        .iter()
+        .map(|line| line.spans.iter().map(|s| s.content.as_ref()).collect())
+        .collect()
+}
+
 fn top_table_widths(config: &nit_games::NormalizedConfig) -> (usize, usize, usize) {
     let n = config.strategies.len().max(1);
     let matches_per = if config.self_play {
@@ -1049,6 +1083,20 @@ fn render_top_table(
 ) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
     lines.push(Line::from(Span::styled("Top Strategies", header_style)));
+    if definitions.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "Loading strategy definitions...",
+            dim_style,
+        )));
+        return lines;
+    }
+    if results.ranking.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "Waiting for leaderboard results...",
+            dim_style,
+        )));
+        return lines;
+    }
 
     let rows: Vec<(String, String, String, String, u32, u32, u32)> = results
         .ranking
