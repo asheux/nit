@@ -1,3 +1,4 @@
+use nit_core::AppState;
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Modifier, Style},
@@ -7,6 +8,8 @@ use ratatui::{
 };
 
 use crate::theme::Theme;
+use crate::widgets::text_selection::apply_ui_selection;
+use nit_core::UiSelectionPane;
 
 pub fn preferred_size(screen: Rect) -> (u16, u16) {
     let width = (screen.width.saturating_sub(4)).min(80).max(30);
@@ -14,7 +17,7 @@ pub fn preferred_size(screen: Rect) -> (u16, u16) {
     (width, height)
 }
 
-pub fn render(frame: &mut Frame, area: Rect, theme: &Theme) {
+pub fn build_lines(theme: &Theme) -> Vec<Line<'static>> {
     let heading_style = Style::default()
         .fg(theme.title_focused)
         .add_modifier(Modifier::BOLD);
@@ -356,6 +359,11 @@ pub fn render(frame: &mut Frame, area: Rect, theme: &Theme) {
         Span::styled(":games analyze <path>", Style::default().fg(theme.accent)),
         Span::raw(" analyze specific history log"),
     ]));
+    lines
+}
+
+pub fn render(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
+    let lines = build_lines(theme);
 
     let block = Block::default()
         .borders(Borders::ALL)
@@ -373,8 +381,19 @@ pub fn render(frame: &mut Frame, area: Rect, theme: &Theme) {
         .constraints([Constraint::Min(1)])
         .split(block.inner(area))[0];
 
-    let para =
-        Paragraph::new(lines).style(Style::default().bg(theme.selection_bg).fg(theme.foreground));
+    let height = inner.height as usize;
+    let max_scroll = lines.len().saturating_sub(height);
+    let scroll = state.help_scroll.min(max_scroll);
+    let visible: Vec<Line> = lines.into_iter().skip(scroll).take(height).collect();
+    let visible = apply_ui_selection(
+        visible,
+        state.ui_selection.as_ref(),
+        UiSelectionPane::HelpPopup,
+        theme.cursor_line_bg,
+        scroll,
+    );
+    let para = Paragraph::new(visible)
+        .style(Style::default().bg(theme.selection_bg).fg(theme.foreground));
 
     frame.render_widget(Clear, area);
     frame.render_widget(block, area);

@@ -10,6 +10,8 @@ use ratatui::{
 };
 
 use crate::theme::Theme;
+use crate::widgets::text_selection::apply_ui_selection;
+use nit_core::UiSelectionPane;
 
 const MIN_WIDTH: u16 = 64;
 const MIN_HEIGHT: u16 = 18;
@@ -20,27 +22,7 @@ pub fn preferred_size(screen: Rect) -> (u16, u16) {
     (width, height)
 }
 
-pub fn render(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
-    if !state.games.analysis.open {
-        return;
-    }
-
-    frame.render_widget(Clear, area);
-
-    let border_style = Style::default().fg(theme.border_focused);
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(border_style)
-        .style(Style::default().bg(theme.background))
-        .title(Span::styled(
-            " GAMES ANALYSIS ",
-            Style::default()
-                .fg(theme.title_focused)
-                .add_modifier(Modifier::BOLD),
-        ));
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-
+pub fn build_lines(state: &AppState, theme: &Theme, inner_width: u16) -> Vec<Line<'static>> {
     let header_style = Style::default()
         .fg(theme.title)
         .add_modifier(Modifier::BOLD);
@@ -56,7 +38,9 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
         .fg(theme.warning)
         .add_modifier(Modifier::BOLD);
 
-    let mut lines: Vec<Line> = Vec::new();
+    let max_width = inner_width.max(1) as usize;
+    let mut lines: Vec<Line<'static>> = Vec::new();
+
     lines.push(Line::from(Span::styled("Games Analysis", header_style)));
     lines.push(Line::from(vec![
         Span::styled("status: ", label_style),
@@ -81,21 +65,24 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
     if let Some(path) = state.games.analysis.source_path.as_deref() {
         lines.push(Line::from(vec![
             Span::styled("source: ", label_style),
-            Span::styled(short_path(path, inner.width as usize), value_style),
+            Span::styled(short_path(path, max_width), value_style),
         ]));
     }
 
     if let Some(err) = state.games.analysis.last_error.as_ref() {
         lines.push(Line::from(vec![
             Span::styled("error: ", warn_style),
-            Span::styled(err.clone(), value_style),
+            Span::styled(trim_to_width(err, max_width), value_style),
         ]));
     }
 
     if state.games.analysis.running && state.games.analysis.summary.is_none() {
         lines.push(Line::from(""));
         lines.push(Line::from(vec![
-            Span::styled("Analyzing history log...", value_style),
+            Span::styled(
+                trim_to_width("Analyzing history log...", max_width),
+                value_style,
+            ),
             Span::styled(" (Esc to close)", dim_style),
         ]));
     }
@@ -123,26 +110,26 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
         lines.push(Line::from(Span::styled("Outputs", header_style)));
         lines.push(Line::from(vec![
             Span::styled("summary: ", label_style),
-            Span::styled(short_path(&summary.paths.summary, inner.width as usize), value_style),
+            Span::styled(short_path(&summary.paths.summary, max_width), value_style),
         ]));
         lines.push(Line::from(vec![
             Span::styled("matches: ", label_style),
             Span::styled(
-                short_path(&summary.paths.matches_csv, inner.width as usize),
+                short_path(&summary.paths.matches_csv, max_width),
                 value_style,
             ),
         ]));
         lines.push(Line::from(vec![
             Span::styled("strategies: ", label_style),
             Span::styled(
-                short_path(&summary.paths.strategies_csv, inner.width as usize),
+                short_path(&summary.paths.strategies_csv, max_width),
                 value_style,
             ),
         ]));
         lines.push(Line::from(vec![
             Span::styled("trajectories: ", label_style),
             Span::styled(
-                short_path(&summary.paths.trajectories_csv, inner.width as usize),
+                short_path(&summary.paths.trajectories_csv, max_width),
                 value_style,
             ),
         ]));
@@ -153,7 +140,7 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
             header_style,
         )));
         let max_rows = 8usize;
-        let id_width = 14usize.min(inner.width as usize / 3).max(6);
+        let id_width = 14usize.min(max_width / 3).max(6);
         for (idx, strat) in summary.strategies.iter().take(max_rows).enumerate() {
             let id = trim_to_width(&strat.id, id_width);
             let coop = strat.coop_rate * 100.0;
@@ -172,7 +159,10 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
         }
         if summary.strategies.len() > max_rows {
             lines.push(Line::from(Span::styled(
-                format!("... {} more", summary.strategies.len() - max_rows),
+                trim_to_width(
+                    &format!("... {} more", summary.strategies.len() - max_rows),
+                    max_width,
+                ),
                 dim_style,
             )));
         }
@@ -189,11 +179,11 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
                     dim_style,
                 )));
             } else {
-                let plot_width = inner.width.saturating_sub(12) as usize;
+                let plot_width = max_width.saturating_sub(12).max(1);
                 for traj in preview.trajectories.iter() {
                     let title = format!("{} vs {}", traj.a, traj.b);
                     lines.push(Line::from(Span::styled(
-                        trim_to_width(&title, inner.width as usize),
+                        trim_to_width(&title, max_width),
                         value_style,
                     )));
                     let a_plot = sparkline(&traj.a_rates, plot_width);
@@ -211,7 +201,43 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
         }
     }
 
-    let paragraph = Paragraph::new(lines)
+    lines
+}
+
+pub fn render(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
+    if !state.games.analysis.open {
+        return;
+    }
+
+    frame.render_widget(Clear, area);
+
+    let border_style = Style::default().fg(theme.border_focused);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(border_style)
+        .style(Style::default().bg(theme.background))
+        .title(Span::styled(
+            " GAMES ANALYSIS ",
+            Style::default()
+                .fg(theme.title_focused)
+                .add_modifier(Modifier::BOLD),
+        ));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let lines = build_lines(state, theme, inner.width);
+    let height = inner.height as usize;
+    let max_scroll = lines.len().saturating_sub(height);
+    let scroll = state.games.analysis.scroll_offset.min(max_scroll);
+    let visible: Vec<Line> = lines.into_iter().skip(scroll).take(height).collect();
+    let visible = apply_ui_selection(
+        visible,
+        state.ui_selection.as_ref(),
+        UiSelectionPane::GamesAnalysisPopup,
+        theme.selection_bg,
+        scroll,
+    );
+    let paragraph = Paragraph::new(visible)
         .style(Style::default().fg(theme.foreground).bg(theme.background))
         .wrap(Wrap { trim: true });
     frame.render_widget(paragraph, inner);

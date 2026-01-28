@@ -8,5 +8,6 @@ pub mod job_output_view;
 pub mod notes_view;
 pub mod protocol_picker;
 pub mod rule_picker;
+pub mod text_selection;
 pub mod top_bar;
 pub mod visualizer_view;

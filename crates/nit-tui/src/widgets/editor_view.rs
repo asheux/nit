@@ -24,7 +24,7 @@ pub fn render_editor(
     snapshot: Option<&HighlightSnapshot>,
     line_map: Option<&[Option<usize>]>,
     focus: PaneId,
-    _mode: Mode,
+    mode: Mode,
     theme: &Theme,
     tab_width: usize,
 ) -> Option<CursorPlacement> {
@@ -40,6 +40,7 @@ pub fn render_editor(
         theme,
         tab_width,
         true,
+        mode,
     )
 }
 
@@ -55,6 +56,7 @@ pub fn render_buffer(
     theme: &Theme,
     tab_width: usize,
     show_cursor: bool,
+    mode: Mode,
 ) -> Option<CursorPlacement> {
     let focused = focus == pane_id;
     let border_style = if focused {
@@ -94,6 +96,7 @@ pub fn render_buffer(
     let content_width = buffer.viewport.width.max(1);
 
     let selection = buffer.selection_range();
+    let selection_active = mode == Mode::Visual && selection.is_some();
     let mut lines: Vec<Line> = Vec::with_capacity(height);
     let snapshot = snapshot;
 
@@ -120,7 +123,7 @@ pub fn render_buffer(
         }
         let is_cursor_line = line_idx == buffer.cursor.line;
         let mut base_style = Style::default().fg(theme.foreground).bg(theme.background);
-        if is_cursor_line {
+        if is_cursor_line && !selection_active {
             base_style = base_style
                 .bg(theme.cursor_line_bg)
                 .add_modifier(Modifier::UNDERLINED);

@@ -1,4 +1,4 @@
-use nit_core::{AppState, PaneId};
+use nit_core::{AppState, PaneId, UiSelectionPane};
 use ratatui::{
     layout::{Constraint, Direction, Layout},
     style::{Modifier, Style},
@@ -8,6 +8,7 @@ use ratatui::{
 };
 
 use crate::theme::Theme;
+use crate::widgets::text_selection::apply_ui_selection;
 
 pub fn render(frame: &mut Frame, area: ratatui::layout::Rect, state: &AppState, theme: &Theme) {
     let focused = state.focus == PaneId::JobOutput;
@@ -69,12 +70,31 @@ pub fn render(frame: &mut Frame, area: ratatui::layout::Rect, state: &AppState, 
 
     // Logs
     let height = chunks[1].height as usize;
-    let logs: Vec<_> = state.logs.iter().rev().take(height).cloned().collect();
+    let total = state.logs.len();
+    let max_scroll = total.saturating_sub(height);
+    let scroll = state.logs_scroll.min(max_scroll);
+    let start = total.saturating_sub(height + scroll);
+    let end = total.saturating_sub(scroll);
+    let logs: Vec<_> = state
+        .logs
+        .iter()
+        .skip(start)
+        .take(end.saturating_sub(start))
+        .cloned()
+        .collect();
     let mut lines: Vec<Line> = Vec::new();
-    for line in logs.into_iter().rev() {
+    for line in logs {
         let style = log_style(&line, theme);
         lines.push(Line::from(Span::styled(line, style)));
     }
+
+    let lines = apply_ui_selection(
+        lines,
+        state.ui_selection.as_ref(),
+        UiSelectionPane::JobOutput,
+        theme.selection_bg,
+        start,
+    );
 
     let paragraph =
         Paragraph::new(lines).style(Style::default().bg(theme.background).fg(theme.foreground));

@@ -51,6 +51,24 @@ pub struct GamesAnalysisState {
     pub summary: Option<nit_games::analysis::HistoryAnalysisSummary>,
     #[serde(skip)]
     pub preview: Option<nit_games::analysis::HistoryAnalysisPreview>,
+    #[serde(skip)]
+    pub scroll_offset: usize,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum UiSelectionPane {
+    JobOutput,
+    HelpPopup,
+    GamesAnalysisPopup,
+}
+
+#[derive(Copy, Clone, Debug)]
+pub struct UiSelection {
+    pub pane: UiSelectionPane,
+    pub start_line: usize,
+    pub start_col: usize,
+    pub end_line: usize,
+    pub end_col: usize,
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -107,6 +125,14 @@ impl LogBuffer {
 
     pub fn iter(&self) -> std::collections::vec_deque::Iter<'_, String> {
         self.lines.iter()
+    }
+
+    pub fn len(&self) -> usize {
+        self.lines.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.lines.is_empty()
     }
 }
 
@@ -322,6 +348,12 @@ pub struct AppState {
     #[serde(skip)]
     pub command_line: Option<CommandLine>,
     #[serde(skip)]
+    pub ui_selection: Option<UiSelection>,
+    #[serde(skip)]
+    pub help_scroll: usize,
+    #[serde(skip)]
+    pub logs_scroll: usize,
+    #[serde(skip)]
     pub rule_catalog: RuleCatalog,
     #[serde(skip)]
     pub rule_picker: RulePickerState,
@@ -465,6 +497,7 @@ impl AppState {
                     last_error: None,
                     summary: None,
                     preview: None,
+                    scroll_offset: 0,
                 },
                 pending_run: false,
                 pending_close: false,
@@ -476,6 +509,9 @@ impl AppState {
             yank: None,
             yank_kind: YankKind::Char,
             command_line: None,
+            ui_selection: None,
+            help_scroll: 0,
+            logs_scroll: 0,
             rule_catalog,
             rule_picker: RulePickerState::default(),
             protocol_picker: ProtocolPickerState::default(),
@@ -896,6 +932,7 @@ pub fn apply_action(state: &mut AppState, action: Action) -> ActionOutcome {
         }
         Action::ClearLogs => {
             state.logs.clear();
+            state.logs_scroll = 0;
         }
         Action::ToggleJobPause => {
             state.job.paused = !state.job.paused;
@@ -1228,8 +1265,19 @@ pub fn apply_action(state: &mut AppState, action: Action) -> ActionOutcome {
                 "Debug OFF".into()
             });
         }
-        Action::ShowHelp => state.show_help = true,
-        Action::HideHelp => state.show_help = false,
+        Action::ShowHelp => {
+            state.show_help = true;
+            state.help_scroll = 0;
+        }
+        Action::HideHelp => {
+            state.show_help = false;
+            state.help_scroll = 0;
+            if let Some(selection) = state.ui_selection {
+                if matches!(selection.pane, UiSelectionPane::HelpPopup) {
+                    state.ui_selection = None;
+                }
+            }
+        }
     }
 
     ActionOutcome {
@@ -1348,6 +1396,7 @@ fn handle_command_line(state: &mut AppState, input: &str) {
                 state.games.analysis.last_error = None;
                 state.games.analysis.summary = None;
                 state.games.analysis.preview = None;
+                state.games.analysis.scroll_offset = 0;
                 state.status = Some("Games analysis queued".into());
             }
         }

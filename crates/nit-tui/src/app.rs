@@ -6,7 +6,8 @@ use arboard::Clipboard;
 use crossterm::{
     cursor::SetCursorStyle,
     event::{
-        self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, KeyboardEnhancementFlags,
+        self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
+        KeyModifiers, KeyboardEnhancementFlags, MouseEvent, MouseEventKind,
         PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
     },
     execute,
@@ -14,7 +15,7 @@ use crossterm::{
 };
 use nit_core::{
     actions::Action, apply_action, io as core_io, AppKind, AppState, Mode, PaneId, Prompt,
-    Viewport, YankKind,
+    UiSelection, UiSelectionPane, Viewport, YankKind,
 };
 use ratatui::{
     backend::CrosstermBackend,
@@ -52,7 +53,11 @@ pub fn run(mut state: AppState, theme: Theme, log_rx: Receiver<String>) -> io::R
     let mut guard = TerminalGuard {
         active: true,
         keyboard_flags_pushed: false,
+        mouse_capture: false,
     };
+    if execute!(stdout, EnableMouseCapture).is_ok() {
+        guard.mouse_capture = true;
+    }
     let keyboard_flags = KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
         | KeyboardEnhancementFlags::REPORT_EVENT_TYPES
         | KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS
@@ -76,6 +81,10 @@ pub fn run(mut state: AppState, theme: Theme, log_rx: Receiver<String>) -> io::R
     if guard.keyboard_flags_pushed {
         let _ = execute!(io::stdout(), PopKeyboardEnhancementFlags);
         guard.keyboard_flags_pushed = false;
+    }
+    if guard.mouse_capture {
+        let _ = execute!(io::stdout(), DisableMouseCapture);
+        guard.mouse_capture = false;
     }
     execute!(io::stdout(), SetCursorStyle::DefaultUserShape)?;
     disable_raw_mode()?;
@@ -122,6 +131,7 @@ fn run_loop(
                 let action_copy = action.clone();
                 let outcome = apply_action_with_syntax(state, syntax, action);
                 handle_clipboard_copy(state, &mut clipboard, &action_copy);
+                handle_selection_autocopy(state, &mut clipboard, &mut input_state);
                 if outcome.should_exit {
                     break;
                 }
@@ -134,68 +144,95 @@ fn run_loop(
         let timeout = TICK_RATE;
         let mut handled_input = false;
         if event::poll(timeout)? {
-            if let Event::Key(key) = event::read()? {
-                if key.kind == KeyEventKind::Release {
-                    continue;
-                }
-                handled_input = true;
-                if state.rule_picker.open {
-                    if rule_picker::handle_key(&key, state) {
-                        needs_redraw = true;
+            match event::read()? {
+                Event::Key(key) => {
+                    if key.kind == KeyEventKind::Release {
                         continue;
                     }
-                }
-                if state.protocol_picker.open {
-                    if protocol_picker::handle_key(&key, state) {
-                        needs_redraw = true;
-                        continue;
-                    }
-                }
-                if state.games.analysis.open {
-                    if handle_analysis_popup_key(&key, state) {
-                        needs_redraw = true;
-                        continue;
-                    }
-                }
-                let petri_visible = match state.app_kind {
-                    AppKind::Gol => gol_petri.as_ref().map(|p| p.is_visible()).unwrap_or(false),
-                    AppKind::Games => games_petri
-                        .as_ref()
-                        .map(|p| p.is_visible())
-                        .unwrap_or(false),
-                };
-                if petri_visible && state.command_line.is_none() && state.prompt.is_none() {
-                    let screen = terminal.size().unwrap_or_default();
-                    let handled = match state.app_kind {
-                        AppKind::Gol => {
-                            if let (Some(petri), Some(seed_runtime)) =
-                                (gol_petri.as_mut(), seed_runtime.as_mut())
-                            {
-                                petri.handle_key(&key, state, seed_runtime, screen)
-                            } else {
-                                false
-                            }
+                    handled_input = true;
+                    if state.rule_picker.open {
+                        if rule_picker::handle_key(&key, state) {
+                            needs_redraw = true;
+                            continue;
                         }
+                    }
+                    if state.protocol_picker.open {
+                        if protocol_picker::handle_key(&key, state) {
+                            needs_redraw = true;
+                            continue;
+                        }
+                    }
+                    if state.show_help {
+                        if handle_help_popup_key(&key, state) {
+                            needs_redraw = true;
+                            continue;
+                        }
+                    }
+                    if state.games.analysis.open {
+                        if handle_analysis_popup_key(&key, state) {
+                            needs_redraw = true;
+                            continue;
+                        }
+                    }
+                    let petri_visible = match state.app_kind {
+                        AppKind::Gol => gol_petri.as_ref().map(|p| p.is_visible()).unwrap_or(false),
                         AppKind::Games => games_petri
-                            .as_mut()
-                            .map(|petri| petri.handle_key(&key, state))
+                            .as_ref()
+                            .map(|p| p.is_visible())
                             .unwrap_or(false),
                     };
-                    if handled {
+                    if petri_visible && state.command_line.is_none() && state.prompt.is_none() {
+                        let screen = terminal.size().unwrap_or_default();
+                        let handled = match state.app_kind {
+                            AppKind::Gol => {
+                                if let (Some(petri), Some(seed_runtime)) =
+                                    (gol_petri.as_mut(), seed_runtime.as_mut())
+                                {
+                                    petri.handle_key(&key, state, seed_runtime, screen)
+                                } else {
+                                    false
+                                }
+                            }
+                            AppKind::Games => games_petri
+                                .as_mut()
+                                .map(|petri| petri.handle_key(&key, state))
+                                .unwrap_or(false),
+                        };
+                        if handled {
+                            needs_redraw = true;
+                            continue;
+                        }
+                    }
+                    if let Some(action) = map_key_to_action(key, state, &mut input_state) {
+                        prepare_clipboard_paste(state, &mut clipboard, &action);
+                        let action_copy = action.clone();
+                        let outcome = apply_action_with_syntax(state, syntax, action);
+                        handle_clipboard_copy(state, &mut clipboard, &action_copy);
+                        handle_selection_autocopy(state, &mut clipboard, &mut input_state);
+                        if outcome.should_exit {
+                            break;
+                        }
+                        needs_redraw = needs_redraw || outcome.state_changed;
+                    }
+                }
+                Event::Mouse(mouse) => {
+                    handled_input = true;
+                    let screen = terminal.size().unwrap_or_default();
+                    if handle_mouse_event(
+                        mouse,
+                        screen,
+                        state,
+                        &mut input_state,
+                        &mut clipboard,
+                        theme,
+                    ) {
                         needs_redraw = true;
-                        continue;
                     }
                 }
-                if let Some(action) = map_key_to_action(key, state, &mut input_state) {
-                    prepare_clipboard_paste(state, &mut clipboard, &action);
-                    let action_copy = action.clone();
-                    let outcome = apply_action_with_syntax(state, syntax, action);
-                    handle_clipboard_copy(state, &mut clipboard, &action_copy);
-                    if outcome.should_exit {
-                        break;
-                    }
-                    needs_redraw = needs_redraw || outcome.state_changed;
+                Event::Resize(_, _) => {
+                    needs_redraw = true;
                 }
+                _ => {}
             }
         }
 
@@ -205,6 +242,7 @@ fn run_loop(
                 let action_copy = action.clone();
                 let outcome = apply_action_with_syntax(state, syntax, action);
                 handle_clipboard_copy(state, &mut clipboard, &action_copy);
+                handle_selection_autocopy(state, &mut clipboard, &mut input_state);
                 if outcome.should_exit {
                     break;
                 }
@@ -439,7 +477,7 @@ fn draw(
         }
         if state.show_help {
             let area = dynamic_popup_rect(f.size(), help_overlay::preferred_size(f.size()));
-            help_overlay::render(f, area, theme);
+            help_overlay::render(f, area, state, theme);
         }
         if let Some(Prompt::ConfirmQuit) = state.prompt {
             let message = "Quit without saving? (Y/N)";
@@ -899,6 +937,45 @@ fn handle_clipboard_copy(state: &AppState, clipboard: &mut Option<Clipboard>, ac
     }
 }
 
+fn handle_selection_autocopy(
+    state: &mut AppState,
+    clipboard: &mut Option<Clipboard>,
+    input_state: &mut InputState,
+) {
+    if state.mode != Mode::Visual {
+        input_state.last_selection = None;
+        return;
+    }
+    let (pane, buffer) = match state.focus {
+        PaneId::Editor => (PaneId::Editor, state.editor_buffer()),
+        PaneId::Notes => (PaneId::Notes, state.notes_buffer()),
+        _ => {
+            input_state.last_selection = None;
+            return;
+        }
+    };
+    let Some((start, end)) = buffer.selection_range() else {
+        input_state.last_selection = None;
+        return;
+    };
+    let signature = SelectionSignature { pane, start, end };
+    if input_state.last_selection == Some(signature) {
+        return;
+    }
+    input_state.last_selection = Some(signature);
+    if let Some(text) = buffer.yank_selection() {
+        state.yank_kind = if text.contains('\n') {
+            YankKind::Line
+        } else {
+            YankKind::Char
+        };
+        state.yank = Some(text.clone());
+        if let Some(cb) = clipboard.as_mut() {
+            let _ = cb.set_text(text);
+        }
+    }
+}
+
 fn prepare_clipboard_paste(
     state: &mut AppState,
     clipboard: &mut Option<Clipboard>,
@@ -988,6 +1065,9 @@ struct InputState {
     pending_insert: Option<(char, Instant)>,
     deferred_key: Option<KeyEvent>,
     visualizer_jump: Option<InspectorJump>,
+    last_selection: Option<SelectionSignature>,
+    mouse_select_anchor: Option<MouseSelectAnchor>,
+    last_ui_selection: Option<UiSelectionSignature>,
 }
 
 impl InputState {
@@ -998,6 +1078,9 @@ impl InputState {
             pending_insert: None,
             deferred_key: None,
             visualizer_jump: None,
+            last_selection: None,
+            mouse_select_anchor: None,
+            last_ui_selection: None,
         }
     }
 
@@ -1104,6 +1187,35 @@ impl InputState {
             }
         }
     }
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+struct SelectionSignature {
+    pane: PaneId,
+    start: usize,
+    end: usize,
+}
+
+#[derive(Copy, Clone, Debug)]
+struct MouseSelectAnchor {
+    target: MouseSelectTarget,
+    line: usize,
+    col: usize,
+}
+
+#[derive(Copy, Clone, Debug)]
+enum MouseSelectTarget {
+    Buffer(PaneId),
+    Ui(UiSelectionPane),
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+struct UiSelectionSignature {
+    pane: UiSelectionPane,
+    start_line: usize,
+    start_col: usize,
+    end_line: usize,
+    end_col: usize,
 }
 
 struct InspectorJump {
@@ -1424,6 +1536,716 @@ fn dynamic_popup_rect(screen: ratatui::layout::Rect, desired: (u16, u16)) -> rat
         .split(vertical)[1]
 }
 
+fn handle_mouse_event(
+    mouse: MouseEvent,
+    screen: ratatui::layout::Rect,
+    state: &mut AppState,
+    input_state: &mut InputState,
+    clipboard: &mut Option<Clipboard>,
+    theme: &Theme,
+) -> bool {
+    match mouse.kind {
+        MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
+            let fast = mouse
+                .modifiers
+                .intersects(KeyModifiers::SHIFT | KeyModifiers::CONTROL);
+            let step = if fast {
+                SCROLL_LINES_FAST
+            } else {
+                SCROLL_LINES
+            };
+            let delta = if matches!(mouse.kind, MouseEventKind::ScrollUp) {
+                -(step as i32)
+            } else {
+                step as i32
+            };
+            if state.command_line.is_some() || state.prompt.is_some() {
+                return true;
+            }
+
+            if state.rule_picker.open || state.protocol_picker.open {
+                return true;
+            }
+
+            if state.show_help {
+                let area = dynamic_popup_rect(screen, help_overlay::preferred_size(screen));
+                if point_in_rect(mouse.column, mouse.row, area) {
+                    bump_scroll(&mut state.help_scroll, delta);
+                }
+                return true;
+            }
+
+            if state.app_kind == AppKind::Games && state.games.analysis.open {
+                let area = dynamic_popup_rect(screen, games_analysis_popup::preferred_size(screen));
+                if point_in_rect(mouse.column, mouse.row, area) {
+                    bump_scroll(&mut state.games.analysis.scroll_offset, delta);
+                }
+                return true;
+            }
+
+            let layout = layout::split(screen);
+            if point_in_rect(mouse.column, mouse.row, layout.editor) {
+                scroll_buffer(state.editor_buffer_mut(), delta);
+                return true;
+            }
+            if point_in_rect(mouse.column, mouse.row, layout.notes) {
+                scroll_buffer(state.notes_buffer_mut(), delta);
+                return true;
+            }
+            if point_in_rect(mouse.column, mouse.row, layout.job) {
+                let height = layout.job.height.saturating_sub(3) as usize;
+                let max_scroll = state.logs.len().saturating_sub(height);
+                let mut scroll = state.logs_scroll;
+                bump_scroll(&mut scroll, delta);
+                state.logs_scroll = scroll.min(max_scroll);
+                return true;
+            }
+            false
+        }
+        MouseEventKind::Down(crossterm::event::MouseButton::Left) => {
+            handle_mouse_down(mouse, screen, state, input_state, clipboard, theme)
+        }
+        MouseEventKind::Drag(crossterm::event::MouseButton::Left) => {
+            handle_mouse_drag(mouse, screen, state, input_state, clipboard, theme)
+        }
+        MouseEventKind::Up(crossterm::event::MouseButton::Left) => {
+            input_state.mouse_select_anchor = None;
+            true
+        }
+        _ => false,
+    }
+}
+
+const SCROLL_LINES: usize = 1;
+const SCROLL_LINES_FAST: usize = 5;
+
+fn bump_scroll(value: &mut usize, delta: i32) {
+    if delta.is_negative() {
+        *value = value.saturating_sub(delta.abs() as usize);
+    } else if delta > 0 {
+        *value = value.saturating_add(delta as usize);
+    }
+}
+
+fn scroll_buffer(buf: &mut nit_core::Buffer, delta: i32) {
+    let height = buf.viewport.height.max(1);
+    let max_offset = buf.lines_len().saturating_sub(height);
+    let offset = buf.viewport.offset_line as i32 + delta;
+    let clamped = offset.clamp(0, max_offset as i32);
+    buf.viewport.offset_line = clamped as usize;
+}
+
+fn point_in_rect(x: u16, y: u16, rect: ratatui::layout::Rect) -> bool {
+    x >= rect.x
+        && x < rect.x.saturating_add(rect.width)
+        && y >= rect.y
+        && y < rect.y.saturating_add(rect.height)
+}
+
+fn map_job_output_mouse(
+    mouse: MouseEvent,
+    screen: ratatui::layout::Rect,
+    state: &AppState,
+    clamp: bool,
+) -> Option<(usize, usize, Vec<String>)> {
+    let layout = layout::split(screen);
+    let text_area = job_output_text_area(layout.job);
+    if !point_in_rect(mouse.column, mouse.row, text_area) && !clamp {
+        return None;
+    }
+    let lines: Vec<String> = state.logs.iter().cloned().collect();
+    if lines.is_empty() {
+        return None;
+    }
+    let height = text_area.height as usize;
+    let total = lines.len();
+    let max_scroll = total.saturating_sub(height);
+    let scroll = state.logs_scroll.min(max_scroll);
+    let start = total.saturating_sub(height + scroll);
+    let (line_idx, col) = map_mouse_to_line_col(
+        mouse,
+        text_area,
+        &lines,
+        start,
+        state.settings.editor.tab_width as usize,
+        clamp,
+    )?;
+    Some((line_idx, col, lines))
+}
+
+fn map_help_popup_mouse(
+    mouse: MouseEvent,
+    screen: ratatui::layout::Rect,
+    state: &AppState,
+    theme: &Theme,
+    clamp: bool,
+) -> Option<(usize, usize, Vec<String>)> {
+    if !state.show_help {
+        return None;
+    }
+    let area = dynamic_popup_rect(screen, help_overlay::preferred_size(screen));
+    let text_area = popup_text_area(area);
+    if !point_in_rect(mouse.column, mouse.row, text_area) && !clamp {
+        return None;
+    }
+    let lines = help_overlay::build_lines(theme);
+    let text_lines = lines_to_strings(&lines);
+    if text_lines.is_empty() {
+        return None;
+    }
+    let height = text_area.height as usize;
+    let max_scroll = text_lines.len().saturating_sub(height);
+    let scroll = state.help_scroll.min(max_scroll);
+    let (line_idx, col) = map_mouse_to_line_col(
+        mouse,
+        text_area,
+        &text_lines,
+        scroll,
+        state.settings.editor.tab_width as usize,
+        clamp,
+    )?;
+    Some((line_idx, col, text_lines))
+}
+
+fn map_analysis_popup_mouse(
+    mouse: MouseEvent,
+    screen: ratatui::layout::Rect,
+    state: &AppState,
+    theme: &Theme,
+    clamp: bool,
+) -> Option<(usize, usize, Vec<String>)> {
+    if state.app_kind != AppKind::Games || !state.games.analysis.open {
+        return None;
+    }
+    let area = dynamic_popup_rect(screen, games_analysis_popup::preferred_size(screen));
+    let text_area = popup_text_area(area);
+    if !point_in_rect(mouse.column, mouse.row, text_area) && !clamp {
+        return None;
+    }
+    let lines = games_analysis_popup::build_lines(state, theme, text_area.width);
+    let text_lines = lines_to_strings(&lines);
+    if text_lines.is_empty() {
+        return None;
+    }
+    let height = text_area.height as usize;
+    let max_scroll = text_lines.len().saturating_sub(height);
+    let scroll = state.games.analysis.scroll_offset.min(max_scroll);
+    let (line_idx, col) = map_mouse_to_line_col(
+        mouse,
+        text_area,
+        &text_lines,
+        scroll,
+        state.settings.editor.tab_width as usize,
+        clamp,
+    )?;
+    Some((line_idx, col, text_lines))
+}
+
+fn map_mouse_to_line_col(
+    mouse: MouseEvent,
+    area: ratatui::layout::Rect,
+    lines: &[String],
+    scroll: usize,
+    tab_width: usize,
+    clamp: bool,
+) -> Option<(usize, usize)> {
+    if lines.is_empty() || area.height == 0 || area.width == 0 {
+        return None;
+    }
+    let max_row = area.height.saturating_sub(1);
+    let row = if clamp {
+        if mouse.row < area.y {
+            0
+        } else {
+            mouse.row.saturating_sub(area.y).min(max_row) as usize
+        }
+    } else if mouse.row < area.y || mouse.row > area.y.saturating_add(max_row) {
+        return None;
+    } else {
+        mouse.row.saturating_sub(area.y) as usize
+    };
+    let line_idx = scroll.saturating_add(row).min(lines.len().saturating_sub(1));
+    let line = &lines[line_idx];
+    let display_col = if mouse.column <= area.x {
+        0
+    } else {
+        (mouse.column - area.x) as usize
+    };
+    let col = char_idx_for_display_col(line, display_col, tab_width);
+    Some((line_idx, col))
+}
+
+fn job_output_text_area(area: ratatui::layout::Rect) -> ratatui::layout::Rect {
+    use ratatui::layout::{Constraint, Direction, Layout};
+    use ratatui::widgets::{Block, Borders};
+    let inner = Block::default().borders(Borders::ALL).inner(area);
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(1), Constraint::Min(1)])
+        .split(inner);
+    chunks[1]
+}
+
+fn popup_text_area(area: ratatui::layout::Rect) -> ratatui::layout::Rect {
+    use ratatui::widgets::{Block, Borders};
+    Block::default().borders(Borders::ALL).inner(area)
+}
+
+fn lines_to_strings(lines: &[ratatui::text::Line<'_>]) -> Vec<String> {
+    lines
+        .iter()
+        .map(|line| line.spans.iter().map(|s| s.content.as_ref()).collect())
+        .collect()
+}
+
+fn update_ui_selection_text(
+    state: &mut AppState,
+    pane: UiSelectionPane,
+    lines: &[String],
+    clipboard: &mut Option<Clipboard>,
+    input_state: &mut InputState,
+) {
+    let Some(selection) = state.ui_selection else {
+        return;
+    };
+    if selection.pane != pane {
+        return;
+    }
+    let signature = UiSelectionSignature {
+        pane,
+        start_line: selection.start_line,
+        start_col: selection.start_col,
+        end_line: selection.end_line,
+        end_col: selection.end_col,
+    };
+    if input_state.last_ui_selection == Some(signature) {
+        return;
+    }
+    input_state.last_ui_selection = Some(signature);
+    let text = selection_text(lines, selection);
+    if text.is_empty() {
+        return;
+    }
+    state.yank_kind = if text.contains('\n') {
+        YankKind::Line
+    } else {
+        YankKind::Char
+    };
+    state.yank = Some(text.clone());
+    if let Some(cb) = clipboard.as_mut() {
+        let _ = cb.set_text(text);
+    }
+}
+
+fn selection_text(lines: &[String], selection: UiSelection) -> String {
+    if lines.is_empty() {
+        return String::new();
+    }
+    let (start_line, start_col, end_line, end_col) = if (selection.start_line, selection.start_col)
+        <= (selection.end_line, selection.end_col)
+    {
+        (
+            selection.start_line,
+            selection.start_col,
+            selection.end_line,
+            selection.end_col,
+        )
+    } else {
+        (
+            selection.end_line,
+            selection.end_col,
+            selection.start_line,
+            selection.start_col,
+        )
+    };
+    let mut out = String::new();
+    let last_line = lines.len().saturating_sub(1);
+    let end_line = end_line.min(last_line);
+    for line_idx in start_line..=end_line {
+        let line = &lines[line_idx];
+        let line_len = line.chars().count();
+        let sel_start = if line_idx == start_line { start_col } else { 0 };
+        let sel_end = if line_idx == end_line { end_col } else { line_len };
+        let sel_start = sel_start.min(line_len);
+        let sel_end = sel_end.min(line_len);
+        out.push_str(&slice_by_char(line, sel_start, sel_end));
+        if line_idx < end_line {
+            out.push('\n');
+        }
+    }
+    out
+}
+
+fn slice_by_char(input: &str, start: usize, end: usize) -> String {
+    if start >= end {
+        return String::new();
+    }
+    let mut start_byte = None;
+    let mut end_byte = None;
+    let mut count = 0usize;
+    for (idx, _) in input.char_indices() {
+        if count == start {
+            start_byte = Some(idx);
+        }
+        if count == end {
+            end_byte = Some(idx);
+            break;
+        }
+        count += 1;
+    }
+    let start_byte = start_byte.unwrap_or_else(|| input.len());
+    let end_byte = end_byte.unwrap_or_else(|| input.len());
+    input[start_byte..end_byte].to_string()
+}
+
+fn handle_mouse_down(
+    mouse: MouseEvent,
+    screen: ratatui::layout::Rect,
+    state: &mut AppState,
+    input_state: &mut InputState,
+    clipboard: &mut Option<Clipboard>,
+    theme: &Theme,
+) -> bool {
+    if state.command_line.is_some() || state.prompt.is_some() {
+        return true;
+    }
+    if state.rule_picker.open || state.protocol_picker.open {
+        return true;
+    }
+    if state.show_help {
+        if let Some((line_idx, col, lines)) =
+            map_help_popup_mouse(mouse, screen, state, theme, false)
+        {
+            reset_ui_selection(state, input_state);
+            state.ui_selection = Some(UiSelection {
+                pane: UiSelectionPane::HelpPopup,
+                start_line: line_idx,
+                start_col: col,
+                end_line: line_idx,
+                end_col: col,
+            });
+            input_state.mouse_select_anchor = Some(MouseSelectAnchor {
+                target: MouseSelectTarget::Ui(UiSelectionPane::HelpPopup),
+                line: line_idx,
+                col,
+            });
+            update_ui_selection_text(
+                state,
+                UiSelectionPane::HelpPopup,
+                &lines,
+                clipboard,
+                input_state,
+            );
+        }
+        return true;
+    }
+    if state.app_kind == AppKind::Games && state.games.analysis.open {
+        if let Some((line_idx, col, lines)) =
+            map_analysis_popup_mouse(mouse, screen, state, theme, false)
+        {
+            reset_ui_selection(state, input_state);
+            state.ui_selection = Some(UiSelection {
+                pane: UiSelectionPane::GamesAnalysisPopup,
+                start_line: line_idx,
+                start_col: col,
+                end_line: line_idx,
+                end_col: col,
+            });
+            input_state.mouse_select_anchor = Some(MouseSelectAnchor {
+                target: MouseSelectTarget::Ui(UiSelectionPane::GamesAnalysisPopup),
+                line: line_idx,
+                col,
+            });
+            update_ui_selection_text(
+                state,
+                UiSelectionPane::GamesAnalysisPopup,
+                &lines,
+                clipboard,
+                input_state,
+            );
+        }
+        return true;
+    }
+    reset_ui_selection(state, input_state);
+    let layout = layout::split(screen);
+    if point_in_rect(mouse.column, mouse.row, layout.editor) {
+        set_buffer_cursor_from_mouse(
+            state,
+            PaneId::Editor,
+            mouse,
+            layout.editor,
+            state.settings.editor.tab_width as usize,
+            false,
+        );
+        if state.mode == Mode::Visual {
+            state.mode = Mode::Normal;
+        }
+        state.editor_buffer_mut().clear_selection();
+        input_state.mouse_select_anchor = Some(MouseSelectAnchor {
+            target: MouseSelectTarget::Buffer(PaneId::Editor),
+            line: state.editor_buffer().cursor.line,
+            col: state.editor_buffer().cursor.col,
+        });
+        return true;
+    }
+    if point_in_rect(mouse.column, mouse.row, layout.notes) {
+        set_buffer_cursor_from_mouse(
+            state,
+            PaneId::Notes,
+            mouse,
+            layout.notes,
+            state.settings.editor.tab_width as usize,
+            false,
+        );
+        if state.mode == Mode::Visual {
+            state.mode = Mode::Normal;
+        }
+        state.notes_buffer_mut().clear_selection();
+        input_state.mouse_select_anchor = Some(MouseSelectAnchor {
+            target: MouseSelectTarget::Buffer(PaneId::Notes),
+            line: state.notes_buffer().cursor.line,
+            col: state.notes_buffer().cursor.col,
+        });
+        return true;
+    }
+    if let Some((line_idx, col, lines)) =
+        map_job_output_mouse(mouse, screen, state, false)
+    {
+        state.focus = PaneId::JobOutput;
+        state.ui_selection = Some(UiSelection {
+            pane: UiSelectionPane::JobOutput,
+            start_line: line_idx,
+            start_col: col,
+            end_line: line_idx,
+            end_col: col,
+        });
+        input_state.mouse_select_anchor = Some(MouseSelectAnchor {
+            target: MouseSelectTarget::Ui(UiSelectionPane::JobOutput),
+            line: line_idx,
+            col,
+        });
+        update_ui_selection_text(state, UiSelectionPane::JobOutput, &lines, clipboard, input_state);
+        return true;
+    }
+    false
+}
+
+fn handle_mouse_drag(
+    mouse: MouseEvent,
+    screen: ratatui::layout::Rect,
+    state: &mut AppState,
+    input_state: &mut InputState,
+    clipboard: &mut Option<Clipboard>,
+    theme: &Theme,
+) -> bool {
+    let Some(anchor) = input_state.mouse_select_anchor else {
+        return false;
+    };
+    if !mouse_drag_allowed(state, anchor) {
+        input_state.mouse_select_anchor = None;
+        return true;
+    }
+    match anchor.target {
+        MouseSelectTarget::Buffer(pane) => {
+            let layout = layout::split(screen);
+            let (pane_rect, tab_width) = match pane {
+                PaneId::Editor => (layout.editor, state.settings.editor.tab_width as usize),
+                PaneId::Notes => (layout.notes, state.settings.editor.tab_width as usize),
+                _ => return false,
+            };
+            state.focus = pane;
+            let buffer = match pane {
+                PaneId::Editor => state.editor_buffer_mut(),
+                PaneId::Notes => state.notes_buffer_mut(),
+                _ => return false,
+            };
+            let Some((line, col)) =
+                mouse_to_buffer_pos(mouse, pane_rect, buffer, tab_width, true)
+            else {
+                return false;
+            };
+            if buffer.selection_range().is_none() {
+                buffer.cursor.line = anchor.line;
+                buffer.cursor.col = anchor.col;
+                buffer.set_selection_anchor();
+            }
+            buffer.cursor.line = line;
+            buffer.cursor.col = col;
+            buffer.ensure_visible();
+            state.mode = Mode::Visual;
+            handle_selection_autocopy(state, clipboard, input_state);
+            true
+        }
+        MouseSelectTarget::Ui(pane) => {
+            let result = match pane {
+                UiSelectionPane::JobOutput => map_job_output_mouse(mouse, screen, state, true)
+                    .map(|(line_idx, col, lines)| (line_idx, col, lines)),
+                UiSelectionPane::HelpPopup => {
+                    map_help_popup_mouse(mouse, screen, state, theme, true)
+                        .map(|(line_idx, col, lines)| (line_idx, col, lines))
+                }
+                UiSelectionPane::GamesAnalysisPopup => {
+                    map_analysis_popup_mouse(mouse, screen, state, theme, true)
+                        .map(|(line_idx, col, lines)| (line_idx, col, lines))
+                }
+            };
+            let Some((line_idx, col, lines)) = result else {
+                return false;
+            };
+            state.ui_selection = Some(UiSelection {
+                pane,
+                start_line: anchor.line,
+                start_col: anchor.col,
+                end_line: line_idx,
+                end_col: col,
+            });
+            update_ui_selection_text(state, pane, &lines, clipboard, input_state);
+            true
+        }
+    }
+}
+
+fn reset_ui_selection(state: &mut AppState, input_state: &mut InputState) {
+    input_state.mouse_select_anchor = None;
+    state.ui_selection = None;
+    input_state.last_ui_selection = None;
+}
+
+fn mouse_drag_allowed(state: &AppState, anchor: MouseSelectAnchor) -> bool {
+    if state.command_line.is_some() || state.prompt.is_some() {
+        return false;
+    }
+    if state.rule_picker.open || state.protocol_picker.open {
+        return false;
+    }
+    if state.show_help {
+        return matches!(anchor.target, MouseSelectTarget::Ui(UiSelectionPane::HelpPopup));
+    }
+    if state.app_kind == AppKind::Games && state.games.analysis.open {
+        return matches!(
+            anchor.target,
+            MouseSelectTarget::Ui(UiSelectionPane::GamesAnalysisPopup)
+        );
+    }
+    true
+}
+
+fn set_buffer_cursor_from_mouse(
+    state: &mut AppState,
+    pane: PaneId,
+    mouse: MouseEvent,
+    area: ratatui::layout::Rect,
+    tab_width: usize,
+    clamp: bool,
+) {
+    state.focus = pane;
+    let buffer = match pane {
+        PaneId::Editor => state.editor_buffer_mut(),
+        PaneId::Notes => state.notes_buffer_mut(),
+        _ => return,
+    };
+    let Some((line, col)) = mouse_to_buffer_pos(mouse, area, buffer, tab_width, clamp) else {
+        return;
+    };
+    buffer.cursor.line = line;
+    buffer.cursor.col = col;
+    buffer.ensure_visible();
+}
+
+fn mouse_to_buffer_pos(
+    mouse: MouseEvent,
+    area: ratatui::layout::Rect,
+    buffer: &nit_core::Buffer,
+    tab_width: usize,
+    clamp: bool,
+) -> Option<(usize, usize)> {
+    let inner_x = area.x.saturating_add(1);
+    let inner_y = area.y.saturating_add(1);
+    let inner_width = area.width.saturating_sub(2) as usize;
+    let inner_height = area.height.saturating_sub(2) as usize;
+    if inner_width == 0 || inner_height == 0 {
+        return None;
+    }
+
+    let total_lines = buffer.lines_len().max(1);
+    let line_num_width = total_lines.to_string().len().max(3);
+    let gutter_width = line_num_width + 4;
+    let content_x = inner_x.saturating_add(gutter_width as u16);
+
+    let row = if clamp {
+        if mouse.row < inner_y {
+            0
+        } else {
+            let max_row = inner_height.saturating_sub(1) as u16;
+            mouse.row.saturating_sub(inner_y).min(max_row) as usize
+        }
+    } else if mouse.row < inner_y || mouse.row >= inner_y.saturating_add(inner_height as u16) {
+        return None;
+    } else {
+        mouse.row.saturating_sub(inner_y) as usize
+    };
+
+    let line_idx = buffer
+        .viewport
+        .offset_line
+        .saturating_add(row)
+        .min(total_lines.saturating_sub(1));
+
+    let mut line = buffer.line_as_string(line_idx);
+    if line.ends_with('\n') {
+        line.pop();
+    }
+
+    let display_offset = display_col_for_char_idx(&line, buffer.viewport.offset_col, tab_width);
+    let display_col = if mouse.column <= content_x {
+        0
+    } else {
+        (mouse.column - content_x) as usize
+    };
+    let target_display = display_offset.saturating_add(display_col);
+    let col = char_idx_for_display_col(&line, target_display, tab_width);
+    Some((line_idx, col))
+}
+
+fn display_col_for_char_idx(line: &str, char_idx: usize, tab_width: usize) -> usize {
+    let mut col = 0;
+    let mut count = 0;
+    for ch in line.chars() {
+        if count >= char_idx {
+            break;
+        }
+        if ch == '\t' {
+            let tab = tab_width.max(1);
+            let advance = tab - (col % tab);
+            col += advance;
+        } else {
+            let w = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(1).max(1);
+            col += w;
+        }
+        count += 1;
+    }
+    col
+}
+
+fn char_idx_for_display_col(line: &str, target_col: usize, tab_width: usize) -> usize {
+    let mut col = 0;
+    let mut idx = 0;
+    for ch in line.chars() {
+        let w = if ch == '\t' {
+            let tab = tab_width.max(1);
+            tab - (col % tab)
+        } else {
+            unicode_width::UnicodeWidthChar::width(ch).unwrap_or(1).max(1)
+        };
+        if col + w > target_col {
+            break;
+        }
+        col += w;
+        idx += 1;
+    }
+    idx
+}
+
 fn handle_analysis_popup_key(key: &KeyEvent, state: &mut AppState) -> bool {
     if !state.games.analysis.open {
         return false;
@@ -1431,9 +2253,39 @@ fn handle_analysis_popup_key(key: &KeyEvent, state: &mut AppState) -> bool {
     match key.code {
         KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') => {
             state.games.analysis.open = false;
+            if let Some(selection) = state.ui_selection {
+                if matches!(selection.pane, UiSelectionPane::GamesAnalysisPopup) {
+                    state.ui_selection = None;
+                }
+            }
             true
         }
         _ => true,
+    }
+}
+
+fn handle_help_popup_key(key: &KeyEvent, state: &mut AppState) -> bool {
+    if !state.show_help {
+        return false;
+    }
+    let close = match key.code {
+        KeyCode::Esc | KeyCode::F(1) | KeyCode::Enter | KeyCode::Char('q') => true,
+        KeyCode::Char('?') if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT => {
+            true
+        }
+        _ => false,
+    };
+    if close {
+        state.show_help = false;
+        state.help_scroll = 0;
+        if let Some(selection) = state.ui_selection {
+            if matches!(selection.pane, UiSelectionPane::HelpPopup) {
+                state.ui_selection = None;
+            }
+        }
+        true
+    } else {
+        true
     }
 }
 
@@ -1493,6 +2345,7 @@ fn save_notes_on_exit(state: &AppState) -> core_io::Result<()> {
 struct TerminalGuard {
     active: bool,
     keyboard_flags_pushed: bool,
+    mouse_capture: bool,
 }
 
 impl Drop for TerminalGuard {
@@ -1500,6 +2353,9 @@ impl Drop for TerminalGuard {
         if self.active {
             if self.keyboard_flags_pushed {
                 let _ = execute!(io::stdout(), PopKeyboardEnhancementFlags);
+            }
+            if self.mouse_capture {
+                let _ = execute!(io::stdout(), DisableMouseCapture);
             }
             let _ = disable_raw_mode();
             let _ = execute!(io::stdout(), SetCursorStyle::DefaultUserShape);

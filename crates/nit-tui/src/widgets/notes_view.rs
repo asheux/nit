@@ -14,7 +14,7 @@ pub fn render_notes(
     snapshot: Option<&HighlightSnapshot>,
     line_map: Option<&[Option<usize>]>,
     focus: PaneId,
-    _mode: Mode,
+    mode: Mode,
     theme: &Theme,
     tab_width: usize,
 ) -> Option<CursorPlacement> {
@@ -30,5 +30,6 @@ pub fn render_notes(
         theme,
         tab_width,
         true,
+        mode,
     )
 }
