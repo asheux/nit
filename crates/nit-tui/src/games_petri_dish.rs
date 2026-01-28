@@ -2,7 +2,7 @@ use std::fs;
 use std::time::Instant;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use nit_core::{AppState, GamesStatus};
+use nit_core::{AppState, GamesAnalysisRequest, GamesStatus};
 use nit_games::{
     config::GamesConfig,
     events::EventWriter,
@@ -22,6 +22,7 @@ use ratatui::{
 use tracing::info;
 
 use crate::theme::Theme;
+use crate::games_analysis::{AnalysisCommand, AnalysisEvent, AnalysisRequest, GamesAnalysisRunner};
 use crate::games_runner::{GamesRunner, RunRequest, RunnerCommand, RunnerEvent};
 use crate::widgets::games_visualizer_view::strategy_display_name_from_def;
 
@@ -36,6 +37,7 @@ enum PetriView {
 
 pub struct GamesPetriDishRuntime {
     runner: GamesRunner,
+    analysis_runner: GamesAnalysisRunner,
     session: Option<GameSession>,
     hidden: bool,
     warning: Option<String>,
@@ -56,6 +58,7 @@ impl GamesPetriDishRuntime {
     pub fn new(_state: &AppState) -> Self {
         Self {
             runner: GamesRunner::spawn(),
+            analysis_runner: GamesAnalysisRunner::spawn(),
             session: None,
             hidden: false,
             warning: None,
@@ -93,6 +96,9 @@ impl GamesPetriDishRuntime {
         if state.games.pending_export {
             state.games.pending_export = false;
             self.export_last_run(state);
+        }
+        if let Some(request) = state.games.pending_analyze.take() {
+            self.start_analysis(state, request);
         }
     }
 
@@ -190,8 +196,35 @@ impl GamesPetriDishRuntime {
     }
 
     pub fn tick(&mut self, state: &mut AppState) {
+        self.handle_analysis_events(state);
         self.handle_runner_events(state);
         self.last_tick = Instant::now();
+    }
+
+    fn handle_analysis_events(&mut self, state: &mut AppState) {
+        while let Ok(event) = self.analysis_runner.events.try_recv() {
+            match event {
+                AnalysisEvent::Started(request) => {
+                    state.games.analysis.running = true;
+                    state.games.analysis.last_error = None;
+                    state.games.analysis.source_path =
+                        Some(request.history_path.display().to_string());
+                    state.status = Some("Games analysis started".into());
+                }
+                AnalysisEvent::Finished(result) => {
+                    state.games.analysis.running = false;
+                    state.games.analysis.last_error = None;
+                    state.games.analysis.summary = Some(result.summary);
+                    state.games.analysis.preview = Some(result.preview);
+                    state.status = Some("Games analysis complete".into());
+                }
+                AnalysisEvent::Error(err) => {
+                    state.games.analysis.running = false;
+                    state.games.analysis.last_error = Some(err.clone());
+                    state.status = Some(err);
+                }
+            }
+        }
     }
 
     fn handle_runner_events(&mut self, state: &mut AppState) {
@@ -495,6 +528,68 @@ impl GamesPetriDishRuntime {
         info!("Games tournament started");
     }
 
+    fn start_analysis(&mut self, state: &mut AppState, request: GamesAnalysisRequest) {
+        if state.games.analysis.running {
+            state.status = Some("Games analysis already running".into());
+            return;
+        }
+        let raw_path = if let Some(path) = request.path {
+            path
+        } else if let Some(path) = state.games.last_history_path.clone() {
+            path
+        } else {
+            state.status = Some("No history log available to analyze".into());
+            state.games.analysis.running = false;
+            return;
+        };
+        let cleaned = normalize_path(&raw_path);
+        if cleaned.is_empty() {
+            state.status = Some("No history log available to analyze".into());
+            state.games.analysis.running = false;
+            return;
+        }
+        let mut history_path = std::path::PathBuf::from(&cleaned);
+        if history_path.is_relative() {
+            history_path = state.workspace_root.join(history_path);
+        }
+        if !history_path.exists() {
+            let fallback = state
+                .workspace_root
+                .join("games-runs")
+                .join(&cleaned);
+            if fallback.exists() {
+                history_path = fallback;
+            }
+        }
+        if !history_path.exists() {
+            state.status = Some(format!(
+                "History log not found: {}",
+                history_path.display()
+            ));
+            state.games.analysis.running = false;
+            return;
+        }
+        let out_dir = history_path
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| state.workspace_root.join("games-runs"));
+
+        state.games.analysis.open = true;
+        state.games.analysis.running = true;
+        state.games.analysis.last_error = None;
+        state.games.analysis.summary = None;
+        state.games.analysis.preview = None;
+        state.games.analysis.source_path = Some(history_path.display().to_string());
+
+        let request = AnalysisRequest {
+            history_path,
+            out_dir,
+            tail_rounds: request.tail_rounds,
+            trajectory_samples: request.trajectory_samples,
+        };
+        self.analysis_runner.send(AnalysisCommand::Analyze(request));
+    }
+
     fn close(&mut self, state: &mut AppState) {
         if self.session.is_some() {
             self.runner.send(RunnerCommand::Cancel);
@@ -564,7 +659,18 @@ impl GamesPetriDishRuntime {
 impl Drop for GamesPetriDishRuntime {
     fn drop(&mut self) {
         self.runner.shutdown();
+        self.analysis_runner.shutdown();
     }
+}
+
+fn normalize_path(input: &str) -> String {
+    let trimmed = input.trim();
+    let unquoted = trimmed
+        .strip_prefix('"')
+        .and_then(|v| v.strip_suffix('"'))
+        .or_else(|| trimmed.strip_prefix('\'').and_then(|v| v.strip_suffix('\'')))
+        .unwrap_or(trimmed);
+    unquoted.trim().to_string()
 }
 
 fn render_progress(

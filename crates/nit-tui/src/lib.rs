@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 pub mod app;
+pub mod games_analysis;
 pub mod games_petri_dish;
 pub mod games_runner;
 pub mod gol_render;

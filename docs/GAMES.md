@@ -52,3 +52,24 @@ Run without the TUI:
 ```
 nit games run --config games.toml --out output --format pretty
 ```
+
+## History analysis
+
+The Games history log (`history__*.ndjson`) can be analyzed to produce:
+- Per-match summaries (overall + tail-window stats)
+- Per-strategy cooperation rates
+- Cooperation trajectories for random matchups
+
+TUI command prompt:
+
+```
+:games analyze [path] [tail=10000] [samples=50]
+```
+
+Outputs are written next to the history log:
+- `analysis__<stamp>__.json` (summary + strategy stats)
+- `analysis_matches__<stamp>__.csv` and `analysis_matches__<stamp>__.ndjson`
+- `analysis_strategies__<stamp>__.csv`
+- `analysis_trajectories__<stamp>__.csv`
+
+Random matchups are detected by strategy ids containing `rand` or `random` (case-insensitive).

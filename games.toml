@@ -3,7 +3,7 @@ game = "ipd"
 rounds = 2000000
 repetitions = 1
 self_play = false
-seed = 12345
+seed = 42
 noise = 0.0
 
 [payoff]

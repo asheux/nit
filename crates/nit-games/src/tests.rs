@@ -3,6 +3,7 @@ use crate::game::Action;
 use crate::history::History;
 use crate::strategy::{FsmStrategy, Strategy};
 use crate::tournament::{KernelRunMode, Parallelism, TournamentKernel, TournamentRunner};
+use crate::{analyze_history, AnalysisConfig};
 
 fn run_to_completion(mut runner: TournamentRunner) -> crate::output::TournamentResults {
     while !runner.is_done() {
@@ -168,6 +169,49 @@ name = "Always Cooperate"
     let run_c = crate::output::run_id_from_seed_config(43, cfg);
     assert_eq!(run_a, run_b);
     assert_ne!(run_a, run_c);
+}
+
+#[test]
+fn analysis_summarizes_outcomes_and_tail() {
+    let history = r#"{"match_id":0,"match_index":1,"total_matches":1,"a":"alpha","b":"beta","repetition":1,"rounds":4,"score_idx":"0123","a_score":10,"b_score":12,"a_initial":null,"b_initial":null}"#;
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    let history_path = std::env::temp_dir().join(format!(
+        "nit_games_history_analysis_test_{stamp}.ndjson"
+    ));
+    let out_dir = std::env::temp_dir().join(format!("nit_games_analysis_out_{stamp}"));
+    std::fs::write(&history_path, format!("{history}\n")).expect("write history");
+
+    let config = AnalysisConfig {
+        tail_rounds: 2,
+        trajectory_samples: 2,
+        ..AnalysisConfig::default()
+    };
+    let analysis = analyze_history(&history_path, &out_dir, config).expect("analyze");
+    assert_eq!(analysis.summary.total_matches, 1);
+    assert_eq!(analysis.summary.total_rounds, 4);
+
+    let alpha = analysis
+        .summary
+        .strategies
+        .iter()
+        .find(|s| s.id == "alpha")
+        .expect("alpha summary");
+    let beta = analysis
+        .summary
+        .strategies
+        .iter()
+        .find(|s| s.id == "beta")
+        .expect("beta summary");
+
+    assert!((alpha.coop_rate - 0.5).abs() < 1e-6);
+    assert!((beta.coop_rate - 0.5).abs() < 1e-6);
+    assert_eq!(alpha.tail_rounds, 2);
+    assert_eq!(beta.tail_rounds, 2);
+    assert_eq!(alpha.tail_coop_rounds, 0);
+    assert_eq!(beta.tail_coop_rounds, 1);
 }
 
 #[test]

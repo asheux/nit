@@ -166,8 +166,8 @@ pub fn render(frame: &mut Frame, area: ratatui::layout::Rect, state: &AppState, 
             spans.push(Span::styled(
                 status_label,
                 Style::default()
-                    .fg(theme.border)
-                    .add_modifier(Modifier::DIM),
+                    .fg(theme.title)
+                    .add_modifier(Modifier::BOLD),
             ));
         }
     }

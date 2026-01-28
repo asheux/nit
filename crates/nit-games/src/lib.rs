@@ -3,6 +3,7 @@
 pub mod config;
 pub mod events;
 pub mod game;
+pub mod analysis;
 pub mod history;
 pub mod history_log;
 pub mod output;
@@ -12,6 +13,10 @@ pub mod tournament;
 pub use config::{
     ConfigError, EngineConfig, EngineMode, GamesConfig, NormalizedConfig, ParallelismConfig,
     ParallelismMode, StrategySpec,
+};
+pub use analysis::{
+    analyze_history, AnalysisConfig, AnalysisPaths, HistoryAnalysis, HistoryAnalysisPreview,
+    HistoryAnalysisSummary, MatchSummary, StrategySummary, TrajectoryPreview, TrajectorySample,
 };
 pub use events::{EventLogConfig, EventWriter, GameEvent};
 pub use game::{Action, Outcome, PayoffMatrix};

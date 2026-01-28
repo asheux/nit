@@ -39,7 +39,8 @@ pub use seed::{
     SeedSymmetry,
 };
 pub use state::{
-    apply_action, AppKind, AppState, GamesState, GamesStatus, GolRenderMode, JobState, LogBuffer,
-    Metrics, VisualizerMode, VisualizerRuleEntry, VisualizerState, YankKind,
+    apply_action, AppKind, AppState, GamesAnalysisRequest, GamesAnalysisState, GamesState,
+    GamesStatus, GolRenderMode, JobState, LogBuffer, Metrics, VisualizerMode,
+    VisualizerRuleEntry, VisualizerState, YankKind,
 };
 pub use viewport::Viewport;

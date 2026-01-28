@@ -33,8 +33,9 @@ use crate::{
     system_stats::SystemStats,
     theme::Theme,
     widgets::{
-        bottom_bar, editor_view, games_visualizer_view, gate_monitor_view, help_overlay,
-        job_output_view, notes_view, protocol_picker, rule_picker, top_bar, visualizer_view,
+        bottom_bar, editor_view, games_analysis_popup, games_visualizer_view, gate_monitor_view,
+        help_overlay, job_output_view, notes_view, protocol_picker, rule_picker, top_bar,
+        visualizer_view,
     },
 };
 
@@ -146,6 +147,12 @@ fn run_loop(
                 }
                 if state.protocol_picker.open {
                     if protocol_picker::handle_key(&key, state) {
+                        needs_redraw = true;
+                        continue;
+                    }
+                }
+                if state.games.analysis.open {
+                    if handle_analysis_popup_key(&key, state) {
                         needs_redraw = true;
                         continue;
                     }
@@ -422,6 +429,10 @@ fn draw(
                     petri.render(f, f.size(), state, theme);
                 }
             }
+        }
+        if state.app_kind == AppKind::Games && state.games.analysis.open {
+            let area = dynamic_popup_rect(f.size(), games_analysis_popup::preferred_size(f.size()));
+            games_analysis_popup::render(f, area, state, theme);
         }
         if state.rule_picker.open {
             rule_picker::render(f, f.size(), state, theme);
@@ -1411,6 +1422,19 @@ fn dynamic_popup_rect(screen: ratatui::layout::Rect, desired: (u16, u16)) -> rat
             Constraint::Min(0),
         ])
         .split(vertical)[1]
+}
+
+fn handle_analysis_popup_key(key: &KeyEvent, state: &mut AppState) -> bool {
+    if !state.games.analysis.open {
+        return false;
+    }
+    match key.code {
+        KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') => {
+            state.games.analysis.open = false;
+            true
+        }
+        _ => true,
+    }
 }
 
 fn prompt_size(message: &str) -> (u16, u16) {

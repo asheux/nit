@@ -75,6 +75,9 @@ rendering and text‑measurement consistent, and avoids lossy conversions.
 - History logs (`history__*.ndjson`) are per-match outcome strings when enabled.
   Outcomes are encoded as digits from player A’s perspective:
   `0=CC`, `1=CD`, `2=DC`, `3=DD`.
+- Analysis outputs (`analysis__*.json`, `analysis_matches__*.{csv,ndjson}`,
+  `analysis_strategies__*.csv`, `analysis_trajectories__*.csv`) are generated
+  via `:games analyze` and summarize per-match, steady-state, and trajectory stats.
 
 ## Games Engine (Phase 2)
 

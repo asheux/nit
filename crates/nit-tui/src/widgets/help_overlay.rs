@@ -348,6 +348,14 @@ pub fn render(frame: &mut Frame, area: Rect, theme: &Theme) {
         Span::styled(":gol show", Style::default().fg(theme.accent)),
         Span::raw(" show Petri Dish"),
     ]));
+    lines.push(Line::from(vec![
+        Span::styled(":games analyze", Style::default().fg(theme.accent)),
+        Span::raw(" analyze last Games history log"),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled(":games analyze <path>", Style::default().fg(theme.accent)),
+        Span::raw(" analyze specific history log"),
+    ]));
 
     let block = Block::default()
         .borders(Borders::ALL)

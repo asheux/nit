@@ -11,6 +11,7 @@ use crate::{
     seed::{SeedEncoderId, SeedParams, SeedPreviewMode, SeedStats, SeedViewMode},
     viewport::Viewport,
 };
+use nit_games::analysis::AnalysisConfig;
 use nit_gol::Rule;
 use nit_gol::{AttractorEvent, AutoStopPolicy};
 use std::collections::VecDeque;
@@ -34,6 +35,25 @@ pub enum GamesStatus {
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct GamesAnalysisRequest {
+    pub path: Option<String>,
+    pub tail_rounds: usize,
+    pub trajectory_samples: usize,
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct GamesAnalysisState {
+    pub open: bool,
+    pub running: bool,
+    pub source_path: Option<String>,
+    pub last_error: Option<String>,
+    #[serde(skip)]
+    pub summary: Option<nit_games::analysis::HistoryAnalysisSummary>,
+    #[serde(skip)]
+    pub preview: Option<nit_games::analysis::HistoryAnalysisPreview>,
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct GamesState {
     pub status: GamesStatus,
     pub running: bool,
@@ -45,6 +65,7 @@ pub struct GamesState {
     pub last_run_path: Option<String>,
     pub last_event_path: Option<String>,
     pub last_history_path: Option<String>,
+    pub analysis: GamesAnalysisState,
     #[serde(skip)]
     pub pending_run: bool,
     #[serde(skip)]
@@ -55,6 +76,8 @@ pub struct GamesState {
     pub pending_show: bool,
     #[serde(skip)]
     pub pending_export: bool,
+    #[serde(skip)]
+    pub pending_analyze: Option<GamesAnalysisRequest>,
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -435,11 +458,20 @@ impl AppState {
                 last_run_path: None,
                 last_event_path: None,
                 last_history_path: None,
+                analysis: GamesAnalysisState {
+                    open: false,
+                    running: false,
+                    source_path: None,
+                    last_error: None,
+                    summary: None,
+                    preview: None,
+                },
                 pending_run: false,
                 pending_close: false,
                 pending_hide: false,
                 pending_show: false,
                 pending_export: false,
+                pending_analyze: None,
             },
             yank: None,
             yank_kind: YankKind::Char,
@@ -1265,6 +1297,60 @@ fn handle_command_line(state: &mut AppState, input: &str) {
         ["games", "status"] => {
             state.status = Some(format!("Games status: {:?}", state.games.status));
         }
+        _ if tokens.get(0) == Some(&"games")
+            && matches!(tokens.get(1), Some(&"analyze") | Some(&"analyse")) =>
+        {
+            let defaults = AnalysisConfig::default();
+            let mut tail_rounds = defaults.tail_rounds;
+            let mut trajectory_samples = defaults.trajectory_samples;
+            let mut path: Option<String> = None;
+
+            for arg in trimmed.split_whitespace().skip(2) {
+                if let Some((key, value)) = arg.split_once('=') {
+                    match key.to_ascii_lowercase().as_str() {
+                        "tail" | "tail_rounds" => {
+                            if let Ok(parsed) = value.parse::<usize>() {
+                                tail_rounds = parsed;
+                            }
+                        }
+                        "samples" | "trajectory_samples" => {
+                            if let Ok(parsed) = value.parse::<usize>() {
+                                trajectory_samples = parsed;
+                            }
+                        }
+                        "path" => {
+                            if !value.is_empty() {
+                                path = Some(normalize_path_token(value));
+                            }
+                        }
+                        _ => {}
+                    }
+                } else if path.is_none() {
+                    path = Some(normalize_path_token(arg));
+                }
+            }
+
+            if let Some(candidate) = path.as_ref() {
+                if candidate.trim().is_empty() {
+                    path = None;
+                }
+            }
+
+            if path.is_none() && state.games.last_history_path.is_none() {
+                state.status = Some("No history log available to analyze".into());
+            } else {
+                state.games.pending_analyze = Some(GamesAnalysisRequest {
+                    path,
+                    tail_rounds,
+                    trajectory_samples,
+                });
+                state.games.analysis.open = true;
+                state.games.analysis.last_error = None;
+                state.games.analysis.summary = None;
+                state.games.analysis.preview = None;
+                state.status = Some("Games analysis queued".into());
+            }
+        }
         ["games", "export"] => {
             state.games.pending_export = true;
         }
@@ -1347,6 +1433,16 @@ fn apply_rule_selection(state: &mut AppState, selected: SelectedRule, persist: b
             state.status = Some(format!("GoL rule set to {label} (save failed: {err})"));
         }
     }
+}
+
+fn normalize_path_token(value: &str) -> String {
+    let trimmed = value.trim();
+    let unquoted = trimmed
+        .strip_prefix('"')
+        .and_then(|v| v.strip_suffix('"'))
+        .or_else(|| trimmed.strip_prefix('\'').and_then(|v| v.strip_suffix('\'')))
+        .unwrap_or(trimmed);
+    unquoted.trim().to_string()
 }
 
 fn apply_protocol_selection(state: &mut AppState, mut mode: RuleMode, label: Option<String>) {
