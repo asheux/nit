@@ -54,6 +54,7 @@ pub struct StrategyConfig {
     pub builtin: Option<String>,
     pub p_cooperate: Option<f32>,
     pub start_state: Option<usize>,
+    pub input_index_base: Option<u8>,
     pub output: Option<Vec<String>>,
     pub transitions: Option<Vec<Vec<usize>>>,
     pub n: Option<usize>,
@@ -118,6 +119,8 @@ pub enum StrategySpecKind {
     },
     Fsm {
         start_state: usize,
+        #[serde(default)]
+        input_index_base: u8,
         output: Vec<Action>,
         transitions: Vec<[usize; 4]>,
     },
@@ -239,9 +242,30 @@ fn normalize_strategy(raw: StrategyConfig) -> Result<StrategySpec, Vec<String>> 
         "fsm" => {
             let output = raw.output.unwrap_or_default();
             let outputs = parse_actions(&id, "output", output, &mut errors);
-            let transitions =
-                parse_transitions(&id, raw.transitions.unwrap_or_default(), &mut errors);
-            let start_state = raw.start_state.unwrap_or(0);
+            let mut input_index_base = raw.input_index_base.unwrap_or(0);
+            if input_index_base > 1 {
+                errors.push(format!("strategy '{id}': input_index_base must be 0 or 1"));
+                input_index_base = 0;
+            }
+            let transitions = parse_transitions(
+                &id,
+                raw.transitions.unwrap_or_default(),
+                input_index_base,
+                &mut errors,
+            );
+            let start_state_raw = raw.start_state.unwrap_or(0);
+            let start_state = if input_index_base == 1 {
+                if start_state_raw == 0 {
+                    errors.push(format!(
+                        "strategy '{id}': start_state must be >= 1 when input_index_base = 1"
+                    ));
+                    0
+                } else {
+                    start_state_raw - 1
+                }
+            } else {
+                start_state_raw
+            };
             if start_state >= outputs.len() {
                 errors.push(format!(
                     "strategy '{id}': start_state {start_state} out of range"
@@ -260,6 +284,7 @@ fn normalize_strategy(raw: StrategyConfig) -> Result<StrategySpec, Vec<String>> 
             }
             StrategySpecKind::Fsm {
                 start_state,
+                input_index_base,
                 output: outputs,
                 transitions,
             }
@@ -341,7 +366,12 @@ fn parse_actions(
     out
 }
 
-fn parse_transitions(id: &str, rows: Vec<Vec<usize>>, errors: &mut Vec<String>) -> Vec<[usize; 4]> {
+fn parse_transitions(
+    id: &str,
+    rows: Vec<Vec<usize>>,
+    input_index_base: u8,
+    errors: &mut Vec<String>,
+) -> Vec<[usize; 4]> {
     let mut out = Vec::new();
     for (idx, row) in rows.iter().enumerate() {
         if row.len() != 4 {
@@ -352,7 +382,18 @@ fn parse_transitions(id: &str, rows: Vec<Vec<usize>>, errors: &mut Vec<String>) 
         }
         let mut arr = [0usize; 4];
         for (i, v) in row.iter().enumerate() {
-            arr[i] = *v;
+            if input_index_base == 1 {
+                if *v == 0 {
+                    errors.push(format!(
+                        "strategy '{id}': transitions[{idx}][{i}] must be >= 1 when input_index_base = 1"
+                    ));
+                    arr[i] = 0;
+                } else {
+                    arr[i] = *v - 1;
+                }
+            } else {
+                arr[i] = *v;
+            }
         }
         out.push(arr);
     }

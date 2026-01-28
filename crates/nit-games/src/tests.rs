@@ -101,3 +101,50 @@ name = "Always Cooperate"
         results_b.ranking[1].total_payoff
     );
 }
+
+#[test]
+fn fsm_input_index_base_one_subtracts_state_indices() {
+    let cfg = r#"
+schema_version = 1
+game = "ipd"
+rounds = 3
+repetitions = 1
+self_play = false
+
+[[strategy]]
+id = "fsm1"
+type = "fsm"
+input_index_base = 1
+start_state = 1
+output = ["C", "D"]
+transitions = [
+  [1, 2, 1, 2],
+  [2, 2, 1, 1],
+]
+
+[[strategy]]
+id = "allc"
+type = "builtin"
+name = "Always Cooperate"
+"#;
+    let config = GamesConfig::from_toml(cfg).expect("config parse");
+    let fsm = config
+        .strategies
+        .iter()
+        .find(|s| s.id == "fsm1")
+        .expect("fsm spec");
+    match &fsm.kind {
+        crate::config::StrategySpecKind::Fsm {
+            start_state,
+            transitions,
+            ..
+        } => {
+            assert_eq!(*start_state, 0);
+            assert_eq!(transitions[0][0], 0);
+            assert_eq!(transitions[0][1], 1);
+            assert_eq!(transitions[1][0], 1);
+            assert_eq!(transitions[1][2], 0);
+        }
+        _ => panic!("expected fsm"),
+    }
+}

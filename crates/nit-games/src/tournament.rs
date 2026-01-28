@@ -741,6 +741,7 @@ fn build_strategy(spec: &StrategySpec, seed: u64) -> Box<dyn Strategy> {
             start_state,
             output,
             transitions,
+            ..
         } => Box::new(FsmStrategy::new(
             spec.id.clone(),
             *start_state,
