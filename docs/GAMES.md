@@ -50,6 +50,144 @@ enabled = true | false
 include_cycle_metadata = true | false
 ```
 
+## Strategies (programs)
+
+### FSM (Moore machine)
+
+FSMs are deterministic Moore machines with a fixed output per state and transitions
+based on an input symbol derived from the last round’s observation.
+
+```
+[[strategy]]
+id = "my_fsm"
+type = "fsm"
+num_states = 4
+start_state = 0
+outputs = ["C","D","D","C"]    # length = num_states
+input_mode = "opponent_last_action"  # default
+transitions = [
+  # Each row: state index; then next_state for each input symbol
+  # For opponent_last_action => alphabet size = 2
+  [0, 1, 2],
+  [1, 1, 3],
+  [2, 0, 2],
+  [3, 0, 1],
+]
+```
+
+Input modes:
+- `opponent_last_action` (alphabet size 2)
+- `self_last_action` (alphabet size 2)
+- `joint_last_action` (alphabet size 4: CC, CD, DC, DD)
+
+Validation rules:
+- `outputs.len == num_states`
+- `transitions.len == num_states`
+- each transition row is either `alphabet` entries or `alphabet+1` entries
+  (leading state index)
+- next states must be in `0..num_states`
+
+### One-sided Turing machine
+
+One-sided TMs are deterministic, bounded-step programs with a right-rail output.
+
+Semantics:
+- Tape indices are `0..∞` with a left boundary at `0`.
+- Tape grows by appending one **history symbol** after each round.
+- At the start of each round:
+  - head is positioned at the rightmost tape cell (most recent history symbol)
+  - internal state resets to `start_state`
+- The TM steps up to `max_steps_per_round`.
+- **Rail output:** if a transition would move `R` when the head is already at the
+  rightmost index, the action is produced immediately using `write` and the
+  round ends.
+- If no output occurs within `max_steps_per_round`, or a transition halts, the
+  fallback action is used.
+  By default this is `output_map[blank]`, but you can override it with
+  `fallback_symbol`.
+
+History symbol encoding uses `input_mode`:
+- `opponent_last_action`, `self_last_action`, or `joint_last_action`
+
+#### Explicit transition table
+
+```
+[[strategy]]
+id = "tm1"
+type = "one_sided_tm"
+states = 3
+symbols = 2
+start_state = 1
+blank = 0
+fallback_symbol = 0
+max_steps_per_round = 256
+input_mode = "opponent_last_action"
+output_map = ["C","D"]
+transitions = [
+  { state=1, read=0, write=1, move="R", next=2 },
+  { state=1, read=1, write=0, move="S", next=1 },
+  { state=2, read=0, write=1, move="L", next=2 },
+  { state=2, read=1, write=1, move="R", next=3 },
+  { state=3, read=0, write=0, move="S", next=0 }, # next=0 => HALT (fallback)
+  { state=3, read=1, write=1, move="S", next=3 },
+]
+```
+
+`next = 0` indicates HALT (fallback output).
+
+#### Wolfram-style rule code
+
+```
+[[strategy]]
+id = "tm_rule"
+type = "one_sided_tm"
+states = 3
+symbols = 2
+start_state = 1
+blank = 0
+max_steps_per_round = 256
+input_mode = "opponent_last_action"
+output_map = ["C","D"]
+rule_code = 600720
+```
+
+Rule decoding order:
+- iterate `(state=1..states, read=0..symbols-1)` (state-major)
+- each digit is in base `symbols * 3 * (states+1)`
+- digit decodes as:
+  - `write = digit % symbols`
+  - `move = (digit / symbols) % 3` with move order `L, R, S`
+  - `next = digit / (symbols*3)` in `0..states` (`0` = HALT)
+
+### Generated strategies (NDJSON)
+
+You can reference NDJSON strategy lists in `games.toml`:
+
+```
+[[strategy]]
+id = "gen"
+type = "generated"
+source = "generated/fsm.ndjson"
+limit = 1000
+```
+
+Each NDJSON line should be a serialized `StrategySpec`. Loaded strategy ids
+are prefixed with `gen::`.
+
+## Enumeration helpers
+
+Enumerate FSMs and emit NDJSON:
+
+```
+nit games enumerate fsm --states 2..4 --out ./generated --canonical --limit 5000
+```
+
+Append NDJSON strategies when running a tournament:
+
+```
+nit games run --config games.toml --strategies ./generated/fsm.ndjson
+```
+
 ## Headless CLI
 
 Run without the TUI:
@@ -110,3 +248,6 @@ It performs cycle detection and sums rounds in `O(mu + lambda)` time.
 
 Cycle metadata (transient length, cycle length, cooperation rates) can be emitted
 into `history.ndjson` by setting `history.include_cycle_metadata = true`.
+
+Note: one-sided TMs are deterministic but **not** currently fast-evaluated; they
+run via the standard simulator.

@@ -12,8 +12,8 @@ use crate::output::{
     TournamentResults,
 };
 use crate::strategy::{
-    AlwaysCooperate, AlwaysDefect, FsmStrategy, GrimTrigger, MemoryStrategy, RandomStrategy,
-    Strategy, TitForTat, WinStayLoseShift,
+    AlwaysCooperate, AlwaysDefect, FsmStrategy, GrimTrigger, MemoryStrategy, OneSidedTmStrategy,
+    RandomStrategy, Strategy, TitForTat, TmRunStats, WinStayLoseShift,
 };
 use nit_utils::hashing::{stable_hash_bytes, XorShift64};
 use rayon::prelude::*;
@@ -196,6 +196,7 @@ struct StrategyStats {
     draws: u32,
     crash_count: u32,
     crashed: bool,
+    tm_stats: Option<TmRunStats>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -357,7 +358,13 @@ impl TournamentRunner {
                     });
                     self.emit_history(&session);
                     self.results
-                        .apply_match(result, session.a_crashed, session.b_crashed);
+                        .apply_match(
+                            result,
+                            session.a_crashed,
+                            session.b_crashed,
+                            session.a_strategy.tm_stats().cloned(),
+                            session.b_strategy.tm_stats().cloned(),
+                        );
                     self.match_index += 1;
                     if self.is_done() {
                         self.emit(GameEvent::TournamentEnd {
@@ -671,6 +678,8 @@ struct MatchOutcome {
     result: MatchResult,
     a_crashed: bool,
     b_crashed: bool,
+    a_tm_stats: Option<TmRunStats>,
+    b_tm_stats: Option<TmRunStats>,
 }
 
 pub enum KernelRunMode<'a> {
@@ -810,7 +819,13 @@ impl TournamentKernel {
                 &mut emit_history,
                 false,
             );
-            results.apply_match(outcome.result, outcome.a_crashed, outcome.b_crashed);
+            results.apply_match(
+                outcome.result,
+                outcome.a_crashed,
+                outcome.b_crashed,
+                outcome.a_tm_stats,
+                outcome.b_tm_stats,
+            );
         }
 
         if let Some(writer) = event_writer.as_mut() {
@@ -901,7 +916,13 @@ impl TournamentKernel {
 
         let mut results = TournamentAccumulator::new(self.config.strategies.len());
         for outcome in outcomes {
-            results.apply_match(outcome.result, outcome.a_crashed, outcome.b_crashed);
+            results.apply_match(
+                outcome.result,
+                outcome.a_crashed,
+                outcome.b_crashed,
+                outcome.a_tm_stats,
+                outcome.b_tm_stats,
+            );
         }
         results.finalize(&self.config.strategies)
     }
@@ -983,6 +1004,8 @@ where
                 },
                 a_crashed: false,
                 b_crashed: false,
+                a_tm_stats: None,
+                b_tm_stats: None,
             };
         }
     }
@@ -1091,6 +1114,8 @@ where
         },
         a_crashed: session.a_crashed,
         b_crashed: session.b_crashed,
+        a_tm_stats: session.a_strategy.tm_stats().cloned(),
+        b_tm_stats: session.b_strategy.tm_stats().cloned(),
     }
 }
 
@@ -1115,6 +1140,7 @@ impl TournamentAccumulator {
                     draws: 0,
                     crash_count: 0,
                     crashed: false,
+                    tm_stats: None,
                 };
                 n
             ],
@@ -1122,7 +1148,14 @@ impl TournamentAccumulator {
         }
     }
 
-    fn apply_match(&mut self, result: MatchResult, a_crashed: bool, b_crashed: bool) {
+    fn apply_match(
+        &mut self,
+        result: MatchResult,
+        a_crashed: bool,
+        b_crashed: bool,
+        a_tm_stats: Option<TmRunStats>,
+        b_tm_stats: Option<TmRunStats>,
+    ) {
         if result.a_idx == result.b_idx {
             let stats = &mut self.strategies[result.a_idx];
             stats.total += result.a_total + result.b_total;
@@ -1135,6 +1168,14 @@ impl TournamentAccumulator {
             pair.a_total += result.a_total;
             pair.b_total += result.b_total;
             pair.draws += 1;
+            if let Some(tm_stats) = a_tm_stats.as_ref() {
+                let entry = stats.tm_stats.get_or_insert_with(TmRunStats::default);
+                entry.merge(tm_stats);
+            }
+            if let Some(tm_stats) = b_tm_stats.as_ref() {
+                let entry = stats.tm_stats.get_or_insert_with(TmRunStats::default);
+                entry.merge(tm_stats);
+            }
             return;
         }
         let (a_stats, b_stats) = if result.a_idx < result.b_idx {
@@ -1157,6 +1198,14 @@ impl TournamentAccumulator {
         }
         if b_crashed {
             b_stats.crashed = true;
+        }
+        if let Some(tm_stats) = a_tm_stats.as_ref() {
+            let entry = a_stats.tm_stats.get_or_insert_with(TmRunStats::default);
+            entry.merge(tm_stats);
+        }
+        if let Some(tm_stats) = b_tm_stats.as_ref() {
+            let entry = b_stats.tm_stats.get_or_insert_with(TmRunStats::default);
+            entry.merge(tm_stats);
         }
 
         if result.a_total > result.b_total {
@@ -1210,6 +1259,19 @@ impl TournamentAccumulator {
                 draws: stats.draws,
                 crashed: stats.crashed,
                 crash_count: stats.crash_count,
+                tm_metrics: stats.tm_stats.as_ref().map(|tm| {
+                    let rounds = tm.rounds.max(1);
+                    let avg_steps = tm.steps as f64 / rounds as f64;
+                    let output_rate = tm.output_events as f64 / rounds as f64;
+                    let fallback_rate = tm.fallback as f64 / rounds as f64;
+                    crate::output::TmDerivedMetrics {
+                        rounds: tm.rounds,
+                        avg_steps_per_move: avg_steps,
+                        max_steps_hit_count: tm.max_steps_hits,
+                        output_event_hit_rate: output_rate,
+                        fallback_rate,
+                    }
+                }),
             });
         }
         ranking.sort_by(|a, b| b.total_payoff.cmp(&a.total_payoff));
@@ -1326,13 +1388,15 @@ fn build_strategy(spec: &StrategySpec, seed: u64) -> Box<dyn Strategy> {
         }
         StrategySpecKind::Fsm {
             start_state,
-            output,
+            outputs,
+            input_mode,
             transitions,
             ..
         } => Box::new(FsmStrategy::new(
             spec.id.clone(),
             *start_state,
-            output.clone(),
+            outputs.clone(),
+            input_mode.unwrap_or_default(),
             transitions.clone(),
         )),
         StrategySpecKind::Memory { n, initial, table } => Box::new(MemoryStrategy::new(
@@ -1340,6 +1404,27 @@ fn build_strategy(spec: &StrategySpec, seed: u64) -> Box<dyn Strategy> {
             *n,
             *initial,
             table.clone(),
+        )),
+        StrategySpecKind::OneSidedTm {
+            symbols,
+            start_state,
+            blank,
+            fallback_symbol,
+            max_steps_per_round,
+            input_mode,
+            output_map,
+            transitions,
+            ..
+        } => Box::new(OneSidedTmStrategy::new(
+            spec.id.clone(),
+            *symbols,
+            *start_state,
+            *blank,
+            fallback_symbol.unwrap_or(*blank),
+            *max_steps_per_round,
+            *input_mode,
+            output_map.clone(),
+            transitions.clone(),
         )),
     }
 }

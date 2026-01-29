@@ -99,6 +99,24 @@ pub struct GamesReplayState {
     pub cycle: Option<nit_games::CycleMetadata>,
 }
 
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+pub struct GamesStrategyInspectState {
+    pub open: bool,
+    pub last_error: Option<String>,
+    #[serde(skip)]
+    pub title: Option<String>,
+    #[serde(skip)]
+    pub lines: Vec<String>,
+    #[serde(skip)]
+    pub selected_index: usize,
+    #[serde(skip)]
+    pub scroll_offset: usize,
+    #[serde(skip)]
+    pub definitions: Vec<nit_games::output::StrategyDefinition>,
+    #[serde(skip)]
+    pub source_label: Option<String>,
+}
+
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum UiSelectionPane {
     JobOutput,
@@ -110,6 +128,7 @@ pub enum UiSelectionPane {
     GamesAnalysisPopup,
     GamesRunBrowserPopup,
     GamesReplayPopup,
+    GamesStrategyPopup,
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -158,6 +177,8 @@ pub struct GamesState {
     pub run_browser: GamesRunBrowserState,
     #[serde(skip)]
     pub replay: GamesReplayState,
+    #[serde(skip)]
+    pub strategy_inspect: GamesStrategyInspectState,
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -585,6 +606,7 @@ impl AppState {
                 pending_replay: None,
                 run_browser: GamesRunBrowserState::default(),
                 replay: GamesReplayState::default(),
+                strategy_inspect: GamesStrategyInspectState::default(),
             },
             yank: None,
             yank_kind: YankKind::Char,
@@ -1464,6 +1486,75 @@ fn handle_command_line(state: &mut AppState, input: &str) {
                 state.games.replay.scroll_offset = 0;
                 state.games.replay.cycle = None;
                 state.status = Some("Games replay opened".into());
+            }
+        }
+        ["games", "strategy"]
+        | ["games", "strategies"]
+        | ["games", "inspect"]
+        | ["games", "strategy", "run"]
+        | ["games", "strategies", "run"] => {
+            if state.games.last_run.is_none() {
+                state.status = Some("No run loaded for strategy inspection".into());
+            } else if let Some(run) = state.games.last_run.as_ref() {
+                state.games.run_browser.open = false;
+                state.games.replay.open = false;
+                state.games.strategy_inspect.open = true;
+                state.games.strategy_inspect.last_error = None;
+                state.games.strategy_inspect.title = None;
+                state.games.strategy_inspect.lines.clear();
+                state.games.strategy_inspect.selected_index = 0;
+                state.games.strategy_inspect.scroll_offset = 0;
+                state.games.strategy_inspect.definitions = run.strategies.clone();
+                state.games.strategy_inspect.source_label = Some("run".into());
+                state.status = Some("Games strategy inspector opened".into());
+            }
+        }
+        ["games", "strategy", "all"]
+        | ["games", "strategies", "all"]
+        | ["games", "strategy", "config"]
+        | ["games", "strategies", "config"] => {
+            let config_text = state.editor_buffer().content_as_string();
+            match nit_games::config::GamesConfig::from_toml_with_root(
+                &config_text,
+                Some(&state.workspace_root),
+            ) {
+                Ok(config) => {
+                    state.games.run_browser.open = false;
+                    state.games.replay.open = false;
+                    state.games.strategy_inspect.open = true;
+                    state.games.strategy_inspect.last_error = None;
+                    state.games.strategy_inspect.title = None;
+                    state.games.strategy_inspect.lines.clear();
+                    state.games.strategy_inspect.selected_index = 0;
+                    state.games.strategy_inspect.scroll_offset = 0;
+                    state.games.strategy_inspect.definitions = config
+                        .strategies
+                        .iter()
+                        .map(|spec| nit_games::output::StrategyDefinition {
+                            id: spec.id.clone(),
+                            name: spec.name.clone(),
+                            kind: spec.kind.clone(),
+                            rng_seed_a: None,
+                            rng_seed_b: None,
+                        })
+                        .collect();
+                    state.games.strategy_inspect.source_label = Some("config".into());
+                    state.status = Some("Games strategy inspector opened".into());
+                }
+                Err(err) => {
+                    let msg = format!("Config error: {err}");
+                    state.games.run_browser.open = false;
+                    state.games.replay.open = false;
+                    state.games.strategy_inspect.open = true;
+                    state.games.strategy_inspect.last_error = Some(msg.clone());
+                    state.games.strategy_inspect.title = None;
+                    state.games.strategy_inspect.lines.clear();
+                    state.games.strategy_inspect.selected_index = 0;
+                    state.games.strategy_inspect.scroll_offset = 0;
+                    state.games.strategy_inspect.definitions.clear();
+                    state.games.strategy_inspect.source_label = Some("config".into());
+                    state.status = Some(msg);
+                }
             }
         }
         _ if tokens.get(0) == Some(&"games")

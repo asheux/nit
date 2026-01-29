@@ -16,7 +16,11 @@ use nit_games::events::{EventWriter, GameEvent};
 use nit_games::history_log::MatchHistory;
 use nit_games::output::{write_summary, RunLayout, RunPaths, RunSummary, RUN_SUMMARY_SCHEMA_VERSION};
 use nit_games::tournament::{KernelRunMode, Parallelism, TournamentKernel};
-use nit_games::{run_id_from_seed_config, GamesConfig, HistoryWriter};
+use nit_games::{
+    enumerate_fsms, run_id_from_seed_config, FsmDefinition, GamesConfig, HistoryWriter, InputMode,
+    StrategySpec,
+};
+use nit_games::config::StrategySpecKind;
 use nit_tui::{run, Theme};
 use nit_utils::hashing::stable_hash_bytes;
 use nit_utils::paths;
@@ -59,10 +63,14 @@ enum Command {
 #[derive(Subcommand, Debug)]
 enum GamesCommand {
     /// Headless batch runner for games
+    #[command(alias = "tournament")]
     Run {
         /// Config path (defaults to games.toml)
         #[arg(long)]
         config: Option<PathBuf>,
+        /// NDJSON strategy list to append
+        #[arg(long)]
+        strategies: Option<PathBuf>,
         /// Output directory (defaults to ./output)
         #[arg(long)]
         out: Option<PathBuf>,
@@ -84,6 +92,9 @@ enum GamesCommand {
         /// Config path (defaults to games.toml)
         #[arg(long)]
         config: Option<PathBuf>,
+        /// NDJSON strategy list to append
+        #[arg(long)]
+        strategies: Option<PathBuf>,
         /// Output directory root (defaults to config directory)
         #[arg(long)]
         out: Option<PathBuf>,
@@ -108,6 +119,33 @@ enum GamesCommand {
         /// Verbose logging to stderr
         #[arg(long)]
         verbose: bool,
+    },
+    /// Enumerate strategies (FSMs)
+    Enumerate {
+        #[command(subcommand)]
+        kind: EnumerateCommand,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum EnumerateCommand {
+    /// Enumerate FSM strategies and write NDJSON
+    Fsm {
+        /// State range (e.g. 2..4)
+        #[arg(long)]
+        states: String,
+        /// Output directory or NDJSON path
+        #[arg(long)]
+        out: PathBuf,
+        /// De-duplicate isomorphic FSMs via canonicalization
+        #[arg(long)]
+        canonical: bool,
+        /// Limit total outputs
+        #[arg(long)]
+        limit: Option<usize>,
+        /// Input mode (opponent_last_action, self_last_action, joint_last_action)
+        #[arg(long)]
+        input_mode: Option<String>,
     },
 }
 
@@ -138,6 +176,7 @@ fn main() -> anyhow::Result<()> {
         command:
             Some(GamesCommand::Run {
                 config,
+                strategies,
                 out,
                 seed,
                 format,
@@ -147,12 +186,13 @@ fn main() -> anyhow::Result<()> {
         ..
     }) = cli.command
     {
-        return run_games_headless(config, out, seed, format, quiet, verbose);
+        return run_games_headless(config, strategies, out, seed, format, quiet, verbose);
     }
     if let Some(Command::Games {
         command:
             Some(GamesCommand::Sweep {
                 config,
+                strategies,
                 out,
                 seed,
                 rounds,
@@ -167,6 +207,7 @@ fn main() -> anyhow::Result<()> {
     {
         return run_games_sweep(
             config,
+            strategies,
             out,
             seed,
             rounds,
@@ -176,6 +217,23 @@ fn main() -> anyhow::Result<()> {
             quiet,
             verbose,
         );
+    }
+    if let Some(Command::Games {
+        command: Some(GamesCommand::Enumerate { kind }),
+        ..
+    }) = cli.command
+    {
+        match kind {
+            EnumerateCommand::Fsm {
+                states,
+                out,
+                canonical,
+                limit,
+                input_mode,
+            } => {
+                return run_games_enumerate_fsm(&states, &out, canonical, limit, input_mode);
+            }
+        }
     }
 
     let (app_kind, target) = match cli.command {
@@ -403,8 +461,10 @@ p_cooperate = 0.5
 [[strategy]]
 id = "fsm1"
 type = "fsm"
+num_states = 2
 start_state = 0
-output = ["C", "D"]
+outputs = ["C", "D"]
+input_mode = "joint_last_action"
 transitions = [
   [0, 1, 0, 1],
   [1, 1, 0, 0],
@@ -547,8 +607,56 @@ fn execute_tournament(
     Ok((results, event_log, history_log))
 }
 
+fn resolve_relative_path(path: &Path, base_dir: Option<&Path>) -> PathBuf {
+    if path.is_absolute() {
+        return path.to_path_buf();
+    }
+    if let Some(base) = base_dir {
+        return base.join(path);
+    }
+    std::env::current_dir()
+        .unwrap_or_else(|_| PathBuf::from("."))
+        .join(path)
+}
+
+fn append_strategies_from_ndjson(
+    config: &mut nit_games::NormalizedConfig,
+    path: &Path,
+) -> anyhow::Result<()> {
+    use std::io::BufRead;
+    let file = std::fs::File::open(path)
+        .with_context(|| format!("failed to open strategies {}", path.display()))?;
+    let reader = std::io::BufReader::new(file);
+    for (line_idx, line) in reader.lines().enumerate() {
+        let line = line.with_context(|| {
+            format!(
+                "failed to read strategies {} line {}",
+                path.display(),
+                line_idx + 1
+            )
+        })?;
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let spec: StrategySpec = serde_json::from_str(trimmed).with_context(|| {
+            format!(
+                "failed to parse strategies {} line {}",
+                path.display(),
+                line_idx + 1
+            )
+        })?;
+        if let StrategySpecKind::Memory { n, .. } = spec.kind {
+            config.max_memory_n = config.max_memory_n.max(n);
+        }
+        config.strategies.push(spec);
+    }
+    Ok(())
+}
+
 fn run_games_headless(
     config_path: Option<PathBuf>,
+    strategies_path: Option<PathBuf>,
     out_dir: Option<PathBuf>,
     seed_override: Option<u64>,
     format: OutputFormat,
@@ -558,7 +666,16 @@ fn run_games_headless(
     let config_path = config_path.unwrap_or_else(|| PathBuf::from("games.toml"));
     let config_text = core_io::load_to_string(&config_path)
         .with_context(|| format!("failed to read {}", config_path.display()))?;
-    let mut config = GamesConfig::from_toml(&config_text).map_err(|err| anyhow::anyhow!(err))?;
+    let mut config = GamesConfig::from_toml_with_root(
+        &config_text,
+        config_path.parent(),
+    )
+    .map_err(|err| anyhow::anyhow!(err))?;
+
+    if let Some(strategies_path) = strategies_path {
+        let resolved = resolve_relative_path(&strategies_path, config_path.parent());
+        append_strategies_from_ndjson(&mut config, &resolved)?;
+    }
 
     if let Some(seed) = seed_override {
         config.seed = Some(seed);
@@ -682,6 +799,7 @@ fn run_games_headless(
 
 fn run_games_sweep(
     config_path: Option<PathBuf>,
+    strategies_path: Option<PathBuf>,
     out_dir: Option<PathBuf>,
     seed_override: Option<u64>,
     rounds: Vec<u32>,
@@ -694,7 +812,16 @@ fn run_games_sweep(
     let config_path = config_path.unwrap_or_else(|| PathBuf::from("games.toml"));
     let config_text = core_io::load_to_string(&config_path)
         .with_context(|| format!("failed to read {}", config_path.display()))?;
-    let mut config = GamesConfig::from_toml(&config_text).map_err(|err| anyhow::anyhow!(err))?;
+    let mut config = GamesConfig::from_toml_with_root(
+        &config_text,
+        config_path.parent(),
+    )
+    .map_err(|err| anyhow::anyhow!(err))?;
+
+    if let Some(strategies_path) = strategies_path {
+        let resolved = resolve_relative_path(&strategies_path, config_path.parent());
+        append_strategies_from_ndjson(&mut config, &resolved)?;
+    }
 
     let timestamp = EventWriter::timestamp();
     let base_seed = seed_override
@@ -922,6 +1049,100 @@ fn run_games_sweep(
         println!("{out}");
     }
 
+    Ok(())
+}
+
+fn parse_states_range(input: &str) -> anyhow::Result<std::ops::RangeInclusive<usize>> {
+    let trimmed = input.trim();
+    if let Some((left, right)) = trimmed.split_once("..=") {
+        let start: usize = left.trim().parse()?;
+        let end: usize = right.trim().parse()?;
+        if start > end {
+            anyhow::bail!("states range start must be <= end");
+        }
+        return Ok(start..=end);
+    }
+    if let Some((left, right)) = trimmed.split_once("..") {
+        let start: usize = left.trim().parse()?;
+        let end: usize = right.trim().parse()?;
+        if start > end {
+            anyhow::bail!("states range start must be <= end");
+        }
+        return Ok(start..=end);
+    }
+    let value: usize = trimmed.parse()?;
+    Ok(value..=value)
+}
+
+fn parse_input_mode_arg(input: Option<&str>) -> anyhow::Result<InputMode> {
+    let Some(raw) = input else {
+        return Ok(InputMode::OpponentLastAction);
+    };
+    let normalized: String = raw
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .map(|c| c.to_ascii_lowercase())
+        .collect();
+    let mode = match normalized.as_str() {
+        "opponentlastaction" | "opponent" | "opp" | "opplastaction" => {
+            InputMode::OpponentLastAction
+        }
+        "selflastaction" | "self" | "selflast" => InputMode::SelfLastAction,
+        "jointlastaction" | "joint" | "jointlast" => InputMode::JointLastAction,
+        _ => anyhow::bail!(
+            "invalid input_mode '{}': expected opponent_last_action, self_last_action, or joint_last_action",
+            raw
+        ),
+    };
+    Ok(mode)
+}
+
+fn run_games_enumerate_fsm(
+    states: &str,
+    out: &Path,
+    canonical: bool,
+    limit: Option<usize>,
+    input_mode: Option<String>,
+) -> anyhow::Result<()> {
+    let range = parse_states_range(states)?;
+    let mode = parse_input_mode_arg(input_mode.as_deref())?;
+
+    let out_path = if out.extension().map(|ext| ext == "ndjson").unwrap_or(false) {
+        out.to_path_buf()
+    } else {
+        fs::create_dir_all(out)?;
+        let filename = format!("fsm_enumeration__states-{}.ndjson", states.replace("..", "-"));
+        out.join(filename)
+    };
+
+    let mut writer = std::io::BufWriter::new(
+        std::fs::File::create(&out_path)
+            .with_context(|| format!("failed to create {}", out_path.display()))?,
+    );
+
+    let mut total = 0usize;
+    for states in range {
+        let remaining = limit.and_then(|limit| limit.checked_sub(total));
+        if matches!(remaining, Some(0)) {
+            break;
+        }
+        total += enumerate_fsms(
+            states,
+            mode,
+            remaining,
+            canonical,
+            |def: FsmDefinition| {
+                let id = format!("fsm_{:016x}", def.stable_hash());
+                let spec = def.to_spec(id);
+                serde_json::to_writer(&mut writer, &spec)
+                    .expect("write fsm strategy");
+                writer.write_all(b"\n").expect("write newline");
+            },
+        );
+    }
+
+    writer.flush()?;
+    eprintln!("FSM enumeration written: {}", out_path.display());
     Ok(())
 }
 

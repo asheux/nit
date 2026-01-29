@@ -42,8 +42,8 @@ pub use seed::{
 };
 pub use state::{
     apply_action, AppState, GamesAnalysisRequest, GamesAnalysisState, GamesReplayRequest,
-    GamesReplayState, GamesRunBrowserState, GamesRunEntry, GamesState, GamesStatus, GolRenderMode,
-    JobState, LogBuffer, Metrics, SyntaxDebugInfo, UiSelection, UiSelectionPane, VisualizerMode,
-    VisualizerRuleEntry, VisualizerState, YankKind,
+    GamesReplayState, GamesRunBrowserState, GamesRunEntry, GamesState, GamesStatus,
+    GamesStrategyInspectState, GolRenderMode, JobState, LogBuffer, Metrics, SyntaxDebugInfo,
+    UiSelection, UiSelectionPane, VisualizerMode, VisualizerRuleEntry, VisualizerState, YankKind,
 };
 pub use viewport::Viewport;

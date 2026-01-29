@@ -139,9 +139,8 @@ pub fn build_lines(state: &AppState, theme: &Theme, inner_width: u16) -> Vec<Lin
             "Strategy cooperation (overall / tail)",
             header_style,
         )));
-        let max_rows = 8usize;
         let id_width = 14usize.min(max_width / 3).max(6);
-        for (idx, strat) in summary.strategies.iter().take(max_rows).enumerate() {
+        for (idx, strat) in summary.strategies.iter().enumerate() {
             let id = trim_to_width(&strat.id, id_width);
             let coop = strat.coop_rate * 100.0;
             let tail = strat.tail_coop_rate * 100.0;
@@ -156,15 +155,6 @@ pub fn build_lines(state: &AppState, theme: &Theme, inner_width: u16) -> Vec<Lin
                 Span::styled("  r=", dim_style),
                 Span::styled(rounds.to_string(), value_style),
             ]));
-        }
-        if summary.strategies.len() > max_rows {
-            lines.push(Line::from(Span::styled(
-                trim_to_width(
-                    &format!("... {} more", summary.strategies.len() - max_rows),
-                    max_width,
-                ),
-                dim_style,
-            )));
         }
 
         if let Some(preview) = state.games.analysis.preview.as_ref() {

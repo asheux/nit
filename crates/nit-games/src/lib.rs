@@ -3,6 +3,7 @@
 pub mod config;
 pub mod events;
 pub mod fast_eval;
+pub mod fsm_enum;
 pub mod game;
 pub mod analysis;
 pub mod history;
@@ -20,6 +21,7 @@ pub use analysis::{
     HistoryAnalysisSummary, MatchSummary, StrategySummary, TrajectoryPreview, TrajectorySample,
 };
 pub use events::{EventLogConfig, EventWriter, GameEvent};
+pub use fsm_enum::{canonicalize_fsm, enumerate_fsms, FsmDefinition};
 pub use fast_eval::{CycleMetadata, FastEvalResult, FastStrategyModel};
 pub use game::{Action, Outcome, PayoffMatrix};
 pub use history::{History, RoundRecord};
@@ -29,8 +31,9 @@ pub use output::{
     RUN_SUMMARY_SCHEMA_VERSION,
 };
 pub use strategy::{
-    AlwaysCooperate, AlwaysDefect, FsmStrategy, GrimTrigger, MemoryStrategy, RandomStrategy,
-    Strategy, StrategyKind, TitForTat, WinStayLoseShift,
+    AlwaysCooperate, AlwaysDefect, FsmStrategy, GrimTrigger, InputMode, MemoryStrategy,
+    OneSidedTmStrategy, RandomStrategy, Strategy, StrategyKind, TitForTat, TmMove, TmRunStats,
+    TmTransition, WinStayLoseShift,
 };
 pub use tournament::{
     KernelRunMode, MatchResult, MatchSnapshot, Parallelism, TournamentKernel, TournamentProgress,

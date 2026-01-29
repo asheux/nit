@@ -87,6 +87,19 @@ rendering and text‑measurement consistent, and avoids lossy conversions.
 See `docs/GAMES.md` for the engine split (kernel vs stepper), deterministic seeding,
 and parallel logging behavior.
 
+## Program Strategies (Phase 3E)
+
+- Strategy implementations live in `crates/nit-games/src/strategy.rs`:
+  builtins, random, FSM (Moore), memory‑n, and one‑sided TM.
+- Deterministic FSM/memory strategies have fast‑eval models in
+  `crates/nit-games/src/fast_eval.rs` (cycle detection on combined state).
+- One‑sided TMs are deterministic but currently run through the simulator
+  (not fast‑evaluated).
+- Program definitions are serialized into `definitions.json`, and TM-derived
+  metrics are surfaced in `run_summary.json` results.
+- FSM enumeration + canonicalization utilities live in
+  `crates/nit-games/src/fsm_enum.rs`.
+
 ## Rendering Discipline
 
 - Event-driven; no busy loop. Redraw when:

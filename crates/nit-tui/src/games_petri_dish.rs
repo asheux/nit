@@ -321,6 +321,7 @@ impl GamesPetriDishRuntime {
                     state.games.replay.selected_pair = None;
                     state.games.replay.selected_index = 0;
                     state.games.replay.scroll_offset = 0;
+                    reset_strategy_inspect(state);
                     state.games.run_browser.loading = false;
                     state.games.run_browser.open = false;
                     if let Some(selection) = state.ui_selection {
@@ -390,6 +391,7 @@ impl GamesPetriDishRuntime {
                     state.games.last_history_path = summary.history_log.clone();
                     state.games.last_run = Some(summary);
                     state.games.replay.pairs = pairs;
+                    reset_strategy_inspect(state);
                     state.games.status = GamesStatus::Done;
                     state.games.running = false;
                     state.games.paused = false;
@@ -590,7 +592,10 @@ impl GamesPetriDishRuntime {
             return;
         }
         let config_text = state.editor_buffer().content_as_string();
-        let mut config = match GamesConfig::from_toml(&config_text) {
+        let mut config = match GamesConfig::from_toml_with_root(
+            &config_text,
+            Some(&state.workspace_root),
+        ) {
             Ok(config) => config,
             Err(err) => {
                 let msg = format!("Config error: {err}");
@@ -836,6 +841,16 @@ impl GamesPetriDishRuntime {
             ));
         }
     }
+}
+
+fn reset_strategy_inspect(state: &mut AppState) {
+    state.games.strategy_inspect.last_error = None;
+    state.games.strategy_inspect.title = None;
+    state.games.strategy_inspect.lines.clear();
+    state.games.strategy_inspect.selected_index = 0;
+    state.games.strategy_inspect.scroll_offset = 0;
+    state.games.strategy_inspect.definitions.clear();
+    state.games.strategy_inspect.source_label = None;
 }
 
 impl Drop for GamesPetriDishRuntime {

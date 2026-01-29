@@ -27,6 +27,17 @@ pub struct StrategyResult {
     pub draws: u32,
     pub crashed: bool,
     pub crash_count: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tm_metrics: Option<TmDerivedMetrics>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TmDerivedMetrics {
+    pub rounds: u64,
+    pub avg_steps_per_move: f64,
+    pub max_steps_hit_count: u64,
+    pub output_event_hit_rate: f64,
+    pub fallback_rate: f64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

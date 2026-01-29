@@ -6,6 +6,7 @@ use nit_games::events::EventWriter;
 use nit_games::game::PayoffMatrix;
 use nit_games::history_log::HistoryWriter;
 use nit_games::tournament::{KernelRunMode, Parallelism, TournamentKernel};
+use nit_games::{InputMode, Strategy, TmMove, TmTransition};
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -100,13 +101,14 @@ fn build_deterministic_config(rounds: u32) -> NormalizedConfig {
             id: "fsm".into(),
             name: None,
             kind: StrategySpecKind::Fsm {
+                num_states: 2,
                 start_state: 0,
-                input_index_base: 0,
-                output: vec![
+                outputs: vec![
                     nit_games::game::Action::Cooperate,
                     nit_games::game::Action::Defect,
                 ],
-                transitions: vec![[0, 1, 0, 1], [1, 1, 1, 1]],
+                input_mode: Some(InputMode::JointLastAction),
+                transitions: vec![vec![0, 1, 0, 1], vec![1, 1, 1, 1]],
             },
         },
     ];
@@ -131,6 +133,146 @@ fn build_deterministic_config(rounds: u32) -> NormalizedConfig {
         },
         engine: EngineConfig::default(),
         max_memory_n: 1,
+    }
+}
+
+fn build_fsm_heavy_config(strategies: usize, rounds: u32) -> NormalizedConfig {
+    let mut specs = Vec::new();
+    for idx in 0..strategies {
+        let a = (idx % 2) as usize;
+        let b = ((idx / 2) % 2) as usize;
+        specs.push(StrategySpec {
+            id: format!("fsm{idx}"),
+            name: None,
+            kind: StrategySpecKind::Fsm {
+                num_states: 2,
+                start_state: 0,
+                outputs: vec![
+                    nit_games::game::Action::Cooperate,
+                    nit_games::game::Action::Defect,
+                ],
+                input_mode: Some(InputMode::JointLastAction),
+                transitions: vec![vec![a, b, a, b], vec![b, a, b, a]],
+            },
+        });
+    }
+    NormalizedConfig {
+        schema_version: 1,
+        game: "ipd".into(),
+        rounds,
+        repetitions: 1,
+        self_play: false,
+        seed: Some(12345),
+        noise: 0.0,
+        payoff: PayoffMatrix::default_pd(),
+        strategies: specs,
+        event_log: nit_games::events::EventLogConfig {
+            enabled: false,
+            include_rounds: false,
+        },
+        history: HistoryConfig {
+            enabled: false,
+            include_cycle_metadata: false,
+        },
+        engine: EngineConfig::default(),
+        max_memory_n: 1,
+    }
+}
+
+fn build_tm_config(strategies: usize, rounds: u32) -> NormalizedConfig {
+    let mut specs = Vec::new();
+    let transitions = vec![
+        TmTransition {
+            write: 0,
+            move_dir: TmMove::Right,
+            next: 1,
+        },
+        TmTransition {
+            write: 1,
+            move_dir: TmMove::Right,
+            next: 1,
+        },
+    ];
+    for idx in 0..strategies {
+        specs.push(StrategySpec {
+            id: format!("tm{idx}"),
+            name: None,
+            kind: StrategySpecKind::OneSidedTm {
+                states: 1,
+                symbols: 2,
+                start_state: 1,
+                blank: 0,
+                fallback_symbol: Some(0),
+                max_steps_per_round: 32,
+                input_mode: InputMode::OpponentLastAction,
+                output_map: vec![
+                    nit_games::game::Action::Cooperate,
+                    nit_games::game::Action::Defect,
+                ],
+                transitions: transitions.clone(),
+                rule_code: None,
+            },
+        });
+    }
+    NormalizedConfig {
+        schema_version: 1,
+        game: "ipd".into(),
+        rounds,
+        repetitions: 1,
+        self_play: false,
+        seed: Some(12345),
+        noise: 0.0,
+        payoff: PayoffMatrix::default_pd(),
+        strategies: specs,
+        event_log: nit_games::events::EventLogConfig {
+            enabled: false,
+            include_rounds: false,
+        },
+        history: HistoryConfig {
+            enabled: false,
+            include_cycle_metadata: false,
+        },
+        engine: EngineConfig::default(),
+        max_memory_n: 0,
+    }
+}
+
+fn build_baseline_deterministic(strategies: usize, rounds: u32) -> NormalizedConfig {
+    let builtins = [
+        nit_games::config::BuiltinKind::AllC,
+        nit_games::config::BuiltinKind::AllD,
+        nit_games::config::BuiltinKind::TitForTat,
+        nit_games::config::BuiltinKind::WinStayLoseShift,
+    ];
+    let specs = (0..strategies)
+        .map(|idx| StrategySpec {
+            id: format!("base{idx}"),
+            name: None,
+            kind: StrategySpecKind::Builtin {
+                builtin: builtins[idx % builtins.len()],
+            },
+        })
+        .collect();
+    NormalizedConfig {
+        schema_version: 1,
+        game: "ipd".into(),
+        rounds,
+        repetitions: 1,
+        self_play: false,
+        seed: Some(12345),
+        noise: 0.0,
+        payoff: PayoffMatrix::default_pd(),
+        strategies: specs,
+        event_log: nit_games::events::EventLogConfig {
+            enabled: false,
+            include_rounds: false,
+        },
+        history: HistoryConfig {
+            enabled: false,
+            include_cycle_metadata: false,
+        },
+        engine: EngineConfig::default(),
+        max_memory_n: 0,
     }
 }
 
@@ -297,6 +439,95 @@ fn bench_fast_eval(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_fsm_fast_eval_heavy(c: &mut Criterion) {
+    let mut group = c.benchmark_group("fsm_fast_eval");
+    let mut config_fast = build_fsm_heavy_config(32, 3000);
+    config_fast.engine.fast_eval = true;
+    let kernel_fast = TournamentKernel::new(config_fast.clone());
+    group.bench_function("fsm_fast", |b| {
+        b.iter(|| {
+            let _ = kernel_fast.run(KernelRunMode::Sequential {
+                event_writer: None,
+                history_writer: None,
+            });
+        });
+    });
+
+    config_fast.engine.fast_eval = false;
+    let kernel_slow = TournamentKernel::new(config_fast);
+    group.bench_function("fsm_slow", |b| {
+        b.iter(|| {
+            let _ = kernel_slow.run(KernelRunMode::Sequential {
+                event_writer: None,
+                history_writer: None,
+            });
+        });
+    });
+    group.finish();
+}
+
+fn bench_tm_micro(c: &mut Criterion) {
+    let transitions = vec![
+        TmTransition {
+            write: 0,
+            move_dir: TmMove::Stay,
+            next: 1,
+        },
+        TmTransition {
+            write: 1,
+            move_dir: TmMove::Stay,
+            next: 1,
+        },
+    ];
+    let mut tm = nit_games::OneSidedTmStrategy::new(
+        "tm",
+        2,
+        1,
+        0,
+        0,
+        256,
+        InputMode::OpponentLastAction,
+        vec![
+            nit_games::game::Action::Cooperate,
+            nit_games::game::Action::Defect,
+        ],
+        transitions,
+    );
+    let history = nit_games::History::new(1);
+    c.bench_function("tm_micro_steps", |b| {
+        b.iter(|| {
+            for _ in 0..256 {
+                let _ = tm.next_action(&history, true);
+            }
+        });
+    });
+}
+
+fn bench_tm_tournament(c: &mut Criterion) {
+    let mut group = c.benchmark_group("tm_tournament");
+    let tm_config = build_tm_config(12, 200);
+    let baseline = build_baseline_deterministic(12, 200);
+    let kernel_tm = TournamentKernel::new(tm_config);
+    let kernel_base = TournamentKernel::new(baseline);
+    group.bench_function("tm", |b| {
+        b.iter(|| {
+            let _ = kernel_tm.run(KernelRunMode::Sequential {
+                event_writer: None,
+                history_writer: None,
+            });
+        });
+    });
+    group.bench_function("baseline", |b| {
+        b.iter(|| {
+            let _ = kernel_base.run(KernelRunMode::Sequential {
+                event_writer: None,
+                history_writer: None,
+            });
+        });
+    });
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_single_match,
@@ -304,6 +535,9 @@ criterion_group!(
     bench_tournament_medium,
     bench_logging,
     bench_parallel,
-    bench_fast_eval
+    bench_fast_eval,
+    bench_fsm_fast_eval_heavy,
+    bench_tm_micro,
+    bench_tm_tournament
 );
 criterion_main!(benches);

@@ -1,5 +1,6 @@
 use nit_core::{AppState, GamesStatus, PaneId, UiSelectionPane};
 use nit_games::config::{BuiltinKind, GamesConfig, StrategySpecKind};
+use nit_games::strategy::InputMode;
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Modifier, Style},
@@ -87,8 +88,8 @@ pub fn build_main_lines(
             Style::default().fg(theme.accent),
         ),
     ]));
-    lines.push(Line::from(""));
     if let Some(err) = state.games.last_error.as_ref() {
+        lines.push(Line::from(""));
         lines.push(Line::from(vec![
             Span::styled("Error: ", Style::default().fg(theme.warning)),
             Span::styled(err.clone(), value_style),
@@ -153,33 +154,55 @@ pub fn build_main_lines(
                 Span::styled("strategies: ", label_style),
                 Span::styled(config.strategies.len().to_string(), value_style),
             ]));
-            lines.push(Line::from(vec![
-                Span::styled(format!("{:<10}", "id"), label_style),
-                Span::raw(" "),
-                Span::styled(format!("{:<10}", "type"), label_style),
-                Span::raw(" "),
-                Span::styled("name", label_style),
-            ]));
+            let interesting: Vec<&nit_games::config::StrategySpec> = config
+                .strategies
+                .iter()
+                .filter(|strategy| {
+                    !matches!(
+                        strategy.kind,
+                        StrategySpecKind::Builtin { .. } | StrategySpecKind::Random { .. }
+                    )
+                })
+                .collect();
+            if interesting.is_empty() {
+                lines.push(Line::from(Span::styled(
+                    "No complex strategies in config.",
+                    dim_style,
+                )));
+            } else {
+                lines.push(Line::from(vec![
+                    Span::styled(format!("{:<10}", "id"), label_style),
+                    Span::raw(" "),
+                    Span::styled(format!("{:<10}", "type"), label_style),
+                    Span::raw(" "),
+                    Span::styled("name", label_style),
+                ]));
+                lines.push(Line::from(Span::styled(
+                    format!("{:-<10} {:-<10} {:-<16}", "", "", ""),
+                    dim_style,
+                )));
+                for strategy in interesting {
+                    let kind_label = match strategy.kind {
+                        StrategySpecKind::Builtin { .. } => "builtin",
+                        StrategySpecKind::Random { .. } => "random",
+                        StrategySpecKind::Fsm { .. } => "fsm",
+                        StrategySpecKind::Memory { .. } => "memory",
+                        StrategySpecKind::OneSidedTm { .. } => "one_sided_tm",
+                    };
+                    let name = strategy_display_name(strategy);
+                    lines.push(Line::from(vec![
+                        Span::styled(format!("{:<10}", strategy.id), value_style),
+                        Span::raw(" "),
+                        Span::styled(format!("{:<10}", kind_label), value_style),
+                        Span::raw(" "),
+                        Span::styled(name, value_style),
+                    ]));
+                }
+            }
             lines.push(Line::from(Span::styled(
-                format!("{:-<10} {:-<10} {:-<16}", "", "", ""),
+                "Use :games strategies all to list every strategy.",
                 dim_style,
             )));
-            for strategy in &config.strategies {
-                let kind_label = match strategy.kind {
-                    StrategySpecKind::Builtin { .. } => "builtin",
-                    StrategySpecKind::Random { .. } => "random",
-                    StrategySpecKind::Fsm { .. } => "fsm",
-                    StrategySpecKind::Memory { .. } => "memory",
-                };
-                let name = strategy_display_name(strategy);
-                lines.push(Line::from(vec![
-                    Span::styled(format!("{:<10}", strategy.id), value_style),
-                    Span::raw(" "),
-                    Span::styled(format!("{:<10}", kind_label), value_style),
-                    Span::raw(" "),
-                    Span::styled(name, value_style),
-                ]));
-            }
         }
         Err(err) => {
             lines.push(Line::from(vec![Span::styled(
@@ -270,7 +293,8 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
     frame.render_widget(block, area);
 
     let config_text = state.editor_buffer().content_as_string();
-    let config_result = GamesConfig::from_toml(&config_text);
+    let config_result =
+        GamesConfig::from_toml_with_root(&config_text, Some(&state.workspace_root));
     let layout = layout_for_config(inner, config_result.as_ref().ok());
 
     let mut lines = build_main_lines(
@@ -351,8 +375,29 @@ fn strategy_display_name_from_kind(kind: &StrategySpecKind) -> String {
             BuiltinKind::WinStayLoseShift => "Win Stay Lose Shift".into(),
         },
         StrategySpecKind::Random { p_cooperate } => format!("Random (p={:.2})", p_cooperate),
-        StrategySpecKind::Fsm { output, .. } => format!("FSM (states={})", output.len()),
+        StrategySpecKind::Fsm {
+            outputs,
+            num_states,
+            input_mode,
+            ..
+        } => {
+            let states = if !outputs.is_empty() {
+                outputs.len()
+            } else {
+                *num_states
+            };
+            let mode = input_mode.unwrap_or(InputMode::OpponentLastAction);
+            let mode_label = match mode {
+                InputMode::OpponentLastAction => "opponent",
+                InputMode::SelfLastAction => "self",
+                InputMode::JointLastAction => "joint",
+            };
+            format!("FSM (states={states}, mode={mode_label})")
+        }
         StrategySpecKind::Memory { n, .. } => format!("Memory-{}", n),
+        StrategySpecKind::OneSidedTm { states, symbols, .. } => {
+            format!("TM (states={states}, symbols={symbols})")
+        }
     }
 }
 

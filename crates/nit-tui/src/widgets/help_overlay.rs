@@ -359,6 +359,22 @@ pub fn build_lines(theme: &Theme) -> Vec<Line<'static>> {
         Span::styled(":games analyze <path>", Style::default().fg(theme.accent)),
         Span::raw(" analyze specific history log"),
     ]));
+    lines.push(Line::from(vec![
+        Span::styled(":games runs", Style::default().fg(theme.accent)),
+        Span::raw(" browse saved runs"),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled(":games replay", Style::default().fg(theme.accent)),
+        Span::raw(" inspect a match replay"),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled(":games strategy", Style::default().fg(theme.accent)),
+        Span::raw(" inspect a strategy definition"),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled(":games strategies all", Style::default().fg(theme.accent)),
+        Span::raw(" list all strategies from config"),
+    ]));
     lines
 }
 

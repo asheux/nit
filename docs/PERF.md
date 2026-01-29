@@ -16,6 +16,9 @@ The benchmark suite includes:
 - `logging_on` vs `logging_off`
 - `fast_eval/deterministic_fast` vs `fast_eval/deterministic_slow`
 - `fast_eval/mixed_random`
+- `fsm_fast_eval/fsm_fast` vs `fsm_fast_eval/fsm_slow`
+- `tm_micro_steps`
+- `tm_tournament/tm` vs `tm_tournament/baseline`
 
 ## Flamegraphs
 

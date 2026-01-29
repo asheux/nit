@@ -1,11 +1,15 @@
 use crate::game::{Action, Outcome};
 use crate::history::History;
 use nit_utils::hashing::XorShift64;
+use serde::{Deserialize, Serialize};
 
 pub trait Strategy: Send {
     fn id(&self) -> &str;
     fn reset(&mut self);
     fn next_action(&mut self, history: &History, player_a: bool) -> Action;
+    fn tm_stats(&self) -> Option<&TmRunStats> {
+        None
+    }
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -14,6 +18,62 @@ pub enum StrategyKind {
     Random,
     Fsm,
     Memory,
+    OneSidedTm,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InputMode {
+    OpponentLastAction,
+    SelfLastAction,
+    JointLastAction,
+}
+
+impl Default for InputMode {
+    fn default() -> Self {
+        InputMode::OpponentLastAction
+    }
+}
+
+impl InputMode {
+    pub fn alphabet_size(self) -> usize {
+        match self {
+            InputMode::OpponentLastAction | InputMode::SelfLastAction => 2,
+            InputMode::JointLastAction => 4,
+        }
+    }
+
+    pub fn symbol_from_actions(self, self_action: Action, opp_action: Action) -> usize {
+        match self {
+            InputMode::OpponentLastAction => match opp_action {
+                Action::Cooperate => 0,
+                Action::Defect => 1,
+            },
+            InputMode::SelfLastAction => match self_action {
+                Action::Cooperate => 0,
+                Action::Defect => 1,
+            },
+            InputMode::JointLastAction => Outcome::from_actions(self_action, opp_action).index(),
+        }
+    }
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TmMove {
+    #[serde(rename = "L")]
+    Left,
+    #[serde(rename = "R")]
+    Right,
+    #[serde(rename = "S")]
+    Stay,
+}
+
+#[derive(Copy, Clone, Debug, Serialize, Deserialize)]
+pub struct TmTransition {
+    pub write: u8,
+    #[serde(rename = "move")]
+    pub move_dir: TmMove,
+    pub next: u16,
 }
 
 #[derive(Clone, Debug)]
@@ -198,7 +258,9 @@ pub struct FsmStrategy {
     start_state: usize,
     state: usize,
     outputs: Vec<Action>,
-    transitions: Vec<[usize; 4]>,
+    input_mode: InputMode,
+    alphabet: usize,
+    transitions: Vec<usize>,
 }
 
 impl FsmStrategy {
@@ -206,14 +268,24 @@ impl FsmStrategy {
         id: impl Into<String>,
         start_state: usize,
         outputs: Vec<Action>,
-        transitions: Vec<[usize; 4]>,
+        input_mode: InputMode,
+        transitions: Vec<Vec<usize>>,
     ) -> Self {
+        let alphabet = input_mode.alphabet_size();
+        let mut flat = Vec::new();
+        for row in transitions {
+            for entry in row {
+                flat.push(entry);
+            }
+        }
         Self {
             id: id.into(),
             start_state,
             state: start_state,
             outputs,
-            transitions,
+            input_mode,
+            alphabet,
+            transitions: flat,
         }
     }
 }
@@ -229,8 +301,9 @@ impl Strategy for FsmStrategy {
 
     fn next_action(&mut self, history: &History, player_a: bool) -> Action {
         if let Some((self_action, opp_action)) = history.last_actions_for(player_a) {
-            let idx = Outcome::from_actions(self_action, opp_action).index();
-            if let Some(next) = self.transitions.get(self.state).and_then(|t| t.get(idx)) {
+            let symbol = self.input_mode.symbol_from_actions(self_action, opp_action);
+            let idx = self.state.saturating_mul(self.alphabet) + symbol;
+            if let Some(next) = self.transitions.get(idx) {
                 self.state = *next;
             }
         }
@@ -272,5 +345,196 @@ impl Strategy for MemoryStrategy {
             return self.initial;
         };
         self.table.get(idx).copied().unwrap_or(self.initial)
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct TmRunStats {
+    pub rounds: u64,
+    pub steps: u64,
+    pub output_events: u64,
+    pub fallback: u64,
+    pub max_steps_hits: u64,
+}
+
+impl TmRunStats {
+    pub fn merge(&mut self, other: &TmRunStats) {
+        self.rounds = self.rounds.saturating_add(other.rounds);
+        self.steps = self.steps.saturating_add(other.steps);
+        self.output_events = self.output_events.saturating_add(other.output_events);
+        self.fallback = self.fallback.saturating_add(other.fallback);
+        self.max_steps_hits = self.max_steps_hits.saturating_add(other.max_steps_hits);
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct OneSidedTmStrategy {
+    id: String,
+    symbols: u8,
+    start_state: u16,
+    blank: u8,
+    fallback_symbol: u8,
+    max_steps_per_round: u32,
+    input_mode: InputMode,
+    output_map: Vec<Action>,
+    transitions: Vec<TmTransition>,
+    tape: Vec<u8>,
+    head: usize,
+    last_history_len: usize,
+    stats: TmRunStats,
+}
+
+impl OneSidedTmStrategy {
+    pub fn new(
+        id: impl Into<String>,
+        symbols: u8,
+        start_state: u16,
+        blank: u8,
+        fallback_symbol: u8,
+        max_steps_per_round: u32,
+        input_mode: InputMode,
+        output_map: Vec<Action>,
+        transitions: Vec<TmTransition>,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            symbols,
+            start_state,
+            blank,
+            fallback_symbol,
+            max_steps_per_round,
+            input_mode,
+            output_map,
+            transitions,
+            tape: vec![blank],
+            head: 0,
+            last_history_len: 0,
+            stats: TmRunStats::default(),
+        }
+    }
+
+    pub fn stats(&self) -> &TmRunStats {
+        &self.stats
+    }
+
+    fn append_history(&mut self, history: &History, player_a: bool) {
+        let history_len = history.len();
+        if history_len == 0 || history_len == self.last_history_len {
+            return;
+        }
+        if let Some((self_action, opp_action)) = history.last_actions_for(player_a) {
+            let symbol = self.input_mode.symbol_from_actions(self_action, opp_action) as u8;
+            self.tape.push(symbol);
+            self.last_history_len = history_len;
+        }
+    }
+
+    fn output_from_symbol(&self, symbol: u8) -> Action {
+        self.output_map
+            .get(symbol as usize)
+            .copied()
+            .unwrap_or(Action::Cooperate)
+    }
+
+    fn fallback_action(&self) -> Action {
+        self.output_map
+            .get(self.fallback_symbol as usize)
+            .copied()
+            .unwrap_or(Action::Cooperate)
+    }
+}
+
+impl Strategy for OneSidedTmStrategy {
+    fn id(&self) -> &str {
+        &self.id
+    }
+
+    fn reset(&mut self) {
+        self.tape.clear();
+        self.tape.push(self.blank);
+        self.head = 0;
+        self.last_history_len = 0;
+        self.stats = TmRunStats::default();
+    }
+
+    fn next_action(&mut self, history: &History, player_a: bool) -> Action {
+        self.append_history(history, player_a);
+
+        self.head = self.tape.len().saturating_sub(1);
+        let mut state = self.start_state;
+        let mut steps_taken: u32 = 0;
+        let mut output_symbol: Option<u8> = None;
+        let mut fallback = false;
+        let mut max_steps_hit = false;
+
+        if self.max_steps_per_round == 0 || state == 0 {
+            fallback = true;
+        } else {
+            let symbols = self.symbols as usize;
+            let max_steps = self.max_steps_per_round as usize;
+            for _ in 0..max_steps {
+                steps_taken += 1;
+                let symbol = self.tape.get(self.head).copied().unwrap_or(self.blank);
+                let idx = (state.saturating_sub(1) as usize)
+                    .saturating_mul(symbols)
+                    .saturating_add(symbol as usize);
+                let Some(trans) = self.transitions.get(idx).copied() else {
+                    fallback = true;
+                    break;
+                };
+                if let Some(cell) = self.tape.get_mut(self.head) {
+                    *cell = trans.write;
+                }
+                if trans.next == 0 {
+                    fallback = true;
+                    break;
+                }
+                match trans.move_dir {
+                    TmMove::Left => {
+                        if self.head > 0 {
+                            self.head -= 1;
+                        }
+                    }
+                    TmMove::Stay => {}
+                    TmMove::Right => {
+                        if self.head + 1 == self.tape.len() {
+                            output_symbol = Some(trans.write);
+                            break;
+                        } else {
+                            self.head += 1;
+                        }
+                    }
+                }
+                state = trans.next;
+            }
+            if output_symbol.is_none() && !fallback && steps_taken >= self.max_steps_per_round {
+                max_steps_hit = true;
+                fallback = true;
+            }
+        }
+
+        let action = if let Some(symbol) = output_symbol {
+            self.output_from_symbol(symbol)
+        } else {
+            self.fallback_action()
+        };
+
+        self.stats.rounds = self.stats.rounds.saturating_add(1);
+        self.stats.steps = self.stats.steps.saturating_add(steps_taken as u64);
+        if output_symbol.is_some() {
+            self.stats.output_events = self.stats.output_events.saturating_add(1);
+        }
+        if fallback {
+            self.stats.fallback = self.stats.fallback.saturating_add(1);
+        }
+        if max_steps_hit {
+            self.stats.max_steps_hits = self.stats.max_steps_hits.saturating_add(1);
+        }
+
+        action
+    }
+
+    fn tm_stats(&self) -> Option<&TmRunStats> {
+        Some(&self.stats)
     }
 }

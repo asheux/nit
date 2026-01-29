@@ -1,6 +1,6 @@
 schema_version = 1
 game = "ipd"
-rounds = 2000000
+rounds = 2000
 repetitions = 1
 self_play = false
 seed = 42
@@ -51,10 +51,12 @@ type = "random"
 p_cooperate = 0.5
 
 [[strategy]]
-id = "fsm1"
+id = "fsm_joint"
 type = "fsm"
+num_states = 2
 start_state = 0
-output = ["C", "D"]
+outputs = ["C", "D"]
+input_mode = "joint_last_action"
 transitions = [
   [0, 1, 0, 1],
   [1, 1, 0, 0],
@@ -66,3 +68,70 @@ type = "memory"
 n = 1
 initial = "C"
 table = ["C", "D", "D", "C"]
+
+[[strategy]]
+id = "fsm_opp"
+type = "fsm"
+num_states = 2
+start_state = 0
+outputs = ["C", "D"]
+input_mode = "opponent_last_action"
+transitions = [
+  [0, 1],
+  [0, 1],
+]
+
+[[strategy]]
+id = "fsm_joint"
+type = "fsm"
+num_states = 2
+start_state = 0
+outputs = ["C", "D"]
+input_mode = "joint_last_action"
+transitions = [
+  [0, 1, 1, 0],
+  [1, 0, 0, 1],
+]
+
+[[strategy]]
+id = "tm_opp"
+type = "one_sided_tm"
+states = 2
+symbols = 2
+start_state = 1
+blank = 0
+fallback_symbol = 0
+max_steps_per_round = 64
+input_mode = "opponent_last_action"
+output_map = ["C", "D"]
+transitions = [
+  { state=1, read=0, write=0, move="R", next=1 },
+  { state=1, read=1, write=1, move="R", next=1 },
+  { state=2, read=0, write=0, move="R", next=2 },
+  { state=2, read=1, write=1, move="R", next=2 },
+]
+
+[[strategy]]
+id = "tm_joint"
+type = "one_sided_tm"
+states = 1
+symbols = 4
+start_state = 1
+blank = 0
+fallback_symbol = 0
+max_steps_per_round = 64
+input_mode = "joint_last_action"
+output_map = ["C", "D", "D", "C"]
+transitions = [
+  { state=1, read=0, write=0, move="R", next=1 },
+  { state=1, read=1, write=1, move="R", next=1 },
+  { state=1, read=2, write=2, move="R", next=1 },
+  { state=1, read=3, write=3, move="R", next=1 },
+]
+
+# Example: generated strategy list (NDJSON)
+# [[strategy]]
+# id = "gen"
+# type = "generated"
+# source = "generated/fsm.ndjson"
+# limit = 1000
