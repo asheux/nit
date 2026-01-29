@@ -491,7 +491,6 @@ fn simulate_tm(
     let mut output_symbol: Option<u8> = None;
     let mut last_transition: Option<(u16, u8, TmTransition)> = None;
     let mut max_steps_hit = false;
-    let mut halted = false;
     let mut missing_transition = false;
     let mut steps_taken = 0usize;
 
@@ -519,22 +518,31 @@ fn simulate_tm(
         }
 
         if trans.next == 0 {
-            halted = true;
-            steps.push(SimStep {
-                step: step + 1,
-                state,
-                head_before,
-                read,
-                next: trans.next,
-                write: trans.write,
-                move_dir: trans.move_dir,
-                head_after: head_before,
-                tape: tape.clone(),
-            });
-            frames.push(SimFrame {
-                tape: tape.clone(),
-                head: head_before,
-            });
+            if matches!(trans.move_dir, TmMove::Right) && head_before + 1 == tape.len() {
+                output_symbol = Some(trans.write);
+                let head_after = head_before + 1;
+                steps.push(SimStep {
+                    step: step + 1,
+                    state,
+                    head_before,
+                    read,
+                    next: trans.next,
+                    write: trans.write,
+                    move_dir: trans.move_dir,
+                    head_after,
+                    tape: tape.clone(),
+                });
+                frames.push(SimFrame {
+                    tape: tape.clone(),
+                    head: head_after,
+                });
+            } else {
+                missing_transition = true;
+                lines.push(format!(
+                    "step {}: halt before rail (next=0) ignored",
+                    step + 1
+                ));
+            }
             break;
         }
 
@@ -549,6 +557,7 @@ fn simulate_tm(
             TmMove::Right => {
                 if head_before + 1 == tape.len() {
                     output_symbol = Some(trans.write);
+                    let head_after = head_before + 1;
                     steps.push(SimStep {
                         step: step + 1,
                         state,
@@ -557,12 +566,12 @@ fn simulate_tm(
                         next: trans.next,
                         write: trans.write,
                         move_dir: trans.move_dir,
-                        head_after: head_before,
+                        head_after,
                         tape: tape.clone(),
                     });
                     frames.push(SimFrame {
                         tape: tape.clone(),
-                        head: head_before,
+                        head: head_after,
                     });
                     break;
                 } else {
@@ -591,7 +600,7 @@ fn simulate_tm(
         });
     }
 
-    if output_symbol.is_none() && !halted && !missing_transition && steps_taken >= max_steps {
+    if output_symbol.is_none() && !missing_transition && steps_taken >= max_steps {
         max_steps_hit = true;
     }
 
@@ -609,12 +618,10 @@ fn simulate_tm(
 
     let reason = if output_symbol.is_some() {
         "rail output"
-    } else if halted {
-        "halt"
     } else if missing_transition {
         "missing transition"
     } else if max_steps_hit {
-        "max_steps"
+        "Never halts"
     } else {
         "fallback"
     };
@@ -622,6 +629,9 @@ fn simulate_tm(
         "result: {reason} -> action {}",
         action.as_char()
     ));
+    if max_steps_hit {
+        lines.push("Never halts".to_string());
+    }
     if let Some((s, r, trans)) = last_transition {
         let move_label = match trans.move_dir {
             TmMove::Left => "-1",
@@ -1121,6 +1131,10 @@ fn tape_with_head_snippet(tape: &[u8], head: usize, max_len: usize) -> String {
             full.push(symbol_char(cell));
         }
     }
+    if head >= tape.len() {
+        head_char_idx = full.len();
+        full.push(HEAD_DOT);
+    }
     if full.len() <= max_len {
         return full;
     }
@@ -1191,7 +1205,7 @@ fn build_grid_lines(
         if needs_ellipsis {
             spans.push(Span::styled("...", Style::default().fg(theme.border)));
         }
-        let head_at_halt = frame.head + 1 == tape_width;
+        let head_at_halt = frame.head == tape_width;
         for cell_idx in start..end {
             let is_halt_cell = cell_idx == tape_width;
             let symbol = frame.tape.get(cell_idx).copied().unwrap_or(0);

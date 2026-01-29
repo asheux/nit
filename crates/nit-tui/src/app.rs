@@ -536,7 +536,7 @@ fn draw(
             let message = format!(":{}", cmd.input);
             let area = dynamic_popup_rect(f.size(), prompt_size(&message));
             render_command_prompt(f, area, theme, &message);
-            command_cursor = command_prompt_cursor(area, &message);
+            command_cursor = command_prompt_cursor(area, &cmd.input, cmd.cursor);
         }
 
         // cursor
@@ -587,6 +587,8 @@ fn map_key_to_action(key: KeyEvent, state: &AppState, input: &mut InputState) ->
             KeyCode::Esc => Some(Action::CommandPromptCancel),
             KeyCode::Enter => Some(Action::CommandPromptExecute),
             KeyCode::Backspace => Some(Action::CommandPromptBackspace),
+            KeyCode::Left => Some(Action::CommandPromptMoveLeft),
+            KeyCode::Right => Some(Action::CommandPromptMoveRight),
             KeyCode::Char(c)
                 if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT =>
             {
@@ -3302,7 +3304,13 @@ fn handle_tm_sim_popup_key(
     if state.app_kind != AppKind::Games || !state.games.tm_sim.open {
         return false;
     }
+    if state.command_line.is_some() || state.prompt.is_some() {
+        return false;
+    }
     if is_global_quit_key(key) {
+        return false;
+    }
+    if matches!(key.code, KeyCode::Char(':')) {
         return false;
     }
     match key.code {
@@ -3390,7 +3398,11 @@ fn prompt_size(message: &str) -> (u16, u16) {
     (width, height)
 }
 
-fn command_prompt_cursor(area: ratatui::layout::Rect, message: &str) -> Option<(u16, u16)> {
+fn command_prompt_cursor(
+    area: ratatui::layout::Rect,
+    input: &str,
+    cursor: usize,
+) -> Option<(u16, u16)> {
     if area.width < 3 || area.height < 3 {
         return None;
     }
@@ -3400,8 +3412,10 @@ fn command_prompt_cursor(area: ratatui::layout::Rect, message: &str) -> Option<(
     }
     let inner_x = area.x.saturating_add(1);
     let inner_y = area.y.saturating_add(1);
-    let width = unicode_width::UnicodeWidthStr::width(message);
-    let mut col = inner_x.saturating_add(width as u16);
+    let prefix_width = unicode_width::UnicodeWidthStr::width(":");
+    let cursor_text: String = input.chars().take(cursor).collect();
+    let cursor_width = unicode_width::UnicodeWidthStr::width(cursor_text.as_str());
+    let mut col = inner_x.saturating_add((prefix_width + cursor_width) as u16);
     let max_col = inner_x.saturating_add(inner_width.saturating_sub(1));
     if col > max_col {
         col = max_col;

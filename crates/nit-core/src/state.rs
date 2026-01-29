@@ -406,13 +406,60 @@ pub struct SyntaxDebugInfo {
 #[derive(Clone, Debug)]
 pub struct CommandLine {
     pub input: String,
+    pub cursor: usize,
 }
 
 impl CommandLine {
     pub fn new() -> Self {
         Self {
             input: String::new(),
+            cursor: 0,
         }
+    }
+
+    pub fn insert(&mut self, ch: char) {
+        let idx = self.char_idx_to_byte(self.cursor);
+        self.input.insert(idx, ch);
+        self.cursor = self.cursor.saturating_add(1);
+    }
+
+    pub fn backspace(&mut self) {
+        if self.cursor == 0 {
+            return;
+        }
+        let end = self.char_idx_to_byte(self.cursor);
+        let start = self.char_idx_to_byte(self.cursor.saturating_sub(1));
+        if start < end {
+            self.input.replace_range(start..end, "");
+            self.cursor = self.cursor.saturating_sub(1);
+        }
+    }
+
+    pub fn move_left(&mut self) {
+        if self.cursor > 0 {
+            self.cursor -= 1;
+        }
+    }
+
+    pub fn move_right(&mut self) {
+        let len = self.input.chars().count();
+        if self.cursor < len {
+            self.cursor += 1;
+        }
+    }
+
+    fn char_idx_to_byte(&self, idx: usize) -> usize {
+        if idx == 0 {
+            return 0;
+        }
+        let mut count = 0usize;
+        for (byte_idx, _) in self.input.char_indices() {
+            if count == idx {
+                return byte_idx;
+            }
+            count += 1;
+        }
+        self.input.len()
     }
 }
 
@@ -1070,7 +1117,17 @@ pub fn apply_action(state: &mut AppState, action: Action) -> ActionOutcome {
         }
         Action::CommandPromptBackspace => {
             if let Some(cmd) = state.command_line.as_mut() {
-                cmd.input.pop();
+                cmd.backspace();
+            }
+        }
+        Action::CommandPromptMoveLeft => {
+            if let Some(cmd) = state.command_line.as_mut() {
+                cmd.move_left();
+            }
+        }
+        Action::CommandPromptMoveRight => {
+            if let Some(cmd) = state.command_line.as_mut() {
+                cmd.move_right();
             }
         }
         Action::CommandPromptExecute => {
@@ -1080,7 +1137,7 @@ pub fn apply_action(state: &mut AppState, action: Action) -> ActionOutcome {
         }
         Action::CommandPromptInput(ch) => {
             if let Some(cmd) = state.command_line.as_mut() {
-                cmd.input.push(ch);
+                cmd.insert(ch);
             }
         }
         Action::VisualizerReseed => {

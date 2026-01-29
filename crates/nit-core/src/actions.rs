@@ -49,6 +49,8 @@ pub enum Action {
     CommandPromptOpen,
     CommandPromptCancel,
     CommandPromptBackspace,
+    CommandPromptMoveLeft,
+    CommandPromptMoveRight,
     CommandPromptExecute,
     CommandPromptInput(char),
     VisualizerReseed,
