@@ -1673,7 +1673,7 @@ fn handle_command_line(state: &mut AppState, input: &str) {
             let mut numbers: Vec<u64> = Vec::new();
             let mut id: Option<String> = None;
             for token in tokens.iter().skip(idx) {
-                if let Ok(value) = token.parse::<u64>() {
+                if let Some(value) = parse_tm_input_token(token) {
                     numbers.push(value);
                     continue;
                 }
@@ -2044,6 +2044,22 @@ fn parse_tm_rule_tuple(input: &str) -> Result<Option<(u64, u16, u8)>, String> {
         ));
     }
     Ok(Some((rule_code, states_raw as u16, symbols_raw as u8)))
+}
+
+fn parse_tm_input_token(token: &str) -> Option<u64> {
+    if let Ok(value) = token.parse::<u64>() {
+        return Some(value);
+    }
+    let (base_str, exp_str) = token.split_once('^')?;
+    if base_str.is_empty() || exp_str.is_empty() {
+        return None;
+    }
+    let base = base_str.parse::<u64>().ok()?;
+    let exp = exp_str.parse::<u32>().ok()?;
+    if base < 2 {
+        return None;
+    }
+    base.checked_pow(exp)
 }
 
 fn lab_from_tokens(tokens: &[&str]) -> Option<AppKind> {
