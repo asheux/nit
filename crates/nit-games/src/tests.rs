@@ -467,6 +467,66 @@ fn tm_rail_output_triggers() {
 }
 
 #[test]
+fn tm_rail_output_triggers_when_next_zero() {
+    let transitions = vec![
+        TmTransition {
+            write: 1,
+            move_dir: TmMove::Right,
+            next: 0,
+        },
+        TmTransition {
+            write: 1,
+            move_dir: TmMove::Right,
+            next: 0,
+        },
+    ];
+    let mut tm = OneSidedTmStrategy::new(
+        "tm",
+        2,
+        1,
+        0,
+        0,
+        8,
+        InputMode::OpponentLastAction,
+        vec![Action::Cooperate, Action::Defect],
+        transitions,
+    );
+    tm.reset();
+    let action = tm.next_action(&History::new(1), true);
+    assert_eq!(action, Action::Defect);
+}
+
+#[test]
+fn tm_next_zero_without_rail_falls_back() {
+    let transitions = vec![
+        TmTransition {
+            write: 1,
+            move_dir: TmMove::Left,
+            next: 0,
+        },
+        TmTransition {
+            write: 1,
+            move_dir: TmMove::Left,
+            next: 0,
+        },
+    ];
+    let mut tm = OneSidedTmStrategy::new(
+        "tm",
+        2,
+        1,
+        0,
+        0,
+        8,
+        InputMode::OpponentLastAction,
+        vec![Action::Cooperate, Action::Defect],
+        transitions,
+    );
+    tm.reset();
+    let action = tm.next_action(&History::new(1), true);
+    assert_eq!(action, Action::Cooperate);
+}
+
+#[test]
 fn tm_left_boundary_safe() {
     let transitions = vec![
         TmTransition {

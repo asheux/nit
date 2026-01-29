@@ -99,10 +99,12 @@ Semantics:
   - internal state resets to `start_state`
 - The TM steps up to `max_steps_per_round`.
 - **Rail output:** if a transition would move `R` when the head is already at the
-  rightmost index, the action is produced immediately using `write` and the
-  round ends.
-- If no output occurs within `max_steps_per_round`, or a transition halts, the
-  fallback action is used.
+  rightmost index, the action is produced immediately using `write` (mapped
+  through `output_map`) and the round ends. The tape is **not** extended to the
+  right; the rail cell is conceptual.
+- If no output occurs within `max_steps_per_round`, or a transition is invalid
+  or halts before the rail (e.g., `next=0` without a rail move), the fallback
+  action is used.
   By default this is `output_map[blank]`, but you can override it with
   `fallback_symbol`.
 
