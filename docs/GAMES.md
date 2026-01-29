@@ -124,16 +124,28 @@ max_steps_per_round = 256
 input_mode = "opponent_last_action"
 output_map = ["C","D"]
 transitions = [
-  { state=1, read=0, write=1, move="R", next=2 },
-  { state=1, read=1, write=0, move="S", next=1 },
-  { state=2, read=0, write=1, move="L", next=2 },
-  { state=2, read=1, write=1, move="R", next=3 },
-  { state=3, read=0, write=0, move="S", next=0 }, # next=0 => HALT (fallback)
-  { state=3, read=1, write=1, move="S", next=3 },
+  # Wolfram-style table: transitions[state][read] = [next, write, move]
+  # move can be "L"/"R"/"S" or -1/1/0
+  [ [2, 1, "R"], [1, 0, "S"] ],
+  [ [2, 1, "L"], [3, 1, "R"] ],
+  [ [0, 0, "S"], [3, 1, "S"] ], # next=0 => HALT (fallback)
 ]
 ```
 
 `next = 0` indicates HALT (fallback output).
+
+You can also use the explicit (state, read, write, move, next) object form:
+
+```
+transitions = [
+  { state=1, read=0, write=1, move="R", next=2 },
+  { state=1, read=1, write=0, move="S", next=1 },
+  { state=2, read=0, write=1, move="L", next=2 },
+  { state=2, read=1, write=1, move="R", next=3 },
+  { state=3, read=0, write=0, move="S", next=0 },
+  { state=3, read=1, write=1, move="S", next=3 },
+]
+```
 
 #### Wolfram-style rule code
 
@@ -151,13 +163,17 @@ output_map = ["C","D"]
 rule_code = 600720
 ```
 
-Rule decoding order:
-- iterate `(state=1..states, read=0..symbols-1)` (state-major)
-- each digit is in base `symbols * 3 * (states+1)`
+Rule decoding order (Wolfram-style one-sided TM):
+- iterate `(state=states..1, read=0..symbols-1)` (state-major, descending)
+- each digit is in base `symbols * states * 2`
 - digit decodes as:
-  - `write = digit % symbols`
-  - `move = (digit / symbols) % 3` with move order `L, R, S`
-  - `next = digit / (symbols*3)` in `0..states` (`0` = HALT)
+  - `move = digit % 2` (`0` = Left, `1` = Right)
+  - `write = (digit / 2) % symbols`
+  - `next = (digit / (2*symbols)) + 1` in `1..states`
+
+Notes:
+- Moves are only Left/Right (no Stay) for rule codes.
+- `next = 0` halting is only available in explicit transition tables.
 
 ### Generated strategies (NDJSON)
 

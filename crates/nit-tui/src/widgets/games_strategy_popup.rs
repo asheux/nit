@@ -141,9 +141,14 @@ pub fn build_definition_lines(def: &nit_games::output::StrategyDefinition) -> Ve
                 for read in 0..*symbols as usize {
                     let idx = (state - 1) * (*symbols as usize) + read;
                     if let Some(rule) = transitions.get(idx) {
+                        let move_label = match rule.move_dir {
+                            nit_games::strategy::TmMove::Left => "-1",
+                            nit_games::strategy::TmMove::Right => "1",
+                            nit_games::strategy::TmMove::Stay => "0",
+                        };
                         lines.push(format!(
-                            "(s{}, r{}) -> write {} move {:?} next {}",
-                            state, read, rule.write, rule.move_dir, rule.next
+                            "(s{}, r{}) -> (next={}, write={}, move={})",
+                            state, read, rule.next, rule.write, move_label
                         ));
                     }
                 }

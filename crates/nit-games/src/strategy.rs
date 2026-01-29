@@ -76,6 +76,53 @@ pub struct TmTransition {
     pub next: u16,
 }
 
+pub fn decode_tm_rule_code_wolfram(
+    rule_code: u64,
+    states: usize,
+    symbols: usize,
+) -> (Vec<TmTransition>, u64) {
+    let total = states.saturating_mul(symbols);
+    let mut transitions = vec![
+        TmTransition {
+            write: 0,
+            move_dir: TmMove::Left,
+            next: 1,
+        };
+        total
+    ];
+    if states == 0 || symbols == 0 {
+        return (transitions, rule_code);
+    }
+    let base = (symbols as u64) * (states as u64) * 2;
+    if base == 0 {
+        return (transitions, rule_code);
+    }
+    let mut code = rule_code;
+    for state in (1..=states).rev() {
+        for read in 0..symbols {
+            let digit = code % base;
+            code /= base;
+            let move_idx = (digit % 2) as u8;
+            let write = ((digit / 2) % symbols as u64) as u8;
+            let next = (digit / (2 * symbols as u64)) as u16 + 1;
+            let move_dir = if move_idx == 0 {
+                TmMove::Left
+            } else {
+                TmMove::Right
+            };
+            let idx = (state - 1) * symbols + read;
+            if let Some(slot) = transitions.get_mut(idx) {
+                *slot = TmTransition {
+                    write,
+                    move_dir,
+                    next,
+                };
+            }
+        }
+    }
+    (transitions, code)
+}
+
 #[derive(Clone, Debug)]
 pub struct AlwaysCooperate {
     id: String,

@@ -375,6 +375,17 @@ pub fn build_lines(theme: &Theme) -> Vec<Line<'static>> {
         Span::styled(":games strategies all", Style::default().fg(theme.accent)),
         Span::raw(" list all strategies from config"),
     ]));
+    lines.push(Line::from(vec![
+        Span::styled(":games tm <n> [steps] [id]", Style::default().fg(theme.accent)),
+        Span::raw(" simulate one-sided TM on integer input"),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled(
+            ":games tm {rule,states,symbols} <n> [steps]",
+            Style::default().fg(theme.accent),
+        ),
+        Span::raw(" simulate a rule-code TM without config"),
+    ]));
     lines
 }
 

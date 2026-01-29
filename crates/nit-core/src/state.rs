@@ -117,6 +117,22 @@ pub struct GamesStrategyInspectState {
     pub source_label: Option<String>,
 }
 
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+pub struct GamesTmSimState {
+    pub open: bool,
+    pub last_error: Option<String>,
+    #[serde(skip)]
+    pub definition: Option<nit_games::output::StrategyDefinition>,
+    #[serde(skip)]
+    pub input: Option<u64>,
+    #[serde(skip)]
+    pub steps_override: Option<u32>,
+    #[serde(skip)]
+    pub source_label: Option<String>,
+    #[serde(skip)]
+    pub scroll_offset: usize,
+}
+
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum UiSelectionPane {
     JobOutput,
@@ -129,6 +145,8 @@ pub enum UiSelectionPane {
     GamesRunBrowserPopup,
     GamesReplayPopup,
     GamesStrategyPopup,
+    GamesTmSimPopupLeft,
+    GamesTmSimPopupRight,
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -179,6 +197,8 @@ pub struct GamesState {
     pub replay: GamesReplayState,
     #[serde(skip)]
     pub strategy_inspect: GamesStrategyInspectState,
+    #[serde(skip)]
+    pub tm_sim: GamesTmSimState,
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -607,6 +627,7 @@ impl AppState {
                 run_browser: GamesRunBrowserState::default(),
                 replay: GamesReplayState::default(),
                 strategy_inspect: GamesStrategyInspectState::default(),
+                tm_sim: GamesTmSimState::default(),
             },
             yank: None,
             yank_kind: YankKind::Char,
@@ -1498,6 +1519,7 @@ fn handle_command_line(state: &mut AppState, input: &str) {
             } else if let Some(run) = state.games.last_run.as_ref() {
                 state.games.run_browser.open = false;
                 state.games.replay.open = false;
+                state.games.tm_sim.open = false;
                 state.games.strategy_inspect.open = true;
                 state.games.strategy_inspect.last_error = None;
                 state.games.strategy_inspect.title = None;
@@ -1521,6 +1543,7 @@ fn handle_command_line(state: &mut AppState, input: &str) {
                 Ok(config) => {
                     state.games.run_browser.open = false;
                     state.games.replay.open = false;
+                    state.games.tm_sim.open = false;
                     state.games.strategy_inspect.open = true;
                     state.games.strategy_inspect.last_error = None;
                     state.games.strategy_inspect.title = None;
@@ -1545,6 +1568,7 @@ fn handle_command_line(state: &mut AppState, input: &str) {
                     let msg = format!("Config error: {err}");
                     state.games.run_browser.open = false;
                     state.games.replay.open = false;
+                    state.games.tm_sim.open = false;
                     state.games.strategy_inspect.open = true;
                     state.games.strategy_inspect.last_error = Some(msg.clone());
                     state.games.strategy_inspect.title = None;
@@ -1556,6 +1580,225 @@ fn handle_command_line(state: &mut AppState, input: &str) {
                     state.status = Some(msg);
                 }
             }
+        }
+        _ if tokens.get(0) == Some(&"games") && tokens.get(1) == Some(&"tm") => {
+            let mut idx = 2usize;
+            let mut source = "config";
+            if let Some(token) = tokens.get(idx) {
+                if *token == "run" {
+                    source = "run";
+                    idx += 1;
+                } else if *token == "config" {
+                    source = "config";
+                    idx += 1;
+                }
+            }
+
+            let rule_tuple = match parse_tm_rule_tuple(trimmed) {
+                Ok(value) => value,
+                Err(msg) => {
+                    state.status = Some(msg.clone());
+                    state.games.run_browser.open = false;
+                    state.games.replay.open = false;
+                    state.games.strategy_inspect.open = false;
+                    state.games.analysis.open = false;
+                    state.games.tm_sim.open = true;
+                    state.games.tm_sim.last_error = Some(msg);
+                    state.games.tm_sim.definition = None;
+                    state.games.tm_sim.input = None;
+                    state.games.tm_sim.steps_override = None;
+                    state.games.tm_sim.source_label = Some("rule".into());
+                    state.games.tm_sim.scroll_offset = 0;
+                    return;
+                }
+            };
+
+            let mut numbers: Vec<u64> = Vec::new();
+            let mut id: Option<String> = None;
+            for token in tokens.iter().skip(idx) {
+                if let Ok(value) = token.parse::<u64>() {
+                    numbers.push(value);
+                    continue;
+                }
+                if id.is_none() {
+                    id = Some((*token).to_string());
+                }
+            }
+
+            let Some(input) = numbers.get(0).copied() else {
+                state.status = Some(
+                    "Usage: :games tm [run|config] <input> [steps] [strategy_id] | :games tm {rule_code, states, symbols} <input> [steps]"
+                        .into(),
+                );
+                return;
+            };
+            let steps_override = numbers.get(1).copied().and_then(|value| {
+                if value > u32::MAX as u64 {
+                    None
+                } else {
+                    Some(value as u32)
+                }
+            });
+
+            if let Some((rule_code, states, symbols)) = rule_tuple {
+                if states == 0 || symbols < 2 {
+                    let msg: String = if states == 0 {
+                        "TM rule tuple: states must be >= 1".into()
+                    } else {
+                        "TM rule tuple: symbols must be >= 2".into()
+                    };
+                    state.status = Some(msg.clone());
+                    state.games.run_browser.open = false;
+                    state.games.replay.open = false;
+                    state.games.strategy_inspect.open = false;
+                    state.games.analysis.open = false;
+                    state.games.tm_sim.open = true;
+                    state.games.tm_sim.last_error = Some(msg);
+                    state.games.tm_sim.definition = None;
+                    state.games.tm_sim.input = Some(input);
+                    state.games.tm_sim.steps_override = steps_override;
+                    state.games.tm_sim.source_label = Some("rule".into());
+                    state.games.tm_sim.scroll_offset = 0;
+                    return;
+                }
+                let (transitions, _remaining) =
+                    nit_games::strategy::decode_tm_rule_code_wolfram(
+                        rule_code,
+                        states as usize,
+                        symbols as usize,
+                    );
+                let output_map: Vec<nit_games::game::Action> = (0..symbols)
+                    .map(|idx| {
+                        if idx % 2 == 0 {
+                            nit_games::game::Action::Cooperate
+                        } else {
+                            nit_games::game::Action::Defect
+                        }
+                    })
+                    .collect();
+                let max_steps = steps_override.unwrap_or(256);
+                let def = nit_games::output::StrategyDefinition {
+                    id: format!("tm_rule_{rule_code}_{states}x{symbols}"),
+                    name: Some(format!("Rule {rule_code} ({states}x{symbols})")),
+                    kind: nit_games::config::StrategySpecKind::OneSidedTm {
+                        states,
+                        symbols,
+                        start_state: 1,
+                        blank: 0,
+                        fallback_symbol: Some(0),
+                        max_steps_per_round: max_steps,
+                        input_mode: nit_games::strategy::InputMode::OpponentLastAction,
+                        output_map,
+                        transitions,
+                        rule_code: Some(rule_code),
+                    },
+                    rng_seed_a: None,
+                    rng_seed_b: None,
+                };
+
+                state.games.run_browser.open = false;
+                state.games.replay.open = false;
+                state.games.strategy_inspect.open = false;
+                state.games.analysis.open = false;
+                state.games.tm_sim.open = true;
+                state.games.tm_sim.last_error = None;
+                state.games.tm_sim.definition = Some(def);
+                state.games.tm_sim.input = Some(input);
+                state.games.tm_sim.steps_override = steps_override;
+                state.games.tm_sim.source_label = Some("rule".into());
+                state.games.tm_sim.scroll_offset = 0;
+                state.status = Some("TM simulation opened (rule tuple)".into());
+                return;
+            }
+
+            let mut source_label = source.to_string();
+            let defs: Vec<nit_games::output::StrategyDefinition>;
+            match source {
+                "run" => {
+                    if let Some(run) = state.games.last_run.as_ref() {
+                        defs = run.strategies.clone();
+                    } else {
+                        state.status = Some("No run loaded for TM simulation".into());
+                        return;
+                    }
+                }
+                _ => {
+                    let config_text = state.editor_buffer().content_as_string();
+                    match nit_games::config::GamesConfig::from_toml_with_root(
+                        &config_text,
+                        Some(&state.workspace_root),
+                    ) {
+                        Ok(config) => {
+                            defs = config
+                                .strategies
+                                .iter()
+                                .map(|spec| nit_games::output::StrategyDefinition {
+                                    id: spec.id.clone(),
+                                    name: spec.name.clone(),
+                                    kind: spec.kind.clone(),
+                                    rng_seed_a: None,
+                                    rng_seed_b: None,
+                                })
+                                .collect();
+                            source_label = "config".into();
+                        }
+                        Err(err) => {
+                            let msg = format!("Config error: {err}");
+                            state.status = Some(msg.clone());
+                            state.games.run_browser.open = false;
+                            state.games.replay.open = false;
+                            state.games.strategy_inspect.open = false;
+                            state.games.analysis.open = false;
+                            state.games.tm_sim.open = true;
+                            state.games.tm_sim.last_error = Some(msg);
+                            state.games.tm_sim.definition = None;
+                            state.games.tm_sim.input = Some(input);
+                            state.games.tm_sim.steps_override = steps_override;
+                            state.games.tm_sim.source_label = Some("config".into());
+                            state.games.tm_sim.scroll_offset = 0;
+                            return;
+                        }
+                    }
+                }
+            }
+
+            let mut tm_defs: Vec<nit_games::output::StrategyDefinition> = defs
+                .into_iter()
+                .filter(|def| matches!(def.kind, nit_games::config::StrategySpecKind::OneSidedTm { .. }))
+                .collect();
+
+            let selected = if let Some(id) = id.as_ref() {
+                tm_defs
+                    .iter()
+                    .position(|def| def.id == *id)
+                    .and_then(|idx| Some(tm_defs.remove(idx)))
+            } else if tm_defs.len() == 1 {
+                tm_defs.pop()
+            } else {
+                None
+            };
+
+            let Some(def) = selected else {
+                if tm_defs.is_empty() {
+                    state.status = Some("No one-sided TM strategies found".into());
+                } else {
+                    state.status = Some("Multiple TM strategies found; specify an id".into());
+                }
+                return;
+            };
+
+            state.games.run_browser.open = false;
+            state.games.replay.open = false;
+            state.games.strategy_inspect.open = false;
+            state.games.analysis.open = false;
+            state.games.tm_sim.open = true;
+            state.games.tm_sim.last_error = None;
+            state.games.tm_sim.definition = Some(def);
+            state.games.tm_sim.input = Some(input);
+            state.games.tm_sim.steps_override = steps_override;
+            state.games.tm_sim.source_label = Some(source_label);
+            state.games.tm_sim.scroll_offset = 0;
+            state.status = Some("TM simulation opened".into());
         }
         _ if tokens.get(0) == Some(&"games")
             && matches!(tokens.get(1), Some(&"analyze") | Some(&"analyse")) =>
@@ -1704,6 +1947,46 @@ fn normalize_path_token(value: &str) -> String {
         .or_else(|| trimmed.strip_prefix('\'').and_then(|v| v.strip_suffix('\'')))
         .unwrap_or(trimmed);
     unquoted.trim().to_string()
+}
+
+fn parse_tm_rule_tuple(input: &str) -> Result<Option<(u64, u16, u8)>, String> {
+    let Some(start) = input.find('{') else {
+        return Ok(None);
+    };
+    let Some(end_rel) = input[start..].find('}') else {
+        return Err("TM rule tuple missing '}'".into());
+    };
+    let end = start + end_rel;
+    let inner = &input[start + 1..end];
+    let parts: Vec<&str> = inner
+        .split(|c: char| c == ',' || c.is_whitespace())
+        .filter(|part| !part.is_empty())
+        .collect();
+    if parts.len() != 3 {
+        return Err("TM rule tuple must be {rule_code, states, symbols}".into());
+    }
+    let rule_code = parts[0]
+        .parse::<u64>()
+        .map_err(|_| "TM rule tuple: rule_code must be an integer".to_string())?;
+    let states_raw = parts[1]
+        .parse::<u64>()
+        .map_err(|_| "TM rule tuple: states must be an integer".to_string())?;
+    let symbols_raw = parts[2]
+        .parse::<u64>()
+        .map_err(|_| "TM rule tuple: symbols must be an integer".to_string())?;
+    if states_raw == 0 || states_raw > u16::MAX as u64 {
+        return Err(format!(
+            "TM rule tuple: states must be in 1..={}",
+            u16::MAX
+        ));
+    }
+    if symbols_raw == 0 || symbols_raw > u8::MAX as u64 {
+        return Err(format!(
+            "TM rule tuple: symbols must be in 1..={}",
+            u8::MAX
+        ));
+    }
+    Ok(Some((rule_code, states_raw as u16, symbols_raw as u8)))
 }
 
 fn lab_from_tokens(tokens: &[&str]) -> Option<AppKind> {

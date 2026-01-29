@@ -51,18 +51,6 @@ type = "random"
 p_cooperate = 0.5
 
 [[strategy]]
-id = "fsm_joint"
-type = "fsm"
-num_states = 2
-start_state = 0
-outputs = ["C", "D"]
-input_mode = "joint_last_action"
-transitions = [
-  [0, 1, 0, 1],
-  [1, 1, 0, 0],
-]
-
-[[strategy]]
 id = "mem1"
 type = "memory"
 n = 1
@@ -105,10 +93,8 @@ max_steps_per_round = 64
 input_mode = "opponent_last_action"
 output_map = ["C", "D"]
 transitions = [
-  { state=1, read=0, write=0, move="R", next=1 },
-  { state=1, read=1, write=1, move="R", next=1 },
-  { state=2, read=0, write=0, move="R", next=2 },
-  { state=2, read=1, write=1, move="R", next=2 },
+  [ [1, 0, "R"], [1, 1, "R"] ],
+  [ [2, 0, "R"], [2, 1, "R"] ],
 ]
 
 [[strategy]]
@@ -123,11 +109,73 @@ max_steps_per_round = 64
 input_mode = "joint_last_action"
 output_map = ["C", "D", "D", "C"]
 transitions = [
-  { state=1, read=0, write=0, move="R", next=1 },
-  { state=1, read=1, write=1, move="R", next=1 },
-  { state=1, read=2, write=2, move="R", next=1 },
-  { state=1, read=3, write=3, move="R", next=1 },
+  [ [1, 0, "R"], [1, 1, "R"], [1, 2, "R"], [1, 3, "R"] ],
 ]
+
+[[strategy]]
+id = "tm_rule_2x2"
+type = "one_sided_tm"
+states = 2
+symbols = 2
+start_state = 1
+blank = 0
+fallback_symbol = 0
+max_steps_per_round = 64
+input_mode = "opponent_last_action"
+output_map = ["C", "D"]
+rule_code = 3111
+
+[[strategy]]
+id = "tm_rule_2x3"
+type = "one_sided_tm"
+states = 2
+symbols = 3
+start_state = 1
+blank = 0
+fallback_symbol = 0
+max_steps_per_round = 64
+input_mode = "opponent_last_action"
+output_map = ["C", "D", "C"]
+rule_code = 0
+
+[[strategy]]
+id = "tm_rule_3x2"
+type = "one_sided_tm"
+states = 3
+symbols = 2
+start_state = 1
+blank = 0
+fallback_symbol = 0
+max_steps_per_round = 64
+input_mode = "opponent_last_action"
+output_map = ["C", "D"]
+rule_code = 0
+
+[[strategy]]
+id = "tm_rule_4x2"
+type = "one_sided_tm"
+states = 4
+symbols = 2
+start_state = 1
+blank = 0
+fallback_symbol = 0
+max_steps_per_round = 64
+input_mode = "opponent_last_action"
+output_map = ["C", "D"]
+rule_code = 0
+
+[[strategy]]
+id = "tm_rule_2x4"
+type = "one_sided_tm"
+states = 2
+symbols = 4
+start_state = 1
+blank = 0
+fallback_symbol = 0
+max_steps_per_round = 64
+input_mode = "opponent_last_action"
+output_map = ["C", "D", "C", "D"]
+rule_code = 0
 
 # Example: generated strategy list (NDJSON)
 # [[strategy]]

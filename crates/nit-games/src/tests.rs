@@ -527,6 +527,105 @@ fn tm_fallback_symbol_overrides_blank() {
 }
 
 #[test]
+fn tm_table_transitions_parse_wl_style() {
+    let cfg = r#"
+schema_version = 1
+game = "ipd"
+rounds = 3
+repetitions = 1
+self_play = false
+
+[[strategy]]
+id = "tm"
+type = "one_sided_tm"
+states = 2
+symbols = 2
+start_state = 1
+blank = 0
+max_steps_per_round = 4
+input_mode = "opponent_last_action"
+output_map = ["C","D"]
+transitions = [
+  [ [1, 0, "R"], [2, 1, "S"] ],
+  [ [0, 1, "L"], [2, 0, "R"] ],
+]
+"#;
+    let config = GamesConfig::from_toml(cfg).expect("config parse");
+    let spec = config
+        .strategies
+        .iter()
+        .find(|s| s.id == "tm")
+        .expect("tm spec");
+    match &spec.kind {
+        StrategySpecKind::OneSidedTm { transitions, .. } => {
+            assert_eq!(transitions.len(), 4);
+            assert_eq!(transitions[0].next, 1);
+            assert_eq!(transitions[0].write, 0);
+            assert!(matches!(transitions[0].move_dir, TmMove::Right));
+            assert_eq!(transitions[1].next, 2);
+            assert_eq!(transitions[1].write, 1);
+            assert!(matches!(transitions[1].move_dir, TmMove::Stay));
+            assert_eq!(transitions[2].next, 0);
+            assert_eq!(transitions[2].write, 1);
+            assert!(matches!(transitions[2].move_dir, TmMove::Left));
+        }
+        _ => panic!("expected one_sided_tm spec"),
+    }
+}
+
+#[test]
+fn tm_rule_code_matches_wolfram_example() {
+    let cfg = r#"
+schema_version = 1
+game = "ipd"
+rounds = 1
+repetitions = 1
+self_play = false
+
+[[strategy]]
+id = "tm"
+type = "one_sided_tm"
+states = 2
+symbols = 2
+start_state = 1
+blank = 0
+max_steps_per_round = 8
+input_mode = "opponent_last_action"
+output_map = ["C","D"]
+rule_code = 3111
+"#;
+    let config = GamesConfig::from_toml(cfg).expect("config parse");
+    let spec = config
+        .strategies
+        .iter()
+        .find(|s| s.id == "tm")
+        .expect("tm spec");
+    match &spec.kind {
+        StrategySpecKind::OneSidedTm { transitions, .. } => {
+            let t = transitions;
+            assert_eq!(t.len(), 4);
+            // (1,0) -> (1,0,L)
+            assert_eq!(t[0].next, 1);
+            assert_eq!(t[0].write, 0);
+            assert!(matches!(t[0].move_dir, TmMove::Left));
+            // (1,1) -> (2,1,L)
+            assert_eq!(t[1].next, 2);
+            assert_eq!(t[1].write, 1);
+            assert!(matches!(t[1].move_dir, TmMove::Left));
+            // (2,0) -> (2,1,R)
+            assert_eq!(t[2].next, 2);
+            assert_eq!(t[2].write, 1);
+            assert!(matches!(t[2].move_dir, TmMove::Right));
+            // (2,1) -> (2,0,L)
+            assert_eq!(t[3].next, 2);
+            assert_eq!(t[3].write, 0);
+            assert!(matches!(t[3].move_dir, TmMove::Left));
+        }
+        _ => panic!("expected one_sided_tm spec"),
+    }
+}
+
+#[test]
 fn tm_deterministic_reproducibility() {
     let transitions = vec![
         TmTransition {

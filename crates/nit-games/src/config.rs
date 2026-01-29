@@ -647,10 +647,15 @@ fn parse_input_mode(
             Some(InputMode::OpponentLastAction)
         }
         "selflastaction" | "self" | "selflast" => Some(InputMode::SelfLastAction),
-        "jointlastaction" | "joint" | "jointlast" => Some(InputMode::JointLastAction),
+        "jointlastaction"
+        | "joint"
+        | "jointlast"
+        | "combinedlastaction"
+        | "combined"
+        | "combinedlast" => Some(InputMode::JointLastAction),
         _ => {
             errors.push(format!(
-                "strategy '{id}': invalid input_mode '{raw}' (expected opponent_last_action, self_last_action, or joint_last_action)"
+                "strategy '{id}': invalid input_mode '{raw}' (expected opponent_last_action, self_last_action, or joint_last_action/combined_last_action)"
             ));
             None
         }
@@ -810,78 +815,191 @@ fn parse_tm_transitions(
     blank: usize,
     errors: &mut Vec<String>,
 ) -> Vec<TmTransition> {
-    let rules: Vec<TmTransitionRule> = match raw.try_into() {
-        Ok(rules) => rules,
+    let raw_clone = raw.clone();
+    if let Ok(rules) = raw_clone.try_into::<Vec<TmTransitionRule>>() {
+        let total = states.saturating_mul(symbols);
+        let mut transitions = vec![
+            TmTransition {
+                write: blank as u8,
+                move_dir: TmMove::Stay,
+                next: 0,
+            };
+            total
+        ];
+        let mut seen = vec![false; total];
+        for rule in rules {
+            if rule.state == 0 || rule.state > states {
+                errors.push(format!(
+                    "strategy '{id}': tm transition state {} out of range (1..={states})",
+                    rule.state
+                ));
+                continue;
+            }
+            if rule.read >= symbols {
+                errors.push(format!(
+                    "strategy '{id}': tm transition read {} out of range (symbols={symbols})",
+                    rule.read
+                ));
+                continue;
+            }
+            if rule.write >= symbols {
+                errors.push(format!(
+                    "strategy '{id}': tm transition write {} out of range (symbols={symbols})",
+                    rule.write
+                ));
+                continue;
+            }
+            if rule.next > states {
+                errors.push(format!(
+                    "strategy '{id}': tm transition next {} out of range (0..={states})",
+                    rule.next
+                ));
+                continue;
+            }
+            let idx = (rule.state - 1) * symbols + rule.read;
+            if let Some(slot) = seen.get_mut(idx) {
+                if *slot {
+                    errors.push(format!(
+                        "strategy '{id}': duplicate tm transition for state {} read {}",
+                        rule.state, rule.read
+                    ));
+                    continue;
+                }
+                *slot = true;
+            }
+            if let Some(entry) = transitions.get_mut(idx) {
+                *entry = TmTransition {
+                    write: rule.write as u8,
+                    move_dir: rule.move_dir,
+                    next: rule.next as u16,
+                };
+            }
+        }
+        if seen.iter().any(|seen| !*seen) {
+            let missing = seen.iter().filter(|seen| !**seen).count();
+            errors.push(format!(
+                "strategy '{id}': tm transitions missing {missing} (state, read) pairs"
+            ));
+        }
+        return transitions;
+    }
+
+    match parse_tm_table_transitions(&raw, states, symbols) {
+        Ok(transitions) => transitions,
         Err(err) => {
             errors.push(format!("strategy '{id}': invalid tm transitions: {err}"));
-            return Vec::new();
+            Vec::new()
         }
-    };
+    }
+}
+
+fn parse_tm_table_transitions(
+    raw: &toml::Value,
+    states: usize,
+    symbols: usize,
+) -> Result<Vec<TmTransition>, String> {
+    let rows = raw
+        .as_array()
+        .ok_or_else(|| "expected transitions to be an array".to_string())?;
+    if rows.len() != states {
+        return Err(format!(
+            "transitions table must have {states} rows (one per state)"
+        ));
+    }
     let total = states.saturating_mul(symbols);
     let mut transitions = vec![
         TmTransition {
-            write: blank as u8,
+            write: 0,
             move_dir: TmMove::Stay,
             next: 0,
         };
         total
     ];
-    let mut seen = vec![false; total];
-    for rule in rules {
-        if rule.state == 0 || rule.state > states {
-            errors.push(format!(
-                "strategy '{id}': tm transition state {} out of range (1..={states})",
-                rule.state
+    for (state_idx, row_val) in rows.iter().enumerate() {
+        let row = row_val
+            .as_array()
+            .ok_or_else(|| format!("transitions[{state_idx}] must be an array"))?;
+        if row.len() != symbols {
+            return Err(format!(
+                "transitions[{state_idx}] must have {symbols} entries (one per symbol)"
             ));
-            continue;
         }
-        if rule.read >= symbols {
-            errors.push(format!(
-                "strategy '{id}': tm transition read {} out of range (symbols={symbols})",
-                rule.read
-            ));
-            continue;
-        }
-        if rule.write >= symbols {
-            errors.push(format!(
-                "strategy '{id}': tm transition write {} out of range (symbols={symbols})",
-                rule.write
-            ));
-            continue;
-        }
-        if rule.next > states {
-            errors.push(format!(
-                "strategy '{id}': tm transition next {} out of range (0..={states})",
-                rule.next
-            ));
-            continue;
-        }
-        let idx = (rule.state - 1) * symbols + rule.read;
-        if let Some(slot) = seen.get_mut(idx) {
-            if *slot {
-                errors.push(format!(
-                    "strategy '{id}': duplicate tm transition for state {} read {}",
-                    rule.state, rule.read
+        for (read_idx, entry_val) in row.iter().enumerate() {
+            let entry = entry_val.as_array().ok_or_else(|| {
+                format!("transitions[{state_idx}][{read_idx}] must be [next, write, move]")
+            })?;
+            if entry.len() != 3 {
+                return Err(format!(
+                    "transitions[{state_idx}][{read_idx}] must be [next, write, move]"
                 ));
-                continue;
             }
-            *slot = true;
-        }
-        if let Some(entry) = transitions.get_mut(idx) {
-            *entry = TmTransition {
-                write: rule.write as u8,
-                move_dir: rule.move_dir,
-                next: rule.next as u16,
+            let next = entry[0]
+                .as_integer()
+                .ok_or_else(|| {
+                    format!("transitions[{state_idx}][{read_idx}][0] must be an integer")
+                })?;
+            let write = entry[1]
+                .as_integer()
+                .ok_or_else(|| {
+                    format!("transitions[{state_idx}][{read_idx}][1] must be an integer")
+                })?;
+            let move_dir = if let Some(move_int) = entry[2].as_integer() {
+                match move_int {
+                    -1 => TmMove::Left,
+                    1 => TmMove::Right,
+                    0 => TmMove::Stay,
+                    other => {
+                        return Err(format!(
+                            "transitions[{state_idx}][{read_idx}][2] invalid move {other} (expected -1, 0, or 1)"
+                        ))
+                    }
+                }
+            } else if let Some(move_str) = entry[2].as_str() {
+                let move_raw = move_str.trim().to_ascii_lowercase();
+                match move_raw.as_str() {
+                    "l" | "left" => TmMove::Left,
+                    "r" | "right" => TmMove::Right,
+                    "s" | "stay" => TmMove::Stay,
+                    _ => {
+                        return Err(format!(
+                            "transitions[{state_idx}][{read_idx}][2] invalid move '{move_raw}'"
+                        ))
+                    }
+                }
+            } else {
+                return Err(format!(
+                    "transitions[{state_idx}][{read_idx}][2] must be a move string or integer"
+                ));
+            };
+            if next < 0 || next as usize > states {
+                return Err(format!(
+                    "transitions[{state_idx}][{read_idx}][0] next {next} out of range (0..={states})"
+                ));
+            }
+            if write < 0 || write as usize >= symbols {
+                return Err(format!(
+                    "transitions[{state_idx}][{read_idx}][1] write {write} out of range (symbols={symbols})"
+                ));
+            }
+            let idx = state_idx * symbols + read_idx;
+            transitions[idx] = TmTransition {
+                write: write as u8,
+                move_dir,
+                next: next as u16,
             };
         }
     }
-    if seen.iter().any(|seen| !*seen) {
-        let missing = seen.iter().filter(|seen| !**seen).count();
-        errors.push(format!(
-            "strategy '{id}': tm transitions missing {missing} (state, read) pairs"
+    if transitions.len() != total {
+        return Err(format!(
+            "transitions table size mismatch: expected {total} entries"
         ));
     }
-    transitions
+    if states == 0 || symbols == 0 {
+        return Err(format!(
+            "transitions table requires states > 0 and symbols > 0"
+        ));
+    }
+    Ok(transitions)
 }
 
 fn decode_tm_rule_code(
@@ -891,37 +1009,9 @@ fn decode_tm_rule_code(
     symbols: usize,
     errors: &mut Vec<String>,
 ) -> Vec<TmTransition> {
-    let total = states.saturating_mul(symbols);
-    let mut transitions = Vec::with_capacity(total);
-    if states == 0 || symbols == 0 {
-        return transitions;
-    }
-    let base = (symbols as u64) * 3 * (states as u64 + 1);
-    if base == 0 {
-        errors.push(format!("strategy '{id}': invalid rule_code base"));
-        return transitions;
-    }
-    let mut code = rule_code;
-    for _state in 1..=states {
-        for _read in 0..symbols {
-            let digit = code % base;
-            code /= base;
-            let write = (digit % symbols as u64) as u8;
-            let move_idx = ((digit / symbols as u64) % 3) as u8;
-            let next = (digit / (symbols as u64 * 3)) as u16;
-            let move_dir = match move_idx {
-                0 => TmMove::Left,
-                1 => TmMove::Right,
-                _ => TmMove::Stay,
-            };
-            transitions.push(TmTransition {
-                write,
-                move_dir,
-                next,
-            });
-        }
-    }
-    if code != 0 {
+    let (transitions, remaining) =
+        crate::strategy::decode_tm_rule_code_wolfram(rule_code, states, symbols);
+    if states > 0 && symbols > 0 && remaining != 0 {
         errors.push(format!(
             "strategy '{id}': rule_code has unused higher digits for states={states} symbols={symbols}"
         ));
