@@ -4,6 +4,7 @@ use crate::history::History;
 use crate::strategy::{FsmStrategy, Strategy};
 use crate::tournament::{KernelRunMode, Parallelism, TournamentKernel, TournamentRunner};
 use crate::{analyze_history, AnalysisConfig};
+use std::collections::HashMap;
 
 fn run_to_completion(mut runner: TournamentRunner) -> crate::output::TournamentResults {
     while !runner.is_done() {
@@ -147,6 +148,98 @@ name = "Always Cooperate"
             assert_eq!(transitions[1][2], 0);
         }
         _ => panic!("expected fsm"),
+    }
+}
+
+#[test]
+fn fast_eval_matches_simulation_for_deterministic_strategies() {
+    let cfg = r#"
+schema_version = 1
+game = "ipd"
+rounds = 250
+repetitions = 2
+self_play = false
+seed = 12345
+noise = 0.0
+
+[history]
+enabled = false
+
+[engine]
+mode = "batch"
+parallelism = "off"
+fast_eval = true
+
+[[strategy]]
+id = "allc"
+type = "builtin"
+
+[[strategy]]
+id = "tft"
+type = "builtin"
+
+[[strategy]]
+id = "grim"
+type = "builtin"
+
+[[strategy]]
+id = "wsls"
+type = "builtin"
+
+[[strategy]]
+id = "mem1"
+type = "memory"
+n = 1
+initial = "C"
+table = ["C", "D", "D", "C"]
+
+[[strategy]]
+id = "fsm"
+type = "fsm"
+start_state = 0
+output = ["C", "D"]
+transitions = [[0, 1, 0, 1], [1, 1, 1, 1]]
+"#;
+    let mut fast_config = GamesConfig::from_toml(cfg).expect("config parse");
+    fast_config.engine.fast_eval = true;
+    let fast_results = TournamentKernel::new(fast_config.clone()).run(KernelRunMode::Sequential {
+        event_writer: None,
+        history_writer: None,
+    });
+
+    fast_config.engine.fast_eval = false;
+    let slow_results = TournamentKernel::new(fast_config).run(KernelRunMode::Sequential {
+        event_writer: None,
+        history_writer: None,
+    });
+
+    let fast_rank: HashMap<_, _> = fast_results
+        .ranking
+        .iter()
+        .map(|r| (r.id.clone(), r.clone()))
+        .collect();
+    for slow in &slow_results.ranking {
+        let fast = fast_rank.get(&slow.id).expect("fast rank");
+        assert_eq!(fast.total_payoff, slow.total_payoff);
+        assert_eq!(fast.wins, slow.wins);
+        assert_eq!(fast.losses, slow.losses);
+        assert_eq!(fast.draws, slow.draws);
+    }
+
+    let fast_pairs: HashMap<_, _> = fast_results
+        .pairwise
+        .iter()
+        .map(|p| ((p.a.clone(), p.b.clone()), p.clone()))
+        .collect();
+    for slow in &slow_results.pairwise {
+        let fast = fast_pairs
+            .get(&(slow.a.clone(), slow.b.clone()))
+            .expect("fast pair");
+        assert_eq!(fast.a_total, slow.a_total);
+        assert_eq!(fast.b_total, slow.b_total);
+        assert_eq!(fast.a_wins, slow.a_wins);
+        assert_eq!(fast.b_wins, slow.b_wins);
+        assert_eq!(fast.draws, slow.draws);
     }
 }
 

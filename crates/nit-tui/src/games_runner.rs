@@ -4,7 +4,9 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use nit_games::events::EventWriter;
-use nit_games::output::{write_summary, RunSummary, StrategyDefinition, TournamentResults};
+use nit_games::output::{
+    write_summary, RunSummary, StrategyDefinition, TournamentResults, RUN_SUMMARY_SCHEMA_VERSION,
+};
 use nit_games::tournament::{MatchSnapshot, TournamentProgress, TournamentRunner};
 use nit_games::{HistoryWriter, NormalizedConfig};
 
@@ -14,7 +16,12 @@ pub struct RunRequest {
     pub config_text: String,
     pub timestamp: String,
     pub run_id: String,
+    pub run_dir: PathBuf,
     pub summary_path: PathBuf,
+    pub definitions_path: PathBuf,
+    pub results_path: PathBuf,
+    pub config_path: PathBuf,
+    pub analysis_dir: PathBuf,
     pub event_path: Option<PathBuf>,
     pub history_path: Option<PathBuf>,
     pub progress_interval: Duration,
@@ -79,7 +86,12 @@ struct RunState {
     config_text: String,
     timestamp: String,
     run_id: String,
+    run_dir: PathBuf,
     summary_path: PathBuf,
+    definitions_path: PathBuf,
+    results_path: PathBuf,
+    config_path: PathBuf,
+    analysis_dir: PathBuf,
     steps_per_tick: u32,
     progress_interval: Duration,
     last_progress: Instant,
@@ -210,7 +222,12 @@ fn start_run(request: RunRequest, event_tx: &Sender<RunnerEvent>) -> Result<RunS
         config_text: request.config_text,
         timestamp: request.timestamp,
         run_id: request.run_id,
+        run_dir: request.run_dir,
         summary_path: request.summary_path,
+        definitions_path: request.definitions_path,
+        results_path: request.results_path,
+        config_path: request.config_path,
+        analysis_dir: request.analysis_dir,
         steps_per_tick: request.steps_per_tick.max(1),
         progress_interval: request.progress_interval,
         last_progress: Instant::now(),
@@ -219,12 +236,37 @@ fn start_run(request: RunRequest, event_tx: &Sender<RunnerEvent>) -> Result<RunS
 }
 
 fn finalize_run(state: RunState) -> Result<RunSummary, String> {
+    if let Err(err) = std::fs::write(&state.config_path, &state.config_text) {
+        tracing::warn!("Failed to write games config snapshot: {err}");
+    }
+
     let mut summary = state.runner.finish(
         state.timestamp.clone(),
         state.run_id.clone(),
         state.config_text.clone(),
     );
+    summary.schema_version = RUN_SUMMARY_SCHEMA_VERSION;
     summary.paths.summary = Some(state.summary_path.display().to_string());
+    summary.paths.definitions = Some(state.definitions_path.display().to_string());
+    summary.paths.results = Some(state.results_path.display().to_string());
+    summary.paths.config = Some(state.config_path.display().to_string());
+    summary.paths.analysis_dir = Some(state.analysis_dir.display().to_string());
+    summary.run_dir = Some(state.run_dir.display().to_string());
+    summary.event_log = summary.paths.events.clone();
+    summary.history_log = summary.paths.history.clone();
+
+    if let Err(err) = nit_utils::fs::write_atomic(&state.definitions_path, |writer| {
+        serde_json::to_writer_pretty(writer, &summary.strategies)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
+    }) {
+        tracing::warn!("Failed to write games definitions: {err}");
+    }
+    if let Err(err) = nit_utils::fs::write_atomic(&state.results_path, |writer| {
+        serde_json::to_writer_pretty(writer, &summary.results)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
+    }) {
+        tracing::warn!("Failed to write games results: {err}");
+    }
     write_summary(&state.summary_path, &summary).map_err(|err| err.to_string())?;
     Ok(summary)
 }

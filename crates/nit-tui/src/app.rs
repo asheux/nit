@@ -15,7 +15,7 @@ use crossterm::{
 };
 use nit_core::{
     actions::Action, apply_action, io as core_io, AppKind, AppState, Mode, PaneId, Prompt,
-    UiSelection, UiSelectionPane, Viewport, YankKind,
+    UiSelection, UiSelectionPane, YankKind,
 };
 use nit_games::config::GamesConfig;
 use ratatui::{
@@ -35,9 +35,9 @@ use crate::{
     system_stats::SystemStats,
     theme::Theme,
     widgets::{
-        bottom_bar, editor_view, games_analysis_popup, games_visualizer_view, gate_monitor_view,
-        help_overlay, job_output_view, notes_view, protocol_picker, rule_picker, top_bar,
-        visualizer_view,
+        bottom_bar, editor_view, games_analysis_popup, games_replay_popup,
+        games_run_browser_popup, games_visualizer_view, gate_monitor_view, help_overlay,
+        job_output_view, notes_view, protocol_picker, rule_picker, top_bar, visualizer_view,
     },
 };
 
@@ -171,6 +171,20 @@ fn run_loop(
                     }
                     if state.games.analysis.open {
                         if handle_analysis_popup_key(&key, state) {
+                            needs_redraw = true;
+                            continue;
+                        }
+                    }
+                    if state.app_kind == AppKind::Games && state.games.run_browser.open {
+                        let screen = terminal.size().unwrap_or_default();
+                        if handle_run_browser_key(&key, state, screen) {
+                            needs_redraw = true;
+                            continue;
+                        }
+                    }
+                    if state.app_kind == AppKind::Games && state.games.replay.open {
+                        let screen = terminal.size().unwrap_or_default();
+                        if handle_replay_popup_key(&key, state, screen) {
                             needs_redraw = true;
                             continue;
                         }
@@ -357,13 +371,16 @@ fn draw(
             .width
             .saturating_sub(2)
             .saturating_sub(editor_gutter);
-        state.set_viewport(
-            PaneId::Editor,
-            Viewport::with_dims(
-                layout.editor.height.saturating_sub(2) as usize,
-                editor_text_width as usize,
-            ),
-        );
+        let editor_height = layout.editor.height.saturating_sub(2) as usize;
+        let editor_width = editor_text_width as usize;
+        {
+            let buf = state.editor_buffer_mut();
+            let resized = buf.viewport.height != editor_height || buf.viewport.width != editor_width;
+            buf.set_viewport_size(editor_height, editor_width);
+            if resized {
+                buf.ensure_visible();
+            }
+        }
         let notes_total = state.notes_buffer().lines_len().max(1);
         let notes_line_width = notes_total.to_string().len().max(3) as u16;
         let notes_gutter = notes_line_width + 4;
@@ -372,15 +389,16 @@ fn draw(
             .width
             .saturating_sub(2)
             .saturating_sub(notes_gutter);
-        state.set_viewport(
-            PaneId::Notes,
-            Viewport::with_dims(
-                layout.notes.height.saturating_sub(2) as usize,
-                notes_text_width as usize,
-            ),
-        );
-        state.editor_buffer_mut().ensure_visible();
-        state.notes_buffer_mut().ensure_visible();
+        let notes_height = layout.notes.height.saturating_sub(2) as usize;
+        let notes_width = notes_text_width as usize;
+        {
+            let buf = state.notes_buffer_mut();
+            let resized = buf.viewport.height != notes_height || buf.viewport.width != notes_width;
+            buf.set_viewport_size(notes_height, notes_width);
+            if resized {
+                buf.ensure_visible();
+            }
+        }
 
         let editor_id = state.active_editor_buffer_id;
         let notes_id = state.notes_buffer_id;
@@ -467,6 +485,15 @@ fn draw(
         if state.app_kind == AppKind::Games && state.games.analysis.open {
             let area = dynamic_popup_rect(f.size(), games_analysis_popup::preferred_size(f.size()));
             games_analysis_popup::render(f, area, state, theme);
+        }
+        if state.app_kind == AppKind::Games && state.games.run_browser.open {
+            let area =
+                dynamic_popup_rect(f.size(), games_run_browser_popup::preferred_size(f.size()));
+            games_run_browser_popup::render(f, area, state, theme);
+        }
+        if state.app_kind == AppKind::Games && state.games.replay.open {
+            let area = dynamic_popup_rect(f.size(), games_replay_popup::preferred_size(f.size()));
+            games_replay_popup::render(f, area, state, theme);
         }
         if state.rule_picker.open {
             rule_picker::render(f, f.size(), state, theme);
@@ -1440,6 +1467,17 @@ fn is_global_run_key(key: &KeyEvent) -> bool {
     }
 }
 
+fn is_global_quit_key(key: &KeyEvent) -> bool {
+    matches!(
+        key,
+        KeyEvent {
+            code: KeyCode::Char('c') | KeyCode::Char('q'),
+            modifiers,
+            ..
+        } if modifiers.contains(KeyModifiers::CONTROL)
+    )
+}
+
 fn is_petri_show_key(key: &KeyEvent, state: &AppState) -> bool {
     let (hidden, running) = match state.app_kind {
         AppKind::Gol => (state.visualizer.petri_hidden, state.visualizer.running),
@@ -1578,6 +1616,23 @@ fn handle_mouse_event(
                 let area = dynamic_popup_rect(screen, games_analysis_popup::preferred_size(screen));
                 if point_in_rect(mouse.column, mouse.row, area) {
                     bump_scroll(&mut state.games.analysis.scroll_offset, delta);
+                }
+                return true;
+            }
+
+            if state.app_kind == AppKind::Games && state.games.run_browser.open {
+                let area =
+                    dynamic_popup_rect(screen, games_run_browser_popup::preferred_size(screen));
+                if point_in_rect(mouse.column, mouse.row, area) {
+                    bump_scroll(&mut state.games.run_browser.scroll_offset, delta);
+                }
+                return true;
+            }
+
+            if state.app_kind == AppKind::Games && state.games.replay.open {
+                let area = dynamic_popup_rect(screen, games_replay_popup::preferred_size(screen));
+                if point_in_rect(mouse.column, mouse.row, area) {
+                    bump_scroll(&mut state.games.replay.scroll_offset, delta);
                 }
                 return true;
             }
@@ -1733,6 +1788,74 @@ fn map_analysis_popup_mouse(
     let height = text_area.height as usize;
     let max_scroll = text_lines.len().saturating_sub(height);
     let scroll = state.games.analysis.scroll_offset.min(max_scroll);
+    let (line_idx, col) = map_mouse_to_line_col(
+        mouse,
+        text_area,
+        &text_lines,
+        scroll,
+        state.settings.editor.tab_width as usize,
+        clamp,
+    )?;
+    Some((line_idx, col, text_lines))
+}
+
+fn map_run_browser_popup_mouse(
+    mouse: MouseEvent,
+    screen: ratatui::layout::Rect,
+    state: &AppState,
+    theme: &Theme,
+    clamp: bool,
+) -> Option<(usize, usize, Vec<String>)> {
+    if state.app_kind != AppKind::Games || !state.games.run_browser.open {
+        return None;
+    }
+    let area = dynamic_popup_rect(screen, games_run_browser_popup::preferred_size(screen));
+    let text_area = popup_text_area(area);
+    if !point_in_rect(mouse.column, mouse.row, text_area) && !clamp {
+        return None;
+    }
+    let lines = games_run_browser_popup::build_lines(state, theme, text_area.width);
+    let text_lines = lines_to_strings(&lines);
+    if text_lines.is_empty() {
+        return None;
+    }
+    let height = text_area.height as usize;
+    let max_scroll = text_lines.len().saturating_sub(height);
+    let scroll = state.games.run_browser.scroll_offset.min(max_scroll);
+    let (line_idx, col) = map_mouse_to_line_col(
+        mouse,
+        text_area,
+        &text_lines,
+        scroll,
+        state.settings.editor.tab_width as usize,
+        clamp,
+    )?;
+    Some((line_idx, col, text_lines))
+}
+
+fn map_replay_popup_mouse(
+    mouse: MouseEvent,
+    screen: ratatui::layout::Rect,
+    state: &AppState,
+    theme: &Theme,
+    clamp: bool,
+) -> Option<(usize, usize, Vec<String>)> {
+    if state.app_kind != AppKind::Games || !state.games.replay.open {
+        return None;
+    }
+    let area = dynamic_popup_rect(screen, games_replay_popup::preferred_size(screen));
+    let text_area = popup_text_area(area);
+    if !point_in_rect(mouse.column, mouse.row, text_area) && !clamp {
+        return None;
+    }
+    let lines = games_replay_popup::build_lines(state, theme, text_area.width);
+    let text_lines = lines_to_strings(&lines);
+    if text_lines.is_empty() {
+        return None;
+    }
+    let height = text_area.height as usize;
+    let max_scroll = text_lines.len().saturating_sub(height);
+    let scroll = state.games.replay.scroll_offset.min(max_scroll);
     let (line_idx, col) = map_mouse_to_line_col(
         mouse,
         text_area,
@@ -2090,6 +2213,60 @@ fn handle_mouse_down(
         }
         return true;
     }
+    if state.app_kind == AppKind::Games && state.games.run_browser.open {
+        if let Some((line_idx, col, lines)) =
+            map_run_browser_popup_mouse(mouse, screen, state, theme, false)
+        {
+            reset_ui_selection(state, input_state);
+            state.ui_selection = Some(UiSelection {
+                pane: UiSelectionPane::GamesRunBrowserPopup,
+                start_line: line_idx,
+                start_col: col,
+                end_line: line_idx,
+                end_col: col,
+            });
+            input_state.mouse_select_anchor = Some(MouseSelectAnchor {
+                target: MouseSelectTarget::Ui(UiSelectionPane::GamesRunBrowserPopup),
+                line: line_idx,
+                col,
+            });
+            update_ui_selection_text(
+                state,
+                UiSelectionPane::GamesRunBrowserPopup,
+                &lines,
+                clipboard,
+                input_state,
+            );
+        }
+        return true;
+    }
+    if state.app_kind == AppKind::Games && state.games.replay.open {
+        if let Some((line_idx, col, lines)) =
+            map_replay_popup_mouse(mouse, screen, state, theme, false)
+        {
+            reset_ui_selection(state, input_state);
+            state.ui_selection = Some(UiSelection {
+                pane: UiSelectionPane::GamesReplayPopup,
+                start_line: line_idx,
+                start_col: col,
+                end_line: line_idx,
+                end_col: col,
+            });
+            input_state.mouse_select_anchor = Some(MouseSelectAnchor {
+                target: MouseSelectTarget::Ui(UiSelectionPane::GamesReplayPopup),
+                line: line_idx,
+                col,
+            });
+            update_ui_selection_text(
+                state,
+                UiSelectionPane::GamesReplayPopup,
+                &lines,
+                clipboard,
+                input_state,
+            );
+        }
+        return true;
+    }
     if state.app_kind == AppKind::Games && state.games.analysis.open {
         if let Some((line_idx, col, lines)) =
             map_analysis_popup_mouse(mouse, screen, state, theme, false)
@@ -2357,6 +2534,14 @@ fn handle_mouse_drag(
                     map_analysis_popup_mouse(mouse, screen, state, theme, true)
                         .map(|(line_idx, col, lines)| (line_idx, col, lines))
                 }
+                UiSelectionPane::GamesRunBrowserPopup => {
+                    map_run_browser_popup_mouse(mouse, screen, state, theme, true)
+                        .map(|(line_idx, col, lines)| (line_idx, col, lines))
+                }
+                UiSelectionPane::GamesReplayPopup => {
+                    map_replay_popup_mouse(mouse, screen, state, theme, true)
+                        .map(|(line_idx, col, lines)| (line_idx, col, lines))
+                }
             };
             let Some((line_idx, col, lines)) = result else {
                 return false;
@@ -2394,6 +2579,18 @@ fn mouse_drag_allowed(state: &AppState, anchor: MouseSelectAnchor) -> bool {
         return matches!(
             anchor.target,
             MouseSelectTarget::Ui(UiSelectionPane::GamesAnalysisPopup)
+        );
+    }
+    if state.app_kind == AppKind::Games && state.games.run_browser.open {
+        return matches!(
+            anchor.target,
+            MouseSelectTarget::Ui(UiSelectionPane::GamesRunBrowserPopup)
+        );
+    }
+    if state.app_kind == AppKind::Games && state.games.replay.open {
+        return matches!(
+            anchor.target,
+            MouseSelectTarget::Ui(UiSelectionPane::GamesReplayPopup)
         );
     }
     if games_petri_visible(state) {
@@ -2525,6 +2722,9 @@ fn handle_analysis_popup_key(key: &KeyEvent, state: &mut AppState) -> bool {
     if !state.games.analysis.open {
         return false;
     }
+    if is_global_quit_key(key) {
+        return false;
+    }
     match key.code {
         KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') => {
             state.games.analysis.open = false;
@@ -2539,8 +2739,201 @@ fn handle_analysis_popup_key(key: &KeyEvent, state: &mut AppState) -> bool {
     }
 }
 
+fn handle_run_browser_key(
+    key: &KeyEvent,
+    state: &mut AppState,
+    screen: ratatui::layout::Rect,
+) -> bool {
+    if state.app_kind != AppKind::Games || !state.games.run_browser.open {
+        return false;
+    }
+    if is_global_quit_key(key) {
+        return false;
+    }
+    match key.code {
+        KeyCode::Esc | KeyCode::Char('q') => {
+            state.games.run_browser.open = false;
+            if let Some(selection) = state.ui_selection {
+                if matches!(selection.pane, UiSelectionPane::GamesRunBrowserPopup) {
+                    state.ui_selection = None;
+                }
+            }
+            true
+        }
+        KeyCode::Char('r') => {
+            state.games.pending_run_browser = true;
+            true
+        }
+        KeyCode::Enter => {
+            if let Some(entry) = state
+                .games
+                .run_browser
+                .entries
+                .get(state.games.run_browser.selected)
+            {
+                state.games.pending_run_load = Some(entry.summary_path.clone());
+                state.games.run_browser.loading = true;
+            }
+            true
+        }
+        KeyCode::Up | KeyCode::Char('k') => {
+            if state.games.run_browser.selected > 0 {
+                state.games.run_browser.selected -= 1;
+            }
+            adjust_run_browser_scroll(state, screen);
+            true
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            let max = state.games.run_browser.entries.len().saturating_sub(1);
+            if state.games.run_browser.selected < max {
+                state.games.run_browser.selected += 1;
+            }
+            adjust_run_browser_scroll(state, screen);
+            true
+        }
+        KeyCode::PageUp => {
+            state.games.run_browser.selected =
+                state.games.run_browser.selected.saturating_sub(10);
+            adjust_run_browser_scroll(state, screen);
+            true
+        }
+        KeyCode::PageDown => {
+            let max = state.games.run_browser.entries.len().saturating_sub(1);
+            state.games.run_browser.selected =
+                (state.games.run_browser.selected + 10).min(max);
+            adjust_run_browser_scroll(state, screen);
+            true
+        }
+        _ => true,
+    }
+}
+
+fn adjust_run_browser_scroll(state: &mut AppState, screen: ratatui::layout::Rect) {
+    let area = dynamic_popup_rect(screen, games_run_browser_popup::preferred_size(screen));
+    let inner_height = area.height.saturating_sub(2) as usize;
+    if inner_height == 0 {
+        return;
+    }
+    let selected = state.games.run_browser.selected;
+    if selected < state.games.run_browser.scroll_offset {
+        state.games.run_browser.scroll_offset = selected;
+    } else if selected >= state.games.run_browser.scroll_offset + inner_height {
+        state.games.run_browser.scroll_offset = selected.saturating_sub(inner_height - 1);
+    }
+}
+
+fn handle_replay_popup_key(
+    key: &KeyEvent,
+    state: &mut AppState,
+    screen: ratatui::layout::Rect,
+) -> bool {
+    if state.app_kind != AppKind::Games || !state.games.replay.open {
+        return false;
+    }
+    if is_global_quit_key(key) {
+        return false;
+    }
+    match key.code {
+        KeyCode::Esc | KeyCode::Char('q') => {
+            state.games.replay.open = false;
+            if let Some(selection) = state.ui_selection {
+                if matches!(selection.pane, UiSelectionPane::GamesReplayPopup) {
+                    state.ui_selection = None;
+                }
+            }
+            true
+        }
+        KeyCode::Char('r') => {
+            state.games.replay.title = None;
+            state.games.replay.lines.clear();
+            state.games.replay.cycle = None;
+            state.games.replay.scroll_offset = 0;
+            true
+        }
+        KeyCode::Enter => {
+            if state.games.replay.lines.is_empty() {
+                let selection = games_replay_popup::pair_list(state)
+                    .get(state.games.replay.selected_index)
+                    .map(|(a, b)| (a.clone(), b.clone()));
+                if let Some((a, b)) = selection {
+                    state.games.pending_replay = Some(nit_core::GamesReplayRequest {
+                        a_id: a.clone(),
+                        b_id: b.clone(),
+                    });
+                    state.games.replay.selected_pair = Some((a.clone(), b.clone()));
+                    state.games.replay.loading = true;
+                    state.games.replay.last_error = None;
+                }
+            }
+            true
+        }
+        KeyCode::Up | KeyCode::Char('k') => {
+            if state.games.replay.lines.is_empty() {
+                if state.games.replay.selected_index > 0 {
+                    state.games.replay.selected_index -= 1;
+                }
+                adjust_replay_scroll(state, screen);
+            } else {
+                bump_scroll(&mut state.games.replay.scroll_offset, -1);
+            }
+            true
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            if state.games.replay.lines.is_empty() {
+                let max = games_replay_popup::pair_list(state).len().saturating_sub(1);
+                if state.games.replay.selected_index < max {
+                    state.games.replay.selected_index += 1;
+                }
+                adjust_replay_scroll(state, screen);
+            } else {
+                bump_scroll(&mut state.games.replay.scroll_offset, 1);
+            }
+            true
+        }
+        KeyCode::PageUp => {
+            if state.games.replay.lines.is_empty() {
+                state.games.replay.selected_index =
+                    state.games.replay.selected_index.saturating_sub(10);
+                adjust_replay_scroll(state, screen);
+            } else {
+                bump_scroll(&mut state.games.replay.scroll_offset, -10);
+            }
+            true
+        }
+        KeyCode::PageDown => {
+            if state.games.replay.lines.is_empty() {
+                let max = games_replay_popup::pair_list(state).len().saturating_sub(1);
+                state.games.replay.selected_index =
+                    (state.games.replay.selected_index + 10).min(max);
+                adjust_replay_scroll(state, screen);
+            } else {
+                bump_scroll(&mut state.games.replay.scroll_offset, 10);
+            }
+            true
+        }
+        _ => true,
+    }
+}
+
+fn adjust_replay_scroll(state: &mut AppState, screen: ratatui::layout::Rect) {
+    let area = dynamic_popup_rect(screen, games_replay_popup::preferred_size(screen));
+    let inner_height = area.height.saturating_sub(2) as usize;
+    if inner_height == 0 {
+        return;
+    }
+    let selected = state.games.replay.selected_index;
+    if selected < state.games.replay.scroll_offset {
+        state.games.replay.scroll_offset = selected;
+    } else if selected >= state.games.replay.scroll_offset + inner_height {
+        state.games.replay.scroll_offset = selected.saturating_sub(inner_height - 1);
+    }
+}
+
 fn handle_help_popup_key(key: &KeyEvent, state: &mut AppState) -> bool {
     if !state.show_help {
+        return false;
+    }
+    if is_global_quit_key(key) {
         return false;
     }
     let close = match key.code {

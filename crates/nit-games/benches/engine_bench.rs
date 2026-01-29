@@ -43,9 +43,94 @@ fn build_config(strategies: usize, rounds: u32, repetitions: u32, self_play: boo
             enabled: false,
             include_rounds: false,
         },
-        history: HistoryConfig { enabled: false },
+        history: HistoryConfig {
+            enabled: false,
+            include_cycle_metadata: false,
+        },
         engine: EngineConfig::default(),
         max_memory_n: 0,
+    }
+}
+
+fn build_deterministic_config(rounds: u32) -> NormalizedConfig {
+    let specs = vec![
+        StrategySpec {
+            id: "allc".into(),
+            name: None,
+            kind: StrategySpecKind::Builtin {
+                builtin: nit_games::config::BuiltinKind::AllC,
+            },
+        },
+        StrategySpec {
+            id: "tft".into(),
+            name: None,
+            kind: StrategySpecKind::Builtin {
+                builtin: nit_games::config::BuiltinKind::TitForTat,
+            },
+        },
+        StrategySpec {
+            id: "grim".into(),
+            name: None,
+            kind: StrategySpecKind::Builtin {
+                builtin: nit_games::config::BuiltinKind::GrimTrigger,
+            },
+        },
+        StrategySpec {
+            id: "wsls".into(),
+            name: None,
+            kind: StrategySpecKind::Builtin {
+                builtin: nit_games::config::BuiltinKind::WinStayLoseShift,
+            },
+        },
+        StrategySpec {
+            id: "mem1".into(),
+            name: None,
+            kind: StrategySpecKind::Memory {
+                n: 1,
+                initial: nit_games::game::Action::Cooperate,
+                table: vec![
+                    nit_games::game::Action::Cooperate,
+                    nit_games::game::Action::Defect,
+                    nit_games::game::Action::Defect,
+                    nit_games::game::Action::Cooperate,
+                ],
+            },
+        },
+        StrategySpec {
+            id: "fsm".into(),
+            name: None,
+            kind: StrategySpecKind::Fsm {
+                start_state: 0,
+                input_index_base: 0,
+                output: vec![
+                    nit_games::game::Action::Cooperate,
+                    nit_games::game::Action::Defect,
+                ],
+                transitions: vec![[0, 1, 0, 1], [1, 1, 1, 1]],
+            },
+        },
+    ];
+
+    NormalizedConfig {
+        schema_version: 1,
+        game: "ipd".into(),
+        rounds,
+        repetitions: 1,
+        self_play: false,
+        seed: Some(12345),
+        noise: 0.0,
+        payoff: PayoffMatrix::default_pd(),
+        strategies: specs,
+        event_log: nit_games::events::EventLogConfig {
+            enabled: false,
+            include_rounds: false,
+        },
+        history: HistoryConfig {
+            enabled: false,
+            include_cycle_metadata: false,
+        },
+        engine: EngineConfig::default(),
+        max_memory_n: 1,
     }
 }
 
@@ -151,12 +236,74 @@ fn bench_parallel(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_fast_eval(c: &mut Criterion) {
+    let mut group = c.benchmark_group("fast_eval");
+    let mut config_fast = build_deterministic_config(5000);
+    config_fast.engine.fast_eval = true;
+    let kernel_fast = TournamentKernel::new(config_fast.clone());
+    group.bench_function("deterministic_fast", |b| {
+        b.iter(|| {
+            let _ = kernel_fast.run(KernelRunMode::Sequential {
+                event_writer: None,
+                history_writer: None,
+            });
+        });
+    });
+
+    config_fast.engine.fast_eval = false;
+    let kernel_slow = TournamentKernel::new(config_fast);
+    group.bench_function("deterministic_slow", |b| {
+        b.iter(|| {
+            let _ = kernel_slow.run(KernelRunMode::Sequential {
+                event_writer: None,
+                history_writer: None,
+            });
+        });
+    });
+
+    let mut mixed = build_config(12, 500, 1, false);
+    mixed.engine.fast_eval = true;
+    // Replace a few random strategies with deterministic ones.
+    if mixed.strategies.len() >= 4 {
+        mixed.strategies[0].kind = StrategySpecKind::Builtin {
+            builtin: nit_games::config::BuiltinKind::AllC,
+        };
+        mixed.strategies[1].kind = StrategySpecKind::Builtin {
+            builtin: nit_games::config::BuiltinKind::TitForTat,
+        };
+        mixed.strategies[2].kind = StrategySpecKind::Builtin {
+            builtin: nit_games::config::BuiltinKind::GrimTrigger,
+        };
+        mixed.strategies[3].kind = StrategySpecKind::Memory {
+            n: 1,
+            initial: nit_games::game::Action::Cooperate,
+            table: vec![
+                nit_games::game::Action::Cooperate,
+                nit_games::game::Action::Defect,
+                nit_games::game::Action::Defect,
+                nit_games::game::Action::Cooperate,
+            ],
+        };
+    }
+    let kernel_mixed = TournamentKernel::new(mixed);
+    group.bench_function("mixed_random", |b| {
+        b.iter(|| {
+            let _ = kernel_mixed.run(KernelRunMode::Sequential {
+                event_writer: None,
+                history_writer: None,
+            });
+        });
+    });
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_single_match,
     bench_tournament_small,
     bench_tournament_medium,
     bench_logging,
-    bench_parallel
+    bench_parallel,
+    bench_fast_eval
 );
 criterion_main!(benches);

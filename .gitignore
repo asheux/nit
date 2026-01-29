@@ -8,3 +8,10 @@ target/
 Cargo.lock
 gol-snapshots/
 games-runs/
+output/
+runs/
+*.log
+*.tmp
+perf.data
+perf.data.old
+flamegraph.svg

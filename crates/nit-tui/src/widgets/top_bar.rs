@@ -12,10 +12,7 @@ use crate::theme::Theme;
 
 pub fn render(frame: &mut Frame, area: ratatui::layout::Rect, state: &AppState, theme: &Theme) {
     let mode = format!("{:?}", state.mode).to_uppercase();
-    let app_label = match state.app_kind {
-        nit_core::AppKind::Gol => "GOL",
-        nit_core::AppKind::Games => "GAMES",
-    };
+    let app_label = state.app_kind.label();
     let file = state
         .editor_buffer()
         .path()

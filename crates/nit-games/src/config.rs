@@ -66,11 +66,16 @@ pub struct StrategyConfig {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct HistoryConfig {
     pub enabled: bool,
+    #[serde(default)]
+    pub include_cycle_metadata: bool,
 }
 
 impl Default for HistoryConfig {
     fn default() -> Self {
-        Self { enabled: false }
+        Self {
+            enabled: false,
+            include_cycle_metadata: false,
+        }
     }
 }
 
@@ -100,6 +105,8 @@ pub struct EngineConfig {
     pub parallelism: ParallelismConfig,
     #[serde(default = "default_progress_interval_ms")]
     pub progress_interval_ms: u64,
+    #[serde(default = "default_fast_eval")]
+    pub fast_eval: bool,
 }
 
 impl Default for EngineConfig {
@@ -108,6 +115,7 @@ impl Default for EngineConfig {
             mode: EngineMode::Interactive,
             parallelism: ParallelismConfig::default(),
             progress_interval_ms: default_progress_interval_ms(),
+            fast_eval: default_fast_eval(),
         }
     }
 }
@@ -147,6 +155,10 @@ pub enum ParallelismMode {
 
 fn default_progress_interval_ms() -> u64 {
     80
+}
+
+fn default_fast_eval() -> bool {
+    true
 }
 
 #[derive(Copy, Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]

@@ -4,6 +4,7 @@ use crate::{
     config::{GolSeedSource, Settings},
     gol_rules::{RuleCatalog, SelectedRule},
     io,
+    lab::AppKind,
     mode::Mode,
     pane::PaneId,
     prompt::Prompt,
@@ -18,12 +19,6 @@ use std::collections::VecDeque;
 use std::path::PathBuf;
 
 const DEFAULT_LOG_CAPACITY: usize = 512;
-
-#[derive(Copy, Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub enum AppKind {
-    Gol,
-    Games,
-}
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum GamesStatus {
@@ -42,6 +37,12 @@ pub struct GamesAnalysisRequest {
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct GamesReplayRequest {
+    pub a_id: String,
+    pub b_id: String,
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct GamesAnalysisState {
     pub open: bool,
     pub running: bool,
@@ -55,6 +56,49 @@ pub struct GamesAnalysisState {
     pub scroll_offset: usize,
 }
 
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct GamesRunEntry {
+    pub label: String,
+    pub summary_path: String,
+    pub run_dir: Option<String>,
+    pub seed: Option<u64>,
+    pub timestamp: Option<String>,
+    pub run_id: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+pub struct GamesRunBrowserState {
+    pub open: bool,
+    pub loading: bool,
+    pub last_error: Option<String>,
+    #[serde(skip)]
+    pub entries: Vec<GamesRunEntry>,
+    #[serde(skip)]
+    pub selected: usize,
+    #[serde(skip)]
+    pub scroll_offset: usize,
+}
+
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+pub struct GamesReplayState {
+    pub open: bool,
+    pub loading: bool,
+    pub last_error: Option<String>,
+    pub selected_pair: Option<(String, String)>,
+    #[serde(skip)]
+    pub pairs: Vec<(String, String)>,
+    #[serde(skip)]
+    pub title: Option<String>,
+    #[serde(skip)]
+    pub lines: Vec<String>,
+    #[serde(skip)]
+    pub scroll_offset: usize,
+    #[serde(skip)]
+    pub selected_index: usize,
+    #[serde(skip)]
+    pub cycle: Option<nit_games::CycleMetadata>,
+}
+
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum UiSelectionPane {
     JobOutput,
@@ -64,6 +108,8 @@ pub enum UiSelectionPane {
     GamesPetriDish,
     HelpPopup,
     GamesAnalysisPopup,
+    GamesRunBrowserPopup,
+    GamesReplayPopup,
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -102,6 +148,16 @@ pub struct GamesState {
     pub pending_export: bool,
     #[serde(skip)]
     pub pending_analyze: Option<GamesAnalysisRequest>,
+    #[serde(skip)]
+    pub pending_run_browser: bool,
+    #[serde(skip)]
+    pub pending_run_load: Option<String>,
+    #[serde(skip)]
+    pub pending_replay: Option<GamesReplayRequest>,
+    #[serde(skip)]
+    pub run_browser: GamesRunBrowserState,
+    #[serde(skip)]
+    pub replay: GamesReplayState,
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -524,6 +580,11 @@ impl AppState {
                 pending_show: false,
                 pending_export: false,
                 pending_analyze: None,
+                pending_run_browser: false,
+                pending_run_load: None,
+                pending_replay: None,
+                run_browser: GamesRunBrowserState::default(),
+                replay: GamesReplayState::default(),
             },
             yank: None,
             yank_kind: YankKind::Char,
@@ -1314,6 +1375,17 @@ fn handle_command_line(state: &mut AppState, input: &str) {
         return;
     }
     let tokens: Vec<&str> = cmd.split_whitespace().collect();
+    if let Some(target_lab) = lab_from_tokens(&tokens) {
+        if target_lab != state.app_kind {
+            state.status = Some(format!(
+                "{} lab not active (current: {}). Use --lab {} to start.",
+                target_lab.label(),
+                state.app_kind.label(),
+                target_lab
+            ));
+            return;
+        }
+    }
     match tokens.as_slice() {
         ["run"] => match state.app_kind {
             AppKind::Gol => {
@@ -1365,6 +1437,34 @@ fn handle_command_line(state: &mut AppState, input: &str) {
         }
         ["games", "status"] => {
             state.status = Some(format!("Games status: {:?}", state.games.status));
+        }
+        ["games", "runs"] | ["games", "browse"] | ["games", "browser"] => {
+            state.games.replay.open = false;
+            state.games.run_browser.open = true;
+            state.games.run_browser.loading = true;
+            state.games.run_browser.last_error = None;
+            state.games.run_browser.entries.clear();
+            state.games.run_browser.selected = 0;
+            state.games.run_browser.scroll_offset = 0;
+            state.games.pending_run_browser = true;
+            state.status = Some("Games run browser opened".into());
+        }
+        ["games", "replay"] => {
+            if state.games.last_run.is_none() {
+                state.status = Some("No run loaded for replay".into());
+            } else {
+                state.games.run_browser.open = false;
+                state.games.replay.open = true;
+                state.games.replay.loading = false;
+                state.games.replay.last_error = None;
+                state.games.replay.selected_pair = None;
+                state.games.replay.selected_index = 0;
+                state.games.replay.title = None;
+                state.games.replay.lines.clear();
+                state.games.replay.scroll_offset = 0;
+                state.games.replay.cycle = None;
+                state.status = Some("Games replay opened".into());
+            }
         }
         _ if tokens.get(0) == Some(&"games")
             && matches!(tokens.get(1), Some(&"analyze") | Some(&"analyse")) =>
@@ -1513,6 +1613,21 @@ fn normalize_path_token(value: &str) -> String {
         .or_else(|| trimmed.strip_prefix('\'').and_then(|v| v.strip_suffix('\'')))
         .unwrap_or(trimmed);
     unquoted.trim().to_string()
+}
+
+fn lab_from_tokens(tokens: &[&str]) -> Option<AppKind> {
+    tokens
+        .get(0)
+        .and_then(|token| lab_from_token(token))
+        .or_else(|| tokens.get(1).and_then(|token| lab_from_token(token)))
+}
+
+fn lab_from_token(token: &str) -> Option<AppKind> {
+    match token {
+        "gol" | "life" => Some(AppKind::Gol),
+        "games" => Some(AppKind::Games),
+        _ => None,
+    }
 }
 
 fn apply_protocol_selection(state: &mut AppState, mut mode: RuleMode, label: Option<String>) {

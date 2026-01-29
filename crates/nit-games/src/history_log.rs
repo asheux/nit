@@ -1,4 +1,6 @@
 use serde::{Deserialize, Serialize};
+
+use crate::fast_eval::CycleMetadata;
 use std::fs::{self, File};
 use std::io::{self, BufWriter, Write};
 use std::path::{Path, PathBuf};
@@ -23,6 +25,8 @@ pub struct MatchHistory {
     pub b_score: i64,
     pub a_initial: Option<char>,
     pub b_initial: Option<char>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cycle: Option<CycleMetadata>,
 }
 
 pub struct HistoryWriter {

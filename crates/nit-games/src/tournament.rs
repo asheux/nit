@@ -4,6 +4,7 @@ use crate::config::{
 };
 use crate::events::{EventWriter, GameEvent};
 use crate::game::{Action, Outcome};
+use crate::fast_eval::{evaluate_match, CycleMetadata, FastStrategyModel};
 use crate::history::History;
 use crate::history_log::{HistoryWriter, MatchHistory};
 use crate::output::{
@@ -407,7 +408,7 @@ impl TournamentRunner {
             .map(|p| p.to_string_lossy().to_string());
         let results = self.results();
         RunSummary {
-            schema_version: self.config.schema_version,
+            schema_version: crate::output::RUN_SUMMARY_SCHEMA_VERSION,
             timestamp,
             run_id,
             seed: self.seed,
@@ -417,11 +418,16 @@ impl TournamentRunner {
                 summary: None,
                 events: event_log.clone(),
                 history: history_log.clone(),
+                definitions: None,
+                results: None,
+                config: None,
+                analysis_dir: None,
             },
             strategies: self.definitions.clone(),
             results,
             event_log,
             history_log,
+            run_dir: None,
         }
     }
 
@@ -461,6 +467,7 @@ impl TournamentRunner {
             b_score: session.b_total,
             a_initial: session.history_actions_a.chars().next(),
             b_initial: session.history_actions_b.chars().next(),
+            cycle: None,
         };
         let _ = writer.write(&record);
     }
@@ -687,6 +694,7 @@ pub struct TournamentKernel {
     schedule: Vec<Matchup>,
     definitions: Vec<StrategyDefinition>,
     seed_deriver: SeedDeriver,
+    fast_models: Vec<Option<FastStrategyModel>>,
 }
 
 impl TournamentKernel {
@@ -700,12 +708,18 @@ impl TournamentKernel {
         );
         let seed_deriver = SeedDeriver::new(seed);
         let definitions = build_strategy_definitions(&config.strategies, &seed_deriver);
+        let fast_models = config
+            .strategies
+            .iter()
+            .map(FastStrategyModel::from_spec)
+            .collect();
         Self {
             config,
             seed,
             schedule,
             definitions,
             seed_deriver,
+            fast_models,
         }
     }
 
@@ -762,6 +776,11 @@ impl TournamentKernel {
         let log_events = event_writer.is_some();
         let log_history = history_writer.is_some();
 
+        let fast_eval_allowed = self.config.engine.fast_eval
+            && self.config.noise == 0.0
+            && !log_history
+            && !(log_events && include_rounds);
+
         for matchup in &self.schedule {
             let mut emit_event = |event: GameEvent| {
                 if let Some(writer) = event_writer.as_mut() {
@@ -781,6 +800,8 @@ impl TournamentKernel {
                 &self.config,
                 &self.config.strategies,
                 &self.seed_deriver,
+                Some(&self.fast_models),
+                fast_eval_allowed,
                 total_matches,
                 log_events,
                 include_rounds,
@@ -821,6 +842,11 @@ impl TournamentKernel {
         let event_sender_for_run = event_sender.clone();
         let history_sender_for_run = history_sender.clone();
 
+        let fast_eval_allowed = self.config.engine.fast_eval
+            && self.config.noise == 0.0
+            && !log_history
+            && !(log_events && include_rounds);
+
         let run = || {
             self.schedule
                 .par_iter()
@@ -842,6 +868,8 @@ impl TournamentKernel {
                         &self.config,
                         &self.config.strategies,
                         &self.seed_deriver,
+                        Some(&self.fast_models),
+                        fast_eval_allowed,
                         total_matches,
                         log_events,
                         include_rounds,
@@ -884,6 +912,8 @@ fn run_match_core<E, H>(
     config: &NormalizedConfig,
     strategies: &[StrategySpec],
     seed_deriver: &SeedDeriver,
+    fast_models: Option<&[Option<FastStrategyModel>]>,
+    fast_eval_allowed: bool,
     total_matches: usize,
     log_events: bool,
     include_rounds: bool,
@@ -896,6 +926,67 @@ where
     E: FnMut(GameEvent),
     H: FnMut(MatchHistory),
 {
+    let a_id = strategies[matchup.a_idx].id.as_str();
+    let b_id = strategies[matchup.b_idx].id.as_str();
+    let match_index = matchup.match_id + 1;
+    let owned_ids = if log_events || log_history {
+        Some((a_id.to_string(), b_id.to_string()))
+    } else {
+        None
+    };
+
+    if log_events {
+        let (a_owned, b_owned) = owned_ids.as_ref().expect("owned ids");
+        emit_event(GameEvent::MatchStart {
+            timestamp: EventWriter::timestamp(),
+            match_id: matchup.match_id,
+            match_index,
+            total_matches,
+            a: a_owned.clone(),
+            b: b_owned.clone(),
+            repetition: matchup.repetition + 1,
+        });
+    }
+
+    if fast_eval_allowed && !record_trace {
+        if let Some((a_model, b_model)) = fast_models
+            .and_then(|models| {
+                let a = models.get(matchup.a_idx).and_then(|m| m.as_ref());
+                let b = models.get(matchup.b_idx).and_then(|m| m.as_ref());
+                a.zip(b)
+            })
+        {
+            let eval = evaluate_match(
+                a_model,
+                b_model,
+                config.rounds,
+                config.payoff,
+                false,
+            );
+            if log_events {
+                emit_event(GameEvent::MatchEnd {
+                    timestamp: EventWriter::timestamp(),
+                    match_id: matchup.match_id,
+                    match_index,
+                    a_total: eval.a_total,
+                    b_total: eval.b_total,
+                });
+            }
+            return MatchOutcome {
+                result: MatchResult {
+                    a_idx: matchup.a_idx,
+                    b_idx: matchup.b_idx,
+                    a_total: eval.a_total,
+                    b_total: eval.b_total,
+                    repetition: matchup.repetition,
+                    match_id: matchup.match_id,
+                },
+                a_crashed: false,
+                b_crashed: false,
+            };
+        }
+    }
+
     let mut session = MatchSession::new(
         matchup.clone(),
         config,
@@ -904,35 +995,19 @@ where
         log_history,
         record_trace,
     );
-    let a_id = strategies[matchup.a_idx].id.clone();
-    let b_id = strategies[matchup.b_idx].id.clone();
-    let match_index = matchup.match_id + 1;
-
-    if log_events {
-        emit_event(GameEvent::MatchStart {
-            timestamp: EventWriter::timestamp(),
-            match_id: matchup.match_id,
-            match_index,
-            total_matches,
-            a: a_id.clone(),
-            b: b_id.clone(),
-            repetition: matchup.repetition + 1,
-        });
-    }
-
     for _ in 0..session.rounds_total {
         let outcome = play_round_core(&mut session, config);
         if outcome.a_crash_now && log_events {
             emit_event(GameEvent::StrategyError {
                 timestamp: EventWriter::timestamp(),
-                strategy_id: a_id.clone(),
+                strategy_id: a_id.to_string(),
                 error: "panic in strategy".into(),
             });
         }
         if outcome.b_crash_now && log_events {
             emit_event(GameEvent::StrategyError {
                 timestamp: EventWriter::timestamp(),
-                strategy_id: b_id.clone(),
+                strategy_id: b_id.to_string(),
                 error: "panic in strategy".into(),
             });
         }
@@ -960,17 +1035,36 @@ where
         });
     }
 
+    let mut cycle_meta: Option<CycleMetadata> = None;
+    if log_history && config.history.include_cycle_metadata && config.noise == 0.0 {
+        if let Some((a_model, b_model)) = fast_models.and_then(|models| {
+            let a = models.get(matchup.a_idx).and_then(|m| m.as_ref());
+            let b = models.get(matchup.b_idx).and_then(|m| m.as_ref());
+            a.zip(b)
+        }) {
+            cycle_meta = evaluate_match(
+                a_model,
+                b_model,
+                config.rounds,
+                config.payoff,
+                true,
+            )
+            .cycle;
+        }
+    }
+
     if log_history {
         let a_moves = session.history_actions_a.clone();
         let b_moves = session.history_actions_b.clone();
+        let (a_owned, b_owned) = owned_ids.as_ref().expect("owned ids");
         emit_history(MatchHistory {
             event: "match_history".into(),
             timestamp: EventWriter::timestamp(),
             match_id: matchup.match_id,
             match_index,
             total_matches,
-            a: a_id,
-            b: b_id,
+            a: a_owned.clone(),
+            b: b_owned.clone(),
             repetition: matchup.repetition + 1,
             rounds: session.rounds_total,
             a_moves: a_moves.clone(),
@@ -982,6 +1076,7 @@ where
             b_score: session.b_total,
             a_initial: session.history_actions_a.chars().next(),
             b_initial: session.history_actions_b.chars().next(),
+            cycle: cycle_meta,
         });
     }
 

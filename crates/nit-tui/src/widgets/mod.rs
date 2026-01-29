@@ -1,6 +1,8 @@
 pub mod bottom_bar;
 pub mod editor_view;
 pub mod games_analysis_popup;
+pub mod games_replay_popup;
+pub mod games_run_browser_popup;
 pub mod games_visualizer_view;
 pub mod gate_monitor_view;
 pub mod help_overlay;

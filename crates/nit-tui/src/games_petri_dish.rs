@@ -1,4 +1,5 @@
 use std::fs;
+use std::path::PathBuf;
 use std::time::Instant;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -6,9 +7,8 @@ use nit_core::{AppState, GamesAnalysisRequest, GamesStatus, UiSelectionPane};
 use nit_games::{
     config::GamesConfig,
     events::EventWriter,
-    output::TournamentResults,
-    run_id_from_seed_config,
-    MatchSnapshot, TournamentProgress,
+    output::{RunLayout, TournamentResults},
+    run_id_from_seed_config, MatchSnapshot, TournamentProgress,
 };
 use nit_games::output::StrategyDefinition;
 use nit_utils::hashing::stable_hash_bytes;
@@ -24,6 +24,7 @@ use tracing::info;
 use crate::theme::Theme;
 use crate::games_analysis::{AnalysisCommand, AnalysisEvent, AnalysisRequest, GamesAnalysisRunner};
 use crate::games_runner::{GamesRunner, RunRequest, RunnerCommand, RunnerEvent};
+use crate::games_runs::{GamesRunsRunner, RunsCommand, RunsEvent};
 use crate::widgets::games_visualizer_view::strategy_display_name_from_def;
 use crate::widgets::text_selection::apply_ui_selection;
 
@@ -50,6 +51,7 @@ enum PetriView {
 pub struct GamesPetriDishRuntime {
     runner: GamesRunner,
     analysis_runner: GamesAnalysisRunner,
+    runs_runner: GamesRunsRunner,
     session: Option<GameSession>,
     hidden: bool,
     warning: Option<String>,
@@ -71,6 +73,7 @@ impl GamesPetriDishRuntime {
         Self {
             runner: GamesRunner::spawn(),
             analysis_runner: GamesAnalysisRunner::spawn(),
+            runs_runner: GamesRunsRunner::spawn(),
             session: None,
             hidden: false,
             warning: None,
@@ -111,6 +114,52 @@ impl GamesPetriDishRuntime {
         }
         if let Some(request) = state.games.pending_analyze.take() {
             self.start_analysis(state, request);
+        }
+        if state.games.pending_run_browser {
+            state.games.pending_run_browser = false;
+            state.games.run_browser.loading = true;
+            state.games.run_browser.last_error = None;
+            self.runs_runner.send(RunsCommand::Refresh {
+                base_dir: state.workspace_root.clone(),
+            });
+        }
+        if let Some(path) = state.games.pending_run_load.take() {
+            let mut summary_path = PathBuf::from(path);
+            if summary_path.is_relative() {
+                summary_path = state.workspace_root.join(summary_path);
+            }
+            state.games.run_browser.loading = true;
+            state.games.run_browser.last_error = None;
+            self.runs_runner
+                .send(RunsCommand::LoadSummary { summary_path });
+        }
+        if let Some(request) = state.games.pending_replay.take() {
+            let Some(run) = state.games.last_run.as_ref() else {
+                state.games.replay.loading = false;
+                state.games.replay.last_error = Some("No run loaded for replay".into());
+                return;
+            };
+            let history_path = run
+                .history_log
+                .clone()
+                .or(run.paths.history.clone());
+            let Some(path) = history_path else {
+                state.games.replay.loading = false;
+                state.games.replay.last_error = Some("Run has no history log".into());
+                return;
+            };
+            let mut history_path = PathBuf::from(path);
+            if history_path.is_relative() {
+                history_path = state.workspace_root.join(history_path);
+            }
+            state.games.replay.loading = true;
+            state.games.replay.last_error = None;
+            self.runs_runner.send(RunsCommand::LoadReplay {
+                history_path,
+                a_id: request.a_id,
+                b_id: request.b_id,
+                payoff: run.config.payoff,
+            });
         }
     }
 
@@ -209,6 +258,7 @@ impl GamesPetriDishRuntime {
 
     pub fn tick(&mut self, state: &mut AppState) {
         self.handle_analysis_events(state);
+        self.handle_runs_events(state);
         self.handle_runner_events(state);
         self.last_tick = Instant::now();
     }
@@ -239,6 +289,70 @@ impl GamesPetriDishRuntime {
         }
     }
 
+    fn handle_runs_events(&mut self, state: &mut AppState) {
+        while let Ok(event) = self.runs_runner.events.try_recv() {
+            match event {
+                RunsEvent::RunsLoaded(entries) => {
+                    state.games.run_browser.loading = false;
+                    state.games.run_browser.last_error = None;
+                    state.games.run_browser.entries = entries;
+                    state.games.run_browser.selected = 0;
+                    state.games.run_browser.scroll_offset = 0;
+                    if state.games.run_browser.entries.is_empty() {
+                        state.games.run_browser.last_error =
+                            Some("No runs found in runs/games".into());
+                    }
+                }
+                RunsEvent::SummaryLoaded(summary) => {
+                    let pairs = summary
+                        .results
+                        .pairwise
+                        .iter()
+                        .map(|p| (p.a.clone(), p.b.clone()))
+                        .collect::<Vec<_>>();
+                    state.games.last_run_path = summary.paths.summary.clone();
+                    state.games.last_event_path = summary.event_log.clone();
+                    state.games.last_history_path = summary.history_log.clone();
+                    state.games.last_run = Some(summary);
+                    state.games.replay.pairs = pairs;
+                    state.games.replay.title = None;
+                    state.games.replay.lines.clear();
+                    state.games.replay.cycle = None;
+                    state.games.replay.selected_pair = None;
+                    state.games.replay.selected_index = 0;
+                    state.games.replay.scroll_offset = 0;
+                    state.games.run_browser.loading = false;
+                    state.games.run_browser.open = false;
+                    if let Some(selection) = state.ui_selection {
+                        if matches!(selection.pane, UiSelectionPane::GamesRunBrowserPopup) {
+                            state.ui_selection = None;
+                        }
+                    }
+                    state.status = Some("Run summary loaded".into());
+                }
+                RunsEvent::ReplayLoaded(replay) => {
+                    state.games.replay.loading = false;
+                    state.games.replay.last_error = None;
+                    state.games.replay.title = Some(replay.title);
+                    state.games.replay.lines = replay.lines;
+                    state.games.replay.cycle = replay.cycle;
+                    state.games.replay.scroll_offset = 0;
+                }
+                RunsEvent::Error(err) => {
+                    if state.games.run_browser.open && state.games.run_browser.loading {
+                        state.games.run_browser.loading = false;
+                        state.games.run_browser.last_error = Some(err.clone());
+                    } else if state.games.replay.open && state.games.replay.loading {
+                        state.games.replay.loading = false;
+                        state.games.replay.last_error = Some(err.clone());
+                    } else {
+                        state.status = Some(err);
+                    }
+                }
+            }
+        }
+    }
+
     fn handle_runner_events(&mut self, state: &mut AppState) {
         while let Ok(event) = self.runner.events.try_recv() {
             match event {
@@ -263,12 +377,19 @@ impl GamesPetriDishRuntime {
                     }
                 }
                 RunnerEvent::Finished(summary) => {
+                    let pairs = summary
+                        .results
+                        .pairwise
+                        .iter()
+                        .map(|p| (p.a.clone(), p.b.clone()))
+                        .collect::<Vec<_>>();
                     self.session = None;
                     state.games.last_error = None;
                     state.games.last_run_path = summary.paths.summary.clone();
                     state.games.last_event_path = summary.event_log.clone();
                     state.games.last_history_path = summary.history_log.clone();
                     state.games.last_run = Some(summary);
+                    state.games.replay.pairs = pairs;
                     state.games.status = GamesStatus::Done;
                     state.games.running = false;
                     state.games.paused = false;
@@ -488,12 +609,10 @@ impl GamesPetriDishRuntime {
             .unwrap_or_else(|| stable_hash_bytes(format!("{timestamp}\n{config_text}").as_bytes()));
         config.seed = Some(seed);
 
-        let run_hash = stable_hash_bytes(format!("{seed}:{config_text}").as_bytes());
         let run_id = run_id_from_seed_config(seed, &config_text);
-        let stamp = timestamp.replace(':', "-");
-        let run_dir = state.workspace_root.join("games-runs");
-        if let Err(err) = fs::create_dir_all(&run_dir) {
-            let msg = format!("Failed to create games-runs: {err}");
+        let layout = RunLayout::for_base(&state.workspace_root, &timestamp, seed, &run_id);
+        if let Err(err) = fs::create_dir_all(&layout.run_dir) {
+            let msg = format!("Failed to create games runs: {err}");
             state.games.status = GamesStatus::Error;
             state.games.last_error = Some(msg.clone());
             state.status = Some(msg);
@@ -502,9 +621,9 @@ impl GamesPetriDishRuntime {
 
         let event_log_enabled = config.event_log.enabled;
         let history_log_enabled = config.history.enabled;
-        let summary_path = run_dir.join(format!("run__{stamp}__{run_hash:08x}.json"));
-        let event_path = run_dir.join(format!("events__{stamp}__{run_hash:08x}.ndjson"));
-        let history_path = run_dir.join(format!("history__{stamp}__{run_hash:08x}.ndjson"));
+        let summary_path = layout.summary_path.clone();
+        let event_path = layout.events_path.clone();
+        let history_path = layout.history_path.clone();
         info!("Games summary path: {}", summary_path.display());
         if event_log_enabled {
             info!("Games event log path: {}", event_path.display());
@@ -519,7 +638,12 @@ impl GamesPetriDishRuntime {
             config_text: config_text.clone(),
             timestamp: timestamp.clone(),
             run_id: run_id.clone(),
+            run_dir: layout.run_dir.clone(),
             summary_path: summary_path.clone(),
+            definitions_path: layout.definitions_path.clone(),
+            results_path: layout.results_path.clone(),
+            config_path: layout.config_path.clone(),
+            analysis_dir: layout.analysis_dir.clone(),
             event_path: event_log_enabled.then_some(event_path),
             history_path: history_log_enabled.then_some(history_path),
             progress_interval,
@@ -571,6 +695,16 @@ impl GamesPetriDishRuntime {
         if !history_path.exists() {
             let fallback = state
                 .workspace_root
+                .join("runs")
+                .join("games")
+                .join(&cleaned);
+            if fallback.exists() {
+                history_path = fallback;
+            }
+        }
+        if !history_path.exists() {
+            let fallback = state
+                .workspace_root
                 .join("games-runs")
                 .join(&cleaned);
             if fallback.exists() {
@@ -587,8 +721,8 @@ impl GamesPetriDishRuntime {
         }
         let out_dir = history_path
             .parent()
-            .map(|p| p.to_path_buf())
-            .unwrap_or_else(|| state.workspace_root.join("games-runs"));
+            .map(|p| p.join("analysis"))
+            .unwrap_or_else(|| state.workspace_root.join("runs").join("games"));
 
         state.games.analysis.open = true;
         state.games.analysis.running = true;
@@ -661,16 +795,37 @@ impl GamesPetriDishRuntime {
             return;
         };
         let timestamp = EventWriter::timestamp();
-        let run_hash = stable_hash_bytes(format!("{}:{timestamp}", run.seed).as_bytes());
-        let stamp = timestamp.replace(':', "-");
-        let run_dir = state.workspace_root.join("games-runs");
-        if let Err(err) = fs::create_dir_all(&run_dir) {
-            state.status = Some(format!("Failed to create games-runs: {err}"));
+        let layout = RunLayout::for_base(&state.workspace_root, &timestamp, run.seed, &run.run_id);
+        if let Err(err) = fs::create_dir_all(&layout.run_dir) {
+            state.status = Some(format!("Failed to create games runs: {err}"));
             return;
         }
-        let summary_path = run_dir.join(format!("run__{stamp}__{run_hash:08x}.json"));
+        let summary_path = layout.summary_path.clone();
         let mut export_run = run.clone();
         export_run.paths.summary = Some(summary_path.display().to_string());
+        export_run.paths.definitions = Some(layout.definitions_path.display().to_string());
+        export_run.paths.results = Some(layout.results_path.display().to_string());
+        export_run.paths.config = Some(layout.config_path.display().to_string());
+        export_run.paths.analysis_dir = Some(layout.analysis_dir.display().to_string());
+        export_run.run_dir = Some(layout.run_dir.display().to_string());
+        export_run.event_log = export_run.paths.events.clone();
+        export_run.history_log = export_run.paths.history.clone();
+
+        if let Err(err) = std::fs::write(&layout.config_path, &export_run.config_text) {
+            tracing::warn!("Failed to write games config snapshot: {err}");
+        }
+        if let Err(err) = nit_utils::fs::write_atomic(&layout.definitions_path, |writer| {
+            serde_json::to_writer_pretty(writer, &export_run.strategies)
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
+        }) {
+            tracing::warn!("Failed to write games definitions: {err}");
+        }
+        if let Err(err) = nit_utils::fs::write_atomic(&layout.results_path, |writer| {
+            serde_json::to_writer_pretty(writer, &export_run.results)
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
+        }) {
+            tracing::warn!("Failed to write games results: {err}");
+        }
         if let Err(err) = nit_games::output::write_summary(&summary_path, &export_run) {
             state.status = Some(format!("Failed to export summary: {err}"));
         } else {
@@ -687,6 +842,7 @@ impl Drop for GamesPetriDishRuntime {
     fn drop(&mut self) {
         self.runner.shutdown();
         self.analysis_runner.shutdown();
+        self.runs_runner.shutdown();
     }
 }
 

@@ -4,6 +4,7 @@ pub mod app;
 pub mod games_analysis;
 pub mod games_petri_dish;
 pub mod games_runner;
+pub mod games_runs;
 pub mod gol_render;
 pub mod layout;
 pub mod petri_dish;

@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 
+use std::collections::HashMap;
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -9,16 +10,17 @@ use std::thread;
 
 use anyhow::Context;
 use clap::{Parser, Subcommand, ValueEnum};
-use nit_core::{io as core_io, AppKind, Buffer, Mode, SelectedRule};
+use nit_core::{io as core_io, AppKind, Buffer, LabId, Mode, SelectedRule};
 use nit_games::config::EngineMode;
 use nit_games::events::{EventWriter, GameEvent};
 use nit_games::history_log::MatchHistory;
-use nit_games::output::{write_summary, RunPaths, RunSummary};
+use nit_games::output::{write_summary, RunLayout, RunPaths, RunSummary, RUN_SUMMARY_SCHEMA_VERSION};
 use nit_games::tournament::{KernelRunMode, Parallelism, TournamentKernel};
 use nit_games::{run_id_from_seed_config, GamesConfig, HistoryWriter};
 use nit_tui::{run, Theme};
 use nit_utils::hashing::stable_hash_bytes;
 use nit_utils::paths;
+use serde::Serialize;
 use tracing_subscriber::fmt::MakeWriter;
 
 #[derive(Parser, Debug)]
@@ -29,8 +31,11 @@ use tracing_subscriber::fmt::MakeWriter;
     subcommand_precedence_over_arg = true
 )]
 struct Cli {
-    /// File or directory to open (GoL mode)
+    /// File or directory to open
     path: Option<PathBuf>,
+    /// Start in the specified lab (gol or games)
+    #[arg(long, value_enum)]
+    lab: Option<LabArg>,
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -74,6 +79,36 @@ enum GamesCommand {
         #[arg(long)]
         verbose: bool,
     },
+    /// Sweep runner for games (parameter grids)
+    Sweep {
+        /// Config path (defaults to games.toml)
+        #[arg(long)]
+        config: Option<PathBuf>,
+        /// Output directory root (defaults to config directory)
+        #[arg(long)]
+        out: Option<PathBuf>,
+        /// Override base seed
+        #[arg(long)]
+        seed: Option<u64>,
+        /// Rounds grid (comma-separated)
+        #[arg(long, value_delimiter = ',')]
+        rounds: Vec<u32>,
+        /// Noise grid (comma-separated)
+        #[arg(long, value_delimiter = ',')]
+        noise: Vec<f32>,
+        /// Repetitions grid (comma-separated)
+        #[arg(long, value_delimiter = ',')]
+        repetitions: Vec<u32>,
+        /// Output format for stdout summary
+        #[arg(long, value_enum, default_value_t = OutputFormat::Pretty)]
+        format: OutputFormat,
+        /// Suppress stdout summary
+        #[arg(long)]
+        quiet: bool,
+        /// Verbose logging to stderr
+        #[arg(long)]
+        verbose: bool,
+    },
 }
 
 #[derive(Copy, Clone, Debug, ValueEnum)]
@@ -82,8 +117,23 @@ enum OutputFormat {
     Pretty,
 }
 
+#[derive(Copy, Clone, Debug, ValueEnum)]
+enum LabArg {
+    Gol,
+    Games,
+}
+
+impl From<LabArg> for LabId {
+    fn from(value: LabArg) -> Self {
+        match value {
+            LabArg::Gol => LabId::Gol,
+            LabArg::Games => LabId::Games,
+        }
+    }
+}
+
 fn main() -> anyhow::Result<()> {
-    let cli = Cli::parse();
+    let cli = Cli::parse_from(normalize_lab_args(std::env::args()));
     if let Some(Command::Games {
         command:
             Some(GamesCommand::Run {
@@ -99,11 +149,42 @@ fn main() -> anyhow::Result<()> {
     {
         return run_games_headless(config, out, seed, format, quiet, verbose);
     }
+    if let Some(Command::Games {
+        command:
+            Some(GamesCommand::Sweep {
+                config,
+                out,
+                seed,
+                rounds,
+                noise,
+                repetitions,
+                format,
+                quiet,
+                verbose,
+            }),
+        ..
+    }) = cli.command
+    {
+        return run_games_sweep(
+            config,
+            out,
+            seed,
+            rounds,
+            noise,
+            repetitions,
+            format,
+            quiet,
+            verbose,
+        );
+    }
 
     let (app_kind, target) = match cli.command {
         Some(Command::Gol { path }) => (AppKind::Gol, path),
         Some(Command::Games { path, .. }) => (AppKind::Games, path),
-        None => (AppKind::Gol, cli.path),
+        None => (
+            cli.lab.map(LabId::from).unwrap_or(AppKind::Gol),
+            cli.path,
+        ),
     };
     let (workspace_root, editor) = match app_kind {
         AppKind::Gol => open_target_gol(target.as_deref())?,
@@ -162,6 +243,38 @@ fn main() -> anyhow::Result<()> {
 
     run(state, theme, log_rx)?;
     Ok(())
+}
+
+fn normalize_lab_args<I>(args: I) -> Vec<String>
+where
+    I: IntoIterator<Item = String>,
+{
+    let mut iter = args.into_iter();
+    let mut out = Vec::new();
+    if let Some(bin) = iter.next() {
+        out.push(bin);
+    }
+    while let Some(arg) = iter.next() {
+        if arg == "--lab" {
+            match iter.next() {
+                Some(value) => {
+                    let value_lc = value.to_ascii_lowercase();
+                    if value_lc == "gol" || value_lc == "games" {
+                        out.push(format!("--lab={value}"));
+                    } else {
+                        out.push(arg);
+                        out.push(value);
+                    }
+                }
+                None => {
+                    out.push(arg);
+                }
+            }
+            continue;
+        }
+        out.push(arg);
+    }
+    out
 }
 
 fn open_target_gol(path: Option<&Path>) -> anyhow::Result<(PathBuf, Buffer)> {
@@ -249,11 +362,13 @@ P = 1
 
 [history]
 enabled = true
+include_cycle_metadata = false
 
 [engine]
 mode = "interactive"
 parallelism = "auto"
 progress_interval_ms = 80
+fast_eval = true
 
 [[strategy]]
 id = "allc"
@@ -304,80 +419,27 @@ table = ["C", "D", "D", "C"]
 "#
 }
 
-fn run_games_headless(
-    config_path: Option<PathBuf>,
-    out_dir: Option<PathBuf>,
-    seed_override: Option<u64>,
-    format: OutputFormat,
-    quiet: bool,
-    verbose: bool,
-) -> anyhow::Result<()> {
-    let config_path = config_path.unwrap_or_else(|| PathBuf::from("games.toml"));
-    let config_text = core_io::load_to_string(&config_path)
-        .with_context(|| format!("failed to read {}", config_path.display()))?;
-    let mut config = GamesConfig::from_toml(&config_text).map_err(|err| anyhow::anyhow!(err))?;
-
-    if let Some(seed) = seed_override {
-        config.seed = Some(seed);
-    }
-    config.engine.mode = EngineMode::Batch;
-
-    let timestamp = EventWriter::timestamp();
-    let seed = config.seed.unwrap_or_else(|| {
-        stable_hash_bytes(format!("{timestamp}\n{config_text}").as_bytes())
-    });
-    config.seed = Some(seed);
-
-    let run_id = run_id_from_seed_config(seed, &config_text);
-    let run_hash = stable_hash_bytes(format!("{seed}:{config_text}").as_bytes());
-    let stamp = timestamp.replace(':', "-");
-
-    let cwd = std::env::current_dir()?;
-    let base_dir = config_path
-        .parent()
-        .map(|p| {
-            if p.is_absolute() {
-                p.to_path_buf()
-            } else {
-                cwd.join(p)
-            }
-        })
-        .unwrap_or(cwd);
-
-    let out_dir = out_dir.unwrap_or_else(|| PathBuf::from("output"));
-    let out_dir = if out_dir.is_absolute() {
-        out_dir
-    } else {
-        base_dir.join(out_dir)
-    };
-    fs::create_dir_all(&out_dir)
-        .with_context(|| format!("failed to create {}", out_dir.display()))?;
-
-    let summary_path = out_dir.join(format!("run__{stamp}__{run_hash:08x}.json"));
-    let event_path = out_dir.join(format!("events__{stamp}__{run_hash:08x}.ndjson"));
-    let history_path = out_dir.join(format!("history__{stamp}__{run_hash:08x}.ndjson"));
-
-    if verbose {
-        eprintln!("Games config: {}", config_path.display());
-        eprintln!("Games summary: {}", summary_path.display());
-    }
-
-    let kernel = TournamentKernel::new(config.clone());
+fn execute_tournament(
+    kernel: &TournamentKernel,
+    config: &nit_games::NormalizedConfig,
+    event_path: Option<PathBuf>,
+    history_path: Option<PathBuf>,
+) -> anyhow::Result<(nit_games::output::TournamentResults, Option<String>, Option<String>)> {
     let parallelism = Parallelism::from_config(&config.engine.parallelism);
-    let event_log_enabled = config.event_log.enabled;
-    let history_log_enabled = config.history.enabled;
+    let event_log_enabled = event_path.is_some();
+    let history_log_enabled = history_path.is_some();
 
     let (results, event_log, history_log) = if matches!(parallelism, Parallelism::Off) {
         let mut event_writer = if event_log_enabled {
             Some(EventWriter::new(
-                event_path.clone(),
+                event_path.clone().expect("event path"),
                 config.event_log.include_rounds,
             )?)
         } else {
             None
         };
         let mut history_writer = if history_log_enabled {
-            Some(HistoryWriter::new(history_path.clone())?)
+            Some(HistoryWriter::new(history_path.clone().expect("history path"))?)
         } else {
             None
         };
@@ -413,7 +475,10 @@ fn run_games_headless(
         let mut history_handle: Option<thread::JoinHandle<std::io::Result<PathBuf>>> = None;
 
         if event_log_enabled {
-            let writer = EventWriter::new(event_path.clone(), config.event_log.include_rounds)?;
+            let writer = EventWriter::new(
+                event_path.clone().expect("event path"),
+                config.event_log.include_rounds,
+            )?;
             let (tx, rx) = mpsc::channel::<GameEvent>();
             let handle = thread::spawn(move || {
                 let mut writer = writer;
@@ -429,7 +494,7 @@ fn run_games_headless(
         }
 
         if history_log_enabled {
-            let writer = HistoryWriter::new(history_path.clone())?;
+            let writer = HistoryWriter::new(history_path.clone().expect("history path"))?;
             let (tx, rx) = mpsc::channel::<MatchHistory>();
             let handle = thread::spawn(move || {
                 let mut writer = writer;
@@ -479,8 +544,98 @@ fn run_games_headless(
         (results, event_log, history_log)
     };
 
+    Ok((results, event_log, history_log))
+}
+
+fn run_games_headless(
+    config_path: Option<PathBuf>,
+    out_dir: Option<PathBuf>,
+    seed_override: Option<u64>,
+    format: OutputFormat,
+    quiet: bool,
+    verbose: bool,
+) -> anyhow::Result<()> {
+    let config_path = config_path.unwrap_or_else(|| PathBuf::from("games.toml"));
+    let config_text = core_io::load_to_string(&config_path)
+        .with_context(|| format!("failed to read {}", config_path.display()))?;
+    let mut config = GamesConfig::from_toml(&config_text).map_err(|err| anyhow::anyhow!(err))?;
+
+    if let Some(seed) = seed_override {
+        config.seed = Some(seed);
+    }
+    config.engine.mode = EngineMode::Batch;
+
+    let timestamp = EventWriter::timestamp();
+    let seed = config.seed.unwrap_or_else(|| {
+        stable_hash_bytes(format!("{timestamp}\n{config_text}").as_bytes())
+    });
+    config.seed = Some(seed);
+
+    let run_id = run_id_from_seed_config(seed, &config_text);
+    let cwd = std::env::current_dir()?;
+    let base_dir = config_path
+        .parent()
+        .map(|p| {
+            if p.is_absolute() {
+                p.to_path_buf()
+            } else {
+                cwd.join(p)
+            }
+        })
+        .unwrap_or(cwd);
+
+    let out_dir = out_dir.unwrap_or_else(|| base_dir.clone());
+    let out_dir = if out_dir.is_absolute() {
+        out_dir
+    } else {
+        base_dir.join(out_dir)
+    };
+
+    let layout = RunLayout::for_base(&out_dir, &timestamp, seed, &run_id);
+    fs::create_dir_all(&layout.run_dir)
+        .with_context(|| format!("failed to create {}", layout.run_dir.display()))?;
+
+    let summary_path = layout.summary_path.clone();
+    let event_path = layout.events_path.clone();
+    let history_path = layout.history_path.clone();
+
+    if verbose {
+        eprintln!("Games config: {}", config_path.display());
+        eprintln!("Games summary: {}", summary_path.display());
+    }
+
+    let kernel = TournamentKernel::new(config.clone());
+    let event_log_enabled = config.event_log.enabled;
+    let history_log_enabled = config.history.enabled;
+    let (results, event_log, history_log) = execute_tournament(
+        &kernel,
+        &config,
+        event_log_enabled.then_some(event_path.clone()),
+        history_log_enabled.then_some(history_path.clone()),
+    )?;
+
+    if let Err(err) = fs::write(&layout.config_path, &config_text) {
+        eprintln!("Warning: failed to write config snapshot: {err}");
+    }
+
+    let definitions_path = layout.definitions_path.clone();
+    if let Err(err) = nit_utils::fs::write_atomic(&definitions_path, |writer| {
+        serde_json::to_writer_pretty(writer, kernel.definitions())
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
+    }) {
+        eprintln!("Warning: failed to write definitions: {err}");
+    }
+
+    let results_path = layout.results_path.clone();
+    if let Err(err) = nit_utils::fs::write_atomic(&results_path, |writer| {
+        serde_json::to_writer_pretty(writer, &results)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
+    }) {
+        eprintln!("Warning: failed to write results: {err}");
+    }
+
     let summary = RunSummary {
-        schema_version: config.schema_version,
+        schema_version: RUN_SUMMARY_SCHEMA_VERSION,
         timestamp,
         run_id,
         seed,
@@ -490,11 +645,16 @@ fn run_games_headless(
             summary: Some(summary_path.display().to_string()),
             events: event_log.clone(),
             history: history_log.clone(),
+            definitions: Some(definitions_path.display().to_string()),
+            results: Some(results_path.display().to_string()),
+            config: Some(layout.config_path.display().to_string()),
+            analysis_dir: Some(layout.analysis_dir.display().to_string()),
         },
         strategies: kernel.definitions().to_vec(),
         results,
         event_log,
         history_log,
+        run_dir: Some(layout.run_dir.display().to_string()),
     };
 
     write_summary(&summary_path, &summary)
@@ -518,6 +678,295 @@ fn run_games_headless(
     }
 
     Ok(())
+}
+
+fn run_games_sweep(
+    config_path: Option<PathBuf>,
+    out_dir: Option<PathBuf>,
+    seed_override: Option<u64>,
+    rounds: Vec<u32>,
+    noise: Vec<f32>,
+    repetitions: Vec<u32>,
+    format: OutputFormat,
+    quiet: bool,
+    verbose: bool,
+) -> anyhow::Result<()> {
+    let config_path = config_path.unwrap_or_else(|| PathBuf::from("games.toml"));
+    let config_text = core_io::load_to_string(&config_path)
+        .with_context(|| format!("failed to read {}", config_path.display()))?;
+    let mut config = GamesConfig::from_toml(&config_text).map_err(|err| anyhow::anyhow!(err))?;
+
+    let timestamp = EventWriter::timestamp();
+    let base_seed = seed_override
+        .or(config.seed)
+        .unwrap_or_else(|| stable_hash_bytes(format!("{timestamp}\n{config_text}").as_bytes()));
+    config.seed = Some(base_seed);
+    config.engine.mode = EngineMode::Batch;
+
+    let rounds_grid = if rounds.is_empty() {
+        vec![config.rounds]
+    } else {
+        rounds
+    };
+    let noise_grid = if noise.is_empty() {
+        vec![config.noise]
+    } else {
+        noise
+    };
+    let reps_grid = if repetitions.is_empty() {
+        vec![config.repetitions]
+    } else {
+        repetitions
+    };
+
+    let cwd = std::env::current_dir()?;
+    let base_dir = config_path
+        .parent()
+        .map(|p| {
+            if p.is_absolute() {
+                p.to_path_buf()
+            } else {
+                cwd.join(p)
+            }
+        })
+        .unwrap_or(cwd);
+    let out_dir = out_dir.unwrap_or_else(|| base_dir.clone());
+    let out_dir = if out_dir.is_absolute() {
+        out_dir
+    } else {
+        base_dir.join(out_dir)
+    };
+
+    let stamp = timestamp.replace(':', "-");
+    let sweep_root = out_dir
+        .join("runs")
+        .join("games")
+        .join("sweeps")
+        .join(format!("{stamp}__seed-{base_seed}"));
+    let cells_root = sweep_root.join("cells");
+    fs::create_dir_all(&cells_root)
+        .with_context(|| format!("failed to create {}", cells_root.display()))?;
+
+    let mut cell_summaries = Vec::new();
+    let mut totals_by_strategy: HashMap<String, Vec<i64>> = HashMap::new();
+    let mut top_counts: HashMap<String, u32> = HashMap::new();
+    let mut cell_id = 0usize;
+
+    for rounds in &rounds_grid {
+        for noise in &noise_grid {
+            for reps in &reps_grid {
+                cell_id += 1;
+                let noise_bits = noise.to_bits();
+                let cell_seed = stable_hash_bytes(
+                    format!("{base_seed}:{rounds}:{reps}:{noise_bits}:{cell_id}").as_bytes(),
+                );
+                let mut cell_config = config.clone();
+                cell_config.rounds = *rounds;
+                cell_config.repetitions = *reps;
+                cell_config.noise = (*noise).clamp(0.0, 1.0);
+                cell_config.seed = Some(cell_seed);
+                cell_config.engine.mode = EngineMode::Batch;
+
+                let config_text_cell =
+                    toml::to_string(&cell_config).unwrap_or_else(|_| config_text.clone());
+                let run_id = run_id_from_seed_config(cell_seed, &config_text_cell);
+                let noise_label = format!("{:.4}", noise).replace('.', "_");
+                let cell_dir = cells_root.join(format!(
+                    "{:04}__r{}__n{}__rep{}",
+                    cell_id, rounds, noise_label, reps
+                ));
+                fs::create_dir_all(&cell_dir)
+                    .with_context(|| format!("failed to create {}", cell_dir.display()))?;
+
+                let summary_path = cell_dir.join("run_summary.json");
+                let definitions_path = cell_dir.join("definitions.json");
+                let results_path = cell_dir.join("results.json");
+                let events_path = cell_dir.join("events.ndjson");
+                let history_path = cell_dir.join("history.ndjson");
+                let config_path = cell_dir.join("config.toml");
+                let analysis_dir = cell_dir.join("analysis");
+
+                if let Err(err) = fs::write(&config_path, &config_text_cell) {
+                    eprintln!("Warning: failed to write config snapshot: {err}");
+                }
+
+                let kernel = TournamentKernel::new(cell_config.clone());
+                let (results, event_log, history_log) = execute_tournament(
+                    &kernel,
+                    &cell_config,
+                    cell_config.event_log.enabled.then_some(events_path.clone()),
+                    cell_config.history.enabled.then_some(history_path.clone()),
+                )?;
+
+                if let Err(err) = nit_utils::fs::write_atomic(&definitions_path, |writer| {
+                    serde_json::to_writer_pretty(writer, kernel.definitions())
+                        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
+                }) {
+                    eprintln!("Warning: failed to write definitions: {err}");
+                }
+                if let Err(err) = nit_utils::fs::write_atomic(&results_path, |writer| {
+                    serde_json::to_writer_pretty(writer, &results)
+                        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
+                }) {
+                    eprintln!("Warning: failed to write results: {err}");
+                }
+
+                let summary = RunSummary {
+                    schema_version: RUN_SUMMARY_SCHEMA_VERSION,
+                    timestamp: timestamp.clone(),
+                    run_id: run_id.clone(),
+                    seed: cell_seed,
+                    config_text: config_text_cell.clone(),
+                    config: cell_config.clone(),
+                    paths: RunPaths {
+                        summary: Some(summary_path.display().to_string()),
+                        events: event_log.clone(),
+                        history: history_log.clone(),
+                        definitions: Some(definitions_path.display().to_string()),
+                        results: Some(results_path.display().to_string()),
+                        config: Some(config_path.display().to_string()),
+                        analysis_dir: Some(analysis_dir.display().to_string()),
+                    },
+                    strategies: kernel.definitions().to_vec(),
+                    results: results.clone(),
+                    event_log,
+                    history_log,
+                    run_dir: Some(cell_dir.display().to_string()),
+                };
+
+                write_summary(&summary_path, &summary)
+                    .with_context(|| format!("failed to write {}", summary_path.display()))?;
+
+                let top_id = results
+                    .ranking
+                    .first()
+                    .map(|r| r.id.clone())
+                    .unwrap_or_else(|| "none".into());
+                *top_counts.entry(top_id.clone()).or_insert(0) += 1;
+
+                for strategy in &results.ranking {
+                    totals_by_strategy
+                        .entry(strategy.id.clone())
+                        .or_default()
+                        .push(strategy.total_payoff);
+                }
+
+                cell_summaries.push(SweepCellSummary {
+                    cell_id,
+                    rounds: *rounds,
+                    noise: *noise,
+                    repetitions: *reps,
+                    seed: cell_seed,
+                    run_id,
+                    run_dir: cell_dir.display().to_string(),
+                    summary_path: summary_path.display().to_string(),
+                    top_strategy: top_id,
+                });
+            }
+        }
+    }
+
+    let mut strategies = Vec::new();
+    for (id, totals) in totals_by_strategy {
+        let count = totals.len() as f64;
+        let mean = totals.iter().map(|v| *v as f64).sum::<f64>() / count.max(1.0);
+        let var = totals
+            .iter()
+            .map(|v| {
+                let diff = *v as f64 - mean;
+                diff * diff
+            })
+            .sum::<f64>()
+            / count.max(1.0);
+        let std = var.sqrt();
+        let top_count = top_counts.get(&id).copied().unwrap_or(0);
+        strategies.push(SweepStrategyAggregate {
+            id,
+            mean_total_payoff: mean,
+            std_total_payoff: std,
+            top1_count: top_count,
+        });
+    }
+    strategies.sort_by(|a, b| b.mean_total_payoff.partial_cmp(&a.mean_total_payoff).unwrap());
+
+    let summary = SweepSummary {
+        schema_version: 1,
+        timestamp: timestamp.clone(),
+        seed: base_seed,
+        config_path: config_path.display().to_string(),
+        grid: SweepGrid {
+            rounds: rounds_grid.clone(),
+            noise: noise_grid.clone(),
+            repetitions: reps_grid.clone(),
+        },
+        cells: cell_summaries,
+        aggregate: SweepAggregate { strategies },
+    };
+
+    let summary_path = sweep_root.join("sweep_summary.json");
+    nit_utils::fs::write_atomic(&summary_path, |writer| {
+        serde_json::to_writer_pretty(writer, &summary)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
+    })
+    .with_context(|| format!("failed to write {}", summary_path.display()))?;
+
+    if verbose {
+        eprintln!("Sweep summary: {}", summary_path.display());
+    }
+
+    if !quiet {
+        let out = match format {
+            OutputFormat::Json => serde_json::to_string(&summary)?,
+            OutputFormat::Pretty => serde_json::to_string_pretty(&summary)?,
+        };
+        println!("{out}");
+    }
+
+    Ok(())
+}
+
+#[derive(Serialize)]
+struct SweepSummary {
+    schema_version: u32,
+    timestamp: String,
+    seed: u64,
+    config_path: String,
+    grid: SweepGrid,
+    cells: Vec<SweepCellSummary>,
+    aggregate: SweepAggregate,
+}
+
+#[derive(Serialize)]
+struct SweepGrid {
+    rounds: Vec<u32>,
+    noise: Vec<f32>,
+    repetitions: Vec<u32>,
+}
+
+#[derive(Serialize)]
+struct SweepCellSummary {
+    cell_id: usize,
+    rounds: u32,
+    noise: f32,
+    repetitions: u32,
+    seed: u64,
+    run_id: String,
+    run_dir: String,
+    summary_path: String,
+    top_strategy: String,
+}
+
+#[derive(Serialize)]
+struct SweepAggregate {
+    strategies: Vec<SweepStrategyAggregate>,
+}
+
+#[derive(Serialize)]
+struct SweepStrategyAggregate {
+    id: String,
+    mean_total_payoff: f64,
+    std_total_payoff: f64,
+    top1_count: u32,
 }
 
 fn find_theme() -> Option<PathBuf> {

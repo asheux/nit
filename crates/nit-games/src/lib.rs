@@ -2,6 +2,7 @@
 
 pub mod config;
 pub mod events;
+pub mod fast_eval;
 pub mod game;
 pub mod analysis;
 pub mod history;
@@ -19,10 +20,14 @@ pub use analysis::{
     HistoryAnalysisSummary, MatchSummary, StrategySummary, TrajectoryPreview, TrajectorySample,
 };
 pub use events::{EventLogConfig, EventWriter, GameEvent};
+pub use fast_eval::{CycleMetadata, FastEvalResult, FastStrategyModel};
 pub use game::{Action, Outcome, PayoffMatrix};
 pub use history::{History, RoundRecord};
 pub use history_log::{HistoryWriter, MatchHistory};
-pub use output::{run_id_from_seed_config, RunPaths, RunSummary, TournamentResults};
+pub use output::{
+    run_id_from_seed_config, RunLayout, RunPaths, RunSummary, TournamentResults,
+    RUN_SUMMARY_SCHEMA_VERSION,
+};
 pub use strategy::{
     AlwaysCooperate, AlwaysDefect, FsmStrategy, GrimTrigger, MemoryStrategy, RandomStrategy,
     Strategy, StrategyKind, TitForTat, WinStayLoseShift,

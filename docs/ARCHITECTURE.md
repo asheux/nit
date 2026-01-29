@@ -52,15 +52,15 @@ rendering and text‑measurement consistent, and avoids lossy conversions.
 - Main grid: left (Notes + Job Output), center (Editor), right (Visualizer + Gate Monitor).
 - Bottom bar with key hints; overlay for help and prompts.
 
-## Multi-App Dispatch
+## Lab Dispatch (Active Lab)
 
-- The CLI supports `nit` (default GoL), `nit gol`, and `nit games` subcommands.
-- `AppKind` in `AppState` selects the active app and gates commands/keybindings.
-- The TUI instantiates app-specific runtimes:
+- The CLI supports `nit` (default GoL), `nit gol`, `nit games`, and `nit --lab <gol|games>`.
+- `LabId`/`AppKind` in `AppState` selects the active lab and gates commands/keybindings.
+- The TUI instantiates lab-specific runtimes:
   - GoL: seed runtime + GoL Petri Dish + GoL visualizer widget.
-  - Games: Games Petri Dish + Games visualizer dashboard widget.
-- The `:run` command routes to the active app; namespaced commands (`:gol ...`, `:games ...`)
-  are always honored.
+  - Games: Games Petri Dish + Games visualizer dashboard widget + run/replay tooling.
+- Unnamespaced commands (`:run`, `:hide`, etc.) route to the active lab.
+  Namespaced commands are accepted **only** for the active lab to avoid cross‑lab conflicts.
 
 ## Games Config (Payoff Matrix)
 
@@ -70,14 +70,17 @@ rendering and text‑measurement consistent, and avoids lossy conversions.
 
 ## Games Output Logs
 
-- Summaries (`run__*.json`) include config + results + log file references.
-- Event logs (`events__*.ndjson`) capture tournament progress (optionally per-round).
-- History logs (`history__*.ndjson`) are per-match outcome strings when enabled.
+- Runs are stored under `runs/games/<timestamp>__seed-<seed>/` with:
+  - `run_summary.json` (schema v2) with config + results + paths
+  - `definitions.json` and `results.json`
+  - `events.ndjson` and `history.ndjson` when enabled
+  - `config.toml` snapshot + `analysis/` outputs
+- History logs are per‑match outcome strings when enabled.
   Outcomes are encoded as digits from player A’s perspective:
   `0=CC`, `1=CD`, `2=DC`, `3=DD`.
 - Analysis outputs (`analysis__*.json`, `analysis_matches__*.{csv,ndjson}`,
   `analysis_strategies__*.csv`, `analysis_trajectories__*.csv`) are generated
-  via `:games analyze` and summarize per-match, steady-state, and trajectory stats.
+  via `:games analyze` and summarize per‑match, steady‑state, and trajectory stats.
 
 ## Games Engine (Phase 2)
 

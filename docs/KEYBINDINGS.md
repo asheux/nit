@@ -84,6 +84,7 @@
 ## Command/Prompts
 - Y / N to confirm quit when prompted
 - :run: Run the active app
+- Commands are routed to the active lab; use `--lab gol|games` at startup to switch labs.
 - :gol hide / :petri hide: Hide GoL Petri Dish (sim keeps running)
 - :gol show / :petri show: Show GoL Petri Dish
 - :gol rule: Show current rule + built-ins
@@ -94,3 +95,5 @@
 - :games show: Show Games Petri Dish
 - :games status: Show tournament status
 - :games export: Re-emit last run summary (if present)
+- :games runs: Open run browser
+- :games replay: Open match replay selector (uses loaded run summary)

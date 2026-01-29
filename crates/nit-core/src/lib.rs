@@ -6,6 +6,7 @@ pub mod config;
 pub mod cursor;
 pub mod gol_rules;
 pub mod io;
+pub mod lab;
 pub mod mode;
 pub mod pane;
 pub mod prompt;
@@ -26,6 +27,7 @@ pub use config::{
 pub use cursor::Cursor;
 pub use gol_rules::{load_rule_catalog, NamedRule, RuleCatalog, RuleSelectError, SelectedRule};
 pub use io::{load_to_string, save_buffer};
+pub use lab::{AppKind, LabId, LabSpec};
 pub use mode::Mode;
 pub use pane::PaneId;
 pub use prompt::Prompt;
@@ -39,8 +41,9 @@ pub use seed::{
     SeedSymmetry,
 };
 pub use state::{
-    apply_action, AppKind, AppState, GamesAnalysisRequest, GamesAnalysisState, GamesState,
-    GamesStatus, GolRenderMode, JobState, LogBuffer, Metrics, SyntaxDebugInfo, UiSelection,
-    UiSelectionPane, VisualizerMode, VisualizerRuleEntry, VisualizerState, YankKind,
+    apply_action, AppState, GamesAnalysisRequest, GamesAnalysisState, GamesReplayRequest,
+    GamesReplayState, GamesRunBrowserState, GamesRunEntry, GamesState, GamesStatus, GolRenderMode,
+    JobState, LogBuffer, Metrics, SyntaxDebugInfo, UiSelection, UiSelectionPane, VisualizerMode,
+    VisualizerRuleEntry, VisualizerState, YankKind,
 };
 pub use viewport::Viewport;
