@@ -529,6 +529,10 @@ impl Strategy for OneSidedTmStrategy {
                     fallback = true;
                     break;
                 };
+                if matches!(trans.move_dir, TmMove::Left) && self.head == 0 {
+                    self.tape.insert(0, self.blank);
+                    self.head = 1;
+                }
                 if let Some(cell) = self.tape.get_mut(self.head) {
                     *cell = trans.write;
                 }

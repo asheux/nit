@@ -270,7 +270,6 @@ pub fn build_columns(
                 &sim.frames,
                 right_width.max(1),
                 theme,
-                sim.tape_width,
             ));
             right_lines.push(Line::from(""));
             right_lines.extend(build_legend_lines(*symbols as usize, theme));
@@ -281,7 +280,6 @@ pub fn build_columns(
                 &sim.frames,
                 left_width.max(1),
                 theme,
-                sim.tape_width,
             ));
             left_lines.push(Line::from(""));
             left_lines.extend(build_legend_lines(*symbols as usize, theme));
@@ -396,13 +394,13 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
 struct SimFrame {
     tape: Vec<u8>,
     head: usize,
+    origin: i32,
 }
 
 struct SimResult {
     log_lines: Vec<String>,
     steps: Vec<SimStep>,
     frames: Vec<SimFrame>,
-    tape_width: usize,
 }
 
 struct SimStep {
@@ -435,7 +433,6 @@ fn simulate_tm(
             log_lines: lines,
             steps: Vec::new(),
             frames,
-            tape_width: 0,
         };
     }
     if start_state == 0 {
@@ -444,7 +441,6 @@ fn simulate_tm(
             log_lines: lines,
             steps: Vec::new(),
             frames,
-            tape_width: 0,
         };
     }
 
@@ -455,6 +451,7 @@ fn simulate_tm(
     let mut tape = vec![blank; pad];
     tape.append(&mut digits);
     let mut head = tape.len().saturating_sub(1);
+    let mut origin: i32 = 0;
     let mut state = start_state;
 
     lines.push(format!(
@@ -467,6 +464,7 @@ fn simulate_tm(
     frames.push(SimFrame {
         tape: tape.clone(),
         head,
+        origin,
     });
     let mut steps: Vec<SimStep> = Vec::new();
 
@@ -484,7 +482,6 @@ fn simulate_tm(
             log_lines: lines,
             steps,
             frames,
-            tape_width: tape.len(),
         };
     }
 
@@ -496,7 +493,7 @@ fn simulate_tm(
 
     for step in 0..max_steps {
         steps_taken = step + 1;
-        let head_before = head;
+        let mut head_before = head;
         let read = tape.get(head_before).copied().unwrap_or(blank);
         let idx = (state.saturating_sub(1) as usize)
             .saturating_mul(symbols as usize)
@@ -512,10 +509,6 @@ fn simulate_tm(
             break;
         };
         last_transition = Some((state, read, trans));
-
-        if let Some(cell) = tape.get_mut(head_before) {
-            *cell = trans.write;
-        }
 
         if trans.next == 0 {
             if matches!(trans.move_dir, TmMove::Right) && head_before + 1 == tape.len() {
@@ -535,6 +528,7 @@ fn simulate_tm(
                 frames.push(SimFrame {
                     tape: tape.clone(),
                     head: head_after,
+                    origin,
                 });
             } else {
                 missing_transition = true;
@@ -544,6 +538,16 @@ fn simulate_tm(
                 ));
             }
             break;
+        }
+
+        if matches!(trans.move_dir, TmMove::Left) && head_before == 0 {
+            tape.insert(0, blank);
+            head_before = 1;
+            origin = origin.saturating_sub(1);
+        }
+
+        if let Some(cell) = tape.get_mut(head_before) {
+            *cell = trans.write;
         }
 
         let mut head_after = head_before;
@@ -572,6 +576,7 @@ fn simulate_tm(
                     frames.push(SimFrame {
                         tape: tape.clone(),
                         head: head_after,
+                        origin,
                     });
                     break;
                 } else {
@@ -597,6 +602,7 @@ fn simulate_tm(
         frames.push(SimFrame {
             tape: tape.clone(),
             head,
+            origin,
         });
     }
 
@@ -648,7 +654,6 @@ fn simulate_tm(
         log_lines: lines,
         steps,
         frames,
-        tape_width: tape.len(),
     }
 }
 
@@ -1163,11 +1168,26 @@ fn build_grid_lines(
     frames: &[SimFrame],
     max_width: usize,
     theme: &Theme,
-    tape_width: usize,
 ) -> Vec<Line<'static>> {
-    if frames.is_empty() || tape_width == 0 || max_width == 0 {
+    if frames.is_empty() || max_width == 0 {
         return Vec::new();
     }
+    let mut min_coord: isize = 0;
+    let mut max_coord: isize = 0;
+    let mut initialized = false;
+    for frame in frames {
+        let origin = frame.origin as isize;
+        let right = origin + frame.tape.len() as isize;
+        if !initialized {
+            min_coord = origin;
+            max_coord = right;
+            initialized = true;
+        } else {
+            min_coord = min_coord.min(origin);
+            max_coord = max_coord.max(right);
+        }
+    }
+    let display_width = (max_coord - min_coord + 1).max(1) as usize;
     let label_width = 4usize;
     let cell_width = 2usize;
     let ellipsis_width = 3usize;
@@ -1176,7 +1196,6 @@ fn build_grid_lines(
     if max_cells_no_ellipsis == 0 {
         return Vec::new();
     }
-    let display_width = tape_width.saturating_add(1);
     let needs_ellipsis = display_width > max_cells_no_ellipsis;
     let available = if needs_ellipsis {
         max_width.saturating_sub(label_width + ellipsis_width)
@@ -1205,12 +1224,21 @@ fn build_grid_lines(
         if needs_ellipsis {
             spans.push(Span::styled("...", Style::default().fg(theme.border)));
         }
-        let head_at_halt = frame.head == tape_width;
+        let origin = frame.origin as isize;
+        let head_coord = origin + frame.head as isize;
+        let halt_coord = origin + frame.tape.len() as isize;
+        let head_at_halt = head_coord == halt_coord;
         for cell_idx in start..end {
-            let is_halt_cell = cell_idx == tape_width;
-            let symbol = frame.tape.get(cell_idx).copied().unwrap_or(0);
+            let global_coord = min_coord + cell_idx as isize;
+            let is_halt_cell = global_coord == halt_coord;
+            let symbol = if global_coord >= origin && global_coord < halt_coord {
+                let idx = (global_coord - origin) as usize;
+                frame.tape.get(idx).copied().unwrap_or(0)
+            } else {
+                0
+            };
             let mut style = if is_halt_cell {
-                if head_at_halt && cell_idx == tape_width {
+                if head_at_halt && global_coord == halt_coord {
                     halt_hit_style
                 } else {
                     halt_style
@@ -1218,7 +1246,7 @@ fn build_grid_lines(
             } else {
                 symbol_style(symbol, theme)
             };
-            if cell_idx == frame.head {
+            if global_coord == head_coord {
                 style = style.fg(Color::White).add_modifier(Modifier::BOLD);
                 spans.push(Span::styled(centered_cell(HEAD_DOT, cell_width), style));
             } else {
@@ -1385,6 +1413,39 @@ mod tests {
         assert_eq!(top.len(), header.len());
         assert!(header.contains("| tape "));
         assert!(row.contains('●'));
+    }
+
+    #[test]
+    fn evolution_head_moves_when_tape_extends_left() {
+        let transitions = vec![
+            TmTransition {
+                write: 0,
+                move_dir: TmMove::Left,
+                next: 1,
+            },
+            TmTransition {
+                write: 0,
+                move_dir: TmMove::Left,
+                next: 1,
+            },
+        ];
+        let output_map = vec![Action::Cooperate, Action::Defect];
+        let sim = simulate_tm(0, 2, 1, 0, 0, 8, &transitions, &output_map);
+        let mut left_insert_idx = None;
+        for i in 1..sim.frames.len() {
+            if sim.frames[i].origin < sim.frames[i - 1].origin {
+                left_insert_idx = Some(i);
+                break;
+            }
+        }
+        let idx = left_insert_idx.expect("expected left extension");
+        let lines = build_grid_lines(&sim.frames[idx - 1..=idx], 120, &Theme::default());
+        assert_eq!(lines.len(), 2);
+        let prev_line = line_to_string(&lines[0]);
+        let next_line = line_to_string(&lines[1]);
+        let prev_pos = prev_line.find(HEAD_DOT).unwrap();
+        let next_pos = next_line.find(HEAD_DOT).unwrap();
+        assert_ne!(prev_pos, next_pos);
     }
 
     #[test]
