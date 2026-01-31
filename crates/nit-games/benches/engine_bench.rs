@@ -5,6 +5,7 @@ use nit_games::config::{
 use nit_games::events::EventWriter;
 use nit_games::game::PayoffMatrix;
 use nit_games::history_log::HistoryWriter;
+use nit_games::output::{RunPaths, RunSummary, RUN_SUMMARY_SCHEMA_VERSION};
 use nit_games::tournament::{KernelRunMode, Parallelism, TournamentKernel};
 use nit_games::{InputMode, Strategy, TmMove, TmTransition};
 use std::path::PathBuf;
@@ -204,6 +205,64 @@ fn build_tm_config(strategies: usize, rounds: u32) -> NormalizedConfig {
                 blank: 0,
                 fallback_symbol: Some(0),
                 max_steps_per_round: 32,
+                input_mode: InputMode::OpponentLastAction,
+                output_map: vec![
+                    nit_games::game::Action::Cooperate,
+                    nit_games::game::Action::Defect,
+                ],
+                transitions: transitions.clone(),
+                rule_code: None,
+            },
+        });
+    }
+    NormalizedConfig {
+        schema_version: 1,
+        game: "ipd".into(),
+        rounds,
+        repetitions: 1,
+        self_play: false,
+        seed: Some(12345),
+        noise: 0.0,
+        payoff: PayoffMatrix::default_pd(),
+        strategies: specs,
+        event_log: nit_games::events::EventLogConfig {
+            enabled: false,
+            include_rounds: false,
+        },
+        history: HistoryConfig {
+            enabled: false,
+            include_cycle_metadata: false,
+        },
+        engine: EngineConfig::default(),
+        max_memory_n: 0,
+    }
+}
+
+fn build_tm_heavy_config(strategies: usize, rounds: u32, max_steps: u32) -> NormalizedConfig {
+    let mut specs = Vec::new();
+    let transitions = vec![
+        TmTransition {
+            write: 0,
+            move_dir: TmMove::Stay,
+            next: 1,
+        },
+        TmTransition {
+            write: 1,
+            move_dir: TmMove::Stay,
+            next: 1,
+        },
+    ];
+    for idx in 0..strategies {
+        specs.push(StrategySpec {
+            id: format!("tm_heavy{idx}"),
+            name: None,
+            kind: StrategySpecKind::OneSidedTm {
+                states: 1,
+                symbols: 2,
+                start_state: 1,
+                blank: 0,
+                fallback_symbol: Some(0),
+                max_steps_per_round: max_steps,
                 input_mode: InputMode::OpponentLastAction,
                 output_map: vec![
                     nit_games::game::Action::Cooperate,
@@ -528,6 +587,73 @@ fn bench_tm_tournament(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_tm_heavy(c: &mut Criterion) {
+    let mut group = c.benchmark_group("tm_heavy");
+    let tm_config = build_tm_heavy_config(8, 150, 512);
+    let kernel_tm = TournamentKernel::new(tm_config);
+    group.bench_function("tm_steps_heavy", |b| {
+        b.iter(|| {
+            let _ = kernel_tm.run(KernelRunMode::Sequential {
+                event_writer: None,
+                history_writer: None,
+            });
+        });
+    });
+    group.finish();
+}
+
+fn bench_sweep_io(c: &mut Criterion) {
+    let config = build_tm_config(6, 60);
+    let kernel = TournamentKernel::new(config.clone());
+    let results = kernel.run(KernelRunMode::Sequential {
+        event_writer: None,
+        history_writer: None,
+    });
+    let summary_path = temp_path("sweep_summary", "json");
+    let results_path = temp_path("sweep_results", "json");
+    let definitions_path = temp_path("sweep_definitions", "json");
+
+    let summary = RunSummary {
+        schema_version: RUN_SUMMARY_SCHEMA_VERSION,
+        timestamp: EventWriter::timestamp(),
+        run_id: "bench".into(),
+        seed: 42,
+        config_text: toml::to_string(&config).unwrap_or_default(),
+        config: config.clone(),
+        paths: RunPaths {
+            summary: Some(summary_path.display().to_string()),
+            events: None,
+            history: None,
+            definitions: Some(definitions_path.display().to_string()),
+            results: Some(results_path.display().to_string()),
+            config: None,
+            analysis_dir: None,
+        },
+        strategies: kernel.definitions().to_vec(),
+        results: results.clone(),
+        event_log: None,
+        history_log: None,
+        run_dir: None,
+    };
+
+    c.bench_function("sweep_cell_io", |b| {
+        b.iter(|| {
+            let _ = nit_utils::fs::write_atomic(&definitions_path, |writer| {
+                serde_json::to_writer_pretty(writer, kernel.definitions())
+                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
+            });
+            let _ = nit_utils::fs::write_atomic(&results_path, |writer| {
+                serde_json::to_writer_pretty(writer, &results)
+                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
+            });
+            let _ = nit_utils::fs::write_atomic(&summary_path, |writer| {
+                serde_json::to_writer_pretty(writer, &summary)
+                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
+            });
+        });
+    });
+}
+
 criterion_group!(
     benches,
     bench_single_match,
@@ -538,6 +664,8 @@ criterion_group!(
     bench_fast_eval,
     bench_fsm_fast_eval_heavy,
     bench_tm_micro,
-    bench_tm_tournament
+    bench_tm_tournament,
+    bench_tm_heavy,
+    bench_sweep_io
 );
 criterion_main!(benches);

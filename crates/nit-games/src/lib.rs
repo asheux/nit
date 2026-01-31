@@ -8,6 +8,7 @@ pub mod game;
 pub mod analysis;
 pub mod history;
 pub mod history_log;
+pub mod introspection;
 pub mod output;
 pub mod strategy;
 pub mod tournament;
@@ -26,6 +27,10 @@ pub use fast_eval::{CycleMetadata, FastEvalResult, FastStrategyModel};
 pub use game::{Action, Outcome, PayoffMatrix};
 pub use history::{History, RoundRecord};
 pub use history_log::{HistoryWriter, MatchHistory};
+pub use introspection::{
+    format_strategy_introspection, introspect_strategy, StrategyIntrospection,
+    StrategyIntrospectionKind, StrategyIntrospectionParameters, TmTransitionRecord,
+};
 pub use output::{
     run_id_from_seed_config, RunLayout, RunPaths, RunSummary, TournamentResults,
     RUN_SUMMARY_SCHEMA_VERSION,

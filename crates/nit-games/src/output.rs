@@ -21,6 +21,10 @@ pub struct StrategyResult {
     pub name: Option<String>,
     pub total_payoff: i64,
     pub average_payoff: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub adjusted_total_payoff: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub adjusted_average_payoff: Option<f64>,
     pub matches: u32,
     pub wins: u32,
     pub losses: u32,
@@ -35,6 +39,10 @@ pub struct StrategyResult {
 pub struct TmDerivedMetrics {
     pub rounds: u64,
     pub avg_steps_per_move: f64,
+    #[serde(default)]
+    pub min_steps_per_move: u32,
+    #[serde(default)]
+    pub max_steps_per_move: u32,
     pub max_steps_hit_count: u64,
     pub output_event_hit_rate: f64,
     pub fallback_rate: f64,
@@ -46,6 +54,10 @@ pub struct PairwiseResult {
     pub b: String,
     pub a_total: i64,
     pub b_total: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub a_adjusted_total: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub b_adjusted_total: Option<f64>,
     pub a_wins: u32,
     pub b_wins: u32,
     pub draws: u32,

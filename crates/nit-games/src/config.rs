@@ -121,6 +121,8 @@ pub struct EngineConfig {
     pub progress_interval_ms: u64,
     #[serde(default = "default_fast_eval")]
     pub fast_eval: bool,
+    #[serde(default)]
+    pub complexity_cost: ComplexityCostConfig,
 }
 
 impl Default for EngineConfig {
@@ -130,6 +132,30 @@ impl Default for EngineConfig {
             parallelism: ParallelismConfig::default(),
             progress_interval_ms: default_progress_interval_ms(),
             fast_eval: default_fast_eval(),
+            complexity_cost: ComplexityCostConfig::default(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ComplexityCostConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub tm_step_cost: f64,
+    #[serde(default)]
+    pub fsm_state_cost: f64,
+    #[serde(default)]
+    pub memory_n_cost: f64,
+}
+
+impl Default for ComplexityCostConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            tm_step_cost: 0.0,
+            fsm_state_cost: 0.0,
+            memory_n_cost: 0.0,
         }
     }
 }

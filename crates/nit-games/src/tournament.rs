@@ -18,6 +18,7 @@ use crate::strategy::{
 use nit_utils::hashing::{stable_hash_bytes, XorShift64};
 use rayon::prelude::*;
 use rayon::ThreadPoolBuilder;
+use std::cmp::Ordering;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::mpsc::Sender;
 
@@ -56,6 +57,8 @@ pub struct MatchResult {
     pub b_idx: usize,
     pub a_total: i64,
     pub b_total: i64,
+    pub a_adjusted_total: f64,
+    pub b_adjusted_total: f64,
     pub repetition: u32,
     pub match_id: usize,
 }
@@ -190,6 +193,7 @@ struct RoundOutcome {
 #[derive(Clone, Debug)]
 struct StrategyStats {
     total: i64,
+    adjusted_total: f64,
     matches: u32,
     wins: u32,
     losses: u32,
@@ -203,6 +207,8 @@ struct StrategyStats {
 struct PairStats {
     a_total: i64,
     b_total: i64,
+    a_adjusted_total: f64,
+    b_adjusted_total: f64,
     a_wins: u32,
     b_wins: u32,
     draws: u32,
@@ -211,6 +217,76 @@ struct PairStats {
 struct TournamentAccumulator {
     strategies: Vec<StrategyStats>,
     pairwise: Vec<Vec<PairStats>>,
+    use_adjusted: bool,
+}
+
+fn tm_metrics_from_stats(stats: &TmRunStats) -> crate::output::TmDerivedMetrics {
+    let rounds = stats.rounds.max(1);
+    let avg_steps = stats.steps as f64 / rounds as f64;
+    let output_rate = stats.output_events as f64 / rounds as f64;
+    let fallback_rate = stats.fallback as f64 / rounds as f64;
+    crate::output::TmDerivedMetrics {
+        rounds: stats.rounds,
+        avg_steps_per_move: avg_steps,
+        min_steps_per_move: stats.min_steps,
+        max_steps_per_move: stats.max_steps,
+        max_steps_hit_count: stats.max_steps_hits,
+        output_event_hit_rate: output_rate,
+        fallback_rate,
+    }
+}
+
+fn adjusted_total_for_match(
+    raw_total: i64,
+    spec: &StrategySpec,
+    rounds: u32,
+    tm_stats: Option<&TmRunStats>,
+    cost: &crate::config::ComplexityCostConfig,
+) -> f64 {
+    if !cost.enabled {
+        return raw_total as f64;
+    }
+    let mut penalty = 0.0;
+    match &spec.kind {
+        StrategySpecKind::OneSidedTm { .. } => {
+            if cost.tm_step_cost != 0.0 {
+                let steps = tm_stats.map(|stats| stats.steps as f64).unwrap_or(0.0);
+                penalty += cost.tm_step_cost * steps;
+            }
+        }
+        StrategySpecKind::Fsm {
+            num_states,
+            outputs,
+            ..
+        } => {
+            if cost.fsm_state_cost != 0.0 {
+                let states = if *num_states > 0 {
+                    *num_states
+                } else {
+                    outputs.len()
+                };
+                penalty += cost.fsm_state_cost * states as f64 * rounds as f64;
+            }
+        }
+        StrategySpecKind::Memory { n, .. } => {
+            if cost.memory_n_cost != 0.0 {
+                penalty += cost.memory_n_cost * *n as f64 * rounds as f64;
+            }
+        }
+        _ => {}
+    }
+    raw_total as f64 - penalty
+}
+
+fn compare_scores(a: f64, b: f64) -> Ordering {
+    let diff = (a - b).abs();
+    if diff < 1e-9 {
+        Ordering::Equal
+    } else if a > b {
+        Ordering::Greater
+    } else {
+        Ordering::Less
+    }
 }
 
 impl TournamentRunner {
@@ -224,7 +300,8 @@ impl TournamentRunner {
         );
         let seed_deriver = SeedDeriver::new(seed);
         let definitions = build_strategy_definitions(&config.strategies, &seed_deriver);
-        let results = TournamentAccumulator::new(config.strategies.len());
+        let use_adjusted = config.engine.complexity_cost.enabled;
+        let results = TournamentAccumulator::new(config.strategies.len(), use_adjusted);
         Self {
             config: config.clone(),
             seed,
@@ -341,11 +418,32 @@ impl TournamentRunner {
                 let snapshot = self.play_round(&mut session);
                 self.last_round = Some(snapshot.clone());
                 if session.round >= session.rounds_total {
+                    let a_spec = &self.strategies[session.matchup.a_idx];
+                    let b_spec = &self.strategies[session.matchup.b_idx];
+                    let cost = &self.config.engine.complexity_cost;
+                    let a_tm_stats = session.a_strategy.tm_stats();
+                    let b_tm_stats = session.b_strategy.tm_stats();
+                    let a_adjusted_total = adjusted_total_for_match(
+                        session.a_total,
+                        a_spec,
+                        session.rounds_total,
+                        a_tm_stats,
+                        cost,
+                    );
+                    let b_adjusted_total = adjusted_total_for_match(
+                        session.b_total,
+                        b_spec,
+                        session.rounds_total,
+                        b_tm_stats,
+                        cost,
+                    );
                     let result = MatchResult {
                         a_idx: session.matchup.a_idx,
                         b_idx: session.matchup.b_idx,
                         a_total: session.a_total,
                         b_total: session.b_total,
+                        a_adjusted_total,
+                        b_adjusted_total,
                         repetition: session.matchup.repetition,
                         match_id: session.matchup.match_id,
                     };
@@ -362,8 +460,8 @@ impl TournamentRunner {
                             result,
                             session.a_crashed,
                             session.b_crashed,
-                            session.a_strategy.tm_stats().cloned(),
-                            session.b_strategy.tm_stats().cloned(),
+                            a_tm_stats.cloned(),
+                            b_tm_stats.cloned(),
                         );
                     self.match_index += 1;
                     if self.is_done() {
@@ -455,6 +553,17 @@ impl TournamentRunner {
         let b = self.strategies[session.matchup.b_idx].id.clone();
         let a_moves = session.history_actions_a.clone();
         let b_moves = session.history_actions_b.clone();
+        let include_tm_metrics = self.config.history.include_cycle_metadata;
+        let a_tm_metrics = if include_tm_metrics {
+            session.a_strategy.tm_stats().map(tm_metrics_from_stats)
+        } else {
+            None
+        };
+        let b_tm_metrics = if include_tm_metrics {
+            session.b_strategy.tm_stats().map(tm_metrics_from_stats)
+        } else {
+            None
+        };
         let record = MatchHistory {
             event: "match_history".into(),
             timestamp: EventWriter::timestamp(),
@@ -475,6 +584,8 @@ impl TournamentRunner {
             a_initial: session.history_actions_a.chars().next(),
             b_initial: session.history_actions_b.chars().next(),
             cycle: None,
+            a_tm_metrics,
+            b_tm_metrics,
         };
         let _ = writer.write(&record);
     }
@@ -769,7 +880,8 @@ impl TournamentKernel {
         mut history_writer: Option<&mut HistoryWriter>,
     ) -> TournamentResults {
         let total_matches = self.schedule.len();
-        let mut results = TournamentAccumulator::new(self.config.strategies.len());
+        let mut results =
+            TournamentAccumulator::new(self.config.strategies.len(), self.config.engine.complexity_cost.enabled);
         if let Some(writer) = event_writer.as_mut() {
             let _ = writer.write(&GameEvent::TournamentStart {
                 timestamp: EventWriter::timestamp(),
@@ -914,7 +1026,8 @@ impl TournamentKernel {
             });
         }
 
-        let mut results = TournamentAccumulator::new(self.config.strategies.len());
+        let mut results =
+            TournamentAccumulator::new(self.config.strategies.len(), self.config.engine.complexity_cost.enabled);
         for outcome in outcomes {
             results.apply_match(
                 outcome.result,
@@ -949,6 +1062,9 @@ where
 {
     let a_id = strategies[matchup.a_idx].id.as_str();
     let b_id = strategies[matchup.b_idx].id.as_str();
+    let a_spec = &strategies[matchup.a_idx];
+    let b_spec = &strategies[matchup.b_idx];
+    let cost = &config.engine.complexity_cost;
     let match_index = matchup.match_id + 1;
     let owned_ids = if log_events || log_history {
         Some((a_id.to_string(), b_id.to_string()))
@@ -993,12 +1109,18 @@ where
                     b_total: eval.b_total,
                 });
             }
+            let a_adjusted_total =
+                adjusted_total_for_match(eval.a_total, a_spec, config.rounds, None, cost);
+            let b_adjusted_total =
+                adjusted_total_for_match(eval.b_total, b_spec, config.rounds, None, cost);
             return MatchOutcome {
                 result: MatchResult {
                     a_idx: matchup.a_idx,
                     b_idx: matchup.b_idx,
                     a_total: eval.a_total,
                     b_total: eval.b_total,
+                    a_adjusted_total,
+                    b_adjusted_total,
                     repetition: matchup.repetition,
                     match_id: matchup.match_id,
                 },
@@ -1080,6 +1202,17 @@ where
         let a_moves = session.history_actions_a.clone();
         let b_moves = session.history_actions_b.clone();
         let (a_owned, b_owned) = owned_ids.as_ref().expect("owned ids");
+        let include_tm_metrics = config.history.include_cycle_metadata;
+        let a_tm_metrics = if include_tm_metrics {
+            session.a_strategy.tm_stats().map(tm_metrics_from_stats)
+        } else {
+            None
+        };
+        let b_tm_metrics = if include_tm_metrics {
+            session.b_strategy.tm_stats().map(tm_metrics_from_stats)
+        } else {
+            None
+        };
         emit_history(MatchHistory {
             event: "match_history".into(),
             timestamp: EventWriter::timestamp(),
@@ -1100,6 +1233,8 @@ where
             a_initial: session.history_actions_a.chars().next(),
             b_initial: session.history_actions_b.chars().next(),
             cycle: cycle_meta,
+            a_tm_metrics,
+            b_tm_metrics,
         });
     }
 
@@ -1109,6 +1244,20 @@ where
             b_idx: matchup.b_idx,
             a_total: session.a_total,
             b_total: session.b_total,
+            a_adjusted_total: adjusted_total_for_match(
+                session.a_total,
+                a_spec,
+                session.rounds_total,
+                session.a_strategy.tm_stats(),
+                cost,
+            ),
+            b_adjusted_total: adjusted_total_for_match(
+                session.b_total,
+                b_spec,
+                session.rounds_total,
+                session.b_strategy.tm_stats(),
+                cost,
+            ),
             repetition: matchup.repetition,
             match_id: matchup.match_id,
         },
@@ -1129,11 +1278,12 @@ fn outcome_char(outcome: Outcome) -> char {
 }
 
 impl TournamentAccumulator {
-    fn new(n: usize) -> Self {
+    fn new(n: usize, use_adjusted: bool) -> Self {
         Self {
             strategies: vec![
                 StrategyStats {
                     total: 0,
+                    adjusted_total: 0.0,
                     matches: 0,
                     wins: 0,
                     losses: 0,
@@ -1145,6 +1295,7 @@ impl TournamentAccumulator {
                 n
             ],
             pairwise: vec![vec![PairStats::default(); n]; n],
+            use_adjusted,
         }
     }
 
@@ -1156,9 +1307,15 @@ impl TournamentAccumulator {
         a_tm_stats: Option<TmRunStats>,
         b_tm_stats: Option<TmRunStats>,
     ) {
+        let (a_outcome, b_outcome) = if self.use_adjusted {
+            (result.a_adjusted_total, result.b_adjusted_total)
+        } else {
+            (result.a_total as f64, result.b_total as f64)
+        };
         if result.a_idx == result.b_idx {
             let stats = &mut self.strategies[result.a_idx];
             stats.total += result.a_total + result.b_total;
+            stats.adjusted_total += result.a_adjusted_total + result.b_adjusted_total;
             stats.matches += 1;
             stats.draws += 1;
             if a_crashed || b_crashed {
@@ -1167,6 +1324,8 @@ impl TournamentAccumulator {
             let pair = &mut self.pairwise[result.a_idx][result.b_idx];
             pair.a_total += result.a_total;
             pair.b_total += result.b_total;
+            pair.a_adjusted_total += result.a_adjusted_total;
+            pair.b_adjusted_total += result.b_adjusted_total;
             pair.draws += 1;
             if let Some(tm_stats) = a_tm_stats.as_ref() {
                 let entry = stats.tm_stats.get_or_insert_with(TmRunStats::default);
@@ -1191,6 +1350,8 @@ impl TournamentAccumulator {
         };
         a_stats.total += result.a_total;
         b_stats.total += result.b_total;
+        a_stats.adjusted_total += result.a_adjusted_total;
+        b_stats.adjusted_total += result.b_adjusted_total;
         a_stats.matches += 1;
         b_stats.matches += 1;
         if a_crashed {
@@ -1208,38 +1369,42 @@ impl TournamentAccumulator {
             entry.merge(tm_stats);
         }
 
-        if result.a_total > result.b_total {
-            a_stats.wins += 1;
-            b_stats.losses += 1;
-        } else if result.b_total > result.a_total {
-            b_stats.wins += 1;
-            a_stats.losses += 1;
-        } else {
-            a_stats.draws += 1;
-            b_stats.draws += 1;
+        match compare_scores(a_outcome, b_outcome) {
+            Ordering::Greater => {
+                a_stats.wins += 1;
+                b_stats.losses += 1;
+            }
+            Ordering::Less => {
+                b_stats.wins += 1;
+                a_stats.losses += 1;
+            }
+            Ordering::Equal => {
+                a_stats.draws += 1;
+                b_stats.draws += 1;
+            }
         }
 
         let pair = &mut self.pairwise[result.a_idx][result.b_idx];
         pair.a_total += result.a_total;
         pair.b_total += result.b_total;
-        if result.a_total > result.b_total {
-            pair.a_wins += 1;
-        } else if result.b_total > result.a_total {
-            pair.b_wins += 1;
-        } else {
-            pair.draws += 1;
+        pair.a_adjusted_total += result.a_adjusted_total;
+        pair.b_adjusted_total += result.b_adjusted_total;
+        match compare_scores(a_outcome, b_outcome) {
+            Ordering::Greater => pair.a_wins += 1,
+            Ordering::Less => pair.b_wins += 1,
+            Ordering::Equal => pair.draws += 1,
         }
 
         if result.a_idx != result.b_idx {
             let reverse = &mut self.pairwise[result.b_idx][result.a_idx];
             reverse.a_total += result.b_total;
             reverse.b_total += result.a_total;
-            if result.b_total > result.a_total {
-                reverse.a_wins += 1;
-            } else if result.a_total > result.b_total {
-                reverse.b_wins += 1;
-            } else {
-                reverse.draws += 1;
+            reverse.a_adjusted_total += result.b_adjusted_total;
+            reverse.b_adjusted_total += result.a_adjusted_total;
+            match compare_scores(b_outcome, a_outcome) {
+                Ordering::Greater => reverse.a_wins += 1,
+                Ordering::Less => reverse.b_wins += 1,
+                Ordering::Equal => reverse.draws += 1,
             }
         }
     }
@@ -1248,33 +1413,38 @@ impl TournamentAccumulator {
         let mut ranking = Vec::new();
         for (idx, stats) in self.strategies.iter().enumerate() {
             let matches = stats.matches.max(1);
+            let adjusted_avg = stats.adjusted_total / matches as f64;
             ranking.push(StrategyResult {
                 id: specs[idx].id.clone(),
                 name: specs[idx].name.clone(),
                 total_payoff: stats.total,
                 average_payoff: stats.total as f64 / matches as f64,
+                adjusted_total_payoff: Some(stats.adjusted_total),
+                adjusted_average_payoff: Some(adjusted_avg),
                 matches: stats.matches,
                 wins: stats.wins,
                 losses: stats.losses,
                 draws: stats.draws,
                 crashed: stats.crashed,
                 crash_count: stats.crash_count,
-                tm_metrics: stats.tm_stats.as_ref().map(|tm| {
-                    let rounds = tm.rounds.max(1);
-                    let avg_steps = tm.steps as f64 / rounds as f64;
-                    let output_rate = tm.output_events as f64 / rounds as f64;
-                    let fallback_rate = tm.fallback as f64 / rounds as f64;
-                    crate::output::TmDerivedMetrics {
-                        rounds: tm.rounds,
-                        avg_steps_per_move: avg_steps,
-                        max_steps_hit_count: tm.max_steps_hits,
-                        output_event_hit_rate: output_rate,
-                        fallback_rate,
-                    }
-                }),
+                tm_metrics: stats.tm_stats.as_ref().map(tm_metrics_from_stats),
             });
         }
-        ranking.sort_by(|a, b| b.total_payoff.cmp(&a.total_payoff));
+        if self.use_adjusted {
+            ranking.sort_by(|a, b| {
+                let a_score = a
+                    .adjusted_total_payoff
+                    .unwrap_or(a.total_payoff as f64);
+                let b_score = b
+                    .adjusted_total_payoff
+                    .unwrap_or(b.total_payoff as f64);
+                b_score
+                    .partial_cmp(&a_score)
+                    .unwrap_or(Ordering::Equal)
+            });
+        } else {
+            ranking.sort_by(|a, b| b.total_payoff.cmp(&a.total_payoff));
+        }
 
         let mut pairwise = Vec::new();
         for (i, row) in self.pairwise.iter().enumerate() {
@@ -1295,6 +1465,8 @@ impl TournamentAccumulator {
                     b: specs[j].id.clone(),
                     a_total: pair.a_total,
                     b_total: pair.b_total,
+                    a_adjusted_total: Some(pair.a_adjusted_total),
+                    b_adjusted_total: Some(pair.b_adjusted_total),
                     a_wins: pair.a_wins,
                     b_wins: pair.b_wins,
                     draws: pair.draws,

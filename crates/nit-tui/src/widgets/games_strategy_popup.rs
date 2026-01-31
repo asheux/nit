@@ -1,9 +1,10 @@
 use nit_core::{AppState, UiSelectionPane};
-use nit_games::config::StrategySpecKind;
+use nit_games::config::{BuiltinKind, StrategySpecKind};
+use nit_games::game::Action;
 use nit_games::strategy::InputMode;
 use ratatui::{
-    layout::Rect,
-    style::{Modifier, Style},
+    layout::{Constraint, Direction, Layout, Rect},
+    style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Clear, Paragraph, Wrap},
     Frame,
@@ -15,6 +16,8 @@ use crate::widgets::text_selection::apply_ui_selection;
 
 const MIN_WIDTH: u16 = 70;
 const MIN_HEIGHT: u16 = 20;
+
+const MEMORY_GRAPH_STATE_LIMIT: usize = 64;
 
 pub fn preferred_size(screen: Rect) -> (u16, u16) {
     let width = screen.width.min(120).max(MIN_WIDTH);
@@ -38,12 +41,364 @@ fn trim_to_width(text: &str, max_width: usize) -> String {
     out
 }
 
+fn color_for_symbol(ch: char, theme: &Theme) -> Option<Color> {
+    match ch {
+        '0' => Some(Color::Red),
+        '1' => Some(Color::Green),
+        '2' => Some(Color::Blue),
+        '3' => Some(Color::Magenta),
+        'C' => Some(Color::Green),
+        'D' => Some(Color::Red),
+        'H' => Some(theme.warning),
+        _ => None,
+    }
+}
+
+fn stylize_tokenized(content: &str, theme: &Theme, base: Style) -> Vec<Span<'static>> {
+    let mut spans = Vec::new();
+    let mut buffer = String::new();
+    for ch in content.chars() {
+        if let Some(color) = color_for_symbol(ch, theme) {
+            if !buffer.is_empty() {
+                spans.push(Span::styled(buffer.clone(), base));
+                buffer.clear();
+            }
+            spans.push(Span::styled(
+                ch.to_string(),
+                base.fg(color).add_modifier(Modifier::BOLD),
+            ));
+        } else {
+            buffer.push(ch);
+        }
+    }
+    if !buffer.is_empty() {
+        spans.push(Span::styled(buffer, base));
+    }
+    spans
+}
+
+fn style_table_row(
+    line: &str,
+    theme: &Theme,
+    value_style: Style,
+    dim_style: Style,
+) -> Line<'static> {
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    let parts: Vec<&str> = line.split('|').collect();
+    if parts.len() <= 1 {
+        return Line::from(Span::styled(line.to_string(), value_style));
+    }
+    for (idx, part) in parts.iter().enumerate() {
+        if idx == 0 {
+            if !part.is_empty() {
+                spans.push(Span::styled((*part).to_string(), dim_style));
+            }
+            continue;
+        }
+        spans.push(Span::styled("|".to_string(), dim_style));
+        let cell = *part;
+        let lead_len = cell.len() - cell.trim_start().len();
+        let trail_len = cell.len() - cell.trim_end().len();
+        if lead_len > 0 {
+            spans.push(Span::styled(" ".repeat(lead_len), value_style));
+        }
+        let trimmed = cell.trim();
+        if !trimmed.is_empty() {
+            spans.extend(stylize_tokenized(trimmed, theme, value_style));
+        }
+        if trail_len > 0 {
+            spans.push(Span::styled(" ".repeat(trail_len), value_style));
+        }
+    }
+    Line::from(spans)
+}
+
+fn style_definition_line(
+    line: &str,
+    max_width: usize,
+    theme: &Theme,
+    label_style: Style,
+    value_style: Style,
+    dim_style: Style,
+) -> Line<'static> {
+    let trimmed = trim_to_width(line, max_width);
+    if trimmed.starts_with('+') {
+        return Line::from(Span::styled(trimmed, dim_style));
+    }
+    if trimmed.starts_with('|') {
+        return style_table_row(&trimmed, theme, value_style, dim_style);
+    }
+    if let Some((label, rest)) = trimmed.split_once(':') {
+        let mut spans = Vec::new();
+        spans.push(Span::styled(format!("{label}:"), label_style));
+        if !rest.is_empty() {
+            spans.push(Span::styled(" ".to_string(), value_style));
+            spans.extend(stylize_tokenized(rest.trim_start(), theme, value_style));
+        }
+        return Line::from(spans);
+    }
+    Line::from(Span::styled(trimmed, value_style))
+}
+
 fn input_mode_label(mode: InputMode) -> &'static str {
     match mode {
         InputMode::OpponentLastAction => "opponent_last_action",
         InputMode::SelfLastAction => "self_last_action",
         InputMode::JointLastAction => "joint_last_action",
     }
+}
+
+fn input_symbol_legend(mode: InputMode) -> &'static str {
+    match mode {
+        InputMode::OpponentLastAction => "0=C 1=D (opponent_last_action)",
+        InputMode::SelfLastAction => "0=C 1=D (self_last_action)",
+        InputMode::JointLastAction => "0=CC 1=CD 2=DC 3=DD",
+    }
+}
+
+fn table_border(widths: &[usize]) -> String {
+    let mut line = String::from("+");
+    for width in widths {
+        line.push_str(&"-".repeat(width.saturating_add(2)));
+        line.push('+');
+    }
+    line
+}
+
+fn table_row(cells: &[String], widths: &[usize]) -> String {
+    let mut line = String::from("|");
+    for (idx, width) in widths.iter().enumerate() {
+        let cell = cells.get(idx).cloned().unwrap_or_default();
+        line.push(' ');
+        line.push_str(&format!("{cell:<width$}", width = *width));
+        line.push(' ');
+        line.push('|');
+    }
+    line
+}
+
+fn build_table(headers: &[String], rows: &[Vec<String>]) -> Vec<String> {
+    if headers.is_empty() {
+        return Vec::new();
+    }
+    let mut widths: Vec<usize> = headers.iter().map(|h| h.chars().count()).collect();
+    for row in rows {
+        for (idx, cell) in row.iter().enumerate() {
+            if let Some(width) = widths.get_mut(idx) {
+                *width = (*width).max(cell.chars().count());
+            }
+        }
+    }
+    let border = table_border(&widths);
+    let mut lines = Vec::new();
+    lines.push(border.clone());
+    lines.push(table_row(headers, &widths));
+    lines.push(border.clone());
+    for row in rows {
+        lines.push(table_row(row, &widths));
+    }
+    lines.push(border);
+    lines
+}
+
+fn split_graph_sections(lines: &[String]) -> (Vec<String>, Vec<String>) {
+    if lines.is_empty() {
+        return (Vec::new(), Vec::new());
+    }
+
+    let mut text = Vec::new();
+    let mut graph = Vec::new();
+    let mut in_graph = false;
+
+    for line in lines {
+        let trimmed = line.trim();
+        if trimmed.eq_ignore_ascii_case("graph:") {
+            in_graph = true;
+            graph.push(line.clone());
+            continue;
+        }
+        if in_graph {
+            if trimmed.is_empty() {
+                in_graph = false;
+                continue;
+            }
+            graph.push(line.clone());
+            continue;
+        }
+        text.push(line.clone());
+    }
+
+    (text, graph)
+}
+
+fn builtin_as_fsm(builtin: BuiltinKind) -> (usize, InputMode, Vec<Action>, Vec<Vec<usize>>) {
+    match builtin {
+        BuiltinKind::AllC => (
+            0,
+            InputMode::JointLastAction,
+            vec![Action::Cooperate],
+            vec![vec![0, 0, 0, 0]],
+        ),
+        BuiltinKind::AllD => (
+            0,
+            InputMode::JointLastAction,
+            vec![Action::Defect],
+            vec![vec![0, 0, 0, 0]],
+        ),
+        BuiltinKind::TitForTat => (
+            0,
+            InputMode::JointLastAction,
+            vec![Action::Cooperate, Action::Defect],
+            vec![vec![0, 1, 0, 1], vec![0, 1, 0, 1]],
+        ),
+        BuiltinKind::GrimTrigger => (
+            0,
+            InputMode::JointLastAction,
+            vec![Action::Cooperate, Action::Defect],
+            vec![vec![0, 1, 0, 1], vec![1, 1, 1, 1]],
+        ),
+        BuiltinKind::WinStayLoseShift => (
+            0,
+            InputMode::JointLastAction,
+            vec![Action::Cooperate, Action::Defect],
+            vec![vec![0, 1, 1, 0], vec![1, 0, 0, 1]],
+        ),
+    }
+}
+
+fn build_fsm_graph_lines(
+    state_count: usize,
+    start_state: usize,
+    mode: InputMode,
+    outputs: &[Action],
+    transitions: &[Vec<usize>],
+) -> Vec<String> {
+    let alphabet = mode.alphabet_size();
+    let mut lines = Vec::new();
+    lines.push("graph:".to_string());
+    lines.push(format!("legend: {}", input_symbol_legend(mode)));
+    lines.push(format!("start_state: {start_state}"));
+
+    let mut headers = Vec::with_capacity(alphabet + 1);
+    headers.push("state".to_string());
+    for idx in 0..alphabet {
+        headers.push(idx.to_string());
+    }
+
+    let mut rows = Vec::new();
+    for state_idx in 0..state_count {
+        let output = outputs.get(state_idx).map(|a| a.as_char()).unwrap_or('?');
+        let mut row = Vec::with_capacity(alphabet + 1);
+        row.push(format!("{state_idx}({output})"));
+        let trans_row = transitions.get(state_idx);
+        for input_idx in 0..alphabet {
+            let next = trans_row
+                .and_then(|row| row.get(input_idx))
+                .map(|n| n.to_string())
+                .unwrap_or_else(|| "-".to_string());
+            row.push(next);
+        }
+        rows.push(row);
+    }
+    lines.extend(build_table(&headers, &rows));
+    lines
+}
+
+fn build_tm_graph_lines(
+    states: u16,
+    symbols: u8,
+    transitions: &[nit_games::strategy::TmTransition],
+) -> Vec<String> {
+    let mut lines = Vec::new();
+    lines.push("graph:".to_string());
+    lines.push("legend: edge label = write symbol (ap)".to_string());
+    lines.push("note: multiple targets separated by ','; H=HALT".to_string());
+
+    let mut headers = Vec::with_capacity(symbols as usize + 1);
+    headers.push("state".to_string());
+    for sym in 0..symbols {
+        headers.push(sym.to_string());
+    }
+
+    let mut rows = Vec::new();
+    let symbols_usize = symbols as usize;
+    let mut by_write: Vec<Vec<Vec<u16>>> =
+        vec![vec![Vec::new(); symbols_usize]; states as usize];
+    for state in 1..=states as usize {
+        for read in 0..symbols_usize {
+            let idx = (state - 1) * symbols_usize + read;
+            if let Some(rule) = transitions.get(idx) {
+                let write_idx = (rule.write as usize).min(symbols_usize.saturating_sub(1));
+                by_write[state - 1][write_idx].push(rule.next);
+            }
+        }
+    }
+
+    for state in 1..=states as usize {
+        let mut row = Vec::with_capacity(symbols_usize + 1);
+        row.push(state.to_string());
+        for write in 0..symbols_usize {
+            let mut targets = by_write[state - 1][write].clone();
+            targets.sort_unstable();
+            targets.dedup();
+            let cell = if targets.is_empty() {
+                "-".to_string()
+            } else {
+                targets
+                    .into_iter()
+                    .map(|next| if next == 0 { "H".to_string() } else { next.to_string() })
+                    .collect::<Vec<_>>()
+                    .join(",")
+            };
+            row.push(cell);
+        }
+        rows.push(row);
+    }
+    lines.extend(build_table(&headers, &rows));
+    lines
+}
+
+fn build_memory_graph_lines(n: usize, initial: Action, table: &[Action]) -> Vec<String> {
+    let mut lines = Vec::new();
+    let states = 4usize.checked_pow(n as u32).unwrap_or(usize::MAX);
+    lines.push("graph:".to_string());
+    lines.push("legend: 0=CC 1=CD 2=DC 3=DD".to_string());
+    if states > MEMORY_GRAPH_STATE_LIMIT {
+        lines.push(format!("graph omitted ({} states)", states));
+        lines.push(format!("note: initial action = {}", initial.as_char()));
+        return lines;
+    }
+
+    let headers = vec![
+        "state".to_string(),
+        "0".to_string(),
+        "1".to_string(),
+        "2".to_string(),
+        "3".to_string(),
+    ];
+    let mask = if n == 0 {
+        0u64
+    } else {
+        (1u64 << (2 * n)) - 1
+    };
+    let mut rows = Vec::new();
+    for idx in 0..states {
+        let output = table.get(idx).copied().unwrap_or(initial);
+        let mut row = Vec::new();
+        row.push(format!("{idx}({})", output.as_char()));
+        for input in 0..4usize {
+            let next = if n == 0 {
+                0
+            } else {
+                (((idx as u64) << 2) | input as u64) & mask
+            };
+            row.push(next.to_string());
+        }
+        rows.push(row);
+    }
+    lines.extend(build_table(&headers, &rows));
+    lines.push(format!("note: initial action = {}", initial.as_char()));
+    lines
 }
 
 pub fn build_definition_lines(def: &nit_games::output::StrategyDefinition) -> Vec<String> {
@@ -55,17 +410,34 @@ pub fn build_definition_lines(def: &nit_games::output::StrategyDefinition) -> Ve
     match &def.kind {
         StrategySpecKind::Builtin { builtin } => {
             lines.push(format!("kind: builtin ({builtin:?})"));
+            let (start_state, mode, outputs, transitions) = builtin_as_fsm(*builtin);
+            lines.push("params: expanded to fsm for graph".to_string());
+            lines.push(String::new());
+            lines.extend(build_fsm_graph_lines(
+                outputs.len(),
+                start_state,
+                mode,
+                &outputs,
+                &transitions,
+            ));
         }
         StrategySpecKind::Random { p_cooperate } => {
-            lines.push(format!("kind: random"));
-            lines.push(format!("p_cooperate: {:.3}", p_cooperate));
+            lines.push("kind: random".to_string());
+            lines.push(format!("params: p_cooperate={:.3}", p_cooperate));
+            lines.push(String::new());
+            lines.push("graph:".to_string());
+            lines.push("note: stochastic output; single-node self-loop".to_string());
         }
         StrategySpecKind::Memory { n, initial, table } => {
             lines.push("kind: memory".to_string());
-            lines.push(format!("n: {}", n));
-            lines.push(format!("initial: {}", initial.as_char()));
-            let table_str: String = table.iter().map(|a| a.as_char()).collect();
-            lines.push(format!("table: {table_str}"));
+            lines.push(format!(
+                "params: n={} initial={} table={}",
+                n,
+                initial.as_char(),
+                table.iter().map(|a| a.as_char()).collect::<String>()
+            ));
+            lines.push(String::new());
+            lines.extend(build_memory_graph_lines(*n, *initial, table));
         }
         StrategySpecKind::Fsm {
             num_states,
@@ -85,30 +457,22 @@ pub fn build_definition_lines(def: &nit_games::output::StrategyDefinition) -> Ve
                 outputs.len()
             };
             lines.push("kind: fsm".to_string());
-            lines.push(format!("states: {}", state_count));
-            lines.push(format!("start_state: {}", start_state));
-            lines.push(format!("input_mode: {}", input_mode_label(mode)));
             let outputs_str: String = outputs.iter().map(|a| a.as_char()).collect();
-            lines.push(format!("outputs: {outputs_str}"));
-            let headers: Vec<&'static str> = match mode {
-                InputMode::OpponentLastAction => vec!["C", "D"],
-                InputMode::SelfLastAction => vec!["C", "D"],
-                InputMode::JointLastAction => vec!["CC", "CD", "DC", "DD"],
-            };
-            lines.push("transitions:".to_string());
-            lines.push(format!("state | {}", headers.join(" ")));
-            for (state_idx, row) in transitions.iter().enumerate() {
-                let output = outputs
-                    .get(state_idx)
-                    .map(|a| a.as_char())
-                    .unwrap_or('?');
-                let row_str = row
-                    .iter()
-                    .map(|n| n.to_string())
-                    .collect::<Vec<_>>()
-                    .join(" ");
-                lines.push(format!("{state_idx}({output}) | {row_str}"));
-            }
+            lines.push(format!(
+                "params: states={} start={} input={} outputs={}",
+                state_count,
+                start_state,
+                input_mode_label(mode),
+                outputs_str
+            ));
+            lines.push(String::new());
+            lines.extend(build_fsm_graph_lines(
+                state_count,
+                *start_state,
+                mode,
+                outputs,
+                transitions,
+            ));
         }
         StrategySpecKind::OneSidedTm {
             states,
@@ -123,36 +487,21 @@ pub fn build_definition_lines(def: &nit_games::output::StrategyDefinition) -> Ve
             rule_code,
         } => {
             lines.push("kind: one_sided_tm".to_string());
-            lines.push(format!("states: {}", states));
-            lines.push(format!("symbols: {}", symbols));
-            lines.push(format!("start_state: {}", start_state));
-            lines.push(format!("blank: {}", blank));
             let fallback = fallback_symbol.unwrap_or(*blank);
-            lines.push(format!("fallback_symbol: {}", fallback));
-            lines.push(format!("max_steps_per_round: {}", max_steps_per_round));
-            lines.push(format!("input_mode: {}", input_mode_label(*input_mode)));
             if let Some(code) = rule_code {
                 lines.push(format!("rule_code: {}", code));
             }
             let output_str: String = output_map.iter().map(|a| a.as_char()).collect();
-            lines.push(format!("output_map: {output_str}"));
-            lines.push("transitions:".to_string());
-            for state in 1..=*states as usize {
-                for read in 0..*symbols as usize {
-                    let idx = (state - 1) * (*symbols as usize) + read;
-                    if let Some(rule) = transitions.get(idx) {
-                        let move_label = match rule.move_dir {
-                            nit_games::strategy::TmMove::Left => "-1",
-                            nit_games::strategy::TmMove::Right => "1",
-                            nit_games::strategy::TmMove::Stay => "0",
-                        };
-                        lines.push(format!(
-                            "(s{}, r{}) -> (next={}, write={}, move={})",
-                            state, read, rule.next, rule.write, move_label
-                        ));
-                    }
-                }
-            }
+            lines.push(format!(
+                "params: states={} symbols={} start={} blank={} fallback={} max_steps={}",
+                states, symbols, start_state, blank, fallback, max_steps_per_round
+            ));
+            lines.push(format!(
+                "io: input={} output_map={output_str}",
+                input_mode_label(*input_mode)
+            ));
+            lines.push(String::new());
+            lines.extend(build_tm_graph_lines(*states, *symbols, transitions));
         }
     }
     lines
@@ -163,6 +512,7 @@ fn strategy_list(state: &AppState) -> &[nit_games::output::StrategyDefinition] {
 }
 
 fn line_count(state: &AppState) -> usize {
+    let (display_lines, _) = split_graph_sections(&state.games.strategy_inspect.lines);
     let mut count = 1; // status line
     if state.games.strategy_inspect.last_error.is_some() {
         count += 1;
@@ -172,7 +522,7 @@ fn line_count(state: &AppState) -> usize {
             count += 2;
         }
         count += 1;
-        count += state.games.strategy_inspect.lines.len();
+        count += display_lines.len();
         count += 2;
         return count;
     }
@@ -194,6 +544,7 @@ fn build_lines_window(
     inner_width: u16,
     start: usize,
     height: usize,
+    display_lines: &[String],
 ) -> Vec<Line<'static>> {
     let label_style = Style::default().fg(theme.title).add_modifier(Modifier::DIM);
     let value_style = Style::default().fg(theme.foreground);
@@ -268,20 +619,21 @@ fn build_lines_window(
         push(Line::from(""), &mut idx, &mut lines);
 
         let lines_start = idx;
-        let total_lines = state.games.strategy_inspect.lines.len();
+        let total_lines = display_lines.len();
         let lines_end = lines_start.saturating_add(total_lines);
         if end > lines_start && start < lines_end {
             let slice_start = start.saturating_sub(lines_start).min(total_lines);
             let slice_end = end.saturating_sub(lines_start).min(total_lines);
-            for line in &state.games.strategy_inspect.lines[slice_start..slice_end] {
-                push(
-                    Line::from(Span::styled(
-                        trim_to_width(line, max_width),
-                        value_style,
-                    )),
-                    &mut idx,
-                    &mut lines,
+            for line in &display_lines[slice_start..slice_end] {
+                let styled = style_definition_line(
+                    line,
+                    max_width,
+                    theme,
+                    label_style,
+                    value_style,
+                    dim_style,
                 );
+                push(styled, &mut idx, &mut lines);
             }
         }
         idx = lines_end;
@@ -358,8 +710,9 @@ fn build_lines_window(
 }
 
 pub fn build_lines(state: &AppState, theme: &Theme, inner_width: u16) -> Vec<Line<'static>> {
+    let (display_lines, _) = split_graph_sections(&state.games.strategy_inspect.lines);
     let total = line_count(state);
-    build_lines_window(state, theme, inner_width, 0, total)
+    build_lines_window(state, theme, inner_width, 0, total, &display_lines)
 }
 
 pub fn render(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
@@ -378,6 +731,99 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
+    let (display_lines, graph_lines) = split_graph_sections(&state.games.strategy_inspect.lines);
+    if !graph_lines.is_empty() && !state.games.strategy_inspect.lines.is_empty() {
+        let chunks = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([
+                Constraint::Percentage(58),
+                Constraint::Length(1),
+                Constraint::Percentage(42),
+            ])
+            .split(inner);
+
+        let left_block = Block::default()
+            .borders(Borders::ALL)
+            .title(Span::styled(
+                " DETAILS ",
+                Style::default()
+                    .fg(theme.title)
+                    .add_modifier(Modifier::BOLD),
+            ))
+            .border_style(Style::default().fg(theme.border))
+            .style(Style::default().bg(theme.background));
+        let right_block = Block::default()
+            .borders(Borders::ALL)
+            .title(Span::styled(
+                " GRAPH ",
+                Style::default()
+                    .fg(theme.title)
+                    .add_modifier(Modifier::BOLD),
+            ))
+            .border_style(Style::default().fg(theme.border))
+            .style(Style::default().bg(theme.background));
+
+        let left_inner = left_block.inner(chunks[0]);
+        let right_inner = right_block.inner(chunks[2]);
+
+        frame.render_widget(left_block, chunks[0]);
+        frame.render_widget(right_block, chunks[2]);
+
+        let total_lines = line_count(state);
+        let max_scroll = total_lines.saturating_sub(left_inner.height as usize);
+        let scroll = state.games.strategy_inspect.scroll_offset.min(max_scroll);
+        let mut left_lines = build_lines_window(
+            state,
+            theme,
+            left_inner.width,
+            scroll,
+            left_inner.height as usize,
+            &display_lines,
+        );
+        left_lines = apply_ui_selection(
+            left_lines,
+            state.ui_selection.as_ref(),
+            UiSelectionPane::GamesStrategyPopup,
+            theme.selection_bg,
+            scroll,
+        );
+        let left_paragraph = Paragraph::new(left_lines)
+            .style(Style::default().fg(theme.foreground).bg(theme.background))
+            .wrap(Wrap { trim: false })
+            .scroll((scroll as u16, 0));
+        frame.render_widget(left_paragraph, left_inner);
+
+        let label_style = Style::default().fg(theme.title).add_modifier(Modifier::DIM);
+        let value_style = Style::default().fg(theme.foreground);
+        let dim_style = Style::default()
+            .fg(theme.border)
+            .add_modifier(Modifier::DIM);
+        let max_width = right_inner.width.max(1) as usize;
+        let mut graph_styled = Vec::new();
+        let mut idx = 0usize;
+        for line in &graph_lines {
+            if idx >= right_inner.height as usize {
+                break;
+            }
+            let styled = style_definition_line(
+                line,
+                max_width,
+                theme,
+                label_style,
+                value_style,
+                dim_style,
+            );
+            graph_styled.push(styled);
+            idx = idx.saturating_add(1);
+        }
+        let right_paragraph = Paragraph::new(graph_styled)
+            .style(Style::default().fg(theme.foreground).bg(theme.background))
+            .wrap(Wrap { trim: false })
+            .scroll((0, 0));
+        frame.render_widget(right_paragraph, right_inner);
+        return;
+    }
+
     let total_lines = line_count(state);
     let max_scroll = total_lines.saturating_sub(inner.height as usize);
     let scroll = state.games.strategy_inspect.scroll_offset.min(max_scroll);
@@ -387,6 +833,7 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
         inner.width,
         scroll,
         inner.height as usize,
+        &display_lines,
     );
     lines = apply_ui_selection(
         lines,

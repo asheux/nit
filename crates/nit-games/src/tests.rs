@@ -154,6 +154,45 @@ name = "Always Cooperate"
 }
 
 #[test]
+fn adjusted_scores_are_deterministic() {
+    let cfg = r#"
+schema_version = 1
+game = "ipd"
+rounds = 6
+repetitions = 1
+self_play = false
+seed = 42
+
+[engine.complexity_cost]
+enabled = true
+memory_n_cost = 0.25
+
+[[strategy]]
+id = "mem1"
+type = "memory"
+n = 1
+initial = "C"
+table = ["C", "C", "C", "C"]
+
+[[strategy]]
+id = "allc"
+type = "builtin"
+name = "Always Cooperate"
+"#;
+    let config = GamesConfig::from_toml(cfg).expect("config parse");
+    let results_a = run_to_completion(TournamentRunner::new(config.clone()));
+    let results_b = run_to_completion(TournamentRunner::new(config));
+    assert_eq!(
+        results_a.ranking[0].adjusted_total_payoff,
+        results_b.ranking[0].adjusted_total_payoff
+    );
+    assert_eq!(
+        results_a.ranking[1].adjusted_total_payoff,
+        results_b.ranking[1].adjusted_total_payoff
+    );
+}
+
+#[test]
 fn fsm_input_index_base_one_subtracts_state_indices() {
     let cfg = r#"
 schema_version = 1
@@ -571,6 +610,99 @@ fn tm_left_boundary_safe() {
 }
 
 #[test]
+fn tm_left_boundary_clamps_without_growth() {
+    let transitions = vec![
+        TmTransition {
+            write: 1,
+            move_dir: TmMove::Left,
+            next: 1,
+        },
+        TmTransition {
+            write: 1,
+            move_dir: TmMove::Left,
+            next: 1,
+        },
+    ];
+    let mut tm = OneSidedTmStrategy::new(
+        "tm",
+        2,
+        1,
+        0,
+        0,
+        3,
+        InputMode::OpponentLastAction,
+        vec![Action::Cooperate, Action::Defect],
+        transitions,
+    );
+    tm.reset();
+    let _ = tm.next_action(&History::new(1), true);
+    assert_eq!(tm.tape_len(), 1);
+}
+
+#[test]
+fn tm_rail_output_writes_before_output() {
+    let transitions = vec![
+        // state 1, read 0 -> move left to inspect previous cell
+        TmTransition {
+            write: 0,
+            move_dir: TmMove::Left,
+            next: 2,
+        },
+        // state 1, read 1 -> rail output with write 0 (Cooperate)
+        TmTransition {
+            write: 0,
+            move_dir: TmMove::Right,
+            next: 2,
+        },
+        // state 2, read 0 -> propagate 0 to rightmost
+        TmTransition {
+            write: 0,
+            move_dir: TmMove::Right,
+            next: 3,
+        },
+        // state 2, read 1 -> propagate 1 to rightmost
+        TmTransition {
+            write: 1,
+            move_dir: TmMove::Right,
+            next: 3,
+        },
+        // state 3, read 0 -> rail output 0
+        TmTransition {
+            write: 0,
+            move_dir: TmMove::Right,
+            next: 3,
+        },
+        // state 3, read 1 -> rail output 1
+        TmTransition {
+            write: 1,
+            move_dir: TmMove::Right,
+            next: 3,
+        },
+    ];
+    let mut tm = OneSidedTmStrategy::new(
+        "tm",
+        2,
+        1,
+        0,
+        0,
+        3,
+        InputMode::OpponentLastAction,
+        vec![Action::Cooperate, Action::Defect],
+        transitions,
+    );
+    tm.reset();
+
+    let mut history = History::new(1);
+    history.push(Action::Cooperate, Action::Defect);
+    let action_round_1 = tm.next_action(&history, true);
+    assert_eq!(action_round_1, Action::Cooperate);
+
+    history.push(action_round_1, Action::Cooperate);
+    let action_round_2 = tm.next_action(&history, true);
+    assert_eq!(action_round_2, Action::Cooperate);
+}
+
+#[test]
 fn tm_fallback_symbol_overrides_blank() {
     let transitions = vec![
         TmTransition {
@@ -700,6 +832,50 @@ rule_code = 3111
 }
 
 #[test]
+fn tm_rule_code_matches_wolfram_example_3x2() {
+    let cfg = r#"
+schema_version = 1
+game = "ipd"
+rounds = 1
+repetitions = 1
+self_play = false
+
+[[strategy]]
+id = "tm"
+type = "one_sided_tm"
+states = 3
+symbols = 2
+start_state = 1
+blank = 0
+max_steps_per_round = 8
+input_mode = "opponent_last_action"
+output_map = ["C","D"]
+rule_code = 3111
+"#;
+    let config = GamesConfig::from_toml(cfg).expect("config parse");
+    let spec = config
+        .strategies
+        .iter()
+        .find(|s| s.id == "tm")
+        .expect("tm spec");
+    match &spec.kind {
+        StrategySpecKind::OneSidedTm { transitions, .. } => {
+            let t = transitions;
+            assert_eq!(t.len(), 6);
+            // (2,0) -> (3,0,R)
+            assert_eq!(t[2].next, 3);
+            assert_eq!(t[2].write, 0);
+            assert!(matches!(t[2].move_dir, TmMove::Right));
+            // (3,1) -> (2,1,R)
+            assert_eq!(t[5].next, 2);
+            assert_eq!(t[5].write, 1);
+            assert!(matches!(t[5].move_dir, TmMove::Right));
+        }
+        _ => panic!("expected one_sided_tm spec"),
+    }
+}
+
+#[test]
 fn tm_deterministic_reproducibility() {
     let transitions = vec![
         TmTransition {
@@ -742,6 +918,54 @@ fn tm_deterministic_reproducibility() {
     let trace_a = drive_strategy(&mut tm_a, &opponent);
     let trace_b = drive_strategy(&mut tm_b, &opponent);
     assert_eq!(trace_a, trace_b);
+}
+
+#[test]
+fn tm_complexity_cost_ranks_high_step_lower() {
+    let cfg = r#"
+schema_version = 1
+game = "ipd"
+rounds = 5
+repetitions = 1
+self_play = false
+
+[engine.complexity_cost]
+enabled = true
+tm_step_cost = 1.0
+
+[[strategy]]
+id = "tm_low"
+type = "one_sided_tm"
+states = 1
+symbols = 2
+start_state = 1
+blank = 0
+max_steps_per_round = 1
+input_mode = "opponent_last_action"
+output_map = ["C", "D"]
+transitions = [
+  [ [1, 0, "R"], [1, 0, "R"] ],
+]
+
+[[strategy]]
+id = "tm_high"
+type = "one_sided_tm"
+states = 2
+symbols = 2
+start_state = 1
+blank = 0
+max_steps_per_round = 2
+input_mode = "opponent_last_action"
+output_map = ["C", "D"]
+transitions = [
+  [ [2, 0, "S"], [2, 0, "S"] ],
+  [ [2, 0, "R"], [2, 0, "R"] ],
+]
+"#;
+    let config = GamesConfig::from_toml(cfg).expect("config parse");
+    let results = run_to_completion(TournamentRunner::new(config));
+    assert_eq!(results.ranking[0].id, "tm_low");
+    assert_eq!(results.ranking[1].id, "tm_high");
 }
 
 #[test]

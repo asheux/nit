@@ -149,7 +149,7 @@ fallback_symbol = 0
 max_steps_per_round = 64
 input_mode = "opponent_last_action"
 output_map = ["C", "D"]
-rule_code = 0
+rule_code = 3111
 
 [[strategy]]
 id = "tm_rule_4x2"

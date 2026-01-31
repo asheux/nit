@@ -11,14 +11,15 @@ use std::thread;
 use anyhow::Context;
 use clap::{Parser, Subcommand, ValueEnum};
 use nit_core::{io as core_io, AppKind, Buffer, LabId, Mode, SelectedRule};
-use nit_games::config::EngineMode;
+use nit_games::config::{BuiltinKind, EngineMode};
 use nit_games::events::{EventWriter, GameEvent};
 use nit_games::history_log::MatchHistory;
 use nit_games::output::{write_summary, RunLayout, RunPaths, RunSummary, RUN_SUMMARY_SCHEMA_VERSION};
 use nit_games::tournament::{KernelRunMode, Parallelism, TournamentKernel};
 use nit_games::{
-    enumerate_fsms, run_id_from_seed_config, FsmDefinition, GamesConfig, HistoryWriter, InputMode,
-    StrategySpec,
+    enumerate_fsms, format_strategy_introspection, introspect_strategy, run_id_from_seed_config,
+    Action, FsmDefinition, GamesConfig, HistoryWriter, InputMode, StrategyIntrospectionKind,
+    StrategyIntrospection, StrategyIntrospectionParameters, StrategySpec, TmTransitionRecord,
 };
 use nit_games::config::StrategySpecKind;
 use nit_tui::{run, Theme};
@@ -110,6 +111,24 @@ enum GamesCommand {
         /// Repetitions grid (comma-separated)
         #[arg(long, value_delimiter = ',')]
         repetitions: Vec<u32>,
+        /// Payoff preset (pd, stag_hunt, snowdrift, chicken)
+        #[arg(long)]
+        payoff_preset: Option<String>,
+        /// Payoff R grid (comma-separated)
+        #[arg(long, value_delimiter = ',')]
+        payoff_r: Vec<i32>,
+        /// Payoff S grid (comma-separated)
+        #[arg(long, value_delimiter = ',')]
+        payoff_s: Vec<i32>,
+        /// Payoff T grid (comma-separated)
+        #[arg(long, value_delimiter = ',')]
+        payoff_t: Vec<i32>,
+        /// Payoff P grid (comma-separated)
+        #[arg(long, value_delimiter = ',')]
+        payoff_p: Vec<i32>,
+        /// Force rerun even if cell output exists
+        #[arg(long)]
+        force: bool,
         /// Output format for stdout summary
         #[arg(long, value_enum, default_value_t = OutputFormat::Pretty)]
         format: OutputFormat,
@@ -124,6 +143,36 @@ enum GamesCommand {
     Enumerate {
         #[command(subcommand)]
         kind: EnumerateCommand,
+    },
+    /// Inspect a strategy definition
+    Inspect {
+        /// Config path (defaults to games.toml)
+        #[arg(long)]
+        config: Option<PathBuf>,
+        /// Strategy id to inspect
+        #[arg(long)]
+        id: String,
+        /// Output format (json or pretty text)
+        #[arg(long, value_enum, default_value_t = OutputFormat::Pretty)]
+        format: OutputFormat,
+        /// Optional output path (defaults to stdout)
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
+    /// Export strategy graph (DOT or JSON)
+    Graph {
+        /// Config path (defaults to games.toml)
+        #[arg(long)]
+        config: Option<PathBuf>,
+        /// Run summary path (optional, overrides --config)
+        #[arg(long)]
+        run: Option<PathBuf>,
+        /// Strategy id to graph (alias: --fsm)
+        #[arg(long, alias = "fsm")]
+        id: String,
+        /// Output path (.dot/.gv or .json)
+        #[arg(long)]
+        out: PathBuf,
     },
 }
 
@@ -198,6 +247,12 @@ fn main() -> anyhow::Result<()> {
                 rounds,
                 noise,
                 repetitions,
+                payoff_preset,
+                payoff_r,
+                payoff_s,
+                payoff_t,
+                payoff_p,
+                force,
                 format,
                 quiet,
                 verbose,
@@ -213,10 +268,42 @@ fn main() -> anyhow::Result<()> {
             rounds,
             noise,
             repetitions,
+            payoff_preset,
+            payoff_r,
+            payoff_s,
+            payoff_t,
+            payoff_p,
+            force,
             format,
             quiet,
             verbose,
         );
+    }
+    if let Some(Command::Games {
+        command:
+            Some(GamesCommand::Inspect {
+                config,
+                id,
+                format,
+                out,
+            }),
+        ..
+    }) = cli.command
+    {
+        return run_games_inspect(config, id, format, out);
+    }
+    if let Some(Command::Games {
+        command:
+            Some(GamesCommand::Graph {
+                config,
+                run,
+                id,
+                out,
+            }),
+        ..
+    }) = cli.command
+    {
+        return run_games_graph(config, run, id, out);
     }
     if let Some(Command::Games {
         command: Some(GamesCommand::Enumerate { kind }),
@@ -427,6 +514,12 @@ mode = "interactive"
 parallelism = "auto"
 progress_interval_ms = 80
 fast_eval = true
+
+[engine.complexity_cost]
+enabled = false
+tm_step_cost = 0.0
+fsm_state_cost = 0.0
+memory_n_cost = 0.0
 
 [[strategy]]
 id = "allc"
@@ -805,6 +898,12 @@ fn run_games_sweep(
     rounds: Vec<u32>,
     noise: Vec<f32>,
     repetitions: Vec<u32>,
+    payoff_preset: Option<String>,
+    payoff_r: Vec<i32>,
+    payoff_s: Vec<i32>,
+    payoff_t: Vec<i32>,
+    payoff_p: Vec<i32>,
+    force: bool,
     format: OutputFormat,
     quiet: bool,
     verbose: bool,
@@ -845,6 +944,33 @@ fn run_games_sweep(
     } else {
         repetitions
     };
+    let preset_values = match payoff_preset.as_deref() {
+        Some(name) => resolve_payoff_preset(name)
+            .ok_or_else(|| anyhow::anyhow!("unknown payoff preset '{name}'"))?
+            .into(),
+        None => (config.payoff.r, config.payoff.s, config.payoff.t, config.payoff.p),
+    };
+    let (base_r, base_s, base_t, base_p) = preset_values;
+    let payoff_r_grid = if payoff_r.is_empty() {
+        vec![base_r]
+    } else {
+        payoff_r
+    };
+    let payoff_s_grid = if payoff_s.is_empty() {
+        vec![base_s]
+    } else {
+        payoff_s
+    };
+    let payoff_t_grid = if payoff_t.is_empty() {
+        vec![base_t]
+    } else {
+        payoff_t
+    };
+    let payoff_p_grid = if payoff_p.is_empty() {
+        vec![base_p]
+    } else {
+        payoff_p
+    };
 
     let cwd = std::env::current_dir()?;
     let base_dir = config_path
@@ -875,146 +1001,279 @@ fn run_games_sweep(
         .with_context(|| format!("failed to create {}", cells_root.display()))?;
 
     let mut cell_summaries = Vec::new();
-    let mut totals_by_strategy: HashMap<String, Vec<i64>> = HashMap::new();
+    let mut raw_totals_by_strategy: HashMap<String, Vec<f64>> = HashMap::new();
+    let mut adjusted_totals_by_strategy: HashMap<String, Vec<f64>> = HashMap::new();
     let mut top_counts: HashMap<String, u32> = HashMap::new();
     let mut cell_id = 0usize;
+    let top_k = 3usize;
+
+    let collect_results = |results: &nit_games::output::TournamentResults,
+                               raw_totals: &mut HashMap<String, Vec<f64>>,
+                               adjusted_totals: &mut HashMap<String, Vec<f64>>,
+                               top_counts: &mut HashMap<String, u32>| {
+        let mut top_entries = Vec::new();
+        for entry in results.ranking.iter().take(top_k) {
+            top_entries.push(SweepTopEntry {
+                id: entry.id.clone(),
+                total_payoff: entry.total_payoff,
+                adjusted_total_payoff: entry.adjusted_total_payoff,
+            });
+        }
+        let top_id = top_entries
+            .first()
+            .map(|entry| entry.id.clone())
+            .unwrap_or_else(|| "none".into());
+        *top_counts.entry(top_id.clone()).or_insert(0) += 1;
+
+        for strategy in &results.ranking {
+            raw_totals
+                .entry(strategy.id.clone())
+                .or_default()
+                .push(strategy.total_payoff as f64);
+            if let Some(adj) = strategy.adjusted_total_payoff {
+                adjusted_totals
+                    .entry(strategy.id.clone())
+                    .or_default()
+                    .push(adj);
+            }
+        }
+
+        (top_id, top_entries)
+    };
 
     for rounds in &rounds_grid {
         for noise in &noise_grid {
             for reps in &reps_grid {
-                cell_id += 1;
-                let noise_bits = noise.to_bits();
-                let cell_seed = stable_hash_bytes(
-                    format!("{base_seed}:{rounds}:{reps}:{noise_bits}:{cell_id}").as_bytes(),
-                );
-                let mut cell_config = config.clone();
-                cell_config.rounds = *rounds;
-                cell_config.repetitions = *reps;
-                cell_config.noise = (*noise).clamp(0.0, 1.0);
-                cell_config.seed = Some(cell_seed);
-                cell_config.engine.mode = EngineMode::Batch;
+                for r in &payoff_r_grid {
+                    for s in &payoff_s_grid {
+                        for t in &payoff_t_grid {
+                            for p in &payoff_p_grid {
+                                cell_id += 1;
+                                let noise_bits = noise.to_bits();
+                                let cell_seed = stable_hash_bytes(
+                                    format!(
+                                        "{base_seed}:{rounds}:{reps}:{noise_bits}:{r}:{s}:{t}:{p}"
+                                    )
+                                    .as_bytes(),
+                                );
+                                let mut cell_config = config.clone();
+                                cell_config.rounds = *rounds;
+                                cell_config.repetitions = *reps;
+                                cell_config.noise = (*noise).clamp(0.0, 1.0);
+                                cell_config.payoff = payoff_from_rsp(*r, *s, *t, *p);
+                                cell_config.seed = Some(cell_seed);
+                                cell_config.engine.mode = EngineMode::Batch;
 
-                let config_text_cell =
-                    toml::to_string(&cell_config).unwrap_or_else(|_| config_text.clone());
-                let run_id = run_id_from_seed_config(cell_seed, &config_text_cell);
-                let noise_label = format!("{:.4}", noise).replace('.', "_");
-                let cell_dir = cells_root.join(format!(
-                    "{:04}__r{}__n{}__rep{}",
-                    cell_id, rounds, noise_label, reps
-                ));
-                fs::create_dir_all(&cell_dir)
-                    .with_context(|| format!("failed to create {}", cell_dir.display()))?;
+                                let config_text_cell =
+                                    toml::to_string(&cell_config)
+                                        .unwrap_or_else(|_| config_text.clone());
+                                let run_id = run_id_from_seed_config(cell_seed, &config_text_cell);
+                                let noise_label = format!("{:.4}", noise).replace('.', "_");
+                                let cell_dir = cells_root.join(format!(
+                                    "{:04}__r{}__n{}__rep{}__R{}__S{}__T{}__P{}",
+                                    cell_id, rounds, noise_label, reps, r, s, t, p
+                                ));
+                                fs::create_dir_all(&cell_dir)
+                                    .with_context(|| format!("failed to create {}", cell_dir.display()))?;
 
-                let summary_path = cell_dir.join("run_summary.json");
-                let definitions_path = cell_dir.join("definitions.json");
-                let results_path = cell_dir.join("results.json");
-                let events_path = cell_dir.join("events.ndjson");
-                let history_path = cell_dir.join("history.ndjson");
-                let config_path = cell_dir.join("config.toml");
-                let analysis_dir = cell_dir.join("analysis");
+                                let summary_path = cell_dir.join("run_summary.json");
+                                let definitions_path = cell_dir.join("definitions.json");
+                                let results_path = cell_dir.join("results.json");
+                                let events_path = cell_dir.join("events.ndjson");
+                                let history_path = cell_dir.join("history.ndjson");
+                                let config_path = cell_dir.join("config.toml");
+                                let analysis_dir = cell_dir.join("analysis");
 
-                if let Err(err) = fs::write(&config_path, &config_text_cell) {
-                    eprintln!("Warning: failed to write config snapshot: {err}");
+                                if summary_path.exists() && !force {
+                                    if let Ok(summary_text) = fs::read_to_string(&summary_path) {
+                                        if let Ok(summary) =
+                                            serde_json::from_str::<RunSummary>(&summary_text)
+                                        {
+                                            let (top_id, top_entries) = collect_results(
+                                                &summary.results,
+                                                &mut raw_totals_by_strategy,
+                                                &mut adjusted_totals_by_strategy,
+                                                &mut top_counts,
+                                            );
+                                            cell_summaries.push(SweepCellSummary {
+                                                cell_id,
+                                                rounds: *rounds,
+                                                noise: *noise,
+                                                repetitions: *reps,
+                                                payoff_r: *r,
+                                                payoff_s: *s,
+                                                payoff_t: *t,
+                                                payoff_p: *p,
+                                                seed: summary.seed,
+                                                run_id: summary.run_id.clone(),
+                                                run_dir: summary
+                                                    .run_dir
+                                                    .clone()
+                                                    .unwrap_or_else(|| cell_dir.display().to_string()),
+                                                summary_path: summary
+                                                    .paths
+                                                    .summary
+                                                    .clone()
+                                                    .unwrap_or_else(|| summary_path.display().to_string()),
+                                                top_strategy: top_id,
+                                                top_strategies: top_entries,
+                                                skipped: true,
+                                            });
+                                            if verbose {
+                                                eprintln!(
+                                                    "Skipping existing cell {} ({}): {}",
+                                                    cell_id,
+                                                    summary.run_id,
+                                                    summary_path.display()
+                                                );
+                                            }
+                                            continue;
+                                        }
+                                    }
+                                }
+
+                                if let Err(err) = fs::write(&config_path, &config_text_cell) {
+                                    eprintln!("Warning: failed to write config snapshot: {err}");
+                                }
+
+                                let kernel = TournamentKernel::new(cell_config.clone());
+                                let (results, event_log, history_log) = execute_tournament(
+                                    &kernel,
+                                    &cell_config,
+                                    cell_config.event_log.enabled.then_some(events_path.clone()),
+                                    cell_config.history.enabled.then_some(history_path.clone()),
+                                )?;
+
+                                if let Err(err) =
+                                    nit_utils::fs::write_atomic(&definitions_path, |writer| {
+                                        serde_json::to_writer_pretty(writer, kernel.definitions())
+                                            .map_err(|e| {
+                                                std::io::Error::new(std::io::ErrorKind::Other, e)
+                                            })
+                                    })
+                                {
+                                    eprintln!("Warning: failed to write definitions: {err}");
+                                }
+                                if let Err(err) = nit_utils::fs::write_atomic(&results_path, |writer| {
+                                    serde_json::to_writer_pretty(writer, &results)
+                                        .map_err(|e| {
+                                            std::io::Error::new(std::io::ErrorKind::Other, e)
+                                        })
+                                }) {
+                                    eprintln!("Warning: failed to write results: {err}");
+                                }
+
+                                let summary = RunSummary {
+                                    schema_version: RUN_SUMMARY_SCHEMA_VERSION,
+                                    timestamp: timestamp.clone(),
+                                    run_id: run_id.clone(),
+                                    seed: cell_seed,
+                                    config_text: config_text_cell.clone(),
+                                    config: cell_config.clone(),
+                                    paths: RunPaths {
+                                        summary: Some(summary_path.display().to_string()),
+                                        events: event_log.clone(),
+                                        history: history_log.clone(),
+                                        definitions: Some(definitions_path.display().to_string()),
+                                        results: Some(results_path.display().to_string()),
+                                        config: Some(config_path.display().to_string()),
+                                        analysis_dir: Some(analysis_dir.display().to_string()),
+                                    },
+                                    strategies: kernel.definitions().to_vec(),
+                                    results: results.clone(),
+                                    event_log,
+                                    history_log,
+                                    run_dir: Some(cell_dir.display().to_string()),
+                                };
+
+                                write_summary(&summary_path, &summary)
+                                    .with_context(|| format!("failed to write {}", summary_path.display()))?;
+
+                                let (top_id, top_entries) = collect_results(
+                                    &results,
+                                    &mut raw_totals_by_strategy,
+                                    &mut adjusted_totals_by_strategy,
+                                    &mut top_counts,
+                                );
+                                cell_summaries.push(SweepCellSummary {
+                                    cell_id,
+                                    rounds: *rounds,
+                                    noise: *noise,
+                                    repetitions: *reps,
+                                    payoff_r: *r,
+                                    payoff_s: *s,
+                                    payoff_t: *t,
+                                    payoff_p: *p,
+                                    seed: cell_seed,
+                                    run_id,
+                                    run_dir: cell_dir.display().to_string(),
+                                    summary_path: summary_path.display().to_string(),
+                                    top_strategy: top_id,
+                                    top_strategies: top_entries,
+                                    skipped: false,
+                                });
+                            }
+                        }
+                    }
                 }
-
-                let kernel = TournamentKernel::new(cell_config.clone());
-                let (results, event_log, history_log) = execute_tournament(
-                    &kernel,
-                    &cell_config,
-                    cell_config.event_log.enabled.then_some(events_path.clone()),
-                    cell_config.history.enabled.then_some(history_path.clone()),
-                )?;
-
-                if let Err(err) = nit_utils::fs::write_atomic(&definitions_path, |writer| {
-                    serde_json::to_writer_pretty(writer, kernel.definitions())
-                        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
-                }) {
-                    eprintln!("Warning: failed to write definitions: {err}");
-                }
-                if let Err(err) = nit_utils::fs::write_atomic(&results_path, |writer| {
-                    serde_json::to_writer_pretty(writer, &results)
-                        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
-                }) {
-                    eprintln!("Warning: failed to write results: {err}");
-                }
-
-                let summary = RunSummary {
-                    schema_version: RUN_SUMMARY_SCHEMA_VERSION,
-                    timestamp: timestamp.clone(),
-                    run_id: run_id.clone(),
-                    seed: cell_seed,
-                    config_text: config_text_cell.clone(),
-                    config: cell_config.clone(),
-                    paths: RunPaths {
-                        summary: Some(summary_path.display().to_string()),
-                        events: event_log.clone(),
-                        history: history_log.clone(),
-                        definitions: Some(definitions_path.display().to_string()),
-                        results: Some(results_path.display().to_string()),
-                        config: Some(config_path.display().to_string()),
-                        analysis_dir: Some(analysis_dir.display().to_string()),
-                    },
-                    strategies: kernel.definitions().to_vec(),
-                    results: results.clone(),
-                    event_log,
-                    history_log,
-                    run_dir: Some(cell_dir.display().to_string()),
-                };
-
-                write_summary(&summary_path, &summary)
-                    .with_context(|| format!("failed to write {}", summary_path.display()))?;
-
-                let top_id = results
-                    .ranking
-                    .first()
-                    .map(|r| r.id.clone())
-                    .unwrap_or_else(|| "none".into());
-                *top_counts.entry(top_id.clone()).or_insert(0) += 1;
-
-                for strategy in &results.ranking {
-                    totals_by_strategy
-                        .entry(strategy.id.clone())
-                        .or_default()
-                        .push(strategy.total_payoff);
-                }
-
-                cell_summaries.push(SweepCellSummary {
-                    cell_id,
-                    rounds: *rounds,
-                    noise: *noise,
-                    repetitions: *reps,
-                    seed: cell_seed,
-                    run_id,
-                    run_dir: cell_dir.display().to_string(),
-                    summary_path: summary_path.display().to_string(),
-                    top_strategy: top_id,
-                });
             }
         }
     }
 
     let mut strategies = Vec::new();
-    for (id, totals) in totals_by_strategy {
+    let sort_by_adjusted = config.engine.complexity_cost.enabled;
+    for (id, totals) in raw_totals_by_strategy {
         let count = totals.len() as f64;
-        let mean = totals.iter().map(|v| *v as f64).sum::<f64>() / count.max(1.0);
+        let mean = totals.iter().sum::<f64>() / count.max(1.0);
         let var = totals
             .iter()
             .map(|v| {
-                let diff = *v as f64 - mean;
+                let diff = *v - mean;
                 diff * diff
             })
             .sum::<f64>()
             / count.max(1.0);
         let std = var.sqrt();
+        let (mean_adj, std_adj) = adjusted_totals_by_strategy
+            .get(&id)
+            .and_then(|vals| {
+                if vals.is_empty() {
+                    None
+                } else {
+                    let count = vals.len() as f64;
+                    let mean = vals.iter().sum::<f64>() / count.max(1.0);
+                    let var = vals
+                        .iter()
+                        .map(|v| {
+                            let diff = *v - mean;
+                            diff * diff
+                        })
+                        .sum::<f64>()
+                        / count.max(1.0);
+                    Some((mean, var.sqrt()))
+                }
+            })
+            .unwrap_or((0.0, 0.0));
+        let adjusted_present = adjusted_totals_by_strategy.get(&id).is_some();
         let top_count = top_counts.get(&id).copied().unwrap_or(0);
         strategies.push(SweepStrategyAggregate {
             id,
             mean_total_payoff: mean,
             std_total_payoff: std,
+            mean_adjusted_payoff: adjusted_present.then_some(mean_adj),
+            std_adjusted_payoff: adjusted_present.then_some(std_adj),
             top1_count: top_count,
         });
     }
-    strategies.sort_by(|a, b| b.mean_total_payoff.partial_cmp(&a.mean_total_payoff).unwrap());
+    if sort_by_adjusted {
+        strategies.sort_by(|a, b| {
+            let a_score = a.mean_adjusted_payoff.unwrap_or(a.mean_total_payoff);
+            let b_score = b.mean_adjusted_payoff.unwrap_or(b.mean_total_payoff);
+            b_score.partial_cmp(&a_score).unwrap()
+        });
+    } else {
+        strategies.sort_by(|a, b| b.mean_total_payoff.partial_cmp(&a.mean_total_payoff).unwrap());
+    }
 
     let summary = SweepSummary {
         schema_version: 1,
@@ -1025,6 +1284,11 @@ fn run_games_sweep(
             rounds: rounds_grid.clone(),
             noise: noise_grid.clone(),
             repetitions: reps_grid.clone(),
+            payoff_preset: payoff_preset.clone(),
+            payoff_r: payoff_r_grid.clone(),
+            payoff_s: payoff_s_grid.clone(),
+            payoff_t: payoff_t_grid.clone(),
+            payoff_p: payoff_p_grid.clone(),
         },
         cells: cell_summaries,
         aggregate: SweepAggregate { strategies },
@@ -1050,6 +1314,486 @@ fn run_games_sweep(
     }
 
     Ok(())
+}
+
+fn run_games_inspect(
+    config_path: Option<PathBuf>,
+    id: String,
+    format: OutputFormat,
+    out: Option<PathBuf>,
+) -> anyhow::Result<()> {
+    let config_path = config_path.unwrap_or_else(|| PathBuf::from("games.toml"));
+    let config_text = core_io::load_to_string(&config_path)
+        .with_context(|| format!("failed to read {}", config_path.display()))?;
+    let config = GamesConfig::from_toml_with_root(
+        &config_text,
+        config_path.parent(),
+    )
+    .map_err(|err| anyhow::anyhow!(err))?;
+
+    let spec = config
+        .strategies
+        .iter()
+        .find(|spec| spec.id == id)
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("strategy '{}' not found", id))?;
+    let intro = introspect_strategy(&spec);
+    let output = match format {
+        OutputFormat::Json => serde_json::to_string(&intro)?,
+        OutputFormat::Pretty => format_strategy_introspection(&intro).join("\n"),
+    };
+
+    if let Some(out_path) = out {
+        if let Some(parent) = out_path.parent() {
+            if !parent.as_os_str().is_empty() {
+                fs::create_dir_all(parent).with_context(|| {
+                    format!("failed to create directory {}", parent.display())
+                })?;
+            }
+        }
+        fs::write(&out_path, output)
+            .with_context(|| format!("failed to write {}", out_path.display()))?;
+    } else {
+        println!("{output}");
+    }
+
+    Ok(())
+}
+
+#[derive(Serialize)]
+struct GraphNode {
+    id: String,
+    label: String,
+}
+
+#[derive(Serialize)]
+struct GraphEdge {
+    from: String,
+    to: String,
+    label: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    color: Option<String>,
+}
+
+#[derive(Serialize)]
+struct StrategyGraph {
+    directed: bool,
+    strategy_id: String,
+    kind: StrategyIntrospectionKind,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    input_mode: Option<InputMode>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    start_state: Option<String>,
+    nodes: Vec<GraphNode>,
+    edges: Vec<GraphEdge>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    notes: Option<Vec<String>>,
+}
+
+fn run_games_graph(
+    config_path: Option<PathBuf>,
+    run_path: Option<PathBuf>,
+    strategy_id: String,
+    out_path: PathBuf,
+) -> anyhow::Result<()> {
+    let spec = if let Some(run_path) = run_path {
+        let run_text = core_io::load_to_string(&run_path)
+            .with_context(|| format!("failed to read {}", run_path.display()))?;
+        let summary: RunSummary = serde_json::from_str(&run_text)
+            .with_context(|| format!("failed to parse {}", run_path.display()))?;
+        summary
+            .config
+            .strategies
+            .iter()
+            .find(|spec| spec.id == strategy_id)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("strategy '{}' not found", strategy_id))?
+    } else {
+        let config_path = config_path.unwrap_or_else(|| PathBuf::from("games.toml"));
+        let config_text = core_io::load_to_string(&config_path)
+            .with_context(|| format!("failed to read {}", config_path.display()))?;
+        let config = GamesConfig::from_toml_with_root(
+            &config_text,
+            config_path.parent(),
+        )
+        .map_err(|err| anyhow::anyhow!(err))?;
+        config
+            .strategies
+            .iter()
+            .find(|spec| spec.id == strategy_id)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("strategy '{}' not found", strategy_id))?
+    };
+    let intro = introspect_strategy(&spec);
+    let graph = build_strategy_graph(&intro)?;
+
+    let ext = out_path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .unwrap_or("");
+    let is_json = ext.eq_ignore_ascii_case("json");
+    let is_dot = ext.eq_ignore_ascii_case("dot") || ext.eq_ignore_ascii_case("gv");
+    if !is_json && !is_dot {
+        anyhow::bail!("output path must end with .json, .dot, or .gv");
+    }
+
+    if let Some(parent) = out_path.parent() {
+        if !parent.as_os_str().is_empty() {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("failed to create directory {}", parent.display()))?;
+        }
+    }
+
+    if is_json {
+        nit_utils::fs::write_atomic(&out_path, |writer| {
+            serde_json::to_writer_pretty(writer, &graph)
+                .map_err(|e| io::Error::new(io::ErrorKind::Other, e))
+        })
+        .with_context(|| format!("failed to write {}", out_path.display()))?;
+    } else {
+        let dot = render_strategy_graph_dot(&graph);
+        fs::write(&out_path, dot)
+            .with_context(|| format!("failed to write {}", out_path.display()))?;
+    }
+
+    eprintln!("Graph written: {}", out_path.display());
+    Ok(())
+}
+
+fn build_strategy_graph(intro: &StrategyIntrospection) -> anyhow::Result<StrategyGraph> {
+    match &intro.parameters {
+        StrategyIntrospectionParameters::Fsm {
+            states,
+            start_state,
+            input_mode,
+            outputs,
+            transitions,
+        } => Ok(build_fsm_graph(
+            intro.id.clone(),
+            intro.kind.clone(),
+            *states,
+            *start_state,
+            *input_mode,
+            outputs,
+            transitions,
+            None,
+        )),
+        StrategyIntrospectionParameters::OneSidedTm {
+            states,
+            start_state,
+            input_mode,
+            transitions,
+            ..
+        } => Ok(build_tm_graph(
+            intro.id.clone(),
+            intro.kind.clone(),
+            *states,
+            *start_state,
+            *input_mode,
+            transitions,
+        )),
+        StrategyIntrospectionParameters::Memory { n, initial, table } => {
+            build_memory_graph(intro.id.clone(), intro.kind.clone(), *n, *initial, table)
+        }
+        StrategyIntrospectionParameters::Builtin { builtin } => {
+            let (start_state, input_mode, outputs, transitions) =
+                builtin_to_fsm(*builtin);
+            let notes = vec![format!("builtin expanded as fsm ({builtin:?})")];
+            Ok(build_fsm_graph(
+                intro.id.clone(),
+                intro.kind.clone(),
+                outputs.len(),
+                start_state,
+                input_mode,
+                &outputs,
+                &transitions,
+                Some(notes),
+            ))
+        }
+        StrategyIntrospectionParameters::Random { p_cooperate } => {
+            Ok(build_random_graph(
+                intro.id.clone(),
+                intro.kind.clone(),
+                *p_cooperate,
+            ))
+        }
+    }
+}
+
+fn build_fsm_graph(
+    strategy_id: String,
+    kind: StrategyIntrospectionKind,
+    states: usize,
+    start_state: usize,
+    input_mode: InputMode,
+    outputs: &[Action],
+    transitions: &[Vec<usize>],
+    notes: Option<Vec<String>>,
+) -> StrategyGraph {
+    let mut nodes = Vec::new();
+    for idx in 0..states {
+        let output = outputs.get(idx).map(|a| a.as_char()).unwrap_or('?');
+        nodes.push(GraphNode {
+            id: idx.to_string(),
+            label: format!("{idx}({output})"),
+        });
+    }
+    let mut edges = Vec::new();
+    for (state_idx, row) in transitions.iter().enumerate() {
+        for (input_idx, next) in row.iter().enumerate() {
+            let label = input_idx.to_string();
+            edges.push(GraphEdge {
+                from: state_idx.to_string(),
+                to: next.to_string(),
+                color: edge_color_for_label(&label),
+                label,
+            });
+        }
+    }
+    StrategyGraph {
+        directed: true,
+        strategy_id,
+        kind,
+        input_mode: Some(input_mode),
+        start_state: Some(start_state.to_string()),
+        nodes,
+        edges,
+        notes,
+    }
+}
+
+fn build_tm_graph(
+    strategy_id: String,
+    kind: StrategyIntrospectionKind,
+    states: u16,
+    start_state: u16,
+    input_mode: InputMode,
+    transitions: &[TmTransitionRecord],
+) -> StrategyGraph {
+    let mut nodes = Vec::new();
+    for state in 1..=states {
+        nodes.push(GraphNode {
+            id: state.to_string(),
+            label: state.to_string(),
+        });
+    }
+    let mut edges = Vec::new();
+    let mut uses_halt = false;
+    for trans in transitions {
+        let label = trans.write.to_string();
+        let to_id = if trans.next == 0 {
+            uses_halt = true;
+            "HALT".to_string()
+        } else {
+            trans.next.to_string()
+        };
+        edges.push(GraphEdge {
+            from: trans.state.to_string(),
+            to: to_id,
+            color: edge_color_for_label(&label),
+            label,
+        });
+    }
+    if uses_halt {
+        nodes.push(GraphNode {
+            id: "HALT".to_string(),
+            label: "HALT".to_string(),
+        });
+    }
+    StrategyGraph {
+        directed: true,
+        strategy_id,
+        kind,
+        input_mode: Some(input_mode),
+        start_state: Some(start_state.to_string()),
+        nodes,
+        edges,
+        notes: Some(vec![
+            "edges labeled by write symbol (ap)".to_string(),
+            "read/move not shown".to_string(),
+        ]),
+    }
+}
+
+fn build_memory_graph(
+    strategy_id: String,
+    kind: StrategyIntrospectionKind,
+    n: usize,
+    initial: Action,
+    table: &[Action],
+) -> anyhow::Result<StrategyGraph> {
+    let states = 4usize
+        .checked_pow(n as u32)
+        .ok_or_else(|| anyhow::anyhow!("memory-n graph too large"))?;
+    let mask = if n == 0 {
+        0u64
+    } else {
+        let bits = 2usize
+            .checked_mul(n)
+            .ok_or_else(|| anyhow::anyhow!("memory-n graph too large"))?;
+        if bits >= 63 {
+            return Err(anyhow::anyhow!("memory-n graph too large"));
+        }
+        (1u64 << bits) - 1
+    };
+    let mut nodes = Vec::new();
+    for idx in 0..states {
+        let output = table.get(idx).copied().unwrap_or(initial);
+        nodes.push(GraphNode {
+            id: idx.to_string(),
+            label: format!("{idx}({})", output.as_char()),
+        });
+    }
+    let mut edges = Vec::new();
+    for idx in 0..states {
+        let idx_u64 = idx as u64;
+        for input in 0..4usize {
+            let next = if n == 0 {
+                0
+            } else {
+                (((idx_u64 << 2) | input as u64) & mask) as usize
+            };
+            let label = input.to_string();
+            edges.push(GraphEdge {
+                from: idx.to_string(),
+                to: next.to_string(),
+                color: edge_color_for_label(&label),
+                label,
+            });
+        }
+    }
+    Ok(StrategyGraph {
+        directed: true,
+        strategy_id,
+        kind,
+        input_mode: Some(InputMode::JointLastAction),
+        start_state: Some("0".to_string()),
+        nodes,
+        edges,
+        notes: Some(vec![
+            "memory-n graph shows full-history states".to_string(),
+            "initial action used until history length n".to_string(),
+        ]),
+    })
+}
+
+fn build_random_graph(
+    strategy_id: String,
+    kind: StrategyIntrospectionKind,
+    p_cooperate: f32,
+) -> StrategyGraph {
+    let label = format!("0(p={:.3})", p_cooperate);
+    let nodes = vec![GraphNode {
+        id: "0".to_string(),
+        label,
+    }];
+    let mut edges = Vec::new();
+    for input in 0..4usize {
+        let label = input.to_string();
+        edges.push(GraphEdge {
+            from: "0".to_string(),
+            to: "0".to_string(),
+            color: edge_color_for_label(&label),
+            label,
+        });
+    }
+    StrategyGraph {
+        directed: true,
+        strategy_id,
+        kind,
+        input_mode: Some(InputMode::JointLastAction),
+        start_state: Some("0".to_string()),
+        nodes,
+        edges,
+        notes: Some(vec!["random output; self-looped graph".to_string()]),
+    }
+}
+
+fn builtin_to_fsm(
+    builtin: BuiltinKind,
+) -> (usize, InputMode, Vec<Action>, Vec<Vec<usize>>) {
+    match builtin {
+        BuiltinKind::AllC => (
+            0,
+            InputMode::JointLastAction,
+            vec![Action::Cooperate],
+            vec![vec![0, 0, 0, 0]],
+        ),
+        BuiltinKind::AllD => (
+            0,
+            InputMode::JointLastAction,
+            vec![Action::Defect],
+            vec![vec![0, 0, 0, 0]],
+        ),
+        BuiltinKind::TitForTat => (
+            0,
+            InputMode::JointLastAction,
+            vec![Action::Cooperate, Action::Defect],
+            vec![vec![0, 1, 0, 1], vec![0, 1, 0, 1]],
+        ),
+        BuiltinKind::GrimTrigger => (
+            0,
+            InputMode::JointLastAction,
+            vec![Action::Cooperate, Action::Defect],
+            vec![vec![0, 1, 0, 1], vec![1, 1, 1, 1]],
+        ),
+        BuiltinKind::WinStayLoseShift => (
+            0,
+            InputMode::JointLastAction,
+            vec![Action::Cooperate, Action::Defect],
+            vec![vec![0, 1, 1, 0], vec![1, 0, 0, 1]],
+        ),
+    }
+}
+
+fn edge_color_for_label(label: &str) -> Option<String> {
+    match label {
+        "0" => Some("#e74c3c".to_string()),
+        "1" => Some("#2ecc71".to_string()),
+        "2" => Some("#3498db".to_string()),
+        "3" => Some("#9b59b6".to_string()),
+        _ => None,
+    }
+}
+
+fn render_strategy_graph_dot(graph: &StrategyGraph) -> String {
+    let mut dot = String::new();
+    dot.push_str("digraph strategy {\n");
+    dot.push_str("  rankdir=LR;\n");
+    dot.push_str("  node [shape=box];\n");
+    if let Some(start) = &graph.start_state {
+        dot.push_str("  start [shape=point];\n");
+        dot.push_str(&format!("  start -> {};\n", dot_id(start)));
+    }
+    for node in &graph.nodes {
+        let label = node.label.replace('"', "\\\"");
+        dot.push_str(&format!(
+            "  {} [label=\"{}\"];\n",
+            dot_id(&node.id),
+            label
+        ));
+    }
+    for edge in &graph.edges {
+        let label = edge.label.replace('"', "\\\"");
+        let mut attrs = vec![format!("label=\"{}\"", label)];
+        if let Some(color) = &edge.color {
+            attrs.push(format!("color=\"{}\"", color));
+            attrs.push(format!("fontcolor=\"{}\"", color));
+        }
+        dot.push_str(&format!(
+            "  {} -> {} [{}];\n",
+            dot_id(&edge.from),
+            dot_id(&edge.to),
+            attrs.join(", ")
+        ));
+    }
+    dot.push_str("}\n");
+    dot
+}
+
+fn dot_id(raw: &str) -> String {
+    let escaped = raw.replace('"', "\\\"");
+    format!("\"{}\"", escaped)
 }
 
 fn parse_states_range(input: &str) -> anyhow::Result<std::ops::RangeInclusive<usize>> {
@@ -1095,6 +1839,25 @@ fn parse_input_mode_arg(input: Option<&str>) -> anyhow::Result<InputMode> {
         ),
     };
     Ok(mode)
+}
+
+fn resolve_payoff_preset(name: &str) -> Option<(i32, i32, i32, i32)> {
+    let normalized: String = name
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .map(|c| c.to_ascii_lowercase())
+        .collect();
+    match normalized.as_str() {
+        "pd" | "prisonersdilemma" | "prisoner" => Some((3, 0, 5, 1)),
+        "staghunt" | "stag" => Some((4, 1, 3, 2)),
+        "snowdrift" | "snow" | "hawkedove" | "hawkdove" => Some((3, 1, 5, 0)),
+        "chicken" => Some((3, 1, 5, 0)),
+        _ => None,
+    }
+}
+
+fn payoff_from_rsp(r: i32, s: i32, t: i32, p: i32) -> nit_games::PayoffMatrix {
+    nit_games::PayoffMatrix::from_matrix([[[r, r], [s, t]], [[t, s], [p, p]]])
 }
 
 fn run_games_enumerate_fsm(
@@ -1162,6 +1925,12 @@ struct SweepGrid {
     rounds: Vec<u32>,
     noise: Vec<f32>,
     repetitions: Vec<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    payoff_preset: Option<String>,
+    payoff_r: Vec<i32>,
+    payoff_s: Vec<i32>,
+    payoff_t: Vec<i32>,
+    payoff_p: Vec<i32>,
 }
 
 #[derive(Serialize)]
@@ -1170,11 +1939,18 @@ struct SweepCellSummary {
     rounds: u32,
     noise: f32,
     repetitions: u32,
+    payoff_r: i32,
+    payoff_s: i32,
+    payoff_t: i32,
+    payoff_p: i32,
     seed: u64,
     run_id: String,
     run_dir: String,
     summary_path: String,
     top_strategy: String,
+    top_strategies: Vec<SweepTopEntry>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    skipped: bool,
 }
 
 #[derive(Serialize)]
@@ -1187,7 +1963,19 @@ struct SweepStrategyAggregate {
     id: String,
     mean_total_payoff: f64,
     std_total_payoff: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    mean_adjusted_payoff: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    std_adjusted_payoff: Option<f64>,
     top1_count: u32,
+}
+
+#[derive(Serialize)]
+struct SweepTopEntry {
+    id: String,
+    total_payoff: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    adjusted_total_payoff: Option<f64>,
 }
 
 fn find_theme() -> Option<PathBuf> {

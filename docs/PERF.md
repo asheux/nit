@@ -19,6 +19,8 @@ The benchmark suite includes:
 - `fsm_fast_eval/fsm_fast` vs `fsm_fast_eval/fsm_slow`
 - `tm_micro_steps`
 - `tm_tournament/tm` vs `tm_tournament/baseline`
+- `tm_heavy/tm_steps_heavy` (max-step TM stress)
+- `sweep_cell_io` (filesystem + serialization overhead)
 
 ## Flamegraphs
 
@@ -32,6 +34,21 @@ Generate a flamegraph for the nit-games bench:
 
 ```bash
 cargo flamegraph -p nit-games --bench engine_bench -- benchmark=tournament_small
+```
+
+Useful flamegraph targets:
+
+```bash
+cargo flamegraph -p nit-games --bench engine_bench -- benchmark=tm_steps_heavy
+cargo flamegraph -p nit-games --bench engine_bench -- benchmark=sweep_cell_io
+```
+
+## Sweep benchmarks
+
+To benchmark sweep orchestration end-to-end:
+
+```bash
+cargo bench -p nit-games --bench engine_bench -- sweep_cell_io
 ```
 
 ## “Fast mode” knobs

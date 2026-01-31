@@ -9,6 +9,10 @@ use ratatui::{
     widgets::{Block, Borders, Clear, Paragraph, Wrap},
     Frame,
 };
+use std::collections::{hash_map::DefaultHasher, HashMap};
+use std::hash::{Hash, Hasher};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::thread;
 
 use crate::theme::Theme;
 use crate::widgets::text_selection::apply_ui_selection;
@@ -16,6 +20,41 @@ use crate::widgets::text_selection::apply_ui_selection;
 const MIN_WIDTH: u16 = 80;
 const MIN_HEIGHT: u16 = 20;
 const HEAD_DOT: char = '●';
+static TM_SIM_CACHE: OnceLock<Mutex<Option<SimCache>>> = OnceLock::new();
+static TM_SIM_PENDING: OnceLock<Arc<SimResult>> = OnceLock::new();
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+struct SimKey {
+    def_hash: u64,
+    input: u64,
+    step_limit: u32,
+}
+
+struct SimCache {
+    key: SimKey,
+    state: SimCacheState,
+}
+
+fn tm_sim_cache() -> &'static Mutex<Option<SimCache>> {
+    TM_SIM_CACHE.get_or_init(|| Mutex::new(None))
+}
+
+fn tm_sim_pending() -> Arc<SimResult> {
+    TM_SIM_PENDING
+        .get_or_init(|| {
+            Arc::new(SimResult {
+                log_lines: vec!["computing...".to_string()],
+                steps: Vec::new(),
+                frames: Vec::new(),
+            })
+        })
+        .clone()
+}
+
+enum SimCacheState {
+    Running,
+    Ready(Arc<SimResult>),
+}
 
 pub fn preferred_size(screen: Rect) -> (u16, u16) {
     let width = screen.width.min(140).max(MIN_WIDTH);
@@ -229,7 +268,20 @@ pub fn build_columns(
 
     left_lines.push(Line::from(""));
     left_lines.push(Line::from(Span::styled("Simulation", header_style)));
-    let sim = simulate_tm(
+    let def_hash = tm_spec_hash(
+        *symbols,
+        *start_state,
+        *blank,
+        fallback,
+        transitions,
+        output_map,
+    );
+    let sim = simulate_tm_cached(
+        SimKey {
+            def_hash,
+            input,
+            step_limit,
+        },
         input,
         *symbols,
         *start_state,
@@ -415,6 +467,97 @@ struct SimStep {
     tape: Vec<u8>,
 }
 
+#[derive(Hash, Eq, PartialEq)]
+struct ConfigKey {
+    state: u16,
+    head: usize,
+    tape: Vec<u8>,
+}
+
+fn tm_spec_hash(
+    symbols: u8,
+    start_state: u16,
+    blank: u8,
+    fallback_symbol: u8,
+    transitions: &[TmTransition],
+    output_map: &[Action],
+) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    symbols.hash(&mut hasher);
+    start_state.hash(&mut hasher);
+    blank.hash(&mut hasher);
+    fallback_symbol.hash(&mut hasher);
+    for action in output_map {
+        action.as_char().hash(&mut hasher);
+    }
+    for trans in transitions {
+        trans.next.hash(&mut hasher);
+        trans.write.hash(&mut hasher);
+        let dir = match trans.move_dir {
+            TmMove::Left => 0u8,
+            TmMove::Stay => 1u8,
+            TmMove::Right => 2u8,
+        };
+        dir.hash(&mut hasher);
+    }
+    hasher.finish()
+}
+
+fn simulate_tm_cached(
+    key: SimKey,
+    input: u64,
+    symbols: u8,
+    start_state: u16,
+    blank: u8,
+    fallback_symbol: u8,
+    step_limit: u32,
+    transitions: &[TmTransition],
+    output_map: &[Action],
+) -> Arc<SimResult> {
+    if let Ok(guard) = tm_sim_cache().lock() {
+        if let Some(cache) = guard.as_ref() {
+            if cache.key == key {
+                return match &cache.state {
+                    SimCacheState::Ready(result) => result.clone(),
+                    SimCacheState::Running => tm_sim_pending(),
+                };
+            }
+        }
+    }
+
+    let mut guard = tm_sim_cache().lock().unwrap_or_else(|err| err.into_inner());
+    *guard = Some(SimCache {
+        key,
+        state: SimCacheState::Running,
+    });
+    drop(guard);
+
+    let transitions = transitions.to_vec();
+    let output_map = output_map.to_vec();
+    let _ = thread::Builder::new()
+        .name("nit-tm-sim".into())
+        .spawn(move || {
+            let result = Arc::new(simulate_tm(
+                input,
+                symbols,
+                start_state,
+                blank,
+                fallback_symbol,
+                step_limit,
+                &transitions,
+                &output_map,
+            ));
+            let mut guard = tm_sim_cache().lock().unwrap_or_else(|err| err.into_inner());
+            if let Some(cache) = guard.as_mut() {
+                if cache.key == key {
+                    cache.state = SimCacheState::Ready(result);
+                }
+            }
+        });
+
+    tm_sim_pending()
+}
+
 fn simulate_tm(
     input: u64,
     symbols: u8,
@@ -452,7 +595,7 @@ fn simulate_tm(
     let mut tape = vec![blank; pad];
     tape.append(&mut digits);
     let mut head = tape.len().saturating_sub(1);
-    let mut origin: i32 = 0;
+    let origin: i32 = 0;
     let mut state = start_state;
 
     lines.push(format!(
@@ -489,18 +632,28 @@ fn simulate_tm(
     let mut output_symbol: Option<u8> = None;
     let mut last_transition: Option<(u16, u8, TmTransition)> = None;
     let mut max_steps_hit = false;
-    let mut missing_transition = false;
+    let mut fallback_reason: Option<&'static str> = None;
     let mut steps_taken = 0usize;
+    let mut cycle_detected: Option<(usize, usize)> = None;
+    let mut seen: HashMap<ConfigKey, usize> = HashMap::new();
+    seen.insert(
+        ConfigKey {
+            state,
+            head,
+            tape: tape.clone(),
+        },
+        0,
+    );
 
     for step in 0..max_steps {
         steps_taken = step + 1;
-        let mut head_before = head;
+        let head_before = head;
         let read = tape.get(head_before).copied().unwrap_or(blank);
         let idx = (state.saturating_sub(1) as usize)
             .saturating_mul(symbols as usize)
             .saturating_add(read as usize);
         let Some(trans) = transitions.get(idx).copied() else {
-            missing_transition = true;
+            fallback_reason = Some("missing transition");
             lines.push(format!(
                 "step {}: missing transition for state {} read {}",
                 step + 1,
@@ -511,40 +664,37 @@ fn simulate_tm(
         };
         last_transition = Some((state, read, trans));
 
-        if trans.next == 0 {
-            if matches!(trans.move_dir, TmMove::Right) && head_before + 1 == tape.len() {
-                output_symbol = Some(trans.write);
-                let head_after = head_before + 1;
-                steps.push(SimStep {
-                    step: step + 1,
-                    state,
-                    head_before,
-                    read,
-                    next: trans.next,
-                    write: trans.write,
-                    move_dir: trans.move_dir,
-                    head_after,
-                    tape: tape.clone(),
-                });
-                frames.push(SimFrame {
-                    tape: tape.clone(),
-                    head: head_after,
-                    origin,
-                });
-            } else {
-                missing_transition = true;
-                lines.push(format!(
-                    "step {}: halt before rail (next=0) ignored",
-                    step + 1
-                ));
+        let rail_output =
+            matches!(trans.move_dir, TmMove::Right) && head_before + 1 == tape.len();
+        if rail_output {
+            if let Some(cell) = tape.get_mut(head_before) {
+                *cell = trans.write;
             }
+            output_symbol = Some(trans.write);
+            let head_after = head_before + 1;
+            steps.push(SimStep {
+                step: step + 1,
+                state,
+                head_before,
+                read,
+                next: trans.next,
+                write: trans.write,
+                move_dir: trans.move_dir,
+                head_after,
+                tape: tape.clone(),
+            });
+            frames.push(SimFrame {
+                tape: tape.clone(),
+                head: head_after,
+                origin,
+            });
             break;
         }
 
-        if matches!(trans.move_dir, TmMove::Left) && head_before == 0 {
-            tape.insert(0, blank);
-            head_before = 1;
-            origin = origin.saturating_sub(1);
+        if trans.next == 0 {
+            fallback_reason = Some("next=0");
+            lines.push(format!("step {}: next=0 -> fallback", step + 1));
+            break;
         }
 
         if let Some(cell) = tape.get_mut(head_before) {
@@ -560,7 +710,9 @@ fn simulate_tm(
             }
             TmMove::Stay => {}
             TmMove::Right => {
-                if head_before + 1 == tape.len() {
+                if head_before + 1 < tape.len() {
+                    head_after = head_before + 1;
+                } else {
                     output_symbol = Some(trans.write);
                     let head_after = head_before + 1;
                     steps.push(SimStep {
@@ -580,8 +732,6 @@ fn simulate_tm(
                         origin,
                     });
                     break;
-                } else {
-                    head_after = head_before + 1;
                 }
             }
         }
@@ -605,10 +755,27 @@ fn simulate_tm(
             head,
             origin,
         });
+
+        if output_symbol.is_none() {
+            let key = ConfigKey {
+                state,
+                head,
+                tape: tape.clone(),
+            };
+            if let Some(prev_step) = seen.insert(key, step + 1) {
+                cycle_detected = Some((prev_step, step + 1));
+                break;
+            }
+        }
     }
 
-    if output_symbol.is_none() && !missing_transition && steps_taken >= max_steps {
+    if output_symbol.is_none()
+        && fallback_reason.is_none()
+        && cycle_detected.is_none()
+        && steps_taken >= max_steps
+    {
         max_steps_hit = true;
+        fallback_reason = Some("max_steps");
     }
 
     let action = if let Some(symbol) = output_symbol {
@@ -625,10 +792,12 @@ fn simulate_tm(
 
     let reason = if output_symbol.is_some() {
         "rail output"
-    } else if missing_transition {
+    } else if cycle_detected.is_some() || max_steps_hit {
+        "never halts"
+    } else if fallback_reason == Some("missing transition") {
         "missing transition"
-    } else if max_steps_hit {
-        "Never halts"
+    } else if fallback_reason == Some("next=0") {
+        "next=0"
     } else {
         "fallback"
     };
@@ -636,8 +805,16 @@ fn simulate_tm(
         "result: {reason} -> action {}",
         action.as_char()
     ));
-    if max_steps_hit {
+    if cycle_detected.is_some() || max_steps_hit {
         lines.push("Never halts".to_string());
+    }
+    if let Some((start, end)) = cycle_detected {
+        lines.push(format!(
+            "cycle detected: step {} repeats step {}",
+            end, start
+        ));
+    } else if max_steps_hit {
+        lines.push(format!("note: max_steps={max_steps}"));
     }
     if let Some((s, r, trans)) = last_transition {
         let move_label = match trans.move_dir {
@@ -1417,7 +1594,7 @@ mod tests {
     }
 
     #[test]
-    fn evolution_head_moves_when_tape_extends_left() {
+    fn evolution_head_clamps_at_left_edge() {
         let transitions = vec![
             TmTransition {
                 write: 0,
@@ -1432,21 +1609,15 @@ mod tests {
         ];
         let output_map = vec![Action::Cooperate, Action::Defect];
         let sim = simulate_tm(0, 2, 1, 0, 0, 8, &transitions, &output_map);
-        let mut left_insert_idx = None;
-        for i in 1..sim.frames.len() {
-            if sim.frames[i].origin < sim.frames[i - 1].origin {
-                left_insert_idx = Some(i);
+        assert!(sim.frames.iter().all(|frame| frame.origin == 0));
+        let mut clamped = false;
+        for window in sim.frames.windows(2) {
+            if window[0].head == 0 && window[1].head == 0 {
+                clamped = true;
                 break;
             }
         }
-        let idx = left_insert_idx.expect("expected left extension");
-        let lines = build_grid_lines(&sim.frames[idx - 1..=idx], 120, &Theme::default());
-        assert_eq!(lines.len(), 2);
-        let prev_line = line_to_string(&lines[0]);
-        let next_line = line_to_string(&lines[1]);
-        let prev_pos = prev_line.find(HEAD_DOT).unwrap();
-        let next_pos = next_line.find(HEAD_DOT).unwrap();
-        assert_ne!(prev_pos, next_pos);
+        assert!(clamped, "expected head to clamp at left boundary");
     }
 
     #[test]

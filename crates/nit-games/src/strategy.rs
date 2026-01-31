@@ -2,6 +2,7 @@ use crate::game::{Action, Outcome};
 use crate::history::History;
 use nit_utils::hashing::XorShift64;
 use serde::{Deserialize, Serialize};
+use std::collections::VecDeque;
 
 pub trait Strategy: Send {
     fn id(&self) -> &str;
@@ -399,6 +400,8 @@ impl Strategy for MemoryStrategy {
 pub struct TmRunStats {
     pub rounds: u64,
     pub steps: u64,
+    pub min_steps: u32,
+    pub max_steps: u32,
     pub output_events: u64,
     pub fallback: u64,
     pub max_steps_hits: u64,
@@ -406,6 +409,15 @@ pub struct TmRunStats {
 
 impl TmRunStats {
     pub fn merge(&mut self, other: &TmRunStats) {
+        if other.rounds > 0 {
+            if self.rounds == 0 {
+                self.min_steps = other.min_steps;
+                self.max_steps = other.max_steps;
+            } else {
+                self.min_steps = self.min_steps.min(other.min_steps);
+                self.max_steps = self.max_steps.max(other.max_steps);
+            }
+        }
         self.rounds = self.rounds.saturating_add(other.rounds);
         self.steps = self.steps.saturating_add(other.steps);
         self.output_events = self.output_events.saturating_add(other.output_events);
@@ -425,7 +437,8 @@ pub struct OneSidedTmStrategy {
     input_mode: InputMode,
     output_map: Vec<Action>,
     transitions: Vec<TmTransition>,
-    tape: Vec<u8>,
+    tape: VecDeque<u8>,
+    tape_window: usize,
     head: usize,
     last_history_len: usize,
     stats: TmRunStats,
@@ -443,6 +456,7 @@ impl OneSidedTmStrategy {
         output_map: Vec<Action>,
         transitions: Vec<TmTransition>,
     ) -> Self {
+        let tape_window = (max_steps_per_round as usize).saturating_add(1).max(1);
         Self {
             id: id.into(),
             symbols,
@@ -453,7 +467,8 @@ impl OneSidedTmStrategy {
             input_mode,
             output_map,
             transitions,
-            tape: vec![blank],
+            tape: VecDeque::from(vec![blank]),
+            tape_window,
             head: 0,
             last_history_len: 0,
             stats: TmRunStats::default(),
@@ -464,6 +479,11 @@ impl OneSidedTmStrategy {
         &self.stats
     }
 
+    #[cfg(test)]
+    pub(crate) fn tape_len(&self) -> usize {
+        self.tape.len()
+    }
+
     fn append_history(&mut self, history: &History, player_a: bool) {
         let history_len = history.len();
         if history_len == 0 || history_len == self.last_history_len {
@@ -471,23 +491,28 @@ impl OneSidedTmStrategy {
         }
         if let Some((self_action, opp_action)) = history.last_actions_for(player_a) {
             let symbol = self.input_mode.symbol_from_actions(self_action, opp_action) as u8;
-            self.tape.push(symbol);
+            self.tape.push_back(symbol);
+            while self.tape.len() > self.tape_window {
+                self.tape.pop_front();
+            }
             self.last_history_len = history_len;
         }
     }
 
     fn output_from_symbol(&self, symbol: u8) -> Action {
-        self.output_map
-            .get(symbol as usize)
-            .copied()
-            .unwrap_or(Action::Cooperate)
+        if self.output_map.is_empty() {
+            return Action::Cooperate;
+        }
+        let idx = (symbol as usize) % self.output_map.len();
+        self.output_map[idx]
     }
 
     fn fallback_action(&self) -> Action {
-        self.output_map
-            .get(self.fallback_symbol as usize)
-            .copied()
-            .unwrap_or(Action::Cooperate)
+        if self.output_map.is_empty() {
+            return Action::Cooperate;
+        }
+        let idx = (self.fallback_symbol as usize) % self.output_map.len();
+        self.output_map[idx]
     }
 }
 
@@ -498,7 +523,7 @@ impl Strategy for OneSidedTmStrategy {
 
     fn reset(&mut self) {
         self.tape.clear();
-        self.tape.push(self.blank);
+        self.tape.push_back(self.blank);
         self.head = 0;
         self.last_history_len = 0;
         self.stats = TmRunStats::default();
@@ -529,18 +554,18 @@ impl Strategy for OneSidedTmStrategy {
                     fallback = true;
                     break;
                 };
-                if trans.next == 0 {
-                    if matches!(trans.move_dir, TmMove::Right) && self.head + 1 == self.tape.len()
-                    {
-                        output_symbol = Some(trans.write);
-                    } else {
-                        fallback = true;
+                let rail_output =
+                    matches!(trans.move_dir, TmMove::Right) && self.head + 1 == self.tape.len();
+                if rail_output {
+                    if let Some(cell) = self.tape.get_mut(self.head) {
+                        *cell = trans.write;
                     }
+                    output_symbol = Some(trans.write);
                     break;
                 }
-                if matches!(trans.move_dir, TmMove::Left) && self.head == 0 {
-                    self.tape.insert(0, self.blank);
-                    self.head = 1;
+                if trans.next == 0 {
+                    fallback = true;
+                    break;
                 }
                 if let Some(cell) = self.tape.get_mut(self.head) {
                     *cell = trans.write;
@@ -553,11 +578,11 @@ impl Strategy for OneSidedTmStrategy {
                     }
                     TmMove::Stay => {}
                     TmMove::Right => {
-                        if self.head + 1 == self.tape.len() {
+                        if self.head + 1 < self.tape.len() {
+                            self.head += 1;
+                        } else {
                             output_symbol = Some(trans.write);
                             break;
-                        } else {
-                            self.head += 1;
                         }
                     }
                 }
@@ -577,6 +602,13 @@ impl Strategy for OneSidedTmStrategy {
 
         self.stats.rounds = self.stats.rounds.saturating_add(1);
         self.stats.steps = self.stats.steps.saturating_add(steps_taken as u64);
+        if self.stats.rounds == 1 {
+            self.stats.min_steps = steps_taken;
+            self.stats.max_steps = steps_taken;
+        } else {
+            self.stats.min_steps = self.stats.min_steps.min(steps_taken);
+            self.stats.max_steps = self.stats.max_steps.max(steps_taken);
+        }
         if output_symbol.is_some() {
             self.stats.output_events = self.stats.output_events.saturating_add(1);
         }

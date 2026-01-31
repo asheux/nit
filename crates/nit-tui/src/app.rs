@@ -152,6 +152,34 @@ fn run_loop(
                         continue;
                     }
                     handled_input = true;
+                    if state.command_line.is_some() || state.prompt.is_some() {
+                        if let Some(action) = map_key_to_action(key, state, &mut input_state) {
+                            prepare_clipboard_paste(state, &mut clipboard, &action);
+                            let action_copy = action.clone();
+                            let outcome = apply_action_with_syntax(state, syntax, action);
+                            handle_clipboard_copy(state, &mut clipboard, &action_copy);
+                            handle_selection_autocopy(state, &mut clipboard, &mut input_state);
+                            if outcome.should_exit {
+                                break;
+                            }
+                            needs_redraw = needs_redraw || outcome.state_changed;
+                        }
+                        continue;
+                    }
+                    if matches!(key.code, KeyCode::Char(':')) {
+                        if let Some(action) = map_key_to_action(key, state, &mut input_state) {
+                            prepare_clipboard_paste(state, &mut clipboard, &action);
+                            let action_copy = action.clone();
+                            let outcome = apply_action_with_syntax(state, syntax, action);
+                            handle_clipboard_copy(state, &mut clipboard, &action_copy);
+                            handle_selection_autocopy(state, &mut clipboard, &mut input_state);
+                            if outcome.should_exit {
+                                break;
+                            }
+                            needs_redraw = needs_redraw || outcome.state_changed;
+                        }
+                        continue;
+                    }
                     if state.rule_picker.open {
                         if rule_picker::handle_key(&key, state) {
                             needs_redraw = true;
@@ -3215,6 +3243,14 @@ fn handle_strategy_popup_key(
                                     lines.push(format!(
                                         "avg_steps_per_move: {:.3}",
                                         metrics.avg_steps_per_move
+                                    ));
+                                    lines.push(format!(
+                                        "min_steps_per_move: {}",
+                                        metrics.min_steps_per_move
+                                    ));
+                                    lines.push(format!(
+                                        "max_steps_per_move: {}",
+                                        metrics.max_steps_per_move
                                     ));
                                     lines.push(format!(
                                         "max_steps_hit_count: {}",

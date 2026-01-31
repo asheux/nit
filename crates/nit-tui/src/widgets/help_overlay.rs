@@ -372,6 +372,10 @@ pub fn build_lines(theme: &Theme) -> Vec<Line<'static>> {
         Span::raw(" inspect a strategy definition"),
     ]));
     lines.push(Line::from(vec![
+        Span::styled(":games inspect <id>", Style::default().fg(theme.accent)),
+        Span::raw(" introspect a strategy (pretty text)"),
+    ]));
+    lines.push(Line::from(vec![
         Span::styled(":games strategies all", Style::default().fg(theme.accent)),
         Span::raw(" list all strategies from config"),
     ]));

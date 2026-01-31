@@ -97,3 +97,4 @@
 - :games export: Re-emit last run summary (if present)
 - :games runs: Open run browser
 - :games replay: Open match replay selector (uses loaded run summary)
+- :games inspect <strategy_id>: Show introspection for a strategy (pretty text)

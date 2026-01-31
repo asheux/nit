@@ -1566,9 +1566,97 @@ fn handle_command_line(state: &mut AppState, input: &str) {
                 state.status = Some("Games replay opened".into());
             }
         }
+        _ if tokens.get(0) == Some(&"games") && tokens.get(1) == Some(&"inspect") => {
+            let Some(target_id) = tokens.get(2).copied() else {
+                state.status = Some("Usage: :games inspect <strategy_id>".into());
+                return;
+            };
+
+            let mut spec: Option<nit_games::StrategySpec> = None;
+            let mut source_label: Option<String> = None;
+
+            if let Some(run) = state.games.last_run.as_ref() {
+                if let Some(def) = run.strategies.iter().find(|s| s.id == target_id) {
+                    spec = Some(nit_games::StrategySpec {
+                        id: def.id.clone(),
+                        name: def.name.clone(),
+                        kind: def.kind.clone(),
+                    });
+                    source_label = Some("run".into());
+                }
+            }
+
+            if spec.is_none() {
+                let config_text = state.editor_buffer().content_as_string();
+                match nit_games::config::GamesConfig::from_toml_with_root(
+                    &config_text,
+                    Some(&state.workspace_root),
+                ) {
+                    Ok(config) => {
+                        if let Some(found) = config.strategies.iter().find(|s| s.id == target_id) {
+                            spec = Some(found.clone());
+                            source_label = Some("config".into());
+                        }
+                    }
+                    Err(err) => {
+                        state.games.run_browser.open = false;
+                        state.games.replay.open = false;
+                        state.games.tm_sim.open = false;
+                        state.games.analysis.open = false;
+                        state.games.strategy_inspect.open = true;
+                        state.games.strategy_inspect.last_error =
+                            Some(format!("Config error: {err}"));
+                        state.games.strategy_inspect.title = None;
+                        state.games.strategy_inspect.lines.clear();
+                        state.games.strategy_inspect.selected_index = 0;
+                        state.games.strategy_inspect.scroll_offset = 0;
+                        state.games.strategy_inspect.definitions.clear();
+                        state.games.strategy_inspect.source_label = Some("config".into());
+                        state.status = Some("Games strategy inspect error".into());
+                        return;
+                    }
+                }
+            }
+
+            let Some(spec) = spec else {
+                state.games.run_browser.open = false;
+                state.games.replay.open = false;
+                state.games.tm_sim.open = false;
+                state.games.analysis.open = false;
+                state.games.strategy_inspect.open = true;
+                state.games.strategy_inspect.last_error = Some(format!(
+                    "Strategy '{}' not found in run or config",
+                    target_id
+                ));
+                state.games.strategy_inspect.title = None;
+                state.games.strategy_inspect.lines.clear();
+                state.games.strategy_inspect.selected_index = 0;
+                state.games.strategy_inspect.scroll_offset = 0;
+                state.games.strategy_inspect.definitions.clear();
+                state.games.strategy_inspect.source_label = None;
+                state.status = Some("Games strategy inspect error".into());
+                return;
+            };
+
+            let intro = nit_games::introspect_strategy(&spec);
+            let lines = nit_games::format_strategy_introspection(&intro);
+
+            state.games.run_browser.open = false;
+            state.games.replay.open = false;
+            state.games.tm_sim.open = false;
+            state.games.analysis.open = false;
+            state.games.strategy_inspect.open = true;
+            state.games.strategy_inspect.last_error = None;
+            state.games.strategy_inspect.title = Some(format!("{} — inspect", spec.id));
+            state.games.strategy_inspect.lines = lines;
+            state.games.strategy_inspect.selected_index = 0;
+            state.games.strategy_inspect.scroll_offset = 0;
+            state.games.strategy_inspect.definitions.clear();
+            state.games.strategy_inspect.source_label = source_label;
+            state.status = Some(format!("Games inspect: {}", spec.id));
+        }
         ["games", "strategy"]
         | ["games", "strategies"]
-        | ["games", "inspect"]
         | ["games", "strategy", "run"]
         | ["games", "strategies", "run"] => {
             if state.games.last_run.is_none() {

@@ -97,6 +97,9 @@ and parallel logging behavior.
   (not fast‑evaluated).
 - Program definitions are serialized into `definitions.json`, and TM-derived
   metrics are surfaced in `run_summary.json` results.
+- Strategy introspection/export lives in `crates/nit-games/src/introspection.rs`
+  and feeds both CLI (`nit games inspect/graph`) and the TUI `:games inspect`
+  popup for downstream visualization workflows.
 - FSM enumeration + canonicalization utilities live in
   `crates/nit-games/src/fsm_enum.rs`.
 
