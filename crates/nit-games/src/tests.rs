@@ -1,6 +1,7 @@
 use crate::config::{GamesConfig, StrategySpec, StrategySpecKind};
 use crate::game::Action;
 use crate::history::History;
+use crate::fsm_enum::enumerate_fsms;
 use crate::strategy::{
     FsmStrategy, InputMode, OneSidedTmStrategy, Strategy, TmMove, TmTransition,
 };
@@ -93,6 +94,19 @@ fn fsm_transition_updates_state() {
     history.push(first, Action::Defect);
     let second = fsm.next_action(&history, true);
     assert_eq!(second, Action::Defect);
+}
+
+#[test]
+fn fsm_enumeration_counts_small_cases() {
+    let count_one = enumerate_fsms(1, InputMode::OpponentLastAction, None, false, |_| {});
+    assert_eq!(count_one, 2);
+
+    let count_two = enumerate_fsms(2, InputMode::OpponentLastAction, None, false, |_| {});
+    assert_eq!(count_two, 64);
+
+    let canonical_two = enumerate_fsms(2, InputMode::OpponentLastAction, None, true, |_| {});
+    assert!(canonical_two > 0);
+    assert!(canonical_two <= count_two);
 }
 
 #[test]

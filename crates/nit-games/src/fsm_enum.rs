@@ -157,14 +157,20 @@ where
                 transitions: transitions.clone(),
             };
 
-            let output_spec = if canonical {
-                canonicalize_fsm(&spec)
+            if canonical {
+                let output_spec = canonicalize_fsm(&spec);
+                let key = output_spec.stable_key();
+                if seen.insert(key) {
+                    emit(output_spec);
+                    count += 1;
+                    if let Some(limit) = limit {
+                        if count >= limit {
+                            return count;
+                        }
+                    }
+                }
             } else {
-                spec
-            };
-            let key = output_spec.stable_key();
-            if !canonical || seen.insert(key) {
-                emit(output_spec);
+                emit(spec);
                 count += 1;
                 if let Some(limit) = limit {
                     if count >= limit {

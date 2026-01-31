@@ -426,7 +426,8 @@ fn simulate_tm(
     output_map: &[Action],
 ) -> SimResult {
     let mut lines = Vec::new();
-    let mut frames = Vec::new();
+    let reserve = step_limit.min(10_000) as usize;
+    let mut frames = Vec::with_capacity(reserve.saturating_add(2));
     if symbols < 2 {
         lines.push("error: symbols must be >= 2 for input decoding".to_string());
         return SimResult {
@@ -466,7 +467,7 @@ fn simulate_tm(
         head,
         origin,
     });
-    let mut steps: Vec<SimStep> = Vec::new();
+    let mut steps: Vec<SimStep> = Vec::with_capacity(reserve);
 
     let max_steps = step_limit as usize;
     if max_steps == 0 {
