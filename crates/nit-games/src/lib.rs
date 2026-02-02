@@ -1,11 +1,11 @@
 #![forbid(unsafe_code)]
 
+pub mod analysis;
 pub mod config;
 pub mod events;
 pub mod fast_eval;
 pub mod fsm_enum;
 pub mod game;
-pub mod analysis;
 pub mod history;
 pub mod history_log;
 pub mod introspection;
@@ -13,17 +13,17 @@ pub mod output;
 pub mod strategy;
 pub mod tournament;
 
-pub use config::{
-    ConfigError, EngineConfig, EngineMode, GamesConfig, NormalizedConfig, ParallelismConfig,
-    ParallelismMode, StrategySpec,
-};
 pub use analysis::{
     analyze_history, AnalysisConfig, AnalysisPaths, HistoryAnalysis, HistoryAnalysisPreview,
     HistoryAnalysisSummary, MatchSummary, StrategySummary, TrajectoryPreview, TrajectorySample,
 };
+pub use config::{
+    ConfigError, EngineConfig, EngineMode, GamesConfig, NormalizedConfig, ParallelismConfig,
+    ParallelismMode, StrategySpec,
+};
 pub use events::{EventLogConfig, EventWriter, GameEvent};
-pub use fsm_enum::{canonicalize_fsm, enumerate_fsms, FsmDefinition};
 pub use fast_eval::{CycleMetadata, FastEvalResult, FastStrategyModel};
+pub use fsm_enum::{canonicalize_fsm, enumerate_fsms, FsmDefinition};
 pub use game::{Action, Outcome, PayoffMatrix};
 pub use history::{History, RoundRecord};
 pub use history_log::{HistoryWriter, MatchHistory};

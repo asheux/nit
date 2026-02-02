@@ -43,13 +43,28 @@ fn normalize(selection: &UiSelection) -> (usize, usize, usize, usize) {
     let start = (selection.start_line, selection.start_col);
     let end = (selection.end_line, selection.end_col);
     if start <= end {
-        (selection.start_line, selection.start_col, selection.end_line, selection.end_col)
+        (
+            selection.start_line,
+            selection.start_col,
+            selection.end_line,
+            selection.end_col,
+        )
     } else {
-        (selection.end_line, selection.end_col, selection.start_line, selection.start_col)
+        (
+            selection.end_line,
+            selection.end_col,
+            selection.start_line,
+            selection.start_col,
+        )
     }
 }
 
-fn highlight_line(line: Line<'static>, sel_start: usize, sel_end: usize, selection_bg: Color) -> Line<'static> {
+fn highlight_line(
+    line: Line<'static>,
+    sel_start: usize,
+    sel_end: usize,
+    selection_bg: Color,
+) -> Line<'static> {
     if sel_start == sel_end {
         return line;
     }

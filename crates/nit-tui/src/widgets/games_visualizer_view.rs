@@ -18,7 +18,10 @@ pub struct VisualizerLayout {
     pub show_payoff_side: bool,
 }
 
-pub fn layout_for_config(inner: Rect, config: Option<&nit_games::config::NormalizedConfig>) -> VisualizerLayout {
+pub fn layout_for_config(
+    inner: Rect,
+    config: Option<&nit_games::config::NormalizedConfig>,
+) -> VisualizerLayout {
     let mut show_payoff_side = false;
     let (main_area, right_area) = if let Some(config) = config {
         let desired = payoff_panel_width(&config.payoff) + 2;
@@ -36,7 +39,11 @@ pub fn layout_for_config(inner: Rect, config: Option<&nit_games::config::Normali
     } else {
         (inner, Rect::default())
     };
-    let side = if show_payoff_side { Some(right_area) } else { None };
+    let side = if show_payoff_side {
+        Some(right_area)
+    } else {
+        None
+    };
     VisualizerLayout {
         main: main_area,
         side,
@@ -221,11 +228,7 @@ pub fn build_main_lines(
     lines
 }
 
-pub fn build_side_lines(
-    state: &AppState,
-    theme: &Theme,
-    width: usize,
-) -> Vec<Line<'static>> {
+pub fn build_side_lines(state: &AppState, theme: &Theme, width: usize) -> Vec<Line<'static>> {
     let title_color = if state.focus == PaneId::Visualizer {
         theme.title_focused
     } else {
@@ -293,8 +296,7 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
     frame.render_widget(block, area);
 
     let config_text = state.editor_buffer().content_as_string();
-    let config_result =
-        GamesConfig::from_toml_with_root(&config_text, Some(&state.workspace_root));
+    let config_result = GamesConfig::from_toml_with_root(&config_text, Some(&state.workspace_root));
     let layout = layout_for_config(inner, config_result.as_ref().ok());
 
     let mut lines = build_main_lines(
@@ -324,8 +326,7 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
         let right_inner = right_block.inner(right_area);
         frame.render_widget(right_block, right_area);
         if right_inner.width > 0 && right_inner.height > 0 {
-            let mut side_lines =
-                build_side_lines(state, theme, right_inner.width as usize);
+            let mut side_lines = build_side_lines(state, theme, right_inner.width as usize);
             side_lines = apply_ui_selection(
                 side_lines,
                 state.ui_selection.as_ref(),
@@ -395,7 +396,9 @@ fn strategy_display_name_from_kind(kind: &StrategySpecKind) -> String {
             format!("FSM (states={states}, mode={mode_label})")
         }
         StrategySpecKind::Memory { n, .. } => format!("Memory-{}", n),
-        StrategySpecKind::OneSidedTm { states, symbols, .. } => {
+        StrategySpecKind::OneSidedTm {
+            states, symbols, ..
+        } => {
             format!("TM (states={states}, symbols={symbols})")
         }
     }

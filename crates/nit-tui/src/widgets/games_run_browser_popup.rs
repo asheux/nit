@@ -64,10 +64,7 @@ pub fn build_lines(state: &AppState, theme: &Theme, inner_width: u16) -> Vec<Lin
 
     if state.games.run_browser.loading {
         lines.push(Line::from(""));
-        lines.push(Line::from(Span::styled(
-            "Loading runs...",
-            dim_style,
-        )));
+        lines.push(Line::from(Span::styled("Loading runs...", dim_style)));
         return lines;
     }
 
@@ -89,7 +86,10 @@ pub fn build_lines(state: &AppState, theme: &Theme, inner_width: u16) -> Vec<Lin
             } else {
                 " "
             };
-            let text = format!("{prefix} {}", trim_to_width(&entry.label, max_width.saturating_sub(2)));
+            let text = format!(
+                "{prefix} {}",
+                trim_to_width(&entry.label, max_width.saturating_sub(2))
+            );
             lines.push(Line::from(Span::styled(text, style)));
         }
     }

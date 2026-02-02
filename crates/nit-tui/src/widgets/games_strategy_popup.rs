@@ -1,21 +1,19 @@
 use nit_core::{AppState, UiSelectionPane};
 use nit_games::config::{BuiltinKind, StrategySpecKind};
-use nit_games::output::StrategyDefinition;
 use nit_games::game::Action;
+use nit_games::output::StrategyDefinition;
 use nit_games::strategy::InputMode;
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{
-        Block, Borders, Clear, Paragraph, Wrap,
-    },
+    widgets::{Block, Borders, Clear, Paragraph, Wrap},
     Frame,
 };
 
 use crate::theme::Theme;
-use crate::widgets::graph_render::{self, GraphEdge, GraphNode, GraphSpec};
 use crate::widgets::games_visualizer_view::strategy_display_name_from_def;
+use crate::widgets::graph_render::{self, GraphEdge, GraphNode, GraphSpec};
 use crate::widgets::text_selection::apply_ui_selection;
 
 const MIN_WIDTH: u16 = 70;
@@ -240,13 +238,7 @@ fn graph_from_definition(def: &StrategyDefinition) -> Option<GraphSpec> {
     match &def.kind {
         StrategySpecKind::Builtin { builtin } => {
             let (start_state, mode, outputs, transitions) = builtin_as_fsm(*builtin);
-            let spec = fsm_graph_spec(
-                outputs.len(),
-                start_state,
-                mode,
-                &outputs,
-                &transitions,
-            );
+            let spec = fsm_graph_spec(outputs.len(), start_state, mode, &outputs, &transitions);
             if spec.nodes.len() > GRAPH_NODE_LIMIT {
                 None
             } else {
@@ -266,9 +258,7 @@ fn graph_from_definition(def: &StrategyDefinition) -> Option<GraphSpec> {
             }],
             start: Some(0),
         }),
-        StrategySpecKind::Memory { n, initial, table } => {
-            memory_graph_spec(*n, *initial, table)
-        }
+        StrategySpecKind::Memory { n, initial, table } => memory_graph_spec(*n, *initial, table),
         StrategySpecKind::Fsm {
             num_states,
             start_state,
@@ -292,13 +282,7 @@ fn graph_from_definition(def: &StrategyDefinition) -> Option<GraphSpec> {
             } else {
                 outputs.len()
             };
-            let spec = fsm_graph_spec(
-                state_count,
-                *start_state,
-                mode,
-                outputs,
-                transitions,
-            );
+            let spec = fsm_graph_spec(state_count, *start_state, mode, outputs, transitions);
             if spec.nodes.len() > GRAPH_NODE_LIMIT {
                 None
             } else {
@@ -582,11 +566,7 @@ fn build_memory_graph_lines(n: usize, initial: Action, table: &[Action]) -> Vec<
         "2".to_string(),
         "3".to_string(),
     ];
-    let mask = if n == 0 {
-        0u64
-    } else {
-        (1u64 << (2 * n)) - 1
-    };
+    let mask = if n == 0 { 0u64 } else { (1u64 << (2 * n)) - 1 };
     let mut rows = Vec::new();
     for idx in 0..states {
         let output = table.get(idx).copied().unwrap_or(initial);
@@ -654,7 +634,13 @@ pub fn build_definition_lines(def: &nit_games::output::StrategyDefinition) -> Ve
         } => {
             let inferred = transitions
                 .first()
-                .map(|row| if row.len() == 4 { InputMode::JointLastAction } else { InputMode::OpponentLastAction })
+                .map(|row| {
+                    if row.len() == 4 {
+                        InputMode::JointLastAction
+                    } else {
+                        InputMode::OpponentLastAction
+                    }
+                })
                 .unwrap_or(InputMode::OpponentLastAction);
             let mode = input_mode.unwrap_or(inferred);
             let state_count = if *num_states > 0 {
@@ -814,10 +800,7 @@ fn build_lines_window(
         if let Some(title) = state.games.strategy_inspect.title.as_ref() {
             push(Line::from(""), &mut idx, &mut lines);
             push(
-                Line::from(Span::styled(
-                    trim_to_width(title, max_width),
-                    value_style,
-                )),
+                Line::from(Span::styled(trim_to_width(title, max_width), value_style)),
                 &mut idx,
                 &mut lines,
             );
@@ -857,10 +840,7 @@ fn build_lines_window(
     let list = strategy_list(state);
     if list.is_empty() {
         push(
-            Line::from(Span::styled(
-                "No strategies available.",
-                dim_style,
-            )),
+            Line::from(Span::styled("No strategies available.", dim_style)),
             &mut idx,
             &mut lines,
         );
@@ -870,7 +850,11 @@ fn build_lines_window(
         } else {
             "Select a strategy:".to_string()
         };
-        push(Line::from(Span::styled(label, label_style)), &mut idx, &mut lines);
+        push(
+            Line::from(Span::styled(label, label_style)),
+            &mut idx,
+            &mut lines,
+        );
         let list_start = idx;
         let list_end = list_start.saturating_add(list.len());
         if end > list_start && start < list_end {

@@ -4,13 +4,13 @@ use std::time::Instant;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use nit_core::{AppState, GamesAnalysisRequest, GamesStatus, UiSelectionPane};
+use nit_games::output::StrategyDefinition;
 use nit_games::{
     config::GamesConfig,
     events::EventWriter,
     output::{RunLayout, TournamentResults},
     run_id_from_seed_config, MatchSnapshot, TournamentProgress,
 };
-use nit_games::output::StrategyDefinition;
 use nit_utils::hashing::stable_hash_bytes;
 use ratatui::{
     layout::Rect,
@@ -21,10 +21,10 @@ use ratatui::{
 };
 use tracing::info;
 
-use crate::theme::Theme;
 use crate::games_analysis::{AnalysisCommand, AnalysisEvent, AnalysisRequest, GamesAnalysisRunner};
 use crate::games_runner::{GamesRunner, RunRequest, RunnerCommand, RunnerEvent};
 use crate::games_runs::{GamesRunsRunner, RunsCommand, RunsEvent};
+use crate::theme::Theme;
 use crate::widgets::games_visualizer_view::strategy_display_name_from_def;
 use crate::widgets::text_selection::apply_ui_selection;
 
@@ -139,10 +139,7 @@ impl GamesPetriDishRuntime {
                 state.games.replay.last_error = Some("No run loaded for replay".into());
                 return;
             };
-            let history_path = run
-                .history_log
-                .clone()
-                .or(run.paths.history.clone());
+            let history_path = run.history_log.clone().or(run.paths.history.clone());
             let Some(path) = history_path else {
                 state.games.replay.loading = false;
                 state.games.replay.last_error = Some("Run has no history log".into());
@@ -592,19 +589,17 @@ impl GamesPetriDishRuntime {
             return;
         }
         let config_text = state.editor_buffer().content_as_string();
-        let mut config = match GamesConfig::from_toml_with_root(
-            &config_text,
-            Some(&state.workspace_root),
-        ) {
-            Ok(config) => config,
-            Err(err) => {
-                let msg = format!("Config error: {err}");
-                state.games.status = GamesStatus::Error;
-                state.games.last_error = Some(msg.clone());
-                state.status = Some(msg);
-                return;
-            }
-        };
+        let mut config =
+            match GamesConfig::from_toml_with_root(&config_text, Some(&state.workspace_root)) {
+                Ok(config) => config,
+                Err(err) => {
+                    let msg = format!("Config error: {err}");
+                    state.games.status = GamesStatus::Error;
+                    state.games.last_error = Some(msg.clone());
+                    state.status = Some(msg);
+                    return;
+                }
+            };
 
         config.engine.mode = nit_games::EngineMode::Interactive;
 
@@ -708,19 +703,13 @@ impl GamesPetriDishRuntime {
             }
         }
         if !history_path.exists() {
-            let fallback = state
-                .workspace_root
-                .join("games-runs")
-                .join(&cleaned);
+            let fallback = state.workspace_root.join("games-runs").join(&cleaned);
             if fallback.exists() {
                 history_path = fallback;
             }
         }
         if !history_path.exists() {
-            state.status = Some(format!(
-                "History log not found: {}",
-                history_path.display()
-            ));
+            state.status = Some(format!("History log not found: {}", history_path.display()));
             state.games.analysis.running = false;
             return;
         }
@@ -867,7 +856,11 @@ fn normalize_path(input: &str) -> String {
     let unquoted = trimmed
         .strip_prefix('"')
         .and_then(|v| v.strip_suffix('"'))
-        .or_else(|| trimmed.strip_prefix('\'').and_then(|v| v.strip_suffix('\'')))
+        .or_else(|| {
+            trimmed
+                .strip_prefix('\'')
+                .and_then(|v| v.strip_suffix('\''))
+        })
         .unwrap_or(trimmed);
     unquoted.trim().to_string()
 }

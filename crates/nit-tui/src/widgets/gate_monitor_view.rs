@@ -1,5 +1,7 @@
 use nit_core::seed::SeedViewMode;
-use nit_core::{AppKind, AppState, GamesStatus, GolSearchIntensity, PaneId, RuleMode, UiSelectionPane};
+use nit_core::{
+    AppKind, AppState, GamesStatus, GolSearchIntensity, PaneId, RuleMode, UiSelectionPane,
+};
 use nit_gol::{AttractorEvent, Rule};
 use ratatui::{
     style::{Modifier, Style},
@@ -11,12 +13,7 @@ use ratatui::{
 use crate::theme::Theme;
 use crate::widgets::text_selection::apply_ui_selection;
 
-pub fn render(
-    frame: &mut Frame,
-    area: ratatui::layout::Rect,
-    state: &AppState,
-    theme: &Theme,
-) {
+pub fn render(frame: &mut Frame, area: ratatui::layout::Rect, state: &AppState, theme: &Theme) {
     if state.app_kind == AppKind::Games {
         return render_games(frame, area, state, theme);
     }
@@ -528,8 +525,8 @@ pub fn render(
         theme.selection_bg,
         0,
     );
-    let para = Paragraph::new(lines)
-        .style(Style::default().bg(theme.background).fg(theme.foreground));
+    let para =
+        Paragraph::new(lines).style(Style::default().bg(theme.background).fg(theme.foreground));
     frame.render_widget(block, area);
     frame.render_widget(para, inner);
 }
@@ -765,8 +762,8 @@ fn render_games(frame: &mut Frame, area: ratatui::layout::Rect, state: &AppState
         theme.selection_bg,
         0,
     );
-    let para = Paragraph::new(lines)
-        .style(Style::default().bg(theme.background).fg(theme.foreground));
+    let para =
+        Paragraph::new(lines).style(Style::default().bg(theme.background).fg(theme.foreground));
     frame.render_widget(block, area);
     frame.render_widget(para, inner);
 }

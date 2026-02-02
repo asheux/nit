@@ -47,13 +47,7 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
     let total_lines = line_count(state);
     let max_scroll = total_lines.saturating_sub(inner.height as usize);
     let scroll = state.games.replay.scroll_offset.min(max_scroll);
-    let mut lines = build_lines_window(
-        state,
-        theme,
-        inner.width,
-        scroll,
-        inner.height as usize,
-    );
+    let mut lines = build_lines_window(state, theme, inner.width, scroll, inner.height as usize);
     lines = apply_ui_selection(
         lines,
         state.ui_selection.as_ref(),
@@ -194,10 +188,7 @@ fn build_lines_window(
         if let Some(title) = state.games.replay.title.as_ref() {
             push(Line::from(""), &mut idx, &mut lines);
             push(
-                Line::from(Span::styled(
-                    trim_to_width(title, max_width),
-                    value_style,
-                )),
+                Line::from(Span::styled(trim_to_width(title, max_width), value_style)),
                 &mut idx,
                 &mut lines,
             );
@@ -212,10 +203,7 @@ fn build_lines_window(
             let slice_end = end.saturating_sub(lines_start).min(total_rounds);
             for line in &state.games.replay.lines[slice_start..slice_end] {
                 push(
-                    Line::from(Span::styled(
-                        trim_to_width(line, max_width),
-                        value_style,
-                    )),
+                    Line::from(Span::styled(trim_to_width(line, max_width), value_style)),
                     &mut idx,
                     &mut lines,
                 );
@@ -236,10 +224,7 @@ fn build_lines_window(
     let pairs = pair_list(state);
     if pairs.is_empty() {
         push(
-            Line::from(Span::styled(
-                "No pairwise results available.",
-                dim_style,
-            )),
+            Line::from(Span::styled("No pairwise results available.", dim_style)),
             &mut idx,
             &mut lines,
         );

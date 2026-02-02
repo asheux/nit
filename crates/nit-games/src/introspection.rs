@@ -24,8 +24,12 @@ pub struct StrategyIntrospection {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum StrategyIntrospectionParameters {
-    Builtin { builtin: BuiltinKind },
-    Random { p_cooperate: f32 },
+    Builtin {
+        builtin: BuiltinKind,
+    },
+    Random {
+        p_cooperate: f32,
+    },
     Fsm {
         states: usize,
         start_state: usize,
@@ -301,7 +305,11 @@ fn build_fsm_graph_lines(
     lines
 }
 
-fn build_tm_graph_lines(states: u16, symbols: u8, transitions: &[TmTransitionRecord]) -> Vec<String> {
+fn build_tm_graph_lines(
+    states: u16,
+    symbols: u8,
+    transitions: &[TmTransitionRecord],
+) -> Vec<String> {
     let mut headers = Vec::with_capacity(symbols as usize + 1);
     headers.push("state".to_string());
     for sym in 0..symbols {
@@ -326,7 +334,13 @@ fn build_tm_graph_lines(states: u16, symbols: u8, transitions: &[TmTransitionRec
             } else {
                 targets
                     .into_iter()
-                    .map(|next| if next == 0 { "H".to_string() } else { next.to_string() })
+                    .map(|next| {
+                        if next == 0 {
+                            "H".to_string()
+                        } else {
+                            next.to_string()
+                        }
+                    })
                     .collect::<Vec<_>>()
                     .join(",")
             };

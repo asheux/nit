@@ -18,8 +18,12 @@ pub struct ReplayData {
 }
 
 pub enum RunsCommand {
-    Refresh { base_dir: PathBuf },
-    LoadSummary { summary_path: PathBuf },
+    Refresh {
+        base_dir: PathBuf,
+    },
+    LoadSummary {
+        summary_path: PathBuf,
+    },
     LoadReplay {
         history_path: PathBuf,
         a_id: String,
@@ -72,26 +76,22 @@ impl GamesRunsRunner {
 fn runner_loop(cmd_rx: Receiver<RunsCommand>, event_tx: Sender<RunsEvent>) {
     loop {
         match cmd_rx.recv() {
-            Ok(RunsCommand::Refresh { base_dir }) => {
-                match scan_runs(&base_dir) {
-                    Ok(entries) => {
-                        let _ = event_tx.send(RunsEvent::RunsLoaded(entries));
-                    }
-                    Err(err) => {
-                        let _ = event_tx.send(RunsEvent::Error(err));
-                    }
+            Ok(RunsCommand::Refresh { base_dir }) => match scan_runs(&base_dir) {
+                Ok(entries) => {
+                    let _ = event_tx.send(RunsEvent::RunsLoaded(entries));
                 }
-            }
-            Ok(RunsCommand::LoadSummary { summary_path }) => {
-                match load_summary(&summary_path) {
-                    Ok(summary) => {
-                        let _ = event_tx.send(RunsEvent::SummaryLoaded(summary));
-                    }
-                    Err(err) => {
-                        let _ = event_tx.send(RunsEvent::Error(err));
-                    }
+                Err(err) => {
+                    let _ = event_tx.send(RunsEvent::Error(err));
                 }
-            }
+            },
+            Ok(RunsCommand::LoadSummary { summary_path }) => match load_summary(&summary_path) {
+                Ok(summary) => {
+                    let _ = event_tx.send(RunsEvent::SummaryLoaded(summary));
+                }
+                Err(err) => {
+                    let _ = event_tx.send(RunsEvent::Error(err));
+                }
+            },
             Ok(RunsCommand::LoadReplay {
                 history_path,
                 a_id,
@@ -236,7 +236,10 @@ fn build_replay(record: MatchHistory, payoff: PayoffMatrix) -> ReplayData {
         "Match {} (id {})  {} vs {}  rep {}",
         record.match_index, record.match_id, record.a, record.b, record.repetition
     );
-    lines.push(format!("rounds: {}  score: {} - {}", record.rounds, record.a_score, record.b_score));
+    lines.push(format!(
+        "rounds: {}  score: {} - {}",
+        record.rounds, record.a_score, record.b_score
+    ));
     if let Some(cycle) = record.cycle.clone() {
         let cycle_start = cycle.transient_rounds.saturating_add(1);
         lines.push(format!(

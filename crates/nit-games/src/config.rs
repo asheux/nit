@@ -522,14 +522,8 @@ fn normalize_strategy(
                 ));
             }
             if let Some(value) = raw.transitions {
-                transitions = parse_tm_transitions(
-                    &id,
-                    value,
-                    states,
-                    symbols,
-                    blank_raw,
-                    &mut errors,
-                );
+                transitions =
+                    parse_tm_transitions(&id, value, states, symbols, blank_raw, &mut errors);
             } else if let Some(rule_code) = raw.rule_code {
                 transitions = decode_tm_rule_code(&id, rule_code, states, symbols, &mut errors);
             } else {
@@ -655,11 +649,7 @@ fn normalize_index(
     }
 }
 
-fn parse_input_mode(
-    id: &str,
-    raw: Option<&str>,
-    errors: &mut Vec<String>,
-) -> Option<InputMode> {
+fn parse_input_mode(id: &str, raw: Option<&str>, errors: &mut Vec<String>) -> Option<InputMode> {
     let Some(raw) = raw else {
         return None;
     };
@@ -673,11 +663,7 @@ fn parse_input_mode(
             Some(InputMode::OpponentLastAction)
         }
         "selflastaction" | "self" | "selflast" => Some(InputMode::SelfLastAction),
-        "jointlastaction"
-        | "joint"
-        | "jointlast"
-        | "combinedlastaction"
-        | "combined"
+        "jointlastaction" | "joint" | "jointlast" | "combinedlastaction" | "combined"
         | "combinedlast" => Some(InputMode::JointLastAction),
         _ => {
             errors.push(format!(
@@ -959,16 +945,12 @@ fn parse_tm_table_transitions(
                     "transitions[{state_idx}][{read_idx}] must be [next, write, move]"
                 ));
             }
-            let next = entry[0]
-                .as_integer()
-                .ok_or_else(|| {
-                    format!("transitions[{state_idx}][{read_idx}][0] must be an integer")
-                })?;
-            let write = entry[1]
-                .as_integer()
-                .ok_or_else(|| {
-                    format!("transitions[{state_idx}][{read_idx}][1] must be an integer")
-                })?;
+            let next = entry[0].as_integer().ok_or_else(|| {
+                format!("transitions[{state_idx}][{read_idx}][0] must be an integer")
+            })?;
+            let write = entry[1].as_integer().ok_or_else(|| {
+                format!("transitions[{state_idx}][{read_idx}][1] must be an integer")
+            })?;
             let move_dir = if let Some(move_int) = entry[2].as_integer() {
                 match move_int {
                     -1 => TmMove::Left,

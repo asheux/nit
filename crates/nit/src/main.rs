@@ -10,18 +10,20 @@ use std::thread;
 
 use anyhow::Context;
 use clap::{Parser, Subcommand, ValueEnum};
-use nit_core::{io as core_io, AppKind, Buffer, LabId, Mode, SelectedRule};
+use nit_core::{io as core_io, AppKind, Buffer, LabId, Mode, PaneId, SelectedRule};
+use nit_games::config::StrategySpecKind;
 use nit_games::config::{BuiltinKind, EngineMode};
 use nit_games::events::{EventWriter, GameEvent};
 use nit_games::history_log::MatchHistory;
-use nit_games::output::{write_summary, RunLayout, RunPaths, RunSummary, RUN_SUMMARY_SCHEMA_VERSION};
+use nit_games::output::{
+    write_summary, RunLayout, RunPaths, RunSummary, RUN_SUMMARY_SCHEMA_VERSION,
+};
 use nit_games::tournament::{KernelRunMode, Parallelism, TournamentKernel};
 use nit_games::{
     enumerate_fsms, format_strategy_introspection, introspect_strategy, run_id_from_seed_config,
-    Action, FsmDefinition, GamesConfig, HistoryWriter, InputMode, StrategyIntrospectionKind,
-    StrategyIntrospection, StrategyIntrospectionParameters, StrategySpec, TmTransitionRecord,
+    Action, FsmDefinition, GamesConfig, HistoryWriter, InputMode, StrategyIntrospection,
+    StrategyIntrospectionKind, StrategyIntrospectionParameters, StrategySpec, TmTransitionRecord,
 };
-use nit_games::config::StrategySpecKind;
 use nit_tui::{run, Theme};
 use nit_utils::hashing::stable_hash_bytes;
 use nit_utils::paths;
@@ -347,6 +349,12 @@ fn main() -> anyhow::Result<()> {
     let seed = stable_hash_bytes(state.editor_buffer().content_as_string().as_bytes());
     state.visualizer.seed = seed;
     state.mode = Mode::Normal;
+    if target.as_deref().is_none_or(|p| p.is_dir()) {
+        state.file_tree.root = state.workspace_root.clone();
+        state.file_tree.open = true;
+        state.focus = PaneId::Editor;
+        state.mode = Mode::Normal;
+    }
 
     if app_kind == AppKind::Gol {
         let rule_config = nit_core::load_rule_config(&state.workspace_root);
@@ -574,7 +582,11 @@ fn execute_tournament(
     config: &nit_games::NormalizedConfig,
     event_path: Option<PathBuf>,
     history_path: Option<PathBuf>,
-) -> anyhow::Result<(nit_games::output::TournamentResults, Option<String>, Option<String>)> {
+) -> anyhow::Result<(
+    nit_games::output::TournamentResults,
+    Option<String>,
+    Option<String>,
+)> {
     let parallelism = Parallelism::from_config(&config.engine.parallelism);
     let event_log_enabled = event_path.is_some();
     let history_log_enabled = history_path.is_some();
@@ -589,7 +601,9 @@ fn execute_tournament(
             None
         };
         let mut history_writer = if history_log_enabled {
-            Some(HistoryWriter::new(history_path.clone().expect("history path"))?)
+            Some(HistoryWriter::new(
+                history_path.clone().expect("history path"),
+            )?)
         } else {
             None
         };
@@ -756,11 +770,8 @@ fn run_games_headless(
     let config_path = config_path.unwrap_or_else(|| PathBuf::from("games.toml"));
     let config_text = core_io::load_to_string(&config_path)
         .with_context(|| format!("failed to read {}", config_path.display()))?;
-    let mut config = GamesConfig::from_toml_with_root(
-        &config_text,
-        config_path.parent(),
-    )
-    .map_err(|err| anyhow::anyhow!(err))?;
+    let mut config = GamesConfig::from_toml_with_root(&config_text, config_path.parent())
+        .map_err(|err| anyhow::anyhow!(err))?;
 
     if let Some(strategies_path) = strategies_path {
         let resolved = resolve_relative_path(&strategies_path, config_path.parent());
@@ -773,9 +784,9 @@ fn run_games_headless(
     config.engine.mode = EngineMode::Batch;
 
     let timestamp = EventWriter::timestamp();
-    let seed = config.seed.unwrap_or_else(|| {
-        stable_hash_bytes(format!("{timestamp}\n{config_text}").as_bytes())
-    });
+    let seed = config
+        .seed
+        .unwrap_or_else(|| stable_hash_bytes(format!("{timestamp}\n{config_text}").as_bytes()));
     config.seed = Some(seed);
 
     let run_id = run_id_from_seed_config(seed, &config_text);
@@ -908,11 +919,8 @@ fn run_games_sweep(
     let config_path = config_path.unwrap_or_else(|| PathBuf::from("games.toml"));
     let config_text = core_io::load_to_string(&config_path)
         .with_context(|| format!("failed to read {}", config_path.display()))?;
-    let mut config = GamesConfig::from_toml_with_root(
-        &config_text,
-        config_path.parent(),
-    )
-    .map_err(|err| anyhow::anyhow!(err))?;
+    let mut config = GamesConfig::from_toml_with_root(&config_text, config_path.parent())
+        .map_err(|err| anyhow::anyhow!(err))?;
 
     if let Some(strategies_path) = strategies_path {
         let resolved = resolve_relative_path(&strategies_path, config_path.parent());
@@ -945,7 +953,12 @@ fn run_games_sweep(
         Some(name) => resolve_payoff_preset(name)
             .ok_or_else(|| anyhow::anyhow!("unknown payoff preset '{name}'"))?
             .into(),
-        None => (config.payoff.r, config.payoff.s, config.payoff.t, config.payoff.p),
+        None => (
+            config.payoff.r,
+            config.payoff.s,
+            config.payoff.t,
+            config.payoff.p,
+        ),
     };
     let (base_r, base_s, base_t, base_p) = preset_values;
     let payoff_r_grid = if payoff_r.is_empty() {
@@ -1005,9 +1018,9 @@ fn run_games_sweep(
     let top_k = 3usize;
 
     let collect_results = |results: &nit_games::output::TournamentResults,
-                               raw_totals: &mut HashMap<String, Vec<f64>>,
-                               adjusted_totals: &mut HashMap<String, Vec<f64>>,
-                               top_counts: &mut HashMap<String, u32>| {
+                           raw_totals: &mut HashMap<String, Vec<f64>>,
+                           adjusted_totals: &mut HashMap<String, Vec<f64>>,
+                           top_counts: &mut HashMap<String, u32>| {
         let mut top_entries = Vec::new();
         for entry in results.ranking.iter().take(top_k) {
             top_entries.push(SweepTopEntry {
@@ -1061,17 +1074,17 @@ fn run_games_sweep(
                                 cell_config.seed = Some(cell_seed);
                                 cell_config.engine.mode = EngineMode::Batch;
 
-                                let config_text_cell =
-                                    toml::to_string(&cell_config)
-                                        .unwrap_or_else(|_| config_text.clone());
+                                let config_text_cell = toml::to_string(&cell_config)
+                                    .unwrap_or_else(|_| config_text.clone());
                                 let run_id = run_id_from_seed_config(cell_seed, &config_text_cell);
                                 let noise_label = format!("{:.4}", noise).replace('.', "_");
                                 let cell_dir = cells_root.join(format!(
                                     "{:04}__r{}__n{}__rep{}__R{}__S{}__T{}__P{}",
                                     cell_id, rounds, noise_label, reps, r, s, t, p
                                 ));
-                                fs::create_dir_all(&cell_dir)
-                                    .with_context(|| format!("failed to create {}", cell_dir.display()))?;
+                                fs::create_dir_all(&cell_dir).with_context(|| {
+                                    format!("failed to create {}", cell_dir.display())
+                                })?;
 
                                 let summary_path = cell_dir.join("run_summary.json");
                                 let definitions_path = cell_dir.join("definitions.json");
@@ -1103,15 +1116,16 @@ fn run_games_sweep(
                                                 payoff_p: *p,
                                                 seed: summary.seed,
                                                 run_id: summary.run_id.clone(),
-                                                run_dir: summary
-                                                    .run_dir
-                                                    .clone()
-                                                    .unwrap_or_else(|| cell_dir.display().to_string()),
+                                                run_dir: summary.run_dir.clone().unwrap_or_else(
+                                                    || cell_dir.display().to_string(),
+                                                ),
                                                 summary_path: summary
                                                     .paths
                                                     .summary
                                                     .clone()
-                                                    .unwrap_or_else(|| summary_path.display().to_string()),
+                                                    .unwrap_or_else(|| {
+                                                        summary_path.display().to_string()
+                                                    }),
                                                 top_strategy: top_id,
                                                 top_strategies: top_entries,
                                                 skipped: true,
@@ -1151,12 +1165,13 @@ fn run_games_sweep(
                                 {
                                     eprintln!("Warning: failed to write definitions: {err}");
                                 }
-                                if let Err(err) = nit_utils::fs::write_atomic(&results_path, |writer| {
-                                    serde_json::to_writer_pretty(writer, &results)
-                                        .map_err(|e| {
-                                            std::io::Error::new(std::io::ErrorKind::Other, e)
-                                        })
-                                }) {
+                                if let Err(err) =
+                                    nit_utils::fs::write_atomic(&results_path, |writer| {
+                                        serde_json::to_writer_pretty(writer, &results).map_err(
+                                            |e| std::io::Error::new(std::io::ErrorKind::Other, e),
+                                        )
+                                    })
+                                {
                                     eprintln!("Warning: failed to write results: {err}");
                                 }
 
@@ -1183,8 +1198,9 @@ fn run_games_sweep(
                                     run_dir: Some(cell_dir.display().to_string()),
                                 };
 
-                                write_summary(&summary_path, &summary)
-                                    .with_context(|| format!("failed to write {}", summary_path.display()))?;
+                                write_summary(&summary_path, &summary).with_context(|| {
+                                    format!("failed to write {}", summary_path.display())
+                                })?;
 
                                 let (top_id, top_entries) = collect_results(
                                     &results,
@@ -1269,7 +1285,11 @@ fn run_games_sweep(
             b_score.partial_cmp(&a_score).unwrap()
         });
     } else {
-        strategies.sort_by(|a, b| b.mean_total_payoff.partial_cmp(&a.mean_total_payoff).unwrap());
+        strategies.sort_by(|a, b| {
+            b.mean_total_payoff
+                .partial_cmp(&a.mean_total_payoff)
+                .unwrap()
+        });
     }
 
     let summary = SweepSummary {
@@ -1322,11 +1342,8 @@ fn run_games_inspect(
     let config_path = config_path.unwrap_or_else(|| PathBuf::from("games.toml"));
     let config_text = core_io::load_to_string(&config_path)
         .with_context(|| format!("failed to read {}", config_path.display()))?;
-    let config = GamesConfig::from_toml_with_root(
-        &config_text,
-        config_path.parent(),
-    )
-    .map_err(|err| anyhow::anyhow!(err))?;
+    let config = GamesConfig::from_toml_with_root(&config_text, config_path.parent())
+        .map_err(|err| anyhow::anyhow!(err))?;
 
     let spec = config
         .strategies
@@ -1343,9 +1360,8 @@ fn run_games_inspect(
     if let Some(out_path) = out {
         if let Some(parent) = out_path.parent() {
             if !parent.as_os_str().is_empty() {
-                fs::create_dir_all(parent).with_context(|| {
-                    format!("failed to create directory {}", parent.display())
-                })?;
+                fs::create_dir_all(parent)
+                    .with_context(|| format!("failed to create directory {}", parent.display()))?;
             }
         }
         fs::write(&out_path, output)
@@ -1409,11 +1425,8 @@ fn run_games_graph(
         let config_path = config_path.unwrap_or_else(|| PathBuf::from("games.toml"));
         let config_text = core_io::load_to_string(&config_path)
             .with_context(|| format!("failed to read {}", config_path.display()))?;
-        let config = GamesConfig::from_toml_with_root(
-            &config_text,
-            config_path.parent(),
-        )
-        .map_err(|err| anyhow::anyhow!(err))?;
+        let config = GamesConfig::from_toml_with_root(&config_text, config_path.parent())
+            .map_err(|err| anyhow::anyhow!(err))?;
         config
             .strategies
             .iter()
@@ -1493,8 +1506,7 @@ fn build_strategy_graph(intro: &StrategyIntrospection) -> anyhow::Result<Strateg
             build_memory_graph(intro.id.clone(), intro.kind.clone(), *n, *initial, table)
         }
         StrategyIntrospectionParameters::Builtin { builtin } => {
-            let (start_state, input_mode, outputs, transitions) =
-                builtin_to_fsm(*builtin);
+            let (start_state, input_mode, outputs, transitions) = builtin_to_fsm(*builtin);
             let notes = vec![format!("builtin expanded as fsm ({builtin:?})")];
             Ok(build_fsm_graph(
                 intro.id.clone(),
@@ -1507,13 +1519,11 @@ fn build_strategy_graph(intro: &StrategyIntrospection) -> anyhow::Result<Strateg
                 Some(notes),
             ))
         }
-        StrategyIntrospectionParameters::Random { p_cooperate } => {
-            Ok(build_random_graph(
-                intro.id.clone(),
-                intro.kind.clone(),
-                *p_cooperate,
-            ))
-        }
+        StrategyIntrospectionParameters::Random { p_cooperate } => Ok(build_random_graph(
+            intro.id.clone(),
+            intro.kind.clone(),
+            *p_cooperate,
+        )),
     }
 }
 
@@ -1706,9 +1716,7 @@ fn build_random_graph(
     }
 }
 
-fn builtin_to_fsm(
-    builtin: BuiltinKind,
-) -> (usize, InputMode, Vec<Action>, Vec<Vec<usize>>) {
+fn builtin_to_fsm(builtin: BuiltinKind) -> (usize, InputMode, Vec<Action>, Vec<Vec<usize>>) {
     match builtin {
         BuiltinKind::AllC => (
             0,
@@ -1764,11 +1772,7 @@ fn render_strategy_graph_dot(graph: &StrategyGraph) -> String {
     }
     for node in &graph.nodes {
         let label = node.label.replace('"', "\\\"");
-        dot.push_str(&format!(
-            "  {} [label=\"{}\"];\n",
-            dot_id(&node.id),
-            label
-        ));
+        dot.push_str(&format!("  {} [label=\"{}\"];\n", dot_id(&node.id), label));
     }
     for edge in &graph.edges {
         let label = edge.label.replace('"', "\\\"");
@@ -1871,7 +1875,10 @@ fn run_games_enumerate_fsm(
         out.to_path_buf()
     } else {
         fs::create_dir_all(out)?;
-        let filename = format!("fsm_enumeration__states-{}.ndjson", states.replace("..", "-"));
+        let filename = format!(
+            "fsm_enumeration__states-{}.ndjson",
+            states.replace("..", "-")
+        );
         out.join(filename)
     };
 
@@ -1886,19 +1893,12 @@ fn run_games_enumerate_fsm(
         if matches!(remaining, Some(0)) {
             break;
         }
-        total += enumerate_fsms(
-            states,
-            mode,
-            remaining,
-            canonical,
-            |def: FsmDefinition| {
-                let id = format!("fsm_{:016x}", def.stable_hash());
-                let spec = def.to_spec(id);
-                serde_json::to_writer(&mut writer, &spec)
-                    .expect("write fsm strategy");
-                writer.write_all(b"\n").expect("write newline");
-            },
-        );
+        total += enumerate_fsms(states, mode, remaining, canonical, |def: FsmDefinition| {
+            let id = format!("fsm_{:016x}", def.stable_hash());
+            let spec = def.to_spec(id);
+            serde_json::to_writer(&mut writer, &spec).expect("write fsm strategy");
+            writer.write_all(b"\n").expect("write newline");
+        });
     }
 
     writer.flush()?;

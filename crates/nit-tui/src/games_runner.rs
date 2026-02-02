@@ -105,17 +105,15 @@ fn runner_loop(cmd_rx: Receiver<RunnerCommand>, event_tx: Sender<RunnerEvent>) {
     loop {
         if state.is_none() {
             match cmd_rx.recv() {
-                Ok(RunnerCommand::StartRun(request)) => {
-                    match start_run(request, &event_tx) {
-                        Ok(run_state) => {
-                            state = Some(run_state);
-                            paused = false;
-                        }
-                        Err(err) => {
-                            let _ = event_tx.send(RunnerEvent::Error(err));
-                        }
+                Ok(RunnerCommand::StartRun(request)) => match start_run(request, &event_tx) {
+                    Ok(run_state) => {
+                        state = Some(run_state);
+                        paused = false;
                     }
-                }
+                    Err(err) => {
+                        let _ = event_tx.send(RunnerEvent::Error(err));
+                    }
+                },
                 Ok(RunnerCommand::Shutdown) | Err(_) => break,
                 _ => {}
             }
@@ -159,9 +157,15 @@ fn runner_loop(cmd_rx: Receiver<RunnerCommand>, event_tx: Sender<RunnerEvent>) {
             continue;
         }
 
-        let Some(run_state) = state.as_mut() else { continue };
+        let Some(run_state) = state.as_mut() else {
+            continue;
+        };
 
-        let steps = if step_once { 1 } else { run_state.steps_per_tick };
+        let steps = if step_once {
+            1
+        } else {
+            run_state.steps_per_tick
+        };
         run_state.runner.step_rounds(steps);
 
         let completed = run_state.runner.completed_matches();
@@ -171,9 +175,7 @@ fn runner_loop(cmd_rx: Receiver<RunnerCommand>, event_tx: Sender<RunnerEvent>) {
             run_state.last_completed = completed;
         }
 
-        if run_state
-            .progress_interval
-            .is_zero()
+        if run_state.progress_interval.is_zero()
             || run_state.last_progress.elapsed() >= run_state.progress_interval
         {
             if let Some(progress) = run_state.runner.progress() {

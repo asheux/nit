@@ -3,12 +3,23 @@
 ## Global
 - Ctrl+Q: Quit (confirm if dirty)
 - Ctrl+S: Save
+- Ctrl+T: Toggle NITTree (file tree overlay)
 - Tab / Shift+Tab: Cycle pane focus
 - Ctrl+H/J/K/L: Focus panes (vim/tmux style: left/down/up/right)
 - F1 / ?: Toggle help overlay
 - Ctrl+Enter: Run Petri Dish simulation popup (active app)
 - Ctrl+^: Show hidden Petri Dish
 - : (Normal mode): Command prompt
+
+## NITTree (Editor overlay)
+- Esc / q: Close tree
+- j/k or Up/Down: Move selection
+- PageUp/PageDown: Page
+- Home/End: Top/Bottom
+- Enter: Open file (closes tree)
+- r: Refresh
+- .: Toggle hidden files
+- i: Toggle ignored files
 
 ## Editor & Notes (focused)
 - Arrow keys / PageUp / PageDown / Home / End: Move cursor/scroll
@@ -85,6 +96,7 @@
 - Y / N to confirm quit when prompted
 - :run: Run the active app
 - :q: Quit (confirm if dirty)
+- :tree / :nittree / :explore: Toggle NITTree
 - Commands are routed to the active lab; use `--lab gol|games` at startup to switch labs.
 - :gol hide / :petri hide: Hide GoL Petri Dish (sim keeps running)
 - :gol show / :petri show: Show GoL Petri Dish

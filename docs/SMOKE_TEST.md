@@ -17,9 +17,24 @@ It's meant for quick confidence after changes to UI, commands, or engine wiring.
 ## Core TUI (Applies To All Labs)
 
 - Launch:
+  - `cargo run --`
   - `cargo run -- path/to/file`
   - `cargo run -- .`
   - Expect: a multi-pane editor TUI (Editor/Notes/Logs + right-side panes).
+  - Expect: with no args or a directory target, NITTree opens in the Editor pane (rooted at the cwd/target dir).
+- NITTree:
+  - Toggle:
+    - `Ctrl+T` or `:tree`
+    - Expect: tree opens/closes as an Editor-pane overlay (editor buffer stays intact under it).
+  - Navigation:
+    - `j/k` or `Up/Down`, `PageUp/PageDown`, `Home/End`
+    - Expect: selection stays visible; directories auto-expand along the selected path and auto-collapse when you leave.
+  - Open:
+    - `Enter` on a file
+    - Expect: file loads into the editor buffer and the tree closes.
+  - Filters:
+    - `.` toggles dotfiles; `r` refreshes; `.git` never appears.
+    - Add an entry to `.gitignore`, refresh, and expect ignored files/dirs to disappear.
 - Pane focus:
   - `Tab` / `Shift+Tab`
   - `Ctrl+H/J/K/L`

@@ -1,4 +1,5 @@
 use crate::{mode::Mode, pane::PaneId};
+use std::path::PathBuf;
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Action {
@@ -100,4 +101,6 @@ pub enum Action {
     HideHelp,
     ToggleSyntax,
     ToggleDebug,
+    ToggleFileTree,
+    OpenFile(PathBuf),
 }

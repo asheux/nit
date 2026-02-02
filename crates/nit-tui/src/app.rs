@@ -27,6 +27,8 @@ use ratatui::{
 use tracing::info;
 
 use crate::{
+    file_tree,
+    file_tree_runner::{FileTreeCommand, FileTreeEvent, FileTreeRunner},
     games_petri_dish::GamesPetriDishRuntime,
     layout,
     petri_dish::PetriDishRuntime,
@@ -35,10 +37,10 @@ use crate::{
     system_stats::SystemStats,
     theme::Theme,
     widgets::{
-        bottom_bar, editor_view, games_analysis_popup, games_replay_popup,
-        games_run_browser_popup, games_strategy_popup, games_tm_sim_popup,
-        games_visualizer_view, gate_monitor_view, help_overlay, job_output_view,
-        notes_view, protocol_picker, rule_picker, top_bar, visualizer_view,
+        bottom_bar, editor_view, file_tree_view, games_analysis_popup, games_replay_popup,
+        games_run_browser_popup, games_strategy_popup, games_tm_sim_popup, games_visualizer_view,
+        gate_monitor_view, help_overlay, job_output_view, notes_view, protocol_picker, rule_picker,
+        top_bar, visualizer_view,
     },
 };
 
@@ -110,6 +112,7 @@ fn run_loop(
     let mut input_state = InputState::new();
     let mut system_stats = SystemStats::new();
     let mut clipboard = Clipboard::new().ok();
+    let mut file_tree_runner = FileTreeRunner::spawn();
     let mut seed_runtime = if state.app_kind == AppKind::Gol {
         Some(SeedRuntime::new(state))
     } else {
@@ -232,6 +235,14 @@ fn run_loop(
                             continue;
                         }
                     }
+                    if state.file_tree.open && state.focus == PaneId::Editor {
+                        let screen = terminal.size().unwrap_or_default();
+                        let layout = layout::split(screen);
+                        if handle_file_tree_key(&key, state, syntax, layout.editor) {
+                            needs_redraw = true;
+                            continue;
+                        }
+                    }
                     let petri_visible = match state.app_kind {
                         AppKind::Gol => gol_petri.as_ref().map(|p| p.is_visible()).unwrap_or(false),
                         AppKind::Games => games_petri
@@ -330,6 +341,29 @@ fn run_loop(
             needs_redraw = true;
         }
 
+        // file tree runner events
+        while let Ok(event) = file_tree_runner.events.try_recv() {
+            let preserve = file_tree::selected_path(state);
+            match event {
+                FileTreeEvent::DirListed { dir, entries } => {
+                    state.file_tree.cache.insert(dir.clone(), entries);
+                    state.file_tree.loading_dirs.remove(&dir);
+                    file_tree::rebuild_view(state, Some(preserve));
+                    needs_redraw = true;
+                }
+                FileTreeEvent::Error { dir, message } => {
+                    state.file_tree.loading_dirs.remove(&dir);
+                    state.status = Some(format!("NITTree: {message}"));
+                    file_tree::rebuild_view(state, Some(preserve));
+                    needs_redraw = true;
+                }
+            }
+        }
+
+        if file_tree_tick(state, &file_tree_runner) {
+            needs_redraw = true;
+        }
+
         // syntax ticks
         let editor_id = state.active_editor_buffer_id;
         let notes_id = state.notes_buffer_id;
@@ -388,6 +422,7 @@ fn run_loop(
             last_tick = Instant::now();
         }
     }
+    file_tree_runner.shutdown();
     Ok(())
 }
 
@@ -418,7 +453,8 @@ fn draw(
         let editor_width = editor_text_width as usize;
         {
             let buf = state.editor_buffer_mut();
-            let resized = buf.viewport.height != editor_height || buf.viewport.width != editor_width;
+            let resized =
+                buf.viewport.height != editor_height || buf.viewport.width != editor_width;
             buf.set_viewport_size(editor_height, editor_width);
             if resized {
                 buf.ensure_visible();
@@ -446,7 +482,11 @@ fn draw(
         let editor_id = state.active_editor_buffer_id;
         let notes_id = state.notes_buffer_id;
         top_bar::render(f, layout.top, state, theme);
-        let editor_cursor = {
+        let editor_cursor = if state.file_tree.open {
+            adjust_file_tree_scroll(state, layout.editor);
+            file_tree_view::render(f, layout.editor, state, theme);
+            None
+        } else {
             let editor_render = syntax.render_snapshot_for(editor_id, state.editor_buffer());
             editor_view::render_editor(
                 f,
@@ -539,8 +579,7 @@ fn draw(
             games_replay_popup::render(f, area, state, theme);
         }
         if state.app_kind == AppKind::Games && state.games.strategy_inspect.open {
-            let area =
-                dynamic_popup_rect(f.size(), games_strategy_popup::preferred_size(f.size()));
+            let area = dynamic_popup_rect(f.size(), games_strategy_popup::preferred_size(f.size()));
             games_strategy_popup::render(f, area, state, theme);
         }
         if state.app_kind == AppKind::Games && state.games.tm_sim.open {
@@ -578,6 +617,8 @@ fn draw(
         if let Some((x, y)) = command_cursor {
             f.set_cursor(x, y);
         } else if petri_visible || state.command_line.is_some() {
+            f.set_cursor(f.size().x, f.size().y);
+        } else if state.file_tree.open {
             f.set_cursor(f.size().x, f.size().y);
         } else if let Some(pos) = if state.focus == PaneId::Editor {
             editor_cursor
@@ -704,6 +745,11 @@ fn map_key_to_action(key: KeyEvent, state: &AppState, input: &mut InputState) ->
             modifiers: KeyModifiers::CONTROL,
             ..
         } => Some(Action::Save),
+        KeyEvent {
+            code: KeyCode::Char('t'),
+            modifiers: KeyModifiers::CONTROL,
+            ..
+        } => Some(Action::ToggleFileTree),
         KeyEvent {
             code: KeyCode::F(1),
             ..
@@ -954,6 +1000,10 @@ fn apply_action_with_syntax(
         syntax.update_config(state.settings.highlight.clone());
         syntax.prime_buffer(editor_id, state.editor_buffer(), true);
         syntax.prime_buffer(notes_id, state.notes_buffer(), false);
+    }
+    if matches!(action, Action::OpenFile(_)) {
+        // Avoid blocking highlight warmup when hopping files from NITTree.
+        syntax.prime_buffer(editor_id, state.editor_buffer(), false);
     }
 
     outcome
@@ -1692,16 +1742,14 @@ fn handle_mouse_event(
             }
 
             if state.app_kind == AppKind::Games && state.games.strategy_inspect.open {
-                let area =
-                    dynamic_popup_rect(screen, games_strategy_popup::preferred_size(screen));
+                let area = dynamic_popup_rect(screen, games_strategy_popup::preferred_size(screen));
                 if point_in_rect(mouse.column, mouse.row, area) {
                     bump_scroll(&mut state.games.strategy_inspect.scroll_offset, delta);
                 }
                 return true;
             }
             if state.app_kind == AppKind::Games && state.games.tm_sim.open {
-                let area =
-                    dynamic_popup_rect(screen, games_tm_sim_popup::preferred_size(screen));
+                let area = dynamic_popup_rect(screen, games_tm_sim_popup::preferred_size(screen));
                 if point_in_rect(mouse.column, mouse.row, area) {
                     bump_scroll(&mut state.games.tm_sim.scroll_offset, delta);
                 }
@@ -2101,13 +2149,14 @@ fn map_visualizer_main_mouse(
         return None;
     }
     let layout = layout::split(screen);
-    let inner = Block::default().borders(Borders::ALL).inner(layout.visualizer);
+    let inner = Block::default()
+        .borders(Borders::ALL)
+        .inner(layout.visualizer);
     if inner.width == 0 || inner.height == 0 {
         return None;
     }
     let config_text = state.editor_buffer().content_as_string();
-    let config_result =
-        GamesConfig::from_toml_with_root(&config_text, Some(&state.workspace_root));
+    let config_result = GamesConfig::from_toml_with_root(&config_text, Some(&state.workspace_root));
     let layout_info = games_visualizer_view::layout_for_config(inner, config_result.as_ref().ok());
     let area = layout_info.main;
     if !point_in_rect(mouse.column, mouse.row, area) && !clamp {
@@ -2146,13 +2195,14 @@ fn map_visualizer_side_mouse(
         return None;
     }
     let layout = layout::split(screen);
-    let inner = Block::default().borders(Borders::ALL).inner(layout.visualizer);
+    let inner = Block::default()
+        .borders(Borders::ALL)
+        .inner(layout.visualizer);
     if inner.width == 0 || inner.height == 0 {
         return None;
     }
     let config_text = state.editor_buffer().content_as_string();
-    let config_result =
-        GamesConfig::from_toml_with_root(&config_text, Some(&state.workspace_root));
+    let config_result = GamesConfig::from_toml_with_root(&config_text, Some(&state.workspace_root));
     let layout_info = games_visualizer_view::layout_for_config(inner, config_result.as_ref().ok());
     let Some(side_area) = layout_info.side else {
         return None;
@@ -2234,7 +2284,9 @@ fn map_mouse_to_line_col(
     } else {
         mouse.row.saturating_sub(area.y) as usize
     };
-    let line_idx = scroll.saturating_add(row).min(lines.len().saturating_sub(1));
+    let line_idx = scroll
+        .saturating_add(row)
+        .min(lines.len().saturating_sub(1));
     let line = &lines[line_idx];
     let display_col = if mouse.column <= area.x {
         0
@@ -2311,23 +2363,22 @@ fn selection_text(lines: &[String], selection: UiSelection) -> String {
     if lines.is_empty() {
         return String::new();
     }
-    let (start_line, start_col, end_line, end_col) = if (selection.start_line, selection.start_col)
-        <= (selection.end_line, selection.end_col)
-    {
-        (
-            selection.start_line,
-            selection.start_col,
-            selection.end_line,
-            selection.end_col,
-        )
-    } else {
-        (
-            selection.end_line,
-            selection.end_col,
-            selection.start_line,
-            selection.start_col,
-        )
-    };
+    let (start_line, start_col, end_line, end_col) =
+        if (selection.start_line, selection.start_col) <= (selection.end_line, selection.end_col) {
+            (
+                selection.start_line,
+                selection.start_col,
+                selection.end_line,
+                selection.end_col,
+            )
+        } else {
+            (
+                selection.end_line,
+                selection.end_col,
+                selection.start_line,
+                selection.start_col,
+            )
+        };
     let mut out = String::new();
     let last_line = lines.len().saturating_sub(1);
     let end_line = end_line.min(last_line);
@@ -2335,7 +2386,11 @@ fn selection_text(lines: &[String], selection: UiSelection) -> String {
         let line = &lines[line_idx];
         let line_len = line.chars().count();
         let sel_start = if line_idx == start_line { start_col } else { 0 };
-        let sel_end = if line_idx == end_line { end_col } else { line_len };
+        let sel_end = if line_idx == end_line {
+            end_col
+        } else {
+            line_len
+        };
         let sel_start = sel_start.min(line_len);
         let sel_end = sel_end.min(line_len);
         out.push_str(&slice_by_char(line, sel_start, sel_end));
@@ -2539,9 +2594,7 @@ fn handle_mouse_down(
         return true;
     }
     if games_petri_visible(state) {
-        if let Some((line_idx, col, lines)) =
-            map_games_petri_mouse(mouse, screen, state, false)
-        {
+        if let Some((line_idx, col, lines)) = map_games_petri_mouse(mouse, screen, state, false) {
             reset_ui_selection(state, input_state);
             state.ui_selection = Some(UiSelection {
                 pane: UiSelectionPane::GamesPetriDish,
@@ -2657,8 +2710,7 @@ fn handle_mouse_down(
         );
         return true;
     }
-    if let Some((line_idx, col, lines)) =
-        map_gate_monitor_mouse(mouse, screen, state, theme, false)
+    if let Some((line_idx, col, lines)) = map_gate_monitor_mouse(mouse, screen, state, theme, false)
     {
         state.focus = PaneId::GateMonitor;
         state.ui_selection = Some(UiSelection {
@@ -2682,9 +2734,7 @@ fn handle_mouse_down(
         );
         return true;
     }
-    if let Some((line_idx, col, lines)) =
-        map_job_output_mouse(mouse, screen, state, false)
-    {
+    if let Some((line_idx, col, lines)) = map_job_output_mouse(mouse, screen, state, false) {
         state.focus = PaneId::JobOutput;
         state.ui_selection = Some(UiSelection {
             pane: UiSelectionPane::JobOutput,
@@ -2698,7 +2748,13 @@ fn handle_mouse_down(
             line: line_idx,
             col,
         });
-        update_ui_selection_text(state, UiSelectionPane::JobOutput, &lines, clipboard, input_state);
+        update_ui_selection_text(
+            state,
+            UiSelectionPane::JobOutput,
+            &lines,
+            clipboard,
+            input_state,
+        );
         return true;
     }
     false
@@ -2733,8 +2789,7 @@ fn handle_mouse_drag(
                 PaneId::Notes => state.notes_buffer_mut(),
                 _ => return false,
             };
-            let Some((line, col)) =
-                mouse_to_buffer_pos(mouse, pane_rect, buffer, tab_width, true)
+            let Some((line, col)) = mouse_to_buffer_pos(mouse, pane_rect, buffer, tab_width, true)
             else {
                 return false;
             };
@@ -2790,8 +2845,7 @@ fn handle_mouse_drag(
                     map_strategy_popup_mouse(mouse, screen, state, theme, true)
                         .map(|(line_idx, col, lines)| (line_idx, col, lines))
                 }
-                UiSelectionPane::GamesTmSimPopupLeft
-                | UiSelectionPane::GamesTmSimPopupRight => {
+                UiSelectionPane::GamesTmSimPopupLeft | UiSelectionPane::GamesTmSimPopupRight => {
                     map_tm_sim_popup_mouse_for_pane(mouse, screen, state, theme, true, pane)
                         .map(|(line_idx, col, lines)| (line_idx, col, lines))
                 }
@@ -2826,7 +2880,10 @@ fn mouse_drag_allowed(state: &AppState, anchor: MouseSelectAnchor) -> bool {
         return false;
     }
     if state.show_help {
-        return matches!(anchor.target, MouseSelectTarget::Ui(UiSelectionPane::HelpPopup));
+        return matches!(
+            anchor.target,
+            MouseSelectTarget::Ui(UiSelectionPane::HelpPopup)
+        );
     }
     if state.app_kind == AppKind::Games && state.games.analysis.open {
         return matches!(
@@ -2957,7 +3014,9 @@ fn display_col_for_char_idx(line: &str, char_idx: usize, tab_width: usize) -> us
             let advance = tab - (col % tab);
             col += advance;
         } else {
-            let w = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(1).max(1);
+            let w = unicode_width::UnicodeWidthChar::width(ch)
+                .unwrap_or(1)
+                .max(1);
             col += w;
         }
         count += 1;
@@ -2973,7 +3032,9 @@ fn char_idx_for_display_col(line: &str, target_col: usize, tab_width: usize) -> 
             let tab = tab_width.max(1);
             tab - (col % tab)
         } else {
-            unicode_width::UnicodeWidthChar::width(ch).unwrap_or(1).max(1)
+            unicode_width::UnicodeWidthChar::width(ch)
+                .unwrap_or(1)
+                .max(1)
         };
         if col + w > target_col {
             break;
@@ -3003,6 +3064,181 @@ fn handle_analysis_popup_key(key: &KeyEvent, state: &mut AppState) -> bool {
         }
         _ => true,
     }
+}
+
+fn file_tree_tick(state: &mut AppState, runner: &FileTreeRunner) -> bool {
+    if !state.file_tree.open {
+        return false;
+    }
+
+    let preserve = file_tree::selected_path(state);
+    let mut requested = false;
+    for dir in file_tree::needed_dirs(state) {
+        if state.file_tree.cache.contains_key(&dir) || state.file_tree.loading_dirs.contains(&dir) {
+            continue;
+        }
+        state.file_tree.loading_dirs.insert(dir.clone());
+        runner.send(FileTreeCommand::ListDir {
+            dir,
+            show_hidden: state.file_tree.show_hidden,
+            show_ignored: state.file_tree.show_ignored,
+        });
+        requested = true;
+    }
+
+    if requested || state.file_tree.rows.is_empty() {
+        file_tree::rebuild_view(state, Some(preserve));
+        return true;
+    }
+    false
+}
+
+fn handle_file_tree_key(
+    key: &KeyEvent,
+    state: &mut AppState,
+    syntax: &mut SyntaxRuntime,
+    editor_area: ratatui::layout::Rect,
+) -> bool {
+    if !state.file_tree.open {
+        return false;
+    }
+    if is_global_quit_key(key) {
+        return false;
+    }
+    if ctrl_nav_dir(key).is_some() {
+        return false;
+    }
+
+    if matches!(
+        key,
+        KeyEvent {
+            code: KeyCode::Char('t'),
+            modifiers,
+            ..
+        } if modifiers.contains(KeyModifiers::CONTROL)
+    ) {
+        state.file_tree.open = false;
+        return true;
+    }
+
+    match key.code {
+        KeyCode::Esc | KeyCode::Char('q') => {
+            state.file_tree.open = false;
+            true
+        }
+        KeyCode::Char('r') => {
+            file_tree::clear_cache(state);
+            state.status = Some("NITTree refreshed".into());
+            true
+        }
+        KeyCode::Char('.') => {
+            state.file_tree.show_hidden = !state.file_tree.show_hidden;
+            file_tree::clear_cache(state);
+            state.status = Some(if state.file_tree.show_hidden {
+                "NITTree: hidden files ON".into()
+            } else {
+                "NITTree: hidden files OFF".into()
+            });
+            true
+        }
+        KeyCode::Char('i') => {
+            state.file_tree.show_ignored = !state.file_tree.show_ignored;
+            file_tree::clear_cache(state);
+            state.status = Some(if state.file_tree.show_ignored {
+                "NITTree: ignored files ON".into()
+            } else {
+                "NITTree: ignored files OFF".into()
+            });
+            true
+        }
+        KeyCode::Enter => {
+            let Some(row) = state.file_tree.rows.get(state.file_tree.selected) else {
+                return true;
+            };
+            match row.kind {
+                nit_core::FileTreeKind::File => {
+                    if state.editor_buffer().is_dirty() {
+                        state.status =
+                            Some("Unsaved changes - save (Ctrl+S) before opening a file".into());
+                        return true;
+                    }
+                    let path = row.path.clone();
+                    let _ = apply_action_with_syntax(state, syntax, Action::OpenFile(path));
+                    state.file_tree.open = false;
+                    true
+                }
+                nit_core::FileTreeKind::Dir => true,
+                nit_core::FileTreeKind::Loading => true,
+            }
+        }
+        KeyCode::Up
+        | KeyCode::Char('k')
+        | KeyCode::Down
+        | KeyCode::Char('j')
+        | KeyCode::PageUp
+        | KeyCode::PageDown
+        | KeyCode::Home
+        | KeyCode::End => {
+            let inner_height = editor_area.height.saturating_sub(2) as usize;
+            let page = inner_height.max(1);
+            let old_anchor = file_tree::anchor_dir(state);
+            let len = state.file_tree.rows.len();
+            if len == 0 {
+                return true;
+            }
+            match key.code {
+                KeyCode::Up | KeyCode::Char('k') => {
+                    state.file_tree.selected = state.file_tree.selected.saturating_sub(1);
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    state.file_tree.selected = (state.file_tree.selected + 1).min(len - 1);
+                }
+                KeyCode::PageUp => {
+                    state.file_tree.selected = state.file_tree.selected.saturating_sub(page);
+                }
+                KeyCode::PageDown => {
+                    state.file_tree.selected = (state.file_tree.selected + page).min(len - 1);
+                }
+                KeyCode::Home => {
+                    state.file_tree.selected = 0;
+                }
+                KeyCode::End => {
+                    state.file_tree.selected = len - 1;
+                }
+                _ => {}
+            }
+            let preserve = file_tree::selected_path(state);
+            let new_anchor = file_tree::anchor_dir(state);
+            if new_anchor != old_anchor {
+                file_tree::rebuild_view(state, Some(preserve));
+            }
+            adjust_file_tree_scroll(state, editor_area);
+            true
+        }
+        _ => true,
+    }
+}
+
+fn adjust_file_tree_scroll(state: &mut AppState, editor_area: ratatui::layout::Rect) {
+    let inner_height = editor_area.height.saturating_sub(2) as usize;
+    if inner_height == 0 {
+        return;
+    }
+    let total = state.file_tree.rows.len();
+    if total == 0 {
+        state.file_tree.scroll_offset = 0;
+        state.file_tree.selected = 0;
+        return;
+    }
+    state.file_tree.selected = state.file_tree.selected.min(total - 1);
+    let selected = state.file_tree.selected;
+    if selected < state.file_tree.scroll_offset {
+        state.file_tree.scroll_offset = selected;
+    } else if selected >= state.file_tree.scroll_offset + inner_height {
+        state.file_tree.scroll_offset = selected.saturating_sub(inner_height - 1);
+    }
+    let max_scroll = total.saturating_sub(inner_height);
+    state.file_tree.scroll_offset = state.file_tree.scroll_offset.min(max_scroll);
 }
 
 fn handle_run_browser_key(
@@ -3058,15 +3294,13 @@ fn handle_run_browser_key(
             true
         }
         KeyCode::PageUp => {
-            state.games.run_browser.selected =
-                state.games.run_browser.selected.saturating_sub(10);
+            state.games.run_browser.selected = state.games.run_browser.selected.saturating_sub(10);
             adjust_run_browser_scroll(state, screen);
             true
         }
         KeyCode::PageDown => {
             let max = state.games.run_browser.entries.len().saturating_sub(1);
-            state.games.run_browser.selected =
-                (state.games.run_browser.selected + 10).min(max);
+            state.games.run_browser.selected = (state.games.run_browser.selected + 10).min(max);
             adjust_run_browser_scroll(state, screen);
             true
         }
@@ -3306,8 +3540,11 @@ fn handle_strategy_popup_key(
         }
         KeyCode::PageUp => {
             if state.games.strategy_inspect.lines.is_empty() {
-                state.games.strategy_inspect.selected_index =
-                    state.games.strategy_inspect.selected_index.saturating_sub(10);
+                state.games.strategy_inspect.selected_index = state
+                    .games
+                    .strategy_inspect
+                    .selected_index
+                    .saturating_sub(10);
                 adjust_strategy_scroll(state, screen);
             } else {
                 bump_scroll(&mut state.games.strategy_inspect.scroll_offset, -10);

@@ -100,11 +100,7 @@ impl FastStrategyModel {
                     });
                 }
                 let n = (*n).min(31) as u8;
-                let mask = if n == 0 {
-                    0
-                } else {
-                    (1u64 << (2 * n)) - 1
-                };
+                let mask = if n == 0 { 0 } else { (1u64 << (2 * n)) - 1 };
                 Some(Self {
                     id: spec.id.clone(),
                     kind: FastStrategyKind::Memory {
@@ -168,21 +164,16 @@ impl FastStrategyModel {
                 FastState::Fsm { state },
             ) => {
                 let symbol = input_symbol_from_outcome(*input_mode, outcome) as u32;
-                let idx = state
-                    .saturating_mul(*alphabet)
-                    .saturating_add(symbol);
-                let next = transitions
-                    .get(idx as usize)
-                    .copied()
-                    .unwrap_or(state);
+                let idx = state.saturating_mul(*alphabet).saturating_add(symbol);
+                let next = transitions.get(idx as usize).copied().unwrap_or(state);
                 FastState::Fsm { state: next }
             }
-            (
-                FastStrategyKind::Memory { n, mask, .. },
-                FastState::Memory { filled, window },
-            ) => {
+            (FastStrategyKind::Memory { n, mask, .. }, FastState::Memory { filled, window }) => {
                 if *n == 0 {
-                    return FastState::Memory { filled: 0, window: 0 };
+                    return FastState::Memory {
+                        filled: 0,
+                        window: 0,
+                    };
                 }
                 let new_window = ((window << 2) | idx) & mask;
                 let new_filled = filled.saturating_add(1).min(*n);
@@ -242,7 +233,8 @@ pub fn evaluate_match(
                         counts[3].saturating_sub(prev.counts[3]),
                     ];
                     if record_cycle && cycle_meta.is_none() {
-                        cycle_meta = Some(build_cycle_metadata(prev.round, cycle_len, cycle_counts));
+                        cycle_meta =
+                            Some(build_cycle_metadata(prev.round, cycle_len, cycle_counts));
                     }
                     let cycle_a_total = a_total.saturating_sub(prev.a_total);
                     let cycle_b_total = b_total.saturating_sub(prev.b_total);
@@ -319,10 +311,7 @@ fn build_cycle_metadata(
     }
 }
 
-fn resolve_fsm_input_mode(
-    input_mode: Option<InputMode>,
-    transitions: &[Vec<usize>],
-) -> InputMode {
+fn resolve_fsm_input_mode(input_mode: Option<InputMode>, transitions: &[Vec<usize>]) -> InputMode {
     if let Some(mode) = input_mode {
         return mode;
     }

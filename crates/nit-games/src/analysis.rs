@@ -209,8 +209,8 @@ pub fn analyze_history(
             .to_string(),
     };
 
-    let history_file = File::open(history_path)
-        .map_err(|err| format!("Failed to open history log: {err}"))?;
+    let history_file =
+        File::open(history_path).map_err(|err| format!("Failed to open history log: {err}"))?;
     let reader = BufReader::new(history_file);
 
     let mut matches_csv =
@@ -444,7 +444,9 @@ fn update_strategy(
     entry.rounds = entry.rounds.saturating_add(rounds as u64);
     entry.coop_rounds = entry.coop_rounds.saturating_add(coop_rounds as u64);
     entry.tail_rounds = entry.tail_rounds.saturating_add(tail_rounds as u64);
-    entry.tail_coop_rounds = entry.tail_coop_rounds.saturating_add(tail_coop_rounds as u64);
+    entry.tail_coop_rounds = entry
+        .tail_coop_rounds
+        .saturating_add(tail_coop_rounds as u64);
     entry.total_score = entry.total_score.saturating_add(score);
 }
 
@@ -542,14 +544,9 @@ fn build_trajectory(outcomes: &[u8], samples: usize) -> TrajectoryData {
     }
 }
 
-fn write_match_summary(
-    writer: &mut BufWriter<File>,
-    summary: &MatchSummary,
-) -> Result<(), String> {
+fn write_match_summary(writer: &mut BufWriter<File>, summary: &MatchSummary) -> Result<(), String> {
     serde_json::to_writer(&mut *writer, summary).map_err(|err| err.to_string())?;
-    writer
-        .write_all(b"\n")
-        .map_err(|err| err.to_string())?;
+    writer.write_all(b"\n").map_err(|err| err.to_string())?;
     Ok(())
 }
 

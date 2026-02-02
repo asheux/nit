@@ -22,7 +22,12 @@ fn temp_path(prefix: &str, ext: &str) -> PathBuf {
     path
 }
 
-fn build_config(strategies: usize, rounds: u32, repetitions: u32, self_play: bool) -> NormalizedConfig {
+fn build_config(
+    strategies: usize,
+    rounds: u32,
+    repetitions: u32,
+    self_play: bool,
+) -> NormalizedConfig {
     let specs: Vec<StrategySpec> = (0..strategies)
         .map(|idx| StrategySpec {
             id: format!("rand{idx}"),

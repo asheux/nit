@@ -15,7 +15,7 @@ use crate::{
 use nit_games::analysis::AnalysisConfig;
 use nit_gol::Rule;
 use nit_gol::{AttractorEvent, AutoStopPolicy};
-use std::collections::VecDeque;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 
 const DEFAULT_LOG_CAPACITY: usize = 512;
@@ -481,6 +481,69 @@ pub struct ProtocolPickerState {
     pub custom_preview: Option<String>,
 }
 
+#[derive(Copy, Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum FileTreeKind {
+    File,
+    Dir,
+    Loading,
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct DirEntryModel {
+    pub name: String,
+    pub path: PathBuf,
+    pub is_dir: bool,
+    pub is_symlink: bool,
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct FileTreeRow {
+    pub text: String,
+    pub path: PathBuf,
+    pub kind: FileTreeKind,
+    pub depth: usize,
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct FileTreeState {
+    pub open: bool,
+    pub root: PathBuf,
+
+    // UI state:
+    pub selected: usize,
+    pub scroll_offset: usize,
+
+    // Filtering:
+    pub show_hidden: bool,
+    pub show_ignored: bool,
+
+    // Computed view (UI model):
+    #[serde(skip)]
+    pub rows: Vec<FileTreeRow>,
+
+    // Async loading + cache (maintained by the TUI runtime):
+    #[serde(skip)]
+    pub loading_dirs: HashSet<PathBuf>,
+    #[serde(skip)]
+    pub cache: HashMap<PathBuf, Vec<DirEntryModel>>,
+}
+
+impl Default for FileTreeState {
+    fn default() -> Self {
+        Self {
+            open: false,
+            root: PathBuf::new(),
+            selected: 0,
+            scroll_offset: 0,
+            show_hidden: false,
+            show_ignored: false,
+            rows: Vec::new(),
+            loading_dirs: HashSet::new(),
+            cache: HashMap::new(),
+        }
+    }
+}
+
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct AppState {
     pub app_kind: AppKind,
@@ -501,6 +564,7 @@ pub struct AppState {
     pub debug: bool,
     pub gol_rule_selected: SelectedRule,
     pub games: GamesState,
+    pub file_tree: FileTreeState,
     #[serde(skip)]
     pub yank: Option<String>,
     #[serde(skip)]
@@ -544,6 +608,10 @@ impl AppState {
         let settings = Settings::default();
         let rule_catalog = RuleCatalog::default();
         let gol_rule_selected = SelectedRule::default();
+        let file_tree = FileTreeState {
+            root: workspace_root.clone(),
+            ..FileTreeState::default()
+        };
         Self {
             app_kind: AppKind::Gol,
             workspace_root,
@@ -678,6 +746,7 @@ impl AppState {
                 strategy_inspect: GamesStrategyInspectState::default(),
                 tm_sim: GamesTmSimState::default(),
             },
+            file_tree,
             yank: None,
             yank_kind: YankKind::Char,
             command_line: None,
@@ -1449,6 +1518,36 @@ pub fn apply_action(state: &mut AppState, action: Action) -> ActionOutcome {
                 "Debug OFF".into()
             });
         }
+        Action::ToggleFileTree => {
+            state.file_tree.open = !state.file_tree.open;
+            if state.file_tree.open {
+                state.file_tree.root = state.workspace_root.clone();
+                state.focus = PaneId::Editor;
+                state.mode = Mode::Normal;
+            }
+        }
+        Action::OpenFile(path) => {
+            if state.editor_buffer().is_dirty() {
+                state.status = Some("Unsaved changes - save (Ctrl+S) before opening a file".into());
+            } else {
+                match io::load_to_string(&path) {
+                    Ok(content) => {
+                        let name = path
+                            .file_name()
+                            .map(|n| n.to_string_lossy().into_owned())
+                            .unwrap_or_else(|| "untitled".into());
+                        let buf = Buffer::from_str(name, &content, Some(path.clone()));
+                        state.buffers[state.active_editor_buffer_id] = buf;
+                        state.focus = PaneId::Editor;
+                        state.mode = Mode::Normal;
+                        state.status = Some(format!("Opened {}", path.display()));
+                    }
+                    Err(err) => {
+                        state.status = Some(format!("Open failed: {err}"));
+                    }
+                }
+            }
+        }
         Action::ShowHelp => {
             state.show_help = true;
             state.help_scroll = 0;
@@ -1501,6 +1600,18 @@ fn handle_command_line(state: &mut AppState, input: &str) -> bool {
             state.show_help = true;
             state.help_scroll = 0;
             state.status = Some("Help opened".into());
+            false
+        }
+        ["tree"] | ["nittree"] | ["explore"] => {
+            state.file_tree.open = !state.file_tree.open;
+            if state.file_tree.open {
+                state.file_tree.root = state.workspace_root.clone();
+                state.focus = PaneId::Editor;
+                state.mode = Mode::Normal;
+                state.status = Some("NITTree opened".into());
+            } else {
+                state.status = Some("NITTree closed".into());
+            }
             false
         }
         ["run"] => match state.app_kind {
@@ -1636,12 +1747,11 @@ fn handle_command_line(state: &mut AppState, input: &str) -> bool {
                     return false;
                 }
 
-                let (transitions, _remaining) =
-                    nit_games::strategy::decode_tm_rule_code_wolfram(
-                        rule_code,
-                        states as usize,
-                        symbols as usize,
-                    );
+                let (transitions, _remaining) = nit_games::strategy::decode_tm_rule_code_wolfram(
+                    rule_code,
+                    states as usize,
+                    symbols as usize,
+                );
                 let output_map: Vec<nit_games::game::Action> = (0..symbols)
                     .map(|idx| {
                         if idx % 2 == 0 {
@@ -1941,12 +2051,11 @@ fn handle_command_line(state: &mut AppState, input: &str) -> bool {
                     state.games.tm_sim.scroll_offset = 0;
                     return false;
                 }
-                let (transitions, _remaining) =
-                    nit_games::strategy::decode_tm_rule_code_wolfram(
-                        rule_code,
-                        states as usize,
-                        symbols as usize,
-                    );
+                let (transitions, _remaining) = nit_games::strategy::decode_tm_rule_code_wolfram(
+                    rule_code,
+                    states as usize,
+                    symbols as usize,
+                );
                 let output_map: Vec<nit_games::game::Action> = (0..symbols)
                     .map(|idx| {
                         if idx % 2 == 0 {
@@ -2044,7 +2153,12 @@ fn handle_command_line(state: &mut AppState, input: &str) -> bool {
 
             let mut tm_defs: Vec<nit_games::output::StrategyDefinition> = defs
                 .into_iter()
-                .filter(|def| matches!(def.kind, nit_games::config::StrategySpecKind::OneSidedTm { .. }))
+                .filter(|def| {
+                    matches!(
+                        def.kind,
+                        nit_games::config::StrategySpecKind::OneSidedTm { .. }
+                    )
+                })
                 .collect();
 
             let selected = if let Some(id) = id.as_ref() {
@@ -2236,7 +2350,11 @@ fn normalize_path_token(value: &str) -> String {
     let unquoted = trimmed
         .strip_prefix('"')
         .and_then(|v| v.strip_suffix('"'))
-        .or_else(|| trimmed.strip_prefix('\'').and_then(|v| v.strip_suffix('\'')))
+        .or_else(|| {
+            trimmed
+                .strip_prefix('\'')
+                .and_then(|v| v.strip_suffix('\''))
+        })
         .unwrap_or(trimmed);
     unquoted.trim().to_string()
 }
@@ -2267,16 +2385,10 @@ fn parse_tm_rule_tuple(input: &str) -> Result<Option<(u64, u16, u8)>, String> {
         .parse::<u64>()
         .map_err(|_| "TM rule tuple: symbols must be an integer".to_string())?;
     if states_raw == 0 || states_raw > u16::MAX as u64 {
-        return Err(format!(
-            "TM rule tuple: states must be in 1..={}",
-            u16::MAX
-        ));
+        return Err(format!("TM rule tuple: states must be in 1..={}", u16::MAX));
     }
     if symbols_raw == 0 || symbols_raw > u8::MAX as u64 {
-        return Err(format!(
-            "TM rule tuple: symbols must be in 1..={}",
-            u8::MAX
-        ));
+        return Err(format!("TM rule tuple: symbols must be in 1..={}", u8::MAX));
     }
     Ok(Some((rule_code, states_raw as u16, symbols_raw as u8)))
 }

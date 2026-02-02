@@ -3,8 +3,8 @@ use crate::config::{
     StrategySpecKind,
 };
 use crate::events::{EventWriter, GameEvent};
-use crate::game::{Action, Outcome};
 use crate::fast_eval::{evaluate_match, CycleMetadata, FastStrategyModel};
+use crate::game::{Action, Outcome};
 use crate::history::History;
 use crate::history_log::{HistoryWriter, MatchHistory};
 use crate::output::{
@@ -455,14 +455,13 @@ impl TournamentRunner {
                         b_total: session.b_total,
                     });
                     self.emit_history(&session);
-                    self.results
-                        .apply_match(
-                            result,
-                            session.a_crashed,
-                            session.b_crashed,
-                            a_tm_stats.cloned(),
-                            b_tm_stats.cloned(),
-                        );
+                    self.results.apply_match(
+                        result,
+                        session.a_crashed,
+                        session.b_crashed,
+                        a_tm_stats.cloned(),
+                        b_tm_stats.cloned(),
+                    );
                     self.match_index += 1;
                     if self.is_done() {
                         self.emit(GameEvent::TournamentEnd {
@@ -631,7 +630,6 @@ impl TournamentRunner {
         });
         outcome.snapshot
     }
-
 }
 
 fn play_round_core(session: &mut MatchSession, config: &NormalizedConfig) -> RoundOutcome {
@@ -880,8 +878,10 @@ impl TournamentKernel {
         mut history_writer: Option<&mut HistoryWriter>,
     ) -> TournamentResults {
         let total_matches = self.schedule.len();
-        let mut results =
-            TournamentAccumulator::new(self.config.strategies.len(), self.config.engine.complexity_cost.enabled);
+        let mut results = TournamentAccumulator::new(
+            self.config.strategies.len(),
+            self.config.engine.complexity_cost.enabled,
+        );
         if let Some(writer) = event_writer.as_mut() {
             let _ = writer.write(&GameEvent::TournamentStart {
                 timestamp: EventWriter::timestamp(),
@@ -1026,8 +1026,10 @@ impl TournamentKernel {
             });
         }
 
-        let mut results =
-            TournamentAccumulator::new(self.config.strategies.len(), self.config.engine.complexity_cost.enabled);
+        let mut results = TournamentAccumulator::new(
+            self.config.strategies.len(),
+            self.config.engine.complexity_cost.enabled,
+        );
         for outcome in outcomes {
             results.apply_match(
                 outcome.result,
@@ -1086,20 +1088,12 @@ where
     }
 
     if fast_eval_allowed && !record_trace {
-        if let Some((a_model, b_model)) = fast_models
-            .and_then(|models| {
-                let a = models.get(matchup.a_idx).and_then(|m| m.as_ref());
-                let b = models.get(matchup.b_idx).and_then(|m| m.as_ref());
-                a.zip(b)
-            })
-        {
-            let eval = evaluate_match(
-                a_model,
-                b_model,
-                config.rounds,
-                config.payoff,
-                false,
-            );
+        if let Some((a_model, b_model)) = fast_models.and_then(|models| {
+            let a = models.get(matchup.a_idx).and_then(|m| m.as_ref());
+            let b = models.get(matchup.b_idx).and_then(|m| m.as_ref());
+            a.zip(b)
+        }) {
+            let eval = evaluate_match(a_model, b_model, config.rounds, config.payoff, false);
             if log_events {
                 emit_event(GameEvent::MatchEnd {
                     timestamp: EventWriter::timestamp(),
@@ -1187,14 +1181,7 @@ where
             let b = models.get(matchup.b_idx).and_then(|m| m.as_ref());
             a.zip(b)
         }) {
-            cycle_meta = evaluate_match(
-                a_model,
-                b_model,
-                config.rounds,
-                config.payoff,
-                true,
-            )
-            .cycle;
+            cycle_meta = evaluate_match(a_model, b_model, config.rounds, config.payoff, true).cycle;
         }
     }
 
@@ -1432,15 +1419,9 @@ impl TournamentAccumulator {
         }
         if self.use_adjusted {
             ranking.sort_by(|a, b| {
-                let a_score = a
-                    .adjusted_total_payoff
-                    .unwrap_or(a.total_payoff as f64);
-                let b_score = b
-                    .adjusted_total_payoff
-                    .unwrap_or(b.total_payoff as f64);
-                b_score
-                    .partial_cmp(&a_score)
-                    .unwrap_or(Ordering::Equal)
+                let a_score = a.adjusted_total_payoff.unwrap_or(a.total_payoff as f64);
+                let b_score = b.adjusted_total_payoff.unwrap_or(b.total_payoff as f64);
+                b_score.partial_cmp(&a_score).unwrap_or(Ordering::Equal)
             });
         } else {
             ranking.sort_by(|a, b| b.total_payoff.cmp(&a.total_payoff));

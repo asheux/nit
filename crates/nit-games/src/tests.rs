@@ -1,14 +1,12 @@
 use crate::config::{GamesConfig, StrategySpec, StrategySpecKind};
+use crate::fsm_enum::enumerate_fsms;
 use crate::game::Action;
 use crate::history::History;
-use crate::fsm_enum::enumerate_fsms;
-use crate::strategy::{
-    FsmStrategy, InputMode, OneSidedTmStrategy, Strategy, TmMove, TmTransition,
-};
+use crate::strategy::{FsmStrategy, InputMode, OneSidedTmStrategy, Strategy, TmMove, TmTransition};
 use crate::tournament::{KernelRunMode, Parallelism, TournamentKernel, TournamentRunner};
 use crate::{analyze_history, AnalysisConfig};
-use std::collections::HashMap;
 use nit_utils::hashing::XorShift64;
+use std::collections::HashMap;
 
 fn run_to_completion(mut runner: TournamentRunner) -> crate::output::TournamentResults {
     while !runner.is_done() {
@@ -17,11 +15,7 @@ fn run_to_completion(mut runner: TournamentRunner) -> crate::output::TournamentR
     runner.results()
 }
 
-fn simulate_match(
-    a: &mut dyn Strategy,
-    b: &mut dyn Strategy,
-    rounds: u32,
-) -> (i64, i64) {
+fn simulate_match(a: &mut dyn Strategy, b: &mut dyn Strategy, rounds: u32) -> (i64, i64) {
     let payoff = crate::game::PayoffMatrix::default_pd();
     let mut history = History::new(1);
     let mut a_total = 0i64;
@@ -349,10 +343,22 @@ fn fast_eval_matches_simulation_for_random_fsms() {
             _ => InputMode::JointLastAction,
         };
         let outputs_a = (0..states_a)
-            .map(|_| if rng.next_u64() & 1 == 0 { Action::Cooperate } else { Action::Defect })
+            .map(|_| {
+                if rng.next_u64() & 1 == 0 {
+                    Action::Cooperate
+                } else {
+                    Action::Defect
+                }
+            })
             .collect::<Vec<_>>();
         let outputs_b = (0..states_b)
-            .map(|_| if rng.next_u64() & 1 == 0 { Action::Cooperate } else { Action::Defect })
+            .map(|_| {
+                if rng.next_u64() & 1 == 0 {
+                    Action::Cooperate
+                } else {
+                    Action::Defect
+                }
+            })
             .collect::<Vec<_>>();
         let trans_a = (0..states_a)
             .map(|_| {
@@ -392,20 +398,8 @@ fn fast_eval_matches_simulation_for_random_fsms() {
             },
         };
 
-        let mut sim_a = FsmStrategy::new(
-            spec_a.id.clone(),
-            0,
-            outputs_a,
-            mode_a,
-            trans_a,
-        );
-        let mut sim_b = FsmStrategy::new(
-            spec_b.id.clone(),
-            0,
-            outputs_b,
-            mode_b,
-            trans_b,
-        );
+        let mut sim_a = FsmStrategy::new(spec_a.id.clone(), 0, outputs_a, mode_a, trans_a);
+        let mut sim_b = FsmStrategy::new(spec_b.id.clone(), 0, outputs_b, mode_b, trans_b);
         sim_a.reset();
         sim_b.reset();
         let (sim_a_total, sim_b_total) = simulate_match(&mut sim_a, &mut sim_b, rounds);
@@ -996,9 +990,8 @@ fn analysis_summarizes_outcomes_and_tail() {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis();
-    let history_path = std::env::temp_dir().join(format!(
-        "nit_games_history_analysis_test_{stamp}.ndjson"
-    ));
+    let history_path =
+        std::env::temp_dir().join(format!("nit_games_history_analysis_test_{stamp}.ndjson"));
     let out_dir = std::env::temp_dir().join(format!("nit_games_analysis_out_{stamp}"));
     std::fs::write(&history_path, format!("{history}\n")).expect("write history");
 

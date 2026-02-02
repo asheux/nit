@@ -33,6 +33,10 @@ pub fn build_lines(theme: &Theme) -> Vec<Line<'static>> {
         Span::raw(" save"),
     ]));
     lines.push(Line::from(vec![
+        Span::styled("Ctrl+T", Style::default().fg(theme.accent)),
+        Span::raw(" toggle NITTree (file tree)"),
+    ]));
+    lines.push(Line::from(vec![
         Span::styled("F1 / ?", Style::default().fg(theme.accent)),
         Span::raw(" toggle help"),
     ]));
@@ -77,6 +81,13 @@ pub fn build_lines(theme: &Theme) -> Vec<Line<'static>> {
         Span::raw(" run active app"),
     ]));
     lines.push(Line::from(vec![
+        Span::styled(
+            ":tree / :nittree / :explore",
+            Style::default().fg(theme.accent),
+        ),
+        Span::raw(" toggle NITTree"),
+    ]));
+    lines.push(Line::from(vec![
         Span::styled(":gol run|hide|show|stop", Style::default().fg(theme.accent)),
         Span::raw(" GoL Petri Dish controls (alias: :life ...)"),
     ]));
@@ -119,7 +130,10 @@ pub fn build_lines(theme: &Theme) -> Vec<Line<'static>> {
         Span::raw(" open strategy inspector for loaded run"),
     ]));
     lines.push(Line::from(vec![
-        Span::styled(":games strategies all|config", Style::default().fg(theme.accent)),
+        Span::styled(
+            ":games strategies all|config",
+            Style::default().fg(theme.accent),
+        ),
         Span::raw(" open strategy inspector from config"),
     ]));
     lines.push(Line::from(vec![
@@ -161,6 +175,44 @@ pub fn build_lines(theme: &Theme) -> Vec<Line<'static>> {
         ),
         Span::raw(" analyze last/specified history log"),
     ]));
+
+    lines.push(Line::from(vec![Span::styled(
+        "NITTREE (EDITOR OVERLAY)",
+        heading_style,
+    )]));
+    lines.push(Line::from(vec![
+        Span::styled("Esc / q", Style::default().fg(theme.accent)),
+        Span::raw(" close tree"),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("j/k / Up/Down", Style::default().fg(theme.accent)),
+        Span::raw(" move selection"),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("PageUp/PageDown", Style::default().fg(theme.accent)),
+        Span::raw(" jump by page"),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("Home/End", Style::default().fg(theme.accent)),
+        Span::raw(" jump to top/bottom"),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("Enter", Style::default().fg(theme.accent)),
+        Span::raw(" open file (closes tree)"),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("r", Style::default().fg(theme.accent)),
+        Span::raw(" refresh tree"),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled(".", Style::default().fg(theme.accent)),
+        Span::raw(" toggle hidden files"),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("i", Style::default().fg(theme.accent)),
+        Span::raw(" toggle ignored files"),
+    ]));
+
     lines.push(Line::from(vec![Span::styled(
         "GAMES PETRI DISH (POPUP)",
         heading_style,
@@ -438,8 +490,8 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
         theme.cursor_line_bg,
         scroll,
     );
-    let para = Paragraph::new(visible)
-        .style(Style::default().bg(theme.selection_bg).fg(theme.foreground));
+    let para =
+        Paragraph::new(visible).style(Style::default().bg(theme.selection_bg).fg(theme.foreground));
 
     frame.render_widget(Clear, area);
     frame.render_widget(block, area);

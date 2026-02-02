@@ -318,21 +318,13 @@ pub fn build_columns(
     if !sim.frames.is_empty() {
         if right_width > 0 {
             right_lines.push(Line::from(Span::styled("Evolution", header_style)));
-            right_lines.extend(build_grid_lines(
-                &sim.frames,
-                right_width.max(1),
-                theme,
-            ));
+            right_lines.extend(build_grid_lines(&sim.frames, right_width.max(1), theme));
             right_lines.push(Line::from(""));
             right_lines.extend(build_legend_lines(*symbols as usize, theme));
         } else {
             left_lines.push(Line::from(""));
             left_lines.push(Line::from(Span::styled("Evolution", header_style)));
-            left_lines.extend(build_grid_lines(
-                &sim.frames,
-                left_width.max(1),
-                theme,
-            ));
+            left_lines.extend(build_grid_lines(&sim.frames, left_width.max(1), theme));
             left_lines.push(Line::from(""));
             left_lines.extend(build_legend_lines(*symbols as usize, theme));
         }
@@ -601,7 +593,11 @@ fn simulate_tm(
     lines.push(format!(
         "input digits (base {}): {} (pad blank left)",
         symbols,
-        if digits_str.is_empty() { "0".into() } else { digits_str }
+        if digits_str.is_empty() {
+            "0".into()
+        } else {
+            digits_str
+        }
     ));
     lines.push(format!("initial tape: {}", tape_to_string(&tape)));
     lines.push(format!("head at index {}", head));
@@ -664,8 +660,7 @@ fn simulate_tm(
         };
         last_transition = Some((state, read, trans));
 
-        let rail_output =
-            matches!(trans.move_dir, TmMove::Right) && head_before + 1 == tape.len();
+        let rail_output = matches!(trans.move_dir, TmMove::Right) && head_before + 1 == tape.len();
         if rail_output {
             if let Some(cell) = tape.get_mut(head_before) {
                 *cell = trans.write;
@@ -801,10 +796,7 @@ fn simulate_tm(
     } else {
         "fallback"
     };
-    lines.push(format!(
-        "result: {reason} -> action {}",
-        action.as_char()
-    ));
+    lines.push(format!("result: {reason} -> action {}", action.as_char()));
     if cycle_detected.is_some() || max_steps_hit {
         lines.push("Never halts".to_string());
     }
@@ -942,7 +934,10 @@ pub fn layout_for_tm_sim(inner: Rect) -> (Rect, Option<Rect>) {
     }
     let cols = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Length(left_total), Constraint::Length(right_total)])
+        .constraints([
+            Constraint::Length(left_total),
+            Constraint::Length(right_total),
+        ])
         .split(inner);
     (cols[0], Some(cols[1]))
 }
@@ -969,10 +964,7 @@ fn merge_columns(
     let mut merged = Vec::with_capacity(max_lines);
     for idx in 0..max_lines {
         let mut spans = Vec::new();
-        let left_line = left
-            .get(idx)
-            .cloned()
-            .unwrap_or_else(|| Line::from(""));
+        let left_line = left.get(idx).cloned().unwrap_or_else(|| Line::from(""));
         let left_len = line_width(&left_line);
         spans.extend(left_line.spans);
         let pad = left_width.saturating_sub(left_len);
@@ -1325,11 +1317,7 @@ fn tape_with_head_snippet(tape: &[u8], head: usize, max_len: usize) -> String {
     if start + max_len > full.len() {
         start = full.len().saturating_sub(max_len);
     }
-    let mut snippet = full
-        .chars()
-        .skip(start)
-        .take(max_len)
-        .collect::<String>();
+    let mut snippet = full.chars().skip(start).take(max_len).collect::<String>();
     if max_len >= 6 {
         if start > 0 && snippet.len() >= 3 {
             snippet.replace_range(0..3, "...");
@@ -1342,11 +1330,7 @@ fn tape_with_head_snippet(tape: &[u8], head: usize, max_len: usize) -> String {
     snippet
 }
 
-fn build_grid_lines(
-    frames: &[SimFrame],
-    max_width: usize,
-    theme: &Theme,
-) -> Vec<Line<'static>> {
+fn build_grid_lines(frames: &[SimFrame], max_width: usize, theme: &Theme) -> Vec<Line<'static>> {
     if frames.is_empty() || max_width == 0 {
         return Vec::new();
     }
@@ -1537,14 +1521,8 @@ mod tests {
                 next: 2,
             },
         ];
-        let lines = build_rule_table_lines(
-            2,
-            2,
-            &transitions,
-            Style::default(),
-            Style::default(),
-            80,
-        );
+        let lines =
+            build_rule_table_lines(2, 2, &transitions, Style::default(), Style::default(), 80);
         assert_eq!(lines.len(), 8);
         let top = line_to_string(&lines[0]);
         let header = line_to_string(&lines[1]);
@@ -1574,12 +1552,7 @@ mod tests {
             head_after: 2,
             tape: vec![0, 1, 1, 0],
         }];
-        let lines = build_step_table_lines(
-            &steps,
-            120,
-            Style::default(),
-            Style::default(),
-        );
+        let lines = build_step_table_lines(&steps, 120, Style::default(), Style::default());
         assert_eq!(lines.len(), 5);
         let top = line_to_string(&lines[0]);
         let header = line_to_string(&lines[1]);
@@ -1677,12 +1650,8 @@ mod tests {
             tape: vec![0, 1, 1, 0],
         }];
         let right_width = 48usize;
-        let right_lines = build_step_table_lines(
-            &steps,
-            right_width,
-            Style::default(),
-            Style::default(),
-        );
+        let right_lines =
+            build_step_table_lines(&steps, right_width, Style::default(), Style::default());
         assert!(!right_lines.is_empty());
         let left_width = 20usize;
         let gap = 2usize;

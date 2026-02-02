@@ -7,8 +7,8 @@ use ratatui::{
     Frame,
 };
 use std::{
-    collections::{HashMap, VecDeque},
     cmp::Reverse,
+    collections::{HashMap, VecDeque},
     sync::{Arc, Mutex, OnceLock},
 };
 
@@ -165,7 +165,9 @@ impl Widget for CircuitWidget<'_> {
         }
 
         if let Some(msg) = self.cached.message.as_ref() {
-            let style = Style::default().fg(self.theme.warning).add_modifier(Modifier::BOLD);
+            let style = Style::default()
+                .fg(self.theme.warning)
+                .add_modifier(Modifier::BOLD);
             let x = area.x + 1;
             let y = area.y + area.height / 2;
             buf.set_stringn(x, y, msg, area.width.saturating_sub(2) as usize, style);
@@ -198,14 +200,24 @@ impl Widget for CircuitWidget<'_> {
             let color = wire_color_from_kind(a.color_kind, self.theme);
             buf.get_mut(area.x + a.x, area.y + a.y)
                 .set_char(a.ch)
-                .set_style(Style::default().fg(color).bg(self.theme.background).add_modifier(Modifier::BOLD));
+                .set_style(
+                    Style::default()
+                        .fg(color)
+                        .bg(self.theme.background)
+                        .add_modifier(Modifier::BOLD),
+                );
         }
 
         if let Some(a) = self.cached.start_arrow {
             if a.x < self.cached.width && a.y < self.cached.height {
                 buf.get_mut(area.x + a.x, area.y + a.y)
                     .set_char(a.ch)
-                    .set_style(Style::default().fg(self.theme.accent).bg(self.theme.background).add_modifier(Modifier::BOLD));
+                    .set_style(
+                        Style::default()
+                            .fg(self.theme.accent)
+                            .bg(self.theme.background)
+                            .add_modifier(Modifier::BOLD),
+                    );
             }
         }
 
@@ -321,7 +333,12 @@ fn compute_circuit_graph(graph: &GraphSpec, area: Rect, _graph_hash: u64) -> Cac
         layer.sort_by_key(|n| n.id);
     }
 
-    let max_per_layer = nodes_by_layer.iter().map(|v| v.len()).max().unwrap_or(0).max(1);
+    let max_per_layer = nodes_by_layer
+        .iter()
+        .map(|v| v.len())
+        .max()
+        .unwrap_or(0)
+        .max(1);
 
     let (col_gap, row_gap, needed_w, needed_h) = match FLOW_DIR {
         FlowDir::LeftToRight => {
@@ -878,8 +895,13 @@ fn route_path(
     let dy = ey - sy;
     let dirs = preferred_dirs(dx, dy, flow);
 
-    let mut heap: std::collections::BinaryHeap<(Reverse<u32>, Reverse<u32>, Reverse<u16>, Reverse<u16>, usize)> =
-        std::collections::BinaryHeap::new();
+    let mut heap: std::collections::BinaryHeap<(
+        Reverse<u32>,
+        Reverse<u32>,
+        Reverse<u16>,
+        Reverse<u16>,
+        usize,
+    )> = std::collections::BinaryHeap::new();
 
     g_score[start_idx] = 0;
     heap.push((
@@ -899,7 +921,10 @@ fn route_path(
         }
 
         let (cx, cy) = idx_xy(width, cur);
-        for (nx, ny) in dirs.iter().filter_map(|d| step(cx as i32, cy as i32, *d, w, h)) {
+        for (nx, ny) in dirs
+            .iter()
+            .filter_map(|d| step(cx as i32, cy as i32, *d, w, h))
+        {
             let nxu = nx as u16;
             let nyu = ny as u16;
             let ni = grid_idx(width, nxu, nyu);
@@ -1088,7 +1113,14 @@ fn wire_color_from_kind(kind: u8, theme: &Theme) -> Color {
     }
 }
 
-fn draw_node_box(buf: &mut Buffer, area: Rect, node: &CachedNode, border: Color, fill: Color, theme: &Theme) {
+fn draw_node_box(
+    buf: &mut Buffer,
+    area: Rect,
+    node: &CachedNode,
+    border: Color,
+    fill: Color,
+    theme: &Theme,
+) {
     let w = node.w;
     let h = NODE_H;
     if node.x + w > area.width || node.y + h > area.height {
@@ -1139,7 +1171,13 @@ fn draw_node_box(buf: &mut Buffer, area: Rect, node: &CachedNode, border: Color,
             .fg(theme.foreground)
             .bg(fill)
             .add_modifier(Modifier::BOLD);
-        buf.set_stringn(area.x + start_x, area.y + node.y + 1, label, label_w as usize, style);
+        buf.set_stringn(
+            area.x + start_x,
+            area.y + node.y + 1,
+            label,
+            label_w as usize,
+            style,
+        );
     }
 }
 
@@ -1243,13 +1281,33 @@ mod tests {
     fn layers_are_deterministic() {
         let g = GraphSpec {
             nodes: vec![
-                GraphNode { id: 0, label: "0".into(), output: None },
-                GraphNode { id: 1, label: "1".into(), output: None },
-                GraphNode { id: 2, label: "2".into(), output: None },
+                GraphNode {
+                    id: 0,
+                    label: "0".into(),
+                    output: None,
+                },
+                GraphNode {
+                    id: 1,
+                    label: "1".into(),
+                    output: None,
+                },
+                GraphNode {
+                    id: 2,
+                    label: "2".into(),
+                    output: None,
+                },
             ],
             edges: vec![
-                GraphEdge { from: 0, to: 1, label: "a".into() },
-                GraphEdge { from: 1, to: 2, label: "b".into() },
+                GraphEdge {
+                    from: 0,
+                    to: 1,
+                    label: "a".into(),
+                },
+                GraphEdge {
+                    from: 1,
+                    to: 2,
+                    label: "b".into(),
+                },
             ],
             start: Some(0),
         };
@@ -1267,9 +1325,16 @@ mod tests {
         let height = 7;
         let blocked = vec![false; (width as usize) * (height as usize)];
         let used = vec![0u8; (width as usize) * (height as usize)];
-        let path =
-            route_path((0, 3), (19, 3), width, height, &blocked, &used, FlowDir::LeftToRight)
-                .unwrap();
+        let path = route_path(
+            (0, 3),
+            (19, 3),
+            width,
+            height,
+            &blocked,
+            &used,
+            FlowDir::LeftToRight,
+        )
+        .unwrap();
         assert_eq!(path.first().copied(), Some((0, 3)));
         assert_eq!(path.last().copied(), Some((19, 3)));
         // Expect a direct run.
