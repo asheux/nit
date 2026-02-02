@@ -847,6 +847,7 @@ fn reset_strategy_inspect(state: &mut AppState) {
     state.games.strategy_inspect.last_error = None;
     state.games.strategy_inspect.title = None;
     state.games.strategy_inspect.lines.clear();
+    state.games.strategy_inspect.definition = None;
     state.games.strategy_inspect.selected_index = 0;
     state.games.strategy_inspect.scroll_offset = 0;
     state.games.strategy_inspect.definitions.clear();

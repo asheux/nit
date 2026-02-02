@@ -7,6 +7,7 @@ pub mod games_run_browser_popup;
 pub mod games_strategy_popup;
 pub mod games_visualizer_view;
 pub mod gate_monitor_view;
+pub mod graph_render;
 pub mod help_overlay;
 pub mod job_output_view;
 pub mod notes_view;

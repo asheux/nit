@@ -3219,6 +3219,7 @@ fn handle_strategy_popup_key(
         KeyCode::Char('r') => {
             state.games.strategy_inspect.title = None;
             state.games.strategy_inspect.lines.clear();
+            state.games.strategy_inspect.definition = None;
             state.games.strategy_inspect.scroll_offset = 0;
             true
         }
@@ -3232,6 +3233,7 @@ fn handle_strategy_popup_key(
                         games_visualizer_view::strategy_display_name_from_def(def)
                     ));
                     let mut lines = games_strategy_popup::build_definition_lines(def);
+                    state.games.strategy_inspect.definition = Some(def.clone());
                     if state.games.strategy_inspect.source_label.as_deref() == Some("run") {
                         if let Some(run) = state.games.last_run.as_ref() {
                             if let Some(result) =

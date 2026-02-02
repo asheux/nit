@@ -108,6 +108,8 @@ pub struct GamesStrategyInspectState {
     #[serde(skip)]
     pub lines: Vec<String>,
     #[serde(skip)]
+    pub definition: Option<nit_games::output::StrategyDefinition>,
+    #[serde(skip)]
     pub selected_index: usize,
     #[serde(skip)]
     pub scroll_offset: usize,
@@ -1573,6 +1575,7 @@ fn handle_command_line(state: &mut AppState, input: &str) {
             };
 
             let mut spec: Option<nit_games::StrategySpec> = None;
+            let mut definition: Option<nit_games::output::StrategyDefinition> = None;
             let mut source_label: Option<String> = None;
 
             if let Some(run) = state.games.last_run.as_ref() {
@@ -1582,6 +1585,7 @@ fn handle_command_line(state: &mut AppState, input: &str) {
                         name: def.name.clone(),
                         kind: def.kind.clone(),
                     });
+                    definition = Some(def.clone());
                     source_label = Some("run".into());
                 }
             }
@@ -1595,6 +1599,13 @@ fn handle_command_line(state: &mut AppState, input: &str) {
                     Ok(config) => {
                         if let Some(found) = config.strategies.iter().find(|s| s.id == target_id) {
                             spec = Some(found.clone());
+                            definition = Some(nit_games::output::StrategyDefinition {
+                                id: found.id.clone(),
+                                name: found.name.clone(),
+                                kind: found.kind.clone(),
+                                rng_seed_a: None,
+                                rng_seed_b: None,
+                            });
                             source_label = Some("config".into());
                         }
                     }
@@ -1608,6 +1619,7 @@ fn handle_command_line(state: &mut AppState, input: &str) {
                             Some(format!("Config error: {err}"));
                         state.games.strategy_inspect.title = None;
                         state.games.strategy_inspect.lines.clear();
+                        state.games.strategy_inspect.definition = None;
                         state.games.strategy_inspect.selected_index = 0;
                         state.games.strategy_inspect.scroll_offset = 0;
                         state.games.strategy_inspect.definitions.clear();
@@ -1630,6 +1642,7 @@ fn handle_command_line(state: &mut AppState, input: &str) {
                 ));
                 state.games.strategy_inspect.title = None;
                 state.games.strategy_inspect.lines.clear();
+                state.games.strategy_inspect.definition = None;
                 state.games.strategy_inspect.selected_index = 0;
                 state.games.strategy_inspect.scroll_offset = 0;
                 state.games.strategy_inspect.definitions.clear();
@@ -1649,6 +1662,7 @@ fn handle_command_line(state: &mut AppState, input: &str) {
             state.games.strategy_inspect.last_error = None;
             state.games.strategy_inspect.title = Some(format!("{} — inspect", spec.id));
             state.games.strategy_inspect.lines = lines;
+            state.games.strategy_inspect.definition = definition;
             state.games.strategy_inspect.selected_index = 0;
             state.games.strategy_inspect.scroll_offset = 0;
             state.games.strategy_inspect.definitions.clear();
@@ -1669,6 +1683,7 @@ fn handle_command_line(state: &mut AppState, input: &str) {
                 state.games.strategy_inspect.last_error = None;
                 state.games.strategy_inspect.title = None;
                 state.games.strategy_inspect.lines.clear();
+                state.games.strategy_inspect.definition = None;
                 state.games.strategy_inspect.selected_index = 0;
                 state.games.strategy_inspect.scroll_offset = 0;
                 state.games.strategy_inspect.definitions = run.strategies.clone();
@@ -1693,6 +1708,7 @@ fn handle_command_line(state: &mut AppState, input: &str) {
                     state.games.strategy_inspect.last_error = None;
                     state.games.strategy_inspect.title = None;
                     state.games.strategy_inspect.lines.clear();
+                    state.games.strategy_inspect.definition = None;
                     state.games.strategy_inspect.selected_index = 0;
                     state.games.strategy_inspect.scroll_offset = 0;
                     state.games.strategy_inspect.definitions = config
@@ -1718,6 +1734,7 @@ fn handle_command_line(state: &mut AppState, input: &str) {
                     state.games.strategy_inspect.last_error = Some(msg.clone());
                     state.games.strategy_inspect.title = None;
                     state.games.strategy_inspect.lines.clear();
+                    state.games.strategy_inspect.definition = None;
                     state.games.strategy_inspect.selected_index = 0;
                     state.games.strategy_inspect.scroll_offset = 0;
                     state.games.strategy_inspect.definitions.clear();

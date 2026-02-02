@@ -1,16 +1,20 @@
 use nit_core::{AppState, UiSelectionPane};
 use nit_games::config::{BuiltinKind, StrategySpecKind};
+use nit_games::output::StrategyDefinition;
 use nit_games::game::Action;
 use nit_games::strategy::InputMode;
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, Paragraph, Wrap},
+    widgets::{
+        Block, Borders, Clear, Paragraph, Wrap,
+    },
     Frame,
 };
 
 use crate::theme::Theme;
+use crate::widgets::graph_render::{self, GraphEdge, GraphNode, GraphSpec};
 use crate::widgets::games_visualizer_view::strategy_display_name_from_def;
 use crate::widgets::text_selection::apply_ui_selection;
 
@@ -18,6 +22,7 @@ const MIN_WIDTH: u16 = 70;
 const MIN_HEIGHT: u16 = 20;
 
 const MEMORY_GRAPH_STATE_LIMIT: usize = 64;
+const GRAPH_NODE_LIMIT: usize = 12;
 
 pub fn preferred_size(screen: Rect) -> (u16, u16) {
     let width = screen.width.min(120).max(MIN_WIDTH);
@@ -231,6 +236,215 @@ fn split_graph_sections(lines: &[String]) -> (Vec<String>, Vec<String>) {
     (text, graph)
 }
 
+fn graph_from_definition(def: &StrategyDefinition) -> Option<GraphSpec> {
+    match &def.kind {
+        StrategySpecKind::Builtin { builtin } => {
+            let (start_state, mode, outputs, transitions) = builtin_as_fsm(*builtin);
+            let spec = fsm_graph_spec(
+                outputs.len(),
+                start_state,
+                mode,
+                &outputs,
+                &transitions,
+            );
+            if spec.nodes.len() > GRAPH_NODE_LIMIT {
+                None
+            } else {
+                Some(spec)
+            }
+        }
+        StrategySpecKind::Random { .. } => Some(GraphSpec {
+            nodes: vec![GraphNode {
+                id: 0,
+                label: "0".to_string(),
+                output: None,
+            }],
+            edges: vec![GraphEdge {
+                from: 0,
+                to: 0,
+                label: "p".to_string(),
+            }],
+            start: Some(0),
+        }),
+        StrategySpecKind::Memory { n, initial, table } => {
+            memory_graph_spec(*n, *initial, table)
+        }
+        StrategySpecKind::Fsm {
+            num_states,
+            start_state,
+            outputs,
+            input_mode,
+            transitions,
+        } => {
+            let inferred = transitions
+                .first()
+                .map(|row| {
+                    if row.len() == 4 {
+                        InputMode::JointLastAction
+                    } else {
+                        InputMode::OpponentLastAction
+                    }
+                })
+                .unwrap_or(InputMode::OpponentLastAction);
+            let mode = input_mode.unwrap_or(inferred);
+            let state_count = if *num_states > 0 {
+                *num_states
+            } else {
+                outputs.len()
+            };
+            let spec = fsm_graph_spec(
+                state_count,
+                *start_state,
+                mode,
+                outputs,
+                transitions,
+            );
+            if spec.nodes.len() > GRAPH_NODE_LIMIT {
+                None
+            } else {
+                Some(spec)
+            }
+        }
+        StrategySpecKind::OneSidedTm {
+            states,
+            symbols,
+            start_state,
+            transitions,
+            ..
+        } => tm_graph_spec(*states, *symbols, *start_state, transitions),
+    }
+}
+
+fn fsm_graph_spec(
+    state_count: usize,
+    start_state: usize,
+    mode: InputMode,
+    outputs: &[Action],
+    transitions: &[Vec<usize>],
+) -> GraphSpec {
+    let alphabet = mode.alphabet_size();
+    let mut nodes = Vec::with_capacity(state_count);
+    for state in 0..state_count {
+        nodes.push(GraphNode {
+            id: state,
+            label: state.to_string(),
+            output: outputs.get(state).map(|a| a.as_char()),
+        });
+    }
+    let mut edges = Vec::new();
+    for state in 0..state_count {
+        if let Some(row) = transitions.get(state) {
+            for input in 0..alphabet {
+                if let Some(&next) = row.get(input) {
+                    edges.push(GraphEdge {
+                        from: state,
+                        to: next,
+                        label: input.to_string(),
+                    });
+                }
+            }
+        }
+    }
+    GraphSpec {
+        nodes,
+        edges,
+        start: Some(start_state),
+    }
+}
+
+fn memory_graph_spec(n: usize, initial: Action, table: &[Action]) -> Option<GraphSpec> {
+    let states = 4usize.checked_pow(n as u32).unwrap_or(usize::MAX);
+    if states > GRAPH_NODE_LIMIT {
+        return None;
+    }
+    let mask = if n == 0 { 0u64 } else { (1u64 << (2 * n)) - 1 };
+    let mut nodes = Vec::with_capacity(states);
+    let mut edges = Vec::new();
+    for idx in 0..states {
+        let output = table.get(idx).copied().unwrap_or(initial);
+        nodes.push(GraphNode {
+            id: idx,
+            label: idx.to_string(),
+            output: Some(output.as_char()),
+        });
+        for input in 0..4usize {
+            let next = if n == 0 {
+                0
+            } else {
+                (((idx as u64) << 2) | input as u64) & mask
+            } as usize;
+            edges.push(GraphEdge {
+                from: idx,
+                to: next,
+                label: input.to_string(),
+            });
+        }
+    }
+    Some(GraphSpec {
+        nodes,
+        edges,
+        start: Some(0),
+    })
+}
+
+fn tm_graph_spec(
+    states: u16,
+    symbols: u8,
+    start_state: u16,
+    transitions: &[nit_games::strategy::TmTransition],
+) -> Option<GraphSpec> {
+    let state_count = states as usize;
+    let mut nodes = Vec::with_capacity(state_count + 1);
+    for state in 1..=state_count {
+        nodes.push(GraphNode {
+            id: state - 1,
+            label: state.to_string(),
+            output: None,
+        });
+    }
+    let mut edges = Vec::new();
+    let symbols_usize = symbols as usize;
+    let mut has_halt = false;
+    for state in 1..=state_count {
+        for read in 0..symbols_usize {
+            let idx = (state - 1) * symbols_usize + read;
+            if let Some(rule) = transitions.get(idx) {
+                let to = if rule.next == 0 {
+                    has_halt = true;
+                    state_count
+                } else {
+                    rule.next.saturating_sub(1) as usize
+                };
+                edges.push(GraphEdge {
+                    from: state - 1,
+                    to,
+                    // Label edges by READ symbol (input branch) to avoid duplicate WRITE collisions.
+                    label: read.to_string(),
+                });
+            }
+        }
+    }
+    if has_halt {
+        nodes.push(GraphNode {
+            id: state_count,
+            label: "H".to_string(),
+            output: None,
+        });
+    }
+    if nodes.len() > GRAPH_NODE_LIMIT {
+        return None;
+    }
+    Some(GraphSpec {
+        nodes,
+        edges,
+        start: Some(start_state.saturating_sub(1) as usize),
+    })
+}
+
+fn render_graph_canvas(frame: &mut Frame, area: Rect, theme: &Theme, graph: &GraphSpec) {
+    graph_render::render(frame, area, theme, graph);
+}
+
 fn builtin_as_fsm(builtin: BuiltinKind) -> (usize, InputMode, Vec<Action>, Vec<Vec<usize>>) {
     match builtin {
         BuiltinKind::AllC => (
@@ -311,8 +525,8 @@ fn build_tm_graph_lines(
 ) -> Vec<String> {
     let mut lines = Vec::new();
     lines.push("graph:".to_string());
-    lines.push("legend: edge label = write symbol (ap)".to_string());
-    lines.push("note: multiple targets separated by ','; H=HALT".to_string());
+    lines.push("legend: edge label = read symbol (input branch)".to_string());
+    lines.push("note: cell = write+move+next (e.g. 1R2); H=HALT".to_string());
 
     let mut headers = Vec::with_capacity(symbols as usize + 1);
     headers.push("state".to_string());
@@ -322,33 +536,25 @@ fn build_tm_graph_lines(
 
     let mut rows = Vec::new();
     let symbols_usize = symbols as usize;
-    let mut by_write: Vec<Vec<Vec<u16>>> =
-        vec![vec![Vec::new(); symbols_usize]; states as usize];
-    for state in 1..=states as usize {
-        for read in 0..symbols_usize {
-            let idx = (state - 1) * symbols_usize + read;
-            if let Some(rule) = transitions.get(idx) {
-                let write_idx = (rule.write as usize).min(symbols_usize.saturating_sub(1));
-                by_write[state - 1][write_idx].push(rule.next);
-            }
-        }
-    }
-
     for state in 1..=states as usize {
         let mut row = Vec::with_capacity(symbols_usize + 1);
         row.push(state.to_string());
-        for write in 0..symbols_usize {
-            let mut targets = by_write[state - 1][write].clone();
-            targets.sort_unstable();
-            targets.dedup();
-            let cell = if targets.is_empty() {
-                "-".to_string()
+        for read in 0..symbols_usize {
+            let idx = (state - 1) * symbols_usize + read;
+            let cell = if let Some(rule) = transitions.get(idx) {
+                let mv = match rule.move_dir {
+                    nit_games::strategy::TmMove::Left => "L",
+                    nit_games::strategy::TmMove::Right => "R",
+                    nit_games::strategy::TmMove::Stay => "S",
+                };
+                let next = if rule.next == 0 {
+                    "H".to_string()
+                } else {
+                    rule.next.to_string()
+                };
+                format!("{}{}{}", rule.write, mv, next)
             } else {
-                targets
-                    .into_iter()
-                    .map(|next| if next == 0 { "H".to_string() } else { next.to_string() })
-                    .collect::<Vec<_>>()
-                    .join(",")
+                "-".to_string()
             };
             row.push(cell);
         }
@@ -732,13 +938,21 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
     frame.render_widget(block, area);
 
     let (display_lines, graph_lines) = split_graph_sections(&state.games.strategy_inspect.lines);
-    if !graph_lines.is_empty() && !state.games.strategy_inspect.lines.is_empty() {
+    let graph_spec = state
+        .games
+        .strategy_inspect
+        .definition
+        .as_ref()
+        .and_then(graph_from_definition);
+    let show_graph = !state.games.strategy_inspect.lines.is_empty()
+        && (graph_spec.is_some() || !graph_lines.is_empty());
+    if show_graph {
         let chunks = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([
-                Constraint::Percentage(58),
+                Constraint::Percentage(50),
                 Constraint::Length(1),
-                Constraint::Percentage(42),
+                Constraint::Percentage(50),
             ])
             .split(inner);
 
@@ -793,34 +1007,42 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
             .scroll((scroll as u16, 0));
         frame.render_widget(left_paragraph, left_inner);
 
-        let label_style = Style::default().fg(theme.title).add_modifier(Modifier::DIM);
-        let value_style = Style::default().fg(theme.foreground);
-        let dim_style = Style::default()
-            .fg(theme.border)
-            .add_modifier(Modifier::DIM);
-        let max_width = right_inner.width.max(1) as usize;
-        let mut graph_styled = Vec::new();
-        let mut idx = 0usize;
-        for line in &graph_lines {
-            if idx >= right_inner.height as usize {
-                break;
-            }
-            let styled = style_definition_line(
-                line,
-                max_width,
-                theme,
-                label_style,
-                value_style,
-                dim_style,
+        if let Some(graph) = graph_spec {
+            frame.render_widget(
+                Block::default().style(Style::default().bg(theme.background)),
+                right_inner,
             );
-            graph_styled.push(styled);
-            idx = idx.saturating_add(1);
+            render_graph_canvas(frame, right_inner, theme, &graph);
+        } else {
+            let label_style = Style::default().fg(theme.title).add_modifier(Modifier::DIM);
+            let value_style = Style::default().fg(theme.foreground);
+            let dim_style = Style::default()
+                .fg(theme.border)
+                .add_modifier(Modifier::DIM);
+            let max_width = right_inner.width.max(1) as usize;
+            let mut graph_styled = Vec::new();
+            let mut idx = 0usize;
+            for line in &graph_lines {
+                if idx >= right_inner.height as usize {
+                    break;
+                }
+                let styled = style_definition_line(
+                    line,
+                    max_width,
+                    theme,
+                    label_style,
+                    value_style,
+                    dim_style,
+                );
+                graph_styled.push(styled);
+                idx = idx.saturating_add(1);
+            }
+            let right_paragraph = Paragraph::new(graph_styled)
+                .style(Style::default().fg(theme.foreground).bg(theme.background))
+                .wrap(Wrap { trim: false })
+                .scroll((0, 0));
+            frame.render_widget(right_paragraph, right_inner);
         }
-        let right_paragraph = Paragraph::new(graph_styled)
-            .style(Style::default().fg(theme.foreground).bg(theme.background))
-            .wrap(Wrap { trim: false })
-            .scroll((0, 0));
-        frame.render_widget(right_paragraph, right_inner);
         return;
     }
 
@@ -847,4 +1069,31 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
         .wrap(Wrap { trim: false })
         .scroll((scroll as u16, 0));
     frame.render_widget(paragraph, inner);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fsm_graph_spec_builds_edges() {
+        let def = StrategyDefinition {
+            id: "t".to_string(),
+            name: None,
+            kind: StrategySpecKind::Fsm {
+                num_states: 2,
+                start_state: 0,
+                outputs: vec![Action::Cooperate, Action::Defect],
+                input_mode: Some(InputMode::OpponentLastAction),
+                transitions: vec![vec![0, 1], vec![1, 0]],
+            },
+            rng_seed_a: None,
+            rng_seed_b: None,
+        };
+
+        let graph = graph_from_definition(&def).expect("graph");
+        assert_eq!(graph.nodes.len(), 2);
+        assert_eq!(graph.edges.len(), 4);
+        assert_eq!(graph.start, Some(0));
+    }
 }
