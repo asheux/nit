@@ -65,6 +65,10 @@ pub fn build_lines(theme: &Theme) -> Vec<Line<'static>> {
         heading_style,
     )]));
     lines.push(Line::from(vec![
+        Span::styled(":q", Style::default().fg(theme.accent)),
+        Span::raw(" quit (confirm if dirty)"),
+    ]));
+    lines.push(Line::from(vec![
         Span::styled(":help / :commands", Style::default().fg(theme.accent)),
         Span::raw(" open this help overlay"),
     ]));

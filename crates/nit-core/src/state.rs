@@ -1134,7 +1134,7 @@ pub fn apply_action(state: &mut AppState, action: Action) -> ActionOutcome {
         }
         Action::CommandPromptExecute => {
             if let Some(cmd) = state.command_line.take() {
-                handle_command_line(state, &cmd.input);
+                should_exit = handle_command_line(state, &cmd.input);
             }
         }
         Action::CommandPromptInput(ch) => {
@@ -1470,11 +1470,11 @@ pub fn apply_action(state: &mut AppState, action: Action) -> ActionOutcome {
     }
 }
 
-fn handle_command_line(state: &mut AppState, input: &str) {
+fn handle_command_line(state: &mut AppState, input: &str) -> bool {
     let trimmed = input.trim();
     let cmd = trimmed.to_lowercase();
     if cmd.is_empty() {
-        return;
+        return false;
     }
     let tokens: Vec<&str> = cmd.split_whitespace().collect();
     if let Some(target_lab) = lab_from_tokens(&tokens) {
@@ -1485,65 +1485,86 @@ fn handle_command_line(state: &mut AppState, input: &str) {
                 state.app_kind.label(),
                 target_lab
             ));
-            return;
+            return false;
         }
     }
     match tokens.as_slice() {
+        ["q"] | ["quit"] | ["exit"] => {
+            if state.editor_buffer().is_dirty() {
+                state.prompt = Some(Prompt::ConfirmQuit);
+                false
+            } else {
+                true
+            }
+        }
         ["help"] | ["commands"] | ["help", "commands"] | ["commands", "help"] => {
             state.show_help = true;
             state.help_scroll = 0;
             state.status = Some("Help opened".into());
+            false
         }
         ["run"] => match state.app_kind {
             AppKind::Gol => {
                 state.visualizer.pending_run = true;
                 state.visualizer.pending_snapshot = true;
                 state.status = Some("Petri dish queued".into());
+                false
             }
             AppKind::Games => {
                 state.games.pending_run = true;
                 state.status = Some("Games tournament queued".into());
+                false
             }
         },
         ["gol", "run"] | ["run", "gol"] | ["life", "run"] | ["gol", "start"] | ["run", "life"] => {
             state.visualizer.pending_run = true;
             state.visualizer.pending_snapshot = true;
             state.status = Some("Petri dish queued".into());
+            false
         }
         ["games", "run"] | ["run", "games"] => {
             state.games.pending_run = true;
             state.status = Some("Games tournament queued".into());
+            false
         }
         ["gol", "hide"] | ["hide", "gol"] => {
             state.visualizer.pending_hide = true;
             state.status = Some("Petri dish hiding".into());
+            false
         }
         ["gol", "show"] | ["show", "gol"] => {
             state.visualizer.pending_show = true;
             state.status = Some("Petri dish showing".into());
+            false
         }
         ["gol", "stop"] | ["life", "stop"] => {
             state.visualizer.pending_close = true;
             state.status = Some("Petri dish closing".into());
+            false
         }
         ["run", "stop"] if state.app_kind == AppKind::Gol => {
             state.visualizer.pending_close = true;
             state.status = Some("Petri dish closing".into());
+            false
         }
         ["games", "hide"] | ["hide", "games"] => {
             state.games.pending_hide = true;
             state.status = Some("Games tournament hiding".into());
+            false
         }
         ["games", "show"] | ["show", "games"] => {
             state.games.pending_show = true;
             state.status = Some("Games tournament showing".into());
+            false
         }
         ["games", "stop"] | ["stop", "games"] => {
             state.games.pending_close = true;
             state.status = Some("Games tournament closing".into());
+            false
         }
         ["games", "status"] => {
             state.status = Some(format!("Games status: {:?}", state.games.status));
+            false
         }
         ["games", "runs"] | ["games", "browse"] | ["games", "browser"] => {
             state.games.replay.open = false;
@@ -1555,6 +1576,7 @@ fn handle_command_line(state: &mut AppState, input: &str) {
             state.games.run_browser.scroll_offset = 0;
             state.games.pending_run_browser = true;
             state.status = Some("Games run browser opened".into());
+            false
         }
         ["games", "replay"] => {
             if state.games.last_run.is_none() {
@@ -1572,13 +1594,14 @@ fn handle_command_line(state: &mut AppState, input: &str) {
                 state.games.replay.cycle = None;
                 state.status = Some("Games replay opened".into());
             }
+            false
         }
         _ if tokens.get(0) == Some(&"games") && tokens.get(1) == Some(&"inspect") => {
             let rule_tuple = match parse_tm_rule_tuple(trimmed) {
                 Ok(value) => value,
                 Err(msg) => {
                     state.status = Some(msg);
-                    return;
+                    return false;
                 }
             };
 
@@ -1596,7 +1619,7 @@ fn handle_command_line(state: &mut AppState, input: &str) {
                     "Usage: :games inspect <strategy_id> | :games inspect <strategy_id> {rule,states,symbols} | :games inspect {rule,states,symbols}"
                         .into(),
                 );
-                return;
+                return false;
             }
 
             let mut spec: Option<nit_games::StrategySpec> = None;
@@ -1610,7 +1633,7 @@ fn handle_command_line(state: &mut AppState, input: &str) {
                     } else {
                         "TM rule tuple: symbols must be >= 2".into()
                     });
-                    return;
+                    return false;
                 }
 
                 let (transitions, _remaining) =
@@ -1716,7 +1739,7 @@ fn handle_command_line(state: &mut AppState, input: &str) {
                         state.games.strategy_inspect.definitions.clear();
                         state.games.strategy_inspect.source_label = Some("config".into());
                         state.status = Some("Games strategy inspect error".into());
-                        return;
+                        return false;
                     }
                 }
             }
@@ -1740,7 +1763,7 @@ fn handle_command_line(state: &mut AppState, input: &str) {
                 state.games.strategy_inspect.definitions.clear();
                 state.games.strategy_inspect.source_label = None;
                 state.status = Some("Games strategy inspect error".into());
-                return;
+                return false;
             };
 
             let intro = nit_games::introspect_strategy(&spec);
@@ -1760,6 +1783,7 @@ fn handle_command_line(state: &mut AppState, input: &str) {
             state.games.strategy_inspect.definitions.clear();
             state.games.strategy_inspect.source_label = source_label;
             state.status = Some(format!("Games inspect: {}", spec.id));
+            false
         }
         ["games", "strategy"]
         | ["games", "strategies"]
@@ -1782,6 +1806,7 @@ fn handle_command_line(state: &mut AppState, input: &str) {
                 state.games.strategy_inspect.source_label = Some("run".into());
                 state.status = Some("Games strategy inspector opened".into());
             }
+            false
         }
         ["games", "strategy", "all"]
         | ["games", "strategies", "all"]
@@ -1834,6 +1859,7 @@ fn handle_command_line(state: &mut AppState, input: &str) {
                     state.status = Some(msg);
                 }
             }
+            false
         }
         _ if tokens.get(0) == Some(&"games") && tokens.get(1) == Some(&"tm") => {
             let mut idx = 2usize;
@@ -1863,7 +1889,7 @@ fn handle_command_line(state: &mut AppState, input: &str) {
                     state.games.tm_sim.steps_override = None;
                     state.games.tm_sim.source_label = Some("rule".into());
                     state.games.tm_sim.scroll_offset = 0;
-                    return;
+                    return false;
                 }
             };
 
@@ -1884,7 +1910,7 @@ fn handle_command_line(state: &mut AppState, input: &str) {
                     "Usage: :games tm [run|config] <input> [steps] [strategy_id] | :games tm {rule_code, states, symbols} <input> [steps]"
                         .into(),
                 );
-                return;
+                return false;
             };
             let steps_override = numbers.get(1).copied().and_then(|value| {
                 if value > u32::MAX as u64 {
@@ -1913,7 +1939,7 @@ fn handle_command_line(state: &mut AppState, input: &str) {
                     state.games.tm_sim.steps_override = steps_override;
                     state.games.tm_sim.source_label = Some("rule".into());
                     state.games.tm_sim.scroll_offset = 0;
-                    return;
+                    return false;
                 }
                 let (transitions, _remaining) =
                     nit_games::strategy::decode_tm_rule_code_wolfram(
@@ -1962,7 +1988,7 @@ fn handle_command_line(state: &mut AppState, input: &str) {
                 state.games.tm_sim.source_label = Some("rule".into());
                 state.games.tm_sim.scroll_offset = 0;
                 state.status = Some("TM simulation opened (rule tuple)".into());
-                return;
+                return false;
             }
 
             let mut source_label = source.to_string();
@@ -1973,7 +1999,7 @@ fn handle_command_line(state: &mut AppState, input: &str) {
                         defs = run.strategies.clone();
                     } else {
                         state.status = Some("No run loaded for TM simulation".into());
-                        return;
+                        return false;
                     }
                 }
                 _ => {
@@ -2010,7 +2036,7 @@ fn handle_command_line(state: &mut AppState, input: &str) {
                             state.games.tm_sim.steps_override = steps_override;
                             state.games.tm_sim.source_label = Some("config".into());
                             state.games.tm_sim.scroll_offset = 0;
-                            return;
+                            return false;
                         }
                     }
                 }
@@ -2038,7 +2064,7 @@ fn handle_command_line(state: &mut AppState, input: &str) {
                 } else {
                     state.status = Some("Multiple TM strategies found; specify an id".into());
                 }
-                return;
+                return false;
             };
 
             state.games.run_browser.open = false;
@@ -2053,6 +2079,7 @@ fn handle_command_line(state: &mut AppState, input: &str) {
             state.games.tm_sim.source_label = Some(source_label);
             state.games.tm_sim.scroll_offset = 0;
             state.status = Some("TM simulation opened".into());
+            false
         }
         _ if tokens.get(0) == Some(&"games")
             && matches!(tokens.get(1), Some(&"analyze") | Some(&"analyse")) =>
@@ -2108,17 +2135,21 @@ fn handle_command_line(state: &mut AppState, input: &str) {
                 state.games.analysis.scroll_offset = 0;
                 state.status = Some("Games analysis queued".into());
             }
+            false
         }
         ["games", "export"] => {
             state.games.pending_export = true;
+            false
         }
         ["gol", "seed"] => {
             state.visualizer.seed_view = state.visualizer.seed_view.next();
             state.status = Some(format!("Seed view: {}", state.visualizer.seed_view.label()));
+            false
         }
         ["seed", "view"] if state.app_kind == AppKind::Gol => {
             state.visualizer.seed_view = state.visualizer.seed_view.next();
             state.status = Some(format!("Seed view: {}", state.visualizer.seed_view.label()));
+            false
         }
         ["gol", "encoder"] => {
             state.visualizer.seed_encoder = state.visualizer.seed_encoder.next();
@@ -2127,6 +2158,7 @@ fn handle_command_line(state: &mut AppState, input: &str) {
                 "Encoder: {}",
                 state.visualizer.seed_encoder.label()
             ));
+            false
         }
         ["seed", "encoder"] if state.app_kind == AppKind::Gol => {
             state.visualizer.seed_encoder = state.visualizer.seed_encoder.next();
@@ -2135,6 +2167,7 @@ fn handle_command_line(state: &mut AppState, input: &str) {
                 "Encoder: {}",
                 state.visualizer.seed_encoder.label()
             ));
+            false
         }
         _ if tokens.get(0) == Some(&"gol") && tokens.get(1) == Some(&"rule") => {
             if tokens.len() == 2 {
@@ -2154,20 +2187,25 @@ fn handle_command_line(state: &mut AppState, input: &str) {
                     }
                 }
             }
+            false
         }
         _ if tokens.get(0) == Some(&"gol") && tokens.get(1) == Some(&"rules") => {
             log_rule_list(state);
+            false
         }
         ["petri", "hide"] | ["hide", "petri"] if state.app_kind == AppKind::Gol => {
             state.visualizer.pending_hide = true;
             state.status = Some("Petri dish hiding".into());
+            false
         }
         ["petri", "show"] | ["show", "petri"] if state.app_kind == AppKind::Gol => {
             state.visualizer.pending_show = true;
             state.status = Some("Petri dish showing".into());
+            false
         }
         other => {
             state.status = Some(format!("Unknown command: {}", other.join(" ")));
+            false
         }
     }
 }
@@ -2560,5 +2598,23 @@ mod tests {
         state.rule_picker.selected = 0;
         let _ = apply_action(&mut state, Action::ApplySelectedRuleFromPicker);
         assert_eq!(state.visualizer.rule, "B36/S23");
+    }
+
+    #[test]
+    fn command_q_quits_when_clean_and_prompts_when_dirty() {
+        let root = temp_dir("cmd-q");
+        let mut state = AppState::new(
+            root.clone(),
+            Buffer::empty("x", None),
+            Buffer::empty("n", None),
+        );
+        assert!(!state.editor_buffer().is_dirty());
+        assert!(handle_command_line(&mut state, "q"));
+
+        // Mark dirty and ensure :q requests confirmation instead of immediate exit.
+        state.editor_buffer_mut().insert_char('x');
+        assert!(state.editor_buffer().is_dirty());
+        assert!(!handle_command_line(&mut state, "q"));
+        assert!(matches!(state.prompt, Some(Prompt::ConfirmQuit)));
     }
 }

@@ -84,6 +84,7 @@
 ## Command/Prompts
 - Y / N to confirm quit when prompted
 - :run: Run the active app
+- :q: Quit (confirm if dirty)
 - Commands are routed to the active lab; use `--lab gol|games` at startup to switch labs.
 - :gol hide / :petri hide: Hide GoL Petri Dish (sim keeps running)
 - :gol show / :petri show: Show GoL Petri Dish

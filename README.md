@@ -50,6 +50,7 @@ For details see `SECURITY.md`.
 
 Open the command prompt with `:` in Normal mode (or press `F1`/`?` for the full help overlay). Commands are routed to the active lab; start with `--lab gol|games` to switch.
 
+- `:q` — quit (confirm if dirty)
 - `:help` / `:commands` — open the help overlay
 - `:run` — run the active app (GoL Petri Dish or Games tournament)
 

@@ -527,9 +527,9 @@ impl SeedEncoder for AsciiBytesEncoder {
         let mut grid = SeedValueGrid::new(size, size);
         let bytes = input.text.as_bytes();
         let mut rng = XorShift64::new(seed_nonce ^ stable_hash_bytes(bytes) ^ (variant as u64));
-        let len = bytes.len().max(1);
+        let len = bytes.len();
         for idx in 0..size * size {
-            let base = bytes[idx % len];
+            let base = if len == 0 { 0 } else { bytes[idx % len] };
             let mix = (rng.next_u64() & 0xff) as u8;
             let value = base.wrapping_add((idx as u8).wrapping_mul(31)) ^ mix;
             let x = idx % size;
@@ -575,17 +575,42 @@ impl SeedEncoder for HilbertBitsEncoder {
         let size = 1usize << order;
         let mut grid = SeedValueGrid::new(size, size);
         let bytes = input.text.as_bytes();
-        let len = bytes.len().max(1);
+        let len = bytes.len();
         let mut rng =
             XorShift64::new(seed_nonce ^ stable_hash_bytes(bytes) ^ (variant as u64) ^ 0x5eed_u64);
         for idx in 0..size * size {
             let (x, y) = hilbert_index_to_xy(order, idx as u32);
-            let base = bytes[idx % len];
+            let base = if len == 0 { 0 } else { bytes[idx % len] };
             let mix = (rng.next_u64() & 0xff) as u8;
             let value = base ^ mix;
             grid.set(x as usize, y as usize, value);
         }
         grid
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn seed_encoders_do_not_panic_on_empty_input() {
+        let input = SeedInput {
+            text: "",
+            source: GolSeedSource::Editor,
+            file_path: None,
+            version: 0,
+        };
+        let params = SeedParams::default();
+        for encoder in [
+            SeedEncoderId::AsciiBytes,
+            SeedEncoderId::Lifehash16,
+            SeedEncoderId::HilbertBits,
+        ] {
+            let encoded = encode_seed(&input, encoder, &params, 0, 0, 32, 32);
+            assert_eq!(encoded.grid.width(), 32);
+            assert_eq!(encoded.grid.height(), 32);
+        }
     }
 }
 

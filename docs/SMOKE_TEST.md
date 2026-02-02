@@ -31,6 +31,7 @@ It's meant for quick confidence after changes to UI, commands, or engine wiring.
   - `:` (Normal mode)
   - Expect: a prompt line; Enter executes; status/logs show results.
   - Try `:help` or `:commands`; expect: help popup opens.
+  - Try `:q`; expect: quit confirmation if dirty, otherwise app exits.
 - Quit confirmation:
   - Make an edit, then `Ctrl+Q`
   - Expect: confirmation prompt; `Y` quits, `N` cancels.

@@ -39,8 +39,8 @@ struct Cli {
     /// File or directory to open
     path: Option<PathBuf>,
     /// Start in the specified lab (gol or games)
-    #[arg(long, value_enum)]
-    lab: Option<LabArg>,
+    #[arg(long, value_enum, default_value_t = LabArg::Gol)]
+    lab: LabArg,
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -326,10 +326,7 @@ fn main() -> anyhow::Result<()> {
     let (app_kind, target) = match cli.command {
         Some(Command::Gol { path }) => (AppKind::Gol, path),
         Some(Command::Games { path, .. }) => (AppKind::Games, path),
-        None => (
-            cli.lab.map(LabId::from).unwrap_or(AppKind::Gol),
-            cli.path,
-        ),
+        None => (LabId::from(cli.lab), cli.path),
     };
     let (workspace_root, editor) = match app_kind {
         AppKind::Gol => open_target_gol(target.as_deref())?,
