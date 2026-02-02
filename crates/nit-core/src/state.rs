@@ -1489,6 +1489,11 @@ fn handle_command_line(state: &mut AppState, input: &str) {
         }
     }
     match tokens.as_slice() {
+        ["help"] | ["commands"] | ["help", "commands"] | ["commands", "help"] => {
+            state.show_help = true;
+            state.help_scroll = 0;
+            state.status = Some("Help opened".into());
+        }
         ["run"] => match state.app_kind {
             AppKind::Gol => {
                 state.visualizer.pending_run = true;
@@ -1569,28 +1574,114 @@ fn handle_command_line(state: &mut AppState, input: &str) {
             }
         }
         _ if tokens.get(0) == Some(&"games") && tokens.get(1) == Some(&"inspect") => {
-            let Some(target_id) = tokens.get(2).copied() else {
-                state.status = Some("Usage: :games inspect <strategy_id>".into());
-                return;
+            let rule_tuple = match parse_tm_rule_tuple(trimmed) {
+                Ok(value) => value,
+                Err(msg) => {
+                    state.status = Some(msg);
+                    return;
+                }
             };
+
+            // Allow either:
+            // - :games inspect <strategy_id>
+            // - :games inspect <strategy_id> {rule_code, states, symbols}
+            // - :games inspect {rule_code, states, symbols}
+            let explicit_id = tokens
+                .get(2)
+                .copied()
+                .filter(|token| !token.starts_with('{'));
+
+            if rule_tuple.is_none() && explicit_id.is_none() {
+                state.status = Some(
+                    "Usage: :games inspect <strategy_id> | :games inspect <strategy_id> {rule,states,symbols} | :games inspect {rule,states,symbols}"
+                        .into(),
+                );
+                return;
+            }
 
             let mut spec: Option<nit_games::StrategySpec> = None;
             let mut definition: Option<nit_games::output::StrategyDefinition> = None;
             let mut source_label: Option<String> = None;
 
-            if let Some(run) = state.games.last_run.as_ref() {
-                if let Some(def) = run.strategies.iter().find(|s| s.id == target_id) {
-                    spec = Some(nit_games::StrategySpec {
-                        id: def.id.clone(),
-                        name: def.name.clone(),
-                        kind: def.kind.clone(),
+            if let Some((rule_code, states, symbols)) = rule_tuple {
+                if states == 0 || symbols < 2 {
+                    state.status = Some(if states == 0 {
+                        "TM rule tuple: states must be >= 1".into()
+                    } else {
+                        "TM rule tuple: symbols must be >= 2".into()
                     });
-                    definition = Some(def.clone());
-                    source_label = Some("run".into());
+                    return;
+                }
+
+                let (transitions, _remaining) =
+                    nit_games::strategy::decode_tm_rule_code_wolfram(
+                        rule_code,
+                        states as usize,
+                        symbols as usize,
+                    );
+                let output_map: Vec<nit_games::game::Action> = (0..symbols)
+                    .map(|idx| {
+                        if idx % 2 == 0 {
+                            nit_games::game::Action::Cooperate
+                        } else {
+                            nit_games::game::Action::Defect
+                        }
+                    })
+                    .collect();
+
+                let max_steps = 256;
+                let effective_id = explicit_id
+                    .map(str::to_string)
+                    .unwrap_or_else(|| format!("tm_rule_{rule_code}_{states}x{symbols}"));
+                let def = nit_games::output::StrategyDefinition {
+                    id: effective_id,
+                    name: Some(format!("Rule {rule_code} ({states}x{symbols})")),
+                    kind: nit_games::config::StrategySpecKind::OneSidedTm {
+                        states,
+                        symbols,
+                        start_state: 1,
+                        blank: 0,
+                        fallback_symbol: Some(0),
+                        max_steps_per_round: max_steps,
+                        input_mode: nit_games::strategy::InputMode::OpponentLastAction,
+                        output_map,
+                        transitions,
+                        rule_code: Some(rule_code),
+                    },
+                    rng_seed_a: None,
+                    rng_seed_b: None,
+                };
+
+                spec = Some(nit_games::StrategySpec {
+                    id: def.id.clone(),
+                    name: def.name.clone(),
+                    kind: def.kind.clone(),
+                });
+                definition = Some(def);
+                source_label = Some("rule".into());
+            }
+
+            if let Some(run) = state.games.last_run.as_ref() {
+                if spec.is_none() {
+                    if let Some(def) = run
+                        .strategies
+                        .iter()
+                        .find(|s| s.id == explicit_id.unwrap_or_default())
+                        .cloned()
+                    {
+                        spec = Some(nit_games::StrategySpec {
+                            id: def.id.clone(),
+                            name: def.name.clone(),
+                            kind: def.kind.clone(),
+                        });
+                        definition = Some(def);
+                        source_label = Some("run".into());
+                    }
                 }
             }
 
             if spec.is_none() {
+                let target_id = explicit_id.unwrap_or("tm_rule");
                 let config_text = state.editor_buffer().content_as_string();
                 match nit_games::config::GamesConfig::from_toml_with_root(
                     &config_text,
@@ -1631,6 +1722,7 @@ fn handle_command_line(state: &mut AppState, input: &str) {
             }
 
             let Some(spec) = spec else {
+                let target_id = explicit_id.unwrap_or("tm_rule");
                 state.games.run_browser.open = false;
                 state.games.replay.open = false;
                 state.games.tm_sim.open = false;

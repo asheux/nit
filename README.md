@@ -44,6 +44,36 @@ For details see `SECURITY.md`.
 
 - `docs/ARCHITECTURE.md` — state model, rendering pipeline.
 - `docs/KEYBINDINGS.md` — full keymap.
+- `docs/SMOKE_TEST.md` — feature tour + quick manual test checklist.
+
+## Command prompt (`:`)
+
+Open the command prompt with `:` in Normal mode (or press `F1`/`?` for the full help overlay). Commands are routed to the active lab; start with `--lab gol|games` to switch.
+
+- `:help` / `:commands` — open the help overlay
+- `:run` — run the active app (GoL Petri Dish or Games tournament)
+
+GoL (aka `:life`):
+- `:gol run` / `:gol hide` / `:gol show` / `:gol stop`
+- `:petri hide` / `:petri show` (aliases for `:gol hide|show`)
+- `:gol rule [id|B/S]` — show/set rule (logs built-ins); example: `:gol rule conway` / `:gol rule B36/S23`
+- `:gol rules` — list rules (logs)
+- `:gol seed` / `:gol encoder` (aliases: `:seed view` / `:seed encoder`) — cycle seed view / encoder
+
+Games:
+- `:games run` / `:games hide` / `:games show` / `:games stop`
+- `:games status` — show tournament status
+- `:games export` — re-emit last run summary (if present)
+- `:games runs` — browse saved runs (aliases: `:games browse` / `:games browser`)
+- `:games replay` — open match replay selector (requires loaded run)
+- `:games strategy [run]` — open strategy inspector for loaded run
+- `:games strategies all|config` — open strategy inspector from config
+- `:games inspect <strategy_id>` — introspect a strategy by id
+- `:games inspect <strategy_id> {rule,states,symbols}` — inspect a one-sided TM rule tuple (override)
+- `:games inspect {rule,states,symbols}` — inspect a one-sided TM rule tuple (no config/run)
+- `:games tm [run|config] <input> [steps] [strategy_id]` — simulate one-sided TM
+- `:games tm {rule,states,symbols} <input> [steps]` — simulate a rule-code TM without config
+- `:games analyze|analyse [path] [tail=N] [samples=N]` — analyze last/specified history log (accepts `tail_rounds=`/`trajectory_samples=` and `path=...`)
 
 ## Visualizer quick notes
 

@@ -65,12 +65,20 @@ pub fn build_lines(theme: &Theme) -> Vec<Line<'static>> {
         heading_style,
     )]));
     lines.push(Line::from(vec![
+        Span::styled(":help / :commands", Style::default().fg(theme.accent)),
+        Span::raw(" open this help overlay"),
+    ]));
+    lines.push(Line::from(vec![
         Span::styled(":run", Style::default().fg(theme.accent)),
         Span::raw(" run active app"),
     ]));
     lines.push(Line::from(vec![
         Span::styled(":gol run|hide|show|stop", Style::default().fg(theme.accent)),
-        Span::raw(" GoL petri controls"),
+        Span::raw(" GoL Petri Dish controls (alias: :life ...)"),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled(":petri hide|show", Style::default().fg(theme.accent)),
+        Span::raw(" GoL Petri Dish visibility (alias for :gol hide|show)"),
     ]));
     lines.push(Line::from(vec![
         Span::styled(":gol rule [id|B/S]", Style::default().fg(theme.accent)),
@@ -85,14 +93,69 @@ pub fn build_lines(theme: &Theme) -> Vec<Line<'static>> {
             ":gol seed | :gol encoder",
             Style::default().fg(theme.accent),
         ),
-        Span::raw(" cycle seed view/encoder"),
+        Span::raw(" cycle seed view/encoder (aliases: :seed view|encoder)"),
     ]));
     lines.push(Line::from(vec![
         Span::styled(
-            ":games run|hide|show|status|export",
+            ":games run|hide|show|stop|status|export",
             Style::default().fg(theme.accent),
         ),
         Span::raw(" games controls"),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled(":games runs", Style::default().fg(theme.accent)),
+        Span::raw(" browse saved runs"),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled(":games replay", Style::default().fg(theme.accent)),
+        Span::raw(" open replay selector (requires loaded run)"),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled(":games strategy [run]", Style::default().fg(theme.accent)),
+        Span::raw(" open strategy inspector for loaded run"),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled(":games strategies all|config", Style::default().fg(theme.accent)),
+        Span::raw(" open strategy inspector from config"),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled(":games inspect <id>", Style::default().fg(theme.accent)),
+        Span::raw(" introspect a strategy by id"),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled(
+            ":games inspect <id> {rule,states,symbols}",
+            Style::default().fg(theme.accent),
+        ),
+        Span::raw(" inspect a one-sided TM rule tuple (override)"),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled(
+            ":games inspect {rule,states,symbols}",
+            Style::default().fg(theme.accent),
+        ),
+        Span::raw(" inspect a one-sided TM rule tuple"),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled(
+            ":games tm [run|config] <input> [steps] [id]",
+            Style::default().fg(theme.accent),
+        ),
+        Span::raw(" simulate one-sided TM on integer input"),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled(
+            ":games tm {rule,states,symbols} <input> [steps]",
+            Style::default().fg(theme.accent),
+        ),
+        Span::raw(" simulate a rule-code TM without config"),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled(
+            ":games analyze[se] [path] [tail=N] [samples=N]",
+            Style::default().fg(theme.accent),
+        ),
+        Span::raw(" analyze last/specified history log"),
     ]));
     lines.push(Line::from(vec![Span::styled(
         "GAMES PETRI DISH (POPUP)",
@@ -337,58 +400,6 @@ pub fn build_lines(theme: &Theme) -> Vec<Line<'static>> {
     lines.push(Line::from(vec![
         Span::styled("H", Style::default().fg(theme.accent)),
         Span::raw(" hide popup (sim keeps running)"),
-    ]));
-
-    lines.push(Line::from(vec![Span::styled(
-        "COMMAND PROMPT",
-        heading_style,
-    )]));
-    lines.push(Line::from(vec![
-        Span::styled(":gol hide", Style::default().fg(theme.accent)),
-        Span::raw(" hide Petri Dish (keep running)"),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled(":gol show", Style::default().fg(theme.accent)),
-        Span::raw(" show Petri Dish"),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled(":games analyze", Style::default().fg(theme.accent)),
-        Span::raw(" analyze last Games history log"),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled(":games analyze <path>", Style::default().fg(theme.accent)),
-        Span::raw(" analyze specific history log"),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled(":games runs", Style::default().fg(theme.accent)),
-        Span::raw(" browse saved runs"),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled(":games replay", Style::default().fg(theme.accent)),
-        Span::raw(" inspect a match replay"),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled(":games strategy", Style::default().fg(theme.accent)),
-        Span::raw(" inspect a strategy definition"),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled(":games inspect <id>", Style::default().fg(theme.accent)),
-        Span::raw(" introspect a strategy (pretty text)"),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled(":games strategies all", Style::default().fg(theme.accent)),
-        Span::raw(" list all strategies from config"),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled(":games tm <n> [steps] [id]", Style::default().fg(theme.accent)),
-        Span::raw(" simulate one-sided TM on integer input"),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled(
-            ":games tm {rule,states,symbols} <n> [steps]",
-            Style::default().fg(theme.accent),
-        ),
-        Span::raw(" simulate a rule-code TM without config"),
     ]));
     lines
 }
