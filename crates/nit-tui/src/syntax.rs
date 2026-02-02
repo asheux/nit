@@ -91,6 +91,10 @@ impl SyntaxRuntime {
         if !self.manager.config().enabled {
             return;
         }
+        let max_spans_per_line = adaptive_max_spans_per_line(
+            self.manager.config().max_spans_per_line,
+            buffer.bytes_len(),
+        );
         let first_line = buffer.first_line();
         let language = self.manager.detect_language(
             buffer.path().map(|p| p.as_path()),
@@ -104,7 +108,7 @@ impl SyntaxRuntime {
             text: buffer.content_as_string(),
             edits: Vec::new(),
             full_reparse: true,
-            max_spans_per_line: self.manager.config().max_spans_per_line,
+            max_spans_per_line,
         };
         self.last_sent.insert(buffer_id, request.version);
         self.manager.schedule_rehighlight(request);
@@ -180,10 +184,15 @@ impl SyntaxRuntime {
         } else {
             entry.edits.extend(edits);
         }
+        let debounce_ms =
+            adaptive_debounce_ms(self.manager.config().debounce_ms, buffer.bytes_len());
         let debouncer = self
             .debouncers
             .entry(buffer_id)
-            .or_insert_with(|| Debouncer::new(self.manager.config().debounce_ms));
+            .or_insert_with(|| Debouncer::new(debounce_ms));
+        if debouncer.delay() != Duration::from_millis(debounce_ms) {
+            *debouncer = Debouncer::new(debounce_ms);
+        }
         debouncer.mark();
     }
 
@@ -209,6 +218,10 @@ impl SyntaxRuntime {
             return;
         };
         let text = buffer.content_as_string();
+        let max_spans_per_line = adaptive_max_spans_per_line(
+            self.manager.config().max_spans_per_line,
+            buffer.bytes_len(),
+        );
         let request = HighlightRequest {
             buffer_id,
             version: pending.version,
@@ -216,7 +229,7 @@ impl SyntaxRuntime {
             text,
             edits: pending.edits,
             full_reparse: pending.full_reparse,
-            max_spans_per_line: self.manager.config().max_spans_per_line,
+            max_spans_per_line,
         };
         self.last_sent.insert(buffer_id, request.version);
         log_rate_limited(&HIGHLIGHT_SCHEDULE_LOG, Duration::from_secs(1), || {
@@ -284,6 +297,20 @@ impl SyntaxRuntime {
             self.render_cache.remove(&buffer_id);
             return RenderSnapshot {
                 snapshot: None,
+                line_map: None,
+            };
+        }
+
+        // For large buffers, keep rendering the latest snapshot without computing a full line-map.
+        // The map computation can be O(lines) and cause UI stutter on very large files; the editor
+        // renderer still validates spans by line hash before applying them.
+        const LARGE_MAP_BYTES: usize = 600_000;
+        const LARGE_MAP_LINES: usize = 15_000;
+        let large = buffer.bytes_len() >= LARGE_MAP_BYTES || current_lines >= LARGE_MAP_LINES;
+        if large {
+            self.render_cache.remove(&buffer_id);
+            return RenderSnapshot {
+                snapshot: self.snapshots.get(&buffer_id),
                 line_map: None,
             };
         }
@@ -360,7 +387,7 @@ impl SyntaxRuntime {
             } else {
                 self.render_cache.remove(&buffer_id);
                 return RenderSnapshot {
-                    snapshot: None,
+                    snapshot: self.snapshots.get(&buffer_id),
                     line_map: None,
                 };
             }
@@ -521,10 +548,10 @@ fn build_line_map_by_hash(snapshot_hashes: &[u64], current_hashes: &[u64]) -> Ve
 }
 
 fn compute_buffer_line_hashes(buffer: &Buffer) -> Vec<u64> {
-    let mut hashes = Vec::with_capacity(buffer.lines_len());
-    for idx in 0..buffer.lines_len() {
-        let line = buffer.line_as_string(idx);
-        hashes.push(nit_syntax::hash_line_bytes(line.as_bytes()));
+    let lines = buffer.lines_len();
+    let mut hashes = Vec::with_capacity(lines);
+    for idx in 0..lines {
+        hashes.push(buffer.line_hash(idx));
     }
     hashes
 }
@@ -687,5 +714,29 @@ fn config_to_syntax(config: HighlightConfig) -> nit_syntax::SyntaxConfig {
         debounce_ms: config.debounce_ms,
         max_file_bytes: config.max_file_bytes,
         max_spans_per_line: config.max_spans_per_line,
+    }
+}
+
+fn adaptive_debounce_ms(base_ms: u64, bytes: usize) -> u64 {
+    if bytes >= 1_500_000 {
+        base_ms.max(500)
+    } else if bytes >= 800_000 {
+        base_ms.max(300)
+    } else if bytes >= 300_000 {
+        base_ms.max(150)
+    } else {
+        base_ms
+    }
+}
+
+fn adaptive_max_spans_per_line(base: usize, bytes: usize) -> usize {
+    if bytes >= 1_500_000 {
+        base.min(64)
+    } else if bytes >= 800_000 {
+        base.min(96)
+    } else if bytes >= 300_000 {
+        base.min(128)
+    } else {
+        base
     }
 }

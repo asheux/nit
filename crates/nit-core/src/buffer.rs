@@ -158,6 +158,27 @@ impl Buffer {
         self.line_as_str(line)
     }
 
+    pub fn line_hash(&self, line: usize) -> u64 {
+        const OFFSET: u64 = 14695981039346656037;
+        const PRIME: u64 = 1099511628211;
+        if line >= self.rope.len_lines() {
+            return OFFSET;
+        }
+        let mut hash = OFFSET;
+        // Ropey stores text in UTF-8 chunks. Hash incrementally to avoid allocating a String.
+        // Match nit_syntax::hash_line_bytes semantics: ignore trailing '\n' and skip '\r'.
+        for chunk in self.rope.line(line).chunks() {
+            for &b in chunk.as_bytes() {
+                if b == b'\n' || b == b'\r' {
+                    continue;
+                }
+                hash ^= b as u64;
+                hash = hash.wrapping_mul(PRIME);
+            }
+        }
+        hash
+    }
+
     pub fn line_char_start(&self, line: usize) -> usize {
         self.rope.line_to_char(line)
     }

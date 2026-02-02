@@ -12,7 +12,7 @@ use tree_sitter_highlight::{HighlightConfiguration, HighlightEvent, Highlighter}
 
 use crate::engine::{HighlightRequest, SyntaxEngine};
 use crate::highlight::{
-    EngineKind, HighlightGroup, HighlightSnapshot, HighlightSpan, SyntaxStatus,
+    EngineKind, HighlightGroup, HighlightSnapshot, HighlightSpan, LineSegment, SyntaxStatus,
 };
 use crate::registry::{LanguageId, LanguageRegistry};
 
@@ -240,6 +240,14 @@ fn highlight_job(
             }
 
             if dirty.iter().any(|v| *v) {
+                // Clear (and later recompute) only the dirty lines. This avoids rebuilding an
+                // entire HighlightSnapshot for the whole file on every small edit.
+                for (idx, is_dirty) in dirty.iter().enumerate() {
+                    if *is_dirty {
+                        per_line[idx].clear();
+                    }
+                }
+
                 if let Some(query_cfg) = query_configs.get(&language) {
                     let mut spans = Vec::new();
                     let dirty_ranges = dirty_line_ranges(&dirty, &line_start_bytes);
@@ -250,30 +258,27 @@ fn highlight_job(
                         &dirty_ranges,
                         &mut spans,
                     );
-                    let dirty_snapshot = HighlightSnapshot::from_spans(
-                        job.buffer_id,
-                        job.version,
-                        job.language,
-                        EngineKind::TreeSitter,
-                        SyntaxStatus::Ok(EngineKind::TreeSitter),
-                        &job.text,
-                        spans,
+                    apply_spans_to_dirty_lines(
+                        &mut spans,
+                        &dirty,
+                        &line_start_bytes,
+                        &mut per_line,
                         job.max_spans_per_line,
                     );
-                    for (idx, is_dirty) in dirty.iter().enumerate() {
-                        if *is_dirty {
-                            if let Some(line) = dirty_snapshot.per_line.get(idx) {
-                                per_line[idx] = line.clone();
-                            } else {
-                                per_line[idx].clear();
-                            }
-                            if let Some(hash) = dirty_snapshot.line_hashes.get(idx) {
-                                line_hashes[idx] = *hash;
-                            }
-                        }
+                }
+
+                // Hash dirty lines only (non-dirty hashes were copied from the prior snapshot).
+                let bytes = job.text.as_bytes();
+                for (idx, is_dirty) in dirty.iter().enumerate() {
+                    if !*is_dirty {
+                        continue;
                     }
-                } else {
-                    per_line.iter_mut().for_each(|line| line.clear());
+                    if idx + 1 >= line_start_bytes.len() {
+                        continue;
+                    }
+                    let start = line_start_bytes[idx];
+                    let end = line_start_bytes[idx + 1];
+                    line_hashes[idx] = crate::highlight::hash_line_bytes(&bytes[start..end]);
                 }
             }
 
@@ -298,6 +303,46 @@ fn highlight_job(
     buffer_state.tree = Some(tree);
     buffer_state.snapshot = Some(snapshot.clone());
     Ok(snapshot)
+}
+
+fn apply_spans_to_dirty_lines(
+    spans: &mut Vec<HighlightSpan>,
+    dirty: &[bool],
+    line_starts: &[usize],
+    per_line: &mut [Vec<LineSegment>],
+    max_spans_per_line: usize,
+) {
+    spans.sort_by(|a, b| match a.start_byte.cmp(&b.start_byte) {
+        cmp::Ordering::Equal => b.priority.cmp(&a.priority),
+        other => other,
+    });
+
+    for span in spans.iter() {
+        if span.end_byte <= span.start_byte {
+            continue;
+        }
+        let start_line = find_line(line_starts, span.start_byte);
+        let end_line = find_line(line_starts, span.end_byte);
+        for line in start_line..=end_line {
+            if line + 1 >= line_starts.len() || line >= dirty.len() || !dirty[line] {
+                continue;
+            }
+            if max_spans_per_line > 0 && per_line[line].len() >= max_spans_per_line {
+                continue;
+            }
+            let line_start = line_starts[line];
+            let line_end = line_starts[line + 1];
+            let seg_start = span.start_byte.max(line_start) - line_start;
+            let seg_end = span.end_byte.min(line_end) - line_start;
+            if seg_start < seg_end {
+                per_line[line].push(LineSegment {
+                    start: seg_start,
+                    end: seg_end,
+                    group: span.group,
+                });
+            }
+        }
+    }
 }
 
 fn to_input_edit(edit: &BufferEdit) -> InputEdit {

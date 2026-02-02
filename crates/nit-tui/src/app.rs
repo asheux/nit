@@ -76,7 +76,8 @@ pub fn run(mut state: AppState, theme: Theme, log_rx: Receiver<String>) -> io::R
     let mut syntax = SyntaxRuntime::new(state.settings.highlight.clone());
     let editor_id = state.active_editor_buffer_id;
     let notes_id = state.notes_buffer_id;
-    syntax.prime_buffer(editor_id, state.editor_buffer(), true);
+    let warmup_editor = state.editor_buffer().bytes_len() <= 200_000;
+    syntax.prime_buffer(editor_id, state.editor_buffer(), warmup_editor);
     syntax.prime_buffer(notes_id, state.notes_buffer(), false);
 
     let result = run_loop(&mut terminal, &mut state, &theme, &mut syntax, log_rx);

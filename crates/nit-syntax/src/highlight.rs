@@ -141,10 +141,32 @@ impl HighlightSnapshot {
         mut spans: Vec<HighlightSpan>,
         max_spans_per_line: usize,
     ) -> Self {
-        spans.sort_by(|a, b| match a.start_byte.cmp(&b.start_byte) {
-            Ordering::Equal => b.priority.cmp(&a.priority),
-            other => other,
-        });
+        // Most engines already emit spans in source order; avoid an O(n log n) sort when possible.
+        // Required order: start_byte ASC, priority DESC for ties.
+        let mut needs_sort = false;
+        for pair in spans.windows(2) {
+            let a = &pair[0];
+            let b = &pair[1];
+            match a.start_byte.cmp(&b.start_byte) {
+                Ordering::Less => {}
+                Ordering::Equal => {
+                    if a.priority < b.priority {
+                        needs_sort = true;
+                        break;
+                    }
+                }
+                Ordering::Greater => {
+                    needs_sort = true;
+                    break;
+                }
+            }
+        }
+        if needs_sort {
+            spans.sort_by(|a, b| match a.start_byte.cmp(&b.start_byte) {
+                Ordering::Equal => b.priority.cmp(&a.priority),
+                other => other,
+            });
+        }
         let line_start_bytes = compute_line_starts(text);
         let mut per_line = vec![Vec::new(); line_start_bytes.len().saturating_sub(1)];
 
