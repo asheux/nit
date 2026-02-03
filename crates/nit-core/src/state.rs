@@ -9,6 +9,7 @@ use crate::{
     pane::PaneId,
     prompt::Prompt,
     rule_protocol::{RuleMode, RuleRef},
+    search::{FuzzySearchState, SearchMode},
     seed::{SeedEncoderId, SeedParams, SeedPreviewMode, SeedStats, SeedViewMode},
     viewport::Viewport,
 };
@@ -565,6 +566,7 @@ pub struct AppState {
     pub gol_rule_selected: SelectedRule,
     pub games: GamesState,
     pub file_tree: FileTreeState,
+    pub fuzzy_search: FuzzySearchState,
     #[serde(skip)]
     pub yank: Option<String>,
     #[serde(skip)]
@@ -611,6 +613,10 @@ impl AppState {
         let file_tree = FileTreeState {
             root: workspace_root.clone(),
             ..FileTreeState::default()
+        };
+        let fuzzy_search = FuzzySearchState {
+            root: workspace_root.clone(),
+            ..FuzzySearchState::default()
         };
         Self {
             app_kind: AppKind::Gol,
@@ -747,6 +753,7 @@ impl AppState {
                 tm_sim: GamesTmSimState::default(),
             },
             file_tree,
+            fuzzy_search,
             yank: None,
             yank_kind: YankKind::Char,
             command_line: None,
@@ -845,6 +852,11 @@ impl AppState {
 
     pub fn receive_log(&mut self, line: impl Into<String>) {
         self.logs.push(line);
+        if self.job.paused {
+            // When paused, keep the currently visible log window stable by increasing the
+            // "scroll from bottom" offset as new lines arrive.
+            self.logs_scroll = self.logs_scroll.saturating_add(1);
+        }
     }
 
     pub fn tick_job(&mut self, delta: f32) {
@@ -1178,7 +1190,12 @@ pub fn apply_action(state: &mut AppState, action: Action) -> ActionOutcome {
             state.logs_scroll = 0;
         }
         Action::ToggleJobPause => {
+            let was_paused = state.job.paused;
             state.job.paused = !state.job.paused;
+            if was_paused {
+                // Resume log follow.
+                state.logs_scroll = 0;
+            }
         }
         Action::CommandPromptOpen => {
             state.command_line = Some(CommandLine::new());
@@ -1526,6 +1543,17 @@ pub fn apply_action(state: &mut AppState, action: Action) -> ActionOutcome {
                 state.mode = Mode::Normal;
             }
         }
+        Action::OpenSearchPopup(mode) => {
+            state.show_help = false;
+            state.rule_picker.open = false;
+            state.protocol_picker.open = false;
+            state.fuzzy_search.open(mode, state.workspace_root.clone());
+            state.focus = PaneId::Editor;
+            state.mode = Mode::Normal;
+        }
+        Action::CloseSearchPopup => {
+            state.fuzzy_search.close();
+        }
         Action::OpenFile(path) => {
             if state.editor_buffer().is_dirty() {
                 state.status = Some("Unsaved changes - save (Ctrl+S) before opening a file".into());
@@ -1611,6 +1639,27 @@ fn handle_command_line(state: &mut AppState, input: &str) -> bool {
                 state.status = Some("NITTree opened".into());
             } else {
                 state.status = Some("NITTree closed".into());
+            }
+            false
+        }
+        ["find"] | ["ff"] => {
+            state
+                .fuzzy_search
+                .open(SearchMode::Files, state.workspace_root.clone());
+            state.status = Some("Search: files".into());
+            false
+        }
+        ["grep"] | ["rg"] | ["search"] => {
+            state
+                .fuzzy_search
+                .open(SearchMode::Content, state.workspace_root.clone());
+            state.status = Some("Search: content".into());
+            false
+        }
+        ["close"] => {
+            if state.fuzzy_search.open {
+                state.fuzzy_search.close();
+                state.status = Some("Search closed".into());
             }
             false
         }

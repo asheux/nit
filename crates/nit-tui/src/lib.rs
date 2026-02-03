@@ -3,6 +3,8 @@
 pub mod app;
 pub mod file_tree;
 pub mod file_tree_runner;
+pub mod fuzzy_preview_runner;
+pub mod fuzzy_search_runner;
 pub mod games_analysis;
 pub mod games_petri_dish;
 pub mod games_runner;

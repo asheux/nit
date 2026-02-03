@@ -12,6 +12,7 @@ pub mod pane;
 pub mod prompt;
 pub mod rule_config;
 pub mod rule_protocol;
+pub mod search;
 pub mod seed;
 pub mod state;
 pub mod viewport;
@@ -36,6 +37,7 @@ pub use rule_protocol::{
     builtin_protocols, parse_protocol_spec, ProtocolPreset, RuleMode, RulePhase, RuleProtocol,
     RuleRef,
 };
+pub use search::{FuzzySearchState, SearchMode, SearchResultFile, SearchResultMatch};
 pub use seed::{
     encode_seed, EncodedSeed, SeedEncoderId, SeedParams, SeedPlacement, SeedPreviewMode, SeedStats,
     SeedSymmetry,

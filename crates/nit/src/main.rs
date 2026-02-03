@@ -2015,7 +2015,7 @@ fn init_tracing(tx: mpsc::Sender<String>, log_path: Option<PathBuf>) -> anyhow::
     tracing_subscriber::fmt()
         .with_writer(writer)
         .with_ansi(false)
-        .with_env_filter("info")
+        .with_env_filter("info,nit_syntax::tree_sitter_engine=error")
         .try_init()
         .ok();
     if let Some(path) = log_path {

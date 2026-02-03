@@ -1,4 +1,5 @@
 use std::io::{self, Stdout};
+use std::path::PathBuf;
 use std::sync::mpsc::Receiver;
 use std::time::{Duration, Instant};
 
@@ -15,7 +16,7 @@ use crossterm::{
 };
 use nit_core::{
     actions::Action, apply_action, io as core_io, AppKind, AppState, Mode, PaneId, Prompt,
-    UiSelection, UiSelectionPane, YankKind,
+    SearchMode, UiSelection, UiSelectionPane, YankKind,
 };
 use nit_games::config::GamesConfig;
 use ratatui::{
@@ -29,6 +30,11 @@ use tracing::info;
 use crate::{
     file_tree,
     file_tree_runner::{FileTreeCommand, FileTreeEvent, FileTreeRunner},
+    fuzzy_preview_runner::{PreviewEvent, PreviewModel, PreviewRunner},
+    fuzzy_search_runner::{
+        ContentEvent, ContentSearchRunner, FileIndexRunner, FuzzyCommand, FuzzyEvent,
+        FuzzyMatcherRunner, IndexEvent,
+    },
     games_petri_dish::GamesPetriDishRuntime,
     layout,
     petri_dish::PetriDishRuntime,
@@ -37,10 +43,10 @@ use crate::{
     system_stats::SystemStats,
     theme::Theme,
     widgets::{
-        bottom_bar, editor_view, file_tree_view, games_analysis_popup, games_replay_popup,
-        games_run_browser_popup, games_strategy_popup, games_tm_sim_popup, games_visualizer_view,
-        gate_monitor_view, help_overlay, job_output_view, notes_view, protocol_picker, rule_picker,
-        top_bar, visualizer_view,
+        bottom_bar, editor_view, file_tree_view, fuzzy_search_popup, games_analysis_popup,
+        games_replay_popup, games_run_browser_popup, games_strategy_popup, games_tm_sim_popup,
+        games_visualizer_view, gate_monitor_view, help_overlay, job_output_view, notes_view,
+        protocol_picker, rule_picker, top_bar, visualizer_view,
     },
 };
 
@@ -49,6 +55,243 @@ const JOB_TICK: Duration = Duration::from_millis(120);
 const LOG_TICK: Duration = Duration::from_millis(900);
 const CHORD_TIMEOUT: Duration = Duration::from_millis(300);
 const INSPECTOR_JUMP_TIMEOUT: Duration = Duration::from_millis(1500);
+
+struct FuzzySearchRuntime {
+    indexer: FileIndexRunner,
+    fuzzy: FuzzyMatcherRunner,
+    content: ContentSearchRunner,
+    preview: PreviewRunner,
+
+    index_gen: u64,
+    file_gen: u64,
+    content_gen: u64,
+    preview_gen: u64,
+
+    index_ready: bool,
+    index_filters: Option<(bool, bool)>,
+
+    preview_model: Option<PreviewModel>,
+    last_preview_key: Option<PreviewKey>,
+    preview_scroll_delta: i32,
+    last_open: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PreviewKey {
+    mode: SearchMode,
+    path: PathBuf,
+    line_hint: usize,
+    query: String,
+}
+
+impl FuzzySearchRuntime {
+    fn new(theme: &Theme, highlight: nit_core::HighlightConfig) -> Self {
+        Self {
+            indexer: FileIndexRunner::spawn(),
+            fuzzy: FuzzyMatcherRunner::spawn(),
+            content: ContentSearchRunner::spawn(),
+            preview: PreviewRunner::spawn(theme.clone(), highlight),
+            index_gen: 0,
+            file_gen: 0,
+            content_gen: 0,
+            preview_gen: 0,
+            index_ready: false,
+            index_filters: None,
+            preview_model: None,
+            last_preview_key: None,
+            preview_scroll_delta: 0,
+            last_open: false,
+        }
+    }
+
+    fn shutdown(&mut self) {
+        self.indexer.shutdown();
+        self.fuzzy.shutdown();
+        self.content.shutdown();
+        self.preview.shutdown();
+    }
+
+    fn update_syntax_config(&self, highlight: nit_core::HighlightConfig) {
+        self.preview.update_config(highlight);
+    }
+
+    fn tick_open(&mut self, state: &mut AppState) {
+        if state.fuzzy_search.open {
+            if !self.last_open {
+                self.last_open = true;
+                self.preview_model = None;
+                self.last_preview_key = None;
+                self.preview_scroll_delta = 0;
+                self.ensure_index(state);
+                self.run_search_for_mode(state);
+                self.request_preview_for_selection(state);
+            }
+            return;
+        }
+        if self.last_open {
+            self.last_open = false;
+            self.preview_model = None;
+            self.last_preview_key = None;
+            self.preview_scroll_delta = 0;
+            self.file_gen = self.file_gen.wrapping_add(1);
+            self.preview_gen = self.preview_gen.wrapping_add(1);
+            self.fuzzy.send(FuzzyCommand::Query {
+                generation: 0,
+                query: String::new(),
+            });
+            state.fuzzy_search.status_msg.clear();
+            state.fuzzy_search.indexing = false;
+            state.fuzzy_search.searching = false;
+            // Cancel any in-flight content search quickly.
+            self.content_gen = self.content_gen.wrapping_add(1);
+            self.content.search(
+                self.content_gen,
+                state.workspace_root.clone(),
+                String::new(),
+                state.fuzzy_search.show_hidden,
+                state.fuzzy_search.show_ignored,
+            );
+        }
+    }
+
+    fn ensure_index(&mut self, state: &mut AppState) {
+        let filters = (
+            state.fuzzy_search.show_hidden,
+            state.fuzzy_search.show_ignored,
+        );
+        let needs = !self.index_ready || self.index_filters != Some(filters);
+        if !needs {
+            return;
+        }
+        self.index_filters = Some(filters);
+        self.index_ready = false;
+        self.index_gen = self.index_gen.wrapping_add(1);
+        state.fuzzy_search.indexing = true;
+        state.fuzzy_search.status_msg = "Indexing…".into();
+        self.preview_model = None;
+        self.preview_scroll_delta = 0;
+
+        self.fuzzy.send(FuzzyCommand::ResetIndex {
+            generation: self.index_gen,
+            root: state.workspace_root.clone(),
+        });
+        self.indexer.build(
+            self.index_gen,
+            state.workspace_root.clone(),
+            state.fuzzy_search.show_hidden,
+            state.fuzzy_search.show_ignored,
+        );
+    }
+
+    fn rebuild_index(&mut self, state: &mut AppState) {
+        self.index_ready = false;
+        self.index_filters = None;
+        self.ensure_index(state);
+    }
+
+    fn run_search_for_mode(&mut self, state: &mut AppState) {
+        match state.fuzzy_search.mode {
+            SearchMode::Files => self.run_file_query(state),
+            SearchMode::Content => self.run_content_query(state),
+        }
+    }
+
+    fn run_file_query(&mut self, state: &mut AppState) {
+        self.file_gen = self.file_gen.wrapping_add(1);
+        state.fuzzy_search.searching = false;
+        state.fuzzy_search.file_results.clear();
+        state.fuzzy_search.selected = 0;
+        state.fuzzy_search.scroll_offset = 0;
+        self.fuzzy.send(FuzzyCommand::Query {
+            generation: self.file_gen,
+            query: state.fuzzy_search.query.clone(),
+        });
+    }
+
+    fn run_content_query(&mut self, state: &mut AppState) {
+        self.content_gen = self.content_gen.wrapping_add(1);
+        state.fuzzy_search.match_results.clear();
+        state.fuzzy_search.selected = 0;
+        state.fuzzy_search.scroll_offset = 0;
+        let query = state.fuzzy_search.query.trim().to_string();
+        if query.is_empty() {
+            state.fuzzy_search.searching = false;
+            state.fuzzy_search.status_msg = "Type to search".into();
+            self.content.search(
+                self.content_gen,
+                state.workspace_root.clone(),
+                String::new(),
+                state.fuzzy_search.show_hidden,
+                state.fuzzy_search.show_ignored,
+            );
+            return;
+        }
+        state.fuzzy_search.searching = true;
+        state.fuzzy_search.status_msg = "Searching…".into();
+        self.content.search(
+            self.content_gen,
+            state.workspace_root.clone(),
+            query,
+            state.fuzzy_search.show_hidden,
+            state.fuzzy_search.show_ignored,
+        );
+    }
+
+    fn request_preview_for_selection(&mut self, state: &AppState) {
+        if !state.fuzzy_search.open {
+            return;
+        }
+        let (path, line_hint, query) = match state.fuzzy_search.mode {
+            SearchMode::Files => {
+                let Some(item) = state
+                    .fuzzy_search
+                    .file_results
+                    .get(state.fuzzy_search.selected)
+                else {
+                    return;
+                };
+                (item.abs_path.clone(), None, String::new())
+            }
+            SearchMode::Content => {
+                let Some(item) = state
+                    .fuzzy_search
+                    .match_results
+                    .get(state.fuzzy_search.selected)
+                else {
+                    return;
+                };
+                (
+                    item.abs_path.clone(),
+                    Some(item.line),
+                    state.fuzzy_search.query.trim().to_string(),
+                )
+            }
+        };
+        let key = PreviewKey {
+            mode: state.fuzzy_search.mode,
+            path: path.clone(),
+            line_hint: line_hint.unwrap_or(0),
+            query: if matches!(state.fuzzy_search.mode, SearchMode::Content) {
+                query.clone()
+            } else {
+                String::new()
+            },
+        };
+        if self.last_preview_key.as_ref() == Some(&key) {
+            return;
+        }
+        self.preview_scroll_delta = 0;
+        self.last_preview_key = Some(key);
+        self.preview_gen = self.preview_gen.wrapping_add(1);
+        self.preview.request(
+            self.preview_gen,
+            state.fuzzy_search.mode,
+            path,
+            line_hint,
+            query,
+        );
+    }
+}
 
 pub fn run(mut state: AppState, theme: Theme, log_rx: Receiver<String>) -> io::Result<()> {
     enable_raw_mode()?;
@@ -114,6 +357,7 @@ fn run_loop(
     let mut system_stats = SystemStats::new();
     let mut clipboard = Clipboard::new().ok();
     let mut file_tree_runner = FileTreeRunner::spawn();
+    let mut fuzzy_runtime = FuzzySearchRuntime::new(theme, state.settings.highlight.clone());
     let mut seed_runtime = if state.app_kind == AppKind::Gol {
         Some(SeedRuntime::new(state))
     } else {
@@ -131,11 +375,15 @@ fn run_loop(
     };
     tracing::info!("SECURITY: no plugins, no network, no shell execution");
     loop {
+        fuzzy_runtime.tick_open(state);
         if let Some(deferred) = input_state.take_deferred() {
             if let Some(action) = map_key_to_action(deferred, state, &mut input_state) {
                 prepare_clipboard_paste(state, &mut clipboard, &action);
                 let action_copy = action.clone();
                 let outcome = apply_action_with_syntax(state, syntax, action);
+                if matches!(action_copy, Action::ToggleSyntax) {
+                    fuzzy_runtime.update_syntax_config(state.settings.highlight.clone());
+                }
                 handle_clipboard_copy(state, &mut clipboard, &action_copy);
                 handle_selection_autocopy(state, &mut clipboard, &mut input_state);
                 if outcome.should_exit {
@@ -156,11 +404,64 @@ fn run_loop(
                         continue;
                     }
                     handled_input = true;
+                    if is_job_pause_key(&key) {
+                        let outcome =
+                            apply_action_with_syntax(state, syntax, Action::ToggleJobPause);
+                        if outcome.should_exit {
+                            break;
+                        }
+                        needs_redraw = needs_redraw || outcome.state_changed;
+                        continue;
+                    }
+                    if !state.fuzzy_search.open
+                        && state.command_line.is_none()
+                        && state.prompt.is_none()
+                        && matches!(
+                            key,
+                            KeyEvent {
+                                code: KeyCode::Char('p')
+                                    | KeyCode::Char('P')
+                                    | KeyCode::Char('f')
+                                    | KeyCode::Char('F'),
+                                modifiers,
+                                ..
+                            } if modifiers.contains(KeyModifiers::CONTROL)
+                        )
+                    {
+                        if let Some(action) = map_key_to_action(key, state, &mut input_state) {
+                            prepare_clipboard_paste(state, &mut clipboard, &action);
+                            let action_copy = action.clone();
+                            let outcome = apply_action_with_syntax(state, syntax, action);
+                            if matches!(action_copy, Action::ToggleSyntax) {
+                                fuzzy_runtime
+                                    .update_syntax_config(state.settings.highlight.clone());
+                            }
+                            handle_clipboard_copy(state, &mut clipboard, &action_copy);
+                            handle_selection_autocopy(state, &mut clipboard, &mut input_state);
+                            if outcome.should_exit {
+                                break;
+                            }
+                            needs_redraw = needs_redraw || outcome.state_changed;
+                        }
+                        continue;
+                    }
+                    if state.fuzzy_search.open {
+                        let screen = terminal.size().unwrap_or_default();
+                        if handle_fuzzy_search_key(&key, state, syntax, &mut fuzzy_runtime, screen)
+                        {
+                            needs_redraw = true;
+                            continue;
+                        }
+                    }
                     if state.command_line.is_some() || state.prompt.is_some() {
                         if let Some(action) = map_key_to_action(key, state, &mut input_state) {
                             prepare_clipboard_paste(state, &mut clipboard, &action);
                             let action_copy = action.clone();
                             let outcome = apply_action_with_syntax(state, syntax, action);
+                            if matches!(action_copy, Action::ToggleSyntax) {
+                                fuzzy_runtime
+                                    .update_syntax_config(state.settings.highlight.clone());
+                            }
                             handle_clipboard_copy(state, &mut clipboard, &action_copy);
                             handle_selection_autocopy(state, &mut clipboard, &mut input_state);
                             if outcome.should_exit {
@@ -175,6 +476,10 @@ fn run_loop(
                             prepare_clipboard_paste(state, &mut clipboard, &action);
                             let action_copy = action.clone();
                             let outcome = apply_action_with_syntax(state, syntax, action);
+                            if matches!(action_copy, Action::ToggleSyntax) {
+                                fuzzy_runtime
+                                    .update_syntax_config(state.settings.highlight.clone());
+                            }
                             handle_clipboard_copy(state, &mut clipboard, &action_copy);
                             handle_selection_autocopy(state, &mut clipboard, &mut input_state);
                             if outcome.should_exit {
@@ -277,6 +582,9 @@ fn run_loop(
                         prepare_clipboard_paste(state, &mut clipboard, &action);
                         let action_copy = action.clone();
                         let outcome = apply_action_with_syntax(state, syntax, action);
+                        if matches!(action_copy, Action::ToggleSyntax) {
+                            fuzzy_runtime.update_syntax_config(state.settings.highlight.clone());
+                        }
                         handle_clipboard_copy(state, &mut clipboard, &action_copy);
                         handle_selection_autocopy(state, &mut clipboard, &mut input_state);
                         if outcome.should_exit {
@@ -292,6 +600,7 @@ fn run_loop(
                         mouse,
                         screen,
                         state,
+                        &mut fuzzy_runtime,
                         &mut input_state,
                         &mut clipboard,
                         theme,
@@ -361,6 +670,24 @@ fn run_loop(
             }
         }
 
+        // fuzzy search runner events
+        while let Ok(event) = fuzzy_runtime.indexer.events.try_recv() {
+            handle_fuzzy_index_event(state, &mut fuzzy_runtime, event);
+            needs_redraw = needs_redraw || state.fuzzy_search.open;
+        }
+        while let Ok(event) = fuzzy_runtime.fuzzy.events.try_recv() {
+            handle_fuzzy_file_event(state, &mut fuzzy_runtime, event);
+            needs_redraw = needs_redraw || state.fuzzy_search.open;
+        }
+        while let Ok(event) = fuzzy_runtime.content.events.try_recv() {
+            handle_fuzzy_content_event(state, &mut fuzzy_runtime, event);
+            needs_redraw = needs_redraw || state.fuzzy_search.open;
+        }
+        while let Ok(event) = fuzzy_runtime.preview.events.try_recv() {
+            handle_fuzzy_preview_event(state, &mut fuzzy_runtime, event);
+            needs_redraw = needs_redraw || state.fuzzy_search.open;
+        }
+
         if file_tree_tick(state, &file_tree_runner) {
             needs_redraw = true;
         }
@@ -418,12 +745,15 @@ fn run_loop(
                 &mut seed_runtime,
                 &mut gol_petri,
                 &mut games_petri,
+                fuzzy_runtime.preview_model.as_ref(),
+                fuzzy_runtime.preview_scroll_delta,
             )?;
             needs_redraw = false;
             last_tick = Instant::now();
         }
     }
     file_tree_runner.shutdown();
+    fuzzy_runtime.shutdown();
     Ok(())
 }
 
@@ -436,10 +766,13 @@ fn draw(
     seed_runtime: &mut Option<SeedRuntime>,
     gol_petri: &mut Option<PetriDishRuntime>,
     games_petri: &mut Option<GamesPetriDishRuntime>,
+    fuzzy_preview: Option<&PreviewModel>,
+    fuzzy_preview_scroll_delta: i32,
 ) -> io::Result<()> {
     let start = Instant::now();
     terminal.draw(|f| {
-        let layout = layout::split(f.size());
+        let screen = f.size();
+        let layout = layout::split(screen);
 
         // Update viewports (account for gutters)
         let editor_total = state.editor_buffer().lines_len().max(1);
@@ -555,57 +888,73 @@ fn draw(
                 if let (Some(petri), Some(seed_runtime)) =
                     (gol_petri.as_mut(), seed_runtime.as_mut())
                 {
-                    petri.handle_pending_requests(state, seed_runtime, f.size());
-                    petri.render(f, f.size(), state, theme);
+                    petri.handle_pending_requests(state, seed_runtime, screen);
+                    petri.render(f, screen, state, theme);
                 }
             }
             AppKind::Games => {
                 if let Some(petri) = games_petri.as_mut() {
                     petri.handle_pending_requests(state);
-                    petri.render(f, f.size(), state, theme);
+                    petri.render(f, screen, state, theme);
                 }
             }
         }
         if state.app_kind == AppKind::Games && state.games.analysis.open {
-            let area = dynamic_popup_rect(f.size(), games_analysis_popup::preferred_size(f.size()));
+            let area = dynamic_popup_rect(screen, games_analysis_popup::preferred_size(screen));
             games_analysis_popup::render(f, area, state, theme);
         }
         if state.app_kind == AppKind::Games && state.games.run_browser.open {
-            let area =
-                dynamic_popup_rect(f.size(), games_run_browser_popup::preferred_size(f.size()));
+            let area = dynamic_popup_rect(screen, games_run_browser_popup::preferred_size(screen));
             games_run_browser_popup::render(f, area, state, theme);
         }
         if state.app_kind == AppKind::Games && state.games.replay.open {
-            let area = dynamic_popup_rect(f.size(), games_replay_popup::preferred_size(f.size()));
+            let area = dynamic_popup_rect(screen, games_replay_popup::preferred_size(screen));
             games_replay_popup::render(f, area, state, theme);
         }
         if state.app_kind == AppKind::Games && state.games.strategy_inspect.open {
-            let area = dynamic_popup_rect(f.size(), games_strategy_popup::preferred_size(f.size()));
+            let area = dynamic_popup_rect(screen, games_strategy_popup::preferred_size(screen));
             games_strategy_popup::render(f, area, state, theme);
         }
         if state.app_kind == AppKind::Games && state.games.tm_sim.open {
-            let area = dynamic_popup_rect(f.size(), games_tm_sim_popup::preferred_size(f.size()));
+            let area = dynamic_popup_rect(screen, games_tm_sim_popup::preferred_size(screen));
             games_tm_sim_popup::render(f, area, state, theme);
         }
         if state.rule_picker.open {
-            rule_picker::render(f, f.size(), state, theme);
+            rule_picker::render(f, screen, state, theme);
         }
         if state.show_help {
-            let area = dynamic_popup_rect(f.size(), help_overlay::preferred_size(f.size()));
+            let area = dynamic_popup_rect(screen, help_overlay::preferred_size(screen));
             help_overlay::render(f, area, state, theme);
+        }
+        if state.fuzzy_search.open {
+            let area = dynamic_popup_rect(screen, fuzzy_popup_size(screen, state));
+            fuzzy_search_popup::render(
+                f,
+                area,
+                state,
+                theme,
+                fuzzy_preview,
+                fuzzy_preview_scroll_delta,
+            );
         }
         if let Some(Prompt::ConfirmQuit) = state.prompt {
             let message = "Quit without saving? (Y/N)";
-            let area = dynamic_popup_rect(f.size(), prompt_size(message));
+            let area = dynamic_popup_rect(screen, prompt_size(message));
             render_prompt(f, area, theme, message);
         }
         let mut command_cursor = None;
         if let Some(cmd) = state.command_line.as_ref() {
             let message = format!(":{}", cmd.input);
-            let area = dynamic_popup_rect(f.size(), prompt_size(&message));
+            let area = dynamic_popup_rect(screen, prompt_size(&message));
             render_command_prompt(f, area, theme, &message);
             command_cursor = command_prompt_cursor(area, &cmd.input, cmd.cursor);
         }
+        let fuzzy_cursor = if state.fuzzy_search.open {
+            let area = dynamic_popup_rect(screen, fuzzy_popup_size(screen, state));
+            fuzzy_search_cursor(area, state)
+        } else {
+            None
+        };
 
         // cursor
         let petri_visible = match state.app_kind {
@@ -617,9 +966,13 @@ fn draw(
         };
         if let Some((x, y)) = command_cursor {
             f.set_cursor(x, y);
+        } else if let Some((x, y)) = fuzzy_cursor {
+            f.set_cursor(x, y);
         } else if petri_visible || state.command_line.is_some() {
             f.set_cursor(f.size().x, f.size().y);
         } else if state.file_tree.open {
+            f.set_cursor(f.size().x, f.size().y);
+        } else if state.fuzzy_search.open {
             f.set_cursor(f.size().x, f.size().y);
         } else if let Some(pos) = if state.focus == PaneId::Editor {
             editor_cursor
@@ -652,6 +1005,26 @@ fn map_key_to_action(key: KeyEvent, state: &AppState, input: &mut InputState) ->
         };
     }
 
+    if state.command_line.is_none() && state.prompt.is_none() {
+        match key {
+            KeyEvent {
+                code: KeyCode::Char('p') | KeyCode::Char('P'),
+                modifiers,
+                ..
+            } if modifiers.contains(KeyModifiers::CONTROL) => {
+                return Some(Action::OpenSearchPopup(SearchMode::Files));
+            }
+            KeyEvent {
+                code: KeyCode::Char('f') | KeyCode::Char('F'),
+                modifiers,
+                ..
+            } if modifiers.contains(KeyModifiers::CONTROL) => {
+                return Some(Action::OpenSearchPopup(SearchMode::Content));
+            }
+            _ => {}
+        }
+    }
+
     if state.command_line.is_some() {
         return match key.code {
             KeyCode::Esc => Some(Action::CommandPromptCancel),
@@ -670,6 +1043,13 @@ fn map_key_to_action(key: KeyEvent, state: &AppState, input: &mut InputState) ->
 
     if state.focus == PaneId::JobOutput && is_clear_logs_key(&key) {
         return Some(Action::ClearLogs);
+    }
+
+    if state.focus == PaneId::JobOutput
+        && key.modifiers.is_empty()
+        && matches!(key.code, KeyCode::Char(' '))
+    {
+        return Some(Action::ToggleJobPause);
     }
 
     if is_job_pause_key(&key) {
@@ -1627,10 +2007,22 @@ fn is_job_pause_key(key: &KeyEvent) -> bool {
     ) || matches!(
         key,
         KeyEvent {
+            code: KeyCode::Null,
+            ..
+        }
+    ) || matches!(
+        key,
+        KeyEvent {
             code: KeyCode::Char('\u{0}'),
             modifiers,
             ..
         } if modifiers.is_empty()
+    ) || matches!(
+        key,
+        KeyEvent {
+            code: KeyCode::F(6),
+            ..
+        }
     )
 }
 
@@ -1678,10 +2070,16 @@ fn dynamic_popup_rect(screen: ratatui::layout::Rect, desired: (u16, u16)) -> rat
         .split(vertical)[1]
 }
 
+fn fuzzy_popup_size(screen: ratatui::layout::Rect, state: &AppState) -> (u16, u16) {
+    let _ = state;
+    fuzzy_search_popup::preferred_size(screen)
+}
+
 fn handle_mouse_event(
     mouse: MouseEvent,
     screen: ratatui::layout::Rect,
     state: &mut AppState,
+    fuzzy_runtime: &mut FuzzySearchRuntime,
     input_state: &mut InputState,
     clipboard: &mut Option<Clipboard>,
     theme: &Theme,
@@ -1706,6 +2104,58 @@ fn handle_mouse_event(
             }
 
             if state.rule_picker.open || state.protocol_picker.open {
+                return true;
+            }
+
+            if state.fuzzy_search.open {
+                use ratatui::layout::{Constraint, Direction, Layout, Rect};
+                let area = dynamic_popup_rect(screen, fuzzy_popup_size(screen, state));
+                let list_height = area
+                    .height
+                    .saturating_sub(6) // outer(2) + header/footer(2) + results block(2)
+                    .max(1) as usize;
+                let mut over_preview = false;
+                if point_in_rect(mouse.column, mouse.row, area) {
+                    let inner = Rect {
+                        x: area.x.saturating_add(1),
+                        y: area.y.saturating_add(1),
+                        width: area.width.saturating_sub(2),
+                        height: area.height.saturating_sub(2),
+                    };
+                    let body = Layout::default()
+                        .direction(Direction::Vertical)
+                        .constraints([
+                            Constraint::Length(1),
+                            Constraint::Min(1),
+                            Constraint::Length(1),
+                        ])
+                        .split(inner)[1];
+                    let halves = Layout::default()
+                        .direction(Direction::Horizontal)
+                        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+                        .split(body);
+                    over_preview = point_in_rect(mouse.column, mouse.row, halves[1]);
+                }
+                if over_preview {
+                    fuzzy_runtime.preview_scroll_delta =
+                        fuzzy_runtime.preview_scroll_delta.saturating_add(delta);
+                } else {
+                    let len = fuzzy_results_len(state);
+                    if len > 0 {
+                        if delta.is_negative() {
+                            state.fuzzy_search.selected = state
+                                .fuzzy_search
+                                .selected
+                                .saturating_sub(delta.abs() as usize);
+                        } else {
+                            state.fuzzy_search.selected =
+                                (state.fuzzy_search.selected + delta as usize).min(len - 1);
+                        }
+                        adjust_fuzzy_scroll(state, list_height);
+                        fuzzy_runtime.request_preview_for_selection(state);
+                    }
+                }
+                // Modal: don't scroll underlying panes while open.
                 return true;
             }
 
@@ -3094,6 +3544,225 @@ fn file_tree_tick(state: &mut AppState, runner: &FileTreeRunner) -> bool {
     false
 }
 
+fn handle_fuzzy_index_event(
+    state: &mut AppState,
+    runtime: &mut FuzzySearchRuntime,
+    event: IndexEvent,
+) {
+    let open = state.fuzzy_search.open;
+    match event {
+        IndexEvent::Started { generation } => {
+            if generation != runtime.index_gen {
+                return;
+            }
+            if open {
+                state.fuzzy_search.indexing = true;
+                state.fuzzy_search.status_msg = "Indexing…".into();
+            }
+        }
+        IndexEvent::Batch {
+            generation,
+            files,
+            total_indexed,
+        } => {
+            if generation != runtime.index_gen {
+                return;
+            }
+            if open {
+                state.fuzzy_search.indexing = true;
+                state.fuzzy_search.status_msg = format!("Indexing… ({total_indexed} files)");
+            }
+            runtime
+                .fuzzy
+                .send(FuzzyCommand::IndexBatch { generation, files });
+        }
+        IndexEvent::Done {
+            generation,
+            total_files,
+            duration_ms,
+        } => {
+            if generation != runtime.index_gen {
+                return;
+            }
+            runtime.index_ready = true;
+            runtime.fuzzy.send(FuzzyCommand::IndexDone { generation });
+            if open {
+                state.fuzzy_search.indexing = false;
+                if state.fuzzy_search.mode == SearchMode::Files
+                    && state.fuzzy_search.query.is_empty()
+                {
+                    state.fuzzy_search.status_msg = format!("{total_files} files");
+                } else if !state.fuzzy_search.searching {
+                    state.fuzzy_search.status_msg =
+                        format!("Indexed {total_files} files in {duration_ms}ms");
+                }
+            }
+        }
+        IndexEvent::Error {
+            generation,
+            message,
+        } => {
+            if generation != runtime.index_gen {
+                return;
+            }
+            runtime.index_ready = false;
+            if open {
+                state.fuzzy_search.indexing = false;
+                state.fuzzy_search.status_msg = format!("Index error: {message}");
+                state.status = Some(format!("Search index error: {message}"));
+            }
+        }
+    }
+}
+
+fn handle_fuzzy_file_event(
+    state: &mut AppState,
+    runtime: &mut FuzzySearchRuntime,
+    event: FuzzyEvent,
+) {
+    if !state.fuzzy_search.open {
+        return;
+    }
+    match event {
+        FuzzyEvent::ResultsReplace {
+            generation,
+            results,
+            total_indexed,
+            total_matches,
+            duration_ms,
+        } => {
+            if generation != runtime.file_gen {
+                return;
+            }
+            state.fuzzy_search.file_results = results;
+            let len = state.fuzzy_search.file_results.len();
+            state.fuzzy_search.selected = state.fuzzy_search.selected.min(len.saturating_sub(1));
+            state.fuzzy_search.scroll_offset = state.fuzzy_search.scroll_offset.min(len);
+            if state.fuzzy_search.mode == SearchMode::Files {
+                if state.fuzzy_search.query.is_empty() {
+                    if state.fuzzy_search.indexing {
+                        state.fuzzy_search.status_msg =
+                            format!("Indexing… ({total_indexed} files)");
+                    } else {
+                        state.fuzzy_search.status_msg = format!("{total_indexed} files");
+                    }
+                } else {
+                    state.fuzzy_search.status_msg =
+                        format!("{total_matches} matches (showing {len}) · {duration_ms}ms");
+                }
+                runtime.request_preview_for_selection(state);
+            }
+        }
+        FuzzyEvent::ResultsAppend {
+            generation,
+            results,
+            total_indexed,
+        } => {
+            if generation != runtime.file_gen {
+                return;
+            }
+            state.fuzzy_search.file_results.extend(results);
+            if state.fuzzy_search.mode == SearchMode::Files {
+                if state.fuzzy_search.indexing {
+                    state.fuzzy_search.status_msg = format!("Indexing… ({total_indexed} files)");
+                } else if state.fuzzy_search.query.is_empty() {
+                    state.fuzzy_search.status_msg = format!("{total_indexed} files");
+                }
+                runtime.request_preview_for_selection(state);
+            }
+        }
+    }
+}
+
+fn handle_fuzzy_content_event(
+    state: &mut AppState,
+    runtime: &mut FuzzySearchRuntime,
+    event: ContentEvent,
+) {
+    if !state.fuzzy_search.open {
+        return;
+    }
+    match event {
+        ContentEvent::Started { generation } => {
+            if generation != runtime.content_gen {
+                return;
+            }
+            state.fuzzy_search.searching = true;
+            state.fuzzy_search.status_msg = "Searching…".into();
+        }
+        ContentEvent::MatchBatch {
+            generation,
+            results,
+        } => {
+            if generation != runtime.content_gen {
+                return;
+            }
+            state.fuzzy_search.match_results.extend(results);
+            if state.fuzzy_search.mode == SearchMode::Content {
+                state.fuzzy_search.status_msg = format!(
+                    "Searching… ({} matches)",
+                    state.fuzzy_search.match_results.len()
+                );
+                runtime.request_preview_for_selection(state);
+            }
+        }
+        ContentEvent::Done {
+            generation,
+            total_matches,
+            duration_ms,
+        } => {
+            if generation != runtime.content_gen {
+                return;
+            }
+            state.fuzzy_search.searching = false;
+            if state.fuzzy_search.mode == SearchMode::Content {
+                state.fuzzy_search.status_msg =
+                    format!("{total_matches} matches · {duration_ms}ms");
+                runtime.request_preview_for_selection(state);
+            }
+        }
+        ContentEvent::Error {
+            generation,
+            message,
+        } => {
+            if generation != runtime.content_gen {
+                return;
+            }
+            state.fuzzy_search.searching = false;
+            state.fuzzy_search.status_msg = format!("Search error: {message}");
+            state.status = Some(format!("Search error: {message}"));
+        }
+    }
+}
+
+fn handle_fuzzy_preview_event(
+    state: &mut AppState,
+    runtime: &mut FuzzySearchRuntime,
+    event: PreviewEvent,
+) {
+    if !state.fuzzy_search.open {
+        return;
+    }
+    match event {
+        PreviewEvent::Ready { generation, model } => {
+            if generation != runtime.preview_gen {
+                return;
+            }
+            runtime.preview_model = Some(model);
+        }
+        PreviewEvent::Error {
+            generation,
+            message,
+        } => {
+            if generation != runtime.preview_gen {
+                return;
+            }
+            runtime.preview_model = None;
+            tracing::debug!("preview error: {message}");
+        }
+    }
+}
+
 fn handle_file_tree_key(
     key: &KeyEvent,
     state: &mut AppState,
@@ -3217,6 +3886,512 @@ fn handle_file_tree_key(
             true
         }
         _ => true,
+    }
+}
+
+fn handle_fuzzy_search_key(
+    key: &KeyEvent,
+    state: &mut AppState,
+    syntax: &mut SyntaxRuntime,
+    runtime: &mut FuzzySearchRuntime,
+    screen: ratatui::layout::Rect,
+) -> bool {
+    if !state.fuzzy_search.open {
+        return false;
+    }
+    if is_global_quit_key(key) {
+        return false;
+    }
+    // Allow global pause/resume while the modal is open.
+    if is_job_pause_key(key) {
+        return false;
+    }
+
+    let popup = dynamic_popup_rect(screen, fuzzy_popup_size(screen, state));
+    let list_height = popup
+        .height
+        .saturating_sub(6) // outer(2) + header/footer(2) + results block(2)
+        .max(1) as usize;
+    let preview_page = ((list_height as i32) / 2).max(1);
+
+    match key {
+        KeyEvent {
+            code: KeyCode::Esc, ..
+        } => {
+            state.fuzzy_search.close();
+            runtime.preview_model = None;
+            runtime.last_preview_key = None;
+            true
+        }
+        KeyEvent {
+            code: KeyCode::Enter,
+            ..
+        } => match state.fuzzy_search.mode {
+            SearchMode::Files => {
+                let Some(item) = state
+                    .fuzzy_search
+                    .file_results
+                    .get(state.fuzzy_search.selected)
+                else {
+                    return true;
+                };
+                if state.editor_buffer().is_dirty() {
+                    state.status =
+                        Some("Unsaved changes - save (Ctrl+S) before opening a file".into());
+                    return true;
+                }
+                let path = item.abs_path.clone();
+                let _ = apply_action_with_syntax(state, syntax, Action::OpenFile(path));
+                state.fuzzy_search.close();
+                runtime.preview_model = None;
+                runtime.last_preview_key = None;
+                true
+            }
+            SearchMode::Content => {
+                let Some(item) = state
+                    .fuzzy_search
+                    .match_results
+                    .get(state.fuzzy_search.selected)
+                else {
+                    return true;
+                };
+                if state.editor_buffer().is_dirty() {
+                    state.status =
+                        Some("Unsaved changes - save (Ctrl+S) before opening a file".into());
+                    return true;
+                }
+                let path = item.abs_path.clone();
+                let line = item.line;
+                let col = item.col;
+                let _ = apply_action_with_syntax(state, syntax, Action::OpenFile(path));
+                {
+                    let buf = state.editor_buffer_mut();
+                    let total = buf.lines_len().max(1);
+                    let target_line = line.saturating_sub(1).min(total.saturating_sub(1));
+                    buf.cursor.line = target_line;
+                    buf.cursor.col = col.saturating_sub(1);
+                    buf.ensure_visible();
+                }
+                state.fuzzy_search.close();
+                runtime.preview_model = None;
+                runtime.last_preview_key = None;
+                true
+            }
+        },
+        KeyEvent {
+            code: KeyCode::Tab, ..
+        } => {
+            state.fuzzy_search.mode = match state.fuzzy_search.mode {
+                SearchMode::Files => SearchMode::Content,
+                SearchMode::Content => SearchMode::Files,
+            };
+            state.fuzzy_search.selected = 0;
+            state.fuzzy_search.scroll_offset = 0;
+            runtime.run_search_for_mode(state);
+            runtime.preview_model = None;
+            runtime.last_preview_key = None;
+            true
+        }
+        KeyEvent {
+            code: KeyCode::F(2),
+            ..
+        } => {
+            state.fuzzy_search.show_hidden = !state.fuzzy_search.show_hidden;
+            runtime.rebuild_index(state);
+            runtime.run_search_for_mode(state);
+            runtime.preview_model = None;
+            runtime.last_preview_key = None;
+            true
+        }
+        KeyEvent {
+            code: KeyCode::Char('.'),
+            modifiers,
+            ..
+        } if modifiers.contains(KeyModifiers::CONTROL) => {
+            state.fuzzy_search.show_hidden = !state.fuzzy_search.show_hidden;
+            runtime.rebuild_index(state);
+            runtime.run_search_for_mode(state);
+            runtime.preview_model = None;
+            runtime.last_preview_key = None;
+            true
+        }
+        KeyEvent {
+            code: KeyCode::Char('\u{1e}'),
+            modifiers,
+            ..
+        } if modifiers.is_empty() => {
+            state.fuzzy_search.show_hidden = !state.fuzzy_search.show_hidden;
+            runtime.rebuild_index(state);
+            runtime.run_search_for_mode(state);
+            runtime.preview_model = None;
+            runtime.last_preview_key = None;
+            true
+        }
+        KeyEvent {
+            code: KeyCode::F(3),
+            ..
+        } => {
+            state.fuzzy_search.show_ignored = !state.fuzzy_search.show_ignored;
+            runtime.rebuild_index(state);
+            runtime.run_search_for_mode(state);
+            runtime.preview_model = None;
+            runtime.last_preview_key = None;
+            true
+        }
+        KeyEvent {
+            code: KeyCode::Char('g') | KeyCode::Char('G'),
+            modifiers,
+            ..
+        } if modifiers.contains(KeyModifiers::CONTROL) => {
+            state.fuzzy_search.show_ignored = !state.fuzzy_search.show_ignored;
+            runtime.rebuild_index(state);
+            runtime.run_search_for_mode(state);
+            runtime.preview_model = None;
+            runtime.last_preview_key = None;
+            true
+        }
+        KeyEvent {
+            code: KeyCode::Char('\u{7}'),
+            modifiers,
+            ..
+        } if modifiers.is_empty() => {
+            state.fuzzy_search.show_ignored = !state.fuzzy_search.show_ignored;
+            runtime.rebuild_index(state);
+            runtime.run_search_for_mode(state);
+            runtime.preview_model = None;
+            runtime.last_preview_key = None;
+            true
+        }
+        KeyEvent {
+            code: KeyCode::F(5),
+            ..
+        } => {
+            match state.fuzzy_search.mode {
+                SearchMode::Files => {
+                    runtime.rebuild_index(state);
+                    runtime.run_file_query(state);
+                }
+                SearchMode::Content => {
+                    runtime.run_content_query(state);
+                }
+            }
+            runtime.preview_model = None;
+            runtime.last_preview_key = None;
+            true
+        }
+        KeyEvent {
+            code: KeyCode::Char('r') | KeyCode::Char('R'),
+            modifiers,
+            ..
+        } if modifiers.contains(KeyModifiers::CONTROL) => {
+            match state.fuzzy_search.mode {
+                SearchMode::Files => {
+                    runtime.rebuild_index(state);
+                    runtime.run_file_query(state);
+                }
+                SearchMode::Content => {
+                    runtime.run_content_query(state);
+                }
+            }
+            runtime.preview_model = None;
+            runtime.last_preview_key = None;
+            true
+        }
+        KeyEvent {
+            code: KeyCode::Char('\u{12}'),
+            modifiers,
+            ..
+        } if modifiers.is_empty() => {
+            match state.fuzzy_search.mode {
+                SearchMode::Files => {
+                    runtime.rebuild_index(state);
+                    runtime.run_file_query(state);
+                }
+                SearchMode::Content => {
+                    runtime.run_content_query(state);
+                }
+            }
+            runtime.preview_model = None;
+            runtime.last_preview_key = None;
+            true
+        }
+        KeyEvent {
+            code: KeyCode::Backspace,
+            modifiers,
+            ..
+        } => {
+            if modifiers.contains(KeyModifiers::CONTROL) {
+                delete_last_word(&mut state.fuzzy_search.query);
+            } else {
+                state.fuzzy_search.query.pop();
+            }
+            runtime.preview_model = None;
+            runtime.last_preview_key = None;
+            runtime.run_search_for_mode(state);
+            true
+        }
+        KeyEvent {
+            code: KeyCode::Char('u') | KeyCode::Char('U'),
+            modifiers,
+            ..
+        } if modifiers.contains(KeyModifiers::CONTROL) => {
+            runtime.preview_scroll_delta =
+                runtime.preview_scroll_delta.saturating_sub(preview_page);
+            true
+        }
+        KeyEvent {
+            code: KeyCode::Char('\u{15}'),
+            modifiers,
+            ..
+        } if modifiers.is_empty() => {
+            runtime.preview_scroll_delta =
+                runtime.preview_scroll_delta.saturating_sub(preview_page);
+            true
+        }
+        KeyEvent {
+            code: KeyCode::PageUp,
+            modifiers,
+            ..
+        } if modifiers.contains(KeyModifiers::CONTROL) => {
+            runtime.preview_scroll_delta =
+                runtime.preview_scroll_delta.saturating_sub(preview_page);
+            true
+        }
+        KeyEvent {
+            code: KeyCode::Char('d') | KeyCode::Char('D'),
+            modifiers,
+            ..
+        } if modifiers.contains(KeyModifiers::CONTROL) => {
+            runtime.preview_scroll_delta =
+                runtime.preview_scroll_delta.saturating_add(preview_page);
+            true
+        }
+        KeyEvent {
+            code: KeyCode::Char('\u{4}'),
+            modifiers,
+            ..
+        } if modifiers.is_empty() => {
+            runtime.preview_scroll_delta =
+                runtime.preview_scroll_delta.saturating_add(preview_page);
+            true
+        }
+        KeyEvent {
+            code: KeyCode::PageDown,
+            modifiers,
+            ..
+        } if modifiers.contains(KeyModifiers::CONTROL) => {
+            runtime.preview_scroll_delta =
+                runtime.preview_scroll_delta.saturating_add(preview_page);
+            true
+        }
+        KeyEvent {
+            code: KeyCode::Char('y') | KeyCode::Char('Y'),
+            modifiers,
+            ..
+        } if modifiers.contains(KeyModifiers::CONTROL) => {
+            runtime.preview_scroll_delta = runtime.preview_scroll_delta.saturating_sub(1);
+            true
+        }
+        KeyEvent {
+            code: KeyCode::Char('\u{19}'),
+            modifiers,
+            ..
+        } if modifiers.is_empty() => {
+            runtime.preview_scroll_delta = runtime.preview_scroll_delta.saturating_sub(1);
+            true
+        }
+        KeyEvent {
+            code: KeyCode::Up,
+            modifiers,
+            ..
+        } if modifiers.contains(KeyModifiers::CONTROL) => {
+            runtime.preview_scroll_delta = runtime.preview_scroll_delta.saturating_sub(1);
+            true
+        }
+        KeyEvent {
+            code: KeyCode::Char('e') | KeyCode::Char('E'),
+            modifiers,
+            ..
+        } if modifiers.contains(KeyModifiers::CONTROL) => {
+            runtime.preview_scroll_delta = runtime.preview_scroll_delta.saturating_add(1);
+            true
+        }
+        KeyEvent {
+            code: KeyCode::Char('\u{5}'),
+            modifiers,
+            ..
+        } if modifiers.is_empty() => {
+            runtime.preview_scroll_delta = runtime.preview_scroll_delta.saturating_add(1);
+            true
+        }
+        KeyEvent {
+            code: KeyCode::Down,
+            modifiers,
+            ..
+        } if modifiers.contains(KeyModifiers::CONTROL) => {
+            runtime.preview_scroll_delta = runtime.preview_scroll_delta.saturating_add(1);
+            true
+        }
+        KeyEvent {
+            code: KeyCode::Char('\u{0b}'),
+            modifiers,
+            ..
+        } if modifiers.is_empty() => {
+            // Some terminals report Ctrl+K as a raw control character.
+            state.fuzzy_search.selected = state.fuzzy_search.selected.saturating_sub(1);
+            adjust_fuzzy_scroll(state, list_height);
+            runtime.request_preview_for_selection(state);
+            true
+        }
+        KeyEvent {
+            code: KeyCode::Char('\n'),
+            modifiers,
+            ..
+        } if modifiers.is_empty() => {
+            // Some terminals report Ctrl+J as a raw control character.
+            let len = fuzzy_results_len(state);
+            if len > 0 {
+                state.fuzzy_search.selected = (state.fuzzy_search.selected + 1).min(len - 1);
+            }
+            adjust_fuzzy_scroll(state, list_height);
+            runtime.request_preview_for_selection(state);
+            true
+        }
+        KeyEvent {
+            code: KeyCode::Char('k') | KeyCode::Char('K') | KeyCode::Char('\u{0b}'),
+            modifiers,
+            ..
+        } if modifiers.contains(KeyModifiers::CONTROL) => {
+            state.fuzzy_search.selected = state.fuzzy_search.selected.saturating_sub(1);
+            adjust_fuzzy_scroll(state, list_height);
+            runtime.request_preview_for_selection(state);
+            true
+        }
+        KeyEvent {
+            code: KeyCode::Char('j') | KeyCode::Char('J') | KeyCode::Char('\n'),
+            modifiers,
+            ..
+        } if modifiers.contains(KeyModifiers::CONTROL) => {
+            let len = fuzzy_results_len(state);
+            if len > 0 {
+                state.fuzzy_search.selected = (state.fuzzy_search.selected + 1).min(len - 1);
+            }
+            adjust_fuzzy_scroll(state, list_height);
+            runtime.request_preview_for_selection(state);
+            true
+        }
+        KeyEvent {
+            code: KeyCode::Up, ..
+        } => {
+            state.fuzzy_search.selected = state.fuzzy_search.selected.saturating_sub(1);
+            adjust_fuzzy_scroll(state, list_height);
+            runtime.request_preview_for_selection(state);
+            true
+        }
+        KeyEvent {
+            code: KeyCode::Down,
+            ..
+        } => {
+            let len = fuzzy_results_len(state);
+            if len > 0 {
+                state.fuzzy_search.selected = (state.fuzzy_search.selected + 1).min(len - 1);
+            }
+            adjust_fuzzy_scroll(state, list_height);
+            runtime.request_preview_for_selection(state);
+            true
+        }
+        KeyEvent {
+            code: KeyCode::PageUp,
+            ..
+        } => {
+            state.fuzzy_search.selected = state
+                .fuzzy_search
+                .selected
+                .saturating_sub(list_height.max(1));
+            adjust_fuzzy_scroll(state, list_height);
+            runtime.request_preview_for_selection(state);
+            true
+        }
+        KeyEvent {
+            code: KeyCode::PageDown,
+            ..
+        } => {
+            let len = fuzzy_results_len(state);
+            if len > 0 {
+                state.fuzzy_search.selected =
+                    (state.fuzzy_search.selected + list_height.max(1)).min(len - 1);
+            }
+            adjust_fuzzy_scroll(state, list_height);
+            runtime.request_preview_for_selection(state);
+            true
+        }
+        KeyEvent {
+            code: KeyCode::Home,
+            ..
+        } => {
+            state.fuzzy_search.selected = 0;
+            adjust_fuzzy_scroll(state, list_height);
+            runtime.request_preview_for_selection(state);
+            true
+        }
+        KeyEvent {
+            code: KeyCode::End, ..
+        } => {
+            let len = fuzzy_results_len(state);
+            if len > 0 {
+                state.fuzzy_search.selected = len - 1;
+            }
+            adjust_fuzzy_scroll(state, list_height);
+            runtime.request_preview_for_selection(state);
+            true
+        }
+        KeyEvent {
+            code: KeyCode::Char(c),
+            modifiers,
+            ..
+        } if (modifiers.is_empty() || *modifiers == KeyModifiers::SHIFT) && !c.is_control() => {
+            state.fuzzy_search.query.push(*c);
+            runtime.preview_model = None;
+            runtime.last_preview_key = None;
+            runtime.run_search_for_mode(state);
+            true
+        }
+        _ => true,
+    }
+}
+
+fn fuzzy_results_len(state: &AppState) -> usize {
+    match state.fuzzy_search.mode {
+        SearchMode::Files => state.fuzzy_search.file_results.len(),
+        SearchMode::Content => state.fuzzy_search.match_results.len(),
+    }
+}
+
+fn adjust_fuzzy_scroll(state: &mut AppState, list_height: usize) {
+    let len = fuzzy_results_len(state);
+    if len == 0 || list_height == 0 {
+        state.fuzzy_search.selected = 0;
+        state.fuzzy_search.scroll_offset = 0;
+        return;
+    }
+    state.fuzzy_search.selected = state.fuzzy_search.selected.min(len - 1);
+    let selected = state.fuzzy_search.selected;
+    let mut scroll = state.fuzzy_search.scroll_offset.min(len.saturating_sub(1));
+    if selected < scroll {
+        scroll = selected;
+    } else if selected >= scroll + list_height {
+        scroll = selected.saturating_sub(list_height - 1);
+    }
+    let max_scroll = len.saturating_sub(list_height);
+    state.fuzzy_search.scroll_offset = scroll.min(max_scroll);
+}
+
+fn delete_last_word(query: &mut String) {
+    while query.chars().last().is_some_and(|c| c.is_whitespace()) {
+        query.pop();
+    }
+    while query.chars().last().is_some_and(|c| !c.is_whitespace()) {
+        query.pop();
     }
 }
 
@@ -3699,6 +4874,31 @@ fn command_prompt_cursor(
     Some((col, inner_y))
 }
 
+fn fuzzy_search_cursor(area: ratatui::layout::Rect, state: &AppState) -> Option<(u16, u16)> {
+    if area.width < 3 || area.height < 3 {
+        return None;
+    }
+    let inner_width = area.width.saturating_sub(2);
+    if inner_width == 0 {
+        return None;
+    }
+    let inner_x = area.x.saturating_add(1);
+    let inner_y = area.y.saturating_add(1);
+    let mode = match state.fuzzy_search.mode {
+        SearchMode::Files => "[FILES]",
+        SearchMode::Content => "[CONTENT]",
+    };
+    let prefix_width =
+        unicode_width::UnicodeWidthStr::width(mode) + unicode_width::UnicodeWidthStr::width("  > ");
+    let query_width = unicode_width::UnicodeWidthStr::width(state.fuzzy_search.query.as_str());
+    let mut col = inner_x.saturating_add((prefix_width + query_width) as u16);
+    let max_col = inner_x.saturating_add(inner_width.saturating_sub(1));
+    if col > max_col {
+        col = max_col;
+    }
+    Some((col, inner_y))
+}
+
 fn render_prompt(
     frame: &mut ratatui::Frame,
     area: ratatui::layout::Rect,
@@ -3765,5 +4965,69 @@ impl Drop for TerminalGuard {
             let _ = execute!(io::stdout(), SetCursorStyle::DefaultUserShape);
             let _ = execute!(io::stdout(), LeaveAlternateScreen);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn state_for_test() -> AppState {
+        let editor = nit_core::Buffer::from_str("editor", "", None);
+        let notes = nit_core::Buffer::from_str("notes", "", None);
+        AppState::new(std::path::PathBuf::from("."), editor, notes)
+    }
+
+    #[test]
+    fn fuzzy_popup_size_matches_preferred_when_tree_closed() {
+        let state = state_for_test();
+        let screen = ratatui::layout::Rect {
+            x: 0,
+            y: 0,
+            width: 200,
+            height: 60,
+        };
+        let expected = fuzzy_search_popup::preferred_size(screen);
+        assert_eq!(fuzzy_popup_size(screen, &state), expected);
+    }
+
+    #[test]
+    fn fuzzy_popup_size_matches_preferred_when_tree_open() {
+        let mut state = state_for_test();
+        state.file_tree.open = true;
+        let screen = ratatui::layout::Rect {
+            x: 0,
+            y: 0,
+            width: 200,
+            height: 60,
+        };
+        let expected = fuzzy_search_popup::preferred_size(screen);
+        assert_eq!(fuzzy_popup_size(screen, &state), expected);
+    }
+
+    #[test]
+    fn job_output_space_toggles_pause() {
+        let mut state = state_for_test();
+        state.focus = PaneId::JobOutput;
+        let mut input = InputState::new();
+        let key = KeyEvent::new(KeyCode::Char(' '), KeyModifiers::empty());
+        let action = map_key_to_action(key, &state, &mut input);
+        assert!(matches!(action, Some(Action::ToggleJobPause)));
+    }
+
+    #[test]
+    fn job_pause_key_matches_ctrl_space_and_f6() {
+        let ctrl_space = KeyEvent::new(KeyCode::Char(' '), KeyModifiers::CONTROL);
+        assert!(is_job_pause_key(&ctrl_space));
+
+        let f6 = KeyEvent::new(KeyCode::F(6), KeyModifiers::empty());
+        assert!(is_job_pause_key(&f6));
+
+        // Depending on terminal + crossterm backend, Ctrl+Space can also arrive as NULL.
+        let nul_code = KeyEvent::new(KeyCode::Char('\u{0}'), KeyModifiers::empty());
+        assert!(is_job_pause_key(&nul_code));
+
+        let null_code = KeyEvent::new(KeyCode::Null, KeyModifiers::empty());
+        assert!(is_job_pause_key(&null_code));
     }
 }

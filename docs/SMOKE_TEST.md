@@ -35,6 +35,19 @@ It's meant for quick confidence after changes to UI, commands, or engine wiring.
   - Filters:
     - `.` toggles dotfiles; `r` refreshes; `.git` never appears.
     - Add an entry to `.gitignore`, refresh, and expect ignored files/dirs to disappear.
+- Fuzzy search:
+  - File search:
+    - `Ctrl+P` (or `:find`)
+    - Expect: centered popup with FILES mode, query prompt, and a scrolling file list.
+    - Type a few characters; expect: results filter quickly and selection stays visible.
+    - `Enter` on a result; expect: file opens in editor and popup closes.
+  - Content search:
+    - `Ctrl+F` (or `:grep`)
+    - Type a query (e.g. `fn main`); expect: matches stream in as they are found.
+    - Move selection; expect: preview updates and highlights the match line.
+    - `Enter` on a match; expect: file opens and cursor jumps to the matched line/col.
+  - Gitignore:
+    - Add an entry to `.gitignore`, re-open search and press `Ctrl+R` (or `F5`); expect: ignored paths disappear (unless `F3`/`Ctrl+G` shows ignored).
 - Pane focus:
   - `Tab` / `Shift+Tab`
   - `Ctrl+H/J/K/L`

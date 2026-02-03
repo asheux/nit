@@ -6,7 +6,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use nit_core::{BufferEdit, BufferPoint};
-use tracing::{error, warn};
+use tracing::{debug, error};
 use tree_sitter::{InputEdit, Parser, Point, Query, QueryCursor, Tree};
 use tree_sitter_highlight::{HighlightConfiguration, HighlightEvent, Highlighter};
 
@@ -140,7 +140,7 @@ fn highlight_job(
     let config = match configs.get(&language) {
         Some(cfg) => cfg,
         None => {
-            warn!("no highlight config for {:?}", language);
+            debug!("no highlight config for {:?}", language);
             return Ok(HighlightSnapshot::plain(
                 job.buffer_id,
                 job.version,
@@ -713,14 +713,14 @@ fn build_configs() -> HashMap<LanguageId, HighlightConfiguration> {
             {
                 Ok(cfg) => cfg,
                 Err(err) => {
-                    warn!(
+                    debug!(
                         "failed to build highlight config for {:?} with injections: {err}",
                         lang
                     );
                     match HighlightConfiguration::new(ts_lang, highlights, "", "") {
                         Ok(cfg) => cfg,
                         Err(err) => {
-                            warn!("failed to build highlight config for {:?}: {err}", lang);
+                            debug!("failed to build highlight config for {:?}: {err}", lang);
                             continue;
                         }
                     }

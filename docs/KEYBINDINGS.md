@@ -4,6 +4,8 @@
 - Ctrl+Q: Quit (confirm if dirty)
 - Ctrl+S: Save
 - Ctrl+T: Toggle NITTree (file tree overlay)
+- Ctrl+P: Fuzzy file search popup
+- Ctrl+F: Content search popup
 - Tab / Shift+Tab: Cycle pane focus
 - Ctrl+H/J/K/L: Focus panes (vim/tmux style: left/down/up/right)
 - F1 / ?: Toggle help overlay
@@ -20,6 +22,23 @@
 - r: Refresh
 - .: Toggle hidden files
 - i: Toggle ignored files
+
+## Fuzzy Search popup
+- Enter: Open selection (closes popup)
+- Esc: Close popup
+- Tab: Switch mode (FILES ↔ CONTENT)
+- Up/Down: Move selection
+- PageUp/PageDown: Page
+- Home/End: Top/Bottom
+- Backspace: Delete character
+- Ctrl+Backspace: Delete word
+- Mouse wheel: Scroll results / preview
+- Ctrl+U / Ctrl+D: Scroll preview up/down
+- Ctrl+J / Ctrl+K: Scroll results down/up
+- Ctrl+Y / Ctrl+E: Scroll preview line down/up
+- F2 / Ctrl+.: Toggle hidden files
+- F3 / Ctrl+G: Toggle ignored files
+- F5 / Ctrl+R: Refresh (re-index / rerun)
 
 ## Editor & Notes (focused)
 - Arrow keys / PageUp / PageDown / Home / End: Move cursor/scroll
@@ -52,7 +71,8 @@
 
 ## Job Output
 - Ctrl+L: Clear logs
-- Ctrl+Space: Pause/resume job updates
+- Space: Pause/resume (when Job Output focused)
+- Ctrl+Space / F6: Pause/resume job output (global)
 
 ## Visualizer (GoL)
 - Ctrl+E: Cycle seed encoder
@@ -97,6 +117,9 @@
 - :run: Run the active app
 - :q: Quit (confirm if dirty)
 - :tree / :nittree / :explore: Toggle NITTree
+- :find / :ff: Open fuzzy file search
+- :grep / :rg / :search: Open content search
+- :close: Close search popup (if open)
 - Commands are routed to the active lab; use `--lab gol|games` at startup to switch labs.
 - :gol hide / :petri hide: Hide GoL Petri Dish (sim keeps running)
 - :gol show / :petri show: Show GoL Petri Dish

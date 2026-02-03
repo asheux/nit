@@ -31,7 +31,7 @@ pub fn render(frame: &mut Frame, area: ratatui::layout::Rect, state: &AppState, 
     let block = Block::default()
         .borders(Borders::ALL)
         .title(Span::styled(
-            "JOB OUTPUT  [ PAUSE ] [ CLEAR ]",
+            "JOB OUTPUT  [ Space/Ctrl+Space/F6 ] [ Ctrl+L ]",
             Style::default()
                 .fg(title_color)
                 .add_modifier(Modifier::BOLD),

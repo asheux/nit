@@ -37,6 +37,14 @@ pub fn build_lines(theme: &Theme) -> Vec<Line<'static>> {
         Span::raw(" toggle NITTree (file tree)"),
     ]));
     lines.push(Line::from(vec![
+        Span::styled("Ctrl+P", Style::default().fg(theme.accent)),
+        Span::raw(" fuzzy file search"),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("Ctrl+F", Style::default().fg(theme.accent)),
+        Span::raw(" content search"),
+    ]));
+    lines.push(Line::from(vec![
         Span::styled("F1 / ?", Style::default().fg(theme.accent)),
         Span::raw(" toggle help"),
     ]));
@@ -86,6 +94,14 @@ pub fn build_lines(theme: &Theme) -> Vec<Line<'static>> {
             Style::default().fg(theme.accent),
         ),
         Span::raw(" toggle NITTree"),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled(":find / :ff", Style::default().fg(theme.accent)),
+        Span::raw(" open fuzzy file search"),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled(":grep / :rg / :search", Style::default().fg(theme.accent)),
+        Span::raw(" open content search"),
     ]));
     lines.push(Line::from(vec![
         Span::styled(":gol run|hide|show|stop", Style::default().fg(theme.accent)),
@@ -340,7 +356,15 @@ pub fn build_lines(theme: &Theme) -> Vec<Line<'static>> {
         Span::raw(" clear logs"),
     ]));
     lines.push(Line::from(vec![
+        Span::styled("Space", Style::default().fg(theme.accent)),
+        Span::raw(" pause/resume job updates"),
+    ]));
+    lines.push(Line::from(vec![
         Span::styled("Ctrl+Space", Style::default().fg(theme.accent)),
+        Span::raw(" pause/resume job updates"),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("F6", Style::default().fg(theme.accent)),
         Span::raw(" pause/resume job updates"),
     ]));
 

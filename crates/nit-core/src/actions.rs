@@ -1,4 +1,4 @@
-use crate::{mode::Mode, pane::PaneId};
+use crate::{mode::Mode, pane::PaneId, search::SearchMode};
 use std::path::PathBuf;
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -103,4 +103,6 @@ pub enum Action {
     ToggleDebug,
     ToggleFileTree,
     OpenFile(PathBuf),
+    OpenSearchPopup(SearchMode),
+    CloseSearchPopup,
 }
