@@ -1,6 +1,6 @@
 schema_version = 1
 game = "ipd"
-rounds = 2000
+rounds = 20000000
 repetitions = 1
 self_play = false
 seed = 42

@@ -87,7 +87,26 @@ pub fn render(f: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
         if idx == selected {
             style = style.bg(theme.selection_bg).add_modifier(Modifier::BOLD);
         }
-        lines.push(Line::from(Span::styled(row.text.clone(), style)));
+        if matches!(row.kind, FileTreeKind::Dir) {
+            let indent_len = row.depth.saturating_mul(2);
+            let arrow_len = 2;
+            let split_at = indent_len.saturating_add(arrow_len);
+            if row.text.len() >= split_at {
+                let indent = row.text[..indent_len].to_string();
+                let arrow = row.text[indent_len..split_at].to_string();
+                let rest = row.text[split_at..].to_string();
+                let arrow_style = style.fg(theme.accent).add_modifier(Modifier::BOLD);
+                lines.push(Line::from(vec![
+                    Span::styled(indent, style),
+                    Span::styled(arrow, arrow_style),
+                    Span::styled(rest, style),
+                ]));
+            } else {
+                lines.push(Line::from(Span::styled(row.text.clone(), style)));
+            }
+        } else {
+            lines.push(Line::from(Span::styled(row.text.clone(), style)));
+        }
     }
 
     let paragraph = Paragraph::new(lines)
