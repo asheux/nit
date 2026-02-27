@@ -573,6 +573,7 @@ fn simulate_tm(
     let mut lines = Vec::new();
     let reserve = step_limit.min(10_000) as usize;
     let mut frames = Vec::with_capacity(reserve.saturating_add(2));
+    let mut fixed_point_step: Option<usize> = None;
     if symbols < 2 {
         lines.push("error: symbols must be >= 2 for input decoding".to_string());
         return SimResult {
@@ -628,6 +629,9 @@ fn simulate_tm(
             head: trace.initial_head,
             origin,
         });
+        let mut prev_after_state: Option<u16> = None;
+        let mut prev_head_after: Option<usize> = None;
+        let mut prev_tape: Option<Vec<u8>> = None;
         for step in &trace.steps {
             steps.push(SimStep {
                 step: step.step,
@@ -645,6 +649,18 @@ fn simulate_tm(
                 head: step.head_after,
                 origin,
             });
+            if !run.halted {
+                let reached_fixed_point = prev_after_state == Some(step.next)
+                    && prev_head_after == Some(step.head_after)
+                    && prev_tape.as_deref() == Some(step.tape.as_slice());
+                if reached_fixed_point {
+                    fixed_point_step = Some(step.step);
+                    break;
+                }
+                prev_after_state = Some(step.next);
+                prev_head_after = Some(step.head_after);
+                prev_tape = Some(step.tape.clone());
+            }
         }
     } else {
         let digits = digits_in_base(input, symbols);
@@ -688,6 +704,12 @@ fn simulate_tm(
         ));
     } else {
         lines.push(format!("result: {} -> {}", reason, action.as_char()));
+    }
+    if let Some(step) = fixed_point_step {
+        lines.push(format!(
+            "note: fixed point at step {} (evolution truncated)",
+            step
+        ));
     }
     if !run.halted && matches!(run.stop_reason, TmStopReason::MaxSteps) {
         lines.push(format!("note: max_steps={}", step_limit));
@@ -1498,6 +1520,31 @@ mod tests {
             }
         }
         assert!(clamped, "expected head to clamp at left boundary");
+    }
+
+    #[test]
+    fn non_halting_evolution_truncates_at_fixed_point() {
+        let transitions = vec![
+            TmTransition {
+                write: 0,
+                move_dir: TmMove::Stay,
+                next: 1,
+            },
+            TmTransition {
+                write: 1,
+                move_dir: TmMove::Stay,
+                next: 1,
+            },
+        ];
+        let output_map = vec![Action::Cooperate, Action::Defect];
+        let sim = simulate_tm(0, 2, 1, 0, 0, 64, &transitions, &output_map);
+        assert!(!sim.halted);
+        assert!(sim.frames.len() < 65);
+        assert_eq!(sim.frames.len(), 3);
+        assert!(sim
+            .log_lines
+            .iter()
+            .any(|line| line.contains("fixed point at step 2")));
     }
 
     #[test]
