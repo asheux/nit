@@ -1,5 +1,5 @@
 use nit_core::{AppState, GamesStatus, PaneId, UiSelectionPane};
-use nit_games::config::{BuiltinKind, GamesConfig, StrategySpecKind};
+use nit_games::config::{GamesConfig, StrategySpecKind};
 use nit_games::strategy::InputMode;
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
@@ -161,16 +161,8 @@ pub fn build_main_lines(
                 Span::styled("strategies: ", label_style),
                 Span::styled(config.strategies.len().to_string(), value_style),
             ]));
-            let interesting: Vec<&nit_games::config::StrategySpec> = config
-                .strategies
-                .iter()
-                .filter(|strategy| {
-                    !matches!(
-                        strategy.kind,
-                        StrategySpecKind::Builtin { .. } | StrategySpecKind::Random { .. }
-                    )
-                })
-                .collect();
+            let interesting: Vec<&nit_games::config::StrategySpec> =
+                config.strategies.iter().collect();
             if interesting.is_empty() {
                 lines.push(Line::from(Span::styled(
                     "No complex strategies in config.",
@@ -190,11 +182,9 @@ pub fn build_main_lines(
                 )));
                 for strategy in interesting {
                     let kind_label = match strategy.kind {
-                        StrategySpecKind::Builtin { .. } => "builtin",
-                        StrategySpecKind::Random { .. } => "random",
                         StrategySpecKind::Fsm { .. } => "fsm",
-                        StrategySpecKind::Memory { .. } => "memory",
-                        StrategySpecKind::OneSidedTm { .. } => "one_sided_tm",
+                        StrategySpecKind::Ca { .. } => "ca",
+                        StrategySpecKind::OneSidedTm { .. } => "tm",
                     };
                     let name = strategy_display_name(strategy);
                     lines.push(Line::from(vec![
@@ -368,14 +358,6 @@ pub fn strategy_display_name_from_def(def: &nit_games::output::StrategyDefinitio
 
 fn strategy_display_name_from_kind(kind: &StrategySpecKind) -> String {
     match kind {
-        StrategySpecKind::Builtin { builtin } => match builtin {
-            BuiltinKind::AllC => "Always Cooperate".into(),
-            BuiltinKind::AllD => "Always Defect".into(),
-            BuiltinKind::TitForTat => "Tit For Tat".into(),
-            BuiltinKind::GrimTrigger => "Grim Trigger".into(),
-            BuiltinKind::WinStayLoseShift => "Win Stay Lose Shift".into(),
-        },
-        StrategySpecKind::Random { p_cooperate } => format!("Random (p={:.2})", p_cooperate),
         StrategySpecKind::Fsm {
             outputs,
             num_states,
@@ -395,7 +377,9 @@ fn strategy_display_name_from_kind(kind: &StrategySpecKind) -> String {
             };
             format!("FSM (states={states}, mode={mode_label})")
         }
-        StrategySpecKind::Memory { n, .. } => format!("Memory-{}", n),
+        StrategySpecKind::Ca { k, r, t, .. } => {
+            format!("CA (k={k}, r={r}, t={t})")
+        }
         StrategySpecKind::OneSidedTm {
             states, symbols, ..
         } => {

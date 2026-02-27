@@ -1,6 +1,6 @@
 schema_version = 1
 game = "ipd"
-rounds = 20000000
+rounds = 200000
 repetitions = 1
 self_play = false
 seed = 42
@@ -19,162 +19,87 @@ enabled = true
 mode = "interactive"
 parallelism = "auto"
 progress_interval_ms = 80
+fast_eval = true
+
+[engine.complexity_cost]
+enabled = false
+tm_step_cost = 0.0
+fsm_state_cost = 0.0
 
 [[strategy]]
-id = "allc"
-type = "builtin"
-name = "Always Cooperate"
-
-[[strategy]]
-id = "alld"
-type = "builtin"
-name = "Always Defect"
-
-[[strategy]]
-id = "tft"
-type = "builtin"
-name = "Tit For Tat"
-
-[[strategy]]
-id = "grim"
-type = "builtin"
-name = "Grim Trigger"
-
-[[strategy]]
-id = "pavlov"
-type = "builtin"
-name = "Win Stay Lose Shift"
-
-[[strategy]]
-id = "rand50"
-type = "random"
-p_cooperate = 0.5
-
-[[strategy]]
-id = "mem1"
-type = "memory"
-n = 1
-initial = "C"
-table = ["C", "D", "D", "C"]
-
-[[strategy]]
-id = "fsm_opp"
+id = "fsm_alld"
 type = "fsm"
-num_states = 2
+index = 0
+num_states = 1
+k = 2
+
+[[strategy]]
+id = "fsm_allc"
+type = "fsm"
+index = 1
+num_states = 1
+k = 2
+
+[[strategy]]
+id = "fsm_tft"
+type = "auto"
+states = 2
 start_state = 0
 outputs = ["C", "D"]
-input_mode = "opponent_last_action"
 transitions = [
   [0, 1],
   [0, 1],
 ]
 
 [[strategy]]
-id = "fsm_joint"
-type = "fsm"
-num_states = 2
-start_state = 0
-outputs = ["C", "D"]
-input_mode = "joint_last_action"
-transitions = [
-  [0, 1, 1, 0],
-  [1, 0, 0, 1],
-]
+id = "fsm_rule"
+type = "auto"
+states = 2
+k = 2
+index = 17
 
 [[strategy]]
-id = "tm_opp"
-type = "one_sided_tm"
+id = "ca_rule30"
+type = "ca"
+n = 30
+k = 2
+r = 1
+t = 30
+
+[[strategy]]
+id = "ca_rule255"
+type = "ca"
+n = 255
+k = 2
+r = 1
+t = 10
+
+[[strategy]]
+id = "ca_rule"
+type = "ca"
+n = 494955
+k = 2
+r = 1
+t = 10
+
+[[strategy]]
+id = "tm_rule2x2"
+type = "auto"
 states = 2
 symbols = 2
 start_state = 1
 blank = 0
-fallback_symbol = 0
 max_steps_per_round = 64
-input_mode = "opponent_last_action"
-output_map = ["C", "D"]
-transitions = [
-  [ [1, 0, "R"], [1, 1, "R"] ],
-  [ [2, 0, "R"], [2, 1, "R"] ],
-]
+rule_code = 3111
 
 [[strategy]]
-id = "tm_joint"
-type = "one_sided_tm"
+id = "tm_timeout"
+type = "tm"
 states = 1
-symbols = 4
-start_state = 1
-blank = 0
-fallback_symbol = 0
-max_steps_per_round = 64
-input_mode = "joint_last_action"
-output_map = ["C", "D", "D", "C"]
-transitions = [
-  [ [1, 0, "R"], [1, 1, "R"], [1, 2, "R"], [1, 3, "R"] ],
-]
-
-[[strategy]]
-id = "tm_rule_2x2"
-type = "one_sided_tm"
-states = 2
 symbols = 2
 start_state = 1
 blank = 0
-fallback_symbol = 0
-max_steps_per_round = 64
-input_mode = "opponent_last_action"
-output_map = ["C", "D"]
-rule_code = 3111
-
-[[strategy]]
-id = "tm_rule_2x3"
-type = "one_sided_tm"
-states = 2
-symbols = 3
-start_state = 1
-blank = 0
-fallback_symbol = 0
-max_steps_per_round = 64
-input_mode = "opponent_last_action"
-output_map = ["C", "D", "C"]
-rule_code = 0
-
-[[strategy]]
-id = "tm_rule_3x2"
-type = "one_sided_tm"
-states = 3
-symbols = 2
-start_state = 1
-blank = 0
-fallback_symbol = 0
-max_steps_per_round = 64
-input_mode = "opponent_last_action"
-output_map = ["C", "D"]
-rule_code = 3111
-
-[[strategy]]
-id = "tm_rule_4x2"
-type = "one_sided_tm"
-states = 4
-symbols = 2
-start_state = 1
-blank = 0
-fallback_symbol = 0
-max_steps_per_round = 64
-input_mode = "opponent_last_action"
-output_map = ["C", "D"]
-rule_code = 0
-
-[[strategy]]
-id = "tm_rule_2x4"
-type = "one_sided_tm"
-states = 2
-symbols = 4
-start_state = 1
-blank = 0
-fallback_symbol = 0
-max_steps_per_round = 64
-input_mode = "opponent_last_action"
-output_map = ["C", "D", "C", "D"]
+max_steps_per_round = 32
 rule_code = 0
 
 # Example: generated strategy list (NDJSON)

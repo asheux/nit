@@ -1,6 +1,5 @@
-use crate::game::{Action, Outcome};
-use crate::history::History;
-use nit_utils::hashing::XorShift64;
+use crate::game::Action;
+use crate::history::{History, RoundRecord};
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 
@@ -8,6 +7,9 @@ pub trait Strategy: Send {
     fn id(&self) -> &str;
     fn reset(&mut self);
     fn next_action(&mut self, history: &History, player_a: bool) -> Action;
+    fn last_halted(&self) -> bool {
+        true
+    }
     fn tm_stats(&self) -> Option<&TmRunStats> {
         None
     }
@@ -15,10 +17,8 @@ pub trait Strategy: Send {
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum StrategyKind {
-    Builtin,
-    Random,
     Fsm,
-    Memory,
+    Ca,
     OneSidedTm,
 }
 
@@ -41,20 +41,6 @@ impl InputMode {
         match self {
             InputMode::OpponentLastAction | InputMode::SelfLastAction => 2,
             InputMode::JointLastAction => 4,
-        }
-    }
-
-    pub fn symbol_from_actions(self, self_action: Action, opp_action: Action) -> usize {
-        match self {
-            InputMode::OpponentLastAction => match opp_action {
-                Action::Cooperate => 0,
-                Action::Defect => 1,
-            },
-            InputMode::SelfLastAction => match self_action {
-                Action::Cooperate => 0,
-                Action::Defect => 1,
-            },
-            InputMode::JointLastAction => Outcome::from_actions(self_action, opp_action).index(),
         }
     }
 }
@@ -124,180 +110,84 @@ pub fn decode_tm_rule_code_wolfram(
     (transitions, code)
 }
 
-#[derive(Clone, Debug)]
-pub struct AlwaysCooperate {
-    id: String,
+pub fn tm_max_index(states: usize, symbols: usize) -> Option<u128> {
+    let base = (2u128)
+        .checked_mul(states as u128)?
+        .checked_mul(symbols as u128)?;
+    let exp = states.checked_mul(symbols)? as u32;
+    checked_pow_u128(base, exp)?.checked_sub(1)
 }
 
-impl AlwaysCooperate {
-    pub fn new(id: impl Into<String>) -> Self {
-        Self { id: id.into() }
-    }
+pub fn fsm_count(states: usize, actions: usize) -> Option<u128> {
+    let transitions = checked_pow_u128(states as u128, states.checked_mul(actions)? as u32)?;
+    let outputs = checked_pow_u128(actions as u128, states as u32)?;
+    transitions.checked_mul(outputs)
 }
 
-impl Strategy for AlwaysCooperate {
-    fn id(&self) -> &str {
-        &self.id
+pub fn decode_fsm_notebook_index(
+    index: u64,
+    states: usize,
+    actions: usize,
+) -> Result<(Vec<Action>, Vec<Vec<usize>>), String> {
+    if states == 0 {
+        return Err("fsm decode requires states > 0".to_string());
+    }
+    if actions == 0 {
+        return Err("fsm decode requires actions > 0".to_string());
+    }
+    let max = fsm_count(states, actions)
+        .ok_or_else(|| "fsm index space overflows u128 for this (states, actions)".to_string())?;
+    if (index as u128) >= max {
+        return Err(format!("fsm index {index} out of range (0..{})", max - 1));
     }
 
-    fn reset(&mut self) {}
+    let n = states.saturating_mul(actions);
+    let action_block = checked_pow_u128(actions as u128, states as u32)
+        .ok_or_else(|| "fsm action block overflows u128".to_string())?;
+    let (transition_code, output_code) =
+        floor_div_rem_i128(index as i128 - 1, action_block as i128);
 
-    fn next_action(&mut self, _history: &History, _player_a: bool) -> Action {
-        Action::Cooperate
-    }
-}
+    let next_digits = if states == 1 {
+        vec![0usize; n]
+    } else {
+        integer_digits_signed_abs(transition_code, states, n)
+    };
+    let output_digits = if actions == 1 {
+        vec![0usize; states]
+    } else {
+        integer_digits_unsigned(output_code as u128, actions, states)
+    };
 
-#[derive(Clone, Debug)]
-pub struct AlwaysDefect {
-    id: String,
-}
-
-impl AlwaysDefect {
-    pub fn new(id: impl Into<String>) -> Self {
-        Self { id: id.into() }
-    }
-}
-
-impl Strategy for AlwaysDefect {
-    fn id(&self) -> &str {
-        &self.id
-    }
-
-    fn reset(&mut self) {}
-
-    fn next_action(&mut self, _history: &History, _player_a: bool) -> Action {
-        Action::Defect
-    }
-}
-
-#[derive(Clone, Debug)]
-pub struct TitForTat {
-    id: String,
-}
-
-impl TitForTat {
-    pub fn new(id: impl Into<String>) -> Self {
-        Self { id: id.into() }
-    }
-}
-
-impl Strategy for TitForTat {
-    fn id(&self) -> &str {
-        &self.id
-    }
-
-    fn reset(&mut self) {}
-
-    fn next_action(&mut self, history: &History, player_a: bool) -> Action {
-        history
-            .last_actions_for(player_a)
-            .map(|(_, opp)| opp)
-            .unwrap_or(Action::Cooperate)
-    }
-}
-
-#[derive(Clone, Debug)]
-pub struct GrimTrigger {
-    id: String,
-    triggered: bool,
-}
-
-impl GrimTrigger {
-    pub fn new(id: impl Into<String>) -> Self {
-        Self {
-            id: id.into(),
-            triggered: false,
-        }
-    }
-}
-
-impl Strategy for GrimTrigger {
-    fn id(&self) -> &str {
-        &self.id
-    }
-
-    fn reset(&mut self) {
-        self.triggered = false;
-    }
-
-    fn next_action(&mut self, history: &History, player_a: bool) -> Action {
-        if !self.triggered {
-            if let Some((_, opp)) = history.last_actions_for(player_a) {
-                if matches!(opp, Action::Defect) {
-                    self.triggered = true;
-                }
+    let outputs = output_digits
+        .into_iter()
+        .map(|digit| {
+            if digit == 0 {
+                Action::Cooperate
+            } else {
+                Action::Defect
             }
-        }
-        if self.triggered {
-            Action::Defect
-        } else {
-            Action::Cooperate
-        }
-    }
-}
+        })
+        .collect::<Vec<_>>();
 
-#[derive(Clone, Debug)]
-pub struct WinStayLoseShift {
-    id: String,
-}
-
-impl WinStayLoseShift {
-    pub fn new(id: impl Into<String>) -> Self {
-        Self { id: id.into() }
-    }
-}
-
-impl Strategy for WinStayLoseShift {
-    fn id(&self) -> &str {
-        &self.id
-    }
-
-    fn reset(&mut self) {}
-
-    fn next_action(&mut self, history: &History, player_a: bool) -> Action {
-        let Some((self_action, opp_action)) = history.last_actions_for(player_a) else {
-            return Action::Cooperate;
-        };
-        let last_self = self_action;
-        let last = Outcome::from_actions(self_action, opp_action);
-        match last {
-            Outcome::CC | Outcome::DD => last_self,
-            Outcome::CD | Outcome::DC => last_self.flip(),
+    let mut transitions = vec![vec![0usize; actions]; states];
+    for state_idx in 0..states {
+        for input_idx in 0..actions {
+            let flat_idx = state_idx.saturating_mul(actions).saturating_add(input_idx);
+            let next = next_digits.get(flat_idx).copied().unwrap_or(0);
+            transitions[state_idx][input_idx] = next.min(states - 1);
         }
     }
+
+    Ok((outputs, transitions))
 }
 
-#[derive(Clone)]
-pub struct RandomStrategy {
-    id: String,
-    rng: XorShift64,
-    p_cooperate: f32,
-}
-
-impl RandomStrategy {
-    pub fn new(id: impl Into<String>, seed: u64, p_cooperate: f32) -> Self {
-        Self {
-            id: id.into(),
-            rng: XorShift64::new(seed),
-            p_cooperate: p_cooperate.clamp(0.0, 1.0),
-        }
+pub fn history_to_input_u64(history: &History) -> Option<u64> {
+    let mut value: u64 = 0;
+    for round in history.iter() {
+        let pair = ((action_bit(round.a) as u64) << 1) | action_bit(round.b) as u64;
+        value = value.checked_mul(4)?.checked_add(pair)?;
     }
-}
-
-impl Strategy for RandomStrategy {
-    fn id(&self) -> &str {
-        &self.id
-    }
-
-    fn reset(&mut self) {}
-
-    fn next_action(&mut self, _history: &History, _player_a: bool) -> Action {
-        if self.rng.next_f32() < self.p_cooperate {
-            Action::Cooperate
-        } else {
-            Action::Defect
-        }
-    }
+    Some(value)
 }
 
 #[derive(Clone, Debug)]
@@ -306,9 +196,8 @@ pub struct FsmStrategy {
     start_state: usize,
     state: usize,
     outputs: Vec<Action>,
-    input_mode: InputMode,
-    alphabet: usize,
     transitions: Vec<usize>,
+    alphabet: usize,
 }
 
 impl FsmStrategy {
@@ -319,7 +208,11 @@ impl FsmStrategy {
         input_mode: InputMode,
         transitions: Vec<Vec<usize>>,
     ) -> Self {
-        let alphabet = input_mode.alphabet_size();
+        let alphabet = if transitions.is_empty() {
+            input_mode.alphabet_size().max(2)
+        } else {
+            transitions[0].len().max(1)
+        };
         let mut flat = Vec::new();
         for row in transitions {
             for entry in row {
@@ -331,9 +224,8 @@ impl FsmStrategy {
             start_state,
             state: start_state,
             outputs,
-            input_mode,
-            alphabet,
             transitions: flat,
+            alphabet,
         }
     }
 }
@@ -348,11 +240,15 @@ impl Strategy for FsmStrategy {
     }
 
     fn next_action(&mut self, history: &History, player_a: bool) -> Action {
-        if let Some((self_action, opp_action)) = history.last_actions_for(player_a) {
-            let symbol = self.input_mode.symbol_from_actions(self_action, opp_action);
-            let idx = self.state.saturating_mul(self.alphabet) + symbol;
-            if let Some(next) = self.transitions.get(idx) {
-                self.state = *next;
+        if let Some(last) = history.last() {
+            let opponent = if player_a { last.b } else { last.a };
+            let symbol = action_bit(opponent) as usize;
+            let idx = self
+                .state
+                .saturating_mul(self.alphabet)
+                .saturating_add(symbol);
+            if let Some(next_state) = self.transitions.get(idx).copied() {
+                self.state = next_state;
             }
         }
         self.outputs
@@ -363,36 +259,103 @@ impl Strategy for FsmStrategy {
 }
 
 #[derive(Clone, Debug)]
-pub struct MemoryStrategy {
+pub struct CaStrategy {
     id: String,
-    n: usize,
-    initial: Action,
-    table: Vec<Action>,
+    rule_code: u64,
+    symbols: u8,
+    two_r: u32,
+    steps: u32,
+    rule_table: Vec<u8>,
+    bit_window: BitWindow,
+    last_history_len: usize,
 }
 
-impl MemoryStrategy {
-    pub fn new(id: impl Into<String>, n: usize, initial: Action, table: Vec<Action>) -> Self {
+impl CaStrategy {
+    pub fn new(id: impl Into<String>, rule_code: u64, symbols: u8, two_r: u32, steps: u32) -> Self {
+        let neighborhood = two_r.saturating_add(1) as usize;
+        let table_len = checked_pow_usize(symbols as usize, neighborhood).unwrap_or(0);
+        let rule_table = integer_digits_unsigned(rule_code as u128, symbols as usize, table_len)
+            .into_iter()
+            .map(|digit| digit as u8)
+            .collect::<Vec<_>>();
+        let suffix_len = two_r.saturating_mul(steps).saturating_add(1).max(1) as usize;
         Self {
             id: id.into(),
-            n,
-            initial,
-            table,
+            rule_code,
+            symbols: symbols.max(2),
+            two_r,
+            steps,
+            rule_table,
+            bit_window: BitWindow::new(suffix_len),
+            last_history_len: 0,
         }
+    }
+
+    pub fn rule_code(&self) -> u64 {
+        self.rule_code
+    }
+
+    fn sync_history(&mut self, history: &History) {
+        sync_bit_window(&mut self.bit_window, history, &mut self.last_history_len);
+    }
+
+    fn transition_symbol(&self, window: &[u8]) -> u8 {
+        let base = self.symbols as usize;
+        let mut idx = 0usize;
+        for &digit in window {
+            idx = idx.saturating_mul(base).saturating_add(digit as usize);
+        }
+        self.rule_table.get(idx).copied().unwrap_or(0)
+    }
+
+    fn run_shrinking_ca(&self, mut row: Vec<u8>) -> u8 {
+        if row.is_empty() {
+            return 0;
+        }
+        let two_r = self.two_r as usize;
+        let neighborhood = two_r.saturating_add(1);
+        for _ in 0..self.steps {
+            if row.len() <= two_r || neighborhood == 0 {
+                break;
+            }
+            let next_len = row.len().saturating_sub(two_r);
+            if next_len == 0 {
+                break;
+            }
+            let mut next = Vec::with_capacity(next_len);
+            for start in 0..next_len {
+                let end = start.saturating_add(neighborhood);
+                let value = self.transition_symbol(&row[start..end]);
+                next.push(value);
+            }
+            row = next;
+        }
+        row.last().copied().unwrap_or(0)
     }
 }
 
-impl Strategy for MemoryStrategy {
+impl Strategy for CaStrategy {
     fn id(&self) -> &str {
         &self.id
     }
 
-    fn reset(&mut self) {}
+    fn reset(&mut self) {
+        self.bit_window.clear();
+        self.last_history_len = 0;
+    }
 
-    fn next_action(&mut self, history: &History, player_a: bool) -> Action {
-        let Some(idx) = history.memory_index(player_a, self.n) else {
-            return self.initial;
-        };
-        self.table.get(idx).copied().unwrap_or(self.initial)
+    fn next_action(&mut self, history: &History, _player_a: bool) -> Action {
+        self.sync_history(history);
+        if history.is_empty() {
+            return Action::Cooperate;
+        }
+        let bits = self.bit_window.to_vec();
+        let symbol = self.run_shrinking_ca(bits);
+        if symbol == 0 {
+            Action::Cooperate
+        } else {
+            Action::Defect
+        }
     }
 }
 
@@ -427,50 +390,244 @@ impl TmRunStats {
 }
 
 #[derive(Clone, Debug)]
+pub struct TmTraceStep {
+    pub step: usize,
+    pub state: u16,
+    pub head_before: usize,
+    pub read: u8,
+    pub next: u16,
+    pub write: u8,
+    pub move_dir: TmMove,
+    pub head_after: usize,
+    pub tape: Vec<u8>,
+}
+
+#[derive(Clone, Debug)]
+pub struct TmTrace {
+    pub input_digits: Vec<u8>,
+    pub initial_tape: Vec<u8>,
+    pub initial_head: usize,
+    pub steps: Vec<TmTraceStep>,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum TmStopReason {
+    Output,
+    MaxSteps,
+    MissingTransition,
+    InvalidState,
+}
+
+#[derive(Clone, Debug)]
+pub struct TmRunResult {
+    pub output_symbol: Option<u8>,
+    pub halted: bool,
+    pub steps_taken: u32,
+    pub stop_reason: TmStopReason,
+    pub trace: Option<TmTrace>,
+}
+
+pub fn run_one_sided_tm_from_integer(
+    transitions: &[TmTransition],
+    symbols: u8,
+    start_state: u16,
+    blank: u8,
+    input: u64,
+    max_steps: u32,
+    with_trace: bool,
+) -> TmRunResult {
+    let digits = digits_in_base(input, symbols.max(2));
+    run_one_sided_tm(
+        transitions,
+        symbols,
+        start_state,
+        blank,
+        &digits,
+        max_steps,
+        with_trace,
+    )
+}
+
+pub fn run_one_sided_tm(
+    transitions: &[TmTransition],
+    symbols: u8,
+    start_state: u16,
+    blank: u8,
+    input_digits: &[u8],
+    max_steps: u32,
+    with_trace: bool,
+) -> TmRunResult {
+    let symbols = symbols.max(1);
+    let digits = if input_digits.is_empty() {
+        vec![0]
+    } else {
+        input_digits.to_vec()
+    };
+    let mut tape = digits.clone();
+    let mut head = tape.len().saturating_sub(1);
+    let mut state = start_state;
+
+    let mut trace = if with_trace {
+        Some(TmTrace {
+            input_digits: digits.clone(),
+            initial_tape: tape.clone(),
+            initial_head: head,
+            steps: Vec::with_capacity(max_steps.min(10_000) as usize),
+        })
+    } else {
+        None
+    };
+
+    if max_steps == 0 {
+        return TmRunResult {
+            output_symbol: None,
+            halted: false,
+            steps_taken: 0,
+            stop_reason: TmStopReason::MaxSteps,
+            trace,
+        };
+    }
+    if state == 0 {
+        return TmRunResult {
+            output_symbol: None,
+            halted: false,
+            steps_taken: 0,
+            stop_reason: TmStopReason::InvalidState,
+            trace,
+        };
+    }
+
+    for step in 0..(max_steps as usize) {
+        let head_before = head;
+        let read = tape.get(head_before).copied().unwrap_or(blank);
+        let idx = (state.saturating_sub(1) as usize)
+            .saturating_mul(symbols as usize)
+            .saturating_add(read as usize);
+        let Some(trans) = transitions.get(idx).copied() else {
+            return TmRunResult {
+                output_symbol: None,
+                halted: false,
+                steps_taken: (step + 1) as u32,
+                stop_reason: TmStopReason::MissingTransition,
+                trace,
+            };
+        };
+
+        if let Some(cell) = tape.get_mut(head_before) {
+            *cell = trans.write;
+        }
+
+        if matches!(trans.move_dir, TmMove::Right) && head_before + 1 == tape.len() {
+            if let Some(trace) = trace.as_mut() {
+                trace.steps.push(TmTraceStep {
+                    step: step + 1,
+                    state,
+                    head_before,
+                    read,
+                    next: trans.next,
+                    write: trans.write,
+                    move_dir: trans.move_dir,
+                    head_after: head_before + 1,
+                    tape: tape.clone(),
+                });
+            }
+            return TmRunResult {
+                output_symbol: Some(trans.write),
+                halted: true,
+                steps_taken: (step + 1) as u32,
+                stop_reason: TmStopReason::Output,
+                trace,
+            };
+        }
+
+        let mut head_after = head_before;
+        match trans.move_dir {
+            TmMove::Left => {
+                if head_after > 0 {
+                    head_after -= 1;
+                }
+            }
+            TmMove::Stay => {}
+            TmMove::Right => {
+                if head_after + 1 < tape.len() {
+                    head_after += 1;
+                }
+            }
+        }
+
+        if let Some(trace) = trace.as_mut() {
+            trace.steps.push(TmTraceStep {
+                step: step + 1,
+                state,
+                head_before,
+                read,
+                next: trans.next,
+                write: trans.write,
+                move_dir: trans.move_dir,
+                head_after,
+                tape: tape.clone(),
+            });
+        }
+
+        head = head_after;
+        state = trans.next;
+        if state == 0 {
+            return TmRunResult {
+                output_symbol: None,
+                halted: false,
+                steps_taken: (step + 1) as u32,
+                stop_reason: TmStopReason::InvalidState,
+                trace,
+            };
+        }
+    }
+
+    TmRunResult {
+        output_symbol: None,
+        halted: false,
+        steps_taken: max_steps,
+        stop_reason: TmStopReason::MaxSteps,
+        trace,
+    }
+}
+
+#[derive(Clone, Debug)]
 pub struct OneSidedTmStrategy {
     id: String,
     symbols: u8,
     start_state: u16,
     blank: u8,
-    fallback_symbol: u8,
     max_steps_per_round: u32,
-    input_mode: InputMode,
-    output_map: Vec<Action>,
     transitions: Vec<TmTransition>,
-    tape: VecDeque<u8>,
-    tape_window: usize,
-    head: usize,
-    last_history_len: usize,
+    input_suffix: InputSuffix,
+    last_halted: bool,
     stats: TmRunStats,
 }
 
 impl OneSidedTmStrategy {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         id: impl Into<String>,
         symbols: u8,
         start_state: u16,
         blank: u8,
-        fallback_symbol: u8,
+        _fallback_symbol: u8,
         max_steps_per_round: u32,
-        input_mode: InputMode,
-        output_map: Vec<Action>,
+        _input_mode: InputMode,
+        _output_map: Vec<Action>,
         transitions: Vec<TmTransition>,
     ) -> Self {
-        let tape_window = (max_steps_per_round as usize).saturating_add(1).max(1);
+        let symbols = symbols.max(2);
+        let width = max_steps_per_round as usize + 1;
         Self {
             id: id.into(),
             symbols,
             start_state,
             blank,
-            fallback_symbol,
             max_steps_per_round,
-            input_mode,
-            output_map,
             transitions,
-            tape: VecDeque::from(vec![blank]),
-            tape_window,
-            head: 0,
-            last_history_len: 0,
+            input_suffix: InputSuffix::new(symbols, width.max(1)),
+            last_halted: true,
             stats: TmRunStats::default(),
         }
     }
@@ -479,40 +636,31 @@ impl OneSidedTmStrategy {
         &self.stats
     }
 
-    #[cfg(test)]
-    pub(crate) fn tape_len(&self) -> usize {
-        self.tape.len()
+    fn action_from_symbol(&self, symbol: u8) -> Action {
+        let base = self.symbols.max(1);
+        if symbol % base == 0 {
+            Action::Cooperate
+        } else {
+            Action::Defect
+        }
     }
 
-    fn append_history(&mut self, history: &History, player_a: bool) {
-        let history_len = history.len();
-        if history_len == 0 || history_len == self.last_history_len {
+    fn sync_input(&mut self, history: &History) {
+        let len = history.len();
+        if len < self.input_suffix.history_len || len > self.input_suffix.history_len + 1 {
+            self.input_suffix.reset();
+            for round in history.iter() {
+                self.input_suffix.push_round(round);
+            }
+            self.input_suffix.history_len = len;
             return;
         }
-        if let Some((self_action, opp_action)) = history.last_actions_for(player_a) {
-            let symbol = self.input_mode.symbol_from_actions(self_action, opp_action) as u8;
-            self.tape.push_back(symbol);
-            while self.tape.len() > self.tape_window {
-                self.tape.pop_front();
+        if len == self.input_suffix.history_len + 1 {
+            if let Some(last) = history.last() {
+                self.input_suffix.push_round(last);
             }
-            self.last_history_len = history_len;
+            self.input_suffix.history_len = len;
         }
-    }
-
-    fn output_from_symbol(&self, symbol: u8) -> Action {
-        if self.output_map.is_empty() {
-            return Action::Cooperate;
-        }
-        let idx = (symbol as usize) % self.output_map.len();
-        self.output_map[idx]
-    }
-
-    fn fallback_action(&self) -> Action {
-        if self.output_map.is_empty() {
-            return Action::Cooperate;
-        }
-        let idx = (self.fallback_symbol as usize) % self.output_map.len();
-        self.output_map[idx]
     }
 }
 
@@ -522,107 +670,271 @@ impl Strategy for OneSidedTmStrategy {
     }
 
     fn reset(&mut self) {
-        self.tape.clear();
-        self.tape.push_back(self.blank);
-        self.head = 0;
-        self.last_history_len = 0;
+        self.input_suffix.reset();
+        self.last_halted = true;
         self.stats = TmRunStats::default();
     }
 
-    fn next_action(&mut self, history: &History, player_a: bool) -> Action {
-        self.append_history(history, player_a);
+    fn next_action(&mut self, history: &History, _player_a: bool) -> Action {
+        self.sync_input(history);
+        let input_digits = self.input_suffix.msd_digits();
+        let run = run_one_sided_tm(
+            &self.transitions,
+            self.symbols,
+            self.start_state,
+            self.blank,
+            &input_digits,
+            self.max_steps_per_round,
+            false,
+        );
 
-        self.head = self.tape.len().saturating_sub(1);
-        let mut state = self.start_state;
-        let mut steps_taken: u32 = 0;
-        let mut output_symbol: Option<u8> = None;
-        let mut fallback = false;
-        let mut max_steps_hit = false;
-
-        if self.max_steps_per_round == 0 || state == 0 {
-            fallback = true;
-        } else {
-            let symbols = self.symbols as usize;
-            let max_steps = self.max_steps_per_round as usize;
-            for _ in 0..max_steps {
-                steps_taken += 1;
-                let symbol = self.tape.get(self.head).copied().unwrap_or(self.blank);
-                let idx = (state.saturating_sub(1) as usize)
-                    .saturating_mul(symbols)
-                    .saturating_add(symbol as usize);
-                let Some(trans) = self.transitions.get(idx).copied() else {
-                    fallback = true;
-                    break;
-                };
-                let rail_output =
-                    matches!(trans.move_dir, TmMove::Right) && self.head + 1 == self.tape.len();
-                if rail_output {
-                    if let Some(cell) = self.tape.get_mut(self.head) {
-                        *cell = trans.write;
-                    }
-                    output_symbol = Some(trans.write);
-                    break;
-                }
-                if trans.next == 0 {
-                    fallback = true;
-                    break;
-                }
-                if let Some(cell) = self.tape.get_mut(self.head) {
-                    *cell = trans.write;
-                }
-                match trans.move_dir {
-                    TmMove::Left => {
-                        if self.head > 0 {
-                            self.head -= 1;
-                        }
-                    }
-                    TmMove::Stay => {}
-                    TmMove::Right => {
-                        if self.head + 1 < self.tape.len() {
-                            self.head += 1;
-                        } else {
-                            output_symbol = Some(trans.write);
-                            break;
-                        }
-                    }
-                }
-                state = trans.next;
-            }
-            if output_symbol.is_none() && !fallback && steps_taken >= self.max_steps_per_round {
-                max_steps_hit = true;
-                fallback = true;
-            }
-        }
-
-        let action = if let Some(symbol) = output_symbol {
-            self.output_from_symbol(symbol)
-        } else {
-            self.fallback_action()
-        };
-
+        self.last_halted = run.halted;
         self.stats.rounds = self.stats.rounds.saturating_add(1);
-        self.stats.steps = self.stats.steps.saturating_add(steps_taken as u64);
+        self.stats.steps = self.stats.steps.saturating_add(run.steps_taken as u64);
         if self.stats.rounds == 1 {
-            self.stats.min_steps = steps_taken;
-            self.stats.max_steps = steps_taken;
+            self.stats.min_steps = run.steps_taken;
+            self.stats.max_steps = run.steps_taken;
         } else {
-            self.stats.min_steps = self.stats.min_steps.min(steps_taken);
-            self.stats.max_steps = self.stats.max_steps.max(steps_taken);
+            self.stats.min_steps = self.stats.min_steps.min(run.steps_taken);
+            self.stats.max_steps = self.stats.max_steps.max(run.steps_taken);
         }
-        if output_symbol.is_some() {
+        if run.halted {
             self.stats.output_events = self.stats.output_events.saturating_add(1);
-        }
-        if fallback {
+        } else {
             self.stats.fallback = self.stats.fallback.saturating_add(1);
-        }
-        if max_steps_hit {
-            self.stats.max_steps_hits = self.stats.max_steps_hits.saturating_add(1);
+            if matches!(run.stop_reason, TmStopReason::MaxSteps) {
+                self.stats.max_steps_hits = self.stats.max_steps_hits.saturating_add(1);
+            }
         }
 
-        action
+        if let Some(symbol) = run.output_symbol {
+            self.action_from_symbol(symbol)
+        } else {
+            Action::Defect
+        }
+    }
+
+    fn last_halted(&self) -> bool {
+        self.last_halted
     }
 
     fn tm_stats(&self) -> Option<&TmRunStats> {
         Some(&self.stats)
     }
+}
+
+#[derive(Clone, Debug)]
+struct BitWindow {
+    max_len: usize,
+    bits: VecDeque<u8>,
+}
+
+impl BitWindow {
+    fn new(max_len: usize) -> Self {
+        Self {
+            max_len: max_len.max(1),
+            bits: VecDeque::new(),
+        }
+    }
+
+    fn clear(&mut self) {
+        self.bits.clear();
+    }
+
+    fn push_round(&mut self, record: RoundRecord) {
+        self.push_bit(action_bit(record.a));
+        self.push_bit(action_bit(record.b));
+    }
+
+    fn push_bit(&mut self, bit: u8) {
+        self.bits.push_back(bit.min(1));
+        while self.bits.len() > self.max_len {
+            self.bits.pop_front();
+        }
+    }
+
+    fn to_vec(&self) -> Vec<u8> {
+        self.bits.iter().copied().collect()
+    }
+}
+
+fn sync_bit_window(window: &mut BitWindow, history: &History, last_history_len: &mut usize) {
+    let len = history.len();
+    if len < *last_history_len || len > (*last_history_len).saturating_add(1) {
+        window.clear();
+        for record in history.iter() {
+            window.push_round(record);
+        }
+        *last_history_len = len;
+        return;
+    }
+    if len == *last_history_len + 1 {
+        if let Some(last) = history.last() {
+            window.push_round(last);
+        }
+        *last_history_len = len;
+    }
+}
+
+#[derive(Clone, Debug)]
+struct InputSuffix {
+    base: u8,
+    width: usize,
+    digits_le: Vec<u8>,
+    prefix_nonzero: bool,
+    history_len: usize,
+}
+
+impl InputSuffix {
+    fn new(base: u8, width: usize) -> Self {
+        Self {
+            base: base.max(2),
+            width: width.max(1),
+            digits_le: vec![0],
+            prefix_nonzero: false,
+            history_len: 0,
+        }
+    }
+
+    fn reset(&mut self) {
+        self.digits_le.clear();
+        self.digits_le.push(0);
+        self.prefix_nonzero = false;
+        self.history_len = 0;
+    }
+
+    fn push_round(&mut self, round: RoundRecord) {
+        let pair = ((action_bit(round.a) << 1) | action_bit(round.b)) as u16;
+        self.mul_add(4, pair);
+    }
+
+    fn mul_add(&mut self, mul: u16, add: u16) {
+        let base = self.base as u16;
+        let mut carry = add;
+        for digit in &mut self.digits_le {
+            let value = (*digit as u16).saturating_mul(mul).saturating_add(carry);
+            *digit = (value % base) as u8;
+            carry = value / base;
+        }
+        while carry > 0 {
+            if self.digits_le.len() < self.width {
+                self.digits_le.push((carry % base) as u8);
+                carry /= base;
+            } else {
+                self.prefix_nonzero = true;
+                break;
+            }
+        }
+        while self.digits_le.len() > self.width {
+            let popped = self.digits_le.pop();
+            if popped.unwrap_or(0) != 0 {
+                self.prefix_nonzero = true;
+            }
+        }
+        if self.prefix_nonzero {
+            self.trim_most_significant_zeros_with_prefix();
+        } else {
+            self.trim_redundant_high_zeros();
+        }
+    }
+
+    fn msd_digits(&self) -> Vec<u8> {
+        if self.digits_le.is_empty() {
+            return vec![0];
+        }
+        let mut out = self.digits_le.iter().rev().copied().collect::<Vec<_>>();
+        if !self.prefix_nonzero {
+            while out.len() > 1 && out.first() == Some(&0) {
+                out.remove(0);
+            }
+        }
+        if out.is_empty() {
+            vec![0]
+        } else {
+            out
+        }
+    }
+
+    fn trim_redundant_high_zeros(&mut self) {
+        while self.digits_le.len() > 1 && self.digits_le.last() == Some(&0) {
+            self.digits_le.pop();
+        }
+    }
+
+    fn trim_most_significant_zeros_with_prefix(&mut self) {
+        while self.digits_le.len() > self.width {
+            self.digits_le.pop();
+        }
+        while self.digits_le.len() > 1 && self.digits_le.last() == Some(&0) {
+            if self.digits_le.len() == self.width {
+                break;
+            }
+            self.digits_le.pop();
+        }
+    }
+}
+
+fn action_bit(action: Action) -> u8 {
+    match action {
+        Action::Cooperate => 0,
+        Action::Defect => 1,
+    }
+}
+
+fn digits_in_base(input: u64, base: u8) -> Vec<u8> {
+    let base = base.max(2) as u64;
+    if input == 0 {
+        return vec![0];
+    }
+    let mut value = input;
+    let mut digits = Vec::new();
+    while value > 0 {
+        digits.push((value % base) as u8);
+        value /= base;
+    }
+    digits.reverse();
+    digits
+}
+
+fn floor_div_rem_i128(numer: i128, denom: i128) -> (i128, i128) {
+    let mut q = numer / denom;
+    let mut r = numer % denom;
+    if r < 0 {
+        q -= 1;
+        r += denom;
+    }
+    (q, r)
+}
+
+fn integer_digits_signed_abs(value: i128, base: usize, len: usize) -> Vec<usize> {
+    integer_digits_unsigned(value.unsigned_abs(), base, len)
+}
+
+fn integer_digits_unsigned(mut value: u128, base: usize, len: usize) -> Vec<usize> {
+    if len == 0 {
+        return Vec::new();
+    }
+    let base_u128 = base.max(2) as u128;
+    let mut digits = vec![0usize; len];
+    for idx in (0..len).rev() {
+        digits[idx] = (value % base_u128) as usize;
+        value /= base_u128;
+    }
+    digits
+}
+
+fn checked_pow_u128(base: u128, exp: u32) -> Option<u128> {
+    let mut value = 1u128;
+    for _ in 0..exp {
+        value = value.checked_mul(base)?;
+    }
+    Some(value)
+}
+
+fn checked_pow_usize(base: usize, exp: usize) -> Option<usize> {
+    let mut value = 1usize;
+    for _ in 0..exp {
+        value = value.checked_mul(base)?;
+    }
+    Some(value)
 }

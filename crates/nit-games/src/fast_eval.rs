@@ -1,36 +1,15 @@
 use std::collections::HashMap;
 
-use crate::config::{BuiltinKind, StrategySpec, StrategySpecKind};
+use crate::config::{StrategySpec, StrategySpecKind};
 use crate::game::{Action, Outcome, PayoffMatrix};
-use crate::strategy::InputMode;
 
 #[derive(Clone, Debug)]
 pub struct FastStrategyModel {
     pub id: String,
-    kind: FastStrategyKind,
-}
-
-#[derive(Clone, Debug)]
-enum FastStrategyKind {
-    Fsm {
-        start: u32,
-        outputs: Vec<Action>,
-        input_mode: InputMode,
-        alphabet: u32,
-        transitions: Vec<u32>,
-    },
-    Memory {
-        n: u8,
-        initial: Action,
-        table: Vec<Action>,
-        mask: u64,
-    },
-}
-
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
-enum FastState {
-    Fsm { state: u32 },
-    Memory { filled: u8, window: u64 },
+    start: u32,
+    outputs: Vec<Action>,
+    transitions: Vec<u32>,
+    alphabet: u32,
 }
 
 #[derive(Clone, Debug)]
@@ -55,142 +34,61 @@ pub struct CycleMetadata {
 impl FastStrategyModel {
     pub fn from_spec(spec: &StrategySpec) -> Option<Self> {
         match &spec.kind {
-            StrategySpecKind::Builtin { builtin } => Some(Self {
-                id: spec.id.clone(),
-                kind: builtin_model(*builtin),
-            }),
-            StrategySpecKind::Random { .. } => None,
             StrategySpecKind::Fsm {
                 start_state,
                 outputs,
-                input_mode,
                 transitions,
                 ..
             } => {
-                let resolved_mode = resolve_fsm_input_mode(*input_mode, transitions);
-                let alphabet = resolved_mode.alphabet_size() as u32;
+                if outputs.is_empty() || transitions.is_empty() {
+                    return None;
+                }
+                let alphabet = transitions.first().map(|row| row.len()).unwrap_or(0);
+                if alphabet == 0 {
+                    return None;
+                }
                 let mut flat = Vec::new();
                 for row in transitions {
+                    if row.len() != alphabet {
+                        return None;
+                    }
                     for entry in row {
                         flat.push(*entry as u32);
                     }
                 }
                 Some(Self {
                     id: spec.id.clone(),
-                    kind: FastStrategyKind::Fsm {
-                        start: *start_state as u32,
-                        outputs: outputs.clone(),
-                        input_mode: resolved_mode,
-                        alphabet,
-                        transitions: flat,
-                    },
+                    start: *start_state as u32,
+                    outputs: outputs.clone(),
+                    transitions: flat,
+                    alphabet: alphabet as u32,
                 })
             }
-            StrategySpecKind::Memory { n, initial, table } => {
-                if *n == 0 {
-                    return Some(Self {
-                        id: spec.id.clone(),
-                        kind: FastStrategyKind::Fsm {
-                            start: 0,
-                            outputs: vec![*initial],
-                            input_mode: InputMode::JointLastAction,
-                            alphabet: 4,
-                            transitions: vec![0, 0, 0, 0],
-                        },
-                    });
-                }
-                let n = (*n).min(31) as u8;
-                let mask = if n == 0 { 0 } else { (1u64 << (2 * n)) - 1 };
-                Some(Self {
-                    id: spec.id.clone(),
-                    kind: FastStrategyKind::Memory {
-                        n,
-                        initial: *initial,
-                        table: table.clone(),
-                        mask,
-                    },
-                })
-            }
-            StrategySpecKind::OneSidedTm { .. } => None,
+            StrategySpecKind::Ca { .. } | StrategySpecKind::OneSidedTm { .. } => None,
         }
     }
 
-    fn start_state(&self) -> FastState {
-        match &self.kind {
-            FastStrategyKind::Fsm { start, .. } => FastState::Fsm { state: *start },
-            FastStrategyKind::Memory { .. } => FastState::Memory {
-                filled: 0,
-                window: 0,
-            },
-        }
+    fn action(&self, state: u32) -> Action {
+        self.outputs
+            .get(state as usize)
+            .copied()
+            .unwrap_or(Action::Cooperate)
     }
 
-    fn action(&self, state: FastState) -> Action {
-        match (&self.kind, state) {
-            (FastStrategyKind::Fsm { outputs, .. }, FastState::Fsm { state }) => outputs
-                .get(state as usize)
-                .copied()
-                .unwrap_or(Action::Cooperate),
-            (
-                FastStrategyKind::Memory {
-                    n,
-                    initial,
-                    table,
-                    mask,
-                },
-                FastState::Memory { filled, window },
-            ) => {
-                if filled < *n {
-                    *initial
-                } else {
-                    let idx = (window & mask) as usize;
-                    table.get(idx).copied().unwrap_or(*initial)
-                }
-            }
-            _ => Action::Cooperate,
-        }
-    }
-
-    fn next_state(&self, state: FastState, outcome: Outcome) -> FastState {
-        let idx = outcome.index() as u64;
-        match (&self.kind, state) {
-            (
-                FastStrategyKind::Fsm {
-                    transitions,
-                    input_mode,
-                    alphabet,
-                    ..
-                },
-                FastState::Fsm { state },
-            ) => {
-                let symbol = input_symbol_from_outcome(*input_mode, outcome) as u32;
-                let idx = state.saturating_mul(*alphabet).saturating_add(symbol);
-                let next = transitions.get(idx as usize).copied().unwrap_or(state);
-                FastState::Fsm { state: next }
-            }
-            (FastStrategyKind::Memory { n, mask, .. }, FastState::Memory { filled, window }) => {
-                if *n == 0 {
-                    return FastState::Memory {
-                        filled: 0,
-                        window: 0,
-                    };
-                }
-                let new_window = ((window << 2) | idx) & mask;
-                let new_filled = filled.saturating_add(1).min(*n);
-                FastState::Memory {
-                    filled: new_filled,
-                    window: new_window,
-                }
-            }
-            _ => state,
-        }
+    fn next_state(&self, state: u32, opponent_action: Action) -> u32 {
+        let symbol = match opponent_action {
+            Action::Cooperate => 0,
+            Action::Defect => 1,
+        };
+        let idx = state.saturating_mul(self.alphabet).saturating_add(symbol);
+        self.transitions.get(idx as usize).copied().unwrap_or(state)
     }
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 struct CombinedState {
-    a: FastState,
-    b: FastState,
+    a: u32,
+    b: u32,
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -209,8 +107,8 @@ pub fn evaluate_match(
     record_cycle: bool,
 ) -> FastEvalResult {
     let mut state = CombinedState {
-        a: a.start_state(),
-        b: b.start_state(),
+        a: a.start,
+        b: b.start,
     };
     let mut seen: HashMap<CombinedState, SeenState> =
         HashMap::with_capacity(rounds.min(4096) as usize);
@@ -272,14 +170,13 @@ pub fn evaluate_match(
 
         let a_action = a.action(state.a);
         let b_action = b.action(state.b);
-        let outcome_a = Outcome::from_actions(a_action, b_action);
-        let outcome_b = Outcome::from_actions(b_action, a_action);
         let (a_payoff, b_payoff) = payoff.payoffs(a_action, b_action);
         a_total += a_payoff as i64;
         b_total += b_payoff as i64;
-        counts[outcome_a.index()] += 1;
-        state.a = a.next_state(state.a, outcome_a);
-        state.b = b.next_state(state.b, outcome_b);
+        let outcome = Outcome::from_actions(a_action, b_action);
+        counts[outcome.index()] += 1;
+        state.a = a.next_state(state.a, b_action);
+        state.b = b.next_state(state.b, a_action);
         round += 1;
     }
 
@@ -308,71 +205,5 @@ fn build_cycle_metadata(
         cycle_dd: dd,
         a_cycle_coop_rate: a_coop,
         b_cycle_coop_rate: b_coop,
-    }
-}
-
-fn resolve_fsm_input_mode(input_mode: Option<InputMode>, transitions: &[Vec<usize>]) -> InputMode {
-    if let Some(mode) = input_mode {
-        return mode;
-    }
-    let first_len = transitions.first().map(|row| row.len()).unwrap_or(2);
-    if first_len == 4 {
-        InputMode::JointLastAction
-    } else {
-        InputMode::OpponentLastAction
-    }
-}
-
-fn input_symbol_from_outcome(mode: InputMode, outcome: Outcome) -> usize {
-    match mode {
-        InputMode::OpponentLastAction => match outcome {
-            Outcome::CC | Outcome::DC => 0,
-            Outcome::CD | Outcome::DD => 1,
-        },
-        InputMode::SelfLastAction => match outcome {
-            Outcome::CC | Outcome::CD => 0,
-            Outcome::DC | Outcome::DD => 1,
-        },
-        InputMode::JointLastAction => outcome.index(),
-    }
-}
-
-fn builtin_model(builtin: BuiltinKind) -> FastStrategyKind {
-    match builtin {
-        BuiltinKind::AllC => FastStrategyKind::Fsm {
-            start: 0,
-            outputs: vec![Action::Cooperate],
-            input_mode: InputMode::JointLastAction,
-            alphabet: 4,
-            transitions: vec![0, 0, 0, 0],
-        },
-        BuiltinKind::AllD => FastStrategyKind::Fsm {
-            start: 0,
-            outputs: vec![Action::Defect],
-            input_mode: InputMode::JointLastAction,
-            alphabet: 4,
-            transitions: vec![0, 0, 0, 0],
-        },
-        BuiltinKind::TitForTat => FastStrategyKind::Fsm {
-            start: 0,
-            outputs: vec![Action::Cooperate, Action::Defect],
-            input_mode: InputMode::JointLastAction,
-            alphabet: 4,
-            transitions: vec![0, 1, 0, 1, 0, 1, 0, 1],
-        },
-        BuiltinKind::GrimTrigger => FastStrategyKind::Fsm {
-            start: 0,
-            outputs: vec![Action::Cooperate, Action::Defect],
-            input_mode: InputMode::JointLastAction,
-            alphabet: 4,
-            transitions: vec![0, 1, 0, 1, 1, 1, 1, 1],
-        },
-        BuiltinKind::WinStayLoseShift => FastStrategyKind::Fsm {
-            start: 0,
-            outputs: vec![Action::Cooperate, Action::Defect],
-            input_mode: InputMode::JointLastAction,
-            alphabet: 4,
-            transitions: vec![0, 1, 1, 0, 1, 0, 0, 1],
-        },
     }
 }

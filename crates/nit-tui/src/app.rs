@@ -471,7 +471,7 @@ fn run_loop(
                         }
                         continue;
                     }
-                    if matches!(key.code, KeyCode::Char(':')) {
+                    if is_command_prompt_open_key(&key) {
                         if let Some(action) = map_key_to_action(key, state, &mut input_state) {
                             prepare_clipboard_paste(state, &mut clipboard, &action);
                             let action_copy = action.clone();
@@ -1110,6 +1110,10 @@ fn map_key_to_action(key: KeyEvent, state: &AppState, input: &mut InputState) ->
         return Some(action);
     }
 
+    if is_command_prompt_open_key(&key) {
+        return Some(Action::CommandPromptOpen);
+    }
+
     match key {
         KeyEvent {
             code: KeyCode::Char('c'),
@@ -1131,19 +1135,7 @@ fn map_key_to_action(key: KeyEvent, state: &AppState, input: &mut InputState) ->
             modifiers: KeyModifiers::CONTROL,
             ..
         } => Some(Action::ToggleFileTree),
-        KeyEvent {
-            code: KeyCode::F(1),
-            ..
-        } => Some(if state.show_help {
-            Action::HideHelp
-        } else {
-            Action::ShowHelp
-        }),
-        KeyEvent {
-            code: KeyCode::Char('?'),
-            modifiers,
-            ..
-        } if modifiers.is_empty() || modifiers == KeyModifiers::SHIFT => {
+        key if is_help_toggle_key(&key) => {
             if state.mode != Mode::Insert {
                 Some(if state.show_help {
                     Action::HideHelp
@@ -1216,10 +1208,6 @@ fn map_key_to_action(key: KeyEvent, state: &AppState, input: &mut InputState) ->
             modifiers: KeyModifiers::NONE,
             ..
         } if is_normal_mode(state) => Some(Action::EnterVisual),
-        KeyEvent {
-            code: KeyCode::Char(':'),
-            ..
-        } => Some(Action::CommandPromptOpen),
         KeyEvent {
             code: KeyCode::Char('a'),
             modifiers: KeyModifiers::NONE,
@@ -1960,6 +1948,38 @@ fn is_global_quit_key(key: &KeyEvent) -> bool {
             modifiers,
             ..
         } if modifiers.contains(KeyModifiers::CONTROL)
+    )
+}
+
+fn is_command_prompt_open_key(key: &KeyEvent) -> bool {
+    match key {
+        KeyEvent {
+            code: KeyCode::Char(':'),
+            ..
+        } => true,
+        KeyEvent {
+            code: KeyCode::Char(';'),
+            modifiers,
+            ..
+        } => modifiers.contains(KeyModifiers::SHIFT),
+        _ => false,
+    }
+}
+
+fn is_help_toggle_key(key: &KeyEvent) -> bool {
+    matches!(
+        key,
+        KeyEvent {
+            code: KeyCode::F(1),
+            ..
+        }
+    ) || matches!(
+        key,
+        KeyEvent {
+            code: KeyCode::Char('?'),
+            modifiers,
+            ..
+        } if modifiers.is_empty() || *modifiers == KeyModifiers::SHIFT
     )
 }
 
@@ -3778,6 +3798,9 @@ fn handle_file_tree_key(
     if ctrl_nav_dir(key).is_some() {
         return false;
     }
+    if is_command_prompt_open_key(key) || is_help_toggle_key(key) {
+        return false;
+    }
 
     if matches!(
         key,
@@ -4761,7 +4784,7 @@ fn handle_tm_sim_popup_key(
     if is_global_quit_key(key) {
         return false;
     }
-    if matches!(key.code, KeyCode::Char(':')) {
+    if is_command_prompt_open_key(key) {
         return false;
     }
     match key.code {
@@ -5029,5 +5052,33 @@ mod tests {
 
         let null_code = KeyEvent::new(KeyCode::Null, KeyModifiers::empty());
         assert!(is_job_pause_key(&null_code));
+    }
+
+    #[test]
+    fn command_prompt_open_key_matches_colon_and_shift_semicolon() {
+        let colon = KeyEvent::new(KeyCode::Char(':'), KeyModifiers::empty());
+        assert!(is_command_prompt_open_key(&colon));
+
+        let semicolon_shift = KeyEvent::new(KeyCode::Char(';'), KeyModifiers::SHIFT);
+        assert!(is_command_prompt_open_key(&semicolon_shift));
+    }
+
+    #[test]
+    fn file_tree_does_not_consume_command_or_help_toggle_keys() {
+        let mut state = state_for_test();
+        state.file_tree.open = true;
+        let mut syntax = SyntaxRuntime::new(state.settings.highlight.clone());
+        let area = ratatui::layout::Rect {
+            x: 0,
+            y: 0,
+            width: 80,
+            height: 24,
+        };
+
+        let colon = KeyEvent::new(KeyCode::Char(':'), KeyModifiers::empty());
+        assert!(!handle_file_tree_key(&colon, &mut state, &mut syntax, area));
+
+        let help = KeyEvent::new(KeyCode::Char('?'), KeyModifiers::SHIFT);
+        assert!(!handle_file_tree_key(&help, &mut state, &mut syntax, area));
     }
 }

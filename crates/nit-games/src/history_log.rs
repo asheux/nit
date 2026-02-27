@@ -19,6 +19,10 @@ pub struct MatchHistory {
     pub rounds: u32,
     pub a_moves: String,
     pub b_moves: String,
+    #[serde(default)]
+    pub a_halted: String,
+    #[serde(default)]
+    pub b_halted: String,
     pub a_incoming: String,
     pub b_incoming: String,
     pub score_idx: String,

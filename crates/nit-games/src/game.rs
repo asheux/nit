@@ -93,4 +93,44 @@ impl PayoffMatrix {
         let cell = self.matrix[a_idx][b_idx];
         (cell[0], cell[1])
     }
+
+    pub fn min_max(self) -> (i32, i32) {
+        let mut min_value = i32::MAX;
+        let mut max_value = i32::MIN;
+        for row in self.matrix {
+            for cell in row {
+                for value in cell {
+                    min_value = min_value.min(value);
+                    max_value = max_value.max(value);
+                }
+            }
+        }
+        if min_value == max_value {
+            if min_value > 0 {
+                min_value = 0;
+            } else {
+                min_value = min_value.saturating_sub(1);
+            }
+        }
+        (min_value, max_value)
+    }
+}
+
+pub fn payoffs_with_timeouts(
+    payoff: PayoffMatrix,
+    a_action: Action,
+    b_action: Action,
+    a_halted: bool,
+    b_halted: bool,
+) -> (i32, i32) {
+    if a_halted && b_halted {
+        return payoff.payoffs(a_action, b_action);
+    }
+    let (lose, win) = payoff.min_max();
+    match (a_halted, b_halted) {
+        (true, true) => payoff.payoffs(a_action, b_action),
+        (false, true) => (lose, win),
+        (true, false) => (win, lose),
+        (false, false) => (lose, lose),
+    }
 }

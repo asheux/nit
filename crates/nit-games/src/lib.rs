@@ -36,9 +36,10 @@ pub use output::{
     RUN_SUMMARY_SCHEMA_VERSION,
 };
 pub use strategy::{
-    AlwaysCooperate, AlwaysDefect, FsmStrategy, GrimTrigger, InputMode, MemoryStrategy,
-    OneSidedTmStrategy, RandomStrategy, Strategy, StrategyKind, TitForTat, TmMove, TmRunStats,
-    TmTransition, WinStayLoseShift,
+    decode_fsm_notebook_index, decode_tm_rule_code_wolfram, fsm_count, history_to_input_u64,
+    run_one_sided_tm, run_one_sided_tm_from_integer, tm_max_index, CaStrategy, FsmStrategy,
+    InputMode, OneSidedTmStrategy, Strategy, StrategyKind, TmMove, TmRunResult, TmRunStats,
+    TmStopReason, TmTrace, TmTraceStep, TmTransition,
 };
 pub use tournament::{
     KernelRunMode, MatchResult, MatchSnapshot, Parallelism, TournamentKernel, TournamentProgress,

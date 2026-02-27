@@ -24,6 +24,7 @@ impl FsmDefinition {
                 outputs: self.outputs.clone(),
                 input_mode: Some(self.input_mode),
                 transitions: self.transitions.clone(),
+                index: None,
             },
         }
     }

@@ -30,9 +30,22 @@ fn build_config(
 ) -> NormalizedConfig {
     let specs: Vec<StrategySpec> = (0..strategies)
         .map(|idx| StrategySpec {
-            id: format!("rand{idx}"),
+            id: format!("fsm{idx}"),
             name: None,
-            kind: StrategySpecKind::Random { p_cooperate: 0.5 },
+            kind: StrategySpecKind::Fsm {
+                num_states: 2,
+                start_state: 0,
+                outputs: vec![
+                    nit_games::game::Action::Cooperate,
+                    nit_games::game::Action::Defect,
+                ],
+                input_mode: Some(InputMode::OpponentLastAction),
+                transitions: vec![
+                    vec![(idx % 2) as usize, ((idx / 2) % 2) as usize],
+                    vec![((idx / 2) % 2) as usize, (idx % 2) as usize],
+                ],
+                index: None,
+            },
         })
         .collect();
 
@@ -62,49 +75,31 @@ fn build_config(
 fn build_deterministic_config(rounds: u32) -> NormalizedConfig {
     let specs = vec![
         StrategySpec {
-            id: "allc".into(),
+            id: "fsm_allc".into(),
             name: None,
-            kind: StrategySpecKind::Builtin {
-                builtin: nit_games::config::BuiltinKind::AllC,
+            kind: StrategySpecKind::Fsm {
+                num_states: 1,
+                start_state: 0,
+                outputs: vec![nit_games::game::Action::Cooperate],
+                input_mode: Some(InputMode::OpponentLastAction),
+                transitions: vec![vec![0, 0]],
+                index: None,
             },
         },
         StrategySpec {
-            id: "tft".into(),
+            id: "fsm_alld".into(),
             name: None,
-            kind: StrategySpecKind::Builtin {
-                builtin: nit_games::config::BuiltinKind::TitForTat,
+            kind: StrategySpecKind::Fsm {
+                num_states: 1,
+                start_state: 0,
+                outputs: vec![nit_games::game::Action::Defect],
+                input_mode: Some(InputMode::OpponentLastAction),
+                transitions: vec![vec![0, 0]],
+                index: None,
             },
         },
         StrategySpec {
-            id: "grim".into(),
-            name: None,
-            kind: StrategySpecKind::Builtin {
-                builtin: nit_games::config::BuiltinKind::GrimTrigger,
-            },
-        },
-        StrategySpec {
-            id: "wsls".into(),
-            name: None,
-            kind: StrategySpecKind::Builtin {
-                builtin: nit_games::config::BuiltinKind::WinStayLoseShift,
-            },
-        },
-        StrategySpec {
-            id: "mem1".into(),
-            name: None,
-            kind: StrategySpecKind::Memory {
-                n: 1,
-                initial: nit_games::game::Action::Cooperate,
-                table: vec![
-                    nit_games::game::Action::Cooperate,
-                    nit_games::game::Action::Defect,
-                    nit_games::game::Action::Defect,
-                    nit_games::game::Action::Cooperate,
-                ],
-            },
-        },
-        StrategySpec {
-            id: "fsm".into(),
+            id: "fsm_tft".into(),
             name: None,
             kind: StrategySpecKind::Fsm {
                 num_states: 2,
@@ -113,8 +108,64 @@ fn build_deterministic_config(rounds: u32) -> NormalizedConfig {
                     nit_games::game::Action::Cooperate,
                     nit_games::game::Action::Defect,
                 ],
-                input_mode: Some(InputMode::JointLastAction),
-                transitions: vec![vec![0, 1, 0, 1], vec![1, 1, 1, 1]],
+                input_mode: Some(InputMode::OpponentLastAction),
+                transitions: vec![vec![0, 1], vec![0, 1]],
+                index: None,
+            },
+        },
+        StrategySpec {
+            id: "fsm_anti_tft".into(),
+            name: None,
+            kind: StrategySpecKind::Fsm {
+                num_states: 2,
+                start_state: 0,
+                outputs: vec![
+                    nit_games::game::Action::Cooperate,
+                    nit_games::game::Action::Defect,
+                ],
+                input_mode: Some(InputMode::OpponentLastAction),
+                transitions: vec![vec![1, 0], vec![1, 0]],
+                index: None,
+            },
+        },
+        StrategySpec {
+            id: "ca30".into(),
+            name: None,
+            kind: StrategySpecKind::Ca {
+                n: 30,
+                k: 2,
+                r: 1.0,
+                t: 2,
+            },
+        },
+        StrategySpec {
+            id: "tm".into(),
+            name: None,
+            kind: StrategySpecKind::OneSidedTm {
+                states: 1,
+                symbols: 2,
+                start_state: 1,
+                blank: 0,
+                fallback_symbol: Some(0),
+                max_steps_per_round: 32,
+                input_mode: InputMode::OpponentLastAction,
+                output_map: vec![
+                    nit_games::game::Action::Cooperate,
+                    nit_games::game::Action::Defect,
+                ],
+                transitions: vec![
+                    TmTransition {
+                        write: 0,
+                        move_dir: TmMove::Right,
+                        next: 1,
+                    },
+                    TmTransition {
+                        write: 1,
+                        move_dir: TmMove::Right,
+                        next: 1,
+                    },
+                ],
+                rule_code: None,
             },
         },
     ];
@@ -157,8 +208,9 @@ fn build_fsm_heavy_config(strategies: usize, rounds: u32) -> NormalizedConfig {
                     nit_games::game::Action::Cooperate,
                     nit_games::game::Action::Defect,
                 ],
-                input_mode: Some(InputMode::JointLastAction),
-                transitions: vec![vec![a, b, a, b], vec![b, a, b, a]],
+                input_mode: Some(InputMode::OpponentLastAction),
+                transitions: vec![vec![a, b], vec![b, a]],
+                index: None,
             },
         });
     }
@@ -302,18 +354,21 @@ fn build_tm_heavy_config(strategies: usize, rounds: u32, max_steps: u32) -> Norm
 }
 
 fn build_baseline_deterministic(strategies: usize, rounds: u32) -> NormalizedConfig {
-    let builtins = [
-        nit_games::config::BuiltinKind::AllC,
-        nit_games::config::BuiltinKind::AllD,
-        nit_games::config::BuiltinKind::TitForTat,
-        nit_games::config::BuiltinKind::WinStayLoseShift,
-    ];
     let specs = (0..strategies)
         .map(|idx| StrategySpec {
             id: format!("base{idx}"),
             name: None,
-            kind: StrategySpecKind::Builtin {
-                builtin: builtins[idx % builtins.len()],
+            kind: StrategySpecKind::Fsm {
+                num_states: 1,
+                start_state: 0,
+                outputs: vec![if idx % 2 == 0 {
+                    nit_games::game::Action::Cooperate
+                } else {
+                    nit_games::game::Action::Defect
+                }],
+                input_mode: Some(InputMode::OpponentLastAction),
+                transitions: vec![vec![0, 0]],
+                index: None,
             },
         })
         .collect();
@@ -469,30 +524,62 @@ fn bench_fast_eval(c: &mut Criterion) {
 
     let mut mixed = build_config(12, 500, 1, false);
     mixed.engine.fast_eval = true;
-    // Replace a few random strategies with deterministic ones.
+    // Mix FSM/CA/TM families in one run.
     if mixed.strategies.len() >= 4 {
-        mixed.strategies[0].kind = StrategySpecKind::Builtin {
-            builtin: nit_games::config::BuiltinKind::AllC,
+        mixed.strategies[0].kind = StrategySpecKind::Fsm {
+            num_states: 1,
+            start_state: 0,
+            outputs: vec![nit_games::game::Action::Cooperate],
+            input_mode: Some(InputMode::OpponentLastAction),
+            transitions: vec![vec![0, 0]],
+            index: None,
         };
-        mixed.strategies[1].kind = StrategySpecKind::Builtin {
-            builtin: nit_games::config::BuiltinKind::TitForTat,
-        };
-        mixed.strategies[2].kind = StrategySpecKind::Builtin {
-            builtin: nit_games::config::BuiltinKind::GrimTrigger,
-        };
-        mixed.strategies[3].kind = StrategySpecKind::Memory {
-            n: 1,
-            initial: nit_games::game::Action::Cooperate,
-            table: vec![
+        mixed.strategies[1].kind = StrategySpecKind::Fsm {
+            num_states: 2,
+            start_state: 0,
+            outputs: vec![
                 nit_games::game::Action::Cooperate,
                 nit_games::game::Action::Defect,
-                nit_games::game::Action::Defect,
-                nit_games::game::Action::Cooperate,
             ],
+            input_mode: Some(InputMode::OpponentLastAction),
+            transitions: vec![vec![0, 1], vec![0, 1]],
+            index: None,
+        };
+        mixed.strategies[2].kind = StrategySpecKind::Ca {
+            n: 30,
+            k: 2,
+            r: 1.0,
+            t: 3,
+        };
+        mixed.strategies[3].kind = StrategySpecKind::OneSidedTm {
+            states: 1,
+            symbols: 2,
+            start_state: 1,
+            blank: 0,
+            fallback_symbol: Some(0),
+            max_steps_per_round: 32,
+            input_mode: InputMode::OpponentLastAction,
+            output_map: vec![
+                nit_games::game::Action::Cooperate,
+                nit_games::game::Action::Defect,
+            ],
+            transitions: vec![
+                TmTransition {
+                    write: 0,
+                    move_dir: TmMove::Right,
+                    next: 1,
+                },
+                TmTransition {
+                    write: 1,
+                    move_dir: TmMove::Right,
+                    next: 1,
+                },
+            ],
+            rule_code: None,
         };
     }
     let kernel_mixed = TournamentKernel::new(mixed);
-    group.bench_function("mixed_random", |b| {
+    group.bench_function("mixed_fsm_ca_tm", |b| {
         b.iter(|| {
             let _ = kernel_mixed.run(KernelRunMode::Sequential {
                 event_writer: None,

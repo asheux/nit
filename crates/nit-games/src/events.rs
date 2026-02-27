@@ -44,6 +44,10 @@ pub enum GameEvent {
         round: u32,
         a_action: char,
         b_action: char,
+        #[serde(default = "default_true")]
+        a_halted: bool,
+        #[serde(default = "default_true")]
+        b_halted: bool,
         a_payoff: i32,
         b_payoff: i32,
     },
@@ -62,6 +66,10 @@ pub enum GameEvent {
     TournamentEnd {
         timestamp: String,
     },
+}
+
+fn default_true() -> bool {
+    true
 }
 
 pub struct EventWriter {

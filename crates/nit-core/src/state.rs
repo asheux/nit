@@ -1599,11 +1599,16 @@ pub fn apply_action(state: &mut AppState, action: Action) -> ActionOutcome {
 
 fn handle_command_line(state: &mut AppState, input: &str) -> bool {
     let trimmed = input.trim();
-    let cmd = trimmed.to_lowercase();
+    let cmd = trimmed.trim_start_matches(':').trim().to_lowercase();
     if cmd.is_empty() {
         return false;
     }
-    let tokens: Vec<&str> = cmd.split_whitespace().collect();
+    let normalized = cmd
+        .split_whitespace()
+        .map(|token| token.trim_matches(':'))
+        .filter(|token| !token.is_empty())
+        .collect::<Vec<_>>();
+    let tokens: Vec<&str> = normalized;
     if let Some(target_lab) = lab_from_tokens(&tokens) {
         if target_lab != state.app_kind {
             state.status = Some(format!(
@@ -1615,6 +1620,12 @@ fn handle_command_line(state: &mut AppState, input: &str) -> bool {
             return false;
         }
     }
+    if is_help_command_tokens(&tokens) {
+        state.show_help = true;
+        state.help_scroll = 0;
+        state.status = Some("Help opened".into());
+        return false;
+    }
     match tokens.as_slice() {
         ["q"] | ["quit"] | ["exit"] => {
             if state.editor_buffer().is_dirty() {
@@ -1623,12 +1634,6 @@ fn handle_command_line(state: &mut AppState, input: &str) -> bool {
             } else {
                 true
             }
-        }
-        ["help"] | ["commands"] | ["help", "commands"] | ["commands", "help"] => {
-            state.show_help = true;
-            state.help_scroll = 0;
-            state.status = Some("Help opened".into());
-            false
         }
         ["tree"] | ["nittree"] | ["explore"] => {
             state.file_tree.open = !state.file_tree.open;
@@ -1803,7 +1808,7 @@ fn handle_command_line(state: &mut AppState, input: &str) -> bool {
                 );
                 let output_map: Vec<nit_games::game::Action> = (0..symbols)
                     .map(|idx| {
-                        if idx % 2 == 0 {
+                        if idx == 0 {
                             nit_games::game::Action::Cooperate
                         } else {
                             nit_games::game::Action::Defect
@@ -2107,7 +2112,7 @@ fn handle_command_line(state: &mut AppState, input: &str) -> bool {
                 );
                 let output_map: Vec<nit_games::game::Action> = (0..symbols)
                     .map(|idx| {
-                        if idx % 2 == 0 {
+                        if idx == 0 {
                             nit_games::game::Action::Cooperate
                         } else {
                             nit_games::game::Action::Defect
@@ -2371,6 +2376,23 @@ fn handle_command_line(state: &mut AppState, input: &str) -> bool {
             false
         }
     }
+}
+
+fn is_help_command_tokens(tokens: &[&str]) -> bool {
+    if tokens.is_empty() {
+        return false;
+    }
+    let mut saw_keyword = false;
+    let mut saw_question = false;
+    for token in tokens {
+        match *token {
+            "help" | "commands" => saw_keyword = true,
+            "?" => saw_question = true,
+            "-" | "/" | "|" | "–" | "—" => {}
+            _ => return false,
+        }
+    }
+    saw_keyword || saw_question
 }
 
 fn apply_rule_selection(state: &mut AppState, selected: SelectedRule, persist: bool) {
@@ -2777,5 +2799,48 @@ mod tests {
         assert!(state.editor_buffer().is_dirty());
         assert!(!handle_command_line(&mut state, "q"));
         assert!(matches!(state.prompt, Some(Prompt::ConfirmQuit)));
+    }
+
+    #[test]
+    fn command_help_dash_question_opens_help_popup() {
+        let root = temp_dir("cmd-help-dash");
+        let mut state = AppState::new(
+            root.clone(),
+            Buffer::empty("x", None),
+            Buffer::empty("n", None),
+        );
+        assert!(!state.show_help);
+        assert!(!handle_command_line(&mut state, "help - ?"));
+        assert!(state.show_help);
+        assert_eq!(state.help_scroll, 0);
+    }
+
+    #[test]
+    fn command_question_mark_opens_help_popup() {
+        let root = temp_dir("cmd-help-qmark");
+        let mut state = AppState::new(
+            root.clone(),
+            Buffer::empty("x", None),
+            Buffer::empty("n", None),
+        );
+        assert!(!state.show_help);
+        assert!(!handle_command_line(&mut state, "?"));
+        assert!(state.show_help);
+        assert_eq!(state.help_scroll, 0);
+    }
+
+    #[test]
+    fn command_colon_help_dash_question_opens_help_with_file_tree_open() {
+        let root = temp_dir("cmd-help-colon-tree");
+        let mut state = AppState::new(
+            root.clone(),
+            Buffer::empty("x", None),
+            Buffer::empty("n", None),
+        );
+        state.file_tree.open = true;
+        assert!(!state.show_help);
+        assert!(!handle_command_line(&mut state, ":help - ?"));
+        assert!(state.show_help);
+        assert_eq!(state.help_scroll, 0);
     }
 }

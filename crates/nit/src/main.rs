@@ -11,8 +11,7 @@ use std::thread;
 use anyhow::Context;
 use clap::{Parser, Subcommand, ValueEnum};
 use nit_core::{io as core_io, AppKind, Buffer, LabId, Mode, PaneId, SelectedRule};
-use nit_games::config::StrategySpecKind;
-use nit_games::config::{BuiltinKind, EngineMode};
+use nit_games::config::EngineMode;
 use nit_games::events::{EventWriter, GameEvent};
 use nit_games::history_log::MatchHistory;
 use nit_games::output::{
@@ -524,56 +523,42 @@ fast_eval = true
 enabled = false
 tm_step_cost = 0.0
 fsm_state_cost = 0.0
-memory_n_cost = 0.0
 
 [[strategy]]
-id = "allc"
-type = "builtin"
-name = "Always Cooperate"
-
-[[strategy]]
-id = "alld"
-type = "builtin"
-name = "Always Defect"
-
-[[strategy]]
-id = "tft"
-type = "builtin"
-name = "Tit For Tat"
-
-[[strategy]]
-id = "grim"
-type = "builtin"
-name = "Grim Trigger"
-
-[[strategy]]
-id = "pavlov"
-type = "builtin"
-name = "Win Stay Lose Shift"
-
-[[strategy]]
-id = "rand50"
-type = "random"
-p_cooperate = 0.5
-
-[[strategy]]
-id = "fsm1"
-type = "fsm"
-num_states = 2
+id = "fsm_tft"
+type = "auto"
+states = 2
 start_state = 0
 outputs = ["C", "D"]
-input_mode = "joint_last_action"
 transitions = [
-  [0, 1, 0, 1],
-  [1, 1, 0, 0],
+  [0, 1],
+  [0, 1],
 ]
 
 [[strategy]]
-id = "mem1"
-type = "memory"
-n = 1
-initial = "C"
-table = ["C", "D", "D", "C"]
+id = "fsm_index_allc"
+type = "fsm"
+index = 1
+num_states = 1
+k = 2
+
+[[strategy]]
+id = "ca_rule30"
+type = "ca"
+n = 30
+k = 2
+r = 1
+t = 3
+
+[[strategy]]
+id = "tm_rule_3111"
+type = "auto"
+states = 2
+symbols = 2
+start_state = 1
+blank = 0
+max_steps_per_round = 128
+rule_code = 3111
 "#
 }
 
@@ -750,9 +735,6 @@ fn append_strategies_from_ndjson(
                 line_idx + 1
             )
         })?;
-        if let StrategySpecKind::Memory { n, .. } = spec.kind {
-            config.max_memory_n = config.max_memory_n.max(n);
-        }
         config.strategies.push(spec);
     }
     Ok(())
@@ -1475,23 +1457,30 @@ fn build_strategy_graph(intro: &StrategyIntrospection) -> anyhow::Result<Strateg
         StrategyIntrospectionParameters::Fsm {
             states,
             start_state,
-            input_mode,
             outputs,
             transitions,
+            index,
+            ..
         } => Ok(build_fsm_graph(
             intro.id.clone(),
             intro.kind.clone(),
             *states,
             *start_state,
-            *input_mode,
             outputs,
             transitions,
-            None,
+            index.map(|value| vec![format!("notebook_index={value}")]),
+        )),
+        StrategyIntrospectionParameters::Ca { n, k, r, t } => Ok(build_ca_graph(
+            intro.id.clone(),
+            intro.kind.clone(),
+            *n,
+            *k,
+            *r,
+            *t,
         )),
         StrategyIntrospectionParameters::OneSidedTm {
             states,
             start_state,
-            input_mode,
             transitions,
             ..
         } => Ok(build_tm_graph(
@@ -1499,30 +1488,7 @@ fn build_strategy_graph(intro: &StrategyIntrospection) -> anyhow::Result<Strateg
             intro.kind.clone(),
             *states,
             *start_state,
-            *input_mode,
             transitions,
-        )),
-        StrategyIntrospectionParameters::Memory { n, initial, table } => {
-            build_memory_graph(intro.id.clone(), intro.kind.clone(), *n, *initial, table)
-        }
-        StrategyIntrospectionParameters::Builtin { builtin } => {
-            let (start_state, input_mode, outputs, transitions) = builtin_to_fsm(*builtin);
-            let notes = vec![format!("builtin expanded as fsm ({builtin:?})")];
-            Ok(build_fsm_graph(
-                intro.id.clone(),
-                intro.kind.clone(),
-                outputs.len(),
-                start_state,
-                input_mode,
-                &outputs,
-                &transitions,
-                Some(notes),
-            ))
-        }
-        StrategyIntrospectionParameters::Random { p_cooperate } => Ok(build_random_graph(
-            intro.id.clone(),
-            intro.kind.clone(),
-            *p_cooperate,
         )),
     }
 }
@@ -1532,7 +1498,6 @@ fn build_fsm_graph(
     kind: StrategyIntrospectionKind,
     states: usize,
     start_state: usize,
-    input_mode: InputMode,
     outputs: &[Action],
     transitions: &[Vec<usize>],
     notes: Option<Vec<String>>,
@@ -1561,7 +1526,7 @@ fn build_fsm_graph(
         directed: true,
         strategy_id,
         kind,
-        input_mode: Some(input_mode),
+        input_mode: Some(InputMode::OpponentLastAction),
         start_state: Some(start_state.to_string()),
         nodes,
         edges,
@@ -1574,7 +1539,6 @@ fn build_tm_graph(
     kind: StrategyIntrospectionKind,
     states: u16,
     start_state: u16,
-    input_mode: InputMode,
     transitions: &[TmTransitionRecord],
 ) -> StrategyGraph {
     let mut nodes = Vec::new();
@@ -1611,7 +1575,7 @@ fn build_tm_graph(
         directed: true,
         strategy_id,
         kind,
-        input_mode: Some(input_mode),
+        input_mode: None,
         start_state: Some(start_state.to_string()),
         nodes,
         edges,
@@ -1622,132 +1586,25 @@ fn build_tm_graph(
     }
 }
 
-fn build_memory_graph(
+fn build_ca_graph(
     strategy_id: String,
     kind: StrategyIntrospectionKind,
-    n: usize,
-    initial: Action,
-    table: &[Action],
-) -> anyhow::Result<StrategyGraph> {
-    let states = 4usize
-        .checked_pow(n as u32)
-        .ok_or_else(|| anyhow::anyhow!("memory-n graph too large"))?;
-    let mask = if n == 0 {
-        0u64
-    } else {
-        let bits = 2usize
-            .checked_mul(n)
-            .ok_or_else(|| anyhow::anyhow!("memory-n graph too large"))?;
-        if bits >= 63 {
-            return Err(anyhow::anyhow!("memory-n graph too large"));
-        }
-        (1u64 << bits) - 1
-    };
-    let mut nodes = Vec::new();
-    for idx in 0..states {
-        let output = table.get(idx).copied().unwrap_or(initial);
-        nodes.push(GraphNode {
-            id: idx.to_string(),
-            label: format!("{idx}({})", output.as_char()),
-        });
-    }
-    let mut edges = Vec::new();
-    for idx in 0..states {
-        let idx_u64 = idx as u64;
-        for input in 0..4usize {
-            let next = if n == 0 {
-                0
-            } else {
-                (((idx_u64 << 2) | input as u64) & mask) as usize
-            };
-            let label = input.to_string();
-            edges.push(GraphEdge {
-                from: idx.to_string(),
-                to: next.to_string(),
-                color: edge_color_for_label(&label),
-                label,
-            });
-        }
-    }
-    Ok(StrategyGraph {
-        directed: true,
-        strategy_id,
-        kind,
-        input_mode: Some(InputMode::JointLastAction),
-        start_state: Some("0".to_string()),
-        nodes,
-        edges,
-        notes: Some(vec![
-            "memory-n graph shows full-history states".to_string(),
-            "initial action used until history length n".to_string(),
-        ]),
-    })
-}
-
-fn build_random_graph(
-    strategy_id: String,
-    kind: StrategyIntrospectionKind,
-    p_cooperate: f32,
+    n: u64,
+    k: u8,
+    r: f32,
+    t: u32,
 ) -> StrategyGraph {
-    let label = format!("0(p={:.3})", p_cooperate);
-    let nodes = vec![GraphNode {
-        id: "0".to_string(),
-        label,
-    }];
-    let mut edges = Vec::new();
-    for input in 0..4usize {
-        let label = input.to_string();
-        edges.push(GraphEdge {
-            from: "0".to_string(),
-            to: "0".to_string(),
-            color: edge_color_for_label(&label),
-            label,
-        });
-    }
     StrategyGraph {
         directed: true,
         strategy_id,
         kind,
-        input_mode: Some(InputMode::JointLastAction),
-        start_state: Some("0".to_string()),
-        nodes,
-        edges,
-        notes: Some(vec!["random output; self-looped graph".to_string()]),
-    }
-}
-
-fn builtin_to_fsm(builtin: BuiltinKind) -> (usize, InputMode, Vec<Action>, Vec<Vec<usize>>) {
-    match builtin {
-        BuiltinKind::AllC => (
-            0,
-            InputMode::JointLastAction,
-            vec![Action::Cooperate],
-            vec![vec![0, 0, 0, 0]],
-        ),
-        BuiltinKind::AllD => (
-            0,
-            InputMode::JointLastAction,
-            vec![Action::Defect],
-            vec![vec![0, 0, 0, 0]],
-        ),
-        BuiltinKind::TitForTat => (
-            0,
-            InputMode::JointLastAction,
-            vec![Action::Cooperate, Action::Defect],
-            vec![vec![0, 1, 0, 1], vec![0, 1, 0, 1]],
-        ),
-        BuiltinKind::GrimTrigger => (
-            0,
-            InputMode::JointLastAction,
-            vec![Action::Cooperate, Action::Defect],
-            vec![vec![0, 1, 0, 1], vec![1, 1, 1, 1]],
-        ),
-        BuiltinKind::WinStayLoseShift => (
-            0,
-            InputMode::JointLastAction,
-            vec![Action::Cooperate, Action::Defect],
-            vec![vec![0, 1, 1, 0], vec![1, 0, 0, 1]],
-        ),
+        input_mode: None,
+        start_state: None,
+        nodes: Vec::new(),
+        edges: Vec::new(),
+        notes: Some(vec![format!(
+            "CA rule tuple {{n={n}, k={k}, r={r}}}, steps={t}"
+        )]),
     }
 }
 

@@ -1,20 +1,16 @@
 use crate::config::{
-    BuiltinKind, NormalizedConfig, ParallelismConfig, ParallelismMode, StrategySpec,
-    StrategySpecKind,
+    NormalizedConfig, ParallelismConfig, ParallelismMode, StrategySpec, StrategySpecKind,
 };
 use crate::events::{EventWriter, GameEvent};
 use crate::fast_eval::{evaluate_match, CycleMetadata, FastStrategyModel};
-use crate::game::{Action, Outcome};
+use crate::game::{payoffs_with_timeouts, Action, Outcome};
 use crate::history::History;
 use crate::history_log::{HistoryWriter, MatchHistory};
 use crate::output::{
     DominanceEdge, PairwiseResult, RunSummary, StrategyDefinition, StrategyResult,
     TournamentResults,
 };
-use crate::strategy::{
-    AlwaysCooperate, AlwaysDefect, FsmStrategy, GrimTrigger, MemoryStrategy, OneSidedTmStrategy,
-    RandomStrategy, Strategy, TitForTat, TmRunStats, WinStayLoseShift,
-};
+use crate::strategy::{CaStrategy, FsmStrategy, OneSidedTmStrategy, Strategy, TmRunStats};
 use nit_utils::hashing::{stable_hash_bytes, XorShift64};
 use rayon::prelude::*;
 use rayon::ThreadPoolBuilder;
@@ -164,6 +160,8 @@ struct MatchSession {
     noise_rng: XorShift64,
     history_actions_a: String,
     history_actions_b: String,
+    history_halted_a: String,
+    history_halted_b: String,
     history_scores: String,
     history_payoffs: Vec<[i32; 2]>,
     round: u32,
@@ -180,6 +178,8 @@ struct MatchSession {
 struct RoundSnapshot {
     a_action: Action,
     b_action: Action,
+    a_halted: bool,
+    b_halted: bool,
     a_payoff: i32,
     b_payoff: i32,
 }
@@ -268,12 +268,7 @@ fn adjusted_total_for_match(
                 penalty += cost.fsm_state_cost * states as f64 * rounds as f64;
             }
         }
-        StrategySpecKind::Memory { n, .. } => {
-            if cost.memory_n_cost != 0.0 {
-                penalty += cost.memory_n_cost * *n as f64 * rounds as f64;
-            }
-        }
-        _ => {}
+        StrategySpecKind::Ca { .. } => {}
     }
     raw_total as f64 - penalty
 }
@@ -552,6 +547,8 @@ impl TournamentRunner {
         let b = self.strategies[session.matchup.b_idx].id.clone();
         let a_moves = session.history_actions_a.clone();
         let b_moves = session.history_actions_b.clone();
+        let a_halted = session.history_halted_a.clone();
+        let b_halted = session.history_halted_b.clone();
         let include_tm_metrics = self.config.history.include_cycle_metadata;
         let a_tm_metrics = if include_tm_metrics {
             session.a_strategy.tm_stats().map(tm_metrics_from_stats)
@@ -575,6 +572,8 @@ impl TournamentRunner {
             rounds: session.rounds_total,
             a_moves: a_moves.clone(),
             b_moves: b_moves.clone(),
+            a_halted,
+            b_halted,
             a_incoming: b_moves,
             b_incoming: a_moves,
             score_idx: session.history_scores.clone(),
@@ -625,6 +624,8 @@ impl TournamentRunner {
             round: session.round,
             a_action: outcome.snapshot.a_action.as_char(),
             b_action: outcome.snapshot.b_action.as_char(),
+            a_halted: outcome.snapshot.a_halted,
+            b_halted: outcome.snapshot.b_halted,
             a_payoff: outcome.snapshot.a_payoff,
             b_payoff: outcome.snapshot.b_payoff,
         });
@@ -633,36 +634,36 @@ impl TournamentRunner {
 }
 
 fn play_round_core(session: &mut MatchSession, config: &NormalizedConfig) -> RoundOutcome {
-    let (a_action, b_action, a_crash_now, b_crash_now) = {
+    let (a_action, b_action, a_halted, b_halted, a_crash_now, b_crash_now) = {
         let mut a_crash = false;
         let mut b_crash = false;
-        let a_action = if session.a_crashed {
-            Action::Defect
+        let (a_action, a_halted) = if session.a_crashed {
+            (Action::Defect, false)
         } else {
             match catch_unwind(AssertUnwindSafe(|| {
                 session.a_strategy.next_action(&session.history, true)
             })) {
-                Ok(action) => action,
+                Ok(action) => (action, session.a_strategy.last_halted()),
                 Err(_) => {
                     a_crash = true;
-                    Action::Defect
+                    (Action::Defect, false)
                 }
             }
         };
-        let b_action = if session.b_crashed {
-            Action::Defect
+        let (b_action, b_halted) = if session.b_crashed {
+            (Action::Defect, false)
         } else {
             match catch_unwind(AssertUnwindSafe(|| {
                 session.b_strategy.next_action(&session.history, false)
             })) {
-                Ok(action) => action,
+                Ok(action) => (action, session.b_strategy.last_halted()),
                 Err(_) => {
                     b_crash = true;
-                    Action::Defect
+                    (Action::Defect, false)
                 }
             }
         };
-        (a_action, b_action, a_crash, b_crash)
+        (a_action, b_action, a_halted, b_halted, a_crash, b_crash)
     };
 
     if a_crash_now {
@@ -674,7 +675,8 @@ fn play_round_core(session: &mut MatchSession, config: &NormalizedConfig) -> Rou
 
     let a_action = apply_noise(config.noise, a_action, &mut session.noise_rng);
     let b_action = apply_noise(config.noise, b_action, &mut session.noise_rng);
-    let (a_payoff, b_payoff) = config.payoff.payoffs(a_action, b_action);
+    let (a_payoff, b_payoff) =
+        payoffs_with_timeouts(config.payoff, a_action, b_action, a_halted, b_halted);
     let outcome = Outcome::from_actions(a_action, b_action);
     session.a_total += a_payoff as i64;
     session.b_total += b_payoff as i64;
@@ -688,6 +690,12 @@ fn play_round_core(session: &mut MatchSession, config: &NormalizedConfig) -> Rou
     if session.record_history {
         session.history_actions_a.push(a_action.as_char());
         session.history_actions_b.push(b_action.as_char());
+        session
+            .history_halted_a
+            .push(if a_halted { '1' } else { '0' });
+        session
+            .history_halted_b
+            .push(if b_halted { '1' } else { '0' });
     }
     session.round += 1;
 
@@ -695,6 +703,8 @@ fn play_round_core(session: &mut MatchSession, config: &NormalizedConfig) -> Rou
         snapshot: RoundSnapshot {
             a_action,
             b_action,
+            a_halted,
+            b_halted,
             a_payoff,
             b_payoff,
         },
@@ -757,6 +767,16 @@ impl MatchSession {
                 String::new()
             },
             history_actions_b: if record_history {
+                String::with_capacity(rounds_total as usize)
+            } else {
+                String::new()
+            },
+            history_halted_a: if record_history {
+                String::with_capacity(rounds_total as usize)
+            } else {
+                String::new()
+            },
+            history_halted_b: if record_history {
                 String::with_capacity(rounds_total as usize)
             } else {
                 String::new()
@@ -1158,6 +1178,8 @@ where
                 round: session.round,
                 a_action: outcome.snapshot.a_action.as_char(),
                 b_action: outcome.snapshot.b_action.as_char(),
+                a_halted: outcome.snapshot.a_halted,
+                b_halted: outcome.snapshot.b_halted,
                 a_payoff: outcome.snapshot.a_payoff,
                 b_payoff: outcome.snapshot.b_payoff,
             });
@@ -1188,6 +1210,8 @@ where
     if log_history {
         let a_moves = session.history_actions_a.clone();
         let b_moves = session.history_actions_b.clone();
+        let a_halted = session.history_halted_a.clone();
+        let b_halted = session.history_halted_b.clone();
         let (a_owned, b_owned) = owned_ids.as_ref().expect("owned ids");
         let include_tm_metrics = config.history.include_cycle_metadata;
         let a_tm_metrics = if include_tm_metrics {
@@ -1212,6 +1236,8 @@ where
             rounds: session.rounds_total,
             a_moves: a_moves.clone(),
             b_moves: b_moves.clone(),
+            a_halted,
+            b_halted,
             a_incoming: b_moves,
             b_incoming: a_moves,
             score_idx: session.history_scores.clone(),
@@ -1511,7 +1537,7 @@ fn build_schedule(count: usize, repetitions: u32, self_play: bool) -> Vec<Matchu
 
 fn build_strategy_definitions(
     strategies: &[StrategySpec],
-    seed_deriver: &SeedDeriver,
+    _seed_deriver: &SeedDeriver,
 ) -> Vec<StrategyDefinition> {
     strategies
         .iter()
@@ -1519,26 +1545,15 @@ fn build_strategy_definitions(
             id: spec.id.clone(),
             name: spec.name.clone(),
             kind: spec.kind.clone(),
-            rng_seed_a: matches!(spec.kind, StrategySpecKind::Random { .. })
-                .then(|| seed_deriver.base_strategy_seed(MatchRole::A, &spec.id)),
-            rng_seed_b: matches!(spec.kind, StrategySpecKind::Random { .. })
-                .then(|| seed_deriver.base_strategy_seed(MatchRole::B, &spec.id)),
+            rng_seed_a: None,
+            rng_seed_b: None,
         })
         .collect()
 }
 
 fn build_strategy(spec: &StrategySpec, seed: u64) -> Box<dyn Strategy> {
+    let _ = seed;
     match &spec.kind {
-        StrategySpecKind::Builtin { builtin } => match builtin {
-            BuiltinKind::AllC => Box::new(AlwaysCooperate::new(spec.id.clone())),
-            BuiltinKind::AllD => Box::new(AlwaysDefect::new(spec.id.clone())),
-            BuiltinKind::TitForTat => Box::new(TitForTat::new(spec.id.clone())),
-            BuiltinKind::GrimTrigger => Box::new(GrimTrigger::new(spec.id.clone())),
-            BuiltinKind::WinStayLoseShift => Box::new(WinStayLoseShift::new(spec.id.clone())),
-        },
-        StrategySpecKind::Random { p_cooperate } => {
-            Box::new(RandomStrategy::new(spec.id.clone(), seed, *p_cooperate))
-        }
         StrategySpecKind::Fsm {
             start_state,
             outputs,
@@ -1552,11 +1567,12 @@ fn build_strategy(spec: &StrategySpec, seed: u64) -> Box<dyn Strategy> {
             input_mode.unwrap_or_default(),
             transitions.clone(),
         )),
-        StrategySpecKind::Memory { n, initial, table } => Box::new(MemoryStrategy::new(
+        StrategySpecKind::Ca { n, k, r, t } => Box::new(CaStrategy::new(
             spec.id.clone(),
             *n,
-            *initial,
-            table.clone(),
+            *k,
+            (*r * 2.0).round() as u32,
+            *t,
         )),
         StrategySpecKind::OneSidedTm {
             symbols,

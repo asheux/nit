@@ -22,8 +22,7 @@ match_strategy_seed = hash(base_strategy_seed, match_id, repetition)
 noise_seed = hash(hash(run_seed, "noise"), match_id, repetition)
 ```
 
-This is applied to:
-- `RandomStrategy` (and future stochastic strategies)
+This is currently applied to:
 - noise flips (`noise` in config)
 
 ## Parallel logging
@@ -47,7 +46,6 @@ fast_eval = true | false
 complexity_cost.enabled = true | false
 complexity_cost.tm_step_cost = 0.0
 complexity_cost.fsm_state_cost = 0.0
-complexity_cost.memory_n_cost = 0.0
 
 [history]
 enabled = true | false
@@ -65,10 +63,10 @@ based on an input symbol derived from the last round’s observation.
 ```
 [[strategy]]
 id = "my_fsm"
-type = "fsm"
-num_states = 4
+type = "auto" # optional: inferred as fsm from fields
+states = 4    # alias: num_states
 start_state = 0
-outputs = ["C","D","D","C"]    # length = num_states
+outputs = ["C","D","D","C"]    # length = states
 input_mode = "opponent_last_action"  # default
 transitions = [
   # Each row: state index; then next_state for each input symbol
@@ -80,51 +78,34 @@ transitions = [
 ]
 ```
 
-Input modes:
-- `opponent_last_action` (alphabet size 2)
-- `self_last_action` (alphabet size 2)
-- `joint_last_action` (alphabet size 4: CC, CD, DC, DD)
+Input mode:
+- `opponent_last_action` only (notebook-compatible semantics)
 
 Validation rules:
-- `outputs.len == num_states`
-- `transitions.len == num_states`
+- `outputs.len == states`
+- `transitions.len == states`
 - each transition row is either `alphabet` entries or `alphabet+1` entries
   (leading state index)
 - next states must be in `0..num_states`
 
 ### One-sided Turing machine
 
-One-sided TMs are deterministic, bounded-step programs with a right-rail output.
+One-sided TMs are deterministic, bounded-step programs with notebook-compatible
+history input semantics.
 
-Semantics:
-- Tape indices are `0..∞` with a left boundary at `0`.
-- Tape grows by appending one **history symbol** after each round.
-- If a transition requests `L` while the head is at `0`, the head **clamps** to `0`
-  (no left extension); the write still applies.
-- At the start of each round:
-  - head is positioned at the rightmost tape cell (most recent history symbol)
-  - internal state resets to `start_state`
-- The TM steps up to `max_steps_per_round`.
-- **Rail output:** if a transition would move `R` when the head is already at the
-  rightmost index, the action is produced immediately using `write` (mapped
-  through `output_map`) and the round ends. The current cell is written **before**
-  the rail output triggers. The tape is **not** extended to the right; the rail
-  cell is conceptual.
-- If no output occurs within `max_steps_per_round`, or a transition is invalid
-  or halts before the rail (e.g., `next=0` without a rail move), the fallback
-  action is used.
-  By default this is `output_map[blank]`, but you can override it with
-  `fallback_symbol`.
-
-History symbol encoding uses `input_mode`:
-- `opponent_last_action`, `self_last_action`, or `joint_last_action`
+Per-round semantics:
+- `input = FromDigits[Flatten[history], 2]` (global A,B order; no player swap)
+- run `OneSidedTuringMachineFunction(tm, input, max_steps_per_round)`
+- if the run produces no output in time: action `D` (`halted=false`)
+- if output symbol is `out`: action is `out mod symbols` (`halted=true`)
+- each round starts from the same TM definition; there is no persistent streaming tape
 
 #### Explicit transition table
 
 ```
 [[strategy]]
 id = "tm1"
-type = "one_sided_tm"
+type = "auto" # optional: inferred as tm from TM fields
 states = 3
 symbols = 2
 start_state = 1
@@ -138,11 +119,9 @@ transitions = [
   # move can be "L"/"R"/"S" or -1/1/0
   [ [2, 1, "R"], [1, 0, "S"] ],
   [ [2, 1, "L"], [3, 1, "R"] ],
-  [ [0, 0, "S"], [3, 1, "S"] ], # next=0 => HALT (fallback)
+  [ [0, 0, "S"], [3, 1, "S"] ],
 ]
 ```
-
-`next = 0` indicates HALT (fallback output).
 
 You can also use the explicit (state, read, write, move, next) object form:
 
@@ -162,7 +141,7 @@ transitions = [
 ```
 [[strategy]]
 id = "tm_rule"
-type = "one_sided_tm"
+type = "tm"
 states = 3
 symbols = 2
 start_state = 1
@@ -183,10 +162,7 @@ Rule decoding order (Wolfram-style one-sided TM):
 
 Notes:
 - Moves are only Left/Right (no Stay) for rule codes.
-- `next = 0` halting is only available in explicit transition tables.
-- **Bounded tape window:** with `max_steps_per_round = M`, the engine retains only
-  the last `M+1` tape symbols (the maximum span reachable in a round). This keeps
-  TM memory usage `O(M)` rather than growing with rounds.
+- For long histories, runtime uses a bounded suffix window sized by `max_steps_per_round`.
 
 ### Generated strategies (NDJSON)
 
@@ -234,7 +210,6 @@ nit games graph --run runs/games/<run>/run_summary.json --id <strategy_id> --out
 Notes:
 - FSM edges are labeled by numeric input symbols (0..alphabet-1).
 - TM edges are labeled by write symbol (ap); transitions with `next=0` target `HALT`.
-- Memory-n graphs show full-history states (n rounds); initial action is used until history is filled.
 
 Append NDJSON strategies when running a tournament:
 
@@ -297,7 +272,7 @@ Random matchups are detected by strategy ids containing `rand` or `random` (case
 ## Fast evaluator (Phase 3)
 
 When `engine.fast_eval = true`, the kernel uses an analytical evaluator if **both**
-strategies are deterministic and finite (builtins, FSM, memory‑n) and `noise = 0`.
+strategies are FSMs and `noise = 0`.
 It performs cycle detection and sums rounds in `O(mu + lambda)` time.
 
 Cycle metadata (transient length, cycle length, cooperation rates) can be emitted

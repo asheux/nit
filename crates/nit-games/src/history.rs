@@ -28,6 +28,10 @@ impl History {
         self.rounds.is_empty()
     }
 
+    pub fn iter(&self) -> impl Iterator<Item = RoundRecord> + '_ {
+        self.rounds.iter().copied()
+    }
+
     pub fn last(&self) -> Option<RoundRecord> {
         self.rounds.last().copied()
     }

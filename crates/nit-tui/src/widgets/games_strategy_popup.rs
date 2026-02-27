@@ -1,5 +1,5 @@
 use nit_core::{AppState, UiSelectionPane};
-use nit_games::config::{BuiltinKind, StrategySpecKind};
+use nit_games::config::StrategySpecKind;
 use nit_games::game::Action;
 use nit_games::output::StrategyDefinition;
 use nit_games::strategy::InputMode;
@@ -19,7 +19,6 @@ use crate::widgets::text_selection::apply_ui_selection;
 const MIN_WIDTH: u16 = 70;
 const MIN_HEIGHT: u16 = 20;
 
-const MEMORY_GRAPH_STATE_LIMIT: usize = 64;
 const GRAPH_NODE_LIMIT: usize = 12;
 
 pub fn preferred_size(screen: Rect) -> (u16, u16) {
@@ -236,35 +235,13 @@ fn split_graph_sections(lines: &[String]) -> (Vec<String>, Vec<String>) {
 
 fn graph_from_definition(def: &StrategyDefinition) -> Option<GraphSpec> {
     match &def.kind {
-        StrategySpecKind::Builtin { builtin } => {
-            let (start_state, mode, outputs, transitions) = builtin_as_fsm(*builtin);
-            let spec = fsm_graph_spec(outputs.len(), start_state, mode, &outputs, &transitions);
-            if spec.nodes.len() > GRAPH_NODE_LIMIT {
-                None
-            } else {
-                Some(spec)
-            }
-        }
-        StrategySpecKind::Random { .. } => Some(GraphSpec {
-            nodes: vec![GraphNode {
-                id: 0,
-                label: "0".to_string(),
-                output: None,
-            }],
-            edges: vec![GraphEdge {
-                from: 0,
-                to: 0,
-                label: "p".to_string(),
-            }],
-            start: Some(0),
-        }),
-        StrategySpecKind::Memory { n, initial, table } => memory_graph_spec(*n, *initial, table),
         StrategySpecKind::Fsm {
             num_states,
             start_state,
             outputs,
             input_mode,
             transitions,
+            ..
         } => {
             let inferred = transitions
                 .first()
@@ -289,6 +266,7 @@ fn graph_from_definition(def: &StrategyDefinition) -> Option<GraphSpec> {
                 Some(spec)
             }
         }
+        StrategySpecKind::Ca { .. } => None,
         StrategySpecKind::OneSidedTm {
             states,
             symbols,
@@ -334,41 +312,6 @@ fn fsm_graph_spec(
         edges,
         start: Some(start_state),
     }
-}
-
-fn memory_graph_spec(n: usize, initial: Action, table: &[Action]) -> Option<GraphSpec> {
-    let states = 4usize.checked_pow(n as u32).unwrap_or(usize::MAX);
-    if states > GRAPH_NODE_LIMIT {
-        return None;
-    }
-    let mask = if n == 0 { 0u64 } else { (1u64 << (2 * n)) - 1 };
-    let mut nodes = Vec::with_capacity(states);
-    let mut edges = Vec::new();
-    for idx in 0..states {
-        let output = table.get(idx).copied().unwrap_or(initial);
-        nodes.push(GraphNode {
-            id: idx,
-            label: idx.to_string(),
-            output: Some(output.as_char()),
-        });
-        for input in 0..4usize {
-            let next = if n == 0 {
-                0
-            } else {
-                (((idx as u64) << 2) | input as u64) & mask
-            } as usize;
-            edges.push(GraphEdge {
-                from: idx,
-                to: next,
-                label: input.to_string(),
-            });
-        }
-    }
-    Some(GraphSpec {
-        nodes,
-        edges,
-        start: Some(0),
-    })
 }
 
 fn tm_graph_spec(
@@ -427,41 +370,6 @@ fn tm_graph_spec(
 
 fn render_graph_canvas(frame: &mut Frame, area: Rect, theme: &Theme, graph: &GraphSpec) {
     graph_render::render(frame, area, theme, graph);
-}
-
-fn builtin_as_fsm(builtin: BuiltinKind) -> (usize, InputMode, Vec<Action>, Vec<Vec<usize>>) {
-    match builtin {
-        BuiltinKind::AllC => (
-            0,
-            InputMode::JointLastAction,
-            vec![Action::Cooperate],
-            vec![vec![0, 0, 0, 0]],
-        ),
-        BuiltinKind::AllD => (
-            0,
-            InputMode::JointLastAction,
-            vec![Action::Defect],
-            vec![vec![0, 0, 0, 0]],
-        ),
-        BuiltinKind::TitForTat => (
-            0,
-            InputMode::JointLastAction,
-            vec![Action::Cooperate, Action::Defect],
-            vec![vec![0, 1, 0, 1], vec![0, 1, 0, 1]],
-        ),
-        BuiltinKind::GrimTrigger => (
-            0,
-            InputMode::JointLastAction,
-            vec![Action::Cooperate, Action::Defect],
-            vec![vec![0, 1, 0, 1], vec![1, 1, 1, 1]],
-        ),
-        BuiltinKind::WinStayLoseShift => (
-            0,
-            InputMode::JointLastAction,
-            vec![Action::Cooperate, Action::Defect],
-            vec![vec![0, 1, 1, 0], vec![1, 0, 0, 1]],
-        ),
-    }
 }
 
 fn build_fsm_graph_lines(
@@ -548,45 +456,6 @@ fn build_tm_graph_lines(
     lines
 }
 
-fn build_memory_graph_lines(n: usize, initial: Action, table: &[Action]) -> Vec<String> {
-    let mut lines = Vec::new();
-    let states = 4usize.checked_pow(n as u32).unwrap_or(usize::MAX);
-    lines.push("graph:".to_string());
-    lines.push("legend: 0=CC 1=CD 2=DC 3=DD".to_string());
-    if states > MEMORY_GRAPH_STATE_LIMIT {
-        lines.push(format!("graph omitted ({} states)", states));
-        lines.push(format!("note: initial action = {}", initial.as_char()));
-        return lines;
-    }
-
-    let headers = vec![
-        "state".to_string(),
-        "0".to_string(),
-        "1".to_string(),
-        "2".to_string(),
-        "3".to_string(),
-    ];
-    let mask = if n == 0 { 0u64 } else { (1u64 << (2 * n)) - 1 };
-    let mut rows = Vec::new();
-    for idx in 0..states {
-        let output = table.get(idx).copied().unwrap_or(initial);
-        let mut row = Vec::new();
-        row.push(format!("{idx}({})", output.as_char()));
-        for input in 0..4usize {
-            let next = if n == 0 {
-                0
-            } else {
-                (((idx as u64) << 2) | input as u64) & mask
-            };
-            row.push(next.to_string());
-        }
-        rows.push(row);
-    }
-    lines.extend(build_table(&headers, &rows));
-    lines.push(format!("note: initial action = {}", initial.as_char()));
-    lines
-}
-
 pub fn build_definition_lines(def: &nit_games::output::StrategyDefinition) -> Vec<String> {
     let mut lines = Vec::new();
     lines.push(format!("id: {}", def.id));
@@ -594,43 +463,13 @@ pub fn build_definition_lines(def: &nit_games::output::StrategyDefinition) -> Ve
         lines.push(format!("name: {}", name));
     }
     match &def.kind {
-        StrategySpecKind::Builtin { builtin } => {
-            lines.push(format!("kind: builtin ({builtin:?})"));
-            let (start_state, mode, outputs, transitions) = builtin_as_fsm(*builtin);
-            lines.push("params: expanded to fsm for graph".to_string());
-            lines.push(String::new());
-            lines.extend(build_fsm_graph_lines(
-                outputs.len(),
-                start_state,
-                mode,
-                &outputs,
-                &transitions,
-            ));
-        }
-        StrategySpecKind::Random { p_cooperate } => {
-            lines.push("kind: random".to_string());
-            lines.push(format!("params: p_cooperate={:.3}", p_cooperate));
-            lines.push(String::new());
-            lines.push("graph:".to_string());
-            lines.push("note: stochastic output; single-node self-loop".to_string());
-        }
-        StrategySpecKind::Memory { n, initial, table } => {
-            lines.push("kind: memory".to_string());
-            lines.push(format!(
-                "params: n={} initial={} table={}",
-                n,
-                initial.as_char(),
-                table.iter().map(|a| a.as_char()).collect::<String>()
-            ));
-            lines.push(String::new());
-            lines.extend(build_memory_graph_lines(*n, *initial, table));
-        }
         StrategySpecKind::Fsm {
             num_states,
             start_state,
             outputs,
             input_mode,
             transitions,
+            ..
         } => {
             let inferred = transitions
                 .first()
@@ -666,6 +505,12 @@ pub fn build_definition_lines(def: &nit_games::output::StrategyDefinition) -> Ve
                 transitions,
             ));
         }
+        StrategySpecKind::Ca { n, k, r, t } => {
+            lines.push("kind: ca".to_string());
+            lines.push(format!("params: n={} k={} r={} t={}", n, k, r, t));
+            lines.push("input: Flatten[history] (global A,B order)".to_string());
+            lines.push("output: last cell of ShrinkingCA final row".to_string());
+        }
         StrategySpecKind::OneSidedTm {
             states,
             symbols,
@@ -678,7 +523,7 @@ pub fn build_definition_lines(def: &nit_games::output::StrategyDefinition) -> Ve
             transitions,
             rule_code,
         } => {
-            lines.push("kind: one_sided_tm".to_string());
+            lines.push("kind: tm".to_string());
             let fallback = fallback_symbol.unwrap_or(*blank);
             if let Some(code) = rule_code {
                 lines.push(format!("rule_code: {}", code));
@@ -1070,6 +915,7 @@ mod tests {
                 outputs: vec![Action::Cooperate, Action::Defect],
                 input_mode: Some(InputMode::OpponentLastAction),
                 transitions: vec![vec![0, 1], vec![1, 0]],
+                index: None,
             },
             rng_seed_a: None,
             rng_seed_b: None,

@@ -1,7 +1,9 @@
 use nit_core::{AppState, UiSelectionPane};
 use nit_games::config::StrategySpecKind;
 use nit_games::game::Action;
-use nit_games::strategy::{InputMode, TmMove, TmTransition};
+use nit_games::strategy::{
+    run_one_sided_tm_from_integer, InputMode, TmMove, TmStopReason, TmTransition,
+};
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
@@ -9,7 +11,7 @@ use ratatui::{
     widgets::{Block, Borders, Clear, Paragraph, Wrap},
     Frame,
 };
-use std::collections::{hash_map::DefaultHasher, HashMap};
+use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
@@ -459,13 +461,6 @@ struct SimStep {
     tape: Vec<u8>,
 }
 
-#[derive(Hash, Eq, PartialEq)]
-struct ConfigKey {
-    state: u16,
-    head: usize,
-    tape: Vec<u8>,
-}
-
 fn tm_spec_hash(
     symbols: u8,
     start_state: u16,
@@ -579,244 +574,107 @@ fn simulate_tm(
             frames,
         };
     }
-
-    let mut digits = digits_in_base(input, symbols);
-    let digits_str: String = digits.iter().map(|&d| symbol_char(d)).collect();
-    let pad_to = digits.len().max(6);
-    let pad = pad_to.saturating_sub(digits.len());
-    let mut tape = vec![blank; pad];
-    tape.append(&mut digits);
-    let mut head = tape.len().saturating_sub(1);
-    let origin: i32 = 0;
-    let mut state = start_state;
-
-    lines.push(format!(
-        "input digits (base {}): {} (pad blank left)",
+    let run = run_one_sided_tm_from_integer(
+        transitions,
         symbols,
-        if digits_str.is_empty() {
-            "0".into()
-        } else {
-            digits_str
-        }
-    ));
-    lines.push(format!("initial tape: {}", tape_to_string(&tape)));
-    lines.push(format!("head at index {}", head));
-    frames.push(SimFrame {
-        tape: tape.clone(),
-        head,
-        origin,
-    });
-    let mut steps: Vec<SimStep> = Vec::with_capacity(reserve);
-
-    let max_steps = step_limit as usize;
-    if max_steps == 0 {
-        let action = output_map
-            .get(fallback_symbol as usize)
-            .copied()
-            .unwrap_or(Action::Cooperate);
-        lines.push(format!(
-            "result: fallback (max_steps=0) -> action {}",
-            action.as_char()
-        ));
-        return SimResult {
-            log_lines: lines,
-            steps,
-            frames,
-        };
-    }
-
-    let mut output_symbol: Option<u8> = None;
-    let mut last_transition: Option<(u16, u8, TmTransition)> = None;
-    let mut max_steps_hit = false;
-    let mut fallback_reason: Option<&'static str> = None;
-    let mut steps_taken = 0usize;
-    let mut cycle_detected: Option<(usize, usize)> = None;
-    let mut seen: HashMap<ConfigKey, usize> = HashMap::new();
-    seen.insert(
-        ConfigKey {
-            state,
-            head,
-            tape: tape.clone(),
-        },
-        0,
+        start_state,
+        blank,
+        input,
+        step_limit,
+        true,
     );
 
-    for step in 0..max_steps {
-        steps_taken = step + 1;
-        let head_before = head;
-        let read = tape.get(head_before).copied().unwrap_or(blank);
-        let idx = (state.saturating_sub(1) as usize)
-            .saturating_mul(symbols as usize)
-            .saturating_add(read as usize);
-        let Some(trans) = transitions.get(idx).copied() else {
-            fallback_reason = Some("missing transition");
-            lines.push(format!(
-                "step {}: missing transition for state {} read {}",
-                step + 1,
-                state,
-                read
-            ));
-            break;
-        };
-        last_transition = Some((state, read, trans));
-
-        let rail_output = matches!(trans.move_dir, TmMove::Right) && head_before + 1 == tape.len();
-        if rail_output {
-            if let Some(cell) = tape.get_mut(head_before) {
-                *cell = trans.write;
+    let mut steps: Vec<SimStep> = Vec::with_capacity(reserve);
+    let origin: i32 = 0;
+    if let Some(trace) = run.trace.as_ref() {
+        let digits_str: String = trace.input_digits.iter().map(|&d| symbol_char(d)).collect();
+        lines.push(format!(
+            "input digits (base {}): {}",
+            symbols,
+            if digits_str.is_empty() {
+                "0".into()
+            } else {
+                digits_str
             }
-            output_symbol = Some(trans.write);
-            let head_after = head_before + 1;
-            steps.push(SimStep {
-                step: step + 1,
-                state,
-                head_before,
-                read,
-                next: trans.next,
-                write: trans.write,
-                move_dir: trans.move_dir,
-                head_after,
-                tape: tape.clone(),
-            });
-            frames.push(SimFrame {
-                tape: tape.clone(),
-                head: head_after,
-                origin,
-            });
-            break;
-        }
-
-        if trans.next == 0 {
-            fallback_reason = Some("next=0");
-            lines.push(format!("step {}: next=0 -> fallback", step + 1));
-            break;
-        }
-
-        if let Some(cell) = tape.get_mut(head_before) {
-            *cell = trans.write;
-        }
-
-        let mut head_after = head_before;
-        match trans.move_dir {
-            TmMove::Left => {
-                if head_before > 0 {
-                    head_after = head_before - 1;
-                }
-            }
-            TmMove::Stay => {}
-            TmMove::Right => {
-                if head_before + 1 < tape.len() {
-                    head_after = head_before + 1;
-                } else {
-                    output_symbol = Some(trans.write);
-                    let head_after = head_before + 1;
-                    steps.push(SimStep {
-                        step: step + 1,
-                        state,
-                        head_before,
-                        read,
-                        next: trans.next,
-                        write: trans.write,
-                        move_dir: trans.move_dir,
-                        head_after,
-                        tape: tape.clone(),
-                    });
-                    frames.push(SimFrame {
-                        tape: tape.clone(),
-                        head: head_after,
-                        origin,
-                    });
-                    break;
-                }
-            }
-        }
-
-        steps.push(SimStep {
-            step: step + 1,
-            state,
-            head_before,
-            read,
-            next: trans.next,
-            write: trans.write,
-            move_dir: trans.move_dir,
-            head_after,
-            tape: tape.clone(),
-        });
-
-        head = head_after;
-        state = trans.next;
+        ));
+        lines.push(format!(
+            "initial tape: {}",
+            tape_to_string(&trace.initial_tape)
+        ));
+        lines.push(format!("head at index {}", trace.initial_head));
         frames.push(SimFrame {
-            tape: tape.clone(),
-            head,
+            tape: trace.initial_tape.clone(),
+            head: trace.initial_head,
             origin,
         });
-
-        if output_symbol.is_none() {
-            let key = ConfigKey {
-                state,
-                head,
-                tape: tape.clone(),
-            };
-            if let Some(prev_step) = seen.insert(key, step + 1) {
-                cycle_detected = Some((prev_step, step + 1));
-                break;
-            }
+        for step in &trace.steps {
+            steps.push(SimStep {
+                step: step.step,
+                state: step.state,
+                head_before: step.head_before,
+                read: step.read,
+                next: step.next,
+                write: step.write,
+                move_dir: step.move_dir,
+                head_after: step.head_after,
+                tape: step.tape.clone(),
+            });
+            frames.push(SimFrame {
+                tape: step.tape.clone(),
+                head: step.head_after,
+                origin,
+            });
         }
-    }
-
-    if output_symbol.is_none()
-        && fallback_reason.is_none()
-        && cycle_detected.is_none()
-        && steps_taken >= max_steps
-    {
-        max_steps_hit = true;
-        fallback_reason = Some("max_steps");
-    }
-
-    let action = if let Some(symbol) = output_symbol {
-        output_map
-            .get(symbol as usize)
-            .copied()
-            .unwrap_or(Action::Cooperate)
     } else {
-        output_map
-            .get(fallback_symbol as usize)
-            .copied()
-            .unwrap_or(Action::Cooperate)
-    };
-
-    let reason = if output_symbol.is_some() {
-        "rail output"
-    } else if cycle_detected.is_some() || max_steps_hit {
-        "never halts"
-    } else if fallback_reason == Some("missing transition") {
-        "missing transition"
-    } else if fallback_reason == Some("next=0") {
-        "next=0"
-    } else {
-        "fallback"
-    };
-    lines.push(format!("result: {reason} -> action {}", action.as_char()));
-    if cycle_detected.is_some() || max_steps_hit {
-        lines.push("Never halts".to_string());
-    }
-    if let Some((start, end)) = cycle_detected {
+        let digits = digits_in_base(input, symbols);
+        let digits_str: String = digits.iter().map(|&d| symbol_char(d)).collect();
         lines.push(format!(
-            "cycle detected: step {} repeats step {}",
-            end, start
+            "input digits (base {}): {}",
+            symbols,
+            if digits_str.is_empty() {
+                "0".into()
+            } else {
+                digits_str
+            }
         ));
-    } else if max_steps_hit {
-        lines.push(format!("note: max_steps={max_steps}"));
     }
-    if let Some((s, r, trans)) = last_transition {
-        let move_label = match trans.move_dir {
+
+    let action = if let Some(symbol) = run.output_symbol {
+        let base = symbols.max(1);
+        if symbol % base == 0 {
+            Action::Cooperate
+        } else {
+            Action::Defect
+        }
+    } else {
+        let _ = fallback_symbol;
+        let _ = output_map;
+        Action::Defect
+    };
+    let reason = match run.stop_reason {
+        TmStopReason::Output => "halted",
+        TmStopReason::MaxSteps => "timeout",
+        TmStopReason::MissingTransition => "missing transition",
+        TmStopReason::InvalidState => "invalid state",
+    };
+    lines.push(format!(
+        "result: {} -> action {} (halted={})",
+        reason,
+        action.as_char(),
+        if run.halted { "true" } else { "false" }
+    ));
+    if !run.halted && matches!(run.stop_reason, TmStopReason::MaxSteps) {
+        lines.push(format!("note: max_steps={}", step_limit));
+    }
+    if let Some(last) = steps.last() {
+        let move_label = match last.move_dir {
             TmMove::Left => "-1",
             TmMove::Right => "1",
             TmMove::Stay => "0",
         };
         lines.push(format!(
             "last transition: (state={}, read={}) -> (next={}, write={}, move={})",
-            s, r, trans.next, trans.write, move_label
+            last.state, last.read, last.next, last.write, move_label
         ));
     }
 
