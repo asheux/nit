@@ -420,6 +420,7 @@ pub enum TmStopReason {
 
 #[derive(Clone, Debug)]
 pub struct TmRunResult {
+    pub output_value: Option<u64>,
     pub output_symbol: Option<u8>,
     pub halted: bool,
     pub steps_taken: u32,
@@ -480,6 +481,7 @@ pub fn run_one_sided_tm(
 
     if max_steps == 0 {
         return TmRunResult {
+            output_value: None,
             output_symbol: None,
             halted: false,
             steps_taken: 0,
@@ -489,6 +491,7 @@ pub fn run_one_sided_tm(
     }
     if state == 0 {
         return TmRunResult {
+            output_value: None,
             output_symbol: None,
             halted: false,
             steps_taken: 0,
@@ -505,6 +508,7 @@ pub fn run_one_sided_tm(
             .saturating_add(read as usize);
         let Some(trans) = transitions.get(idx).copied() else {
             return TmRunResult {
+                output_value: None,
                 output_symbol: None,
                 halted: false,
                 steps_taken: (step + 1) as u32,
@@ -518,6 +522,8 @@ pub fn run_one_sided_tm(
         }
 
         if matches!(trans.move_dir, TmMove::Right) && head_before + 1 == tape.len() {
+            let output_value = digits_to_u64(&tape, symbols);
+            let output_symbol = output_value.map(|value| (value % symbols as u64) as u8);
             if let Some(trace) = trace.as_mut() {
                 trace.steps.push(TmTraceStep {
                     step: step + 1,
@@ -532,7 +538,8 @@ pub fn run_one_sided_tm(
                 });
             }
             return TmRunResult {
-                output_symbol: Some(trans.write),
+                output_value,
+                output_symbol,
                 halted: true,
                 steps_taken: (step + 1) as u32,
                 stop_reason: TmStopReason::Output,
@@ -573,6 +580,7 @@ pub fn run_one_sided_tm(
         state = trans.next;
         if state == 0 {
             return TmRunResult {
+                output_value: None,
                 output_symbol: None,
                 halted: false,
                 steps_taken: (step + 1) as u32,
@@ -583,6 +591,7 @@ pub fn run_one_sided_tm(
     }
 
     TmRunResult {
+        output_value: None,
         output_symbol: None,
         halted: false,
         steps_taken: max_steps,
@@ -643,6 +652,11 @@ impl OneSidedTmStrategy {
         } else {
             Action::Defect
         }
+    }
+
+    fn action_from_output_value(&self, output: u64) -> Action {
+        let symbol = (output % self.symbols.max(1) as u64) as u8;
+        self.action_from_symbol(symbol)
     }
 
     fn sync_input(&mut self, history: &History) {
@@ -707,8 +721,8 @@ impl Strategy for OneSidedTmStrategy {
             }
         }
 
-        if let Some(symbol) = run.output_symbol {
-            self.action_from_symbol(symbol)
+        if let Some(output) = run.output_value {
+            self.action_from_output_value(output)
         } else {
             Action::Defect
         }
@@ -894,6 +908,16 @@ fn digits_in_base(input: u64, base: u8) -> Vec<u8> {
     }
     digits.reverse();
     digits
+}
+
+fn digits_to_u64(digits: &[u8], base: u8) -> Option<u64> {
+    let base_u64 = base.max(2) as u64;
+    let mut value = 0u64;
+    for &digit in digits {
+        value = value.checked_mul(base_u64)?;
+        value = value.checked_add(digit as u64)?;
+    }
+    Some(value)
 }
 
 fn floor_div_rem_i128(numer: i128, denom: i128) -> (i128, i128) {

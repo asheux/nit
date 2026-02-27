@@ -1,9 +1,7 @@
 use nit_core::{AppState, UiSelectionPane};
 use nit_games::config::StrategySpecKind;
 use nit_games::game::Action;
-use nit_games::strategy::{
-    run_one_sided_tm_from_integer, InputMode, TmMove, TmStopReason, TmTransition,
-};
+use nit_games::strategy::{run_one_sided_tm_from_integer, TmMove, TmStopReason, TmTransition};
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
@@ -48,6 +46,9 @@ fn tm_sim_pending() -> Arc<SimResult> {
                 log_lines: vec!["computing...".to_string()],
                 steps: Vec::new(),
                 frames: Vec::new(),
+                halted: false,
+                output_value: None,
+                output_symbol: None,
             })
         })
         .clone()
@@ -172,7 +173,7 @@ pub fn build_columns(
         blank,
         fallback_symbol,
         max_steps_per_round,
-        input_mode,
+        input_mode: _input_mode,
         output_map,
         transitions,
         rule_code,
@@ -216,13 +217,18 @@ pub fn build_columns(
         left_lines.push(Line::from(spans));
     }
     left_lines.push(Line::from(vec![
-        Span::styled("input_mode: ", label_style),
-        Span::styled(input_mode_label(*input_mode), value_style),
+        Span::styled("input: ", label_style),
+        Span::styled(
+            "integer (gameplay uses FromDigits[Flatten[history], 2])".to_string(),
+            value_style,
+        ),
     ]));
-    let output_str: String = output_map.iter().map(|a| a.as_char()).collect();
     left_lines.push(Line::from(vec![
-        Span::styled("output_map: ", label_style),
-        Span::styled(output_str, value_style),
+        Span::styled("output: ", label_style),
+        Span::styled(
+            "halted -> (tm_output mod symbols), timeout -> D".to_string(),
+            value_style,
+        ),
     ]));
     if let Some(code) = rule_code {
         left_lines.push(Line::from(vec![
@@ -293,12 +299,6 @@ pub fn build_columns(
         transitions,
         output_map,
     );
-    if matches!(input_mode, InputMode::JointLastAction) && *symbols < 4 {
-        left_lines.push(Line::from(Span::styled(
-            "warning: symbols < 4 but input_mode is joint_last_action",
-            warn_style,
-        )));
-    }
     for line in sim.log_lines.iter() {
         left_lines.push(Line::from(Span::styled(
             trim_to_width(line, left_width),
@@ -322,13 +322,25 @@ pub fn build_columns(
             right_lines.push(Line::from(Span::styled("Evolution", header_style)));
             right_lines.extend(build_grid_lines(&sim.frames, right_width.max(1), theme));
             right_lines.push(Line::from(""));
-            right_lines.extend(build_legend_lines(*symbols as usize, theme));
+            right_lines.extend(build_legend_lines(
+                *symbols as usize,
+                theme,
+                sim.halted,
+                sim.output_value,
+                sim.output_symbol,
+            ));
         } else {
             left_lines.push(Line::from(""));
             left_lines.push(Line::from(Span::styled("Evolution", header_style)));
             left_lines.extend(build_grid_lines(&sim.frames, left_width.max(1), theme));
             left_lines.push(Line::from(""));
-            left_lines.extend(build_legend_lines(*symbols as usize, theme));
+            left_lines.extend(build_legend_lines(
+                *symbols as usize,
+                theme,
+                sim.halted,
+                sim.output_value,
+                sim.output_symbol,
+            ));
         }
     }
 
@@ -447,6 +459,9 @@ struct SimResult {
     log_lines: Vec<String>,
     steps: Vec<SimStep>,
     frames: Vec<SimFrame>,
+    halted: bool,
+    output_value: Option<u64>,
+    output_symbol: Option<u8>,
 }
 
 struct SimStep {
@@ -550,10 +565,10 @@ fn simulate_tm(
     symbols: u8,
     start_state: u16,
     blank: u8,
-    fallback_symbol: u8,
+    _fallback_symbol: u8,
     step_limit: u32,
     transitions: &[TmTransition],
-    output_map: &[Action],
+    _output_map: &[Action],
 ) -> SimResult {
     let mut lines = Vec::new();
     let reserve = step_limit.min(10_000) as usize;
@@ -564,6 +579,9 @@ fn simulate_tm(
             log_lines: lines,
             steps: Vec::new(),
             frames,
+            halted: false,
+            output_value: None,
+            output_symbol: None,
         };
     }
     if start_state == 0 {
@@ -572,6 +590,9 @@ fn simulate_tm(
             log_lines: lines,
             steps: Vec::new(),
             frames,
+            halted: false,
+            output_value: None,
+            output_symbol: None,
         };
     }
     let run = run_one_sided_tm_from_integer(
@@ -639,16 +660,14 @@ fn simulate_tm(
         ));
     }
 
-    let action = if let Some(symbol) = run.output_symbol {
-        let base = symbols.max(1);
-        if symbol % base == 0 {
+    let action = if let Some(output) = run.output_value {
+        let symbol = (output % symbols.max(1) as u64) as u8;
+        if symbol == 0 {
             Action::Cooperate
         } else {
             Action::Defect
         }
     } else {
-        let _ = fallback_symbol;
-        let _ = output_map;
         Action::Defect
     };
     let reason = match run.stop_reason {
@@ -657,12 +676,24 @@ fn simulate_tm(
         TmStopReason::MissingTransition => "missing transition",
         TmStopReason::InvalidState => "invalid state",
     };
-    lines.push(format!(
-        "result: {} -> action {} (halted={})",
-        reason,
-        action.as_char(),
-        if run.halted { "true" } else { "false" }
-    ));
+    if let Some(output) = run.output_value {
+        let symbol = output % symbols.max(1) as u64;
+        lines.push(format!(
+            "result: {} -> tm_output={} -> symbol={} -> action {} (halted={})",
+            reason,
+            output,
+            symbol,
+            action.as_char(),
+            if run.halted { "true" } else { "false" }
+        ));
+    } else {
+        lines.push(format!(
+            "result: {} -> action {} (halted={})",
+            reason,
+            action.as_char(),
+            if run.halted { "true" } else { "false" }
+        ));
+    }
     if !run.halted && matches!(run.stop_reason, TmStopReason::MaxSteps) {
         lines.push(format!("note: max_steps={}", step_limit));
     }
@@ -682,6 +713,9 @@ fn simulate_tm(
         log_lines: lines,
         steps,
         frames,
+        halted: run.halted,
+        output_value: run.output_value,
+        output_symbol: run.output_symbol,
     }
 }
 
@@ -709,14 +743,6 @@ fn symbol_char(symbol: u8) -> char {
         (b'0' + symbol) as char
     } else {
         (b'A' + (symbol - 10)) as char
-    }
-}
-
-fn input_mode_label(mode: InputMode) -> &'static str {
-    match mode {
-        InputMode::OpponentLastAction => "opponent_last_action",
-        InputMode::SelfLastAction => "self_last_action",
-        InputMode::JointLastAction => "joint_last_action",
     }
 }
 
@@ -1278,7 +1304,13 @@ fn build_grid_lines(frames: &[SimFrame], max_width: usize, theme: &Theme) -> Vec
     lines
 }
 
-fn build_legend_lines(symbols: usize, theme: &Theme) -> Vec<Line<'static>> {
+fn build_legend_lines(
+    symbols: usize,
+    theme: &Theme,
+    halted: bool,
+    output_value: Option<u64>,
+    output_symbol: Option<u8>,
+) -> Vec<Line<'static>> {
     let mut spans = Vec::new();
     spans.push(Span::styled(
         "legend: ",
@@ -1301,12 +1333,29 @@ fn build_legend_lines(symbols: usize, theme: &Theme) -> Vec<Line<'static>> {
         Style::default().fg(theme.title).add_modifier(Modifier::DIM),
     ));
     halt_line.push(Span::styled("  ", halt_style));
+    halt_line.push(Span::raw(" "));
+    halt_line.push(Span::styled(
+        if halted { "true" } else { "false" },
+        Style::default().fg(theme.foreground),
+    ));
     halt_line.push(Span::raw("  "));
     halt_line.push(Span::styled(
         "output: ",
         Style::default().fg(theme.title).add_modifier(Modifier::DIM),
     ));
     halt_line.push(Span::styled("  ", halt_hit_style));
+    let output_text = match (output_value, output_symbol) {
+        (Some(value), Some(symbol)) => {
+            format!(" {} (mod {symbols} = {symbol})", value)
+        }
+        (Some(value), None) => format!(" {value}"),
+        (None, _) if !halted => " timeout -> D".to_string(),
+        (None, _) => " n/a".to_string(),
+    };
+    halt_line.push(Span::styled(
+        output_text,
+        Style::default().fg(theme.foreground),
+    ));
     vec![Line::from(spans), Line::from(halt_line)]
 }
 
@@ -1517,5 +1566,24 @@ mod tests {
         let border = line_to_string(&merged[0]);
         let idx = border.find('+').unwrap_or(usize::MAX);
         assert_eq!(idx, 0);
+    }
+
+    #[test]
+    fn legend_shows_halt_and_output_value() {
+        let lines = build_legend_lines(2, &Theme::default(), true, Some(7), Some(1));
+        let summary = line_to_string(&lines[1]);
+        assert!(summary.contains("halt:"));
+        assert!(summary.contains("true"));
+        assert!(summary.contains("output:"));
+        assert!(summary.contains("7"));
+        assert!(summary.contains("mod 2 = 1"));
+    }
+
+    #[test]
+    fn legend_shows_timeout_for_non_halting_run() {
+        let lines = build_legend_lines(2, &Theme::default(), false, None, None);
+        let summary = line_to_string(&lines[1]);
+        assert!(summary.contains("false"));
+        assert!(summary.contains("timeout -> D"));
     }
 }
