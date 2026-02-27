@@ -679,20 +679,15 @@ fn simulate_tm(
     if let Some(output) = run.output_value {
         let symbol = output % symbols.max(1) as u64;
         lines.push(format!(
-            "result: {} -> tm_output={} -> symbol={} -> action {} (halted={})",
+            "result: {} -> out={} mod{}={} -> {}",
             reason,
             output,
+            symbols,
             symbol,
-            action.as_char(),
-            if run.halted { "true" } else { "false" }
+            action.as_char()
         ));
     } else {
-        lines.push(format!(
-            "result: {} -> action {} (halted={})",
-            reason,
-            action.as_char(),
-            if run.halted { "true" } else { "false" }
-        ));
+        lines.push(format!("result: {} -> {}", reason, action.as_char()));
     }
     if !run.halted && matches!(run.stop_reason, TmStopReason::MaxSteps) {
         lines.push(format!("note: max_steps={}", step_limit));
@@ -1346,7 +1341,12 @@ fn build_legend_lines(
     halt_line.push(Span::styled("  ", halt_hit_style));
     let output_text = match (output_value, output_symbol) {
         (Some(value), Some(symbol)) => {
-            format!(" {} (mod {symbols} = {symbol})", value)
+            let action = if symbol == 0 {
+                Action::Cooperate.as_char()
+            } else {
+                Action::Defect.as_char()
+            };
+            format!(" {} (mod {symbols} = {symbol} = {action})", value)
         }
         (Some(value), None) => format!(" {value}"),
         (None, _) if !halted => " timeout -> D".to_string(),
@@ -1577,6 +1577,7 @@ mod tests {
         assert!(summary.contains("output:"));
         assert!(summary.contains("7"));
         assert!(summary.contains("mod 2 = 1"));
+        assert!(summary.contains("= D"));
     }
 
     #[test]
