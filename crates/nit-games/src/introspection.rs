@@ -234,7 +234,7 @@ pub fn format_strategy_introspection(intro: &StrategyIntrospection) -> Vec<Strin
             index,
         } => {
             lines.push(format!("states: {}", states));
-            lines.push(format!("start_state: {}", start_state));
+            lines.push(format!("start_state: {}", start_state.saturating_add(1)));
             if let Some(index) = index {
                 lines.push(format!("notebook_index: {}", index));
             }
@@ -249,13 +249,13 @@ pub fn format_strategy_introspection(intro: &StrategyIntrospection) -> Vec<Strin
             for state_idx in 0..*states {
                 let output = outputs.get(state_idx).map(|a| a.as_char()).unwrap_or('?');
                 let mut row = Vec::new();
-                row.push(format!("{state_idx}({output})"));
+                row.push(format!("{}({output})", state_idx + 1));
                 let trans_row = transitions.get(state_idx);
                 for input in 0..2 {
                     row.push(
                         trans_row
                             .and_then(|r| r.get(input))
-                            .map(|n| n.to_string())
+                            .map(|n| (n + 1).to_string())
                             .unwrap_or_else(|| "-".to_string()),
                     );
                 }

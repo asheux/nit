@@ -13,18 +13,26 @@ use std::{
 };
 
 // Circuit renderer version for cache invalidation.
-const STYLE_VERSION: u64 = 4;
+const STYLE_VERSION: u64 = 5;
 
-// Keep both directions around for a potential future toggle.
-#[allow(dead_code)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub enum GraphFlow {
+    LeftToRight,
+    TopToBottom,
+}
+
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 enum FlowDir {
     LeftToRight,
     TopToBottom,
 }
 
-// Default circuit flow direction.
-const FLOW_DIR: FlowDir = FlowDir::TopToBottom;
+fn as_flow_dir(flow: GraphFlow) -> FlowDir {
+    match flow {
+        GraphFlow::LeftToRight => FlowDir::LeftToRight,
+        GraphFlow::TopToBottom => FlowDir::TopToBottom,
+    }
+}
 
 const MIN_AREA_W: u16 = 18;
 const MIN_AREA_H: u16 = 7;
@@ -35,6 +43,7 @@ const MAX_CACHE_ENTRIES: usize = 16;
 const NODE_H: u16 = 3;
 const NODE_MIN_W: u16 = 5;
 const NODE_PAD_X: u16 = 1;
+const MAX_HORIZONTAL_LAYER_GAP: u16 = 18;
 
 // Layout margins inside the provided area.
 const MARGIN_X: u16 = 2;
@@ -49,6 +58,8 @@ pub struct GraphSpec {
     pub nodes: Vec<GraphNode>,
     pub edges: Vec<GraphEdge>,
     pub start: Option<usize>,
+    pub flow: GraphFlow,
+    pub show_edge_labels: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -243,15 +254,13 @@ impl Widget for CircuitWidget<'_> {
             } else if node.is_halt {
                 self.theme.warning
             } else if node.output == Some('C') {
-                self.theme.title
+                Color::Green
             } else if node.output == Some('D') {
-                self.theme.accent
+                Color::Red
             } else {
                 self.theme.border
             };
             let fill = if node.is_start {
-                self.theme.selection_bg
-            } else if node.output == Some('D') {
                 self.theme.selection_bg
             } else {
                 self.theme.cursor_line_bg
@@ -295,6 +304,7 @@ pub fn render(frame: &mut Frame, area: Rect, theme: &Theme, graph: &GraphSpec) {
 fn compute_circuit_graph(graph: &GraphSpec, area: Rect, _graph_hash: u64) -> CachedCircuitGraph {
     let width = area.width;
     let height = area.height;
+    let flow = as_flow_dir(graph.flow);
 
     if width < MIN_AREA_W || height < MIN_AREA_H {
         return CachedCircuitGraph {
@@ -340,7 +350,7 @@ fn compute_circuit_graph(graph: &GraphSpec, area: Rect, _graph_hash: u64) -> Cac
         .unwrap_or(0)
         .max(1);
 
-    let (col_gap, row_gap, needed_w, needed_h) = match FLOW_DIR {
+    let (col_gap, row_gap, needed_w, needed_h) = match flow {
         FlowDir::LeftToRight => {
             let col_gap = compute_gap(width, layer_count as u16, node_w, MARGIN_X);
             let row_gap = compute_gap(height, max_per_layer as u16, node_h, MARGIN_Y);
@@ -381,10 +391,10 @@ fn compute_circuit_graph(graph: &GraphSpec, area: Rect, _graph_hash: u64) -> Cac
     let mut nodes: Vec<CachedNode> = Vec::with_capacity(graph.nodes.len());
     let mut node_index: HashMap<usize, usize> = HashMap::new();
 
-    match FLOW_DIR {
+    match flow {
         FlowDir::LeftToRight => {
             // Slot Y positions shared across layers to reduce crossings.
-            let x0 = MARGIN_X;
+            let x0 = centered_start(width, layer_count as u16, node_w, MARGIN_X, col_gap);
             let y0 = centered_start(height, max_per_layer as u16, node_h, MARGIN_Y, row_gap);
             let mut slot_y: Vec<u16> = Vec::with_capacity(max_per_layer);
             for idx in 0..max_per_layer {
@@ -540,7 +550,7 @@ fn compute_circuit_graph(graph: &GraphSpec, area: Rect, _graph_hash: u64) -> Cac
         let from_node = &nodes[from_i];
         let to_node = &nodes[to_i];
 
-        let (start, end, edge_flow) = match FLOW_DIR {
+        let (start, end, edge_flow) = match flow {
             FlowDir::LeftToRight => (
                 anchor_right(from_node, out_port[edge_idx], width, height),
                 anchor_left(to_node, in_port[edge_idx], width, height),
@@ -615,104 +625,113 @@ fn compute_circuit_graph(graph: &GraphSpec, area: Rect, _graph_hash: u64) -> Cac
             arrows.push(arrow);
         }
 
-        // Label chip.
-        let chip = format!("[{}]", e.label);
-        let mid = path[path.len() / 2];
-        let chip_x = chip_anchor_x(mid.0, width, chip.len() as u16);
-        labels_out.push(CachedLabel {
-            x: chip_x,
-            y: mid.1,
-            text: chip,
-            color_kind,
-        });
-    }
-
-    // Start arrow into the start node, coming from "nowhere".
-    let start_arrow = graph.start.and_then(|id| {
-        let &idx = node_index.get(&id)?;
-        let n = &nodes[idx];
-        match FLOW_DIR {
-            FlowDir::LeftToRight => {
-                let y = n.y + 1;
-                let x = n.x.saturating_sub(1);
-                Some(CachedArrow {
-                    x,
-                    y,
-                    ch: '>',
-                    color_kind: COLOR_ACCENT,
-                })
-            }
-            FlowDir::TopToBottom => {
-                let x_center = n.x + n.w / 2;
-                let x = x_center.min(width.saturating_sub(1));
-                let y = n.y.saturating_sub(1).min(height.saturating_sub(1));
-                Some(CachedArrow {
-                    x,
-                    y,
-                    ch: 'v',
-                    color_kind: COLOR_ACCENT,
-                })
-            }
-        }
-    });
-
-    // Label the entry point so the initial state is unambiguous.
-    if let Some(a) = start_arrow {
-        let text = "[start]";
-        let chip_w = text.chars().count() as u16;
-        if chip_w + 2 < width {
-            let mut x = a.x.saturating_add(2);
-            if x + chip_w > width {
-                x = a.x.saturating_sub(chip_w.saturating_add(2));
-            }
-            x = x.min(width.saturating_sub(chip_w));
+        if graph.show_edge_labels {
+            let chip = format!("[{}]", e.label);
+            let mid = path[path.len() / 2];
+            let chip_x = chip_anchor_x(mid.0, width, chip.len() as u16);
             labels_out.push(CachedLabel {
-                x,
-                y: a.y,
-                text: text.to_string(),
-                color_kind: COLOR_ACCENT,
+                x: chip_x,
+                y: mid.1,
+                text: chip,
+                color_kind,
             });
         }
     }
-    if let Some(a) = start_arrow {
-        match FLOW_DIR {
-            FlowDir::LeftToRight => {
-                // Wire stub from the left edge to the start arrow.
-                if a.y < height {
-                    for x in 0..=a.x.min(width.saturating_sub(1)) {
-                        let idx = grid_idx(width, x, a.y);
-                        wire_used[idx] = wire_used[idx].saturating_add(1);
-                        if wire_color[idx] == 0 {
-                            wire_color[idx] = COLOR_ACCENT;
-                        } else if wire_color[idx] != COLOR_ACCENT {
-                            wire_color[idx] = COLOR_JUNCTION;
-                        }
-                    }
-                    for x in 0..a.x.min(width.saturating_sub(1)) {
-                        let a_idx = grid_idx(width, x, a.y);
-                        let b_idx = grid_idx(width, x + 1, a.y);
-                        wire_mask[a_idx] |= BIT_R;
-                        wire_mask[b_idx] |= BIT_L;
-                    }
+
+    // Start arrow into the start node, coming from "nowhere".
+    let start_arrow = if graph.show_edge_labels {
+        graph.start.and_then(|id| {
+            let &idx = node_index.get(&id)?;
+            let n = &nodes[idx];
+            match flow {
+                FlowDir::LeftToRight => {
+                    let y = n.y + 1;
+                    let x = n.x.saturating_sub(1);
+                    Some(CachedArrow {
+                        x,
+                        y,
+                        ch: '→',
+                        color_kind: COLOR_ACCENT,
+                    })
+                }
+                FlowDir::TopToBottom => {
+                    let x_center = n.x + n.w / 2;
+                    let x = x_center.min(width.saturating_sub(1));
+                    let y = n.y.saturating_sub(1).min(height.saturating_sub(1));
+                    Some(CachedArrow {
+                        x,
+                        y,
+                        ch: '↓',
+                        color_kind: COLOR_ACCENT,
+                    })
                 }
             }
-            FlowDir::TopToBottom => {
-                // Wire stub from the top edge to the start arrow.
-                if a.x < width {
-                    for y in 0..=a.y.min(height.saturating_sub(1)) {
-                        let idx = grid_idx(width, a.x, y);
-                        wire_used[idx] = wire_used[idx].saturating_add(1);
-                        if wire_color[idx] == 0 {
-                            wire_color[idx] = COLOR_ACCENT;
-                        } else if wire_color[idx] != COLOR_ACCENT {
-                            wire_color[idx] = COLOR_JUNCTION;
+        })
+    } else {
+        None
+    };
+
+    // Label the entry point so the initial state is unambiguous.
+    if graph.show_edge_labels {
+        if let Some(a) = start_arrow {
+            let text = "[start]";
+            let chip_w = text.chars().count() as u16;
+            if chip_w + 2 < width {
+                let mut x = a.x.saturating_add(2);
+                if x + chip_w > width {
+                    x = a.x.saturating_sub(chip_w.saturating_add(2));
+                }
+                x = x.min(width.saturating_sub(chip_w));
+                labels_out.push(CachedLabel {
+                    x,
+                    y: a.y,
+                    text: text.to_string(),
+                    color_kind: COLOR_ACCENT,
+                });
+            }
+        }
+    }
+    if graph.show_edge_labels {
+        if let Some(a) = start_arrow {
+            match flow {
+                FlowDir::LeftToRight => {
+                    // Wire stub from the left edge to the start arrow.
+                    if a.y < height {
+                        for x in 0..=a.x.min(width.saturating_sub(1)) {
+                            let idx = grid_idx(width, x, a.y);
+                            wire_used[idx] = wire_used[idx].saturating_add(1);
+                            if wire_color[idx] == 0 {
+                                wire_color[idx] = COLOR_ACCENT;
+                            } else if wire_color[idx] != COLOR_ACCENT {
+                                wire_color[idx] = COLOR_JUNCTION;
+                            }
+                        }
+                        for x in 0..a.x.min(width.saturating_sub(1)) {
+                            let a_idx = grid_idx(width, x, a.y);
+                            let b_idx = grid_idx(width, x + 1, a.y);
+                            wire_mask[a_idx] |= BIT_R;
+                            wire_mask[b_idx] |= BIT_L;
                         }
                     }
-                    for y in 0..a.y.min(height.saturating_sub(1)) {
-                        let a_idx = grid_idx(width, a.x, y);
-                        let b_idx = grid_idx(width, a.x, y + 1);
-                        wire_mask[a_idx] |= BIT_D;
-                        wire_mask[b_idx] |= BIT_U;
+                }
+                FlowDir::TopToBottom => {
+                    // Wire stub from the top edge to the start arrow.
+                    if a.x < width {
+                        for y in 0..=a.y.min(height.saturating_sub(1)) {
+                            let idx = grid_idx(width, a.x, y);
+                            wire_used[idx] = wire_used[idx].saturating_add(1);
+                            if wire_color[idx] == 0 {
+                                wire_color[idx] = COLOR_ACCENT;
+                            } else if wire_color[idx] != COLOR_ACCENT {
+                                wire_color[idx] = COLOR_JUNCTION;
+                            }
+                        }
+                        for y in 0..a.y.min(height.saturating_sub(1)) {
+                            let a_idx = grid_idx(width, a.x, y);
+                            let b_idx = grid_idx(width, a.x, y + 1);
+                            wire_mask[a_idx] |= BIT_D;
+                            wire_mask[b_idx] |= BIT_U;
+                        }
                     }
                 }
             }
@@ -754,7 +773,7 @@ fn compute_gap(total: u16, count: u16, item: u16, margin: u16) -> u16 {
         return 0;
     }
     let remaining = usable - needed_items;
-    remaining / (count - 1)
+    (remaining / (count - 1)).min(MAX_HORIZONTAL_LAYER_GAP)
 }
 
 fn centered_start(total: u16, count: u16, item: u16, margin: u16, gap: u16) -> u16 {
@@ -1046,13 +1065,13 @@ fn apply_wire_path(
 
 fn arrow_char(a: (u16, u16), b: (u16, u16)) -> char {
     if b.0 > a.0 {
-        '>'
+        '→'
     } else if b.0 < a.0 {
-        '<'
+        '←'
     } else if b.1 > a.1 {
-        'v'
+        '↓'
     } else {
-        '^'
+        '↑'
     }
 }
 
@@ -1103,10 +1122,10 @@ fn edge_color_kind(label: &str) -> u8 {
 
 fn wire_color_from_kind(kind: u8, theme: &Theme) -> Color {
     match kind {
-        COLOR_WIRE0 => theme.title,
-        COLOR_WIRE1 => theme.accent,
-        COLOR_WIRE2 => theme.warning,
-        COLOR_WIRE3 => theme.border_focused,
+        COLOR_WIRE0 => Color::Green,
+        COLOR_WIRE1 => Color::Red,
+        COLOR_WIRE2 => Color::Blue,
+        COLOR_WIRE3 => Color::Magenta,
         COLOR_JUNCTION => theme.border,
         COLOR_ACCENT => theme.accent,
         COLOR_NONE | _ => theme.border_focused,
@@ -1229,10 +1248,15 @@ impl StableHasher {
 
 fn graph_hash(graph: &GraphSpec) -> u64 {
     let mut h = StableHasher::new();
-    h.write_u64(2); // format version
+    h.write_u64(3); // format version
     h.write_u64(graph.nodes.len() as u64);
     h.write_u64(graph.edges.len() as u64);
     h.write_u64(graph.start.unwrap_or(usize::MAX) as u64);
+    h.write_u64(match graph.flow {
+        GraphFlow::LeftToRight => 0,
+        GraphFlow::TopToBottom => 1,
+    });
+    h.write_u64(if graph.show_edge_labels { 1 } else { 0 });
 
     let mut nodes: Vec<&GraphNode> = graph.nodes.iter().collect();
     nodes.sort_by_key(|n| n.id);
@@ -1310,6 +1334,8 @@ mod tests {
                 },
             ],
             start: Some(0),
+            flow: GraphFlow::TopToBottom,
+            show_edge_labels: true,
         };
         let a = assign_layers(&g);
         let b = assign_layers(&g);
@@ -1339,5 +1365,52 @@ mod tests {
         assert_eq!(path.last().copied(), Some((19, 3)));
         // Expect a direct run.
         assert_eq!(path.len() as u16, 20);
+    }
+
+    #[test]
+    fn arrow_char_uses_directional_glyphs() {
+        assert_eq!(arrow_char((1, 1), (2, 1)), '→');
+        assert_eq!(arrow_char((2, 1), (1, 1)), '←');
+        assert_eq!(arrow_char((1, 1), (1, 2)), '↓');
+        assert_eq!(arrow_char((1, 2), (1, 1)), '↑');
+    }
+
+    #[test]
+    fn fsm_flow_renders_rightward_arrowheads() {
+        let graph = GraphSpec {
+            nodes: vec![
+                GraphNode {
+                    id: 0,
+                    label: "1".into(),
+                    output: Some('C'),
+                },
+                GraphNode {
+                    id: 1,
+                    label: "2".into(),
+                    output: Some('D'),
+                },
+            ],
+            edges: vec![GraphEdge {
+                from: 0,
+                to: 1,
+                label: "0".into(),
+            }],
+            start: Some(0),
+            flow: GraphFlow::LeftToRight,
+            show_edge_labels: false,
+        };
+        let cached = compute_circuit_graph(
+            &graph,
+            Rect {
+                x: 0,
+                y: 0,
+                width: 80,
+                height: 16,
+            },
+            0,
+        );
+        assert_eq!(cached.message, None);
+        assert_eq!(cached.arrows.len(), 1);
+        assert_eq!(cached.arrows[0].ch, '→');
     }
 }

@@ -65,16 +65,17 @@ based on an input symbol derived from the last round’s observation.
 id = "my_fsm"
 type = "auto" # optional: inferred as fsm from fields
 states = 4    # alias: num_states
-start_state = 0
+start_state = 1
+input_index_base = 1
 outputs = ["C","D","D","C"]    # length = states
 input_mode = "opponent_last_action"  # default
 transitions = [
   # Each row: state index; then next_state for each input symbol
   # For opponent_last_action => alphabet size = 2
-  [0, 1, 2],
-  [1, 1, 3],
-  [2, 0, 2],
-  [3, 0, 1],
+  [1, 1, 2],
+  [2, 2, 4],
+  [3, 3, 1],
+  [4, 4, 2],
 ]
 ```
 
@@ -86,7 +87,9 @@ Validation rules:
 - `transitions.len == states`
 - each transition row is either `alphabet` entries or `alphabet+1` entries
   (leading state index)
-- next states must be in `0..num_states`
+- next states must be valid for selected indexing base:
+  - `input_index_base = 0` => `0..(num_states-1)`
+  - `input_index_base = 1` => `1..num_states`
 
 ### One-sided Turing machine
 

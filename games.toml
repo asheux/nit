@@ -44,11 +44,12 @@ k = 2
 id = "fsm_tft"
 type = "auto"
 states = 2
-start_state = 0
+start_state = 1
+input_index_base = 1
 outputs = ["C", "D"]
 transitions = [
-  [0, 1],
-  [0, 1],
+  [1, 2],
+  [1, 2],
 ]
 
 [[strategy]]

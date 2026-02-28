@@ -1772,16 +1772,19 @@ fn handle_command_line(state: &mut AppState, input: &str) -> bool {
 
             // Allow either:
             // - :games inspect <strategy_id>
+            // - :games inspect <fsm_index>                (defaults to {index,2,2})
             // - :games inspect <strategy_id> {rule_code, states, symbols}
             // - :games inspect {rule_code, states, symbols}
-            let explicit_id = tokens
+            let explicit_target = tokens
                 .get(2)
                 .copied()
                 .filter(|token| !token.starts_with('{'));
+            let explicit_fsm_index = explicit_target.and_then(parse_tm_input_token);
+            let explicit_id = explicit_target.filter(|token| parse_tm_input_token(token).is_none());
 
-            if rule_tuple.is_none() && explicit_id.is_none() {
+            if rule_tuple.is_none() && explicit_id.is_none() && explicit_fsm_index.is_none() {
                 state.status = Some(
-                    "Usage: :games inspect <strategy_id> | :games inspect <strategy_id> {rule,states,symbols} | :games inspect {rule,states,symbols}"
+                    "Usage: :games inspect <strategy_id> | :games inspect <fsm_index> | :games inspect fsm {index,states,k} | :games inspect <strategy_id> {rule,states,symbols} | :games inspect {rule,states,symbols}"
                         .into(),
                 );
                 return false;
@@ -1791,49 +1794,70 @@ fn handle_command_line(state: &mut AppState, input: &str) -> bool {
             let mut definition: Option<nit_games::output::StrategyDefinition> = None;
             let mut source_label: Option<String> = None;
 
-            if let Some((rule_code, states, symbols)) = rule_tuple {
-                if states == 0 || symbols < 2 {
-                    state.status = Some(if states == 0 {
-                        "TM rule tuple: states must be >= 1".into()
-                    } else {
-                        "TM rule tuple: symbols must be >= 2".into()
-                    });
-                    return false;
-                }
-
-                let (transitions, _remaining) = nit_games::strategy::decode_tm_rule_code_wolfram(
-                    rule_code,
-                    states as usize,
-                    symbols as usize,
-                );
-                let output_map: Vec<nit_games::game::Action> = (0..symbols)
-                    .map(|idx| {
-                        if idx == 0 {
-                            nit_games::game::Action::Cooperate
-                        } else {
-                            nit_games::game::Action::Defect
+            if let Some(index) = explicit_fsm_index {
+                let states = 2usize;
+                let actions = 2usize;
+                let (outputs, transitions) =
+                    match nit_games::strategy::decode_fsm_notebook_index(index, states, actions) {
+                        Ok(decoded) => decoded,
+                        Err(err) => {
+                            state.status = Some(format!("FSM rule decode error: {err}"));
+                            return false;
                         }
-                    })
-                    .collect();
+                    };
+                let def = nit_games::output::StrategyDefinition {
+                    id: format!("fsm_rule_{index}_{states}x{actions}"),
+                    name: Some(format!("FSM index {index} ({states}x{actions})")),
+                    kind: nit_games::config::StrategySpecKind::Fsm {
+                        num_states: states,
+                        start_state: 0,
+                        outputs,
+                        input_mode: Some(nit_games::strategy::InputMode::OpponentLastAction),
+                        transitions,
+                        index: Some(index),
+                    },
+                    rng_seed_a: None,
+                    rng_seed_b: None,
+                };
+                spec = Some(nit_games::StrategySpec {
+                    id: def.id.clone(),
+                    name: def.name.clone(),
+                    kind: def.kind.clone(),
+                });
+                definition = Some(def);
+                source_label = Some("rule".into());
+            }
 
-                let max_steps = 256;
+            let tuple_prefers_fsm = rule_tuple.is_some()
+                && explicit_id
+                    .map(|id| strategy_id_prefers_fsm(state, id))
+                    .unwrap_or(false);
+
+            if spec.is_none() && tuple_prefers_fsm {
+                let (index, states, actions) = rule_tuple.expect("checked is_some");
+                let states = states as usize;
+                let actions = actions as usize;
+                let (outputs, transitions) =
+                    match nit_games::strategy::decode_fsm_notebook_index(index, states, actions) {
+                        Ok(decoded) => decoded,
+                        Err(err) => {
+                            state.status = Some(format!("FSM rule decode error: {err}"));
+                            return false;
+                        }
+                    };
                 let effective_id = explicit_id
                     .map(str::to_string)
-                    .unwrap_or_else(|| format!("tm_rule_{rule_code}_{states}x{symbols}"));
+                    .unwrap_or_else(|| format!("fsm_rule_{index}_{states}x{actions}"));
                 let def = nit_games::output::StrategyDefinition {
                     id: effective_id,
-                    name: Some(format!("Rule {rule_code} ({states}x{symbols})")),
-                    kind: nit_games::config::StrategySpecKind::OneSidedTm {
-                        states,
-                        symbols,
-                        start_state: 1,
-                        blank: 0,
-                        fallback_symbol: Some(0),
-                        max_steps_per_round: max_steps,
-                        input_mode: nit_games::strategy::InputMode::OpponentLastAction,
-                        output_map,
+                    name: Some(format!("FSM index {index} ({states}x{actions})")),
+                    kind: nit_games::config::StrategySpecKind::Fsm {
+                        num_states: states,
+                        start_state: 0,
+                        outputs,
+                        input_mode: Some(nit_games::strategy::InputMode::OpponentLastAction),
                         transitions,
-                        rule_code: Some(rule_code),
+                        index: Some(index),
                     },
                     rng_seed_a: None,
                     rng_seed_b: None,
@@ -1846,6 +1870,66 @@ fn handle_command_line(state: &mut AppState, input: &str) -> bool {
                 });
                 definition = Some(def);
                 source_label = Some("rule".into());
+            }
+
+            if spec.is_none() {
+                if let Some((rule_code, states, symbols)) = rule_tuple {
+                    if states == 0 || symbols < 2 {
+                        state.status = Some(if states == 0 {
+                            "TM rule tuple: states must be >= 1".into()
+                        } else {
+                            "TM rule tuple: symbols must be >= 2".into()
+                        });
+                        return false;
+                    }
+
+                    let (transitions, _remaining) =
+                        nit_games::strategy::decode_tm_rule_code_wolfram(
+                            rule_code,
+                            states as usize,
+                            symbols as usize,
+                        );
+                    let output_map: Vec<nit_games::game::Action> = (0..symbols)
+                        .map(|idx| {
+                            if idx == 0 {
+                                nit_games::game::Action::Cooperate
+                            } else {
+                                nit_games::game::Action::Defect
+                            }
+                        })
+                        .collect();
+
+                    let max_steps = 256;
+                    let effective_id = explicit_id
+                        .map(str::to_string)
+                        .unwrap_or_else(|| format!("tm_rule_{rule_code}_{states}x{symbols}"));
+                    let def = nit_games::output::StrategyDefinition {
+                        id: effective_id,
+                        name: Some(format!("Rule {rule_code} ({states}x{symbols})")),
+                        kind: nit_games::config::StrategySpecKind::OneSidedTm {
+                            states,
+                            symbols,
+                            start_state: 1,
+                            blank: 0,
+                            fallback_symbol: Some(0),
+                            max_steps_per_round: max_steps,
+                            input_mode: nit_games::strategy::InputMode::OpponentLastAction,
+                            output_map,
+                            transitions,
+                            rule_code: Some(rule_code),
+                        },
+                        rng_seed_a: None,
+                        rng_seed_b: None,
+                    };
+
+                    spec = Some(nit_games::StrategySpec {
+                        id: def.id.clone(),
+                        name: def.name.clone(),
+                        kind: def.kind.clone(),
+                    });
+                    definition = Some(def);
+                    source_label = Some("rule".into());
+                }
             }
 
             if let Some(run) = state.games.last_run.as_ref() {
@@ -2480,6 +2564,26 @@ fn parse_tm_input_token(token: &str) -> Option<u64> {
     base.checked_pow(exp)
 }
 
+fn strategy_id_prefers_fsm(state: &AppState, id: &str) -> bool {
+    if let Some(run) = state.games.last_run.as_ref() {
+        if let Some(def) = run.strategies.iter().find(|def| def.id == id) {
+            return matches!(def.kind, nit_games::config::StrategySpecKind::Fsm { .. });
+        }
+    }
+
+    let config_text = state.editor_buffer().content_as_string();
+    if let Ok(config) = nit_games::config::GamesConfig::from_toml_with_root(
+        &config_text,
+        Some(&state.workspace_root),
+    ) {
+        if let Some(spec) = config.strategies.iter().find(|spec| spec.id == id) {
+            return matches!(spec.kind, nit_games::config::StrategySpecKind::Fsm { .. });
+        }
+    }
+
+    id.eq_ignore_ascii_case("fsm") || id.starts_with("fsm")
+}
+
 fn lab_from_tokens(tokens: &[&str]) -> Option<AppKind> {
     tokens
         .get(0)
@@ -2842,5 +2946,102 @@ mod tests {
         assert!(!handle_command_line(&mut state, ":help - ?"));
         assert!(state.show_help);
         assert_eq!(state.help_scroll, 0);
+    }
+
+    #[test]
+    fn command_games_inspect_numeric_generates_fsm_rule() {
+        let root = temp_dir("cmd-games-inspect-fsm-numeric");
+        let mut state = AppState::new(
+            root.clone(),
+            Buffer::empty("x", None),
+            Buffer::empty("n", None),
+        );
+        state.app_kind = AppKind::Games;
+        assert!(!handle_command_line(&mut state, ":games inspect 22"));
+        let def = state
+            .games
+            .strategy_inspect
+            .definition
+            .as_ref()
+            .expect("generated definition");
+        match &def.kind {
+            nit_games::config::StrategySpecKind::Fsm {
+                num_states, index, ..
+            } => {
+                assert_eq!(*num_states, 2);
+                assert_eq!(*index, Some(22));
+            }
+            other => panic!("expected FSM kind, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn command_games_inspect_fsm_tuple_uses_fsm_override() {
+        let root = temp_dir("cmd-games-inspect-fsm-tuple");
+        let mut state = AppState::new(
+            root.clone(),
+            Buffer::empty("x", None),
+            Buffer::empty("n", None),
+        );
+        state.app_kind = AppKind::Games;
+        assert!(!handle_command_line(
+            &mut state,
+            ":games inspect fsm {22, 3, 2}"
+        ));
+        let def = state
+            .games
+            .strategy_inspect
+            .definition
+            .as_ref()
+            .expect("generated definition");
+        assert_eq!(def.id, "fsm");
+        match &def.kind {
+            nit_games::config::StrategySpecKind::Fsm {
+                num_states,
+                transitions,
+                index,
+                ..
+            } => {
+                assert_eq!(*num_states, 3);
+                assert_eq!(*index, Some(22));
+                assert_eq!(transitions.len(), 3);
+                assert!(transitions.iter().all(|row| row.len() == 2));
+            }
+            other => panic!("expected FSM kind, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn command_games_inspect_tm_tuple_still_generates_tm() {
+        let root = temp_dir("cmd-games-inspect-tm-tuple");
+        let mut state = AppState::new(
+            root.clone(),
+            Buffer::empty("x", None),
+            Buffer::empty("n", None),
+        );
+        state.app_kind = AppKind::Games;
+        assert!(!handle_command_line(
+            &mut state,
+            ":games inspect tm_rule {3111, 2, 2}"
+        ));
+        let def = state
+            .games
+            .strategy_inspect
+            .definition
+            .as_ref()
+            .expect("generated definition");
+        match &def.kind {
+            nit_games::config::StrategySpecKind::OneSidedTm {
+                states,
+                symbols,
+                rule_code,
+                ..
+            } => {
+                assert_eq!(*states, 2);
+                assert_eq!(*symbols, 2);
+                assert_eq!(*rule_code, Some(3111));
+            }
+            other => panic!("expected TM kind, got {other:?}"),
+        }
     }
 }

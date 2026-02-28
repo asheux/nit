@@ -13,17 +13,21 @@ use ratatui::{
 
 use crate::theme::Theme;
 use crate::widgets::games_visualizer_view::strategy_display_name_from_def;
-use crate::widgets::graph_render::{self, GraphEdge, GraphNode, GraphSpec};
+use crate::widgets::graph_render::{self, GraphEdge, GraphFlow, GraphNode, GraphSpec};
 use crate::widgets::text_selection::apply_ui_selection;
 
 const MIN_WIDTH: u16 = 70;
 const MIN_HEIGHT: u16 = 20;
+const MAX_WIDTH: u16 = 136;
+const MAX_HEIGHT: u16 = 36;
+const DETAILS_PANE_TARGET_WIDTH: u16 = 60;
+const GRAPH_PANE_MIN_WIDTH: u16 = 24;
 
 const GRAPH_NODE_LIMIT: usize = 12;
 
 pub fn preferred_size(screen: Rect) -> (u16, u16) {
-    let width = screen.width.min(120).max(MIN_WIDTH);
-    let height = screen.height.min(45).max(MIN_HEIGHT);
+    let width = screen.width.min(MAX_WIDTH).max(MIN_WIDTH);
+    let height = screen.height.min(MAX_HEIGHT).max(MIN_HEIGHT);
     (width, height)
 }
 
@@ -284,25 +288,61 @@ fn fsm_graph_spec(
     outputs: &[Action],
     transitions: &[Vec<usize>],
 ) -> GraphSpec {
+    if state_count == 0 {
+        return GraphSpec {
+            nodes: Vec::new(),
+            edges: Vec::new(),
+            start: None,
+            flow: GraphFlow::LeftToRight,
+            show_edge_labels: false,
+        };
+    }
+
     let alphabet = mode.alphabet_size();
-    let mut nodes = Vec::with_capacity(state_count);
-    for state in 0..state_count {
+    let start = start_state.min(state_count.saturating_sub(1));
+
+    let mut reachable = vec![false; state_count];
+    let mut queue = vec![start];
+    let mut cursor = 0usize;
+    reachable[start] = true;
+    while cursor < queue.len() {
+        let state = queue[cursor];
+        cursor += 1;
+        if let Some(row) = transitions.get(state) {
+            for input in 0..alphabet {
+                if let Some(&next) = row.get(input) {
+                    if next < state_count && !reachable[next] {
+                        reachable[next] = true;
+                        queue.push(next);
+                    }
+                }
+            }
+        }
+    }
+
+    let mut nodes = Vec::with_capacity(queue.len());
+    for state in queue {
         nodes.push(GraphNode {
             id: state,
-            label: state.to_string(),
+            label: (state + 1).to_string(),
             output: outputs.get(state).map(|a| a.as_char()),
         });
     }
     let mut edges = Vec::new();
     for state in 0..state_count {
+        if !reachable[state] {
+            continue;
+        }
         if let Some(row) = transitions.get(state) {
             for input in 0..alphabet {
                 if let Some(&next) = row.get(input) {
-                    edges.push(GraphEdge {
-                        from: state,
-                        to: next,
-                        label: input.to_string(),
-                    });
+                    if next < state_count && reachable[next] {
+                        edges.push(GraphEdge {
+                            from: state,
+                            to: next,
+                            label: input.to_string(),
+                        });
+                    }
                 }
             }
         }
@@ -310,7 +350,9 @@ fn fsm_graph_spec(
     GraphSpec {
         nodes,
         edges,
-        start: Some(start_state),
+        start: Some(start),
+        flow: GraphFlow::LeftToRight,
+        show_edge_labels: false,
     }
 }
 
@@ -365,6 +407,8 @@ fn tm_graph_spec(
         nodes,
         edges,
         start: Some(start_state.saturating_sub(1) as usize),
+        flow: GraphFlow::TopToBottom,
+        show_edge_labels: true,
     })
 }
 
@@ -383,7 +427,7 @@ fn build_fsm_graph_lines(
     let mut lines = Vec::new();
     lines.push("graph:".to_string());
     lines.push(format!("legend: {}", input_symbol_legend(mode)));
-    lines.push(format!("start_state: {start_state}"));
+    lines.push(format!("start_state: {}", start_state.saturating_add(1)));
 
     let mut headers = Vec::with_capacity(alphabet + 1);
     headers.push("state".to_string());
@@ -395,12 +439,12 @@ fn build_fsm_graph_lines(
     for state_idx in 0..state_count {
         let output = outputs.get(state_idx).map(|a| a.as_char()).unwrap_or('?');
         let mut row = Vec::with_capacity(alphabet + 1);
-        row.push(format!("{state_idx}({output})"));
+        row.push(format!("{}({output})", state_idx + 1));
         let trans_row = transitions.get(state_idx);
         for input_idx in 0..alphabet {
             let next = trans_row
                 .and_then(|row| row.get(input_idx))
-                .map(|n| n.to_string())
+                .map(|n| (n + 1).to_string())
                 .unwrap_or_else(|| "-".to_string());
             row.push(next);
         }
@@ -492,7 +536,7 @@ pub fn build_definition_lines(def: &nit_games::output::StrategyDefinition) -> Ve
             lines.push(format!(
                 "params: states={} start={} input={} outputs={}",
                 state_count,
-                start_state,
+                start_state.saturating_add(1),
                 input_mode_label(mode),
                 outputs_str
             ));
@@ -776,13 +820,24 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
     let show_graph = !state.games.strategy_inspect.lines.is_empty()
         && (graph_spec.is_some() || !graph_lines.is_empty());
     if show_graph {
-        let chunks = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([
+        let use_fixed_details_width =
+            inner.width > DETAILS_PANE_TARGET_WIDTH + 1 + GRAPH_PANE_MIN_WIDTH;
+        let constraints = if use_fixed_details_width {
+            vec![
+                Constraint::Length(DETAILS_PANE_TARGET_WIDTH),
+                Constraint::Length(1),
+                Constraint::Min(GRAPH_PANE_MIN_WIDTH),
+            ]
+        } else {
+            vec![
                 Constraint::Percentage(50),
                 Constraint::Length(1),
                 Constraint::Percentage(50),
-            ])
+            ]
+        };
+        let chunks = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints(constraints)
             .split(inner);
 
         let left_block = Block::default()
@@ -925,5 +980,33 @@ mod tests {
         assert_eq!(graph.nodes.len(), 2);
         assert_eq!(graph.edges.len(), 4);
         assert_eq!(graph.start, Some(0));
+        assert_eq!(graph.flow, GraphFlow::LeftToRight);
+        assert!(!graph.show_edge_labels);
+    }
+
+    #[test]
+    fn fsm_graph_spec_filters_unreachable_states() {
+        let def = StrategyDefinition {
+            id: "t".to_string(),
+            name: None,
+            kind: StrategySpecKind::Fsm {
+                num_states: 3,
+                start_state: 0,
+                outputs: vec![Action::Cooperate, Action::Defect, Action::Cooperate],
+                input_mode: Some(InputMode::OpponentLastAction),
+                transitions: vec![vec![0, 1], vec![1, 0], vec![2, 2]],
+                index: None,
+            },
+            rng_seed_a: None,
+            rng_seed_b: None,
+        };
+
+        let graph = graph_from_definition(&def).expect("graph");
+        assert_eq!(graph.nodes.len(), 2);
+        assert!(graph.nodes.iter().all(|node| node.id != 2));
+        assert!(graph
+            .edges
+            .iter()
+            .all(|edge| edge.from != 2 && edge.to != 2));
     }
 }

@@ -158,10 +158,17 @@ pub fn build_lines(theme: &Theme) -> Vec<Line<'static>> {
     ]));
     lines.push(Line::from(vec![
         Span::styled(
+            ":games inspect <fsm_index>",
+            Style::default().fg(theme.accent),
+        ),
+        Span::raw(" inspect FSM notebook index (defaults to {index,2,2})"),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled(
             ":games inspect <id> {rule,states,symbols}",
             Style::default().fg(theme.accent),
         ),
-        Span::raw(" inspect a one-sided TM rule tuple (override)"),
+        Span::raw(" inspect TM tuple; use id=fsm for FSM {index,states,k}"),
     ]));
     lines.push(Line::from(vec![
         Span::styled(

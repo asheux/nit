@@ -528,11 +528,12 @@ fsm_state_cost = 0.0
 id = "fsm_tft"
 type = "auto"
 states = 2
-start_state = 0
+start_state = 1
+input_index_base = 1
 outputs = ["C", "D"]
 transitions = [
-  [0, 1],
-  [0, 1],
+  [1, 2],
+  [1, 2],
 ]
 
 [[strategy]]
@@ -1506,8 +1507,8 @@ fn build_fsm_graph(
     for idx in 0..states {
         let output = outputs.get(idx).map(|a| a.as_char()).unwrap_or('?');
         nodes.push(GraphNode {
-            id: idx.to_string(),
-            label: format!("{idx}({output})"),
+            id: (idx + 1).to_string(),
+            label: format!("{}({output})", idx + 1),
         });
     }
     let mut edges = Vec::new();
@@ -1515,8 +1516,8 @@ fn build_fsm_graph(
         for (input_idx, next) in row.iter().enumerate() {
             let label = input_idx.to_string();
             edges.push(GraphEdge {
-                from: state_idx.to_string(),
-                to: next.to_string(),
+                from: (state_idx + 1).to_string(),
+                to: (next + 1).to_string(),
                 color: edge_color_for_label(&label),
                 label,
             });
@@ -1527,7 +1528,7 @@ fn build_fsm_graph(
         strategy_id,
         kind,
         input_mode: Some(InputMode::OpponentLastAction),
-        start_state: Some(start_state.to_string()),
+        start_state: Some((start_state + 1).to_string()),
         nodes,
         edges,
         notes,
