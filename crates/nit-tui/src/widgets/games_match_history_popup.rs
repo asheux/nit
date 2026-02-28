@@ -242,7 +242,7 @@ pub fn build_lines(state: &AppState, theme: &Theme, inner: Rect) -> Vec<Line<'st
         Span::styled("=", dim_style),
         Span::styled(CELL_GLYPH, one_style),
         Span::styled(" ", dim_style),
-        Span::styled("cyan", value_style),
+        Span::styled("accent", value_style),
         Span::styled("  ", dim_style),
         Span::styled("A/B columns", dim_style),
     ]));
