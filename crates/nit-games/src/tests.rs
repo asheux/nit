@@ -218,7 +218,9 @@ index = 1
 
     let cfg = GamesConfig::from_toml(src).expect("parse single-strategy config");
     let runner = TournamentRunner::new(cfg);
-    let progress = runner.progress().expect("progress should exist for empty schedule");
+    let progress = runner
+        .progress()
+        .expect("progress should exist for empty schedule");
     assert_eq!(progress.match_index, 0);
     assert_eq!(progress.total_matches, 0);
     assert_eq!(progress.round, 0);

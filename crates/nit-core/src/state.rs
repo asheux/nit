@@ -1835,9 +1835,7 @@ fn handle_command_line(state: &mut AppState, input: &str) -> bool {
                     state.games.pending_family_run = Some(request);
                     state.games.family_building = true;
                     let mode = if force { "forced, " } else { "" };
-                    state.status = Some(format!(
-                        "Preparing family run ({mode}{family})..."
-                    ));
+                    state.status = Some(format!("Preparing family run ({mode}{family})..."));
                 }
                 Err(err) => {
                     state.games.pending_family_run = None;
@@ -2930,11 +2928,9 @@ pub fn build_family_run_override_for_request(
     config_text: &str,
     request: &GamesFamilyRunRequest,
 ) -> Result<GamesRunOverride, String> {
-    let mut config = nit_games::config::GamesConfig::from_toml_with_root(
-        config_text,
-        Some(workspace_root),
-    )
-    .map_err(|err| format!("Config error: {err}"))?;
+    let mut config =
+        nit_games::config::GamesConfig::from_toml_with_root(config_text, Some(workspace_root))
+            .map_err(|err| format!("Config error: {err}"))?;
 
     let (strategies, label) = match request.family.as_str() {
         "fsm" => {
@@ -3110,9 +3106,7 @@ fn parse_fsm_family_tuple(input: &str) -> Result<(usize, usize), String> {
         ));
     }
     if actions_raw != 2 {
-        return Err(
-            "FSM family tuple currently requires k=2".into(),
-        );
+        return Err("FSM family tuple currently requires k=2".into());
     }
     Ok((states_raw as usize, actions_raw as usize))
 }

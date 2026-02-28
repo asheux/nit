@@ -8,7 +8,7 @@ use std::time::Instant;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use nit_core::{
     build_family_run_override_for_request, AppState, GamesAnalysisRequest, GamesFamilyRunRequest,
-    GamesStatus, GamesRunOverride, UiSelectionPane,
+    GamesRunOverride, GamesStatus, UiSelectionPane,
 };
 use nit_games::output::StrategyDefinition;
 use nit_games::{
@@ -67,6 +67,8 @@ pub struct GamesPetriDishRuntime {
     view: PetriView,
     inspector_window: usize,
     family_run_rx: Option<Receiver<FamilyBuildOutcome>>,
+    loading_open: bool,
+    loading_message: Option<String>,
 }
 
 struct GameSession {
@@ -161,15 +163,17 @@ impl GamesPetriDishRuntime {
             view: PetriView::Tournament,
             inspector_window: 50,
             family_run_rx: None,
+            loading_open: false,
+            loading_message: None,
         }
     }
 
     pub fn is_open(&self) -> bool {
-        self.session.is_some()
+        self.session.is_some() || self.loading_open
     }
 
     pub fn is_visible(&self) -> bool {
-        self.session.is_some() && !self.hidden
+        (self.session.is_some() || self.loading_open) && !self.hidden
     }
 
     pub fn handle_pending_requests(&mut self, state: &mut AppState) {
@@ -257,9 +261,11 @@ impl GamesPetriDishRuntime {
         let mode = if request.force { "forced, " } else { "" };
         let force = request.force;
         state.games.family_building = true;
-        state.status = Some(format!(
-            "Preparing family run ({mode}{family_label})..."
-        ));
+        self.open_loading_popup(
+            state,
+            format!("Preparing family run ({mode}{family_label})..."),
+        );
+        state.status = None;
         let (tx, rx) = mpsc::channel();
         thread::spawn(move || {
             let result =
@@ -297,13 +303,17 @@ impl GamesPetriDishRuntime {
                 let mode = if outcome.force { "forced, " } else { "" };
                 state.games.pending_run_override = Some(override_run);
                 state.games.pending_run = true;
-                state.status = Some(format!(
-                    "Games tournament queued ({mode}{label}, {machine_count} machines)"
+                self.loading_message = Some(format!(
+                    "Queued tournament ({mode}{label}, {machine_count} machines)"
                 ));
+                state.status = None;
             }
             Err(err) => {
                 state.games.pending_run_override = None;
                 state.games.pending_run = false;
+                self.loading_open = false;
+                self.loading_message = None;
+                state.games.running = false;
                 state.status = Some(err);
             }
         }
@@ -317,9 +327,22 @@ impl GamesPetriDishRuntime {
             }
             return true;
         }
-        let Some(_session) = self.session.as_mut() else {
-            return false;
-        };
+        if self.session.is_none() {
+            if !self.loading_open {
+                return false;
+            }
+            return match key.code {
+                KeyCode::Esc => {
+                    self.close(state);
+                    true
+                }
+                KeyCode::Char('h') | KeyCode::Char('H') => {
+                    self.hide(state);
+                    true
+                }
+                _ => false,
+            };
+        }
 
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         if ctrl
@@ -510,6 +533,11 @@ impl GamesPetriDishRuntime {
                     }
                 }
                 RunnerEvent::Progress(progress) => {
+                    state.games.match_history.total_entries = state
+                        .games
+                        .match_history
+                        .total_entries
+                        .max(progress.total_matches);
                     if let Some(session) = self.session.as_mut() {
                         session.progress = Some(progress);
                     }
@@ -532,16 +560,23 @@ impl GamesPetriDishRuntime {
                                 Some(format!("Failed to cache match history preview: {err}"));
                             state.games.match_history.entries.push(preview);
                             state.games.match_history.loaded_start = 0;
-                            state.games.match_history.total_entries =
-                                state.games.match_history.entries.len();
+                            state.games.match_history.total_entries = state
+                                .games
+                                .match_history
+                                .total_entries
+                                .max(state.games.match_history.entries.len());
                         } else {
-                            state.games.match_history.total_entries = store.len();
+                            state.games.match_history.total_entries =
+                                state.games.match_history.total_entries.max(store.len());
                         }
                     } else {
                         state.games.match_history.entries.push(preview);
                         state.games.match_history.loaded_start = 0;
-                        state.games.match_history.total_entries =
-                            state.games.match_history.entries.len();
+                        state.games.match_history.total_entries = state
+                            .games
+                            .match_history
+                            .total_entries
+                            .max(state.games.match_history.entries.len());
                     }
                 }
                 RunnerEvent::PartialLeaderboard(results) => {
@@ -649,6 +684,59 @@ impl GamesPetriDishRuntime {
                 warning.clone(),
                 Style::default().fg(theme.warning),
             )));
+        } else if self.loading_open {
+            let loading_message = self
+                .loading_message
+                .as_deref()
+                .or_else(|| {
+                    if state.games.family_building {
+                        Some("Preparing family run...")
+                    } else if state.games.pending_run {
+                        Some("Preparing run config...")
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or("Starting tournament...");
+            lines.push(Line::from(vec![
+                Span::styled("Status: ", label_style),
+                Span::styled("Loading", status_style(state, theme)),
+            ]));
+            lines.push(Line::from(vec![
+                Span::styled("Stage: ", label_style),
+                Span::styled(loading_message.to_string(), value_style),
+            ]));
+            lines.push(Line::from(vec![
+                Span::styled("Match: ", label_style),
+                Span::styled("Waiting for runner...", dim_style),
+            ]));
+            lines.push(Line::from(vec![
+                Span::styled("Pair: ", label_style),
+                Span::styled("Waiting for runner...", dim_style),
+            ]));
+            lines.push(Line::from(vec![
+                Span::styled("Last: ", label_style),
+                Span::styled("Waiting for runner...", dim_style),
+            ]));
+            lines.push(Line::from(vec![
+                Span::styled("Halt: ", label_style),
+                Span::styled("Waiting for runner...", dim_style),
+            ]));
+            lines.push(Line::from(vec![
+                Span::styled("Payoff: ", label_style),
+                Span::styled("Waiting for runner...", dim_style),
+            ]));
+            lines.push(Line::from(vec![
+                Span::styled("Total: ", label_style),
+                Span::styled("Waiting for runner...", dim_style),
+            ]));
+            lines.push(Line::from(""));
+            lines.push(Line::from(vec![
+                Span::styled("Esc", key_style),
+                Span::styled(" close | ", help_style),
+                Span::styled("H", key_style),
+                Span::styled(" hide", help_style),
+            ]));
         } else if let Some(session) = self.session.as_ref() {
             match self.view {
                 PetriView::Tournament => {
@@ -781,37 +869,37 @@ impl GamesPetriDishRuntime {
         }
         let mut run_label: Option<String> = None;
         let mut family_mode = false;
-        let (mut config, config_text) = if let Some(override_run) =
-            state.games.pending_run_override.take()
-        {
-            run_label = Some(override_run.label);
-            family_mode = override_run.family_mode;
-            (override_run.config, override_run.config_text)
-        } else {
-            let config_text = state.editor_buffer().content_as_string();
-            let version = state.editor_buffer().version();
-            let Some(preview) = state
-                .games
-                .config_preview
-                .as_ref()
-                .filter(|preview| preview.version == version)
-            else {
-                state.games.pending_run = true;
-                state.status = Some("Preparing run config in background...".into());
-                return;
-            };
-            let config = match &preview.result {
-                Ok(config) => config.clone(),
-                Err(err) => {
-                    let msg = format!("Config error: {err}");
-                    state.games.status = GamesStatus::Error;
-                    state.games.last_error = Some(msg.clone());
-                    state.status = Some(msg);
+        let (mut config, config_text) =
+            if let Some(override_run) = state.games.pending_run_override.take() {
+                run_label = Some(override_run.label);
+                family_mode = override_run.family_mode;
+                (override_run.config, override_run.config_text)
+            } else {
+                let config_text = state.editor_buffer().content_as_string();
+                let version = state.editor_buffer().version();
+                let Some(preview) = state
+                    .games
+                    .config_preview
+                    .as_ref()
+                    .filter(|preview| preview.version == version)
+                else {
+                    state.games.pending_run = true;
+                    self.open_loading_popup(state, "Preparing run config in background...");
+                    state.status = None;
                     return;
-                }
+                };
+                let config = match &preview.result {
+                    Ok(config) => config.clone(),
+                    Err(err) => {
+                        let msg = format!("Config error: {err}");
+                        state.games.status = GamesStatus::Error;
+                        state.games.last_error = Some(msg.clone());
+                        state.status = Some(msg);
+                        return;
+                    }
+                };
+                (config, config_text)
             };
-            (config, config_text)
-        };
 
         config.engine.mode = if family_mode {
             nit_games::EngineMode::Batch
@@ -852,8 +940,9 @@ impl GamesPetriDishRuntime {
             state.status = Some(msg);
             return;
         }
-        self.history_store = match HistoryPreviewStore::create(layout.run_dir.join("match_history_preview.ndjson"))
-        {
+        self.history_store = match HistoryPreviewStore::create(
+            layout.run_dir.join("match_history_preview.ndjson"),
+        ) {
             Ok(store) => Some(store),
             Err(err) => {
                 tracing::warn!("Failed to create match history preview cache: {err}");
@@ -895,6 +984,8 @@ impl GamesPetriDishRuntime {
         };
 
         self.runner.send(RunnerCommand::StartRun(request));
+        self.loading_open = false;
+        self.loading_message = None;
         self.session = Some(GameSession {
             config,
             progress: None,
@@ -934,11 +1025,12 @@ impl GamesPetriDishRuntime {
     }
 
     fn refresh_history_window(&mut self, state: &mut AppState) {
-        let total = if let Some(store) = self.history_store.as_ref() {
+        let observed_total = if let Some(store) = self.history_store.as_ref() {
             store.len()
         } else {
             state.games.match_history.entries.len()
         };
+        let total = state.games.match_history.total_entries.max(observed_total);
         state.games.match_history.total_entries = total;
 
         if total == 0 {
@@ -948,7 +1040,7 @@ impl GamesPetriDishRuntime {
 
         if self.history_store.is_none() {
             state.games.match_history.loaded_start = 0;
-            state.games.match_history.total_entries = state.games.match_history.entries.len();
+            state.games.match_history.total_entries = observed_total;
             return;
         }
 
@@ -1059,10 +1151,14 @@ impl GamesPetriDishRuntime {
         }
         self.family_run_rx = None;
         self.session = None;
+        self.loading_open = false;
+        self.loading_message = None;
         self.hidden = false;
         state.games.running = false;
         state.games.paused = false;
         state.games.family_building = false;
+        state.games.pending_run = false;
+        state.games.pending_run_override = None;
         state.games.pending_family_run = None;
         state.games.status = GamesStatus::Idle;
         state.games.petri_hidden = false;
@@ -1075,7 +1171,7 @@ impl GamesPetriDishRuntime {
     }
 
     fn hide(&mut self, state: &mut AppState) {
-        if self.session.is_some() {
+        if self.session.is_some() || self.loading_open {
             self.hidden = true;
             state.games.petri_hidden = true;
             if let Some(selection) = state.ui_selection {
@@ -1087,10 +1183,21 @@ impl GamesPetriDishRuntime {
     }
 
     fn show(&mut self, state: &mut AppState) {
-        if self.session.is_some() {
+        if self.session.is_some() || self.loading_open {
             self.hidden = false;
             state.games.petri_hidden = false;
         }
+    }
+
+    fn open_loading_popup(&mut self, state: &mut AppState, message: impl Into<String>) {
+        self.loading_open = true;
+        self.loading_message = Some(message.into());
+        self.hidden = false;
+        state.games.running = true;
+        state.games.paused = false;
+        state.games.status = GamesStatus::Running;
+        state.games.petri_hidden = false;
+        state.games.last_error = None;
     }
 
     fn adjust_inspector_window(&mut self, delta: i32) {

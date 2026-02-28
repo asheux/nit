@@ -310,10 +310,7 @@ pub fn render(
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    let layout = layout_for_config(
-        inner,
-        config_result.and_then(|result| result.as_ref().ok()),
-    );
+    let layout = layout_for_config(inner, config_result.and_then(|result| result.as_ref().ok()));
 
     let mut lines = build_main_lines(
         state,

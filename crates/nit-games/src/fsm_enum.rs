@@ -263,9 +263,7 @@ pub fn group_canonical_fsm_indices_by_behavior_with_mode(
     for idx in canonical {
         let raw = decode_fsm_notebook_index_raw(idx, states, actions)?;
         let key = match mode {
-            FsmGroupingMode::Wnbm => {
-                behavior_trace_signature(&raw, NOTEBOOK_BEHAVIOR_TRACE_STEPS)?
-            }
+            FsmGroupingMode::Wnbm => behavior_trace_signature(&raw, NOTEBOOK_BEHAVIOR_TRACE_STEPS)?,
             FsmGroupingMode::Moorem => raw_fsm_key(&minimize_raw_fsm(&raw, 0))?,
         };
         if let Some(group_idx) = group_index_by_key.get(&key).copied() {
