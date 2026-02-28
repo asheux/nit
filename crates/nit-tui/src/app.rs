@@ -2783,6 +2783,37 @@ fn map_ca_sim_popup_mouse_for_pane(
     Some((line_idx, col, text_lines))
 }
 
+fn map_match_history_popup_mouse(
+    mouse: MouseEvent,
+    screen: ratatui::layout::Rect,
+    state: &AppState,
+    theme: &Theme,
+    clamp: bool,
+) -> Option<(usize, usize, Vec<String>)> {
+    if state.app_kind != AppKind::Games || !state.games.match_history.open {
+        return None;
+    }
+    let area = dynamic_popup_rect(screen, games_match_history_popup::preferred_size(screen));
+    let text_area = popup_text_area(area);
+    if !point_in_rect(mouse.column, mouse.row, text_area) && !clamp {
+        return None;
+    }
+    let lines = games_match_history_popup::build_lines(state, theme, text_area);
+    let text_lines = lines_to_strings(&lines);
+    if text_lines.is_empty() {
+        return None;
+    }
+    let (line_idx, col) = map_mouse_to_line_col(
+        mouse,
+        text_area,
+        &text_lines,
+        0,
+        state.settings.editor.tab_width as usize,
+        clamp,
+    )?;
+    Some((line_idx, col, text_lines))
+}
+
 fn map_games_petri_mouse(
     mouse: MouseEvent,
     screen: ratatui::layout::Rect,
@@ -3262,6 +3293,30 @@ fn handle_mouse_down(
         return true;
     }
     if state.app_kind == AppKind::Games && state.games.match_history.open {
+        if let Some((line_idx, col, lines)) =
+            map_match_history_popup_mouse(mouse, screen, state, theme, false)
+        {
+            reset_ui_selection(state, input_state);
+            state.ui_selection = Some(UiSelection {
+                pane: UiSelectionPane::GamesMatchHistoryPopup,
+                start_line: line_idx,
+                start_col: col,
+                end_line: line_idx,
+                end_col: col,
+            });
+            input_state.mouse_select_anchor = Some(MouseSelectAnchor {
+                target: MouseSelectTarget::Ui(UiSelectionPane::GamesMatchHistoryPopup),
+                line: line_idx,
+                col,
+            });
+            update_ui_selection_text(
+                state,
+                UiSelectionPane::GamesMatchHistoryPopup,
+                &lines,
+                clipboard,
+                input_state,
+            );
+        }
         return true;
     }
     if state.app_kind == AppKind::Games && state.games.analysis.open {
@@ -3551,6 +3606,10 @@ fn handle_mouse_drag(
                     map_ca_sim_popup_mouse_for_pane(mouse, screen, state, theme, true, pane)
                         .map(|(line_idx, col, lines)| (line_idx, col, lines))
                 }
+                UiSelectionPane::GamesMatchHistoryPopup => {
+                    map_match_history_popup_mouse(mouse, screen, state, theme, true)
+                        .map(|(line_idx, col, lines)| (line_idx, col, lines))
+                }
             };
             let Some((line_idx, col, lines)) = result else {
                 return false;
@@ -3626,7 +3685,10 @@ fn mouse_drag_allowed(state: &AppState, anchor: MouseSelectAnchor) -> bool {
         );
     }
     if state.app_kind == AppKind::Games && state.games.match_history.open {
-        return false;
+        return matches!(
+            anchor.target,
+            MouseSelectTarget::Ui(UiSelectionPane::GamesMatchHistoryPopup)
+        );
     }
     if games_petri_visible(state) {
         return matches!(
@@ -5146,6 +5208,11 @@ fn handle_match_history_popup_key(
     match key.code {
         KeyCode::Esc | KeyCode::Char('q') => {
             state.games.match_history.open = false;
+            if let Some(selection) = state.ui_selection {
+                if matches!(selection.pane, UiSelectionPane::GamesMatchHistoryPopup) {
+                    state.ui_selection = None;
+                }
+            }
             true
         }
         KeyCode::Left | KeyCode::Char('h') => {

@@ -1,4 +1,4 @@
-use nit_core::AppState;
+use nit_core::{AppState, UiSelectionPane};
 use ratatui::{
     layout::Rect,
     style::{Color, Modifier, Style},
@@ -8,12 +8,15 @@ use ratatui::{
 };
 
 use crate::theme::Theme;
+use crate::widgets::text_selection::apply_ui_selection;
 
 const MIN_WIDTH: u16 = 70;
 const MIN_HEIGHT: u16 = 20;
 const PANEL_WIDTH: usize = 18;
 const PANEL_GAP: usize = 2;
 const RESERVED_LINES: usize = 8;
+const CELL_GLYPH: &str = "▀▀";
+const CELL_EMPTY: &str = "  ";
 
 pub fn preferred_size(screen: Rect) -> (u16, u16) {
     let width = ((screen.width as u32).saturating_mul(9) / 10) as u16;
@@ -40,13 +43,20 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
     frame.render_widget(block, area);
 
     let lines = build_lines(state, theme, inner);
+    let lines = apply_ui_selection(
+        lines,
+        state.ui_selection.as_ref(),
+        UiSelectionPane::GamesMatchHistoryPopup,
+        theme.selection_bg,
+        0,
+    );
     let paragraph = Paragraph::new(lines)
         .style(Style::default().fg(theme.foreground).bg(theme.background))
         .wrap(Wrap { trim: false });
     frame.render_widget(paragraph, inner);
 }
 
-fn build_lines(state: &AppState, theme: &Theme, inner: Rect) -> Vec<Line<'static>> {
+pub fn build_lines(state: &AppState, theme: &Theme, inner: Rect) -> Vec<Line<'static>> {
     let label_style = Style::default().fg(theme.title).add_modifier(Modifier::DIM);
     let value_style = Style::default().fg(theme.foreground);
     let dim_style = Style::default()
@@ -55,9 +65,9 @@ fn build_lines(state: &AppState, theme: &Theme, inner: Rect) -> Vec<Line<'static
     let warn_style = Style::default()
         .fg(theme.warning)
         .add_modifier(Modifier::BOLD);
-    let zero_style = Style::default().bg(Color::White).fg(Color::White);
-    let one_style = Style::default().bg(theme.accent).fg(theme.accent);
-    let empty_cell_style = Style::default().bg(Color::DarkGray).fg(Color::DarkGray);
+    let zero_style = Style::default().fg(Color::White).bg(theme.background);
+    let one_style = Style::default().fg(theme.accent).bg(theme.background);
+    let empty_cell_style = Style::default().fg(Color::DarkGray).bg(theme.background);
 
     let mut lines: Vec<Line<'static>> = Vec::new();
     let entries = state.games.match_history.entries.as_slice();
@@ -157,25 +167,13 @@ fn build_lines(state: &AppState, theme: &Theme, inner: Rect) -> Vec<Line<'static
             spans.push(Span::styled(format!("{:>3} ", round_idx + 1), dim_style));
             let (a_bit, b_bit) = decode_outcome(entry.outcomes_prefix.as_bytes().get(round_idx).copied());
             spans.push(Span::styled(
-                "  ",
-                if a_bit == Some(1) {
-                    one_style
-                } else if a_bit == Some(0) {
-                    zero_style
-                } else {
-                    empty_cell_style
-                },
+                history_cell_text(a_bit),
+                history_cell_style(a_bit, zero_style, one_style, empty_cell_style),
             ));
             spans.push(Span::raw(" "));
             spans.push(Span::styled(
-                "  ",
-                if b_bit == Some(1) {
-                    one_style
-                } else if b_bit == Some(0) {
-                    zero_style
-                } else {
-                    empty_cell_style
-                },
+                history_cell_text(b_bit),
+                history_cell_style(b_bit, zero_style, one_style, empty_cell_style),
             ));
             let consumed = 4 + 2 + 1 + 2;
             let pad = PANEL_WIDTH.saturating_sub(consumed);
@@ -191,10 +189,14 @@ fn build_lines(state: &AppState, theme: &Theme, inner: Rect) -> Vec<Line<'static
         Span::styled("Legend: ", label_style),
         Span::styled("0", dim_style),
         Span::styled("=", dim_style),
+        Span::styled(CELL_GLYPH, zero_style),
+        Span::styled(" ", dim_style),
         Span::styled("white", value_style),
         Span::styled("  ", dim_style),
         Span::styled("1", dim_style),
         Span::styled("=", dim_style),
+        Span::styled(CELL_GLYPH, one_style),
+        Span::styled(" ", dim_style),
         Span::styled("cyan", value_style),
         Span::styled("  ", dim_style),
         Span::styled("A/B columns", dim_style),
@@ -233,6 +235,22 @@ fn decode_outcome(outcome: Option<u8>) -> (Option<u8>, Option<u8>) {
         Some(b'2') => (Some(1), Some(0)),
         Some(b'3') => (Some(1), Some(1)),
         _ => (None, None),
+    }
+}
+
+fn history_cell_text(bit: Option<u8>) -> &'static str {
+    if bit.is_some() {
+        CELL_GLYPH
+    } else {
+        CELL_EMPTY
+    }
+}
+
+fn history_cell_style(bit: Option<u8>, zero: Style, one: Style, empty: Style) -> Style {
+    match bit {
+        Some(0) => zero,
+        Some(1) => one,
+        _ => empty,
     }
 }
 

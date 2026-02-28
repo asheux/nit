@@ -178,6 +178,7 @@ pub enum UiSelectionPane {
     GamesTmSimPopupRight,
     GamesCaSimPopupLeft,
     GamesCaSimPopupRight,
+    GamesMatchHistoryPopup,
 }
 
 #[derive(Copy, Clone, Debug)]
