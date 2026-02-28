@@ -794,6 +794,30 @@ pub fn build_lines(state: &AppState, theme: &Theme, inner_width: u16) -> Vec<Lin
     build_lines_window(state, theme, inner_width, 0, total, &display_lines)
 }
 
+fn shows_graph_pane(state: &AppState) -> bool {
+    if state.games.strategy_inspect.lines.is_empty() {
+        return false;
+    }
+    let (_, graph_lines) = split_graph_sections(&state.games.strategy_inspect.lines);
+    let has_graph_spec = state
+        .games
+        .strategy_inspect
+        .definition
+        .as_ref()
+        .and_then(graph_from_definition)
+        .is_some();
+    has_graph_spec || !graph_lines.is_empty()
+}
+
+pub fn max_scroll(state: &AppState, inner: Rect) -> usize {
+    let viewport_height = if shows_graph_pane(state) {
+        inner.height.saturating_sub(2) as usize
+    } else {
+        inner.height as usize
+    };
+    line_count(state).saturating_sub(viewport_height)
+}
+
 pub fn render(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
     frame.render_widget(Clear, area);
     let block = Block::default()
@@ -817,8 +841,7 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
         .definition
         .as_ref()
         .and_then(graph_from_definition);
-    let show_graph = !state.games.strategy_inspect.lines.is_empty()
-        && (graph_spec.is_some() || !graph_lines.is_empty());
+    let show_graph = shows_graph_pane(state);
     if show_graph {
         let use_fixed_details_width =
             inner.width > DETAILS_PANE_TARGET_WIDTH + 1 + GRAPH_PANE_MIN_WIDTH;
@@ -867,8 +890,7 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
         frame.render_widget(left_block, chunks[0]);
         frame.render_widget(right_block, chunks[2]);
 
-        let total_lines = line_count(state);
-        let max_scroll = total_lines.saturating_sub(left_inner.height as usize);
+        let max_scroll = max_scroll(state, inner);
         let scroll = state.games.strategy_inspect.scroll_offset.min(max_scroll);
         let mut left_lines = build_lines_window(
             state,
@@ -930,8 +952,7 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
         return;
     }
 
-    let total_lines = line_count(state);
-    let max_scroll = total_lines.saturating_sub(inner.height as usize);
+    let max_scroll = max_scroll(state, inner);
     let scroll = state.games.strategy_inspect.scroll_offset.min(max_scroll);
     let mut lines = build_lines_window(
         state,

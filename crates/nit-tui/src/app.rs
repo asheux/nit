@@ -540,6 +540,7 @@ fn run_loop(
                     if state.app_kind == AppKind::Games && state.games.run_browser.open {
                         let screen = terminal.size().unwrap_or_default();
                         if handle_run_browser_key(&key, state, screen) {
+                            clamp_modal_scroll_offsets(state, screen, theme);
                             needs_redraw = true;
                             continue;
                         }
@@ -547,6 +548,7 @@ fn run_loop(
                     if state.app_kind == AppKind::Games && state.games.replay.open {
                         let screen = terminal.size().unwrap_or_default();
                         if handle_replay_popup_key(&key, state, screen) {
+                            clamp_modal_scroll_offsets(state, screen, theme);
                             needs_redraw = true;
                             continue;
                         }
@@ -554,6 +556,7 @@ fn run_loop(
                     if state.app_kind == AppKind::Games && state.games.strategy_inspect.open {
                         let screen = terminal.size().unwrap_or_default();
                         if handle_strategy_popup_key(&key, state, screen) {
+                            clamp_modal_scroll_offsets(state, screen, theme);
                             needs_redraw = true;
                             continue;
                         }
@@ -561,6 +564,7 @@ fn run_loop(
                     if state.app_kind == AppKind::Games && state.games.tm_sim.open {
                         let screen = terminal.size().unwrap_or_default();
                         if handle_tm_sim_popup_key(&key, state, screen) {
+                            clamp_modal_scroll_offsets(state, screen, theme);
                             needs_redraw = true;
                             continue;
                         }
@@ -568,6 +572,7 @@ fn run_loop(
                     if state.app_kind == AppKind::Games && state.games.ca_sim.open {
                         let screen = terminal.size().unwrap_or_default();
                         if handle_ca_sim_popup_key(&key, state, screen) {
+                            clamp_modal_scroll_offsets(state, screen, theme);
                             needs_redraw = true;
                             continue;
                         }
@@ -575,6 +580,7 @@ fn run_loop(
                     if state.app_kind == AppKind::Games && state.games.match_history.open {
                         let screen = terminal.size().unwrap_or_default();
                         if handle_match_history_popup_key(&key, state, screen) {
+                            clamp_modal_scroll_offsets(state, screen, theme);
                             needs_redraw = true;
                             continue;
                         }
@@ -643,6 +649,7 @@ fn run_loop(
                         &mut clipboard,
                         theme,
                     ) {
+                        clamp_modal_scroll_offsets(state, screen, theme);
                         needs_redraw = true;
                     }
                 }
@@ -2329,11 +2336,11 @@ fn handle_mouse_event(
                 let area =
                     dynamic_popup_rect(screen, games_match_history_popup::preferred_size(screen));
                 if point_in_rect(mouse.column, mouse.row, area) {
+                    let max = games_match_history_max_offset(state, screen);
                     if delta > 0 {
                         state.games.match_history.column_offset =
                             state.games.match_history.column_offset.saturating_sub(1);
                     } else if !state.games.match_history.entries.is_empty() {
-                        let max = state.games.match_history.entries.len().saturating_sub(1);
                         state.games.match_history.column_offset =
                             (state.games.match_history.column_offset + 1).min(max);
                     }
@@ -2386,6 +2393,155 @@ fn bump_scroll(value: &mut usize, delta: i32) {
         *value = value.saturating_sub(delta.abs() as usize);
     } else if delta > 0 {
         *value = value.saturating_add(delta as usize);
+    }
+}
+
+fn popup_max_scroll(line_count: usize, text_area: ratatui::layout::Rect) -> usize {
+    line_count.saturating_sub(text_area.height as usize)
+}
+
+fn max_scroll_for_height(line_count: usize, height: usize) -> usize {
+    line_count.saturating_sub(height)
+}
+
+fn help_popup_max_scroll(screen: ratatui::layout::Rect, theme: &Theme) -> usize {
+    let area = dynamic_popup_rect(screen, help_overlay::preferred_size(screen));
+    let text_area = popup_text_area(area);
+    let lines = help_overlay::build_lines(theme);
+    popup_max_scroll(lines.len(), text_area)
+}
+
+fn games_analysis_popup_max_scroll(
+    state: &AppState,
+    screen: ratatui::layout::Rect,
+    theme: &Theme,
+) -> usize {
+    let area = dynamic_popup_rect(screen, games_analysis_popup::preferred_size(screen));
+    let text_area = popup_text_area(area);
+    let lines = games_analysis_popup::build_lines(state, theme, text_area.width);
+    popup_max_scroll(lines.len(), text_area)
+}
+
+fn games_run_browser_popup_max_scroll(
+    state: &AppState,
+    screen: ratatui::layout::Rect,
+    theme: &Theme,
+) -> usize {
+    let area = dynamic_popup_rect(screen, games_run_browser_popup::preferred_size(screen));
+    let text_area = popup_text_area(area);
+    let lines = games_run_browser_popup::build_lines(state, theme, text_area.width);
+    popup_max_scroll(lines.len(), text_area)
+}
+
+fn games_replay_popup_max_scroll(
+    state: &AppState,
+    screen: ratatui::layout::Rect,
+    theme: &Theme,
+) -> usize {
+    let area = dynamic_popup_rect(screen, games_replay_popup::preferred_size(screen));
+    let text_area = popup_text_area(area);
+    let lines = games_replay_popup::build_lines(state, theme, text_area.width);
+    popup_max_scroll(lines.len(), text_area)
+}
+
+fn games_strategy_popup_max_scroll(state: &AppState, screen: ratatui::layout::Rect) -> usize {
+    let area = dynamic_popup_rect(screen, games_strategy_popup::preferred_size(screen));
+    let text_area = popup_text_area(area);
+    games_strategy_popup::max_scroll(state, text_area)
+}
+
+fn games_tm_sim_popup_max_scroll(
+    state: &AppState,
+    screen: ratatui::layout::Rect,
+    theme: &Theme,
+) -> usize {
+    let area = dynamic_popup_rect(screen, games_tm_sim_popup::preferred_size(screen));
+    let text_area = popup_text_area(area);
+    let (left_area, right_area) = games_tm_sim_popup::layout_for_tm_sim(text_area);
+    if let Some(right_area) = right_area {
+        let right_inner = Block::default().borders(Borders::ALL).inner(right_area);
+        let (left_lines, right_lines) = games_tm_sim_popup::build_columns(
+            state,
+            theme,
+            left_area.width.max(1) as usize,
+            right_inner.width.max(1) as usize,
+        );
+        let content_height = left_area.height.min(right_inner.height) as usize;
+        max_scroll_for_height(left_lines.len().max(right_lines.len()), content_height)
+    } else {
+        let (lines, _) =
+            games_tm_sim_popup::build_columns(state, theme, text_area.width.max(1) as usize, 0);
+        popup_max_scroll(lines.len(), text_area)
+    }
+}
+
+fn games_ca_sim_popup_max_scroll(
+    state: &AppState,
+    screen: ratatui::layout::Rect,
+    theme: &Theme,
+) -> usize {
+    let area = dynamic_popup_rect(screen, games_ca_sim_popup::preferred_size(screen));
+    let text_area = popup_text_area(area);
+    let (left_area, right_area) = games_ca_sim_popup::layout_for_ca_sim(text_area);
+    if let Some(right_area) = right_area {
+        let right_inner = Block::default().borders(Borders::ALL).inner(right_area);
+        let (left_lines, right_lines) = games_ca_sim_popup::build_columns(
+            state,
+            theme,
+            left_area.width.max(1) as usize,
+            right_inner.width.max(1) as usize,
+        );
+        let content_height = left_area.height.min(right_inner.height) as usize;
+        max_scroll_for_height(left_lines.len().max(right_lines.len()), content_height)
+    } else {
+        let (lines, _) =
+            games_ca_sim_popup::build_columns(state, theme, text_area.width.max(1) as usize, 0);
+        popup_max_scroll(lines.len(), text_area)
+    }
+}
+
+fn games_match_history_max_offset(state: &AppState, screen: ratatui::layout::Rect) -> usize {
+    let area = dynamic_popup_rect(screen, games_match_history_popup::preferred_size(screen));
+    let text_area = popup_text_area(area);
+    games_match_history_popup::max_column_offset(state.games.match_history.entries.len(), text_area.width)
+}
+
+fn clamp_modal_scroll_offsets(state: &mut AppState, screen: ratatui::layout::Rect, theme: &Theme) {
+    if state.show_help {
+        let max_scroll = help_popup_max_scroll(screen, theme);
+        state.help_scroll = state.help_scroll.min(max_scroll);
+    }
+    if state.app_kind != AppKind::Games {
+        return;
+    }
+    if state.games.analysis.open {
+        let max_scroll = games_analysis_popup_max_scroll(state, screen, theme);
+        state.games.analysis.scroll_offset = state.games.analysis.scroll_offset.min(max_scroll);
+    }
+    if state.games.run_browser.open {
+        let max_scroll = games_run_browser_popup_max_scroll(state, screen, theme);
+        state.games.run_browser.scroll_offset = state.games.run_browser.scroll_offset.min(max_scroll);
+    }
+    if state.games.replay.open {
+        let max_scroll = games_replay_popup_max_scroll(state, screen, theme);
+        state.games.replay.scroll_offset = state.games.replay.scroll_offset.min(max_scroll);
+    }
+    if state.games.strategy_inspect.open {
+        let max_scroll = games_strategy_popup_max_scroll(state, screen);
+        state.games.strategy_inspect.scroll_offset =
+            state.games.strategy_inspect.scroll_offset.min(max_scroll);
+    }
+    if state.games.tm_sim.open {
+        let max_scroll = games_tm_sim_popup_max_scroll(state, screen, theme);
+        state.games.tm_sim.scroll_offset = state.games.tm_sim.scroll_offset.min(max_scroll);
+    }
+    if state.games.ca_sim.open {
+        let max_scroll = games_ca_sim_popup_max_scroll(state, screen, theme);
+        state.games.ca_sim.scroll_offset = state.games.ca_sim.scroll_offset.min(max_scroll);
+    }
+    if state.games.match_history.open {
+        let max_offset = games_match_history_max_offset(state, screen);
+        state.games.match_history.column_offset = state.games.match_history.column_offset.min(max_offset);
     }
 }
 
@@ -5190,7 +5346,7 @@ fn handle_ca_sim_popup_key(
 fn handle_match_history_popup_key(
     key: &KeyEvent,
     state: &mut AppState,
-    _screen: ratatui::layout::Rect,
+    screen: ratatui::layout::Rect,
 ) -> bool {
     if state.app_kind != AppKind::Games || !state.games.match_history.open {
         return false;
@@ -5205,6 +5361,7 @@ fn handle_match_history_popup_key(
         return false;
     }
     let total = state.games.match_history.entries.len();
+    let max_offset = games_match_history_max_offset(state, screen);
     match key.code {
         KeyCode::Esc | KeyCode::Char('q') => {
             state.games.match_history.open = false;
@@ -5222,9 +5379,8 @@ fn handle_match_history_popup_key(
         }
         KeyCode::Right | KeyCode::Char('l') => {
             if total > 0 {
-                let max = total.saturating_sub(1);
                 state.games.match_history.column_offset =
-                    (state.games.match_history.column_offset + 1).min(max);
+                    (state.games.match_history.column_offset + 1).min(max_offset);
             }
             true
         }
@@ -5235,9 +5391,8 @@ fn handle_match_history_popup_key(
         }
         KeyCode::PageDown => {
             if total > 0 {
-                let max = total.saturating_sub(1);
                 state.games.match_history.column_offset =
-                    (state.games.match_history.column_offset + 5).min(max);
+                    (state.games.match_history.column_offset + 5).min(max_offset);
             }
             true
         }
@@ -5247,7 +5402,7 @@ fn handle_match_history_popup_key(
         }
         KeyCode::End => {
             if total > 0 {
-                state.games.match_history.column_offset = total.saturating_sub(1);
+                state.games.match_history.column_offset = max_offset;
             }
             true
         }

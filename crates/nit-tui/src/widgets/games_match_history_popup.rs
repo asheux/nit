@@ -27,6 +27,10 @@ pub fn preferred_size(screen: Rect) -> (u16, u16) {
     (width, height)
 }
 
+pub fn max_column_offset(total_matches: usize, inner_width: u16) -> usize {
+    total_matches.saturating_sub(panel_capacity(inner_width))
+}
+
 pub fn render(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
     frame.render_widget(Clear, area);
     let block = Block::default()
