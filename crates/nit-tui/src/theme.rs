@@ -253,6 +253,32 @@ impl Theme {
         }
         style
     }
+
+    pub fn status_idle_style(&self) -> Style {
+        Style::default().fg(self.border).add_modifier(Modifier::DIM)
+    }
+
+    pub fn status_ok_style(&self) -> Style {
+        Style::default()
+            .fg(self.title_focused)
+            .add_modifier(Modifier::BOLD)
+    }
+
+    pub fn status_warn_style(&self) -> Style {
+        Style::default()
+            .fg(self.warning)
+            .add_modifier(Modifier::BOLD)
+    }
+
+    pub fn status_hot_style(&self) -> Style {
+        Style::default()
+            .fg(self.warning)
+            .add_modifier(Modifier::BOLD)
+    }
+
+    pub fn status_crit_style(&self) -> Style {
+        Style::default().fg(self.error).add_modifier(Modifier::BOLD)
+    }
 }
 
 impl Default for Theme {

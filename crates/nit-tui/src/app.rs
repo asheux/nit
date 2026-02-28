@@ -4,6 +4,30 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
+use crate::{
+    file_tree,
+    file_tree_runner::{FileTreeCommand, FileTreeEvent, FileTreeRunner},
+    fuzzy_preview_runner::{PreviewEvent, PreviewModel, PreviewRunner},
+    fuzzy_search_runner::{
+        ContentEvent, ContentSearchRunner, FileIndexRunner, FuzzyCommand, FuzzyEvent,
+        FuzzyMatcherRunner, IndexEvent,
+    },
+    games_petri_dish::GamesPetriDishRuntime,
+    layout,
+    petri_dish::PetriDishRuntime,
+    seed_runtime::SeedRuntime,
+    syntax::SyntaxRuntime,
+    system_stats::SystemStats,
+    theme::Theme,
+    vitals::{AgentVitalsState, DiagSeverity, LabVitalsSnapshot, VitalsState},
+    widgets::{
+        bottom_bar, editor_view, file_tree_view, fuzzy_search_popup, games_analysis_popup,
+        games_ca_sim_popup, games_match_history_popup, games_replay_popup, games_run_browser_popup,
+        games_strategy_popup, games_tm_sim_popup, games_visualizer_view, gate_monitor_view,
+        help_overlay, job_output_view, notes_view, protocol_picker, rule_picker, top_bar,
+        visualizer_view,
+    },
+};
 use arboard::Clipboard;
 use crossterm::{
     cursor::SetCursorStyle,
@@ -26,35 +50,10 @@ use ratatui::{
     widgets::{Block, Borders, Clear, Paragraph},
     Terminal,
 };
-use tracing::info;
-
-use crate::{
-    file_tree,
-    file_tree_runner::{FileTreeCommand, FileTreeEvent, FileTreeRunner},
-    fuzzy_preview_runner::{PreviewEvent, PreviewModel, PreviewRunner},
-    fuzzy_search_runner::{
-        ContentEvent, ContentSearchRunner, FileIndexRunner, FuzzyCommand, FuzzyEvent,
-        FuzzyMatcherRunner, IndexEvent,
-    },
-    games_petri_dish::GamesPetriDishRuntime,
-    layout,
-    petri_dish::PetriDishRuntime,
-    seed_runtime::SeedRuntime,
-    syntax::SyntaxRuntime,
-    system_stats::SystemStats,
-    theme::Theme,
-    widgets::{
-        bottom_bar, editor_view, file_tree_view, fuzzy_search_popup, games_analysis_popup,
-        games_ca_sim_popup, games_match_history_popup, games_replay_popup, games_run_browser_popup,
-        games_strategy_popup, games_tm_sim_popup, games_visualizer_view, gate_monitor_view,
-        help_overlay, job_output_view, notes_view, protocol_picker, rule_picker, top_bar,
-        visualizer_view,
-    },
-};
 
 const TICK_RATE: Duration = Duration::from_millis(50);
 const JOB_TICK: Duration = Duration::from_millis(120);
-const LOG_TICK: Duration = Duration::from_millis(900);
+const BUSY_PULSE_INTERVAL: Duration = Duration::from_millis(550);
 const CHORD_TIMEOUT: Duration = Duration::from_millis(300);
 const INSPECTOR_JUMP_TIMEOUT: Duration = Duration::from_millis(1500);
 
@@ -457,7 +456,8 @@ fn run_loop(
 ) -> io::Result<()> {
     let mut last_tick = Instant::now();
     let mut last_job = Instant::now();
-    let mut last_log = Instant::now();
+    let mut last_vitals_sample = Instant::now();
+    let mut last_busy_pulse = Instant::now();
     let mut needs_redraw = true;
     let mut input_state = InputState::new();
     let mut system_stats = SystemStats::new();
@@ -484,6 +484,18 @@ fn run_loop(
     } else {
         None
     };
+    let mut vitals = VitalsState::default();
+    let mut last_gol_generation = state.visualizer.generation;
+    let mut last_gol_running = state.visualizer.running;
+    let mut last_gol_paused = state.visualizer.paused;
+    let mut last_games_status = state.games.status;
+    let mut last_games_running = state.games.running;
+    let mut last_games_paused = state.games.paused;
+    let mut last_status_text = state.status.clone();
+    let mut last_games_activity_epoch = games_petri
+        .as_ref()
+        .map(|petri| petri.activity_epoch())
+        .unwrap_or(0);
     tracing::info!("SECURITY: no plugins, no network, no shell execution");
     loop {
         fuzzy_runtime.tick_open(state);
@@ -793,21 +805,14 @@ fn run_loop(
         // job tick
         if last_job.elapsed() >= JOB_TICK {
             state.tick_job(0.03);
-            if !state.job.paused {
-                info!("job {:.0}% complete", state.job.progress * 100.0);
-            }
             last_job = Instant::now();
             needs_redraw = true;
         }
 
-        // periodic log injection (in addition to tracing)
-        if last_log.elapsed() >= LOG_TICK {
-            info!("heartbeat frame={}", state.metrics.frame_count);
-            last_log = Instant::now();
-        }
-
         // drain logs
         while let Ok(line) = log_rx.try_recv() {
+            let now = Instant::now();
+            record_log_line_vitals(&mut vitals, now, &line);
             state.receive_log(line);
             needs_redraw = true;
         }
@@ -824,6 +829,7 @@ fn run_loop(
                 }
                 FileTreeEvent::Error { dir, message } => {
                     state.file_tree.loading_dirs.remove(&dir);
+                    vitals.record_diag_event(Instant::now(), DiagSeverity::Error);
                     state.status = Some(format!("NITTree: {message}"));
                     file_tree::rebuild_view(state, Some(preserve));
                     needs_redraw = true;
@@ -880,6 +886,9 @@ fn run_loop(
         }));
         if let Err(err) = tick_result {
             tracing::error!("Runtime panic: {:?}", err);
+            let now = Instant::now();
+            vitals.record_diag_event(now, DiagSeverity::Error);
+            vitals.mark_fatal(now);
             match state.app_kind {
                 AppKind::Gol => {
                     state.visualizer.paused = true;
@@ -893,10 +902,76 @@ fn run_loop(
                 }
             }
         }
+        let now = Instant::now();
+        if state.status != last_status_text {
+            if let Some(status) = state.status.as_deref() {
+                record_log_line_vitals(&mut vitals, now, status);
+                if status_looks_busy(status) {
+                    vitals.record_job_event(now);
+                }
+            }
+            last_status_text = state.status.clone();
+        }
+        match state.app_kind {
+            AppKind::Gol => {
+                if state.visualizer.generation != last_gol_generation {
+                    last_gol_generation = state.visualizer.generation;
+                    vitals.record_job_event(now);
+                }
+                if state.visualizer.running != last_gol_running
+                    || state.visualizer.paused != last_gol_paused
+                {
+                    last_gol_running = state.visualizer.running;
+                    last_gol_paused = state.visualizer.paused;
+                    vitals.record_job_event(now);
+                }
+            }
+            AppKind::Games => {
+                if let Some(petri) = games_petri.as_ref() {
+                    let epoch = petri.activity_epoch();
+                    if epoch != last_games_activity_epoch {
+                        let pulses = epoch.saturating_sub(last_games_activity_epoch).min(8);
+                        for _ in 0..pulses {
+                            vitals.record_job_event(now);
+                        }
+                        last_games_activity_epoch = epoch;
+                    }
+                }
+                if state.games.status != last_games_status
+                    || state.games.running != last_games_running
+                    || state.games.paused != last_games_paused
+                {
+                    last_games_status = state.games.status;
+                    last_games_running = state.games.running;
+                    last_games_paused = state.games.paused;
+                    vitals.record_job_event(now);
+                }
+            }
+        }
+        let busy = is_background_work_active(state);
+        if busy {
+            if !is_lab_job_running(state)
+                && now.saturating_duration_since(last_busy_pulse) >= BUSY_PULSE_INTERVAL
+            {
+                vitals.record_job_event(now);
+                last_busy_pulse = now;
+            }
+        } else {
+            last_busy_pulse = now;
+        }
 
         // redraw
         if needs_redraw || last_tick.elapsed() >= TICK_RATE {
             system_stats.refresh_if_needed();
+            let now = Instant::now();
+            let dt = now.saturating_duration_since(last_vitals_sample);
+            last_vitals_sample = now;
+            let vitals_snapshot = vitals.tick(
+                now,
+                dt,
+                is_lab_job_running(state),
+                current_agent_state(state),
+            );
             draw(
                 terminal,
                 state,
@@ -908,6 +983,7 @@ fn run_loop(
                 &mut games_petri,
                 fuzzy_runtime.preview_model.as_ref(),
                 fuzzy_runtime.preview_scroll_delta,
+                &vitals_snapshot,
             )?;
             needs_redraw = false;
             last_tick = Instant::now();
@@ -921,6 +997,72 @@ fn run_loop(
     Ok(())
 }
 
+fn is_lab_job_running(state: &AppState) -> bool {
+    match state.app_kind {
+        AppKind::Gol => state.visualizer.running && !state.visualizer.paused,
+        AppKind::Games => state.games.running && !state.games.paused,
+    }
+}
+
+fn record_log_line_vitals(vitals: &mut VitalsState, now: Instant, line: &str) {
+    if let Some(severity) = log_diag_severity(line) {
+        vitals.record_diag_event(now, severity);
+    }
+    if line_looks_fatal(line) {
+        vitals.mark_fatal(now);
+    }
+}
+
+fn is_background_work_active(state: &AppState) -> bool {
+    match state.app_kind {
+        AppKind::Gol => false,
+        AppKind::Games => {
+            state.games.running
+                || state.games.pending_run
+                || state.games.family_building
+                || state.games.analysis.running
+                || state.games.run_browser.loading
+                || state.games.replay.loading
+                || state.games.config_preview_pending
+                || state.games.pending_analyze.is_some()
+                || state.games.pending_run_load.is_some()
+                || state.games.pending_replay.is_some()
+                || state.status.as_deref().is_some_and(status_looks_busy)
+        }
+    }
+}
+
+fn status_looks_busy(status_text: &str) -> bool {
+    let lower = status_text.to_ascii_lowercase();
+    lower.contains("queued")
+        || lower.contains("running")
+        || lower.contains("loading")
+        || lower.contains("pending")
+        || lower.contains("preparing")
+        || lower.contains("started")
+        || lower.contains("busy")
+}
+
+fn current_agent_state(_state: &AppState) -> AgentVitalsState {
+    AgentVitalsState::disabled()
+}
+
+fn log_diag_severity(line: &str) -> Option<DiagSeverity> {
+    let upper = line.to_ascii_uppercase();
+    if upper.contains("PANIC") || upper.contains("ERROR") || upper.contains("FAILED") {
+        Some(DiagSeverity::Error)
+    } else if upper.contains("WARN") {
+        Some(DiagSeverity::Warn)
+    } else {
+        None
+    }
+}
+
+fn line_looks_fatal(line: &str) -> bool {
+    let upper = line.to_ascii_uppercase();
+    upper.contains("PANIC") || upper.contains("BACKTRACE")
+}
+
 fn draw(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     state: &mut AppState,
@@ -932,6 +1074,7 @@ fn draw(
     games_petri: &mut Option<GamesPetriDishRuntime>,
     fuzzy_preview: Option<&PreviewModel>,
     fuzzy_preview_scroll_delta: i32,
+    vitals: &LabVitalsSnapshot,
 ) -> io::Result<()> {
     let start = Instant::now();
     terminal.draw(|f| {
@@ -979,7 +1122,7 @@ fn draw(
 
         let editor_id = state.active_editor_buffer_id;
         let notes_id = state.notes_buffer_id;
-        top_bar::render(f, layout.top, state, theme);
+        top_bar::render(f, layout.top, state, theme, vitals);
         let editor_cursor = if state.file_tree.open {
             adjust_file_tree_scroll(state, layout.editor);
             file_tree_view::render(f, layout.editor, state, theme);
@@ -5976,5 +6119,144 @@ mod tests {
             &mut syntax,
             area
         ));
+    }
+
+    #[test]
+    fn background_work_active_when_games_running_or_loading() {
+        let mut state = state_for_test();
+        state.app_kind = AppKind::Games;
+        assert!(!is_background_work_active(&state));
+
+        state.games.running = true;
+        assert!(is_background_work_active(&state));
+
+        state.games.running = false;
+        state.games.run_browser.loading = true;
+        assert!(is_background_work_active(&state));
+    }
+
+    #[test]
+    fn background_work_active_when_status_text_is_busy() {
+        let mut state = state_for_test();
+        state.app_kind = AppKind::Games;
+        state.status = Some("Games analysis started".into());
+        assert!(is_background_work_active(&state));
+
+        state.status = Some("Games tournament completed".into());
+        assert!(!is_background_work_active(&state));
+    }
+
+    #[test]
+    fn log_line_vitals_do_not_refresh_job_heartbeat_without_real_activity() {
+        let mut vitals = VitalsState::default();
+        let start = Instant::now();
+        vitals.record_job_event(start);
+
+        let later = start + Duration::from_secs(3);
+        record_log_line_vitals(&mut vitals, later, "INFO just a message");
+
+        let age = vitals.job_hb.age(later).unwrap_or_default();
+        assert!(age >= Duration::from_secs(3));
+    }
+
+    #[test]
+    fn status_looks_busy_matches_expected_keywords() {
+        assert!(status_looks_busy("Games analysis started"));
+        assert!(status_looks_busy("Preparing run config..."));
+        assert!(status_looks_busy("Loading replay..."));
+        assert!(!status_looks_busy("Games tournament completed"));
+        assert!(!status_looks_busy("Saved"));
+    }
+
+    #[test]
+    fn vitals_smoke_games_busy_phase_keeps_ecg_alive_before_run() {
+        let mut state = state_for_test();
+        state.app_kind = AppKind::Games;
+        state.games.pending_run = true;
+        state.status = Some("Preparing run config...".into());
+
+        let mut vitals = VitalsState::default();
+        let mut now = Instant::now();
+        let dt = Duration::from_millis(100);
+        let mut last_busy_pulse = now;
+        let mut max_sample = 0u64;
+        let mut last_snapshot = vitals.tick(
+            now,
+            dt,
+            is_lab_job_running(&state),
+            current_agent_state(&state),
+        );
+
+        for _ in 0..40 {
+            now += dt;
+            if is_background_work_active(&state)
+                && !is_lab_job_running(&state)
+                && now.saturating_duration_since(last_busy_pulse) >= BUSY_PULSE_INTERVAL
+            {
+                vitals.record_job_event(now);
+                last_busy_pulse = now;
+            }
+            last_snapshot = vitals.tick(
+                now,
+                dt,
+                is_lab_job_running(&state),
+                current_agent_state(&state),
+            );
+            max_sample = max_sample.max(*last_snapshot.ecg_samples.last().unwrap_or(&0));
+        }
+
+        assert!(
+            max_sample >= 30,
+            "expected busy pulses to animate ECG before run, got {max_sample}"
+        );
+        assert_eq!(
+            last_snapshot.criticality,
+            crate::vitals::LabCriticality::Idle
+        );
+    }
+
+    #[test]
+    fn vitals_smoke_games_run_then_stall_hits_crit_boundary() {
+        let mut state = state_for_test();
+        state.app_kind = AppKind::Games;
+        state.games.running = true;
+        state.games.paused = false;
+
+        let mut vitals = VitalsState::default();
+        let mut now = Instant::now();
+        let dt = Duration::from_millis(100);
+
+        let mut snapshot = vitals.tick(
+            now,
+            dt,
+            is_lab_job_running(&state),
+            current_agent_state(&state),
+        );
+        for _ in 0..30 {
+            now += dt;
+            vitals.record_job_event(now);
+            snapshot = vitals.tick(
+                now,
+                dt,
+                is_lab_job_running(&state),
+                current_agent_state(&state),
+            );
+        }
+
+        assert!(snapshot.hb_age.unwrap_or(Duration::MAX) < Duration::from_secs(1));
+        assert_ne!(snapshot.criticality, crate::vitals::LabCriticality::Crit);
+
+        for _ in 0..120 {
+            now += dt;
+            snapshot = vitals.tick(
+                now,
+                dt,
+                is_lab_job_running(&state),
+                current_agent_state(&state),
+            );
+        }
+
+        assert!(snapshot.hb_age.unwrap_or_default() >= Duration::from_secs(10));
+        assert_eq!(snapshot.criticality, crate::vitals::LabCriticality::Crit);
     }
 }

@@ -18,6 +18,7 @@ pub mod seed_snapshot;
 pub mod syntax;
 pub mod system_stats;
 pub mod theme;
+pub mod vitals;
 pub mod widgets;
 
 pub use app::run;

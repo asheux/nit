@@ -69,6 +69,7 @@ pub struct GamesPetriDishRuntime {
     family_run_rx: Option<Receiver<FamilyBuildOutcome>>,
     loading_open: bool,
     loading_message: Option<String>,
+    activity_epoch: u64,
 }
 
 struct GameSession {
@@ -165,7 +166,16 @@ impl GamesPetriDishRuntime {
             family_run_rx: None,
             loading_open: false,
             loading_message: None,
+            activity_epoch: 0,
         }
+    }
+
+    pub fn activity_epoch(&self) -> u64 {
+        self.activity_epoch
+    }
+
+    fn mark_activity(&mut self) {
+        self.activity_epoch = self.activity_epoch.wrapping_add(1);
     }
 
     pub fn is_open(&self) -> bool {
@@ -435,6 +445,7 @@ impl GamesPetriDishRuntime {
 
     fn handle_analysis_events(&mut self, state: &mut AppState) {
         while let Ok(event) = self.analysis_runner.events.try_recv() {
+            self.mark_activity();
             match event {
                 AnalysisEvent::Started(request) => {
                     state.games.analysis.running = true;
@@ -461,6 +472,7 @@ impl GamesPetriDishRuntime {
 
     fn handle_runs_events(&mut self, state: &mut AppState) {
         while let Ok(event) = self.runs_runner.events.try_recv() {
+            self.mark_activity();
             match event {
                 RunsEvent::RunsLoaded(entries) => {
                     state.games.run_browser.loading = false;
@@ -526,6 +538,7 @@ impl GamesPetriDishRuntime {
 
     fn handle_runner_events(&mut self, state: &mut AppState) {
         while let Ok(event) = self.runner.events.try_recv() {
+            self.mark_activity();
             match event {
                 RunnerEvent::Definitions(defs) => {
                     if let Some(session) = self.session.as_mut() {
