@@ -30,6 +30,8 @@ pub struct TournamentProgress {
     pub last_action_b: Option<Action>,
     pub last_payoff_a: Option<i32>,
     pub last_payoff_b: Option<i32>,
+    pub last_halted_a: Option<bool>,
+    pub last_halted_b: Option<bool>,
     pub last_outcome: Option<Outcome>,
 }
 
@@ -45,6 +47,8 @@ pub struct MatchSnapshot {
     pub b_score: i64,
     pub outcomes: String,
     pub payoffs: Vec<[i32; 2]>,
+    pub a_halted: String,
+    pub b_halted: String,
 }
 
 #[derive(Clone, Debug)]
@@ -343,6 +347,8 @@ impl TournamentRunner {
             last_action_b: self.last_round.as_ref().map(|r| r.b_action),
             last_payoff_a: self.last_round.as_ref().map(|r| r.a_payoff),
             last_payoff_b: self.last_round.as_ref().map(|r| r.b_payoff),
+            last_halted_a: self.last_round.as_ref().map(|r| r.a_halted),
+            last_halted_b: self.last_round.as_ref().map(|r| r.b_halted),
             last_outcome: self
                 .last_round
                 .as_ref()
@@ -366,6 +372,8 @@ impl TournamentRunner {
             b_score: current.b_total,
             outcomes: current.history_scores.clone(),
             payoffs: current.history_payoffs.clone(),
+            a_halted: current.history_halted_a.clone(),
+            b_halted: current.history_halted_b.clone(),
         })
     }
 
@@ -391,7 +399,7 @@ impl TournamentRunner {
                         &self.config,
                         &self.strategies,
                         &self.seed_deriver,
-                        self.history_writer.is_some(),
+                        true,
                         true,
                     );
                     self.emit(GameEvent::MatchStart {

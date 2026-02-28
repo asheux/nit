@@ -54,9 +54,9 @@ k = 2
 [[strategy]]
 id = "fsm_rule"
 type = "auto"
-states = 2
+states = 3
 k = 2
-index = 17
+index = 3495
 
 [[strategy]]
 id = "fsm_grim_t"

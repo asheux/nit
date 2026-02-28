@@ -929,6 +929,20 @@ fn render_progress(
                 ],
             },
         ));
+        lines.push(Line::from(match (progress.last_halted_a, progress.last_halted_b) {
+            (Some(a), Some(b)) => vec![
+                Span::styled("Halt: ", label_style),
+                Span::styled(if a { "1" } else { "0" }, number_style),
+                Span::styled(" / ", dim_style),
+                Span::styled(if b { "1" } else { "0" }, number_style),
+                Span::styled(" ", dim_style),
+                Span::styled("(1=halt, 0=timeout)", dim_style),
+            ],
+            _ => vec![
+                Span::styled("Halt: ", label_style),
+                Span::styled("Waiting for tournament...", dim_style),
+            ],
+        }));
         if let (Some(pa), Some(pb)) = (progress.last_payoff_a, progress.last_payoff_b) {
             lines.push(Line::from(vec![
                 Span::styled("Payoff: ", label_style),
@@ -953,6 +967,10 @@ fn render_progress(
         ]));
         lines.push(Line::from(vec![
             Span::styled("Last: ", label_style),
+            Span::styled("Waiting for tournament...", dim_style),
+        ]));
+        lines.push(Line::from(vec![
+            Span::styled("Halt: ", label_style),
             Span::styled("Waiting for tournament...", dim_style),
         ]));
         lines.push(Line::from(vec![
@@ -1113,6 +1131,15 @@ fn render_match_strip(
         cumulative.push((a_total, b_total));
     }
 
+    let halt_token = |index: usize| -> String {
+        let a = snapshot.a_halted.as_bytes().get(index).copied();
+        let b = snapshot.b_halted.as_bytes().get(index).copied();
+        match (a, b) {
+            (Some(a), Some(b)) => format!("{}/{}", a as char, b as char),
+            _ => "--".to_string(),
+        }
+    };
+
     let label_w = 3usize;
     let prefix_len = label_w + 2;
     let available = width.saturating_sub(prefix_len);
@@ -1130,11 +1157,13 @@ fn render_match_strip(
         let total_len = format!("{}/{}", cumulative[i].0, cumulative[i].1)
             .chars()
             .count();
+        let halt_len = halt_token(i).chars().count();
         max_len = max_len
             .max(round_len)
             .max(out_len)
             .max(payoff_len)
-            .max(total_len);
+            .max(total_len)
+            .max(halt_len);
     }
     let col_w = (max_len + 1).max(4);
     let max_cols = (available / col_w).max(1);
@@ -1155,10 +1184,15 @@ fn render_match_strip(
     };
     let mut idx_line = String::new();
     let mut out_spans = Vec::new();
+    let mut halt_spans = Vec::new();
     let mut pay_line = String::new();
     let mut total_line = String::new();
     out_spans.push(Span::styled(
         format!("{:>label_w$}: ", "Out", label_w = label_w),
+        label_style,
+    ));
+    halt_spans.push(Span::styled(
+        format!("{:>label_w$}: ", "Hlt", label_w = label_w),
         label_style,
     ));
     for i in start..total {
@@ -1179,6 +1213,16 @@ fn render_match_strip(
             _ => dim_style,
         };
         out_spans.push(Span::styled(fit_right(outcome), outcome_style));
+        let halt = halt_token(i);
+        let halt_style = match (
+            snapshot.a_halted.as_bytes().get(i).copied(),
+            snapshot.b_halted.as_bytes().get(i).copied(),
+        ) {
+            (Some(b'1'), Some(b'1')) => dim_style,
+            (Some(_), Some(_)) => warn_style,
+            _ => dim_style,
+        };
+        halt_spans.push(Span::styled(fit_right(&halt), halt_style));
         let payoff = snapshot.payoffs[i];
         pay_line.push_str(&fit_right(&format!("{}/{}", payoff[0], payoff[1])));
         total_line.push_str(&fit_right(&format!(
@@ -1197,6 +1241,7 @@ fn render_match_strip(
         Span::styled("DC", warn_style),
         Span::styled(" ", dim_style),
         Span::styled("DD", dim_style),
+        Span::styled(" | Hlt: 1=halt 0=timeout", dim_style),
     ]);
 
     vec![
@@ -1209,6 +1254,7 @@ fn render_match_strip(
             Span::styled(idx_line, number_style),
         ]),
         Line::from(out_spans),
+        Line::from(halt_spans),
         Line::from(vec![
             Span::styled(
                 format!("{:>label_w$}: ", "Pay", label_w = label_w),
@@ -1536,4 +1582,69 @@ fn truncate_text(value: &str, width: usize) -> String {
     let mut out: String = value.chars().take(width - 3).collect();
     out.push_str("...");
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_snapshot() -> MatchSnapshot {
+        MatchSnapshot {
+            match_index: 1,
+            total_matches: 1,
+            round: 3,
+            rounds: 3,
+            a: "a".into(),
+            b: "b".into(),
+            a_score: -4,
+            b_score: -2,
+            outcomes: "013".into(),
+            payoffs: vec![[-1, -1], [-3, 0], [0, -1]],
+            a_halted: "110".into(),
+            b_halted: "111".into(),
+        }
+    }
+
+    fn line_text(line: &Line<'_>) -> String {
+        line.spans.iter().map(|span| span.content.as_ref()).collect()
+    }
+
+    #[test]
+    fn match_strip_renders_halt_row_and_timeout_markers() {
+        let lines = render_match_strip(
+            &sample_snapshot(),
+            50,
+            120,
+            Style::default(),
+            Style::default(),
+            Style::default(),
+            Style::default(),
+            Style::default(),
+        );
+        assert_eq!(lines.len(), 7);
+        let halt_line = line_text(&lines[3]);
+        assert!(halt_line.contains("Hlt:"));
+        assert!(halt_line.contains("1/1"));
+        assert!(halt_line.contains("0/1"));
+    }
+
+    #[test]
+    fn match_strip_handles_missing_halt_history() {
+        let mut snapshot = sample_snapshot();
+        snapshot.a_halted.clear();
+        snapshot.b_halted.clear();
+
+        let lines = render_match_strip(
+            &snapshot,
+            50,
+            120,
+            Style::default(),
+            Style::default(),
+            Style::default(),
+            Style::default(),
+            Style::default(),
+        );
+        let halt_line = line_text(&lines[3]);
+        assert!(halt_line.contains("--"));
+    }
 }
