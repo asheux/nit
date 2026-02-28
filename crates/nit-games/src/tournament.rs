@@ -15,6 +15,7 @@ use crate::strategy::{CaStrategy, FsmStrategy, OneSidedTmStrategy, Strategy, TmR
 use nit_utils::hashing::{stable_hash_bytes, XorShift64};
 use rayon::prelude::*;
 use rayon::ThreadPoolBuilder;
+use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::mpsc::Sender;
@@ -54,7 +55,7 @@ pub struct MatchSnapshot {
     pub b_halted: String,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct MatchHistoryPreview {
     pub match_index: usize,
     pub total_matches: usize,

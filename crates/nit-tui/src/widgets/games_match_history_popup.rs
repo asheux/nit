@@ -89,7 +89,17 @@ pub fn build_lines(state: &AppState, theme: &Theme, inner: Rect) -> Vec<Line<'st
 
     let mut lines: Vec<Line<'static>> = Vec::new();
     let entries = state.games.match_history.entries.as_slice();
-    let total = entries.len();
+    let total = if state.games.match_history.total_entries > 0 {
+        state.games.match_history.total_entries
+    } else {
+        entries.len()
+    };
+    let loaded_start = state
+        .games
+        .match_history
+        .loaded_start
+        .min(total.saturating_sub(1));
+    let loaded_end = loaded_start.saturating_add(entries.len()).min(total);
 
     lines.push(Line::from(vec![
         Span::styled("status: ", label_style),
@@ -132,7 +142,13 @@ pub fn build_lines(state: &AppState, theme: &Theme, inner: Rect) -> Vec<Line<'st
         start = 0;
     }
     let end = (start + capacity).min(total);
-    let visible = &entries[start..end];
+    let visible_start = start.max(loaded_start);
+    let visible_end = end.min(loaded_end);
+    let visible = if visible_start < visible_end {
+        &entries[(visible_start - loaded_start)..(visible_end - loaded_start)]
+    } else {
+        &[]
+    };
     let (aliases, alias_legend) = strategy_aliases(state, visible);
     let available_rows = (inner.height as usize).saturating_sub(RESERVED_LINES);
     let max_rounds_in_view = max_round_limit(visible);
@@ -152,6 +168,22 @@ pub fn build_lines(state: &AppState, theme: &Theme, inner: Rect) -> Vec<Line<'st
         Span::styled("layout: ", label_style),
         Span::styled("left → right", value_style),
     ]));
+    if visible.is_empty() {
+        lines.push(Line::from(vec![
+            Span::styled("status: ", label_style),
+            Span::styled("loading visible slice…", dim_style),
+        ]));
+        lines.push(Line::from(""));
+        lines.push(Line::from(vec![
+            Span::styled("Esc", value_style),
+            Span::styled(" close | ", dim_style),
+            Span::styled("←/→", value_style),
+            Span::styled(" pan | ", dim_style),
+            Span::styled("+/-", value_style),
+            Span::styled(" rounds (default 30)", dim_style),
+        ]));
+        return lines;
+    }
     if !alias_legend.is_empty() {
         let legend_text = format!(
             "types: {}",

@@ -12,7 +12,7 @@ use crate::widgets::text_selection::apply_ui_selection;
 use nit_core::UiSelectionPane;
 
 pub fn preferred_size(screen: Rect) -> (u16, u16) {
-    let width = (screen.width.saturating_sub(4)).min(80).max(30);
+    let width = (screen.width.saturating_sub(4)).min(110).max(30);
     let height = (screen.height.saturating_sub(4)).min(36).max(12);
     (width, height)
 }
@@ -132,6 +132,13 @@ pub fn build_lines(theme: &Theme) -> Vec<Line<'static>> {
             Style::default().fg(theme.accent),
         ),
         Span::raw(" games controls"),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled(
+            ":games run <fsm|ca|tm> {…}",
+            Style::default().fg(theme.accent),
+        ),
+        Span::raw(" run family tournament (all machines for that tuple)"),
     ]));
     lines.push(Line::from(vec![
         Span::styled(":games runs", Style::default().fg(theme.accent)),

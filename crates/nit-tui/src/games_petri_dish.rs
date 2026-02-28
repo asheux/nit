@@ -1,4 +1,5 @@
-use std::fs;
+use std::fs::{self, File};
+use std::io::{BufRead, BufReader, BufWriter, Seek, SeekFrom, Write};
 use std::path::PathBuf;
 use std::time::Instant;
 
@@ -30,6 +31,8 @@ use crate::widgets::text_selection::apply_ui_selection;
 
 const MIN_WIDTH: u16 = 120;
 const MIN_HEIGHT: u16 = 32;
+const HISTORY_LOAD_CHUNK: usize = 256;
+const HISTORY_LOAD_PREFETCH: usize = 64;
 
 pub fn petri_rect(screen: Rect) -> Rect {
     let width = screen.width.min(MIN_WIDTH).max(60);
@@ -53,6 +56,7 @@ pub struct GamesPetriDishRuntime {
     analysis_runner: GamesAnalysisRunner,
     runs_runner: GamesRunsRunner,
     session: Option<GameSession>,
+    history_store: Option<HistoryPreviewStore>,
     hidden: bool,
     warning: Option<String>,
     last_tick: Instant,
@@ -68,6 +72,71 @@ struct GameSession {
     definitions: Vec<StrategyDefinition>,
 }
 
+struct HistoryPreviewStore {
+    path: PathBuf,
+    writer: BufWriter<File>,
+    offsets: Vec<u64>,
+    next_offset: u64,
+}
+
+impl HistoryPreviewStore {
+    fn create(path: PathBuf) -> std::io::Result<Self> {
+        let file = File::create(&path)?;
+        Ok(Self {
+            path,
+            writer: BufWriter::new(file),
+            offsets: Vec::new(),
+            next_offset: 0,
+        })
+    }
+
+    fn push(&mut self, preview: &nit_games::MatchHistoryPreview) -> std::io::Result<()> {
+        let encoded = serde_json::to_vec(preview)
+            .map_err(|err| std::io::Error::new(std::io::ErrorKind::Other, err))?;
+        self.offsets.push(self.next_offset);
+        self.writer.write_all(&encoded)?;
+        self.writer.write_all(b"\n")?;
+        self.next_offset = self
+            .next_offset
+            .saturating_add(encoded.len() as u64)
+            .saturating_add(1);
+        Ok(())
+    }
+
+    fn len(&self) -> usize {
+        self.offsets.len()
+    }
+
+    fn load_range(
+        &mut self,
+        start: usize,
+        count: usize,
+    ) -> std::io::Result<Vec<nit_games::MatchHistoryPreview>> {
+        if count == 0 || start >= self.offsets.len() {
+            return Ok(Vec::new());
+        }
+        self.writer.flush()?;
+        let end = start.saturating_add(count).min(self.offsets.len());
+        let mut file = File::open(&self.path)?;
+        file.seek(SeekFrom::Start(self.offsets[start]))?;
+        let mut reader = BufReader::new(file);
+        let mut entries = Vec::with_capacity(end.saturating_sub(start));
+        let mut line = String::new();
+        for _ in start..end {
+            line.clear();
+            let bytes = reader.read_line(&mut line)?;
+            if bytes == 0 {
+                break;
+            }
+            let trimmed = line.trim_end_matches(&['\n', '\r'][..]);
+            let preview = serde_json::from_str::<nit_games::MatchHistoryPreview>(trimmed)
+                .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))?;
+            entries.push(preview);
+        }
+        Ok(entries)
+    }
+}
+
 impl GamesPetriDishRuntime {
     pub fn new(_state: &AppState) -> Self {
         Self {
@@ -75,6 +144,7 @@ impl GamesPetriDishRuntime {
             analysis_runner: GamesAnalysisRunner::spawn(),
             runs_runner: GamesRunsRunner::spawn(),
             session: None,
+            history_store: None,
             hidden: false,
             warning: None,
             last_tick: Instant::now(),
@@ -257,6 +327,7 @@ impl GamesPetriDishRuntime {
         self.handle_analysis_events(state);
         self.handle_runs_events(state);
         self.handle_runner_events(state);
+        self.refresh_history_window(state);
         self.last_tick = Instant::now();
     }
 
@@ -370,7 +441,29 @@ impl GamesPetriDishRuntime {
                     }
                 }
                 RunnerEvent::MatchHistoryPreview(preview) => {
-                    state.games.match_history.entries.push(preview);
+                    state.games.match_history.max_rounds_seen = state
+                        .games
+                        .match_history
+                        .max_rounds_seen
+                        .max(preview.rounds_total as usize)
+                        .max(preview.outcomes_prefix.len());
+                    if let Some(store) = self.history_store.as_mut() {
+                        if let Err(err) = store.push(&preview) {
+                            state.games.match_history.last_error =
+                                Some(format!("Failed to cache match history preview: {err}"));
+                            state.games.match_history.entries.push(preview);
+                            state.games.match_history.loaded_start = 0;
+                            state.games.match_history.total_entries =
+                                state.games.match_history.entries.len();
+                        } else {
+                            state.games.match_history.total_entries = store.len();
+                        }
+                    } else {
+                        state.games.match_history.entries.push(preview);
+                        state.games.match_history.loaded_start = 0;
+                        state.games.match_history.total_entries =
+                            state.games.match_history.entries.len();
+                    }
                 }
                 RunnerEvent::PartialLeaderboard(results) => {
                     if let Some(session) = self.session.as_mut() {
@@ -596,24 +689,62 @@ impl GamesPetriDishRuntime {
     }
 
     fn start_session(&mut self, state: &mut AppState) {
-        if self.session.is_some() {
+        if self.session.is_some() && state.games.running {
             self.warning = Some("Games tournament already running".into());
             return;
         }
-        let config_text = state.editor_buffer().content_as_string();
-        let mut config =
-            match GamesConfig::from_toml_with_root(&config_text, Some(&state.workspace_root)) {
-                Ok(config) => config,
-                Err(err) => {
-                    let msg = format!("Config error: {err}");
-                    state.games.status = GamesStatus::Error;
-                    state.games.last_error = Some(msg.clone());
-                    state.status = Some(msg);
-                    return;
-                }
-            };
+        if self.session.is_some() && !state.games.running {
+            self.session = None;
+            self.hidden = false;
+            self.warning = None;
+        }
+        let mut run_label: Option<String> = None;
+        let mut family_mode = false;
+        let (mut config, config_text) = if let Some(override_run) =
+            state.games.pending_run_override.take()
+        {
+            run_label = Some(override_run.label);
+            family_mode = override_run.family_mode;
+            (override_run.config, override_run.config_text)
+        } else {
+            let config_text = state.editor_buffer().content_as_string();
+            let config =
+                match GamesConfig::from_toml_with_root(&config_text, Some(&state.workspace_root)) {
+                    Ok(config) => config,
+                    Err(err) => {
+                        let msg = format!("Config error: {err}");
+                        state.games.status = GamesStatus::Error;
+                        state.games.last_error = Some(msg.clone());
+                        state.status = Some(msg);
+                        return;
+                    }
+                };
+            (config, config_text)
+        };
 
-        config.engine.mode = nit_games::EngineMode::Interactive;
+        config.engine.mode = if family_mode {
+            nit_games::EngineMode::Batch
+        } else {
+            nit_games::EngineMode::Interactive
+        };
+        if family_mode {
+            config.event_log.enabled = false;
+            config.history.enabled = false;
+            config.engine.fast_eval = true;
+        }
+        let mut request_steps_per_tick = state.games.steps_per_tick.max(1);
+        if family_mode {
+            let strategy_count = config.strategies.len() as u32;
+            let turbo_steps = strategy_count
+                .saturating_mul(strategy_count)
+                .saturating_div(8)
+                .max(256)
+                .min(50_000);
+            if request_steps_per_tick < turbo_steps {
+                request_steps_per_tick = turbo_steps;
+                state.games.steps_per_tick = turbo_steps;
+            }
+        }
 
         let timestamp = EventWriter::timestamp();
         let seed = config
@@ -630,6 +761,19 @@ impl GamesPetriDishRuntime {
             state.status = Some(msg);
             return;
         }
+        self.history_store = if family_mode {
+            None
+        } else {
+            match HistoryPreviewStore::create(layout.run_dir.join("match_history_preview.ndjson")) {
+                Ok(store) => Some(store),
+                Err(err) => {
+                    tracing::warn!("Failed to create match history preview cache: {err}");
+                    state.games.match_history.last_error =
+                        Some(format!("History preview cache disabled: {err}"));
+                    None
+                }
+            }
+        };
 
         let event_log_enabled = config.event_log.enabled;
         let history_log_enabled = config.history.enabled;
@@ -659,7 +803,7 @@ impl GamesPetriDishRuntime {
             event_path: event_log_enabled.then_some(event_path),
             history_path: history_log_enabled.then_some(history_path),
             progress_interval,
-            steps_per_tick: state.games.steps_per_tick.max(1),
+            steps_per_tick: request_steps_per_tick,
         };
 
         self.runner.send(RunnerCommand::StartRun(request));
@@ -674,6 +818,9 @@ impl GamesPetriDishRuntime {
         state.games.match_history.open = false;
         state.games.match_history.last_error = None;
         state.games.match_history.entries.clear();
+        state.games.match_history.total_entries = 0;
+        state.games.match_history.loaded_start = 0;
+        state.games.match_history.max_rounds_seen = 0;
         state.games.match_history.column_offset = 0;
         state.games.match_history.round_limit = None;
         state.games.run_browser.open = false;
@@ -687,8 +834,69 @@ impl GamesPetriDishRuntime {
         state.games.paused = false;
         state.games.status = GamesStatus::Running;
         state.games.last_error = None;
-        state.status = Some("Games tournament started".into());
+        state.status = Some(match run_label {
+            Some(label) if family_mode => format!(
+                "Games tournament started ({label}, turbo x{})",
+                request_steps_per_tick
+            ),
+            Some(label) => format!("Games tournament started ({label})"),
+            None => "Games tournament started".into(),
+        });
         info!("Games tournament started");
+    }
+
+    fn refresh_history_window(&mut self, state: &mut AppState) {
+        let total = if let Some(store) = self.history_store.as_ref() {
+            store.len()
+        } else {
+            state.games.match_history.entries.len()
+        };
+        state.games.match_history.total_entries = total;
+
+        if total == 0 {
+            state.games.match_history.loaded_start = 0;
+            return;
+        }
+
+        if self.history_store.is_none() {
+            state.games.match_history.loaded_start = 0;
+            state.games.match_history.total_entries = state.games.match_history.entries.len();
+            return;
+        }
+
+        if !state.games.match_history.open {
+            return;
+        }
+
+        let desired = state
+            .games
+            .match_history
+            .column_offset
+            .min(total.saturating_sub(1));
+        let load_start = desired.saturating_sub(HISTORY_LOAD_PREFETCH);
+        let load_end = load_start.saturating_add(HISTORY_LOAD_CHUNK).min(total);
+        let loaded_start = state.games.match_history.loaded_start;
+        let loaded_end = loaded_start
+            .saturating_add(state.games.match_history.entries.len())
+            .min(total);
+        let has_window = !state.games.match_history.entries.is_empty();
+        let needs_reload = !has_window || desired < loaded_start || desired >= loaded_end;
+        if !needs_reload {
+            return;
+        }
+
+        if let Some(store) = self.history_store.as_mut() {
+            match store.load_range(load_start, load_end.saturating_sub(load_start)) {
+                Ok(entries) => {
+                    state.games.match_history.entries = entries;
+                    state.games.match_history.loaded_start = load_start;
+                }
+                Err(err) => {
+                    state.games.match_history.last_error =
+                        Some(format!("Failed to load history slice: {err}"));
+                }
+            }
+        }
     }
 
     fn start_analysis(&mut self, state: &mut AppState, request: GamesAnalysisRequest) {
@@ -1376,6 +1584,7 @@ fn render_top_table(
     fixed_score_w: usize,
     fixed_wld_w: usize,
 ) -> Vec<Line<'static>> {
+    const TOP_LIMIT: usize = 15;
     let mut lines = Vec::new();
     lines.push(Line::from(Span::styled("Top Strategies", header_style)));
     if definitions.is_empty() {
@@ -1396,6 +1605,7 @@ fn render_top_table(
     let rows: Vec<(String, String, String, String, String, u32, u32, u32)> = results
         .ranking
         .iter()
+        .take(TOP_LIMIT)
         .enumerate()
         .map(|(idx, entry)| {
             let found = definitions.iter().find(|def| def.id == entry.id).cloned();
@@ -1539,6 +1749,16 @@ fn render_top_table(
         ));
         spans.push(Span::styled("|", dim_style));
         lines.push(Line::from(spans));
+    }
+
+    if results.ranking.len() > TOP_LIMIT {
+        lines.push(Line::from(vec![
+            Span::styled("… showing top ", dim_style),
+            Span::styled(TOP_LIMIT.to_string(), number_style),
+            Span::styled(" of ", dim_style),
+            Span::styled(results.ranking.len().to_string(), number_style),
+            Span::styled(" strategies", dim_style),
+        ]));
     }
 
     lines.push(Line::from(Span::styled(sep, dim_style)));

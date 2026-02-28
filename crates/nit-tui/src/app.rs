@@ -2356,7 +2356,7 @@ fn handle_mouse_event(
                     if delta > 0 {
                         state.games.match_history.column_offset =
                             state.games.match_history.column_offset.saturating_sub(1);
-                    } else if !state.games.match_history.entries.is_empty() {
+                    } else if games_match_history_total_entries(state) > 0 {
                         state.games.match_history.column_offset =
                             (state.games.match_history.column_offset + 1).min(max);
                     }
@@ -2520,13 +2520,25 @@ fn games_match_history_max_offset(state: &AppState, screen: ratatui::layout::Rec
     let area = dynamic_popup_rect(screen, games_match_history_popup::preferred_size(screen));
     let text_area = popup_text_area(area);
     games_match_history_popup::max_column_offset(
-        state.games.match_history.entries.len(),
+        games_match_history_total_entries(state),
         text_area.width,
     )
 }
 
 fn games_match_history_max_rounds(state: &AppState) -> usize {
-    games_match_history_popup::max_round_limit(state.games.match_history.entries.as_slice())
+    if state.games.match_history.max_rounds_seen > 0 {
+        state.games.match_history.max_rounds_seen
+    } else {
+        games_match_history_popup::max_round_limit(state.games.match_history.entries.as_slice())
+    }
+}
+
+fn games_match_history_total_entries(state: &AppState) -> usize {
+    if state.games.match_history.total_entries > 0 {
+        state.games.match_history.total_entries
+    } else {
+        state.games.match_history.entries.len()
+    }
 }
 
 fn games_match_history_default_rounds(state: &AppState) -> usize {
@@ -5399,7 +5411,7 @@ fn handle_match_history_popup_key(
     if is_command_prompt_open_key(key) {
         return false;
     }
-    let total = state.games.match_history.entries.len();
+    let total = games_match_history_total_entries(state);
     let max_offset = games_match_history_max_offset(state, screen);
     let max_rounds = games_match_history_max_rounds(state);
     let default_rounds = games_match_history_default_rounds(state);
