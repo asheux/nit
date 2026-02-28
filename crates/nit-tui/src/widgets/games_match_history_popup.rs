@@ -9,6 +9,7 @@ use ratatui::{
 
 use crate::theme::Theme;
 use crate::widgets::text_selection::apply_ui_selection;
+use std::collections::{HashMap, HashSet};
 
 const MIN_WIDTH: u16 = 70;
 const MIN_HEIGHT: u16 = 20;
@@ -110,6 +111,7 @@ pub fn build_lines(state: &AppState, theme: &Theme, inner: Rect) -> Vec<Line<'st
     }
     let end = (start + capacity).min(total);
     let visible = &entries[start..end];
+    let (aliases, alias_legend) = strategy_aliases(state, visible);
     let available_rows = (inner.height as usize).saturating_sub(RESERVED_LINES);
     let max_rounds_in_view = visible
         .iter()
@@ -129,6 +131,20 @@ pub fn build_lines(state: &AppState, theme: &Theme, inner: Rect) -> Vec<Line<'st
         Span::styled("layout: ", label_style),
         Span::styled("left → right", value_style),
     ]));
+    if !alias_legend.is_empty() {
+        let legend_text = format!(
+            "types: {}",
+            alias_legend
+                .iter()
+                .map(|(alias, id)| format!("{alias}={id}"))
+                .collect::<Vec<_>>()
+                .join("  ")
+        );
+        lines.push(Line::from(vec![Span::styled(
+            truncate_text(&legend_text, inner.width.max(1) as usize),
+            dim_style,
+        )]));
+    }
     lines.push(Line::from(""));
 
     let pad_line = |text: &str| -> String { pad_to_width(text, PANEL_WIDTH) };
@@ -146,7 +162,14 @@ pub fn build_lines(state: &AppState, theme: &Theme, inner: Rect) -> Vec<Line<'st
             label_style,
         ));
         header_pair.push(Span::styled(
-            pad_line(&truncate_text(&format!("{} vs {}", entry.a, entry.b), PANEL_WIDTH)),
+            pad_line(&truncate_text(
+                &format!(
+                    "{} vs {}",
+                    aliases.get(entry.a.as_str()).unwrap_or(&entry.a),
+                    aliases.get(entry.b.as_str()).unwrap_or(&entry.b)
+                ),
+                PANEL_WIDTH,
+            )),
             value_style,
         ));
         header_cols.push(Span::styled(
@@ -235,6 +258,125 @@ fn decode_outcome(outcome: Option<u8>) -> (Option<u8>, Option<u8>) {
         Some(b'2') => (Some(1), Some(0)),
         Some(b'3') => (Some(1), Some(1)),
         _ => (None, None),
+    }
+}
+
+fn strategy_aliases(
+    state: &AppState,
+    visible: &[nit_games::MatchHistoryPreview],
+) -> (HashMap<String, String>, Vec<(String, String)>) {
+    let mut strategy_ids = Vec::new();
+    let mut seen_ids: HashSet<&str> = HashSet::new();
+    for entry in visible {
+        if seen_ids.insert(entry.a.as_str()) {
+            strategy_ids.push(entry.a.as_str());
+        }
+        if seen_ids.insert(entry.b.as_str()) {
+            strategy_ids.push(entry.b.as_str());
+        }
+    }
+    let mut kind_by_id: HashMap<&str, &nit_games::config::StrategySpecKind> = HashMap::new();
+    if let Some(run) = state.games.last_run.as_ref() {
+        for def in &run.strategies {
+            kind_by_id.insert(def.id.as_str(), &def.kind);
+        }
+    }
+    let mut alias_map: HashMap<String, String> = HashMap::new();
+    let mut legend = Vec::new();
+    let mut used_aliases: HashSet<String> = HashSet::new();
+    for id in strategy_ids {
+        let family = family_code(id, kind_by_id.get(id).copied());
+        let suffix = alias_suffix(id);
+        let base = if suffix.is_empty() {
+            family.to_string()
+        } else {
+            format!("{family}{suffix}")
+        };
+        let alias = dedupe_alias(base, &mut used_aliases);
+        alias_map.insert(id.to_string(), alias.clone());
+        legend.push((alias, id.to_string()));
+    }
+    (alias_map, legend)
+}
+
+fn family_code(id: &str, kind: Option<&nit_games::config::StrategySpecKind>) -> char {
+    if let Some(kind) = kind {
+        return match kind {
+            nit_games::config::StrategySpecKind::Fsm { .. } => 'F',
+            nit_games::config::StrategySpecKind::Ca { .. } => 'C',
+            nit_games::config::StrategySpecKind::OneSidedTm { .. } => 'T',
+        };
+    }
+    let lower = id.to_ascii_lowercase();
+    if lower.starts_with("fsm") || lower.contains("_fsm") {
+        'F'
+    } else if lower.starts_with("ca") || lower.contains("_ca") {
+        'C'
+    } else if lower.starts_with("tm") || lower.contains("_tm") {
+        'T'
+    } else {
+        lower
+            .chars()
+            .find(|ch| ch.is_ascii_alphanumeric())
+            .map(|ch| ch.to_ascii_uppercase())
+            .unwrap_or('S')
+    }
+}
+
+fn alias_suffix(id: &str) -> String {
+    let tokens: Vec<&str> = id
+        .split(|ch: char| !ch.is_ascii_alphanumeric())
+        .filter(|token| !token.is_empty())
+        .collect();
+    if tokens.is_empty() {
+        return String::new();
+    }
+    let family_like = ["fsm", "ca", "tm", "auto", "rule"];
+    let token_start = if family_like.contains(&tokens[0].to_ascii_lowercase().as_str()) {
+        1
+    } else {
+        0
+    };
+    let mut out = String::new();
+    for token in tokens.iter().skip(token_start) {
+        out.push_str(&token_code(token));
+        if out.chars().count() >= 6 {
+            break;
+        }
+    }
+    out.chars().take(6).collect()
+}
+
+fn token_code(token: &str) -> String {
+    if token.is_empty() {
+        return String::new();
+    }
+    if token.chars().all(|ch| ch.is_ascii_digit()) {
+        return token.to_string();
+    }
+    if token.chars().all(|ch| ch.is_ascii_alphabetic()) {
+        let mut chars = token.chars();
+        let first = chars.next().unwrap_or('X').to_ascii_uppercase();
+        let last = token.chars().last().unwrap_or(first).to_ascii_uppercase();
+        if token.chars().count() <= 2 {
+            return token.to_ascii_uppercase();
+        }
+        return format!("{first}{last}");
+    }
+    token.to_ascii_uppercase()
+}
+
+fn dedupe_alias(base: String, used: &mut HashSet<String>) -> String {
+    if used.insert(base.clone()) {
+        return base;
+    }
+    let mut suffix = 2usize;
+    loop {
+        let candidate = format!("{base}{suffix}");
+        if used.insert(candidate.clone()) {
+            return candidate;
+        }
+        suffix = suffix.saturating_add(1);
     }
 }
 
