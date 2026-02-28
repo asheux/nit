@@ -1310,7 +1310,12 @@ fn build_grid_lines(frames: &[SimFrame], max_width: usize, theme: &Theme) -> Vec
                 symbol_style(symbol, theme)
             };
             if global_coord == head_coord {
-                style = style.fg(Color::White).add_modifier(Modifier::BOLD);
+                let head_fg = if !is_halt_cell && symbol == 0 {
+                    Color::Black
+                } else {
+                    Color::White
+                };
+                style = style.fg(head_fg).add_modifier(Modifier::BOLD);
                 spans.push(Span::styled(centered_cell(HEAD_DOT, cell_width), style));
             } else {
                 spans.push(Span::styled(" ".repeat(cell_width), style));
@@ -1338,8 +1343,13 @@ fn build_legend_lines(
             spans.push(Span::raw(" "));
         }
         let label = symbol_char(symbol as u8).to_string();
+        let fg = if symbol == 0 {
+            Color::Black
+        } else {
+            theme.foreground
+        };
         let style = symbol_style(symbol as u8, theme)
-            .fg(theme.foreground)
+            .fg(fg)
             .add_modifier(Modifier::BOLD);
         spans.push(Span::styled(format!(" {label} "), style));
     }
@@ -1383,7 +1393,7 @@ fn build_legend_lines(
 
 fn symbol_style(symbol: u8, theme: &Theme) -> Style {
     let bg = match symbol {
-        0 => theme.border,
+        0 => Color::White,
         1 => theme.accent,
         2 => theme.warning,
         3 => theme.title,

@@ -44,9 +44,9 @@ use crate::{
     theme::Theme,
     widgets::{
         bottom_bar, editor_view, file_tree_view, fuzzy_search_popup, games_analysis_popup,
-        games_replay_popup, games_run_browser_popup, games_strategy_popup, games_tm_sim_popup,
-        games_visualizer_view, gate_monitor_view, help_overlay, job_output_view, notes_view,
-        protocol_picker, rule_picker, top_bar, visualizer_view,
+        games_ca_sim_popup, games_replay_popup, games_run_browser_popup, games_strategy_popup,
+        games_tm_sim_popup, games_visualizer_view, gate_monitor_view, help_overlay,
+        job_output_view, notes_view, protocol_picker, rule_picker, top_bar, visualizer_view,
     },
 };
 
@@ -541,6 +541,13 @@ fn run_loop(
                             continue;
                         }
                     }
+                    if state.app_kind == AppKind::Games && state.games.ca_sim.open {
+                        let screen = terminal.size().unwrap_or_default();
+                        if handle_ca_sim_popup_key(&key, state, screen) {
+                            needs_redraw = true;
+                            continue;
+                        }
+                    }
                     if state.file_tree.open && state.focus == PaneId::Editor {
                         let screen = terminal.size().unwrap_or_default();
                         let layout = layout::split(screen);
@@ -918,6 +925,10 @@ fn draw(
         if state.app_kind == AppKind::Games && state.games.tm_sim.open {
             let area = dynamic_popup_rect(screen, games_tm_sim_popup::preferred_size(screen));
             games_tm_sim_popup::render(f, area, state, theme);
+        }
+        if state.app_kind == AppKind::Games && state.games.ca_sim.open {
+            let area = dynamic_popup_rect(screen, games_ca_sim_popup::preferred_size(screen));
+            games_ca_sim_popup::render(f, area, state, theme);
         }
         if state.rule_picker.open {
             rule_picker::render(f, screen, state, theme);
@@ -2226,6 +2237,13 @@ fn handle_mouse_event(
                 }
                 return true;
             }
+            if state.app_kind == AppKind::Games && state.games.ca_sim.open {
+                let area = dynamic_popup_rect(screen, games_ca_sim_popup::preferred_size(screen));
+                if point_in_rect(mouse.column, mouse.row, area) {
+                    bump_scroll(&mut state.games.ca_sim.scroll_offset, delta);
+                }
+                return true;
+            }
 
             if games_petri_visible(state) {
                 return true;
@@ -2569,6 +2587,95 @@ fn map_tm_sim_popup_mouse_for_pane(
     let height = target_area.height as usize;
     let max_scroll = text_lines.len().saturating_sub(height);
     let scroll = state.games.tm_sim.scroll_offset.min(max_scroll);
+    let (line_idx, col) = map_mouse_to_line_col(
+        mouse,
+        target_area,
+        &text_lines,
+        scroll,
+        state.settings.editor.tab_width as usize,
+        clamp,
+    )?;
+    Some((line_idx, col, text_lines))
+}
+
+fn map_ca_sim_popup_mouse(
+    mouse: MouseEvent,
+    screen: ratatui::layout::Rect,
+    state: &AppState,
+    theme: &Theme,
+    clamp: bool,
+) -> Option<(UiSelectionPane, usize, usize, Vec<String>)> {
+    if state.app_kind != AppKind::Games || !state.games.ca_sim.open {
+        return None;
+    }
+    let area = dynamic_popup_rect(screen, games_ca_sim_popup::preferred_size(screen));
+    let text_area = popup_text_area(area);
+    let (_left_area, right_area) = games_ca_sim_popup::layout_for_ca_sim(text_area);
+    let right_inner = right_area.map(|area| Block::default().borders(Borders::ALL).inner(area));
+    let pane = if let Some(right_inner) = right_inner {
+        if point_in_rect(mouse.column, mouse.row, right_inner) {
+            UiSelectionPane::GamesCaSimPopupRight
+        } else {
+            UiSelectionPane::GamesCaSimPopupLeft
+        }
+    } else {
+        UiSelectionPane::GamesCaSimPopupLeft
+    };
+    let (line_idx, col, lines) =
+        map_ca_sim_popup_mouse_for_pane(mouse, screen, state, theme, clamp, pane)?;
+    Some((pane, line_idx, col, lines))
+}
+
+fn map_ca_sim_popup_mouse_for_pane(
+    mouse: MouseEvent,
+    screen: ratatui::layout::Rect,
+    state: &AppState,
+    theme: &Theme,
+    clamp: bool,
+    pane: UiSelectionPane,
+) -> Option<(usize, usize, Vec<String>)> {
+    if state.app_kind != AppKind::Games || !state.games.ca_sim.open {
+        return None;
+    }
+    let area = dynamic_popup_rect(screen, games_ca_sim_popup::preferred_size(screen));
+    let text_area = popup_text_area(area);
+    let (left_area, right_area) = games_ca_sim_popup::layout_for_ca_sim(text_area);
+    let right_inner = right_area.map(|area| Block::default().borders(Borders::ALL).inner(area));
+    let (target_area, lines) = match pane {
+        UiSelectionPane::GamesCaSimPopupRight => {
+            let right_inner = right_inner?;
+            let right_width = right_inner.width.max(1) as usize;
+            let (_left_lines, right_lines) = games_ca_sim_popup::build_columns(
+                state,
+                theme,
+                left_area.width.max(1) as usize,
+                right_width,
+            );
+            (right_inner, right_lines)
+        }
+        _ => {
+            let right_width = right_inner
+                .map(|area| area.width.max(1) as usize)
+                .unwrap_or(0);
+            let (left_lines, _right_lines) = games_ca_sim_popup::build_columns(
+                state,
+                theme,
+                left_area.width.max(1) as usize,
+                right_width,
+            );
+            (left_area, left_lines)
+        }
+    };
+    if !point_in_rect(mouse.column, mouse.row, target_area) && !clamp {
+        return None;
+    }
+    let text_lines = lines_to_strings(&lines);
+    if text_lines.is_empty() {
+        return None;
+    }
+    let height = target_area.height as usize;
+    let max_scroll = text_lines.len().saturating_sub(height);
+    let scroll = state.games.ca_sim.scroll_offset.min(max_scroll);
     let (line_idx, col) = map_mouse_to_line_col(
         mouse,
         target_area,
@@ -3037,6 +3144,27 @@ fn handle_mouse_down(
         }
         return true;
     }
+    if state.app_kind == AppKind::Games && state.games.ca_sim.open {
+        if let Some((pane, line_idx, col, lines)) =
+            map_ca_sim_popup_mouse(mouse, screen, state, theme, false)
+        {
+            reset_ui_selection(state, input_state);
+            state.ui_selection = Some(UiSelection {
+                pane,
+                start_line: line_idx,
+                start_col: col,
+                end_line: line_idx,
+                end_col: col,
+            });
+            input_state.mouse_select_anchor = Some(MouseSelectAnchor {
+                target: MouseSelectTarget::Ui(pane),
+                line: line_idx,
+                col,
+            });
+            update_ui_selection_text(state, pane, &lines, clipboard, input_state);
+        }
+        return true;
+    }
     if state.app_kind == AppKind::Games && state.games.analysis.open {
         if let Some((line_idx, col, lines)) =
             map_analysis_popup_mouse(mouse, screen, state, theme, false)
@@ -3320,6 +3448,10 @@ fn handle_mouse_drag(
                     map_tm_sim_popup_mouse_for_pane(mouse, screen, state, theme, true, pane)
                         .map(|(line_idx, col, lines)| (line_idx, col, lines))
                 }
+                UiSelectionPane::GamesCaSimPopupLeft | UiSelectionPane::GamesCaSimPopupRight => {
+                    map_ca_sim_popup_mouse_for_pane(mouse, screen, state, theme, true, pane)
+                        .map(|(line_idx, col, lines)| (line_idx, col, lines))
+                }
             };
             let Some((line_idx, col, lines)) = result else {
                 return false;
@@ -3385,6 +3517,13 @@ fn mouse_drag_allowed(state: &AppState, anchor: MouseSelectAnchor) -> bool {
             anchor.target,
             MouseSelectTarget::Ui(UiSelectionPane::GamesTmSimPopupLeft)
                 | MouseSelectTarget::Ui(UiSelectionPane::GamesTmSimPopupRight)
+        );
+    }
+    if state.app_kind == AppKind::Games && state.games.ca_sim.open {
+        return matches!(
+            anchor.target,
+            MouseSelectTarget::Ui(UiSelectionPane::GamesCaSimPopupLeft)
+                | MouseSelectTarget::Ui(UiSelectionPane::GamesCaSimPopupRight)
         );
     }
     if games_petri_visible(state) {
@@ -4818,6 +4957,60 @@ fn handle_tm_sim_popup_key(
         }
         KeyCode::PageDown => {
             bump_scroll(&mut state.games.tm_sim.scroll_offset, 10);
+            true
+        }
+        _ => true,
+    }
+}
+
+fn handle_ca_sim_popup_key(
+    key: &KeyEvent,
+    state: &mut AppState,
+    _screen: ratatui::layout::Rect,
+) -> bool {
+    if state.app_kind != AppKind::Games || !state.games.ca_sim.open {
+        return false;
+    }
+    if state.command_line.is_some() || state.prompt.is_some() {
+        return false;
+    }
+    if is_global_quit_key(key) {
+        return false;
+    }
+    if is_command_prompt_open_key(key) {
+        return false;
+    }
+    match key.code {
+        KeyCode::Esc | KeyCode::Char('q') => {
+            state.games.ca_sim.open = false;
+            if let Some(selection) = state.ui_selection {
+                if matches!(
+                    selection.pane,
+                    UiSelectionPane::GamesCaSimPopupLeft | UiSelectionPane::GamesCaSimPopupRight
+                ) {
+                    state.ui_selection = None;
+                }
+            }
+            true
+        }
+        KeyCode::Char('r') => {
+            state.games.ca_sim.scroll_offset = 0;
+            true
+        }
+        KeyCode::Up | KeyCode::Char('k') => {
+            bump_scroll(&mut state.games.ca_sim.scroll_offset, -1);
+            true
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            bump_scroll(&mut state.games.ca_sim.scroll_offset, 1);
+            true
+        }
+        KeyCode::PageUp => {
+            bump_scroll(&mut state.games.ca_sim.scroll_offset, -10);
+            true
+        }
+        KeyCode::PageDown => {
+            bump_scroll(&mut state.games.ca_sim.scroll_offset, 10);
             true
         }
         _ => true,

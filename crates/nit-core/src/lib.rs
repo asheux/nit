@@ -44,9 +44,9 @@ pub use seed::{
 };
 pub use state::{
     apply_action, AppState, DirEntryModel, FileTreeKind, FileTreeRow, FileTreeState,
-    GamesAnalysisRequest, GamesAnalysisState, GamesReplayRequest, GamesReplayState,
-    GamesRunBrowserState, GamesRunEntry, GamesState, GamesStatus, GamesStrategyInspectState,
-    GolRenderMode, JobState, LogBuffer, Metrics, SyntaxDebugInfo, UiSelection, UiSelectionPane,
-    VisualizerMode, VisualizerRuleEntry, VisualizerState, YankKind,
+    GamesAnalysisRequest, GamesAnalysisState, GamesCaSimState, GamesReplayRequest,
+    GamesReplayState, GamesRunBrowserState, GamesRunEntry, GamesState, GamesStatus,
+    GamesStrategyInspectState, GolRenderMode, JobState, LogBuffer, Metrics, SyntaxDebugInfo,
+    UiSelection, UiSelectionPane, VisualizerMode, VisualizerRuleEntry, VisualizerState, YankKind,
 };
 pub use viewport::Viewport;

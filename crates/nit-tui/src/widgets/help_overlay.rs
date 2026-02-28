@@ -193,6 +193,20 @@ pub fn build_lines(theme: &Theme) -> Vec<Line<'static>> {
     ]));
     lines.push(Line::from(vec![
         Span::styled(
+            ":games ca [run|config] <input> [steps] [id]",
+            Style::default().fg(theme.accent),
+        ),
+        Span::raw(" simulate shrinking CA on integer input"),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled(
+            ":games ca {n,k,r} <input> [steps]",
+            Style::default().fg(theme.accent),
+        ),
+        Span::raw(" simulate a CA rule tuple (t defaults to 10)"),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled(
             ":games analyze[se] [path] [tail=N] [samples=N]",
             Style::default().fg(theme.accent),
         ),

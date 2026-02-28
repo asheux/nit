@@ -3,6 +3,7 @@ pub mod editor_view;
 pub mod file_tree_view;
 pub mod fuzzy_search_popup;
 pub mod games_analysis_popup;
+pub mod games_ca_sim_popup;
 pub mod games_replay_popup;
 pub mod games_run_browser_popup;
 pub mod games_strategy_popup;

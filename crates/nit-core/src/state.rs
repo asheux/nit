@@ -136,6 +136,22 @@ pub struct GamesTmSimState {
     pub scroll_offset: usize,
 }
 
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+pub struct GamesCaSimState {
+    pub open: bool,
+    pub last_error: Option<String>,
+    #[serde(skip)]
+    pub definition: Option<nit_games::output::StrategyDefinition>,
+    #[serde(skip)]
+    pub input: Option<u64>,
+    #[serde(skip)]
+    pub steps_override: Option<u32>,
+    #[serde(skip)]
+    pub source_label: Option<String>,
+    #[serde(skip)]
+    pub scroll_offset: usize,
+}
+
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum UiSelectionPane {
     JobOutput,
@@ -150,6 +166,8 @@ pub enum UiSelectionPane {
     GamesStrategyPopup,
     GamesTmSimPopupLeft,
     GamesTmSimPopupRight,
+    GamesCaSimPopupLeft,
+    GamesCaSimPopupRight,
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -202,6 +220,8 @@ pub struct GamesState {
     pub strategy_inspect: GamesStrategyInspectState,
     #[serde(skip)]
     pub tm_sim: GamesTmSimState,
+    #[serde(skip)]
+    pub ca_sim: GamesCaSimState,
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -751,6 +771,7 @@ impl AppState {
                 replay: GamesReplayState::default(),
                 strategy_inspect: GamesStrategyInspectState::default(),
                 tm_sim: GamesTmSimState::default(),
+                ca_sim: GamesCaSimState::default(),
             },
             file_tree,
             fuzzy_search,
@@ -1975,6 +1996,7 @@ fn handle_command_line(state: &mut AppState, input: &str) -> bool {
                         state.games.run_browser.open = false;
                         state.games.replay.open = false;
                         state.games.tm_sim.open = false;
+                        state.games.ca_sim.open = false;
                         state.games.analysis.open = false;
                         state.games.strategy_inspect.open = true;
                         state.games.strategy_inspect.last_error =
@@ -1997,6 +2019,7 @@ fn handle_command_line(state: &mut AppState, input: &str) -> bool {
                 state.games.run_browser.open = false;
                 state.games.replay.open = false;
                 state.games.tm_sim.open = false;
+                state.games.ca_sim.open = false;
                 state.games.analysis.open = false;
                 state.games.strategy_inspect.open = true;
                 state.games.strategy_inspect.last_error = Some(format!(
@@ -2020,6 +2043,7 @@ fn handle_command_line(state: &mut AppState, input: &str) -> bool {
             state.games.run_browser.open = false;
             state.games.replay.open = false;
             state.games.tm_sim.open = false;
+            state.games.ca_sim.open = false;
             state.games.analysis.open = false;
             state.games.strategy_inspect.open = true;
             state.games.strategy_inspect.last_error = None;
@@ -2043,6 +2067,7 @@ fn handle_command_line(state: &mut AppState, input: &str) -> bool {
                 state.games.run_browser.open = false;
                 state.games.replay.open = false;
                 state.games.tm_sim.open = false;
+                state.games.ca_sim.open = false;
                 state.games.strategy_inspect.open = true;
                 state.games.strategy_inspect.last_error = None;
                 state.games.strategy_inspect.title = None;
@@ -2069,6 +2094,7 @@ fn handle_command_line(state: &mut AppState, input: &str) -> bool {
                     state.games.run_browser.open = false;
                     state.games.replay.open = false;
                     state.games.tm_sim.open = false;
+                    state.games.ca_sim.open = false;
                     state.games.strategy_inspect.open = true;
                     state.games.strategy_inspect.last_error = None;
                     state.games.strategy_inspect.title = None;
@@ -2095,6 +2121,7 @@ fn handle_command_line(state: &mut AppState, input: &str) -> bool {
                     state.games.run_browser.open = false;
                     state.games.replay.open = false;
                     state.games.tm_sim.open = false;
+                    state.games.ca_sim.open = false;
                     state.games.strategy_inspect.open = true;
                     state.games.strategy_inspect.last_error = Some(msg.clone());
                     state.games.strategy_inspect.title = None;
@@ -2130,6 +2157,7 @@ fn handle_command_line(state: &mut AppState, input: &str) -> bool {
                     state.games.replay.open = false;
                     state.games.strategy_inspect.open = false;
                     state.games.analysis.open = false;
+                    state.games.ca_sim.open = false;
                     state.games.tm_sim.open = true;
                     state.games.tm_sim.last_error = Some(msg);
                     state.games.tm_sim.definition = None;
@@ -2180,6 +2208,7 @@ fn handle_command_line(state: &mut AppState, input: &str) -> bool {
                     state.games.replay.open = false;
                     state.games.strategy_inspect.open = false;
                     state.games.analysis.open = false;
+                    state.games.ca_sim.open = false;
                     state.games.tm_sim.open = true;
                     state.games.tm_sim.last_error = Some(msg);
                     state.games.tm_sim.definition = None;
@@ -2227,6 +2256,7 @@ fn handle_command_line(state: &mut AppState, input: &str) -> bool {
                 state.games.replay.open = false;
                 state.games.strategy_inspect.open = false;
                 state.games.analysis.open = false;
+                state.games.ca_sim.open = false;
                 state.games.tm_sim.open = true;
                 state.games.tm_sim.last_error = None;
                 state.games.tm_sim.definition = Some(def);
@@ -2276,6 +2306,7 @@ fn handle_command_line(state: &mut AppState, input: &str) -> bool {
                             state.games.replay.open = false;
                             state.games.strategy_inspect.open = false;
                             state.games.analysis.open = false;
+                            state.games.ca_sim.open = false;
                             state.games.tm_sim.open = true;
                             state.games.tm_sim.last_error = Some(msg);
                             state.games.tm_sim.definition = None;
@@ -2323,6 +2354,7 @@ fn handle_command_line(state: &mut AppState, input: &str) -> bool {
             state.games.replay.open = false;
             state.games.strategy_inspect.open = false;
             state.games.analysis.open = false;
+            state.games.ca_sim.open = false;
             state.games.tm_sim.open = true;
             state.games.tm_sim.last_error = None;
             state.games.tm_sim.definition = Some(def);
@@ -2331,6 +2363,194 @@ fn handle_command_line(state: &mut AppState, input: &str) -> bool {
             state.games.tm_sim.source_label = Some(source_label);
             state.games.tm_sim.scroll_offset = 0;
             state.status = Some("TM simulation opened".into());
+            false
+        }
+        _ if tokens.get(0) == Some(&"games") && tokens.get(1) == Some(&"ca") => {
+            let mut idx = 2usize;
+            let mut source = "config";
+            if let Some(token) = tokens.get(idx) {
+                if *token == "run" {
+                    source = "run";
+                    idx += 1;
+                } else if *token == "config" {
+                    source = "config";
+                    idx += 1;
+                }
+            }
+
+            let rule_tuple = match parse_ca_rule_tuple(trimmed) {
+                Ok(value) => value,
+                Err(msg) => {
+                    state.status = Some(msg.clone());
+                    state.games.run_browser.open = false;
+                    state.games.replay.open = false;
+                    state.games.strategy_inspect.open = false;
+                    state.games.analysis.open = false;
+                    state.games.tm_sim.open = false;
+                    state.games.ca_sim.open = true;
+                    state.games.ca_sim.last_error = Some(msg);
+                    state.games.ca_sim.definition = None;
+                    state.games.ca_sim.input = None;
+                    state.games.ca_sim.steps_override = None;
+                    state.games.ca_sim.source_label = Some("rule".into());
+                    state.games.ca_sim.scroll_offset = 0;
+                    return false;
+                }
+            };
+
+            let mut numbers: Vec<u64> = Vec::new();
+            let mut id: Option<String> = None;
+            for token in tokens.iter().skip(idx) {
+                if let Some(value) = parse_tm_input_token(token) {
+                    numbers.push(value);
+                    continue;
+                }
+                if token.contains('{') || token.contains('}') || token.contains(',') {
+                    continue;
+                }
+                if id.is_none() {
+                    id = Some((*token).to_string());
+                }
+            }
+
+            let Some(input) = numbers.get(0).copied() else {
+                state.status = Some(
+                    "Usage: :games ca [run|config] <input> [steps] [strategy_id] | :games ca {n,k,r} <input> [steps]"
+                        .into(),
+                );
+                return false;
+            };
+            let steps_override = numbers.get(1).copied().and_then(|value| {
+                if value > u32::MAX as u64 {
+                    None
+                } else {
+                    Some(value as u32)
+                }
+            });
+
+            if let Some((n, k, two_r, t)) = rule_tuple {
+                let def = nit_games::output::StrategyDefinition {
+                    id: format!("ca_rule_{n}_{k}_{}_{}", two_r, t),
+                    name: Some(format!(
+                        "CA rule {n} (k={k}, r={}, t={t})",
+                        two_r as f32 / 2.0
+                    )),
+                    kind: nit_games::config::StrategySpecKind::Ca {
+                        n,
+                        k,
+                        r: two_r as f32 / 2.0,
+                        t,
+                    },
+                    rng_seed_a: None,
+                    rng_seed_b: None,
+                };
+
+                state.games.run_browser.open = false;
+                state.games.replay.open = false;
+                state.games.strategy_inspect.open = false;
+                state.games.analysis.open = false;
+                state.games.tm_sim.open = false;
+                state.games.ca_sim.open = true;
+                state.games.ca_sim.last_error = None;
+                state.games.ca_sim.definition = Some(def);
+                state.games.ca_sim.input = Some(input);
+                state.games.ca_sim.steps_override = steps_override;
+                state.games.ca_sim.source_label = Some("rule".into());
+                state.games.ca_sim.scroll_offset = 0;
+                state.status = Some("CA simulation opened (rule tuple)".into());
+                return false;
+            }
+
+            let mut source_label = source.to_string();
+            let defs: Vec<nit_games::output::StrategyDefinition>;
+            match source {
+                "run" => {
+                    if let Some(run) = state.games.last_run.as_ref() {
+                        defs = run.strategies.clone();
+                    } else {
+                        state.status = Some("No run loaded for CA simulation".into());
+                        return false;
+                    }
+                }
+                _ => {
+                    let config_text = state.editor_buffer().content_as_string();
+                    match nit_games::config::GamesConfig::from_toml_with_root(
+                        &config_text,
+                        Some(&state.workspace_root),
+                    ) {
+                        Ok(config) => {
+                            defs = config
+                                .strategies
+                                .iter()
+                                .map(|spec| nit_games::output::StrategyDefinition {
+                                    id: spec.id.clone(),
+                                    name: spec.name.clone(),
+                                    kind: spec.kind.clone(),
+                                    rng_seed_a: None,
+                                    rng_seed_b: None,
+                                })
+                                .collect();
+                            source_label = "config".into();
+                        }
+                        Err(err) => {
+                            let msg = format!("Config error: {err}");
+                            state.status = Some(msg.clone());
+                            state.games.run_browser.open = false;
+                            state.games.replay.open = false;
+                            state.games.strategy_inspect.open = false;
+                            state.games.analysis.open = false;
+                            state.games.tm_sim.open = false;
+                            state.games.ca_sim.open = true;
+                            state.games.ca_sim.last_error = Some(msg);
+                            state.games.ca_sim.definition = None;
+                            state.games.ca_sim.input = Some(input);
+                            state.games.ca_sim.steps_override = steps_override;
+                            state.games.ca_sim.source_label = Some("config".into());
+                            state.games.ca_sim.scroll_offset = 0;
+                            return false;
+                        }
+                    }
+                }
+            }
+
+            let mut ca_defs: Vec<nit_games::output::StrategyDefinition> = defs
+                .into_iter()
+                .filter(|def| matches!(def.kind, nit_games::config::StrategySpecKind::Ca { .. }))
+                .collect();
+
+            let selected = if let Some(id) = id.as_ref() {
+                ca_defs
+                    .iter()
+                    .position(|def| def.id == *id)
+                    .map(|idx| ca_defs.remove(idx))
+            } else if ca_defs.len() == 1 {
+                ca_defs.pop()
+            } else {
+                None
+            };
+
+            let Some(def) = selected else {
+                if ca_defs.is_empty() {
+                    state.status = Some("No CA strategies found".into());
+                } else {
+                    state.status = Some("Multiple CA strategies found; specify an id".into());
+                }
+                return false;
+            };
+
+            state.games.run_browser.open = false;
+            state.games.replay.open = false;
+            state.games.strategy_inspect.open = false;
+            state.games.analysis.open = false;
+            state.games.tm_sim.open = false;
+            state.games.ca_sim.open = true;
+            state.games.ca_sim.last_error = None;
+            state.games.ca_sim.definition = Some(def);
+            state.games.ca_sim.input = Some(input);
+            state.games.ca_sim.steps_override = steps_override;
+            state.games.ca_sim.source_label = Some(source_label);
+            state.games.ca_sim.scroll_offset = 0;
+            state.status = Some("CA simulation opened".into());
             false
         }
         _ if tokens.get(0) == Some(&"games")
@@ -2512,6 +2732,85 @@ fn normalize_path_token(value: &str) -> String {
         })
         .unwrap_or(trimmed);
     unquoted.trim().to_string()
+}
+
+fn parse_ca_rule_tuple(input: &str) -> Result<Option<(u64, u8, u32, u32)>, String> {
+    const DEFAULT_CA_T: u32 = 10;
+    let Some(start) = input.find('{') else {
+        return Ok(None);
+    };
+    let Some(end_rel) = input[start..].find('}') else {
+        return Err("CA rule tuple missing '}'".into());
+    };
+    let end = start + end_rel;
+    let inner = &input[start + 1..end];
+    let parts: Vec<&str> = inner
+        .split(|c: char| c == ',' || c.is_whitespace())
+        .filter(|part| !part.is_empty())
+        .collect();
+    if parts.len() != 3 && parts.len() != 4 {
+        return Err("CA rule tuple must be {n, k, r} (or {n, k, r, t})".into());
+    }
+    let n = parts[0]
+        .parse::<u64>()
+        .map_err(|_| "CA rule tuple: n must be an integer".to_string())?;
+    let k_raw = parts[1]
+        .parse::<u64>()
+        .map_err(|_| "CA rule tuple: k must be an integer".to_string())?;
+    if k_raw < 2 || k_raw > u8::MAX as u64 {
+        return Err(format!("CA rule tuple: k must be in 2..={}", u8::MAX));
+    }
+    let two_r = parse_two_r_token(parts[2])
+        .ok_or_else(|| "CA rule tuple: r must satisfy r >= 0 and IntegerQ[2r]".to_string())?;
+    let t = if parts.len() == 4 {
+        let t_raw = parts[3]
+            .parse::<u64>()
+            .map_err(|_| "CA rule tuple: t must be an integer".to_string())?;
+        if t_raw == 0 || t_raw > u32::MAX as u64 {
+            return Err(format!("CA rule tuple: t must be in 1..={}", u32::MAX));
+        }
+        t_raw as u32
+    } else {
+        DEFAULT_CA_T
+    };
+    Ok(Some((n, k_raw as u8, two_r, t)))
+}
+
+fn parse_two_r_token(token: &str) -> Option<u32> {
+    let token = token.trim();
+    if token.is_empty() {
+        return None;
+    }
+    if let Some((numer, denom)) = token.split_once('/') {
+        let numer = numer.trim().parse::<i64>().ok()?;
+        let denom = denom.trim().parse::<i64>().ok()?;
+        if denom == 0 || numer < 0 {
+            return None;
+        }
+        let two_numer = numer.checked_mul(2)?;
+        if two_numer % denom != 0 {
+            return None;
+        }
+        let two_r = two_numer / denom;
+        if two_r < 0 || two_r > u32::MAX as i64 {
+            return None;
+        }
+        return Some(two_r as u32);
+    }
+
+    let value = token.parse::<f64>().ok()?;
+    if !value.is_finite() || value < 0.0 {
+        return None;
+    }
+    let doubled = value * 2.0;
+    let rounded = doubled.round();
+    if (doubled - rounded).abs() > 1e-6 {
+        return None;
+    }
+    if rounded < 0.0 || rounded > u32::MAX as f64 {
+        return None;
+    }
+    Some(rounded as u32)
 }
 
 fn parse_tm_rule_tuple(input: &str) -> Result<Option<(u64, u16, u8)>, String> {
@@ -3043,5 +3342,106 @@ mod tests {
             }
             other => panic!("expected TM kind, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn command_games_ca_tuple_opens_ca_simulator() {
+        let root = temp_dir("cmd-games-ca-tuple");
+        let mut state = AppState::new(
+            root.clone(),
+            Buffer::empty("x", None),
+            Buffer::empty("n", None),
+        );
+        state.app_kind = AppKind::Games;
+        assert!(!handle_command_line(
+            &mut state,
+            ":games ca {30, 2, 1, 5} 13 7"
+        ));
+        assert!(state.games.ca_sim.open);
+        assert_eq!(state.games.ca_sim.input, Some(13));
+        assert_eq!(state.games.ca_sim.steps_override, Some(7));
+        let def = state
+            .games
+            .ca_sim
+            .definition
+            .as_ref()
+            .expect("generated definition");
+        match &def.kind {
+            nit_games::config::StrategySpecKind::Ca { n, k, r, t } => {
+                assert_eq!(*n, 30);
+                assert_eq!(*k, 2);
+                assert!((*r - 1.0).abs() < f32::EPSILON);
+                assert_eq!(*t, 5);
+            }
+            other => panic!("expected CA kind, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn command_games_ca_tuple_without_t_uses_default_ten() {
+        let root = temp_dir("cmd-games-ca-tuple-default-t");
+        let mut state = AppState::new(
+            root.clone(),
+            Buffer::empty("x", None),
+            Buffer::empty("n", None),
+        );
+        state.app_kind = AppKind::Games;
+        assert!(!handle_command_line(&mut state, ":games ca {30, 2, 1} 13"));
+        let def = state
+            .games
+            .ca_sim
+            .definition
+            .as_ref()
+            .expect("generated definition");
+        match &def.kind {
+            nit_games::config::StrategySpecKind::Ca { t, .. } => {
+                assert_eq!(*t, 10);
+            }
+            other => panic!("expected CA kind, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn command_games_ca_config_selects_strategy_by_id() {
+        let root = temp_dir("cmd-games-ca-config");
+        let config = r#"
+schema_version = 1
+game = "ipd"
+rounds = 10
+repetitions = 1
+noise = 0.0
+
+[[strategy]]
+id = "ca_rule"
+type = "ca"
+n = 30
+k = 2
+r = 1
+t = 4
+"#;
+        let mut state = AppState::new(
+            root.clone(),
+            Buffer::from_str("x", config, None),
+            Buffer::empty("n", None),
+        );
+        state.app_kind = AppKind::Games;
+        assert!(!handle_command_line(
+            &mut state,
+            ":games ca config 9 3 ca_rule"
+        ));
+        assert!(state.games.ca_sim.open);
+        assert_eq!(state.games.ca_sim.input, Some(9));
+        assert_eq!(state.games.ca_sim.steps_override, Some(3));
+        let def = state
+            .games
+            .ca_sim
+            .definition
+            .as_ref()
+            .expect("selected definition");
+        assert_eq!(def.id, "ca_rule");
+        assert!(matches!(
+            def.kind,
+            nit_games::config::StrategySpecKind::Ca { .. }
+        ));
     }
 }

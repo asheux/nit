@@ -74,6 +74,8 @@ Games:
 - `:games inspect {rule,states,symbols}` — inspect a one-sided TM rule tuple (no config/run)
 - `:games tm [run|config] <input> [steps] [strategy_id]` — simulate one-sided TM
 - `:games tm {rule,states,symbols} <input> [steps]` — simulate a rule-code TM without config
+- `:games ca [run|config] <input> [steps] [strategy_id]` — simulate shrinking CA
+- `:games ca {n,k,r} <input> [steps]` — simulate a CA rule tuple (uses default `t=10`)
 - `:games analyze|analyse [path] [tail=N] [samples=N]` — analyze last/specified history log (accepts `tail_rounds=`/`trajectory_samples=` and `path=...`)
 
 ## Visualizer quick notes
