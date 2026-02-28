@@ -16,7 +16,7 @@ const MIN_HEIGHT: u16 = 20;
 const PANEL_WIDTH: usize = 18;
 const PANEL_GAP: usize = 2;
 const RESERVED_LINES: usize = 8;
-const DEFAULT_ROUND_LIMIT: usize = 50;
+const DEFAULT_ROUND_LIMIT: usize = 30;
 const CELL_GLYPH: &str = "▀▀";
 const CELL_EMPTY: &str = "  ";
 
@@ -268,7 +268,7 @@ pub fn build_lines(state: &AppState, theme: &Theme, inner: Rect) -> Vec<Line<'st
     } else {
         footer.push_str(" | rounds shown: 0");
     }
-    footer.push_str(" | +/- rounds (default 50)");
+    footer.push_str(" | +/- rounds (default 30)");
     if clipped_for_capture {
         footer.push_str(" | preview capture capped");
     }

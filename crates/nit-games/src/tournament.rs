@@ -304,7 +304,7 @@ fn compare_scores(a: f64, b: f64) -> Ordering {
 }
 
 impl TournamentRunner {
-    const MATCH_HISTORY_PREVIEW_ROUNDS: usize = 256;
+    const MATCH_HISTORY_PREVIEW_ROUNDS: usize = 500;
 
     pub fn new(mut config: NormalizedConfig) -> Self {
         let seed = config.seed.unwrap_or(0);
