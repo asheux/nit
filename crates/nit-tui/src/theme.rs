@@ -265,14 +265,12 @@ impl Theme {
     }
 
     pub fn status_warn_style(&self) -> Style {
-        Style::default()
-            .fg(self.warning)
-            .add_modifier(Modifier::BOLD)
+        Style::default().fg(self.title).add_modifier(Modifier::BOLD)
     }
 
     pub fn status_hot_style(&self) -> Style {
         Style::default()
-            .fg(self.warning)
+            .fg(self.border_focused)
             .add_modifier(Modifier::BOLD)
     }
 

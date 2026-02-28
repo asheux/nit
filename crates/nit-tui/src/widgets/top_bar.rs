@@ -58,7 +58,7 @@ pub fn render(
         Span::styled(
             " nit ",
             Style::default()
-                .fg(theme.accent)
+                .fg(theme.title_focused)
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled(" | ", Style::default().fg(theme.border)),
@@ -68,7 +68,7 @@ pub fn render(
                 .fg(if dirty.is_empty() {
                     theme.foreground
                 } else {
-                    theme.warning
+                    theme.title_focused
                 })
                 .add_modifier(if dirty.is_empty() {
                     Modifier::empty()
@@ -77,9 +77,9 @@ pub fn render(
                 }),
         ),
         Span::styled(" | ", Style::default().fg(theme.border)),
-        Span::styled(mode, Style::default().fg(theme.accent)),
+        Span::styled(mode, Style::default().fg(theme.title)),
         Span::styled(" | ", Style::default().fg(theme.border)),
-        Span::styled(app_label, Style::default().fg(theme.accent)),
+        Span::styled(app_label, Style::default().fg(theme.title)),
         Span::styled(" | UTF-8 ", Style::default().fg(theme.border)),
     ];
 
@@ -148,14 +148,16 @@ fn build_vitals_spans(
     let level = vitals.criticality.label().to_string();
     let level_style = criticality_style(vitals.criticality, theme);
     let label_style = theme.status_idle_style();
-    let value_style = Style::default().fg(theme.foreground);
+    let number_style = Style::default()
+        .fg(theme.accent)
+        .add_modifier(Modifier::BOLD);
     let hb_style = if vitals.job_running {
-        value_style
+        number_style
     } else {
         theme.status_idle_style()
     };
     let ag_style = if vitals.agent_enabled && vitals.agent_connected {
-        value_style
+        number_style
     } else {
         theme.status_idle_style()
     };
@@ -309,9 +311,9 @@ fn status_style(status: &str, theme: &Theme) -> Style {
         || lower.contains("loading")
         || lower.contains("pending")
     {
-        theme.warning
+        theme.foreground
     } else {
-        theme.accent
+        theme.foreground
     };
     Style::default().fg(color).add_modifier(Modifier::BOLD)
 }
@@ -371,8 +373,9 @@ fn is_high_priority_status(status_text: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_status_label, severity_scaled_samples};
+    use super::{build_status_label, severity_scaled_samples, status_style};
     use crate::vitals::LabCriticality;
+    use crate::Theme;
 
     #[test]
     fn status_label_non_compact_keeps_full_message() {
@@ -416,5 +419,17 @@ mod tests {
         assert!(warn.iter().zip(base.iter()).all(|(w, b)| *w >= *b));
         assert!(hot.iter().zip(warn.iter()).all(|(h, w)| *h >= *w));
         assert!(crit.iter().zip(hot.iter()).all(|(c, h)| *c >= *h));
+    }
+
+    #[test]
+    fn status_style_busy_avoids_warning_and_accent_yellow() {
+        let theme = Theme::default();
+        let style = status_style("STATUS: BUSY", &theme);
+        assert_ne!(style.fg, Some(theme.warning));
+        assert_ne!(style.fg, Some(theme.accent));
+        assert_ne!(style.fg, Some(theme.border_focused));
+        assert_ne!(style.fg, Some(theme.title));
+        assert_ne!(style.fg, Some(theme.title_focused));
+        assert_eq!(style.fg, Some(theme.foreground));
     }
 }
