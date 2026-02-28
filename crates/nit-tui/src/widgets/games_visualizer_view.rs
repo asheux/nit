@@ -12,6 +12,8 @@ use ratatui::{
 use crate::theme::Theme;
 use crate::widgets::text_selection::apply_ui_selection;
 
+const LAST_RUN_PANEL_EXTRA_WIDTH: usize = 4;
+
 pub struct VisualizerLayout {
     pub main: Rect,
     pub side: Option<Rect>,
@@ -24,7 +26,7 @@ pub fn layout_for_config(
 ) -> VisualizerLayout {
     let mut show_payoff_side = false;
     let (main_area, right_area) = if let Some(config) = config {
-        let desired = payoff_panel_width(&config.payoff) + 2;
+        let desired = payoff_panel_width(&config.payoff) + 2 + LAST_RUN_PANEL_EXTRA_WIDTH;
         let min_main = 44usize;
         if inner.width as usize >= min_main + desired {
             show_payoff_side = true;

@@ -7,7 +7,9 @@ use nit_games::events::EventWriter;
 use nit_games::output::{
     write_summary, RunSummary, StrategyDefinition, TournamentResults, RUN_SUMMARY_SCHEMA_VERSION,
 };
-use nit_games::tournament::{MatchSnapshot, TournamentProgress, TournamentRunner};
+use nit_games::tournament::{
+    MatchHistoryPreview, MatchSnapshot, TournamentProgress, TournamentRunner,
+};
 use nit_games::{HistoryWriter, NormalizedConfig};
 
 #[derive(Clone)]
@@ -42,6 +44,7 @@ pub enum RunnerEvent {
     Definitions(Vec<StrategyDefinition>),
     Progress(TournamentProgress),
     MatchPreview(MatchSnapshot),
+    MatchHistoryPreview(MatchHistoryPreview),
     PartialLeaderboard(TournamentResults),
     Finished(RunSummary),
     Cancelled,
@@ -167,6 +170,9 @@ fn runner_loop(cmd_rx: Receiver<RunnerCommand>, event_tx: Sender<RunnerEvent>) {
             run_state.steps_per_tick
         };
         run_state.runner.step_rounds(steps);
+        for preview in run_state.runner.drain_match_history_previews() {
+            let _ = event_tx.send(RunnerEvent::MatchHistoryPreview(preview));
+        }
 
         let completed = run_state.runner.completed_matches();
         if completed > run_state.last_completed {

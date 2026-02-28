@@ -70,6 +70,7 @@ pub enum Action {
     GamesStop,
     GamesHide,
     GamesShow,
+    GamesHistoryOpen,
     VisualizerCycleRenderMode,
     VisualizerToggleAgeShading,
     VisualizerToggleTrails,

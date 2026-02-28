@@ -369,6 +369,9 @@ impl GamesPetriDishRuntime {
                         session.snapshot = Some(snapshot);
                     }
                 }
+                RunnerEvent::MatchHistoryPreview(preview) => {
+                    state.games.match_history.entries.push(preview);
+                }
                 RunnerEvent::PartialLeaderboard(results) => {
                     if let Some(session) = self.session.as_mut() {
                         session.results = results;
@@ -381,7 +384,10 @@ impl GamesPetriDishRuntime {
                         .iter()
                         .map(|p| (p.a.clone(), p.b.clone()))
                         .collect::<Vec<_>>();
-                    self.session = None;
+                    if let Some(session) = self.session.as_mut() {
+                        session.results = summary.results.clone();
+                        session.definitions = summary.strategies.clone();
+                    }
                     state.games.last_error = None;
                     state.games.last_run_path = summary.paths.summary.clone();
                     state.games.last_event_path = summary.event_log.clone();
@@ -549,6 +555,8 @@ impl GamesPetriDishRuntime {
                     Span::styled(" speed | ", help_style),
                     Span::styled("Tab", key_style),
                     Span::styled(" inspect | ", help_style),
+                    Span::styled("Ctrl+*", key_style),
+                    Span::styled(" history | ", help_style),
                     Span::styled("H", key_style),
                     Span::styled(" hide", help_style),
                 ],
@@ -565,6 +573,8 @@ impl GamesPetriDishRuntime {
                     Span::styled(" tournament | ", help_style),
                     Span::styled("←/→", key_style),
                     Span::styled(" window | ", help_style),
+                    Span::styled("Ctrl+*", key_style),
+                    Span::styled(" history | ", help_style),
                     Span::styled("H", key_style),
                     Span::styled(" hide", help_style),
                 ],
@@ -661,6 +671,10 @@ impl GamesPetriDishRuntime {
             definitions: Vec::new(),
         });
         self.hidden = false;
+        state.games.match_history.open = false;
+        state.games.match_history.last_error = None;
+        state.games.match_history.entries.clear();
+        state.games.match_history.column_offset = 0;
         state.games.run_browser.open = false;
         state.games.replay.open = false;
         state.games.strategy_inspect.open = false;
@@ -956,6 +970,12 @@ fn render_progress(
                 Span::styled("Waiting for tournament...", dim_style),
             ]));
         }
+        lines.push(Line::from(vec![
+            Span::styled("Total: ", label_style),
+            Span::styled(progress.total_payoff_a.to_string(), number_style),
+            Span::styled(" / ", dim_style),
+            Span::styled(progress.total_payoff_b.to_string(), number_style),
+        ]));
     } else {
         lines.push(Line::from(vec![
             Span::styled("Match: ", label_style),
@@ -975,6 +995,10 @@ fn render_progress(
         ]));
         lines.push(Line::from(vec![
             Span::styled("Payoff: ", label_style),
+            Span::styled("Waiting for tournament...", dim_style),
+        ]));
+        lines.push(Line::from(vec![
+            Span::styled("Total: ", label_style),
             Span::styled("Waiting for tournament...", dim_style),
         ]));
     }

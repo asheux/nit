@@ -152,6 +152,16 @@ pub struct GamesCaSimState {
     pub scroll_offset: usize,
 }
 
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+pub struct GamesMatchHistoryState {
+    pub open: bool,
+    pub last_error: Option<String>,
+    #[serde(skip)]
+    pub entries: Vec<nit_games::MatchHistoryPreview>,
+    #[serde(skip)]
+    pub column_offset: usize,
+}
+
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum UiSelectionPane {
     JobOutput,
@@ -222,6 +232,8 @@ pub struct GamesState {
     pub tm_sim: GamesTmSimState,
     #[serde(skip)]
     pub ca_sim: GamesCaSimState,
+    #[serde(skip)]
+    pub match_history: GamesMatchHistoryState,
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -772,6 +784,7 @@ impl AppState {
                 strategy_inspect: GamesStrategyInspectState::default(),
                 tm_sim: GamesTmSimState::default(),
                 ca_sim: GamesCaSimState::default(),
+                match_history: GamesMatchHistoryState::default(),
             },
             file_tree,
             fuzzy_search,
@@ -1322,6 +1335,9 @@ pub fn apply_action(state: &mut AppState, action: Action) -> ActionOutcome {
             state.games.pending_show = true;
             state.status = Some("Games tournament showing".into());
         }
+        Action::GamesHistoryOpen => {
+            open_games_history_popup(state);
+        }
         Action::PetriShow => {
             state.visualizer.pending_show = true;
             state.status = Some("Petri dish showing".into());
@@ -1618,6 +1634,24 @@ pub fn apply_action(state: &mut AppState, action: Action) -> ActionOutcome {
     }
 }
 
+fn open_games_history_popup(state: &mut AppState) {
+    if state.games.match_history.entries.is_empty() {
+        state.games.match_history.last_error =
+            Some("No completed matches available yet. Start a tournament first.".into());
+    } else {
+        state.games.match_history.last_error = None;
+    }
+    state.games.run_browser.open = false;
+    state.games.replay.open = false;
+    state.games.strategy_inspect.open = false;
+    state.games.analysis.open = false;
+    state.games.tm_sim.open = false;
+    state.games.ca_sim.open = false;
+    state.games.match_history.open = true;
+    state.games.match_history.column_offset = 0;
+    state.status = Some("Games match history plot opened".into());
+}
+
 fn handle_command_line(state: &mut AppState, input: &str) -> bool {
     let trimmed = input.trim();
     let cmd = trimmed.trim_start_matches(':').trim().to_lowercase();
@@ -1754,6 +1788,7 @@ fn handle_command_line(state: &mut AppState, input: &str) -> bool {
         }
         ["games", "runs"] | ["games", "browse"] | ["games", "browser"] => {
             state.games.replay.open = false;
+            state.games.match_history.open = false;
             state.games.run_browser.open = true;
             state.games.run_browser.loading = true;
             state.games.run_browser.last_error = None;
@@ -1769,6 +1804,7 @@ fn handle_command_line(state: &mut AppState, input: &str) -> bool {
                 state.status = Some("No run loaded for replay".into());
             } else {
                 state.games.run_browser.open = false;
+                state.games.match_history.open = false;
                 state.games.replay.open = true;
                 state.games.replay.loading = false;
                 state.games.replay.last_error = None;
@@ -1780,6 +1816,14 @@ fn handle_command_line(state: &mut AppState, input: &str) -> bool {
                 state.games.replay.cycle = None;
                 state.status = Some("Games replay opened".into());
             }
+            false
+        }
+        ["games", "history"] | ["games", "hist"] | ["games", "plot"] | ["games", "plots"] => {
+            open_games_history_popup(state);
+            false
+        }
+        ["history"] | ["hist"] | ["plot"] | ["plots"] if state.app_kind == AppKind::Games => {
+            open_games_history_popup(state);
             false
         }
         _ if tokens.get(0) == Some(&"games") && tokens.get(1) == Some(&"inspect") => {
@@ -3443,5 +3487,49 @@ t = 4
             def.kind,
             nit_games::config::StrategySpecKind::Ca { .. }
         ));
+    }
+
+    #[test]
+    fn command_games_history_opens_popup_with_completed_matches() {
+        let root = temp_dir("cmd-games-history");
+        let mut state = AppState::new(
+            root.clone(),
+            Buffer::empty("x", None),
+            Buffer::empty("n", None),
+        );
+        state.app_kind = AppKind::Games;
+        state.games.match_history.entries.push(nit_games::MatchHistoryPreview {
+            match_index: 1,
+            total_matches: 1,
+            a: "fsm_allc".into(),
+            b: "fsm_alld".into(),
+            rounds_total: 4,
+            outcomes_prefix: "0123".into(),
+        });
+        assert!(!handle_command_line(&mut state, ":games history"));
+        assert!(state.games.match_history.open);
+        assert!(state.games.match_history.last_error.is_none());
+    }
+
+    #[test]
+    fn command_history_alias_opens_popup_with_completed_matches() {
+        let root = temp_dir("cmd-history-alias");
+        let mut state = AppState::new(
+            root.clone(),
+            Buffer::empty("x", None),
+            Buffer::empty("n", None),
+        );
+        state.app_kind = AppKind::Games;
+        state.games.match_history.entries.push(nit_games::MatchHistoryPreview {
+            match_index: 1,
+            total_matches: 1,
+            a: "fsm_allc".into(),
+            b: "fsm_alld".into(),
+            rounds_total: 4,
+            outcomes_prefix: "0123".into(),
+        });
+        assert!(!handle_command_line(&mut state, ":history"));
+        assert!(state.games.match_history.open);
+        assert!(state.games.match_history.last_error.is_none());
     }
 }

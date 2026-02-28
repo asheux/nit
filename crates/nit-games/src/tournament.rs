@@ -1,5 +1,5 @@
 use crate::config::{
-    NormalizedConfig, ParallelismConfig, ParallelismMode, StrategySpec, StrategySpecKind,
+    EngineMode, NormalizedConfig, ParallelismConfig, ParallelismMode, StrategySpec, StrategySpecKind,
 };
 use crate::events::{EventWriter, GameEvent};
 use crate::fast_eval::{evaluate_match, CycleMetadata, FastStrategyModel};
@@ -26,6 +26,8 @@ pub struct TournamentProgress {
     pub rounds: u32,
     pub a: String,
     pub b: String,
+    pub total_payoff_a: i64,
+    pub total_payoff_b: i64,
     pub last_action_a: Option<Action>,
     pub last_action_b: Option<Action>,
     pub last_payoff_a: Option<i32>,
@@ -49,6 +51,16 @@ pub struct MatchSnapshot {
     pub payoffs: Vec<[i32; 2]>,
     pub a_halted: String,
     pub b_halted: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct MatchHistoryPreview {
+    pub match_index: usize,
+    pub total_matches: usize,
+    pub a: String,
+    pub b: String,
+    pub rounds_total: u32,
+    pub outcomes_prefix: String,
 }
 
 #[derive(Clone, Debug)]
@@ -146,6 +158,8 @@ pub struct TournamentRunner {
     event_writer: Option<EventWriter>,
     history_writer: Option<HistoryWriter>,
     last_round: Option<RoundSnapshot>,
+    collect_match_history_previews: bool,
+    completed_history_previews: Vec<MatchHistoryPreview>,
 }
 
 #[derive(Clone, Debug)]
@@ -289,6 +303,8 @@ fn compare_scores(a: f64, b: f64) -> Ordering {
 }
 
 impl TournamentRunner {
+    const MATCH_HISTORY_PREVIEW_ROUNDS: usize = 256;
+
     pub fn new(mut config: NormalizedConfig) -> Self {
         let seed = config.seed.unwrap_or(0);
         config.seed = Some(seed);
@@ -314,6 +330,8 @@ impl TournamentRunner {
             event_writer: None,
             history_writer: None,
             last_round: None,
+            collect_match_history_previews: matches!(config.engine.mode, EngineMode::Interactive),
+            completed_history_previews: Vec::new(),
         }
     }
 
@@ -325,6 +343,10 @@ impl TournamentRunner {
     pub fn with_history_writer(mut self, writer: HistoryWriter) -> Self {
         self.history_writer = Some(writer);
         self
+    }
+
+    pub fn drain_match_history_previews(&mut self) -> Vec<MatchHistoryPreview> {
+        std::mem::take(&mut self.completed_history_previews)
     }
 
     pub fn is_done(&self) -> bool {
@@ -343,6 +365,8 @@ impl TournamentRunner {
             rounds: current.rounds_total,
             a,
             b,
+            total_payoff_a: current.a_total,
+            total_payoff_b: current.b_total,
             last_action_a: self.last_round.as_ref().map(|r| r.a_action),
             last_action_b: self.last_round.as_ref().map(|r| r.b_action),
             last_payoff_a: self.last_round.as_ref().map(|r| r.a_payoff),
@@ -421,6 +445,21 @@ impl TournamentRunner {
                 let snapshot = self.play_round(&mut session);
                 self.last_round = Some(snapshot.clone());
                 if session.round >= session.rounds_total {
+                    if self.collect_match_history_previews {
+                        let outcomes_prefix: String = session
+                            .history_scores
+                            .chars()
+                            .take(Self::MATCH_HISTORY_PREVIEW_ROUNDS)
+                            .collect();
+                        self.completed_history_previews.push(MatchHistoryPreview {
+                            match_index: self.match_index.saturating_add(1),
+                            total_matches: self.schedule.len().max(1),
+                            a: self.strategies[session.matchup.a_idx].id.clone(),
+                            b: self.strategies[session.matchup.b_idx].id.clone(),
+                            rounds_total: session.rounds_total,
+                            outcomes_prefix,
+                        });
+                    }
                     let a_spec = &self.strategies[session.matchup.a_idx];
                     let b_spec = &self.strategies[session.matchup.b_idx];
                     let cost = &self.config.engine.complexity_cost;

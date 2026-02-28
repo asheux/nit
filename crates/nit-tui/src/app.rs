@@ -44,9 +44,10 @@ use crate::{
     theme::Theme,
     widgets::{
         bottom_bar, editor_view, file_tree_view, fuzzy_search_popup, games_analysis_popup,
-        games_ca_sim_popup, games_replay_popup, games_run_browser_popup, games_strategy_popup,
-        games_tm_sim_popup, games_visualizer_view, gate_monitor_view, help_overlay,
-        job_output_view, notes_view, protocol_picker, rule_picker, top_bar, visualizer_view,
+        games_ca_sim_popup, games_match_history_popup, games_replay_popup,
+        games_run_browser_popup, games_strategy_popup, games_tm_sim_popup, games_visualizer_view,
+        gate_monitor_view, help_overlay, job_output_view, notes_view, protocol_picker,
+        rule_picker, top_bar, visualizer_view,
     },
 };
 
@@ -571,6 +572,13 @@ fn run_loop(
                             continue;
                         }
                     }
+                    if state.app_kind == AppKind::Games && state.games.match_history.open {
+                        let screen = terminal.size().unwrap_or_default();
+                        if handle_match_history_popup_key(&key, state, screen) {
+                            needs_redraw = true;
+                            continue;
+                        }
+                    }
                     if state.file_tree.open && state.focus == PaneId::Editor {
                         let screen = terminal.size().unwrap_or_default();
                         let layout = layout::split(screen);
@@ -953,6 +961,10 @@ fn draw(
             let area = dynamic_popup_rect(screen, games_ca_sim_popup::preferred_size(screen));
             games_ca_sim_popup::render(f, area, state, theme);
         }
+        if state.app_kind == AppKind::Games && state.games.match_history.open {
+            let area = dynamic_popup_rect(screen, games_match_history_popup::preferred_size(screen));
+            games_match_history_popup::render(f, area, state, theme);
+        }
         if state.rule_picker.open {
             rule_picker::render(f, screen, state, theme);
         }
@@ -1040,6 +1052,9 @@ fn map_key_to_action(key: KeyEvent, state: &AppState, input: &mut InputState) ->
     }
 
     if state.command_line.is_none() && state.prompt.is_none() {
+        if is_games_history_open_key(&key, state) {
+            return Some(Action::GamesHistoryOpen);
+        }
         match key {
             KeyEvent {
                 code: KeyCode::Char('p') | KeyCode::Char('P'),
@@ -2040,6 +2055,23 @@ fn is_petri_show_key(key: &KeyEvent, state: &AppState) -> bool {
     }
 }
 
+fn is_games_history_open_key(key: &KeyEvent, state: &AppState) -> bool {
+    if state.app_kind != AppKind::Games {
+        return false;
+    }
+    if !state.games.running && state.games.last_run.is_none() {
+        return false;
+    }
+    match key {
+        KeyEvent {
+            code: KeyCode::Char('*') | KeyCode::Char('8'),
+            modifiers,
+            ..
+        } if modifiers.contains(KeyModifiers::CONTROL) => true,
+        _ => false,
+    }
+}
+
 fn games_petri_visible(state: &AppState) -> bool {
     state.app_kind == AppKind::Games && state.games.running && !state.games.petri_hidden
 }
@@ -2290,6 +2322,21 @@ fn handle_mouse_event(
                 let area = dynamic_popup_rect(screen, games_ca_sim_popup::preferred_size(screen));
                 if point_in_rect(mouse.column, mouse.row, area) {
                     bump_scroll(&mut state.games.ca_sim.scroll_offset, delta);
+                }
+                return true;
+            }
+            if state.app_kind == AppKind::Games && state.games.match_history.open {
+                let area =
+                    dynamic_popup_rect(screen, games_match_history_popup::preferred_size(screen));
+                if point_in_rect(mouse.column, mouse.row, area) {
+                    if delta > 0 {
+                        state.games.match_history.column_offset =
+                            state.games.match_history.column_offset.saturating_sub(1);
+                    } else if !state.games.match_history.entries.is_empty() {
+                        let max = state.games.match_history.entries.len().saturating_sub(1);
+                        state.games.match_history.column_offset =
+                            (state.games.match_history.column_offset + 1).min(max);
+                    }
                 }
                 return true;
             }
@@ -3214,6 +3261,9 @@ fn handle_mouse_down(
         }
         return true;
     }
+    if state.app_kind == AppKind::Games && state.games.match_history.open {
+        return true;
+    }
     if state.app_kind == AppKind::Games && state.games.analysis.open {
         if let Some((line_idx, col, lines)) =
             map_analysis_popup_mouse(mouse, screen, state, theme, false)
@@ -3574,6 +3624,9 @@ fn mouse_drag_allowed(state: &AppState, anchor: MouseSelectAnchor) -> bool {
             MouseSelectTarget::Ui(UiSelectionPane::GamesCaSimPopupLeft)
                 | MouseSelectTarget::Ui(UiSelectionPane::GamesCaSimPopupRight)
         );
+    }
+    if state.app_kind == AppKind::Games && state.games.match_history.open {
+        return false;
     }
     if games_petri_visible(state) {
         return matches!(
@@ -3989,7 +4042,10 @@ fn handle_file_tree_key(
     if ctrl_nav_dir(key).is_some() {
         return false;
     }
-    if is_command_prompt_open_key(key) || is_help_toggle_key(key) {
+    if is_command_prompt_open_key(key)
+        || is_help_toggle_key(key)
+        || is_games_history_open_key(key, state)
+    {
         return false;
     }
 
@@ -5069,6 +5125,69 @@ fn handle_ca_sim_popup_key(
     }
 }
 
+fn handle_match_history_popup_key(
+    key: &KeyEvent,
+    state: &mut AppState,
+    _screen: ratatui::layout::Rect,
+) -> bool {
+    if state.app_kind != AppKind::Games || !state.games.match_history.open {
+        return false;
+    }
+    if state.command_line.is_some() || state.prompt.is_some() {
+        return false;
+    }
+    if is_global_quit_key(key) {
+        return false;
+    }
+    if is_command_prompt_open_key(key) {
+        return false;
+    }
+    let total = state.games.match_history.entries.len();
+    match key.code {
+        KeyCode::Esc | KeyCode::Char('q') => {
+            state.games.match_history.open = false;
+            true
+        }
+        KeyCode::Left | KeyCode::Char('h') => {
+            state.games.match_history.column_offset =
+                state.games.match_history.column_offset.saturating_sub(1);
+            true
+        }
+        KeyCode::Right | KeyCode::Char('l') => {
+            if total > 0 {
+                let max = total.saturating_sub(1);
+                state.games.match_history.column_offset =
+                    (state.games.match_history.column_offset + 1).min(max);
+            }
+            true
+        }
+        KeyCode::PageUp => {
+            state.games.match_history.column_offset =
+                state.games.match_history.column_offset.saturating_sub(5);
+            true
+        }
+        KeyCode::PageDown => {
+            if total > 0 {
+                let max = total.saturating_sub(1);
+                state.games.match_history.column_offset =
+                    (state.games.match_history.column_offset + 5).min(max);
+            }
+            true
+        }
+        KeyCode::Home => {
+            state.games.match_history.column_offset = 0;
+            true
+        }
+        KeyCode::End => {
+            if total > 0 {
+                state.games.match_history.column_offset = total.saturating_sub(1);
+            }
+            true
+        }
+        _ => true,
+    }
+}
+
 fn adjust_strategy_scroll(state: &mut AppState, screen: ratatui::layout::Rect) {
     let area = dynamic_popup_rect(screen, games_strategy_popup::preferred_size(screen));
     let inner_height = area.height.saturating_sub(2) as usize;
@@ -5326,6 +5445,23 @@ mod tests {
     }
 
     #[test]
+    fn games_history_open_key_matches_ctrl_star_variants() {
+        let mut state = state_for_test();
+        state.app_kind = AppKind::Games;
+        state.games.running = true;
+
+        let ctrl_star = KeyEvent::new(KeyCode::Char('*'), KeyModifiers::CONTROL);
+        assert!(is_games_history_open_key(&ctrl_star, &state));
+
+        let ctrl_shift_star =
+            KeyEvent::new(KeyCode::Char('*'), KeyModifiers::CONTROL | KeyModifiers::SHIFT);
+        assert!(is_games_history_open_key(&ctrl_shift_star, &state));
+
+        let ctrl_eight = KeyEvent::new(KeyCode::Char('8'), KeyModifiers::CONTROL);
+        assert!(is_games_history_open_key(&ctrl_eight, &state));
+    }
+
+    #[test]
     fn file_tree_does_not_consume_command_or_help_toggle_keys() {
         let mut state = state_for_test();
         state.file_tree.open = true;
@@ -5353,5 +5489,8 @@ mod tests {
             &mut syntax,
             area
         ));
+
+        let history = KeyEvent::new(KeyCode::Char('8'), KeyModifiers::CONTROL);
+        assert!(!handle_file_tree_key(&history, &mut state, &mut syntax, area));
     }
 }
