@@ -82,7 +82,7 @@ Games:
 
 - Visualizer pane defaults to GENOME (raw encoding); PLATE shows the sim seed grid.
 - Run Petri Dish popup: `Ctrl+Enter`
-- Show hidden Petri Dish: `Ctrl+^`
+- Show hidden Petri Dish: `Ctrl+^` (or `Ctrl+6`)
 - Command prompt (Normal mode): `:gol run` / `:run gol` / `:life run`
 - Seed controls (Visualizer focus):
   - Cycle encoder: `Ctrl+E`
@@ -117,7 +117,7 @@ Games:
 
 - Launch: `nit games [path]` (opens `games.toml` by default).
 - Run tournament: `Ctrl+Enter` or `:games run`.
-- Hide/show: `H` in popup to hide, `Ctrl+^` to show.
+- Hide/show: `H` in popup to hide, `Ctrl+^` (or `Ctrl+6`) to show.
 - Inspector: `Tab` toggles tournament vs match inspector; `←/→` changes the window size.
 - Outputs: summaries, event logs, and optional history logs land in `games-runs/` under the workspace root.
   Summary JSON includes `run_id`, `config_text`, and `paths` for summary/events/history.
@@ -129,13 +129,13 @@ source of truth if provided. `R/S/T/P` are validated when the matrix is symmetri
 
 ```toml
 [payoff]
-R = 3
-S = 0
-T = 5
-P = 1
+R = -1
+S = -3
+T = 0
+P = -2
 matrix = [
-  [[3,3],[0,5]],
-  [[5,0],[1,1]],
+  [[-1,-1],[-3,0]],
+  [[0,-3],[-2,-2]],
 ]
 ```
 

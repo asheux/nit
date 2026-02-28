@@ -28,8 +28,8 @@ use crate::theme::Theme;
 use crate::widgets::games_visualizer_view::strategy_display_name_from_def;
 use crate::widgets::text_selection::apply_ui_selection;
 
-const MIN_WIDTH: u16 = 88;
-const MIN_HEIGHT: u16 = 22;
+const MIN_WIDTH: u16 = 120;
+const MIN_HEIGHT: u16 = 32;
 
 pub fn petri_rect(screen: Rect) -> Rect {
     let width = screen.width.min(MIN_WIDTH).max(60);
@@ -213,7 +213,7 @@ impl GamesPetriDishRuntime {
                 self.close(state);
                 true
             }
-            KeyCode::Char(' ') => {
+            KeyCode::Char(' ') | KeyCode::Null | KeyCode::Char('\u{0}') => {
                 state.games.paused = !state.games.paused;
                 state.games.status = if state.games.paused {
                     GamesStatus::Paused
@@ -477,6 +477,7 @@ impl GamesPetriDishRuntime {
                     let progress = session.progress.clone();
                     lines.extend(render_progress(
                         progress,
+                        &session.definitions,
                         state,
                         label_style,
                         value_style,
@@ -509,6 +510,7 @@ impl GamesPetriDishRuntime {
                     let snapshot = session.snapshot.clone();
                     lines.extend(render_match_inspector(
                         snapshot,
+                        &session.definitions,
                         self.inspector_window,
                         inner.width as usize,
                         header_style,
@@ -659,6 +661,12 @@ impl GamesPetriDishRuntime {
             definitions: Vec::new(),
         });
         self.hidden = false;
+        state.games.run_browser.open = false;
+        state.games.replay.open = false;
+        state.games.strategy_inspect.open = false;
+        state.games.tm_sim.open = false;
+        state.games.ca_sim.open = false;
+        state.games.analysis.open = false;
         state.games.petri_hidden = false;
         state.games.running = true;
         state.games.paused = false;
@@ -867,6 +875,7 @@ fn normalize_path(input: &str) -> String {
 
 fn render_progress(
     progress: Option<TournamentProgress>,
+    definitions: &[StrategyDefinition],
     state: &AppState,
     label_style: Style,
     value_style: Style,
@@ -880,6 +889,8 @@ fn render_progress(
         Span::styled(format!("{:?}", state.games.status), status_style),
     ]));
     if let Some(progress) = progress {
+        let a_label = strategy_label_for_pair(&progress.a, definitions);
+        let b_label = strategy_label_for_pair(&progress.b, definitions);
         let pct = if progress.rounds > 0 {
             (progress.round as f32 / progress.rounds as f32) * 100.0
         } else {
@@ -900,9 +911,9 @@ fn render_progress(
         ]));
         lines.push(Line::from(vec![
             Span::styled("Pair: ", label_style),
-            Span::styled(progress.a, value_style),
+            Span::styled(a_label, value_style),
             Span::styled(" vs ", dim_style),
-            Span::styled(progress.b, value_style),
+            Span::styled(b_label, value_style),
         ]));
         lines.push(Line::from(
             match (progress.last_action_a, progress.last_action_b) {
@@ -954,6 +965,7 @@ fn render_progress(
 
 fn render_match_inspector(
     snapshot: Option<MatchSnapshot>,
+    definitions: &[StrategyDefinition],
     window: usize,
     width: usize,
     header_style: Style,
@@ -972,6 +984,8 @@ fn render_match_inspector(
     ]));
 
     if let Some(snapshot) = snapshot {
+        let a_label = strategy_label_for_pair(&snapshot.a, definitions);
+        let b_label = strategy_label_for_pair(&snapshot.b, definitions);
         lines.push(Line::from(vec![
             Span::styled("Match: ", label_style),
             Span::styled(snapshot.match_index.to_string(), number_style),
@@ -985,9 +999,9 @@ fn render_match_inspector(
         ]));
         lines.push(Line::from(vec![
             Span::styled("Pair: ", label_style),
-            Span::styled(snapshot.a.clone(), value_style),
+            Span::styled(a_label, value_style),
             Span::styled(" vs ", dim_style),
-            Span::styled(snapshot.b.clone(), value_style),
+            Span::styled(b_label, value_style),
         ]));
         lines.push(Line::from(vec![
             Span::styled("Score: ", label_style),
@@ -1028,6 +1042,49 @@ fn render_match_inspector(
         ]));
     }
     lines
+}
+
+fn strategy_label_for_pair(id: &str, definitions: &[StrategyDefinition]) -> String {
+    let Some(def) = definitions.iter().find(|def| def.id == id) else {
+        return id.to_string();
+    };
+    match &def.kind {
+        nit_games::config::StrategySpecKind::Fsm {
+            num_states,
+            outputs,
+            transitions,
+            index,
+            ..
+        } => {
+            let states = if outputs.is_empty() {
+                *num_states
+            } else {
+                outputs.len()
+            };
+            let k = transitions.first().map(|row| row.len()).unwrap_or(2);
+            if let Some(index) = index {
+                format!("{id} {{n={index}, s={states}, k={k}}}")
+            } else {
+                format!("{id} {{s={states}, k={k}}}")
+            }
+        }
+        nit_games::config::StrategySpecKind::Ca { n, k, r, t } => {
+            let _ = t;
+            format!("{id} {{n={n}, k={k}, r={r}}}")
+        }
+        nit_games::config::StrategySpecKind::OneSidedTm {
+            rule_code,
+            states,
+            symbols,
+            ..
+        } => {
+            if let Some(rule) = rule_code {
+                format!("{id} {{n={rule}, s={states}, k={symbols}}}")
+            } else {
+                format!("{id} {{s={states}, k={symbols}}}")
+            }
+        }
+    }
 }
 
 fn render_match_strip(
@@ -1263,23 +1320,31 @@ fn render_top_table(
         return lines;
     }
 
-    let rows: Vec<(String, String, String, String, u32, u32, u32)> = results
+    let rows: Vec<(String, String, String, String, String, u32, u32, u32)> = results
         .ranking
         .iter()
-        .take(5)
         .enumerate()
         .map(|(idx, entry)| {
-            let display = definitions
+            let found = definitions
                 .iter()
                 .find(|def| def.id == entry.id)
+                .cloned();
+            let display = found
+                .as_ref()
                 .map(strategy_display_name_from_def)
                 .unwrap_or_else(|| entry.id.clone());
+            let machine_n = found
+                .as_ref()
+                .and_then(strategy_machine_index)
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "-".to_string());
             let rank = format!("{}", idx + 1);
             let id = entry.id.clone();
             let score = format!("{}", entry.total_payoff);
             (
                 rank,
                 id,
+                machine_n,
                 display,
                 score,
                 entry.wins,
@@ -1289,16 +1354,18 @@ fn render_top_table(
         })
         .collect();
 
-    let headers = ["#", "id", "Strategy", "Score", "W-L-D"];
+    let headers = ["#", "id", "n", "Strategy", "Score", "W-L-D"];
     let mut rank_w = headers[0].len().max(fixed_rank_w);
     let mut id_w = headers[1].len();
-    let mut name_w = headers[2].len();
-    let mut score_w = headers[3].len().max(fixed_score_w);
-    let mut wld_w = headers[4].len().max(fixed_wld_w);
+    let mut n_w = headers[2].len();
+    let mut name_w = headers[3].len();
+    let mut score_w = headers[4].len().max(fixed_score_w);
+    let mut wld_w = headers[5].len().max(fixed_wld_w);
 
-    for (rank, id, name, score, wins, losses, draws) in &rows {
+    for (rank, id, machine_n, name, score, wins, losses, draws) in &rows {
         rank_w = rank_w.max(rank.len());
         id_w = id_w.max(id.len());
+        n_w = n_w.max(machine_n.len());
         name_w = name_w.max(name.chars().count());
         score_w = score_w.max(score.len());
         let wld_len = format!("W{}-L{}-D{}", wins, losses, draws).len();
@@ -1307,8 +1374,8 @@ fn render_top_table(
 
     let min_id = 4usize;
     let min_name = 10usize;
-    let overhead = 6 + (2 * 5);
-    let fixed = rank_w + score_w + wld_w;
+    let overhead = 7 + (2 * 6);
+    let fixed = rank_w + n_w + score_w + wld_w;
     let available = width.saturating_sub(overhead + fixed);
     if available >= min_id + min_name {
         id_w = id_w.min(available.saturating_sub(min_name));
@@ -1319,9 +1386,10 @@ fn render_top_table(
     }
 
     let sep = format!(
-        "+{}+{}+{}+{}+{}+",
+        "+{}+{}+{}+{}+{}+{}+",
         "-".repeat(rank_w + 2),
         "-".repeat(id_w + 2),
+        "-".repeat(n_w + 2),
         "-".repeat(name_w + 2),
         "-".repeat(score_w + 2),
         "-".repeat(wld_w + 2)
@@ -1336,25 +1404,27 @@ fn render_top_table(
         Span::styled("|", dim_style),
         Span::styled(format!(" {} ", center_text(headers[1], id_w)), header_style),
         Span::styled("|", dim_style),
+        Span::styled(format!(" {} ", center_text(headers[2], n_w)), header_style),
+        Span::styled("|", dim_style),
         Span::styled(
-            format!(" {} ", center_text(headers[2], name_w)),
+            format!(" {} ", center_text(headers[3], name_w)),
             header_style,
         ),
         Span::styled("|", dim_style),
         Span::styled(
-            format!(" {} ", center_text(headers[3], score_w)),
+            format!(" {} ", center_text(headers[4], score_w)),
             header_style,
         ),
         Span::styled("|", dim_style),
         Span::styled(
-            format!(" {} ", center_text(headers[4], wld_w)),
+            format!(" {} ", center_text(headers[5], wld_w)),
             header_style,
         ),
         Span::styled("|", dim_style),
     ]));
     lines.push(Line::from(Span::styled(sep.clone(), dim_style)));
 
-    for (rank, id, name, score, wins, losses, draws) in rows {
+    for (rank, id, machine_n, name, score, wins, losses, draws) in rows {
         let mut spans = Vec::new();
         spans.push(Span::styled("|", dim_style));
         spans.push(Span::styled(
@@ -1365,6 +1435,15 @@ fn render_top_table(
         spans.push(Span::styled(
             format!(" {:<width$} ", truncate_text(&id, id_w), width = id_w),
             label_style,
+        ));
+        spans.push(Span::styled("|", dim_style));
+        spans.push(Span::styled(
+            format!(" {:>width$} ", truncate_text(&machine_n, n_w), width = n_w),
+            if machine_n == "-" {
+                dim_style
+            } else {
+                number_style
+            },
         ));
         spans.push(Span::styled("|", dim_style));
         spans.push(Span::styled(
@@ -1394,6 +1473,14 @@ fn render_top_table(
 
     lines.push(Line::from(Span::styled(sep, dim_style)));
     lines
+}
+
+fn strategy_machine_index(def: &StrategyDefinition) -> Option<u64> {
+    match &def.kind {
+        nit_games::config::StrategySpecKind::Fsm { index, .. } => *index,
+        nit_games::config::StrategySpecKind::Ca { n, .. } => Some(*n),
+        nit_games::config::StrategySpecKind::OneSidedTm { rule_code, .. } => *rule_code,
+    }
 }
 
 fn wld_cell_spans(

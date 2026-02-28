@@ -1,16 +1,20 @@
 schema_version = 1
 game = "ipd"
-rounds = 200000
+rounds = 2000000
 repetitions = 1
 self_play = false
 seed = 42
 noise = 0.0
 
 [payoff]
-R = 3
-S = 0
-T = 5
-P = 1
+R = -1
+S = -3
+T = 0
+P = -2
+matrix = [
+  [[-1, -1], [-3, 0]],
+  [[0, -3], [-2, -2]],
+]
 
 [history]
 enabled = true
@@ -42,15 +46,10 @@ k = 2
 
 [[strategy]]
 id = "fsm_tft"
-type = "auto"
-states = 2
-start_state = 1
-input_index_base = 1
-outputs = ["C", "D"]
-transitions = [
-  [1, 2],
-  [1, 2],
-]
+type = "fsm"
+index = 22
+num_states = 2
+k = 2
 
 [[strategy]]
 id = "fsm_rule"
@@ -58,6 +57,13 @@ type = "auto"
 states = 2
 k = 2
 index = 17
+
+[[strategy]]
+id = "fsm_grim_t"
+type = "fsm"
+states = 2
+k = 2
+index = 30
 
 [[strategy]]
 id = "ca_rule30"

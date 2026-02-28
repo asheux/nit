@@ -65,7 +65,7 @@ pub fn build_lines(theme: &Theme) -> Vec<Line<'static>> {
         Span::raw(" run Petri Dish (active app)"),
     ]));
     lines.push(Line::from(vec![
-        Span::styled("Ctrl+^", Style::default().fg(theme.accent)),
+        Span::styled("Ctrl+^ / Ctrl+6", Style::default().fg(theme.accent)),
         Span::raw(" show hidden Petri Dish"),
     ]));
     lines.push(Line::from(vec![

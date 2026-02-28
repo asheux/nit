@@ -405,6 +405,17 @@ fn run_loop(
                     }
                     handled_input = true;
                     if is_job_pause_key(&key) {
+                        if state.app_kind == AppKind::Games
+                            && state.command_line.is_none()
+                            && state.prompt.is_none()
+                        {
+                            if let Some(petri) = games_petri.as_mut() {
+                                if petri.is_visible() && petri.handle_key(&key, state) {
+                                    needs_redraw = true;
+                                    continue;
+                                }
+                            }
+                        }
                         let outcome =
                             apply_action_with_syntax(state, syntax, Action::ToggleJobPause);
                         if outcome.should_exit {
@@ -412,6 +423,18 @@ fn run_loop(
                         }
                         needs_redraw = needs_redraw || outcome.state_changed;
                         continue;
+                    }
+                    if state.app_kind == AppKind::Games
+                        && state.command_line.is_none()
+                        && state.prompt.is_none()
+                        && is_games_petri_control_key(&key)
+                    {
+                        if let Some(petri) = games_petri.as_mut() {
+                            if petri.is_visible() && petri.handle_key(&key, state) {
+                                needs_redraw = true;
+                                continue;
+                            }
+                        }
                     }
                     if !state.fuzzy_search.open
                         && state.command_line.is_none()
@@ -2008,12 +2031,38 @@ fn is_petri_show_key(key: &KeyEvent, state: &AppState) -> bool {
             modifiers,
             ..
         } if modifiers.contains(KeyModifiers::CONTROL) => true,
+        KeyEvent {
+            code: KeyCode::Char('\u{1e}'),
+            modifiers,
+            ..
+        } if modifiers.is_empty() || modifiers.contains(KeyModifiers::CONTROL) => true,
         _ => false,
     }
 }
 
 fn games_petri_visible(state: &AppState) -> bool {
     state.app_kind == AppKind::Games && state.games.running && !state.games.petri_hidden
+}
+
+fn is_games_petri_control_key(key: &KeyEvent) -> bool {
+    matches!(
+        key.code,
+        KeyCode::Char(' ')
+            | KeyCode::Null
+            | KeyCode::Char('\u{0}')
+            | KeyCode::Enter
+            | KeyCode::Char('\n')
+            | KeyCode::Char('\r')
+            | KeyCode::Char('+')
+            | KeyCode::Char('=')
+            | KeyCode::Char('-')
+            | KeyCode::Char('_')
+            | KeyCode::Tab
+            | KeyCode::Left
+            | KeyCode::Right
+            | KeyCode::Char('h')
+            | KeyCode::Char('H')
+    )
 }
 
 fn is_clear_logs_key(key: &KeyEvent) -> bool {
@@ -3934,6 +3983,9 @@ fn handle_file_tree_key(
     if is_global_quit_key(key) {
         return false;
     }
+    if is_petri_show_key(key, state) {
+        return false;
+    }
     if ctrl_nav_dir(key).is_some() {
         return false;
     }
@@ -5257,6 +5309,23 @@ mod tests {
     }
 
     #[test]
+    fn petri_show_key_matches_ctrl_caret_terminal_variants() {
+        let mut state = state_for_test();
+        state.app_kind = AppKind::Games;
+        state.games.running = true;
+        state.games.petri_hidden = true;
+
+        let ctrl_six = KeyEvent::new(KeyCode::Char('6'), KeyModifiers::CONTROL);
+        assert!(is_petri_show_key(&ctrl_six, &state));
+
+        let ctrl_caret = KeyEvent::new(KeyCode::Char('^'), KeyModifiers::CONTROL);
+        assert!(is_petri_show_key(&ctrl_caret, &state));
+
+        let rs_control_char = KeyEvent::new(KeyCode::Char('\u{1e}'), KeyModifiers::empty());
+        assert!(is_petri_show_key(&rs_control_char, &state));
+    }
+
+    #[test]
     fn file_tree_does_not_consume_command_or_help_toggle_keys() {
         let mut state = state_for_test();
         state.file_tree.open = true;
@@ -5273,5 +5342,16 @@ mod tests {
 
         let help = KeyEvent::new(KeyCode::Char('?'), KeyModifiers::SHIFT);
         assert!(!handle_file_tree_key(&help, &mut state, &mut syntax, area));
+
+        state.app_kind = AppKind::Games;
+        state.games.running = true;
+        state.games.petri_hidden = true;
+        let show_hidden = KeyEvent::new(KeyCode::Char('\u{1e}'), KeyModifiers::empty());
+        assert!(!handle_file_tree_key(
+            &show_hidden,
+            &mut state,
+            &mut syntax,
+            area
+        ));
     }
 }
