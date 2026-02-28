@@ -675,6 +675,7 @@ impl GamesPetriDishRuntime {
         state.games.match_history.last_error = None;
         state.games.match_history.entries.clear();
         state.games.match_history.column_offset = 0;
+        state.games.match_history.round_limit = None;
         state.games.run_browser.open = false;
         state.games.replay.open = false;
         state.games.strategy_inspect.open = false;
@@ -943,20 +944,22 @@ fn render_progress(
                 ],
             },
         ));
-        lines.push(Line::from(match (progress.last_halted_a, progress.last_halted_b) {
-            (Some(a), Some(b)) => vec![
-                Span::styled("Halt: ", label_style),
-                Span::styled(if a { "1" } else { "0" }, number_style),
-                Span::styled(" / ", dim_style),
-                Span::styled(if b { "1" } else { "0" }, number_style),
-                Span::styled(" ", dim_style),
-                Span::styled("(1=halt, 0=timeout)", dim_style),
-            ],
-            _ => vec![
-                Span::styled("Halt: ", label_style),
-                Span::styled("Waiting for tournament...", dim_style),
-            ],
-        }));
+        lines.push(Line::from(
+            match (progress.last_halted_a, progress.last_halted_b) {
+                (Some(a), Some(b)) => vec![
+                    Span::styled("Halt: ", label_style),
+                    Span::styled(if a { "1" } else { "0" }, number_style),
+                    Span::styled(" / ", dim_style),
+                    Span::styled(if b { "1" } else { "0" }, number_style),
+                    Span::styled(" ", dim_style),
+                    Span::styled("(1=halt, 0=timeout)", dim_style),
+                ],
+                _ => vec![
+                    Span::styled("Halt: ", label_style),
+                    Span::styled("Waiting for tournament...", dim_style),
+                ],
+            },
+        ));
         if let (Some(pa), Some(pb)) = (progress.last_payoff_a, progress.last_payoff_b) {
             lines.push(Line::from(vec![
                 Span::styled("Payoff: ", label_style),
@@ -1395,10 +1398,7 @@ fn render_top_table(
         .iter()
         .enumerate()
         .map(|(idx, entry)| {
-            let found = definitions
-                .iter()
-                .find(|def| def.id == entry.id)
-                .cloned();
+            let found = definitions.iter().find(|def| def.id == entry.id).cloned();
             let display = found
                 .as_ref()
                 .map(strategy_display_name_from_def)
@@ -1630,7 +1630,10 @@ mod tests {
     }
 
     fn line_text(line: &Line<'_>) -> String {
-        line.spans.iter().map(|span| span.content.as_ref()).collect()
+        line.spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect()
     }
 
     #[test]

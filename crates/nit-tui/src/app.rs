@@ -44,10 +44,10 @@ use crate::{
     theme::Theme,
     widgets::{
         bottom_bar, editor_view, file_tree_view, fuzzy_search_popup, games_analysis_popup,
-        games_ca_sim_popup, games_match_history_popup, games_replay_popup,
-        games_run_browser_popup, games_strategy_popup, games_tm_sim_popup, games_visualizer_view,
-        gate_monitor_view, help_overlay, job_output_view, notes_view, protocol_picker,
-        rule_picker, top_bar, visualizer_view,
+        games_ca_sim_popup, games_match_history_popup, games_replay_popup, games_run_browser_popup,
+        games_strategy_popup, games_tm_sim_popup, games_visualizer_view, gate_monitor_view,
+        help_overlay, job_output_view, notes_view, protocol_picker, rule_picker, top_bar,
+        visualizer_view,
     },
 };
 
@@ -428,6 +428,8 @@ fn run_loop(
                     if state.app_kind == AppKind::Games
                         && state.command_line.is_none()
                         && state.prompt.is_none()
+                        && !state.show_help
+                        && !games_modal_popup_open(state)
                         && is_games_petri_control_key(&key)
                     {
                         if let Some(petri) = games_petri.as_mut() {
@@ -969,7 +971,8 @@ fn draw(
             games_ca_sim_popup::render(f, area, state, theme);
         }
         if state.app_kind == AppKind::Games && state.games.match_history.open {
-            let area = dynamic_popup_rect(screen, games_match_history_popup::preferred_size(screen));
+            let area =
+                dynamic_popup_rect(screen, games_match_history_popup::preferred_size(screen));
             games_match_history_popup::render(f, area, state, theme);
         }
         if state.rule_picker.open {
@@ -2083,6 +2086,19 @@ fn games_petri_visible(state: &AppState) -> bool {
     state.app_kind == AppKind::Games && state.games.running && !state.games.petri_hidden
 }
 
+fn games_modal_popup_open(state: &AppState) -> bool {
+    if state.app_kind != AppKind::Games {
+        return false;
+    }
+    state.games.analysis.open
+        || state.games.run_browser.open
+        || state.games.replay.open
+        || state.games.strategy_inspect.open
+        || state.games.tm_sim.open
+        || state.games.ca_sim.open
+        || state.games.match_history.open
+}
+
 fn is_games_petri_control_key(key: &KeyEvent) -> bool {
     matches!(
         key.code,
@@ -2503,7 +2519,18 @@ fn games_ca_sim_popup_max_scroll(
 fn games_match_history_max_offset(state: &AppState, screen: ratatui::layout::Rect) -> usize {
     let area = dynamic_popup_rect(screen, games_match_history_popup::preferred_size(screen));
     let text_area = popup_text_area(area);
-    games_match_history_popup::max_column_offset(state.games.match_history.entries.len(), text_area.width)
+    games_match_history_popup::max_column_offset(
+        state.games.match_history.entries.len(),
+        text_area.width,
+    )
+}
+
+fn games_match_history_max_rounds(state: &AppState) -> usize {
+    games_match_history_popup::max_round_limit(state.games.match_history.entries.as_slice())
+}
+
+fn games_match_history_default_rounds(state: &AppState) -> usize {
+    games_match_history_popup::default_round_limit(games_match_history_max_rounds(state))
 }
 
 fn clamp_modal_scroll_offsets(state: &mut AppState, screen: ratatui::layout::Rect, theme: &Theme) {
@@ -2520,7 +2547,8 @@ fn clamp_modal_scroll_offsets(state: &mut AppState, screen: ratatui::layout::Rec
     }
     if state.games.run_browser.open {
         let max_scroll = games_run_browser_popup_max_scroll(state, screen, theme);
-        state.games.run_browser.scroll_offset = state.games.run_browser.scroll_offset.min(max_scroll);
+        state.games.run_browser.scroll_offset =
+            state.games.run_browser.scroll_offset.min(max_scroll);
     }
     if state.games.replay.open {
         let max_scroll = games_replay_popup_max_scroll(state, screen, theme);
@@ -2541,7 +2569,18 @@ fn clamp_modal_scroll_offsets(state: &mut AppState, screen: ratatui::layout::Rec
     }
     if state.games.match_history.open {
         let max_offset = games_match_history_max_offset(state, screen);
-        state.games.match_history.column_offset = state.games.match_history.column_offset.min(max_offset);
+        state.games.match_history.column_offset =
+            state.games.match_history.column_offset.min(max_offset);
+        let max_rounds = games_match_history_max_rounds(state);
+        let default_rounds = games_match_history_default_rounds(state);
+        if let Some(limit) = state.games.match_history.round_limit {
+            let clamped = limit.min(max_rounds);
+            state.games.match_history.round_limit = if clamped == default_rounds {
+                None
+            } else {
+                Some(clamped)
+            };
+        }
     }
 }
 
@@ -5362,6 +5401,14 @@ fn handle_match_history_popup_key(
     }
     let total = state.games.match_history.entries.len();
     let max_offset = games_match_history_max_offset(state, screen);
+    let max_rounds = games_match_history_max_rounds(state);
+    let default_rounds = games_match_history_default_rounds(state);
+    let current_round_limit = state
+        .games
+        .match_history
+        .round_limit
+        .unwrap_or(default_rounds)
+        .min(max_rounds);
     match key.code {
         KeyCode::Esc | KeyCode::Char('q') => {
             state.games.match_history.open = false;
@@ -5404,6 +5451,32 @@ fn handle_match_history_popup_key(
             if total > 0 {
                 state.games.match_history.column_offset = max_offset;
             }
+            true
+        }
+        KeyCode::Char('-') | KeyCode::Char('_') => {
+            if max_rounds > 0 {
+                let new_limit = current_round_limit.saturating_sub(10).max(1);
+                state.games.match_history.round_limit = if new_limit == default_rounds {
+                    None
+                } else {
+                    Some(new_limit)
+                };
+            }
+            true
+        }
+        KeyCode::Char('+') | KeyCode::Char('=') => {
+            if max_rounds > 0 {
+                let new_limit = current_round_limit.saturating_add(10).min(max_rounds);
+                state.games.match_history.round_limit = if new_limit == default_rounds {
+                    None
+                } else {
+                    Some(new_limit)
+                };
+            }
+            true
+        }
+        KeyCode::Char('r') => {
+            state.games.match_history.round_limit = None;
             true
         }
         _ => true,
@@ -5675,8 +5748,10 @@ mod tests {
         let ctrl_star = KeyEvent::new(KeyCode::Char('*'), KeyModifiers::CONTROL);
         assert!(is_games_history_open_key(&ctrl_star, &state));
 
-        let ctrl_shift_star =
-            KeyEvent::new(KeyCode::Char('*'), KeyModifiers::CONTROL | KeyModifiers::SHIFT);
+        let ctrl_shift_star = KeyEvent::new(
+            KeyCode::Char('*'),
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+        );
         assert!(is_games_history_open_key(&ctrl_shift_star, &state));
 
         let ctrl_eight = KeyEvent::new(KeyCode::Char('8'), KeyModifiers::CONTROL);
@@ -5713,6 +5788,11 @@ mod tests {
         ));
 
         let history = KeyEvent::new(KeyCode::Char('8'), KeyModifiers::CONTROL);
-        assert!(!handle_file_tree_key(&history, &mut state, &mut syntax, area));
+        assert!(!handle_file_tree_key(
+            &history,
+            &mut state,
+            &mut syntax,
+            area
+        ));
     }
 }

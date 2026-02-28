@@ -142,7 +142,10 @@ pub fn build_lines(theme: &Theme) -> Vec<Line<'static>> {
         Span::raw(" open replay selector (requires loaded run)"),
     ]));
     lines.push(Line::from(vec![
-        Span::styled(":games history | :history", Style::default().fg(theme.accent)),
+        Span::styled(
+            ":games history | :history",
+            Style::default().fg(theme.accent),
+        ),
         Span::raw(" open match history plot popup"),
     ]));
     lines.push(Line::from(vec![

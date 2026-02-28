@@ -160,6 +160,8 @@ pub struct GamesMatchHistoryState {
     pub entries: Vec<nit_games::MatchHistoryPreview>,
     #[serde(skip)]
     pub column_offset: usize,
+    #[serde(skip)]
+    pub round_limit: Option<usize>,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -1650,6 +1652,7 @@ fn open_games_history_popup(state: &mut AppState) {
     state.games.ca_sim.open = false;
     state.games.match_history.open = true;
     state.games.match_history.column_offset = 0;
+    state.games.match_history.round_limit = None;
     state.status = Some("Games match history plot opened".into());
 }
 
@@ -3499,14 +3502,18 @@ t = 4
             Buffer::empty("n", None),
         );
         state.app_kind = AppKind::Games;
-        state.games.match_history.entries.push(nit_games::MatchHistoryPreview {
-            match_index: 1,
-            total_matches: 1,
-            a: "fsm_allc".into(),
-            b: "fsm_alld".into(),
-            rounds_total: 4,
-            outcomes_prefix: "0123".into(),
-        });
+        state
+            .games
+            .match_history
+            .entries
+            .push(nit_games::MatchHistoryPreview {
+                match_index: 1,
+                total_matches: 1,
+                a: "fsm_allc".into(),
+                b: "fsm_alld".into(),
+                rounds_total: 4,
+                outcomes_prefix: "0123".into(),
+            });
         assert!(!handle_command_line(&mut state, ":games history"));
         assert!(state.games.match_history.open);
         assert!(state.games.match_history.last_error.is_none());
@@ -3521,14 +3528,18 @@ t = 4
             Buffer::empty("n", None),
         );
         state.app_kind = AppKind::Games;
-        state.games.match_history.entries.push(nit_games::MatchHistoryPreview {
-            match_index: 1,
-            total_matches: 1,
-            a: "fsm_allc".into(),
-            b: "fsm_alld".into(),
-            rounds_total: 4,
-            outcomes_prefix: "0123".into(),
-        });
+        state
+            .games
+            .match_history
+            .entries
+            .push(nit_games::MatchHistoryPreview {
+                match_index: 1,
+                total_matches: 1,
+                a: "fsm_allc".into(),
+                b: "fsm_alld".into(),
+                rounds_total: 4,
+                outcomes_prefix: "0123".into(),
+            });
         assert!(!handle_command_line(&mut state, ":history"));
         assert!(state.games.match_history.open);
         assert!(state.games.match_history.last_error.is_none());

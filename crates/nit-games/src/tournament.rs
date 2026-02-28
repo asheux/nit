@@ -1,5 +1,6 @@
 use crate::config::{
-    EngineMode, NormalizedConfig, ParallelismConfig, ParallelismMode, StrategySpec, StrategySpecKind,
+    EngineMode, NormalizedConfig, ParallelismConfig, ParallelismMode, StrategySpec,
+    StrategySpecKind,
 };
 use crate::events::{EventWriter, GameEvent};
 use crate::fast_eval::{evaluate_match, CycleMetadata, FastStrategyModel};

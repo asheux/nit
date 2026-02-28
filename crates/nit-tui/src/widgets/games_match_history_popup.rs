@@ -16,6 +16,7 @@ const MIN_HEIGHT: u16 = 20;
 const PANEL_WIDTH: usize = 18;
 const PANEL_GAP: usize = 2;
 const RESERVED_LINES: usize = 8;
+const DEFAULT_ROUND_LIMIT: usize = 50;
 const CELL_GLYPH: &str = "▀▀";
 const CELL_EMPTY: &str = "  ";
 
@@ -29,6 +30,18 @@ pub fn preferred_size(screen: Rect) -> (u16, u16) {
 
 pub fn max_column_offset(total_matches: usize, inner_width: u16) -> usize {
     total_matches.saturating_sub(panel_capacity(inner_width))
+}
+
+pub fn max_round_limit(entries: &[nit_games::MatchHistoryPreview]) -> usize {
+    entries
+        .iter()
+        .map(|entry| entry.outcomes_prefix.len())
+        .max()
+        .unwrap_or(0)
+}
+
+pub fn default_round_limit(total_rounds: usize) -> usize {
+    total_rounds.min(DEFAULT_ROUND_LIMIT)
 }
 
 pub fn render(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
@@ -95,9 +108,10 @@ pub fn build_lines(state: &AppState, theme: &Theme, inner: Rect) -> Vec<Line<'st
 
     if total == 0 {
         lines.push(Line::from(""));
-        lines.push(Line::from(vec![
-            Span::styled("No completed matches to plot yet.", dim_style),
-        ]));
+        lines.push(Line::from(vec![Span::styled(
+            "No completed matches to plot yet.",
+            dim_style,
+        )]));
         lines.push(Line::from(""));
         lines.push(Line::from(vec![
             Span::styled("Esc", value_style),
@@ -107,7 +121,11 @@ pub fn build_lines(state: &AppState, theme: &Theme, inner: Rect) -> Vec<Line<'st
     }
 
     let capacity = panel_capacity(inner.width);
-    let mut start = state.games.match_history.column_offset.min(total.saturating_sub(1));
+    let mut start = state
+        .games
+        .match_history
+        .column_offset
+        .min(total.saturating_sub(1));
     if total > capacity {
         start = start.min(total - capacity);
     } else {
@@ -117,20 +135,19 @@ pub fn build_lines(state: &AppState, theme: &Theme, inner: Rect) -> Vec<Line<'st
     let visible = &entries[start..end];
     let (aliases, alias_legend) = strategy_aliases(state, visible);
     let available_rows = (inner.height as usize).saturating_sub(RESERVED_LINES);
-    let max_rounds_in_view = visible
-        .iter()
-        .map(|entry| entry.outcomes_prefix.len())
-        .max()
-        .unwrap_or(0);
-    let shown_rounds = available_rows.min(max_rounds_in_view);
-    let clipped_for_height = max_rounds_in_view > shown_rounds;
+    let max_rounds_in_view = max_round_limit(visible);
+    let default_limit = default_round_limit(max_rounds_in_view);
+    let round_limit = state
+        .games
+        .match_history
+        .round_limit
+        .unwrap_or(default_limit)
+        .min(max_rounds_in_view);
+    let round_start = round_limit.saturating_sub(available_rows);
 
     lines.push(Line::from(vec![
         Span::styled("range: ", label_style),
-        Span::styled(
-            format!("{}-{} of {}", start + 1, end, total),
-            value_style,
-        ),
+        Span::styled(format!("{}-{} of {}", start + 1, end, total), value_style),
         Span::styled("  ", dim_style),
         Span::styled("layout: ", label_style),
         Span::styled("left → right", value_style),
@@ -185,14 +202,15 @@ pub fn build_lines(state: &AppState, theme: &Theme, inner: Rect) -> Vec<Line<'st
     lines.push(Line::from(header_pair));
     lines.push(Line::from(header_cols));
 
-    for round_idx in 0..shown_rounds {
+    for round_idx in round_start..round_limit {
         let mut spans: Vec<Span<'static>> = Vec::new();
         for (panel_idx, entry) in visible.iter().enumerate() {
             if panel_idx > 0 {
                 spans.push(Span::raw(" ".repeat(PANEL_GAP)));
             }
             spans.push(Span::styled(format!("{:>3} ", round_idx + 1), dim_style));
-            let (a_bit, b_bit) = decode_outcome(entry.outcomes_prefix.as_bytes().get(round_idx).copied());
+            let (a_bit, b_bit) =
+                decode_outcome(entry.outcomes_prefix.as_bytes().get(round_idx).copied());
             spans.push(Span::styled(
                 history_cell_text(a_bit),
                 history_cell_style(a_bit, zero_style, one_style, empty_cell_style),
@@ -238,11 +256,19 @@ pub fn build_lines(state: &AppState, theme: &Theme, inner: Rect) -> Vec<Line<'st
         .iter()
         .any(|entry| entry.rounds_total as usize > entry.outcomes_prefix.len());
     let mut footer = String::from("Esc close | ←/→ pan");
-    if clipped_for_height {
-        footer.push_str(&format!(" | showing first {} rounds (height)", shown_rounds));
-    } else if shown_rounds > 0 {
-        footer.push_str(&format!(" | rounds shown: {}", shown_rounds.min(max_rounds_total)));
+    if round_limit > 0 {
+        let shown = round_limit.saturating_sub(round_start);
+        footer.push_str(&format!(
+            " | rounds {}-{} of {} (shown {})",
+            round_start + 1,
+            round_limit.min(max_rounds_total),
+            max_rounds_in_view.max(max_rounds_total),
+            shown
+        ));
+    } else {
+        footer.push_str(" | rounds shown: 0");
     }
+    footer.push_str(" | +/- rounds (default 50)");
     if clipped_for_capture {
         footer.push_str(" | preview capture capped");
     }
