@@ -1,13 +1,17 @@
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader, BufWriter, Seek, SeekFrom, Write};
 use std::path::PathBuf;
+use std::sync::mpsc::{self, Receiver, TryRecvError};
+use std::thread;
 use std::time::Instant;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use nit_core::{AppState, GamesAnalysisRequest, GamesStatus, UiSelectionPane};
+use nit_core::{
+    build_family_run_override_for_request, AppState, GamesAnalysisRequest, GamesFamilyRunRequest,
+    GamesStatus, GamesRunOverride, UiSelectionPane,
+};
 use nit_games::output::StrategyDefinition;
 use nit_games::{
-    config::GamesConfig,
     events::EventWriter,
     output::{RunLayout, TournamentResults},
     run_id_from_seed_config, MatchSnapshot, TournamentProgress,
@@ -62,6 +66,7 @@ pub struct GamesPetriDishRuntime {
     last_tick: Instant,
     view: PetriView,
     inspector_window: usize,
+    family_run_rx: Option<Receiver<FamilyBuildOutcome>>,
 }
 
 struct GameSession {
@@ -70,6 +75,11 @@ struct GameSession {
     snapshot: Option<MatchSnapshot>,
     results: TournamentResults,
     definitions: Vec<StrategyDefinition>,
+}
+
+struct FamilyBuildOutcome {
+    force: bool,
+    result: Result<GamesRunOverride, String>,
 }
 
 struct HistoryPreviewStore {
@@ -150,6 +160,7 @@ impl GamesPetriDishRuntime {
             last_tick: Instant::now(),
             view: PetriView::Tournament,
             inspector_window: 50,
+            family_run_rx: None,
         }
     }
 
@@ -162,6 +173,10 @@ impl GamesPetriDishRuntime {
     }
 
     pub fn handle_pending_requests(&mut self, state: &mut AppState) {
+        self.handle_family_build_result(state);
+        if let Some(request) = state.games.pending_family_run.take() {
+            self.start_family_build(state, request);
+        }
         if state.games.pending_close {
             state.games.pending_close = false;
             self.close(state);
@@ -227,6 +242,70 @@ impl GamesPetriDishRuntime {
                 b_id: request.b_id,
                 payoff: run.config.payoff,
             });
+        }
+    }
+
+    fn start_family_build(&mut self, state: &mut AppState, request: GamesFamilyRunRequest) {
+        if self.family_run_rx.is_some() {
+            state.games.family_building = true;
+            state.status = Some("Family run preparation already in progress".into());
+            return;
+        }
+        let workspace_root = state.workspace_root.clone();
+        let config_text = state.editor_buffer().content_as_string();
+        let family_label = request.family.clone();
+        let mode = if request.force { "forced, " } else { "" };
+        let force = request.force;
+        state.games.family_building = true;
+        state.status = Some(format!(
+            "Preparing family run ({mode}{family_label})..."
+        ));
+        let (tx, rx) = mpsc::channel();
+        thread::spawn(move || {
+            let result =
+                build_family_run_override_for_request(&workspace_root, &config_text, &request);
+            let _ = tx.send(FamilyBuildOutcome { force, result });
+        });
+        self.family_run_rx = Some(rx);
+    }
+
+    fn handle_family_build_result(&mut self, state: &mut AppState) {
+        let Some(rx) = self.family_run_rx.as_ref() else {
+            return;
+        };
+        if !state.games.family_building {
+            self.family_run_rx = None;
+            return;
+        }
+        let outcome = match rx.try_recv() {
+            Ok(outcome) => Some(outcome),
+            Err(TryRecvError::Empty) => None,
+            Err(TryRecvError::Disconnected) => Some(FamilyBuildOutcome {
+                force: false,
+                result: Err("Family run preparation failed".into()),
+            }),
+        };
+        let Some(outcome) = outcome else {
+            return;
+        };
+        self.family_run_rx = None;
+        state.games.family_building = false;
+        match outcome.result {
+            Ok(override_run) => {
+                let machine_count = override_run.config.strategies.len();
+                let label = override_run.label.clone();
+                let mode = if outcome.force { "forced, " } else { "" };
+                state.games.pending_run_override = Some(override_run);
+                state.games.pending_run = true;
+                state.status = Some(format!(
+                    "Games tournament queued ({mode}{label}, {machine_count} machines)"
+                ));
+            }
+            Err(err) => {
+                state.games.pending_run_override = None;
+                state.games.pending_run = false;
+                state.status = Some(err);
+            }
         }
     }
 
@@ -610,6 +689,7 @@ impl GamesPetriDishRuntime {
                     lines.extend(render_match_inspector(
                         snapshot,
                         &session.definitions,
+                        state.games.status,
                         self.inspector_window,
                         inner.width as usize,
                         header_style,
@@ -689,6 +769,7 @@ impl GamesPetriDishRuntime {
     }
 
     fn start_session(&mut self, state: &mut AppState) {
+        state.games.family_building = false;
         if self.session.is_some() && state.games.running {
             self.warning = Some("Games tournament already running".into());
             return;
@@ -708,17 +789,27 @@ impl GamesPetriDishRuntime {
             (override_run.config, override_run.config_text)
         } else {
             let config_text = state.editor_buffer().content_as_string();
-            let config =
-                match GamesConfig::from_toml_with_root(&config_text, Some(&state.workspace_root)) {
-                    Ok(config) => config,
-                    Err(err) => {
-                        let msg = format!("Config error: {err}");
-                        state.games.status = GamesStatus::Error;
-                        state.games.last_error = Some(msg.clone());
-                        state.status = Some(msg);
-                        return;
-                    }
-                };
+            let version = state.editor_buffer().version();
+            let Some(preview) = state
+                .games
+                .config_preview
+                .as_ref()
+                .filter(|preview| preview.version == version)
+            else {
+                state.games.pending_run = true;
+                state.status = Some("Preparing run config in background...".into());
+                return;
+            };
+            let config = match &preview.result {
+                Ok(config) => config.clone(),
+                Err(err) => {
+                    let msg = format!("Config error: {err}");
+                    state.games.status = GamesStatus::Error;
+                    state.games.last_error = Some(msg.clone());
+                    state.status = Some(msg);
+                    return;
+                }
+            };
             (config, config_text)
         };
 
@@ -761,17 +852,14 @@ impl GamesPetriDishRuntime {
             state.status = Some(msg);
             return;
         }
-        self.history_store = if family_mode {
-            None
-        } else {
-            match HistoryPreviewStore::create(layout.run_dir.join("match_history_preview.ndjson")) {
-                Ok(store) => Some(store),
-                Err(err) => {
-                    tracing::warn!("Failed to create match history preview cache: {err}");
-                    state.games.match_history.last_error =
-                        Some(format!("History preview cache disabled: {err}"));
-                    None
-                }
+        self.history_store = match HistoryPreviewStore::create(layout.run_dir.join("match_history_preview.ndjson"))
+        {
+            Ok(store) => Some(store),
+            Err(err) => {
+                tracing::warn!("Failed to create match history preview cache: {err}");
+                state.games.match_history.last_error =
+                    Some(format!("History preview cache disabled: {err}"));
+                None
             }
         };
 
@@ -969,10 +1057,13 @@ impl GamesPetriDishRuntime {
         if self.session.is_some() {
             self.runner.send(RunnerCommand::Cancel);
         }
+        self.family_run_rx = None;
         self.session = None;
         self.hidden = false;
         state.games.running = false;
         state.games.paused = false;
+        state.games.family_building = false;
+        state.games.pending_family_run = None;
         state.games.status = GamesStatus::Idle;
         state.games.petri_hidden = false;
         state.games.petri_lines.clear();
@@ -1096,6 +1187,41 @@ fn normalize_path(input: &str) -> String {
     unquoted.trim().to_string()
 }
 
+fn progress_waiting_text(status: GamesStatus) -> &'static str {
+    match status {
+        GamesStatus::Idle => "Waiting for tournament...",
+        GamesStatus::Running => "Starting tournament...",
+        GamesStatus::Paused => "Paused before first round",
+        GamesStatus::Done => "Tournament complete",
+        GamesStatus::Error => "Tournament unavailable",
+    }
+}
+
+fn progress_pending_round_text(status: GamesStatus) -> &'static str {
+    match status {
+        GamesStatus::Running => "Round pending...",
+        GamesStatus::Paused => "Paused",
+        _ => progress_waiting_text(status),
+    }
+}
+
+fn tournament_progress_percent(progress: &TournamentProgress) -> f32 {
+    if progress.total_matches == 0 || progress.rounds == 0 {
+        return 0.0;
+    }
+    let completed_matches = progress.match_index.saturating_sub(1) as u128;
+    let round = progress.round.min(progress.rounds) as u128;
+    let rounds_per_match = progress.rounds as u128;
+    let total_rounds = (progress.total_matches as u128).saturating_mul(rounds_per_match);
+    if total_rounds == 0 {
+        return 0.0;
+    }
+    let done_rounds = completed_matches
+        .saturating_mul(rounds_per_match)
+        .saturating_add(round);
+    ((done_rounds as f64 / total_rounds as f64) * 100.0) as f32
+}
+
 fn render_progress(
     progress: Option<TournamentProgress>,
     definitions: &[StrategyDefinition],
@@ -1107,18 +1233,46 @@ fn render_progress(
     status_style: Style,
 ) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
+    let waiting_text = progress_waiting_text(state.games.status);
+    let pending_round_text = progress_pending_round_text(state.games.status);
     lines.push(Line::from(vec![
         Span::styled("Status: ", label_style),
         Span::styled(format!("{:?}", state.games.status), status_style),
     ]));
     if let Some(progress) = progress {
+        if progress.total_matches == 0 {
+            lines.push(Line::from(vec![
+                Span::styled("Match: ", label_style),
+                Span::styled("0/0", number_style),
+                Span::styled(" (no matches scheduled)", dim_style),
+            ]));
+            lines.push(Line::from(vec![
+                Span::styled("Pair: ", label_style),
+                Span::styled("n/a", dim_style),
+            ]));
+            lines.push(Line::from(vec![
+                Span::styled("Last: ", label_style),
+                Span::styled("n/a", dim_style),
+            ]));
+            lines.push(Line::from(vec![
+                Span::styled("Halt: ", label_style),
+                Span::styled("n/a", dim_style),
+            ]));
+            lines.push(Line::from(vec![
+                Span::styled("Payoff: ", label_style),
+                Span::styled("n/a", dim_style),
+            ]));
+            lines.push(Line::from(vec![
+                Span::styled("Total: ", label_style),
+                Span::styled("0", number_style),
+                Span::styled(" / ", dim_style),
+                Span::styled("0", number_style),
+            ]));
+            return lines;
+        }
         let a_label = strategy_label_for_pair(&progress.a, definitions);
         let b_label = strategy_label_for_pair(&progress.b, definitions);
-        let pct = if progress.rounds > 0 {
-            (progress.round as f32 / progress.rounds as f32) * 100.0
-        } else {
-            0.0
-        };
+        let pct = tournament_progress_percent(&progress);
         lines.push(Line::from(vec![
             Span::styled("Match: ", label_style),
             Span::styled(progress.match_index.to_string(), number_style),
@@ -1128,7 +1282,7 @@ fn render_progress(
             Span::styled(progress.round.to_string(), number_style),
             Span::styled("/", dim_style),
             Span::styled(progress.rounds.to_string(), number_style),
-            Span::styled(", ", dim_style),
+            Span::styled(", overall ", dim_style),
             Span::styled(format!("{:>5.1}%", pct), number_style),
             Span::styled(")", dim_style),
         ]));
@@ -1148,7 +1302,7 @@ fn render_progress(
                 ],
                 _ => vec![
                     Span::styled("Last: ", label_style),
-                    Span::styled("Waiting for tournament...", dim_style),
+                    Span::styled(pending_round_text, dim_style),
                 ],
             },
         ));
@@ -1164,7 +1318,7 @@ fn render_progress(
                 ],
                 _ => vec![
                     Span::styled("Halt: ", label_style),
-                    Span::styled("Waiting for tournament...", dim_style),
+                    Span::styled(pending_round_text, dim_style),
                 ],
             },
         ));
@@ -1178,7 +1332,7 @@ fn render_progress(
         } else {
             lines.push(Line::from(vec![
                 Span::styled("Payoff: ", label_style),
-                Span::styled("Waiting for tournament...", dim_style),
+                Span::styled(pending_round_text, dim_style),
             ]));
         }
         lines.push(Line::from(vec![
@@ -1190,27 +1344,27 @@ fn render_progress(
     } else {
         lines.push(Line::from(vec![
             Span::styled("Match: ", label_style),
-            Span::styled("Waiting for tournament...", dim_style),
+            Span::styled(waiting_text, dim_style),
         ]));
         lines.push(Line::from(vec![
             Span::styled("Pair: ", label_style),
-            Span::styled("Waiting for tournament...", dim_style),
+            Span::styled(waiting_text, dim_style),
         ]));
         lines.push(Line::from(vec![
             Span::styled("Last: ", label_style),
-            Span::styled("Waiting for tournament...", dim_style),
+            Span::styled(waiting_text, dim_style),
         ]));
         lines.push(Line::from(vec![
             Span::styled("Halt: ", label_style),
-            Span::styled("Waiting for tournament...", dim_style),
+            Span::styled(waiting_text, dim_style),
         ]));
         lines.push(Line::from(vec![
             Span::styled("Payoff: ", label_style),
-            Span::styled("Waiting for tournament...", dim_style),
+            Span::styled(waiting_text, dim_style),
         ]));
         lines.push(Line::from(vec![
             Span::styled("Total: ", label_style),
-            Span::styled("Waiting for tournament...", dim_style),
+            Span::styled(waiting_text, dim_style),
         ]));
     }
     lines
@@ -1219,6 +1373,7 @@ fn render_progress(
 fn render_match_inspector(
     snapshot: Option<MatchSnapshot>,
     definitions: &[StrategyDefinition],
+    status: GamesStatus,
     window: usize,
     width: usize,
     header_style: Style,
@@ -1229,6 +1384,7 @@ fn render_match_inspector(
     warn_style: Style,
 ) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
+    let waiting_text = progress_waiting_text(status);
     lines.push(Line::from(Span::styled("Match Inspector", header_style)));
     lines.push(Line::from(vec![
         Span::styled("window: ", label_style),
@@ -1279,19 +1435,19 @@ fn render_match_inspector(
     } else {
         lines.push(Line::from(vec![
             Span::styled("Match: ", label_style),
-            Span::styled("Waiting for tournament...", dim_style),
+            Span::styled(waiting_text, dim_style),
         ]));
         lines.push(Line::from(vec![
             Span::styled("Pair: ", label_style),
-            Span::styled("Waiting for tournament...", dim_style),
+            Span::styled(waiting_text, dim_style),
         ]));
         lines.push(Line::from(vec![
             Span::styled("Score: ", label_style),
-            Span::styled("Waiting for tournament...", dim_style),
+            Span::styled(waiting_text, dim_style),
         ]));
         lines.push(Line::from(vec![
             Span::styled("Outcomes: ", label_style),
-            Span::styled("Waiting for tournament...", dim_style),
+            Span::styled(waiting_text, dim_style),
         ]));
     }
     lines
@@ -1893,5 +2049,49 @@ mod tests {
         );
         let halt_line = line_text(&lines[3]);
         assert!(halt_line.contains("--"));
+    }
+
+    #[test]
+    fn progress_waiting_text_reflects_running_status() {
+        assert_eq!(
+            progress_waiting_text(GamesStatus::Running),
+            "Starting tournament..."
+        );
+        assert_eq!(
+            progress_pending_round_text(GamesStatus::Running),
+            "Round pending..."
+        );
+    }
+
+    #[test]
+    fn progress_waiting_text_reflects_done_status() {
+        assert_eq!(
+            progress_waiting_text(GamesStatus::Done),
+            "Tournament complete"
+        );
+    }
+
+    #[test]
+    fn tournament_progress_percent_uses_overall_progress() {
+        let progress = TournamentProgress {
+            match_index: 100_001,
+            total_matches: 456_490,
+            round: 0,
+            rounds: 20,
+            a: "a".into(),
+            b: "b".into(),
+            total_payoff_a: 0,
+            total_payoff_b: 0,
+            last_action_a: None,
+            last_action_b: None,
+            last_payoff_a: None,
+            last_payoff_b: None,
+            last_halted_a: None,
+            last_halted_b: None,
+            last_outcome: None,
+        };
+        let pct = tournament_progress_percent(&progress);
+        assert!(pct > 20.0);
+        assert!(pct < 22.5);
     }
 }

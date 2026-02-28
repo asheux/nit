@@ -18,12 +18,17 @@ pub use analysis::{
     HistoryAnalysisSummary, MatchSummary, StrategySummary, TrajectoryPreview, TrajectorySample,
 };
 pub use config::{
-    ConfigError, EngineConfig, EngineMode, GamesConfig, NormalizedConfig, ParallelismConfig,
-    ParallelismMode, StrategySpec,
+    ConfigError, EngineConfig, EngineMode, FsmGroupingMode, GamesConfig, NormalizedConfig,
+    ParallelismConfig, ParallelismMode, StrategySpec,
 };
 pub use events::{EventLogConfig, EventWriter, GameEvent};
 pub use fast_eval::{CycleMetadata, FastEvalResult, FastStrategyModel};
-pub use fsm_enum::{canonicalize_fsm, enumerate_fsms, FsmDefinition};
+pub use fsm_enum::{
+    canonical_fsm_indices, canonicalize_fsm, enumerate_fsms,
+    group_canonical_fsm_indices_by_behavior, group_canonical_fsm_indices_by_behavior_with_mode,
+    unique_fsm_behavior_representatives, unique_fsm_behavior_representatives_with_mode,
+    FsmDefinition,
+};
 pub use game::{Action, Outcome, PayoffMatrix};
 pub use history::{History, RoundRecord};
 pub use history_log::{HistoryWriter, MatchHistory};

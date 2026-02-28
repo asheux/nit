@@ -1,6 +1,6 @@
 schema_version = 1
 game = "ipd"
-rounds = 20000
+rounds = 20
 repetitions = 1
 self_play = false
 seed = 42
@@ -24,6 +24,7 @@ mode = "interactive"
 parallelism = "auto"
 progress_interval_ms = 80
 fast_eval = true
+fsm_grouping = "wnbm"  # or "moorem"
 
 [engine.complexity_cost]
 enabled = false

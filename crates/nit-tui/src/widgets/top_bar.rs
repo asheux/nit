@@ -23,11 +23,12 @@ pub fn render(frame: &mut Frame, area: ratatui::layout::Rect, state: &AppState, 
         ""
     };
     let file_text = file.unwrap_or_else(|| state.editor_buffer().name().to_string());
-    let status_label = state
-        .status
-        .as_ref()
-        .map(|s| format!("STATUS: {s}"))
-        .unwrap_or_default();
+    let status_text = state.status.as_deref().unwrap_or_default();
+    let status_label = if status_text.is_empty() {
+        String::new()
+    } else {
+        format!("STATUS: {status_text}")
+    };
 
     let inner_width = area.width.saturating_sub(2) as usize;
     let fixed_width = [" nit ", " | ", " | ", &mode, " | ", app_label, " | UTF-8 "]
@@ -160,12 +161,7 @@ pub fn render(frame: &mut Frame, area: ratatui::layout::Rect, state: &AppState, 
             if hints_width > 0 {
                 spans.push(Span::raw("  "));
             }
-            spans.push(Span::styled(
-                status_label,
-                Style::default()
-                    .fg(theme.title)
-                    .add_modifier(Modifier::BOLD),
-            ));
+            spans.push(Span::styled(status_label, status_style(status_text, theme)));
         }
     }
 
@@ -206,4 +202,24 @@ fn truncate_start(text: &str, max_width: usize) -> String {
         }
     }
     format!("…{}", &text[idx..])
+}
+
+fn status_style(status: &str, theme: &Theme) -> Style {
+    let lower = status.to_ascii_lowercase();
+    let color = if lower.contains("error")
+        || lower.contains("failed")
+        || lower.contains("invalid")
+        || lower.contains("unknown")
+    {
+        theme.error
+    } else if lower.contains("queued")
+        || lower.contains("running")
+        || lower.contains("loading")
+        || lower.contains("pending")
+    {
+        theme.warning
+    } else {
+        theme.accent
+    };
+    Style::default().fg(color).add_modifier(Modifier::BOLD)
 }

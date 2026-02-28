@@ -178,6 +178,19 @@ pub struct GamesRunOverride {
     pub family_mode: bool,
 }
 
+#[derive(Clone, Debug)]
+pub struct GamesFamilyRunRequest {
+    pub family: String,
+    pub input: String,
+    pub force: bool,
+}
+
+#[derive(Clone, Debug)]
+pub struct GamesConfigPreview {
+    pub version: u64,
+    pub result: Result<nit_games::config::NormalizedConfig, nit_games::config::ConfigError>,
+}
+
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum UiSelectionPane {
     JobOutput,
@@ -225,6 +238,14 @@ pub struct GamesState {
     pub pending_run: bool,
     #[serde(skip)]
     pub pending_run_override: Option<GamesRunOverride>,
+    #[serde(skip)]
+    pub config_preview: Option<GamesConfigPreview>,
+    #[serde(skip)]
+    pub config_preview_pending: bool,
+    #[serde(skip)]
+    pub pending_family_run: Option<GamesFamilyRunRequest>,
+    #[serde(skip)]
+    pub family_building: bool,
     #[serde(skip)]
     pub pending_close: bool,
     #[serde(skip)]
@@ -791,6 +812,10 @@ impl AppState {
                 petri_lines: Vec::new(),
                 pending_run: false,
                 pending_run_override: None,
+                config_preview: None,
+                config_preview_pending: false,
+                pending_family_run: None,
+                family_building: false,
                 pending_close: false,
                 pending_hide: false,
                 pending_show: false,
@@ -1766,6 +1791,8 @@ fn handle_command_line(state: &mut AppState, input: &str) -> bool {
             }
             AppKind::Games => {
                 state.games.pending_run_override = None;
+                state.games.pending_family_run = None;
+                state.games.family_building = false;
                 state.games.pending_run = true;
                 state.status = Some("Games tournament queued".into());
                 false
@@ -1781,23 +1808,49 @@ fn handle_command_line(state: &mut AppState, input: &str) -> bool {
             && tokens.get(1) == Some(&"run")
             && tokens.len() > 2 =>
         {
-            let family = tokens[2];
-            match build_family_run_override(state, family, trimmed) {
-                Ok(override_run) => {
-                    let machine_count = override_run.config.strategies.len();
-                    let label = override_run.label.clone();
-                    state.games.pending_run_override = Some(override_run);
-                    state.games.pending_run = true;
+            let (force, family) = if tokens.get(2) == Some(&"force") {
+                match tokens.get(3).copied() {
+                    Some(family) => (true, family),
+                    None => {
+                        state.status = Some(
+                            "Usage: :games run force <fsm|ca|tm> {params} (e.g. :games run force fsm {3, 2})"
+                                .into(),
+                        );
+                        return false;
+                    }
+                }
+            } else {
+                (false, tokens[2])
+            };
+
+            if state.games.family_building {
+                state.status = Some("Family run preparation already in progress".into());
+                return false;
+            }
+
+            match build_family_run_override(state, family, trimmed, force) {
+                Ok(request) => {
+                    state.games.pending_run_override = None;
+                    state.games.pending_run = false;
+                    state.games.pending_family_run = Some(request);
+                    state.games.family_building = true;
+                    let mode = if force { "forced, " } else { "" };
                     state.status = Some(format!(
-                        "Games tournament queued ({label}, {machine_count} machines)"
+                        "Preparing family run ({mode}{family})..."
                     ));
                 }
-                Err(err) => state.status = Some(err),
+                Err(err) => {
+                    state.games.pending_family_run = None;
+                    state.games.family_building = false;
+                    state.status = Some(err)
+                }
             }
             false
         }
         ["games", "run"] | ["run", "games"] => {
             state.games.pending_run_override = None;
+            state.games.pending_family_run = None;
+            state.games.family_building = false;
             state.games.pending_run = true;
             state.status = Some("Games tournament queued".into());
             false
@@ -2841,26 +2894,66 @@ const MAX_FAMILY_TOTAL_MATCHES: u128 = 500_000;
 const MAX_FAMILY_TOTAL_ROUND_OPS: u128 = 50_000_000;
 
 fn build_family_run_override(
-    state: &AppState,
+    _state: &AppState,
     family: &str,
     input: &str,
-) -> Result<GamesRunOverride, String> {
+    force: bool,
+) -> Result<GamesFamilyRunRequest, String> {
     let family = family.to_ascii_lowercase();
-    let config_text = state.editor_buffer().content_as_string();
+    match family.as_str() {
+        "fsm" => {
+            parse_fsm_family_tuple(input)?;
+        }
+        "tm" => {
+            parse_tm_family_tuple(input)?;
+        }
+        "ca" => {
+            parse_ca_family_tuple(input)?;
+        }
+        _ => {
+            return Err(
+                "Usage: :games run [force] <fsm|ca|tm> {params} (e.g. :games run fsm {2, 2})"
+                    .into(),
+            )
+        }
+    }
+
+    Ok(GamesFamilyRunRequest {
+        family,
+        input: input.to_string(),
+        force,
+    })
+}
+
+pub fn build_family_run_override_for_request(
+    workspace_root: &std::path::Path,
+    config_text: &str,
+    request: &GamesFamilyRunRequest,
+) -> Result<GamesRunOverride, String> {
     let mut config = nit_games::config::GamesConfig::from_toml_with_root(
-        &config_text,
-        Some(&state.workspace_root),
+        config_text,
+        Some(workspace_root),
     )
     .map_err(|err| format!("Config error: {err}"))?;
 
-    let (strategies, label) = match family.as_str() {
+    let (strategies, label) = match request.family.as_str() {
         "fsm" => {
-            let (states, actions) = parse_fsm_family_tuple(input)?;
-            let specs = generate_fsm_family_strategies(states, actions)?;
-            (specs, format!("fsm {{s={states}, k={actions}}}"))
+            let (states, actions) = parse_fsm_family_tuple(&request.input)?;
+            let (specs, stats) =
+                generate_fsm_family_strategies(states, actions, config.engine.fsm_grouping)?;
+            (
+                specs,
+                format!(
+                    "fsm {{s={states}, k={actions}, grouping={}}}; raw→canonical→unique = {}→{}→{}",
+                    fsm_grouping_mode_label(config.engine.fsm_grouping),
+                    stats.raw_count,
+                    stats.canonical_count,
+                    stats.unique_behavior_count
+                ),
+            )
         }
         "tm" => {
-            let (states, symbols) = parse_tm_family_tuple(input)?;
+            let (states, symbols) = parse_tm_family_tuple(&request.input)?;
             let (blank, max_steps) = default_tm_family_params(&config);
             let specs = generate_tm_family_strategies(states, symbols, blank, max_steps)?;
             (
@@ -2869,7 +2962,7 @@ fn build_family_run_override(
             )
         }
         "ca" => {
-            let (symbols, two_r, t) = parse_ca_family_tuple(input)?;
+            let (symbols, two_r, t) = parse_ca_family_tuple(&request.input)?;
             let specs = generate_ca_family_strategies(symbols, two_r, t)?;
             (
                 specs,
@@ -2878,7 +2971,8 @@ fn build_family_run_override(
         }
         _ => {
             return Err(
-                "Usage: :games run <fsm|ca|tm> {params} (e.g. :games run fsm {2, 2})".into(),
+                "Usage: :games run [force] <fsm|ca|tm> {params} (e.g. :games run fsm {2, 2})"
+                    .into(),
             )
         }
     };
@@ -2888,16 +2982,18 @@ fn build_family_run_override(
     }
     let total_matches =
         estimate_total_matches(strategies.len(), config.repetitions, config.self_play)?;
-    if total_matches > MAX_FAMILY_TOTAL_MATCHES {
-        return Err(format!(
-            "Family run too large for interactive speed: {total_matches} matches exceeds cap {MAX_FAMILY_TOTAL_MATCHES}. Reduce tuple size or repetitions."
-        ));
-    }
     let total_round_ops = total_matches.saturating_mul(config.rounds.max(1) as u128);
-    if total_round_ops > MAX_FAMILY_TOTAL_ROUND_OPS {
-        return Err(format!(
-            "Family run too large for interactive speed: {total_round_ops} round-ops exceeds cap {MAX_FAMILY_TOTAL_ROUND_OPS}. Reduce rounds/repetitions or tuple size."
-        ));
+    if !request.force {
+        if total_matches > MAX_FAMILY_TOTAL_MATCHES {
+            return Err(format!(
+                "Family run too large for interactive speed: {total_matches} matches exceed cap {MAX_FAMILY_TOTAL_MATCHES}. Reduce tuple size or repetitions."
+            ));
+        }
+        if total_round_ops > MAX_FAMILY_TOTAL_ROUND_OPS {
+            return Err(format!(
+                "Family run too large for interactive speed: {total_round_ops} round-ops exceeds cap {MAX_FAMILY_TOTAL_ROUND_OPS}. Reduce rounds/repetitions or tuple size."
+            ));
+        }
     }
     config.strategies = strategies;
     let generated_text = format!("{FAMILY_RUN_CONFIG_PREFIX}\n# {label}\n{config_text}");
@@ -2952,17 +3048,61 @@ fn parse_braced_parts<'a>(input: &'a str, usage: &str) -> Result<Vec<&'a str>, S
 }
 
 fn parse_fsm_family_tuple(input: &str) -> Result<(usize, usize), String> {
-    let usage = "Usage: :games run fsm {states, k}";
+    let usage = "Usage: :games run fsm {states, k} (example: :games run fsm {2, 2})";
     let parts = parse_braced_parts(input, usage)?;
     if parts.len() != 2 {
         return Err("FSM family tuple must be {states, k}".into());
     }
-    let states_raw = parts[0]
-        .parse::<u64>()
-        .map_err(|_| "FSM family tuple: states must be an integer".to_string())?;
-    let actions_raw = parts[1]
-        .parse::<u64>()
-        .map_err(|_| "FSM family tuple: k must be an integer".to_string())?;
+
+    let mut states_raw: Option<u64> = None;
+    let mut actions_raw: Option<u64> = None;
+
+    for part in parts {
+        let token = part.trim();
+        if let Some((key_raw, value_raw)) = token.split_once('=') {
+            let key = key_raw.trim().to_ascii_lowercase();
+            let value = value_raw.trim().parse::<u64>().map_err(|_| {
+                format!("FSM family tuple: '{key}' value must be an integer (example: {{2, 2}})")
+            })?;
+            match key.as_str() {
+                "s" | "state" | "states" => states_raw = Some(value),
+                "k" | "actions" => actions_raw = Some(value),
+                _ => return Err(
+                    "FSM family tuple: unknown key; use 's'/'states' and 'k' (example: {s=2, k=2})"
+                        .into(),
+                ),
+            }
+            continue;
+        }
+
+        if token.eq_ignore_ascii_case("s")
+            || token.eq_ignore_ascii_case("state")
+            || token.eq_ignore_ascii_case("states")
+            || token.eq_ignore_ascii_case("k")
+        {
+            return Err(
+                "FSM family tuple placeholders need numeric values (example: :games run fsm {2, 2})"
+                    .into(),
+            );
+        }
+
+        let value = token.parse::<u64>().map_err(|_| {
+            "FSM family tuple entries must be integers (example: :games run fsm {2, 2})".to_string()
+        })?;
+        if states_raw.is_none() {
+            states_raw = Some(value);
+        } else if actions_raw.is_none() {
+            actions_raw = Some(value);
+        } else {
+            return Err("FSM family tuple must be {states, k}".into());
+        }
+    }
+
+    let states_raw = states_raw
+        .ok_or_else(|| "FSM family tuple missing states value (example: {2, 2})".to_string())?;
+    let actions_raw = actions_raw
+        .ok_or_else(|| "FSM family tuple missing k value (example: {2, 2})".to_string())?;
+
     if states_raw == 0 || states_raw > usize::MAX as u64 {
         return Err(format!(
             "FSM family tuple: states must be in 1..={}",
@@ -2971,7 +3111,7 @@ fn parse_fsm_family_tuple(input: &str) -> Result<(usize, usize), String> {
     }
     if actions_raw != 2 {
         return Err(
-            "FSM family tuple: notebook-compatible tournament run currently requires k=2".into(),
+            "FSM family tuple currently requires k=2".into(),
         );
     }
     Ok((states_raw as usize, actions_raw as usize))
@@ -3058,16 +3198,42 @@ fn checked_pow_u128_exp(mut base: u128, mut exp: u128) -> Option<u128> {
     Some(out)
 }
 
+struct FsmFamilyStats {
+    raw_count: u128,
+    canonical_count: usize,
+    unique_behavior_count: usize,
+}
+
+fn fsm_grouping_mode_label(mode: nit_games::FsmGroupingMode) -> &'static str {
+    match mode {
+        nit_games::FsmGroupingMode::Wnbm => "wnbm",
+        nit_games::FsmGroupingMode::Moorem => "moorem",
+    }
+}
+
 fn generate_fsm_family_strategies(
     states: usize,
     actions: usize,
-) -> Result<Vec<nit_games::StrategySpec>, String> {
-    let count = nit_games::fsm_count(states, actions)
+    grouping_mode: nit_games::FsmGroupingMode,
+) -> Result<(Vec<nit_games::StrategySpec>, FsmFamilyStats), String> {
+    let total_count = nit_games::fsm_count(states, actions)
         .ok_or_else(|| "FSM family count overflow".to_string())?;
-    let machine_count = checked_machine_count(count, "FSM")?;
+    checked_machine_count(total_count, "FSM")?;
+    let groups = nit_games::group_canonical_fsm_indices_by_behavior_with_mode(
+        states,
+        actions,
+        grouping_mode,
+    )?;
+    let representative_indices = groups
+        .iter()
+        .filter_map(|group| group.first().copied())
+        .collect::<Vec<_>>();
+    let unique_behavior_count = groups.len();
+    let canonical_indices = nit_games::canonical_fsm_indices(states, actions)?;
+    let canonical_count = canonical_indices.len();
+    let machine_count = checked_machine_count(unique_behavior_count as u128, "FSM")?;
     let mut specs = Vec::with_capacity(machine_count);
-    for index in 0..machine_count {
-        let rule_index = index as u64;
+    for rule_index in representative_indices {
         let (outputs, transitions) =
             nit_games::decode_fsm_notebook_index(rule_index, states, actions)
                 .map_err(|err| format!("FSM index decode error for {rule_index}: {err}"))?;
@@ -3084,7 +3250,14 @@ fn generate_fsm_family_strategies(
             },
         });
     }
-    Ok(specs)
+    Ok((
+        specs,
+        FsmFamilyStats {
+            raw_count: total_count,
+            canonical_count,
+            unique_behavior_count,
+        },
+    ))
 }
 
 fn default_tm_family_params(config: &nit_games::NormalizedConfig) -> (u8, u32) {
@@ -3916,18 +4089,179 @@ transitions = [[0, 0]]
         );
         state.app_kind = AppKind::Games;
         assert!(!handle_command_line(&mut state, ":games run fsm {2, 2}"));
-        assert!(state.games.pending_run);
-        let override_run = state
+        assert!(!state.games.pending_run);
+        assert!(state.games.family_building);
+        let request = state
             .games
-            .pending_run_override
+            .pending_family_run
             .as_ref()
-            .expect("expected generated override");
-        assert_eq!(override_run.config.strategies.len(), 64);
+            .expect("expected queued family request");
+        let override_run = build_family_run_override_for_request(
+            &state.workspace_root,
+            &state.editor_buffer().content_as_string(),
+            request,
+        )
+        .expect("expected generated override");
+        let expected = nit_games::unique_fsm_behavior_representatives(2, 2)
+            .expect("notebook behavior representatives")
+            .len();
+        assert_eq!(override_run.config.strategies.len(), expected);
+        assert_eq!(override_run.config.strategies.len(), 22);
         assert!(override_run
             .config
             .strategies
             .iter()
             .all(|spec| matches!(spec.kind, nit_games::config::StrategySpecKind::Fsm { .. })));
+    }
+
+    #[test]
+    fn command_games_run_fsm_family_accepts_named_tuple_keys() {
+        let root = temp_dir("cmd-games-run-fsm-family-named");
+        let config = r#"
+schema_version = 1
+game = "ipd"
+rounds = 10
+repetitions = 1
+noise = 0.0
+
+[[strategy]]
+id = "fsm_allc"
+type = "fsm"
+num_states = 1
+outputs = ["C"]
+transitions = [[0, 0]]
+"#;
+        let mut state = AppState::new(
+            root.clone(),
+            Buffer::from_str("x", config, None),
+            Buffer::empty("n", None),
+        );
+        state.app_kind = AppKind::Games;
+        assert!(!handle_command_line(
+            &mut state,
+            ":games run fsm {s=2, k=2}"
+        ));
+        assert!(!state.games.pending_run);
+        assert!(state.games.pending_family_run.is_some());
+    }
+
+    #[test]
+    fn command_games_run_fsm_family_placeholder_tuple_shows_hint() {
+        let root = temp_dir("cmd-games-run-fsm-family-placeholder");
+        let config = r#"
+schema_version = 1
+game = "ipd"
+rounds = 10
+repetitions = 1
+noise = 0.0
+
+[[strategy]]
+id = "fsm_allc"
+type = "fsm"
+num_states = 1
+outputs = ["C"]
+transitions = [[0, 0]]
+"#;
+        let mut state = AppState::new(
+            root.clone(),
+            Buffer::from_str("x", config, None),
+            Buffer::empty("n", None),
+        );
+        state.app_kind = AppKind::Games;
+        assert!(!handle_command_line(&mut state, ":games run fsm {s, k}"));
+        assert!(!state.games.pending_run);
+        let status = state.status.clone().unwrap_or_default();
+        assert!(status.contains("placeholders need numeric values"));
+    }
+
+    #[test]
+    fn command_games_run_fsm_family_cap_blocks_without_force() {
+        let root = temp_dir("cmd-games-run-fsm-family-cap");
+        let config = r#"
+schema_version = 1
+game = "ipd"
+rounds = 10
+repetitions = 1
+noise = 0.0
+
+[engine]
+fsm_grouping = "moorem"
+
+[[strategy]]
+id = "fsm_allc"
+type = "fsm"
+num_states = 1
+outputs = ["C"]
+transitions = [[0, 0]]
+"#;
+        let mut state = AppState::new(
+            root.clone(),
+            Buffer::from_str("x", config, None),
+            Buffer::empty("n", None),
+        );
+        state.app_kind = AppKind::Games;
+        assert!(!handle_command_line(&mut state, ":games run fsm {3, 2}"));
+        assert!(!state.games.pending_run);
+        assert!(state.games.pending_family_run.is_some());
+        let request = state
+            .games
+            .pending_family_run
+            .as_ref()
+            .expect("expected queued family request");
+        let err = build_family_run_override_for_request(
+            &state.workspace_root,
+            &state.editor_buffer().content_as_string(),
+            request,
+        )
+        .expect_err("expected cap error");
+        let status = err;
+        assert!(status.contains("matches exceed cap"));
+    }
+
+    #[test]
+    fn command_games_run_fsm_family_cap_force_bypasses_limits() {
+        let root = temp_dir("cmd-games-run-fsm-family-cap-force");
+        let config = r#"
+schema_version = 1
+game = "ipd"
+rounds = 10
+repetitions = 1
+noise = 0.0
+
+[engine]
+fsm_grouping = "moorem"
+
+[[strategy]]
+id = "fsm_allc"
+type = "fsm"
+num_states = 1
+outputs = ["C"]
+transitions = [[0, 0]]
+"#;
+        let mut state = AppState::new(
+            root.clone(),
+            Buffer::from_str("x", config, None),
+            Buffer::empty("n", None),
+        );
+        state.app_kind = AppKind::Games;
+        assert!(!handle_command_line(
+            &mut state,
+            ":games run force fsm {3, 2}"
+        ));
+        assert!(!state.games.pending_run);
+        assert!(state.games.pending_family_run.is_some());
+        let request = state
+            .games
+            .pending_family_run
+            .as_ref()
+            .expect("expected queued family request");
+        let override_run = build_family_run_override_for_request(
+            &state.workspace_root,
+            &state.editor_buffer().content_as_string(),
+            request,
+        )
+        .expect("expected generated override");
+        assert!(!override_run.config.strategies.is_empty());
     }
 
     #[test]
@@ -3957,12 +4291,18 @@ rule_code = 0
         );
         state.app_kind = AppKind::Games;
         assert!(!handle_command_line(&mut state, ":games run tm {1, 2}"));
-        assert!(state.games.pending_run);
-        let override_run = state
+        assert!(!state.games.pending_run);
+        let request = state
             .games
-            .pending_run_override
+            .pending_family_run
             .as_ref()
-            .expect("expected generated override");
+            .expect("expected queued family request");
+        let override_run = build_family_run_override_for_request(
+            &state.workspace_root,
+            &state.editor_buffer().content_as_string(),
+            request,
+        )
+        .expect("expected generated override");
         assert_eq!(override_run.config.strategies.len(), 16);
         assert!(override_run.config.strategies.iter().all(|spec| matches!(
             spec.kind,
@@ -3995,12 +4335,18 @@ t = 2
         );
         state.app_kind = AppKind::Games;
         assert!(!handle_command_line(&mut state, ":games run ca {2, 1}"));
-        assert!(state.games.pending_run);
-        let override_run = state
+        assert!(!state.games.pending_run);
+        let request = state
             .games
-            .pending_run_override
+            .pending_family_run
             .as_ref()
-            .expect("expected generated override");
+            .expect("expected queued family request");
+        let override_run = build_family_run_override_for_request(
+            &state.workspace_root,
+            &state.editor_buffer().content_as_string(),
+            request,
+        )
+        .expect("expected generated override");
         assert_eq!(override_run.config.strategies.len(), 256);
         assert!(override_run
             .config

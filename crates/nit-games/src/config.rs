@@ -130,6 +130,8 @@ pub struct EngineConfig {
     #[serde(default = "default_fast_eval")]
     pub fast_eval: bool,
     #[serde(default)]
+    pub fsm_grouping: FsmGroupingMode,
+    #[serde(default)]
     pub complexity_cost: ComplexityCostConfig,
 }
 
@@ -140,8 +142,24 @@ impl Default for EngineConfig {
             parallelism: ParallelismConfig::default(),
             progress_interval_ms: default_progress_interval_ms(),
             fast_eval: default_fast_eval(),
+            fsm_grouping: FsmGroupingMode::default(),
             complexity_cost: ComplexityCostConfig::default(),
         }
+    }
+}
+
+#[derive(Copy, Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum FsmGroupingMode {
+    #[serde(alias = "notebook")]
+    Wnbm,
+    #[serde(alias = "exact", alias = "moore")]
+    Moorem,
+}
+
+impl Default for FsmGroupingMode {
+    fn default() -> Self {
+        Self::Wnbm
     }
 }
 

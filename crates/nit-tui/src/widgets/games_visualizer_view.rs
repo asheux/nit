@@ -1,5 +1,5 @@
 use nit_core::{AppState, GamesStatus, PaneId, UiSelectionPane};
-use nit_games::config::{GamesConfig, StrategySpecKind};
+use nit_games::config::StrategySpecKind;
 use nit_games::strategy::InputMode;
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
@@ -56,7 +56,10 @@ pub fn layout_for_config(
 pub fn build_main_lines(
     state: &AppState,
     theme: &Theme,
-    config_result: &Result<nit_games::config::NormalizedConfig, nit_games::config::ConfigError>,
+    config_result: Option<
+        &Result<nit_games::config::NormalizedConfig, nit_games::config::ConfigError>,
+    >,
+    config_pending: bool,
     show_payoff_side: bool,
     width: usize,
 ) -> Vec<Line<'static>> {
@@ -126,7 +129,7 @@ pub fn build_main_lines(
     lines.push(Line::from(Span::styled("Config Summary", header_style)));
 
     match config_result {
-        Ok(config) => {
+        Some(Ok(config)) => {
             lines.push(Line::from(vec![
                 Span::styled("game: ", label_style),
                 Span::styled(config.game.clone(), value_style),
@@ -203,7 +206,7 @@ pub fn build_main_lines(
                 dim_style,
             )));
         }
-        Err(err) => {
+        Some(Err(err)) => {
             lines.push(Line::from(vec![Span::styled(
                 "Config error:",
                 Style::default().fg(theme.warning),
@@ -214,6 +217,17 @@ pub fn build_main_lines(
                     Span::styled(msg.clone(), value_style),
                 ]));
             }
+        }
+        None => {
+            let label = if config_pending {
+                "Parsing config in background..."
+            } else {
+                "Config preview pending..."
+            };
+            lines.push(Line::from(vec![
+                Span::styled("Config: ", label_style),
+                Span::styled(label, dim_style),
+            ]));
         }
     }
 
@@ -262,7 +276,16 @@ pub fn build_side_lines(state: &AppState, theme: &Theme, width: usize) -> Vec<Li
     )
 }
 
-pub fn render(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
+pub fn render(
+    frame: &mut Frame,
+    area: Rect,
+    state: &AppState,
+    theme: &Theme,
+    config_result: Option<
+        &Result<nit_games::config::NormalizedConfig, nit_games::config::ConfigError>,
+    >,
+    config_pending: bool,
+) {
     let focused = state.focus == PaneId::Visualizer;
     let border = if focused {
         Style::default().fg(theme.title_focused)
@@ -287,14 +310,16 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    let config_text = state.editor_buffer().content_as_string();
-    let config_result = GamesConfig::from_toml_with_root(&config_text, Some(&state.workspace_root));
-    let layout = layout_for_config(inner, config_result.as_ref().ok());
+    let layout = layout_for_config(
+        inner,
+        config_result.and_then(|result| result.as_ref().ok()),
+    );
 
     let mut lines = build_main_lines(
         state,
         theme,
-        &config_result,
+        config_result,
+        config_pending,
         layout.show_payoff_side,
         layout.main.width as usize,
     );

@@ -98,6 +98,7 @@ struct RunState {
     steps_per_tick: u32,
     progress_interval: Duration,
     last_progress: Instant,
+    last_progress_match: Option<usize>,
     last_completed: usize,
 }
 
@@ -164,10 +165,11 @@ fn runner_loop(cmd_rx: Receiver<RunnerCommand>, event_tx: Sender<RunnerEvent>) {
             continue;
         };
 
+        let rounds_per_match = run_state.runner.config().rounds.max(1);
         let steps = if step_once {
             1
         } else {
-            run_state.steps_per_tick
+            dephase_steps_per_tick(run_state.steps_per_tick, rounds_per_match)
         };
         run_state.runner.step_rounds(steps);
         for preview in run_state.runner.drain_match_history_previews() {
@@ -181,19 +183,31 @@ fn runner_loop(cmd_rx: Receiver<RunnerCommand>, event_tx: Sender<RunnerEvent>) {
             run_state.last_completed = completed;
         }
 
+        let progress = run_state.runner.progress();
+        let progress_match = progress.as_ref().map(|p| p.match_index);
+        let match_changed = progress_match != run_state.last_progress_match;
         if run_state.progress_interval.is_zero()
             || run_state.last_progress.elapsed() >= run_state.progress_interval
+            || match_changed
         {
-            if let Some(progress) = run_state.runner.progress() {
+            if let Some(progress) = progress {
                 let _ = event_tx.send(RunnerEvent::Progress(progress));
             }
             if let Some(snapshot) = run_state.runner.match_snapshot() {
                 let _ = event_tx.send(RunnerEvent::MatchPreview(snapshot));
             }
             run_state.last_progress = Instant::now();
+            run_state.last_progress_match = progress_match;
         }
 
         if run_state.runner.is_done() {
+            if let Some(progress) = run_state.runner.progress() {
+                let _ = event_tx.send(RunnerEvent::Progress(progress));
+            }
+            if let Some(snapshot) = run_state.runner.match_snapshot() {
+                let _ = event_tx.send(RunnerEvent::MatchPreview(snapshot));
+            }
+            let _ = event_tx.send(RunnerEvent::PartialLeaderboard(run_state.runner.results()));
             match finalize_run(state.take().expect("run state")) {
                 Ok(summary) => {
                     let _ = event_tx.send(RunnerEvent::Finished(summary));
@@ -239,6 +253,7 @@ fn start_run(request: RunRequest, event_tx: &Sender<RunnerEvent>) -> Result<RunS
         steps_per_tick: request.steps_per_tick.max(1),
         progress_interval: request.progress_interval,
         last_progress: Instant::now(),
+        last_progress_match: None,
         last_completed: 0,
     })
 }
@@ -283,4 +298,34 @@ fn finalize_cancel(state: RunState) {
     let _ = state
         .runner
         .finish(state.timestamp, state.run_id, state.config_text);
+}
+
+fn dephase_steps_per_tick(steps_per_tick: u32, rounds_per_match: u32) -> u32 {
+    let steps = steps_per_tick.max(1);
+    if rounds_per_match <= 1 || steps <= 1 {
+        return steps;
+    }
+    if steps % rounds_per_match == 0 {
+        steps.saturating_add(1)
+    } else {
+        steps
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::dephase_steps_per_tick;
+
+    #[test]
+    fn dephase_steps_breaks_round_alignment() {
+        assert_eq!(dephase_steps_per_tick(50_000, 20), 50_001);
+        assert_eq!(dephase_steps_per_tick(20, 20), 21);
+    }
+
+    #[test]
+    fn dephase_steps_keeps_non_aligned_values() {
+        assert_eq!(dephase_steps_per_tick(50_001, 20), 50_001);
+        assert_eq!(dephase_steps_per_tick(1, 20), 1);
+        assert_eq!(dephase_steps_per_tick(20, 1), 20);
+    }
 }

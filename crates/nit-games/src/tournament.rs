@@ -1,6 +1,5 @@
 use crate::config::{
-    EngineMode, NormalizedConfig, ParallelismConfig, ParallelismMode, StrategySpec,
-    StrategySpecKind,
+    NormalizedConfig, ParallelismConfig, ParallelismMode, StrategySpec, StrategySpecKind,
 };
 use crate::events::{EventWriter, GameEvent};
 use crate::fast_eval::{evaluate_match, CycleMetadata, FastStrategyModel};
@@ -160,6 +159,7 @@ pub struct TournamentRunner {
     event_writer: Option<EventWriter>,
     history_writer: Option<HistoryWriter>,
     last_round: Option<RoundSnapshot>,
+    last_progress: Option<TournamentProgress>,
     collect_match_history_previews: bool,
     completed_history_previews: Vec<MatchHistoryPreview>,
 }
@@ -332,7 +332,8 @@ impl TournamentRunner {
             event_writer: None,
             history_writer: None,
             last_round: None,
-            collect_match_history_previews: matches!(config.engine.mode, EngineMode::Interactive),
+            last_progress: None,
+            collect_match_history_previews: true,
             completed_history_previews: Vec::new(),
         }
     }
@@ -356,30 +357,74 @@ impl TournamentRunner {
     }
 
     pub fn progress(&self) -> Option<TournamentProgress> {
-        let current = self.current.as_ref()?;
-        let matchup = &current.matchup;
-        let a = self.strategies.get(matchup.a_idx)?.id.clone();
-        let b = self.strategies.get(matchup.b_idx)?.id.clone();
-        Some(TournamentProgress {
-            match_index: self.match_index.saturating_add(1),
-            total_matches: self.schedule.len().max(1),
-            round: current.round,
-            rounds: current.rounds_total,
-            a,
-            b,
-            total_payoff_a: current.a_total,
-            total_payoff_b: current.b_total,
-            last_action_a: self.last_round.as_ref().map(|r| r.a_action),
-            last_action_b: self.last_round.as_ref().map(|r| r.b_action),
-            last_payoff_a: self.last_round.as_ref().map(|r| r.a_payoff),
-            last_payoff_b: self.last_round.as_ref().map(|r| r.b_payoff),
-            last_halted_a: self.last_round.as_ref().map(|r| r.a_halted),
-            last_halted_b: self.last_round.as_ref().map(|r| r.b_halted),
-            last_outcome: self
-                .last_round
-                .as_ref()
-                .map(|r| Outcome::from_actions(r.a_action, r.b_action)),
-        })
+        if self.schedule.is_empty() {
+            return Some(TournamentProgress {
+                match_index: 0,
+                total_matches: 0,
+                round: 0,
+                rounds: self.config.rounds,
+                a: "-".into(),
+                b: "-".into(),
+                total_payoff_a: 0,
+                total_payoff_b: 0,
+                last_action_a: None,
+                last_action_b: None,
+                last_payoff_a: None,
+                last_payoff_b: None,
+                last_halted_a: None,
+                last_halted_b: None,
+                last_outcome: None,
+            });
+        }
+        if let Some(current) = self.current.as_ref() {
+            let matchup = &current.matchup;
+            let a = self.strategies.get(matchup.a_idx)?.id.clone();
+            let b = self.strategies.get(matchup.b_idx)?.id.clone();
+            let last_round = if current.round > 0 {
+                self.last_round.as_ref()
+            } else {
+                None
+            };
+            return Some(TournamentProgress {
+                match_index: self.match_index.saturating_add(1),
+                total_matches: self.schedule.len().max(1),
+                round: current.round,
+                rounds: current.rounds_total,
+                a,
+                b,
+                total_payoff_a: current.a_total,
+                total_payoff_b: current.b_total,
+                last_action_a: last_round.map(|r| r.a_action),
+                last_action_b: last_round.map(|r| r.b_action),
+                last_payoff_a: last_round.map(|r| r.a_payoff),
+                last_payoff_b: last_round.map(|r| r.b_payoff),
+                last_halted_a: last_round.map(|r| r.a_halted),
+                last_halted_b: last_round.map(|r| r.b_halted),
+                last_outcome: last_round.map(|r| Outcome::from_actions(r.a_action, r.b_action)),
+            });
+        }
+        if let Some(next_match) = self.schedule.get(self.match_index) {
+            let a = self.strategies.get(next_match.a_idx)?.id.clone();
+            let b = self.strategies.get(next_match.b_idx)?.id.clone();
+            return Some(TournamentProgress {
+                match_index: self.match_index.saturating_add(1),
+                total_matches: self.schedule.len().max(1),
+                round: 0,
+                rounds: self.config.rounds,
+                a,
+                b,
+                total_payoff_a: 0,
+                total_payoff_b: 0,
+                last_action_a: None,
+                last_action_b: None,
+                last_payoff_a: None,
+                last_payoff_b: None,
+                last_halted_a: None,
+                last_halted_b: None,
+                last_outcome: None,
+            });
+        }
+        self.last_progress.clone()
     }
 
     pub fn match_snapshot(&self) -> Option<MatchSnapshot> {
@@ -437,6 +482,23 @@ impl TournamentRunner {
                         b: self.strategies[session.matchup.b_idx].id.clone(),
                         repetition: session.matchup.repetition + 1,
                     });
+                    self.last_progress = Some(TournamentProgress {
+                        match_index: self.match_index.saturating_add(1),
+                        total_matches: self.schedule.len().max(1),
+                        round: 0,
+                        rounds: session.rounds_total,
+                        a: self.strategies[session.matchup.a_idx].id.clone(),
+                        b: self.strategies[session.matchup.b_idx].id.clone(),
+                        total_payoff_a: 0,
+                        total_payoff_b: 0,
+                        last_action_a: None,
+                        last_action_b: None,
+                        last_payoff_a: None,
+                        last_payoff_b: None,
+                        last_halted_a: None,
+                        last_halted_b: None,
+                        last_outcome: None,
+                    });
                     self.current = Some(session);
                 } else {
                     break;
@@ -446,6 +508,23 @@ impl TournamentRunner {
             if let Some(mut session) = self.current.take() {
                 let snapshot = self.play_round(&mut session);
                 self.last_round = Some(snapshot.clone());
+                self.last_progress = Some(TournamentProgress {
+                    match_index: self.match_index.saturating_add(1),
+                    total_matches: self.schedule.len().max(1),
+                    round: session.round,
+                    rounds: session.rounds_total,
+                    a: self.strategies[session.matchup.a_idx].id.clone(),
+                    b: self.strategies[session.matchup.b_idx].id.clone(),
+                    total_payoff_a: session.a_total,
+                    total_payoff_b: session.b_total,
+                    last_action_a: Some(snapshot.a_action),
+                    last_action_b: Some(snapshot.b_action),
+                    last_payoff_a: Some(snapshot.a_payoff),
+                    last_payoff_b: Some(snapshot.b_payoff),
+                    last_halted_a: Some(snapshot.a_halted),
+                    last_halted_b: Some(snapshot.b_halted),
+                    last_outcome: Some(Outcome::from_actions(snapshot.a_action, snapshot.b_action)),
+                });
                 if session.round >= session.rounds_total {
                     if self.collect_match_history_previews {
                         let outcomes_prefix: String = session

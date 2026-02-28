@@ -135,10 +135,10 @@ pub fn build_lines(theme: &Theme) -> Vec<Line<'static>> {
     ]));
     lines.push(Line::from(vec![
         Span::styled(
-            ":games run <fsm|ca|tm> {…}",
+            ":games run [force] <fsm|ca|tm> {…}",
             Style::default().fg(theme.accent),
         ),
-        Span::raw(" run family tournament (all machines for that tuple)"),
+        Span::raw(" run family tournament; use force to bypass speed caps"),
     ]));
     lines.push(Line::from(vec![
         Span::styled(":games runs", Style::default().fg(theme.accent)),

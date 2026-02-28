@@ -1,6 +1,7 @@
 use std::io::{self, Stdout};
 use std::path::PathBuf;
-use std::sync::mpsc::Receiver;
+use std::sync::mpsc::{self, Receiver, Sender};
+use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use arboard::Clipboard;
@@ -75,6 +76,110 @@ struct FuzzySearchRuntime {
     last_preview_key: Option<PreviewKey>,
     preview_scroll_delta: i32,
     last_open: bool,
+}
+
+enum GamesConfigPreviewCommand {
+    Parse {
+        version: u64,
+        config_text: String,
+        workspace_root: PathBuf,
+    },
+    Shutdown,
+}
+
+struct GamesConfigPreviewEvent {
+    version: u64,
+    result: Result<nit_games::config::NormalizedConfig, nit_games::config::ConfigError>,
+}
+
+struct GamesConfigPreviewRuntime {
+    cmd_tx: Sender<GamesConfigPreviewCommand>,
+    events: Receiver<GamesConfigPreviewEvent>,
+    handle: Option<JoinHandle<()>>,
+    pending_version: Option<u64>,
+}
+
+impl GamesConfigPreviewRuntime {
+    fn spawn() -> Self {
+        let (cmd_tx, cmd_rx) = mpsc::channel::<GamesConfigPreviewCommand>();
+        let (event_tx, event_rx) = mpsc::channel::<GamesConfigPreviewEvent>();
+        let handle = thread::Builder::new()
+            .name("nit-games-config-preview".into())
+            .spawn(move || {
+                while let Ok(cmd) = cmd_rx.recv() {
+                    match cmd {
+                        GamesConfigPreviewCommand::Parse {
+                            version,
+                            config_text,
+                            workspace_root,
+                        } => {
+                            let result = GamesConfig::from_toml_with_root(
+                                &config_text,
+                                Some(&workspace_root),
+                            );
+                            let _ = event_tx.send(GamesConfigPreviewEvent { version, result });
+                        }
+                        GamesConfigPreviewCommand::Shutdown => break,
+                    }
+                }
+            })
+            .expect("spawn games config preview");
+        Self {
+            cmd_tx,
+            events: event_rx,
+            handle: Some(handle),
+            pending_version: None,
+        }
+    }
+
+    fn request_for_editor(&mut self, state: &mut AppState) {
+        if state.app_kind != AppKind::Games {
+            return;
+        }
+        let version = state.editor_buffer().version();
+        if state
+            .games
+            .config_preview
+            .as_ref()
+            .is_some_and(|preview| preview.version == version)
+            || self.pending_version == Some(version)
+        {
+            return;
+        }
+        let cmd = GamesConfigPreviewCommand::Parse {
+            version,
+            config_text: state.editor_buffer().content_as_string(),
+            workspace_root: state.workspace_root.clone(),
+        };
+        if self.cmd_tx.send(cmd).is_ok() {
+            self.pending_version = Some(version);
+            state.games.config_preview_pending = true;
+        } else {
+            state.games.config_preview_pending = false;
+        }
+    }
+
+    fn poll(&mut self, state: &mut AppState) {
+        while let Ok(event) = self.events.try_recv() {
+            state.games.config_preview = Some(nit_core::GamesConfigPreview {
+                version: event.version,
+                result: event.result,
+            });
+            if self.pending_version == Some(event.version) {
+                self.pending_version = None;
+            }
+            if state.editor_buffer().version() == event.version {
+                state.games.config_preview_pending = false;
+            }
+        }
+    }
+
+    fn shutdown(&mut self) {
+        let _ = self.cmd_tx.send(GamesConfigPreviewCommand::Shutdown);
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -374,9 +479,18 @@ fn run_loop(
     } else {
         None
     };
+    let mut games_config_preview = if state.app_kind == AppKind::Games {
+        Some(GamesConfigPreviewRuntime::spawn())
+    } else {
+        None
+    };
     tracing::info!("SECURITY: no plugins, no network, no shell execution");
     loop {
         fuzzy_runtime.tick_open(state);
+        if let Some(runtime) = games_config_preview.as_mut() {
+            runtime.request_for_editor(state);
+            runtime.poll(state);
+        }
         if let Some(deferred) = input_state.take_deferred() {
             if let Some(action) = map_key_to_action(deferred, state, &mut input_state) {
                 prepare_clipboard_paste(state, &mut clipboard, &action);
@@ -587,14 +701,6 @@ fn run_loop(
                             continue;
                         }
                     }
-                    if state.file_tree.open && state.focus == PaneId::Editor {
-                        let screen = terminal.size().unwrap_or_default();
-                        let layout = layout::split(screen);
-                        if handle_file_tree_key(&key, state, syntax, layout.editor) {
-                            needs_redraw = true;
-                            continue;
-                        }
-                    }
                     let petri_visible = match state.app_kind {
                         AppKind::Gol => gol_petri.as_ref().map(|p| p.is_visible()).unwrap_or(false),
                         AppKind::Games => games_petri
@@ -620,6 +726,14 @@ fn run_loop(
                                 .unwrap_or(false),
                         };
                         if handled {
+                            needs_redraw = true;
+                            continue;
+                        }
+                    }
+                    if state.file_tree.open && state.focus == PaneId::Editor {
+                        let screen = terminal.size().unwrap_or_default();
+                        let layout = layout::split(screen);
+                        if handle_file_tree_key(&key, state, syntax, layout.editor) {
                             needs_redraw = true;
                             continue;
                         }
@@ -801,6 +915,9 @@ fn run_loop(
     }
     file_tree_runner.shutdown();
     fuzzy_runtime.shutdown();
+    if let Some(runtime) = games_config_preview.as_mut() {
+        runtime.shutdown();
+    }
     Ok(())
 }
 
@@ -912,7 +1029,14 @@ fn draw(
                 }
             }
             AppKind::Games => {
-                games_visualizer_view::render(f, layout.visualizer, state, theme);
+                games_visualizer_view::render(
+                    f,
+                    layout.visualizer,
+                    state,
+                    theme,
+                    current_games_config_result(state),
+                    state.games.config_preview_pending,
+                );
             }
         }
         let syntax_status = syntax.status_label_for(editor_id, state.editor_buffer().version());
@@ -2043,12 +2167,17 @@ fn is_help_toggle_key(key: &KeyEvent) -> bool {
 }
 
 fn is_petri_show_key(key: &KeyEvent, state: &AppState) -> bool {
-    let (hidden, running) = match state.app_kind {
-        AppKind::Gol => (state.visualizer.petri_hidden, state.visualizer.running),
-        AppKind::Games => (state.games.petri_hidden, state.games.running),
-    };
-    if !hidden || !running {
-        return false;
+    match state.app_kind {
+        AppKind::Gol => {
+            if !state.visualizer.petri_hidden || !state.visualizer.running {
+                return false;
+            }
+        }
+        AppKind::Games => {
+            if !state.games.petri_hidden || !games_petri_active(state) {
+                return false;
+            }
+        }
     }
     match key {
         KeyEvent {
@@ -2063,6 +2192,15 @@ fn is_petri_show_key(key: &KeyEvent, state: &AppState) -> bool {
         } if modifiers.is_empty() || modifiers.contains(KeyModifiers::CONTROL) => true,
         _ => false,
     }
+}
+
+fn games_petri_active(state: &AppState) -> bool {
+    state.games.running
+        || matches!(
+            state.games.status,
+            nit_core::GamesStatus::Paused | nit_core::GamesStatus::Done
+        )
+        || !state.games.petri_lines.is_empty()
 }
 
 fn is_games_history_open_key(key: &KeyEvent, state: &AppState) -> bool {
@@ -2083,7 +2221,18 @@ fn is_games_history_open_key(key: &KeyEvent, state: &AppState) -> bool {
 }
 
 fn games_petri_visible(state: &AppState) -> bool {
-    state.app_kind == AppKind::Games && state.games.running && !state.games.petri_hidden
+    state.app_kind == AppKind::Games && games_petri_active(state) && !state.games.petri_hidden
+}
+
+fn current_games_config_result(
+    state: &AppState,
+) -> Option<&Result<nit_games::config::NormalizedConfig, nit_games::config::ConfigError>> {
+    let version = state.editor_buffer().version();
+    state
+        .games
+        .config_preview
+        .as_ref()
+        .and_then(|preview| (preview.version == version).then_some(&preview.result))
 }
 
 fn games_modal_popup_open(state: &AppState) -> bool {
@@ -3067,9 +3216,11 @@ fn map_visualizer_main_mouse(
     if inner.width == 0 || inner.height == 0 {
         return None;
     }
-    let config_text = state.editor_buffer().content_as_string();
-    let config_result = GamesConfig::from_toml_with_root(&config_text, Some(&state.workspace_root));
-    let layout_info = games_visualizer_view::layout_for_config(inner, config_result.as_ref().ok());
+    let config_result = current_games_config_result(state);
+    let layout_info = games_visualizer_view::layout_for_config(
+        inner,
+        config_result.and_then(|result| result.as_ref().ok()),
+    );
     let area = layout_info.main;
     if !point_in_rect(mouse.column, mouse.row, area) && !clamp {
         return None;
@@ -3077,7 +3228,8 @@ fn map_visualizer_main_mouse(
     let lines = games_visualizer_view::build_main_lines(
         state,
         theme,
-        &config_result,
+        config_result,
+        state.games.config_preview_pending,
         layout_info.show_payoff_side,
         area.width as usize,
     );
@@ -3113,9 +3265,11 @@ fn map_visualizer_side_mouse(
     if inner.width == 0 || inner.height == 0 {
         return None;
     }
-    let config_text = state.editor_buffer().content_as_string();
-    let config_result = GamesConfig::from_toml_with_root(&config_text, Some(&state.workspace_root));
-    let layout_info = games_visualizer_view::layout_for_config(inner, config_result.as_ref().ok());
+    let config_result = current_games_config_result(state);
+    let layout_info = games_visualizer_view::layout_for_config(
+        inner,
+        config_result.and_then(|result| result.as_ref().ok()),
+    );
     let Some(side_area) = layout_info.side else {
         return None;
     };
@@ -5749,6 +5903,22 @@ mod tests {
 
         let rs_control_char = KeyEvent::new(KeyCode::Char('\u{1e}'), KeyModifiers::empty());
         assert!(is_petri_show_key(&rs_control_char, &state));
+    }
+
+    #[test]
+    fn petri_show_key_allows_done_games_session() {
+        let mut state = state_for_test();
+        state.app_kind = AppKind::Games;
+        state.games.running = false;
+        state.games.status = nit_core::GamesStatus::Done;
+        state.games.petri_hidden = true;
+        state.games.petri_lines = vec!["Status: Done".into()];
+
+        let ctrl_six = KeyEvent::new(KeyCode::Char('6'), KeyModifiers::CONTROL);
+        assert!(is_petri_show_key(&ctrl_six, &state));
+        assert!(games_petri_active(&state));
+        state.games.petri_hidden = false;
+        assert!(games_petri_visible(&state));
     }
 
     #[test]

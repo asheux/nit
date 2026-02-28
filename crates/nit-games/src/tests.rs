@@ -1,9 +1,14 @@
-use crate::config::{GamesConfig, StrategySpecKind};
+use crate::config::{FsmGroupingMode, GamesConfig, StrategySpecKind};
 use crate::game::{payoffs_with_timeouts, Action, PayoffMatrix};
 use crate::history::History;
 use crate::strategy::{
     decode_fsm_notebook_index, decode_tm_rule_code_wolfram, history_to_input_u64, CaStrategy,
     FsmStrategy, InputMode, OneSidedTmStrategy, Strategy, TmMove, TmTransition,
+};
+use crate::{
+    canonical_fsm_indices, group_canonical_fsm_indices_by_behavior,
+    group_canonical_fsm_indices_by_behavior_with_mode, unique_fsm_behavior_representatives,
+    unique_fsm_behavior_representatives_with_mode, TournamentRunner,
 };
 
 fn push_round(history: &mut History, a: Action, b: Action) {
@@ -195,6 +200,77 @@ fn timeout_scoring_matches_notebook_min_max_logic() {
 }
 
 #[test]
+fn tournament_progress_reports_zero_match_runs() {
+    let src = r#"
+schema_version = 1
+game = "ipd"
+rounds = 5
+repetitions = 1
+self_play = false
+
+[[strategy]]
+id = "solo"
+type = "auto"
+states = 2
+k = 2
+index = 1
+"#;
+
+    let cfg = GamesConfig::from_toml(src).expect("parse single-strategy config");
+    let runner = TournamentRunner::new(cfg);
+    let progress = runner.progress().expect("progress should exist for empty schedule");
+    assert_eq!(progress.match_index, 0);
+    assert_eq!(progress.total_matches, 0);
+    assert_eq!(progress.round, 0);
+    assert_eq!(progress.rounds, 5);
+    assert_eq!(progress.total_payoff_a, 0);
+    assert_eq!(progress.total_payoff_b, 0);
+}
+
+#[test]
+fn tournament_progress_advances_to_next_match_after_boundary() {
+    let src = r#"
+schema_version = 1
+game = "ipd"
+rounds = 4
+repetitions = 1
+self_play = false
+
+[[strategy]]
+id = "s0"
+type = "auto"
+states = 2
+k = 2
+index = 0
+
+[[strategy]]
+id = "s1"
+type = "auto"
+states = 2
+k = 2
+index = 1
+
+[[strategy]]
+id = "s2"
+type = "auto"
+states = 2
+k = 2
+index = 18
+"#;
+
+    let cfg = GamesConfig::from_toml(src).expect("parse three-strategy config");
+    let mut runner = TournamentRunner::new(cfg);
+    runner.step_rounds(4);
+
+    let progress = runner
+        .progress()
+        .expect("progress should point to the next match");
+    assert_eq!(progress.match_index, 2);
+    assert_eq!(progress.round, 0);
+    assert_eq!(progress.rounds, 4);
+}
+
+#[test]
 fn config_infers_fsm_from_fields_and_states_alias() {
     let src = r#"
 schema_version = 1
@@ -262,4 +338,155 @@ rule_code = 1
         }
         other => panic!("expected one_sided_tm, got {other:?}"),
     }
+}
+
+#[test]
+fn fsm_canonical_indices_s1_k2_match_allc_alld() {
+    let canonical = canonical_fsm_indices(1, 2).expect("canonical indices");
+    assert_eq!(canonical, vec![0, 1]);
+
+    let groups = group_canonical_fsm_indices_by_behavior(1, 2)
+        .expect("grouped canonical indices by behavior");
+    assert_eq!(groups, vec![vec![0], vec![1]]);
+
+    let reps = unique_fsm_behavior_representatives(1, 2).expect("behavior representatives");
+    assert_eq!(reps, vec![0, 1]);
+}
+
+#[test]
+fn fsm_unique_behavior_reps_s2_k2_match_notebook_reference_set_by_default() {
+    let canonical = unique_fsm_behavior_representatives(2, 2).expect("behavior representatives");
+    let expected = vec![
+        0, 1, 18, 19, 22, 23, 26, 27, 30, 31, 34, 35, 38, 39, 46, 47, 50, 51, 54, 55, 58, 59,
+    ];
+    assert_eq!(canonical, expected);
+}
+
+#[test]
+fn fsm_unique_behavior_reps_s3_k2_match_notebook_reference_count_by_default() {
+    let canonical = unique_fsm_behavior_representatives(3, 2).expect("behavior representatives");
+    assert_eq!(canonical.len(), 956);
+}
+
+#[test]
+fn fsm_exact_grouping_mode_matches_exact_minimization_reference() {
+    let reps_22 = unique_fsm_behavior_representatives_with_mode(2, 2, FsmGroupingMode::Moorem)
+        .expect("exact behavior representatives");
+    let expected_22 = vec![
+        0, 1, 18, 19, 22, 23, 26, 27, 30, 31, 34, 35, 38, 39, 42, 43, 46, 47, 50, 51, 54, 55, 58,
+        59, 62, 63,
+    ];
+    assert_eq!(reps_22, expected_22);
+
+    let reps_32 = unique_fsm_behavior_representatives_with_mode(3, 2, FsmGroupingMode::Moorem)
+        .expect("exact behavior representatives");
+    assert_eq!(reps_32.len(), 1054);
+}
+
+#[test]
+fn fsm_canonical_groupings_are_consistent_for_multiple_s_k() {
+    for (states, actions) in [(2usize, 2usize), (3, 2)] {
+        let canonical =
+            canonical_fsm_indices(states, actions).expect("canonical indices for (s, k)");
+        assert!(!canonical.is_empty());
+
+        let mut sorted = canonical.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(canonical, sorted);
+
+        for mode in [FsmGroupingMode::Wnbm, FsmGroupingMode::Moorem] {
+            let groups = group_canonical_fsm_indices_by_behavior_with_mode(states, actions, mode)
+                .expect("grouped canonical indices by behavior");
+            assert!(!groups.is_empty());
+            assert!(groups.iter().all(|group| !group.is_empty()));
+
+            let mut flattened = groups.iter().flatten().copied().collect::<Vec<_>>();
+            flattened.sort_unstable();
+            assert_eq!(flattened, canonical);
+
+            let reps = unique_fsm_behavior_representatives_with_mode(states, actions, mode)
+                .expect("behavior representatives");
+            assert_eq!(reps.len(), groups.len());
+            assert!(groups
+                .iter()
+                .zip(reps.iter())
+                .all(|(group, rep)| group.first() == Some(rep)));
+        }
+    }
+}
+
+#[test]
+fn config_defaults_fsm_grouping_to_wnbm() {
+    let src = r#"
+schema_version = 1
+game = "ipd"
+rounds = 2
+repetitions = 1
+
+[[strategy]]
+id = "fsm_auto"
+states = 2
+start_state = 0
+outputs = ["C", "D"]
+transitions = [
+  [0, 1],
+  [0, 1],
+]
+"#;
+
+    let cfg = GamesConfig::from_toml(src).expect("parse config");
+    assert_eq!(cfg.engine.fsm_grouping, FsmGroupingMode::Wnbm);
+}
+
+#[test]
+fn config_parses_moorem_fsm_grouping_mode() {
+    let src = r#"
+schema_version = 1
+game = "ipd"
+rounds = 2
+repetitions = 1
+
+[engine]
+fsm_grouping = "moorem"
+
+[[strategy]]
+id = "fsm_auto"
+states = 2
+start_state = 0
+outputs = ["C", "D"]
+transitions = [
+  [0, 1],
+  [0, 1],
+]
+"#;
+
+    let cfg = GamesConfig::from_toml(src).expect("parse config");
+    assert_eq!(cfg.engine.fsm_grouping, FsmGroupingMode::Moorem);
+}
+
+#[test]
+fn config_legacy_exact_alias_still_parses() {
+    let src = r#"
+schema_version = 1
+game = "ipd"
+rounds = 2
+repetitions = 1
+
+[engine]
+fsm_grouping = "exact"
+
+[[strategy]]
+id = "fsm_auto"
+states = 2
+start_state = 0
+outputs = ["C", "D"]
+transitions = [
+  [0, 1],
+  [0, 1],
+]
+"#;
+
+    let cfg = GamesConfig::from_toml(src).expect("parse config");
+    assert_eq!(cfg.engine.fsm_grouping, FsmGroupingMode::Moorem);
 }
