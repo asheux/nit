@@ -45,6 +45,9 @@ struct Cli {
     /// Agent station backend (defaults to Codex when available, else mock)
     #[arg(long, value_enum)]
     agents: Option<AgentsArg>,
+    /// Codex automation runtime (exec spawns per-turn; mcp uses a persistent `codex mcp-server`)
+    #[arg(long, value_enum, default_value_t = CodexRuntimeArg::Mcp)]
+    codex_runtime: CodexRuntimeArg,
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -214,6 +217,12 @@ enum AgentsArg {
     Mock,
     /// Seed the Agent Station roster from Codex's cached model list (~/.codex/models_cache.json).
     Codex,
+}
+
+#[derive(Copy, Clone, Debug, ValueEnum)]
+enum CodexRuntimeArg {
+    Exec,
+    Mcp,
 }
 
 #[derive(Copy, Clone, Debug, ValueEnum)]
@@ -423,7 +432,11 @@ fn main() -> anyhow::Result<()> {
         );
     }
 
-    run(state, theme, log_rx)?;
+    let codex_runtime = match cli.codex_runtime {
+        CodexRuntimeArg::Exec => nit_tui::codex_runner::CodexRuntimeMode::Exec,
+        CodexRuntimeArg::Mcp => nit_tui::codex_runner::CodexRuntimeMode::Mcp,
+    };
+    run(state, theme, log_rx, codex_runtime)?;
     Ok(())
 }
 

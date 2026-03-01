@@ -147,6 +147,12 @@ fn build_vitals_spans(
     };
     let level = vitals.criticality.label().to_string();
     let level_style = criticality_style(vitals.criticality, theme);
+    let ecg_style = match vitals.criticality {
+        LabCriticality::Crit => Style::default()
+            .fg(theme.error)
+            .add_modifier(Modifier::BOLD),
+        _ => level_style,
+    };
     let label_style = theme.status_idle_style();
     let number_style = Style::default()
         .fg(theme.accent)
@@ -194,7 +200,7 @@ fn build_vitals_spans(
             Span::styled("LAB ", label_style),
             Span::styled(level.clone(), level_style),
             Span::styled("  ECG ", label_style),
-            Span::styled(ecg, level_style),
+            Span::styled(ecg, ecg_style),
         ];
         match details {
             VitalsDetails::Full => {
@@ -352,9 +358,11 @@ fn is_high_priority_status(status_text: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_status_label, criticality_style, status_style};
+    use std::time::Duration;
+
+    use super::{build_status_label, build_vitals_spans, criticality_style, status_style};
     use crate::vitals::severity_scaled_samples;
-    use crate::vitals::LabCriticality;
+    use crate::vitals::{LabCriticality, LabVitalsSnapshot};
     use crate::Theme;
 
     #[test]
@@ -427,5 +435,31 @@ mod tests {
         assert_eq!(warn.fg, Some(theme.warning));
         assert_eq!(hot.fg, Some(theme.accent));
         assert_eq!(crit.bg, Some(theme.error));
+    }
+
+    #[test]
+    fn crit_ecg_waveform_avoids_reverse_background_style() {
+        let theme = Theme::default();
+        let vitals = LabVitalsSnapshot {
+            criticality: LabCriticality::Crit,
+            hb_age: Some(Duration::from_secs(12)),
+            ag_age: Some(Duration::from_secs(2)),
+            job_running: true,
+            agent_enabled: true,
+            agent_connected: true,
+            ecg_samples: vec![0, 20, 55, 80, 40, 95, 10],
+        };
+        let (spans, _) = build_vitals_spans(&vitals, &theme, 80);
+
+        // spans = ["LAB ", level, "  ECG ", waveform, ...]
+        assert!(
+            spans.len() >= 4,
+            "expected ECG waveform span to be present, got {spans:?}"
+        );
+        assert_eq!(
+            spans[3].style.bg, None,
+            "ECG waveform should not be reverse-filled"
+        );
+        assert_eq!(spans[3].style.fg, Some(theme.error));
     }
 }

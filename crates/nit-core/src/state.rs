@@ -553,6 +553,13 @@ pub struct AgentTurnState {
     pub stage: Option<String>,
 }
 
+#[derive(Clone, Debug)]
+pub struct QueuedCodexTurn {
+    pub agent_id: String,
+    pub mission_id: Option<String>,
+    pub prompt: String,
+}
+
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct AgentsState {
     pub selected_agent: Option<String>,
@@ -645,6 +652,10 @@ pub struct AgentsState {
     /// Runtime-only.
     #[serde(skip)]
     pub active_turns: HashMap<String, AgentTurnState>,
+    /// Codex turns queued by the operator while another Codex turn is still running.
+    /// Runtime-only.
+    #[serde(skip)]
+    pub queued_codex_turns: VecDeque<QueuedCodexTurn>,
 }
 
 fn chat_input_scroll_default() -> usize {
@@ -784,6 +795,7 @@ impl AgentsState {
             codex_thread_ids: HashMap::new(),
             codex_mission_thread_ids: HashMap::new(),
             active_turns: HashMap::new(),
+            queued_codex_turns: VecDeque::new(),
         }
     }
 
@@ -855,6 +867,7 @@ impl Default for AgentsState {
             codex_thread_ids: HashMap::new(),
             codex_mission_thread_ids: HashMap::new(),
             active_turns: HashMap::new(),
+            queued_codex_turns: VecDeque::new(),
         }
     }
 }

@@ -1,6 +1,6 @@
 use crate::state::{
     AgentAlert, AgentAlertSeverity, AgentChannel, AgentDiagnosticEvent, AgentLane, AgentMessage,
-    AgentStatus, AgentTurnState, AppState, McpConnectionState, McpStatus, MissionRecord,
+    AgentStatus, AgentTurnState, AppState, McpStatus, MissionRecord,
 };
 use std::time::Instant;
 
@@ -112,7 +112,7 @@ impl AgentBusEvent {
             AgentBusEvent::TurnStarted {
                 agent_id,
                 mission_id,
-                resume_thread_id,
+                resume_thread_id: _resume_thread_id,
             } => {
                 let now = Instant::now();
                 state.agents.active_turns.insert(
@@ -131,11 +131,6 @@ impl AgentBusEvent {
                     agent.heartbeat_age_secs = 0;
                     agent.current_mission = mission_id.clone();
                 }
-
-                state.agents.mcp.state = McpConnectionState::Connecting;
-                state.agents.mcp.endpoint =
-                    codex_endpoint_label(agent_id, resume_thread_id.as_deref());
-                state.agents.mcp.last_error = None;
 
                 if let Some(mission_id) = mission_id.as_deref() {
                     if let Some(mission) = state
@@ -217,13 +212,10 @@ impl AgentBusEvent {
                 let at = timestamp_label(state);
                 if let Some(agent) = state.agents.agents.iter_mut().find(|a| a.id == *agent_id) {
                     agent.status = AgentStatus::Error;
-                    agent.queue_len = 0;
+                    agent.queue_len = agent.queue_len.saturating_sub(1);
                     agent.heartbeat_age_secs = 0;
                     agent.current_mission = mission_id.clone();
                 }
-                state.agents.mcp.state = McpConnectionState::Error;
-                state.agents.mcp.endpoint = format!("codex exec -m {agent_id}");
-                state.agents.mcp.last_error = Some(message.clone());
 
                 if let (Some(mission_id), Some(thread_id)) =
                     (mission_id.as_deref(), thread_id.as_deref())
@@ -280,8 +272,12 @@ impl AgentBusEvent {
                 }
                 let at = timestamp_label(state);
                 if let Some(agent) = state.agents.agents.iter_mut().find(|a| a.id == *agent_id) {
-                    agent.status = AgentStatus::Idle;
-                    agent.queue_len = 0;
+                    agent.queue_len = agent.queue_len.saturating_sub(1);
+                    agent.status = if agent.queue_len > 0 {
+                        AgentStatus::Waiting
+                    } else {
+                        AgentStatus::Idle
+                    };
                     agent.heartbeat_age_secs = 0;
                     agent.current_mission = mission_id.clone();
                 }
@@ -335,10 +331,6 @@ impl AgentBusEvent {
                     message: format!("[{agent_id}] turn completed"),
                     at,
                 });
-
-                state.agents.mcp.state = McpConnectionState::Connected;
-                state.agents.mcp.endpoint = format!("codex exec -m {agent_id}");
-                state.agents.mcp.last_error = None;
             }
         }
 
@@ -426,26 +418,6 @@ fn estimate_codex_context_tokens(text: &str) -> u32 {
 
 fn timestamp_label(state: &AppState) -> String {
     format!("t+{}", state.metrics.frame_count)
-}
-
-fn codex_endpoint_label(agent_id: &str, resume_thread_id: Option<&str>) -> String {
-    if let Some(thread_id) = resume_thread_id {
-        format!(
-            "codex exec resume {} -m {agent_id}",
-            shorten_thread_id(thread_id)
-        )
-    } else {
-        format!("codex exec -m {agent_id}")
-    }
-}
-
-fn shorten_thread_id(thread_id: &str) -> String {
-    let id = thread_id.trim();
-    const MAX_CHARS: usize = 8;
-    let Some((idx, _)) = id.char_indices().nth(MAX_CHARS) else {
-        return id.to_string();
-    };
-    format!("{}…", &id[..idx])
 }
 
 fn apply_codex_token_count(

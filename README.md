@@ -48,7 +48,28 @@ nit includes an Agent Ops / Agent Chat UI.
 
 - Default: uses Codex if `codex` is available and `~/.codex/models_cache.json` is present; otherwise seeds mock planner/coder/reviewer lanes.
 - `nit --agents mock` — force mock lanes.
-- `nit --agents codex` — force Codex (loads a model roster from `~/.codex/models_cache.json` and dispatches turns via the `codex` CLI).
+- `nit --agents codex` — force Codex (loads a model roster from `~/.codex/models_cache.json`).
+  - Default runtime: `--codex-runtime mcp` (runs a persistent `codex mcp-server`).
+  - Exec runtime: `--codex-runtime exec` (spawns `codex exec` per turn).
+
+Examples:
+
+```bash
+# Auto agent station backend (Codex if available, else mock)
+nit
+
+# Force Codex agent station
+nit --agents codex
+
+# Force Codex agent station, per-turn `codex exec`
+nit --agents codex --codex-runtime exec
+
+# Force mock agent station
+nit --agents mock
+
+# From source
+cargo run -p nit -- --agents codex
+```
 
 ## Documentation
 

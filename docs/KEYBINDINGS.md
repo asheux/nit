@@ -75,7 +75,7 @@
 - j/k or Up/Down: Move selection
 - Enter: Focus Agent Chat with selected context
 - n: New mission (mock runner in MVP)
-- r / s / x: MCP reconnect / start / stop (MCP tab)
+- r / s / x: MCP reconnect / start / stop (MCP tab; default runtime for Codex, override with `--codex-runtime exec`)
 - Ctrl+Space / F6: Pause/resume active Petri/tournament runtime (global)
 
 ## Agent Chat

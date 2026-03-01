@@ -288,9 +288,44 @@ pub fn render(
         .collect::<Vec<_>>();
     let input_max_row = layout.input_inner_height.saturating_sub(1);
     if layout.input_boxed {
+        let queued_count = state
+            .agents
+            .selected_context_agent()
+            .and_then(|agent_id| state.agents.agents.iter().find(|a| a.id == agent_id))
+            .map(|agent| {
+                let running = state.agents.active_turns.contains_key(&agent.id);
+                agent.queue_len.saturating_sub(usize::from(running))
+            })
+            .unwrap_or(0);
+        let mut title_spans = Vec::new();
+        title_spans.push(Span::styled(
+            "CHAT BOX".to_string(),
+            Style::default()
+                .fg(if focused {
+                    theme.border_focused
+                } else {
+                    theme.border
+                })
+                .add_modifier(Modifier::BOLD),
+        ));
+        if queued_count > 0 {
+            title_spans.push(Span::raw("  "));
+            let label = if queued_count > 1 {
+                format!(" Queued {queued_count} ")
+            } else {
+                " Queued ".to_string()
+            };
+            title_spans.push(Span::styled(
+                label,
+                Style::default()
+                    .fg(theme.background)
+                    .bg(theme.seed.accent_2)
+                    .add_modifier(Modifier::BOLD),
+            ));
+        }
         let input_block = Block::default()
             .borders(Borders::ALL)
-            .title("CHAT BOX")
+            .title(Line::from(title_spans))
             .border_style(if focused {
                 Style::default().fg(theme.border_focused)
             } else {
@@ -1174,34 +1209,10 @@ fn breather_rows_for_user_prompt(state: &AppState, pulse_on: bool, width: usize)
         agent_type
     };
     let ecg = ecg_indicator(state.metrics.frame_count, Some(&agent.id), pulse_on, true);
-    let ctx_pct = if agent.is_codex() {
-        let mission_id = agent.current_mission.as_deref();
-        mission_id
-            .and_then(|mid| {
-                state
-                    .agents
-                    .codex_mission_context_remaining_pct
-                    .get(mid)
-                    .and_then(|m| m.get(&agent.id))
-                    .copied()
-            })
-            .or_else(|| {
-                state
-                    .agents
-                    .codex_context_remaining_pct
-                    .get(&agent.id)
-                    .copied()
-            })
-    } else {
-        None
-    };
-    let ctx_suffix = ctx_pct
-        .map(|pct| format!(" {pct}% ctx"))
-        .unwrap_or_default();
 
     let mut rows = Vec::new();
     rows.push(ThreadRow {
-        text: format!("{ecg} [{agent_type}] Working{ctx_suffix}"),
+        text: format!("{ecg} [{agent_type}] Working ..."),
         kind: ThreadRowKind::Breather,
     });
 

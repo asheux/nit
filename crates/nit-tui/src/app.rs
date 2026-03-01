@@ -7,7 +7,7 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use crate::{
-    codex_runner::{CodexCommand, CodexRunner},
+    codex_runner::{CodexCommand, CodexRunner, CodexRuntimeMode},
     file_tree,
     file_tree_runner::{FileTreeCommand, FileTreeEvent, FileTreeRunner},
     fuzzy_preview_runner::{PreviewEvent, PreviewModel, PreviewRunner},
@@ -403,7 +403,12 @@ impl FuzzySearchRuntime {
     }
 }
 
-pub fn run(mut state: AppState, theme: Theme, log_rx: Receiver<String>) -> io::Result<()> {
+pub fn run(
+    mut state: AppState,
+    theme: Theme,
+    log_rx: Receiver<String>,
+    codex_runtime: CodexRuntimeMode,
+) -> io::Result<()> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
@@ -437,7 +442,14 @@ pub fn run(mut state: AppState, theme: Theme, log_rx: Receiver<String>) -> io::R
     syntax.prime_buffer(editor_id, state.editor_buffer(), warmup_editor);
     syntax.prime_buffer(notes_id, state.notes_buffer(), false);
 
-    let result = run_loop(&mut terminal, &mut state, &theme, &mut syntax, log_rx);
+    let result = run_loop(
+        &mut terminal,
+        &mut state,
+        &theme,
+        &mut syntax,
+        log_rx,
+        codex_runtime,
+    );
 
     terminal.show_cursor()?;
     if guard.keyboard_flags_pushed {
@@ -466,6 +478,7 @@ fn run_loop(
     theme: &Theme,
     syntax: &mut SyntaxRuntime,
     log_rx: Receiver<String>,
+    codex_runtime: CodexRuntimeMode,
 ) -> io::Result<()> {
     let mut last_tick = Instant::now();
     let mut last_job = Instant::now();
@@ -476,7 +489,13 @@ fn run_loop(
     let mut system_stats = SystemStats::new();
     let mut clipboard = Clipboard::new().ok();
     let mut file_tree_runner = FileTreeRunner::spawn();
-    let mut codex_runner = CodexRunner::spawn();
+    let has_codex = state.agents.agents.iter().any(|lane| lane.is_codex());
+    let codex_runtime = if has_codex {
+        codex_runtime
+    } else {
+        CodexRuntimeMode::Exec
+    };
+    let mut codex_runner = CodexRunner::spawn(codex_runtime);
     let mut fuzzy_runtime = FuzzySearchRuntime::new(theme, state.settings.highlight.clone());
     let mut seed_runtime = if state.app_kind == AppKind::Gol {
         Some(SeedRuntime::new(state))
@@ -887,7 +906,14 @@ fn run_loop(
         // codex runner events
         while let Ok(event) = codex_runner.events.try_recv() {
             record_agent_bus_vitals(&mut vitals, &event);
+            let finished = matches!(
+                event,
+                AgentBusEvent::TurnCompleted { .. } | AgentBusEvent::TurnFailed { .. }
+            );
             event.apply(state);
+            if finished {
+                maybe_dispatch_next_queued_codex_turn(state, &mut vitals, Some(&codex_runner));
+            }
             needs_redraw = true;
         }
 
@@ -1537,7 +1563,7 @@ fn handle_agent_station_key(
     }
 
     match state.focus {
-        PaneId::JobOutput => handle_agent_ops_key(key, state, vitals),
+        PaneId::JobOutput => handle_agent_ops_key(key, state, vitals, codex),
         PaneId::Notes => handle_agent_console_key(key, state, vitals, codex),
         _ => false,
     }
@@ -1564,7 +1590,12 @@ fn map_focus_hotkey(key: &KeyEvent) -> Option<PaneId> {
     }
 }
 
-fn handle_agent_ops_key(key: KeyEvent, state: &mut AppState, vitals: &mut VitalsState) -> bool {
+fn handle_agent_ops_key(
+    key: KeyEvent,
+    state: &mut AppState,
+    vitals: &mut VitalsState,
+    codex: Option<&CodexRunner>,
+) -> bool {
     if state.agents.dock_tab == AgentOpsTab::Scratchpad {
         match key {
             KeyEvent {
@@ -1786,30 +1817,30 @@ fn handle_agent_ops_key(key: KeyEvent, state: &mut AppState, vitals: &mut Vitals
             modifiers,
             ..
         } if modifiers.is_empty() && state.agents.dock_tab == AgentOpsTab::Mcp => {
-            set_mcp_state(state, McpConnectionState::Connecting, Some(19), None);
-            set_mcp_state(state, McpConnectionState::Connected, Some(7), None);
-            changed = true;
+            if let Some(codex) = codex {
+                codex.send(CodexCommand::McpReconnect);
+                changed = true;
+            }
         }
         KeyEvent {
             code: KeyCode::Char('s'),
             modifiers,
             ..
         } if modifiers.is_empty() && state.agents.dock_tab == AgentOpsTab::Mcp => {
-            set_mcp_state(state, McpConnectionState::Connected, Some(8), None);
-            changed = true;
+            if let Some(codex) = codex {
+                codex.send(CodexCommand::McpStart);
+                changed = true;
+            }
         }
         KeyEvent {
             code: KeyCode::Char('x'),
             modifiers,
             ..
         } if modifiers.is_empty() && state.agents.dock_tab == AgentOpsTab::Mcp => {
-            set_mcp_state(
-                state,
-                McpConnectionState::Disconnected,
-                None,
-                Some("MCP link stopped by operator".into()),
-            );
-            changed = true;
+            if let Some(codex) = codex {
+                codex.send(CodexCommand::McpStop);
+                changed = true;
+            }
         }
         _ => {}
     }
@@ -2043,7 +2074,7 @@ fn reset_roster_context(state: &mut AppState) -> bool {
         return false;
     };
     let agent_id = agent.id.clone();
-    let agent_label = agent.role.trim();
+    let agent_label = agent.role.trim().to_string();
     let is_codex = agent.is_codex();
     let mission_ctx = state
         .agents
@@ -2086,6 +2117,41 @@ fn reset_roster_context(state: &mut AppState) -> bool {
         state.agents.codex_thread_ids.clear();
         state.agents.codex_used_tokens.clear();
         state.agents.messages.retain(|msg| msg.mission_id.is_some());
+    }
+
+    // If there are queued Codex turns for the context we're resetting, drop them (they would run
+    // against a now-forgotten thread id). Keep each agent's `queue_len` consistent with removals.
+    let mut removed_by_agent: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
+    if let Some(mission_id) = mission_ctx.as_deref() {
+        state.agents.queued_codex_turns.retain(|turn| {
+            if turn.mission_id.as_deref() == Some(mission_id) {
+                *removed_by_agent.entry(turn.agent_id.clone()).or_insert(0) += 1;
+                false
+            } else {
+                true
+            }
+        });
+    } else {
+        state.agents.queued_codex_turns.retain(|turn| {
+            if turn.mission_id.is_none() {
+                *removed_by_agent.entry(turn.agent_id.clone()).or_insert(0) += 1;
+                false
+            } else {
+                true
+            }
+        });
+    }
+    if !removed_by_agent.is_empty() {
+        for agent in state.agents.agents.iter_mut() {
+            let Some(removed) = removed_by_agent.get(&agent.id).copied() else {
+                continue;
+            };
+            agent.queue_len = agent.queue_len.saturating_sub(removed);
+            if agent.queue_len == 0 && matches!(agent.status, AgentStatus::Waiting) {
+                agent.status = AgentStatus::Idle;
+            }
+        }
     }
     let removed = before.saturating_sub(state.agents.messages.len());
     state.agents.console_scroll = usize::MAX;
@@ -2153,7 +2219,25 @@ fn handle_agent_console_key(
             changed = push_chat_message(state);
             follow_chat_cursor = changed;
             if changed {
-                maybe_dispatch_codex_turn(state, vitals, codex, model, mission_id, prompt);
+                let is_busy = !state.agents.active_turns.is_empty()
+                    || !state.agents.queued_codex_turns.is_empty();
+                let is_codex = model.as_deref().is_some_and(|model| {
+                    state
+                        .agents
+                        .agents
+                        .iter()
+                        .find(|lane| lane.id.as_str() == model)
+                        .is_some_and(|lane| lane.is_codex())
+                });
+                if is_codex && is_busy {
+                    enqueue_codex_turn(state, vitals, model, mission_id, prompt);
+                    // If we were "busy" only because there is a local queue, kick the next turn.
+                    maybe_dispatch_next_queued_codex_turn(state, vitals, codex);
+                } else {
+                    maybe_dispatch_codex_turn(
+                        state, vitals, codex, model, mission_id, prompt, true,
+                    );
+                }
             }
         }
         KeyEvent {
@@ -2533,6 +2617,103 @@ fn chat_line_len(line_starts: &[usize], line_idx: usize, total_chars: usize) -> 
     end.saturating_sub(start)
 }
 
+fn enqueue_codex_turn(
+    state: &mut AppState,
+    vitals: &mut VitalsState,
+    model: Option<String>,
+    mission_id: Option<String>,
+    prompt: String,
+) {
+    let Some(model) = model else {
+        return;
+    };
+    // This queue is only used for Codex lanes; if the selected agent isn't Codex, ignore.
+    let is_codex = state
+        .agents
+        .agents
+        .iter()
+        .find(|lane| lane.id.as_str() == model.as_str())
+        .is_some_and(|lane| lane.is_codex());
+    if !is_codex {
+        return;
+    }
+
+    state
+        .agents
+        .queued_codex_turns
+        .push_back(nit_core::QueuedCodexTurn {
+            agent_id: model.clone(),
+            mission_id: mission_id.clone(),
+            prompt,
+        });
+
+    if let Some(agent) = state.agents.agents.iter_mut().find(|a| a.id == model) {
+        let is_running = matches!(agent.status, AgentStatus::Running);
+        agent.queue_len = agent.queue_len.saturating_add(1);
+        agent.heartbeat_age_secs = 0;
+        agent.last_message = "queued".into();
+        if !is_running {
+            agent.current_mission = mission_id;
+        }
+        if !matches!(agent.status, AgentStatus::Running | AgentStatus::Error) {
+            agent.status = AgentStatus::Waiting;
+        }
+    }
+
+    let now = Instant::now();
+    state.agents.note_event();
+    vitals.record_agent_event(now);
+}
+
+fn maybe_dispatch_next_queued_codex_turn(
+    state: &mut AppState,
+    vitals: &mut VitalsState,
+    codex: Option<&CodexRunner>,
+) {
+    let Some(codex) = codex else {
+        return;
+    };
+    if !state.agents.active_turns.is_empty() {
+        return;
+    }
+
+    loop {
+        let Some(queued) = state.agents.queued_codex_turns.pop_front() else {
+            return;
+        };
+        let model = queued.agent_id.clone();
+        let mission_id = queued.mission_id.clone();
+
+        // Queue length was incremented when we queued; only dispatch if this is still a Codex lane.
+        let is_codex = state
+            .agents
+            .agents
+            .iter()
+            .find(|lane| lane.id.as_str() == model.as_str())
+            .is_some_and(|lane| lane.is_codex());
+        if !is_codex {
+            if let Some(agent) = state.agents.agents.iter_mut().find(|a| a.id == model) {
+                agent.queue_len = agent.queue_len.saturating_sub(1);
+                if agent.queue_len == 0 && matches!(agent.status, AgentStatus::Waiting) {
+                    agent.status = AgentStatus::Idle;
+                }
+            }
+            continue;
+        }
+
+        maybe_dispatch_codex_turn(
+            state,
+            vitals,
+            Some(codex),
+            Some(model),
+            mission_id,
+            queued.prompt,
+            false,
+        );
+        return;
+    }
+}
+
 fn maybe_dispatch_codex_turn(
     state: &mut AppState,
     vitals: &mut VitalsState,
@@ -2540,6 +2721,7 @@ fn maybe_dispatch_codex_turn(
     model: Option<String>,
     mission_id: Option<String>,
     prompt: String,
+    count_new_turn: bool,
 ) {
     let Some(codex) = codex else {
         return;
@@ -2651,7 +2833,11 @@ fn maybe_dispatch_codex_turn(
         return;
     };
     agent.status = AgentStatus::Running;
-    agent.queue_len = agent.queue_len.saturating_add(1).max(1);
+    if count_new_turn {
+        agent.queue_len = agent.queue_len.saturating_add(1).max(1);
+    } else {
+        agent.queue_len = agent.queue_len.max(1);
+    }
     agent.heartbeat_age_secs = 0;
     agent.last_message = "queued".into();
     // Always reflect the active mission context (including clearing it for non-mission chat).
@@ -2855,38 +3041,6 @@ fn spawn_mock_mission(state: &mut AppState) {
         at: timestamp_label(state),
     });
     mark_mission_provenance_dirty(state, &mission_id);
-}
-
-fn set_mcp_state(
-    state: &mut AppState,
-    connection_state: McpConnectionState,
-    latency_ms: Option<u64>,
-    last_error: Option<String>,
-) {
-    state.agents.mcp.state = connection_state;
-    state.agents.mcp.latency_ms = latency_ms;
-    state.agents.mcp.last_error = last_error.clone();
-    let message = match last_error {
-        Some(err) => format!("MCP {} ({err})", connection_state.label()),
-        None => format!("MCP {}", connection_state.label()),
-    };
-    let severity = if matches!(connection_state, McpConnectionState::Error) {
-        AgentAlertSeverity::Error
-    } else {
-        AgentAlertSeverity::Info
-    };
-    state.agents.alerts.push(AgentAlert {
-        severity,
-        source: "mcp".into(),
-        message: message.clone(),
-        at: timestamp_label(state),
-    });
-    state.agents.diag_events.push(AgentDiagnosticEvent {
-        severity,
-        source: "mcp".into(),
-        message,
-        at: timestamp_label(state),
-    });
 }
 
 fn mark_mission_provenance_dirty(state: &mut AppState, mission_id: &str) {
