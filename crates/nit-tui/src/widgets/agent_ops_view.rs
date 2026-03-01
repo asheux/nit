@@ -24,12 +24,24 @@ pub fn roster_meta_for_body_line(state: &AppState, body_line: usize) -> Option<R
     roster_body_meta(state, body_line)
 }
 
+pub fn roster_body_offset(state: &AppState) -> usize {
+    if roster_show_codex_title(state) {
+        3
+    } else {
+        2
+    }
+}
+
 pub fn alert_index_for_body_line(
     state: &AppState,
     width: usize,
     body_line: usize,
 ) -> Option<usize> {
     alert_body_meta(state, width, body_line).map(|meta| meta.alert_idx)
+}
+
+fn roster_show_codex_title(state: &AppState) -> bool {
+    !state.agents.agents.is_empty() && state.agents.agents.iter().all(|agent| agent.is_codex())
 }
 
 fn roster_body_meta(state: &AppState, body_line: usize) -> Option<RosterBodyMeta> {
@@ -328,6 +340,9 @@ fn roster_lines(state: &AppState, width: usize) -> Vec<String> {
     if state.agents.agents.is_empty() {
         out.push(" No agents available.".into());
         return out;
+    }
+    if roster_show_codex_title(state) {
+        out.push(" Codex".into());
     }
     for (idx, agent) in state.agents.agents.iter().enumerate() {
         let marker = if idx == state.agents.roster_selected
@@ -864,7 +879,15 @@ fn roster_styled_line(
                 .add_modifier(Modifier::DIM),
         ));
     }
-    let body_line = line_idx.saturating_sub(2);
+    if roster_show_codex_title(state) && line_idx == 2 {
+        return Line::from(Span::styled(
+            line.to_string(),
+            Style::default()
+                .fg(theme.title)
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
+    let body_line = line_idx.saturating_sub(roster_body_offset(state));
     let Some(meta) = roster_body_meta(state, body_line) else {
         return Line::from(Span::styled(
             line.to_string(),

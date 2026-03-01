@@ -5831,10 +5831,14 @@ fn handle_mouse_down(
 }
 
 fn apply_agent_ops_click_selection(state: &mut AppState, line_idx: usize, text_width: usize) {
-    if line_idx < 2 {
+    let offset = match state.agents.dock_tab {
+        AgentOpsTab::Roster => agent_ops_view::roster_body_offset(state),
+        _ => 2,
+    };
+    if line_idx < offset {
         return;
     }
-    let data_line = line_idx.saturating_sub(2);
+    let data_line = line_idx.saturating_sub(offset);
     match state.agents.dock_tab {
         AgentOpsTab::Roster => {
             let Some(meta) = agent_ops_view::roster_meta_for_body_line(state, data_line) else {

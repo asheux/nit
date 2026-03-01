@@ -3,7 +3,7 @@
 ## Philosophy
 
 - Secure-by-default: no plugins, no network calls from `nit` itself, and no arbitrary command execution.
-- Optional: the Agent Station can invoke the local `codex` CLI when explicitly enabled (which may make network requests).
+- Agent Station can invoke the local `codex` CLI (which may make network requests depending on Codex configuration).
 - Terminal state is restored on exit and panic.
 - Saves are atomic and confined to explicit paths provided by the user.
 

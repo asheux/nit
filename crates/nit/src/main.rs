@@ -42,9 +42,9 @@ struct Cli {
     /// Start in the specified lab (gol or games)
     #[arg(long, value_enum, default_value_t = LabArg::Gol)]
     lab: LabArg,
-    /// Agent station data source (mock lanes vs Codex model roster)
-    #[arg(long, value_enum, default_value_t = AgentsArg::Mock)]
-    agents: AgentsArg,
+    /// Agent station backend (defaults to Codex when available, else mock)
+    #[arg(long, value_enum)]
+    agents: Option<AgentsArg>,
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -210,12 +210,10 @@ enum OutputFormat {
 
 #[derive(Copy, Clone, Debug, ValueEnum)]
 enum AgentsArg {
-    /// Seed the Agent Station with mock planner/coder/reviewer lanes (current default).
+    /// Seed the Agent Station with mock planner/coder/reviewer lanes.
     Mock,
     /// Seed the Agent Station roster from Codex's cached model list (~/.codex/models_cache.json).
     Codex,
-    /// Start with an empty Agent Station.
-    Empty,
 }
 
 #[derive(Copy, Clone, Debug, ValueEnum)]
@@ -358,9 +356,8 @@ fn main() -> anyhow::Result<()> {
 
     let mut state = nit_core::AppState::new(workspace_root, editor, notes);
     state.agents = match cli.agents {
-        AgentsArg::Mock => nit_core::AgentsState::default_with_mocks(),
-        AgentsArg::Empty => nit_core::AgentsState::default(),
-        AgentsArg::Codex => load_agents_from_codex_models_cache().unwrap_or_else(|err| {
+        Some(AgentsArg::Mock) => nit_core::AgentsState::default_with_mocks(),
+        Some(AgentsArg::Codex) => load_agents_from_codex_models_cache().unwrap_or_else(|err| {
             let mut agents = nit_core::AgentsState::default_with_mocks();
             agents.alerts.push(nit_core::AgentAlert {
                 severity: nit_core::AgentAlertSeverity::Warn,
@@ -370,6 +367,9 @@ fn main() -> anyhow::Result<()> {
             });
             agents
         }),
+        None => {
+            try_seed_agents_from_codex().unwrap_or_else(nit_core::AgentsState::default_with_mocks)
+        }
     };
     if let Some(path) = export_legacy_notes_snapshot(&state.workspace_root, state.notes_buffer()) {
         state.agents.pending_legacy_notes_alert = Some(format!(
@@ -2208,4 +2208,65 @@ fn open_log_file(path: &Path) -> io::Result<std::fs::File> {
         .create(true)
         .append(true)
         .open(path)
+}
+
+fn try_seed_agents_from_codex() -> Option<nit_core::AgentsState> {
+    if !codex_cli_available() {
+        return None;
+    }
+    match load_agents_from_codex_models_cache() {
+        Ok(agents) if !agents.agents.is_empty() => Some(agents),
+        Ok(_) => None,
+        Err(_) => None,
+    }
+}
+
+fn codex_cli_available() -> bool {
+    is_executable_in_path("codex")
+}
+
+fn is_executable_in_path(bin: &str) -> bool {
+    let Some(path) = std::env::var_os("PATH") else {
+        return false;
+    };
+    for dir in std::env::split_paths(&path) {
+        if dir.as_os_str().is_empty() {
+            continue;
+        }
+        #[cfg(windows)]
+        {
+            let mut exts = std::env::var_os("PATHEXT")
+                .map(|v| {
+                    v.to_string_lossy()
+                        .split(';')
+                        .map(|s| s.trim())
+                        .filter(|s| !s.is_empty())
+                        .map(|s| s.trim_start_matches('.').to_ascii_lowercase())
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_else(|| vec!["exe".into(), "cmd".into(), "bat".into()]);
+            if exts.is_empty() {
+                exts = vec!["exe".into(), "cmd".into(), "bat".into()];
+            }
+
+            let candidate = dir.join(bin);
+            if candidate.is_file() {
+                return true;
+            }
+            for ext in exts.iter() {
+                let candidate = dir.join(format!("{bin}.{ext}"));
+                if candidate.is_file() {
+                    return true;
+                }
+            }
+        }
+        #[cfg(not(windows))]
+        {
+            let candidate = dir.join(bin);
+            if candidate.is_file() {
+                return true;
+            }
+        }
+    }
+    false
 }
