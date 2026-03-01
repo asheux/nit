@@ -35,10 +35,20 @@ just run -- path/to/file
 
 ## Security Notes
 
-- No network or shell execution.
+- No plugins.
+- No network calls from `nit` itself.
+- No arbitrary command execution; the optional Agent Station Codex integration can invoke the local `codex` CLI.
 - Atomic file writes.
 - Terminal restored on exit and panic.
 For details see `SECURITY.md`.
+
+## Agent Station (optional)
+
+nit includes an Agent Ops / Agent Chat UI. By default it is seeded with mock lanes.
+
+- `nit --agents mock` (default) — mock planner/coder/reviewer lanes.
+- `nit --agents codex` — load a model roster from `~/.codex/models_cache.json` and dispatch turns via the `codex` CLI.
+- `nit --agents empty` — start with an empty Agent Station.
 
 ## Documentation
 

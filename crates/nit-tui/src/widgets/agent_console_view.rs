@@ -744,19 +744,190 @@ fn agent_line_with_accent_ecg(text: &str, theme: &Theme) -> Line<'static> {
             let badge = rest[start..end].to_string();
             let post = rest[end..].to_string();
             if !pre.is_empty() {
-                spans.push(Span::styled(pre, agent_style));
+                push_agent_text_with_inline_highlights(&mut spans, &pre, agent_style, theme);
             }
             spans.push(Span::styled(badge, badge_style));
             if !post.is_empty() {
-                spans.push(Span::styled(post, agent_style));
+                push_agent_text_with_inline_highlights(&mut spans, &post, agent_style, theme);
             }
         } else {
-            spans.push(Span::styled(rest, agent_style));
+            push_agent_text_with_inline_highlights(&mut spans, &rest, agent_style, theme);
         }
     } else {
-        spans.push(Span::styled(body, agent_style));
+        push_agent_text_with_inline_highlights(&mut spans, &body, agent_style, theme);
     }
     Line::from(spans)
+}
+
+fn push_agent_text_with_inline_highlights(
+    spans: &mut Vec<Span<'static>>,
+    text: &str,
+    base: Style,
+    theme: &Theme,
+) {
+    if text.is_empty() {
+        return;
+    }
+    // Avoid confusing the inline-code highlighter with fenced code blocks.
+    if text.trim_start().starts_with("```") {
+        spans.push(Span::styled(
+            text.to_string(),
+            Style::default()
+                .fg(theme.foreground)
+                .add_modifier(Modifier::DIM),
+        ));
+        return;
+    }
+    if !text.contains('`') {
+        spans.push(Span::styled(text.to_string(), base));
+        return;
+    }
+
+    let tick_style = Style::default()
+        .fg(theme.border)
+        .add_modifier(Modifier::DIM);
+    let mut remaining = text;
+    while let Some(start) = remaining.find('`') {
+        let (before, after_tick) = remaining.split_at(start);
+        if !before.is_empty() {
+            spans.push(Span::styled(before.to_string(), base));
+        }
+
+        // `after_tick` begins with '`'
+        let after_tick = &after_tick[1..];
+        let Some(end) = after_tick.find('`') else {
+            spans.push(Span::styled("`".to_string(), tick_style));
+            spans.push(Span::styled(after_tick.to_string(), base));
+            return;
+        };
+
+        let code = &after_tick[..end];
+        let after = &after_tick[end + 1..];
+        spans.push(Span::styled("`".to_string(), tick_style));
+        spans.push(Span::styled(
+            code.to_string(),
+            inline_code_style(code, theme),
+        ));
+        spans.push(Span::styled("`".to_string(), tick_style));
+        remaining = after;
+    }
+    if !remaining.is_empty() {
+        spans.push(Span::styled(remaining.to_string(), base));
+    }
+}
+
+fn inline_code_style(code: &str, theme: &Theme) -> Style {
+    let code = code.trim();
+    if looks_like_link_or_path_ref(code) {
+        Style::default()
+            .fg(theme.hl.link)
+            .add_modifier(Modifier::UNDERLINED)
+    } else if looks_like_command(code) {
+        Style::default()
+            .fg(theme.accent)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(theme.foreground)
+    }
+}
+
+fn looks_like_link_or_path_ref(text: &str) -> bool {
+    let text = text.trim();
+    if text.is_empty() {
+        return false;
+    }
+    if text.starts_with("http://") || text.starts_with("https://") {
+        return true;
+    }
+    if let Some(pos) = text.find("#L") {
+        if text[pos + 2..]
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_digit())
+        {
+            return true;
+        }
+    }
+
+    if contains_colon_number(text)
+        && (text.contains('/') || text.contains('\\') || text.contains('.'))
+    {
+        return true;
+    }
+
+    let has_path_sep = text.contains('/') || text.contains('\\');
+    has_path_sep && looks_like_file_path(text)
+}
+
+fn contains_colon_number(text: &str) -> bool {
+    for (idx, ch) in text.char_indices() {
+        if ch != ':' {
+            continue;
+        }
+        // Skip Windows drive letter colon (e.g. C:\foo\bar.txt:12).
+        if idx == 1 {
+            if text.chars().next().is_some_and(|c| c.is_ascii_alphabetic()) {
+                continue;
+            }
+        }
+        let after = &text[idx + 1..];
+        let mut digits = 0usize;
+        for ch in after.chars() {
+            if ch.is_ascii_digit() {
+                digits += 1;
+            } else {
+                break;
+            }
+        }
+        if digits > 0 {
+            return true;
+        }
+    }
+    false
+}
+
+fn looks_like_file_path(text: &str) -> bool {
+    let Some(sep) = text.rfind(|c| c == '/' || c == '\\') else {
+        return false;
+    };
+    let tail = &text[sep + 1..];
+    tail.contains('.')
+}
+
+fn looks_like_command(text: &str) -> bool {
+    let text = text.trim();
+    if text.is_empty() {
+        return false;
+    }
+    if text.contains('\n') || text.contains('\r') {
+        return true;
+    }
+    if text.contains(' ') || text.contains('\t') {
+        return true;
+    }
+    matches!(
+        text.to_ascii_lowercase().as_str(),
+        "cargo"
+            | "git"
+            | "rg"
+            | "sed"
+            | "npm"
+            | "yarn"
+            | "pnpm"
+            | "python"
+            | "python3"
+            | "node"
+            | "go"
+            | "make"
+            | "docker"
+            | "kubectl"
+            | "codex"
+            | "nit"
+            | "curl"
+            | "wget"
+            | "bash"
+            | "zsh"
+    )
 }
 
 fn user_line_with_prompt_bg(text: &str, theme: &Theme) -> Line<'static> {

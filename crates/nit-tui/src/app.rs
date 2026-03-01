@@ -511,7 +511,9 @@ fn run_loop(
         .map(|petri| petri.activity_epoch())
         .unwrap_or(0);
     let mut last_agent_event_epoch = state.agents.event_epoch;
-    tracing::info!("SECURITY: no plugins, no network, no shell execution");
+    tracing::info!(
+        "SECURITY: no plugins; nit makes no network calls; external commands only run via explicit agent integrations (e.g. codex)"
+    );
     loop {
         fuzzy_runtime.tick_open(state);
         if let Some(runtime) = games_config_preview.as_mut() {
