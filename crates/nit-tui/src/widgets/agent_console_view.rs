@@ -41,6 +41,7 @@ const CHAT_INPUT_MAX_INNER_LINES: usize = 12;
 const CHAT_INPUT_MAX_INNER_LINES_COMPACT: usize = 8;
 const CHAT_INPUT_SCROLL_AUTO: usize = usize::MAX;
 const AGENT_BADGE_MAX_CHARS: usize = 24;
+const USER_PROMPT_BG_BACKGROUND_PCT: u8 = 80;
 
 struct ConsoleLayout {
     thread_area: Rect,
@@ -131,14 +132,17 @@ pub fn render(
         if !is_codex {
             return None;
         }
-        Some(
+        let pct = if let Some(mission_id) = mission {
             state
                 .agents
-                .codex_context_remaining_pct
-                .get(agent_id)
+                .codex_mission_context_remaining_pct
+                .get(mission_id)
+                .and_then(|m| m.get(agent_id))
                 .copied()
-                .unwrap_or(100),
-        )
+        } else {
+            state.agents.codex_context_remaining_pct.get(agent_id).copied()
+        };
+        Some(pct.unwrap_or(100))
     });
     let codex_ctx_max = agent.and_then(|agent_id| {
         state
@@ -576,7 +580,7 @@ fn next_tab_width(col: usize, width: usize) -> usize {
 fn thread_lines(rows: Vec<ThreadRow>, theme: &Theme, _pulse_on: bool) -> Vec<Line<'static>> {
     rows.into_iter()
         .map(|row| match row.kind {
-            ThreadRowKind::User => user_line_with_cyan_edges(row.text, theme),
+            ThreadRowKind::User => user_line_with_prompt_bg(row.text, theme),
             ThreadRowKind::Agent => agent_line_with_accent_ecg(row.text, theme),
             ThreadRowKind::Breather => {
                 let mut parts = row.text.splitn(2, ' ');
@@ -608,6 +612,9 @@ fn agent_line_with_accent_ecg(text: String, theme: &Theme) -> Line<'static> {
     // Keep agent output distinct from user bubbles, but don't over-dim (hard to read in many
     // terminals). Use a brighter cyan tone from the theme.
     let agent_style = Style::default().fg(theme.title);
+    let badge_style = Style::default()
+        .fg(theme.accent)
+        .add_modifier(Modifier::BOLD);
 
     let leading_spaces = text.chars().take_while(|ch| *ch == ' ').count();
     if leading_spaces > 0 {
@@ -624,50 +631,76 @@ fn agent_line_with_accent_ecg(text: String, theme: &Theme) -> Line<'static> {
                 .fg(theme.accent)
                 .add_modifier(Modifier::BOLD),
         ));
-        spans.push(Span::styled(
-            if rest.is_empty() {
-                "".to_string()
-            } else {
-                format!(" {rest}")
-            },
-            agent_style,
-        ));
+        if rest.is_empty() {
+            return Line::from(spans);
+        }
+
+        // Highlight the agent/model badge (e.g. "[gpt-5.3-codex]") using the same accent color as
+        // the breather ECG. Keep the surrounding text cyan so headers remain scannable.
+        let rest = format!(" {rest}");
+        let badge_start = rest.find('[');
+        let badge_end = badge_start.and_then(|start| rest[start..].find(']').map(|rel| start + rel + 1));
+        if let (Some(start), Some(end)) = (badge_start, badge_end) {
+            let pre = rest[..start].to_string();
+            let badge = rest[start..end].to_string();
+            let post = rest[end..].to_string();
+            if !pre.is_empty() {
+                spans.push(Span::styled(pre, agent_style));
+            }
+            spans.push(Span::styled(badge, badge_style));
+            if !post.is_empty() {
+                spans.push(Span::styled(post, agent_style));
+            }
+        } else {
+            spans.push(Span::styled(rest, agent_style));
+        }
     } else {
         spans.push(Span::styled(body, agent_style));
     }
     Line::from(spans)
 }
 
-fn user_line_with_cyan_edges(text: String, theme: &Theme) -> Line<'static> {
-    let leading_spaces = text.chars().take_while(|ch| *ch == ' ').count();
+fn user_line_with_prompt_bg(text: String, theme: &Theme) -> Line<'static> {
+    if text.is_empty() {
+        return Line::from(Span::styled(String::new(), Style::default()));
+    }
+
+    let prompt_bg = dim_bg_towards(
+        theme.cursor_line_bg,
+        theme.background,
+        USER_PROMPT_BG_BACKGROUND_PCT,
+    );
+
+    // User prompts are rendered as a padded block with a subtle background instead of ASCII
+    // borders. Pad spaces are included in the string so the background fills the whole row.
+    let base = Style::default()
+        .fg(theme.foreground)
+        .bg(prompt_bg);
+    let label_style = Style::default()
+        .fg(theme.accent)
+        .bg(prompt_bg)
+        .add_modifier(Modifier::BOLD);
+
+    let trimmed = text.trim();
+    if trimmed != "You" {
+        return Line::from(Span::styled(text, base));
+    }
+
+    // Highlight just the "You" label, while keeping the rest of the row padded/backgrounded.
+    let indent = text.chars().take_while(|ch| *ch == ' ').count();
     let mut spans = Vec::new();
-    if leading_spaces > 0 {
-        spans.push(Span::styled(
-            " ".repeat(leading_spaces),
-            Style::default().fg(theme.foreground),
-        ));
+    if indent > 0 {
+        spans.push(Span::styled(" ".repeat(indent), base));
     }
-    let body = text[leading_spaces..].to_string();
-    if body.starts_with('+') && body.ends_with('+') && body.chars().all(|ch| ch == '+' || ch == '-')
-    {
-        spans.push(Span::styled(body, Style::default().fg(Color::Cyan)));
-        return Line::from(spans);
+    spans.push(Span::styled("You".to_string(), label_style));
+    let rest_len = text
+        .chars()
+        .count()
+        .saturating_sub(indent)
+        .saturating_sub(3);
+    if rest_len > 0 {
+        spans.push(Span::styled(" ".repeat(rest_len), base));
     }
-    if body.starts_with('|') && body.ends_with('|') && body.len() >= 2 {
-        spans.push(Span::styled("|", Style::default().fg(Color::Cyan)));
-        let inner = body[1..body.len().saturating_sub(1)].to_string();
-        let inner_style = if inner.trim() == "You" {
-            Style::default()
-                .fg(theme.accent)
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(theme.foreground)
-        };
-        spans.push(Span::styled(inner, inner_style));
-        spans.push(Span::styled("|", Style::default().fg(Color::Cyan)));
-        return Line::from(spans);
-    }
-    spans.push(Span::styled(body, Style::default().fg(theme.foreground)));
     Line::from(spans)
 }
 
@@ -680,6 +713,22 @@ fn looks_like_ecg(token: &str) -> bool {
         }
     }
     count == 6
+}
+
+fn dim_bg_towards(color: Color, background: Color, background_pct: u8) -> Color {
+    let pct = background_pct.min(100) as u16;
+    match (color, background) {
+        (Color::Rgb(r1, g1, b1), Color::Rgb(r0, g0, b0)) => {
+            let inv = 100u16.saturating_sub(pct);
+            let mix = |top: u8, base: u8| -> u8 {
+                let top = top as u16;
+                let base = base as u16;
+                ((top.saturating_mul(inv) + base.saturating_mul(pct) + 50) / 100) as u8
+            };
+            Color::Rgb(mix(r1, r0), mix(g1, g0), mix(b1, b0))
+        }
+        _ => color,
+    }
 }
 
 fn thread_rows(state: &AppState, width: usize, pulse_on: bool) -> Vec<ThreadRow> {
@@ -729,6 +778,7 @@ fn format_message_rows(
     width: usize,
     pulse_on: bool,
 ) -> Vec<ThreadRow> {
+    let width = width.max(1);
     let text_lines: Vec<&str> = if msg.text.is_empty() {
         vec![""]
     } else {
@@ -776,15 +826,34 @@ fn format_message_rows(
         header.push_str(&format!(" [{agent_badge}]"));
     }
 
+    let indent = 2usize.min(width.saturating_sub(1));
+    // Keep at least one trailing column free so transcript text doesn't hug the right edge.
+    let max_inner = width.saturating_sub(indent + 1).max(1);
+    let indent_str = " ".repeat(indent);
+
     let mut out = Vec::new();
-    out.push(ThreadRow {
-        text: header,
-        kind: ThreadRowKind::Agent,
-    });
+    for seg in wrap_visual_line(&header, max_inner) {
+        // `wrap_visual_line` can leave trailing spaces when it wraps at a break point. If we
+        // preserve those, selection logic may mistake agent rows for padded user prompt rows.
+        let seg = seg.trim_end_matches(' ');
+        out.push(ThreadRow {
+            text: if seg.is_empty() {
+                String::new()
+            } else {
+                format!("{indent_str}{seg}")
+            },
+            kind: ThreadRowKind::Agent,
+        });
+    }
     for line in text_lines {
-        for segment in wrap_visual_line(line, width) {
+        for segment in wrap_visual_line(line, max_inner) {
+            let segment = segment.trim_end_matches(' ');
             out.push(ThreadRow {
-                text: segment,
+                text: if segment.is_empty() {
+                    String::new()
+                } else {
+                    format!("{indent_str}{segment}")
+                },
                 kind: ThreadRowKind::Agent,
             });
         }
@@ -829,11 +898,17 @@ fn breather_row_for_user_prompt(state: &AppState, pulse_on: bool) -> Option<Thre
     };
     let ecg = ecg_indicator(state.metrics.frame_count, Some(&agent.id), pulse_on, true);
     let ctx = if agent.lane.eq_ignore_ascii_case("codex") {
-        state
-            .agents
-            .codex_context_remaining_pct
-            .get(&agent.id)
-            .copied()
+        let mission_id = agent.current_mission.as_deref();
+        mission_id
+            .and_then(|mid| {
+                state
+                    .agents
+                    .codex_mission_context_remaining_pct
+                    .get(mid)
+                    .and_then(|m| m.get(&agent.id))
+                    .copied()
+            })
+            .or_else(|| state.agents.codex_context_remaining_pct.get(&agent.id).copied())
     } else {
         None
     };
@@ -896,44 +971,53 @@ fn format_token_count_short(tokens: u32) -> String {
 }
 
 fn format_user_bubble_rows(_msg: &AgentMessage, text_lines: &[&str], width: usize) -> Vec<String> {
+    // Render user prompts as a background-tinted block (no ASCII borders).
+    // We pad every line out to the full thread width so the background is continuous.
     let width = width.max(1);
-    if width < 8 {
-        let plain = text_lines
-            .iter()
-            .enumerate()
-            .flat_map(|(idx, line)| {
-                let rendered = if idx == 0 {
-                    format!("You: {}", line)
-                } else {
-                    (*line).to_string()
-                };
-                wrap_visual_line(&rendered, width)
-            })
-            .collect::<Vec<_>>();
-        return right_align_block(plain, width);
-    }
+    let indent = 2usize.min(width.saturating_sub(1));
+    // Leave at least 1 trailing space so clipboard trimming and mouse drag snapping can reliably
+    // detect these "prompt block" rows.
+    let max_inner = width.saturating_sub(indent + 1).max(1);
 
-    let max_inner = width.saturating_sub(4).max(1);
-    let mut body_lines = Vec::new();
-    body_lines.extend(wrap_visual_line("You", max_inner));
+    let mut out = Vec::new();
+    // Add top/bottom padding so prompt blocks breathe vertically.
+    out.push(pad_to_width(&" ".repeat(indent), width));
+    out.extend(wrap_visual_line("You", max_inner).into_iter().map(|line| {
+        pad_to_width(&format!("{}{}", " ".repeat(indent), line), width)
+    }));
     for line in text_lines {
-        body_lines.extend(wrap_visual_line(line, max_inner));
+        for seg in wrap_visual_line(line, max_inner) {
+            out.push(pad_to_width(
+                &format!("{}{}", " ".repeat(indent), seg),
+                width,
+            ));
+        }
     }
-    let inner_width = body_lines
-        .iter()
-        .map(|line| UnicodeWidthStr::width(line.as_str()))
-        .max()
-        .unwrap_or(0)
-        .max(1);
-    let border = "-".repeat(inner_width + 2);
-    let mut bubble = Vec::with_capacity(body_lines.len() + 2);
-    bubble.push(format!("+{border}+"));
-    for line in body_lines {
-        let pad = inner_width.saturating_sub(UnicodeWidthStr::width(line.as_str()));
-        bubble.push(format!("| {line}{} |", " ".repeat(pad)));
+    out.push(pad_to_width(&" ".repeat(indent), width));
+    out
+}
+
+fn pad_to_width(input: &str, width: usize) -> String {
+    let width = width.max(1);
+    let current = UnicodeWidthStr::width(input);
+    if current >= width {
+        // The input is already wrapped to width; truncate by display width as a safety net.
+        let mut out = String::new();
+        let mut used = 0usize;
+        for ch in input.chars() {
+            let ch_width = UnicodeWidthChar::width(ch).unwrap_or(1).max(1);
+            if used + ch_width > width {
+                break;
+            }
+            out.push(ch);
+            used += ch_width;
+        }
+        return out;
     }
-    bubble.push(format!("+{border}+"));
-    right_align_block(bubble, width)
+    let mut out = String::with_capacity(input.len() + (width - current));
+    out.push_str(input);
+    out.push_str(&" ".repeat(width - current));
+    out
 }
 
 fn ecg_indicator(
@@ -975,27 +1059,6 @@ fn agent_seed(agent_id: &str) -> u64 {
         hash = hash.wrapping_mul(1099511628211);
     }
     hash
-}
-
-fn right_align_block(lines: Vec<String>, width: usize) -> Vec<String> {
-    if lines.is_empty() || width == 0 {
-        return lines;
-    }
-    let block_width = lines
-        .iter()
-        .map(|line| UnicodeWidthStr::width(line.as_str()))
-        .max()
-        .unwrap_or(0);
-    let left_pad = width.saturating_sub(block_width);
-    lines
-        .into_iter()
-        .map(|line| {
-            let mut out = String::with_capacity(left_pad + line.len());
-            out.push_str(&" ".repeat(left_pad));
-            out.push_str(&line);
-            out
-        })
-        .collect()
 }
 
 fn pulse_on(state: &AppState) -> bool {
@@ -1093,13 +1156,13 @@ fn wrap_visual_line(text: &str, width: usize) -> Vec<String> {
 mod tests {
     use super::{
         chat_input_scroll_metrics, chat_input_text_area, ecg_indicator, format_message_rows,
-        map_chat_input_point_to_cursor, thread_lines, thread_rows, wrap_input_with_cursor,
-        wrap_visual_line, ThreadRow, ThreadRowKind,
+        dim_bg_towards, map_chat_input_point_to_cursor, thread_lines, thread_rows,
+        wrap_input_with_cursor, wrap_visual_line, ThreadRow, ThreadRowKind,
+        USER_PROMPT_BG_BACKGROUND_PCT,
     };
     use crate::theme::Theme;
     use nit_core::{AgentChannel, AgentLane, AgentMessage, AgentStatus, AppState, Buffer};
     use ratatui::layout::Rect;
-    use ratatui::style::Color;
     use std::path::PathBuf;
 
     fn test_state() -> AppState {
@@ -1142,17 +1205,17 @@ mod tests {
             text: "line one\nline two".into(),
         };
         let rows = format_message_rows(&state, &msg, 48, true);
-        assert!(rows.len() >= 5);
+        assert!(rows.len() >= 6);
         assert!(matches!(rows[0].kind, ThreadRowKind::User));
-        assert!(rows[0].text.trim_start().starts_with('+'));
-        assert!(rows[1].text.trim_start().starts_with("| You"));
-        assert!(rows[rows.len().saturating_sub(2)]
-            .text
-            .trim_start()
-            .starts_with('+'));
-        let left_pad_first = rows[0].text.chars().take_while(|ch| *ch == ' ').count();
-        let left_pad_mid = rows[1].text.chars().take_while(|ch| *ch == ' ').count();
-        assert_eq!(left_pad_first, left_pad_mid);
+        // Top padding row + label row.
+        assert!(rows[0].text.trim().is_empty());
+        assert_eq!(rows[1].text.trim(), "You");
+        assert!(rows[2].text.trim_start().starts_with("line one"));
+        assert!(rows[3].text.trim_start().starts_with("line two"));
+        // Bottom padding row.
+        assert!(rows[4].text.trim().is_empty());
+        // Spacer row after the prompt to make turns easier to scan.
+        assert!(rows.last().unwrap().text.is_empty());
     }
 
     #[test]
@@ -1187,10 +1250,11 @@ mod tests {
         let first_rows = format_message_rows(&state, &msg, 80, true);
         state.metrics.frame_count = 30;
         let second_rows = format_message_rows(&state, &msg, 80, true);
-        assert_eq!(first_rows[0].text, "▁▁▁▁▁▁");
-        assert_eq!(second_rows[0].text, "▁▁▁▁▁▁");
-        assert_eq!(first_rows[1].text, "working");
-        assert_eq!(second_rows[1].text, "working");
+        // Stable header row (no animation on agent transcript lines).
+        assert_eq!(first_rows[0].text, "  ▁▁▁▁▁▁");
+        assert_eq!(second_rows[0].text, "  ▁▁▁▁▁▁");
+        assert_eq!(first_rows[1].text, "  working");
+        assert_eq!(second_rows[1].text, "  working");
         assert!(!first_rows[0].text.contains("[Coder]"));
         assert!(!second_rows[0].text.contains("[Coder]"));
     }
@@ -1218,8 +1282,9 @@ mod tests {
             text: "hello".into(),
         };
         let rows = format_message_rows(&state, &msg, 120, true);
+        // Header row, then message.
         assert!(!rows[0].text.contains("[Coder]"));
-        assert_eq!(rows[1].text, "hello");
+        assert_eq!(rows[1].text, "  hello");
     }
 
     #[test]
@@ -1246,7 +1311,7 @@ mod tests {
         };
         let row = format_message_rows(&state, &msg, 120, true)
             .into_iter()
-            .next()
+            .find(|row| !row.text.trim().is_empty())
             .expect("row");
         assert!(row.text.contains("[UltraLongRe…/reviewer]"));
     }
@@ -1424,16 +1489,21 @@ mod tests {
     }
 
     #[test]
-    fn user_bubble_edges_render_in_cyan() {
+    fn user_bubble_rows_use_dim_prompt_bg_and_highlight_you_label() {
         let theme = Theme::default();
+        let prompt_bg = dim_bg_towards(
+            theme.cursor_line_bg,
+            theme.background,
+            USER_PROMPT_BG_BACKGROUND_PCT,
+        );
         let lines = thread_lines(
             vec![
                 ThreadRow {
-                    text: "  +------+".to_string(),
+                    text: "  You      ".to_string(),
                     kind: ThreadRowKind::User,
                 },
                 ThreadRow {
-                    text: "  | hello |".to_string(),
+                    text: "  hello    ".to_string(),
                     kind: ThreadRowKind::User,
                 },
             ],
@@ -1441,8 +1511,21 @@ mod tests {
             false,
         );
 
-        assert_eq!(lines[0].spans[1].style.fg, Some(Color::Cyan));
-        assert_eq!(lines[1].spans[1].style.fg, Some(Color::Cyan));
-        assert_eq!(lines[1].spans[3].style.fg, Some(Color::Cyan));
+        assert!(lines[0]
+            .spans
+            .iter()
+            .all(|span| span.style.bg == Some(prompt_bg)));
+        assert!(lines[1]
+            .spans
+            .iter()
+            .all(|span| span.style.bg == Some(prompt_bg)));
+        assert!(
+            lines[0]
+                .spans
+                .iter()
+                .any(|span| span.content.as_ref().contains("You")
+                    && span.style.fg == Some(theme.accent)),
+            "expected 'You' label span to use accent color"
+        );
     }
 }

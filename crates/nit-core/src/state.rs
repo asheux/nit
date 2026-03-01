@@ -549,6 +549,16 @@ pub struct AgentsState {
     /// Runtime-only; updated when dispatching a Codex turn.
     #[serde(skip)]
     pub codex_context_remaining_pct: HashMap<String, u8>,
+    /// Last-known Codex context remaining percentage for a mission thread, keyed by mission id then
+    /// model slug.
+    /// Runtime-only; updated when Codex reports token counts for a mission-backed session.
+    #[serde(skip)]
+    pub codex_mission_context_remaining_pct: HashMap<String, HashMap<String, u8>>,
+    /// Codex session/thread ids keyed by mission id. Used to resume a "live mission" thread across
+    /// multiple prompts without prompt-stitching.
+    /// Runtime-only.
+    #[serde(skip)]
+    pub codex_mission_thread_ids: HashMap<String, HashMap<String, String>>,
 }
 
 fn chat_input_scroll_default() -> usize {
@@ -677,6 +687,8 @@ impl AgentsState {
             codex_supported_reasoning_efforts: HashMap::new(),
             codex_selected_reasoning_effort: HashMap::new(),
             codex_context_remaining_pct: HashMap::new(),
+            codex_mission_context_remaining_pct: HashMap::new(),
+            codex_mission_thread_ids: HashMap::new(),
         }
     }
 
@@ -740,6 +752,8 @@ impl Default for AgentsState {
             codex_supported_reasoning_efforts: HashMap::new(),
             codex_selected_reasoning_effort: HashMap::new(),
             codex_context_remaining_pct: HashMap::new(),
+            codex_mission_context_remaining_pct: HashMap::new(),
+            codex_mission_thread_ids: HashMap::new(),
         }
     }
 }

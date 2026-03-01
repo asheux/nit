@@ -1104,18 +1104,42 @@ fn append_log_to_agent_diagnostics(state: &mut AppState, line: &str) {
 
 fn handle_codex_event(state: &mut AppState, vitals: &mut VitalsState, event: CodexEvent) {
     match event {
-        CodexEvent::TurnStarted { model, mission_id } => {
+        CodexEvent::TurnStarted {
+            model,
+            mission_id,
+            resume_thread_id,
+        } => {
+            let at = timestamp_label(state);
             if let Some(agent) = state.agents.agents.iter_mut().find(|a| a.id == model) {
                 agent.status = AgentStatus::Running;
                 agent.queue_len = agent.queue_len.max(1);
                 agent.heartbeat_age_secs = 0;
                 if mission_id.is_some() {
-                    agent.current_mission = mission_id;
+                    agent.current_mission = mission_id.clone();
                 }
             }
             state.agents.mcp.state = McpConnectionState::Connecting;
-            state.agents.mcp.endpoint = format!("codex exec -m {model}");
+            state.agents.mcp.endpoint = if let Some(thread_id) = resume_thread_id.as_deref() {
+                format!(
+                    "codex exec resume {} -m {model}",
+                    shorten_codex_thread_id(thread_id)
+                )
+            } else {
+                format!("codex exec -m {model}")
+            };
             state.agents.mcp.last_error = None;
+
+            if let Some(mission_id) = mission_id.as_deref() {
+                if let Some(mission) = state
+                    .agents
+                    .missions
+                    .iter_mut()
+                    .find(|mission| mission.id == mission_id)
+                {
+                    mission.status = "RUNNING".into();
+                    mission.updated_at = at;
+                }
+            }
             state.agents.note_event();
             vitals.record_agent_event(Instant::now());
         }
@@ -1140,31 +1164,59 @@ fn handle_codex_event(state: &mut AppState, vitals: &mut VitalsState, event: Cod
         CodexEvent::TurnFailed {
             model,
             mission_id,
+            thread_id,
+            token_count,
             message,
         } => {
+            let at = timestamp_label(state);
+            if let Some(token_count) = token_count.as_ref() {
+                apply_codex_token_count(state, &model, mission_id.as_deref(), token_count);
+            }
             if let Some(agent) = state.agents.agents.iter_mut().find(|a| a.id == model) {
                 agent.status = AgentStatus::Error;
                 agent.queue_len = 0;
                 agent.heartbeat_age_secs = 0;
                 if mission_id.is_some() {
-                    agent.current_mission = mission_id;
+                    agent.current_mission = mission_id.clone();
                 }
             }
             state.agents.mcp.state = McpConnectionState::Error;
             state.agents.mcp.endpoint = format!("codex exec -m {model}");
             state.agents.mcp.last_error = Some(message.clone());
 
+            if let (Some(mission_id), Some(thread_id)) =
+                (mission_id.as_deref(), thread_id.as_deref())
+            {
+                state
+                    .agents
+                    .codex_mission_thread_ids
+                    .entry(mission_id.to_string())
+                    .or_default()
+                    .insert(model.clone(), thread_id.to_string());
+            }
+            if let Some(mission_id) = mission_id.as_deref() {
+                if let Some(mission) = state
+                    .agents
+                    .missions
+                    .iter_mut()
+                    .find(|mission| mission.id == mission_id)
+                {
+                    mission.status = "ERROR".into();
+                    mission.updated_at = at.clone();
+                }
+            }
+
             state.agents.alerts.push(AgentAlert {
                 severity: AgentAlertSeverity::Error,
                 source: "codex".into(),
                 message: format!("[{model}] {message}"),
-                at: timestamp_label(state),
+                at: at.clone(),
             });
             state.agents.diag_events.push(AgentDiagnosticEvent {
                 severity: AgentAlertSeverity::Error,
                 source: "codex".into(),
                 message: format!("[{model}] {message}"),
-                at: timestamp_label(state),
+                at: at.clone(),
             });
             state.agents.console_scroll = usize::MAX;
             // Keep the top status bar clean: extract the human message from JSON errors.
@@ -1176,8 +1228,14 @@ fn handle_codex_event(state: &mut AppState, vitals: &mut VitalsState, event: Cod
         CodexEvent::TurnCompleted {
             model,
             mission_id,
+            thread_id,
+            token_count,
             message,
         } => {
+            let at = timestamp_label(state);
+            if let Some(token_count) = token_count.as_ref() {
+                apply_codex_token_count(state, &model, mission_id.as_deref(), token_count);
+            }
             if let Some(agent) = state.agents.agents.iter_mut().find(|a| a.id == model) {
                 agent.status = AgentStatus::Idle;
                 agent.queue_len = 0;
@@ -1189,9 +1247,26 @@ fn handle_codex_event(state: &mut AppState, vitals: &mut VitalsState, event: Cod
 
             if let Some(mission_id) = mission_id.as_deref() {
                 mark_mission_provenance_dirty(state, mission_id);
+                if let Some(thread_id) = thread_id.as_deref() {
+                    state
+                        .agents
+                        .codex_mission_thread_ids
+                        .entry(mission_id.to_string())
+                        .or_default()
+                        .insert(model.clone(), thread_id.to_string());
+                }
+                if let Some(mission) = state
+                    .agents
+                    .missions
+                    .iter_mut()
+                    .find(|mission| mission.id == mission_id)
+                {
+                    mission.status = "LIVE".into();
+                    mission.updated_at = at.clone();
+                }
             }
             state.agents.messages.push(AgentMessage {
-                at: timestamp_label(state),
+                at: at.clone(),
                 channel: AgentChannel::Agent,
                 agent_id: Some(model.clone()),
                 mission_id,
@@ -1203,7 +1278,7 @@ fn handle_codex_event(state: &mut AppState, vitals: &mut VitalsState, event: Cod
                 severity: AgentAlertSeverity::Info,
                 source: "codex".into(),
                 message: format!("[{model}] turn completed"),
-                at: timestamp_label(state),
+                at,
             });
 
             state.agents.mcp.state = McpConnectionState::Connected;
@@ -1213,6 +1288,47 @@ fn handle_codex_event(state: &mut AppState, vitals: &mut VitalsState, event: Cod
             state.agents.note_event();
             vitals.record_agent_event(Instant::now());
         }
+    }
+}
+
+fn shorten_codex_thread_id(thread_id: &str) -> String {
+    let id = thread_id.trim();
+    if id.len() <= 8 {
+        return id.to_string();
+    }
+    format!("{}…", &id[..8])
+}
+
+fn apply_codex_token_count(
+    state: &mut AppState,
+    model: &str,
+    mission_id: Option<&str>,
+    token_count: &crate::codex_runner::CodexTokenCount,
+) {
+    let context_window = token_count.context_window.max(1);
+    state
+        .agents
+        .codex_effective_context_window_tokens
+        .insert(model.to_string(), context_window);
+
+    let used = token_count.total_tokens.min(context_window);
+    let remaining = context_window.saturating_sub(used);
+    let denom = context_window.max(1) as u64;
+    let pct =
+        (((remaining as u64).saturating_mul(100)).saturating_add(denom / 2) / denom) as u8;
+
+    if let Some(mission_id) = mission_id {
+        state
+            .agents
+            .codex_mission_context_remaining_pct
+            .entry(mission_id.to_string())
+            .or_default()
+            .insert(model.to_string(), pct);
+    } else {
+        state
+            .agents
+            .codex_context_remaining_pct
+            .insert(model.to_string(), pct);
     }
 }
 
@@ -2175,12 +2291,18 @@ fn reset_roster_context(state: &mut AppState) -> bool {
     }
 
     let before = state.agents.messages.len();
-    if let Some(mission_id) = mission_ctx.as_deref() {
-        // In mission context, only clear this agent's transcript so other lanes remain intact.
-        state.agents.messages.retain(|msg| {
-            !(msg.mission_id.as_deref() == Some(mission_id)
-                && msg.agent_id.as_deref() == Some(agent_id.as_str()))
-        });
+	    if let Some(mission_id) = mission_ctx.as_deref() {
+	        // In mission context, the Codex session is shared by mission id. Resetting context should
+	        // clear the mission transcript and forget the session id so the next prompt starts fresh.
+	        state.agents.codex_mission_thread_ids.remove(mission_id);
+	        state
+	            .agents
+	            .codex_mission_context_remaining_pct
+	            .remove(mission_id);
+	        state
+	            .agents
+	            .messages
+	            .retain(|msg| msg.mission_id.as_deref() != Some(mission_id));
     } else {
         // In non-mission chat, the thread isn't partitioned by agent; reset the whole local thread.
         state.agents.messages.retain(|msg| msg.mission_id.is_some());
@@ -2192,22 +2314,26 @@ fn reset_roster_context(state: &mut AppState) -> bool {
         severity: AgentAlertSeverity::Info,
         source: "ops".into(),
         message: format!(
-            "context reset for {agent_id}{} (cleared {removed} msgs)",
+            "{}context reset{} (cleared {removed} msgs)",
+            mission_ctx
+                .as_deref()
+                .map(|id| format!("mission {id} "))
+                .unwrap_or_default(),
             if agent_label.is_empty() {
-                String::new()
+                format!(" for {agent_id}")
             } else {
-                format!(" ({agent_label})")
+                format!(" for {agent_id} ({agent_label})")
             }
         ),
         at: timestamp_label(state),
     });
     state.status = Some(format!(
-        "Context reset: {}",
-        if agent_label.is_empty() {
-            agent_id
-        } else {
-            agent_label.to_string()
-        }
+        "{}Context reset: {}",
+        mission_ctx
+            .as_deref()
+            .map(|id| format!("{id} "))
+            .unwrap_or_default(),
+        if agent_label.is_empty() { agent_id } else { agent_label.to_string() }
     ));
     true
 }
@@ -2637,12 +2763,25 @@ fn maybe_dispatch_codex_turn(
     let Some(model) = model else {
         return;
     };
-    let Some(agent) = state.agents.agents.iter_mut().find(|a| a.id == model) else {
-        return;
-    };
-    if !agent.lane.eq_ignore_ascii_case("codex") {
+    let is_codex = state
+        .agents
+        .agents
+        .iter()
+        .find(|lane| lane.id.as_str() == model.as_str())
+        .is_some_and(|lane| lane.lane.eq_ignore_ascii_case("codex"));
+    if !is_codex {
         return;
     }
+
+    let resume_thread_id = mission_id.as_deref().and_then(|mission_id| {
+        state
+            .agents
+            .codex_mission_thread_ids
+            .get(mission_id)
+            .and_then(|threads| threads.get(&model))
+            .cloned()
+    });
+    let persist_session = mission_id.is_some();
 
     // Best-effort context remaining percentage for the breather row.
     if let Some(max_tokens) = state
@@ -2651,21 +2790,52 @@ fn maybe_dispatch_codex_turn(
         .get(&model)
         .copied()
     {
-        let used_tokens = estimate_codex_context_tokens(&prompt).min(max_tokens);
+        let used_tokens = if let Some(mission_id) = mission_id.as_deref() {
+            estimate_codex_context_tokens_for_mission(state, mission_id).min(max_tokens)
+        } else {
+            estimate_codex_context_tokens(&prompt).min(max_tokens)
+        };
         let remaining = max_tokens.saturating_sub(used_tokens);
         // Round to nearest percent so small prompts on large context windows still show 100%.
-        let denom = max_tokens.max(1) as u64;
-        let pct =
-            (((remaining as u64).saturating_mul(100)).saturating_add(denom / 2) / denom) as u8;
-        state
-            .agents
-            .codex_context_remaining_pct
-            .insert(model.clone(), pct);
-    } else {
-        state.agents.codex_context_remaining_pct.remove(&model);
-    }
+	        let denom = max_tokens.max(1) as u64;
+	        let pct =
+	            (((remaining as u64).saturating_mul(100)).saturating_add(denom / 2) / denom) as u8;
+	        if let Some(mission_id) = mission_id.as_deref() {
+	            state
+	                .agents
+	                .codex_mission_context_remaining_pct
+	                .entry(mission_id.to_string())
+	                .or_default()
+	                .entry(model.clone())
+	                .or_insert(pct);
+	        } else {
+	            state
+	                .agents
+	                .codex_context_remaining_pct
+	                .entry(model.clone())
+	                .or_insert(pct);
+	        }
+	    } else {
+	        if let Some(mission_id) = mission_id.as_deref() {
+	            if let Some(map) = state
+	                .agents
+	                .codex_mission_context_remaining_pct
+	                .get_mut(mission_id)
+	            {
+	                map.remove(&model);
+	                if map.is_empty() {
+	                    state.agents.codex_mission_context_remaining_pct.remove(mission_id);
+	                }
+	            }
+	        } else {
+	            state.agents.codex_context_remaining_pct.remove(&model);
+	        }
+	    }
 
     // Immediate UI feedback: mark the model as running and show the loader/breather row.
+    let Some(agent) = state.agents.agents.iter_mut().find(|a| a.id == model) else {
+        return;
+    };
     agent.status = AgentStatus::Running;
     agent.queue_len = agent.queue_len.saturating_add(1).max(1);
     agent.heartbeat_age_secs = 0;
@@ -2697,6 +2867,8 @@ fn maybe_dispatch_codex_turn(
         model,
         cwd: state.workspace_root.clone(),
         mission_id,
+        resume_thread_id,
+        persist_session,
         reasoning_effort: Some(reasoning_effort),
         prompt,
     });
@@ -2710,6 +2882,15 @@ fn estimate_codex_context_tokens(text: &str) -> u32 {
     }
     let bytes = text.as_bytes().len() as u32;
     (bytes + 3) / 4
+}
+
+fn estimate_codex_context_tokens_for_mission(state: &AppState, mission_id: &str) -> u32 {
+    state
+        .agents
+        .messages
+        .iter()
+        .filter(|msg| msg.mission_id.as_deref() == Some(mission_id))
+        .fold(0u32, |acc, msg| acc.saturating_add(estimate_codex_context_tokens(&msg.text)))
 }
 
 fn push_chat_message(state: &mut AppState) -> bool {
@@ -5264,10 +5445,6 @@ fn selection_text_agent_console(lines: &[String], selection: UiSelection) -> Str
     let mut out_lines = Vec::new();
     for line_idx in start_line..=end_line {
         let line = &lines[line_idx];
-        if is_user_bubble_border_line_in_block(lines, line_idx) {
-            continue;
-        }
-        let payload_bounds = user_bubble_payload_bounds_in_block(lines, line_idx);
         let line_len = line.chars().count();
         let mut sel_start = if line_idx == start_line { start_col } else { 0 };
         let mut sel_end = if line_idx == end_line {
@@ -5277,7 +5454,9 @@ fn selection_text_agent_console(lines: &[String], selection: UiSelection) -> Str
         };
         sel_start = sel_start.min(line_len);
         sel_end = sel_end.min(line_len);
-        let slice = if let Some((payload_start, payload_end)) = payload_bounds {
+        let slice = if let Some((payload_start, payload_end)) =
+            user_prompt_payload_bounds_in_block(lines, line_idx)
+        {
             let sel_start = sel_start.max(payload_start);
             let sel_end = sel_end.min(payload_end);
             slice_by_char(line, sel_start, sel_end)
@@ -5313,89 +5492,40 @@ fn slice_by_char(input: &str, start: usize, end: usize) -> String {
     input[start_byte..end_byte].to_string()
 }
 
-fn is_user_bubble_border_line(line: &str) -> bool {
-    let body = line.trim_start_matches(' ');
-    body.starts_with('+') && body.ends_with('+') && body.chars().all(|ch| ch == '+' || ch == '-')
+const USER_PROMPT_INDENT: usize = 2;
+
+fn is_user_prompt_row(line: &str) -> bool {
+    // User prompts are padded out to the full thread width so the background fills the row.
+    // That makes them easy to detect for clipboard trimming: they start with the fixed indent and
+    // end with spaces.
+    line.starts_with("  ") && line.ends_with(' ')
 }
 
-fn leading_spaces(line: &str) -> usize {
-    line.chars().take_while(|ch| *ch == ' ').count()
-}
-
-fn is_user_bubble_border_line_in_block(lines: &[String], idx: usize) -> bool {
-    let Some(line) = lines.get(idx) else {
-        return false;
-    };
-    if !is_user_bubble_border_line(line) {
-        return false;
-    }
-    let leading = leading_spaces(line);
-    if idx > 0 {
-        let above = &lines[idx - 1];
-        if leading_spaces(above) == leading && user_bubble_payload_bounds(above).is_some() {
-            return true;
-        }
-    }
-    if let Some(below) = lines.get(idx + 1) {
-        if leading_spaces(below) == leading && user_bubble_payload_bounds(below).is_some() {
-            return true;
-        }
-    }
-    false
-}
-
-fn user_bubble_payload_bounds(line: &str) -> Option<(usize, usize)> {
-    let start = user_bubble_payload_start_col(line)?;
-    let mut rev = line.chars().rev();
-    let last = rev.next()?;
-    let second_last = rev.next()?;
-    if last != '|' || second_last != ' ' {
-        return None;
-    }
-    let line_len = line.chars().count();
-    let end = line_len.saturating_sub(2);
-    if start > end {
-        return None;
-    }
-    Some((start, end))
-}
-
-fn user_bubble_payload_bounds_in_block(lines: &[String], idx: usize) -> Option<(usize, usize)> {
+fn user_prompt_payload_bounds_in_block(lines: &[String], idx: usize) -> Option<(usize, usize)> {
     let line = lines.get(idx)?;
-    let bounds = user_bubble_payload_bounds(line)?;
-    let leading = leading_spaces(line);
+    if !is_user_prompt_row(line) {
+        return None;
+    }
 
+    // Find the contiguous block of padded user rows that this line belongs to.
     let mut start = idx;
-    while start > 0 {
-        let prev = &lines[start - 1];
-        if leading_spaces(prev) != leading {
-            break;
-        }
-        if user_bubble_payload_bounds(prev).is_none() && !is_user_bubble_border_line(prev) {
-            break;
-        }
+    while start > 0 && is_user_prompt_row(&lines[start - 1]) {
         start = start.saturating_sub(1);
     }
-
     let mut end = idx;
-    while end + 1 < lines.len() {
-        let next = &lines[end + 1];
-        if leading_spaces(next) != leading {
-            break;
-        }
-        if user_bubble_payload_bounds(next).is_none() && !is_user_bubble_border_line(next) {
-            break;
-        }
+    while end + 1 < lines.len() && is_user_prompt_row(&lines[end + 1]) {
         end = end.saturating_add(1);
     }
 
-    let border_count = (start..=end)
-        .filter(|line_idx| is_user_bubble_border_line(&lines[*line_idx]))
-        .count();
-    if border_count < 2 {
+    // Only treat the block as a user prompt if it contains the "You" label line.
+    let has_label = (start..=end).any(|line_idx| lines[line_idx].trim() == "You");
+    if !has_label {
         return None;
     }
-    Some(bounds)
+
+    let len = line.chars().count();
+    let start_col = USER_PROMPT_INDENT.min(len);
+    Some((start_col, len))
 }
 
 fn handle_mouse_down(
@@ -6073,14 +6203,7 @@ fn adjust_agent_console_drag_col(
 }
 
 fn user_bubble_payload_start_col(line: &str) -> Option<usize> {
-    let leading = line.chars().take_while(|ch| *ch == ' ').count();
-    let mut chars = line.chars().skip(leading);
-    let first = chars.next()?;
-    let second = chars.next()?;
-    if first != '|' || second != ' ' {
-        return None;
-    }
-    Some(leading + 2)
+    is_user_prompt_row(line).then_some(USER_PROMPT_INDENT)
 }
 
 fn mouse_drag_allowed(state: &AppState, anchor: MouseSelectAnchor) -> bool {
@@ -7922,19 +8045,24 @@ fn write_agent_run_provenance(state: &AppState, mission_id: &str) -> io::Result<
         .iter()
         .filter(|patch| patch.mission_id.as_deref() == Some(mission_id))
         .collect::<Vec<_>>();
-    let run_payload = serde_json::json!({
-        "id": mission.id,
-        "title": mission.title,
-        "phase": mission.phase.label(),
+	    let run_payload = serde_json::json!({
+	        "id": mission.id,
+	        "title": mission.title,
+	        "phase": mission.phase.label(),
         "status": mission.status,
         "swarm": mission.swarm,
-        "assigned_agents": mission.assigned_agents,
-        "updated_at": mission.updated_at,
-        "selected_agent": state.agents.selected_context_agent(),
-        "mcp": {
-            "state": state.agents.mcp.state.label(),
-            "endpoint": state.agents.mcp.endpoint,
-            "latency_ms": state.agents.mcp.latency_ms,
+	        "assigned_agents": mission.assigned_agents,
+	        "updated_at": mission.updated_at,
+	        "selected_agent": state.agents.selected_context_agent(),
+	        "codex_thread_id": state
+	            .agents
+	            .selected_context_agent()
+	            .and_then(|agent| state.agents.codex_mission_thread_ids.get(mission_id)?.get(agent)),
+	        "codex_thread_ids": state.agents.codex_mission_thread_ids.get(mission_id),
+	        "mcp": {
+	            "state": state.agents.mcp.state.label(),
+	            "endpoint": state.agents.mcp.endpoint,
+	            "latency_ms": state.agents.mcp.latency_ms,
             "last_error": state.agents.mcp.last_error,
         },
         "patches": patches
@@ -8118,6 +8246,135 @@ mod tests {
         let thread = agent_console_view::thread_lines_for_selection(&state, 80).join("\n");
         assert!(thread.contains("Please integrate Codex."));
         assert!(thread.contains("Streaming events into AgentsState"));
+    }
+
+    #[test]
+    fn codex_turn_completed_stores_mission_thread_id_and_marks_live() {
+        let mut state = state_for_test();
+        state.agents.missions.push(MissionRecord {
+            id: "mis-001".into(),
+            title: "Test mission".into(),
+            phase: MissionPhase::Execute,
+            swarm: false,
+            assigned_agents: vec!["gpt-5.1-codex-mini".into()],
+            status: "QUEUED".into(),
+            updated_at: "t+0".into(),
+        });
+        state.agents.selected_mission = Some("mis-001".into());
+        state.agents.mission_selected = 0;
+        state.agents.agents.push(nit_core::AgentLane {
+            id: "gpt-5.1-codex-mini".into(),
+            role: "gpt-5.1-codex-mini".into(),
+            lane: "Codex".into(),
+            status: AgentStatus::Idle,
+            heartbeat_age_secs: 0,
+            queue_len: 0,
+            current_mission: None,
+            last_message: String::new(),
+        });
+
+        let mut vitals = VitalsState::default();
+        handle_codex_event(
+            &mut state,
+            &mut vitals,
+            CodexEvent::TurnCompleted {
+                model: "gpt-5.1-codex-mini".into(),
+                mission_id: Some("mis-001".into()),
+                thread_id: Some("thread-123".into()),
+                token_count: None,
+                message: "ok".into(),
+            },
+        );
+
+        assert_eq!(
+            state
+                .agents
+                .codex_mission_thread_ids
+                .get("mis-001")
+                .and_then(|threads| threads.get("gpt-5.1-codex-mini"))
+                .map(|s| s.as_str()),
+            Some("thread-123")
+        );
+        assert_eq!(
+            state.agents.missions[0].status.to_ascii_uppercase(),
+            "LIVE"
+        );
+        assert!(state
+            .agents
+            .messages
+            .iter()
+            .any(|msg| msg.mission_id.as_deref() == Some("mis-001")
+                && msg.agent_id.as_deref() == Some("gpt-5.1-codex-mini")
+                && msg.text == "ok"));
+    }
+
+    #[test]
+    fn reset_context_in_mission_forgets_codex_thread_id_and_clears_mission_thread() {
+        let mut state = state_for_test();
+        state.agents.missions.push(MissionRecord {
+            id: "mis-001".into(),
+            title: "Test mission".into(),
+            phase: MissionPhase::Execute,
+            swarm: true,
+            assigned_agents: vec!["gpt-5.1-codex-mini".into(), "gpt-5.3-codex".into()],
+            status: "LIVE".into(),
+            updated_at: "t+0".into(),
+        });
+        state.agents.selected_mission = Some("mis-001".into());
+        state.agents.mission_selected = 0;
+        state.agents.agents.push(nit_core::AgentLane {
+            id: "gpt-5.1-codex-mini".into(),
+            role: "gpt-5.1-codex-mini".into(),
+            lane: "Codex".into(),
+            status: AgentStatus::Idle,
+            heartbeat_age_secs: 0,
+            queue_len: 0,
+            current_mission: Some("mis-001".into()),
+            last_message: String::new(),
+        });
+        state.agents.selected_agent = Some("gpt-5.1-codex-mini".into());
+        state.agents.roster_selected = 0;
+
+        state
+            .agents
+            .codex_mission_thread_ids
+            .entry("mis-001".into())
+            .or_default()
+            .insert("gpt-5.1-codex-mini".into(), "thread-123".into());
+        state.agents.messages.push(AgentMessage {
+            at: "t+1".into(),
+            channel: AgentChannel::Agent,
+            agent_id: None,
+            mission_id: Some("mis-001".into()),
+            text: "hello".into(),
+        });
+        state.agents.messages.push(AgentMessage {
+            at: "t+2".into(),
+            channel: AgentChannel::Agent,
+            agent_id: Some("gpt-5.1-codex-mini".into()),
+            mission_id: Some("mis-001".into()),
+            text: "world".into(),
+        });
+        state.agents.messages.push(AgentMessage {
+            at: "t+3".into(),
+            channel: AgentChannel::Agent,
+            agent_id: None,
+            mission_id: Some("mis-999".into()),
+            text: "other mission".into(),
+        });
+
+        assert!(reset_roster_context(&mut state));
+        assert!(state.agents.codex_mission_thread_ids.get("mis-001").is_none());
+        assert!(state
+            .agents
+            .messages
+            .iter()
+            .all(|msg| msg.mission_id.as_deref() != Some("mis-001")));
+        assert!(state
+            .agents
+            .messages
+            .iter()
+            .any(|msg| msg.mission_id.as_deref() == Some("mis-999")));
     }
 
     #[test]
@@ -9076,6 +9333,13 @@ mod tests {
             .enumerate()
             .find_map(|(idx, line)| line.contains("short").then_some(idx))
             .expect("short row");
+        let end_col = lines
+            .get(end_row)
+            .and_then(|line| {
+                line.find("short")
+                    .map(|byte| line[..byte].chars().count() + "short".chars().count())
+            })
+            .expect("short col");
 
         let down = MouseEvent {
             kind: MouseEventKind::Down(crossterm::event::MouseButton::Left),
@@ -9085,7 +9349,7 @@ mod tests {
         };
         let drag = MouseEvent {
             kind: MouseEventKind::Drag(crossterm::event::MouseButton::Left),
-            column: thread_area.x.saturating_add(start_col as u16),
+            column: thread_area.x.saturating_add(end_col as u16),
             row: thread_area.y.saturating_add(end_row as u16),
             modifiers: KeyModifiers::NONE,
         };
@@ -9353,8 +9617,8 @@ mod tests {
         let down = MouseEvent {
             kind: MouseEventKind::Down(crossterm::event::MouseButton::Left),
             column: text_area.x,
-            // Agent messages render an ECG header line first, then message text below.
-            row: text_area.y.saturating_add(1),
+            // Agent messages include a top padding row, then ECG header, then message text.
+            row: text_area.y.saturating_add(2),
             modifiers: KeyModifiers::NONE,
         };
         assert!(handle_mouse_down(
@@ -9368,7 +9632,7 @@ mod tests {
         let drag = MouseEvent {
             kind: MouseEventKind::Drag(crossterm::event::MouseButton::Left),
             column: text_area.x.saturating_add(24),
-            row: text_area.y.saturating_add(1),
+            row: text_area.y.saturating_add(2),
             modifiers: KeyModifiers::NONE,
         };
         assert!(handle_mouse_drag(

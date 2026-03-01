@@ -3,7 +3,7 @@ use nit_core::{
 };
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
-    style::{Modifier, Style},
+    style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, BorderType, Borders, Paragraph},
     Frame,
@@ -728,6 +728,34 @@ fn selected_row_style(style: Style, selected: bool, theme: &Theme) -> Style {
     }
 }
 
+fn striped_row_style(style: Style, selected: bool, striped: bool, theme: &Theme) -> Style {
+    if selected {
+        style.bg(theme.selection_bg).add_modifier(Modifier::BOLD)
+    } else if striped {
+        // Mission zebra stripes should read as "dim background", clearly distinct from the selected
+        // row highlight. Derive the stripe bg from the theme instead of hardcoding colors.
+        style.bg(dim_bg_towards(theme.cursor_line_bg, theme.background, 60))
+    } else {
+        style
+    }
+}
+
+fn dim_bg_towards(color: Color, background: Color, background_pct: u8) -> Color {
+    let pct = background_pct.min(100) as u16;
+    match (color, background) {
+        (Color::Rgb(r1, g1, b1), Color::Rgb(r0, g0, b0)) => {
+            let inv = 100u16.saturating_sub(pct);
+            let mix = |top: u8, base: u8| -> u8 {
+                let top = top as u16;
+                let base = base as u16;
+                ((top.saturating_mul(inv) + base.saturating_mul(pct) + 50) / 100) as u8
+            };
+            Color::Rgb(mix(r1, r0), mix(g1, g0), mix(b1, b0))
+        }
+        _ => color,
+    }
+}
+
 fn agent_status_style(status: AgentStatus, theme: &Theme) -> Style {
     match status {
         AgentStatus::Running => Style::default()
@@ -1077,48 +1105,62 @@ fn mission_styled_line(
         ));
     };
     let selected = meta.mission_idx == state.agents.mission_selected;
+    let striped = !selected && meta.mission_idx % 2 == 1;
 
     let marker_style = if selected && meta.agent_row == Some(0) {
-        selected_row_style(
+        striped_row_style(
             Style::default()
                 .fg(theme.accent)
                 .add_modifier(Modifier::BOLD),
-            true,
+            selected,
+            striped,
             theme,
         )
     } else if selected {
-        selected_row_style(
+        striped_row_style(
             Style::default()
                 .fg(theme.border)
                 .add_modifier(Modifier::DIM),
-            true,
+            selected,
+            striped,
             theme,
         )
     } else {
-        Style::default()
+        striped_row_style(
+            Style::default()
             .fg(theme.border)
-            .add_modifier(Modifier::DIM)
+            .add_modifier(Modifier::DIM),
+            selected,
+            striped,
+            theme,
+        )
     };
-    let muted_style = selected_row_style(
+    let muted_style = striped_row_style(
         Style::default()
             .fg(theme.border)
             .add_modifier(Modifier::DIM),
         selected,
+        striped,
         theme,
     );
     let is_primary_line = meta.agent_row == Some(0);
     let id_style = if is_primary_line {
-        selected_row_style(Style::default().fg(theme.foreground), selected, theme)
+        striped_row_style(Style::default().fg(theme.foreground), selected, striped, theme)
     } else {
         muted_style
     };
     let phase_style = if is_primary_line {
-        selected_row_style(mission_phase_style(mission.phase, theme), selected, theme)
+        striped_row_style(
+            mission_phase_style(mission.phase, theme),
+            selected,
+            striped,
+            theme,
+        )
     } else {
         muted_style
     };
     let swarm_style = if is_primary_line {
-        selected_row_style(
+        striped_row_style(
             if mission.swarm {
                 Style::default()
                     .fg(theme.accent)
@@ -1129,41 +1171,46 @@ fn mission_styled_line(
                     .add_modifier(Modifier::DIM)
             },
             selected,
+            striped,
             theme,
         )
     } else {
         muted_style
     };
     let status_style = if is_primary_line {
-        selected_row_style(
+        striped_row_style(
             mission_status_style(&mission.status, theme),
             selected,
+            striped,
             theme,
         )
     } else {
         muted_style
     };
-    let space_style = selected_row_style(Style::default(), selected, theme);
+    let space_style = striped_row_style(Style::default(), selected, striped, theme);
 
-    let agent_edges = selected_row_style(
+    let agent_edges = striped_row_style(
         Style::default()
             .fg(theme.border)
             .add_modifier(Modifier::DIM),
         selected,
+        striped,
         theme,
     );
-    let agent_assigned = selected_row_style(
+    let agent_assigned = striped_row_style(
         Style::default()
             .fg(theme.title_focused)
             .add_modifier(Modifier::BOLD),
         selected,
+        striped,
         theme,
     );
-    let agent_missing = selected_row_style(
+    let agent_missing = striped_row_style(
         Style::default()
             .fg(theme.border)
             .add_modifier(Modifier::DIM),
         selected,
+        striped,
         theme,
     );
 
