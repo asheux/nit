@@ -511,6 +511,11 @@ pub struct AgentsState {
     pub diag_events: Vec<AgentDiagnosticEvent>,
     pub mcp: McpStatus,
     pub roster_selected: usize,
+    /// When selecting Codex reasoning effort "sizes" in the roster tree, this stores the selected
+    /// child-row index for the currently selected model.
+    /// Runtime-only; UI navigation state.
+    #[serde(skip)]
+    pub roster_effort_selected: Option<usize>,
     pub mission_selected: usize,
     pub alert_selected: usize,
     pub patch_selected: usize,
@@ -524,6 +529,26 @@ pub struct AgentsState {
     pub pending_provenance_mission_ids: Vec<String>,
     #[serde(skip)]
     pub pending_legacy_notes_alert: Option<String>,
+    /// Codex model metadata (effective context window tokens) keyed by model slug.
+    /// Runtime-only; populated when seeding the roster from `~/.codex/models_cache.json`.
+    #[serde(skip)]
+    pub codex_effective_context_window_tokens: HashMap<String, u32>,
+    /// Codex model default reasoning effort (e.g. low/medium/high/xhigh) keyed by model slug.
+    /// Runtime-only; populated when seeding the roster from `~/.codex/models_cache.json`.
+    #[serde(skip)]
+    pub codex_default_reasoning_effort: HashMap<String, String>,
+    /// Codex model supported reasoning effort "sizes" keyed by model slug.
+    /// Runtime-only; populated when seeding the roster from `~/.codex/models_cache.json`.
+    #[serde(skip)]
+    pub codex_supported_reasoning_efforts: HashMap<String, Vec<String>>,
+    /// Codex model operator-selected reasoning effort keyed by model slug.
+    /// Runtime-only; defaults to `codex_default_reasoning_effort` but can be changed in the roster.
+    #[serde(skip)]
+    pub codex_selected_reasoning_effort: HashMap<String, String>,
+    /// Best-effort context remaining percentage for the currently running Codex turn.
+    /// Runtime-only; updated when dispatching a Codex turn.
+    #[serde(skip)]
+    pub codex_context_remaining_pct: HashMap<String, u8>,
 }
 
 fn chat_input_scroll_default() -> usize {
@@ -638,6 +663,7 @@ impl AgentsState {
                 last_error: None,
             },
             roster_selected: 0,
+            roster_effort_selected: None,
             mission_selected: 0,
             alert_selected: 0,
             patch_selected: 0,
@@ -646,6 +672,11 @@ impl AgentsState {
             event_epoch: 0,
             pending_provenance_mission_ids: vec!["mis-001".into()],
             pending_legacy_notes_alert: None,
+            codex_effective_context_window_tokens: HashMap::new(),
+            codex_default_reasoning_effort: HashMap::new(),
+            codex_supported_reasoning_efforts: HashMap::new(),
+            codex_selected_reasoning_effort: HashMap::new(),
+            codex_context_remaining_pct: HashMap::new(),
         }
     }
 
@@ -695,6 +726,7 @@ impl Default for AgentsState {
                 last_error: None,
             },
             roster_selected: 0,
+            roster_effort_selected: None,
             mission_selected: 0,
             alert_selected: 0,
             patch_selected: 0,
@@ -703,6 +735,11 @@ impl Default for AgentsState {
             event_epoch: 0,
             pending_provenance_mission_ids: Vec::new(),
             pending_legacy_notes_alert: None,
+            codex_effective_context_window_tokens: HashMap::new(),
+            codex_default_reasoning_effort: HashMap::new(),
+            codex_supported_reasoning_efforts: HashMap::new(),
+            codex_selected_reasoning_effort: HashMap::new(),
+            codex_context_remaining_pct: HashMap::new(),
         }
     }
 }

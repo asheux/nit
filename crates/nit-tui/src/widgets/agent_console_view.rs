@@ -104,6 +104,49 @@ pub fn render(
 
     let mission = state.agents.selected_context_mission();
     let agent = state.agents.selected_context_agent();
+    let codex_size = agent.and_then(|agent_id| {
+        let is_codex = state
+            .agents
+            .agents
+            .iter()
+            .find(|lane| lane.id == agent_id)
+            .is_some_and(|lane| lane.lane.eq_ignore_ascii_case("codex"));
+        if !is_codex {
+            return None;
+        }
+        state
+            .agents
+            .codex_selected_reasoning_effort
+            .get(agent_id)
+            .or_else(|| state.agents.codex_default_reasoning_effort.get(agent_id))
+            .map(|s| s.as_str())
+    });
+    let codex_ctx_pct = agent.and_then(|agent_id| {
+        let is_codex = state
+            .agents
+            .agents
+            .iter()
+            .find(|lane| lane.id == agent_id)
+            .is_some_and(|lane| lane.lane.eq_ignore_ascii_case("codex"));
+        if !is_codex {
+            return None;
+        }
+        Some(
+            state
+                .agents
+                .codex_context_remaining_pct
+                .get(agent_id)
+                .copied()
+                .unwrap_or(100),
+        )
+    });
+    let codex_ctx_max = agent.and_then(|agent_id| {
+        state
+            .agents
+            .codex_effective_context_window_tokens
+            .get(agent_id)
+            .copied()
+    });
     let label_style = Style::default()
         .fg(theme.border)
         .add_modifier(Modifier::DIM);
@@ -122,12 +165,45 @@ pub fn render(
         label_style
     };
     let context_line = Line::from(vec![
-        Span::styled("context ", label_style),
         Span::styled("mission=", label_style),
         Span::styled(mission.unwrap_or("--"), mission_style),
         Span::styled("  ", label_style),
         Span::styled("agent=", label_style),
         Span::styled(agent.unwrap_or("--"), agent_style),
+        Span::styled("  ", label_style),
+        Span::styled("size=", label_style),
+        Span::styled(
+            codex_size.unwrap_or("--"),
+            if codex_size.is_some() {
+                Style::default()
+                    .fg(theme.accent)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                label_style
+            },
+        ),
+        Span::styled("  ", label_style),
+        Span::styled("ctx=", label_style),
+        Span::styled(
+            if let Some(pct) = codex_ctx_pct {
+                if let Some(max) = codex_ctx_max {
+                    format!("{pct}%/{}", format_token_count_short(max))
+                } else {
+                    format!("{pct}%")
+                }
+            } else if codex_ctx_max.is_some() {
+                format_token_count_short(codex_ctx_max.unwrap_or(0))
+            } else {
+                "--".to_string()
+            },
+            if codex_ctx_pct.is_some() || codex_ctx_max.is_some() {
+                Style::default()
+                    .fg(theme.accent)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                label_style
+            },
+        ),
     ]);
     frame.render_widget(Paragraph::new(context_line), chunks[0]);
 
@@ -529,9 +605,9 @@ fn thread_lines(rows: Vec<ThreadRow>, theme: &Theme, _pulse_on: bool) -> Vec<Lin
 
 fn agent_line_with_accent_ecg(text: String, theme: &Theme) -> Line<'static> {
     let mut spans = Vec::new();
-    let agent_style = Style::default()
-        .fg(theme.border)
-        .add_modifier(Modifier::DIM);
+    // Keep agent output distinct from user bubbles, but don't over-dim (hard to read in many
+    // terminals). Use a brighter cyan tone from the theme.
+    let agent_style = Style::default().fg(theme.title);
 
     let leading_spaces = text.chars().take_while(|ch| *ch == ' ').count();
     if leading_spaces > 0 {
@@ -688,41 +764,32 @@ fn format_message_rows(
         true
     };
     let agent_badge = show_badge.then(|| agent_identity_badge(state, src));
-    let ecg = ecg_indicator(
-        state.metrics.frame_count,
-        msg.agent_id.as_deref(),
-        pulse_on,
-        agent_is_running(state, msg.agent_id.as_deref()),
-    );
+    // Agent transcript entries should be stable (non-animated). The live "working" indicator is
+    // represented by the dedicated breather row appended after the latest prompt.
+    let ecg = ecg_indicator(state.metrics.frame_count, None, pulse_on, false);
 
-    let mut prefix = ecg.to_string();
+    let mut header = ecg.to_string();
     if matches!(msg.channel, nit_core::AgentChannel::Broadcast) {
-        prefix.push_str(" @all");
+        header.push_str(" @all");
     }
     if let Some(agent_badge) = agent_badge.as_deref() {
-        prefix.push_str(&format!(" [{agent_badge}]"));
+        header.push_str(&format!(" [{agent_badge}]"));
     }
-    prefix.push(' ');
-    let prefix_width = UnicodeWidthStr::width(prefix.as_str());
-    let indent = " ".repeat(prefix_width);
-    text_lines
-        .into_iter()
-        .enumerate()
-        .flat_map(|(idx, line)| {
-            let line_prefix = if idx == 0 {
-                prefix.as_str()
-            } else {
-                indent.as_str()
-            };
-            wrap_with_hanging_indent(line_prefix, indent.as_str(), line, width)
-                .into_iter()
-                .map(|segment| ThreadRow {
-                    text: segment,
-                    kind: ThreadRowKind::Agent,
-                })
-                .collect::<Vec<_>>()
-        })
-        .collect()
+
+    let mut out = Vec::new();
+    out.push(ThreadRow {
+        text: header,
+        kind: ThreadRowKind::Agent,
+    });
+    for line in text_lines {
+        for segment in wrap_visual_line(line, width) {
+            out.push(ThreadRow {
+                text: segment,
+                kind: ThreadRowKind::Agent,
+            });
+        }
+    }
+    out
 }
 
 fn agent_identity_badge(state: &AppState, agent_id: &str) -> String {
@@ -754,15 +821,25 @@ fn breather_row_for_user_prompt(state: &AppState, pulse_on: bool) -> Option<Thre
     let Some(agent) = active_running_agent(state) else {
         return None;
     };
-    let agent_type = truncate_label(agent.role.trim(), 14);
+    let agent_type = agent.role.trim();
     let agent_type = if agent_type.is_empty() {
-        truncate_label(&agent.id, 14)
+        agent.id.as_str()
     } else {
         agent_type
     };
     let ecg = ecg_indicator(state.metrics.frame_count, Some(&agent.id), pulse_on, true);
+    let ctx = if agent.lane.eq_ignore_ascii_case("codex") {
+        state
+            .agents
+            .codex_context_remaining_pct
+            .get(&agent.id)
+            .copied()
+    } else {
+        None
+    };
+    let ctx_suffix = ctx.map(|pct| format!(" {pct}% ctx")).unwrap_or_default();
     Some(ThreadRow {
-        text: format!("{ecg} [{agent_type}] Working"),
+        text: format!("{ecg} [{agent_type}] Working{ctx_suffix}"),
         kind: ThreadRowKind::Breather,
     })
 }
@@ -808,6 +885,16 @@ fn truncate_label(input: &str, max_chars: usize) -> String {
     out
 }
 
+fn format_token_count_short(tokens: u32) -> String {
+    if tokens >= 1_000_000 {
+        format!("{}m", tokens / 1_000_000)
+    } else if tokens >= 1_000 {
+        format!("{}k", tokens / 1_000)
+    } else {
+        tokens.to_string()
+    }
+}
+
 fn format_user_bubble_rows(_msg: &AgentMessage, text_lines: &[&str], width: usize) -> Vec<String> {
     let width = width.max(1);
     if width < 8 {
@@ -847,21 +934,6 @@ fn format_user_bubble_rows(_msg: &AgentMessage, text_lines: &[&str], width: usiz
     }
     bubble.push(format!("+{border}+"));
     right_align_block(bubble, width)
-}
-
-fn agent_is_running(state: &AppState, agent_id: Option<&str>) -> bool {
-    match agent_id {
-        Some(agent_id) => state
-            .agents
-            .agents
-            .iter()
-            .any(|agent| agent.id == agent_id && matches!(agent.status, AgentStatus::Running)),
-        None => state
-            .agents
-            .agents
-            .iter()
-            .any(|agent| matches!(agent.status, AgentStatus::Running)),
-    }
 }
 
 fn ecg_indicator(
@@ -1017,29 +1089,6 @@ fn wrap_visual_line(text: &str, width: usize) -> Vec<String> {
     }
 }
 
-fn wrap_with_hanging_indent(prefix: &str, indent: &str, content: &str, width: usize) -> Vec<String> {
-    let width = width.max(1);
-    let prefix_width = UnicodeWidthStr::width(prefix);
-    if prefix_width == 0 {
-        return wrap_visual_line(content, width);
-    }
-    if prefix_width >= width {
-        return wrap_visual_line(&format!("{prefix}{content}"), width);
-    }
-    let content_width = width.saturating_sub(prefix_width).max(1);
-    wrap_visual_line(content, content_width)
-        .into_iter()
-        .enumerate()
-        .map(|(idx, segment)| {
-            if idx == 0 {
-                format!("{prefix}{segment}")
-            } else {
-                format!("{indent}{segment}")
-            }
-        })
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
@@ -1115,7 +1164,7 @@ mod tests {
     }
 
     #[test]
-    fn agent_indicator_animates_when_agent_running() {
+    fn agent_messages_use_stable_ecg_header() {
         let mut state = test_state();
         state.agents.agents.push(AgentLane {
             id: "coder".into(),
@@ -1135,14 +1184,15 @@ mod tests {
             text: "working".into(),
         };
         state.metrics.frame_count = 3;
-        let first = format_message_rows(&state, &msg, 80, true)[0].text.clone();
+        let first_rows = format_message_rows(&state, &msg, 80, true);
         state.metrics.frame_count = 30;
-        let second = format_message_rows(&state, &msg, 80, true)[0].text.clone();
-        assert_ne!(first, second);
-        assert!(first.contains("working"));
-        assert!(second.contains("working"));
-        assert!(!first.contains("[Coder]"));
-        assert!(!second.contains("[Coder]"));
+        let second_rows = format_message_rows(&state, &msg, 80, true);
+        assert_eq!(first_rows[0].text, "▁▁▁▁▁▁");
+        assert_eq!(second_rows[0].text, "▁▁▁▁▁▁");
+        assert_eq!(first_rows[1].text, "working");
+        assert_eq!(second_rows[1].text, "working");
+        assert!(!first_rows[0].text.contains("[Coder]"));
+        assert!(!second_rows[0].text.contains("[Coder]"));
     }
 
     #[test]
@@ -1167,13 +1217,9 @@ mod tests {
             mission_id: None,
             text: "hello".into(),
         };
-        let row = format_message_rows(&state, &msg, 120, true)
-            .into_iter()
-            .next()
-            .expect("row")
-            .text;
-        assert!(row.contains("hello"));
-        assert!(!row.contains("[Coder]"));
+        let rows = format_message_rows(&state, &msg, 120, true);
+        assert!(!rows[0].text.contains("[Coder]"));
+        assert_eq!(rows[1].text, "hello");
     }
 
     #[test]
@@ -1206,7 +1252,7 @@ mod tests {
     }
 
     #[test]
-    fn agent_ecg_renders_in_accent_color_and_text_is_dim_cyan() {
+    fn agent_ecg_renders_in_accent_color_and_text_is_cyan_theme() {
         let theme = Theme::default();
         let lines = thread_lines(
             vec![ThreadRow {
@@ -1218,7 +1264,7 @@ mod tests {
         );
         assert_eq!(lines.len(), 1);
         assert_eq!(lines[0].spans[0].style.fg, Some(theme.accent));
-        assert_eq!(lines[0].spans[1].style.fg, Some(theme.border));
+        assert_eq!(lines[0].spans[1].style.fg, Some(theme.title));
     }
 
     #[test]

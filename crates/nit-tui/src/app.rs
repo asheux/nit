@@ -1167,7 +1167,8 @@ fn handle_codex_event(state: &mut AppState, vitals: &mut VitalsState, event: Cod
                 at: timestamp_label(state),
             });
             state.agents.console_scroll = usize::MAX;
-            state.status = Some(format!("Codex failed: {message}"));
+            // Keep the top status bar clean: extract the human message from JSON errors.
+            state.status = Some(format!("Codex failed: {}", summarize_codex_error(&message)));
             state.agents.note_event();
             vitals.record_diag_event(Instant::now(), DiagSeverity::Error);
             vitals.record_agent_event(Instant::now());
@@ -1213,6 +1214,57 @@ fn handle_codex_event(state: &mut AppState, vitals: &mut VitalsState, event: Cod
             vitals.record_agent_event(Instant::now());
         }
     }
+}
+
+fn summarize_codex_error(message: &str) -> String {
+    let trimmed = message.trim();
+    if trimmed.is_empty() {
+        return "unknown error".into();
+    }
+
+    // Codex CLI sometimes prints structured JSON error payloads; the top bar should show just the
+    // message portion rather than dumping the whole object.
+    if let Some(value) = parse_codex_error_json(trimmed) {
+        if let Some(msg) = extract_codex_error_message(&value) {
+            let msg = msg.trim();
+            if !msg.is_empty() {
+                return msg.to_string();
+            }
+        }
+    }
+
+    // Single-line fallback (top bar can't display multi-line anyway).
+    trimmed.lines().next().unwrap_or(trimmed).trim().to_string()
+}
+
+fn parse_codex_error_json(text: &str) -> Option<serde_json::Value> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if (trimmed.starts_with('{') && trimmed.ends_with('}'))
+        || (trimmed.starts_with('[') && trimmed.ends_with(']'))
+    {
+        return serde_json::from_str::<serde_json::Value>(trimmed).ok();
+    }
+
+    // Try to parse an embedded JSON object (e.g. "codex: {...}").
+    let start = trimmed.find('{')?;
+    let end = trimmed.rfind('}')?;
+    if start >= end {
+        return None;
+    }
+    serde_json::from_str::<serde_json::Value>(&trimmed[start..=end]).ok()
+}
+
+fn extract_codex_error_message(value: &serde_json::Value) -> Option<&str> {
+    // Typical Codex error payload:
+    // {"type":"error","error":{"message":"...","param":"reasoning.effort",...},"status":400}
+    value
+        .get("error")
+        .and_then(|err| err.get("message"))
+        .and_then(|v| v.as_str())
+        .or_else(|| value.get("message").and_then(|v| v.as_str()))
 }
 
 fn is_background_work_active(state: &AppState) -> bool {
@@ -1634,6 +1686,7 @@ fn handle_agent_ops_key(key: KeyEvent, state: &mut AppState, vitals: &mut Vitals
                 ..
             } => {
                 state.agents.dock_tab = state.agents.dock_tab.prev();
+                state.agents.roster_effort_selected = None;
                 state.agents.ops_scroll = 0;
                 state.mode = if state.agents.dock_tab == AgentOpsTab::Scratchpad {
                     Mode::Insert
@@ -1648,6 +1701,7 @@ fn handle_agent_ops_key(key: KeyEvent, state: &mut AppState, vitals: &mut Vitals
                 code: KeyCode::Tab, ..
             } => {
                 state.agents.dock_tab = state.agents.dock_tab.next();
+                state.agents.roster_effort_selected = None;
                 state.agents.ops_scroll = 0;
                 state.mode = if state.agents.dock_tab == AgentOpsTab::Scratchpad {
                     Mode::Insert
@@ -1663,6 +1717,7 @@ fn handle_agent_ops_key(key: KeyEvent, state: &mut AppState, vitals: &mut Vitals
                 ..
             } if state.mode != Mode::Insert => {
                 state.agents.dock_tab = state.agents.dock_tab.prev();
+                state.agents.roster_effort_selected = None;
                 state.agents.ops_scroll = 0;
                 state.mode = if state.agents.dock_tab == AgentOpsTab::Scratchpad {
                     Mode::Insert
@@ -1678,6 +1733,7 @@ fn handle_agent_ops_key(key: KeyEvent, state: &mut AppState, vitals: &mut Vitals
                 ..
             } if state.mode != Mode::Insert => {
                 state.agents.dock_tab = state.agents.dock_tab.next();
+                state.agents.roster_effort_selected = None;
                 state.agents.ops_scroll = 0;
                 state.mode = if state.agents.dock_tab == AgentOpsTab::Scratchpad {
                     Mode::Insert
@@ -1714,11 +1770,33 @@ fn handle_agent_ops_key(key: KeyEvent, state: &mut AppState, vitals: &mut Vitals
     let mut changed = false;
     match key {
         KeyEvent {
+            code: KeyCode::Char('l'),
+            modifiers: KeyModifiers::NONE,
+            ..
+        } if state.agents.dock_tab == AgentOpsTab::Roster => {
+            changed = enter_roster_effort_cursor(state);
+        }
+        KeyEvent {
+            code: KeyCode::Char('h'),
+            modifiers: KeyModifiers::NONE,
+            ..
+        } if state.agents.dock_tab == AgentOpsTab::Roster => {
+            changed = exit_roster_effort_cursor(state);
+        }
+        KeyEvent {
+            code: KeyCode::Char('c'),
+            modifiers: KeyModifiers::NONE,
+            ..
+        } if state.agents.dock_tab == AgentOpsTab::Roster => {
+            changed = reset_roster_context(state);
+        }
+        KeyEvent {
             code: KeyCode::Tab,
             modifiers: KeyModifiers::SHIFT,
             ..
         } => {
             state.agents.dock_tab = state.agents.dock_tab.prev();
+            state.agents.roster_effort_selected = None;
             state.agents.ops_scroll = 0;
             if state.agents.dock_tab == AgentOpsTab::Scratchpad {
                 state.mode = Mode::Insert;
@@ -1729,6 +1807,7 @@ fn handle_agent_ops_key(key: KeyEvent, state: &mut AppState, vitals: &mut Vitals
             code: KeyCode::Tab, ..
         } => {
             state.agents.dock_tab = state.agents.dock_tab.next();
+            state.agents.roster_effort_selected = None;
             state.agents.ops_scroll = 0;
             if state.agents.dock_tab == AgentOpsTab::Scratchpad {
                 state.mode = Mode::Insert;
@@ -1740,6 +1819,7 @@ fn handle_agent_ops_key(key: KeyEvent, state: &mut AppState, vitals: &mut Vitals
             ..
         } => {
             state.agents.dock_tab = state.agents.dock_tab.prev();
+            state.agents.roster_effort_selected = None;
             state.agents.ops_scroll = 0;
             if state.agents.dock_tab == AgentOpsTab::Scratchpad {
                 state.mode = Mode::Insert;
@@ -1751,6 +1831,7 @@ fn handle_agent_ops_key(key: KeyEvent, state: &mut AppState, vitals: &mut Vitals
             ..
         } => {
             state.agents.dock_tab = state.agents.dock_tab.next();
+            state.agents.roster_effort_selected = None;
             state.agents.ops_scroll = 0;
             if state.agents.dock_tab == AgentOpsTab::Scratchpad {
                 state.mode = Mode::Insert;
@@ -1777,6 +1858,24 @@ fn handle_agent_ops_key(key: KeyEvent, state: &mut AppState, vitals: &mut Vitals
             ..
         } => {
             changed = move_agent_ops_selection(state, 1);
+        }
+        KeyEvent {
+            code: KeyCode::Char(' '),
+            modifiers: KeyModifiers::NONE,
+            ..
+        } if state.agents.dock_tab == AgentOpsTab::Roster
+            && state.agents.roster_effort_selected.is_some() =>
+        {
+            changed = select_roster_effort(state);
+        }
+        KeyEvent {
+            code: KeyCode::Enter,
+            modifiers: KeyModifiers::NONE,
+            ..
+        } if state.agents.dock_tab == AgentOpsTab::Roster
+            && state.agents.roster_effort_selected.is_some() =>
+        {
+            changed = select_roster_effort(state);
         }
         KeyEvent {
             code: KeyCode::Enter,
@@ -1840,12 +1939,77 @@ fn move_agent_ops_selection(state: &mut AppState, delta: i32) -> bool {
             if state.agents.agents.is_empty() {
                 return false;
             }
+            if let Some(effort_idx) = state.agents.roster_effort_selected {
+                let Some(agent) = state.agents.agents.get(state.agents.roster_selected) else {
+                    state.agents.roster_effort_selected = None;
+                    return true;
+                };
+                let efforts = state
+                    .agents
+                    .codex_supported_reasoning_efforts
+                    .get(&agent.id)
+                    .map(|v| v.as_slice())
+                    .unwrap_or(&[]);
+                if efforts.is_empty() {
+                    state.agents.roster_effort_selected = None;
+                    return true;
+                }
+                let max = efforts.len().saturating_sub(1);
+                if delta.is_negative() {
+                    if effort_idx > 0 {
+                        let next = effort_idx.saturating_sub(1);
+                        if next != effort_idx {
+                            state.agents.roster_effort_selected = Some(next);
+                            return true;
+                        }
+                    }
+                    state.agents.roster_effort_selected = None;
+                    return true;
+                }
+                if delta > 0 {
+                    if effort_idx < max {
+                        let next = (effort_idx + 1).min(max);
+                        if next != effort_idx {
+                            state.agents.roster_effort_selected = Some(next);
+                            return true;
+                        }
+                    }
+
+                    // Walk out of the effort list when we hit the end.
+                    state.agents.roster_effort_selected = None;
+                    let agent_max = state.agents.agents.len().saturating_sub(1) as i32;
+                    let next_agent =
+                        (state.agents.roster_selected as i32 + 1).clamp(0, agent_max) as usize;
+                    if next_agent == state.agents.roster_selected {
+                        return true;
+                    }
+                    state.agents.roster_selected = next_agent;
+                    if let Some(agent) = state.agents.agents.get(next_agent) {
+                        state.agents.selected_agent = Some(agent.id.clone());
+                        if let Some(mission_id) = agent.current_mission.as_deref() {
+                            state.agents.selected_mission = Some(mission_id.to_string());
+                            if let Some(idx) = state
+                                .agents
+                                .missions
+                                .iter()
+                                .position(|mission| mission.id == mission_id)
+                            {
+                                state.agents.mission_selected = idx;
+                            }
+                        }
+                    }
+                    return true;
+                }
+                return false;
+            }
+
             let max = state.agents.agents.len().saturating_sub(1) as i32;
             let next = (state.agents.roster_selected as i32 + delta).clamp(0, max) as usize;
             if next == state.agents.roster_selected {
                 return false;
             }
             state.agents.roster_selected = next;
+            state.agents.roster_effort_selected = None;
             if let Some(agent) = state.agents.agents.get(next) {
                 state.agents.selected_agent = Some(agent.id.clone());
                 if let Some(mission_id) = agent.current_mission.as_deref() {
@@ -1902,6 +2066,150 @@ fn move_agent_ops_selection(state: &mut AppState, delta: i32) -> bool {
         }
         AgentOpsTab::Mcp => false,
     }
+}
+
+fn enter_roster_effort_cursor(state: &mut AppState) -> bool {
+    let Some(agent) = state.agents.agents.get(state.agents.roster_selected) else {
+        state.agents.roster_effort_selected = None;
+        return false;
+    };
+    let Some(efforts) = state
+        .agents
+        .codex_supported_reasoning_efforts
+        .get(&agent.id)
+        .map(|v| v.as_slice())
+    else {
+        state.agents.roster_effort_selected = None;
+        return false;
+    };
+    if efforts.is_empty() {
+        state.agents.roster_effort_selected = None;
+        return false;
+    }
+
+    let current = state
+        .agents
+        .codex_selected_reasoning_effort
+        .get(&agent.id)
+        .or_else(|| state.agents.codex_default_reasoning_effort.get(&agent.id))
+        .map(|s| s.as_str());
+    let idx = current
+        .and_then(|effort| efforts.iter().position(|e| e == effort))
+        .unwrap_or(0)
+        .min(efforts.len().saturating_sub(1));
+
+    if state.agents.roster_effort_selected == Some(idx) {
+        return false;
+    }
+    state.agents.roster_effort_selected = Some(idx);
+    true
+}
+
+fn exit_roster_effort_cursor(state: &mut AppState) -> bool {
+    if state.agents.roster_effort_selected.is_some() {
+        state.agents.roster_effort_selected = None;
+        return true;
+    }
+    false
+}
+
+fn select_roster_effort(state: &mut AppState) -> bool {
+    let Some(effort_idx) = state.agents.roster_effort_selected else {
+        return false;
+    };
+    let Some(agent) = state.agents.agents.get(state.agents.roster_selected) else {
+        return false;
+    };
+    let Some(efforts) = state
+        .agents
+        .codex_supported_reasoning_efforts
+        .get(&agent.id)
+    else {
+        return false;
+    };
+    let Some(effort) = efforts.get(effort_idx) else {
+        return false;
+    };
+
+    let effort = effort.trim();
+    if effort.is_empty() {
+        return false;
+    }
+
+    let current = state
+        .agents
+        .codex_selected_reasoning_effort
+        .get(&agent.id)
+        .map(|s| s.as_str());
+    if current == Some(effort) {
+        return false;
+    }
+    state
+        .agents
+        .codex_selected_reasoning_effort
+        .insert(agent.id.clone(), effort.to_string());
+    true
+}
+
+fn reset_roster_context(state: &mut AppState) -> bool {
+    let Some(agent) = state.agents.agents.get(state.agents.roster_selected) else {
+        return false;
+    };
+    let agent_id = agent.id.clone();
+    let agent_label = agent.role.trim();
+    let is_codex = agent.lane.eq_ignore_ascii_case("codex");
+    let mission_ctx = state
+        .agents
+        .selected_context_mission()
+        .map(ToString::to_string);
+
+    state.agents.roster_effort_selected = None;
+    if is_codex {
+        // Reset back to "full context" for display purposes.
+        state
+            .agents
+            .codex_context_remaining_pct
+            .insert(agent_id.clone(), 100);
+    } else {
+        state.agents.codex_context_remaining_pct.remove(&agent_id);
+    }
+
+    let before = state.agents.messages.len();
+    if let Some(mission_id) = mission_ctx.as_deref() {
+        // In mission context, only clear this agent's transcript so other lanes remain intact.
+        state.agents.messages.retain(|msg| {
+            !(msg.mission_id.as_deref() == Some(mission_id)
+                && msg.agent_id.as_deref() == Some(agent_id.as_str()))
+        });
+    } else {
+        // In non-mission chat, the thread isn't partitioned by agent; reset the whole local thread.
+        state.agents.messages.retain(|msg| msg.mission_id.is_some());
+    }
+    let removed = before.saturating_sub(state.agents.messages.len());
+    state.agents.console_scroll = usize::MAX;
+
+    state.agents.diag_events.push(AgentDiagnosticEvent {
+        severity: AgentAlertSeverity::Info,
+        source: "ops".into(),
+        message: format!(
+            "context reset for {agent_id}{} (cleared {removed} msgs)",
+            if agent_label.is_empty() {
+                String::new()
+            } else {
+                format!(" ({agent_label})")
+            }
+        ),
+        at: timestamp_label(state),
+    });
+    state.status = Some(format!(
+        "Context reset: {}",
+        if agent_label.is_empty() {
+            agent_id
+        } else {
+            agent_label.to_string()
+        }
+    ));
+    true
 }
 
 fn handle_agent_console_key(
@@ -2336,6 +2644,27 @@ fn maybe_dispatch_codex_turn(
         return;
     }
 
+    // Best-effort context remaining percentage for the breather row.
+    if let Some(max_tokens) = state
+        .agents
+        .codex_effective_context_window_tokens
+        .get(&model)
+        .copied()
+    {
+        let used_tokens = estimate_codex_context_tokens(&prompt).min(max_tokens);
+        let remaining = max_tokens.saturating_sub(used_tokens);
+        // Round to nearest percent so small prompts on large context windows still show 100%.
+        let denom = max_tokens.max(1) as u64;
+        let pct =
+            (((remaining as u64).saturating_mul(100)).saturating_add(denom / 2) / denom) as u8;
+        state
+            .agents
+            .codex_context_remaining_pct
+            .insert(model.clone(), pct);
+    } else {
+        state.agents.codex_context_remaining_pct.remove(&model);
+    }
+
     // Immediate UI feedback: mark the model as running and show the loader/breather row.
     agent.status = AgentStatus::Running;
     agent.queue_len = agent.queue_len.saturating_add(1).max(1);
@@ -2350,12 +2679,37 @@ fn maybe_dispatch_codex_turn(
     state.agents.note_event();
     vitals.record_agent_event(Instant::now());
 
+    let reasoning_effort = state
+        .agents
+        .codex_selected_reasoning_effort
+        .get(&model)
+        .cloned()
+        .or_else(|| {
+            state
+                .agents
+                .codex_default_reasoning_effort
+                .get(&model)
+                .cloned()
+        })
+        .unwrap_or_else(|| "medium".into());
+
     codex.send(CodexCommand::RunTurn {
         model,
         cwd: state.workspace_root.clone(),
         mission_id,
+        reasoning_effort: Some(reasoning_effort),
         prompt,
     });
+}
+
+fn estimate_codex_context_tokens(text: &str) -> u32 {
+    // Fast heuristic: ~4 bytes per token for typical English/code mixtures.
+    // This keeps the UI responsive and avoids bringing in a tokenizer dependency.
+    if text.is_empty() {
+        return 0;
+    }
+    let bytes = text.as_bytes().len() as u32;
+    (bytes + 3) / 4
 }
 
 fn push_chat_message(state: &mut AppState) -> bool {
@@ -3885,9 +4239,10 @@ fn handle_mouse_event(
                 if state.agents.dock_tab == AgentOpsTab::Scratchpad {
                     scroll_buffer(state.notes_buffer_mut(), delta);
                 } else {
-                    let text_width = job_output_text_area(layout.job).width as usize;
+                    let text_area = job_output_text_area(layout.job);
+                    let text_width = text_area.width as usize;
                     let lines = agent_ops_view::current_lines_for_width(state, text_width);
-                    let height = layout.job.height.saturating_sub(3) as usize;
+                    let height = text_area.height as usize;
                     let max_scroll = lines.len().saturating_sub(height);
                     let mut scroll = state.agents.ops_scroll;
                     bump_scroll(&mut scroll, delta);
@@ -4761,7 +5116,12 @@ fn job_output_text_area(area: ratatui::layout::Rect) -> ratatui::layout::Rect {
     let inner = Block::default().borders(Borders::ALL).inner(area);
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(1), Constraint::Min(1)])
+        // Keep in sync with Agent Ops layout: tabs + body + footer hints.
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Min(1),
+            Constraint::Length(1),
+        ])
         .split(inner);
     chunks[1]
 }
@@ -4772,7 +5132,12 @@ fn agent_ops_scratchpad_editor_area(area: ratatui::layout::Rect) -> ratatui::lay
     let inner = Block::default().borders(Borders::ALL).inner(area);
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(1), Constraint::Min(1)])
+        // Keep in sync with Agent Ops layout: tabs + body + footer hints.
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Min(1),
+            Constraint::Length(1),
+        ])
         .split(inner);
     chunks[1]
 }
@@ -5488,12 +5853,37 @@ fn apply_agent_ops_click_selection(state: &mut AppState, line_idx: usize, text_w
     let data_line = line_idx.saturating_sub(2);
     match state.agents.dock_tab {
         AgentOpsTab::Roster => {
-            if data_line < state.agents.agents.len() {
-                state.agents.roster_selected = data_line;
-                if let Some(agent) = state.agents.agents.get(data_line) {
-                    state.agents.selected_agent = Some(agent.id.clone());
-                    if let Some(mission_id) = agent.current_mission.as_deref() {
-                        state.agents.selected_mission = Some(mission_id.to_string());
+            let Some(meta) = agent_ops_view::roster_meta_for_body_line(state, data_line) else {
+                return;
+            };
+            state.agents.roster_selected = meta.agent_idx;
+            state.agents.roster_effort_selected = meta.effort_idx;
+            if let Some(agent) = state.agents.agents.get(meta.agent_idx) {
+                state.agents.selected_agent = Some(agent.id.clone());
+                if let Some(mission_id) = agent.current_mission.as_deref() {
+                    state.agents.selected_mission = Some(mission_id.to_string());
+                    if let Some(idx) = state
+                        .agents
+                        .missions
+                        .iter()
+                        .position(|mission| mission.id == mission_id)
+                    {
+                        state.agents.mission_selected = idx;
+                    }
+                }
+
+                if let Some(effort_idx) = meta.effort_idx {
+                    if let Some(efforts) = state
+                        .agents
+                        .codex_supported_reasoning_efforts
+                        .get(&agent.id)
+                    {
+                        if let Some(effort) = efforts.get(effort_idx).cloned() {
+                            state
+                                .agents
+                                .codex_selected_reasoning_effort
+                                .insert(agent.id.clone(), effort);
+                        }
                     }
                 }
             }
@@ -8963,7 +9353,8 @@ mod tests {
         let down = MouseEvent {
             kind: MouseEventKind::Down(crossterm::event::MouseButton::Left),
             column: text_area.x,
-            row: text_area.y,
+            // Agent messages render an ECG header line first, then message text below.
+            row: text_area.y.saturating_add(1),
             modifiers: KeyModifiers::NONE,
         };
         assert!(handle_mouse_down(
@@ -8977,7 +9368,7 @@ mod tests {
         let drag = MouseEvent {
             kind: MouseEventKind::Drag(crossterm::event::MouseButton::Left),
             column: text_area.x.saturating_add(24),
-            row: text_area.y,
+            row: text_area.y.saturating_add(1),
             modifiers: KeyModifiers::NONE,
         };
         assert!(handle_mouse_drag(
@@ -8997,7 +9388,7 @@ mod tests {
             .yank
             .as_deref()
             .unwrap_or_default()
-            .contains("10:00:00"));
+            .contains("selection copy works"));
     }
 
     #[test]

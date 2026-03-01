@@ -15,12 +15,50 @@ pub fn mission_index_for_body_line(state: &AppState, body_line: usize) -> Option
     mission_body_meta(state, body_line).map(|meta| meta.mission_idx)
 }
 
+pub struct RosterBodyMeta {
+    pub agent_idx: usize,
+    pub effort_idx: Option<usize>,
+}
+
+pub fn roster_meta_for_body_line(state: &AppState, body_line: usize) -> Option<RosterBodyMeta> {
+    roster_body_meta(state, body_line)
+}
+
 pub fn alert_index_for_body_line(
     state: &AppState,
     width: usize,
     body_line: usize,
 ) -> Option<usize> {
     alert_body_meta(state, width, body_line).map(|meta| meta.alert_idx)
+}
+
+fn roster_body_meta(state: &AppState, body_line: usize) -> Option<RosterBodyMeta> {
+    let mut cursor = 0usize;
+    for (agent_idx, agent) in state.agents.agents.iter().enumerate() {
+        if body_line == cursor {
+            return Some(RosterBodyMeta {
+                agent_idx,
+                effort_idx: None,
+            });
+        }
+        cursor = cursor.saturating_add(1);
+        if agent_idx == state.agents.roster_selected {
+            let effort_len = state
+                .agents
+                .codex_supported_reasoning_efforts
+                .get(&agent.id)
+                .map(|v| v.len())
+                .unwrap_or(0);
+            if body_line < cursor.saturating_add(effort_len) {
+                return Some(RosterBodyMeta {
+                    agent_idx,
+                    effort_idx: Some(body_line.saturating_sub(cursor)),
+                });
+            }
+            cursor = cursor.saturating_add(effort_len);
+        }
+    }
+    None
 }
 
 struct MissionBodyMeta {
@@ -96,7 +134,7 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
     let block = Block::default()
         .borders(Borders::ALL)
         .title(Span::styled(
-            "AGENT OPS  [ Tab ] [ j/k ] [ Enter ] [ n ]",
+            "AGENT OPS",
             Style::default()
                 .fg(title_color)
                 .add_modifier(Modifier::BOLD),
@@ -112,7 +150,11 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
     }
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(1), Constraint::Min(1)])
+        .constraints([
+            Constraint::Length(1), // tabs
+            Constraint::Min(1),    // body
+            Constraint::Length(1), // footer hints
+        ])
         .split(inner);
 
     render_tab_bar(frame, chunks[0], state, theme);
@@ -132,11 +174,94 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
         Paragraph::new(visible).style(Style::default().bg(theme.background)),
         chunks[1],
     );
+
+    render_footer(frame, chunks[2], state, theme);
 }
 
 pub fn render_tab_bar(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
     let tabs = tab_line(state, theme);
     frame.render_widget(Paragraph::new(tabs), area);
+}
+
+fn render_footer(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
+    if area.width < 2 || area.height == 0 {
+        return;
+    }
+    let line = footer_line(state, theme);
+    frame.render_widget(Paragraph::new(line), area);
+}
+
+fn footer_line(state: &AppState, theme: &Theme) -> Line<'static> {
+    let label_style = Style::default()
+        .fg(theme.border)
+        .add_modifier(Modifier::DIM);
+    let key_style = Style::default()
+        .fg(theme.title)
+        .add_modifier(Modifier::BOLD);
+    let sep_style = label_style;
+
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    spans.push(Span::styled("Keys: ", label_style));
+
+    // Always present: tab/selection/enter semantics.
+    spans.push(Span::styled("Tab", key_style));
+    spans.push(Span::styled(" tabs", label_style));
+    spans.push(Span::styled("  ", sep_style));
+    spans.push(Span::styled("j/k", key_style));
+    spans.push(Span::styled(" move", label_style));
+    spans.push(Span::styled("  ", sep_style));
+
+    match state.agents.dock_tab {
+        AgentOpsTab::Roster => {
+            spans.push(Span::styled("h/l", key_style));
+            spans.push(Span::styled(" size", label_style));
+            spans.push(Span::styled("  ", sep_style));
+            spans.push(Span::styled("Space", key_style));
+            spans.push(Span::styled(" set", label_style));
+            spans.push(Span::styled("  ", sep_style));
+            spans.push(Span::styled("c", key_style));
+            spans.push(Span::styled(" reset", label_style));
+            spans.push(Span::styled("  ", sep_style));
+            spans.push(Span::styled("Enter", key_style));
+            spans.push(Span::styled(" chat", label_style));
+        }
+        AgentOpsTab::Missions => {
+            spans.push(Span::styled("n", key_style));
+            spans.push(Span::styled(" new", label_style));
+            spans.push(Span::styled("  ", sep_style));
+            spans.push(Span::styled("Enter", key_style));
+            spans.push(Span::styled(" chat", label_style));
+        }
+        AgentOpsTab::Mcp => {
+            spans.push(Span::styled("r", key_style));
+            spans.push(Span::styled(" reconnect", label_style));
+            spans.push(Span::styled("  ", sep_style));
+            spans.push(Span::styled("s", key_style));
+            spans.push(Span::styled(" start", label_style));
+            spans.push(Span::styled("  ", sep_style));
+            spans.push(Span::styled("x", key_style));
+            spans.push(Span::styled(" stop", label_style));
+        }
+        AgentOpsTab::Alerts => {
+            spans.push(Span::styled("Enter", key_style));
+            spans.push(Span::styled(" chat", label_style));
+        }
+        AgentOpsTab::Diagnostics => {
+            spans.push(Span::styled("j/k", key_style));
+            spans.push(Span::styled(" scroll", label_style));
+        }
+        AgentOpsTab::Scratchpad => {
+            spans.push(Span::styled("Enter", key_style));
+            spans.push(Span::styled(" chat", label_style));
+        }
+        // Patch/Evidence are legacy; render them like Diagnostics.
+        AgentOpsTab::Patch | AgentOpsTab::Evidence => {
+            spans.push(Span::styled("j/k", key_style));
+            spans.push(Span::styled(" scroll", label_style));
+        }
+    }
+
+    Line::from(spans)
 }
 
 fn tab_line(state: &AppState, theme: &Theme) -> Line<'static> {
@@ -205,7 +330,9 @@ fn roster_lines(state: &AppState, width: usize) -> Vec<String> {
         return out;
     }
     for (idx, agent) in state.agents.agents.iter().enumerate() {
-        let marker = if idx == state.agents.roster_selected {
+        let marker = if idx == state.agents.roster_selected
+            && state.agents.roster_effort_selected.is_none()
+        {
             ">"
         } else {
             " "
@@ -218,6 +345,51 @@ fn roster_lines(state: &AppState, width: usize) -> Vec<String> {
             fit_right(&agent.queue_len.to_string(), widths[3]),
             fit_left(agent.current_mission.as_deref().unwrap_or("--"), widths[4]),
         ));
+
+        // Expand the selected model into a "size" tree (Codex reasoning effort levels).
+        if idx == state.agents.roster_selected {
+            let efforts = state
+                .agents
+                .codex_supported_reasoning_efforts
+                .get(&agent.id)
+                .map(|v| v.as_slice())
+                .unwrap_or(&[]);
+            if efforts.is_empty() {
+                continue;
+            }
+            let chosen = state
+                .agents
+                .codex_selected_reasoning_effort
+                .get(&agent.id)
+                .or_else(|| state.agents.codex_default_reasoning_effort.get(&agent.id))
+                .map(|s| s.as_str());
+            for (effort_idx, effort) in efforts.iter().enumerate() {
+                let marker = if state.agents.roster_effort_selected == Some(effort_idx) {
+                    ">"
+                } else {
+                    " "
+                };
+                let branch = if effort_idx + 1 == efforts.len() {
+                    "└"
+                } else {
+                    "├"
+                };
+                let checked = if chosen == Some(effort.as_str()) {
+                    "*"
+                } else {
+                    " "
+                };
+                let label = format!("  {branch}─ [{checked}] {effort}");
+                out.push(format!(
+                    "{marker}{} {} {} {} {}",
+                    fit_left(&label, widths[0]),
+                    fit_left("", widths[1]),
+                    fit_right("", widths[2]),
+                    fit_right("", widths[3]),
+                    fit_left("", widths[4]),
+                ));
+            }
+        }
     }
     out
 }
@@ -351,7 +523,8 @@ fn agent_pane_mid(text: &str, col_width: usize) -> String {
 fn mcp_lines(state: &AppState, width: usize) -> Vec<String> {
     let mcp = &state.agents.mcp;
     let key_w = 11usize.min(width.saturating_sub(4));
-    let value_w = width.saturating_sub(key_w + 1).max(1);
+    // One leading spacer + one spacer between KEY and VALUE.
+    let value_w = width.saturating_sub(key_w + 2).max(1);
     let latency = mcp
         .latency_ms
         .map(|ms| format!("{ms}ms"))
@@ -359,32 +532,56 @@ fn mcp_lines(state: &AppState, width: usize) -> Vec<String> {
     let mut out = vec![
         format!(" {} {}", fit_left("KEY", key_w), fit_left("VALUE", value_w)),
         "─".repeat(width.min(240)),
-        format!(
-            " {} {}",
-            fit_left("STATE", key_w),
-            fit_left(mcp_state_label(mcp.state), value_w)
-        ),
-        format!(
-            " {} {}",
-            fit_left("ENDPOINT", key_w),
-            fit_left(&mcp.endpoint, value_w)
-        ),
-        format!(
-            " {} {}",
-            fit_left("LATENCY", key_w),
-            fit_left(&latency, value_w)
-        ),
     ];
+    push_wrapped_kv(
+        &mut out,
+        key_w,
+        value_w,
+        "STATE",
+        mcp_state_label(mcp.state),
+        false,
+    );
+    push_wrapped_kv(&mut out, key_w, value_w, "ENDPOINT", &mcp.endpoint, false);
+    push_wrapped_kv(&mut out, key_w, value_w, "LATENCY", &latency, false);
     if let Some(err) = mcp.last_error.as_deref() {
-        out.push(format!(
-            " {} {}",
-            fit_left("LAST ERR", key_w),
-            fit_left(err, value_w)
-        ));
+        let err = format_mcp_error_for_display(err);
+        push_wrapped_kv(&mut out, key_w, value_w, "LAST ERR", &err, true);
     }
     out.push(String::new());
     out.push(" [r] reconnect   [s] start   [x] stop".into());
     out
+}
+
+fn push_wrapped_kv(
+    out: &mut Vec<String>,
+    key_w: usize,
+    value_w: usize,
+    key: &str,
+    value: &str,
+    repeat_key: bool,
+) {
+    let chunks = wrap_cell_text(value, value_w);
+    for (idx, chunk) in chunks.iter().enumerate() {
+        let key_cell = if idx == 0 || repeat_key { key } else { "" };
+        out.push(format!(
+            " {} {}",
+            fit_left(key_cell, key_w),
+            fit_left(chunk, value_w)
+        ));
+    }
+}
+
+fn format_mcp_error_for_display(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    if let Ok(json) = serde_json::from_str::<serde_json::Value>(trimmed) {
+        if let Ok(pretty) = serde_json::to_string_pretty(&json) {
+            return pretty;
+        }
+    }
+    trimmed.to_string()
 }
 
 fn mcp_state_label(state: McpConnectionState) -> &'static str {
@@ -639,8 +836,14 @@ fn roster_styled_line(
                 .add_modifier(Modifier::DIM),
         ));
     }
-    let agent_idx = line_idx.saturating_sub(2);
-    let Some(agent) = state.agents.agents.get(agent_idx) else {
+    let body_line = line_idx.saturating_sub(2);
+    let Some(meta) = roster_body_meta(state, body_line) else {
+        return Line::from(Span::styled(
+            line.to_string(),
+            Style::default().fg(theme.foreground),
+        ));
+    };
+    let Some(agent) = state.agents.agents.get(meta.agent_idx) else {
         return Line::from(Span::styled(
             line.to_string(),
             Style::default().fg(theme.foreground),
@@ -654,70 +857,149 @@ fn roster_styled_line(
             Style::default().fg(theme.foreground),
         ));
     };
-    let selected = agent_idx == state.agents.roster_selected;
+    match meta.effort_idx {
+        None => {
+            let selected = meta.agent_idx == state.agents.roster_selected
+                && state.agents.roster_effort_selected.is_none();
 
-    let marker_style = if selected {
-        selected_row_style(
-            Style::default()
-                .fg(theme.accent)
-                .add_modifier(Modifier::BOLD),
-            true,
-            theme,
-        )
-    } else {
-        Style::default()
-            .fg(theme.border)
-            .add_modifier(Modifier::DIM)
-    };
+            let marker_style = if selected {
+                selected_row_style(
+                    Style::default()
+                        .fg(theme.accent)
+                        .add_modifier(Modifier::BOLD),
+                    true,
+                    theme,
+                )
+            } else {
+                Style::default()
+                    .fg(theme.border)
+                    .add_modifier(Modifier::DIM)
+            };
 
-    let role_style = selected_row_style(Style::default().fg(theme.foreground), selected, theme);
-    let status_style = selected_row_style(agent_status_style(agent.status, theme), selected, theme);
-    let hb_style = selected_row_style(
-        heartbeat_age_style(agent.heartbeat_age_secs, theme),
-        selected,
-        theme,
-    );
-    let q_style = selected_row_style(queue_len_style(agent.queue_len, theme), selected, theme);
-    let mission_style = selected_row_style(
-        if agent.current_mission.is_some() {
-            Style::default().fg(theme.title)
-        } else {
-            Style::default()
-                .fg(theme.border)
-                .add_modifier(Modifier::DIM)
-        },
-        selected,
-        theme,
-    );
-    let space_style = selected_row_style(Style::default(), selected, theme);
+            let role_style =
+                selected_row_style(Style::default().fg(theme.foreground), selected, theme);
+            let status_style =
+                selected_row_style(agent_status_style(agent.status, theme), selected, theme);
+            let hb_style = selected_row_style(
+                heartbeat_age_style(agent.heartbeat_age_secs, theme),
+                selected,
+                theme,
+            );
+            let q_style =
+                selected_row_style(queue_len_style(agent.queue_len, theme), selected, theme);
+            let mission_style = selected_row_style(
+                if agent.current_mission.is_some() {
+                    Style::default().fg(theme.title)
+                } else {
+                    Style::default()
+                        .fg(theme.border)
+                        .add_modifier(Modifier::DIM)
+                },
+                selected,
+                theme,
+            );
+            let space_style = selected_row_style(Style::default(), selected, theme);
 
-    let mut spans = Vec::with_capacity(14);
-    spans.push(Span::styled(marker, marker_style));
-    spans.push(Span::styled(
-        cols.get(0).cloned().unwrap_or_default(),
-        role_style,
-    ));
-    spans.push(Span::styled(" ", space_style));
-    spans.push(Span::styled(
-        cols.get(1).cloned().unwrap_or_default(),
-        status_style,
-    ));
-    spans.push(Span::styled(" ", space_style));
-    spans.push(Span::styled(
-        cols.get(2).cloned().unwrap_or_default(),
-        hb_style,
-    ));
-    spans.push(Span::styled(" ", space_style));
-    spans.push(Span::styled(
-        cols.get(3).cloned().unwrap_or_default(),
-        q_style,
-    ));
-    spans.push(Span::styled(" ", space_style));
-    spans.push(Span::styled(
-        cols.get(4).cloned().unwrap_or_default(),
-        mission_style,
-    ));
-    Line::from(spans)
+            let mut spans = Vec::with_capacity(14);
+            spans.push(Span::styled(marker, marker_style));
+            spans.push(Span::styled(
+                cols.get(0).cloned().unwrap_or_default(),
+                role_style,
+            ));
+            spans.push(Span::styled(" ", space_style));
+            spans.push(Span::styled(
+                cols.get(1).cloned().unwrap_or_default(),
+                status_style,
+            ));
+            spans.push(Span::styled(" ", space_style));
+            spans.push(Span::styled(
+                cols.get(2).cloned().unwrap_or_default(),
+                hb_style,
+            ));
+            spans.push(Span::styled(" ", space_style));
+            spans.push(Span::styled(
+                cols.get(3).cloned().unwrap_or_default(),
+                q_style,
+            ));
+            spans.push(Span::styled(" ", space_style));
+            spans.push(Span::styled(
+                cols.get(4).cloned().unwrap_or_default(),
+                mission_style,
+            ));
+            Line::from(spans)
+        }
+        Some(effort_idx) => {
+            let selected = meta.agent_idx == state.agents.roster_selected
+                && state.agents.roster_effort_selected == Some(effort_idx);
+            let chosen = state
+                .agents
+                .codex_selected_reasoning_effort
+                .get(&agent.id)
+                .or_else(|| state.agents.codex_default_reasoning_effort.get(&agent.id))
+                .map(|s| s.as_str());
+            let effort = state
+                .agents
+                .codex_supported_reasoning_efforts
+                .get(&agent.id)
+                .and_then(|v| v.get(effort_idx))
+                .map(|s| s.as_str());
+            let is_chosen = effort.is_some_and(|effort| chosen == Some(effort));
+
+            let marker_style = if selected {
+                selected_row_style(
+                    Style::default()
+                        .fg(theme.accent)
+                        .add_modifier(Modifier::BOLD),
+                    true,
+                    theme,
+                )
+            } else {
+                Style::default()
+                    .fg(theme.border)
+                    .add_modifier(Modifier::DIM)
+            };
+
+            let base_role_style = if is_chosen {
+                Style::default()
+                    .fg(theme.title_focused)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+                    .fg(theme.border)
+                    .add_modifier(Modifier::DIM)
+            };
+            let role_style = selected_row_style(base_role_style, selected, theme);
+            let cell_style = selected_row_style(Style::default(), selected, theme);
+
+            let mut spans = Vec::with_capacity(14);
+            spans.push(Span::styled(marker, marker_style));
+            spans.push(Span::styled(
+                cols.get(0).cloned().unwrap_or_default(),
+                role_style,
+            ));
+            spans.push(Span::styled(" ", cell_style));
+            spans.push(Span::styled(
+                cols.get(1).cloned().unwrap_or_default(),
+                cell_style,
+            ));
+            spans.push(Span::styled(" ", cell_style));
+            spans.push(Span::styled(
+                cols.get(2).cloned().unwrap_or_default(),
+                cell_style,
+            ));
+            spans.push(Span::styled(" ", cell_style));
+            spans.push(Span::styled(
+                cols.get(3).cloned().unwrap_or_default(),
+                cell_style,
+            ));
+            spans.push(Span::styled(" ", cell_style));
+            spans.push(Span::styled(
+                cols.get(4).cloned().unwrap_or_default(),
+                cell_style,
+            ));
+            Line::from(spans)
+        }
+    }
 }
 
 fn mission_phase_style(phase: nit_core::MissionPhase, theme: &Theme) -> Style {
@@ -942,7 +1224,7 @@ fn mcp_styled_line(
     let _ = line_idx; // line indices aren't stable (LAST ERR is conditional); parse by content.
     let mcp = &state.agents.mcp;
     let key_w = 11usize.min(usable.saturating_sub(4));
-    let value_w = usable.saturating_sub(key_w + 1).max(1);
+    let value_w = usable.saturating_sub(key_w + 2).max(1);
     if line.is_empty() {
         return Line::from(Span::styled(String::new(), Style::default()));
     }

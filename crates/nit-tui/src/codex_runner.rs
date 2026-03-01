@@ -10,6 +10,7 @@ pub enum CodexCommand {
         model: String,
         cwd: PathBuf,
         mission_id: Option<String>,
+        reasoning_effort: Option<String>,
         prompt: String,
     },
     Shutdown,
@@ -78,6 +79,7 @@ fn runner_loop(cmd_rx: Receiver<CodexCommand>, event_tx: Sender<CodexEvent>) {
                 model,
                 cwd,
                 mission_id,
+                reasoning_effort,
                 prompt,
             }) => {
                 let _ = event_tx.send(CodexEvent::TurnStarted {
@@ -85,7 +87,15 @@ fn runner_loop(cmd_rx: Receiver<CodexCommand>, event_tx: Sender<CodexEvent>) {
                     mission_id: mission_id.clone(),
                 });
                 seq = seq.wrapping_add(1);
-                run_turn(&event_tx, seq, model, cwd, mission_id, prompt);
+                run_turn(
+                    &event_tx,
+                    seq,
+                    model,
+                    cwd,
+                    mission_id,
+                    reasoning_effort,
+                    prompt,
+                );
             }
             Ok(CodexCommand::Shutdown) | Err(_) => break,
         }
@@ -98,19 +108,25 @@ fn run_turn(
     model: String,
     cwd: PathBuf,
     mission_id: Option<String>,
+    reasoning_effort: Option<String>,
     prompt: String,
 ) {
     let out_file = std::env::temp_dir().join(format!("nit-codex-last-message-{seq}.txt"));
 
-    let mut child = match Command::new("codex")
-        .arg("exec")
+    let mut cmd = Command::new("codex");
+    cmd.arg("exec")
         .arg("--ephemeral")
         .arg("--json")
         .arg("--color")
         .arg("never")
         .arg("-m")
-        .arg(&model)
-        .arg("-C")
+        .arg(&model);
+    if let Some(effort) = reasoning_effort.as_deref() {
+        // Override any global config (e.g. `xhigh`) that some models don't support.
+        cmd.arg("-c")
+            .arg(format!("model_reasoning_effort={:?}", effort.trim()));
+    }
+    cmd.arg("-C")
         .arg(&cwd)
         .arg("-o")
         .arg(&out_file)
@@ -118,9 +134,9 @@ fn run_turn(
         .arg("-")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-    {
+        .stderr(Stdio::piped());
+
+    let mut child = match cmd.spawn() {
         Ok(child) => child,
         Err(err) => {
             let _ = event_tx.send(CodexEvent::TurnFailed {
@@ -168,7 +184,13 @@ fn run_turn(
             continue;
         };
         if kind == "error" {
-            if let Some(msg) = value.get("message").and_then(|v| v.as_str()) {
+            let msg = value.get("message").and_then(|v| v.as_str()).or_else(|| {
+                value
+                    .get("error")
+                    .and_then(|err| err.get("message"))?
+                    .as_str()
+            });
+            if let Some(msg) = msg {
                 json_errors.push(msg.to_string());
                 let _ = event_tx.send(CodexEvent::TurnLog {
                     model: model.clone(),

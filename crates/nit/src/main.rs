@@ -2040,6 +2040,19 @@ struct CodexModelEntry {
     visibility: Option<String>,
     #[serde(default)]
     priority: Option<i64>,
+    #[serde(default)]
+    context_window: Option<u32>,
+    #[serde(default)]
+    effective_context_window_percent: Option<u8>,
+    #[serde(default)]
+    default_reasoning_level: Option<String>,
+    #[serde(default)]
+    supported_reasoning_levels: Option<Vec<CodexReasoningLevel>>,
+}
+
+#[derive(Deserialize)]
+struct CodexReasoningLevel {
+    effort: String,
 }
 
 fn load_agents_from_codex_models_cache() -> anyhow::Result<nit_core::AgentsState> {
@@ -2066,6 +2079,46 @@ fn load_agents_from_codex_models_cache() -> anyhow::Result<nit_core::AgentsState
     agents.mcp.latency_ms = None;
     agents.mcp.last_error = None;
 
+    for model in entries.iter() {
+        if let Some(context_window) = model.context_window {
+            let effective_pct = model.effective_context_window_percent.unwrap_or(100) as u64;
+            let effective_tokens = (context_window as u64)
+                .saturating_mul(effective_pct)
+                .saturating_div(100) as u32;
+            agents
+                .codex_effective_context_window_tokens
+                .insert(model.slug.clone(), effective_tokens.max(1));
+        }
+
+        if let Some(levels) = model.supported_reasoning_levels.as_ref() {
+            let mut efforts = levels
+                .iter()
+                .map(|lvl| lvl.effort.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect::<Vec<_>>();
+            efforts.sort_by(|a, b| {
+                reasoning_effort_rank(a)
+                    .cmp(&reasoning_effort_rank(b))
+                    .then_with(|| a.cmp(b))
+            });
+            efforts.dedup();
+            if !efforts.is_empty() {
+                agents
+                    .codex_supported_reasoning_efforts
+                    .insert(model.slug.clone(), efforts);
+            }
+        }
+
+        if let Some(effort) = pick_codex_reasoning_effort(model) {
+            agents
+                .codex_default_reasoning_effort
+                .insert(model.slug.clone(), effort.clone());
+            agents
+                .codex_selected_reasoning_effort
+                .insert(model.slug.clone(), effort);
+        }
+    }
+
     agents.agents = entries
         .into_iter()
         .map(|model| nit_core::AgentLane {
@@ -2086,6 +2139,58 @@ fn load_agents_from_codex_models_cache() -> anyhow::Result<nit_core::AgentsState
     agents.selected_agent = agents.agents.first().map(|a| a.id.clone());
     agents.roster_selected = 0;
     Ok(agents)
+}
+
+fn reasoning_effort_rank(effort: &str) -> u8 {
+    if effort.eq_ignore_ascii_case("low") {
+        0
+    } else if effort.eq_ignore_ascii_case("medium") {
+        1
+    } else if effort.eq_ignore_ascii_case("high") {
+        2
+    } else if effort.eq_ignore_ascii_case("xhigh") {
+        3
+    } else {
+        10
+    }
+}
+
+fn pick_codex_reasoning_effort(model: &CodexModelEntry) -> Option<String> {
+    let supported = model
+        .supported_reasoning_levels
+        .as_ref()
+        .map(|levels| {
+            levels
+                .iter()
+                .map(|lvl| lvl.effort.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let supported_set: std::collections::HashSet<String> = supported
+        .iter()
+        .cloned()
+        .collect::<std::collections::HashSet<_>>(
+    );
+
+    let default = model
+        .default_reasoning_level
+        .as_deref()
+        .unwrap_or("medium")
+        .trim()
+        .to_string();
+    if supported_set.is_empty() {
+        return Some(default);
+    }
+    if supported_set.contains(&default) {
+        return Some(default);
+    }
+    for effort in ["medium", "high", "low"] {
+        if supported_set.contains(effort) {
+            return Some(effort.to_string());
+        }
+    }
+    supported.first().cloned().or_else(|| Some(default))
 }
 
 fn open_log_file(path: &Path) -> io::Result<std::fs::File> {
