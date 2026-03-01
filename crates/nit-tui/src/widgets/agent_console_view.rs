@@ -501,10 +501,7 @@ fn thread_lines(rows: Vec<ThreadRow>, theme: &Theme, _pulse_on: bool) -> Vec<Lin
     rows.into_iter()
         .map(|row| match row.kind {
             ThreadRowKind::User => user_line_with_cyan_edges(row.text, theme),
-            ThreadRowKind::Agent => Line::from(Span::styled(
-                row.text,
-                Style::default().fg(theme.foreground),
-            )),
+            ThreadRowKind::Agent => agent_line_with_accent_ecg(row.text, theme),
             ThreadRowKind::Breather => {
                 let mut parts = row.text.splitn(2, ' ');
                 let ecg = parts.next().unwrap_or_default();
@@ -528,6 +525,41 @@ fn thread_lines(rows: Vec<ThreadRow>, theme: &Theme, _pulse_on: bool) -> Vec<Lin
             }
         })
         .collect()
+}
+
+fn agent_line_with_accent_ecg(text: String, theme: &Theme) -> Line<'static> {
+    let mut spans = Vec::new();
+    let agent_style = Style::default()
+        .fg(theme.border)
+        .add_modifier(Modifier::DIM);
+
+    let leading_spaces = text.chars().take_while(|ch| *ch == ' ').count();
+    if leading_spaces > 0 {
+        spans.push(Span::styled(" ".repeat(leading_spaces), agent_style));
+    }
+    let body = text[leading_spaces..].to_string();
+    let mut parts = body.splitn(2, ' ');
+    let first = parts.next().unwrap_or_default();
+    let rest = parts.next().unwrap_or_default();
+    if looks_like_ecg(first) {
+        spans.push(Span::styled(
+            first.to_string(),
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
+        ));
+        spans.push(Span::styled(
+            if rest.is_empty() {
+                "".to_string()
+            } else {
+                format!(" {rest}")
+            },
+            agent_style,
+        ));
+    } else {
+        spans.push(Span::styled(body, agent_style));
+    }
+    Line::from(spans)
 }
 
 fn user_line_with_cyan_edges(text: String, theme: &Theme) -> Line<'static> {
@@ -561,6 +593,17 @@ fn user_line_with_cyan_edges(text: String, theme: &Theme) -> Line<'static> {
     }
     spans.push(Span::styled(body, Style::default().fg(theme.foreground)));
     Line::from(spans)
+}
+
+fn looks_like_ecg(token: &str) -> bool {
+    let mut count = 0usize;
+    for ch in token.chars() {
+        count += 1;
+        if !matches!(ch, '▁' | '▂' | '▃' | '▄' | '▅' | '▆' | '▇' | '█') {
+            return false;
+        }
+    }
+    count == 6
 }
 
 fn thread_rows(state: &AppState, width: usize, pulse_on: bool) -> Vec<ThreadRow> {
@@ -633,28 +676,45 @@ fn format_message_rows(
     }
 
     let src = msg.agent_id.as_deref().unwrap_or("agent");
-    let agent_badge = agent_identity_badge(state, src);
+    let mission_ctx = state.agents.selected_context_mission();
+    let agent_ctx = state.agents.selected_context_agent();
+    let show_badge = if mission_ctx.is_some() {
+        // Mission context can include multiple agents, so always label who spoke.
+        true
+    } else if let Some(selected) = agent_ctx {
+        // In single-agent chat context, don't repeat the model name on every line.
+        msg.agent_id.as_deref() != Some(selected)
+    } else {
+        true
+    };
+    let agent_badge = show_badge.then(|| agent_identity_badge(state, src));
     let ecg = ecg_indicator(
         state.metrics.frame_count,
         msg.agent_id.as_deref(),
         pulse_on,
         agent_is_running(state, msg.agent_id.as_deref()),
     );
-    let channel = if matches!(msg.channel, nit_core::AgentChannel::Broadcast) {
-        "@all "
-    } else {
-        ""
-    };
+
+    let mut prefix = ecg.to_string();
+    if matches!(msg.channel, nit_core::AgentChannel::Broadcast) {
+        prefix.push_str(" @all");
+    }
+    if let Some(agent_badge) = agent_badge.as_deref() {
+        prefix.push_str(&format!(" [{agent_badge}]"));
+    }
+    prefix.push(' ');
+    let prefix_width = UnicodeWidthStr::width(prefix.as_str());
+    let indent = " ".repeat(prefix_width);
     text_lines
         .into_iter()
         .enumerate()
         .flat_map(|(idx, line)| {
-            let rendered = if idx == 0 {
-                format!("{ecg} [{}] {channel}[{agent_badge}]: {line}", msg.at)
+            let line_prefix = if idx == 0 {
+                prefix.as_str()
             } else {
-                format!("       {line}")
+                indent.as_str()
             };
-            wrap_visual_line(&rendered, width)
+            wrap_with_hanging_indent(line_prefix, indent.as_str(), line, width)
                 .into_iter()
                 .map(|segment| ThreadRow {
                     text: segment,
@@ -666,7 +726,8 @@ fn format_message_rows(
 }
 
 fn agent_identity_badge(state: &AppState, agent_id: &str) -> String {
-    let id = truncate_label(agent_id, 10);
+    let id_full = agent_id.trim();
+    let id = truncate_label(id_full, 10);
     let Some(agent) = state
         .agents
         .agents
@@ -675,12 +736,16 @@ fn agent_identity_badge(state: &AppState, agent_id: &str) -> String {
     else {
         return id;
     };
-    let role = truncate_label(agent.role.trim(), 12);
-    if role.is_empty() {
+    let role_full = agent.role.trim();
+    if role_full.is_empty() {
         return id;
     }
-    if role.eq_ignore_ascii_case(agent_id) {
-        return role;
+    if role_full.eq_ignore_ascii_case(id_full) {
+        return truncate_label(role_full, AGENT_BADGE_MAX_CHARS);
+    }
+    let role = truncate_label(role_full, 12);
+    if role.is_empty() {
+        return id;
     }
     truncate_label(&format!("{role}/{id}"), AGENT_BADGE_MAX_CHARS)
 }
@@ -952,6 +1017,29 @@ fn wrap_visual_line(text: &str, width: usize) -> Vec<String> {
     }
 }
 
+fn wrap_with_hanging_indent(prefix: &str, indent: &str, content: &str, width: usize) -> Vec<String> {
+    let width = width.max(1);
+    let prefix_width = UnicodeWidthStr::width(prefix);
+    if prefix_width == 0 {
+        return wrap_visual_line(content, width);
+    }
+    if prefix_width >= width {
+        return wrap_visual_line(&format!("{prefix}{content}"), width);
+    }
+    let content_width = width.saturating_sub(prefix_width).max(1);
+    wrap_visual_line(content, content_width)
+        .into_iter()
+        .enumerate()
+        .map(|(idx, segment)| {
+            if idx == 0 {
+                format!("{prefix}{segment}")
+            } else {
+                format!("{indent}{segment}")
+            }
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -1051,13 +1139,48 @@ mod tests {
         state.metrics.frame_count = 30;
         let second = format_message_rows(&state, &msg, 80, true)[0].text.clone();
         assert_ne!(first, second);
-        assert!(first.contains("[10:00:00] [Coder]:"));
-        assert!(second.contains("[10:00:00] [Coder]:"));
+        assert!(first.contains("working"));
+        assert!(second.contains("working"));
+        assert!(!first.contains("[Coder]"));
+        assert!(!second.contains("[Coder]"));
+    }
+
+    #[test]
+    fn agent_badge_hidden_when_single_agent_context_selected() {
+        let mut state = test_state();
+        state.agents.selected_mission = None;
+        state.agents.selected_agent = Some("coder".into());
+        state.agents.agents.push(AgentLane {
+            id: "coder".into(),
+            role: "Coder".into(),
+            lane: "Lane B".into(),
+            status: AgentStatus::Idle,
+            heartbeat_age_secs: 1,
+            queue_len: 0,
+            current_mission: None,
+            last_message: "idle".into(),
+        });
+        let msg = AgentMessage {
+            at: "10:00:00".into(),
+            channel: AgentChannel::Agent,
+            agent_id: Some("coder".into()),
+            mission_id: None,
+            text: "hello".into(),
+        };
+        let row = format_message_rows(&state, &msg, 120, true)
+            .into_iter()
+            .next()
+            .expect("row")
+            .text;
+        assert!(row.contains("hello"));
+        assert!(!row.contains("[Coder]"));
     }
 
     #[test]
     fn agent_header_includes_truncated_role_badge() {
         let mut state = test_state();
+        // Force the badge to show even though we're rendering the selected agent.
+        state.agents.selected_agent = Some("planner".into());
         state.agents.agents.push(AgentLane {
             id: "reviewer".into(),
             role: "UltraLongReviewerRoleName".into(),
@@ -1079,7 +1202,23 @@ mod tests {
             .into_iter()
             .next()
             .expect("row");
-        assert!(row.text.contains("[UltraLongRe…/reviewer]:"));
+        assert!(row.text.contains("[UltraLongRe…/reviewer]"));
+    }
+
+    #[test]
+    fn agent_ecg_renders_in_accent_color_and_text_is_dim_cyan() {
+        let theme = Theme::default();
+        let lines = thread_lines(
+            vec![ThreadRow {
+                text: "▁▁▁▁▁▁ hello".to_string(),
+                kind: ThreadRowKind::Agent,
+            }],
+            &theme,
+            false,
+        );
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].spans[0].style.fg, Some(theme.accent));
+        assert_eq!(lines[0].spans[1].style.fg, Some(theme.border));
     }
 
     #[test]

@@ -26,7 +26,7 @@ use nit_games::{
 use nit_tui::{run, Theme};
 use nit_utils::hashing::stable_hash_bytes;
 use nit_utils::paths;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tracing_subscriber::fmt::MakeWriter;
 
 #[derive(Parser, Debug)]
@@ -42,6 +42,9 @@ struct Cli {
     /// Start in the specified lab (gol or games)
     #[arg(long, value_enum, default_value_t = LabArg::Gol)]
     lab: LabArg,
+    /// Agent station data source (mock lanes vs Codex model roster)
+    #[arg(long, value_enum, default_value_t = AgentsArg::Mock)]
+    agents: AgentsArg,
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -206,6 +209,16 @@ enum OutputFormat {
 }
 
 #[derive(Copy, Clone, Debug, ValueEnum)]
+enum AgentsArg {
+    /// Seed the Agent Station with mock planner/coder/reviewer lanes (current default).
+    Mock,
+    /// Seed the Agent Station roster from Codex's cached model list (~/.codex/models_cache.json).
+    Codex,
+    /// Start with an empty Agent Station.
+    Empty,
+}
+
+#[derive(Copy, Clone, Debug, ValueEnum)]
 enum LabArg {
     Gol,
     Games,
@@ -344,7 +357,20 @@ fn main() -> anyhow::Result<()> {
     install_panic_hook();
 
     let mut state = nit_core::AppState::new(workspace_root, editor, notes);
-    state.agents = nit_core::AgentsState::default_with_mocks();
+    state.agents = match cli.agents {
+        AgentsArg::Mock => nit_core::AgentsState::default_with_mocks(),
+        AgentsArg::Empty => nit_core::AgentsState::default(),
+        AgentsArg::Codex => load_agents_from_codex_models_cache().unwrap_or_else(|err| {
+            let mut agents = nit_core::AgentsState::default_with_mocks();
+            agents.alerts.push(nit_core::AgentAlert {
+                severity: nit_core::AgentAlertSeverity::Warn,
+                source: "codex".into(),
+                message: format!("Failed to load Codex models: {err}"),
+                at: "t+0".into(),
+            });
+            agents
+        }),
+    };
     if let Some(path) = export_legacy_notes_snapshot(&state.workspace_root, state.notes_buffer()) {
         state.agents.pending_legacy_notes_alert = Some(format!(
             "Legacy Notes were preserved in {} and are available in Agent Ops > Scratchpad.",
@@ -1996,6 +2022,70 @@ fn log_path_for_workspace(workspace_root: &Path) -> Option<PathBuf> {
     let hash = stable_hash_bytes(key.as_bytes());
     let filename = format!("{:016x}.log", hash);
     Some(logs_dir.join(filename))
+}
+
+#[derive(Deserialize)]
+struct CodexModelsCache {
+    models: Vec<CodexModelEntry>,
+}
+
+#[derive(Deserialize)]
+struct CodexModelEntry {
+    slug: String,
+    #[serde(default)]
+    display_name: Option<String>,
+    #[serde(default)]
+    description: Option<String>,
+    #[serde(default)]
+    visibility: Option<String>,
+    #[serde(default)]
+    priority: Option<i64>,
+}
+
+fn load_agents_from_codex_models_cache() -> anyhow::Result<nit_core::AgentsState> {
+    let home = std::env::var("HOME").context("HOME not set")?;
+    let path = PathBuf::from(home).join(".codex").join("models_cache.json");
+    let raw = fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
+    let cache: CodexModelsCache =
+        serde_json::from_str(&raw).context("parse ~/.codex/models_cache.json")?;
+
+    let mut entries = cache
+        .models
+        .into_iter()
+        .filter(|m| m.visibility.as_deref().unwrap_or("list") == "list")
+        .collect::<Vec<_>>();
+    entries.sort_by(|a, b| {
+        let pa = a.priority.unwrap_or(i64::MAX);
+        let pb = b.priority.unwrap_or(i64::MAX);
+        pa.cmp(&pb).then_with(|| a.slug.cmp(&b.slug))
+    });
+
+    let mut agents = nit_core::AgentsState::default();
+    agents.mcp.state = nit_core::McpConnectionState::Connected;
+    agents.mcp.endpoint = format!("codex://cache ({})", path.display());
+    agents.mcp.latency_ms = None;
+    agents.mcp.last_error = None;
+
+    agents.agents = entries
+        .into_iter()
+        .map(|model| nit_core::AgentLane {
+            id: model.slug.clone(),
+            role: model
+                .display_name
+                .clone()
+                .unwrap_or_else(|| model.slug.clone()),
+            lane: "Codex".into(),
+            status: nit_core::AgentStatus::Idle,
+            heartbeat_age_secs: 0,
+            queue_len: 0,
+            current_mission: None,
+            last_message: model.description.unwrap_or_default(),
+        })
+        .collect();
+
+    agents.selected_agent = agents.agents.first().map(|a| a.id.clone());
+    agents.roster_selected = 0;
+    Ok(agents)
 }
 
 fn open_log_file(path: &Path) -> io::Result<std::fs::File> {

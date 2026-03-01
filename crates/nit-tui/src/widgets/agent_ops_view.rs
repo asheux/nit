@@ -188,8 +188,7 @@ pub fn current_lines_for_width(state: &AppState, width: usize) -> Vec<String> {
 }
 
 fn roster_lines(state: &AppState, width: usize) -> Vec<String> {
-    let cols_total = width.saturating_sub(1);
-    let widths = allocate_columns(cols_total, &[4, 6, 2, 1, 6], &[12, 10, 4, 2, 28], 4);
+    let widths = roster_column_widths(width);
     let mut out = vec![
         format!(
             " {} {} {} {} {}",
@@ -648,8 +647,7 @@ fn roster_styled_line(
         ));
     };
 
-    let cols_total = usable.saturating_sub(1);
-    let widths = allocate_columns(cols_total, &[4, 6, 2, 1, 6], &[12, 10, 4, 2, 28], 4);
+    let widths = roster_column_widths(usable);
     let Some((marker, cols)) = split_marker_and_columns(line, &widths) else {
         return Line::from(Span::styled(
             line.to_string(),
@@ -1213,6 +1211,25 @@ fn fit(text: &str, width: usize, right_align: bool) -> String {
     } else {
         format!("{text}{pad}")
     }
+}
+
+fn roster_column_widths(width: usize) -> Vec<usize> {
+    // For the roster, the ROLE column is the primary piece of information (especially when
+    // listing model slugs). Keep MISSION readable, but bias extra width to ROLE instead of letting
+    // it all pool in the last column.
+    let cols_total = width.saturating_sub(1);
+    let mut widths = allocate_columns(cols_total, &[4, 6, 2, 1, 7], &[24, 10, 4, 2, 14], 4);
+
+    // `allocate_columns` gives any extra space to the last column (MISSION). Shift surplus back to
+    // ROLE so long model slugs don't get truncated while the right side sits empty.
+    let mission_cap = 14usize;
+    if widths.len() == 5 && widths[4] > mission_cap {
+        let extra = widths[4].saturating_sub(mission_cap);
+        widths[4] = widths[4].saturating_sub(extra);
+        widths[0] = widths[0].saturating_add(extra);
+    }
+
+    widths
 }
 
 fn wrap_cell_text(text: &str, width: usize) -> Vec<String> {

@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 pub mod actions;
+pub mod agent_bus;
 pub mod buffer;
 pub mod config;
 pub mod cursor;
@@ -18,6 +19,7 @@ pub mod state;
 pub mod viewport;
 
 pub use actions::Action;
+pub use agent_bus::AgentBusEvent;
 pub use buffer::Buffer;
 pub use buffer::{BufferEdit, BufferPoint};
 pub use config::{

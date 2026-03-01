@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 pub mod app;
+pub mod codex_runner;
 pub mod file_tree;
 pub mod file_tree_runner;
 pub mod fuzzy_preview_runner;

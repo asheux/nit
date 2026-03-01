@@ -7,6 +7,7 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use crate::{
+    codex_runner::{CodexCommand, CodexEvent, CodexRunner},
     file_tree,
     file_tree_runner::{FileTreeCommand, FileTreeEvent, FileTreeRunner},
     fuzzy_preview_runner::{PreviewEvent, PreviewModel, PreviewRunner},
@@ -475,6 +476,7 @@ fn run_loop(
     let mut system_stats = SystemStats::new();
     let mut clipboard = Clipboard::new().ok();
     let mut file_tree_runner = FileTreeRunner::spawn();
+    let mut codex_runner = CodexRunner::spawn();
     let mut fuzzy_runtime = FuzzySearchRuntime::new(theme, state.settings.highlight.clone());
     let mut seed_runtime = if state.app_kind == AppKind::Gol {
         Some(SeedRuntime::new(state))
@@ -763,7 +765,7 @@ fn run_loop(
                             continue;
                         }
                     }
-                    if handle_agent_station_key(key, state, &mut vitals) {
+                    if handle_agent_station_key(key, state, &mut vitals, Some(&codex_runner)) {
                         needs_redraw = true;
                         continue;
                     }
@@ -877,6 +879,12 @@ fn run_loop(
         while let Ok(event) = fuzzy_runtime.preview.events.try_recv() {
             handle_fuzzy_preview_event(state, &mut fuzzy_runtime, event);
             needs_redraw = needs_redraw || state.fuzzy_search.open;
+        }
+
+        // codex runner events
+        while let Ok(event) = codex_runner.events.try_recv() {
+            handle_codex_event(state, &mut vitals, event);
+            needs_redraw = true;
         }
 
         if file_tree_tick(state, &file_tree_runner) {
@@ -1046,6 +1054,7 @@ fn run_loop(
         }
     }
     file_tree_runner.shutdown();
+    codex_runner.shutdown();
     fuzzy_runtime.shutdown();
     if let Some(runtime) = games_config_preview.as_mut() {
         runtime.shutdown();
@@ -1089,6 +1098,119 @@ fn append_log_to_agent_diagnostics(state: &mut AppState, line: &str) {
         let drop = state.agents.diag_events.len().saturating_sub(512);
         if drop > 0 {
             state.agents.diag_events.drain(0..drop);
+        }
+    }
+}
+
+fn handle_codex_event(state: &mut AppState, vitals: &mut VitalsState, event: CodexEvent) {
+    match event {
+        CodexEvent::TurnStarted { model, mission_id } => {
+            if let Some(agent) = state.agents.agents.iter_mut().find(|a| a.id == model) {
+                agent.status = AgentStatus::Running;
+                agent.queue_len = agent.queue_len.max(1);
+                agent.heartbeat_age_secs = 0;
+                if mission_id.is_some() {
+                    agent.current_mission = mission_id;
+                }
+            }
+            state.agents.mcp.state = McpConnectionState::Connecting;
+            state.agents.mcp.endpoint = format!("codex exec -m {model}");
+            state.agents.mcp.last_error = None;
+            state.agents.note_event();
+            vitals.record_agent_event(Instant::now());
+        }
+        CodexEvent::TurnLog { model, message } => {
+            let lowered = message.to_ascii_lowercase();
+            let severity = if lowered.contains("error") || lowered.contains("failed") {
+                AgentAlertSeverity::Warn
+            } else {
+                AgentAlertSeverity::Info
+            };
+            state.agents.diag_events.push(AgentDiagnosticEvent {
+                severity,
+                source: "codex".into(),
+                message: format!("[{model}] {message}"),
+                at: timestamp_label(state),
+            });
+            if severity != AgentAlertSeverity::Info {
+                vitals.record_diag_event(Instant::now(), DiagSeverity::Warn);
+            }
+            state.agents.note_event();
+        }
+        CodexEvent::TurnFailed {
+            model,
+            mission_id,
+            message,
+        } => {
+            if let Some(agent) = state.agents.agents.iter_mut().find(|a| a.id == model) {
+                agent.status = AgentStatus::Error;
+                agent.queue_len = 0;
+                agent.heartbeat_age_secs = 0;
+                if mission_id.is_some() {
+                    agent.current_mission = mission_id;
+                }
+            }
+            state.agents.mcp.state = McpConnectionState::Error;
+            state.agents.mcp.endpoint = format!("codex exec -m {model}");
+            state.agents.mcp.last_error = Some(message.clone());
+
+            state.agents.alerts.push(AgentAlert {
+                severity: AgentAlertSeverity::Error,
+                source: "codex".into(),
+                message: format!("[{model}] {message}"),
+                at: timestamp_label(state),
+            });
+            state.agents.diag_events.push(AgentDiagnosticEvent {
+                severity: AgentAlertSeverity::Error,
+                source: "codex".into(),
+                message: format!("[{model}] {message}"),
+                at: timestamp_label(state),
+            });
+            state.agents.console_scroll = usize::MAX;
+            state.status = Some(format!("Codex failed: {message}"));
+            state.agents.note_event();
+            vitals.record_diag_event(Instant::now(), DiagSeverity::Error);
+            vitals.record_agent_event(Instant::now());
+        }
+        CodexEvent::TurnCompleted {
+            model,
+            mission_id,
+            message,
+        } => {
+            if let Some(agent) = state.agents.agents.iter_mut().find(|a| a.id == model) {
+                agent.status = AgentStatus::Idle;
+                agent.queue_len = 0;
+                agent.heartbeat_age_secs = 0;
+                if mission_id.is_some() {
+                    agent.current_mission = mission_id.clone();
+                }
+            }
+
+            if let Some(mission_id) = mission_id.as_deref() {
+                mark_mission_provenance_dirty(state, mission_id);
+            }
+            state.agents.messages.push(AgentMessage {
+                at: timestamp_label(state),
+                channel: AgentChannel::Agent,
+                agent_id: Some(model.clone()),
+                mission_id,
+                text: message.clone(),
+            });
+            state.agents.console_scroll = usize::MAX;
+
+            state.agents.diag_events.push(AgentDiagnosticEvent {
+                severity: AgentAlertSeverity::Info,
+                source: "codex".into(),
+                message: format!("[{model}] turn completed"),
+                at: timestamp_label(state),
+            });
+
+            state.agents.mcp.state = McpConnectionState::Connected;
+            state.agents.mcp.endpoint = format!("codex exec -m {model}");
+            state.agents.mcp.last_error = None;
+
+            state.agents.note_event();
+            vitals.record_agent_event(Instant::now());
         }
     }
 }
@@ -1449,7 +1571,12 @@ fn draw(
     Ok(())
 }
 
-fn handle_agent_station_key(key: KeyEvent, state: &mut AppState, vitals: &mut VitalsState) -> bool {
+fn handle_agent_station_key(
+    key: KeyEvent,
+    state: &mut AppState,
+    vitals: &mut VitalsState,
+    codex: Option<&CodexRunner>,
+) -> bool {
     if let Some(target) = map_focus_hotkey(&key) {
         state.focus = target;
         if target == PaneId::JobOutput && state.agents.dock_tab == AgentOpsTab::Scratchpad {
@@ -1472,7 +1599,7 @@ fn handle_agent_station_key(key: KeyEvent, state: &mut AppState, vitals: &mut Vi
 
     match state.focus {
         PaneId::JobOutput => handle_agent_ops_key(key, state, vitals),
-        PaneId::Notes => handle_agent_console_key(key, state, vitals),
+        PaneId::Notes => handle_agent_console_key(key, state, vitals, codex),
         _ => false,
     }
 }
@@ -1777,7 +1904,12 @@ fn move_agent_ops_selection(state: &mut AppState, delta: i32) -> bool {
     }
 }
 
-fn handle_agent_console_key(key: KeyEvent, state: &mut AppState, vitals: &mut VitalsState) -> bool {
+fn handle_agent_console_key(
+    key: KeyEvent,
+    state: &mut AppState,
+    vitals: &mut VitalsState,
+    codex: Option<&CodexRunner>,
+) -> bool {
     let mut changed = false;
     let mut handled = false;
     let mut follow_chat_cursor = false;
@@ -1791,8 +1923,20 @@ fn handle_agent_console_key(key: KeyEvent, state: &mut AppState, vitals: &mut Vi
             ..
         } => {
             handled = true;
+            let prompt = state.agents.chat_input.clone();
+            let mission_id = state
+                .agents
+                .selected_context_mission()
+                .map(ToString::to_string);
+            let model = state
+                .agents
+                .selected_context_agent()
+                .map(ToString::to_string);
             changed = push_chat_message(state);
             follow_chat_cursor = changed;
+            if changed {
+                maybe_dispatch_codex_turn(state, vitals, codex, model, mission_id, prompt);
+            }
         }
         KeyEvent {
             code: KeyCode::Char('c'),
@@ -2169,6 +2313,49 @@ fn chat_line_len(line_starts: &[usize], line_idx: usize, total_chars: usize) -> 
         total_chars
     };
     end.saturating_sub(start)
+}
+
+fn maybe_dispatch_codex_turn(
+    state: &mut AppState,
+    vitals: &mut VitalsState,
+    codex: Option<&CodexRunner>,
+    model: Option<String>,
+    mission_id: Option<String>,
+    prompt: String,
+) {
+    let Some(codex) = codex else {
+        return;
+    };
+    let Some(model) = model else {
+        return;
+    };
+    let Some(agent) = state.agents.agents.iter_mut().find(|a| a.id == model) else {
+        return;
+    };
+    if !agent.lane.eq_ignore_ascii_case("codex") {
+        return;
+    }
+
+    // Immediate UI feedback: mark the model as running and show the loader/breather row.
+    agent.status = AgentStatus::Running;
+    agent.queue_len = agent.queue_len.saturating_add(1).max(1);
+    agent.heartbeat_age_secs = 0;
+    agent.last_message = "queued".into();
+    if mission_id.is_some() {
+        agent.current_mission = mission_id.clone();
+    }
+
+    state.agents.mcp.state = McpConnectionState::Connecting;
+    state.agents.mcp.last_error = None;
+    state.agents.note_event();
+    vitals.record_agent_event(Instant::now());
+
+    codex.send(CodexCommand::RunTurn {
+        model,
+        cwd: state.workspace_root.clone(),
+        mission_id,
+        prompt,
+    });
 }
 
 fn push_chat_message(state: &mut AppState) -> bool {
@@ -7445,6 +7632,8 @@ impl Drop for TerminalGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::widgets::{agent_console_view, agent_ops_view};
+    use nit_core::AgentBusEvent;
 
     fn state_for_test() -> AppState {
         let editor = nit_core::Buffer::from_str("editor", "", None);
@@ -7487,6 +7676,58 @@ mod tests {
         let key = KeyEvent::new(KeyCode::Char(' '), KeyModifiers::empty());
         let action = map_key_to_action(key, &state, &mut input);
         assert!(action.is_none());
+    }
+
+    #[test]
+    fn codex_like_event_stream_updates_agent_panes() {
+        let mut state = state_for_test();
+
+        // Simulate an external runtime (Codex/Claude/etc.) driving NIT via NDJSON events.
+        let events = [
+            r#"{"type":"mcp_status","status":{"state":"Connected","endpoint":"stdio://nit-agentd","latency_ms":7,"last_error":null}}"#,
+            r#"{"type":"mission_upsert","mission":{"id":"mis-001","title":"Wire up Codex runtime","phase":"Execute","swarm":false,"assigned_agents":["codex"],"status":"RUNNING","updated_at":"t+1"}}"#,
+            r#"{"type":"agent_upsert","agent":{"id":"codex","role":"Coder","lane":"Lane A","status":"Running","heartbeat_age_secs":1,"queue_len":1,"current_mission":"mis-001","last_message":"boot"}}"#,
+            r#"{"type":"message_append","message":{"at":"t+2","channel":"Agent","agent_id":null,"mission_id":"mis-001","text":"Please integrate Codex."}}"#,
+            r#"{"type":"message_append","message":{"at":"t+3","channel":"Agent","agent_id":"codex","mission_id":"mis-001","text":"Acknowledged. Streaming events into AgentsState now."}}"#,
+            r#"{"type":"alert_append","alert":{"severity":"Warn","source":"codex","message":"This is a long alert message that should wrap into multiple lines in the Agent Ops Alerts table for smaller widths.","at":"t+4"}}"#,
+        ];
+
+        let start_epoch = state.agents.event_epoch;
+        for json in events {
+            let ev: AgentBusEvent = serde_json::from_str(json).expect("parse AgentBusEvent");
+            ev.apply(&mut state);
+        }
+        assert!(state.agents.event_epoch > start_epoch);
+
+        // Roster tab should show the Codex agent.
+        state.agents.dock_tab = AgentOpsTab::Roster;
+        let roster = agent_ops_view::current_lines_for_width(&state, 72);
+        assert!(roster.iter().any(|line| line.contains("Coder")));
+
+        // Missions tab should show the mission + agent list in a vertical column.
+        state.agents.dock_tab = AgentOpsTab::Missions;
+        let missions = agent_ops_view::current_lines_for_width(&state, 72);
+        assert!(missions.iter().any(|line| line.contains("mis-001")));
+
+        // Alerts tab should wrap long messages and keep click mapping stable across wrapped rows.
+        let alert_width = 48usize;
+        state.agents.dock_tab = AgentOpsTab::Alerts;
+        let alerts = agent_ops_view::current_lines_for_width(&state, alert_width);
+        assert!(alerts.len() >= 5); // header + separator + at least two wrapped rows
+        assert!(alerts[2].contains("WARN"));
+        assert_eq!(
+            agent_ops_view::alert_index_for_body_line(&state, alert_width, 0),
+            Some(0)
+        );
+        assert_eq!(
+            agent_ops_view::alert_index_for_body_line(&state, alert_width, 1),
+            Some(0)
+        );
+
+        // Thread selection/export should include both user and agent message content.
+        let thread = agent_console_view::thread_lines_for_selection(&state, 80).join("\n");
+        assert!(thread.contains("Please integrate Codex."));
+        assert!(thread.contains("Streaming events into AgentsState"));
     }
 
     #[test]
@@ -7541,12 +7782,14 @@ mod tests {
         assert!(handle_agent_station_key(
             KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE),
             &mut state,
-            &mut vitals
+            &mut vitals,
+            None
         ));
         assert!(handle_agent_station_key(
             KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE),
             &mut state,
-            &mut vitals
+            &mut vitals,
+            None
         ));
         assert_eq!(state.agents.chat_input, "hi");
         assert_eq!(state.agents.chat_input_cursor, 2);
@@ -7554,7 +7797,8 @@ mod tests {
         assert!(handle_agent_station_key(
             KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
             &mut state,
-            &mut vitals
+            &mut vitals,
+            None
         ));
         assert_eq!(state.agents.chat_input, "");
         assert_eq!(state.agents.chat_input_cursor, 0);
@@ -7574,7 +7818,8 @@ mod tests {
         assert!(handle_agent_station_key(
             KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
             &mut state,
-            &mut vitals
+            &mut vitals,
+            None
         ));
         assert_eq!(state.agents.chat_input, "");
         assert_eq!(state.agents.chat_input_cursor, 0);
@@ -7591,19 +7836,22 @@ mod tests {
         assert!(handle_agent_station_key(
             KeyEvent::new(KeyCode::Left, KeyModifiers::empty()),
             &mut state,
-            &mut vitals
+            &mut vitals,
+            None
         ));
         assert!(handle_agent_station_key(
             KeyEvent::new(KeyCode::Char('l'), KeyModifiers::empty()),
             &mut state,
-            &mut vitals
+            &mut vitals,
+            None
         ));
         assert_eq!(state.agents.chat_input, "hello");
 
         assert!(handle_agent_station_key(
             KeyEvent::new(KeyCode::Right, KeyModifiers::empty()),
             &mut state,
-            &mut vitals
+            &mut vitals,
+            None
         ));
         assert_eq!(state.agents.chat_input_cursor, 5);
     }
@@ -7619,21 +7867,24 @@ mod tests {
         assert!(handle_agent_station_key(
             KeyEvent::new(KeyCode::Down, KeyModifiers::empty()),
             &mut state,
-            &mut vitals
+            &mut vitals,
+            None
         ));
         assert_eq!(state.agents.chat_input_cursor, 7);
 
         assert!(handle_agent_station_key(
             KeyEvent::new(KeyCode::Down, KeyModifiers::empty()),
             &mut state,
-            &mut vitals
+            &mut vitals,
+            None
         ));
         assert_eq!(state.agents.chat_input_cursor, 10);
 
         assert!(handle_agent_station_key(
             KeyEvent::new(KeyCode::Up, KeyModifiers::empty()),
             &mut state,
-            &mut vitals
+            &mut vitals,
+            None
         ));
         assert_eq!(state.agents.chat_input_cursor, 7);
     }
@@ -7650,7 +7901,8 @@ mod tests {
         assert!(handle_agent_station_key(
             KeyEvent::new(KeyCode::Down, KeyModifiers::empty()),
             &mut state,
-            &mut vitals
+            &mut vitals,
+            None
         ));
         assert_eq!(state.agents.chat_input_cursor, 4);
         assert_eq!(state.agents.console_scroll, 3);
@@ -7658,7 +7910,8 @@ mod tests {
         assert!(handle_agent_station_key(
             KeyEvent::new(KeyCode::Up, KeyModifiers::empty()),
             &mut state,
-            &mut vitals
+            &mut vitals,
+            None
         ));
         assert_eq!(state.agents.chat_input_cursor, 0);
         assert_eq!(state.agents.console_scroll, 3);
@@ -7728,7 +7981,8 @@ mod tests {
         assert!(handle_agent_station_key(
             KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
             &mut state,
-            &mut vitals
+            &mut vitals,
+            None
         ));
         assert_eq!(state.agents.messages.len(), 1);
         assert_eq!(
@@ -7749,7 +8003,8 @@ mod tests {
         assert!(handle_agent_station_key(
             KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
             &mut state,
-            &mut vitals
+            &mut vitals,
+            None
         ));
         assert_eq!(state.agents.messages.len(), 1);
         assert_eq!(state.agents.messages[0].text, markdown);
@@ -7760,6 +8015,18 @@ mod tests {
         let mut state = state_for_test();
         state.agents.selected_mission = None;
         state.agents.selected_agent = None;
+        // In normal usage the roster provides a selected agent context; include a lane so the
+        // thread renders in single-agent mode (no repeating badge) and preserves content width.
+        state.agents.agents.push(nit_core::AgentLane {
+            id: "planner".into(),
+            role: "Planner".into(),
+            lane: "Lane A".into(),
+            status: nit_core::AgentStatus::Idle,
+            heartbeat_age_secs: 0,
+            queue_len: 0,
+            current_mission: None,
+            last_message: "idle".into(),
+        });
         state.agents.messages.push(AgentMessage {
             at: "10:00:00".into(),
             channel: AgentChannel::Agent,
@@ -7872,6 +8139,18 @@ mod tests {
         state.agents.selected_mission = None;
         state.agents.selected_agent = None;
         state.agents.console_scroll = 0;
+        // Include the agent lane so the transcript renders in single-agent context and doesn't
+        // waste horizontal space on redundant agent badges.
+        state.agents.agents.push(nit_core::AgentLane {
+            id: "planner".into(),
+            role: "Planner".into(),
+            lane: "Lane A".into(),
+            status: nit_core::AgentStatus::Idle,
+            heartbeat_age_secs: 0,
+            queue_len: 0,
+            current_mission: None,
+            last_message: "idle".into(),
+        });
         state.agents.messages.push(AgentMessage {
             at: "10:00:00".into(),
             channel: AgentChannel::Agent,
@@ -8739,7 +9018,8 @@ mod tests {
         assert!(handle_agent_station_key(
             KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
             &mut state,
-            &mut vitals
+            &mut vitals,
+            None
         ));
         assert!(state.ui_selection.is_none());
         assert_eq!(state.agents.chat_input, "draft message");
@@ -8757,7 +9037,8 @@ mod tests {
         assert!(!handle_agent_station_key(
             KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
             &mut state,
-            &mut vitals
+            &mut vitals,
+            None
         ));
         assert!(state.ui_selection.is_none());
         assert_eq!(state.agents.chat_input, "draft message");
@@ -8875,7 +9156,8 @@ mod tests {
         assert!(!handle_agent_station_key(
             KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE),
             &mut state,
-            &mut vitals
+            &mut vitals,
+            None
         ));
         let action = map_key_to_action(
             KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE),
@@ -8898,7 +9180,8 @@ mod tests {
         assert!(handle_agent_station_key(
             KeyEvent::new(KeyCode::Tab, KeyModifiers::empty()),
             &mut state,
-            &mut vitals
+            &mut vitals,
+            None
         ));
         assert_eq!(state.agents.dock_tab, AgentOpsTab::Roster);
         assert_eq!(state.mode, Mode::Normal);
@@ -8914,14 +9197,16 @@ mod tests {
         assert!(handle_agent_station_key(
             KeyEvent::new(KeyCode::Right, KeyModifiers::empty()),
             &mut state,
-            &mut vitals
+            &mut vitals,
+            None
         ));
         assert_eq!(state.agents.dock_tab, AgentOpsTab::Missions);
 
         assert!(handle_agent_station_key(
             KeyEvent::new(KeyCode::Left, KeyModifiers::empty()),
             &mut state,
-            &mut vitals
+            &mut vitals,
+            None
         ));
         assert_eq!(state.agents.dock_tab, AgentOpsTab::Roster);
     }
