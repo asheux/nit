@@ -1,3 +1,5 @@
+use std::collections::BTreeSet;
+use std::fs;
 use std::io::{self, Stdout};
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -21,33 +23,35 @@ use crate::{
     theme::Theme,
     vitals::{AgentVitalsState, DiagSeverity, LabVitalsSnapshot, VitalsState},
     widgets::{
-        bottom_bar, editor_view, file_tree_view, fuzzy_search_popup, games_analysis_popup,
-        games_ca_sim_popup, games_match_history_popup, games_replay_popup, games_run_browser_popup,
-        games_strategy_popup, games_tm_sim_popup, games_visualizer_view, gate_monitor_view,
-        help_overlay, job_output_view, notes_view, protocol_picker, rule_picker, top_bar,
-        visualizer_view,
+        agent_console_view, agent_ops_view, bottom_bar, editor_view, file_tree_view,
+        fuzzy_search_popup, games_analysis_popup, games_ca_sim_popup, games_match_history_popup,
+        games_replay_popup, games_run_browser_popup, games_strategy_popup, games_tm_sim_popup,
+        games_visualizer_view, gate_monitor_view, help_overlay, protocol_picker, rule_picker,
+        top_bar, visualizer_view,
     },
 };
 use arboard::Clipboard;
 use crossterm::{
     cursor::SetCursorStyle,
     event::{
-        self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
-        KeyModifiers, KeyboardEnhancementFlags, MouseEvent, MouseEventKind,
-        PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+        self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+        Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, KeyboardEnhancementFlags, MouseEvent,
+        MouseEventKind, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
     },
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use nit_core::{
-    actions::Action, apply_action, io as core_io, AppKind, AppState, Mode, PaneId, Prompt,
-    SearchMode, UiSelection, UiSelectionPane, YankKind,
+    actions::Action, apply_action, io as core_io, AgentAlert, AgentAlertSeverity, AgentChannel,
+    AgentDiagnosticEvent, AgentMessage, AgentOpsTab, AgentStatus, AppKind, AppState,
+    McpConnectionState, MissionPhase, MissionRecord, Mode, PaneId, PatchProposal, PatchStatus,
+    Prompt, SearchMode, UiSelection, UiSelectionPane, YankKind,
 };
 use nit_games::config::GamesConfig;
 use ratatui::{
     backend::CrosstermBackend,
     style::Style,
-    widgets::{Block, Borders, Clear, Paragraph},
+    widgets::{Block, BorderType, Borders, Clear, Paragraph},
     Terminal,
 };
 
@@ -406,6 +410,7 @@ pub fn run(mut state: AppState, theme: Theme, log_rx: Receiver<String>) -> io::R
         active: true,
         keyboard_flags_pushed: false,
         mouse_capture: false,
+        bracketed_paste: false,
     };
     if execute!(stdout, EnableMouseCapture).is_ok() {
         guard.mouse_capture = true;
@@ -416,6 +421,9 @@ pub fn run(mut state: AppState, theme: Theme, log_rx: Receiver<String>) -> io::R
         | KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES;
     if execute!(stdout, PushKeyboardEnhancementFlags(keyboard_flags)).is_ok() {
         guard.keyboard_flags_pushed = true;
+    }
+    if execute!(stdout, EnableBracketedPaste).is_ok() {
+        guard.bracketed_paste = true;
     }
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
@@ -438,6 +446,10 @@ pub fn run(mut state: AppState, theme: Theme, log_rx: Receiver<String>) -> io::R
     if guard.mouse_capture {
         let _ = execute!(io::stdout(), DisableMouseCapture);
         guard.mouse_capture = false;
+    }
+    if guard.bracketed_paste {
+        let _ = execute!(io::stdout(), DisableBracketedPaste);
+        guard.bracketed_paste = false;
     }
     execute!(io::stdout(), SetCursorStyle::DefaultUserShape)?;
     disable_raw_mode()?;
@@ -496,6 +508,7 @@ fn run_loop(
         .as_ref()
         .map(|petri| petri.activity_epoch())
         .unwrap_or(0);
+    let mut last_agent_event_epoch = state.agents.event_epoch;
     tracing::info!("SECURITY: no plugins, no network, no shell execution");
     loop {
         fuzzy_runtime.tick_open(state);
@@ -750,6 +763,10 @@ fn run_loop(
                             continue;
                         }
                     }
+                    if handle_agent_station_key(key, state, &mut vitals) {
+                        needs_redraw = true;
+                        continue;
+                    }
                     if let Some(action) = map_key_to_action(key, state, &mut input_state) {
                         prepare_clipboard_paste(state, &mut clipboard, &action);
                         let action_copy = action.clone();
@@ -763,6 +780,12 @@ fn run_loop(
                             break;
                         }
                         needs_redraw = needs_redraw || outcome.state_changed;
+                    }
+                }
+                Event::Paste(text) => {
+                    handled_input = true;
+                    if handle_paste_event(&text, state, syntax, &mut fuzzy_runtime, &mut vitals) {
+                        needs_redraw = true;
                     }
                 }
                 Event::Mouse(mouse) => {
@@ -813,7 +836,8 @@ fn run_loop(
         while let Ok(line) = log_rx.try_recv() {
             let now = Instant::now();
             record_log_line_vitals(&mut vitals, now, &line);
-            state.receive_log(line);
+            state.receive_log(line.clone());
+            append_log_to_agent_diagnostics(state, &line);
             needs_redraw = true;
         }
 
@@ -959,6 +983,38 @@ fn run_loop(
         } else {
             last_busy_pulse = now;
         }
+        if let Some(message) = state.agents.pending_legacy_notes_alert.take() {
+            state.agents.alerts.push(AgentAlert {
+                severity: AgentAlertSeverity::Warn,
+                source: "migration".into(),
+                message: message.clone(),
+                at: timestamp_label(state),
+            });
+            state.agents.diag_events.push(AgentDiagnosticEvent {
+                severity: AgentAlertSeverity::Warn,
+                source: "migration".into(),
+                message,
+                at: timestamp_label(state),
+            });
+            state.agents.note_event();
+            needs_redraw = true;
+        }
+        if state.agents.event_epoch != last_agent_event_epoch {
+            let now = Instant::now();
+            let pulses = state
+                .agents
+                .event_epoch
+                .wrapping_sub(last_agent_event_epoch)
+                .min(8);
+            for _ in 0..pulses {
+                vitals.record_agent_event(now);
+            }
+            last_agent_event_epoch = state.agents.event_epoch;
+        }
+        if flush_agent_run_provenance(state).is_err() {
+            let now = Instant::now();
+            vitals.record_diag_event(now, DiagSeverity::Warn);
+        }
 
         // redraw
         if needs_redraw || last_tick.elapsed() >= TICK_RATE {
@@ -1013,6 +1069,30 @@ fn record_log_line_vitals(vitals: &mut VitalsState, now: Instant, line: &str) {
     }
 }
 
+fn append_log_to_agent_diagnostics(state: &mut AppState, line: &str) {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return;
+    }
+    let severity = match log_diag_severity(trimmed) {
+        Some(DiagSeverity::Error) => AgentAlertSeverity::Error,
+        Some(DiagSeverity::Warn) => AgentAlertSeverity::Warn,
+        None => AgentAlertSeverity::Info,
+    };
+    state.agents.diag_events.push(AgentDiagnosticEvent {
+        severity,
+        source: "runtime".into(),
+        message: trimmed.to_string(),
+        at: timestamp_label(state),
+    });
+    if state.agents.diag_events.len() > 512 {
+        let drop = state.agents.diag_events.len().saturating_sub(512);
+        if drop > 0 {
+            state.agents.diag_events.drain(0..drop);
+        }
+    }
+}
+
 fn is_background_work_active(state: &AppState) -> bool {
     match state.app_kind {
         AppKind::Gol => false,
@@ -1043,8 +1123,19 @@ fn status_looks_busy(status_text: &str) -> bool {
         || lower.contains("busy")
 }
 
-fn current_agent_state(_state: &AppState) -> AgentVitalsState {
-    AgentVitalsState::disabled()
+fn current_agent_state(state: &AppState) -> AgentVitalsState {
+    let enabled = !state.agents.agents.is_empty();
+    let connected = matches!(state.agents.mcp.state, McpConnectionState::Connected);
+    let active_tasks = state
+        .agents
+        .agents
+        .iter()
+        .any(|agent| matches!(agent.status, AgentStatus::Running) || agent.queue_len > 0);
+    AgentVitalsState {
+        enabled,
+        connected,
+        active_tasks,
+    }
 }
 
 fn log_diag_severity(line: &str) -> Option<DiagSeverity> {
@@ -1101,25 +1192,6 @@ fn draw(
                 buf.ensure_visible();
             }
         }
-        let notes_total = state.notes_buffer().lines_len().max(1);
-        let notes_line_width = notes_total.to_string().len().max(3) as u16;
-        let notes_gutter = notes_line_width + 4;
-        let notes_text_width = layout
-            .notes
-            .width
-            .saturating_sub(2)
-            .saturating_sub(notes_gutter);
-        let notes_height = layout.notes.height.saturating_sub(2) as usize;
-        let notes_width = notes_text_width as usize;
-        {
-            let buf = state.notes_buffer_mut();
-            let resized = buf.viewport.height != notes_height || buf.viewport.width != notes_width;
-            buf.set_viewport_size(notes_height, notes_width);
-            if resized {
-                buf.ensure_visible();
-            }
-        }
-
         let editor_id = state.active_editor_buffer_id;
         let notes_id = state.notes_buffer_id;
         top_bar::render(f, layout.top, state, theme, vitals);
@@ -1141,21 +1213,78 @@ fn draw(
                 state.settings.editor.tab_width as usize,
             )
         };
-        let notes_cursor = {
-            let notes_render = syntax.render_snapshot_for(notes_id, state.notes_buffer());
-            notes_view::render_notes(
-                f,
-                layout.notes,
-                state.notes_buffer(),
-                notes_render.snapshot,
-                notes_render.line_map,
-                state.focus,
-                state.mode,
-                theme,
-                state.settings.editor.tab_width as usize,
-            )
+        let notes_cursor = agent_console_view::render(f, layout.notes, state, theme);
+        let job_cursor = if state.agents.dock_tab == AgentOpsTab::Scratchpad {
+            let focused = state.focus == PaneId::JobOutput;
+            let border_style = if focused {
+                Style::default().fg(theme.border_focused)
+            } else {
+                Style::default().fg(theme.border)
+            };
+            let border_type = if focused {
+                BorderType::Thick
+            } else {
+                BorderType::Plain
+            };
+            let block = Block::default()
+                .borders(Borders::ALL)
+                .title("AGENT OPS")
+                .border_style(border_style)
+                .border_type(border_type)
+                .style(Style::default().bg(theme.background));
+            f.render_widget(block.clone(), layout.job);
+            let outer_inner = block.inner(layout.job);
+            if outer_inner.width >= 4 && outer_inner.height >= 3 {
+                let outer_chunks = ratatui::layout::Layout::default()
+                    .direction(ratatui::layout::Direction::Vertical)
+                    .constraints([
+                        ratatui::layout::Constraint::Length(1),
+                        ratatui::layout::Constraint::Min(1),
+                    ])
+                    .split(outer_inner);
+                agent_ops_view::render_tab_bar(f, outer_chunks[0], state, theme);
+                let scratchpad_area = outer_chunks[1];
+
+                let notes_total = state.notes_buffer().lines_len().max(1);
+                let notes_line_width = notes_total.to_string().len().max(3) as u16;
+                let notes_gutter = notes_line_width + 4;
+                let notes_text_width = scratchpad_area
+                    .width
+                    .saturating_sub(2)
+                    .saturating_sub(notes_gutter);
+                let notes_height = scratchpad_area.height.saturating_sub(2) as usize;
+                let notes_width = notes_text_width as usize;
+                {
+                    let buf = state.notes_buffer_mut();
+                    let resized =
+                        buf.viewport.height != notes_height || buf.viewport.width != notes_width;
+                    buf.set_viewport_size(notes_height, notes_width);
+                    if resized {
+                        buf.ensure_visible();
+                    }
+                }
+                let notes_render = syntax.render_snapshot_for(notes_id, state.notes_buffer());
+                editor_view::render_buffer(
+                    f,
+                    scratchpad_area,
+                    state.notes_buffer(),
+                    notes_render.snapshot,
+                    notes_render.line_map,
+                    PaneId::JobOutput,
+                    state.focus,
+                    "SCRATCHPAD",
+                    theme,
+                    state.settings.editor.tab_width as usize,
+                    true,
+                    state.mode,
+                )
+            } else {
+                None
+            }
+        } else {
+            agent_ops_view::render(f, layout.job, state, theme);
+            None
         };
-        job_output_view::render(f, layout.job, state, theme);
         match state.app_kind {
             AppKind::Gol => {
                 let viz_inner_width = layout.visualizer.width.saturating_sub(2) as usize;
@@ -1279,7 +1408,9 @@ fn draw(
             None
         };
 
-        // cursor
+        // Cursor: only set it when we actually want a visible caret. If we don't set a cursor,
+        // ratatui will hide it; calling `set_cursor(0, 0)` makes it look like the cursor is
+        // jumping to the top-left corner.
         let petri_visible = match state.app_kind {
             AppKind::Gol => gol_petri.as_ref().map(|p| p.is_visible()).unwrap_or(false),
             AppKind::Games => games_petri
@@ -1287,24 +1418,25 @@ fn draw(
                 .map(|p| p.is_visible())
                 .unwrap_or(false),
         };
-        if let Some((x, y)) = command_cursor {
-            f.set_cursor(x, y);
+        let cursor = if let Some((x, y)) = command_cursor {
+            Some((x, y))
         } else if let Some((x, y)) = fuzzy_cursor {
+            Some((x, y))
+        } else if petri_visible {
+            None
+        } else if state.file_tree.open && state.focus == PaneId::Editor {
+            None
+        } else if state.focus == PaneId::Editor {
+            editor_cursor.map(|pos| (pos.x, pos.y))
+        } else if state.focus == PaneId::JobOutput
+            && state.agents.dock_tab == AgentOpsTab::Scratchpad
+        {
+            job_cursor.map(|pos| (pos.x, pos.y))
+        } else {
+            notes_cursor.map(|pos| (pos.x, pos.y))
+        };
+        if let Some((x, y)) = cursor {
             f.set_cursor(x, y);
-        } else if petri_visible || state.command_line.is_some() {
-            f.set_cursor(f.size().x, f.size().y);
-        } else if state.file_tree.open {
-            f.set_cursor(f.size().x, f.size().y);
-        } else if state.fuzzy_search.open {
-            f.set_cursor(f.size().x, f.size().y);
-        } else if let Some(pos) = if state.focus == PaneId::Editor {
-            editor_cursor
-        } else {
-            notes_cursor
-        } {
-            f.set_cursor(pos.x, pos.y);
-        } else {
-            f.set_cursor(f.size().x, f.size().y);
         }
     })?;
     let cursor_style = match state.mode {
@@ -1317,6 +1449,888 @@ fn draw(
     Ok(())
 }
 
+fn handle_agent_station_key(key: KeyEvent, state: &mut AppState, vitals: &mut VitalsState) -> bool {
+    if let Some(target) = map_focus_hotkey(&key) {
+        state.focus = target;
+        if target == PaneId::JobOutput && state.agents.dock_tab == AgentOpsTab::Scratchpad {
+            state.mode = Mode::Insert;
+        } else if target != PaneId::Editor {
+            state.mode = Mode::Normal;
+        }
+        return true;
+    }
+    if state.command_line.is_some()
+        || state.prompt.is_some()
+        || state.show_help
+        || state.rule_picker.open
+        || state.protocol_picker.open
+        || state.fuzzy_search.open
+        || games_modal_popup_open(state)
+    {
+        return false;
+    }
+
+    match state.focus {
+        PaneId::JobOutput => handle_agent_ops_key(key, state, vitals),
+        PaneId::Notes => handle_agent_console_key(key, state, vitals),
+        _ => false,
+    }
+}
+
+fn map_focus_hotkey(key: &KeyEvent) -> Option<PaneId> {
+    match key {
+        KeyEvent {
+            code: KeyCode::Char('1'),
+            modifiers,
+            ..
+        } if modifiers.contains(KeyModifiers::CONTROL) => Some(PaneId::Editor),
+        KeyEvent {
+            code: KeyCode::Char('2'),
+            modifiers,
+            ..
+        } if modifiers.contains(KeyModifiers::CONTROL) => Some(PaneId::JobOutput),
+        KeyEvent {
+            code: KeyCode::Char('3'),
+            modifiers,
+            ..
+        } if modifiers.contains(KeyModifiers::CONTROL) => Some(PaneId::Notes),
+        _ => None,
+    }
+}
+
+fn handle_agent_ops_key(key: KeyEvent, state: &mut AppState, vitals: &mut VitalsState) -> bool {
+    if state.agents.dock_tab == AgentOpsTab::Scratchpad {
+        match key {
+            KeyEvent {
+                code: KeyCode::Tab,
+                modifiers: KeyModifiers::SHIFT,
+                ..
+            } => {
+                state.agents.dock_tab = state.agents.dock_tab.prev();
+                state.agents.ops_scroll = 0;
+                state.mode = if state.agents.dock_tab == AgentOpsTab::Scratchpad {
+                    Mode::Insert
+                } else {
+                    Mode::Normal
+                };
+                state.agents.note_event();
+                vitals.record_agent_event(Instant::now());
+                return true;
+            }
+            KeyEvent {
+                code: KeyCode::Tab, ..
+            } => {
+                state.agents.dock_tab = state.agents.dock_tab.next();
+                state.agents.ops_scroll = 0;
+                state.mode = if state.agents.dock_tab == AgentOpsTab::Scratchpad {
+                    Mode::Insert
+                } else {
+                    Mode::Normal
+                };
+                state.agents.note_event();
+                vitals.record_agent_event(Instant::now());
+                return true;
+            }
+            KeyEvent {
+                code: KeyCode::Left,
+                ..
+            } if state.mode != Mode::Insert => {
+                state.agents.dock_tab = state.agents.dock_tab.prev();
+                state.agents.ops_scroll = 0;
+                state.mode = if state.agents.dock_tab == AgentOpsTab::Scratchpad {
+                    Mode::Insert
+                } else {
+                    Mode::Normal
+                };
+                state.agents.note_event();
+                vitals.record_agent_event(Instant::now());
+                return true;
+            }
+            KeyEvent {
+                code: KeyCode::Right,
+                ..
+            } if state.mode != Mode::Insert => {
+                state.agents.dock_tab = state.agents.dock_tab.next();
+                state.agents.ops_scroll = 0;
+                state.mode = if state.agents.dock_tab == AgentOpsTab::Scratchpad {
+                    Mode::Insert
+                } else {
+                    Mode::Normal
+                };
+                state.agents.note_event();
+                vitals.record_agent_event(Instant::now());
+                return true;
+            }
+            KeyEvent {
+                code: KeyCode::Char(_),
+                modifiers,
+                ..
+            } if state.mode != Mode::Insert
+                && (modifiers.is_empty() || modifiers == KeyModifiers::SHIFT) =>
+            {
+                // In Scratchpad, treat first printable key as intent to type.
+                state.mode = Mode::Insert;
+                return false;
+            }
+            KeyEvent {
+                code: KeyCode::Enter | KeyCode::Backspace | KeyCode::Delete,
+                modifiers,
+                ..
+            } if state.mode != Mode::Insert && modifiers.is_empty() => {
+                state.mode = Mode::Insert;
+                return false;
+            }
+            _ => return false,
+        }
+    }
+
+    let mut changed = false;
+    match key {
+        KeyEvent {
+            code: KeyCode::Tab,
+            modifiers: KeyModifiers::SHIFT,
+            ..
+        } => {
+            state.agents.dock_tab = state.agents.dock_tab.prev();
+            state.agents.ops_scroll = 0;
+            if state.agents.dock_tab == AgentOpsTab::Scratchpad {
+                state.mode = Mode::Insert;
+            }
+            changed = true;
+        }
+        KeyEvent {
+            code: KeyCode::Tab, ..
+        } => {
+            state.agents.dock_tab = state.agents.dock_tab.next();
+            state.agents.ops_scroll = 0;
+            if state.agents.dock_tab == AgentOpsTab::Scratchpad {
+                state.mode = Mode::Insert;
+            }
+            changed = true;
+        }
+        KeyEvent {
+            code: KeyCode::Left,
+            ..
+        } => {
+            state.agents.dock_tab = state.agents.dock_tab.prev();
+            state.agents.ops_scroll = 0;
+            if state.agents.dock_tab == AgentOpsTab::Scratchpad {
+                state.mode = Mode::Insert;
+            }
+            changed = true;
+        }
+        KeyEvent {
+            code: KeyCode::Right,
+            ..
+        } => {
+            state.agents.dock_tab = state.agents.dock_tab.next();
+            state.agents.ops_scroll = 0;
+            if state.agents.dock_tab == AgentOpsTab::Scratchpad {
+                state.mode = Mode::Insert;
+            }
+            changed = true;
+        }
+        KeyEvent {
+            code: KeyCode::Up, ..
+        }
+        | KeyEvent {
+            code: KeyCode::Char('k'),
+            modifiers: KeyModifiers::NONE,
+            ..
+        } => {
+            changed = move_agent_ops_selection(state, -1);
+        }
+        KeyEvent {
+            code: KeyCode::Down,
+            ..
+        }
+        | KeyEvent {
+            code: KeyCode::Char('j'),
+            modifiers: KeyModifiers::NONE,
+            ..
+        } => {
+            changed = move_agent_ops_selection(state, 1);
+        }
+        KeyEvent {
+            code: KeyCode::Enter,
+            ..
+        } => {
+            state.focus = PaneId::Notes;
+            state.mode = Mode::Normal;
+            state.agents.console_scroll = usize::MAX;
+            changed = true;
+        }
+        KeyEvent {
+            code: KeyCode::Char('n'),
+            modifiers,
+            ..
+        } if modifiers.is_empty() => {
+            spawn_mock_mission(state);
+            changed = true;
+        }
+        KeyEvent {
+            code: KeyCode::Char('r'),
+            modifiers,
+            ..
+        } if modifiers.is_empty() && state.agents.dock_tab == AgentOpsTab::Mcp => {
+            set_mcp_state(state, McpConnectionState::Connecting, Some(19), None);
+            set_mcp_state(state, McpConnectionState::Connected, Some(7), None);
+            changed = true;
+        }
+        KeyEvent {
+            code: KeyCode::Char('s'),
+            modifiers,
+            ..
+        } if modifiers.is_empty() && state.agents.dock_tab == AgentOpsTab::Mcp => {
+            set_mcp_state(state, McpConnectionState::Connected, Some(8), None);
+            changed = true;
+        }
+        KeyEvent {
+            code: KeyCode::Char('x'),
+            modifiers,
+            ..
+        } if modifiers.is_empty() && state.agents.dock_tab == AgentOpsTab::Mcp => {
+            set_mcp_state(
+                state,
+                McpConnectionState::Disconnected,
+                None,
+                Some("MCP link stopped by operator".into()),
+            );
+            changed = true;
+        }
+        _ => {}
+    }
+    if changed {
+        state.agents.note_event();
+        vitals.record_agent_event(Instant::now());
+    }
+    changed
+}
+
+fn move_agent_ops_selection(state: &mut AppState, delta: i32) -> bool {
+    match state.agents.dock_tab {
+        AgentOpsTab::Roster => {
+            if state.agents.agents.is_empty() {
+                return false;
+            }
+            let max = state.agents.agents.len().saturating_sub(1) as i32;
+            let next = (state.agents.roster_selected as i32 + delta).clamp(0, max) as usize;
+            if next == state.agents.roster_selected {
+                return false;
+            }
+            state.agents.roster_selected = next;
+            if let Some(agent) = state.agents.agents.get(next) {
+                state.agents.selected_agent = Some(agent.id.clone());
+                if let Some(mission_id) = agent.current_mission.as_deref() {
+                    state.agents.selected_mission = Some(mission_id.to_string());
+                    if let Some(idx) = state
+                        .agents
+                        .missions
+                        .iter()
+                        .position(|mission| mission.id == mission_id)
+                    {
+                        state.agents.mission_selected = idx;
+                    }
+                }
+            }
+            true
+        }
+        AgentOpsTab::Missions => {
+            if state.agents.missions.is_empty() {
+                return false;
+            }
+            let max = state.agents.missions.len().saturating_sub(1) as i32;
+            let next = (state.agents.mission_selected as i32 + delta).clamp(0, max) as usize;
+            if next == state.agents.mission_selected {
+                return false;
+            }
+            state.agents.mission_selected = next;
+            if let Some(mission) = state.agents.missions.get(next) {
+                state.agents.selected_mission = Some(mission.id.clone());
+            }
+            true
+        }
+        AgentOpsTab::Alerts => {
+            if state.agents.alerts.is_empty() {
+                return false;
+            }
+            let max = state.agents.alerts.len().saturating_sub(1) as i32;
+            let next = (state.agents.alert_selected as i32 + delta).clamp(0, max) as usize;
+            if next == state.agents.alert_selected {
+                return false;
+            }
+            state.agents.alert_selected = next;
+            true
+        }
+        AgentOpsTab::Patch
+        | AgentOpsTab::Evidence
+        | AgentOpsTab::Diagnostics
+        | AgentOpsTab::Scratchpad => {
+            if delta.is_negative() {
+                state.agents.ops_scroll = state.agents.ops_scroll.saturating_sub(1);
+            } else if delta > 0 {
+                state.agents.ops_scroll = state.agents.ops_scroll.saturating_add(1);
+            }
+            true
+        }
+        AgentOpsTab::Mcp => false,
+    }
+}
+
+fn handle_agent_console_key(key: KeyEvent, state: &mut AppState, vitals: &mut VitalsState) -> bool {
+    let mut changed = false;
+    let mut handled = false;
+    let mut follow_chat_cursor = false;
+    let input_len_chars = state.agents.chat_input.chars().count();
+    if state.agents.chat_input_cursor > input_len_chars {
+        state.agents.chat_input_cursor = input_len_chars;
+    }
+    match key {
+        KeyEvent {
+            code: KeyCode::Enter,
+            ..
+        } => {
+            handled = true;
+            changed = push_chat_message(state);
+            follow_chat_cursor = changed;
+        }
+        KeyEvent {
+            code: KeyCode::Char('c'),
+            modifiers,
+            ..
+        } if modifiers.contains(KeyModifiers::CONTROL) => {
+            handled = true;
+            if !state.agents.chat_input.is_empty() {
+                state.agents.chat_input.clear();
+                state.agents.chat_input_cursor = 0;
+                changed = true;
+                follow_chat_cursor = true;
+            }
+        }
+        KeyEvent {
+            code: KeyCode::Char('\u{3}'),
+            modifiers: KeyModifiers::NONE,
+            ..
+        } => {
+            handled = true;
+            if !state.agents.chat_input.is_empty() {
+                state.agents.chat_input.clear();
+                state.agents.chat_input_cursor = 0;
+                changed = true;
+                follow_chat_cursor = true;
+            }
+        }
+        KeyEvent {
+            code: KeyCode::Esc, ..
+        } => {
+            if matches!(
+                state.ui_selection,
+                Some(nit_core::UiSelection {
+                    pane: UiSelectionPane::AgentConsole,
+                    ..
+                })
+            ) {
+                // In Agent Chat, Esc should clear any active thread selection before touching the
+                // compose box contents.
+                handled = true;
+                state.ui_selection = None;
+            }
+        }
+        KeyEvent {
+            code: KeyCode::Backspace,
+            ..
+        } => {
+            handled = true;
+            if state.agents.chat_input_cursor > 0 {
+                let remove_start = chat_input_byte_index(
+                    &state.agents.chat_input,
+                    state.agents.chat_input_cursor - 1,
+                );
+                let remove_end =
+                    chat_input_byte_index(&state.agents.chat_input, state.agents.chat_input_cursor);
+                state
+                    .agents
+                    .chat_input
+                    .replace_range(remove_start..remove_end, "");
+                state.agents.chat_input_cursor = state.agents.chat_input_cursor.saturating_sub(1);
+                changed = true;
+                follow_chat_cursor = true;
+            }
+        }
+        KeyEvent {
+            code: KeyCode::Delete,
+            ..
+        } => {
+            handled = true;
+            if state.agents.chat_input_cursor < state.agents.chat_input.chars().count() {
+                let remove_start =
+                    chat_input_byte_index(&state.agents.chat_input, state.agents.chat_input_cursor);
+                let remove_end = chat_input_byte_index(
+                    &state.agents.chat_input,
+                    state.agents.chat_input_cursor + 1,
+                );
+                state
+                    .agents
+                    .chat_input
+                    .replace_range(remove_start..remove_end, "");
+                changed = true;
+                follow_chat_cursor = true;
+            }
+        }
+        KeyEvent {
+            code: KeyCode::Left,
+            ..
+        } => {
+            handled = true;
+            if state.agents.chat_input_cursor > 0 {
+                state.agents.chat_input_cursor = state.agents.chat_input_cursor.saturating_sub(1);
+                changed = true;
+                follow_chat_cursor = true;
+            }
+        }
+        KeyEvent {
+            code: KeyCode::Right,
+            ..
+        } => {
+            handled = true;
+            let max = state.agents.chat_input.chars().count();
+            if state.agents.chat_input_cursor < max {
+                state.agents.chat_input_cursor += 1;
+                changed = true;
+                follow_chat_cursor = true;
+            }
+        }
+        KeyEvent {
+            code: KeyCode::Home,
+            ..
+        } => {
+            handled = true;
+            if state.agents.chat_input_cursor != 0 {
+                state.agents.chat_input_cursor = 0;
+                changed = true;
+                follow_chat_cursor = true;
+            }
+        }
+        KeyEvent {
+            code: KeyCode::End, ..
+        } => {
+            handled = true;
+            let max = state.agents.chat_input.chars().count();
+            if state.agents.chat_input_cursor != max {
+                state.agents.chat_input_cursor = max;
+                changed = true;
+                follow_chat_cursor = true;
+            }
+        }
+        KeyEvent {
+            code: KeyCode::Char(c),
+            modifiers,
+            ..
+        } if modifiers.is_empty() || modifiers == KeyModifiers::SHIFT => {
+            handled = true;
+            let insert_at =
+                chat_input_byte_index(&state.agents.chat_input, state.agents.chat_input_cursor);
+            state.agents.chat_input.insert(insert_at, c);
+            state.agents.chat_input_cursor += 1;
+            changed = true;
+            follow_chat_cursor = true;
+        }
+        KeyEvent {
+            modifiers,
+            code: KeyCode::Up,
+            ..
+        } if modifiers.contains(KeyModifiers::CONTROL) => {
+            handled = true;
+            state.agents.console_scroll = state.agents.console_scroll.saturating_sub(1);
+            changed = true;
+        }
+        KeyEvent {
+            code: KeyCode::Down,
+            modifiers,
+            ..
+        } if modifiers.contains(KeyModifiers::CONTROL) => {
+            handled = true;
+            state.agents.console_scroll = state.agents.console_scroll.saturating_add(1);
+            changed = true;
+        }
+        KeyEvent {
+            code: KeyCode::Up, ..
+        } => {
+            handled = true;
+            let moved = chat_cursor_move_vertical(
+                &state.agents.chat_input,
+                state.agents.chat_input_cursor,
+                -1,
+            );
+            if moved != state.agents.chat_input_cursor {
+                state.agents.chat_input_cursor = moved;
+                changed = true;
+                follow_chat_cursor = true;
+            }
+        }
+        KeyEvent {
+            code: KeyCode::Down,
+            ..
+        } => {
+            handled = true;
+            let moved = chat_cursor_move_vertical(
+                &state.agents.chat_input,
+                state.agents.chat_input_cursor,
+                1,
+            );
+            if moved != state.agents.chat_input_cursor {
+                state.agents.chat_input_cursor = moved;
+                changed = true;
+                follow_chat_cursor = true;
+            }
+        }
+        _ => {}
+    }
+    if changed {
+        if follow_chat_cursor {
+            state.agents.chat_input_scroll = usize::MAX;
+        }
+        state.agents.note_event();
+        vitals.record_agent_event(Instant::now());
+    }
+    handled
+}
+
+fn handle_paste_event(
+    text: &str,
+    state: &mut AppState,
+    syntax: &mut SyntaxRuntime,
+    fuzzy_runtime: &mut FuzzySearchRuntime,
+    vitals: &mut VitalsState,
+) -> bool {
+    if text.is_empty() {
+        return false;
+    }
+
+    if state.fuzzy_search.open {
+        state.fuzzy_search.query.push_str(text);
+        fuzzy_runtime.preview_model = None;
+        fuzzy_runtime.last_preview_key = None;
+        fuzzy_runtime.run_search_for_mode(state);
+        return true;
+    }
+
+    if state.prompt.is_some()
+        || state.rule_picker.open
+        || state.protocol_picker.open
+        || state.show_help
+        || games_modal_popup_open(state)
+    {
+        return false;
+    }
+
+    if let Some(command_line) = state.command_line.as_mut() {
+        for ch in text.chars() {
+            command_line.insert(ch);
+        }
+        return true;
+    }
+
+    if state.focus == PaneId::Notes {
+        let changed = insert_chat_input_text(state, text);
+        if changed {
+            state.agents.note_event();
+            vitals.record_agent_event(Instant::now());
+        }
+        return changed;
+    }
+
+    if pane_accepts_text_input(state, state.focus) && state.mode == Mode::Insert {
+        return insert_text_into_focused_buffer(state, syntax, text);
+    }
+
+    false
+}
+
+fn insert_chat_input_text(state: &mut AppState, text: &str) -> bool {
+    let normalized = normalize_chat_input_text(text);
+    if normalized.is_empty() {
+        return false;
+    }
+    let insert_at = chat_input_byte_index(&state.agents.chat_input, state.agents.chat_input_cursor);
+    state.agents.chat_input.insert_str(insert_at, &normalized);
+    state.agents.chat_input_cursor = state
+        .agents
+        .chat_input_cursor
+        .saturating_add(normalized.chars().count());
+    state.agents.chat_input_scroll = usize::MAX;
+    true
+}
+
+fn normalize_chat_input_text(text: &str) -> String {
+    if !text.contains('\r') {
+        return text.to_string();
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\r' {
+            if matches!(chars.peek(), Some('\n')) {
+                chars.next();
+            }
+            out.push('\n');
+        } else {
+            out.push(ch);
+        }
+    }
+    out
+}
+
+fn insert_text_into_focused_buffer(
+    state: &mut AppState,
+    syntax: &mut SyntaxRuntime,
+    text: &str,
+) -> bool {
+    if text.is_empty() {
+        return false;
+    }
+    let editor_id = state.active_editor_buffer_id;
+    let notes_id = state.notes_buffer_id;
+    let editor_version = state.editor_buffer().version();
+    let notes_version = state.notes_buffer().version();
+    {
+        let Some(buffer) = state.focused_buffer_mut() else {
+            return false;
+        };
+        buffer.insert_str(text);
+    }
+    if state.editor_buffer().version() != editor_version {
+        let buf = state.editor_buffer_mut();
+        syntax.note_buffer_change(editor_id, buf);
+    }
+    if state.notes_buffer().version() != notes_version {
+        let buf = state.notes_buffer_mut();
+        syntax.note_buffer_change(notes_id, buf);
+    }
+    true
+}
+
+fn chat_input_byte_index(input: &str, char_idx: usize) -> usize {
+    if char_idx == 0 {
+        return 0;
+    }
+    input
+        .char_indices()
+        .nth(char_idx)
+        .map(|(idx, _)| idx)
+        .unwrap_or(input.len())
+}
+
+fn chat_cursor_move_vertical(input: &str, cursor_char_idx: usize, direction: i8) -> usize {
+    let total_chars = input.chars().count();
+    let cursor = cursor_char_idx.min(total_chars);
+    if input.is_empty() {
+        return 0;
+    }
+    let line_starts = chat_line_starts(input);
+    if line_starts.is_empty() {
+        return cursor;
+    }
+    let current_line = line_starts
+        .iter()
+        .rposition(|start| *start <= cursor)
+        .unwrap_or(0);
+    let target_line = if direction < 0 {
+        current_line.saturating_sub(1)
+    } else {
+        (current_line + 1).min(line_starts.len().saturating_sub(1))
+    };
+    if target_line == current_line {
+        return cursor;
+    }
+    let current_start = line_starts[current_line];
+    let current_len = chat_line_len(&line_starts, current_line, total_chars);
+    let column = cursor.saturating_sub(current_start).min(current_len);
+    let target_start = line_starts[target_line];
+    let target_len = chat_line_len(&line_starts, target_line, total_chars);
+    target_start + column.min(target_len)
+}
+
+fn chat_line_starts(input: &str) -> Vec<usize> {
+    let mut starts = vec![0];
+    for (idx, ch) in input.chars().enumerate() {
+        if ch == '\n' {
+            starts.push(idx + 1);
+        }
+    }
+    starts
+}
+
+fn chat_line_len(line_starts: &[usize], line_idx: usize, total_chars: usize) -> usize {
+    let start = line_starts.get(line_idx).copied().unwrap_or(total_chars);
+    let end = if let Some(next_start) = line_starts.get(line_idx + 1).copied() {
+        next_start.saturating_sub(1)
+    } else {
+        total_chars
+    };
+    end.saturating_sub(start)
+}
+
+fn push_chat_message(state: &mut AppState) -> bool {
+    let text = state.agents.chat_input.clone();
+    if text.trim().is_empty() {
+        return false;
+    }
+    let message = AgentMessage {
+        at: timestamp_label(state),
+        channel: state.agents.chat_channel,
+        agent_id: None,
+        mission_id: state
+            .agents
+            .selected_context_mission()
+            .map(ToString::to_string),
+        text: text.clone(),
+    };
+    if let Some(mission_id) = message.mission_id.as_deref() {
+        mark_mission_provenance_dirty(state, mission_id);
+    }
+    state.agents.messages.push(message);
+    state.agents.diag_events.push(AgentDiagnosticEvent {
+        severity: AgentAlertSeverity::Info,
+        source: "thread".into(),
+        message: format!("sent message: {text}"),
+        at: timestamp_label(state),
+    });
+    state.agents.console_scroll = usize::MAX;
+    state.agents.chat_input.clear();
+    state.agents.chat_input_cursor = 0;
+    state.agents.chat_input_scroll = usize::MAX;
+    true
+}
+
+fn spawn_mock_mission(state: &mut AppState) {
+    let mission_id = format!("mis-{:03}", state.agents.missions.len() + 1);
+    let assigned_agents = if let Some(agent_id) = state.agents.selected_context_agent() {
+        let mut agents = vec![agent_id.to_string()];
+        for extra in state.agents.agents.iter().take(2) {
+            if !agents.iter().any(|id| id == &extra.id) {
+                agents.push(extra.id.clone());
+            }
+        }
+        agents
+    } else {
+        state
+            .agents
+            .agents
+            .iter()
+            .take(2)
+            .map(|agent| agent.id.clone())
+            .collect::<Vec<_>>()
+    };
+    state.agents.missions.push(MissionRecord {
+        id: mission_id.clone(),
+        title: format!("Mission {}", state.agents.missions.len() + 1),
+        phase: MissionPhase::Plan,
+        swarm: assigned_agents.len() > 1,
+        assigned_agents: assigned_agents.clone(),
+        status: "QUEUED".into(),
+        updated_at: timestamp_label(state),
+    });
+    state.agents.mission_selected = state.agents.missions.len().saturating_sub(1);
+    state.agents.selected_mission = Some(mission_id.clone());
+    state.agents.messages.push(AgentMessage {
+        at: timestamp_label(state),
+        channel: AgentChannel::Broadcast,
+        agent_id: None,
+        mission_id: Some(mission_id.clone()),
+        text: format!(
+            "New mission queued with swarm agents: {}",
+            assigned_agents.join(", ")
+        ),
+    });
+
+    let patch_base = state.agents.patches.len() + 1;
+    state.agents.patches.push(PatchProposal {
+        id: format!("patch-{:03}", patch_base),
+        mission_id: Some(mission_id.clone()),
+        agent_id: assigned_agents
+            .first()
+            .cloned()
+            .unwrap_or_else(|| "coder".into()),
+        title: "Swarm proposal A".into(),
+        summary: "Primary implementation candidate from lane A.".into(),
+        diff: "diff --git a/src/lib.rs b/src/lib.rs\n@@ -1,2 +1,4 @@\n+// swarm proposal A\n"
+            .into(),
+        status: PatchStatus::New,
+    });
+    state.agents.patches.push(PatchProposal {
+        id: format!("patch-{:03}", patch_base + 1),
+        mission_id: Some(mission_id.clone()),
+        agent_id: assigned_agents
+            .get(1)
+            .cloned()
+            .unwrap_or_else(|| "reviewer".into()),
+        title: "Swarm proposal B".into(),
+        summary: "Alternative implementation from parallel lane.".into(),
+        diff: "diff --git a/src/lib.rs b/src/lib.rs\n@@ -1,2 +1,4 @@\n+// swarm proposal B\n"
+            .into(),
+        status: PatchStatus::New,
+    });
+    state.agents.patch_selected = 0;
+    state.agents.alerts.push(AgentAlert {
+        severity: AgentAlertSeverity::Info,
+        source: "mission".into(),
+        message: format!("Created mission {mission_id}"),
+        at: timestamp_label(state),
+    });
+    mark_mission_provenance_dirty(state, &mission_id);
+}
+
+fn set_mcp_state(
+    state: &mut AppState,
+    connection_state: McpConnectionState,
+    latency_ms: Option<u64>,
+    last_error: Option<String>,
+) {
+    state.agents.mcp.state = connection_state;
+    state.agents.mcp.latency_ms = latency_ms;
+    state.agents.mcp.last_error = last_error.clone();
+    let message = match last_error {
+        Some(err) => format!("MCP {} ({err})", connection_state.label()),
+        None => format!("MCP {}", connection_state.label()),
+    };
+    let severity = if matches!(connection_state, McpConnectionState::Error) {
+        AgentAlertSeverity::Error
+    } else {
+        AgentAlertSeverity::Info
+    };
+    state.agents.alerts.push(AgentAlert {
+        severity,
+        source: "mcp".into(),
+        message: message.clone(),
+        at: timestamp_label(state),
+    });
+    state.agents.diag_events.push(AgentDiagnosticEvent {
+        severity,
+        source: "mcp".into(),
+        message,
+        at: timestamp_label(state),
+    });
+}
+
+fn mark_mission_provenance_dirty(state: &mut AppState, mission_id: &str) {
+    if state
+        .agents
+        .pending_provenance_mission_ids
+        .iter()
+        .all(|id| id != mission_id)
+    {
+        state
+            .agents
+            .pending_provenance_mission_ids
+            .push(mission_id.to_string());
+    }
+}
+
+fn timestamp_label(state: &AppState) -> String {
+    format!("t+{}", state.metrics.frame_count)
+}
+
 fn map_key_to_action(key: KeyEvent, state: &AppState, input: &mut InputState) -> Option<Action> {
     input.expire_visualizer_jump();
     // Prompt confirm takes precedence
@@ -1326,6 +2340,9 @@ fn map_key_to_action(key: KeyEvent, state: &AppState, input: &mut InputState) ->
             KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => Some(Action::ConfirmQuitNo),
             _ => None,
         };
+    }
+    if let Some(target) = map_focus_hotkey(&key) {
+        return Some(Action::FocusPane(target));
     }
 
     if state.command_line.is_none() && state.prompt.is_none() {
@@ -1365,17 +2382,6 @@ fn map_key_to_action(key: KeyEvent, state: &AppState, input: &mut InputState) ->
             }
             _ => None,
         };
-    }
-
-    if state.focus == PaneId::JobOutput && is_clear_logs_key(&key) {
-        return Some(Action::ClearLogs);
-    }
-
-    if state.focus == PaneId::JobOutput
-        && key.modifiers.is_empty()
-        && matches!(key.code, KeyCode::Char(' '))
-    {
-        return Some(Action::ToggleJobPause);
     }
 
     if is_job_pause_key(&key) {
@@ -1442,11 +2448,6 @@ fn map_key_to_action(key: KeyEvent, state: &AppState, input: &mut InputState) ->
 
     match key {
         KeyEvent {
-            code: KeyCode::Char('c'),
-            modifiers: KeyModifiers::CONTROL,
-            ..
-        }
-        | KeyEvent {
             code: KeyCode::Char('q'),
             modifiers: KeyModifiers::CONTROL,
             ..
@@ -1515,7 +2516,7 @@ fn map_key_to_action(key: KeyEvent, state: &AppState, input: &mut InputState) ->
         KeyEvent {
             code: KeyCode::Tab, ..
         } => {
-            if matches!(state.focus, PaneId::Editor | PaneId::Notes) && state.mode == Mode::Insert {
+            if pane_accepts_text_input(state, state.focus) && state.mode == Mode::Insert {
                 Some(Action::InsertTab)
             } else {
                 Some(Action::FocusNextPane)
@@ -1657,7 +2658,7 @@ fn map_key_to_action(key: KeyEvent, state: &AppState, input: &mut InputState) ->
             modifiers,
             ..
         } if (modifiers.is_empty() || modifiers == KeyModifiers::SHIFT)
-            && matches!(state.focus, PaneId::Editor | PaneId::Notes)
+            && pane_accepts_text_input(state, state.focus)
             && state.mode == Mode::Insert =>
         {
             Some(Action::InsertChar(c))
@@ -1769,7 +2770,9 @@ fn handle_selection_autocopy(
     }
     let (pane, buffer) = match state.focus {
         PaneId::Editor => (PaneId::Editor, state.editor_buffer()),
-        PaneId::Notes => (PaneId::Notes, state.notes_buffer()),
+        PaneId::JobOutput if state.agents.dock_tab == AgentOpsTab::Scratchpad => {
+            (PaneId::JobOutput, state.notes_buffer())
+        }
         _ => {
             input_state.last_selection = None;
             return;
@@ -2046,20 +3049,27 @@ struct InspectorJump {
 }
 
 fn is_normal_mode(state: &AppState) -> bool {
-    matches!(state.focus, PaneId::Editor | PaneId::Notes) && state.mode == Mode::Normal
+    pane_accepts_text_input(state, state.focus) && state.mode == Mode::Normal
 }
 
 fn is_visual_mode(state: &AppState) -> bool {
-    matches!(state.focus, PaneId::Editor | PaneId::Notes) && state.mode == Mode::Visual
+    pane_accepts_text_input(state, state.focus) && state.mode == Mode::Visual
 }
 
 fn is_motion_mode(state: &AppState) -> bool {
-    matches!(state.focus, PaneId::Editor | PaneId::Notes)
-        && matches!(state.mode, Mode::Normal | Mode::Visual)
+    pane_accepts_text_input(state, state.focus) && matches!(state.mode, Mode::Normal | Mode::Visual)
 }
 
 fn is_insert_editing(state: &AppState) -> bool {
-    matches!(state.focus, PaneId::Editor | PaneId::Notes) && state.mode == Mode::Insert
+    pane_accepts_text_input(state, state.focus) && state.mode == Mode::Insert
+}
+
+fn pane_accepts_text_input(_state: &AppState, pane: PaneId) -> bool {
+    match pane {
+        PaneId::Editor => true,
+        PaneId::JobOutput => _state.agents.dock_tab == AgentOpsTab::Scratchpad,
+        _ => false,
+    }
 }
 
 fn handle_normal_chords(
@@ -2270,7 +3280,7 @@ fn is_global_quit_key(key: &KeyEvent) -> bool {
     matches!(
         key,
         KeyEvent {
-            code: KeyCode::Char('c') | KeyCode::Char('q'),
+            code: KeyCode::Char('q'),
             modifiers,
             ..
         } if modifiers.contains(KeyModifiers::CONTROL)
@@ -2409,17 +3419,6 @@ fn is_games_petri_control_key(key: &KeyEvent) -> bool {
             | KeyCode::Right
             | KeyCode::Char('h')
             | KeyCode::Char('H')
-    )
-}
-
-fn is_clear_logs_key(key: &KeyEvent) -> bool {
-    matches!(
-        key,
-        KeyEvent {
-            code: KeyCode::Char('l') | KeyCode::Char('L'),
-            modifiers,
-            ..
-        } if modifiers.contains(KeyModifiers::CONTROL)
     )
 }
 
@@ -2666,15 +3665,47 @@ fn handle_mouse_event(
                 return true;
             }
             if point_in_rect(mouse.column, mouse.row, layout.notes) {
-                scroll_buffer(state.notes_buffer_mut(), delta);
+                if let Some(metrics) =
+                    agent_console_view::chat_input_scroll_metrics(layout.notes, state)
+                {
+                    if point_in_rect(mouse.column, mouse.row, metrics.area) {
+                        let mut start = metrics.window_start;
+                        bump_scroll(&mut start, delta);
+                        state.agents.chat_input_scroll = start.min(metrics.max_scroll);
+                        return true;
+                    }
+                }
+                if let Some(thread_area) = agent_console_view::thread_text_area(layout.notes, state)
+                {
+                    let lines = agent_console_view::thread_lines_for_selection(
+                        state,
+                        thread_area.width.max(1) as usize,
+                    );
+                    let max_scroll = lines
+                        .len()
+                        .saturating_sub(thread_area.height.max(1) as usize);
+                    let mut scroll = state.agents.console_scroll.min(max_scroll);
+                    bump_scroll(&mut scroll, delta);
+                    state.agents.console_scroll = scroll.min(max_scroll);
+                } else {
+                    let mut scroll = state.agents.console_scroll;
+                    bump_scroll(&mut scroll, delta);
+                    state.agents.console_scroll = scroll;
+                }
                 return true;
             }
             if point_in_rect(mouse.column, mouse.row, layout.job) {
-                let height = layout.job.height.saturating_sub(3) as usize;
-                let max_scroll = state.logs.len().saturating_sub(height);
-                let mut scroll = state.logs_scroll;
-                bump_scroll(&mut scroll, delta);
-                state.logs_scroll = scroll.min(max_scroll);
+                if state.agents.dock_tab == AgentOpsTab::Scratchpad {
+                    scroll_buffer(state.notes_buffer_mut(), delta);
+                } else {
+                    let text_width = job_output_text_area(layout.job).width as usize;
+                    let lines = agent_ops_view::current_lines_for_width(state, text_width);
+                    let height = layout.job.height.saturating_sub(3) as usize;
+                    let max_scroll = lines.len().saturating_sub(height);
+                    let mut scroll = state.agents.ops_scroll;
+                    bump_scroll(&mut scroll, delta);
+                    state.agents.ops_scroll = scroll.min(max_scroll);
+                }
                 return true;
             }
             false
@@ -2903,26 +3934,57 @@ fn point_in_rect(x: u16, y: u16, rect: ratatui::layout::Rect) -> bool {
         && y < rect.y.saturating_add(rect.height)
 }
 
-fn map_job_output_mouse(
+fn map_agent_console_mouse(
     mouse: MouseEvent,
     screen: ratatui::layout::Rect,
     state: &AppState,
     clamp: bool,
 ) -> Option<(usize, usize, Vec<String>)> {
     let layout = layout::split(screen);
-    let text_area = job_output_text_area(layout.job);
+    let text_area = agent_console_view::thread_text_area(layout.notes, state)?;
     if !point_in_rect(mouse.column, mouse.row, text_area) && !clamp {
         return None;
     }
-    let lines: Vec<String> = state.logs.iter().cloned().collect();
+    let lines = agent_console_view::thread_lines_for_selection(state, text_area.width as usize);
     if lines.is_empty() {
         return None;
     }
     let height = text_area.height as usize;
     let total = lines.len();
     let max_scroll = total.saturating_sub(height);
-    let scroll = state.logs_scroll.min(max_scroll);
-    let start = total.saturating_sub(height + scroll);
+    let scroll = state.agents.console_scroll.min(max_scroll);
+    let (line_idx, col) = map_mouse_to_line_col(
+        mouse,
+        text_area,
+        &lines,
+        scroll,
+        state.settings.editor.tab_width as usize,
+        clamp,
+    )?;
+    Some((line_idx, col, lines))
+}
+
+fn map_job_output_mouse(
+    mouse: MouseEvent,
+    screen: ratatui::layout::Rect,
+    state: &AppState,
+    clamp: bool,
+) -> Option<(usize, usize, usize, Vec<String>)> {
+    let layout = layout::split(screen);
+    let text_area = job_output_text_area(layout.job);
+    if !point_in_rect(mouse.column, mouse.row, text_area) && !clamp {
+        return None;
+    }
+    let text_width = text_area.width as usize;
+    let lines = agent_ops_view::current_lines_for_width(state, text_width);
+    if lines.is_empty() {
+        return None;
+    }
+    let height = text_area.height as usize;
+    let total = lines.len();
+    let max_scroll = total.saturating_sub(height);
+    let scroll = state.agents.ops_scroll.min(max_scroll);
+    let start = scroll;
     let (line_idx, col) = map_mouse_to_line_col(
         mouse,
         text_area,
@@ -2931,7 +3993,7 @@ fn map_job_output_mouse(
         state.settings.editor.tab_width as usize,
         clamp,
     )?;
-    Some((line_idx, col, lines))
+    Some((line_idx, col, text_width, lines))
 }
 
 fn map_help_popup_mouse(
@@ -3517,6 +4579,17 @@ fn job_output_text_area(area: ratatui::layout::Rect) -> ratatui::layout::Rect {
     chunks[1]
 }
 
+fn agent_ops_scratchpad_editor_area(area: ratatui::layout::Rect) -> ratatui::layout::Rect {
+    use ratatui::layout::{Constraint, Direction, Layout};
+    use ratatui::widgets::{Block, Borders};
+    let inner = Block::default().borders(Borders::ALL).inner(area);
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(1), Constraint::Min(1)])
+        .split(inner);
+    chunks[1]
+}
+
 fn popup_text_area(area: ratatui::layout::Rect) -> ratatui::layout::Rect {
     use ratatui::widgets::{Block, Borders};
     Block::default().borders(Borders::ALL).inner(area)
@@ -3553,7 +4626,11 @@ fn update_ui_selection_text(
         return;
     }
     input_state.last_ui_selection = Some(signature);
-    let text = selection_text(lines, selection);
+    let text = if matches!(pane, UiSelectionPane::AgentConsole) {
+        selection_text_agent_console(lines, selection)
+    } else {
+        selection_text(lines, selection)
+    };
     if text.is_empty() {
         return;
     }
@@ -3610,6 +4687,58 @@ fn selection_text(lines: &[String], selection: UiSelection) -> String {
     out
 }
 
+fn selection_text_agent_console(lines: &[String], selection: UiSelection) -> String {
+    if lines.is_empty() {
+        return String::new();
+    }
+    let (start_line, start_col, end_line, end_col) =
+        if (selection.start_line, selection.start_col) <= (selection.end_line, selection.end_col) {
+            (
+                selection.start_line,
+                selection.start_col,
+                selection.end_line,
+                selection.end_col,
+            )
+        } else {
+            (
+                selection.end_line,
+                selection.end_col,
+                selection.start_line,
+                selection.start_col,
+            )
+        };
+    let last_line = lines.len().saturating_sub(1);
+    let end_line = end_line.min(last_line);
+    let mut out_lines = Vec::new();
+    for line_idx in start_line..=end_line {
+        let line = &lines[line_idx];
+        if is_user_bubble_border_line_in_block(lines, line_idx) {
+            continue;
+        }
+        let payload_bounds = user_bubble_payload_bounds_in_block(lines, line_idx);
+        let line_len = line.chars().count();
+        let mut sel_start = if line_idx == start_line { start_col } else { 0 };
+        let mut sel_end = if line_idx == end_line {
+            end_col
+        } else {
+            line_len
+        };
+        sel_start = sel_start.min(line_len);
+        sel_end = sel_end.min(line_len);
+        let slice = if let Some((payload_start, payload_end)) = payload_bounds {
+            let sel_start = sel_start.max(payload_start);
+            let sel_end = sel_end.min(payload_end);
+            slice_by_char(line, sel_start, sel_end)
+                .trim_end_matches(' ')
+                .to_string()
+        } else {
+            slice_by_char(line, sel_start, sel_end)
+        };
+        out_lines.push(slice);
+    }
+    out_lines.join("\n")
+}
+
 fn slice_by_char(input: &str, start: usize, end: usize) -> String {
     if start >= end {
         return String::new();
@@ -3630,6 +4759,91 @@ fn slice_by_char(input: &str, start: usize, end: usize) -> String {
     let start_byte = start_byte.unwrap_or_else(|| input.len());
     let end_byte = end_byte.unwrap_or_else(|| input.len());
     input[start_byte..end_byte].to_string()
+}
+
+fn is_user_bubble_border_line(line: &str) -> bool {
+    let body = line.trim_start_matches(' ');
+    body.starts_with('+') && body.ends_with('+') && body.chars().all(|ch| ch == '+' || ch == '-')
+}
+
+fn leading_spaces(line: &str) -> usize {
+    line.chars().take_while(|ch| *ch == ' ').count()
+}
+
+fn is_user_bubble_border_line_in_block(lines: &[String], idx: usize) -> bool {
+    let Some(line) = lines.get(idx) else {
+        return false;
+    };
+    if !is_user_bubble_border_line(line) {
+        return false;
+    }
+    let leading = leading_spaces(line);
+    if idx > 0 {
+        let above = &lines[idx - 1];
+        if leading_spaces(above) == leading && user_bubble_payload_bounds(above).is_some() {
+            return true;
+        }
+    }
+    if let Some(below) = lines.get(idx + 1) {
+        if leading_spaces(below) == leading && user_bubble_payload_bounds(below).is_some() {
+            return true;
+        }
+    }
+    false
+}
+
+fn user_bubble_payload_bounds(line: &str) -> Option<(usize, usize)> {
+    let start = user_bubble_payload_start_col(line)?;
+    let mut rev = line.chars().rev();
+    let last = rev.next()?;
+    let second_last = rev.next()?;
+    if last != '|' || second_last != ' ' {
+        return None;
+    }
+    let line_len = line.chars().count();
+    let end = line_len.saturating_sub(2);
+    if start > end {
+        return None;
+    }
+    Some((start, end))
+}
+
+fn user_bubble_payload_bounds_in_block(lines: &[String], idx: usize) -> Option<(usize, usize)> {
+    let line = lines.get(idx)?;
+    let bounds = user_bubble_payload_bounds(line)?;
+    let leading = leading_spaces(line);
+
+    let mut start = idx;
+    while start > 0 {
+        let prev = &lines[start - 1];
+        if leading_spaces(prev) != leading {
+            break;
+        }
+        if user_bubble_payload_bounds(prev).is_none() && !is_user_bubble_border_line(prev) {
+            break;
+        }
+        start = start.saturating_sub(1);
+    }
+
+    let mut end = idx;
+    while end + 1 < lines.len() {
+        let next = &lines[end + 1];
+        if leading_spaces(next) != leading {
+            break;
+        }
+        if user_bubble_payload_bounds(next).is_none() && !is_user_bubble_border_line(next) {
+            break;
+        }
+        end = end.saturating_add(1);
+    }
+
+    let border_count = (start..=end)
+        .filter(|line_idx| is_user_bubble_border_line(&lines[*line_idx]))
+        .count();
+    if border_count < 2 {
+        return None;
+    }
+    Some(bounds)
 }
 
 fn handle_mouse_down(
@@ -3897,12 +5111,61 @@ fn handle_mouse_down(
         });
         return true;
     }
+    if let Some(cursor_char_idx) = agent_console_view::map_chat_input_point_to_cursor(
+        layout.notes,
+        state,
+        mouse.column,
+        mouse.row,
+        false,
+    ) {
+        reset_ui_selection(state, input_state);
+        state.focus = PaneId::Notes;
+        state.mode = Mode::Normal;
+        state.agents.chat_input_cursor =
+            cursor_char_idx.min(state.agents.chat_input.chars().count());
+        input_state.mouse_select_anchor = None;
+        return true;
+    }
+    if let Some((line_idx, col, lines)) = map_agent_console_mouse(mouse, screen, state, false) {
+        state.focus = PaneId::Notes;
+        state.mode = Mode::Normal;
+        state.ui_selection = Some(UiSelection {
+            pane: UiSelectionPane::AgentConsole,
+            start_line: line_idx,
+            start_col: col,
+            end_line: line_idx,
+            end_col: col,
+        });
+        input_state.mouse_select_anchor = Some(MouseSelectAnchor {
+            target: MouseSelectTarget::Ui(UiSelectionPane::AgentConsole),
+            line: line_idx,
+            col,
+        });
+        update_ui_selection_text(
+            state,
+            UiSelectionPane::AgentConsole,
+            &lines,
+            clipboard,
+            input_state,
+        );
+        return true;
+    }
     if point_in_rect(mouse.column, mouse.row, layout.notes) {
+        reset_ui_selection(state, input_state);
+        state.focus = PaneId::Notes;
+        state.mode = Mode::Normal;
+        input_state.mouse_select_anchor = None;
+        return true;
+    }
+    let scratchpad_area = agent_ops_scratchpad_editor_area(layout.job);
+    if point_in_rect(mouse.column, mouse.row, scratchpad_area)
+        && state.agents.dock_tab == AgentOpsTab::Scratchpad
+    {
         set_buffer_cursor_from_mouse(
             state,
-            PaneId::Notes,
+            PaneId::JobOutput,
             mouse,
-            layout.notes,
+            scratchpad_area,
             state.settings.editor.tab_width as usize,
             false,
         );
@@ -3911,10 +5174,18 @@ fn handle_mouse_down(
         }
         state.notes_buffer_mut().clear_selection();
         input_state.mouse_select_anchor = Some(MouseSelectAnchor {
-            target: MouseSelectTarget::Buffer(PaneId::Notes),
+            target: MouseSelectTarget::Buffer(PaneId::JobOutput),
             line: state.notes_buffer().cursor.line,
             col: state.notes_buffer().cursor.col,
         });
+        return true;
+    }
+    if point_in_rect(mouse.column, mouse.row, layout.job)
+        && state.agents.dock_tab == AgentOpsTab::Scratchpad
+    {
+        state.focus = PaneId::JobOutput;
+        state.mode = Mode::Insert;
+        input_state.mouse_select_anchor = None;
         return true;
     }
     if let Some((line_idx, col, lines)) =
@@ -3991,8 +5262,14 @@ fn handle_mouse_down(
         );
         return true;
     }
-    if let Some((line_idx, col, lines)) = map_job_output_mouse(mouse, screen, state, false) {
+    if let Some((line_idx, col, text_width, lines)) =
+        map_job_output_mouse(mouse, screen, state, false)
+    {
         state.focus = PaneId::JobOutput;
+        apply_agent_ops_click_selection(state, line_idx, text_width);
+        if state.agents.dock_tab == AgentOpsTab::Scratchpad {
+            state.mode = Mode::Insert;
+        }
         state.ui_selection = Some(UiSelection {
             pane: UiSelectionPane::JobOutput,
             start_line: line_idx,
@@ -4017,6 +5294,49 @@ fn handle_mouse_down(
     false
 }
 
+fn apply_agent_ops_click_selection(state: &mut AppState, line_idx: usize, text_width: usize) {
+    if line_idx < 2 {
+        return;
+    }
+    let data_line = line_idx.saturating_sub(2);
+    match state.agents.dock_tab {
+        AgentOpsTab::Roster => {
+            if data_line < state.agents.agents.len() {
+                state.agents.roster_selected = data_line;
+                if let Some(agent) = state.agents.agents.get(data_line) {
+                    state.agents.selected_agent = Some(agent.id.clone());
+                    if let Some(mission_id) = agent.current_mission.as_deref() {
+                        state.agents.selected_mission = Some(mission_id.to_string());
+                    }
+                }
+            }
+        }
+        AgentOpsTab::Missions => {
+            let Some(mission_idx) = agent_ops_view::mission_index_for_body_line(state, data_line)
+            else {
+                return;
+            };
+            state.agents.mission_selected = mission_idx;
+            if let Some(mission) = state.agents.missions.get(mission_idx) {
+                state.agents.selected_mission = Some(mission.id.clone());
+            }
+        }
+        AgentOpsTab::Alerts => {
+            let Some(alert_idx) =
+                agent_ops_view::alert_index_for_body_line(state, text_width, data_line)
+            else {
+                return;
+            };
+            state.agents.alert_selected = alert_idx;
+        }
+        AgentOpsTab::Patch
+        | AgentOpsTab::Evidence
+        | AgentOpsTab::Diagnostics
+        | AgentOpsTab::Scratchpad => {}
+        AgentOpsTab::Mcp => {}
+    }
+}
+
 fn handle_mouse_drag(
     mouse: MouseEvent,
     screen: ratatui::layout::Rect,
@@ -4037,13 +5357,18 @@ fn handle_mouse_drag(
             let layout = layout::split(screen);
             let (pane_rect, tab_width) = match pane {
                 PaneId::Editor => (layout.editor, state.settings.editor.tab_width as usize),
-                PaneId::Notes => (layout.notes, state.settings.editor.tab_width as usize),
+                PaneId::JobOutput if state.agents.dock_tab == AgentOpsTab::Scratchpad => (
+                    agent_ops_scratchpad_editor_area(layout.job),
+                    state.settings.editor.tab_width as usize,
+                ),
                 _ => return false,
             };
             state.focus = pane;
             let buffer = match pane {
                 PaneId::Editor => state.editor_buffer_mut(),
-                PaneId::Notes => state.notes_buffer_mut(),
+                PaneId::JobOutput if state.agents.dock_tab == AgentOpsTab::Scratchpad => {
+                    state.notes_buffer_mut()
+                }
                 _ => return false,
             };
             let Some((line, col)) = mouse_to_buffer_pos(mouse, pane_rect, buffer, tab_width, true)
@@ -4065,7 +5390,11 @@ fn handle_mouse_drag(
         MouseSelectTarget::Ui(pane) => {
             let result = match pane {
                 UiSelectionPane::JobOutput => map_job_output_mouse(mouse, screen, state, true)
-                    .map(|(line_idx, col, lines)| (line_idx, col, lines)),
+                    .map(|(line_idx, col, _text_width, lines)| (line_idx, col, lines)),
+                UiSelectionPane::AgentConsole => {
+                    map_agent_console_mouse(mouse, screen, state, true)
+                        .map(|(line_idx, col, lines)| (line_idx, col, lines))
+                }
                 UiSelectionPane::GamesPetriDish => {
                     map_games_petri_mouse(mouse, screen, state, true)
                         .map(|(line_idx, col, lines)| (line_idx, col, lines))
@@ -4118,12 +5447,17 @@ fn handle_mouse_drag(
             let Some((line_idx, col, lines)) = result else {
                 return false;
             };
+            let adjusted_col = if matches!(pane, UiSelectionPane::AgentConsole) {
+                adjust_agent_console_drag_col(&lines, anchor.line, line_idx, col)
+            } else {
+                col
+            };
             state.ui_selection = Some(UiSelection {
                 pane,
                 start_line: anchor.line,
                 start_col: anchor.col,
                 end_line: line_idx,
-                end_col: col,
+                end_col: adjusted_col,
             });
             update_ui_selection_text(state, pane, &lines, clipboard, input_state);
             true
@@ -4135,6 +5469,41 @@ fn reset_ui_selection(state: &mut AppState, input_state: &mut InputState) {
     input_state.mouse_select_anchor = None;
     state.ui_selection = None;
     input_state.last_ui_selection = None;
+}
+
+fn adjust_agent_console_drag_col(
+    lines: &[String],
+    anchor_line: usize,
+    line_idx: usize,
+    col: usize,
+) -> usize {
+    let Some(line) = lines.get(line_idx) else {
+        return col;
+    };
+    let Some(payload_start) = user_bubble_payload_start_col(line) else {
+        return col;
+    };
+    if col > payload_start {
+        return col;
+    }
+    if line_idx > anchor_line {
+        line.chars().count()
+    } else if line_idx < anchor_line {
+        0
+    } else {
+        col
+    }
+}
+
+fn user_bubble_payload_start_col(line: &str) -> Option<usize> {
+    let leading = line.chars().take_while(|ch| *ch == ' ').count();
+    let mut chars = line.chars().skip(leading);
+    let first = chars.next()?;
+    let second = chars.next()?;
+    if first != '|' || second != ' ' {
+        return None;
+    }
+    Some(leading + 2)
 }
 
 fn mouse_drag_allowed(state: &AppState, anchor: MouseSelectAnchor) -> bool {
@@ -4215,6 +5584,9 @@ fn set_buffer_cursor_from_mouse(
     let buffer = match pane {
         PaneId::Editor => state.editor_buffer_mut(),
         PaneId::Notes => state.notes_buffer_mut(),
+        PaneId::JobOutput if state.agents.dock_tab == AgentOpsTab::Scratchpad => {
+            state.notes_buffer_mut()
+        }
         _ => return,
     };
     let Some((line, col)) = mouse_to_buffer_pos(mouse, area, buffer, tab_width, clamp) else {
@@ -5937,10 +7309,118 @@ fn save_notes_on_exit(state: &AppState) -> core_io::Result<()> {
     core_io::save_buffer(buffer)
 }
 
+fn flush_agent_run_provenance(state: &mut AppState) -> io::Result<()> {
+    let pending = std::mem::take(&mut state.agents.pending_provenance_mission_ids);
+    if pending.is_empty() {
+        return Ok(());
+    }
+    let unique = pending.into_iter().collect::<BTreeSet<_>>();
+    for mission_id in unique {
+        write_agent_run_provenance(state, &mission_id)?;
+    }
+    Ok(())
+}
+
+fn write_agent_run_provenance(state: &AppState, mission_id: &str) -> io::Result<()> {
+    let Some(mission) = state
+        .agents
+        .missions
+        .iter()
+        .find(|mission| mission.id == mission_id)
+    else {
+        return Ok(());
+    };
+    let run_dir = state
+        .workspace_root
+        .join(".nit")
+        .join("agents")
+        .join("runs")
+        .join(mission_id);
+    let patches_dir = run_dir.join("patches");
+    fs::create_dir_all(&patches_dir)?;
+
+    let patches = state
+        .agents
+        .patches
+        .iter()
+        .filter(|patch| patch.mission_id.as_deref() == Some(mission_id))
+        .collect::<Vec<_>>();
+    let run_payload = serde_json::json!({
+        "id": mission.id,
+        "title": mission.title,
+        "phase": mission.phase.label(),
+        "status": mission.status,
+        "swarm": mission.swarm,
+        "assigned_agents": mission.assigned_agents,
+        "updated_at": mission.updated_at,
+        "selected_agent": state.agents.selected_context_agent(),
+        "mcp": {
+            "state": state.agents.mcp.state.label(),
+            "endpoint": state.agents.mcp.endpoint,
+            "latency_ms": state.agents.mcp.latency_ms,
+            "last_error": state.agents.mcp.last_error,
+        },
+        "patches": patches
+            .iter()
+            .map(|patch| {
+                serde_json::json!({
+                    "id": patch.id,
+                    "agent_id": patch.agent_id,
+                    "title": patch.title,
+                    "status": patch.status.label(),
+                })
+            })
+            .collect::<Vec<_>>(),
+    });
+    let run_json = serde_json::to_string_pretty(&run_payload)
+        .map_err(|err| io::Error::new(io::ErrorKind::Other, format!("serde run.json: {err}")))?;
+    fs::write(run_dir.join("run.json"), run_json)?;
+
+    let mut thread_md = String::new();
+    thread_md.push_str(&format!("# Mission {}\n\n", mission.id));
+    thread_md.push_str(&format!("Title: {}\n\n", mission.title));
+    thread_md.push_str("## Thread\n\n");
+    for msg in state.agents.messages.iter().filter(|msg| {
+        msg.mission_id.as_deref() == Some(mission_id)
+            || (msg.mission_id.is_none() && matches!(msg.channel, AgentChannel::Broadcast))
+    }) {
+        let channel = match msg.channel {
+            AgentChannel::Agent => "",
+            AgentChannel::Broadcast => "@all ",
+        };
+        let src = msg.agent_id.as_deref().unwrap_or("user");
+        thread_md.push_str(&format!(
+            "- [{}] {}{}: {}\n",
+            msg.at, channel, src, msg.text
+        ));
+    }
+    fs::write(run_dir.join("thread.md"), thread_md)?;
+
+    for patch in patches {
+        let filename = format!("{}.diff", sanitize_for_filename(&patch.id));
+        fs::write(patches_dir.join(filename), &patch.diff)?;
+    }
+    Ok(())
+}
+
+fn sanitize_for_filename(input: &str) -> String {
+    input
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
 struct TerminalGuard {
     active: bool,
     keyboard_flags_pushed: bool,
     mouse_capture: bool,
+    bracketed_paste: bool,
 }
 
 impl Drop for TerminalGuard {
@@ -5951,6 +7431,9 @@ impl Drop for TerminalGuard {
             }
             if self.mouse_capture {
                 let _ = execute!(io::stdout(), DisableMouseCapture);
+            }
+            if self.bracketed_paste {
+                let _ = execute!(io::stdout(), DisableBracketedPaste);
             }
             let _ = disable_raw_mode();
             let _ = execute!(io::stdout(), SetCursorStyle::DefaultUserShape);
@@ -5997,13 +7480,1450 @@ mod tests {
     }
 
     #[test]
-    fn job_output_space_toggles_pause() {
+    fn agent_ops_space_does_not_toggle_pause() {
         let mut state = state_for_test();
         state.focus = PaneId::JobOutput;
         let mut input = InputState::new();
         let key = KeyEvent::new(KeyCode::Char(' '), KeyModifiers::empty());
         let action = map_key_to_action(key, &state, &mut input);
-        assert!(matches!(action, Some(Action::ToggleJobPause)));
+        assert!(action.is_none());
+    }
+
+    #[test]
+    fn ctrl_focus_hotkeys_target_expected_panes() {
+        let mut input = InputState::new();
+        let state = state_for_test();
+        let editor = map_key_to_action(
+            KeyEvent::new(KeyCode::Char('1'), KeyModifiers::CONTROL),
+            &state,
+            &mut input,
+        );
+        assert_eq!(editor, Some(Action::FocusPane(PaneId::Editor)));
+        let ops = map_key_to_action(
+            KeyEvent::new(KeyCode::Char('2'), KeyModifiers::CONTROL),
+            &state,
+            &mut input,
+        );
+        assert_eq!(ops, Some(Action::FocusPane(PaneId::JobOutput)));
+        let console = map_key_to_action(
+            KeyEvent::new(KeyCode::Char('3'), KeyModifiers::CONTROL),
+            &state,
+            &mut input,
+        );
+        assert_eq!(console, Some(Action::FocusPane(PaneId::Notes)));
+    }
+
+    #[test]
+    fn ctrl_q_quits_but_ctrl_c_does_not() {
+        let mut input = InputState::new();
+        let state = state_for_test();
+        let quit = map_key_to_action(
+            KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL),
+            &state,
+            &mut input,
+        );
+        assert_eq!(quit, Some(Action::Quit));
+        let no_quit = map_key_to_action(
+            KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+            &state,
+            &mut input,
+        );
+        assert_eq!(no_quit, None);
+    }
+
+    #[test]
+    fn agent_chat_accepts_input_and_sends_on_enter() {
+        let mut state = state_for_test();
+        state.focus = PaneId::Notes;
+        state.agents.console_scroll = 9;
+        let mut vitals = VitalsState::default();
+
+        assert!(handle_agent_station_key(
+            KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE),
+            &mut state,
+            &mut vitals
+        ));
+        assert!(handle_agent_station_key(
+            KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE),
+            &mut state,
+            &mut vitals
+        ));
+        assert_eq!(state.agents.chat_input, "hi");
+        assert_eq!(state.agents.chat_input_cursor, 2);
+
+        assert!(handle_agent_station_key(
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &mut state,
+            &mut vitals
+        ));
+        assert_eq!(state.agents.chat_input, "");
+        assert_eq!(state.agents.chat_input_cursor, 0);
+        assert_eq!(state.agents.console_scroll, usize::MAX);
+        assert_eq!(state.agents.messages.len(), 1);
+        assert_eq!(state.agents.messages[0].text, "hi");
+    }
+
+    #[test]
+    fn ctrl_c_clears_chat_input_when_chat_focused() {
+        let mut state = state_for_test();
+        state.focus = PaneId::Notes;
+        state.agents.chat_input = "clear me".into();
+        state.agents.chat_input_cursor = state.agents.chat_input.chars().count();
+        let mut vitals = VitalsState::default();
+
+        assert!(handle_agent_station_key(
+            KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+            &mut state,
+            &mut vitals
+        ));
+        assert_eq!(state.agents.chat_input, "");
+        assert_eq!(state.agents.chat_input_cursor, 0);
+    }
+
+    #[test]
+    fn agent_chat_left_right_moves_cursor_and_inserts_at_cursor() {
+        let mut state = state_for_test();
+        state.focus = PaneId::Notes;
+        state.agents.chat_input = "helo".into();
+        state.agents.chat_input_cursor = 4;
+        let mut vitals = VitalsState::default();
+
+        assert!(handle_agent_station_key(
+            KeyEvent::new(KeyCode::Left, KeyModifiers::empty()),
+            &mut state,
+            &mut vitals
+        ));
+        assert!(handle_agent_station_key(
+            KeyEvent::new(KeyCode::Char('l'), KeyModifiers::empty()),
+            &mut state,
+            &mut vitals
+        ));
+        assert_eq!(state.agents.chat_input, "hello");
+
+        assert!(handle_agent_station_key(
+            KeyEvent::new(KeyCode::Right, KeyModifiers::empty()),
+            &mut state,
+            &mut vitals
+        ));
+        assert_eq!(state.agents.chat_input_cursor, 5);
+    }
+
+    #[test]
+    fn agent_chat_up_down_moves_cursor_between_lines() {
+        let mut state = state_for_test();
+        state.focus = PaneId::Notes;
+        state.agents.chat_input = "abcd\nxy\nlast".into();
+        state.agents.chat_input_cursor = 3;
+        let mut vitals = VitalsState::default();
+
+        assert!(handle_agent_station_key(
+            KeyEvent::new(KeyCode::Down, KeyModifiers::empty()),
+            &mut state,
+            &mut vitals
+        ));
+        assert_eq!(state.agents.chat_input_cursor, 7);
+
+        assert!(handle_agent_station_key(
+            KeyEvent::new(KeyCode::Down, KeyModifiers::empty()),
+            &mut state,
+            &mut vitals
+        ));
+        assert_eq!(state.agents.chat_input_cursor, 10);
+
+        assert!(handle_agent_station_key(
+            KeyEvent::new(KeyCode::Up, KeyModifiers::empty()),
+            &mut state,
+            &mut vitals
+        ));
+        assert_eq!(state.agents.chat_input_cursor, 7);
+    }
+
+    #[test]
+    fn agent_chat_arrow_keys_move_cursor_not_thread_scroll() {
+        let mut state = state_for_test();
+        state.focus = PaneId::Notes;
+        state.agents.chat_input = "one\ntwo".into();
+        state.agents.chat_input_cursor = 0;
+        state.agents.console_scroll = 3;
+        let mut vitals = VitalsState::default();
+
+        assert!(handle_agent_station_key(
+            KeyEvent::new(KeyCode::Down, KeyModifiers::empty()),
+            &mut state,
+            &mut vitals
+        ));
+        assert_eq!(state.agents.chat_input_cursor, 4);
+        assert_eq!(state.agents.console_scroll, 3);
+
+        assert!(handle_agent_station_key(
+            KeyEvent::new(KeyCode::Up, KeyModifiers::empty()),
+            &mut state,
+            &mut vitals
+        ));
+        assert_eq!(state.agents.chat_input_cursor, 0);
+        assert_eq!(state.agents.console_scroll, 3);
+    }
+
+    #[test]
+    fn chat_paste_inserts_raw_text_without_sending_or_opening_command_prompt() {
+        let mut state = state_for_test();
+        state.focus = PaneId::Notes;
+        let mut vitals = VitalsState::default();
+        let mut syntax = SyntaxRuntime::new(state.settings.highlight.clone());
+        let mut fuzzy_runtime =
+            FuzzySearchRuntime::new(&Theme::default(), state.settings.highlight.clone());
+        let pasted = ":run now\n  keep this exactly\n@all is plain text";
+
+        assert!(handle_paste_event(
+            pasted,
+            &mut state,
+            &mut syntax,
+            &mut fuzzy_runtime,
+            &mut vitals
+        ));
+        assert_eq!(state.agents.chat_input, pasted);
+        assert_eq!(state.agents.chat_input_cursor, pasted.chars().count());
+        assert!(state.agents.messages.is_empty());
+        assert!(state.command_line.is_none());
+    }
+
+    #[test]
+    fn chat_paste_normalizes_crlf_markdown_for_chat_box() {
+        let mut state = state_for_test();
+        state.focus = PaneId::Notes;
+        let mut vitals = VitalsState::default();
+        let mut syntax = SyntaxRuntime::new(state.settings.highlight.clone());
+        let mut fuzzy_runtime =
+            FuzzySearchRuntime::new(&Theme::default(), state.settings.highlight.clone());
+        let pasted = "# Plan\r\n- item 1\r\n```rust\r\nlet x = 1;\r\n```\r\n";
+
+        assert!(handle_paste_event(
+            pasted,
+            &mut state,
+            &mut syntax,
+            &mut fuzzy_runtime,
+            &mut vitals
+        ));
+        assert_eq!(
+            state.agents.chat_input,
+            "# Plan\n- item 1\n```rust\nlet x = 1;\n```\n"
+        );
+        assert!(!state.agents.chat_input.contains('\r'));
+        assert_eq!(
+            state.agents.chat_input_cursor,
+            state.agents.chat_input.chars().count()
+        );
+        assert!(state.agents.messages.is_empty());
+        assert!(state.command_line.is_none());
+    }
+
+    #[test]
+    fn agent_chat_send_preserves_pasted_formatting() {
+        let mut state = state_for_test();
+        state.focus = PaneId::Notes;
+        state.agents.chat_input = "  code block:\n    let x = 1;\n".into();
+        state.agents.chat_input_cursor = state.agents.chat_input.chars().count();
+        let mut vitals = VitalsState::default();
+
+        assert!(handle_agent_station_key(
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &mut state,
+            &mut vitals
+        ));
+        assert_eq!(state.agents.messages.len(), 1);
+        assert_eq!(
+            state.agents.messages[0].text,
+            "  code block:\n    let x = 1;\n"
+        );
+    }
+
+    #[test]
+    fn agent_chat_send_preserves_markdown_text() {
+        let mut state = state_for_test();
+        state.focus = PaneId::Notes;
+        let markdown = "# Plan\n- item 1\n- item 2\n```rust\nlet x = 1;\n```\n";
+        state.agents.chat_input = markdown.into();
+        state.agents.chat_input_cursor = state.agents.chat_input.chars().count();
+        let mut vitals = VitalsState::default();
+
+        assert!(handle_agent_station_key(
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &mut state,
+            &mut vitals
+        ));
+        assert_eq!(state.agents.messages.len(), 1);
+        assert_eq!(state.agents.messages[0].text, markdown);
+    }
+
+    #[test]
+    fn map_agent_console_mouse_maps_chat_thread_lines() {
+        let mut state = state_for_test();
+        state.agents.selected_mission = None;
+        state.agents.selected_agent = None;
+        state.agents.messages.push(AgentMessage {
+            at: "10:00:00".into(),
+            channel: AgentChannel::Agent,
+            agent_id: Some("planner".into()),
+            mission_id: None,
+            text: "hello world".into(),
+        });
+        let screen = ratatui::layout::Rect {
+            x: 0,
+            y: 0,
+            width: 160,
+            height: 48,
+        };
+        let layout = layout::split(screen);
+        let text_area = agent_console_view::thread_text_area(layout.notes, &state)
+            .expect("thread area should be available");
+        let mouse = MouseEvent {
+            kind: MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            column: text_area.x,
+            row: text_area.y,
+            modifiers: KeyModifiers::NONE,
+        };
+
+        let (line_idx, col, lines) = map_agent_console_mouse(mouse, screen, &state, false)
+            .expect("mouse should map into chat thread");
+        assert_eq!(line_idx, 0);
+        assert_eq!(col, 0);
+        let flattened = lines.concat();
+        assert!(flattened.contains("hello world"));
+    }
+
+    #[test]
+    fn click_in_chat_input_box_moves_chat_cursor() {
+        let mut state = state_for_test();
+        state.agents.chat_input = "hello\nworld".into();
+        state.agents.chat_input_cursor = 0;
+        let mut input_state = InputState::new();
+        let mut clipboard = None;
+        let theme = Theme::default();
+        let screen = ratatui::layout::Rect {
+            x: 0,
+            y: 0,
+            width: 220,
+            height: 42,
+        };
+        let layout = layout::split(screen);
+        let input_area = agent_console_view::chat_input_text_area(layout.notes, &state)
+            .expect("chat input area should be available");
+        let down = MouseEvent {
+            kind: MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            column: input_area.x.saturating_add(2),
+            row: input_area.y.saturating_add(1),
+            modifiers: KeyModifiers::NONE,
+        };
+        assert!(handle_mouse_down(
+            down,
+            screen,
+            &mut state,
+            &mut input_state,
+            &mut clipboard,
+            &theme
+        ));
+        assert_eq!(state.focus, PaneId::Notes);
+        assert_eq!(state.agents.chat_input_cursor, 8);
+    }
+
+    #[test]
+    fn click_in_chat_header_does_not_start_thread_selection() {
+        let mut state = state_for_test();
+        state.agents.selected_mission = None;
+        state.agents.selected_agent = None;
+        state.agents.messages.push(AgentMessage {
+            at: "10:00:00".into(),
+            channel: AgentChannel::Agent,
+            agent_id: Some("planner".into()),
+            mission_id: None,
+            text: "select me".into(),
+        });
+        let mut input_state = InputState::new();
+        let mut clipboard = None;
+        let theme = Theme::default();
+        let screen = ratatui::layout::Rect {
+            x: 0,
+            y: 0,
+            width: 140,
+            height: 42,
+        };
+        let layout = layout::split(screen);
+        let context_click = MouseEvent {
+            kind: MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            column: layout.notes.x.saturating_add(3),
+            row: layout.notes.y.saturating_add(1),
+            modifiers: KeyModifiers::NONE,
+        };
+        assert!(handle_mouse_down(
+            context_click,
+            screen,
+            &mut state,
+            &mut input_state,
+            &mut clipboard,
+            &theme
+        ));
+        assert_eq!(state.focus, PaneId::Notes);
+        assert!(state.ui_selection.is_none());
+    }
+
+    #[test]
+    fn chat_thread_selection_starts_at_clicked_column() {
+        let mut state = state_for_test();
+        state.agents.selected_mission = None;
+        state.agents.selected_agent = None;
+        state.agents.console_scroll = 0;
+        state.agents.messages.push(AgentMessage {
+            at: "10:00:00".into(),
+            channel: AgentChannel::Agent,
+            agent_id: Some("planner".into()),
+            mission_id: None,
+            text: "selection precision".into(),
+        });
+        let mut input_state = InputState::new();
+        let mut clipboard = None;
+        let theme = Theme::default();
+        let screen = ratatui::layout::Rect {
+            x: 0,
+            y: 0,
+            width: 140,
+            height: 42,
+        };
+        let layout = layout::split(screen);
+        let text_area = agent_console_view::thread_text_area(layout.notes, &state)
+            .expect("thread area should be available");
+        let lines =
+            agent_console_view::thread_lines_for_selection(&state, text_area.width as usize);
+        let line_idx = lines
+            .iter()
+            .position(|line| line.contains("precision"))
+            .expect("precision line");
+        let line = &lines[line_idx];
+        let marker_byte = line.find("precision").expect("precision marker");
+        let target_col = line[..marker_byte].chars().count();
+        let click = MouseEvent {
+            kind: MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            column: text_area.x.saturating_add(target_col as u16),
+            row: text_area.y.saturating_add(line_idx as u16),
+            modifiers: KeyModifiers::NONE,
+        };
+
+        assert!(handle_mouse_down(
+            click,
+            screen,
+            &mut state,
+            &mut input_state,
+            &mut clipboard,
+            &theme
+        ));
+        let selection = state.ui_selection.expect("selection should exist");
+        assert_eq!(selection.pane, UiSelectionPane::AgentConsole);
+        assert_eq!(selection.start_line, line_idx);
+        assert_eq!(selection.start_col, target_col);
+        let selected_char = line
+            .chars()
+            .nth(selection.start_col)
+            .expect("selected char at cursor");
+        assert_eq!(selected_char, 'p');
+    }
+
+    #[test]
+    fn mouse_wheel_in_chat_input_scrolls_input_not_thread() {
+        let mut state = state_for_test();
+        state.focus = PaneId::Notes;
+        state.agents.chat_input = (0..40).map(|i| format!("line-{i}\n")).collect();
+        state.agents.chat_input_cursor = 0;
+        state.agents.chat_input_scroll = 0;
+        state.agents.console_scroll = 6;
+        let mut fuzzy_runtime =
+            FuzzySearchRuntime::new(&Theme::default(), state.settings.highlight.clone());
+        let mut input_state = InputState::new();
+        let mut clipboard = None;
+        let theme = Theme::default();
+        let screen = ratatui::layout::Rect {
+            x: 0,
+            y: 0,
+            width: 140,
+            height: 42,
+        };
+        let layout = layout::split(screen);
+        let input_area = agent_console_view::chat_input_text_area(layout.notes, &state)
+            .expect("chat input area should be available");
+        let wheel = MouseEvent {
+            kind: MouseEventKind::ScrollDown,
+            column: input_area.x.saturating_add(1),
+            row: input_area.y.saturating_add(1),
+            modifiers: KeyModifiers::NONE,
+        };
+        assert!(handle_mouse_event(
+            wheel,
+            screen,
+            &mut state,
+            &mut fuzzy_runtime,
+            &mut input_state,
+            &mut clipboard,
+            &theme
+        ));
+        assert!(state.agents.chat_input_scroll > 0);
+        assert_eq!(state.agents.console_scroll, 6);
+    }
+
+    #[test]
+    fn mouse_wheel_in_chat_thread_clamps_at_bottom_without_wrap() {
+        let mut state = state_for_test();
+        state.focus = PaneId::Notes;
+        state.agents.selected_mission = None;
+        state.agents.selected_agent = None;
+        state.agents.missions.clear();
+        state.agents.console_scroll = 0;
+        state.agents.messages.clear();
+        for i in 0..120 {
+            state.agents.messages.push(AgentMessage {
+                at: format!("10:00:{:02}", i % 60),
+                channel: AgentChannel::Agent,
+                agent_id: Some("planner".into()),
+                mission_id: None,
+                text: format!("message-{i}"),
+            });
+        }
+
+        let mut fuzzy_runtime =
+            FuzzySearchRuntime::new(&Theme::default(), state.settings.highlight.clone());
+        let mut input_state = InputState::new();
+        let mut clipboard = None;
+        let theme = Theme::default();
+        let screen = ratatui::layout::Rect {
+            x: 0,
+            y: 0,
+            width: 120,
+            height: 36,
+        };
+        let layout = layout::split(screen);
+        let thread_area = agent_console_view::thread_text_area(layout.notes, &state)
+            .expect("chat thread area should be available");
+        let lines =
+            agent_console_view::thread_lines_for_selection(&state, thread_area.width as usize);
+        let max_scroll = lines.len().saturating_sub(thread_area.height as usize);
+        let wheel_down = MouseEvent {
+            kind: MouseEventKind::ScrollDown,
+            column: thread_area.x.saturating_add(1),
+            row: thread_area.y.saturating_add(1),
+            modifiers: KeyModifiers::NONE,
+        };
+
+        for _ in 0..(max_scroll + 50) {
+            assert!(handle_mouse_event(
+                wheel_down,
+                screen,
+                &mut state,
+                &mut fuzzy_runtime,
+                &mut input_state,
+                &mut clipboard,
+                &theme
+            ));
+        }
+        assert_eq!(state.agents.console_scroll, max_scroll);
+
+        assert!(handle_mouse_event(
+            wheel_down,
+            screen,
+            &mut state,
+            &mut fuzzy_runtime,
+            &mut input_state,
+            &mut clipboard,
+            &theme
+        ));
+        assert_eq!(state.agents.console_scroll, max_scroll);
+    }
+
+    #[test]
+    fn scrolled_chat_selection_maps_to_visible_line_not_top() {
+        let mut state = state_for_test();
+        state.focus = PaneId::Notes;
+        state.agents.selected_mission = None;
+        state.agents.selected_agent = None;
+        state.agents.messages.clear();
+        for i in 0..120 {
+            state.agents.messages.push(AgentMessage {
+                at: format!("10:00:{:02}", i % 60),
+                channel: AgentChannel::Agent,
+                agent_id: Some("planner".into()),
+                mission_id: None,
+                text: format!("payload-{i:03}"),
+            });
+        }
+        let mut fuzzy_runtime =
+            FuzzySearchRuntime::new(&Theme::default(), state.settings.highlight.clone());
+        let mut input_state = InputState::new();
+        let mut clipboard = None;
+        let theme = Theme::default();
+        let screen = ratatui::layout::Rect {
+            x: 0,
+            y: 0,
+            width: 140,
+            height: 42,
+        };
+        let layout = layout::split(screen);
+        let thread_area = agent_console_view::thread_text_area(layout.notes, &state)
+            .expect("chat thread area should be available");
+        let wheel_down = MouseEvent {
+            kind: MouseEventKind::ScrollDown,
+            column: thread_area.x.saturating_add(1),
+            row: thread_area.y.saturating_add(1),
+            modifiers: KeyModifiers::NONE,
+        };
+        for _ in 0..18 {
+            assert!(handle_mouse_event(
+                wheel_down,
+                screen,
+                &mut state,
+                &mut fuzzy_runtime,
+                &mut input_state,
+                &mut clipboard,
+                &theme
+            ));
+        }
+        assert!(state.agents.console_scroll > 0);
+
+        let lines =
+            agent_console_view::thread_lines_for_selection(&state, thread_area.width as usize);
+        let visible_height = thread_area.height as usize;
+        let visible_start = state.agents.console_scroll;
+        let maybe_target = (0..visible_height)
+            .filter_map(|row| {
+                let idx = visible_start.saturating_add(row);
+                lines.get(idx).map(|line| (row, idx, line))
+            })
+            .find(|(_, _, line)| line.contains("payl"));
+        let (row_rel, expected_line_idx, line) = if let Some(target) = maybe_target {
+            target
+        } else {
+            let visible = (0..visible_height)
+                .filter_map(|row| {
+                    let idx = visible_start.saturating_add(row);
+                    lines.get(idx).map(|line| line.clone())
+                })
+                .collect::<Vec<_>>();
+            panic!("payl line visible after scroll; visible={visible:?}");
+        };
+        let marker_byte = line.find("payl").expect("marker in visible line");
+        let marker_col = line[..marker_byte].chars().count();
+        let select_col = marker_col + 1;
+        let expected_char = line
+            .chars()
+            .nth(select_col)
+            .expect("character at selection point")
+            .to_string();
+
+        let down = MouseEvent {
+            kind: MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            column: thread_area.x.saturating_add(select_col as u16),
+            row: thread_area.y.saturating_add(row_rel as u16),
+            modifiers: KeyModifiers::NONE,
+        };
+        assert!(handle_mouse_down(
+            down,
+            screen,
+            &mut state,
+            &mut input_state,
+            &mut clipboard,
+            &theme
+        ));
+        let selection = state.ui_selection.expect("selection exists");
+        assert_eq!(selection.start_line, expected_line_idx);
+        assert_eq!(selection.start_col, select_col);
+
+        let drag = MouseEvent {
+            kind: MouseEventKind::Drag(crossterm::event::MouseButton::Left),
+            column: down.column.saturating_add(1),
+            row: down.row,
+            modifiers: KeyModifiers::NONE,
+        };
+        assert!(handle_mouse_drag(
+            drag,
+            screen,
+            &mut state,
+            &mut input_state,
+            &mut clipboard,
+            &theme
+        ));
+        assert_eq!(state.yank.as_deref(), Some(expected_char.as_str()));
+    }
+
+    #[test]
+    fn user_bubble_selection_can_span_multiple_messages() {
+        let mut state = state_for_test();
+        state.focus = PaneId::Notes;
+        state.agents.selected_mission = None;
+        state.agents.selected_agent = None;
+        state.agents.missions.clear();
+        state.agents.console_scroll = 0;
+        state.agents.messages.clear();
+        state.agents.messages.push(AgentMessage {
+            at: "10:00:00".into(),
+            channel: AgentChannel::Agent,
+            agent_id: None,
+            mission_id: None,
+            text: "alpha prompt".into(),
+        });
+        state.agents.messages.push(AgentMessage {
+            at: "10:00:01".into(),
+            channel: AgentChannel::Agent,
+            agent_id: None,
+            mission_id: None,
+            text: "omega prompt".into(),
+        });
+        let mut input_state = InputState::new();
+        let mut clipboard = None;
+        let theme = Theme::default();
+        let screen = ratatui::layout::Rect {
+            x: 0,
+            y: 0,
+            width: 180,
+            height: 42,
+        };
+        let layout = layout::split(screen);
+        let thread_area = agent_console_view::thread_text_area(layout.notes, &state)
+            .expect("chat thread area should be available");
+        let lines =
+            agent_console_view::thread_lines_for_selection(&state, thread_area.width as usize);
+        let (start_row, start_col) = lines
+            .iter()
+            .enumerate()
+            .find_map(|(idx, line)| {
+                line.find("alpha")
+                    .map(|byte| (idx, line[..byte].chars().count()))
+            })
+            .expect("alpha row");
+        let (end_row, end_col) = lines
+            .iter()
+            .enumerate()
+            .find_map(|(idx, line)| {
+                line.find("omega")
+                    .map(|byte| (idx, line[..byte].chars().count() + "omega".chars().count()))
+            })
+            .expect("omega row");
+        let down = MouseEvent {
+            kind: MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            column: thread_area.x.saturating_add(start_col as u16),
+            row: thread_area.y.saturating_add(start_row as u16),
+            modifiers: KeyModifiers::NONE,
+        };
+        let drag = MouseEvent {
+            kind: MouseEventKind::Drag(crossterm::event::MouseButton::Left),
+            column: thread_area.x.saturating_add(end_col as u16),
+            row: thread_area.y.saturating_add(end_row as u16),
+            modifiers: KeyModifiers::NONE,
+        };
+        assert!(handle_mouse_down(
+            down,
+            screen,
+            &mut state,
+            &mut input_state,
+            &mut clipboard,
+            &theme
+        ));
+        assert!(handle_mouse_drag(
+            drag,
+            screen,
+            &mut state,
+            &mut input_state,
+            &mut clipboard,
+            &theme
+        ));
+        let yank = state.yank.clone().unwrap_or_default();
+        assert!(yank.contains("alpha"));
+        assert!(yank.contains("omega"));
+    }
+
+    #[test]
+    fn scrolled_user_bubble_selection_can_span_multiple_messages() {
+        let mut state = state_for_test();
+        state.focus = PaneId::Notes;
+        state.agents.selected_mission = None;
+        state.agents.selected_agent = None;
+        state.agents.missions.clear();
+        state.agents.console_scroll = 0;
+        state.agents.messages.clear();
+        for i in 0..60 {
+            state.agents.messages.push(AgentMessage {
+                at: format!("10:00:{:02}", i % 60),
+                channel: AgentChannel::Agent,
+                agent_id: None,
+                mission_id: None,
+                text: format!("user-prompt-{i:02}"),
+            });
+        }
+        let mut fuzzy_runtime =
+            FuzzySearchRuntime::new(&Theme::default(), state.settings.highlight.clone());
+        let mut input_state = InputState::new();
+        let mut clipboard = None;
+        let theme = Theme::default();
+        let screen = ratatui::layout::Rect {
+            x: 0,
+            y: 0,
+            width: 180,
+            height: 42,
+        };
+        let layout = layout::split(screen);
+        let thread_area = agent_console_view::thread_text_area(layout.notes, &state)
+            .expect("chat thread area should be available");
+        let wheel_down = MouseEvent {
+            kind: MouseEventKind::ScrollDown,
+            column: thread_area.x.saturating_add(1),
+            row: thread_area.y.saturating_add(1),
+            modifiers: KeyModifiers::NONE,
+        };
+        for _ in 0..12 {
+            assert!(handle_mouse_event(
+                wheel_down,
+                screen,
+                &mut state,
+                &mut fuzzy_runtime,
+                &mut input_state,
+                &mut clipboard,
+                &theme
+            ));
+        }
+        let lines =
+            agent_console_view::thread_lines_for_selection(&state, thread_area.width as usize);
+        let visible_start = state.agents.console_scroll;
+        let visible_end = visible_start.saturating_add(thread_area.height as usize);
+        let visible = lines
+            .iter()
+            .enumerate()
+            .filter(|(idx, _)| *idx >= visible_start && *idx < visible_end)
+            .collect::<Vec<_>>();
+        let (start_row_rel, start_col, _) = visible
+            .iter()
+            .find_map(|(idx, line)| {
+                line.find("user-prompt-").map(|byte| {
+                    (
+                        idx.saturating_sub(visible_start),
+                        line[..byte].chars().count(),
+                        *idx,
+                    )
+                })
+            })
+            .expect("visible start prompt");
+        let (end_row_rel, end_col, _) = visible
+            .iter()
+            .rev()
+            .find_map(|(idx, line)| {
+                line.find("user-prompt-").map(|byte| {
+                    (
+                        idx.saturating_sub(visible_start),
+                        line[..byte].chars().count() + 8,
+                        *idx,
+                    )
+                })
+            })
+            .expect("visible end prompt");
+        let down = MouseEvent {
+            kind: MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            column: thread_area.x.saturating_add(start_col as u16),
+            row: thread_area.y.saturating_add(start_row_rel as u16),
+            modifiers: KeyModifiers::NONE,
+        };
+        let drag = MouseEvent {
+            kind: MouseEventKind::Drag(crossterm::event::MouseButton::Left),
+            column: thread_area.x.saturating_add(end_col as u16),
+            row: thread_area.y.saturating_add(end_row_rel as u16),
+            modifiers: KeyModifiers::NONE,
+        };
+        assert!(handle_mouse_down(
+            down,
+            screen,
+            &mut state,
+            &mut input_state,
+            &mut clipboard,
+            &theme
+        ));
+        assert!(handle_mouse_drag(
+            drag,
+            screen,
+            &mut state,
+            &mut input_state,
+            &mut clipboard,
+            &theme
+        ));
+        let yank = state.yank.clone().unwrap_or_default();
+        assert!(yank.contains("user-prompt-"));
+        let unique_hits = yank.matches("user-prompt-").count();
+        assert!(
+            unique_hits >= 2,
+            "expected >= 2 prompts in yank, got {unique_hits} from {yank:?}"
+        );
+    }
+
+    #[test]
+    fn vertical_drag_across_user_bubbles_includes_end_message_text() {
+        let mut state = state_for_test();
+        state.focus = PaneId::Notes;
+        state.agents.selected_mission = None;
+        state.agents.selected_agent = None;
+        state.agents.missions.clear();
+        state.agents.console_scroll = 0;
+        state.agents.messages.clear();
+        state.agents.messages.push(AgentMessage {
+            at: "10:00:00".into(),
+            channel: AgentChannel::Agent,
+            agent_id: None,
+            mission_id: None,
+            text: "first message has a wider bubble".into(),
+        });
+        state.agents.messages.push(AgentMessage {
+            at: "10:00:01".into(),
+            channel: AgentChannel::Agent,
+            agent_id: None,
+            mission_id: None,
+            text: "short".into(),
+        });
+
+        let mut input_state = InputState::new();
+        let mut clipboard = None;
+        let theme = Theme::default();
+        let screen = ratatui::layout::Rect {
+            x: 0,
+            y: 0,
+            width: 180,
+            height: 42,
+        };
+        let layout = layout::split(screen);
+        let thread_area = agent_console_view::thread_text_area(layout.notes, &state)
+            .expect("chat thread area should be available");
+        let lines =
+            agent_console_view::thread_lines_for_selection(&state, thread_area.width as usize);
+
+        let (start_row, start_col) = lines
+            .iter()
+            .enumerate()
+            .find_map(|(idx, line)| {
+                line.find("first")
+                    .map(|byte| (idx, line[..byte].chars().count() + 2))
+            })
+            .expect("first row");
+        let end_row = lines
+            .iter()
+            .enumerate()
+            .find_map(|(idx, line)| line.contains("short").then_some(idx))
+            .expect("short row");
+
+        let down = MouseEvent {
+            kind: MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            column: thread_area.x.saturating_add(start_col as u16),
+            row: thread_area.y.saturating_add(start_row as u16),
+            modifiers: KeyModifiers::NONE,
+        };
+        let drag = MouseEvent {
+            kind: MouseEventKind::Drag(crossterm::event::MouseButton::Left),
+            column: thread_area.x.saturating_add(start_col as u16),
+            row: thread_area.y.saturating_add(end_row as u16),
+            modifiers: KeyModifiers::NONE,
+        };
+        assert!(handle_mouse_down(
+            down,
+            screen,
+            &mut state,
+            &mut input_state,
+            &mut clipboard,
+            &theme
+        ));
+        assert!(handle_mouse_drag(
+            drag,
+            screen,
+            &mut state,
+            &mut input_state,
+            &mut clipboard,
+            &theme
+        ));
+        let yank = state.yank.clone().unwrap_or_default();
+        assert!(
+            yank.contains("short"),
+            "end message text missing from yank: {yank:?}"
+        );
+    }
+
+    #[test]
+    fn reverse_vertical_drag_across_user_bubbles_keeps_both_messages() {
+        let mut state = state_for_test();
+        state.focus = PaneId::Notes;
+        state.agents.selected_mission = None;
+        state.agents.selected_agent = None;
+        state.agents.missions.clear();
+        state.agents.console_scroll = 0;
+        state.agents.messages.clear();
+        state.agents.messages.push(AgentMessage {
+            at: "10:00:00".into(),
+            channel: AgentChannel::Agent,
+            agent_id: None,
+            mission_id: None,
+            text: "first message has a wider bubble".into(),
+        });
+        state.agents.messages.push(AgentMessage {
+            at: "10:00:01".into(),
+            channel: AgentChannel::Agent,
+            agent_id: None,
+            mission_id: None,
+            text: "short".into(),
+        });
+
+        let mut input_state = InputState::new();
+        let mut clipboard = None;
+        let theme = Theme::default();
+        let screen = ratatui::layout::Rect {
+            x: 0,
+            y: 0,
+            width: 180,
+            height: 42,
+        };
+        let layout = layout::split(screen);
+        let thread_area = agent_console_view::thread_text_area(layout.notes, &state)
+            .expect("chat thread area should be available");
+        let lines =
+            agent_console_view::thread_lines_for_selection(&state, thread_area.width as usize);
+
+        let (start_row, start_col) = lines
+            .iter()
+            .enumerate()
+            .find_map(|(idx, line)| {
+                line.find("short")
+                    .map(|byte| (idx, line[..byte].chars().count() + "short".chars().count()))
+            })
+            .expect("short row");
+        let end_row = lines
+            .iter()
+            .enumerate()
+            .find_map(|(idx, line)| line.contains("first").then_some(idx))
+            .expect("first row");
+        let end_payload_start = user_bubble_payload_start_col(
+            lines
+                .get(end_row)
+                .expect("line for first message payload should exist"),
+        )
+        .expect("payload start for first message");
+        let end_col = end_payload_start.saturating_sub(1);
+
+        let down = MouseEvent {
+            kind: MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            column: thread_area.x.saturating_add(start_col as u16),
+            row: thread_area.y.saturating_add(start_row as u16),
+            modifiers: KeyModifiers::NONE,
+        };
+        let drag = MouseEvent {
+            kind: MouseEventKind::Drag(crossterm::event::MouseButton::Left),
+            column: thread_area.x.saturating_add(end_col as u16),
+            row: thread_area.y.saturating_add(end_row as u16),
+            modifiers: KeyModifiers::NONE,
+        };
+        assert!(handle_mouse_down(
+            down,
+            screen,
+            &mut state,
+            &mut input_state,
+            &mut clipboard,
+            &theme
+        ));
+        assert!(handle_mouse_drag(
+            drag,
+            screen,
+            &mut state,
+            &mut input_state,
+            &mut clipboard,
+            &theme
+        ));
+        let yank = state.yank.clone().unwrap_or_default();
+        assert!(
+            yank.contains("first"),
+            "first message missing from yank: {yank:?}"
+        );
+        assert!(
+            yank.contains("short"),
+            "second message missing from yank: {yank:?}"
+        );
+    }
+
+    #[test]
+    fn scrolled_reverse_drag_across_user_bubbles_keeps_visible_messages() {
+        let mut state = state_for_test();
+        state.focus = PaneId::Notes;
+        state.agents.selected_mission = None;
+        state.agents.selected_agent = None;
+        state.agents.missions.clear();
+        state.agents.console_scroll = 0;
+        state.agents.messages.clear();
+        for i in 0..80 {
+            state.agents.messages.push(AgentMessage {
+                at: format!("10:00:{:02}", i % 60),
+                channel: AgentChannel::Agent,
+                agent_id: None,
+                mission_id: None,
+                text: format!("user-prompt-{i:02}"),
+            });
+        }
+
+        let mut fuzzy_runtime =
+            FuzzySearchRuntime::new(&Theme::default(), state.settings.highlight.clone());
+        let mut input_state = InputState::new();
+        let mut clipboard = None;
+        let theme = Theme::default();
+        let screen = ratatui::layout::Rect {
+            x: 0,
+            y: 0,
+            width: 180,
+            height: 42,
+        };
+        let layout = layout::split(screen);
+        let thread_area = agent_console_view::thread_text_area(layout.notes, &state)
+            .expect("chat thread area should be available");
+        let wheel_down = MouseEvent {
+            kind: MouseEventKind::ScrollDown,
+            column: thread_area.x.saturating_add(1),
+            row: thread_area.y.saturating_add(1),
+            modifiers: KeyModifiers::NONE,
+        };
+        for _ in 0..16 {
+            assert!(handle_mouse_event(
+                wheel_down,
+                screen,
+                &mut state,
+                &mut fuzzy_runtime,
+                &mut input_state,
+                &mut clipboard,
+                &theme
+            ));
+        }
+
+        let lines =
+            agent_console_view::thread_lines_for_selection(&state, thread_area.width as usize);
+        let visible_start = state.agents.console_scroll;
+        let visible_end = visible_start.saturating_add(thread_area.height as usize);
+        let visible_prompt_rows = lines
+            .iter()
+            .enumerate()
+            .filter(|(idx, line)| {
+                *idx >= visible_start && *idx < visible_end && line.contains("user-prompt-")
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            visible_prompt_rows.len() >= 2,
+            "need at least two visible prompt rows after scroll"
+        );
+        let (start_abs_row, start_line) =
+            *visible_prompt_rows.last().expect("last visible prompt row");
+        let (end_abs_row, end_line) = *visible_prompt_rows
+            .first()
+            .expect("first visible prompt row");
+        let start_row_rel = start_abs_row.saturating_sub(visible_start);
+        let end_row_rel = end_abs_row.saturating_sub(visible_start);
+        let start_col = start_line
+            .find("user-prompt-")
+            .map(|byte| start_line[..byte].chars().count() + "user-prompt-".chars().count())
+            .expect("start prompt marker");
+        let end_payload_start =
+            user_bubble_payload_start_col(end_line).expect("payload start in end prompt row");
+        let end_col = end_payload_start.saturating_sub(1);
+
+        let down = MouseEvent {
+            kind: MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            column: thread_area.x.saturating_add(start_col as u16),
+            row: thread_area.y.saturating_add(start_row_rel as u16),
+            modifiers: KeyModifiers::NONE,
+        };
+        let drag = MouseEvent {
+            kind: MouseEventKind::Drag(crossterm::event::MouseButton::Left),
+            column: thread_area.x.saturating_add(end_col as u16),
+            row: thread_area.y.saturating_add(end_row_rel as u16),
+            modifiers: KeyModifiers::NONE,
+        };
+        assert!(handle_mouse_down(
+            down,
+            screen,
+            &mut state,
+            &mut input_state,
+            &mut clipboard,
+            &theme
+        ));
+        assert!(handle_mouse_drag(
+            drag,
+            screen,
+            &mut state,
+            &mut input_state,
+            &mut clipboard,
+            &theme
+        ));
+        let yank = state.yank.clone().unwrap_or_default();
+        let hits = yank.matches("user-prompt-").count();
+        assert!(
+            hits >= 2,
+            "expected >=2 prompt hits in yank after scrolled reverse drag, got {hits}: {yank:?}"
+        );
+    }
+
+    #[test]
+    fn agent_console_mouse_drag_copies_selected_chat_text() {
+        let mut state = state_for_test();
+        state.agents.messages.push(AgentMessage {
+            at: "10:00:00".into(),
+            channel: AgentChannel::Agent,
+            agent_id: Some("planner".into()),
+            mission_id: None,
+            text: "selection copy works".into(),
+        });
+        let mut input_state = InputState::new();
+        let mut clipboard = None;
+        let theme = Theme::default();
+        let screen = ratatui::layout::Rect {
+            x: 0,
+            y: 0,
+            width: 160,
+            height: 48,
+        };
+        let layout = layout::split(screen);
+        let text_area = agent_console_view::thread_text_area(layout.notes, &state)
+            .expect("thread area should be available");
+        let down = MouseEvent {
+            kind: MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            column: text_area.x,
+            row: text_area.y,
+            modifiers: KeyModifiers::NONE,
+        };
+        assert!(handle_mouse_down(
+            down,
+            screen,
+            &mut state,
+            &mut input_state,
+            &mut clipboard,
+            &theme
+        ));
+        let drag = MouseEvent {
+            kind: MouseEventKind::Drag(crossterm::event::MouseButton::Left),
+            column: text_area.x.saturating_add(24),
+            row: text_area.y,
+            modifiers: KeyModifiers::NONE,
+        };
+        assert!(handle_mouse_drag(
+            drag,
+            screen,
+            &mut state,
+            &mut input_state,
+            &mut clipboard,
+            &theme
+        ));
+        assert_eq!(state.focus, PaneId::Notes);
+        assert!(matches!(
+            state.ui_selection.map(|s| s.pane),
+            Some(UiSelectionPane::AgentConsole)
+        ));
+        assert!(state
+            .yank
+            .as_deref()
+            .unwrap_or_default()
+            .contains("10:00:00"));
+    }
+
+    #[test]
+    fn esc_in_agent_chat_clears_thread_selection_before_chat_input() {
+        let mut state = state_for_test();
+        state.focus = PaneId::Notes;
+        state.ui_selection = Some(nit_core::UiSelection {
+            pane: UiSelectionPane::AgentConsole,
+            start_line: 0,
+            start_col: 0,
+            end_line: 0,
+            end_col: 1,
+        });
+        state.agents.chat_input = "draft message".into();
+        state.agents.chat_input_cursor = state.agents.chat_input.chars().count();
+        let mut vitals = VitalsState::default();
+
+        assert!(handle_agent_station_key(
+            KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+            &mut state,
+            &mut vitals
+        ));
+        assert!(state.ui_selection.is_none());
+        assert_eq!(state.agents.chat_input, "draft message");
+    }
+
+    #[test]
+    fn esc_in_agent_chat_does_not_clear_chat_input_when_no_selection() {
+        let mut state = state_for_test();
+        state.focus = PaneId::Notes;
+        state.ui_selection = None;
+        state.agents.chat_input = "draft message".into();
+        state.agents.chat_input_cursor = state.agents.chat_input.chars().count();
+        let mut vitals = VitalsState::default();
+
+        assert!(!handle_agent_station_key(
+            KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+            &mut state,
+            &mut vitals
+        ));
+        assert!(state.ui_selection.is_none());
+        assert_eq!(state.agents.chat_input, "draft message");
+    }
+
+    #[test]
+    fn agent_console_selection_strips_user_bubble_edges_from_clipboard() {
+        let mut state = state_for_test();
+        state.agents.selected_mission = None;
+        state.agents.selected_agent = None;
+        state.agents.console_scroll = 0;
+        state.agents.messages.clear();
+        state.agents.messages.push(AgentMessage {
+            at: "10:00:00".into(),
+            channel: AgentChannel::Agent,
+            agent_id: None,
+            mission_id: None,
+            text: "hello".into(),
+        });
+        let screen = ratatui::layout::Rect {
+            x: 0,
+            y: 0,
+            width: 120,
+            height: 36,
+        };
+        let layout = layout::split(screen);
+        let thread_area =
+            agent_console_view::thread_text_area(layout.notes, &state).expect("thread area");
+        let lines =
+            agent_console_view::thread_lines_for_selection(&state, thread_area.width as usize);
+        let (line_idx, line) = lines
+            .iter()
+            .enumerate()
+            .find(|(_, line)| line.contains("hello"))
+            .expect("hello bubble line");
+        let line_len = line.chars().count();
+        let selection = UiSelection {
+            pane: UiSelectionPane::AgentConsole,
+            start_line: line_idx,
+            start_col: 0,
+            end_line: line_idx,
+            end_col: line_len,
+        };
+        let text = selection_text_agent_console(&lines, selection);
+        assert_eq!(text, "hello");
+    }
+
+    #[test]
+    fn agent_console_selection_does_not_strip_markdown_table_pipes_in_agent_output() {
+        let mut state = state_for_test();
+        state.agents.selected_mission = None;
+        state.agents.selected_agent = None;
+        state.agents.console_scroll = 0;
+        state.agents.messages.clear();
+        state.agents.agents.push(nit_core::AgentLane {
+            id: "coder".into(),
+            role: "Coder".into(),
+            lane: "Lane B".into(),
+            status: AgentStatus::Running,
+            heartbeat_age_secs: 1,
+            queue_len: 1,
+            current_mission: None,
+            last_message: "active".into(),
+        });
+        state.agents.messages.push(AgentMessage {
+            at: "10:00:00".into(),
+            channel: AgentChannel::Agent,
+            agent_id: Some("coder".into()),
+            mission_id: None,
+            text: "intro\n| table row |".into(),
+        });
+
+        let screen = ratatui::layout::Rect {
+            x: 0,
+            y: 0,
+            width: 140,
+            height: 42,
+        };
+        let layout = layout::split(screen);
+        let thread_area =
+            agent_console_view::thread_text_area(layout.notes, &state).expect("thread area");
+        let lines =
+            agent_console_view::thread_lines_for_selection(&state, thread_area.width as usize);
+        let (line_idx, line) = lines
+            .iter()
+            .enumerate()
+            .find(|(_, line)| line.contains("| table row |"))
+            .expect("table row line");
+        let line_len = line.chars().count();
+        let selection = UiSelection {
+            pane: UiSelectionPane::AgentConsole,
+            start_line: line_idx,
+            start_col: 0,
+            end_line: line_idx,
+            end_col: line_len,
+        };
+        let text = selection_text_agent_console(&lines, selection);
+        assert!(
+            text.contains("| table row |"),
+            "unexpected stripped text: {text:?}"
+        );
+        assert_eq!(text, line.as_str());
+    }
+
+    #[test]
+    fn scratchpad_in_agent_ops_accepts_insert_input() {
+        let mut state = state_for_test();
+        state.focus = PaneId::JobOutput;
+        state.agents.dock_tab = AgentOpsTab::Scratchpad;
+        state.mode = Mode::Insert;
+        let mut input = InputState::new();
+        let mut vitals = VitalsState::default();
+
+        // Scratchpad editing should flow through the normal action keymap.
+        assert!(!handle_agent_station_key(
+            KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE),
+            &mut state,
+            &mut vitals
+        ));
+        let action = map_key_to_action(
+            KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE),
+            &state,
+            &mut input,
+        );
+        assert_eq!(action, Some(Action::InsertChar('x')));
+        let _ = apply_action(&mut state, Action::InsertChar('x'));
+        assert!(state.notes_buffer().content_as_string().contains('x'));
+    }
+
+    #[test]
+    fn scratchpad_tab_cycles_ops_tabs_without_escaping_insert_mode() {
+        let mut state = state_for_test();
+        state.focus = PaneId::JobOutput;
+        state.agents.dock_tab = AgentOpsTab::Scratchpad;
+        state.mode = Mode::Insert;
+        let mut vitals = VitalsState::default();
+
+        assert!(handle_agent_station_key(
+            KeyEvent::new(KeyCode::Tab, KeyModifiers::empty()),
+            &mut state,
+            &mut vitals
+        ));
+        assert_eq!(state.agents.dock_tab, AgentOpsTab::Roster);
+        assert_eq!(state.mode, Mode::Normal);
+    }
+
+    #[test]
+    fn agent_ops_left_right_arrows_switch_tabs() {
+        let mut state = state_for_test();
+        state.focus = PaneId::JobOutput;
+        state.agents.dock_tab = AgentOpsTab::Roster;
+        let mut vitals = VitalsState::default();
+
+        assert!(handle_agent_station_key(
+            KeyEvent::new(KeyCode::Right, KeyModifiers::empty()),
+            &mut state,
+            &mut vitals
+        ));
+        assert_eq!(state.agents.dock_tab, AgentOpsTab::Missions);
+
+        assert!(handle_agent_station_key(
+            KeyEvent::new(KeyCode::Left, KeyModifiers::empty()),
+            &mut state,
+            &mut vitals
+        ));
+        assert_eq!(state.agents.dock_tab, AgentOpsTab::Roster);
     }
 
     #[test]

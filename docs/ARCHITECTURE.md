@@ -25,7 +25,7 @@ The app redraws only when state changes or the terminal resizes.
 ## State Model (nit-core)
 
 - Workspace root (PathBuf)
-- Buffers (main editor + notes) stored in rope-backed `Buffer`
+- Buffers (main editor + scratchpad) stored in rope-backed `Buffer`
 - Mode (Insert/Normal)
 - Focused pane
 - Logs ring buffer and job progress/paused flag
@@ -34,9 +34,9 @@ The app redraws only when state changes or the terminal resizes.
 - Metrics: last render time, frame count, last action
 - Optional prompt (e.g., confirm quit)
 
-## Text Encoding (Editor + Notes)
+## Text Encoding (Editor + Scratchpad)
 
-Both the editor and notes buffers are **UTF-8 only**:
+Both the editor and scratchpad buffers are **UTF-8 only**:
 
 - Files are loaded with `read_to_string` (UTF-8 decode) and stored in `String`/`ropey::Rope`.
 - Saves write `String` bytes back out as UTF-8.
@@ -49,7 +49,7 @@ rendering and text‑measurement consistent, and avoids lossy conversions.
 ## Layout (nit-tui)
 
 - Top bar with title, path, mode, encoding, ln/col.
-- Main grid: left (Notes + Job Output), center (Editor), right (Visualizer + Gate Monitor).
+- Main grid: left (Agent Chat + Agent Ops), center (Editor), right (Visualizer + Gate Monitor).
 - Bottom bar with key hints; overlay for help and prompts.
 
 ## Lab Dispatch (Active Lab)
@@ -151,7 +151,7 @@ semantic tokens (LSP) can layer on top of syntactic tokens without rewriting UI 
 
 ## Visualizer (Game of Life)
 
-The Visualizer pane runs a Conway’s Game of Life simulation seeded from visible editor/notes
+The Visualizer pane runs a Conway’s Game of Life simulation seeded from visible editor/scratchpad
 text. The TUI drives a lightweight tick loop for simulation, while heavier work (rule search
 and snapshot I/O) runs in a background worker thread.
 

@@ -18,8 +18,8 @@ impl PaneId {
 
     pub fn title(self) -> &'static str {
         match self {
-            PaneId::Notes => "NOTES",
-            PaneId::JobOutput => "JOB OUTPUT",
+            PaneId::Notes => "AGENT CHAT",
+            PaneId::JobOutput => "AGENT OPS",
             PaneId::Editor => "EDITOR",
             PaneId::Visualizer => "VISUALIZER",
             PaneId::GateMonitor => "GATE MONITOR",

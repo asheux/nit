@@ -43,11 +43,14 @@ pub use seed::{
     SeedSymmetry,
 };
 pub use state::{
-    apply_action, build_family_run_override_for_request, AppState, DirEntryModel, FileTreeKind,
-    FileTreeRow, FileTreeState, GamesAnalysisRequest, GamesAnalysisState, GamesCaSimState,
-    GamesConfigPreview, GamesFamilyRunRequest, GamesReplayRequest, GamesReplayState,
-    GamesRunBrowserState, GamesRunEntry, GamesRunOverride, GamesState, GamesStatus,
-    GamesStrategyInspectState, GolRenderMode, JobState, LogBuffer, Metrics, SyntaxDebugInfo,
-    UiSelection, UiSelectionPane, VisualizerMode, VisualizerRuleEntry, VisualizerState, YankKind,
+    apply_action, build_family_run_override_for_request, AgentAlert, AgentAlertSeverity,
+    AgentChannel, AgentConsoleTab, AgentDiagnosticEvent, AgentLane, AgentMessage, AgentOpsTab,
+    AgentStatus, AgentsState, AppState, DirEntryModel, EvidenceItem, FileTreeKind, FileTreeRow,
+    FileTreeState, GamesAnalysisRequest, GamesAnalysisState, GamesCaSimState, GamesConfigPreview,
+    GamesFamilyRunRequest, GamesReplayRequest, GamesReplayState, GamesRunBrowserState,
+    GamesRunEntry, GamesRunOverride, GamesState, GamesStatus, GamesStrategyInspectState,
+    GolRenderMode, JobState, LogBuffer, McpConnectionState, McpStatus, Metrics, MissionPhase,
+    MissionRecord, PatchProposal, PatchStatus, SyntaxDebugInfo, UiSelection, UiSelectionPane,
+    VisualizerMode, VisualizerRuleEntry, VisualizerState, YankKind,
 };
 pub use viewport::Viewport;

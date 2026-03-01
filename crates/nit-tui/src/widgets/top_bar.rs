@@ -11,7 +11,7 @@ use ratatui::{
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::theme::Theme;
-use crate::vitals::{sparkline_from_samples, LabCriticality, LabVitalsSnapshot};
+use crate::vitals::{LabCriticality, LabVitalsSnapshot};
 
 pub fn render(
     frame: &mut Frame,
@@ -189,7 +189,7 @@ fn build_vitals_spans(
             .saturating_sub(prefix_width + suffix_width)
             .min(max_ecg_width)
             .max(min_ecg);
-        let ecg = severity_scaled_waveform(vitals, ecg_width);
+        let ecg = vitals.severity_scaled_waveform(ecg_width);
         let mut spans = vec![
             Span::styled("LAB ", label_style),
             Span::styled(level.clone(), level_style),
@@ -268,27 +268,6 @@ fn criticality_style(level: LabCriticality, theme: &Theme) -> Style {
         LabCriticality::Hot => theme.status_hot_style(),
         LabCriticality::Crit => theme.status_crit_style(),
     }
-}
-
-fn severity_scaled_waveform(vitals: &LabVitalsSnapshot, width: usize) -> String {
-    let scaled = severity_scaled_samples(&vitals.ecg_samples, vitals.criticality);
-    sparkline_from_samples(&scaled, width)
-}
-
-fn severity_scaled_samples(samples: &[u64], level: LabCriticality) -> Vec<u64> {
-    let (floor, scale) = match level {
-        LabCriticality::Idle | LabCriticality::Ok => (0u64, 1.0f64),
-        LabCriticality::Warn => (16u64, 1.15f64),
-        LabCriticality::Hot => (30u64, 1.35f64),
-        LabCriticality::Crit => (45u64, 1.60f64),
-    };
-    samples
-        .iter()
-        .map(|sample| {
-            let amplified = ((*sample as f64) * scale).round() as u64;
-            amplified.max(floor).min(100)
-        })
-        .collect()
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -373,7 +352,8 @@ fn is_high_priority_status(status_text: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_status_label, severity_scaled_samples, status_style};
+    use super::{build_status_label, criticality_style, status_style};
+    use crate::vitals::severity_scaled_samples;
     use crate::vitals::LabCriticality;
     use crate::Theme;
 
@@ -431,5 +411,21 @@ mod tests {
         assert_ne!(style.fg, Some(theme.title));
         assert_ne!(style.fg, Some(theme.title_focused));
         assert_eq!(style.fg, Some(theme.foreground));
+    }
+
+    #[test]
+    fn criticality_styles_are_visually_distinct() {
+        let theme = Theme::default();
+        let ok = criticality_style(LabCriticality::Ok, &theme);
+        let warn = criticality_style(LabCriticality::Warn, &theme);
+        let hot = criticality_style(LabCriticality::Hot, &theme);
+        let crit = criticality_style(LabCriticality::Crit, &theme);
+
+        assert_ne!(ok, warn);
+        assert_ne!(warn, hot);
+        assert_ne!(hot, crit);
+        assert_eq!(warn.fg, Some(theme.warning));
+        assert_eq!(hot.fg, Some(theme.accent));
+        assert_eq!(crit.bg, Some(theme.error));
     }
 }

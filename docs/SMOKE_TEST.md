@@ -110,7 +110,7 @@ It's meant for quick confidence after changes to UI, commands, or engine wiring.
   - Expect: popup visibility toggles without stopping the sim.
 - Reseed from code:
   - In popup: `Ctrl+R`
-  - Expect: seed derived from current editor/notes content; sim restarts on new seed.
+  - Expect: seed derived from current editor/scratchpad content; sim restarts on new seed.
 - Rule picker:
   - In popup: `F2` or `Ctrl+P`
   - Expect: rule list + custom input; selecting updates active rule.

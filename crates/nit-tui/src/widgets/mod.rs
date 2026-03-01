@@ -1,3 +1,5 @@
+pub mod agent_console_view;
+pub mod agent_ops_view;
 pub mod bottom_bar;
 pub mod editor_view;
 pub mod file_tree_view;

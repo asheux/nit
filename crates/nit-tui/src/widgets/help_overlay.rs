@@ -53,6 +53,10 @@ pub fn build_lines(theme: &Theme) -> Vec<Line<'static>> {
         Span::raw(" focus panes"),
     ]));
     lines.push(Line::from(vec![
+        Span::styled("Ctrl+1/2/3", Style::default().fg(theme.accent)),
+        Span::raw(" focus Editor / Agent Ops / Agent Chat"),
+    ]));
+    lines.push(Line::from(vec![
         Span::styled("Ctrl+H/J/K/L", Style::default().fg(theme.accent)),
         Span::raw(" focus panes (left/down/up/right; not in Visualizer)"),
     ]));
@@ -298,7 +302,7 @@ pub fn build_lines(theme: &Theme) -> Vec<Line<'static>> {
     ]));
 
     lines.push(Line::from(vec![Span::styled(
-        "EDITOR / NOTES (FOCUSED)",
+        "EDITOR (FOCUSED)",
         heading_style,
     )]));
     lines.push(Line::from(vec![
@@ -383,24 +387,45 @@ pub fn build_lines(theme: &Theme) -> Vec<Line<'static>> {
     ]));
 
     lines.push(Line::from(vec![Span::styled(
-        "JOB OUTPUT (FOCUSED)",
+        "AGENT OPS (FOCUSED)",
         heading_style,
     )]));
     lines.push(Line::from(vec![
-        Span::styled("Ctrl+L", Style::default().fg(theme.accent)),
-        Span::raw(" clear logs"),
+        Span::styled("Tab / Shift+Tab / ←/→", Style::default().fg(theme.accent)),
+        Span::raw(" cycle Ops tabs"),
     ]));
     lines.push(Line::from(vec![
-        Span::styled("Space", Style::default().fg(theme.accent)),
-        Span::raw(" pause/resume job updates"),
+        Span::styled("j/k or ↑/↓", Style::default().fg(theme.accent)),
+        Span::raw(" move selection"),
     ]));
     lines.push(Line::from(vec![
-        Span::styled("Ctrl+Space", Style::default().fg(theme.accent)),
-        Span::raw(" pause/resume job updates"),
+        Span::styled("Enter", Style::default().fg(theme.accent)),
+        Span::raw(" focus Agent Chat with current context"),
     ]));
     lines.push(Line::from(vec![
-        Span::styled("F6", Style::default().fg(theme.accent)),
-        Span::raw(" pause/resume job updates"),
+        Span::styled("n", Style::default().fg(theme.accent)),
+        Span::raw(" create new mission (mock runner)"),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("r / s / x", Style::default().fg(theme.accent)),
+        Span::raw(" MCP reconnect / start / stop (MCP tab)"),
+    ]));
+
+    lines.push(Line::from(vec![Span::styled(
+        "AGENT CHAT (FOCUSED)",
+        heading_style,
+    )]));
+    lines.push(Line::from(vec![
+        Span::styled("Enter / Esc", Style::default().fg(theme.accent)),
+        Span::raw(" send message / clear input (@all <msg> broadcasts)"),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("←/→ / Home/End", Style::default().fg(theme.accent)),
+        Span::raw(" move chat input cursor"),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("j/k or ↑/↓", Style::default().fg(theme.accent)),
+        Span::raw(" scroll chat thread"),
     ]));
 
     lines.push(Line::from(vec![Span::styled(

@@ -7,6 +7,7 @@
 - Ctrl+P: Fuzzy file search popup
 - Ctrl+F: Content search popup
 - Tab / Shift+Tab: Cycle pane focus
+- Ctrl+1/2/3: Focus Editor / Agent Ops / Agent Chat
 - Ctrl+H/J/K/L: Focus panes (vim/tmux style: left/down/up/right)
 - F1 / ?: Toggle help overlay
 - Ctrl+Enter: Run Petri Dish simulation popup (active app)
@@ -40,7 +41,7 @@
 - F3 / Ctrl+G: Toggle ignored files
 - F5 / Ctrl+R: Refresh (re-index / rerun)
 
-## Editor & Notes (focused)
+## Editor (focused)
 - Arrow keys / PageUp / PageDown / Home / End: Move cursor/scroll
 - H/J/K/L (Normal mode): Move cursor
 - I (Normal mode): Enter Insert mode
@@ -69,10 +70,19 @@
 - Backspace / Delete: Delete
 - Esc: Switch to Normal mode
 
-## Job Output
-- Ctrl+L: Clear logs
-- Space: Pause/resume (when Job Output focused)
-- Ctrl+Space / F6: Pause/resume job output (global)
+## Agent Ops
+- Tab / Shift+Tab / Left/Right: Cycle Ops tabs (Roster/Missions/MCP/Alerts/Diagnostics/Scratchpad)
+- j/k or Up/Down: Move selection
+- Enter: Focus Agent Chat with selected context
+- n: New mission (mock runner in MVP)
+- r / s / x: MCP reconnect / start / stop (MCP tab)
+- Ctrl+Space / F6: Pause/resume active Petri/tournament runtime (global)
+
+## Agent Chat
+- Type message, Enter to send, Esc or Ctrl+C to clear input (`@all <msg>` broadcasts)
+- Left/Right/Home/End: Move input cursor
+- Up/Down: Move input cursor between lines
+- Ctrl+Up/Ctrl+Down: Scroll chat thread
 
 ## Visualizer (GoL)
 - Ctrl+E: Cycle seed encoder

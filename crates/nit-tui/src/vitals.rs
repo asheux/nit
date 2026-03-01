@@ -188,6 +188,11 @@ impl LabVitalsSnapshot {
     pub fn waveform(&self, width: usize) -> String {
         sparkline_from_samples(&self.ecg_samples, width)
     }
+
+    pub fn severity_scaled_waveform(&self, width: usize) -> String {
+        let scaled = severity_scaled_samples(&self.ecg_samples, self.criticality);
+        sparkline_from_samples(&scaled, width)
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -338,6 +343,22 @@ impl VitalsState {
         }
         self.ecg_samples.push_back(sample.min(100));
     }
+}
+
+pub(crate) fn severity_scaled_samples(samples: &[u64], level: LabCriticality) -> Vec<u64> {
+    let (floor, scale) = match level {
+        LabCriticality::Idle | LabCriticality::Ok => (0u64, 1.0f64),
+        LabCriticality::Warn => (16u64, 1.15f64),
+        LabCriticality::Hot => (30u64, 1.35f64),
+        LabCriticality::Crit => (45u64, 1.60f64),
+    };
+    samples
+        .iter()
+        .map(|sample| {
+            let amplified = ((*sample as f64) * scale).round() as u64;
+            amplified.max(floor).min(100)
+        })
+        .collect()
 }
 
 pub fn sparkline_from_samples(samples: &[u64], width: usize) -> String {

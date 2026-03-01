@@ -265,17 +265,22 @@ impl Theme {
     }
 
     pub fn status_warn_style(&self) -> Style {
-        Style::default().fg(self.title).add_modifier(Modifier::BOLD)
+        Style::default()
+            .fg(self.warning)
+            .add_modifier(Modifier::BOLD)
     }
 
     pub fn status_hot_style(&self) -> Style {
         Style::default()
-            .fg(self.border_focused)
-            .add_modifier(Modifier::BOLD)
+            .fg(self.accent)
+            .add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
     }
 
     pub fn status_crit_style(&self) -> Style {
-        Style::default().fg(self.error).add_modifier(Modifier::BOLD)
+        Style::default()
+            .fg(self.background)
+            .bg(self.error)
+            .add_modifier(Modifier::BOLD)
     }
 }
 

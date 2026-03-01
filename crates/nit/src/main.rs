@@ -344,6 +344,13 @@ fn main() -> anyhow::Result<()> {
     install_panic_hook();
 
     let mut state = nit_core::AppState::new(workspace_root, editor, notes);
+    state.agents = nit_core::AgentsState::default_with_mocks();
+    if let Some(path) = export_legacy_notes_snapshot(&state.workspace_root, state.notes_buffer()) {
+        state.agents.pending_legacy_notes_alert = Some(format!(
+            "Legacy Notes were preserved in {} and are available in Agent Ops > Scratchpad.",
+            path.display()
+        ));
+    }
     state.app_kind = app_kind;
     let seed = stable_hash_bytes(state.editor_buffer().content_as_string().as_bytes());
     state.visualizer.seed = seed;
@@ -1862,6 +1869,25 @@ fn notes_path_for_workspace(workspace_root: &Path) -> Option<PathBuf> {
     let hash = stable_hash_bytes(key.as_bytes());
     let filename = format!("{:016x}.md", hash);
     Some(notes_dir.join(filename))
+}
+
+fn export_legacy_notes_snapshot(workspace_root: &Path, buffer: &Buffer) -> Option<PathBuf> {
+    let content = buffer.content_as_string();
+    if content.trim().is_empty() {
+        return None;
+    }
+    let path = workspace_root.join(".nit").join("legacy_notes.md");
+    if path.exists() {
+        return Some(path);
+    }
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    if fs::write(&path, content).is_ok() {
+        Some(path)
+    } else {
+        None
+    }
 }
 
 fn init_tracing(tx: mpsc::Sender<String>, log_path: Option<PathBuf>) -> anyhow::Result<()> {

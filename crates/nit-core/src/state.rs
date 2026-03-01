@@ -194,6 +194,7 @@ pub struct GamesConfigPreview {
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum UiSelectionPane {
     JobOutput,
+    AgentConsole,
     VisualizerMain,
     VisualizerSide,
     GateMonitor,
@@ -217,6 +218,493 @@ pub struct UiSelection {
     pub start_col: usize,
     pub end_line: usize,
     pub end_col: usize,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum AgentOpsTab {
+    Roster,
+    Missions,
+    Mcp,
+    Alerts,
+    Patch,
+    Evidence,
+    Diagnostics,
+    Scratchpad,
+}
+
+impl AgentOpsTab {
+    pub fn label(self) -> &'static str {
+        match self {
+            AgentOpsTab::Roster => "ROSTER",
+            AgentOpsTab::Missions => "MISSIONS",
+            AgentOpsTab::Mcp => "MCP",
+            AgentOpsTab::Alerts => "ALERTS",
+            AgentOpsTab::Patch => "PATCH",
+            AgentOpsTab::Evidence => "EVIDENCE",
+            AgentOpsTab::Diagnostics => "DIAGNOSTICS",
+            AgentOpsTab::Scratchpad => "SCRATCHPAD",
+        }
+    }
+
+    pub fn next(self) -> Self {
+        match self {
+            AgentOpsTab::Roster => AgentOpsTab::Missions,
+            AgentOpsTab::Missions => AgentOpsTab::Mcp,
+            AgentOpsTab::Mcp => AgentOpsTab::Alerts,
+            AgentOpsTab::Alerts => AgentOpsTab::Diagnostics,
+            // Legacy/hidden tabs: skip forward into Diagnostics.
+            AgentOpsTab::Patch | AgentOpsTab::Evidence => AgentOpsTab::Diagnostics,
+            AgentOpsTab::Diagnostics => AgentOpsTab::Scratchpad,
+            AgentOpsTab::Scratchpad => AgentOpsTab::Roster,
+        }
+    }
+
+    pub fn prev(self) -> Self {
+        match self {
+            AgentOpsTab::Roster => AgentOpsTab::Scratchpad,
+            AgentOpsTab::Missions => AgentOpsTab::Roster,
+            AgentOpsTab::Mcp => AgentOpsTab::Missions,
+            AgentOpsTab::Alerts => AgentOpsTab::Mcp,
+            // Legacy/hidden tabs: skip backward into Alerts.
+            AgentOpsTab::Patch | AgentOpsTab::Evidence => AgentOpsTab::Alerts,
+            AgentOpsTab::Diagnostics => AgentOpsTab::Alerts,
+            AgentOpsTab::Scratchpad => AgentOpsTab::Diagnostics,
+        }
+    }
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum AgentConsoleTab {
+    Thread,
+    Patch,
+    Evidence,
+    Diagnostics,
+    Scratchpad,
+}
+
+impl AgentConsoleTab {
+    pub fn label(self) -> &'static str {
+        match self {
+            AgentConsoleTab::Thread => "THREAD",
+            AgentConsoleTab::Patch => "PATCH",
+            AgentConsoleTab::Evidence => "EVIDENCE",
+            AgentConsoleTab::Diagnostics => "DIAGNOSTICS",
+            AgentConsoleTab::Scratchpad => "SCRATCHPAD",
+        }
+    }
+
+    pub fn next(self) -> Self {
+        match self {
+            AgentConsoleTab::Thread => AgentConsoleTab::Patch,
+            AgentConsoleTab::Patch => AgentConsoleTab::Evidence,
+            AgentConsoleTab::Evidence => AgentConsoleTab::Diagnostics,
+            AgentConsoleTab::Diagnostics => AgentConsoleTab::Scratchpad,
+            AgentConsoleTab::Scratchpad => AgentConsoleTab::Thread,
+        }
+    }
+
+    pub fn prev(self) -> Self {
+        match self {
+            AgentConsoleTab::Thread => AgentConsoleTab::Scratchpad,
+            AgentConsoleTab::Patch => AgentConsoleTab::Thread,
+            AgentConsoleTab::Evidence => AgentConsoleTab::Patch,
+            AgentConsoleTab::Diagnostics => AgentConsoleTab::Evidence,
+            AgentConsoleTab::Scratchpad => AgentConsoleTab::Diagnostics,
+        }
+    }
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum AgentStatus {
+    Idle,
+    Running,
+    Waiting,
+    Error,
+}
+
+impl AgentStatus {
+    pub fn label(self) -> &'static str {
+        match self {
+            AgentStatus::Idle => "IDLE",
+            AgentStatus::Running => "RUNNING",
+            AgentStatus::Waiting => "WAITING",
+            AgentStatus::Error => "ERROR",
+        }
+    }
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum MissionPhase {
+    Plan,
+    Execute,
+    Verify,
+    Report,
+}
+
+impl MissionPhase {
+    pub fn label(self) -> &'static str {
+        match self {
+            MissionPhase::Plan => "PLAN",
+            MissionPhase::Execute => "EXECUTE",
+            MissionPhase::Verify => "VERIFY",
+            MissionPhase::Report => "REPORT",
+        }
+    }
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum McpConnectionState {
+    Disconnected,
+    Connecting,
+    Connected,
+    Error,
+}
+
+impl McpConnectionState {
+    pub fn label(self) -> &'static str {
+        match self {
+            McpConnectionState::Disconnected => "DISCONNECTED",
+            McpConnectionState::Connecting => "CONNECTING",
+            McpConnectionState::Connected => "CONNECTED",
+            McpConnectionState::Error => "ERROR",
+        }
+    }
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum PatchStatus {
+    New,
+    Reviewed,
+    Applied,
+    Rejected,
+}
+
+impl PatchStatus {
+    pub fn label(self) -> &'static str {
+        match self {
+            PatchStatus::New => "NEW",
+            PatchStatus::Reviewed => "REVIEWED",
+            PatchStatus::Applied => "APPLIED",
+            PatchStatus::Rejected => "REJECTED",
+        }
+    }
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum AgentAlertSeverity {
+    Info,
+    Warn,
+    Error,
+}
+
+impl AgentAlertSeverity {
+    pub fn label(self) -> &'static str {
+        match self {
+            AgentAlertSeverity::Info => "INFO",
+            AgentAlertSeverity::Warn => "WARN",
+            AgentAlertSeverity::Error => "ERROR",
+        }
+    }
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum AgentChannel {
+    Agent,
+    Broadcast,
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct AgentLane {
+    pub id: String,
+    pub role: String,
+    pub lane: String,
+    pub status: AgentStatus,
+    pub heartbeat_age_secs: u64,
+    pub queue_len: usize,
+    pub current_mission: Option<String>,
+    pub last_message: String,
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct MissionRecord {
+    pub id: String,
+    pub title: String,
+    pub phase: MissionPhase,
+    pub swarm: bool,
+    pub assigned_agents: Vec<String>,
+    pub status: String,
+    pub updated_at: String,
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct McpStatus {
+    pub state: McpConnectionState,
+    pub endpoint: String,
+    pub latency_ms: Option<u64>,
+    pub last_error: Option<String>,
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct AgentAlert {
+    pub severity: AgentAlertSeverity,
+    pub source: String,
+    pub message: String,
+    pub at: String,
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct AgentMessage {
+    pub at: String,
+    pub channel: AgentChannel,
+    pub agent_id: Option<String>,
+    pub mission_id: Option<String>,
+    pub text: String,
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct PatchProposal {
+    pub id: String,
+    pub mission_id: Option<String>,
+    pub agent_id: String,
+    pub title: String,
+    pub summary: String,
+    pub diff: String,
+    pub status: PatchStatus,
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct EvidenceItem {
+    pub id: String,
+    pub mission_id: Option<String>,
+    pub agent_id: Option<String>,
+    pub title: String,
+    pub detail: String,
+    pub link: Option<String>,
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct AgentDiagnosticEvent {
+    pub severity: AgentAlertSeverity,
+    pub source: String,
+    pub message: String,
+    pub at: String,
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct AgentsState {
+    pub selected_agent: Option<String>,
+    pub selected_mission: Option<String>,
+    pub dock_tab: AgentOpsTab,
+    pub console_tab: AgentConsoleTab,
+    pub chat_input: String,
+    #[serde(default)]
+    pub chat_input_cursor: usize,
+    #[serde(skip, default = "chat_input_scroll_default")]
+    pub chat_input_scroll: usize,
+    pub chat_channel: AgentChannel,
+    pub agents: Vec<AgentLane>,
+    pub missions: Vec<MissionRecord>,
+    pub patches: Vec<PatchProposal>,
+    pub messages: Vec<AgentMessage>,
+    pub evidence: Vec<EvidenceItem>,
+    pub alerts: Vec<AgentAlert>,
+    pub diag_events: Vec<AgentDiagnosticEvent>,
+    pub mcp: McpStatus,
+    pub roster_selected: usize,
+    pub mission_selected: usize,
+    pub alert_selected: usize,
+    pub patch_selected: usize,
+    #[serde(skip)]
+    pub ops_scroll: usize,
+    #[serde(skip)]
+    pub console_scroll: usize,
+    #[serde(skip)]
+    pub event_epoch: u64,
+    #[serde(skip)]
+    pub pending_provenance_mission_ids: Vec<String>,
+    #[serde(skip)]
+    pub pending_legacy_notes_alert: Option<String>,
+}
+
+fn chat_input_scroll_default() -> usize {
+    usize::MAX
+}
+
+impl AgentsState {
+    pub fn default_with_mocks() -> Self {
+        let agents = vec![
+            AgentLane {
+                id: "planner".into(),
+                role: "Planner".into(),
+                lane: "Lane A".into(),
+                status: AgentStatus::Running,
+                heartbeat_age_secs: 1,
+                queue_len: 1,
+                current_mission: Some("mis-001".into()),
+                last_message: "Drafted execution plan".into(),
+            },
+            AgentLane {
+                id: "coder".into(),
+                role: "Coder".into(),
+                lane: "Lane B".into(),
+                status: AgentStatus::Running,
+                heartbeat_age_secs: 2,
+                queue_len: 2,
+                current_mission: Some("mis-001".into()),
+                last_message: "Generated 2 patch proposals".into(),
+            },
+            AgentLane {
+                id: "reviewer".into(),
+                role: "Reviewer".into(),
+                lane: "Lane C".into(),
+                status: AgentStatus::Waiting,
+                heartbeat_age_secs: 5,
+                queue_len: 0,
+                current_mission: Some("mis-001".into()),
+                last_message: "Waiting for patch review".into(),
+            },
+        ];
+        let missions = vec![MissionRecord {
+            id: "mis-001".into(),
+            title: "Agent Station MVP refactor".into(),
+            phase: MissionPhase::Execute,
+            swarm: true,
+            assigned_agents: vec!["planner".into(), "coder".into(), "reviewer".into()],
+            status: "RUNNING".into(),
+            updated_at: "now".into(),
+        }];
+        let patches = vec![
+            PatchProposal {
+                id: "patch-001".into(),
+                mission_id: Some("mis-001".into()),
+                agent_id: "coder".into(),
+                title: "Swap pane widgets".into(),
+                summary: "Replaces Job Output + Notes render paths with Agent Station widgets."
+                    .into(),
+                diff: "diff --git a/crates/nit-tui/src/app.rs b/crates/nit-tui/src/app.rs\n@@ -1,3 +1,3 @@\n- job_output_view::render(...)\n- notes_view::render_notes(...)\n+ agent_ops_view::render(...)\n+ agent_console_view::render(...)\n".into(),
+                status: PatchStatus::New,
+            },
+            PatchProposal {
+                id: "patch-002".into(),
+                mission_id: Some("mis-001".into()),
+                agent_id: "reviewer".into(),
+                title: "Keybinding alignment".into(),
+                summary: "Adds Ctrl+1/2/3 and pane-local tab controls.".into(),
+                diff: "diff --git a/crates/nit-tui/src/app.rs b/crates/nit-tui/src/app.rs\n@@ -1,3 +1,7 @@\n+ Ctrl+1 => Editor\n+ Ctrl+2 => Agent Ops\n+ Ctrl+3 => Agent Console\n".into(),
+                status: PatchStatus::Reviewed,
+            },
+        ];
+        let messages = Vec::new();
+        let evidence = vec![EvidenceItem {
+            id: "ev-001".into(),
+            mission_id: Some("mis-001".into()),
+            agent_id: Some("planner".into()),
+            title: "Architecture notes".into(),
+            detail: "Reused existing pane IDs to keep layout/config compatibility.".into(),
+            link: None,
+        }];
+        let alerts = vec![AgentAlert {
+            severity: AgentAlertSeverity::Info,
+            source: "system".into(),
+            message: "Agent Station initialized with mock backend.".into(),
+            at: "00:00:00".into(),
+        }];
+        let diag_events = vec![AgentDiagnosticEvent {
+            severity: AgentAlertSeverity::Info,
+            source: "ops".into(),
+            message: "Diagnostics now live under Agent Console.".into(),
+            at: "00:00:00".into(),
+        }];
+        Self {
+            selected_agent: agents.first().map(|agent| agent.id.clone()),
+            selected_mission: missions.first().map(|mission| mission.id.clone()),
+            dock_tab: AgentOpsTab::Roster,
+            console_tab: AgentConsoleTab::Thread,
+            chat_input: String::new(),
+            chat_input_cursor: 0,
+            chat_input_scroll: chat_input_scroll_default(),
+            chat_channel: AgentChannel::Agent,
+            agents,
+            missions,
+            patches,
+            messages,
+            evidence,
+            alerts,
+            diag_events,
+            mcp: McpStatus {
+                state: McpConnectionState::Connected,
+                endpoint: "mock://local-agent-bus".into(),
+                latency_ms: Some(6),
+                last_error: None,
+            },
+            roster_selected: 0,
+            mission_selected: 0,
+            alert_selected: 0,
+            patch_selected: 0,
+            ops_scroll: 0,
+            console_scroll: usize::MAX,
+            event_epoch: 0,
+            pending_provenance_mission_ids: vec!["mis-001".into()],
+            pending_legacy_notes_alert: None,
+        }
+    }
+
+    pub fn selected_context_agent(&self) -> Option<&str> {
+        self.selected_agent.as_deref().or_else(|| {
+            self.agents
+                .get(self.roster_selected)
+                .map(|agent| agent.id.as_str())
+        })
+    }
+
+    pub fn selected_context_mission(&self) -> Option<&str> {
+        self.selected_mission.as_deref().or_else(|| {
+            self.missions
+                .get(self.mission_selected)
+                .map(|mission| mission.id.as_str())
+        })
+    }
+
+    pub fn note_event(&mut self) {
+        self.event_epoch = self.event_epoch.wrapping_add(1);
+    }
+}
+
+impl Default for AgentsState {
+    fn default() -> Self {
+        Self {
+            selected_agent: None,
+            selected_mission: None,
+            dock_tab: AgentOpsTab::Roster,
+            console_tab: AgentConsoleTab::Thread,
+            chat_input: String::new(),
+            chat_input_cursor: 0,
+            chat_input_scroll: chat_input_scroll_default(),
+            chat_channel: AgentChannel::Agent,
+            agents: Vec::new(),
+            missions: Vec::new(),
+            patches: Vec::new(),
+            messages: Vec::new(),
+            evidence: Vec::new(),
+            alerts: Vec::new(),
+            diag_events: Vec::new(),
+            mcp: McpStatus {
+                state: McpConnectionState::Disconnected,
+                endpoint: "mock://offline".into(),
+                latency_ms: None,
+                last_error: None,
+            },
+            roster_selected: 0,
+            mission_selected: 0,
+            alert_selected: 0,
+            patch_selected: 0,
+            ops_scroll: 0,
+            console_scroll: usize::MAX,
+            event_epoch: 0,
+            pending_provenance_mission_ids: Vec::new(),
+            pending_legacy_notes_alert: None,
+        }
+    }
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -624,6 +1112,7 @@ pub struct AppState {
     pub buffers: Vec<Buffer>,
     pub active_editor_buffer_id: usize,
     pub notes_buffer_id: usize,
+    pub agents: AgentsState,
     pub mode: Mode,
     pub focus: PaneId,
     pub logs: LogBuffer,
@@ -696,6 +1185,7 @@ impl AppState {
             buffers: vec![editor, notes],
             active_editor_buffer_id: 0,
             notes_buffer_id: 1,
+            agents: AgentsState::default(),
             mode: Mode::Normal,
             focus: PaneId::Editor,
             logs: LogBuffer::new(DEFAULT_LOG_CAPACITY),
@@ -906,6 +1396,9 @@ impl AppState {
         match self.focus {
             PaneId::Editor => Some(self.editor_buffer_mut()),
             PaneId::Notes => Some(self.notes_buffer_mut()),
+            PaneId::JobOutput if self.agents.dock_tab == AgentOpsTab::Scratchpad => {
+                Some(self.notes_buffer_mut())
+            }
             _ => None,
         }
     }
