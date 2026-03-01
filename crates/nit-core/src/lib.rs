@@ -19,7 +19,7 @@ pub mod state;
 pub mod viewport;
 
 pub use actions::Action;
-pub use agent_bus::AgentBusEvent;
+pub use agent_bus::{AgentBusEvent, AgentTokenCount};
 pub use buffer::Buffer;
 pub use buffer::{BufferEdit, BufferPoint};
 pub use config::{
@@ -46,13 +46,14 @@ pub use seed::{
 };
 pub use state::{
     apply_action, build_family_run_override_for_request, AgentAlert, AgentAlertSeverity,
-    AgentChannel, AgentConsoleTab, AgentDiagnosticEvent, AgentLane, AgentMessage, AgentOpsTab,
-    AgentStatus, AgentsState, AppState, DirEntryModel, EvidenceItem, FileTreeKind, FileTreeRow,
-    FileTreeState, GamesAnalysisRequest, GamesAnalysisState, GamesCaSimState, GamesConfigPreview,
-    GamesFamilyRunRequest, GamesReplayRequest, GamesReplayState, GamesRunBrowserState,
-    GamesRunEntry, GamesRunOverride, GamesState, GamesStatus, GamesStrategyInspectState,
-    GolRenderMode, JobState, LogBuffer, McpConnectionState, McpStatus, Metrics, MissionPhase,
-    MissionRecord, PatchProposal, PatchStatus, SyntaxDebugInfo, UiSelection, UiSelectionPane,
-    VisualizerMode, VisualizerRuleEntry, VisualizerState, YankKind,
+    AgentChannel, AgentConsoleRow, AgentConsoleRowKind, AgentConsoleRowsCache,
+    AgentConsoleRowsCacheKey, AgentConsoleTab, AgentDiagnosticEvent, AgentLane, AgentLaneKind,
+    AgentMessage, AgentOpsTab, AgentStatus, AgentsState, AppState, DirEntryModel, EvidenceItem,
+    FileTreeKind, FileTreeRow, FileTreeState, GamesAnalysisRequest, GamesAnalysisState,
+    GamesCaSimState, GamesConfigPreview, GamesFamilyRunRequest, GamesReplayRequest,
+    GamesReplayState, GamesRunBrowserState, GamesRunEntry, GamesRunOverride, GamesState,
+    GamesStatus, GamesStrategyInspectState, GolRenderMode, JobState, LogBuffer, McpConnectionState,
+    McpStatus, Metrics, MissionPhase, MissionRecord, PatchProposal, PatchStatus, SyntaxDebugInfo,
+    UiSelection, UiSelectionPane, VisualizerMode, VisualizerRuleEntry, VisualizerState, YankKind,
 };
 pub use viewport::Viewport;

@@ -1,8 +1,14 @@
-use std::io::Write;
+use std::collections::VecDeque;
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::Arc;
 use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant};
+
+use nit_core::{AgentBusEvent, AgentTokenCount};
 
 #[derive(Clone, Debug)]
 pub enum CodexCommand {
@@ -21,42 +27,9 @@ pub enum CodexCommand {
     Shutdown,
 }
 
-#[derive(Clone, Debug)]
-pub enum CodexEvent {
-    TurnStarted {
-        model: String,
-        mission_id: Option<String>,
-        resume_thread_id: Option<String>,
-    },
-    TurnLog {
-        model: String,
-        message: String,
-    },
-    TurnFailed {
-        model: String,
-        mission_id: Option<String>,
-        thread_id: Option<String>,
-        token_count: Option<CodexTokenCount>,
-        message: String,
-    },
-    TurnCompleted {
-        model: String,
-        mission_id: Option<String>,
-        thread_id: Option<String>,
-        token_count: Option<CodexTokenCount>,
-        message: String,
-    },
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CodexTokenCount {
-    pub total_tokens: u32,
-    pub context_window: u32,
-}
-
 pub struct CodexRunner {
     cmd_tx: Sender<CodexCommand>,
-    pub events: Receiver<CodexEvent>,
+    pub events: Receiver<AgentBusEvent>,
     handle: Option<JoinHandle<()>>,
 }
 
@@ -81,34 +54,74 @@ impl CodexRunner {
 
     pub fn shutdown(&mut self) {
         let _ = self.cmd_tx.send(CodexCommand::Shutdown);
-        if let Some(handle) = self.handle.take() {
-            let _ = handle.join();
-        }
+        let Some(handle) = self.handle.take() else {
+            return;
+        };
+
+        // Ensure quitting the TUI can't hang indefinitely if Codex is stuck. The runner loop
+        // applies a short shutdown deadline; join in a helper thread with a matching timeout.
+        let (done_tx, done_rx) = mpsc::channel();
+        let _ = thread::Builder::new()
+            .name("nit-codex-join".into())
+            .spawn(move || {
+                let _ = handle.join();
+                let _ = done_tx.send(());
+            });
+        let _ = done_rx.recv_timeout(Duration::from_millis(400));
     }
 }
 
-fn runner_loop(cmd_rx: Receiver<CodexCommand>, event_tx: Sender<CodexEvent>) {
+fn runner_loop(cmd_rx: Receiver<CodexCommand>, event_tx: Sender<AgentBusEvent>) {
     let mut seq = 0u64;
+    let mut queue: VecDeque<CodexCommand> = VecDeque::new();
+    let mut active: Option<ActiveTurn> = None;
+    let mut shutting_down = false;
+    let mut shutdown_deadline: Option<Instant> = None;
+
     loop {
-        match cmd_rx.recv() {
-            Ok(CodexCommand::RunTurn {
-                model,
-                cwd,
-                mission_id,
-                resume_thread_id,
-                persist_session,
-                reasoning_effort,
-                prompt,
-            }) => {
-                let _ = event_tx.send(CodexEvent::TurnStarted {
-                    model: model.clone(),
-                    mission_id: mission_id.clone(),
-                    resume_thread_id: resume_thread_id.clone(),
-                });
-                seq = seq.wrapping_add(1);
-                run_turn(
-                    &event_tx,
-                    seq,
+        // Keep this control loop responsive so `Shutdown` can cancel an in-flight Codex process.
+        let cmd = if active.is_none() && queue.is_empty() && !shutting_down {
+            cmd_rx.recv().ok()
+        } else {
+            match cmd_rx.recv_timeout(Duration::from_millis(50)) {
+                Ok(cmd) => Some(cmd),
+                Err(mpsc::RecvTimeoutError::Timeout) => None,
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    shutting_down = true;
+                    shutdown_deadline = Some(Instant::now() + Duration::from_millis(400));
+                    None
+                }
+            }
+        };
+
+        if let Some(cmd) = cmd {
+            match cmd {
+                CodexCommand::RunTurn { .. } if !shutting_down => queue.push_back(cmd),
+                CodexCommand::RunTurn { .. } => {}
+                CodexCommand::Shutdown => {
+                    shutting_down = true;
+                    shutdown_deadline = Some(Instant::now() + Duration::from_millis(400));
+                    queue.clear();
+                    if let Some(active) = active.as_ref() {
+                        active.cancel.store(true, Ordering::Relaxed);
+                    }
+                }
+            }
+        }
+
+        if let Some(turn) = active.as_mut() {
+            match turn.done_rx.try_recv() {
+                Ok(()) | Err(mpsc::TryRecvError::Disconnected) => {
+                    let turn = active.take().expect("active turn");
+                    let _ = turn.handle.join();
+                }
+                Err(mpsc::TryRecvError::Empty) => {}
+            }
+        }
+
+        if active.is_none() && !shutting_down {
+            if let Some(cmd) = queue.pop_front() {
+                if let CodexCommand::RunTurn {
                     model,
                     cwd,
                     mission_id,
@@ -116,15 +129,58 @@ fn runner_loop(cmd_rx: Receiver<CodexCommand>, event_tx: Sender<CodexEvent>) {
                     persist_session,
                     reasoning_effort,
                     prompt,
-                );
+                } = cmd
+                {
+                    let _ = event_tx.send(AgentBusEvent::TurnStarted {
+                        agent_id: model.clone(),
+                        mission_id: mission_id.clone(),
+                        resume_thread_id: resume_thread_id.clone(),
+                    });
+                    seq = seq.wrapping_add(1);
+                    active = Some(spawn_turn_worker(
+                        &event_tx,
+                        seq,
+                        model,
+                        cwd,
+                        mission_id,
+                        resume_thread_id,
+                        persist_session,
+                        reasoning_effort,
+                        prompt,
+                    ));
+                }
             }
-            Ok(CodexCommand::Shutdown) | Err(_) => break,
+        }
+
+        if shutting_down {
+            if let Some(active) = active.as_ref() {
+                active.cancel.store(true, Ordering::Relaxed);
+            }
+            if active.is_none() {
+                break;
+            }
+            if let Some(deadline) = shutdown_deadline {
+                if Instant::now() >= deadline {
+                    break;
+                }
+            }
         }
     }
 }
 
-fn run_turn(
-    event_tx: &Sender<CodexEvent>,
+struct ActiveTurn {
+    cancel: Arc<AtomicBool>,
+    done_rx: Receiver<()>,
+    handle: JoinHandle<()>,
+}
+
+struct StdoutCapture {
+    stdout: Vec<u8>,
+    json_errors: Vec<String>,
+}
+
+fn spawn_turn_worker(
+    event_tx: &Sender<AgentBusEvent>,
     seq: u64,
     model: String,
     cwd: PathBuf,
@@ -133,12 +189,57 @@ fn run_turn(
     persist_session: bool,
     reasoning_effort: Option<String>,
     prompt: String,
+) -> ActiveTurn {
+    let cancel = Arc::new(AtomicBool::new(false));
+    let (done_tx, done_rx) = mpsc::channel();
+    let event_tx = event_tx.clone();
+    let cancel_worker = Arc::clone(&cancel);
+    let handle = thread::Builder::new()
+        .name(format!("nit-codex-turn-{seq}"))
+        .spawn(move || {
+            run_turn(
+                &event_tx,
+                seq,
+                model,
+                cwd,
+                mission_id,
+                resume_thread_id,
+                persist_session,
+                reasoning_effort,
+                prompt,
+                cancel_worker,
+            );
+            let _ = done_tx.send(());
+        })
+        .expect("spawn codex turn worker");
+    ActiveTurn {
+        cancel,
+        done_rx,
+        handle,
+    }
+}
+
+fn run_turn(
+    event_tx: &Sender<AgentBusEvent>,
+    seq: u64,
+    model: String,
+    cwd: PathBuf,
+    mission_id: Option<String>,
+    resume_thread_id: Option<String>,
+    persist_session: bool,
+    reasoning_effort: Option<String>,
+    prompt: String,
+    cancel: Arc<AtomicBool>,
 ) {
     let out_file = std::env::temp_dir().join(format!("nit-codex-last-message-{seq}.txt"));
 
     let mut cmd = Command::new("codex");
     if let Some(_thread_id) = resume_thread_id.as_deref() {
-        cmd.arg("exec").arg("resume").arg("--json").arg("-m").arg(&model);
+        cmd.arg("exec")
+            .arg("resume")
+            .arg("--json")
+            .arg("-m")
+            .arg(&model);
     } else {
         cmd.arg("exec").arg("--json").arg("--color").arg("never");
         if !persist_session {
@@ -165,16 +266,16 @@ fn run_turn(
 
     let mut child = match cmd.spawn() {
         Ok(child) => child,
-	        Err(err) => {
-	            let _ = event_tx.send(CodexEvent::TurnFailed {
-	                model,
-	                mission_id,
-	                thread_id: resume_thread_id.clone(),
-	                token_count: None,
-	                message: format!("Failed to spawn codex: {err}"),
-	            });
-	            return;
-	        }
+        Err(err) => {
+            let _ = event_tx.send(AgentBusEvent::TurnFailed {
+                agent_id: model,
+                mission_id,
+                thread_id: resume_thread_id.clone(),
+                token_count: None,
+                message: format!("Failed to spawn codex: {err}"),
+            });
+            return;
+        }
     };
 
     if let Some(mut stdin) = child.stdin.take() {
@@ -182,79 +283,185 @@ fn run_turn(
         let _ = stdin.write_all(b"\n");
     }
 
-    let output = match child.wait_with_output() {
-        Ok(output) => output,
-	        Err(err) => {
-	            let _ = event_tx.send(CodexEvent::TurnFailed {
-	                model,
-	                mission_id,
-	                thread_id: resume_thread_id.clone(),
-	                token_count: None,
-	                message: format!("Codex wait failed: {err}"),
-	            });
-	            let _ = std::fs::remove_file(&out_file);
-	            return;
-	        }
-    };
+    let stdout_handle = child.stdout.take().map(|stdout| {
+        let event_tx = event_tx.clone();
+        let model = model.clone();
+        let mission_id = mission_id.clone();
+        thread::Builder::new()
+            .name(format!("nit-codex-stdout-{seq}"))
+            .spawn(move || {
+                let mut buf = Vec::new();
+                let mut json_errors = Vec::new();
+                let mut last_stage: Option<String> = None;
+                let mut last_stage_sent_at = Instant::now();
+                let mut reader = BufReader::new(stdout);
+                let mut line = String::new();
+                loop {
+                    line.clear();
+                    match reader.read_line(&mut line) {
+                        Ok(0) => break,
+                        Ok(_) => {
+                            buf.extend_from_slice(line.as_bytes());
+                            let raw = line.trim();
+                            if raw.is_empty() {
+                                continue;
+                            }
+                            let Ok(value) = serde_json::from_str::<serde_json::Value>(raw) else {
+                                let _ = event_tx.send(AgentBusEvent::TurnLog {
+                                    agent_id: model.clone(),
+                                    message: raw.to_string(),
+                                });
+                                continue;
+                            };
 
-    // Parse Codex JSONL stdout (best-effort) into diagnostic messages.
-    let mut json_errors: Vec<String> = Vec::new();
-    for raw in String::from_utf8_lossy(&output.stdout).lines() {
-        let raw = raw.trim();
-        if raw.is_empty() {
-            continue;
+                            if let Some(token_count) = token_count_from_value(&value) {
+                                let _ = event_tx.send(AgentBusEvent::TokenCount {
+                                    agent_id: model.clone(),
+                                    mission_id: mission_id.clone(),
+                                    token_count,
+                                });
+                            }
+
+                            let payload = value.get("payload").unwrap_or(&value);
+                            let kind = payload.get("type").and_then(|v| v.as_str());
+                            if let Some(kind) = kind {
+                                // Emit a compact "stage" update so the UI can show progress even
+                                // when Codex doesn't stream intermediate messages.
+                                let stage = if matches!(kind, "item.started" | "item.completed") {
+                                    payload
+                                        .get("item")
+                                        .and_then(|item| item.get("type"))
+                                        .and_then(|v| v.as_str())
+                                        .map(|item_kind| format!("{kind}({item_kind})"))
+                                        .unwrap_or_else(|| kind.to_string())
+                                } else {
+                                    kind.to_string()
+                                };
+                                let is_interesting = kind.starts_with("thread.")
+                                    || kind.starts_with("turn.")
+                                    || kind.starts_with("item.")
+                                    || kind.starts_with("tool.")
+                                    || kind == "token_count"
+                                    || kind == "error";
+                                if is_interesting
+                                    && (last_stage.as_deref() != Some(stage.as_str())
+                                        || last_stage_sent_at.elapsed() >= Duration::from_secs(1))
+                                {
+                                    last_stage = Some(stage.clone());
+                                    last_stage_sent_at = Instant::now();
+                                    let _ = event_tx.send(AgentBusEvent::TurnStage {
+                                        agent_id: model.clone(),
+                                        mission_id: mission_id.clone(),
+                                        stage,
+                                    });
+                                }
+                            }
+                            if kind == Some("error") {
+                                let msg =
+                                    payload.get("message").and_then(|v| v.as_str()).or_else(|| {
+                                        payload
+                                            .get("error")
+                                            .and_then(|err| err.get("message"))
+                                            .and_then(|v| v.as_str())
+                                    });
+                                if let Some(msg) = msg {
+                                    json_errors.push(msg.to_string());
+                                    let _ = event_tx.send(AgentBusEvent::TurnLog {
+                                        agent_id: model.clone(),
+                                        message: msg.to_string(),
+                                    });
+                                }
+                            }
+                        }
+                        Err(_) => break,
+                    }
+                }
+                StdoutCapture {
+                    stdout: buf,
+                    json_errors,
+                }
+            })
+            .expect("spawn codex stdout reader")
+    });
+    let stderr_handle = child.stderr.take().map(|mut stderr| {
+        thread::Builder::new()
+            .name(format!("nit-codex-stderr-{seq}"))
+            .spawn(move || {
+                let mut buf = Vec::new();
+                let _ = stderr.read_to_end(&mut buf);
+                buf
+            })
+            .expect("spawn codex stderr reader")
+    });
+
+    let mut killed = false;
+    let mut last_heartbeat_at = Instant::now();
+    let status = loop {
+        if !killed && last_heartbeat_at.elapsed() >= Duration::from_secs(2) {
+            let _ = event_tx.send(AgentBusEvent::TurnHeartbeat {
+                agent_id: model.clone(),
+                mission_id: mission_id.clone(),
+            });
+            last_heartbeat_at = Instant::now();
         }
-        let Ok(value) = serde_json::from_str::<serde_json::Value>(raw) else {
-            let _ = event_tx.send(CodexEvent::TurnLog {
-                model: model.clone(),
-                message: raw.to_string(),
-            });
-            continue;
-        };
-        let Some(kind) = value.get("type").and_then(|v| v.as_str()) else {
-            continue;
-        };
-        if kind == "error" {
-            let msg = value.get("message").and_then(|v| v.as_str()).or_else(|| {
-                value
-                    .get("error")
-                    .and_then(|err| err.get("message"))?
-                    .as_str()
-            });
-            if let Some(msg) = msg {
-                json_errors.push(msg.to_string());
-                let _ = event_tx.send(CodexEvent::TurnLog {
-                    model: model.clone(),
-                    message: msg.to_string(),
+        if cancel.load(Ordering::Relaxed) && !killed {
+            let _ = child.kill();
+            killed = true;
+        }
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => thread::sleep(Duration::from_millis(50)),
+            Err(err) => {
+                let _ = event_tx.send(AgentBusEvent::TurnFailed {
+                    agent_id: model,
+                    mission_id,
+                    thread_id: resume_thread_id.clone(),
+                    token_count: None,
+                    message: format!("Codex wait failed: {err}"),
                 });
+                let _ = std::fs::remove_file(&out_file);
+                return;
             }
         }
+    };
+
+    let (stdout, json_errors) = match stdout_handle.and_then(|handle| handle.join().ok()) {
+        Some(capture) => (capture.stdout, capture.json_errors),
+        None => (Vec::new(), Vec::new()),
+    };
+    let stderr = stderr_handle
+        .and_then(|handle| handle.join().ok())
+        .unwrap_or_default();
+
+    if killed {
+        let _ = std::fs::remove_file(&out_file);
+        return;
     }
 
     // Stderr can contain plain-text warnings even when `--json` is used.
-    let stderr_text = String::from_utf8_lossy(&output.stderr);
+    let stderr_text = String::from_utf8_lossy(&stderr);
     for line in stderr_text.lines() {
         let line = line.trim();
         if !line.is_empty() {
-            let _ = event_tx.send(CodexEvent::TurnLog {
-                model: model.clone(),
+            let _ = event_tx.send(AgentBusEvent::TurnLog {
+                agent_id: model.clone(),
                 message: line.to_string(),
             });
         }
     }
 
-    if !output.status.success() {
+    if !status.success() {
         let message = if !json_errors.is_empty() {
             json_errors.join(" | ")
         } else if !stderr_text.trim().is_empty() {
             stderr_text.trim().to_string()
         } else {
-            format!("Codex exited with {}", output.status)
+            format!("Codex exited with {status}")
         };
-        let thread_id = extract_thread_id_from_jsonl(&output.stdout);
-        let token_count = extract_token_count_from_jsonl(&output.stdout);
-        let _ = event_tx.send(CodexEvent::TurnFailed {
-            model,
+        let thread_id = extract_thread_id_from_jsonl(&stdout);
+        let token_count = extract_token_count_from_jsonl(&stdout);
+        let _ = event_tx.send(AgentBusEvent::TurnFailed {
+            agent_id: model,
             mission_id,
             thread_id,
             token_count,
@@ -268,10 +475,10 @@ fn run_turn(
     let _ = std::fs::remove_file(&out_file);
     let message = message.trim_end().to_string();
     if message.is_empty() {
-        let thread_id = extract_thread_id_from_jsonl(&output.stdout);
-        let token_count = extract_token_count_from_jsonl(&output.stdout);
-        let _ = event_tx.send(CodexEvent::TurnFailed {
-            model,
+        let thread_id = extract_thread_id_from_jsonl(&stdout);
+        let token_count = extract_token_count_from_jsonl(&stdout);
+        let _ = event_tx.send(AgentBusEvent::TurnFailed {
+            agent_id: model,
             mission_id,
             thread_id,
             token_count,
@@ -280,10 +487,10 @@ fn run_turn(
         return;
     }
 
-    let thread_id = extract_thread_id_from_jsonl(&output.stdout);
-    let token_count = extract_token_count_from_jsonl(&output.stdout);
-    let _ = event_tx.send(CodexEvent::TurnCompleted {
-        model,
+    let thread_id = extract_thread_id_from_jsonl(&stdout);
+    let token_count = extract_token_count_from_jsonl(&stdout);
+    let _ = event_tx.send(AgentBusEvent::TurnCompleted {
+        agent_id: model,
         mission_id,
         thread_id,
         token_count,
@@ -319,11 +526,11 @@ fn extract_thread_id_from_jsonl(stdout: &[u8]) -> Option<String> {
     None
 }
 
-fn extract_token_count_from_jsonl(stdout: &[u8]) -> Option<CodexTokenCount> {
+fn extract_token_count_from_jsonl(stdout: &[u8]) -> Option<AgentTokenCount> {
     // Codex streams "token_count" events that include total token usage + context window.
     // We accept both exec-mode JSONL and session-style wrapped events.
     let text = String::from_utf8_lossy(stdout);
-    let mut last: Option<CodexTokenCount> = None;
+    let mut last: Option<AgentTokenCount> = None;
     for raw in text.lines() {
         let raw = raw.trim();
         if raw.is_empty() {
@@ -333,47 +540,91 @@ fn extract_token_count_from_jsonl(stdout: &[u8]) -> Option<CodexTokenCount> {
             continue;
         };
 
-        let payload = value.get("payload").unwrap_or(&value);
-        let Some(kind) = payload.get("type").and_then(|v| v.as_str()) else {
-            continue;
-        };
-        if kind != "token_count" {
-            continue;
+        if let Some(token_count) = token_count_from_value(&value) {
+            last = Some(token_count);
         }
-        let Some(info) = payload.get("info") else {
-            continue;
-        };
-        let context_window = info
-            .get("model_context_window")
-            .and_then(|v| v.as_u64())
-            .filter(|v| *v > 0)?;
-        let total_tokens = info
-            .get("total_token_usage")
-            .and_then(|u| u.get("total_tokens"))
-            .and_then(|v| v.as_u64())
-            .or_else(|| {
-                info.get("last_token_usage")
-                    .and_then(|u| u.get("total_tokens"))
-                    .and_then(|v| v.as_u64())
-            })?;
-        if context_window > u32::MAX as u64 || total_tokens > u32::MAX as u64 {
-            continue;
-        }
-        last = Some(CodexTokenCount {
-            total_tokens: total_tokens as u32,
-            context_window: context_window as u32,
-        });
     }
     last
 }
 
+fn token_count_from_value(value: &serde_json::Value) -> Option<AgentTokenCount> {
+    let payload = value.get("payload").unwrap_or(value);
+    let Some(kind) = payload.get("type").and_then(|v| v.as_str()) else {
+        return None;
+    };
+    if kind == "token_count" {
+        let Some(info) = payload.get("info") else {
+            return None;
+        };
+        let context_window = extract_context_window(info)?;
+        let total_tokens = extract_total_tokens(info)?;
+        if context_window > u32::MAX as u64 || total_tokens > u32::MAX as u64 {
+            return None;
+        }
+        return Some(AgentTokenCount {
+            total_tokens: total_tokens as u32,
+            context_window: context_window as u32,
+        });
+    }
+
+    // Fallback: some Codex CLI versions only report per-turn token usage at `turn.completed`.
+    // Those payloads often omit the context window size; the UI can stitch that in from the
+    // models cache. We use `context_window=0` to mean "unknown".
+    let Some(usage) = payload.get("usage") else {
+        return None;
+    };
+    let input = usage
+        .get("input_tokens")
+        .or_else(|| usage.get("prompt_tokens"))
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let output = usage
+        .get("output_tokens")
+        .or_else(|| usage.get("completion_tokens"))
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let total = input.saturating_add(output);
+    if total == 0 || total > u32::MAX as u64 {
+        return None;
+    }
+    Some(AgentTokenCount {
+        total_tokens: total as u32,
+        context_window: 0,
+    })
+}
+
+fn extract_context_window(info: &serde_json::Value) -> Option<u64> {
+    info.get("model_context_window")
+        .or_else(|| info.get("context_window"))
+        .or_else(|| info.get("context_window_tokens"))
+        .or_else(|| info.get("model_context_window_tokens"))
+        .and_then(|v| v.as_u64())
+        .filter(|v| *v > 0)
+}
+
+fn extract_total_tokens(info: &serde_json::Value) -> Option<u64> {
+    info.get("total_token_usage")
+        .and_then(|u| u.get("total_tokens"))
+        .and_then(|v| v.as_u64())
+        .or_else(|| {
+            info.get("last_token_usage")
+                .and_then(|u| u.get("total_tokens"))
+                .and_then(|v| v.as_u64())
+        })
+        .or_else(|| info.get("total_tokens").and_then(|v| v.as_u64()))
+        .or_else(|| info.get("used_tokens").and_then(|v| v.as_u64()))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{extract_thread_id_from_jsonl, extract_token_count_from_jsonl, CodexTokenCount};
+    use super::extract_thread_id_from_jsonl;
+    use super::extract_token_count_from_jsonl;
+    use nit_core::AgentTokenCount;
 
     #[test]
     fn extracts_thread_id_from_event_stream() {
-        let jsonl = br#"{"type":"thread.started","thread_id":"019ca7c5-536f-7f81-82a7-7a38fa483cb2"}
+        let jsonl =
+            br#"{"type":"thread.started","thread_id":"019ca7c5-536f-7f81-82a7-7a38fa483cb2"}
 {"type":"turn.started"}
 {"type":"turn.completed"}"#;
         assert_eq!(
@@ -395,9 +646,23 @@ mod tests {
 {"timestamp":"t","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"total_tokens":250},"model_context_window":1000}}}"#;
         assert_eq!(
             extract_token_count_from_jsonl(jsonl),
-            Some(CodexTokenCount {
+            Some(AgentTokenCount {
                 total_tokens: 250,
                 context_window: 1000
+            })
+        );
+    }
+
+    #[test]
+    fn extracts_token_count_from_turn_completed_usage() {
+        let jsonl = br#"{"type":"thread.started","thread_id":"thread-123"}
+{"type":"turn.started"}
+{"type":"turn.completed","usage":{"input_tokens":10916,"cached_input_tokens":9984,"output_tokens":72}}"#;
+        assert_eq!(
+            extract_token_count_from_jsonl(jsonl),
+            Some(AgentTokenCount {
+                total_tokens: 10988,
+                context_window: 0
             })
         );
     }

@@ -2128,6 +2128,7 @@ fn load_agents_from_codex_models_cache() -> anyhow::Result<nit_core::AgentsState
                 .clone()
                 .unwrap_or_else(|| model.slug.clone()),
             lane: "Codex".into(),
+            kind: nit_core::AgentLaneKind::Codex,
             status: nit_core::AgentStatus::Idle,
             heartbeat_age_secs: 0,
             queue_len: 0,
@@ -2162,35 +2163,41 @@ fn pick_codex_reasoning_effort(model: &CodexModelEntry) -> Option<String> {
         .map(|levels| {
             levels
                 .iter()
-                .map(|lvl| lvl.effort.trim().to_string())
+                .map(|lvl| lvl.effort.trim())
                 .filter(|s| !s.is_empty())
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
-    let supported_set: std::collections::HashSet<String> = supported
-        .iter()
-        .cloned()
-        .collect::<std::collections::HashSet<_>>(
-    );
 
     let default = model
         .default_reasoning_level
         .as_deref()
         .unwrap_or("medium")
-        .trim()
-        .to_string();
-    if supported_set.is_empty() {
-        return Some(default);
+        .trim();
+    if supported.is_empty() {
+        return Some(default.to_string());
     }
-    if supported_set.contains(&default) {
-        return Some(default);
+
+    if let Some(found) = supported
+        .iter()
+        .find(|effort| effort.eq_ignore_ascii_case(default))
+    {
+        return Some((*found).to_string());
     }
     for effort in ["medium", "high", "low"] {
-        if supported_set.contains(effort) {
-            return Some(effort.to_string());
+        if let Some(found) = supported
+            .iter()
+            .find(|candidate| candidate.eq_ignore_ascii_case(effort))
+        {
+            return Some((*found).to_string());
         }
     }
-    supported.first().cloned().or_else(|| Some(default))
+
+    supported
+        .first()
+        .copied()
+        .map(str::to_string)
+        .or_else(|| Some(default.to_string()))
 }
 
 fn open_log_file(path: &Path) -> io::Result<std::fs::File> {

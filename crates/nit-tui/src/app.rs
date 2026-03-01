@@ -7,7 +7,7 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use crate::{
-    codex_runner::{CodexCommand, CodexEvent, CodexRunner},
+    codex_runner::{CodexCommand, CodexRunner},
     file_tree,
     file_tree_runner::{FileTreeCommand, FileTreeEvent, FileTreeRunner},
     fuzzy_preview_runner::{PreviewEvent, PreviewModel, PreviewRunner},
@@ -43,8 +43,8 @@ use crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use nit_core::{
-    actions::Action, apply_action, io as core_io, AgentAlert, AgentAlertSeverity, AgentChannel,
-    AgentDiagnosticEvent, AgentMessage, AgentOpsTab, AgentStatus, AppKind, AppState,
+    actions::Action, apply_action, io as core_io, AgentAlert, AgentAlertSeverity, AgentBusEvent,
+    AgentChannel, AgentDiagnosticEvent, AgentMessage, AgentOpsTab, AgentStatus, AppKind, AppState,
     McpConnectionState, MissionPhase, MissionRecord, Mode, PaneId, PatchProposal, PatchStatus,
     Prompt, SearchMode, UiSelection, UiSelectionPane, YankKind,
 };
@@ -830,6 +830,7 @@ fn run_loop(
         // job tick
         if last_job.elapsed() >= JOB_TICK {
             state.tick_job(0.03);
+            tick_agent_turn_liveness(state);
             last_job = Instant::now();
             needs_redraw = true;
         }
@@ -883,7 +884,8 @@ fn run_loop(
 
         // codex runner events
         while let Ok(event) = codex_runner.events.try_recv() {
-            handle_codex_event(state, &mut vitals, event);
+            record_agent_bus_vitals(&mut vitals, &event);
+            event.apply(state);
             needs_redraw = true;
         }
 
@@ -1102,285 +1104,52 @@ fn append_log_to_agent_diagnostics(state: &mut AppState, line: &str) {
     }
 }
 
-fn handle_codex_event(state: &mut AppState, vitals: &mut VitalsState, event: CodexEvent) {
+fn record_agent_bus_vitals(vitals: &mut VitalsState, event: &AgentBusEvent) {
+    let now = Instant::now();
     match event {
-        CodexEvent::TurnStarted {
-            model,
-            mission_id,
-            resume_thread_id,
-        } => {
-            let at = timestamp_label(state);
-            if let Some(agent) = state.agents.agents.iter_mut().find(|a| a.id == model) {
-                agent.status = AgentStatus::Running;
-                agent.queue_len = agent.queue_len.max(1);
-                agent.heartbeat_age_secs = 0;
-                if mission_id.is_some() {
-                    agent.current_mission = mission_id.clone();
-                }
-            }
-            state.agents.mcp.state = McpConnectionState::Connecting;
-            state.agents.mcp.endpoint = if let Some(thread_id) = resume_thread_id.as_deref() {
-                format!(
-                    "codex exec resume {} -m {model}",
-                    shorten_codex_thread_id(thread_id)
-                )
-            } else {
-                format!("codex exec -m {model}")
-            };
-            state.agents.mcp.last_error = None;
-
-            if let Some(mission_id) = mission_id.as_deref() {
-                if let Some(mission) = state
-                    .agents
-                    .missions
-                    .iter_mut()
-                    .find(|mission| mission.id == mission_id)
-                {
-                    mission.status = "RUNNING".into();
-                    mission.updated_at = at;
-                }
-            }
-            state.agents.note_event();
-            vitals.record_agent_event(Instant::now());
-        }
-        CodexEvent::TurnLog { model, message } => {
+        AgentBusEvent::TurnFailed { .. } => vitals.record_diag_event(now, DiagSeverity::Error),
+        AgentBusEvent::TurnLog { message, .. } => {
             let lowered = message.to_ascii_lowercase();
-            let severity = if lowered.contains("error") || lowered.contains("failed") {
-                AgentAlertSeverity::Warn
-            } else {
-                AgentAlertSeverity::Info
-            };
-            state.agents.diag_events.push(AgentDiagnosticEvent {
-                severity,
-                source: "codex".into(),
-                message: format!("[{model}] {message}"),
-                at: timestamp_label(state),
-            });
-            if severity != AgentAlertSeverity::Info {
-                vitals.record_diag_event(Instant::now(), DiagSeverity::Warn);
-            }
-            state.agents.note_event();
-        }
-        CodexEvent::TurnFailed {
-            model,
-            mission_id,
-            thread_id,
-            token_count,
-            message,
-        } => {
-            let at = timestamp_label(state);
-            if let Some(token_count) = token_count.as_ref() {
-                apply_codex_token_count(state, &model, mission_id.as_deref(), token_count);
-            }
-            if let Some(agent) = state.agents.agents.iter_mut().find(|a| a.id == model) {
-                agent.status = AgentStatus::Error;
-                agent.queue_len = 0;
-                agent.heartbeat_age_secs = 0;
-                if mission_id.is_some() {
-                    agent.current_mission = mission_id.clone();
-                }
-            }
-            state.agents.mcp.state = McpConnectionState::Error;
-            state.agents.mcp.endpoint = format!("codex exec -m {model}");
-            state.agents.mcp.last_error = Some(message.clone());
-
-            if let (Some(mission_id), Some(thread_id)) =
-                (mission_id.as_deref(), thread_id.as_deref())
-            {
-                state
-                    .agents
-                    .codex_mission_thread_ids
-                    .entry(mission_id.to_string())
-                    .or_default()
-                    .insert(model.clone(), thread_id.to_string());
-            }
-            if let Some(mission_id) = mission_id.as_deref() {
-                if let Some(mission) = state
-                    .agents
-                    .missions
-                    .iter_mut()
-                    .find(|mission| mission.id == mission_id)
-                {
-                    mission.status = "ERROR".into();
-                    mission.updated_at = at.clone();
-                }
-            }
-
-            state.agents.alerts.push(AgentAlert {
-                severity: AgentAlertSeverity::Error,
-                source: "codex".into(),
-                message: format!("[{model}] {message}"),
-                at: at.clone(),
-            });
-            state.agents.diag_events.push(AgentDiagnosticEvent {
-                severity: AgentAlertSeverity::Error,
-                source: "codex".into(),
-                message: format!("[{model}] {message}"),
-                at: at.clone(),
-            });
-            state.agents.console_scroll = usize::MAX;
-            // Keep the top status bar clean: extract the human message from JSON errors.
-            state.status = Some(format!("Codex failed: {}", summarize_codex_error(&message)));
-            state.agents.note_event();
-            vitals.record_diag_event(Instant::now(), DiagSeverity::Error);
-            vitals.record_agent_event(Instant::now());
-        }
-        CodexEvent::TurnCompleted {
-            model,
-            mission_id,
-            thread_id,
-            token_count,
-            message,
-        } => {
-            let at = timestamp_label(state);
-            if let Some(token_count) = token_count.as_ref() {
-                apply_codex_token_count(state, &model, mission_id.as_deref(), token_count);
-            }
-            if let Some(agent) = state.agents.agents.iter_mut().find(|a| a.id == model) {
-                agent.status = AgentStatus::Idle;
-                agent.queue_len = 0;
-                agent.heartbeat_age_secs = 0;
-                if mission_id.is_some() {
-                    agent.current_mission = mission_id.clone();
-                }
-            }
-
-            if let Some(mission_id) = mission_id.as_deref() {
-                mark_mission_provenance_dirty(state, mission_id);
-                if let Some(thread_id) = thread_id.as_deref() {
-                    state
-                        .agents
-                        .codex_mission_thread_ids
-                        .entry(mission_id.to_string())
-                        .or_default()
-                        .insert(model.clone(), thread_id.to_string());
-                }
-                if let Some(mission) = state
-                    .agents
-                    .missions
-                    .iter_mut()
-                    .find(|mission| mission.id == mission_id)
-                {
-                    mission.status = "LIVE".into();
-                    mission.updated_at = at.clone();
-                }
-            }
-            state.agents.messages.push(AgentMessage {
-                at: at.clone(),
-                channel: AgentChannel::Agent,
-                agent_id: Some(model.clone()),
-                mission_id,
-                text: message.clone(),
-            });
-            state.agents.console_scroll = usize::MAX;
-
-            state.agents.diag_events.push(AgentDiagnosticEvent {
-                severity: AgentAlertSeverity::Info,
-                source: "codex".into(),
-                message: format!("[{model}] turn completed"),
-                at,
-            });
-
-            state.agents.mcp.state = McpConnectionState::Connected;
-            state.agents.mcp.endpoint = format!("codex exec -m {model}");
-            state.agents.mcp.last_error = None;
-
-            state.agents.note_event();
-            vitals.record_agent_event(Instant::now());
-        }
-    }
-}
-
-fn shorten_codex_thread_id(thread_id: &str) -> String {
-    let id = thread_id.trim();
-    if id.len() <= 8 {
-        return id.to_string();
-    }
-    format!("{}…", &id[..8])
-}
-
-fn apply_codex_token_count(
-    state: &mut AppState,
-    model: &str,
-    mission_id: Option<&str>,
-    token_count: &crate::codex_runner::CodexTokenCount,
-) {
-    let context_window = token_count.context_window.max(1);
-    state
-        .agents
-        .codex_effective_context_window_tokens
-        .insert(model.to_string(), context_window);
-
-    let used = token_count.total_tokens.min(context_window);
-    let remaining = context_window.saturating_sub(used);
-    let denom = context_window.max(1) as u64;
-    let pct =
-        (((remaining as u64).saturating_mul(100)).saturating_add(denom / 2) / denom) as u8;
-
-    if let Some(mission_id) = mission_id {
-        state
-            .agents
-            .codex_mission_context_remaining_pct
-            .entry(mission_id.to_string())
-            .or_default()
-            .insert(model.to_string(), pct);
-    } else {
-        state
-            .agents
-            .codex_context_remaining_pct
-            .insert(model.to_string(), pct);
-    }
-}
-
-fn summarize_codex_error(message: &str) -> String {
-    let trimmed = message.trim();
-    if trimmed.is_empty() {
-        return "unknown error".into();
-    }
-
-    // Codex CLI sometimes prints structured JSON error payloads; the top bar should show just the
-    // message portion rather than dumping the whole object.
-    if let Some(value) = parse_codex_error_json(trimmed) {
-        if let Some(msg) = extract_codex_error_message(&value) {
-            let msg = msg.trim();
-            if !msg.is_empty() {
-                return msg.to_string();
+            if lowered.contains("error") || lowered.contains("failed") {
+                vitals.record_diag_event(now, DiagSeverity::Warn);
             }
         }
+        AgentBusEvent::AlertAppend { alert } => match alert.severity {
+            AgentAlertSeverity::Error => vitals.record_diag_event(now, DiagSeverity::Error),
+            AgentAlertSeverity::Warn => vitals.record_diag_event(now, DiagSeverity::Warn),
+            AgentAlertSeverity::Info => {}
+        },
+        AgentBusEvent::DiagnosticAppend { event: diag } => match diag.severity {
+            AgentAlertSeverity::Error => vitals.record_diag_event(now, DiagSeverity::Error),
+            AgentAlertSeverity::Warn => vitals.record_diag_event(now, DiagSeverity::Warn),
+            AgentAlertSeverity::Info => {}
+        },
+        _ => {}
     }
-
-    // Single-line fallback (top bar can't display multi-line anyway).
-    trimmed.lines().next().unwrap_or(trimmed).trim().to_string()
 }
 
-fn parse_codex_error_json(text: &str) -> Option<serde_json::Value> {
-    let trimmed = text.trim();
-    if trimmed.is_empty() {
-        return None;
+fn tick_agent_turn_liveness(state: &mut AppState) {
+    // Backends can emit periodic `TurnHeartbeat` events. Use those to keep the roster "HB"
+    // column honest and to surface stalls when heartbeats stop.
+    let now = Instant::now();
+    let (agents, active_turns) = {
+        let agents_state = &mut state.agents;
+        (&mut agents_state.agents, &agents_state.active_turns)
+    };
+    for agent in agents.iter_mut() {
+        if !matches!(agent.status, AgentStatus::Running) {
+            continue;
+        }
+        let Some(turn) = active_turns.get(&agent.id) else {
+            continue;
+        };
+        let age = now
+            .checked_duration_since(turn.last_heartbeat_at)
+            .or_else(|| now.checked_duration_since(turn.started_at))
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        agent.heartbeat_age_secs = age;
     }
-    if (trimmed.starts_with('{') && trimmed.ends_with('}'))
-        || (trimmed.starts_with('[') && trimmed.ends_with(']'))
-    {
-        return serde_json::from_str::<serde_json::Value>(trimmed).ok();
-    }
-
-    // Try to parse an embedded JSON object (e.g. "codex: {...}").
-    let start = trimmed.find('{')?;
-    let end = trimmed.rfind('}')?;
-    if start >= end {
-        return None;
-    }
-    serde_json::from_str::<serde_json::Value>(&trimmed[start..=end]).ok()
-}
-
-fn extract_codex_error_message(value: &serde_json::Value) -> Option<&str> {
-    // Typical Codex error payload:
-    // {"type":"error","error":{"message":"...","param":"reasoning.effort",...},"status":400}
-    value
-        .get("error")
-        .and_then(|err| err.get("message"))
-        .and_then(|v| v.as_str())
-        .or_else(|| value.get("message").and_then(|v| v.as_str()))
 }
 
 fn is_background_work_active(state: &AppState) -> bool {
@@ -2273,13 +2042,15 @@ fn reset_roster_context(state: &mut AppState) -> bool {
     };
     let agent_id = agent.id.clone();
     let agent_label = agent.role.trim();
-    let is_codex = agent.lane.eq_ignore_ascii_case("codex");
+    let is_codex = agent.is_codex();
     let mission_ctx = state
         .agents
         .selected_context_mission()
         .map(ToString::to_string);
 
     state.agents.roster_effort_selected = None;
+    // Clear any in-flight liveness tracking for this agent context.
+    state.agents.active_turns.remove(&agent_id);
     if is_codex {
         // Reset back to "full context" for display purposes.
         state
@@ -2291,20 +2062,27 @@ fn reset_roster_context(state: &mut AppState) -> bool {
     }
 
     let before = state.agents.messages.len();
-	    if let Some(mission_id) = mission_ctx.as_deref() {
-	        // In mission context, the Codex session is shared by mission id. Resetting context should
-	        // clear the mission transcript and forget the session id so the next prompt starts fresh.
-	        state.agents.codex_mission_thread_ids.remove(mission_id);
-	        state
-	            .agents
-	            .codex_mission_context_remaining_pct
-	            .remove(mission_id);
-	        state
-	            .agents
-	            .messages
-	            .retain(|msg| msg.mission_id.as_deref() != Some(mission_id));
+    if let Some(mission_id) = mission_ctx.as_deref() {
+        // In mission context, the Codex session is shared by mission id. Resetting context should
+        // clear the mission transcript and forget the session id so the next prompt starts fresh.
+        state.agents.codex_mission_thread_ids.remove(mission_id);
+        state
+            .agents
+            .codex_mission_context_remaining_pct
+            .remove(mission_id);
+        state.agents.codex_mission_used_tokens.remove(mission_id);
+        state
+            .agents
+            .codex_estimated_tokens_used_by_mission
+            .remove(mission_id);
+        state
+            .agents
+            .messages
+            .retain(|msg| msg.mission_id.as_deref() != Some(mission_id));
     } else {
         // In non-mission chat, the thread isn't partitioned by agent; reset the whole local thread.
+        state.agents.codex_thread_ids.clear();
+        state.agents.codex_used_tokens.clear();
         state.agents.messages.retain(|msg| msg.mission_id.is_some());
     }
     let removed = before.saturating_sub(state.agents.messages.len());
@@ -2333,7 +2111,11 @@ fn reset_roster_context(state: &mut AppState) -> bool {
             .as_deref()
             .map(|id| format!("{id} "))
             .unwrap_or_default(),
-        if agent_label.is_empty() { agent_id } else { agent_label.to_string() }
+        if agent_label.is_empty() {
+            agent_id
+        } else {
+            agent_label.to_string()
+        }
     ));
     true
 }
@@ -2768,20 +2550,23 @@ fn maybe_dispatch_codex_turn(
         .agents
         .iter()
         .find(|lane| lane.id.as_str() == model.as_str())
-        .is_some_and(|lane| lane.lane.eq_ignore_ascii_case("codex"));
+        .is_some_and(|lane| lane.is_codex());
     if !is_codex {
         return;
     }
 
-    let resume_thread_id = mission_id.as_deref().and_then(|mission_id| {
+    let resume_thread_id = if let Some(mission_id) = mission_id.as_deref() {
         state
             .agents
             .codex_mission_thread_ids
             .get(mission_id)
             .and_then(|threads| threads.get(&model))
             .cloned()
-    });
-    let persist_session = mission_id.is_some();
+    } else {
+        state.agents.codex_thread_ids.get(&model).cloned()
+    };
+    // Always persist Codex sessions so non-mission chat can resume context across prompts.
+    let persist_session = true;
 
     // Best-effort context remaining percentage for the breather row.
     if let Some(max_tokens) = state
@@ -2790,47 +2575,74 @@ fn maybe_dispatch_codex_turn(
         .get(&model)
         .copied()
     {
-        let used_tokens = if let Some(mission_id) = mission_id.as_deref() {
+        let prompt_tokens_est = estimate_codex_context_tokens(&prompt);
+        let baseline_used = if let Some(mission_id) = mission_id.as_deref() {
+            state
+                .agents
+                .codex_mission_used_tokens
+                .get(mission_id)
+                .and_then(|m| m.get(&model))
+                .copied()
+        } else {
+            state.agents.codex_used_tokens.get(&model).copied()
+        };
+        let used_tokens = if let Some(baseline) = baseline_used {
+            baseline.saturating_add(prompt_tokens_est).min(max_tokens)
+        } else if let Some(mission_id) = mission_id.as_deref() {
             estimate_codex_context_tokens_for_mission(state, mission_id).min(max_tokens)
         } else {
-            estimate_codex_context_tokens(&prompt).min(max_tokens)
+            prompt_tokens_est.min(max_tokens)
         };
+        if let Some(mission_id) = mission_id.as_deref() {
+            state
+                .agents
+                .codex_mission_used_tokens
+                .entry(mission_id.to_string())
+                .or_default()
+                .insert(model.clone(), used_tokens);
+        } else {
+            state
+                .agents
+                .codex_used_tokens
+                .insert(model.clone(), used_tokens);
+        }
         let remaining = max_tokens.saturating_sub(used_tokens);
         // Round to nearest percent so small prompts on large context windows still show 100%.
-	        let denom = max_tokens.max(1) as u64;
-	        let pct =
-	            (((remaining as u64).saturating_mul(100)).saturating_add(denom / 2) / denom) as u8;
-	        if let Some(mission_id) = mission_id.as_deref() {
-	            state
-	                .agents
-	                .codex_mission_context_remaining_pct
-	                .entry(mission_id.to_string())
-	                .or_default()
-	                .entry(model.clone())
-	                .or_insert(pct);
-	        } else {
-	            state
-	                .agents
-	                .codex_context_remaining_pct
-	                .entry(model.clone())
-	                .or_insert(pct);
-	        }
-	    } else {
-	        if let Some(mission_id) = mission_id.as_deref() {
-	            if let Some(map) = state
-	                .agents
-	                .codex_mission_context_remaining_pct
-	                .get_mut(mission_id)
-	            {
-	                map.remove(&model);
-	                if map.is_empty() {
-	                    state.agents.codex_mission_context_remaining_pct.remove(mission_id);
-	                }
-	            }
-	        } else {
-	            state.agents.codex_context_remaining_pct.remove(&model);
-	        }
-	    }
+        let denom = max_tokens.max(1) as u64;
+        let pct =
+            (((remaining as u64).saturating_mul(100)).saturating_add(denom / 2) / denom) as u8;
+        if let Some(mission_id) = mission_id.as_deref() {
+            state
+                .agents
+                .codex_mission_context_remaining_pct
+                .entry(mission_id.to_string())
+                .or_default()
+                .insert(model.clone(), pct);
+        } else {
+            state
+                .agents
+                .codex_context_remaining_pct
+                .insert(model.clone(), pct);
+        }
+    } else {
+        if let Some(mission_id) = mission_id.as_deref() {
+            if let Some(map) = state
+                .agents
+                .codex_mission_context_remaining_pct
+                .get_mut(mission_id)
+            {
+                map.remove(&model);
+                if map.is_empty() {
+                    state
+                        .agents
+                        .codex_mission_context_remaining_pct
+                        .remove(mission_id);
+                }
+            }
+        } else {
+            state.agents.codex_context_remaining_pct.remove(&model);
+        }
+    }
 
     // Immediate UI feedback: mark the model as running and show the loader/breather row.
     let Some(agent) = state.agents.agents.iter_mut().find(|a| a.id == model) else {
@@ -2840,14 +2652,24 @@ fn maybe_dispatch_codex_turn(
     agent.queue_len = agent.queue_len.saturating_add(1).max(1);
     agent.heartbeat_age_secs = 0;
     agent.last_message = "queued".into();
-    if mission_id.is_some() {
-        agent.current_mission = mission_id.clone();
-    }
+    // Always reflect the active mission context (including clearing it for non-mission chat).
+    agent.current_mission = mission_id.clone();
+
+    let now = Instant::now();
+    state.agents.active_turns.insert(
+        model.clone(),
+        nit_core::state::AgentTurnState {
+            started_at: now,
+            last_heartbeat_at: now,
+            last_output_at: now,
+            stage: Some("queued".into()),
+        },
+    );
 
     state.agents.mcp.state = McpConnectionState::Connecting;
     state.agents.mcp.last_error = None;
     state.agents.note_event();
-    vitals.record_agent_event(Instant::now());
+    vitals.record_agent_event(now);
 
     let reasoning_effort = state
         .agents
@@ -2884,13 +2706,28 @@ fn estimate_codex_context_tokens(text: &str) -> u32 {
     (bytes + 3) / 4
 }
 
-fn estimate_codex_context_tokens_for_mission(state: &AppState, mission_id: &str) -> u32 {
-    state
+fn estimate_codex_context_tokens_for_mission(state: &mut AppState, mission_id: &str) -> u32 {
+    if let Some(tokens) = state
+        .agents
+        .codex_estimated_tokens_used_by_mission
+        .get(mission_id)
+        .copied()
+    {
+        return tokens;
+    }
+    let tokens = state
         .agents
         .messages
         .iter()
         .filter(|msg| msg.mission_id.as_deref() == Some(mission_id))
-        .fold(0u32, |acc, msg| acc.saturating_add(estimate_codex_context_tokens(&msg.text)))
+        .fold(0u32, |acc, msg| {
+            acc.saturating_add(estimate_codex_context_tokens(&msg.text))
+        });
+    state
+        .agents
+        .codex_estimated_tokens_used_by_mission
+        .insert(mission_id.to_string(), tokens);
+    tokens
 }
 
 fn push_chat_message(state: &mut AppState) -> bool {
@@ -2910,6 +2747,13 @@ fn push_chat_message(state: &mut AppState) -> bool {
     };
     if let Some(mission_id) = message.mission_id.as_deref() {
         mark_mission_provenance_dirty(state, mission_id);
+        let delta = estimate_codex_context_tokens(&text);
+        let entry = state
+            .agents
+            .codex_estimated_tokens_used_by_mission
+            .entry(mission_id.to_string())
+            .or_insert(0);
+        *entry = entry.saturating_add(delta);
     }
     state.agents.messages.push(message);
     state.agents.diag_events.push(AgentDiagnosticEvent {
@@ -2955,16 +2799,24 @@ fn spawn_mock_mission(state: &mut AppState) {
     });
     state.agents.mission_selected = state.agents.missions.len().saturating_sub(1);
     state.agents.selected_mission = Some(mission_id.clone());
+    let message_text = format!(
+        "New mission queued with swarm agents: {}",
+        assigned_agents.join(", ")
+    );
     state.agents.messages.push(AgentMessage {
         at: timestamp_label(state),
         channel: AgentChannel::Broadcast,
         agent_id: None,
         mission_id: Some(mission_id.clone()),
-        text: format!(
-            "New mission queued with swarm agents: {}",
-            assigned_agents.join(", ")
-        ),
+        text: message_text.clone(),
     });
+    let delta = estimate_codex_context_tokens(&message_text);
+    let entry = state
+        .agents
+        .codex_estimated_tokens_used_by_mission
+        .entry(mission_id.clone())
+        .or_insert(0);
+    *entry = entry.saturating_add(delta);
 
     let patch_base = state.agents.patches.len() + 1;
     state.agents.patches.push(PatchProposal {
@@ -8045,24 +7897,24 @@ fn write_agent_run_provenance(state: &AppState, mission_id: &str) -> io::Result<
         .iter()
         .filter(|patch| patch.mission_id.as_deref() == Some(mission_id))
         .collect::<Vec<_>>();
-	    let run_payload = serde_json::json!({
-	        "id": mission.id,
-	        "title": mission.title,
-	        "phase": mission.phase.label(),
+    let run_payload = serde_json::json!({
+            "id": mission.id,
+            "title": mission.title,
+            "phase": mission.phase.label(),
         "status": mission.status,
         "swarm": mission.swarm,
-	        "assigned_agents": mission.assigned_agents,
-	        "updated_at": mission.updated_at,
-	        "selected_agent": state.agents.selected_context_agent(),
-	        "codex_thread_id": state
-	            .agents
-	            .selected_context_agent()
-	            .and_then(|agent| state.agents.codex_mission_thread_ids.get(mission_id)?.get(agent)),
-	        "codex_thread_ids": state.agents.codex_mission_thread_ids.get(mission_id),
-	        "mcp": {
-	            "state": state.agents.mcp.state.label(),
-	            "endpoint": state.agents.mcp.endpoint,
-	            "latency_ms": state.agents.mcp.latency_ms,
+            "assigned_agents": mission.assigned_agents,
+            "updated_at": mission.updated_at,
+            "selected_agent": state.agents.selected_context_agent(),
+            "codex_thread_id": state
+                .agents
+                .selected_context_agent()
+                .and_then(|agent| state.agents.codex_mission_thread_ids.get(mission_id)?.get(agent)),
+            "codex_thread_ids": state.agents.codex_mission_thread_ids.get(mission_id),
+            "mcp": {
+                "state": state.agents.mcp.state.label(),
+                "endpoint": state.agents.mcp.endpoint,
+                "latency_ms": state.agents.mcp.latency_ms,
             "last_error": state.agents.mcp.last_error,
         },
         "patches": patches
@@ -8266,6 +8118,7 @@ mod tests {
             id: "gpt-5.1-codex-mini".into(),
             role: "gpt-5.1-codex-mini".into(),
             lane: "Codex".into(),
+            kind: nit_core::AgentLaneKind::Codex,
             status: AgentStatus::Idle,
             heartbeat_age_secs: 0,
             queue_len: 0,
@@ -8273,18 +8126,14 @@ mod tests {
             last_message: String::new(),
         });
 
-        let mut vitals = VitalsState::default();
-        handle_codex_event(
-            &mut state,
-            &mut vitals,
-            CodexEvent::TurnCompleted {
-                model: "gpt-5.1-codex-mini".into(),
-                mission_id: Some("mis-001".into()),
-                thread_id: Some("thread-123".into()),
-                token_count: None,
-                message: "ok".into(),
-            },
-        );
+        AgentBusEvent::TurnCompleted {
+            agent_id: "gpt-5.1-codex-mini".into(),
+            mission_id: Some("mis-001".into()),
+            thread_id: Some("thread-123".into()),
+            token_count: None,
+            message: "ok".into(),
+        }
+        .apply(&mut state);
 
         assert_eq!(
             state
@@ -8295,10 +8144,7 @@ mod tests {
                 .map(|s| s.as_str()),
             Some("thread-123")
         );
-        assert_eq!(
-            state.agents.missions[0].status.to_ascii_uppercase(),
-            "LIVE"
-        );
+        assert_eq!(state.agents.missions[0].status.to_ascii_uppercase(), "LIVE");
         assert!(state
             .agents
             .messages
@@ -8326,6 +8172,7 @@ mod tests {
             id: "gpt-5.1-codex-mini".into(),
             role: "gpt-5.1-codex-mini".into(),
             lane: "Codex".into(),
+            kind: nit_core::AgentLaneKind::Codex,
             status: AgentStatus::Idle,
             heartbeat_age_secs: 0,
             queue_len: 0,
@@ -8364,7 +8211,11 @@ mod tests {
         });
 
         assert!(reset_roster_context(&mut state));
-        assert!(state.agents.codex_mission_thread_ids.get("mis-001").is_none());
+        assert!(state
+            .agents
+            .codex_mission_thread_ids
+            .get("mis-001")
+            .is_none());
         assert!(state
             .agents
             .messages
@@ -8668,6 +8519,7 @@ mod tests {
             id: "planner".into(),
             role: "Planner".into(),
             lane: "Lane A".into(),
+            kind: nit_core::AgentLaneKind::Mock,
             status: nit_core::AgentStatus::Idle,
             heartbeat_age_secs: 0,
             queue_len: 0,
@@ -8792,6 +8644,7 @@ mod tests {
             id: "planner".into(),
             role: "Planner".into(),
             lane: "Lane A".into(),
+            kind: nit_core::AgentLaneKind::Mock,
             status: nit_core::AgentStatus::Idle,
             heartbeat_age_secs: 0,
             queue_len: 0,
@@ -9752,6 +9605,7 @@ mod tests {
             id: "coder".into(),
             role: "Coder".into(),
             lane: "Lane B".into(),
+            kind: nit_core::AgentLaneKind::Mock,
             status: AgentStatus::Running,
             heartbeat_age_secs: 1,
             queue_len: 1,

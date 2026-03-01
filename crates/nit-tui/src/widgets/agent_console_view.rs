@@ -1,4 +1,7 @@
-use nit_core::{AgentLane, AgentMessage, AgentStatus, AppState, PaneId, UiSelectionPane};
+use nit_core::{
+    AgentConsoleRow as ThreadRow, AgentConsoleRowKind as ThreadRowKind, AgentConsoleRowsCacheKey,
+    AgentLane, AgentMessage, AgentStatus, AppState, PaneId, UiSelectionPane,
+};
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
@@ -6,6 +9,7 @@ use ratatui::{
     widgets::{Block, BorderType, Borders, Paragraph, Wrap},
     Frame,
 };
+use std::time::{Duration, Instant};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::theme::Theme;
@@ -22,18 +26,6 @@ pub struct ChatInputScrollMetrics {
     pub visible_height: usize,
     pub max_scroll: usize,
     pub total_lines: usize,
-}
-
-#[derive(Copy, Clone)]
-enum ThreadRowKind {
-    User,
-    Agent,
-    Breather,
-}
-
-struct ThreadRow {
-    text: String,
-    kind: ThreadRowKind,
 }
 
 const TAB_STOP: usize = 4;
@@ -111,7 +103,7 @@ pub fn render(
             .agents
             .iter()
             .find(|lane| lane.id == agent_id)
-            .is_some_and(|lane| lane.lane.eq_ignore_ascii_case("codex"));
+            .is_some_and(|lane| lane.is_codex());
         if !is_codex {
             return None;
         }
@@ -128,7 +120,7 @@ pub fn render(
             .agents
             .iter()
             .find(|lane| lane.id == agent_id)
-            .is_some_and(|lane| lane.lane.eq_ignore_ascii_case("codex"));
+            .is_some_and(|lane| lane.is_codex());
         if !is_codex {
             return None;
         }
@@ -140,9 +132,34 @@ pub fn render(
                 .and_then(|m| m.get(agent_id))
                 .copied()
         } else {
-            state.agents.codex_context_remaining_pct.get(agent_id).copied()
+            state
+                .agents
+                .codex_context_remaining_pct
+                .get(agent_id)
+                .copied()
         };
         Some(pct.unwrap_or(100))
+    });
+    let codex_ctx_used = agent.and_then(|agent_id| {
+        let is_codex = state
+            .agents
+            .agents
+            .iter()
+            .find(|lane| lane.id == agent_id)
+            .is_some_and(|lane| lane.is_codex());
+        if !is_codex {
+            return None;
+        }
+        if let Some(mission_id) = mission {
+            state
+                .agents
+                .codex_mission_used_tokens
+                .get(mission_id)
+                .and_then(|m| m.get(agent_id))
+                .copied()
+        } else {
+            state.agents.codex_used_tokens.get(agent_id).copied()
+        }
     });
     let codex_ctx_max = agent.and_then(|agent_id| {
         state
@@ -190,17 +207,29 @@ pub fn render(
         Span::styled("ctx=", label_style),
         Span::styled(
             if let Some(pct) = codex_ctx_pct {
-                if let Some(max) = codex_ctx_max {
+                if let (Some(used), Some(max)) = (codex_ctx_used, codex_ctx_max) {
+                    format!(
+                        "{pct}% {}/{}",
+                        format_token_count_short(used),
+                        format_token_count_short(max)
+                    )
+                } else if let Some(max) = codex_ctx_max {
                     format!("{pct}%/{}", format_token_count_short(max))
                 } else {
                     format!("{pct}%")
                 }
-            } else if codex_ctx_max.is_some() {
-                format_token_count_short(codex_ctx_max.unwrap_or(0))
+            } else if let (Some(used), Some(max)) = (codex_ctx_used, codex_ctx_max) {
+                format!(
+                    "{}/{}",
+                    format_token_count_short(used),
+                    format_token_count_short(max)
+                )
+            } else if let Some(max) = codex_ctx_max {
+                format_token_count_short(max)
             } else {
                 "--".to_string()
             },
-            if codex_ctx_pct.is_some() || codex_ctx_max.is_some() {
+            if codex_ctx_pct.is_some() || codex_ctx_max.is_some() || codex_ctx_used.is_some() {
                 Style::default()
                     .fg(theme.accent)
                     .add_modifier(Modifier::BOLD)
@@ -213,21 +242,30 @@ pub fn render(
 
     let pulse_on = pulse_on(state);
     let thread_width = layout.thread_area.width.max(1) as usize;
-    let rows = thread_rows(state, thread_width, pulse_on);
+    let (cached_rows_len, last_message_was_user) = refresh_thread_rows_cache(state, thread_width);
     let thread_height = layout.thread_area.height.max(1) as usize;
-    let max_scroll = rows.len().saturating_sub(thread_height);
+    let breather = if last_message_was_user {
+        breather_rows_for_user_prompt(state, pulse_on, thread_width)
+    } else {
+        Vec::new()
+    };
+    let total_rows = cached_rows_len.saturating_add(breather.len());
+    let max_scroll = total_rows.saturating_sub(thread_height);
     state.agents.console_scroll = if state.agents.console_scroll == usize::MAX {
         max_scroll
     } else {
         state.agents.console_scroll.min(max_scroll)
     };
     let scroll_usize = state.agents.console_scroll;
-    let lines = thread_lines(rows, theme, pulse_on);
-    let visible: Vec<Line<'static>> = lines
-        .into_iter()
+    let visible_rows = state
+        .agents
+        .console_rows_cache
+        .rows
+        .iter()
+        .chain(breather.iter())
         .skip(scroll_usize)
-        .take(thread_height)
-        .collect();
+        .take(thread_height);
+    let visible: Vec<Line<'static>> = thread_lines(visible_rows, theme);
     let visible = apply_ui_selection(
         visible,
         state.ui_selection.as_ref(),
@@ -368,6 +406,59 @@ pub fn thread_lines_for_selection(state: &AppState, width: usize) -> Vec<String>
         .into_iter()
         .map(|row| row.text)
         .collect()
+}
+
+fn refresh_thread_rows_cache(state: &mut AppState, width: usize) -> (usize, bool) {
+    let width = width.max(1);
+    let mission_ref = state.agents.selected_context_mission();
+    let agent_ref = if mission_ref.is_some() {
+        None
+    } else {
+        state.agents.selected_context_agent()
+    };
+    let messages_len = state.agents.messages.len();
+
+    if state
+        .agents
+        .console_rows_cache
+        .key
+        .as_ref()
+        .is_some_and(|key| {
+            key.width == width
+                && key.messages_len == messages_len
+                && key.mission.as_deref() == mission_ref
+                && key.agent.as_deref() == agent_ref
+        })
+    {
+        return (
+            state.agents.console_rows_cache.rows.len(),
+            state.agents.console_rows_cache.last_message_was_user,
+        );
+    }
+
+    let mut rows = Vec::new();
+    let mut last_message_was_user = false;
+    for msg in state.agents.messages.iter() {
+        if !message_matches_context(msg, mission_ref, agent_ref) {
+            continue;
+        }
+        last_message_was_user = msg.agent_id.is_none();
+        rows.extend(format_message_rows(state, msg, width, false));
+    }
+
+    let key = AgentConsoleRowsCacheKey {
+        width,
+        mission: mission_ref.map(str::to_string),
+        agent: agent_ref.map(str::to_string),
+        messages_len,
+    };
+    state.agents.console_rows_cache.key = Some(key);
+    state.agents.console_rows_cache.rows = rows;
+    state.agents.console_rows_cache.last_message_was_user = last_message_was_user;
+    (
+        state.agents.console_rows_cache.rows.len(),
+        state.agents.console_rows_cache.last_message_was_user,
+    )
 }
 
 fn compute_console_layout(area: Rect, state: &AppState) -> Option<ConsoleLayout> {
@@ -577,37 +668,44 @@ fn next_tab_width(col: usize, width: usize) -> usize {
     to_stop.max(1).min(width)
 }
 
-fn thread_lines(rows: Vec<ThreadRow>, theme: &Theme, _pulse_on: bool) -> Vec<Line<'static>> {
+fn thread_lines<'a>(
+    rows: impl IntoIterator<Item = &'a ThreadRow>,
+    theme: &Theme,
+) -> Vec<Line<'static>> {
     rows.into_iter()
         .map(|row| match row.kind {
-            ThreadRowKind::User => user_line_with_prompt_bg(row.text, theme),
-            ThreadRowKind::Agent => agent_line_with_accent_ecg(row.text, theme),
-            ThreadRowKind::Breather => {
-                let mut parts = row.text.splitn(2, ' ');
-                let ecg = parts.next().unwrap_or_default();
-                let rest = parts.next().unwrap_or_default();
-                Line::from(vec![
-                    Span::styled(
-                        ecg.to_string(),
-                        Style::default()
-                            .fg(theme.accent)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled(
-                        if rest.is_empty() {
-                            "".to_string()
-                        } else {
-                            format!(" {rest}")
-                        },
-                        Style::default().fg(theme.foreground),
-                    ),
-                ])
-            }
+            ThreadRowKind::User => user_line_with_prompt_bg(&row.text, theme),
+            ThreadRowKind::Agent => agent_line_with_accent_ecg(&row.text, theme),
+            ThreadRowKind::Breather => breather_line(&row.text, theme),
+            ThreadRowKind::StatusHeader => status_header_line(&row.text, theme),
+            ThreadRowKind::StatusRow => status_row_line(&row.text, theme),
         })
         .collect()
 }
 
-fn agent_line_with_accent_ecg(text: String, theme: &Theme) -> Line<'static> {
+fn breather_line(text: &str, theme: &Theme) -> Line<'static> {
+    let mut parts = text.splitn(2, ' ');
+    let ecg = parts.next().unwrap_or_default();
+    let rest = parts.next().unwrap_or_default();
+    Line::from(vec![
+        Span::styled(
+            ecg.to_string(),
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            if rest.is_empty() {
+                String::new()
+            } else {
+                format!(" {rest}")
+            },
+            Style::default().fg(theme.foreground),
+        ),
+    ])
+}
+
+fn agent_line_with_accent_ecg(text: &str, theme: &Theme) -> Line<'static> {
     let mut spans = Vec::new();
     // Keep agent output distinct from user bubbles, but don't over-dim (hard to read in many
     // terminals). Use a brighter cyan tone from the theme.
@@ -616,7 +714,7 @@ fn agent_line_with_accent_ecg(text: String, theme: &Theme) -> Line<'static> {
         .fg(theme.accent)
         .add_modifier(Modifier::BOLD);
 
-    let leading_spaces = text.chars().take_while(|ch| *ch == ' ').count();
+    let leading_spaces = text.bytes().take_while(|b| *b == b' ').count();
     if leading_spaces > 0 {
         spans.push(Span::styled(" ".repeat(leading_spaces), agent_style));
     }
@@ -639,7 +737,8 @@ fn agent_line_with_accent_ecg(text: String, theme: &Theme) -> Line<'static> {
         // the breather ECG. Keep the surrounding text cyan so headers remain scannable.
         let rest = format!(" {rest}");
         let badge_start = rest.find('[');
-        let badge_end = badge_start.and_then(|start| rest[start..].find(']').map(|rel| start + rel + 1));
+        let badge_end =
+            badge_start.and_then(|start| rest[start..].find(']').map(|rel| start + rel + 1));
         if let (Some(start), Some(end)) = (badge_start, badge_end) {
             let pre = rest[..start].to_string();
             let badge = rest[start..end].to_string();
@@ -660,7 +759,7 @@ fn agent_line_with_accent_ecg(text: String, theme: &Theme) -> Line<'static> {
     Line::from(spans)
 }
 
-fn user_line_with_prompt_bg(text: String, theme: &Theme) -> Line<'static> {
+fn user_line_with_prompt_bg(text: &str, theme: &Theme) -> Line<'static> {
     if text.is_empty() {
         return Line::from(Span::styled(String::new(), Style::default()));
     }
@@ -673,9 +772,7 @@ fn user_line_with_prompt_bg(text: String, theme: &Theme) -> Line<'static> {
 
     // User prompts are rendered as a padded block with a subtle background instead of ASCII
     // borders. Pad spaces are included in the string so the background fills the whole row.
-    let base = Style::default()
-        .fg(theme.foreground)
-        .bg(prompt_bg);
+    let base = Style::default().fg(theme.foreground).bg(prompt_bg);
     let label_style = Style::default()
         .fg(theme.accent)
         .bg(prompt_bg)
@@ -683,11 +780,11 @@ fn user_line_with_prompt_bg(text: String, theme: &Theme) -> Line<'static> {
 
     let trimmed = text.trim();
     if trimmed != "You" {
-        return Line::from(Span::styled(text, base));
+        return Line::from(Span::styled(text.to_string(), base));
     }
 
     // Highlight just the "You" label, while keeping the rest of the row padded/backgrounded.
-    let indent = text.chars().take_while(|ch| *ch == ' ').count();
+    let indent = text.bytes().take_while(|b| *b == b' ').count();
     let mut spans = Vec::new();
     if indent > 0 {
         spans.push(Span::styled(" ".repeat(indent), base));
@@ -702,6 +799,25 @@ fn user_line_with_prompt_bg(text: String, theme: &Theme) -> Line<'static> {
         spans.push(Span::styled(" ".repeat(rest_len), base));
     }
     Line::from(spans)
+}
+
+fn status_header_line(text: &str, theme: &Theme) -> Line<'static> {
+    let bg = dim_bg_towards(theme.border, theme.background, 85);
+    Line::from(Span::styled(
+        text.to_string(),
+        Style::default()
+            .fg(theme.border)
+            .bg(bg)
+            .add_modifier(Modifier::DIM),
+    ))
+}
+
+fn status_row_line(text: &str, theme: &Theme) -> Line<'static> {
+    let bg = dim_bg_towards(theme.border, theme.background, 85);
+    Line::from(Span::styled(
+        text.to_string(),
+        Style::default().fg(theme.foreground).bg(bg),
+    ))
 }
 
 fn looks_like_ecg(token: &str) -> bool {
@@ -734,29 +850,19 @@ fn dim_bg_towards(color: Color, background: Color, background_pct: u8) -> Color 
 fn thread_rows(state: &AppState, width: usize, pulse_on: bool) -> Vec<ThreadRow> {
     let mission = state.agents.selected_context_mission();
     let agent = state.agents.selected_context_agent();
-    let filtered = state
-        .agents
-        .messages
-        .iter()
-        .filter(|msg| message_matches_context(msg, mission, agent))
-        .collect::<Vec<_>>();
-    let mut rows = filtered
-        .iter()
-        .flat_map(|msg| format_message_rows(state, msg, width, pulse_on))
-        .collect::<Vec<_>>();
-    if should_show_breather_after_prompt(&filtered) {
-        if let Some(row) = breather_row_for_user_prompt(state, pulse_on) {
-            rows.push(row);
+    let mut rows = Vec::new();
+    let mut last_message_was_user = false;
+    for msg in state.agents.messages.iter() {
+        if !message_matches_context(msg, mission, agent) {
+            continue;
         }
+        last_message_was_user = msg.agent_id.is_none();
+        rows.extend(format_message_rows(state, msg, width, pulse_on));
+    }
+    if last_message_was_user {
+        rows.extend(breather_rows_for_user_prompt(state, pulse_on, width));
     }
     rows
-}
-
-fn should_show_breather_after_prompt(messages: &[&AgentMessage]) -> bool {
-    let Some(last) = messages.last() else {
-        return false;
-    };
-    last.agent_id.is_none()
 }
 
 fn message_matches_context(msg: &AgentMessage, mission: Option<&str>, agent: Option<&str>) -> bool {
@@ -886,9 +992,9 @@ fn agent_identity_badge(state: &AppState, agent_id: &str) -> String {
     truncate_label(&format!("{role}/{id}"), AGENT_BADGE_MAX_CHARS)
 }
 
-fn breather_row_for_user_prompt(state: &AppState, pulse_on: bool) -> Option<ThreadRow> {
+fn breather_rows_for_user_prompt(state: &AppState, pulse_on: bool, width: usize) -> Vec<ThreadRow> {
     let Some(agent) = active_running_agent(state) else {
-        return None;
+        return Vec::new();
     };
     let agent_type = agent.role.trim();
     let agent_type = if agent_type.is_empty() {
@@ -897,7 +1003,7 @@ fn breather_row_for_user_prompt(state: &AppState, pulse_on: bool) -> Option<Thre
         agent_type
     };
     let ecg = ecg_indicator(state.metrics.frame_count, Some(&agent.id), pulse_on, true);
-    let ctx = if agent.lane.eq_ignore_ascii_case("codex") {
+    let ctx_pct = if agent.is_codex() {
         let mission_id = agent.current_mission.as_deref();
         mission_id
             .and_then(|mid| {
@@ -908,15 +1014,102 @@ fn breather_row_for_user_prompt(state: &AppState, pulse_on: bool) -> Option<Thre
                     .and_then(|m| m.get(&agent.id))
                     .copied()
             })
-            .or_else(|| state.agents.codex_context_remaining_pct.get(&agent.id).copied())
+            .or_else(|| {
+                state
+                    .agents
+                    .codex_context_remaining_pct
+                    .get(&agent.id)
+                    .copied()
+            })
     } else {
         None
     };
-    let ctx_suffix = ctx.map(|pct| format!(" {pct}% ctx")).unwrap_or_default();
-    Some(ThreadRow {
+    let ctx_suffix = ctx_pct
+        .map(|pct| format!(" {pct}% ctx"))
+        .unwrap_or_default();
+
+    let mut rows = Vec::new();
+    rows.push(ThreadRow {
         text: format!("{ecg} [{agent_type}] Working{ctx_suffix}"),
         kind: ThreadRowKind::Breather,
-    })
+    });
+
+    let Some(turn) = state.agents.active_turns.get(&agent.id) else {
+        return rows;
+    };
+
+    let width = width.max(1);
+    let indent = 2usize.min(width.saturating_sub(1));
+    let indent_str = " ".repeat(indent);
+    let inner = width.saturating_sub(indent);
+
+    let now = Instant::now();
+    let stage = turn.stage.as_deref().unwrap_or("starting");
+    let elapsed = now.checked_duration_since(turn.started_at);
+    let hb_age = now
+        .checked_duration_since(turn.last_heartbeat_at)
+        .map(|d| d.as_secs());
+    let out_age = now
+        .checked_duration_since(turn.last_output_at)
+        .map(|d| d.as_secs());
+
+    let elapsed_s = elapsed
+        .map(format_duration_compact)
+        .unwrap_or_else(|| "--".into());
+    let hb_s = hb_age
+        .map(|s| format!("{s}s"))
+        .unwrap_or_else(|| "--".into());
+    let out_s = out_age
+        .map(|s| format!("{s}s"))
+        .unwrap_or_else(|| "--".into());
+
+    // Table layout (stage gets the remaining space).
+    let elap_w = 6usize;
+    let hb_w = 4usize;
+    let out_w = 4usize;
+    let fixed = elap_w + hb_w + out_w + 3; // spaces between columns
+
+    if inner.saturating_sub(fixed) < 10 {
+        // Narrow fallback: keep it readable without a multi-column layout.
+        rows.push(ThreadRow {
+            text: pad_to_width(
+                &format!("{indent_str}stage={stage} elap={elapsed_s} hb={hb_s} out={out_s}"),
+                width,
+            ),
+            kind: ThreadRowKind::StatusRow,
+        });
+        return rows;
+    }
+
+    let stage_w = inner.saturating_sub(fixed);
+    rows.push(ThreadRow {
+        text: pad_to_width(
+            &format!(
+                "{indent_str}{} {} {} {}",
+                fit_left("STAGE", stage_w),
+                fit_right("ELAP", elap_w),
+                fit_right("HB", hb_w),
+                fit_right("OUT", out_w),
+            ),
+            width,
+        ),
+        kind: ThreadRowKind::StatusHeader,
+    });
+    rows.push(ThreadRow {
+        text: pad_to_width(
+            &format!(
+                "{indent_str}{} {} {} {}",
+                fit_left(stage, stage_w),
+                fit_right(&elapsed_s, elap_w),
+                fit_right(&hb_s, hb_w),
+                fit_right(&out_s, out_w),
+            ),
+            width,
+        ),
+        kind: ThreadRowKind::StatusRow,
+    });
+
+    rows
 }
 
 fn active_running_agent<'a>(state: &'a AppState) -> Option<&'a AgentLane> {
@@ -960,11 +1153,70 @@ fn truncate_label(input: &str, max_chars: usize) -> String {
     out
 }
 
+fn fit_left(text: &str, width: usize) -> String {
+    fit_cell(text, width, false)
+}
+
+fn fit_right(text: &str, width: usize) -> String {
+    fit_cell(text, width, true)
+}
+
+fn fit_cell(text: &str, width: usize, right_align: bool) -> String {
+    if width == 0 {
+        return String::new();
+    }
+    let len = text.chars().count();
+    if len == width {
+        return text.to_string();
+    }
+    if len > width {
+        if width == 1 {
+            return "…".into();
+        }
+        let mut out = text.chars().take(width - 1).collect::<String>();
+        out.push('…');
+        return out;
+    }
+    let pad = " ".repeat(width - len);
+    if right_align {
+        format!("{pad}{text}")
+    } else {
+        format!("{text}{pad}")
+    }
+}
+
+fn format_duration_compact(duration: Duration) -> String {
+    let secs = duration.as_secs();
+    let minutes = secs / 60;
+    let seconds = secs % 60;
+    let hours = minutes / 60;
+    let minutes = minutes % 60;
+    if hours > 0 {
+        format!("{hours}h{minutes:02}m")
+    } else if minutes > 0 {
+        format!("{minutes}m{seconds:02}s")
+    } else {
+        format!("{seconds}s")
+    }
+}
+
 fn format_token_count_short(tokens: u32) -> String {
     if tokens >= 1_000_000 {
-        format!("{}m", tokens / 1_000_000)
+        let whole = tokens / 1_000_000;
+        let frac = (tokens % 1_000_000) / 100_000;
+        if whole < 10 && frac > 0 {
+            format!("{whole}.{frac}M")
+        } else {
+            format!("{whole}M")
+        }
     } else if tokens >= 1_000 {
-        format!("{}k", tokens / 1_000)
+        let whole = tokens / 1_000;
+        let frac = (tokens % 1_000) / 100;
+        if whole < 100 && frac > 0 {
+            format!("{whole}.{frac}K")
+        } else {
+            format!("{whole}K")
+        }
     } else {
         tokens.to_string()
     }
@@ -982,9 +1234,11 @@ fn format_user_bubble_rows(_msg: &AgentMessage, text_lines: &[&str], width: usiz
     let mut out = Vec::new();
     // Add top/bottom padding so prompt blocks breathe vertically.
     out.push(pad_to_width(&" ".repeat(indent), width));
-    out.extend(wrap_visual_line("You", max_inner).into_iter().map(|line| {
-        pad_to_width(&format!("{}{}", " ".repeat(indent), line), width)
-    }));
+    out.extend(
+        wrap_visual_line("You", max_inner)
+            .into_iter()
+            .map(|line| pad_to_width(&format!("{}{}", " ".repeat(indent), line), width)),
+    );
     for line in text_lines {
         for seg in wrap_visual_line(line, max_inner) {
             out.push(pad_to_width(
@@ -1155,8 +1409,8 @@ fn wrap_visual_line(text: &str, width: usize) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        chat_input_scroll_metrics, chat_input_text_area, ecg_indicator, format_message_rows,
-        dim_bg_towards, map_chat_input_point_to_cursor, thread_lines, thread_rows,
+        chat_input_scroll_metrics, chat_input_text_area, dim_bg_towards, ecg_indicator,
+        format_message_rows, map_chat_input_point_to_cursor, thread_lines, thread_rows,
         wrap_input_with_cursor, wrap_visual_line, ThreadRow, ThreadRowKind,
         USER_PROMPT_BG_BACKGROUND_PCT,
     };
@@ -1233,6 +1487,7 @@ mod tests {
             id: "coder".into(),
             role: "Coder".into(),
             lane: "Lane B".into(),
+            kind: nit_core::AgentLaneKind::Mock,
             status: AgentStatus::Running,
             heartbeat_age_secs: 1,
             queue_len: 1,
@@ -1268,6 +1523,7 @@ mod tests {
             id: "coder".into(),
             role: "Coder".into(),
             lane: "Lane B".into(),
+            kind: nit_core::AgentLaneKind::Mock,
             status: AgentStatus::Idle,
             heartbeat_age_secs: 1,
             queue_len: 0,
@@ -1296,6 +1552,7 @@ mod tests {
             id: "reviewer".into(),
             role: "UltraLongReviewerRoleName".into(),
             lane: "Lane C".into(),
+            kind: nit_core::AgentLaneKind::Mock,
             status: AgentStatus::Running,
             heartbeat_age_secs: 1,
             queue_len: 0,
@@ -1319,14 +1576,11 @@ mod tests {
     #[test]
     fn agent_ecg_renders_in_accent_color_and_text_is_cyan_theme() {
         let theme = Theme::default();
-        let lines = thread_lines(
-            vec![ThreadRow {
-                text: "▁▁▁▁▁▁ hello".to_string(),
-                kind: ThreadRowKind::Agent,
-            }],
-            &theme,
-            false,
-        );
+        let rows = vec![ThreadRow {
+            text: "▁▁▁▁▁▁ hello".to_string(),
+            kind: ThreadRowKind::Agent,
+        }];
+        let lines = thread_lines(rows.iter(), &theme);
         assert_eq!(lines.len(), 1);
         assert_eq!(lines[0].spans[0].style.fg, Some(theme.accent));
         assert_eq!(lines[0].spans[1].style.fg, Some(theme.title));
@@ -1376,6 +1630,7 @@ mod tests {
             id: "planner".into(),
             role: "Planner".into(),
             lane: "Lane A".into(),
+            kind: nit_core::AgentLaneKind::Mock,
             status: AgentStatus::Running,
             heartbeat_age_secs: 0,
             queue_len: 1,
@@ -1411,6 +1666,7 @@ mod tests {
             id: "planner".into(),
             role: "Planner".into(),
             lane: "Lane A".into(),
+            kind: nit_core::AgentLaneKind::Mock,
             status: AgentStatus::Running,
             heartbeat_age_secs: 0,
             queue_len: 1,
@@ -1496,20 +1752,17 @@ mod tests {
             theme.background,
             USER_PROMPT_BG_BACKGROUND_PCT,
         );
-        let lines = thread_lines(
-            vec![
-                ThreadRow {
-                    text: "  You      ".to_string(),
-                    kind: ThreadRowKind::User,
-                },
-                ThreadRow {
-                    text: "  hello    ".to_string(),
-                    kind: ThreadRowKind::User,
-                },
-            ],
-            &theme,
-            false,
-        );
+        let rows = vec![
+            ThreadRow {
+                text: "  You      ".to_string(),
+                kind: ThreadRowKind::User,
+            },
+            ThreadRow {
+                text: "  hello    ".to_string(),
+                kind: ThreadRowKind::User,
+            },
+        ];
+        let lines = thread_lines(rows.iter(), &theme);
 
         assert!(lines[0]
             .spans

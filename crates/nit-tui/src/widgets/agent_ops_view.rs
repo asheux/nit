@@ -1128,8 +1128,8 @@ fn mission_styled_line(
     } else {
         striped_row_style(
             Style::default()
-            .fg(theme.border)
-            .add_modifier(Modifier::DIM),
+                .fg(theme.border)
+                .add_modifier(Modifier::DIM),
             selected,
             striped,
             theme,
@@ -1145,7 +1145,12 @@ fn mission_styled_line(
     );
     let is_primary_line = meta.agent_row == Some(0);
     let id_style = if is_primary_line {
-        striped_row_style(Style::default().fg(theme.foreground), selected, striped, theme)
+        striped_row_style(
+            Style::default().fg(theme.foreground),
+            selected,
+            striped,
+            theme,
+        )
     } else {
         muted_style
     };

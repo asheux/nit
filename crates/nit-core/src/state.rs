@@ -18,6 +18,7 @@ use nit_gol::Rule;
 use nit_gol::{AttractorEvent, AutoStopPolicy};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
+use std::time::Instant;
 
 const DEFAULT_LOG_CAPACITY: usize = 512;
 
@@ -413,16 +414,40 @@ pub enum AgentChannel {
     Broadcast,
 }
 
+#[derive(Copy, Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentLaneKind {
+    Unknown,
+    Mock,
+    Codex,
+}
+
+impl Default for AgentLaneKind {
+    fn default() -> Self {
+        Self::Unknown
+    }
+}
+
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct AgentLane {
     pub id: String,
     pub role: String,
     pub lane: String,
+    #[serde(default)]
+    pub kind: AgentLaneKind,
     pub status: AgentStatus,
     pub heartbeat_age_secs: u64,
     pub queue_len: usize,
     pub current_mission: Option<String>,
     pub last_message: String,
+}
+
+impl AgentLane {
+    pub fn is_codex(&self) -> bool {
+        matches!(self.kind, AgentLaneKind::Codex)
+            || (matches!(self.kind, AgentLaneKind::Unknown)
+                && self.lane.eq_ignore_ascii_case("codex"))
+    }
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -490,6 +515,44 @@ pub struct AgentDiagnosticEvent {
     pub at: String,
 }
 
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum AgentConsoleRowKind {
+    User,
+    Agent,
+    Breather,
+    StatusHeader,
+    StatusRow,
+}
+
+#[derive(Clone, Debug)]
+pub struct AgentConsoleRow {
+    pub text: String,
+    pub kind: AgentConsoleRowKind,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AgentConsoleRowsCacheKey {
+    pub width: usize,
+    pub mission: Option<String>,
+    pub agent: Option<String>,
+    pub messages_len: usize,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct AgentConsoleRowsCache {
+    pub key: Option<AgentConsoleRowsCacheKey>,
+    pub rows: Vec<AgentConsoleRow>,
+    pub last_message_was_user: bool,
+}
+
+#[derive(Clone, Debug)]
+pub struct AgentTurnState {
+    pub started_at: Instant,
+    pub last_heartbeat_at: Instant,
+    pub last_output_at: Instant,
+    pub stage: Option<String>,
+}
+
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct AgentsState {
     pub selected_agent: Option<String>,
@@ -524,6 +587,8 @@ pub struct AgentsState {
     #[serde(skip)]
     pub console_scroll: usize,
     #[serde(skip)]
+    pub console_rows_cache: AgentConsoleRowsCache,
+    #[serde(skip)]
     pub event_epoch: u64,
     #[serde(skip)]
     pub pending_provenance_mission_ids: Vec<String>,
@@ -533,6 +598,10 @@ pub struct AgentsState {
     /// Runtime-only; populated when seeding the roster from `~/.codex/models_cache.json`.
     #[serde(skip)]
     pub codex_effective_context_window_tokens: HashMap<String, u32>,
+    /// Best-effort estimated context tokens used per mission thread (heuristic; used for UI).
+    /// Runtime-only.
+    #[serde(skip)]
+    pub codex_estimated_tokens_used_by_mission: HashMap<String, u32>,
     /// Codex model default reasoning effort (e.g. low/medium/high/xhigh) keyed by model slug.
     /// Runtime-only; populated when seeding the roster from `~/.codex/models_cache.json`.
     #[serde(skip)]
@@ -554,11 +623,28 @@ pub struct AgentsState {
     /// Runtime-only; updated when Codex reports token counts for a mission-backed session.
     #[serde(skip)]
     pub codex_mission_context_remaining_pct: HashMap<String, HashMap<String, u8>>,
+    /// Last-known Codex total token usage (non-mission chat), keyed by model slug.
+    /// Runtime-only; updated when Codex reports token counts.
+    #[serde(skip)]
+    pub codex_used_tokens: HashMap<String, u32>,
+    /// Last-known Codex total token usage for mission threads, keyed by mission id then model slug.
+    /// Runtime-only; updated when Codex reports token counts.
+    #[serde(skip)]
+    pub codex_mission_used_tokens: HashMap<String, HashMap<String, u32>>,
+    /// Codex session/thread ids keyed by model slug for non-mission chat. Used to resume an
+    /// ad-hoc "agent chat" thread across multiple prompts without requiring a mission.
+    /// Runtime-only.
+    #[serde(skip)]
+    pub codex_thread_ids: HashMap<String, String>,
     /// Codex session/thread ids keyed by mission id. Used to resume a "live mission" thread across
     /// multiple prompts without prompt-stitching.
     /// Runtime-only.
     #[serde(skip)]
     pub codex_mission_thread_ids: HashMap<String, HashMap<String, String>>,
+    /// Active backend turn telemetry keyed by agent id.
+    /// Runtime-only.
+    #[serde(skip)]
+    pub active_turns: HashMap<String, AgentTurnState>,
 }
 
 fn chat_input_scroll_default() -> usize {
@@ -572,6 +658,7 @@ impl AgentsState {
                 id: "planner".into(),
                 role: "Planner".into(),
                 lane: "Lane A".into(),
+                kind: AgentLaneKind::Mock,
                 status: AgentStatus::Running,
                 heartbeat_age_secs: 1,
                 queue_len: 1,
@@ -582,6 +669,7 @@ impl AgentsState {
                 id: "coder".into(),
                 role: "Coder".into(),
                 lane: "Lane B".into(),
+                kind: AgentLaneKind::Mock,
                 status: AgentStatus::Running,
                 heartbeat_age_secs: 2,
                 queue_len: 2,
@@ -592,6 +680,7 @@ impl AgentsState {
                 id: "reviewer".into(),
                 role: "Reviewer".into(),
                 lane: "Lane C".into(),
+                kind: AgentLaneKind::Mock,
                 status: AgentStatus::Waiting,
                 heartbeat_age_secs: 5,
                 queue_len: 0,
@@ -679,16 +768,22 @@ impl AgentsState {
             patch_selected: 0,
             ops_scroll: 0,
             console_scroll: usize::MAX,
+            console_rows_cache: AgentConsoleRowsCache::default(),
             event_epoch: 0,
             pending_provenance_mission_ids: vec!["mis-001".into()],
             pending_legacy_notes_alert: None,
             codex_effective_context_window_tokens: HashMap::new(),
+            codex_estimated_tokens_used_by_mission: HashMap::new(),
             codex_default_reasoning_effort: HashMap::new(),
             codex_supported_reasoning_efforts: HashMap::new(),
             codex_selected_reasoning_effort: HashMap::new(),
             codex_context_remaining_pct: HashMap::new(),
             codex_mission_context_remaining_pct: HashMap::new(),
+            codex_used_tokens: HashMap::new(),
+            codex_mission_used_tokens: HashMap::new(),
+            codex_thread_ids: HashMap::new(),
             codex_mission_thread_ids: HashMap::new(),
+            active_turns: HashMap::new(),
         }
     }
 
@@ -744,16 +839,22 @@ impl Default for AgentsState {
             patch_selected: 0,
             ops_scroll: 0,
             console_scroll: usize::MAX,
+            console_rows_cache: AgentConsoleRowsCache::default(),
             event_epoch: 0,
             pending_provenance_mission_ids: Vec::new(),
             pending_legacy_notes_alert: None,
             codex_effective_context_window_tokens: HashMap::new(),
+            codex_estimated_tokens_used_by_mission: HashMap::new(),
             codex_default_reasoning_effort: HashMap::new(),
             codex_supported_reasoning_efforts: HashMap::new(),
             codex_selected_reasoning_effort: HashMap::new(),
             codex_context_remaining_pct: HashMap::new(),
             codex_mission_context_remaining_pct: HashMap::new(),
+            codex_used_tokens: HashMap::new(),
+            codex_mission_used_tokens: HashMap::new(),
+            codex_thread_ids: HashMap::new(),
             codex_mission_thread_ids: HashMap::new(),
+            active_turns: HashMap::new(),
         }
     }
 }
