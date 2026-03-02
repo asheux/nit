@@ -420,6 +420,7 @@ pub enum AgentLaneKind {
     Unknown,
     Mock,
     Codex,
+    Claude,
 }
 
 impl Default for AgentLaneKind {
@@ -656,6 +657,14 @@ pub struct AgentsState {
     /// Runtime-only.
     #[serde(skip)]
     pub queued_codex_turns: VecDeque<QueuedCodexTurn>,
+    /// Whether the `codex` CLI is available in PATH (used for backend inventory in the roster UI).
+    /// Runtime-only.
+    #[serde(skip)]
+    pub codex_cli_available: bool,
+    /// Whether the `claude` CLI is available in PATH (used for backend inventory in the roster UI).
+    /// Runtime-only.
+    #[serde(skip)]
+    pub claude_cli_available: bool,
 }
 
 fn chat_input_scroll_default() -> usize {
@@ -796,6 +805,8 @@ impl AgentsState {
             codex_mission_thread_ids: HashMap::new(),
             active_turns: HashMap::new(),
             queued_codex_turns: VecDeque::new(),
+            codex_cli_available: false,
+            claude_cli_available: false,
         }
     }
 
@@ -868,6 +879,8 @@ impl Default for AgentsState {
             codex_mission_thread_ids: HashMap::new(),
             active_turns: HashMap::new(),
             queued_codex_turns: VecDeque::new(),
+            codex_cli_available: false,
+            claude_cli_available: false,
         }
     }
 }

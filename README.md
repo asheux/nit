@@ -46,26 +46,33 @@ For details see `SECURITY.md`.
 
 nit includes an Agent Ops / Agent Chat UI.
 
-- Default: uses Codex if `codex` is available and `~/.codex/models_cache.json` is present; otherwise seeds mock planner/coder/reviewer lanes.
-- `nit --agents mock` — force mock lanes.
-- `nit --agents codex` — force Codex (loads a model roster from `~/.codex/models_cache.json`).
+- Default: seeds all available lanes (`local`, Codex cache models, and `claude` when detected).
+- `nit --agents local` (alias: `mock`) — force local lane only.
+- `nit --agents codex` — force Codex only (loads a model roster from `~/.codex/models_cache.json`).
+- `nit --agents claude` — force Claude lane only.
+- `nit --agents all` — include all available lanes.
   - Default runtime: `--codex-runtime mcp` (runs a persistent `codex mcp-server`).
   - Exec runtime: `--codex-runtime exec` (spawns `codex exec` per turn).
+  - Optional safety knobs: `--codex-sandbox <read-only|workspace-write|danger-full-access>` and
+    `--codex-approval-policy <untrusted|on-failure|on-request|never>`.
 
 Examples:
 
 ```bash
-# Auto agent station backend (Codex if available, else mock)
+# Load all available lanes (default)
 nit
 
 # Force Codex agent station
 nit --agents codex
 
+# Force Claude-only agent station
+nit --agents claude
+
 # Force Codex agent station, per-turn `codex exec`
 nit --agents codex --codex-runtime exec
 
-# Force mock agent station
-nit --agents mock
+# Force local-only agent station
+nit --agents local
 
 # From source
 cargo run -p nit -- --agents codex

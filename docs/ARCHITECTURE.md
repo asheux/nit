@@ -52,6 +52,83 @@ rendering and text‑measurement consistent, and avoids lossy conversions.
 - Main grid: left (Agent Chat + Agent Ops), center (Editor), right (Visualizer + Gate Monitor).
 - Bottom bar with key hints; overlay for help and prompts.
 
+## Agent Station (Codex)
+
+nit includes an Agent Station UI (Agent Ops + Agent Chat) that can be backed by either a mock
+planner/coder/reviewer demo or the local `codex` CLI.
+
+### Roster seeding
+
+- `nit --agents codex` loads model metadata from `~/.codex/models_cache.json` (used to populate the
+  roster and reasoning-effort picker).
+- `nit --agents claude` seeds a Claude lane when `claude` is available on `PATH`.
+- `nit --agents local` (alias `mock`) seeds a built-in local lane.
+- `nit --agents all` (or default `nit`) includes all available lanes.
+
+### Runtime modes (Exec vs MCP)
+
+The Codex backend is implemented in `nit-tui` as a background `CodexRunner` thread that emits
+`nit-core::AgentBusEvent` updates into the main TUI loop.
+
+- **Exec runtime** (`--codex-runtime exec`):
+  - Spawns `codex exec` per turn.
+  - Parses the JSONL stdout stream for stage updates and token counts.
+- **MCP runtime** (`--codex-runtime mcp`, default):
+  - Spawns a persistent `codex mcp-server` child process.
+  - Communicates over stdio using JSON-RPC 2.0 / MCP protocol `2024-11-05`.
+  - Startup handshake:
+    1. `initialize` (clientInfo `nit/<version>`)
+    2. `initialized` (notify)
+    3. `tools/list` (must include tools `codex` and `codex-reply`)
+  - Per turn:
+    - `tools/call` with tool **`codex`** for a new session (`{prompt, model, cwd, config.model_reasoning_effort}`)
+    - `tools/call` with tool **`codex-reply`** to continue an existing session (`{threadId, prompt}`)
+  - While waiting for the final response, the runner consumes `codex/event` notifications to surface
+    compact progress “stages” in the UI.
+
+### API wiring (CLI → TUI → runner)
+
+The wiring for Codex runtime configuration is intentionally explicit:
+
+- `crates/nit` (CLI) parses `--codex-runtime`, plus optional `--codex-sandbox` and
+  `--codex-approval-policy`, into a `nit_tui::codex_runner::CodexRunnerConfig`.
+- `crates/nit/src/main.rs` passes that config into `nit_tui::run(state, theme, log_rx, codex_runtime, codex_config)`.
+- `crates/nit-tui/src/app.rs` forwards the config into `run_loop(...)` and spawns the runner via
+  `CodexRunner::spawn(codex_runtime, codex_config)`.
+- `crates/nit-tui/src/codex_runner.rs` applies the config:
+  - Exec runtime: adds `-a <policy>` and `-s <sandbox>` to `codex exec ...`.
+  - MCP runtime: forwards `approval-policy` and `sandbox` only when starting new sessions via the
+    `codex` tool (continuations via `codex-reply` resume the existing session settings).
+
+### Thread + mission context
+
+- For ad-hoc chat (no mission), the last known Codex `threadId` is tracked per model so future
+  prompts can resume the session.
+- For missions, thread ids are tracked per mission *and* per model so each agent can continue its
+  own mission thread independently.
+- `AgentBusEvent::TurnCompleted` / `TurnFailed` store the returned `threadId` back into the
+  appropriate map.
+
+## MCP status + notes
+
+The MCP tab in Agent Ops reflects `AgentsState.mcp` (connection state + endpoint + last error).
+
+Implementation notes:
+
+- Token accounting: MCP mode consumes `codex/event` token count notifications and emits
+  `AgentBusEvent::TokenCount` so the UI can keep context usage estimates fresh.
+- Cancellation/timeouts:
+  - MCP Stop/Reconnect cancels an in-flight turn by stopping the server process.
+  - Turns have a configurable timeout via `NIT_MCP_TURN_TIMEOUT_SECS` (default 600; set to `0` to disable).
+- Reconnect robustness: the runner checks for unexpected `codex mcp-server` exit, drops the dead
+  handle, and retries with a short backoff (operator can still use MCP tab `r`).
+- Latency: `latency_ms` is best-effort; it is updated on connect and on successful turns.
+- Sandbox/approval pass-through:
+  - `nit --codex-sandbox <read-only|workspace-write|danger-full-access>`
+  - `nit --codex-approval-policy <untrusted|on-failure|on-request|never>`
+  - In MCP mode these are applied when starting new sessions via the `codex` tool; `codex-reply`
+    continues an existing session and does not accept these options.
+
 ## Lab Dispatch (Active Lab)
 
 - The CLI supports `nit` (default GoL), `nit gol`, `nit games`, and `nit --lab <gol|games>`.

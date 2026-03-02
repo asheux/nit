@@ -308,11 +308,19 @@ fn build_status_label(status_text: &str, compact_mode: bool) -> String {
     if text.is_empty() {
         return String::new();
     }
+    let lower = text.to_ascii_lowercase();
+    if lower.contains("error")
+        || lower.contains("failed")
+        || lower.contains("invalid")
+        || lower.contains("unknown")
+        || lower.contains("panic")
+        || lower.contains("fatal")
+        || lower.contains("timeout")
+        || lower.contains("crash")
+    {
+        return "STATUS: ERROR".into();
+    }
     if compact_mode {
-        if is_high_priority_status(text) {
-            return format!("STATUS: {text}");
-        }
-        let lower = text.to_ascii_lowercase();
         let compact = if lower.contains("queued") {
             Some("QUEUED")
         } else if lower.contains("running")
@@ -343,17 +351,6 @@ fn build_status_label(status_text: &str, compact_mode: bool) -> String {
         return String::new();
     }
     format!("STATUS: {text}")
-}
-
-fn is_high_priority_status(status_text: &str) -> bool {
-    let lower = status_text.to_ascii_lowercase();
-    lower.contains("error")
-        || lower.contains("failed")
-        || lower.contains("panic")
-        || lower.contains("fatal")
-        || lower.contains("warn")
-        || lower.contains("timeout")
-        || lower.contains("crash")
 }
 
 #[cfg(test)]
@@ -390,10 +387,10 @@ mod tests {
     }
 
     #[test]
-    fn status_label_compact_keeps_high_priority_detail() {
+    fn status_label_compact_sanitizes_error_detail() {
         assert_eq!(
             build_status_label("Games tournament failed: timeout", true),
-            "STATUS: Games tournament failed: timeout"
+            "STATUS: ERROR"
         );
     }
 

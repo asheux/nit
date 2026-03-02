@@ -1,5 +1,6 @@
 use nit_core::{
-    AgentAlertSeverity, AgentOpsTab, AgentStatus, AppState, McpConnectionState, PaneId,
+    AgentAlertSeverity, AgentLaneKind, AgentOpsTab, AgentStatus, AppState, McpConnectionState,
+    PaneId, UiSelectionPane,
 };
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
@@ -10,6 +11,7 @@ use ratatui::{
 };
 
 use crate::theme::Theme;
+use crate::widgets::text_selection::apply_ui_selection;
 
 pub fn mission_index_for_body_line(state: &AppState, body_line: usize) -> Option<usize> {
     mission_body_meta(state, body_line).map(|meta| meta.mission_idx)
@@ -25,11 +27,9 @@ pub fn roster_meta_for_body_line(state: &AppState, body_line: usize) -> Option<R
 }
 
 pub fn roster_body_offset(state: &AppState) -> usize {
-    if roster_show_codex_title(state) {
-        3
-    } else {
-        2
-    }
+    let _ = state;
+    // Backends header (4 lines) + blank spacer (1) + table header/separator (2)
+    7
 }
 
 pub fn alert_index_for_body_line(
@@ -38,10 +38,6 @@ pub fn alert_index_for_body_line(
     body_line: usize,
 ) -> Option<usize> {
     alert_body_meta(state, width, body_line).map(|meta| meta.alert_idx)
-}
-
-fn roster_show_codex_title(state: &AppState) -> bool {
-    !state.agents.agents.is_empty() && state.agents.agents.iter().all(|agent| agent.is_codex())
 }
 
 fn roster_body_meta(state: &AppState, body_line: usize) -> Option<RosterBodyMeta> {
@@ -182,6 +178,13 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
         .take(height)
         .map(|(idx, line)| ops_styled_line(state, idx, line, chunks[1].width as usize, theme))
         .collect::<Vec<_>>();
+    let visible = apply_ui_selection(
+        visible,
+        state.ui_selection.as_ref(),
+        UiSelectionPane::JobOutput,
+        theme.selection_bg,
+        scroll,
+    );
     frame.render_widget(
         Paragraph::new(visible).style(Style::default().bg(theme.background)),
         chunks[1],
@@ -326,7 +329,37 @@ pub fn current_lines_for_width(state: &AppState, width: usize) -> Vec<String> {
 
 fn roster_lines(state: &AppState, width: usize) -> Vec<String> {
     let widths = roster_column_widths(width);
+    let codex_active = state.agents.agents.iter().any(|agent| agent.is_codex());
+    let local_active = state
+        .agents
+        .agents
+        .iter()
+        .any(|agent| matches!(agent.kind, AgentLaneKind::Mock));
+    let codex_available = state.agents.codex_cli_available || codex_active;
+    let claude_active = state
+        .agents
+        .agents
+        .iter()
+        .any(|agent| matches!(agent.kind, AgentLaneKind::Claude));
+    let claude_available = state.agents.claude_cli_available || claude_active;
+
     let mut out = vec![
+        " Backends".into(),
+        format!(
+            "  Codex  {}{}",
+            if codex_available { "available" } else { "not found" },
+            if codex_active { " (active)" } else { "" }
+        ),
+        format!(
+            "  Claude {}{}",
+            if claude_available { "available" } else { "not found" },
+            if claude_active { " (active)" } else { "" }
+        ),
+        format!(
+            "  Local  built-in{}",
+            if local_active { " (active)" } else { "" }
+        ),
+        String::new(),
         format!(
             " {} {} {} {} {}",
             fit_left("ROLE", widths[0]),
@@ -337,12 +370,10 @@ fn roster_lines(state: &AppState, width: usize) -> Vec<String> {
         ),
         "─".repeat(width.min(240)),
     ];
+
     if state.agents.agents.is_empty() {
         out.push(" No agents available.".into());
         return out;
-    }
-    if roster_show_codex_title(state) {
-        out.push(" Codex".into());
     }
     for (idx, agent) in state.agents.agents.iter().enumerate() {
         let marker = if idx == state.agents.roster_selected
@@ -871,15 +902,7 @@ fn roster_styled_line(
     usable: usize,
     theme: &Theme,
 ) -> Line<'static> {
-    if state.agents.agents.is_empty() {
-        return Line::from(Span::styled(
-            line.to_string(),
-            Style::default()
-                .fg(theme.border)
-                .add_modifier(Modifier::DIM),
-        ));
-    }
-    if roster_show_codex_title(state) && line_idx == 2 {
+    if line_idx == 0 {
         return Line::from(Span::styled(
             line.to_string(),
             Style::default()
@@ -887,8 +910,89 @@ fn roster_styled_line(
                 .add_modifier(Modifier::BOLD),
         ));
     }
+    if line_idx == 1 {
+        let codex_active = state.agents.agents.iter().any(|agent| agent.is_codex());
+        let codex_available = state.agents.codex_cli_available || codex_active;
+        let style = if codex_active {
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD)
+        } else if codex_available {
+            Style::default().fg(theme.foreground)
+        } else {
+            Style::default()
+                .fg(theme.border)
+                .add_modifier(Modifier::DIM)
+        };
+        return Line::from(Span::styled(line.to_string(), style));
+    }
+    if line_idx == 2 {
+        let claude_active = state
+            .agents
+            .agents
+            .iter()
+            .any(|agent| matches!(agent.kind, AgentLaneKind::Claude));
+        let claude_available = state.agents.claude_cli_available || claude_active;
+        let style = if claude_active {
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD)
+        } else if claude_available {
+            Style::default().fg(theme.foreground)
+        } else {
+            Style::default()
+                .fg(theme.border)
+                .add_modifier(Modifier::DIM)
+        };
+        return Line::from(Span::styled(line.to_string(), style));
+    }
+    if line_idx == 3 {
+        let local_active = state
+            .agents
+            .agents
+            .iter()
+            .any(|agent| matches!(agent.kind, AgentLaneKind::Mock));
+        let style = if local_active {
+            Style::default()
+                .fg(theme.seed.accent_2)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(theme.foreground)
+        };
+        return Line::from(Span::styled(line.to_string(), style));
+    }
+    if line_idx == 4 {
+        return Line::from(Span::styled(
+            line.to_string(),
+            Style::default().fg(theme.foreground),
+        ));
+    }
+    if line_idx == 5 {
+        return Line::from(Span::styled(
+            line.to_string(),
+            Style::default()
+                .fg(theme.border)
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
+    if line_idx == 6 {
+        return Line::from(Span::styled(
+            line.to_string(),
+            Style::default()
+                .fg(theme.border)
+                .add_modifier(Modifier::DIM),
+        ));
+    }
     let body_line = line_idx.saturating_sub(roster_body_offset(state));
     let Some(meta) = roster_body_meta(state, body_line) else {
+        if state.agents.agents.is_empty() {
+            return Line::from(Span::styled(
+                line.to_string(),
+                Style::default()
+                    .fg(theme.border)
+                    .add_modifier(Modifier::DIM),
+            ));
+        }
         return Line::from(Span::styled(
             line.to_string(),
             Style::default().fg(theme.foreground),

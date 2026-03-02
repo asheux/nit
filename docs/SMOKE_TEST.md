@@ -70,6 +70,24 @@ It's meant for quick confidence after changes to UI, commands, or engine wiring.
   - `Ctrl+B`
   - Expect: debug information appears (and toggles back off).
 
+## Agent Station (Codex/MCP)
+
+- Preconditions:
+  - `codex` installed and accessible on `$PATH`
+  - `~/.codex/models_cache.json` present (for `--agents codex`)
+- Launch with Codex lanes:
+  - `cargo run -- --agents codex`
+  - Expect: Agent Ops roster populated with Codex models.
+- Verify MCP transport (default runtime):
+  - In Agent Ops: switch to the MCP tab.
+  - Expect: status transitions to CONNECTED and endpoint shows `stdio://...` (backed by `codex mcp-server`).
+  - Press `x` (stop), `s` (start), `r` (reconnect); expect status updates accordingly.
+- Verify a turn over MCP:
+  - Focus Agent Chat (from Agent Ops: `Enter`).
+  - Send a short prompt; expect: stage updates while running and an agent reply appended to the thread.
+- Failure mode sanity:
+  - If Codex is offline/misconfigured, expect MCP state ERROR and details in Agent diagnostics/logs.
+
 ## Editor + Notes
 
 - Mode switching:

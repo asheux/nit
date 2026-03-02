@@ -42,12 +42,18 @@ struct Cli {
     /// Start in the specified lab (gol or games)
     #[arg(long, value_enum, default_value_t = LabArg::Gol)]
     lab: LabArg,
-    /// Agent station backend (defaults to Codex when available, else mock)
+    /// Agent station backend selection (defaults to all available backends)
     #[arg(long, value_enum)]
     agents: Option<AgentsArg>,
     /// Codex automation runtime (exec spawns per-turn; mcp uses a persistent `codex mcp-server`)
     #[arg(long, value_enum, default_value_t = CodexRuntimeArg::Mcp)]
     codex_runtime: CodexRuntimeArg,
+    /// Codex sandbox mode (forwarded to Codex runs; default is Codex's own config)
+    #[arg(long, value_enum)]
+    codex_sandbox: Option<CodexSandboxArg>,
+    /// Codex approval policy for executing model-suggested commands (default is Codex's own config)
+    #[arg(long, value_enum)]
+    codex_approval_policy: Option<CodexApprovalPolicyArg>,
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -213,16 +219,57 @@ enum OutputFormat {
 
 #[derive(Copy, Clone, Debug, ValueEnum)]
 enum AgentsArg {
-    /// Seed the Agent Station with mock planner/coder/reviewer lanes.
-    Mock,
+    /// Seed the Agent Station with local built-in lanes.
+    #[value(alias = "mock")]
+    Local,
     /// Seed the Agent Station roster from Codex's cached model list (~/.codex/models_cache.json).
     Codex,
+    /// Seed the Agent Station with Claude CLI lane.
+    Claude,
+    /// Seed all available lanes (local + codex cache + claude).
+    All,
 }
 
 #[derive(Copy, Clone, Debug, ValueEnum)]
 enum CodexRuntimeArg {
     Exec,
     Mcp,
+}
+
+#[derive(Copy, Clone, Debug, ValueEnum)]
+enum CodexSandboxArg {
+    ReadOnly,
+    WorkspaceWrite,
+    DangerFullAccess,
+}
+
+impl CodexSandboxArg {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::ReadOnly => "read-only",
+            Self::WorkspaceWrite => "workspace-write",
+            Self::DangerFullAccess => "danger-full-access",
+        }
+    }
+}
+
+#[derive(Copy, Clone, Debug, ValueEnum)]
+enum CodexApprovalPolicyArg {
+    Untrusted,
+    OnFailure,
+    OnRequest,
+    Never,
+}
+
+impl CodexApprovalPolicyArg {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Untrusted => "untrusted",
+            Self::OnFailure => "on-failure",
+            Self::OnRequest => "on-request",
+            Self::Never => "never",
+        }
+    }
 }
 
 #[derive(Copy, Clone, Debug, ValueEnum)]
@@ -364,22 +411,14 @@ fn main() -> anyhow::Result<()> {
     install_panic_hook();
 
     let mut state = nit_core::AppState::new(workspace_root, editor, notes);
-    state.agents = match cli.agents {
-        Some(AgentsArg::Mock) => nit_core::AgentsState::default_with_mocks(),
-        Some(AgentsArg::Codex) => load_agents_from_codex_models_cache().unwrap_or_else(|err| {
-            let mut agents = nit_core::AgentsState::default_with_mocks();
-            agents.alerts.push(nit_core::AgentAlert {
-                severity: nit_core::AgentAlertSeverity::Warn,
-                source: "codex".into(),
-                message: format!("Failed to load Codex models: {err}"),
-                at: "t+0".into(),
-            });
-            agents
-        }),
-        None => {
-            try_seed_agents_from_codex().unwrap_or_else(nit_core::AgentsState::default_with_mocks)
-        }
+    state.agents = match cli.agents.unwrap_or(AgentsArg::All) {
+        AgentsArg::Local => load_local_agent_lane(),
+        AgentsArg::Codex => load_only_codex_agents(),
+        AgentsArg::Claude => load_only_claude_agents(),
+        AgentsArg::All => load_all_available_agents(),
     };
+    state.agents.codex_cli_available = codex_cli_available();
+    state.agents.claude_cli_available = claude_cli_available();
     if let Some(path) = export_legacy_notes_snapshot(&state.workspace_root, state.notes_buffer()) {
         state.agents.pending_legacy_notes_alert = Some(format!(
             "Legacy Notes were preserved in {} and are available in Agent Ops > Scratchpad.",
@@ -436,7 +475,11 @@ fn main() -> anyhow::Result<()> {
         CodexRuntimeArg::Exec => nit_tui::codex_runner::CodexRuntimeMode::Exec,
         CodexRuntimeArg::Mcp => nit_tui::codex_runner::CodexRuntimeMode::Mcp,
     };
-    run(state, theme, log_rx, codex_runtime)?;
+    let codex_config = nit_tui::codex_runner::CodexRunnerConfig {
+        sandbox: cli.codex_sandbox.map(|v| v.as_str().to_string()),
+        approval_policy: cli.codex_approval_policy.map(|v| v.as_str().to_string()),
+    };
+    run(state, theme, log_rx, codex_runtime, codex_config)?;
     Ok(())
 }
 
@@ -2223,19 +2266,122 @@ fn open_log_file(path: &Path) -> io::Result<std::fs::File> {
         .open(path)
 }
 
-fn try_seed_agents_from_codex() -> Option<nit_core::AgentsState> {
-    if !codex_cli_available() {
-        return None;
+fn load_only_codex_agents() -> nit_core::AgentsState {
+    load_agents_from_codex_models_cache().unwrap_or_else(|err| {
+        let mut agents = nit_core::AgentsState::default();
+        agents.alerts.push(nit_core::AgentAlert {
+            severity: nit_core::AgentAlertSeverity::Warn,
+            source: "codex".into(),
+            message: format!("Failed to load Codex models: {err}"),
+            at: "t+0".into(),
+        });
+        agents
+    })
+}
+
+fn load_only_claude_agents() -> nit_core::AgentsState {
+    let mut agents = nit_core::AgentsState::default();
+    if !claude_cli_available() {
+        agents.alerts.push(nit_core::AgentAlert {
+            severity: nit_core::AgentAlertSeverity::Warn,
+            source: "claude".into(),
+            message: "Claude CLI not found in PATH.".into(),
+            at: "t+0".into(),
+        });
+        return agents;
     }
-    match load_agents_from_codex_models_cache() {
-        Ok(agents) if !agents.agents.is_empty() => Some(agents),
-        Ok(_) => None,
-        Err(_) => None,
+    agents.agents.push(nit_core::AgentLane {
+        id: "claude".into(),
+        role: "Claude".into(),
+        lane: "Claude".into(),
+        kind: nit_core::AgentLaneKind::Claude,
+        status: nit_core::AgentStatus::Idle,
+        heartbeat_age_secs: 0,
+        queue_len: 0,
+        current_mission: None,
+        last_message: "Claude backend detected.".into(),
+    });
+    agents.selected_agent = Some("claude".into());
+    agents.roster_selected = 0;
+    agents
+}
+
+fn load_local_agent_lane() -> nit_core::AgentsState {
+    let mut agents = nit_core::AgentsState::default();
+    agents.agents.push(nit_core::AgentLane {
+        id: "local".into(),
+        role: "Local".into(),
+        lane: "Local".into(),
+        kind: nit_core::AgentLaneKind::Mock,
+        status: nit_core::AgentStatus::Idle,
+        heartbeat_age_secs: 0,
+        queue_len: 0,
+        current_mission: None,
+        last_message: "Built-in local lane.".into(),
+    });
+    agents.selected_agent = Some("local".into());
+    agents.roster_selected = 0;
+    agents
+}
+
+fn load_all_available_agents() -> nit_core::AgentsState {
+    let mut agents = nit_core::AgentsState::default();
+    agents.agents.extend(load_local_agent_lane().agents);
+
+    if claude_cli_available() {
+        agents.agents.push(nit_core::AgentLane {
+            id: "claude".into(),
+            role: "Claude".into(),
+            lane: "Claude".into(),
+            kind: nit_core::AgentLaneKind::Claude,
+            status: nit_core::AgentStatus::Idle,
+            heartbeat_age_secs: 0,
+            queue_len: 0,
+            current_mission: None,
+            last_message: "Claude backend detected.".into(),
+        });
     }
+
+    if codex_cli_available() {
+        match load_agents_from_codex_models_cache() {
+            Ok(mut codex_agents) => {
+                agents
+                    .codex_effective_context_window_tokens
+                    .extend(codex_agents.codex_effective_context_window_tokens.drain());
+                agents
+                    .codex_default_reasoning_effort
+                    .extend(codex_agents.codex_default_reasoning_effort.drain());
+                agents
+                    .codex_supported_reasoning_efforts
+                    .extend(codex_agents.codex_supported_reasoning_efforts.drain());
+                agents
+                    .codex_selected_reasoning_effort
+                    .extend(codex_agents.codex_selected_reasoning_effort.drain());
+                agents.agents.extend(codex_agents.agents.drain(..));
+                agents.mcp = codex_agents.mcp;
+            }
+            Err(err) => {
+                agents.alerts.push(nit_core::AgentAlert {
+                    severity: nit_core::AgentAlertSeverity::Warn,
+                    source: "codex".into(),
+                    message: format!("Failed to load Codex models: {err}"),
+                    at: "t+0".into(),
+                });
+            }
+        }
+    }
+
+    agents.selected_agent = agents.agents.first().map(|a| a.id.clone());
+    agents.roster_selected = 0;
+    agents
 }
 
 fn codex_cli_available() -> bool {
     is_executable_in_path("codex")
+}
+
+fn claude_cli_available() -> bool {
+    is_executable_in_path("claude")
 }
 
 fn is_executable_in_path(bin: &str) -> bool {

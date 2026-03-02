@@ -7,7 +7,7 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use crate::{
-    codex_runner::{CodexCommand, CodexRunner, CodexRuntimeMode},
+    codex_runner::{CodexCommand, CodexRunner, CodexRunnerConfig, CodexRuntimeMode},
     file_tree,
     file_tree_runner::{FileTreeCommand, FileTreeEvent, FileTreeRunner},
     fuzzy_preview_runner::{PreviewEvent, PreviewModel, PreviewRunner},
@@ -408,6 +408,7 @@ pub fn run(
     theme: Theme,
     log_rx: Receiver<String>,
     codex_runtime: CodexRuntimeMode,
+    codex_config: CodexRunnerConfig,
 ) -> io::Result<()> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -449,6 +450,7 @@ pub fn run(
         &mut syntax,
         log_rx,
         codex_runtime,
+        codex_config,
     );
 
     terminal.show_cursor()?;
@@ -479,6 +481,7 @@ fn run_loop(
     syntax: &mut SyntaxRuntime,
     log_rx: Receiver<String>,
     codex_runtime: CodexRuntimeMode,
+    codex_config: CodexRunnerConfig,
 ) -> io::Result<()> {
     let mut last_tick = Instant::now();
     let mut last_job = Instant::now();
@@ -495,7 +498,7 @@ fn run_loop(
     } else {
         CodexRuntimeMode::Exec
     };
-    let mut codex_runner = CodexRunner::spawn(codex_runtime);
+    let mut codex_runner = CodexRunner::spawn(codex_runtime, codex_config);
     let mut fuzzy_runtime = FuzzySearchRuntime::new(theme, state.settings.highlight.clone());
     let mut seed_runtime = if state.app_kind == AppKind::Gol {
         Some(SeedRuntime::new(state))
@@ -642,24 +645,6 @@ fn run_loop(
                         }
                     }
                     if state.command_line.is_some() || state.prompt.is_some() {
-                        if let Some(action) = map_key_to_action(key, state, &mut input_state) {
-                            prepare_clipboard_paste(state, &mut clipboard, &action);
-                            let action_copy = action.clone();
-                            let outcome = apply_action_with_syntax(state, syntax, action);
-                            if matches!(action_copy, Action::ToggleSyntax) {
-                                fuzzy_runtime
-                                    .update_syntax_config(state.settings.highlight.clone());
-                            }
-                            handle_clipboard_copy(state, &mut clipboard, &action_copy);
-                            handle_selection_autocopy(state, &mut clipboard, &mut input_state);
-                            if outcome.should_exit {
-                                break;
-                            }
-                            needs_redraw = needs_redraw || outcome.state_changed;
-                        }
-                        continue;
-                    }
-                    if is_command_prompt_open_key(&key) {
                         if let Some(action) = map_key_to_action(key, state, &mut input_state) {
                             prepare_clipboard_paste(state, &mut clipboard, &action);
                             let action_copy = action.clone();
@@ -2854,7 +2839,6 @@ fn maybe_dispatch_codex_turn(
         },
     );
 
-    state.agents.mcp.state = McpConnectionState::Connecting;
     state.agents.mcp.last_error = None;
     state.agents.note_event();
     vitals.record_agent_event(now);
@@ -3172,7 +3156,7 @@ fn map_key_to_action(key: KeyEvent, state: &AppState, input: &mut InputState) ->
         return Some(action);
     }
 
-    if is_command_prompt_open_key(&key) {
+    if is_command_prompt_open_key(&key) && state.mode == Mode::Normal {
         return Some(Action::CommandPromptOpen);
     }
 
@@ -9903,6 +9887,34 @@ mod tests {
 
         let semicolon_shift = KeyEvent::new(KeyCode::Char(';'), KeyModifiers::SHIFT);
         assert!(is_command_prompt_open_key(&semicolon_shift));
+    }
+
+    #[test]
+    fn command_prompt_open_key_does_not_trigger_in_insert_mode() {
+        let mut state = state_for_test();
+        state.focus = PaneId::Editor;
+        state.mode = Mode::Insert;
+        let mut input = InputState::new();
+
+        let colon = KeyEvent::new(KeyCode::Char(':'), KeyModifiers::SHIFT);
+        assert_eq!(
+            map_key_to_action(colon, &state, &mut input),
+            Some(Action::InsertChar(':'))
+        );
+    }
+
+    #[test]
+    fn command_prompt_open_key_triggers_in_normal_mode() {
+        let mut state = state_for_test();
+        state.focus = PaneId::Editor;
+        state.mode = Mode::Normal;
+        let mut input = InputState::new();
+
+        let colon = KeyEvent::new(KeyCode::Char(':'), KeyModifiers::empty());
+        assert_eq!(
+            map_key_to_action(colon, &state, &mut input),
+            Some(Action::CommandPromptOpen)
+        );
     }
 
     #[test]
