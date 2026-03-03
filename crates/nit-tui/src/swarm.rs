@@ -1758,6 +1758,8 @@ pub fn push_system_message_to_mission(state: &mut AppState, mission_id: &str, te
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nit_core::{AgentLane, AgentLaneKind, Buffer};
+    use std::path::PathBuf;
 
     #[test]
     fn parse_swarm_requires_whitespace_after_prefix() {
@@ -2089,6 +2091,92 @@ Plan:
             .tasks
             .iter()
             .all(|t| matches!(t.state, SwarmTaskState::Skipped)));
+    }
+
+    #[test]
+    fn deadlock_detection_emits_system_message() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let editor = Buffer::empty("editor", None);
+        let notes = Buffer::empty("notes", None);
+        let mut state = AppState::new(root, editor, notes);
+        state.agents.messages.clear();
+        state.agents.missions.clear();
+        state.agents.agents.clear();
+
+        state.agents.agents.push(AgentLane {
+            id: "planner".into(),
+            role: "Planner".into(),
+            lane: "Lane A".into(),
+            kind: AgentLaneKind::Codex,
+            status: AgentStatus::Idle,
+            heartbeat_age_secs: 0,
+            queue_len: 0,
+            current_mission: None,
+            last_message: String::new(),
+        });
+        state.agents.agents.push(AgentLane {
+            id: "a1".into(),
+            role: "Integrator".into(),
+            lane: "Lane B".into(),
+            kind: AgentLaneKind::Codex,
+            status: AgentStatus::Idle,
+            heartbeat_age_secs: 0,
+            queue_len: 0,
+            current_mission: None,
+            last_message: String::new(),
+        });
+
+        let mut swarm = SwarmRuntime::default();
+        let (mission_id, _dispatches) = swarm
+            .start(
+                &mut state,
+                "planner".into(),
+                vec!["planner".into(), "a1".into()],
+                Some("lab".into()),
+                "root".into(),
+            )
+            .expect("swarm start");
+
+        let planner_message = r#"
+Plan:
+- (test) introduce a deadlock cycle
+
+```json
+{
+  "version": 2,
+  "template": "lab",
+  "integrator_agent_id": "a1",
+  "tasks": [
+    { "id": "t1", "agent_id": "a1", "title": "T1", "prompt": "DONE t1", "deps": ["t2"] },
+    { "id": "t2", "agent_id": "a1", "title": "T2", "prompt": "DONE t2", "deps": ["t1"] }
+  ]
+}
+```
+"#;
+
+        let event = AgentBusEvent::TurnCompleted {
+            agent_id: "planner".into(),
+            mission_id: Some(mission_id.clone()),
+            thread_id: None,
+            token_count: None,
+            message: planner_message.into(),
+        };
+        event.apply(&mut state);
+        swarm.handle_event(&mut state, &event);
+
+        assert!(state.agents.messages.iter().any(|msg| {
+            msg.mission_id.as_deref() == Some(mission_id.as_str())
+                && msg.agent_id.as_deref() == Some("swarm")
+                && msg.text.contains("Swarm deadlock:")
+                && msg.text.contains("t1")
+                && msg.text.contains("t2")
+        }));
+
+        let run = swarm.runs.get(mission_id.as_str()).expect("swarm run");
+        assert!(run
+            .tasks
+            .iter()
+            .all(|task| matches!(task.state, SwarmTaskState::Skipped)));
     }
 
     #[test]
