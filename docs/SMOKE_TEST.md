@@ -94,12 +94,27 @@ It's meant for quick confidence after changes to UI, commands, or engine wiring.
 - Verify `@swarm` orchestration (task splitting + synthesis):
   - In Agent Chat (any Codex model selected): send `@swarm 4 template=lab <prompt>` (or omit `template=...` since `lab` is the default).
   - Expect: a new mission is created (Missions tab shows `SWM yes`) and the planner runs first (phase `PLAN`).
-  - Expect: after the planner returns a JSON plan, tasks run as a DAG (phase `EXECUTE`, status like `EXEC 1/6`), with some tasks queued until their deps finish.
+  - Expect: after the planner returns a JSON plan, Agent Chat shows a `Swarm DAG` table with task rows (`ID/ASSIGNEE/ROLE/STATE/BLOCKED/DEPS/TITLE`) and accurate `Pending` vs `Queued` vs `Skipped` states.
+  - Expect: tasks run as a DAG (phase `EXECUTE`, status like `EXEC 1/6`), with some tasks queued until their deps finish.
   - Expect: when all task agents finish, nit runs a verifier turn (phase `VERIFY`, status `VERIFY`) to execute a built-in gate bundle when detected.
+  - Expect: per-gate verifier outcomes are visible in Agent Chat (`GATE STATUS COMMAND` rows) and include PASS/FAIL (and SKIP when reported).
   - Expect: after verification completes, the planner runs a synthesis turn (status `SYNTH`) and the mission status becomes:
     - `DONE` when gates pass (or no gates were detected)
     - `FAILED` when gates ran and failed
     - `ERROR` when verification errored (e.g., missing/invalid gate report JSON)
+  - Template `bulk` sanity:
+    - Send `@swarm 5 template=bulk <prompt>`.
+    - Expect: multiple “propose” tasks run first (parallel), then a “judge” task runs, then an integrator task runs before VERIFY/SYNTH.
+  - Deadlock sanity (cyclic plan):
+    - If the planner returns a cyclic plan where no tasks can ever become ready, expect a system message like `Swarm deadlock: skipping tasks with unresolvable deps: ...`, followed immediately by `VERIFY`/`SYNTH`, and the mission ends `FAILED`.
+  - Structured artifacts persistence sanity:
+    - Have a task emit a `swarm_artifacts` JSON block (files/diffs/commands/risks/notes).
+    - Expect persistence under `.nit/swarm/<mission>/` (`run.json`, `tasks/<task-id>/artifacts.json`, `tasks/<task-id>/output.md`, optional `gates/report.json`).
+  - Gate bundle override sanity:
+    - Add `.nit/config.toml` with:
+      - `[swarm.gates]`
+      - `default = "none"` (or `rust-ci`/`node-ci`/`python-ci`/`go-ci`).
+    - Expect swarm metadata and VERIFY behavior to follow the override.
 - Failure mode sanity:
   - If Codex is offline/misconfigured, expect MCP state ERROR and details in Agent diagnostics/logs.
 

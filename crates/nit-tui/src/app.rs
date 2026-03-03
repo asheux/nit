@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 use std::fs;
 use std::io::{self, Stdout};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -62,6 +62,7 @@ const JOB_TICK: Duration = Duration::from_millis(120);
 const BUSY_PULSE_INTERVAL: Duration = Duration::from_millis(550);
 const CHORD_TIMEOUT: Duration = Duration::from_millis(300);
 const INSPECTOR_JUMP_TIMEOUT: Duration = Duration::from_millis(1500);
+const CHAT_PROMPT_HISTORY_MAX: usize = 200;
 
 struct FuzzySearchRuntime {
     indexer: FileIndexRunner,
@@ -799,7 +800,8 @@ fn run_loop(
                 Event::Mouse(mouse) => {
                     handled_input = true;
                     let screen = terminal.size().unwrap_or_default();
-                    if handle_mouse_event(
+                    if handle_mouse_event_with_swarm(
+                        &swarm,
                         mouse,
                         screen,
                         state,
@@ -1045,7 +1047,7 @@ fn run_loop(
             }
             last_agent_event_epoch = state.agents.event_epoch;
         }
-        if flush_agent_run_provenance(state).is_err() {
+        if flush_agent_run_provenance(state, &swarm).is_err() {
             let now = Instant::now();
             vitals.record_diag_event(now, DiagSeverity::Warn);
         }
@@ -1065,6 +1067,7 @@ fn run_loop(
             draw(
                 terminal,
                 state,
+                &swarm,
                 theme,
                 syntax,
                 &system_stats,
@@ -1241,6 +1244,7 @@ fn line_looks_fatal(line: &str) -> bool {
 fn draw(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     state: &mut AppState,
+    swarm: &SwarmRuntime,
     theme: &Theme,
     syntax: &mut SyntaxRuntime,
     system_stats: &SystemStats,
@@ -1297,7 +1301,7 @@ fn draw(
                 state.settings.editor.tab_width as usize,
             )
         };
-        let notes_cursor = agent_console_view::render(f, layout.notes, state, theme);
+        let notes_cursor = agent_console_view::render(f, layout.notes, state, swarm, theme);
         let job_cursor = if state.agents.dock_tab == AgentOpsTab::Scratchpad {
             let focused = state.focus == PaneId::JobOutput;
             let border_style = if focused {
@@ -1366,7 +1370,7 @@ fn draw(
                 None
             }
         } else {
-            agent_ops_view::render(f, layout.job, state, theme);
+            agent_ops_view::render(f, layout.job, state, swarm, theme);
             None
         };
         match state.app_kind {
@@ -1970,6 +1974,7 @@ fn move_agent_ops_selection(state: &mut AppState, delta: i32) -> bool {
         AgentOpsTab::Patch
         | AgentOpsTab::Evidence
         | AgentOpsTab::Diagnostics
+        | AgentOpsTab::Dag
         | AgentOpsTab::Scratchpad => {
             if delta.is_negative() {
                 state.agents.ops_scroll = state.agents.ops_scroll.saturating_sub(1);
@@ -2207,6 +2212,7 @@ fn handle_agent_console_key(
             let raw = state.agents.chat_input.clone();
             let mut swarm_handled = false;
             if let Some(cmd) = parse_swarm_command(&raw) {
+                chat_history_remember(state, &raw);
                 let planner = state
                     .agents
                     .selected_context_agent()
@@ -2281,6 +2287,7 @@ fn handle_agent_console_key(
                 changed = sent.is_some();
                 follow_chat_cursor = changed;
                 if let Some((channel, prompt)) = sent {
+                    chat_history_remember(state, &raw);
                     let targets = if matches!(channel, AgentChannel::Broadcast) {
                         broadcast_target_agents(state, mission_id.as_deref())
                     } else {
@@ -2319,6 +2326,7 @@ fn handle_agent_console_key(
             if !state.agents.chat_input.is_empty() {
                 state.agents.chat_input.clear();
                 state.agents.chat_input_cursor = 0;
+                chat_history_reset_nav(state);
                 changed = true;
                 follow_chat_cursor = true;
             }
@@ -2332,6 +2340,7 @@ fn handle_agent_console_key(
             if !state.agents.chat_input.is_empty() {
                 state.agents.chat_input.clear();
                 state.agents.chat_input_cursor = 0;
+                chat_history_reset_nav(state);
                 changed = true;
                 follow_chat_cursor = true;
             }
@@ -2482,6 +2491,9 @@ fn handle_agent_console_key(
                 state.agents.chat_input_cursor = moved;
                 changed = true;
                 follow_chat_cursor = true;
+            } else if chat_history_prev(state) {
+                changed = true;
+                follow_chat_cursor = true;
             }
         }
         KeyEvent {
@@ -2496,6 +2508,9 @@ fn handle_agent_console_key(
             );
             if moved != state.agents.chat_input_cursor {
                 state.agents.chat_input_cursor = moved;
+                changed = true;
+                follow_chat_cursor = true;
+            } else if chat_history_next(state) {
                 changed = true;
                 follow_chat_cursor = true;
             }
@@ -2623,6 +2638,81 @@ fn insert_text_into_focused_buffer(
         let buf = state.notes_buffer_mut();
         syntax.note_buffer_change(notes_id, buf);
     }
+    true
+}
+
+fn chat_history_reset_nav(state: &mut AppState) {
+    state.agents.chat_prompt_history_pos = None;
+    state.agents.chat_prompt_history_draft = None;
+}
+
+fn chat_history_remember(state: &mut AppState, raw: &str) {
+    chat_history_reset_nav(state);
+    if raw.trim().is_empty() {
+        return;
+    }
+    if state
+        .agents
+        .chat_prompt_history
+        .last()
+        .is_some_and(|prev| prev == raw)
+    {
+        return;
+    }
+    state.agents.chat_prompt_history.push(raw.to_string());
+    if state.agents.chat_prompt_history.len() > CHAT_PROMPT_HISTORY_MAX {
+        let excess = state.agents.chat_prompt_history.len() - CHAT_PROMPT_HISTORY_MAX;
+        state.agents.chat_prompt_history.drain(0..excess);
+    }
+}
+
+fn chat_history_prev(state: &mut AppState) -> bool {
+    if state.agents.chat_prompt_history.is_empty() {
+        return false;
+    }
+    let next_pos = match state.agents.chat_prompt_history_pos {
+        None => {
+            state.agents.chat_prompt_history_draft = Some(state.agents.chat_input.clone());
+            Some(state.agents.chat_prompt_history.len().saturating_sub(1))
+        }
+        Some(0) => None,
+        Some(pos) => Some(pos.saturating_sub(1)),
+    };
+    let Some(pos) = next_pos else {
+        return false;
+    };
+    if pos >= state.agents.chat_prompt_history.len() {
+        chat_history_reset_nav(state);
+        return false;
+    }
+    state.agents.chat_prompt_history_pos = Some(pos);
+    state.agents.chat_input = state.agents.chat_prompt_history[pos].clone();
+    state.agents.chat_input_cursor = state.agents.chat_input.chars().count();
+    true
+}
+
+fn chat_history_next(state: &mut AppState) -> bool {
+    let Some(pos) = state.agents.chat_prompt_history_pos else {
+        return false;
+    };
+    let history_len = state.agents.chat_prompt_history.len();
+    if history_len == 0 || pos >= history_len {
+        chat_history_reset_nav(state);
+        return false;
+    }
+    if pos.saturating_add(1) < history_len {
+        let next = pos.saturating_add(1);
+        state.agents.chat_prompt_history_pos = Some(next);
+        state.agents.chat_input = state.agents.chat_prompt_history[next].clone();
+    } else {
+        state.agents.chat_prompt_history_pos = None;
+        state.agents.chat_input = state
+            .agents
+            .chat_prompt_history_draft
+            .take()
+            .unwrap_or_default();
+    }
+    state.agents.chat_input_cursor = state.agents.chat_input.chars().count();
     true
 }
 
@@ -4376,7 +4466,9 @@ fn fuzzy_popup_size(screen: ratatui::layout::Rect, state: &AppState) -> (u16, u1
     fuzzy_search_popup::preferred_size(screen)
 }
 
-fn handle_mouse_event(
+#[allow(clippy::too_many_arguments)]
+fn handle_mouse_event_with_swarm(
+    swarm: &SwarmRuntime,
     mouse: MouseEvent,
     screen: ratatui::layout::Rect,
     state: &mut AppState,
@@ -4552,8 +4644,9 @@ fn handle_mouse_event(
                 }
                 if let Some(thread_area) = agent_console_view::thread_text_area(layout.notes, state)
                 {
-                    let lines = agent_console_view::thread_lines_for_selection(
+                    let lines = agent_console_view::thread_lines_for_selection_with_swarm(
                         state,
+                        swarm,
                         thread_area.width.max(1) as usize,
                     );
                     let max_scroll = lines
@@ -4575,7 +4668,11 @@ fn handle_mouse_event(
                 } else {
                     let text_area = job_output_text_area(layout.job);
                     let text_width = text_area.width as usize;
-                    let lines = agent_ops_view::current_lines_for_width(state, text_width);
+                    let lines = agent_ops_view::current_lines_for_width_with_swarm(
+                        state,
+                        Some(swarm),
+                        text_width,
+                    );
                     let height = text_area.height as usize;
                     let max_scroll = lines.len().saturating_sub(height);
                     let mut scroll = state.agents.ops_scroll;
@@ -4590,11 +4687,19 @@ fn handle_mouse_event(
             if state.fuzzy_search.open {
                 handle_fuzzy_search_mouse_down(mouse, screen, state, fuzzy_runtime)
             } else {
-                handle_mouse_down(mouse, screen, state, input_state, clipboard, theme)
+                handle_mouse_down_with_swarm(
+                    swarm,
+                    mouse,
+                    screen,
+                    state,
+                    input_state,
+                    clipboard,
+                    theme,
+                )
             }
         }
         MouseEventKind::Drag(crossterm::event::MouseButton::Left) => {
-            handle_mouse_drag(mouse, screen, state, input_state, clipboard, theme)
+            handle_mouse_drag_with_swarm(swarm, mouse, screen, state, input_state, clipboard, theme)
         }
         MouseEventKind::Up(crossterm::event::MouseButton::Left) => {
             input_state.mouse_select_anchor = None;
@@ -4602,6 +4707,28 @@ fn handle_mouse_event(
         }
         _ => false,
     }
+}
+
+#[cfg(test)]
+fn handle_mouse_event(
+    mouse: MouseEvent,
+    screen: ratatui::layout::Rect,
+    state: &mut AppState,
+    fuzzy_runtime: &mut FuzzySearchRuntime,
+    input_state: &mut InputState,
+    clipboard: &mut Option<Clipboard>,
+    theme: &Theme,
+) -> bool {
+    handle_mouse_event_with_swarm(
+        &SwarmRuntime::default(),
+        mouse,
+        screen,
+        state,
+        fuzzy_runtime,
+        input_state,
+        clipboard,
+        theme,
+    )
 }
 
 const SCROLL_LINES: usize = 1;
@@ -4873,7 +5000,18 @@ fn point_in_rect(x: u16, y: u16, rect: ratatui::layout::Rect) -> bool {
         && y < rect.y.saturating_add(rect.height)
 }
 
+#[cfg(test)]
 fn map_agent_console_mouse(
+    mouse: MouseEvent,
+    screen: ratatui::layout::Rect,
+    state: &AppState,
+    clamp: bool,
+) -> Option<(usize, usize, Vec<String>)> {
+    map_agent_console_mouse_with_swarm(&SwarmRuntime::default(), mouse, screen, state, clamp)
+}
+
+fn map_agent_console_mouse_with_swarm(
+    swarm: &SwarmRuntime,
     mouse: MouseEvent,
     screen: ratatui::layout::Rect,
     state: &AppState,
@@ -4884,7 +5022,11 @@ fn map_agent_console_mouse(
     if !point_in_rect(mouse.column, mouse.row, text_area) && !clamp {
         return None;
     }
-    let lines = agent_console_view::thread_lines_for_selection(state, text_area.width as usize);
+    let lines = agent_console_view::thread_lines_for_selection_with_swarm(
+        state,
+        swarm,
+        text_area.width as usize,
+    );
     if lines.is_empty() {
         return None;
     }
@@ -4903,7 +5045,8 @@ fn map_agent_console_mouse(
     Some((line_idx, col, lines))
 }
 
-fn map_job_output_mouse(
+fn map_job_output_mouse_with_swarm(
+    swarm: &SwarmRuntime,
     mouse: MouseEvent,
     screen: ratatui::layout::Rect,
     state: &AppState,
@@ -4915,7 +5058,7 @@ fn map_job_output_mouse(
         return None;
     }
     let text_width = text_area.width as usize;
-    let lines = agent_ops_view::current_lines_for_width(state, text_width);
+    let lines = agent_ops_view::current_lines_for_width_with_swarm(state, Some(swarm), text_width);
     if lines.is_empty() {
         return None;
     }
@@ -5521,6 +5664,17 @@ fn job_output_text_area(area: ratatui::layout::Rect) -> ratatui::layout::Rect {
     chunks[1]
 }
 
+fn agent_ops_tab_bar_area(area: ratatui::layout::Rect) -> ratatui::layout::Rect {
+    use ratatui::widgets::{Block, Borders};
+    let inner = Block::default().borders(Borders::ALL).inner(area);
+    ratatui::layout::Rect {
+        x: inner.x,
+        y: inner.y,
+        width: inner.width,
+        height: inner.height.min(1),
+    }
+}
+
 fn agent_ops_scratchpad_editor_area(area: ratatui::layout::Rect) -> ratatui::layout::Rect {
     use ratatui::layout::{Constraint, Direction, Layout};
     use ratatui::widgets::{Block, Borders};
@@ -5744,7 +5898,8 @@ fn user_prompt_payload_bounds_in_block(lines: &[String], idx: usize) -> Option<(
     Some((start_col, len))
 }
 
-fn handle_mouse_down(
+fn handle_mouse_down_with_swarm(
+    swarm: &SwarmRuntime,
     mouse: MouseEvent,
     screen: ratatui::layout::Rect,
     state: &mut AppState,
@@ -6024,7 +6179,9 @@ fn handle_mouse_down(
         input_state.mouse_select_anchor = None;
         return true;
     }
-    if let Some((line_idx, col, lines)) = map_agent_console_mouse(mouse, screen, state, false) {
+    if let Some((line_idx, col, lines)) =
+        map_agent_console_mouse_with_swarm(swarm, mouse, screen, state, false)
+    {
         state.focus = PaneId::Notes;
         state.mode = Mode::Normal;
         state.ui_selection = Some(UiSelection {
@@ -6052,6 +6209,27 @@ fn handle_mouse_down(
         reset_ui_selection(state, input_state);
         state.focus = PaneId::Notes;
         state.mode = Mode::Normal;
+        input_state.mouse_select_anchor = None;
+        return true;
+    }
+    let agent_ops_tabs_area = agent_ops_tab_bar_area(layout.job);
+    if point_in_rect(mouse.column, mouse.row, agent_ops_tabs_area) {
+        reset_ui_selection(state, input_state);
+        state.focus = PaneId::JobOutput;
+        let rel_col = mouse.column.saturating_sub(agent_ops_tabs_area.x) as usize;
+        if let Some(tab) = agent_ops_view::tab_at_column(rel_col) {
+            if state.agents.dock_tab != tab {
+                state.agents.dock_tab = tab;
+                state.agents.roster_effort_selected = None;
+                state.agents.ops_scroll = 0;
+            }
+            state.mode = if state.agents.dock_tab == AgentOpsTab::Scratchpad {
+                Mode::Insert
+            } else {
+                Mode::Normal
+            };
+            state.agents.note_event();
+        }
         input_state.mouse_select_anchor = None;
         return true;
     }
@@ -6161,7 +6339,7 @@ fn handle_mouse_down(
         return true;
     }
     if let Some((line_idx, col, text_width, lines)) =
-        map_job_output_mouse(mouse, screen, state, false)
+        map_job_output_mouse_with_swarm(swarm, mouse, screen, state, false)
     {
         state.focus = PaneId::JobOutput;
         apply_agent_ops_click_selection(state, line_idx, text_width);
@@ -6259,12 +6437,34 @@ fn apply_agent_ops_click_selection(state: &mut AppState, line_idx: usize, text_w
         AgentOpsTab::Patch
         | AgentOpsTab::Evidence
         | AgentOpsTab::Diagnostics
+        | AgentOpsTab::Dag
         | AgentOpsTab::Scratchpad => {}
         AgentOpsTab::Mcp => {}
     }
 }
 
-fn handle_mouse_drag(
+#[cfg(test)]
+fn handle_mouse_down(
+    mouse: MouseEvent,
+    screen: ratatui::layout::Rect,
+    state: &mut AppState,
+    input_state: &mut InputState,
+    clipboard: &mut Option<Clipboard>,
+    theme: &Theme,
+) -> bool {
+    handle_mouse_down_with_swarm(
+        &SwarmRuntime::default(),
+        mouse,
+        screen,
+        state,
+        input_state,
+        clipboard,
+        theme,
+    )
+}
+
+fn handle_mouse_drag_with_swarm(
+    swarm: &SwarmRuntime,
     mouse: MouseEvent,
     screen: ratatui::layout::Rect,
     state: &mut AppState,
@@ -6316,10 +6516,12 @@ fn handle_mouse_drag(
         }
         MouseSelectTarget::Ui(pane) => {
             let result = match pane {
-                UiSelectionPane::JobOutput => map_job_output_mouse(mouse, screen, state, true)
-                    .map(|(line_idx, col, _text_width, lines)| (line_idx, col, lines)),
+                UiSelectionPane::JobOutput => {
+                    { map_job_output_mouse_with_swarm(swarm, mouse, screen, state, true) }
+                        .map(|(line_idx, col, _text_width, lines)| (line_idx, col, lines))
+                }
                 UiSelectionPane::AgentConsole => {
-                    map_agent_console_mouse(mouse, screen, state, true)
+                    map_agent_console_mouse_with_swarm(swarm, mouse, screen, state, true)
                 }
                 UiSelectionPane::GamesPetriDish => {
                     map_games_petri_mouse(mouse, screen, state, true)
@@ -6377,6 +6579,26 @@ fn handle_mouse_drag(
             true
         }
     }
+}
+
+#[cfg(test)]
+fn handle_mouse_drag(
+    mouse: MouseEvent,
+    screen: ratatui::layout::Rect,
+    state: &mut AppState,
+    input_state: &mut InputState,
+    clipboard: &mut Option<Clipboard>,
+    theme: &Theme,
+) -> bool {
+    handle_mouse_drag_with_swarm(
+        &SwarmRuntime::default(),
+        mouse,
+        screen,
+        state,
+        input_state,
+        clipboard,
+        theme,
+    )
 }
 
 fn reset_ui_selection(state: &mut AppState, input_state: &mut InputState) {
@@ -8212,19 +8434,23 @@ fn save_notes_on_exit(state: &AppState) -> core_io::Result<()> {
     core_io::save_buffer(buffer)
 }
 
-fn flush_agent_run_provenance(state: &mut AppState) -> io::Result<()> {
+fn flush_agent_run_provenance(state: &mut AppState, swarm: &SwarmRuntime) -> io::Result<()> {
     let pending = std::mem::take(&mut state.agents.pending_provenance_mission_ids);
     if pending.is_empty() {
         return Ok(());
     }
     let unique = pending.into_iter().collect::<BTreeSet<_>>();
     for mission_id in unique {
-        write_agent_run_provenance(state, &mission_id)?;
+        write_agent_run_provenance(state, swarm, &mission_id)?;
     }
     Ok(())
 }
 
-fn write_agent_run_provenance(state: &AppState, mission_id: &str) -> io::Result<()> {
+fn write_agent_run_provenance(
+    state: &AppState,
+    swarm: &SwarmRuntime,
+    mission_id: &str,
+) -> io::Result<()> {
     let Some(mission) = state
         .agents
         .missions
@@ -8308,6 +8534,127 @@ fn write_agent_run_provenance(state: &AppState, mission_id: &str) -> io::Result<
         let filename = format!("{}.diff", sanitize_for_filename(&patch.id));
         fs::write(patches_dir.join(filename), &patch.diff)?;
     }
+    write_swarm_run_provenance(state, swarm, mission_id)?;
+    Ok(())
+}
+
+fn write_swarm_run_provenance(
+    state: &AppState,
+    swarm: &SwarmRuntime,
+    mission_id: &str,
+) -> io::Result<()> {
+    let Some(mission) = state
+        .agents
+        .missions
+        .iter()
+        .find(|mission| mission.id == mission_id)
+    else {
+        return Ok(());
+    };
+    if !mission.swarm {
+        return Ok(());
+    }
+    let Some(view) = swarm.swarm_persistence(mission_id) else {
+        return Ok(());
+    };
+
+    let run_dir = state
+        .workspace_root
+        .join(".nit")
+        .join("swarm")
+        .join(mission_id);
+    let tasks_dir = run_dir.join("tasks");
+    let gates_dir = run_dir.join("gates");
+    fs::create_dir_all(&tasks_dir)?;
+    fs::create_dir_all(&gates_dir)?;
+
+    let run_payload = serde_json::json!({
+        "id": mission.id,
+        "title": mission.title,
+        "phase": mission.phase.label(),
+        "status": mission.status,
+        "template": view.template,
+        "swarm": mission.swarm,
+        "updated_at": mission.updated_at,
+        "gate_bundle": view.gate_bundle,
+        "gate_selection": view.gate_selection,
+        "task_count": view.tasks.len(),
+        "tasks": view.tasks.iter().map(|task| {
+            serde_json::json!({
+                "id": task.id,
+                "agent_id": task.agent_id,
+                "role": task.role,
+                "title": task.title,
+                "state": task.state,
+                "deps": task.deps,
+                "blocked_on": task.blocked_on,
+                "writes": task.writes,
+                "expected_artifacts": task.expected_artifacts,
+                "expected_artifacts_missing": task.expected_artifacts_missing,
+                "output_present": task.output_present
+            })
+        }).collect::<Vec<_>>()
+    });
+    let run_json = serde_json::to_vec_pretty(&run_payload)
+        .map_err(|err| io::Error::other(format!("serde swarm run.json: {err}")))?;
+    write_file_atomic(&run_dir.join("run.json"), &run_json)?;
+
+    let mut summary_entries = Vec::new();
+    for task in view.tasks.iter() {
+        let task_dir = tasks_dir.join(sanitize_for_filename(&task.id));
+        fs::create_dir_all(&task_dir)?;
+
+        if let Some(artifacts) = task.artifacts.as_ref() {
+            let artifacts_json = serde_json::to_vec_pretty(artifacts)
+                .map_err(|err| io::Error::other(format!("serde artifacts.json: {err}")))?;
+            write_file_atomic(&task_dir.join("artifacts.json"), &artifacts_json)?;
+            if let Some(summary) = artifacts.summary.as_deref().map(str::trim) {
+                if !summary.is_empty() {
+                    summary_entries.push(serde_json::json!({
+                        "task_id": task.id,
+                        "summary": summary
+                    }));
+                }
+            }
+        }
+
+        if let Some(output) = task.output.as_deref() {
+            write_file_atomic(&task_dir.join("output.md"), output.as_bytes())?;
+        }
+    }
+
+    if !summary_entries.is_empty() {
+        let summary_json = serde_json::to_vec_pretty(&serde_json::json!({
+            "mission_id": mission_id,
+            "summaries": summary_entries
+        }))
+        .map_err(|err| io::Error::other(format!("serde summary.json: {err}")))?;
+        write_file_atomic(&run_dir.join("summary.json"), &summary_json)?;
+    }
+
+    if let Some(report) = view.gate_report.as_ref() {
+        let report_json = serde_json::to_vec_pretty(report)
+            .map_err(|err| io::Error::other(format!("serde gate report: {err}")))?;
+        write_file_atomic(&gates_dir.join("report.json"), &report_json)?;
+    }
+    if let Some(output) = view.gate_output.as_deref() {
+        write_file_atomic(&gates_dir.join("output.txt"), output.as_bytes())?;
+    }
+
+    Ok(())
+}
+
+fn write_file_atomic(path: &Path, contents: &[u8]) -> io::Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let file_name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .unwrap_or_else(|| "data".into());
+    let tmp = path.with_file_name(format!(".{file_name}.nit.tmp"));
+    fs::write(&tmp, contents)?;
+    fs::rename(tmp, path)?;
     Ok(())
 }
 
@@ -8811,6 +9158,121 @@ mod tests {
     }
 
     #[test]
+    fn agent_chat_prompt_history_cycles_with_up_down() {
+        let mut state = state_for_test();
+        state.focus = PaneId::Notes;
+        let mut vitals = VitalsState::default();
+        let mut swarm = SwarmRuntime::default();
+
+        state.agents.chat_input = "first".into();
+        state.agents.chat_input_cursor = state.agents.chat_input.chars().count();
+        assert!(handle_agent_station_key(
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()),
+            &mut state,
+            &mut vitals,
+            None,
+            &mut swarm
+        ));
+
+        state.agents.chat_input = "second".into();
+        state.agents.chat_input_cursor = state.agents.chat_input.chars().count();
+        assert!(handle_agent_station_key(
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()),
+            &mut state,
+            &mut vitals,
+            None,
+            &mut swarm
+        ));
+
+        assert!(handle_agent_station_key(
+            KeyEvent::new(KeyCode::Up, KeyModifiers::empty()),
+            &mut state,
+            &mut vitals,
+            None,
+            &mut swarm
+        ));
+        assert_eq!(state.agents.chat_input, "second");
+        assert_eq!(state.agents.chat_input_cursor, 6);
+
+        assert!(handle_agent_station_key(
+            KeyEvent::new(KeyCode::Up, KeyModifiers::empty()),
+            &mut state,
+            &mut vitals,
+            None,
+            &mut swarm
+        ));
+        assert_eq!(state.agents.chat_input, "first");
+        assert_eq!(state.agents.chat_input_cursor, 5);
+
+        assert!(handle_agent_station_key(
+            KeyEvent::new(KeyCode::Down, KeyModifiers::empty()),
+            &mut state,
+            &mut vitals,
+            None,
+            &mut swarm
+        ));
+        assert_eq!(state.agents.chat_input, "second");
+
+        assert!(handle_agent_station_key(
+            KeyEvent::new(KeyCode::Down, KeyModifiers::empty()),
+            &mut state,
+            &mut vitals,
+            None,
+            &mut swarm
+        ));
+        assert_eq!(state.agents.chat_input, "");
+        assert_eq!(state.agents.chat_input_cursor, 0);
+    }
+
+    #[test]
+    fn agent_chat_prompt_history_restores_draft() {
+        let mut state = state_for_test();
+        state.focus = PaneId::Notes;
+        let mut vitals = VitalsState::default();
+        let mut swarm = SwarmRuntime::default();
+
+        state.agents.chat_input = "one".into();
+        state.agents.chat_input_cursor = state.agents.chat_input.chars().count();
+        assert!(handle_agent_station_key(
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()),
+            &mut state,
+            &mut vitals,
+            None,
+            &mut swarm
+        ));
+        state.agents.chat_input = "two".into();
+        state.agents.chat_input_cursor = state.agents.chat_input.chars().count();
+        assert!(handle_agent_station_key(
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()),
+            &mut state,
+            &mut vitals,
+            None,
+            &mut swarm
+        ));
+
+        state.agents.chat_input = "draft".into();
+        state.agents.chat_input_cursor = state.agents.chat_input.chars().count();
+        assert!(handle_agent_station_key(
+            KeyEvent::new(KeyCode::Up, KeyModifiers::empty()),
+            &mut state,
+            &mut vitals,
+            None,
+            &mut swarm
+        ));
+        assert_eq!(state.agents.chat_input, "two");
+
+        assert!(handle_agent_station_key(
+            KeyEvent::new(KeyCode::Down, KeyModifiers::empty()),
+            &mut state,
+            &mut vitals,
+            None,
+            &mut swarm
+        ));
+        assert_eq!(state.agents.chat_input, "draft");
+        assert_eq!(state.agents.chat_input_cursor, 5);
+    }
+
+    #[test]
     fn chat_paste_inserts_raw_text_without_sending_or_opening_command_prompt() {
         let mut state = state_for_test();
         state.focus = PaneId::Notes;
@@ -9029,6 +9491,47 @@ mod tests {
         ));
         assert_eq!(state.focus, PaneId::Notes);
         assert!(state.ui_selection.is_none());
+    }
+
+    #[test]
+    fn agent_ops_tabs_are_clickable() {
+        let mut state = state_for_test();
+        state.focus = PaneId::Editor;
+        state.mode = Mode::Normal;
+        state.agents.dock_tab = AgentOpsTab::Roster;
+
+        let mut input_state = InputState::new();
+        let mut clipboard = None;
+        let theme = Theme::default();
+        let screen = ratatui::layout::Rect {
+            x: 0,
+            y: 0,
+            width: 200,
+            height: 42,
+        };
+        let layout = layout::split(screen);
+        let tabs_area = agent_ops_tab_bar_area(layout.job);
+        let missions_start = "ROSTER".len() + 2; // two spaces between tabs
+        let click = MouseEvent {
+            kind: MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            column: tabs_area
+                .x
+                .saturating_add(missions_start as u16)
+                .saturating_add(1),
+            row: tabs_area.y,
+            modifiers: KeyModifiers::NONE,
+        };
+
+        assert!(handle_mouse_down(
+            click,
+            screen,
+            &mut state,
+            &mut input_state,
+            &mut clipboard,
+            &theme
+        ));
+        assert_eq!(state.focus, PaneId::JobOutput);
+        assert_eq!(state.agents.dock_tab, AgentOpsTab::Missions);
     }
 
     #[test]

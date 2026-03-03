@@ -97,6 +97,9 @@ fn render_ascii_bytes(area: Rect, buf: &mut Buffer, seed: &EncodedSeed, palette:
     if cols == 0 {
         return;
     }
+    // Keep genome byte colors in the cyan family so the view doesn't become a rainbow of accents.
+    // Reserve the full accent yellow for selection/crosshair.
+    let printable_fg = mix_towards(palette.accent, palette.hud_text, 65);
     let rows = max_rows.max(1);
     let stride = digits + gap;
     for y in 0..rows {
@@ -130,7 +133,7 @@ fn render_ascii_bytes(area: Rect, buf: &mut Buffer, seed: &EncodedSeed, palette:
             }
             let digits_arr = to_three_digits(value);
             let fg = if printable {
-                palette.accent
+                printable_fg
             } else {
                 value_fg(value, palette)
             };
@@ -354,12 +357,13 @@ fn to_three_digits(value: u16) -> [char; 3] {
 }
 
 fn value_fg(value: u16, palette: &SeedPalette) -> ratatui::style::Color {
+    let base = palette.hud_text;
     if value >= 200 {
-        palette.accent_2
+        mix_towards(palette.accent_2, base, 55)
     } else if value >= 120 {
-        palette.live_dim
+        mix_towards(palette.live_dim, base, 40)
     } else {
-        palette.hud_text
+        base
     }
 }
 
@@ -370,6 +374,26 @@ fn value_bg(value: u16, palette: &SeedPalette) -> ratatui::style::Color {
         palette.halo_1
     } else {
         palette.bg
+    }
+}
+
+fn mix_towards(
+    color: ratatui::style::Color,
+    target: ratatui::style::Color,
+    target_pct: u8,
+) -> ratatui::style::Color {
+    let pct = (target_pct.min(100)) as u16;
+    match (color, target) {
+        (ratatui::style::Color::Rgb(r1, g1, b1), ratatui::style::Color::Rgb(r0, g0, b0)) => {
+            let inv = 100u16.saturating_sub(pct);
+            let mix = |top: u8, base: u8| -> u8 {
+                let top = top as u16;
+                let base = base as u16;
+                ((top.saturating_mul(inv) + base.saturating_mul(pct) + 50) / 100) as u8
+            };
+            ratatui::style::Color::Rgb(mix(r1, r0), mix(g1, g0), mix(b1, b0))
+        }
+        _ => color,
     }
 }
 

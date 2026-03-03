@@ -155,7 +155,7 @@ Cancellation/timeouts in MCP mode:
 nit supports two “multi-agent” modes:
 
 - `@all <prompt>`: **fan-out** (every targeted agent gets the same prompt).
-- `@swarm [all|N] [template=lab|parallel] <prompt>`: **orchestrated task splitting** (agents get different prompts).
+- `@swarm [all|N] [template=lab|parallel|bulk] <prompt>`: **orchestrated workflows** (agents get different prompts and/or coordinated roles).
 
 `@swarm` is implemented in `nit-tui` as a small orchestrator state machine (`SwarmRuntime`) that
 creates a mission, asks a planner agent for a machine-readable plan, dispatches distinct tasks to
@@ -181,6 +181,10 @@ Templates:
   - scheduler dispatches tasks when their deps have finished (DONE/FAILED/SKIPPED).
 - `parallel`: v1-style parallel split:
   - prefer one task per agent id, no deps, and maximum parallelism.
+- `bulk`: “bulk orchestration” (ensemble + converge):
+  - run multiple proposer tasks in parallel (different “lenses” on the same operator request),
+  - run a judge task that depends on all proposers and selects the best approach,
+  - run a single-writer integrator task (`writes=true`) that implements the selected approach.
 
 Planner contract:
 

@@ -225,6 +225,7 @@ pub struct UiSelection {
 pub enum AgentOpsTab {
     Roster,
     Missions,
+    Dag,
     Mcp,
     Alerts,
     Patch,
@@ -238,6 +239,7 @@ impl AgentOpsTab {
         match self {
             AgentOpsTab::Roster => "ROSTER",
             AgentOpsTab::Missions => "MISSIONS",
+            AgentOpsTab::Dag => "DAG",
             AgentOpsTab::Mcp => "MCP",
             AgentOpsTab::Alerts => "ALERTS",
             AgentOpsTab::Patch => "PATCH",
@@ -250,7 +252,8 @@ impl AgentOpsTab {
     pub fn next(self) -> Self {
         match self {
             AgentOpsTab::Roster => AgentOpsTab::Missions,
-            AgentOpsTab::Missions => AgentOpsTab::Mcp,
+            AgentOpsTab::Missions => AgentOpsTab::Dag,
+            AgentOpsTab::Dag => AgentOpsTab::Mcp,
             AgentOpsTab::Mcp => AgentOpsTab::Alerts,
             AgentOpsTab::Alerts => AgentOpsTab::Diagnostics,
             // Legacy/hidden tabs: skip forward into Diagnostics.
@@ -264,7 +267,8 @@ impl AgentOpsTab {
         match self {
             AgentOpsTab::Roster => AgentOpsTab::Scratchpad,
             AgentOpsTab::Missions => AgentOpsTab::Roster,
-            AgentOpsTab::Mcp => AgentOpsTab::Missions,
+            AgentOpsTab::Dag => AgentOpsTab::Missions,
+            AgentOpsTab::Mcp => AgentOpsTab::Dag,
             AgentOpsTab::Alerts => AgentOpsTab::Mcp,
             // Legacy/hidden tabs: skip backward into Alerts.
             AgentOpsTab::Patch | AgentOpsTab::Evidence => AgentOpsTab::Alerts,
@@ -567,6 +571,18 @@ pub struct AgentsState {
     pub chat_input_cursor: usize,
     #[serde(skip, default = "chat_input_scroll_default")]
     pub chat_input_scroll: usize,
+    /// Previously submitted prompts from the Agent Chat compose box.
+    /// Runtime-only: avoid persisting operator prompts to disk.
+    #[serde(skip)]
+    pub chat_prompt_history: Vec<String>,
+    /// History navigation cursor (index into `chat_prompt_history`) while cycling via Up/Down.
+    /// Runtime-only.
+    #[serde(skip)]
+    pub chat_prompt_history_pos: Option<usize>,
+    /// Draft compose text captured when entering history navigation.
+    /// Runtime-only.
+    #[serde(skip)]
+    pub chat_prompt_history_draft: Option<String>,
     pub chat_channel: AgentChannel,
     pub agents: Vec<AgentLane>,
     pub missions: Vec<MissionRecord>,
@@ -762,6 +778,9 @@ impl AgentsState {
             chat_input: String::new(),
             chat_input_cursor: 0,
             chat_input_scroll: chat_input_scroll_default(),
+            chat_prompt_history: Vec::new(),
+            chat_prompt_history_pos: None,
+            chat_prompt_history_draft: None,
             chat_channel: AgentChannel::Agent,
             agents,
             missions,
@@ -836,6 +855,9 @@ impl Default for AgentsState {
             chat_input: String::new(),
             chat_input_cursor: 0,
             chat_input_scroll: chat_input_scroll_default(),
+            chat_prompt_history: Vec::new(),
+            chat_prompt_history_pos: None,
+            chat_prompt_history_draft: None,
             chat_channel: AgentChannel::Agent,
             agents: Vec::new(),
             missions: Vec::new(),

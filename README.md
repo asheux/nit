@@ -58,7 +58,7 @@ nit includes an Agent Ops / Agent Chat UI.
     `--codex-approval-policy <untrusted|on-failure|on-request|never>`.
   - In Agent Chat:
     - `@all <prompt>` broadcasts to multiple Codex agents (fan-out).
-    - `@swarm [all|N] [template=lab|parallel] <prompt>` runs an orchestrated multi-agent workflow (plan → DAG tasks → verify → synthesis). (`lab` is the default.)
+    - `@swarm [all|N] [template=lab|parallel|bulk] <prompt>` runs an orchestrated multi-agent workflow (plan → DAG tasks → verify → synthesis). (`lab` is the default.)
 
 Examples:
 

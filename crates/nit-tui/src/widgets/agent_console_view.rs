@@ -12,6 +12,7 @@ use ratatui::{
 use std::time::{Duration, Instant};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
+use crate::swarm::SwarmRuntime;
 use crate::theme::Theme;
 use crate::widgets::text_selection::apply_ui_selection;
 
@@ -51,6 +52,7 @@ pub fn render(
     frame: &mut Frame,
     area: Rect,
     state: &mut AppState,
+    swarm: &SwarmRuntime,
     theme: &Theme,
 ) -> Option<ChatCursor> {
     let focused = state.focus == PaneId::Notes;
@@ -242,7 +244,7 @@ pub fn render(
     let thread_width = layout.thread_area.width.max(1) as usize;
     let (cached_rows_len, _) = refresh_thread_rows_cache(state, thread_width);
     let thread_height = layout.thread_area.height.max(1) as usize;
-    let breather = breather_rows_for_user_prompt(state, pulse_on, thread_width);
+    let breather = breather_rows_for_user_prompt(state, Some(swarm), pulse_on, thread_width);
     let total_rows = cached_rows_len.saturating_add(breather.len());
     let max_scroll = total_rows.saturating_sub(thread_height);
     state.agents.console_scroll = if state.agents.console_scroll == usize::MAX {
@@ -431,7 +433,18 @@ pub fn map_chat_input_point_to_cursor(
 }
 
 pub fn thread_lines_for_selection(state: &AppState, width: usize) -> Vec<String> {
-    thread_rows(state, width.max(1), pulse_on(state))
+    thread_rows(state, None, width.max(1), pulse_on(state))
+        .into_iter()
+        .map(|row| row.text)
+        .collect()
+}
+
+pub fn thread_lines_for_selection_with_swarm(
+    state: &AppState,
+    swarm: &SwarmRuntime,
+    width: usize,
+) -> Vec<String> {
+    thread_rows(state, Some(swarm), width.max(1), pulse_on(state))
         .into_iter()
         .map(|row| row.text)
         .collect()
@@ -1201,7 +1214,12 @@ fn dim_bg_towards(color: Color, background: Color, background_pct: u8) -> Color 
     }
 }
 
-fn thread_rows(state: &AppState, width: usize, pulse_on: bool) -> Vec<ThreadRow> {
+fn thread_rows(
+    state: &AppState,
+    swarm: Option<&SwarmRuntime>,
+    width: usize,
+    pulse_on: bool,
+) -> Vec<ThreadRow> {
     let mission = state.agents.selected_context_mission();
     let agent = state.agents.selected_context_agent();
     let mut rows = Vec::new();
@@ -1211,7 +1229,7 @@ fn thread_rows(state: &AppState, width: usize, pulse_on: bool) -> Vec<ThreadRow>
         }
         rows.extend(format_message_rows(state, msg, width, pulse_on));
     }
-    rows.extend(breather_rows_for_user_prompt(state, pulse_on, width));
+    rows.extend(breather_rows_for_user_prompt(state, swarm, pulse_on, width));
     rows
 }
 
@@ -1259,7 +1277,7 @@ fn format_message_rows(
 
     // Swarm meta is shown in the "Working ..." table footer when in swarm mission context, so
     // don't also render it as a transcript message.
-    if msg.agent_id.as_deref() == Some("swarm") && msg.text.starts_with("Swarm template:") {
+    if msg.agent_id.as_deref() == Some("swarm") && msg.text.starts_with("Swarm ") {
         return Vec::new();
     }
 
@@ -1348,17 +1366,33 @@ fn agent_identity_badge(state: &AppState, agent_id: &str) -> String {
     truncate_label(&format!("{role}/{id}"), AGENT_BADGE_MAX_CHARS)
 }
 
-fn breather_rows_for_user_prompt(state: &AppState, pulse_on: bool, width: usize) -> Vec<ThreadRow> {
+fn breather_rows_for_user_prompt(
+    state: &AppState,
+    _swarm: Option<&SwarmRuntime>,
+    pulse_on: bool,
+    width: usize,
+) -> Vec<ThreadRow> {
     let mission_ctx = state.agents.selected_context_mission();
     let agent_ctx = state.agents.selected_context_agent();
     let mut primary_ids = Vec::new();
     let mut secondary_ids = Vec::new();
     for agent in state.agents.agents.iter() {
-        if !state.agents.active_turns.contains_key(&agent.id) {
+        let has_active = state.agents.active_turns.contains_key(&agent.id);
+        let has_queued = state
+            .agents
+            .queued_codex_turns
+            .iter()
+            .any(|turn| turn.agent_id == agent.id);
+        if !has_active && !has_queued {
             continue;
         }
+        let queued_in_mission = mission_ctx.is_some_and(|mission_id| {
+            state.agents.queued_codex_turns.iter().any(|turn| {
+                turn.agent_id == agent.id && turn.mission_id.as_deref() == Some(mission_id)
+            })
+        });
         let in_context = if let Some(mission_id) = mission_ctx {
-            agent.current_mission.as_deref() == Some(mission_id)
+            agent.current_mission.as_deref() == Some(mission_id) || queued_in_mission
         } else if let Some(selected_agent) = agent_ctx {
             agent.id == selected_agent
         } else {
@@ -1383,7 +1417,7 @@ fn breather_rows_for_user_prompt(state: &AppState, pulse_on: bool, width: usize)
         if let Some(mission) = state.agents.missions.iter().find(|m| m.id == mission_id) {
             let status = mission.status.to_ascii_uppercase();
             let is_final = matches!(status.as_str(), "DONE" | "FAILED" | "ERROR");
-            if mission.swarm && mission.title.starts_with("Swarm:") && !is_final {
+            if mission.swarm && !is_final {
                 swarm_mission_id = Some(mission_id);
                 for id in mission.assigned_agents.iter() {
                     if swarm_assigned_ids.iter().any(|existing| existing == id) {
@@ -1407,16 +1441,48 @@ fn breather_rows_for_user_prompt(state: &AppState, pulse_on: bool, width: usize)
         return Vec::new();
     }
 
+    let any_active = ordered_ids
+        .iter()
+        .any(|id| state.agents.active_turns.contains_key(id.as_str()));
+    let any_queued = ordered_ids.iter().any(|id| {
+        state
+            .agents
+            .queued_codex_turns
+            .iter()
+            .any(|turn| turn.agent_id == id.as_str())
+    });
+    let all_swarm_done = swarm_mission_id.is_some_and(|mid| {
+        !swarm_assigned_ids.is_empty()
+            && swarm_assigned_ids.iter().all(|id| {
+                state.agents.messages.iter().any(|msg| {
+                    msg.mission_id.as_deref() == Some(mid)
+                        && msg.agent_id.as_deref() == Some(id.as_str())
+                })
+            })
+    });
+    let working = any_active || any_queued;
+    let label = if any_active {
+        "Working ..."
+    } else if any_queued {
+        "Queued ..."
+    } else if swarm_mission_id.is_some() && all_swarm_done {
+        "Done"
+    } else if swarm_mission_id.is_some() {
+        "Waiting ..."
+    } else {
+        "Working ..."
+    };
+
     let seed_id = primary_ids
         .first()
         .or_else(|| secondary_ids.first())
         .or_else(|| ordered_ids.first())
         .map(String::as_str);
-    let ecg = ecg_indicator(state.metrics.frame_count, seed_id, pulse_on, true);
+    let ecg = ecg_indicator(state.metrics.frame_count, seed_id, pulse_on, working);
 
     let mut rows = Vec::new();
     rows.push(ThreadRow {
-        text: format!("{ecg} Working ..."),
+        text: format!("{ecg} {label}"),
         kind: ThreadRowKind::Breather,
     });
 
@@ -1458,11 +1524,16 @@ fn breather_rows_for_user_prompt(state: &AppState, pulse_on: bool, width: usize)
                 .map(|agent| agent_identity_badge(state, agent.id.as_str()))
                 .unwrap_or_else(|| id.to_string());
             let turn = state.agents.active_turns.get(id.as_str());
-            let queued = swarm_mission_id.is_some_and(|mid| {
+            let queued_for_swarm = swarm_mission_id.is_some_and(|mid| {
                 state.agents.queued_codex_turns.iter().any(|turn| {
                     turn.agent_id == id.as_str() && turn.mission_id.as_deref() == Some(mid)
                 })
             });
+            let queued_any = state
+                .agents
+                .queued_codex_turns
+                .iter()
+                .any(|turn| turn.agent_id == id.as_str());
             let has_message = swarm_mission_id.is_some_and(|mid| {
                 state.agents.messages.iter().any(|msg| {
                     msg.mission_id.as_deref() == Some(mid)
@@ -1473,8 +1544,10 @@ fn breather_rows_for_user_prompt(state: &AppState, pulse_on: bool, width: usize)
                 turn.stage.as_deref().unwrap_or("starting")
             } else if matches!(agent.map(|agent| agent.status), Some(AgentStatus::Error)) {
                 "error"
-            } else if queued {
+            } else if queued_for_swarm {
                 "swarm_queued"
+            } else if queued_any {
+                "queued"
             } else if swarm_assigned_ids.iter().any(|assigned| assigned == id) {
                 if has_message {
                     "swarm_done"
@@ -1547,12 +1620,17 @@ fn breather_rows_for_user_prompt(state: &AppState, pulse_on: bool, width: usize)
             .map(|agent| agent_identity_badge(state, agent.id.as_str()))
             .unwrap_or_else(|| id.to_string());
         let turn = state.agents.active_turns.get(id.as_str());
-        let queued =
+        let queued_for_swarm =
             swarm_mission_id.is_some_and(|mid| {
                 state.agents.queued_codex_turns.iter().any(|turn| {
                     turn.agent_id == id.as_str() && turn.mission_id.as_deref() == Some(mid)
                 })
             });
+        let queued_any = state
+            .agents
+            .queued_codex_turns
+            .iter()
+            .any(|turn| turn.agent_id == id.as_str());
         let has_message = swarm_mission_id.is_some_and(|mid| {
             state.agents.messages.iter().any(|msg| {
                 msg.mission_id.as_deref() == Some(mid)
@@ -1563,8 +1641,10 @@ fn breather_rows_for_user_prompt(state: &AppState, pulse_on: bool, width: usize)
             turn.stage.as_deref().unwrap_or("starting")
         } else if matches!(agent.map(|agent| agent.status), Some(AgentStatus::Error)) {
             "error"
-        } else if queued {
+        } else if queued_for_swarm {
             "swarm_queued"
+        } else if queued_any {
+            "queued"
         } else if swarm_assigned_ids.iter().any(|assigned| assigned == id) {
             if has_message {
                 "swarm_done"
@@ -1627,23 +1707,22 @@ fn append_swarm_meta_footer_rows(
     width: usize,
     inner: usize,
 ) {
-    let Some(meta) = state
+    let metas = state
         .agents
         .messages
         .iter()
-        .rev()
-        .find(|msg| {
+        .filter(|msg| {
             msg.mission_id.as_deref() == Some(mission_id)
                 && msg.agent_id.as_deref() == Some("swarm")
-                && msg.text.starts_with("Swarm template:")
+                && msg.text.starts_with("Swarm ")
         })
         .map(|msg| msg.text.trim().to_string())
-    else {
-        return;
-    };
-    if meta.is_empty() {
+        .collect::<Vec<_>>();
+    if metas.is_empty() {
         return;
     }
+    let start = metas.len().saturating_sub(6);
+    let metas = &metas[start..];
 
     let max_inner = inner.saturating_sub(1).max(1);
     rows.push(ThreadRow {
@@ -1651,17 +1730,19 @@ fn append_swarm_meta_footer_rows(
         kind: ThreadRowKind::StatusHeader,
     });
 
-    for seg in wrap_visual_line(&meta, max_inner) {
-        let seg = seg.trim_end_matches(' ');
-        let line = if seg.is_empty() {
-            indent_str.to_string()
-        } else {
-            format!("{indent_str}{seg}")
-        };
-        rows.push(ThreadRow {
-            text: pad_to_width(&line, width),
-            kind: ThreadRowKind::StatusRow,
-        });
+    for meta in metas.iter() {
+        for seg in wrap_visual_line(meta, max_inner) {
+            let seg = seg.trim_end_matches(' ');
+            let line = if seg.is_empty() {
+                indent_str.to_string()
+            } else {
+                format!("{indent_str}{seg}")
+            };
+            rows.push(ThreadRow {
+                text: pad_to_width(&line, width),
+                kind: ThreadRowKind::StatusRow,
+            });
+        }
     }
 
     rows.push(ThreadRow {
@@ -2095,7 +2176,7 @@ mod tests {
     use crate::theme::Theme;
     use nit_core::{
         AgentChannel, AgentLane, AgentMessage, AgentStatus, AppState, Buffer, MissionPhase,
-        MissionRecord,
+        MissionRecord, QueuedCodexTurn,
     };
     use ratatui::layout::Rect;
     use ratatui::style::Modifier;
@@ -2403,7 +2484,7 @@ mod tests {
             text: "newest message".into(),
         });
 
-        let rows = thread_rows(&state, 100, true);
+        let rows = thread_rows(&state, None, 100, true);
         assert!(!rows.is_empty());
         let flattened = rows
             .iter()
@@ -2451,7 +2532,7 @@ mod tests {
             text: "please plan".into(),
         });
 
-        let rows = thread_rows(&state, 100, true);
+        let rows = thread_rows(&state, None, 100, true);
         let breather_idx = rows
             .iter()
             .position(|row| matches!(row.kind, ThreadRowKind::Breather))
@@ -2495,7 +2576,7 @@ mod tests {
             text: "on it".into(),
         });
 
-        let rows = thread_rows(&state, 100, true);
+        let rows = thread_rows(&state, None, 100, true);
         assert!(!rows
             .iter()
             .any(|row| matches!(row.kind, ThreadRowKind::Breather)));
@@ -2559,7 +2640,7 @@ mod tests {
             text: "do the work".into(),
         });
 
-        let rows = thread_rows(&state, 120, true);
+        let rows = thread_rows(&state, None, 120, true);
         let flattened = rows.iter().map(|row| row.text.as_str()).collect::<Vec<_>>();
         assert!(flattened.iter().any(|line| line.contains("Working ...")));
         assert!(flattened.iter().any(|line| line.contains("Planner")));
@@ -2567,6 +2648,43 @@ mod tests {
         assert!(flattened
             .iter()
             .any(|line| line.contains("Starting session")));
+    }
+
+    #[test]
+    fn breather_rows_show_when_prompt_queued_but_not_yet_started() {
+        let mut state = test_state();
+        state.agents.selected_mission = None;
+        state.agents.selected_agent = Some("planner".into());
+        state.agents.messages.clear();
+        state.agents.agents.clear();
+        state.agents.agents.push(AgentLane {
+            id: "planner".into(),
+            role: "Planner".into(),
+            lane: "Lane A".into(),
+            kind: nit_core::AgentLaneKind::Mock,
+            status: AgentStatus::Waiting,
+            heartbeat_age_secs: 0,
+            queue_len: 1,
+            current_mission: None,
+            last_message: "queued".into(),
+        });
+        state.agents.queued_codex_turns.push_back(QueuedCodexTurn {
+            agent_id: "planner".into(),
+            mission_id: None,
+            prompt: "do the thing".into(),
+        });
+        state.agents.messages.push(AgentMessage {
+            at: "10:00:01".into(),
+            channel: AgentChannel::Agent,
+            agent_id: Some("planner".into()),
+            mission_id: None,
+            text: "finished previous turn".into(),
+        });
+
+        let rows = thread_rows(&state, None, 120, true);
+        let flattened = rows.iter().map(|row| row.text.as_str()).collect::<Vec<_>>();
+        assert!(flattened.iter().any(|line| line.contains("Queued ...")));
+        assert!(flattened.iter().any(|line| line.contains("Queued")));
     }
 
     #[test]
@@ -2640,7 +2758,7 @@ mod tests {
                 .into(),
         });
 
-        let rows = thread_rows(&state, 120, true);
+        let rows = thread_rows(&state, None, 120, true);
         let flattened = rows.iter().map(|row| row.text.as_str()).collect::<Vec<_>>();
         assert!(flattened.iter().any(|line| line.contains("Working ...")));
         assert!(flattened.iter().any(|line| line.contains("Planner")));
@@ -2652,6 +2770,81 @@ mod tests {
         assert!(!rows.iter().any(|row| {
             matches!(row.kind, ThreadRowKind::Agent) && row.text.contains("Swarm template:")
         }));
+    }
+
+    #[test]
+    fn breather_rows_show_done_when_swarm_idle_and_all_assigned_reported() {
+        let mut state = test_state();
+        state.agents.messages.clear();
+        state.agents.missions.clear();
+        state.agents.agents.clear();
+        state.agents.active_turns.clear();
+        state.agents.queued_codex_turns.clear();
+
+        state.agents.missions.push(MissionRecord {
+            id: "mis-001".into(),
+            title: "Swarm: demo".into(),
+            phase: MissionPhase::Plan,
+            swarm: true,
+            assigned_agents: vec!["planner".into(), "coder".into()],
+            status: "PLAN".into(),
+            updated_at: "t+0".into(),
+        });
+        state.agents.selected_mission = Some("mis-001".into());
+        state.agents.mission_selected = 0;
+        state.agents.selected_agent = Some("planner".into());
+
+        state.agents.agents.push(AgentLane {
+            id: "planner".into(),
+            role: "Planner".into(),
+            lane: "Lane A".into(),
+            kind: nit_core::AgentLaneKind::Mock,
+            status: AgentStatus::Idle,
+            heartbeat_age_secs: 0,
+            queue_len: 0,
+            current_mission: Some("mis-001".into()),
+            last_message: "done".into(),
+        });
+        state.agents.agents.push(AgentLane {
+            id: "coder".into(),
+            role: "Coder".into(),
+            lane: "Lane B".into(),
+            kind: nit_core::AgentLaneKind::Mock,
+            status: AgentStatus::Idle,
+            heartbeat_age_secs: 0,
+            queue_len: 0,
+            current_mission: Some("mis-001".into()),
+            last_message: "done".into(),
+        });
+
+        state.agents.messages.push(AgentMessage {
+            at: "10:00:01".into(),
+            channel: AgentChannel::Agent,
+            agent_id: Some("planner".into()),
+            mission_id: Some("mis-001".into()),
+            text: "planner output".into(),
+        });
+        state.agents.messages.push(AgentMessage {
+            at: "10:00:02".into(),
+            channel: AgentChannel::Agent,
+            agent_id: Some("coder".into()),
+            mission_id: Some("mis-001".into()),
+            text: "coder output".into(),
+        });
+        state.agents.messages.push(AgentMessage {
+            at: "10:00:03".into(),
+            channel: AgentChannel::Broadcast,
+            agent_id: Some("swarm".into()),
+            mission_id: Some("mis-001".into()),
+            text: "Swarm template: lab | integrator: planner | verifier: coder | gates: rust-ci"
+                .into(),
+        });
+
+        let rows = thread_rows(&state, None, 120, true);
+        assert!(rows.iter().any(|row| {
+            matches!(row.kind, ThreadRowKind::Breather) && row.text.contains("▁▁▁▁▁▁ Done")
+        }));
+        assert!(!rows.iter().any(|row| row.text.contains("Working ...")));
     }
 
     #[test]

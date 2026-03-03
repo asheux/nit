@@ -1,4 +1,8 @@
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{HashMap, HashSet},
+    fs,
+    path::Path,
+};
 
 use nit_core::{AgentBusEvent, AgentMessage, AgentStatus, AppState, MissionPhase, MissionRecord};
 
@@ -20,6 +24,9 @@ enum SwarmTemplate {
     Parallel,
     /// "Lab" workflow: read-only research/review feeding a single-writer integrator.
     Lab,
+    /// "Bulk orchestration": propose many candidate solutions in parallel, then converge via a
+    /// judge step feeding a single-writer integrator.
+    Bulk,
 }
 
 fn parse_swarm_template(value: Option<&str>) -> SwarmTemplate {
@@ -29,6 +36,9 @@ fn parse_swarm_template(value: Option<&str>) -> SwarmTemplate {
     let value = value.trim();
     if value.eq_ignore_ascii_case("parallel") || value.eq_ignore_ascii_case("v1") {
         return SwarmTemplate::Parallel;
+    }
+    if value.eq_ignore_ascii_case("bulk") || value.eq_ignore_ascii_case("bo") {
+        return SwarmTemplate::Bulk;
     }
     if value.eq_ignore_ascii_case("lab")
         || value.eq_ignore_ascii_case("default")
@@ -44,6 +54,7 @@ impl SwarmTemplate {
         match self {
             SwarmTemplate::Parallel => "parallel",
             SwarmTemplate::Lab => "lab",
+            SwarmTemplate::Bulk => "bulk",
         }
     }
 }
@@ -118,9 +129,10 @@ pub struct SwarmDispatch {
 #[derive(Default)]
 pub struct SwarmRuntime {
     runs: HashMap<String, SwarmRun>,
+    completed_runs: HashMap<String, SwarmRun>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
 enum SwarmStage {
     Planning,
     Executing,
@@ -130,7 +142,10 @@ enum SwarmStage {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum GateBundle {
-    RustCi,
+    Rust,
+    Node,
+    Python,
+    Go,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -140,25 +155,106 @@ struct Gate {
 }
 
 impl GateBundle {
-    fn detect(state: &AppState) -> Option<Self> {
-        let mut cursor = state.workspace_root.as_path();
-        loop {
-            if cursor.join("Cargo.toml").exists() {
-                return Some(Self::RustCi);
+    fn from_label(value: &str) -> Option<Self> {
+        let value = value.trim();
+        if value.eq_ignore_ascii_case("rust-ci") {
+            return Some(Self::Rust);
+        }
+        if value.eq_ignore_ascii_case("node-ci") {
+            return Some(Self::Node);
+        }
+        if value.eq_ignore_ascii_case("python-ci") {
+            return Some(Self::Python);
+        }
+        if value.eq_ignore_ascii_case("go-ci") {
+            return Some(Self::Go);
+        }
+        None
+    }
+
+    fn detect(state: &AppState) -> GateBundleSelection {
+        let config_default = read_workspace_gate_default(state.workspace_root.as_path());
+        if let Ok(Some(default)) = config_default.as_ref() {
+            if default.eq_ignore_ascii_case("none") {
+                return GateBundleSelection {
+                    bundle: None,
+                    source: "config:none".into(),
+                };
             }
-            cursor = cursor.parent()?;
+            if default.eq_ignore_ascii_case("auto") {
+                // continue with auto-detection below
+            } else if let Some(bundle) = Self::from_label(default) {
+                return GateBundleSelection {
+                    bundle: Some(bundle.clone()),
+                    source: format!("config:{}", bundle.label()),
+                };
+            }
+        }
+
+        let mut detected = None;
+        let mut cursor = Some(state.workspace_root.as_path());
+        while let Some(path) = cursor {
+            if path.join("Cargo.toml").exists() {
+                detected = Some((Self::Rust, "Cargo.toml"));
+                break;
+            }
+            if path.join("package.json").exists() {
+                detected = Some((Self::Node, "package.json"));
+                break;
+            }
+            if path.join("pyproject.toml").exists() {
+                detected = Some((Self::Python, "pyproject.toml"));
+                break;
+            }
+            if path.join("requirements.txt").exists() {
+                detected = Some((Self::Python, "requirements.txt"));
+                break;
+            }
+            if path.join("setup.cfg").exists() {
+                detected = Some((Self::Python, "setup.cfg"));
+                break;
+            }
+            if path.join("setup.py").exists() {
+                detected = Some((Self::Python, "setup.py"));
+                break;
+            }
+            if path.join("go.mod").exists() {
+                detected = Some((Self::Go, "go.mod"));
+                break;
+            }
+            cursor = path.parent();
+        }
+
+        let parse_error = config_default
+            .err()
+            .map(|err| format!("config-error:{err}"));
+        if let Some((bundle, marker)) = detected {
+            return GateBundleSelection {
+                bundle: Some(bundle.clone()),
+                source: parse_error
+                    .map(|prefix| format!("{prefix}|auto:{}({marker})", bundle.label()))
+                    .unwrap_or_else(|| format!("auto:{}({marker})", bundle.label())),
+            };
+        }
+
+        GateBundleSelection {
+            bundle: None,
+            source: parse_error.unwrap_or_else(|| "auto:none".into()),
         }
     }
 
     fn label(&self) -> &'static str {
         match self {
-            GateBundle::RustCi => "rust-ci",
+            GateBundle::Rust => "rust-ci",
+            GateBundle::Node => "node-ci",
+            GateBundle::Python => "python-ci",
+            GateBundle::Go => "go-ci",
         }
     }
 
     fn gates(&self) -> Vec<Gate> {
         match self {
-            GateBundle::RustCi => vec![
+            GateBundle::Rust => vec![
                 Gate {
                     name: "fmt",
                     command: "cargo fmt --all -- --check",
@@ -172,23 +268,97 @@ impl GateBundle {
                     command: "cargo test --workspace --all-features",
                 },
             ],
+            GateBundle::Node => vec![
+                Gate {
+                    name: "lint",
+                    command: "npm run lint --if-present",
+                },
+                Gate {
+                    name: "build",
+                    command: "npm run build --if-present",
+                },
+                Gate {
+                    name: "test",
+                    command: "npm test -- --watch=false --passWithNoTests",
+                },
+            ],
+            GateBundle::Python => vec![
+                Gate {
+                    name: "ruff",
+                    command: "python -m ruff check .",
+                },
+                Gate {
+                    name: "mypy",
+                    command: "python -m mypy .",
+                },
+                Gate {
+                    name: "pytest",
+                    command: "python -m pytest -q",
+                },
+            ],
+            GateBundle::Go => vec![
+                Gate {
+                    name: "fmt",
+                    command: "gofmt -l .",
+                },
+                Gate {
+                    name: "vet",
+                    command: "go vet ./...",
+                },
+                Gate {
+                    name: "test",
+                    command: "go test ./...",
+                },
+            ],
         }
     }
 }
 
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
-struct GateReport {
-    overall_ok: bool,
-    gates: Vec<GateReportGate>,
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct GateBundleSelection {
+    bundle: Option<GateBundle>,
+    source: String,
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
-struct GateReportGate {
-    name: String,
-    command: String,
-    ok: bool,
+pub struct GateReport {
+    pub overall_ok: bool,
+    pub gates: Vec<GateReportGate>,
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct GateReportGate {
+    pub name: String,
+    pub command: String,
+    pub ok: bool,
     #[serde(default)]
-    notes: Option<String>,
+    pub status: Option<String>,
+    #[serde(default)]
+    pub notes: Option<String>,
+}
+
+impl GateReportGate {
+    fn ui_status(&self) -> &'static str {
+        if let Some(status) = self.status.as_deref() {
+            if status.eq_ignore_ascii_case("pass")
+                || status.eq_ignore_ascii_case("ok")
+                || status.eq_ignore_ascii_case("success")
+            {
+                return "PASS";
+            }
+            if status.eq_ignore_ascii_case("skip") || status.eq_ignore_ascii_case("skipped") {
+                return "SKIP";
+            }
+            if status.eq_ignore_ascii_case("fail") || status.eq_ignore_ascii_case("failed") {
+                return "FAIL";
+            }
+        }
+        if self.ok {
+            "PASS"
+        } else {
+            "FAIL"
+        }
+    }
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -211,6 +381,133 @@ impl SwarmTaskState {
     }
 }
 
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+pub struct SwarmTaskArtifacts {
+    #[serde(default)]
+    pub summary: Option<String>,
+    #[serde(default)]
+    pub files: Vec<SwarmArtifactFile>,
+    #[serde(default)]
+    pub diffs: Vec<SwarmArtifactDiff>,
+    #[serde(default)]
+    pub commands: Vec<SwarmArtifactCommand>,
+    #[serde(default)]
+    pub risks: Vec<SwarmArtifactRisk>,
+    #[serde(default)]
+    pub notes: Vec<String>,
+}
+
+impl SwarmTaskArtifacts {
+    fn is_empty(&self) -> bool {
+        self.summary
+            .as_deref()
+            .is_none_or(|summary| summary.trim().is_empty())
+            && self.files.is_empty()
+            && self.diffs.is_empty()
+            && self.commands.is_empty()
+            && self.risks.is_empty()
+            && self.notes.is_empty()
+    }
+}
+
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+pub struct SwarmArtifactFile {
+    pub path: String,
+    #[serde(default)]
+    pub notes: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+pub struct SwarmArtifactDiff {
+    #[serde(default)]
+    pub path: Option<String>,
+    pub summary: String,
+}
+
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+pub struct SwarmArtifactCommand {
+    pub cmd: String,
+    #[serde(default)]
+    pub purpose: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+pub struct SwarmArtifactRisk {
+    #[serde(default)]
+    pub level: Option<String>,
+    pub item: String,
+    #[serde(default)]
+    pub mitigation: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+pub struct SwarmTaskDashboardRow {
+    pub id: String,
+    pub title: String,
+    pub role: Option<String>,
+    pub agent_id: String,
+    pub state: String,
+    pub deps: Vec<String>,
+    pub blocked_on: Vec<String>,
+    pub writes: bool,
+    pub done_when: Option<String>,
+    pub output_present: bool,
+}
+
+#[derive(Clone, Debug)]
+pub struct SwarmGateDashboardRow {
+    pub name: String,
+    pub command: String,
+    pub status: String,
+    pub notes: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+pub struct SwarmDashboardView {
+    pub mission_id: String,
+    pub template: String,
+    pub phase: String,
+    pub done: usize,
+    pub failed: usize,
+    pub skipped: usize,
+    pub running: usize,
+    pub queued: usize,
+    pub pending: usize,
+    pub tasks: Vec<SwarmTaskDashboardRow>,
+    pub gate_bundle: Option<String>,
+    pub gates: Vec<SwarmGateDashboardRow>,
+}
+
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct SwarmTaskPersistenceView {
+    pub id: String,
+    pub title: String,
+    pub role: Option<String>,
+    pub agent_id: String,
+    pub state: String,
+    pub deps: Vec<String>,
+    pub blocked_on: Vec<String>,
+    pub writes: bool,
+    pub done_when: Option<String>,
+    pub expected_artifacts: Vec<String>,
+    pub expected_artifacts_missing: bool,
+    pub output_present: bool,
+    pub output: Option<String>,
+    pub artifacts: Option<SwarmTaskArtifacts>,
+}
+
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct SwarmPersistenceView {
+    pub mission_id: String,
+    pub template: String,
+    pub phase: String,
+    pub gate_bundle: Option<String>,
+    pub gate_selection: String,
+    pub gate_report: Option<GateReport>,
+    pub gate_output: Option<String>,
+    pub tasks: Vec<SwarmTaskPersistenceView>,
+}
+
 #[derive(Clone, Debug)]
 struct SwarmTask {
     id: String,
@@ -224,6 +521,8 @@ struct SwarmTask {
     done_when: Option<String>,
     state: SwarmTaskState,
     output: Option<String>,
+    parsed_artifacts: Option<SwarmTaskArtifacts>,
+    expected_artifacts_missing: bool,
     failed: bool,
 }
 
@@ -236,6 +535,7 @@ struct SwarmRun {
     integrator_agent_id: Option<String>,
     verifier_agent_id: Option<String>,
     gate_bundle: Option<GateBundle>,
+    gate_selection: String,
     agent_ids: Vec<String>,
     stage: SwarmStage,
     tasks: Vec<SwarmTask>,
@@ -247,6 +547,98 @@ struct SwarmRun {
 impl SwarmRuntime {
     pub fn is_active_mission(&self, mission_id: &str) -> bool {
         self.runs.contains_key(mission_id)
+    }
+
+    pub fn swarm_dashboard(&self, mission_id: &str) -> Option<SwarmDashboardView> {
+        let run = self.run_for_mission(mission_id)?;
+        let tasks = run
+            .tasks
+            .iter()
+            .map(|task| SwarmTaskDashboardRow {
+                id: task.id.clone(),
+                title: task.title.clone(),
+                role: task.role.clone(),
+                agent_id: task.agent_id.clone(),
+                state: task_state_dashboard_label(task.state).into(),
+                deps: task.deps.clone(),
+                blocked_on: blocked_on(run, task),
+                writes: task.writes,
+                done_when: task.done_when.clone(),
+                output_present: task.output.is_some(),
+            })
+            .collect::<Vec<_>>();
+
+        let mut done = 0usize;
+        let mut failed = 0usize;
+        let mut skipped = 0usize;
+        let mut running = 0usize;
+        let mut queued = 0usize;
+        let mut pending = 0usize;
+        for task in run.tasks.iter() {
+            match task.state {
+                SwarmTaskState::Done => done += 1,
+                SwarmTaskState::Failed => failed += 1,
+                SwarmTaskState::Skipped => skipped += 1,
+                SwarmTaskState::Running => running += 1,
+                SwarmTaskState::Ready | SwarmTaskState::Dispatched => queued += 1,
+                SwarmTaskState::Pending => pending += 1,
+            }
+        }
+
+        Some(SwarmDashboardView {
+            mission_id: run.mission_id.clone(),
+            template: run.template.label().into(),
+            phase: stage_label(run.stage).into(),
+            done,
+            failed,
+            skipped,
+            running,
+            queued,
+            pending,
+            tasks,
+            gate_bundle: run
+                .gate_bundle
+                .as_ref()
+                .map(|bundle| bundle.label().to_string()),
+            gates: dashboard_gate_rows(run),
+        })
+    }
+
+    pub fn swarm_persistence(&self, mission_id: &str) -> Option<SwarmPersistenceView> {
+        let run = self.run_for_mission(mission_id)?;
+        let tasks = run
+            .tasks
+            .iter()
+            .map(|task| SwarmTaskPersistenceView {
+                id: task.id.clone(),
+                title: task.title.clone(),
+                role: task.role.clone(),
+                agent_id: task.agent_id.clone(),
+                state: task_state_dashboard_label(task.state).into(),
+                deps: task.deps.clone(),
+                blocked_on: blocked_on(run, task),
+                writes: task.writes,
+                done_when: task.done_when.clone(),
+                expected_artifacts: task.artifacts.clone(),
+                expected_artifacts_missing: task.expected_artifacts_missing,
+                output_present: task.output.is_some(),
+                output: task.output.clone(),
+                artifacts: task.parsed_artifacts.clone(),
+            })
+            .collect::<Vec<_>>();
+        Some(SwarmPersistenceView {
+            mission_id: run.mission_id.clone(),
+            template: run.template.label().into(),
+            phase: stage_label(run.stage).into(),
+            gate_bundle: run
+                .gate_bundle
+                .as_ref()
+                .map(|bundle| bundle.label().to_string()),
+            gate_selection: run.gate_selection.clone(),
+            gate_report: run.gate_report.clone(),
+            gate_output: run.gate_output.clone(),
+            tasks,
+        })
     }
 
     pub fn start(
@@ -279,8 +671,9 @@ impl SwarmRuntime {
             agents.insert(0, planner_agent_id.clone());
         }
 
+        let template_kind = parse_swarm_template(template.as_deref());
         let mission_id = next_mission_id(state);
-        let title = swarm_mission_title(&root_prompt, &mission_id);
+        let title = swarm_mission_title(&root_prompt, &mission_id, template_kind);
         let at = timestamp_label(state);
         state.agents.missions.push(MissionRecord {
             id: mission_id.clone(),
@@ -304,15 +697,15 @@ impl SwarmRuntime {
             at,
         });
 
-        let template_kind = parse_swarm_template(template.as_deref());
-        let integrator_agent_id = if matches!(template_kind, SwarmTemplate::Lab) {
-            agents
-                .iter()
-                .find(|id| id.as_str() != planner_agent_id.as_str())
-                .cloned()
-        } else {
-            None
-        };
+        let integrator_agent_id =
+            if matches!(template_kind, SwarmTemplate::Lab | SwarmTemplate::Bulk) {
+                agents
+                    .iter()
+                    .find(|id| id.as_str() != planner_agent_id.as_str())
+                    .cloned()
+            } else {
+                None
+            };
         let plan_prompt = build_planner_prompt(
             &root_prompt,
             template_kind,
@@ -321,7 +714,8 @@ impl SwarmRuntime {
             integrator_agent_id.as_deref(),
         );
 
-        let gate_bundle = GateBundle::detect(state);
+        let gate_selection = GateBundle::detect(state);
+        let gate_bundle = gate_selection.bundle.clone();
         let verifier_agent_id = gate_bundle.as_ref().and_then(|_| {
             if let Some(integrator) = integrator_agent_id.as_deref() {
                 agents
@@ -352,10 +746,11 @@ impl SwarmRuntime {
                 template_kind.label(),
                 integrator_agent_id.as_deref().unwrap_or("(none)"),
                 verifier_agent_id.as_deref().unwrap_or("(none)"),
-                gate_bundle.as_ref().map(|b| b.label()).unwrap_or("(none)")
+                gate_bundle_label(gate_bundle.as_ref(), &gate_selection.source)
             ),
         );
 
+        self.completed_runs.remove(&mission_id);
         self.runs.insert(
             mission_id.clone(),
             SwarmRun {
@@ -366,6 +761,7 @@ impl SwarmRuntime {
                 integrator_agent_id: integrator_agent_id.clone(),
                 verifier_agent_id,
                 gate_bundle,
+                gate_selection: gate_selection.source,
                 agent_ids: agents,
                 stage: SwarmStage::Planning,
                 tasks: Vec::new(),
@@ -434,8 +830,56 @@ impl SwarmRuntime {
                                 format!("PLAN warning: {warning}"),
                             );
                         }
+                        let prev_integrator = run.integrator_agent_id.clone();
+                        let prev_verifier = run.verifier_agent_id.clone();
                         if parsed.integrator_agent_id.is_some() {
                             run.integrator_agent_id = parsed.integrator_agent_id.clone();
+                        }
+                        if run.gate_bundle.is_some() {
+                            run.verifier_agent_id = {
+                                if let Some(integrator) = run.integrator_agent_id.as_deref() {
+                                    run.agent_ids
+                                        .iter()
+                                        .find(|id| {
+                                            id.as_str() != run.planner_agent_id.as_str()
+                                                && id.as_str() != integrator
+                                        })
+                                        .cloned()
+                                        .or_else(|| {
+                                            run.agent_ids
+                                                .iter()
+                                                .find(|id| {
+                                                    id.as_str() != run.planner_agent_id.as_str()
+                                                })
+                                                .cloned()
+                                        })
+                                } else {
+                                    run.agent_ids
+                                        .iter()
+                                        .find(|id| id.as_str() != run.planner_agent_id.as_str())
+                                        .cloned()
+                                }
+                            };
+                        }
+                        if prev_integrator != run.integrator_agent_id
+                            || prev_verifier != run.verifier_agent_id
+                        {
+                            push_system_message_to_mission(
+                                state,
+                                &run.mission_id,
+                                format!(
+                                    "Swarm template: {} | integrator: {} | verifier: {} | gates: {}",
+                                    run.template.label(),
+                                    run.integrator_agent_id
+                                        .as_deref()
+                                        .unwrap_or("(none)"),
+                                    run.verifier_agent_id.as_deref().unwrap_or("(none)"),
+                                    gate_bundle_label(
+                                        run.gate_bundle.as_ref(),
+                                        run.gate_selection.as_str()
+                                    )
+                                ),
+                            );
                         }
                         run.tasks = parsed.tasks;
                         initialize_task_graph(&mut run);
@@ -455,11 +899,58 @@ impl SwarmRuntime {
                                 ),
                             );
                         }
-                        update_mission_status(state, &run, Some(tasks_terminal_count(&run.tasks)));
+                        let done = tasks_terminal_count(&run.tasks);
+                        update_mission_status(state, &run, Some(done));
+                        if done == run.tasks.len() {
+                            if let (Some(bundle), Some(verifier)) =
+                                (run.gate_bundle.clone(), run.verifier_agent_id.clone())
+                            {
+                                run.stage = SwarmStage::Verifying;
+                                update_mission_phase(state, &run.mission_id, MissionPhase::Verify);
+                                update_mission_status(state, &run, Some(done));
+                                push_system_message_to_mission(
+                                    state,
+                                    &run.mission_id,
+                                    format!(
+                                        "Starting VERIFY ({}) on agent {verifier}",
+                                        bundle.label()
+                                    ),
+                                );
+                                let prompt = build_verify_prompt(&run, &bundle);
+                                dispatches.push(SwarmDispatch {
+                                    agent_id: verifier,
+                                    mission_id: run.mission_id.clone(),
+                                    prompt,
+                                });
+                            } else {
+                                run.stage = SwarmStage::Synthesizing;
+                                update_mission_phase(state, &run.mission_id, MissionPhase::Report);
+                                update_mission_status(state, &run, Some(done));
+                                let prompt = build_synthesis_prompt(&run);
+                                dispatches.push(SwarmDispatch {
+                                    agent_id: run.planner_agent_id.clone(),
+                                    mission_id: run.mission_id.clone(),
+                                    prompt,
+                                });
+                            }
+                        }
                         self.runs.insert(mid.clone(), run);
                     }
                     SwarmStage::Executing => {
-                        let _ = mark_task_finished(&mut run, agent_id, message.clone(), false);
+                        if let Some(completed) =
+                            mark_task_finished(&mut run, agent_id, message.clone(), false)
+                        {
+                            if completed.expected_artifacts_missing {
+                                push_system_message_to_mission(
+                                    state,
+                                    &run.mission_id,
+                                    format!(
+                                        "Swarm artifacts: task '{}' declared artifacts but no parseable swarm_artifacts JSON block was found.",
+                                        completed.task_id
+                                    ),
+                                );
+                            }
+                        }
                         refresh_task_readiness(&mut run);
                         dispatches.extend(dispatch_ready_tasks(&mut run));
                         let skipped = maybe_resolve_deadlock(&mut run);
@@ -524,6 +1015,19 @@ impl SwarmRuntime {
                                 &run.mission_id,
                                 format!("VERIFY result: {outcome}"),
                             );
+                            let gate_summary = report
+                                .gates
+                                .iter()
+                                .map(|gate| format!("{} {}", gate.name, gate.ui_status()))
+                                .collect::<Vec<_>>()
+                                .join(" | ");
+                            if !gate_summary.is_empty() {
+                                push_system_message_to_mission(
+                                    state,
+                                    &run.mission_id,
+                                    format!("Swarm gates: {gate_summary}"),
+                                );
+                            }
                         } else {
                             push_system_message_to_mission(
                                 state,
@@ -546,20 +1050,27 @@ impl SwarmRuntime {
                     SwarmStage::Synthesizing if agent_id == &run.planner_agent_id => {
                         run.stage = SwarmStage::Synthesizing;
                         update_mission_phase(state, &run.mission_id, MissionPhase::Report);
+                        let tasks_ok = run
+                            .tasks
+                            .iter()
+                            .all(|task| matches!(task.state, SwarmTaskState::Done));
                         let verify_ok = run.gate_bundle.is_none()
                             || run
                                 .gate_report
                                 .as_ref()
                                 .is_some_and(|report| report.overall_ok);
-                        let final_status = if verify_ok {
-                            "DONE"
-                        } else if run.gate_report.is_some() {
-                            "FAILED"
-                        } else {
+                        let verify_error = run.gate_bundle.is_some() && run.gate_report.is_none();
+                        let final_status = if verify_error {
                             "ERROR"
+                        } else if !tasks_ok {
+                            "FAILED"
+                        } else if verify_ok {
+                            "DONE"
+                        } else {
+                            "FAILED"
                         };
                         update_mission_final(state, &run.mission_id, final_status);
-                        // keep messages already appended; drop runtime state.
+                        self.completed_runs.insert(mid.clone(), run);
                     }
                     _ => {
                         self.runs.insert(mid.clone(), run);
@@ -590,8 +1101,56 @@ impl SwarmRuntime {
                             &available,
                             Some(message),
                         );
+                        let prev_integrator = run.integrator_agent_id.clone();
+                        let prev_verifier = run.verifier_agent_id.clone();
                         if parsed.integrator_agent_id.is_some() {
                             run.integrator_agent_id = parsed.integrator_agent_id.clone();
+                        }
+                        if run.gate_bundle.is_some() {
+                            run.verifier_agent_id = {
+                                if let Some(integrator) = run.integrator_agent_id.as_deref() {
+                                    run.agent_ids
+                                        .iter()
+                                        .find(|id| {
+                                            id.as_str() != run.planner_agent_id.as_str()
+                                                && id.as_str() != integrator
+                                        })
+                                        .cloned()
+                                        .or_else(|| {
+                                            run.agent_ids
+                                                .iter()
+                                                .find(|id| {
+                                                    id.as_str() != run.planner_agent_id.as_str()
+                                                })
+                                                .cloned()
+                                        })
+                                } else {
+                                    run.agent_ids
+                                        .iter()
+                                        .find(|id| id.as_str() != run.planner_agent_id.as_str())
+                                        .cloned()
+                                }
+                            };
+                        }
+                        if prev_integrator != run.integrator_agent_id
+                            || prev_verifier != run.verifier_agent_id
+                        {
+                            push_system_message_to_mission(
+                                state,
+                                &run.mission_id,
+                                format!(
+                                    "Swarm template: {} | integrator: {} | verifier: {} | gates: {}",
+                                    run.template.label(),
+                                    run.integrator_agent_id
+                                        .as_deref()
+                                        .unwrap_or("(none)"),
+                                    run.verifier_agent_id.as_deref().unwrap_or("(none)"),
+                                    gate_bundle_label(
+                                        run.gate_bundle.as_ref(),
+                                        run.gate_selection.as_str()
+                                    )
+                                ),
+                            );
                         }
                         run.tasks = parsed.tasks;
                         run.synthesis_prompt = parsed.synthesis_prompt;
@@ -611,11 +1170,58 @@ impl SwarmRuntime {
                                 ),
                             );
                         }
-                        update_mission_status(state, &run, Some(tasks_terminal_count(&run.tasks)));
+                        let done = tasks_terminal_count(&run.tasks);
+                        update_mission_status(state, &run, Some(done));
+                        if done == run.tasks.len() {
+                            if let (Some(bundle), Some(verifier)) =
+                                (run.gate_bundle.clone(), run.verifier_agent_id.clone())
+                            {
+                                run.stage = SwarmStage::Verifying;
+                                update_mission_phase(state, &run.mission_id, MissionPhase::Verify);
+                                update_mission_status(state, &run, Some(done));
+                                push_system_message_to_mission(
+                                    state,
+                                    &run.mission_id,
+                                    format!(
+                                        "Starting VERIFY ({}) on agent {verifier}",
+                                        bundle.label()
+                                    ),
+                                );
+                                let prompt = build_verify_prompt(&run, &bundle);
+                                dispatches.push(SwarmDispatch {
+                                    agent_id: verifier,
+                                    mission_id: run.mission_id.clone(),
+                                    prompt,
+                                });
+                            } else {
+                                run.stage = SwarmStage::Synthesizing;
+                                update_mission_phase(state, &run.mission_id, MissionPhase::Report);
+                                update_mission_status(state, &run, Some(done));
+                                let prompt = build_synthesis_prompt(&run);
+                                dispatches.push(SwarmDispatch {
+                                    agent_id: run.planner_agent_id.clone(),
+                                    mission_id: run.mission_id.clone(),
+                                    prompt,
+                                });
+                            }
+                        }
                         self.runs.insert(mid.clone(), run);
                     }
                     SwarmStage::Executing => {
-                        let _ = mark_task_finished(&mut run, agent_id, message.clone(), true);
+                        if let Some(completed) =
+                            mark_task_finished(&mut run, agent_id, message.clone(), true)
+                        {
+                            if completed.expected_artifacts_missing {
+                                push_system_message_to_mission(
+                                    state,
+                                    &run.mission_id,
+                                    format!(
+                                        "Swarm artifacts: task '{}' declared artifacts but no parseable swarm_artifacts JSON block was found.",
+                                        completed.task_id
+                                    ),
+                                );
+                            }
+                        }
                         refresh_task_readiness(&mut run);
                         dispatches.extend(dispatch_ready_tasks(&mut run));
                         let skipped = maybe_resolve_deadlock(&mut run);
@@ -692,6 +1298,7 @@ impl SwarmRuntime {
                     }
                     SwarmStage::Synthesizing if agent_id == &run.planner_agent_id => {
                         update_mission_final(state, &run.mission_id, "ERROR");
+                        self.completed_runs.insert(mid.clone(), run);
                     }
                     _ => {
                         self.runs.insert(mid.clone(), run);
@@ -702,6 +1309,12 @@ impl SwarmRuntime {
         }
 
         dispatches
+    }
+
+    fn run_for_mission(&self, mission_id: &str) -> Option<&SwarmRun> {
+        self.runs
+            .get(mission_id)
+            .or_else(|| self.completed_runs.get(mission_id))
     }
 }
 
@@ -758,6 +1371,163 @@ struct ParsedSwarmPlan {
     warnings: Vec<String>,
 }
 
+fn task_role_is(task: &SwarmTask, role: &str) -> bool {
+    task.role
+        .as_deref()
+        .is_some_and(|r| r.trim().eq_ignore_ascii_case(role))
+}
+
+fn bulk_is_proposer(task: &SwarmTask) -> bool {
+    task_role_is(task, "propose") || task.id.to_ascii_lowercase().starts_with("propose-")
+}
+
+fn bulk_is_judge(task: &SwarmTask) -> bool {
+    task_role_is(task, "judge") || task.id.eq_ignore_ascii_case("judge")
+}
+
+fn bulk_is_integrate(task: &SwarmTask) -> bool {
+    task_role_is(task, "integrate") || task.id.eq_ignore_ascii_case("integrate")
+}
+
+fn normalize_bulk_plan(tasks: &mut [SwarmTask], integrator_agent_id: Option<&str>) -> Vec<String> {
+    let mut warnings = Vec::new();
+    let proposer_ids = tasks
+        .iter()
+        .filter(|task| bulk_is_proposer(task))
+        .map(|task| task.id.clone())
+        .collect::<Vec<_>>();
+    let judge_idx = tasks.iter().position(bulk_is_judge);
+    let integrate_idx = tasks.iter().position(bulk_is_integrate);
+
+    for task in tasks.iter_mut() {
+        if bulk_is_proposer(task) && task.writes {
+            task.writes = false;
+            warnings.push(format!(
+                "Bulk plan: proposer task '{}' had writes=true; forcing read-only.",
+                task.id
+            ));
+        }
+    }
+
+    if let Some(judge_idx) = judge_idx {
+        let judge_id = tasks[judge_idx].id.clone();
+        let mut changed = false;
+        for proposer in proposer_ids.iter() {
+            if proposer == &judge_id {
+                continue;
+            }
+            if tasks[judge_idx].deps.iter().any(|dep| dep == proposer) {
+                continue;
+            }
+            tasks[judge_idx].deps.push(proposer.clone());
+            changed = true;
+        }
+        if changed {
+            warnings.push(
+                "Bulk plan: added missing deps so the judge depends on all proposer tasks.".into(),
+            );
+        }
+    }
+
+    if let (Some(integrate_idx), Some(judge_idx)) = (integrate_idx, judge_idx) {
+        let judge_id = tasks[judge_idx].id.clone();
+        if !tasks[integrate_idx].deps.iter().any(|dep| dep == &judge_id) {
+            tasks[integrate_idx].deps.push(judge_id);
+            warnings.push("Bulk plan: added missing dep so integrate depends on judge.".into());
+        }
+    }
+
+    if let Some(integrate_idx) = integrate_idx {
+        let allowed = integrator_agent_id
+            .is_none_or(|integrator| tasks[integrate_idx].agent_id == integrator);
+        if allowed && !tasks[integrate_idx].writes {
+            tasks[integrate_idx].writes = true;
+            warnings
+                .push("Bulk plan: forcing integrate task writes=true for the integrator.".into());
+        }
+    }
+
+    warnings
+}
+
+fn validate_bulk_plan(
+    tasks: &[SwarmTask],
+    available_agents: &[String],
+    integrator_agent_id: Option<&str>,
+) -> Result<(), String> {
+    let mut issues = Vec::new();
+    let proposer_tasks = tasks
+        .iter()
+        .filter(|task| bulk_is_proposer(task))
+        .collect::<Vec<_>>();
+    let judge_task = tasks.iter().find(|task| bulk_is_judge(task));
+    let integrate_task = tasks.iter().find(|task| bulk_is_integrate(task));
+
+    if proposer_tasks.is_empty() {
+        issues.push("missing proposer tasks (role=propose or id=propose-XX)".into());
+    }
+    if judge_task.is_none() {
+        issues.push("missing judge task (role=judge or id=judge)".into());
+    }
+    if integrate_task.is_none() {
+        issues.push("missing integrate task (role=integrate or id=integrate)".into());
+    }
+
+    if let Some(integrate_task) = integrate_task {
+        if !integrate_task.writes {
+            issues.push("integrate task must set writes=true (integrator step)".into());
+        }
+        if let Some(integrator) = integrator_agent_id {
+            if integrate_task.agent_id != integrator {
+                issues.push(format!(
+                    "integrate task must be assigned to integrator agent '{integrator}' (got '{}')",
+                    integrate_task.agent_id
+                ));
+            }
+        }
+    }
+
+    if let Some(judge_task) = judge_task {
+        for proposer in proposer_tasks.iter() {
+            if proposer.id == judge_task.id {
+                continue;
+            }
+            if !judge_task.deps.iter().any(|dep| dep == &proposer.id) {
+                issues.push(format!(
+                    "judge task must depend on proposer task '{}' (missing dep)",
+                    proposer.id
+                ));
+            }
+        }
+    }
+
+    if let (Some(judge_task), Some(integrate_task)) = (judge_task, integrate_task) {
+        if !integrate_task.deps.iter().any(|dep| dep == &judge_task.id) {
+            issues.push("integrate task must depend on judge task".into());
+        }
+    }
+
+    let non_integrator_agents = match integrator_agent_id {
+        Some(integrator) => available_agents
+            .iter()
+            .filter(|id| id.as_str() != integrator)
+            .count(),
+        None => available_agents.len(),
+    };
+    let min_proposers = if non_integrator_agents >= 2 { 2 } else { 1 };
+    if proposer_tasks.len() < min_proposers {
+        issues.push(format!(
+            "expected at least {min_proposers} proposer tasks for bulk orchestration"
+        ));
+    }
+
+    if issues.is_empty() {
+        Ok(())
+    } else {
+        Err(issues.join("; "))
+    }
+}
+
 fn parse_plan_from_planner(
     planner_message: &str,
     template: SwarmTemplate,
@@ -770,9 +1540,41 @@ fn parse_plan_from_planner(
     };
 
     if let Ok(plan) = serde_json::from_str::<SwarmPlanV2>(&json) {
-        if let Some(parsed) = parse_v2_plan(plan, template, available_agents, integrator_hint) {
+        if let Some(mut parsed) = parse_v2_plan(plan, template, available_agents, integrator_hint) {
+            if matches!(template, SwarmTemplate::Bulk) {
+                let integrator = parsed
+                    .integrator_agent_id
+                    .as_deref()
+                    .or(integrator_hint)
+                    .or_else(|| available_agents.first().map(String::as_str));
+                let mut warnings = normalize_bulk_plan(&mut parsed.tasks, integrator);
+                parsed.warnings.append(&mut warnings);
+                if let Err(issue) = validate_bulk_plan(&parsed.tasks, available_agents, integrator)
+                {
+                    let mut fallback =
+                        fallback_tasks(template, root_prompt, available_agents, Some(&issue));
+                    fallback.warnings.push(format!(
+                        "Planner did not produce a usable bulk plan; using built-in bulk workflow. Reason: {issue}"
+                    ));
+                    return fallback;
+                }
+            }
             return parsed;
         }
+    }
+
+    if matches!(template, SwarmTemplate::Bulk) {
+        let mut fallback = fallback_tasks(
+            template,
+            root_prompt,
+            available_agents,
+            Some("Planner did not return a valid v2 bulk plan."),
+        );
+        fallback.warnings.push(
+            "Bulk template requires the v2 JSON schema (with deps); using built-in bulk workflow."
+                .into(),
+        );
+        return fallback;
     }
 
     let Ok(plan) = serde_json::from_str::<SwarmPlanV1>(&json) else {
@@ -811,6 +1613,8 @@ fn parse_plan_from_planner(
             done_when: None,
             state: SwarmTaskState::Pending,
             output: None,
+            parsed_artifacts: None,
+            expected_artifacts_missing: false,
             failed: false,
         });
     }
@@ -945,6 +1749,8 @@ fn parse_v2_plan(
                 .filter(|d| !d.is_empty()),
             state: SwarmTaskState::Pending,
             output: None,
+            parsed_artifacts: None,
+            expected_artifacts_missing: false,
             failed: false,
         });
     }
@@ -967,6 +1773,148 @@ fn fallback_tasks(
     available_agents: &[String],
     plan_error: Option<&str>,
 ) -> ParsedSwarmPlan {
+    if matches!(template, SwarmTemplate::Bulk) {
+        let integrator = available_agents.first().cloned();
+        let judge_agent = available_agents
+            .get(1)
+            .or_else(|| available_agents.first())
+            .cloned();
+        let review_agent = available_agents
+            .get(2)
+            .or_else(|| available_agents.get(1))
+            .or_else(|| available_agents.first())
+            .cloned();
+
+        let mut proposer_ids = available_agents
+            .iter()
+            .filter(|id| integrator.as_ref() != Some(*id))
+            .filter(|id| judge_agent.as_ref() != Some(*id))
+            .cloned()
+            .collect::<Vec<_>>();
+        if proposer_ids.is_empty() {
+            if let Some(judge) = judge_agent.clone() {
+                proposer_ids.push(judge);
+            } else if let Some(integrator) = integrator.clone() {
+                proposer_ids.push(integrator);
+            }
+        }
+        proposer_ids.truncate(8);
+
+        let proposer_lenses = [
+            "minimal diff / safest change",
+            "correctness & edge cases",
+            "UX/TUI clarity",
+            "performance & scalability",
+            "testing & verification",
+            "docs & maintainability",
+            "security & failure modes",
+        ];
+
+        let mut tasks = Vec::new();
+        let mut proposer_task_ids = Vec::new();
+        for (idx, agent_id) in proposer_ids.into_iter().enumerate() {
+            let id = format!("propose-{:02}", idx + 1);
+            let lens = proposer_lenses
+                .get(idx)
+                .copied()
+                .unwrap_or("alternative approach");
+            proposer_task_ids.push(id.clone());
+            tasks.push(SwarmTask {
+                id,
+                agent_id,
+                role: Some("propose".into()),
+                title: format!("Proposal ({lens})"),
+                task_prompt: format!(
+                    "Propose an end-to-end solution candidate.\n\nLens: {lens}\n\nConstraints:\n- Do NOT edit the workspace (read-only).\n- Be concrete: file paths, key symbols, and exact commands.\n- If helpful, include a small unified diff (but do not apply it).\n"
+                ),
+                deps: Vec::new(),
+                writes: false,
+                artifacts: vec!["options".into(), "files".into(), "commands".into(), "risks".into()],
+                done_when: Some(
+                    "We have a concrete, repo-grounded candidate solution with tradeoffs."
+                        .into(),
+                ),
+                state: SwarmTaskState::Pending,
+                output: None,
+                parsed_artifacts: None,
+                expected_artifacts_missing: false,
+                failed: false,
+            });
+        }
+
+        if let Some(agent_id) = judge_agent.clone() {
+            tasks.push(SwarmTask {
+                id: "judge".into(),
+                agent_id,
+                role: Some("judge".into()),
+                title: "Judge + select approach".into(),
+                task_prompt: "Compare the proposer outputs and pick the best approach. Provide:\n- Decision (which proposal / why)\n- A step-by-step integration plan for the integrator\n- Acceptance criteria\n- Exact verification commands\n\nConstraints:\n- Do NOT edit the workspace (read-only).\n"
+                    .into(),
+                deps: proposer_task_ids.clone(),
+                writes: false,
+                artifacts: vec!["decision".into(), "plan".into(), "commands".into(), "risks".into()],
+                done_when: Some("Integrator has a clear, actionable plan to implement.".into()),
+                state: SwarmTaskState::Pending,
+                output: None,
+                parsed_artifacts: None,
+                expected_artifacts_missing: false,
+                failed: false,
+            });
+        }
+
+        if let Some(agent_id) = integrator.clone() {
+            tasks.push(SwarmTask {
+                id: "integrate".into(),
+                agent_id,
+                role: Some("integrate".into()),
+                title: "Integrate selected approach".into(),
+                task_prompt: "Implement the selected approach using the judge output.\n\nConstraints:\n- You are the ONLY agent allowed to edit the workspace.\n- Prefer small, safe diffs.\n- Run the suggested verification commands.\n"
+                    .into(),
+                deps: vec!["judge".into()],
+                writes: true,
+                artifacts: vec!["diffs".into(), "commands".into()],
+                done_when: Some("Changes are implemented cleanly with validations passing.".into()),
+                state: SwarmTaskState::Pending,
+                output: None,
+                parsed_artifacts: None,
+                expected_artifacts_missing: false,
+                failed: false,
+            });
+        }
+
+        if let Some(agent_id) = review_agent {
+            tasks.push(SwarmTask {
+                id: "review".into(),
+                agent_id,
+                role: Some("review".into()),
+                title: "Review final diff".into(),
+                task_prompt: "Review the integrated changes for correctness, UX, and maintainability. Suggest follow-ups and edge cases.\n\nConstraints:\n- Do NOT edit the workspace (read-only).\n"
+                    .into(),
+                deps: vec!["integrate".into()],
+                writes: false,
+                artifacts: vec!["risks".into(), "commands".into()],
+                done_when: Some("We have confidence in correctness and know remaining risks.".into()),
+                state: SwarmTaskState::Pending,
+                output: None,
+                parsed_artifacts: None,
+                expected_artifacts_missing: false,
+                failed: false,
+            });
+        }
+
+        let synth = plan_error.map(|err| {
+            format!(
+                "Note: planner output could not be used; fallback prompts were used. Reason: {err}"
+            )
+        });
+
+        return ParsedSwarmPlan {
+            tasks,
+            synthesis_prompt: synth,
+            integrator_agent_id: integrator,
+            warnings: Vec::new(),
+        };
+    }
     if matches!(template, SwarmTemplate::Lab) {
         let integrator = available_agents.first().cloned();
         let recon_agent = available_agents
@@ -998,6 +1946,8 @@ fn fallback_tasks(
                 done_when: Some("We know exactly where changes should happen and the main risks.".into()),
                 state: SwarmTaskState::Pending,
                 output: None,
+                parsed_artifacts: None,
+                expected_artifacts_missing: false,
                 failed: false,
             });
         }
@@ -1014,6 +1964,8 @@ fn fallback_tasks(
                 done_when: Some("We have 1-2 clear, repo-grounded approaches with tradeoffs.".into()),
                 state: SwarmTaskState::Pending,
                 output: None,
+                parsed_artifacts: None,
+                expected_artifacts_missing: false,
                 failed: false,
             });
         }
@@ -1030,6 +1982,8 @@ fn fallback_tasks(
                 done_when: Some("Changes are implemented cleanly with validations to run.".into()),
                 state: SwarmTaskState::Pending,
                 output: None,
+                parsed_artifacts: None,
+                expected_artifacts_missing: false,
                 failed: false,
             });
         }
@@ -1046,12 +2000,16 @@ fn fallback_tasks(
                 done_when: Some("We have confidence in correctness and a clear test plan.".into()),
                 state: SwarmTaskState::Pending,
                 output: None,
+                parsed_artifacts: None,
+                expected_artifacts_missing: false,
                 failed: false,
             });
         }
 
         let synth = plan_error.map(|err| {
-            format!("Note: planning failed; fallback prompts were used. Planner error was: {err}")
+            format!(
+                "Note: planner output could not be used; fallback prompts were used. Reason: {err}"
+            )
         });
 
         return ParsedSwarmPlan {
@@ -1138,12 +2096,14 @@ fn fallback_tasks(
             done_when: None,
             state: SwarmTaskState::Pending,
             output: None,
+            parsed_artifacts: None,
+            expected_artifacts_missing: false,
             failed: false,
         });
     }
 
     let synth = plan_error.map(|err| {
-        format!("Note: planning failed; fallback prompts were used. Planner error was: {err}")
+        format!("Note: planner output could not be used; fallback prompts were used. Reason: {err}")
     });
 
     ParsedSwarmPlan {
@@ -1199,7 +2159,17 @@ fn mark_task_running(run: &mut SwarmRun, agent_id: &str) {
     }
 }
 
-fn mark_task_finished(run: &mut SwarmRun, agent_id: &str, message: String, failed: bool) -> bool {
+struct TaskCompletion {
+    task_id: String,
+    expected_artifacts_missing: bool,
+}
+
+fn mark_task_finished(
+    run: &mut SwarmRun,
+    agent_id: &str,
+    message: String,
+    failed: bool,
+) -> Option<TaskCompletion> {
     let pos_running = run.tasks.iter().position(|task| {
         task.agent_id == agent_id && matches!(task.state, SwarmTaskState::Running)
     });
@@ -1208,18 +2178,26 @@ fn mark_task_finished(run: &mut SwarmRun, agent_id: &str, message: String, faile
             task.agent_id == agent_id && matches!(task.state, SwarmTaskState::Dispatched)
         })
     });
-    let Some(pos) = pos else {
-        return false;
-    };
+    let pos = pos?;
+
+    let parsed_artifacts = parse_task_artifacts(&run.tasks[pos].id, &message);
+    let expected_artifacts_missing =
+        !run.tasks[pos].artifacts.is_empty() && parsed_artifacts.is_none();
+
     let task = &mut run.tasks[pos];
     task.output = Some(message);
+    task.parsed_artifacts = parsed_artifacts;
+    task.expected_artifacts_missing = expected_artifacts_missing;
     task.failed = failed;
     task.state = if failed {
         SwarmTaskState::Failed
     } else {
         SwarmTaskState::Done
     };
-    true
+    Some(TaskCompletion {
+        task_id: task.id.clone(),
+        expected_artifacts_missing,
+    })
 }
 
 fn refresh_task_readiness(run: &mut SwarmRun) {
@@ -1342,10 +2320,587 @@ fn collect_dependency_payload(run: &SwarmRun, task: &SwarmTask) -> Vec<(String, 
             _ => "PENDING",
         };
         let label = format!("{} [{}] (agent {})", dep.id, status, dep.agent_id);
-        let text = dep.output.as_deref().unwrap_or("(no output)");
-        out.push((label, truncate_chars(text, SWARM_DEP_OUTPUT_MAX_CHARS)));
+        let text = dependency_payload_text(run, dep);
+        out.push((label, truncate_chars(&text, SWARM_DEP_OUTPUT_MAX_CHARS)));
     }
     out
+}
+
+fn dependency_payload_text(run: &SwarmRun, task: &SwarmTask) -> String {
+    if let Some(summary) = task_artifacts_summary_for_prompt(task, &run.mission_id) {
+        return summary;
+    }
+    task.output
+        .as_deref()
+        .map(ToString::to_string)
+        .unwrap_or_else(|| "(no output)".into())
+}
+
+fn task_artifacts_summary_for_prompt(task: &SwarmTask, mission_id: &str) -> Option<String> {
+    let artifacts = task.parsed_artifacts.as_ref()?;
+    if artifacts.is_empty() {
+        return None;
+    }
+
+    let mut lines = Vec::new();
+    if let Some(summary) = artifacts
+        .summary
+        .as_deref()
+        .map(str::trim)
+        .filter(|summary| !summary.is_empty())
+    {
+        lines.push(format!("summary: {summary}"));
+    }
+    if !artifacts.files.is_empty() {
+        let files = artifacts
+            .files
+            .iter()
+            .take(8)
+            .map(|entry| match entry.notes.as_deref().map(str::trim) {
+                Some(notes) if !notes.is_empty() => format!("{} ({notes})", entry.path),
+                _ => entry.path.clone(),
+            })
+            .collect::<Vec<_>>()
+            .join("; ");
+        lines.push(format!("files: {files}"));
+    }
+    if !artifacts.diffs.is_empty() {
+        let diffs = artifacts
+            .diffs
+            .iter()
+            .take(8)
+            .map(|entry| match entry.path.as_deref().map(str::trim) {
+                Some(path) if !path.is_empty() => format!("{path}: {}", entry.summary),
+                _ => entry.summary.clone(),
+            })
+            .collect::<Vec<_>>()
+            .join("; ");
+        lines.push(format!("diffs: {diffs}"));
+    }
+    if !artifacts.commands.is_empty() {
+        let commands = artifacts
+            .commands
+            .iter()
+            .take(8)
+            .map(|entry| match entry.purpose.as_deref().map(str::trim) {
+                Some(purpose) if !purpose.is_empty() => format!("{} ({purpose})", entry.cmd),
+                _ => entry.cmd.clone(),
+            })
+            .collect::<Vec<_>>()
+            .join("; ");
+        lines.push(format!("commands: {commands}"));
+    }
+    if !artifacts.risks.is_empty() {
+        let risks = artifacts
+            .risks
+            .iter()
+            .take(8)
+            .map(|entry| {
+                let prefix = entry
+                    .level
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|level| !level.is_empty())
+                    .map(|level| format!("{level}: "))
+                    .unwrap_or_default();
+                let mitigation = entry
+                    .mitigation
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|text| !text.is_empty())
+                    .map(|text| format!(" (mitigation: {text})"))
+                    .unwrap_or_default();
+                format!("{prefix}{}{}", entry.item, mitigation)
+            })
+            .collect::<Vec<_>>()
+            .join("; ");
+        lines.push(format!("risks: {risks}"));
+    }
+    if !artifacts.notes.is_empty() {
+        lines.push(format!(
+            "notes: {}",
+            artifacts
+                .notes
+                .iter()
+                .take(8)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join("; ")
+        ));
+    }
+    lines.push(format!(
+        "artifact_path: .nit/swarm/{mission_id}/tasks/{}/artifacts.json",
+        sanitize_for_filename(&task.id)
+    ));
+    Some(lines.join("\n"))
+}
+
+fn parse_task_artifacts(task_id: &str, message: &str) -> Option<SwarmTaskArtifacts> {
+    let mut merged = SwarmTaskArtifacts::default();
+    let mut found = false;
+    for json in extract_json_code_blocks(message) {
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(&json) else {
+            continue;
+        };
+        let Some(parsed) = parse_task_artifacts_value(task_id, &value) else {
+            continue;
+        };
+        merge_task_artifacts(&mut merged, parsed);
+        found = true;
+    }
+    if found && !merged.is_empty() {
+        Some(merged)
+    } else {
+        None
+    }
+}
+
+fn parse_task_artifacts_value(
+    task_id: &str,
+    value: &serde_json::Value,
+) -> Option<SwarmTaskArtifacts> {
+    let object = value.as_object()?;
+    let typed = object
+        .get("type")
+        .and_then(|value| value.as_str())
+        .is_some_and(|value| value.eq_ignore_ascii_case("swarm_artifacts"));
+    let has_artifacts = object.contains_key("artifacts");
+    if !typed && !has_artifacts {
+        return None;
+    }
+    if typed
+        && object
+            .get("version")
+            .and_then(|value| value.as_u64())
+            .is_some_and(|version| version != 1)
+    {
+        return None;
+    }
+    if let Some(owner) = object.get("task_id").and_then(|value| value.as_str()) {
+        let owner = owner.trim();
+        if !owner.is_empty() && owner != task_id {
+            return None;
+        }
+    }
+
+    let mut parsed = SwarmTaskArtifacts {
+        summary: object
+            .get("summary")
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|summary| !summary.is_empty())
+            .map(ToString::to_string),
+        ..SwarmTaskArtifacts::default()
+    };
+
+    let source = object.get("artifacts").unwrap_or(value);
+    let source_obj = source.as_object()?;
+
+    parsed.files = parse_artifact_files(source_obj.get("files"));
+    parsed.diffs = parse_artifact_diffs(source_obj.get("diffs"));
+    parsed.commands = parse_artifact_commands(source_obj.get("commands"));
+    parsed.risks = parse_artifact_risks(source_obj.get("risks"));
+    parsed.notes = parse_artifact_notes(source_obj.get("notes"));
+
+    if parsed.is_empty() {
+        None
+    } else {
+        Some(parsed)
+    }
+}
+
+fn parse_artifact_files(value: Option<&serde_json::Value>) -> Vec<SwarmArtifactFile> {
+    let Some(items) = value.and_then(|value| value.as_array()) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for item in items.iter() {
+        if let Some(path) = item.as_str().map(str::trim).filter(|path| !path.is_empty()) {
+            out.push(SwarmArtifactFile {
+                path: path.to_string(),
+                notes: None,
+            });
+            continue;
+        }
+        let Some(obj) = item.as_object() else {
+            continue;
+        };
+        let Some(path) = obj
+            .get("path")
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|path| !path.is_empty())
+        else {
+            continue;
+        };
+        let notes = obj
+            .get("notes")
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|notes| !notes.is_empty())
+            .map(ToString::to_string);
+        out.push(SwarmArtifactFile {
+            path: path.to_string(),
+            notes,
+        });
+    }
+    out
+}
+
+fn parse_artifact_diffs(value: Option<&serde_json::Value>) -> Vec<SwarmArtifactDiff> {
+    let Some(items) = value.and_then(|value| value.as_array()) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for item in items.iter() {
+        if let Some(summary) = item
+            .as_str()
+            .map(str::trim)
+            .filter(|summary| !summary.is_empty())
+        {
+            out.push(SwarmArtifactDiff {
+                path: None,
+                summary: summary.to_string(),
+            });
+            continue;
+        }
+        let Some(obj) = item.as_object() else {
+            continue;
+        };
+        let summary = obj
+            .get("summary")
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|summary| !summary.is_empty());
+        let path = obj
+            .get("path")
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|path| !path.is_empty())
+            .map(ToString::to_string);
+        let summary = summary.map(ToString::to_string).or_else(|| path.clone());
+        let Some(summary) = summary else {
+            continue;
+        };
+        out.push(SwarmArtifactDiff { path, summary });
+    }
+    out
+}
+
+fn parse_artifact_commands(value: Option<&serde_json::Value>) -> Vec<SwarmArtifactCommand> {
+    let Some(items) = value.and_then(|value| value.as_array()) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for item in items.iter() {
+        if let Some(cmd) = item.as_str().map(str::trim).filter(|cmd| !cmd.is_empty()) {
+            out.push(SwarmArtifactCommand {
+                cmd: cmd.to_string(),
+                purpose: None,
+            });
+            continue;
+        }
+        let Some(obj) = item.as_object() else {
+            continue;
+        };
+        let Some(cmd) = obj
+            .get("cmd")
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|cmd| !cmd.is_empty())
+        else {
+            continue;
+        };
+        let purpose = obj
+            .get("purpose")
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|purpose| !purpose.is_empty())
+            .map(ToString::to_string);
+        out.push(SwarmArtifactCommand {
+            cmd: cmd.to_string(),
+            purpose,
+        });
+    }
+    out
+}
+
+fn parse_artifact_risks(value: Option<&serde_json::Value>) -> Vec<SwarmArtifactRisk> {
+    let Some(items) = value.and_then(|value| value.as_array()) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for item in items.iter() {
+        if let Some(item_text) = item
+            .as_str()
+            .map(str::trim)
+            .filter(|item_text| !item_text.is_empty())
+        {
+            out.push(SwarmArtifactRisk {
+                level: None,
+                item: item_text.to_string(),
+                mitigation: None,
+            });
+            continue;
+        }
+        let Some(obj) = item.as_object() else {
+            continue;
+        };
+        let Some(item_text) = obj
+            .get("item")
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|item_text| !item_text.is_empty())
+        else {
+            continue;
+        };
+        let level = obj
+            .get("level")
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|level| !level.is_empty())
+            .map(ToString::to_string);
+        let mitigation = obj
+            .get("mitigation")
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|mitigation| !mitigation.is_empty())
+            .map(ToString::to_string);
+        out.push(SwarmArtifactRisk {
+            level,
+            item: item_text.to_string(),
+            mitigation,
+        });
+    }
+    out
+}
+
+fn parse_artifact_notes(value: Option<&serde_json::Value>) -> Vec<String> {
+    let Some(items) = value.and_then(|value| value.as_array()) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for item in items.iter() {
+        if let Some(note) = item.as_str().map(str::trim).filter(|note| !note.is_empty()) {
+            out.push(note.to_string());
+            continue;
+        }
+        let Some(obj) = item.as_object() else {
+            continue;
+        };
+        if let Some(note) = obj
+            .get("note")
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|note| !note.is_empty())
+        {
+            out.push(note.to_string());
+        }
+    }
+    out
+}
+
+fn merge_task_artifacts(dst: &mut SwarmTaskArtifacts, src: SwarmTaskArtifacts) {
+    if let Some(summary) = src
+        .summary
+        .as_deref()
+        .map(str::trim)
+        .filter(|summary| !summary.is_empty())
+    {
+        dst.summary = Some(summary.to_string());
+    }
+
+    let mut seen_files = dst
+        .files
+        .iter()
+        .map(|entry| entry.path.to_ascii_lowercase())
+        .collect::<HashSet<_>>();
+    for entry in src.files {
+        let key = entry.path.to_ascii_lowercase();
+        if key.is_empty() || !seen_files.insert(key) {
+            continue;
+        }
+        dst.files.push(entry);
+    }
+
+    let mut seen_diffs = dst
+        .diffs
+        .iter()
+        .map(|entry| {
+            format!(
+                "{}|{}",
+                entry
+                    .path
+                    .as_deref()
+                    .unwrap_or_default()
+                    .to_ascii_lowercase(),
+                entry.summary.to_ascii_lowercase()
+            )
+        })
+        .collect::<HashSet<_>>();
+    for entry in src.diffs {
+        let key = format!(
+            "{}|{}",
+            entry
+                .path
+                .as_deref()
+                .unwrap_or_default()
+                .to_ascii_lowercase(),
+            entry.summary.to_ascii_lowercase()
+        );
+        if key == "|" || !seen_diffs.insert(key) {
+            continue;
+        }
+        dst.diffs.push(entry);
+    }
+
+    let mut seen_commands = dst
+        .commands
+        .iter()
+        .map(|entry| entry.cmd.to_ascii_lowercase())
+        .collect::<HashSet<_>>();
+    for entry in src.commands {
+        let key = entry.cmd.to_ascii_lowercase();
+        if key.is_empty() || !seen_commands.insert(key) {
+            continue;
+        }
+        dst.commands.push(entry);
+    }
+
+    let mut seen_risks = dst
+        .risks
+        .iter()
+        .map(|entry| entry.item.to_ascii_lowercase())
+        .collect::<HashSet<_>>();
+    for entry in src.risks {
+        let key = entry.item.to_ascii_lowercase();
+        if key.is_empty() || !seen_risks.insert(key) {
+            continue;
+        }
+        dst.risks.push(entry);
+    }
+
+    let mut seen_notes = dst
+        .notes
+        .iter()
+        .map(|note| note.to_ascii_lowercase())
+        .collect::<HashSet<_>>();
+    for note in src.notes {
+        let key = note.to_ascii_lowercase();
+        if key.is_empty() || !seen_notes.insert(key) {
+            continue;
+        }
+        dst.notes.push(note);
+    }
+}
+
+fn blocked_on(run: &SwarmRun, task: &SwarmTask) -> Vec<String> {
+    task.deps
+        .iter()
+        .filter_map(|dep_id| {
+            let dep = run.tasks.iter().find(|candidate| candidate.id == *dep_id)?;
+            (!dep.state.is_terminal()).then(|| dep.id.clone())
+        })
+        .collect()
+}
+
+fn task_state_dashboard_label(state: SwarmTaskState) -> &'static str {
+    match state {
+        SwarmTaskState::Pending => "Pending",
+        SwarmTaskState::Ready | SwarmTaskState::Dispatched => "Queued",
+        SwarmTaskState::Running => "Running",
+        SwarmTaskState::Done => "Done",
+        SwarmTaskState::Failed => "Failed",
+        SwarmTaskState::Skipped => "Skipped",
+    }
+}
+
+fn stage_label(stage: SwarmStage) -> &'static str {
+    match stage {
+        SwarmStage::Planning => "PLAN",
+        SwarmStage::Executing => "EXEC",
+        SwarmStage::Verifying => "VERIFY",
+        SwarmStage::Synthesizing => "SYNTH",
+    }
+}
+
+fn dashboard_gate_rows(run: &SwarmRun) -> Vec<SwarmGateDashboardRow> {
+    let mut rows = Vec::new();
+    if let Some(bundle) = run.gate_bundle.as_ref() {
+        for gate in bundle.gates() {
+            rows.push(SwarmGateDashboardRow {
+                name: gate.name.to_string(),
+                command: gate.command.to_string(),
+                status: "PENDING".into(),
+                notes: None,
+            });
+        }
+    }
+    if let Some(report) = run.gate_report.as_ref() {
+        for reported in report.gates.iter() {
+            if let Some(existing) = rows.iter_mut().find(|row| row.name == reported.name) {
+                existing.status = reported.ui_status().into();
+                existing.command = reported.command.clone();
+                existing.notes = reported.notes.clone();
+            } else {
+                rows.push(SwarmGateDashboardRow {
+                    name: reported.name.clone(),
+                    command: reported.command.clone(),
+                    status: reported.ui_status().into(),
+                    notes: reported.notes.clone(),
+                });
+            }
+        }
+    }
+    rows
+}
+
+fn gate_bundle_label(bundle: Option<&GateBundle>, source: &str) -> String {
+    let source = source.trim();
+    if source.is_empty() {
+        return bundle
+            .map(|bundle| bundle.label().to_string())
+            .unwrap_or_else(|| "(none)".into());
+    }
+    if source.eq_ignore_ascii_case("config:none") {
+        return "none (config)".into();
+    }
+    match bundle {
+        Some(bundle) => format!("{} ({source})", bundle.label()),
+        None => format!("(none) ({source})"),
+    }
+}
+
+fn read_workspace_gate_default(workspace_root: &Path) -> Result<Option<String>, String> {
+    let path = workspace_root.join(".nit").join("config.toml");
+    if !path.exists() {
+        return Ok(None);
+    }
+    let contents = fs::read_to_string(&path)
+        .map_err(|err| format!("failed reading {}: {err}", path.display()))?;
+    let value = toml::from_str::<toml::Value>(&contents)
+        .map_err(|err| format!("failed parsing {}: {err}", path.display()))?;
+    Ok(value
+        .get("swarm")
+        .and_then(|value| value.get("gates"))
+        .and_then(|value| value.get("default"))
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| value.to_ascii_lowercase()))
+}
+
+fn sanitize_for_filename(input: &str) -> String {
+    input
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_') {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect()
 }
 
 fn build_planner_prompt(
@@ -1365,7 +2920,7 @@ fn build_planner_prompt(
         "You are the SWARM PLANNER inside nit. Create an execution plan for a multi-agent workflow.\n\n",
     );
     out.push_str(&format!("Template: `{}`\n\n", template.label()));
-    if matches!(template, SwarmTemplate::Lab) {
+    if matches!(template, SwarmTemplate::Lab | SwarmTemplate::Bulk) {
         if let Some(integrator_agent_id) = integrator_agent_id {
             out.push_str(&format!(
                 "Single-writer integrator: `{integrator_agent_id}` (only this agent may do workspace writes).\n\n"
@@ -1400,6 +2955,25 @@ fn build_planner_prompt(
             out.push_str("- Only the integrator agent may have `writes=true` tasks.\n");
             out.push_str("- Use read-only researcher/reviewer tasks to feed the integrator.\n");
         }
+        SwarmTemplate::Bulk => {
+            out.push_str(
+                "- Bulk orchestration: explore multiple solution candidates in parallel, then converge.\n",
+            );
+            out.push_str(
+                "- Prefer ONE proposer task per agent id (except the integrator), each with a distinct lens.\n",
+            );
+            out.push_str(
+                "- Use ids `propose-01`, `propose-02`, ... plus `judge` and `integrate` so the workflow is easy to track.\n",
+            );
+            out.push_str(
+                "- Create a judge task that depends on ALL proposer tasks and selects the best approach.\n",
+            );
+            out.push_str(
+                "- Create an integrator task assigned to the integrator agent with `writes=true`, depending on the judge.\n",
+            );
+            out.push_str("- Use deps to express ordering (DAG). Avoid cycles.\n");
+            out.push_str("- Only the integrator agent may have `writes=true` tasks.\n");
+        }
     }
     out.push_str("\nOutput format:\n");
     out.push_str("1) 3-6 bullets summarizing the plan.\n");
@@ -1412,7 +2986,7 @@ fn build_planner_prompt(
     out.push_str("    {\n");
     out.push_str("      \"id\": \"task-id\",\n");
     out.push_str("      \"agent_id\": \"one-of-the-listed-agent-ids\",\n");
-    out.push_str("      \"role\": \"(optional: research|integrate|review|test)\",\n");
+    out.push_str("      \"role\": \"(optional: propose|judge|research|integrate|review|test)\",\n");
     out.push_str("      \"title\": \"short title\",\n");
     out.push_str("      \"prompt\": \"task instructions\",\n");
     out.push_str("      \"deps\": [\"task-id\"],\n");
@@ -1487,6 +3061,14 @@ fn wrap_task_prompt(
         }
     }
 
+    if !task.artifacts.is_empty() {
+        out.push_str("\nStructured artifacts:\n");
+        out.push_str("Include a ```json block with:\n");
+        out.push_str("{\"type\":\"swarm_artifacts\",\"version\":1,\"task_id\":\"");
+        out.push_str(task.id.as_str());
+        out.push_str("\",\"summary\":\"...\",\"artifacts\":{\"files\":[],\"diffs\":[],\"commands\":[],\"risks\":[],\"notes\":[]}}\n");
+    }
+
     out.push_str("\nRespond with:\n- Findings / recommendations\n- Concrete file paths / commands where relevant\n");
     out
 }
@@ -1524,6 +3106,13 @@ fn build_synthesis_prompt(run: &SwarmRun) -> String {
             SwarmTaskState::Running => "RUNNING",
         };
         out.push_str(&format!("STATUS: {status}\n"));
+        if let Some(summary) = task_artifacts_summary_for_prompt(task, &run.mission_id) {
+            out.push_str("ARTIFACTS:\n");
+            out.push_str(summary.trim());
+            out.push('\n');
+        } else if task.expected_artifacts_missing {
+            out.push_str("ARTIFACTS: expected but missing parseable swarm_artifacts JSON block\n");
+        }
         if let Some(output) = task.output.as_deref() {
             out.push_str(output.trim());
             out.push('\n');
@@ -1534,6 +3123,12 @@ fn build_synthesis_prompt(run: &SwarmRun) -> String {
     if let Some(bundle) = run.gate_bundle.as_ref() {
         out.push_str("\n\nVerification gates:\n");
         out.push_str(&format!("Bundle: {}\n", bundle.label()));
+        for gate in dashboard_gate_rows(run).iter() {
+            out.push_str(&format!(
+                "- {}: {} ({})\n",
+                gate.name, gate.status, gate.command
+            ));
+        }
         if let Some(report) = run.gate_report.as_ref() {
             out.push_str("Structured report:\n```json\n");
             if let Ok(json) = serde_json::to_string_pretty(report) {
@@ -1563,6 +3158,23 @@ fn build_synthesis_prompt(run: &SwarmRun) -> String {
 }
 
 fn extract_json_code_block(text: &str) -> Option<String> {
+    if let Some(first) = extract_json_code_blocks(text).into_iter().next() {
+        return Some(first);
+    }
+
+    // Fallback: attempt to parse the first JSON object we can find.
+    let trimmed = text.trim();
+    let start = trimmed.find('{')?;
+    let end = trimmed.rfind('}')?;
+    if start >= end {
+        return None;
+    }
+    let candidate = trimmed[start..=end].trim().to_string();
+    (!candidate.is_empty()).then_some(candidate)
+}
+
+fn extract_json_code_blocks(text: &str) -> Vec<String> {
+    let mut blocks = Vec::new();
     let mut lines = text.lines();
     while let Some(line) = lines.next() {
         let trimmed = line.trim_start();
@@ -1580,19 +3192,10 @@ fn extract_json_code_block(text: &str) -> Option<String> {
         }
         let candidate = buf.trim().to_string();
         if !candidate.is_empty() {
-            return Some(candidate);
+            blocks.push(candidate);
         }
     }
-
-    // Fallback: attempt to parse the first JSON object we can find.
-    let trimmed = text.trim();
-    let start = trimmed.find('{')?;
-    let end = trimmed.rfind('}')?;
-    if start >= end {
-        return None;
-    }
-    let candidate = trimmed[start..=end].trim().to_string();
-    (!candidate.is_empty()).then_some(candidate)
+    blocks
 }
 
 fn build_verify_prompt(run: &SwarmRun, bundle: &GateBundle) -> String {
@@ -1616,7 +3219,7 @@ fn build_verify_prompt(run: &SwarmRun, bundle: &GateBundle) -> String {
     }
 
     out.push_str("\nReport schema:\n");
-    out.push_str("{\"overall_ok\":true,\"gates\":[{\"name\":\"fmt\",\"command\":\"...\",\"ok\":true,\"notes\":\"(optional)\"}]}\n");
+    out.push_str("{\"overall_ok\":true,\"gates\":[{\"name\":\"fmt\",\"command\":\"...\",\"ok\":true,\"status\":\"pass|fail|skip\",\"notes\":\"(optional)\"}]}\n");
     out.push_str(
         "\nImportant: The JSON must reflect the actual command outcomes (ok=true only when the command succeeded).\n",
     );
@@ -1624,6 +3227,11 @@ fn build_verify_prompt(run: &SwarmRun, bundle: &GateBundle) -> String {
 }
 
 fn parse_gate_report(message: &str) -> Option<GateReport> {
+    for json in extract_json_code_blocks(message) {
+        if let Ok(report) = serde_json::from_str::<GateReport>(&json) {
+            return Some(report);
+        }
+    }
     let json = extract_json_code_block(message)?;
     serde_json::from_str::<GateReport>(&json).ok()
 }
@@ -1640,16 +3248,17 @@ fn next_mission_id(state: &AppState) -> String {
     format!("mis-{:03}", state.agents.missions.len() + 1)
 }
 
-fn swarm_mission_title(root_prompt: &str, mission_id: &str) -> String {
+fn swarm_mission_title(root_prompt: &str, mission_id: &str, template: SwarmTemplate) -> String {
     let first = root_prompt.lines().next().unwrap_or("Swarm mission").trim();
+    let label = template.label();
     if first.is_empty() {
-        return format!("{mission_id} swarm mission");
+        return format!("{mission_id} swarm[{label}]");
     }
     let mut title = String::new();
     for ch in first.chars().take(48) {
         title.push(ch);
     }
-    format!("Swarm: {title}")
+    format!("Swarm[{label}]: {title}")
 }
 
 fn timestamp_label(state: &AppState) -> String {
@@ -1803,6 +3412,11 @@ mod tests {
         assert_eq!(cmd.size, SwarmSize::Count(5));
         assert_eq!(cmd.template.as_deref(), Some("parallel"));
         assert_eq!(cmd.prompt, "do thing");
+
+        let cmd = parse_swarm_command("@swarm 6 template=bulk do thing").expect("cmd");
+        assert_eq!(cmd.size, SwarmSize::Count(6));
+        assert_eq!(cmd.template.as_deref(), Some("bulk"));
+        assert_eq!(cmd.prompt, "do thing");
     }
 
     #[test]
@@ -1844,6 +3458,83 @@ Plan:
     }
 
     #[test]
+    fn bulk_template_falls_back_when_planner_plan_is_not_bulk_shaped() {
+        let planner_message = r#"
+Plan:
+- do stuff
+
+```json
+{
+  "tasks": [
+    { "agent_id": "a1", "title": "T1", "prompt": "x" }
+  ]
+}
+```
+"#;
+        let available = vec!["a1".to_string(), "a2".to_string(), "a3".to_string()];
+        let parsed = parse_plan_from_planner(
+            planner_message,
+            SwarmTemplate::Bulk,
+            "root",
+            &available,
+            Some("a1"),
+        );
+
+        assert!(parsed
+            .warnings
+            .iter()
+            .any(|w| w.contains("using built-in bulk workflow")));
+        assert!(parsed.tasks.iter().any(|t| t.id.starts_with("propose-")));
+        assert!(parsed.tasks.iter().any(|t| t.id == "judge"));
+        assert!(parsed.tasks.iter().any(|t| t.id == "integrate" && t.writes));
+    }
+
+    #[test]
+    fn bulk_template_normalizes_missing_deps_and_writes() {
+        let planner_message = r#"
+Plan:
+- bulk
+
+```json
+{
+  "version": 2,
+  "template": "bulk",
+  "integrator_agent_id": "a1",
+  "tasks": [
+    { "id": "propose-01", "agent_id": "a2", "role": "propose", "title": "Proposal", "prompt": "x", "deps": [], "writes": false },
+    { "id": "judge", "agent_id": "a2", "role": "judge", "title": "Judge", "prompt": "y", "deps": [], "writes": false },
+    { "id": "integrate", "agent_id": "a1", "role": "integrate", "title": "Integrate", "prompt": "z", "deps": [], "writes": false }
+  ]
+}
+```
+"#;
+        let available = vec!["a1".to_string(), "a2".to_string()];
+        let parsed = parse_plan_from_planner(
+            planner_message,
+            SwarmTemplate::Bulk,
+            "root",
+            &available,
+            Some("a1"),
+        );
+
+        assert_eq!(parsed.tasks.len(), 3);
+        let judge = parsed
+            .tasks
+            .iter()
+            .find(|t| t.id == "judge")
+            .expect("judge");
+        assert!(judge.deps.iter().any(|dep| dep == "propose-01"));
+
+        let integrate = parsed
+            .tasks
+            .iter()
+            .find(|t| t.id == "integrate")
+            .expect("integrate");
+        assert!(integrate.writes);
+        assert!(integrate.deps.iter().any(|dep| dep == "judge"));
+    }
+
+    #[test]
     fn dag_scheduler_dispatches_after_deps() {
         let mut run = SwarmRun {
             mission_id: "mis-001".into(),
@@ -1853,6 +3544,7 @@ Plan:
             integrator_agent_id: Some("a1".into()),
             verifier_agent_id: None,
             gate_bundle: None,
+            gate_selection: "auto:none".into(),
             agent_ids: vec![
                 "planner".into(),
                 "a1".into(),
@@ -1874,6 +3566,8 @@ Plan:
                     done_when: None,
                     state: SwarmTaskState::Pending,
                     output: None,
+                    parsed_artifacts: None,
+                    expected_artifacts_missing: false,
                     failed: false,
                 },
                 SwarmTask {
@@ -1888,6 +3582,8 @@ Plan:
                     done_when: None,
                     state: SwarmTaskState::Pending,
                     output: None,
+                    parsed_artifacts: None,
+                    expected_artifacts_missing: false,
                     failed: false,
                 },
                 SwarmTask {
@@ -1902,6 +3598,8 @@ Plan:
                     done_when: None,
                     state: SwarmTaskState::Pending,
                     output: None,
+                    parsed_artifacts: None,
+                    expected_artifacts_missing: false,
                     failed: false,
                 },
                 SwarmTask {
@@ -1916,6 +3614,8 @@ Plan:
                     done_when: None,
                     state: SwarmTaskState::Pending,
                     output: None,
+                    parsed_artifacts: None,
+                    expected_artifacts_missing: false,
                     failed: false,
                 },
             ],
@@ -1932,25 +3632,15 @@ Plan:
         assert!(first.iter().any(|d| d.agent_id == "a2"));
         assert!(first.iter().any(|d| d.agent_id == "a3"));
 
-        assert!(mark_task_finished(
-            &mut run,
-            "a2",
-            "recon out".into(),
-            false
-        ));
-        assert!(mark_task_finished(
-            &mut run,
-            "a3",
-            "design out".into(),
-            false
-        ));
+        assert!(mark_task_finished(&mut run, "a2", "recon out".into(), false).is_some());
+        assert!(mark_task_finished(&mut run, "a3", "design out".into(), false).is_some());
         refresh_task_readiness(&mut run);
 
         let second = dispatch_ready_tasks(&mut run);
         assert_eq!(second.len(), 1);
         assert_eq!(second[0].agent_id, "a1");
 
-        assert!(mark_task_finished(&mut run, "a1", "impl out".into(), false));
+        assert!(mark_task_finished(&mut run, "a1", "impl out".into(), false).is_some());
         refresh_task_readiness(&mut run);
         let third = dispatch_ready_tasks(&mut run);
         assert_eq!(third.len(), 1);
@@ -1967,6 +3657,7 @@ Plan:
             integrator_agent_id: Some("a1".into()),
             verifier_agent_id: None,
             gate_bundle: None,
+            gate_selection: "auto:none".into(),
             agent_ids: vec!["planner".into(), "a1".into(), "a2".into()],
             stage: SwarmStage::Executing,
             tasks: vec![
@@ -1982,6 +3673,8 @@ Plan:
                     done_when: None,
                     state: SwarmTaskState::Pending,
                     output: None,
+                    parsed_artifacts: None,
+                    expected_artifacts_missing: false,
                     failed: false,
                 },
                 SwarmTask {
@@ -1996,6 +3689,8 @@ Plan:
                     done_when: None,
                     state: SwarmTaskState::Pending,
                     output: None,
+                    parsed_artifacts: None,
+                    expected_artifacts_missing: false,
                     failed: false,
                 },
                 SwarmTask {
@@ -2010,6 +3705,8 @@ Plan:
                     done_when: None,
                     state: SwarmTaskState::Pending,
                     output: None,
+                    parsed_artifacts: None,
+                    expected_artifacts_missing: false,
                     failed: false,
                 },
             ],
@@ -2028,7 +3725,7 @@ Plan:
         assert!(first.iter().any(|d| d.prompt.contains("Read (r1)")));
         assert!(!first.iter().any(|d| d.prompt.contains("Write 2 (w2)")));
 
-        assert!(mark_task_finished(&mut run, "a1", "w1 out".into(), false));
+        assert!(mark_task_finished(&mut run, "a1", "w1 out".into(), false).is_some());
         refresh_task_readiness(&mut run);
         let second = dispatch_ready_tasks(&mut run);
         assert_eq!(second.len(), 1);
@@ -2045,6 +3742,7 @@ Plan:
             integrator_agent_id: Some("a1".into()),
             verifier_agent_id: None,
             gate_bundle: None,
+            gate_selection: "auto:none".into(),
             agent_ids: vec!["planner".into(), "a1".into()],
             stage: SwarmStage::Executing,
             tasks: vec![
@@ -2060,6 +3758,8 @@ Plan:
                     done_when: None,
                     state: SwarmTaskState::Pending,
                     output: None,
+                    parsed_artifacts: None,
+                    expected_artifacts_missing: false,
                     failed: false,
                 },
                 SwarmTask {
@@ -2074,6 +3774,8 @@ Plan:
                     done_when: None,
                     state: SwarmTaskState::Pending,
                     output: None,
+                    parsed_artifacts: None,
+                    expected_artifacts_missing: false,
                     failed: false,
                 },
             ],
@@ -2162,7 +3864,7 @@ Plan:
             message: planner_message.into(),
         };
         event.apply(&mut state);
-        swarm.handle_event(&mut state, &event);
+        let dispatches = swarm.handle_event(&mut state, &event);
 
         assert!(state.agents.messages.iter().any(|msg| {
             msg.mission_id.as_deref() == Some(mission_id.as_str())
@@ -2172,11 +3874,170 @@ Plan:
                 && msg.text.contains("t2")
         }));
 
+        assert_eq!(dispatches.len(), 1);
+        assert_eq!(dispatches[0].mission_id, mission_id);
+        assert!(
+            dispatches[0].prompt.contains("SWARM VERIFIER")
+                || dispatches[0].prompt.contains("SWARM SYNTHESIZER")
+        );
+
         let run = swarm.runs.get(mission_id.as_str()).expect("swarm run");
+        assert!(matches!(
+            run.stage,
+            SwarmStage::Verifying | SwarmStage::Synthesizing
+        ));
         assert!(run
             .tasks
             .iter()
             .all(|task| matches!(task.state, SwarmTaskState::Skipped)));
+    }
+
+    #[test]
+    fn parse_task_artifacts_merges_json_blocks() {
+        let message = r#"
+notes
+```json
+{
+  "type": "swarm_artifacts",
+  "version": 1,
+  "task_id": "design",
+  "summary": "initial summary",
+  "artifacts": {
+    "files": [{"path": "crates/nit-tui/src/swarm.rs", "notes": "touches parser"}],
+    "commands": [{"cmd": "cargo test --workspace"}]
+  }
+}
+```
+```json
+{
+  "type": "swarm_artifacts",
+  "version": 1,
+  "task_id": "design",
+  "summary": "final summary",
+  "artifacts": {
+    "files": [{"path": "crates/nit-tui/src/swarm.rs", "notes": "duplicate"}],
+    "risks": [{"level": "med", "item": "parser false positive"}],
+    "notes": ["remember fallback"]
+  }
+}
+```
+"#;
+
+        let artifacts = parse_task_artifacts("design", message).expect("artifacts");
+        assert_eq!(artifacts.summary.as_deref(), Some("final summary"));
+        assert_eq!(artifacts.files.len(), 1);
+        assert_eq!(artifacts.commands.len(), 1);
+        assert_eq!(artifacts.risks.len(), 1);
+        assert_eq!(artifacts.notes, vec!["remember fallback".to_string()]);
+    }
+
+    #[test]
+    fn dashboard_distinguishes_pending_queued_and_skipped() {
+        let run = SwarmRun {
+            mission_id: "mis-001".into(),
+            root_prompt: "root".into(),
+            template: SwarmTemplate::Lab,
+            planner_agent_id: "planner".into(),
+            integrator_agent_id: Some("a1".into()),
+            verifier_agent_id: Some("a2".into()),
+            gate_bundle: Some(GateBundle::Rust),
+            gate_selection: "auto:rust-ci(Cargo.toml)".into(),
+            agent_ids: vec!["planner".into(), "a1".into(), "a2".into(), "a3".into()],
+            stage: SwarmStage::Executing,
+            tasks: vec![
+                SwarmTask {
+                    id: "done".into(),
+                    agent_id: "a1".into(),
+                    role: Some("integrate".into()),
+                    title: "done".into(),
+                    task_prompt: "done".into(),
+                    deps: Vec::new(),
+                    writes: true,
+                    artifacts: Vec::new(),
+                    done_when: None,
+                    state: SwarmTaskState::Done,
+                    output: Some("done".into()),
+                    parsed_artifacts: None,
+                    expected_artifacts_missing: false,
+                    failed: false,
+                },
+                SwarmTask {
+                    id: "ready".into(),
+                    agent_id: "a2".into(),
+                    role: Some("review".into()),
+                    title: "ready".into(),
+                    task_prompt: "ready".into(),
+                    deps: Vec::new(),
+                    writes: false,
+                    artifacts: Vec::new(),
+                    done_when: None,
+                    state: SwarmTaskState::Ready,
+                    output: None,
+                    parsed_artifacts: None,
+                    expected_artifacts_missing: false,
+                    failed: false,
+                },
+                SwarmTask {
+                    id: "blocked".into(),
+                    agent_id: "a3".into(),
+                    role: Some("review".into()),
+                    title: "blocked".into(),
+                    task_prompt: "blocked".into(),
+                    deps: vec!["ready".into()],
+                    writes: false,
+                    artifacts: Vec::new(),
+                    done_when: None,
+                    state: SwarmTaskState::Pending,
+                    output: None,
+                    parsed_artifacts: None,
+                    expected_artifacts_missing: false,
+                    failed: false,
+                },
+                SwarmTask {
+                    id: "skip".into(),
+                    agent_id: "a3".into(),
+                    role: Some("review".into()),
+                    title: "skip".into(),
+                    task_prompt: "skip".into(),
+                    deps: vec!["unknown".into()],
+                    writes: false,
+                    artifacts: Vec::new(),
+                    done_when: None,
+                    state: SwarmTaskState::Skipped,
+                    output: Some("SKIPPED".into()),
+                    parsed_artifacts: None,
+                    expected_artifacts_missing: false,
+                    failed: true,
+                },
+            ],
+            synthesis_prompt: None,
+            gate_output: None,
+            gate_report: Some(GateReport {
+                overall_ok: false,
+                gates: vec![GateReportGate {
+                    name: "fmt".into(),
+                    command: "cargo fmt --all -- --check".into(),
+                    ok: false,
+                    status: None,
+                    notes: Some("formatting".into()),
+                }],
+            }),
+        };
+        let mut runtime = SwarmRuntime::default();
+        runtime.runs.insert("mis-001".into(), run);
+
+        let dashboard = runtime.swarm_dashboard("mis-001").expect("dashboard");
+        assert_eq!(dashboard.pending, 1);
+        assert_eq!(dashboard.queued, 1);
+        assert_eq!(dashboard.skipped, 1);
+        assert!(dashboard
+            .tasks
+            .iter()
+            .any(|task| task.id == "blocked" && task.blocked_on == vec!["ready"]));
+        assert!(dashboard
+            .gates
+            .iter()
+            .any(|gate| gate.name == "fmt" && gate.status == "FAIL"));
     }
 
     #[test]

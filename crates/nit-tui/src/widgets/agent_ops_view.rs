@@ -10,6 +10,7 @@ use ratatui::{
     Frame,
 };
 
+use crate::swarm::{SwarmDashboardView, SwarmRuntime};
 use crate::theme::Theme;
 use crate::widgets::text_selection::apply_ui_selection;
 
@@ -121,7 +122,13 @@ fn alert_body_meta(state: &AppState, width: usize, body_line: usize) -> Option<A
     None
 }
 
-pub fn render(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
+pub fn render(
+    frame: &mut Frame,
+    area: Rect,
+    state: &AppState,
+    swarm: &SwarmRuntime,
+    theme: &Theme,
+) {
     let focused = state.focus == PaneId::JobOutput;
     let border_style = if focused {
         Style::default().fg(theme.border_focused)
@@ -167,7 +174,7 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
 
     render_tab_bar(frame, chunks[0], state, theme);
 
-    let rows = current_lines_for_width(state, chunks[1].width as usize);
+    let rows = current_lines_for_width_with_swarm(state, Some(swarm), chunks[1].width as usize);
     let height = chunks[1].height as usize;
     let max_scroll = rows.len().saturating_sub(height);
     let scroll = state.agents.ops_scroll.min(max_scroll);
@@ -260,7 +267,7 @@ fn footer_line(state: &AppState, theme: &Theme) -> Line<'static> {
             spans.push(Span::styled("Enter", key_style));
             spans.push(Span::styled(" chat", label_style));
         }
-        AgentOpsTab::Diagnostics => {
+        AgentOpsTab::Dag | AgentOpsTab::Diagnostics => {
             spans.push(Span::styled("j/k", key_style));
             spans.push(Span::styled(" scroll", label_style));
         }
@@ -279,22 +286,24 @@ fn footer_line(state: &AppState, theme: &Theme) -> Line<'static> {
 }
 
 fn tab_line(state: &AppState, theme: &Theme) -> Line<'static> {
-    let tabs = [
+    const TABS: [AgentOpsTab; 7] = [
         AgentOpsTab::Roster,
         AgentOpsTab::Missions,
+        AgentOpsTab::Dag,
         AgentOpsTab::Mcp,
         AgentOpsTab::Alerts,
         AgentOpsTab::Diagnostics,
         AgentOpsTab::Scratchpad,
     ];
+    const TAB_SPACING: &str = "  ";
     let active = match state.agents.dock_tab {
         AgentOpsTab::Patch | AgentOpsTab::Evidence => AgentOpsTab::Diagnostics,
         other => other,
     };
     let mut spans = Vec::new();
-    for (idx, tab) in tabs.iter().enumerate() {
+    for (idx, tab) in TABS.iter().enumerate() {
         if idx > 0 {
-            spans.push(Span::raw("  "));
+            spans.push(Span::raw(TAB_SPACING));
         }
         let style = if active == *tab {
             Style::default()
@@ -308,15 +317,51 @@ fn tab_line(state: &AppState, theme: &Theme) -> Line<'static> {
     Line::from(spans)
 }
 
+pub fn tab_at_column(col: usize) -> Option<AgentOpsTab> {
+    const TABS: [AgentOpsTab; 7] = [
+        AgentOpsTab::Roster,
+        AgentOpsTab::Missions,
+        AgentOpsTab::Dag,
+        AgentOpsTab::Mcp,
+        AgentOpsTab::Alerts,
+        AgentOpsTab::Diagnostics,
+        AgentOpsTab::Scratchpad,
+    ];
+    const TAB_GAP: usize = 2;
+
+    let mut x = 0usize;
+    for (idx, tab) in TABS.iter().enumerate() {
+        let label = tab.label();
+        let end = x.saturating_add(label.len());
+        if col >= x && col < end {
+            return Some(*tab);
+        }
+        x = end;
+        if idx + 1 < TABS.len() {
+            x = x.saturating_add(TAB_GAP);
+        }
+    }
+    None
+}
+
 pub fn current_lines(state: &AppState) -> Vec<String> {
-    current_lines_for_width(state, usize::MAX)
+    current_lines_for_width_with_swarm(state, None, usize::MAX)
 }
 
 pub fn current_lines_for_width(state: &AppState, width: usize) -> Vec<String> {
+    current_lines_for_width_with_swarm(state, None, width)
+}
+
+pub fn current_lines_for_width_with_swarm(
+    state: &AppState,
+    swarm: Option<&SwarmRuntime>,
+    width: usize,
+) -> Vec<String> {
     let usable = width.max(32);
     match state.agents.dock_tab {
         AgentOpsTab::Roster => roster_lines(state, usable),
         AgentOpsTab::Missions => mission_lines(state, usable),
+        AgentOpsTab::Dag => dag_lines(state, swarm, usable),
         AgentOpsTab::Mcp => mcp_lines(state, usable),
         AgentOpsTab::Alerts => alert_lines(state, usable),
         // Patch/Evidence are hidden from the UI; treat as Diagnostics for legacy state.
@@ -681,6 +726,189 @@ fn alert_lines(state: &AppState, width: usize) -> Vec<String> {
     out
 }
 
+fn dag_lines(state: &AppState, swarm: Option<&SwarmRuntime>, width: usize) -> Vec<String> {
+    let width = width.max(32);
+    let mut out = vec![" DAG".into(), "─".repeat(width.min(240))];
+    let Some(mission_id) = state.agents.selected_context_mission() else {
+        out.push(" No mission selected.".into());
+        return out;
+    };
+    if let Some(mission) = state
+        .agents
+        .missions
+        .iter()
+        .find(|mission| mission.id == mission_id)
+    {
+        if !mission.swarm {
+            out.push(format!(" Mission {mission_id} is not a swarm."));
+            return out;
+        }
+    }
+    let Some(swarm) = swarm else {
+        out.push(" Swarm runtime unavailable.".into());
+        return out;
+    };
+    let Some(dashboard) = swarm.swarm_dashboard(mission_id) else {
+        out.push(" No DAG data for this mission yet.".into());
+        return out;
+    };
+    dag_lines_for_dashboard(&dashboard, width)
+}
+
+fn dag_task_widths(cols_total: usize) -> Vec<usize> {
+    allocate_columns(cols_total, &[9, 7, 10], &[10, 7, 24], 2)
+}
+
+fn dag_gate_widths(cols_total: usize) -> Vec<usize> {
+    allocate_columns(cols_total, &[4, 6, 10], &[10, 8, 24], 2)
+}
+
+fn dag_lines_for_dashboard(dashboard: &SwarmDashboardView, width: usize) -> Vec<String> {
+    let width = width.max(32);
+    let cols_total = width.saturating_sub(1);
+    let total = dashboard.tasks.len();
+    let pending_work = dashboard.pending > 0 && dashboard.running == 0 && dashboard.queued == 0;
+    let status_word = match dashboard.phase.as_str() {
+        "PLAN" => "PLAN",
+        "VERIFY" => "VERIFY",
+        "SYNTH" => "SYNTH",
+        _ => {
+            if total == 0 {
+                "EMPTY"
+            } else if dashboard.failed > 0 {
+                "FAILED"
+            } else if dashboard.running > 0 {
+                "RUNNING"
+            } else if dashboard.queued > 0 {
+                "QUEUED"
+            } else if pending_work {
+                "PENDING"
+            } else if dashboard.done + dashboard.skipped == total {
+                "DONE"
+            } else {
+                "IDLE"
+            }
+        }
+    };
+
+    let summary = format!(
+        "Swarm DAG {} [{status_word}] template={} phase={} done={}/{} failed={} skipped={} running={} queued={} pending={}",
+        dashboard.mission_id,
+        dashboard.template,
+        dashboard.phase,
+        dashboard.done,
+        total,
+        dashboard.failed,
+        dashboard.skipped,
+        dashboard.running,
+        dashboard.queued,
+        dashboard.pending
+    );
+
+    let mut out = vec![" DAG".into(), "─".repeat(width.min(240))];
+    out.push(format!(" {}", fit_left(&summary, cols_total)));
+    if let Some(bundle) = dashboard.gate_bundle.as_deref() {
+        let line = format!("Gate bundle: {bundle}");
+        out.push(format!(" {}", fit_left(&line, cols_total)));
+    }
+
+    let task_widths = dag_task_widths(cols_total);
+    let empty_id = fit_left("", task_widths[0]);
+    let empty_state = fit_left("", task_widths[1]);
+    out.push(format!(
+        " {} {} {}",
+        fit_left("ID", task_widths[0]),
+        fit_left("STATE", task_widths[1]),
+        fit_left("TITLE", task_widths[2]),
+    ));
+    out.push("─".repeat(width.min(240)));
+
+    if dashboard.tasks.is_empty() {
+        if dashboard.phase == "PLAN" {
+            let line =
+                "Planning: waiting for planner output (tasks will appear here once the plan is parsed).";
+            out.push(format!(
+                " {} {} {}",
+                empty_id,
+                empty_state,
+                fit_left(line, task_widths[2]),
+            ));
+        } else {
+            out.push(format!(
+                " {} {} {}",
+                empty_id,
+                empty_state,
+                fit_left("No tasks.", task_widths[2]),
+            ));
+        }
+    } else {
+        for task in dashboard.tasks.iter() {
+            let blocked = if task.blocked_on.is_empty() {
+                "-".to_string()
+            } else {
+                task.blocked_on.join(",")
+            };
+            let deps = if task.deps.is_empty() {
+                "-".to_string()
+            } else {
+                task.deps.join(",")
+            };
+            let role = task.role.as_deref().unwrap_or("-");
+            let writes = if task.writes { "yes" } else { "no" };
+            let out_present = if task.output_present { "yes" } else { "no" };
+            let done_when = task
+                .done_when
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .unwrap_or("-");
+
+            let details = format!(
+                "↳ agent: {}  role: {}  deps: {}  block: {}  writes: {}  out: {}  done_when: {}",
+                task.agent_id, role, deps, blocked, writes, out_present, done_when
+            );
+
+            out.push(format!(
+                " {} {} {}",
+                fit_left(task.id.as_str(), task_widths[0]),
+                fit_left(task.state.as_str(), task_widths[1]),
+                fit_left(task.title.as_str(), task_widths[2]),
+            ));
+            out.push(format!(
+                " {} {} {}",
+                empty_id,
+                empty_state,
+                fit_left(&details, task_widths[2]),
+            ));
+        }
+    }
+
+    if !dashboard.gates.is_empty() {
+        out.push("─".repeat(width.min(240)));
+        let gate_widths = dag_gate_widths(cols_total);
+        out.push(format!(
+            " {} {} {}",
+            fit_left("GATE", gate_widths[0]),
+            fit_left("STATUS", gate_widths[1]),
+            fit_left("COMMAND", gate_widths[2]),
+        ));
+        for gate in dashboard.gates.iter() {
+            let command = match gate.notes.as_deref() {
+                Some(notes) if !notes.is_empty() => format!("{} ({notes})", gate.command),
+                _ => gate.command.clone(),
+            };
+            out.push(format!(
+                " {} {} {}",
+                fit_left(gate.name.as_str(), gate_widths[0]),
+                fit_left(gate.status.as_str(), gate_widths[1]),
+                fit_left(command.as_str(), gate_widths[2]),
+            ));
+        }
+    }
+
+    out
+}
+
 fn diagnostics_lines(state: &AppState, width: usize) -> Vec<String> {
     let mut out = vec![" DIAGNOSTICS".into(), "─".repeat(width.min(240))];
     for event in &state.agents.diag_events {
@@ -762,6 +990,7 @@ fn ops_styled_line(
         AgentOpsTab::Missions => mission_styled_line(state, line_idx, line, usable, theme),
         AgentOpsTab::Mcp => mcp_styled_line(state, line_idx, line, usable, theme),
         AgentOpsTab::Alerts => alert_styled_line(state, line_idx, line, usable, theme),
+        AgentOpsTab::Dag => dag_styled_line(line_idx, line, usable, theme),
         // Patch/Evidence are hidden from the UI; render them like Diagnostics for legacy state.
         AgentOpsTab::Patch | AgentOpsTab::Evidence | AgentOpsTab::Diagnostics => Line::from(
             Span::styled(line.to_string(), ops_line_style(line_idx, line, theme)),
@@ -771,6 +1000,163 @@ fn ops_styled_line(
             Style::default().fg(theme.foreground),
         )),
     }
+}
+
+fn dag_table_bg(theme: &Theme) -> Color {
+    dim_bg_towards(theme.border, theme.background, 85)
+}
+
+fn dag_state_style(state: &str, base: Style, theme: &Theme) -> Style {
+    match state {
+        "Running" => base.fg(theme.title_focused).add_modifier(Modifier::BOLD),
+        "Queued" | "Pending" => base.fg(theme.accent).add_modifier(Modifier::BOLD),
+        "Failed" => base.fg(theme.error).add_modifier(Modifier::BOLD),
+        "Done" | "Skipped" => base.fg(theme.border).add_modifier(Modifier::DIM),
+        _ => base.fg(theme.foreground),
+    }
+}
+
+fn dag_gate_status_style(status: &str, base: Style, theme: &Theme) -> Style {
+    match status {
+        "PASS" => base.fg(theme.title_focused).add_modifier(Modifier::BOLD),
+        "FAIL" => base.fg(theme.error).add_modifier(Modifier::BOLD),
+        "PENDING" => base.fg(theme.border).add_modifier(Modifier::DIM),
+        _ => base.fg(theme.foreground),
+    }
+}
+
+fn dag_styled_line(_line_idx: usize, line: &str, usable: usize, theme: &Theme) -> Line<'static> {
+    let cols_total = usable.saturating_sub(1);
+    let bg = dag_table_bg(theme);
+    let base = Style::default().bg(bg);
+    let header_style = base
+        .fg(theme.border)
+        .add_modifier(Modifier::DIM | Modifier::BOLD);
+    let row_style = base.fg(theme.foreground);
+    let dim_row_style = base.fg(theme.border).add_modifier(Modifier::DIM);
+
+    let trimmed = line.trim_start();
+    if trimmed.starts_with("Swarm DAG") || trimmed.starts_with("Gate bundle:") {
+        return Line::from(Span::styled(
+            line.to_string(),
+            Style::default().fg(theme.foreground),
+        ));
+    }
+    if line.starts_with('─') {
+        return Line::from(Span::styled(line.to_string(), dim_row_style));
+    }
+
+    if trimmed.starts_with("ID") {
+        let widths = dag_task_widths(cols_total);
+        let Some((marker, cols)) = split_marker_and_columns(line, &widths) else {
+            return Line::from(Span::styled(line.to_string(), header_style));
+        };
+        let mut spans = Vec::with_capacity(cols.len().saturating_mul(2) + 1);
+        spans.push(Span::styled(marker, header_style));
+        for (idx, col) in cols.into_iter().enumerate() {
+            spans.push(Span::styled(col, header_style));
+            if idx + 1 < widths.len() {
+                spans.push(Span::styled(" ", header_style));
+            }
+        }
+        return Line::from(spans);
+    }
+
+    if trimmed.starts_with("GATE") {
+        let widths = dag_gate_widths(cols_total);
+        let Some((marker, cols)) = split_marker_and_columns(line, &widths) else {
+            return Line::from(Span::styled(line.to_string(), header_style));
+        };
+        let mut spans = Vec::with_capacity(cols.len().saturating_mul(2) + 1);
+        spans.push(Span::styled(marker, header_style));
+        for (idx, col) in cols.into_iter().enumerate() {
+            spans.push(Span::styled(col, header_style));
+            if idx + 1 < widths.len() {
+                spans.push(Span::styled(" ", header_style));
+            }
+        }
+        return Line::from(spans);
+    }
+
+    // Gate rows: GATE | STATUS | COMMAND
+    let gate_widths = dag_gate_widths(cols_total);
+    if let Some((marker, cols)) = split_marker_and_columns(line, &gate_widths) {
+        let status = cols.get(1).map(|s| s.trim()).unwrap_or_default();
+        if matches!(status, "PENDING" | "PASS" | "FAIL") {
+            let gate_style = row_style
+                .fg(theme.title_focused)
+                .add_modifier(Modifier::BOLD);
+            let status_style = dag_gate_status_style(status, row_style, theme);
+            let cmd_style = row_style;
+            let space_style = row_style;
+            let mut spans = Vec::with_capacity(8);
+            spans.push(Span::styled(marker, row_style));
+            spans.push(Span::styled(
+                cols.first().cloned().unwrap_or_default(),
+                gate_style,
+            ));
+            spans.push(Span::styled(" ", space_style));
+            spans.push(Span::styled(
+                cols.get(1).cloned().unwrap_or_default(),
+                status_style,
+            ));
+            spans.push(Span::styled(" ", space_style));
+            spans.push(Span::styled(
+                cols.get(2).cloned().unwrap_or_default(),
+                cmd_style,
+            ));
+            return Line::from(spans);
+        }
+    }
+
+    // Task cards: ID | STATE | TITLE (2 lines per task; details lines have empty ID/STATE).
+    if trimmed.starts_with("No ")
+        || trimmed.starts_with("Mission ")
+        || trimmed.starts_with("Swarm runtime")
+        || trimmed.starts_with("No DAG data")
+        || trimmed.starts_with("Planning:")
+        || trimmed.starts_with("No tasks.")
+    {
+        return Line::from(Span::styled(line.to_string(), dim_row_style));
+    }
+
+    let task_widths = dag_task_widths(cols_total);
+    let Some((marker, cols)) = split_marker_and_columns(line, &task_widths) else {
+        return Line::from(Span::styled(line.to_string(), row_style));
+    };
+    let id_cell = cols.first().cloned().unwrap_or_default();
+    let state_cell = cols.get(1).cloned().unwrap_or_default();
+    let title_cell = cols.get(2).cloned().unwrap_or_default();
+
+    let is_details = id_cell.trim().is_empty() && state_cell.trim().is_empty();
+    let marker_style = row_style.fg(theme.border).add_modifier(Modifier::DIM);
+    let id_style = if is_details {
+        dim_row_style
+    } else {
+        row_style
+            .fg(theme.title_focused)
+            .add_modifier(Modifier::BOLD)
+    };
+    let state_style = if is_details {
+        dim_row_style
+    } else {
+        dag_state_style(state_cell.trim(), row_style, theme)
+    };
+    let title_style = if is_details {
+        row_style.add_modifier(Modifier::DIM)
+    } else {
+        row_style.add_modifier(Modifier::BOLD)
+    };
+    let space_style = row_style;
+
+    let mut spans = Vec::with_capacity(10);
+    spans.push(Span::styled(marker, marker_style));
+    spans.push(Span::styled(id_cell, id_style));
+    spans.push(Span::styled(" ", space_style));
+    spans.push(Span::styled(state_cell, state_style));
+    spans.push(Span::styled(" ", space_style));
+    spans.push(Span::styled(title_cell, title_style));
+    Line::from(spans)
 }
 
 fn selected_row_style(style: Style, selected: bool, theme: &Theme) -> Style {
@@ -1747,4 +2133,49 @@ fn split_at_chars(text: &str, count: usize) -> (&str, &str) {
         .map(|(idx, _)| idx)
         .unwrap_or(text.len());
     (&text[..idx], &text[idx..])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::dag_lines_for_dashboard;
+    use crate::swarm::{SwarmDashboardView, SwarmGateDashboardRow, SwarmTaskDashboardRow};
+
+    #[test]
+    fn dag_lines_include_tasks_and_gates() {
+        let dashboard = SwarmDashboardView {
+            mission_id: "mis-009".into(),
+            template: "plan-v2".into(),
+            phase: "EXEC".into(),
+            done: 1,
+            failed: 0,
+            skipped: 0,
+            running: 1,
+            queued: 0,
+            pending: 0,
+            tasks: vec![SwarmTaskDashboardRow {
+                id: "t1".into(),
+                title: "Integrate dashboard changes".into(),
+                role: Some("integrator".into()),
+                agent_id: "agent-1".into(),
+                state: "Running".into(),
+                deps: vec!["t0".into()],
+                blocked_on: Vec::new(),
+                writes: true,
+                done_when: Some("UI matches spec".into()),
+                output_present: false,
+            }],
+            gate_bundle: Some("rust-ci".into()),
+            gates: vec![SwarmGateDashboardRow {
+                name: "fmt".into(),
+                command: "cargo fmt --all -- --check".into(),
+                status: "PENDING".into(),
+                notes: None,
+            }],
+        };
+
+        let lines = dag_lines_for_dashboard(&dashboard, 80);
+        assert!(lines.iter().any(|line| line.contains("Swarm DAG")));
+        assert!(lines.iter().any(|line| line.contains("t1")));
+        assert!(lines.iter().any(|line| line.contains("fmt")));
+    }
 }
