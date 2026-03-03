@@ -515,10 +515,8 @@ impl Buffer {
             return;
         }
         let is_word = |c: char| c.is_alphanumeric() || c == '_';
-        if is_word(self.rope.char(idx)) {
-            if idx + 1 < len && !is_word(self.rope.char(idx + 1)) {
-                idx += 1;
-            }
+        if is_word(self.rope.char(idx)) && idx + 1 < len && !is_word(self.rope.char(idx + 1)) {
+            idx += 1;
         }
         while idx < len && !is_word(self.rope.char(idx)) {
             idx += 1;

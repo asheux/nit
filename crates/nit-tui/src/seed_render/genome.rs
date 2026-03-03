@@ -48,7 +48,7 @@ fn render_hilbert_bits(
         return;
     }
     let total = stream.len().max(1);
-    let mut stride = (total + cols - 1) / cols;
+    let mut stride = total.div_ceil(cols);
     if stride == 0 {
         stride = 1;
     }
@@ -104,7 +104,7 @@ fn render_ascii_bytes(area: Rect, buf: &mut Buffer, seed: &EncodedSeed, palette:
         for x in 0..cols {
             let sx = x.saturating_mul(w) / cols;
             let value = seed.base_values.get(sx, sy) as u16;
-            let printable = value >= 0x20 && value <= 0x7e;
+            let printable = (0x20u16..=0x7eu16).contains(&value);
             let start_x = area.x + (x * stride) as u16;
             let bg = value_bg(value, palette);
             for dx in 0..digits {
@@ -139,16 +139,10 @@ fn render_ascii_bytes(area: Rect, buf: &mut Buffer, seed: &EncodedSeed, palette:
                 2 => 1,
                 _ => 0,
             };
-            let mut dx = 0u16;
-            for idx in start_idx..3 {
-                if dx as usize >= digits {
-                    break;
-                }
-                let ch = digits_arr[idx];
-                let cell = buf.get_mut(start_x + dx, area.y + y as u16);
+            for (dx, &ch) in digits_arr.iter().skip(start_idx).take(digits).enumerate() {
+                let cell = buf.get_mut(start_x + dx as u16, area.y + y as u16);
                 cell.set_char(ch);
                 cell.set_style(Style::default().fg(fg).bg(bg));
-                dx = dx.saturating_add(1);
             }
         }
     }

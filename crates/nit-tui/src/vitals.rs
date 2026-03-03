@@ -294,7 +294,10 @@ impl VitalsState {
         if events_this_tick > 0 {
             if self.last_tick_had_events {
                 self.sustained_event_ticks = self.sustained_event_ticks.saturating_add(1);
-                if self.sustained_event_ticks % SPIKE_SUSTAIN_EVERY_TICKS == 0 {
+                if self
+                    .sustained_event_ticks
+                    .is_multiple_of(SPIKE_SUSTAIN_EVERY_TICKS)
+                {
                     self.spike = (self.spike + SPIKE_SUSTAIN_BOOST).min(1.0);
                 }
             } else {

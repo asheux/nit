@@ -17,8 +17,8 @@ const MIN_WIDTH: u16 = 72;
 const MIN_HEIGHT: u16 = 16;
 
 pub fn preferred_size(screen: Rect) -> (u16, u16) {
-    let width = screen.width.min(118).max(MIN_WIDTH);
-    let height = screen.height.min(32).max(MIN_HEIGHT);
+    let width = screen.width.clamp(MIN_WIDTH, 118);
+    let height = screen.height.clamp(MIN_HEIGHT, 32);
     (width, height)
 }
 
@@ -553,11 +553,11 @@ fn pad_rows_for_plot(rows: &[Vec<u8>], two_r: u32) -> Vec<Vec<i16>> {
         let left_pad = idx.saturating_mul(left_unit as usize);
         let right_pad = idx.saturating_mul(right_unit as usize);
         let mut padded = Vec::with_capacity(width.max(left_pad + row.len() + right_pad));
-        padded.extend(std::iter::repeat(-1).take(left_pad));
+        padded.extend(std::iter::repeat_n(-1, left_pad));
         padded.extend(row.iter().map(|&value| value as i16));
-        padded.extend(std::iter::repeat(-1).take(right_pad));
+        padded.extend(std::iter::repeat_n(-1, right_pad));
         if padded.len() < width {
-            padded.extend(std::iter::repeat(-1).take(width - padded.len()));
+            padded.extend(std::iter::repeat_n(-1, width - padded.len()));
         }
         if padded.len() > width {
             padded.truncate(width);
@@ -610,7 +610,7 @@ fn parse_two_r(radius: f32) -> Option<u32> {
 }
 
 fn format_radius(two_r: u32) -> String {
-    if two_r % 2 == 0 {
+    if two_r.is_multiple_of(2) {
         (two_r / 2).to_string()
     } else {
         format!("{}/2", two_r)
@@ -659,7 +659,7 @@ mod tests {
     #[test]
     fn pad_rows_matches_notebook_shape_for_integer_radius() {
         let rows = vec![vec![0, 1, 1, 0], vec![1, 0], vec![1]];
-        let padded = pad_rows_for_plot(&rows, 1 * 2);
+        let padded = pad_rows_for_plot(&rows, 2);
         assert_eq!(padded.len(), 3);
         assert_eq!(padded[0].len(), 4);
         assert_eq!(padded[1], vec![-1, 1, 0, -1]);

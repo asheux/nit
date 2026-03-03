@@ -85,13 +85,178 @@ The Codex backend is implemented in `nit-tui` as a background `CodexRunner` thre
     - `tools/call` with tool **`codex-reply`** to continue an existing session (`{threadId, prompt}`)
   - While waiting for the final response, the runner consumes `codex/event` notifications to surface
     compact progress “stages” in the UI.
+  - Parallel turns: the runner can keep multiple turns in-flight across different agents by
+    multiplexing JSON-RPC request ids (and routing `codex/event` updates via `_meta.requestId`).
+    Controlled by `--codex-max-parallel-turns` (default `2`).
+
+### Parallel turns (multi-agent workflows)
+
+nit treats each roster entry (`AgentLane.id`) as an **agent**. For Codex lanes, that id is the
+Codex model slug (e.g. `gpt-5.2`, `gpt-5.3-codex`, etc.).
+
+Parallelism exists at two layers:
+
+- **UI queueing (per agent)**: `AppState.agents.queued_codex_turns` stores prompts the operator
+  submits while that same agent already has an active turn.
+- **Runner parallelism (across agents)**: `CodexRunner` executes up to
+  `--codex-max-parallel-turns` turns concurrently **across different agent ids**.
+
+Key rules:
+
+- **Per-agent single-flight:** at most one in-flight turn per `agent_id`. This avoids out-of-order
+  session usage (especially `codex-reply`) and keeps `threadId` bookkeeping deterministic.
+- **Global cap:** total in-flight turns across all agents is capped by
+  `--codex-max-parallel-turns` (minimum `1`).
+- **Dispatch fairness:** both runtimes skip queued turns whose agent already has an in-flight turn
+  so other agents can make progress (simple round-robin over the queue).
+
+#### Exec runtime (`codex exec`) parallelism
+
+- Each in-flight turn spawns a `codex exec ...` child process (one process per turn).
+- The runner loop keeps a list of active workers and starts more until the cap is reached.
+- Stage and token counts come from parsing Codex JSONL on stdout and are forwarded as
+  `AgentBusEvent::TurnStage` and `AgentBusEvent::TokenCount`.
+
+#### MCP runtime (`codex mcp-server`) parallelism
+
+The MCP runtime is a single persistent `codex mcp-server` process that can have multiple
+in-flight JSON-RPC requests.
+
+- Each turn sends exactly one JSON-RPC `tools/call` request with a unique request id (`id`).
+- nit stores an `InFlightMcpTurn` record keyed by request id so it can:
+  - match the final JSON-RPC response by `id`, and
+  - route `codex/event` notifications to the correct agent by `_meta.requestId`.
+- The final `tools/call` result yields a `threadId`. nit stores it:
+  - per agent id for ad-hoc chat (`AgentsState.codex_thread_ids`), or
+  - per mission id and agent id for missions (`AgentsState.codex_mission_thread_ids`).
+
+Cancellation/timeouts in MCP mode:
+
+- MCP Stop/Reconnect stops the server process, which cancels **all** in-flight requests (they
+  share the same transport). nit emits `TurnFailed` for each in-flight turn and clears the in-flight
+  maps before reconnecting.
+- Turns have an optional timeout via `NIT_MCP_TURN_TIMEOUT_SECS`. If any in-flight turn exceeds the
+  timeout, nit restarts the MCP server and fails all in-flight turns.
+
+#### UI visibility + interaction model
+
+- `AgentsState.active_turns` tracks per-agent telemetry (started time, last heartbeat, last output,
+  and last stage string).
+- Agent Chat renders a small status table listing all in-flight turns (`agent`, `stage`, `elapsed`,
+  heartbeat age, output age). When viewing a Swarm mission, the table also includes assigned
+  agents that are pending/queued (for clearer multi-agent visibility).
+- To inspect a specific agent’s transcript, select it in Agent Ops → Roster and press `Enter`.
+- `@all <prompt>` broadcasts to multiple Codex agents:
+  - in mission context: targets the mission’s assigned Codex agents,
+  - otherwise: targets all available Codex lanes.
+
+#### Swarm orchestration (`@swarm`)
+
+nit supports two “multi-agent” modes:
+
+- `@all <prompt>`: **fan-out** (every targeted agent gets the same prompt).
+- `@swarm [all|N] [template=lab|parallel] <prompt>`: **orchestrated task splitting** (agents get different prompts).
+
+`@swarm` is implemented in `nit-tui` as a small orchestrator state machine (`SwarmRuntime`) that
+creates a mission, asks a planner agent for a machine-readable plan, dispatches distinct tasks to
+other agents, optionally runs a verification gate bundle, then asks the planner to synthesize a
+final report.
+
+Agent selection rules:
+
+- The currently selected Codex model becomes the **planner/synthesizer**.
+- Additional Codex agents are selected from the roster in priority order:
+  - `@swarm <prompt>` defaults to 4 agents total (planner + 3), capped at 16.
+  - `@swarm N <prompt>` uses `N` agents total (1–16).
+  - `@swarm all <prompt>` uses all available Codex agents (still capped at 16).
+- If fewer than 2 Codex agents are available, `@swarm` falls back to a normal single-agent send.
+
+Templates:
+
+- `lab` (default): DAG-style workflow optimized for “research lab” collaboration:
+  - read-only researcher/reviewer tasks feed a single-writer integrator task,
+  - tasks can have dependencies (`deps`) and multiple tasks can target the same agent id
+    (they run sequentially),
+  - only `writes=true` tasks are allowed to touch the workspace (enforced to the integrator agent),
+  - scheduler dispatches tasks when their deps have finished (DONE/FAILED/SKIPPED).
+- `parallel`: v1-style parallel split:
+  - prefer one task per agent id, no deps, and maximum parallelism.
+
+Planner contract:
+
+- nit sends the planner the operator request plus the list of available agent ids.
+- The planner returns:
+  1) a brief human-readable summary, and
+  2) a JSON plan inside a ` ```json ` code block.
+
+Plan schema (v2):
+
+```json
+{
+  "version": 2,
+  "template": "lab",
+  "integrator_agent_id": "gpt-5.2",
+  "tasks": [
+    {
+      "id": "recon",
+      "agent_id": "gpt-5.2",
+      "role": "research",
+      "title": "Codebase recon",
+      "prompt": "...",
+      "deps": [],
+      "writes": false,
+      "artifacts": ["files", "risks"],
+      "done_when": "..."
+    }
+  ],
+  "synthesis_prompt": "(optional extra guidance for the final synthesis step)"
+}
+```
+
+Execution rules:
+
+- Tasks are dispatched as Codex turns in the new mission when they become runnable:
+  - tasks with `deps=[]` start immediately,
+  - a task becomes runnable when all its deps have reached a terminal state.
+- Multiple tasks may target the same agent id; they will run sequentially (queued).
+- Tasks run in parallel subject to `--codex-max-parallel-turns` (the runner may queue excess turns).
+- Single-writer enforcement:
+  - tasks may set `writes=true`, but only for the selected integrator agent id,
+  - the scheduler dispatches at most one `writes=true` task at a time.
+- When all task turns have completed/failed:
+  - If a built-in gate bundle is detected, nit enters phase `VERIFY` and dispatches a verifier turn
+    (first non-planner agent) to run the gates and emit a JSON report.
+  - nit then dispatches a final **synthesis** turn to the planner containing the original prompt,
+    each agent’s full output, and the verification report.
+
+Gate bundles (v1):
+
+- `rust-ci` (auto-detected when a `Cargo.toml` exists in the workspace root or ancestors):
+  - `cargo fmt --all -- --check`
+  - `cargo clippy --all-targets --all-features -- -D warnings`
+  - `cargo test --workspace --all-features`
+- Gates run inside a Codex turn (nit does not execute arbitrary shell commands itself), so outcomes
+  respect Codex sandbox + approval policy settings.
+
+Fallback behavior:
+
+- If the planner output has no parseable JSON plan, nit falls back to built-in prompts (recon,
+  implementation plan, tests/verification, review) and proceeds with execution + synthesis.
+- If the planner outputs the legacy v1 schema, nit will still run it (interpreting tasks as
+  independent, read-only tasks with no deps).
+
+Safety note:
+
+- `@swarm` is orchestration and aggregation; it does not automatically merge code changes.
+  The planner prompt encourages using a single “integrator” for file edits to reduce conflicts.
 
 ### API wiring (CLI → TUI → runner)
 
 The wiring for Codex runtime configuration is intentionally explicit:
 
-- `crates/nit` (CLI) parses `--codex-runtime`, plus optional `--codex-sandbox` and
-  `--codex-approval-policy`, into a `nit_tui::codex_runner::CodexRunnerConfig`.
+- `crates/nit` (CLI) parses `--codex-runtime`, plus optional `--codex-sandbox`,
+  `--codex-approval-policy`, and `--codex-max-parallel-turns`, into a
+  `nit_tui::codex_runner::CodexRunnerConfig`.
 - `crates/nit/src/main.rs` passes that config into `nit_tui::run(state, theme, log_rx, codex_runtime, codex_config)`.
 - `crates/nit-tui/src/app.rs` forwards the config into `run_loop(...)` and spawns the runner via
   `CodexRunner::spawn(codex_runtime, codex_config)`.
@@ -118,8 +283,8 @@ Implementation notes:
 - Token accounting: MCP mode consumes `codex/event` token count notifications and emits
   `AgentBusEvent::TokenCount` so the UI can keep context usage estimates fresh.
 - Cancellation/timeouts:
-  - MCP Stop/Reconnect cancels an in-flight turn by stopping the server process.
-  - Turns have a configurable timeout via `NIT_MCP_TURN_TIMEOUT_SECS` (default 600; set to `0` to disable).
+  - MCP Stop/Reconnect cancels in-flight turns by stopping the server process.
+  - Turns have an optional timeout via `NIT_MCP_TURN_TIMEOUT_SECS` (default disabled; set to `600` to restore the previous default; set to `0` to disable).
 - Reconnect robustness: the runner checks for unexpected `codex mcp-server` exit, drops the dead
   handle, and retries with a short backoff (operator can still use MCP tab `r`).
 - Latency: `latency_ms` is best-effort; it is updated on connect and on successful turns.

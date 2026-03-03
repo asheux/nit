@@ -132,16 +132,17 @@ impl SeedRenderCache {
             let mut index_by_xy = vec![0u32; total];
             let mut inset = vec![0u8; 16 * 16];
             let denom = total.saturating_sub(1).max(1) as u32;
-            for idx in 0..total {
-                let (x, y) = hilbert_index_to_xy(order, idx as u32);
+            for (idx, cell) in stream.iter_mut().enumerate() {
+                let idx = idx as u32;
+                let (x, y) = hilbert_index_to_xy(order, idx);
                 let xi = x as usize;
                 let yi = y as usize;
                 if xi < w && yi < h {
-                    stream[idx] = if seed.base_bits.get(xi, yi) { 1 } else { 0 };
-                    index_by_xy[yi * w + xi] = idx as u32;
+                    *cell = u8::from(seed.base_bits.get(xi, yi));
+                    index_by_xy[yi * w + xi] = idx;
                     let ix = xi.saturating_mul(16) / w;
                     let iy = yi.saturating_mul(16) / h;
-                    let v = ((idx as u32).saturating_mul(255) / denom) as u8;
+                    let v = (idx.saturating_mul(255) / denom) as u8;
                     let inset_idx = iy.saturating_mul(16) + ix;
                     if inset_idx < inset.len() && v > inset[inset_idx] {
                         inset[inset_idx] = v;
@@ -173,7 +174,7 @@ impl SeedRenderCache {
         for y in 0..seed.base_values.height() {
             for x in 0..seed.base_values.width() {
                 let v = seed.base_values.get(x, y);
-                if v >= 0x20 && v <= 0x7e {
+                if (0x20u8..=0x7eu8).contains(&v) {
                     printable += 1;
                 } else {
                     nonprintable += 1;
@@ -351,8 +352,8 @@ fn compute_density(grid: &Grid, block: usize) -> (Option<Vec<u8>>, usize, usize)
         return (None, 0, block);
     }
     let block = block.max(2);
-    let bw = (w + block - 1) / block;
-    let bh = (h + block - 1) / block;
+    let bw = w.div_ceil(block);
+    let bh = h.div_ceil(block);
     let mut density = vec![0u8; bw * bh];
     for y in 0..h {
         for x in 0..w {

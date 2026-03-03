@@ -32,10 +32,15 @@ pub fn render(
         ""
     };
     let file_text = file.unwrap_or_else(|| state.editor_buffer().name().to_string());
-    let status_text = state.status.as_deref().unwrap_or_default();
+    let status_text_raw = state.status.as_deref().unwrap_or_default();
+    let status_text = if state.debug {
+        status_text_raw.to_string()
+    } else {
+        minify_status_text(status_text_raw)
+    };
     let compact_status_mode =
         matches!(state.app_kind, nit_core::AppKind::Games) && state.games.running;
-    let status_label = build_status_label(status_text, compact_status_mode);
+    let status_label = build_status_label(&status_text, compact_status_mode);
 
     let inner_width = area.width.saturating_sub(2) as usize;
     let fixed_width = [" nit ", " | ", " | ", &mode, " | ", app_label, " | UTF-8 "]
@@ -92,7 +97,7 @@ pub fn render(
         if !trimmed.is_empty() {
             right_width += 2 + trimmed.width();
             vitals_spans.push(Span::raw("  "));
-            vitals_spans.push(Span::styled(trimmed, status_style(status_text, theme)));
+            vitals_spans.push(Span::styled(trimmed, status_style(&status_text, theme)));
         }
     }
 
@@ -291,16 +296,56 @@ fn status_style(status: &str, theme: &Theme) -> Style {
         || lower.contains("unknown")
     {
         theme.error
-    } else if lower.contains("queued")
-        || lower.contains("running")
-        || lower.contains("loading")
-        || lower.contains("pending")
-    {
-        theme.foreground
     } else {
         theme.foreground
     };
     Style::default().fg(color).add_modifier(Modifier::BOLD)
+}
+
+fn minify_status_text(status_text: &str) -> String {
+    let text = status_text.trim();
+    if text.is_empty() {
+        return String::new();
+    }
+
+    // A file open already updates the file label elsewhere (top-left), so avoid redundant paths.
+    if text.starts_with("Opened ") {
+        return "Opened".into();
+    }
+
+    // Keep the first clause for multi-part guidance strings.
+    if let Some((left, _)) = text.split_once(" - ") {
+        return left.trim().to_string();
+    }
+
+    // Prefer terse status verbs over repeating the chosen option/value.
+    if text.starts_with("Protocol set to ") {
+        return "Protocol set".into();
+    }
+    if text.starts_with("GoL rule set to ") {
+        return "GoL rule set".into();
+    }
+
+    // If there's a long detail payload after a colon, keep just the label.
+    if let Some((left, right)) = text.split_once(':') {
+        let right = right.trim();
+        if right.is_empty() {
+            return left.trim().to_string();
+        }
+        let too_long = right.len() > 16;
+        let has_pathish = right.contains('/') || right.contains('\\');
+        let word_count = right.split_whitespace().count();
+        if too_long || has_pathish || word_count > 3 {
+            return left.trim().to_string();
+        }
+    }
+
+    // Drop trailing parenthetical detail (usually debug-ish).
+    if let Some((left, _)) = text.split_once(" (") {
+        return left.trim().to_string();
+    }
+
+    text.to_string()
 }
 
 fn build_status_label(status_text: &str, compact_mode: bool) -> String {
@@ -357,7 +402,9 @@ fn build_status_label(status_text: &str, compact_mode: bool) -> String {
 mod tests {
     use std::time::Duration;
 
-    use super::{build_status_label, build_vitals_spans, criticality_style, status_style};
+    use super::{
+        build_status_label, build_vitals_spans, criticality_style, minify_status_text, status_style,
+    };
     use crate::vitals::severity_scaled_samples;
     use crate::vitals::{LabCriticality, LabVitalsSnapshot};
     use crate::Theme;
@@ -391,6 +438,24 @@ mod tests {
         assert_eq!(
             build_status_label("Games tournament failed: timeout", true),
             "STATUS: ERROR"
+        );
+    }
+
+    #[test]
+    fn minify_status_text_strips_opened_path() {
+        assert_eq!(minify_status_text("Opened /tmp/foo.txt"), "Opened");
+    }
+
+    #[test]
+    fn minify_status_text_keeps_short_colon_values() {
+        assert_eq!(minify_status_text("Heat: ON"), "Heat: ON");
+    }
+
+    #[test]
+    fn minify_status_text_drops_long_colon_payloads() {
+        assert_eq!(
+            minify_status_text("Save failed: permission denied (os error 13)"),
+            "Save failed"
         );
     }
 

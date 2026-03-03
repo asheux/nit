@@ -35,7 +35,7 @@ pub enum RunsCommand {
 
 pub enum RunsEvent {
     RunsLoaded(Vec<GamesRunEntry>),
-    SummaryLoaded(RunSummary),
+    SummaryLoaded(Box<RunSummary>),
     ReplayLoaded(ReplayData),
     Error(String),
 }
@@ -86,7 +86,7 @@ fn runner_loop(cmd_rx: Receiver<RunsCommand>, event_tx: Sender<RunsEvent>) {
             },
             Ok(RunsCommand::LoadSummary { summary_path }) => match load_summary(&summary_path) {
                 Ok(summary) => {
-                    let _ = event_tx.send(RunsEvent::SummaryLoaded(summary));
+                    let _ = event_tx.send(RunsEvent::SummaryLoaded(Box::new(summary)));
                 }
                 Err(err) => {
                     let _ = event_tx.send(RunsEvent::Error(err));

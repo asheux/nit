@@ -197,7 +197,7 @@ fn draw_scanline(area: Rect, buf: &mut Buffer, cache: &SeedRenderCache, palette:
     if area.height == 0 {
         return;
     }
-    let y = (cache.scanline_phase as u16 % area.height).saturating_add(area.y);
+    let y = (cache.scanline_phase % area.height).saturating_add(area.y);
     let style = Style::default()
         .bg(halo_color(1, palette))
         .fg(palette.hud_dim)

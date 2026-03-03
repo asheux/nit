@@ -185,8 +185,7 @@ fn render_results(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme
             if rows.is_empty() {
                 lines.push(Line::from(Span::styled("No matches.", dim_style)));
             } else {
-                for idx in scroll..end {
-                    let item = &rows[idx];
+                for (idx, item) in rows.iter().enumerate().take(end).skip(scroll) {
                     let selected_row = idx == selected;
                     lines.push(render_file_row(item, selected_row, theme));
                 }
@@ -209,8 +208,7 @@ fn render_results(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme
             if rows.is_empty() {
                 lines.push(Line::from(Span::styled("No matches.", dim_style)));
             } else {
-                for idx in scroll..end {
-                    let item = &rows[idx];
+                for (idx, item) in rows.iter().enumerate().take(end).skip(scroll) {
                     let selected_row = idx == selected;
                     lines.push(render_match_row(item, selected_row, theme));
                 }
@@ -404,8 +402,7 @@ fn slice_by_char(input: &str, start: usize, end: usize) -> String {
     }
     let mut start_byte = None;
     let mut end_byte = None;
-    let mut count = 0usize;
-    for (idx, _) in input.char_indices() {
+    for (count, (idx, _)) in input.char_indices().enumerate() {
         if count == start {
             start_byte = Some(idx);
         }
@@ -413,10 +410,9 @@ fn slice_by_char(input: &str, start: usize, end: usize) -> String {
             end_byte = Some(idx);
             break;
         }
-        count += 1;
     }
-    let start_byte = start_byte.unwrap_or_else(|| input.len());
-    let end_byte = end_byte.unwrap_or_else(|| input.len());
+    let start_byte = start_byte.unwrap_or(input.len());
+    let end_byte = end_byte.unwrap_or(input.len());
     input[start_byte..end_byte].to_string()
 }
 

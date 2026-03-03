@@ -147,6 +147,12 @@ impl GolRenderState {
     }
 }
 
+impl Default for GolRenderState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct GolHudMetrics {
     history: AliveHistory,
@@ -220,6 +226,10 @@ impl AliveHistory {
         }
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
     pub fn get(&self, idx: usize) -> Option<u16> {
         let len = self.len();
         if idx >= len {
@@ -245,6 +255,7 @@ pub struct GolHudState<'a> {
 }
 
 pub trait GolRenderer {
+    #[allow(clippy::too_many_arguments)]
     fn render(
         &mut self,
         area: Rect,
@@ -265,6 +276,7 @@ pub struct GolRenderPipeline {
 }
 
 impl GolRenderPipeline {
+    #[allow(clippy::too_many_arguments)]
     pub fn render(
         &mut self,
         area: Rect,
@@ -681,6 +693,7 @@ pub(crate) fn neighbor_count(grid: &Grid, x: usize, y: usize) -> u8 {
     count
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn draw_bbox(
     grid_area: Rect,
     buf: &mut Buffer,

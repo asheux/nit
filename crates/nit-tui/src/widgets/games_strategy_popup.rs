@@ -26,8 +26,8 @@ const GRAPH_PANE_MIN_WIDTH: u16 = 24;
 const GRAPH_NODE_LIMIT: usize = 12;
 
 pub fn preferred_size(screen: Rect) -> (u16, u16) {
-    let width = screen.width.min(MAX_WIDTH).max(MIN_WIDTH);
-    let height = screen.height.min(MAX_HEIGHT).max(MIN_HEIGHT);
+    let width = screen.width.clamp(MIN_WIDTH, MAX_WIDTH);
+    let height = screen.height.clamp(MIN_HEIGHT, MAX_HEIGHT);
     (width, height)
 }
 
@@ -35,16 +35,7 @@ fn trim_to_width(text: &str, max_width: usize) -> String {
     if max_width == 0 {
         return String::new();
     }
-    let mut out = String::new();
-    let mut count = 0usize;
-    for ch in text.chars() {
-        if count >= max_width {
-            break;
-        }
-        out.push(ch);
-        count += 1;
-    }
-    out
+    text.chars().take(max_width).collect()
 }
 
 fn color_for_symbol(ch: char, theme: &Theme) -> Option<Color> {

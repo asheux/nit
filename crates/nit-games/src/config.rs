@@ -85,20 +85,11 @@ pub struct StrategyConfig {
     pub rule_code: Option<u64>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
 pub struct HistoryConfig {
     pub enabled: bool,
     #[serde(default)]
     pub include_cycle_metadata: bool,
-}
-
-impl Default for HistoryConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            include_cycle_metadata: false,
-        }
-    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -148,19 +139,14 @@ impl Default for EngineConfig {
     }
 }
 
-#[derive(Copy, Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Copy, Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum FsmGroupingMode {
+    #[default]
     #[serde(alias = "notebook")]
     Wnbm,
     #[serde(alias = "exact", alias = "moore")]
     Moorem,
-}
-
-impl Default for FsmGroupingMode {
-    fn default() -> Self {
-        Self::Wnbm
-    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -183,17 +169,12 @@ impl Default for ComplexityCostConfig {
     }
 }
 
-#[derive(Copy, Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Copy, Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum EngineMode {
+    #[default]
     Interactive,
     Batch,
-}
-
-impl Default for EngineMode {
-    fn default() -> Self {
-        EngineMode::Interactive
-    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -746,7 +727,7 @@ fn parse_actions(
 ) -> Vec<Action> {
     let mut out = Vec::new();
     for value in values {
-        match Action::from_str(&value) {
+        match Action::parse(&value) {
             Some(action) => out.push(action),
             None => errors.push(format!(
                 "strategy '{id}': invalid action '{value}' in {field}"
@@ -778,9 +759,7 @@ fn normalize_index(
 }
 
 fn parse_input_mode(id: &str, raw: Option<&str>, errors: &mut Vec<String>) -> Option<InputMode> {
-    let Some(raw) = raw else {
-        return None;
-    };
+    let raw = raw?;
     let normalized: String = raw
         .chars()
         .filter(|c| c.is_ascii_alphanumeric())

@@ -6,6 +6,7 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
+use crate::swarm::{is_agent_busy, parse_swarm_command, select_swarm_agents, SwarmRuntime};
 use crate::{
     codex_runner::{CodexCommand, CodexRunner, CodexRunnerConfig, CodexRuntimeMode},
     file_tree,
@@ -499,6 +500,7 @@ fn run_loop(
         CodexRuntimeMode::Exec
     };
     let mut codex_runner = CodexRunner::spawn(codex_runtime, codex_config);
+    let mut swarm = SwarmRuntime::default();
     let mut fuzzy_runtime = FuzzySearchRuntime::new(theme, state.settings.highlight.clone());
     let mut seed_runtime = if state.app_kind == AppKind::Gol {
         Some(SeedRuntime::new(state))
@@ -662,29 +664,21 @@ fn run_loop(
                         }
                         continue;
                     }
-                    if state.rule_picker.open {
-                        if rule_picker::handle_key(&key, state) {
-                            needs_redraw = true;
-                            continue;
-                        }
+                    if state.rule_picker.open && rule_picker::handle_key(&key, state) {
+                        needs_redraw = true;
+                        continue;
                     }
-                    if state.protocol_picker.open {
-                        if protocol_picker::handle_key(&key, state) {
-                            needs_redraw = true;
-                            continue;
-                        }
+                    if state.protocol_picker.open && protocol_picker::handle_key(&key, state) {
+                        needs_redraw = true;
+                        continue;
                     }
-                    if state.show_help {
-                        if handle_help_popup_key(&key, state) {
-                            needs_redraw = true;
-                            continue;
-                        }
+                    if state.show_help && handle_help_popup_key(&key, state) {
+                        needs_redraw = true;
+                        continue;
                     }
-                    if state.games.analysis.open {
-                        if handle_analysis_popup_key(&key, state) {
-                            needs_redraw = true;
-                            continue;
-                        }
+                    if state.games.analysis.open && handle_analysis_popup_key(&key, state) {
+                        needs_redraw = true;
+                        continue;
                     }
                     if state.app_kind == AppKind::Games && state.games.run_browser.open {
                         let screen = terminal.size().unwrap_or_default();
@@ -771,7 +765,13 @@ fn run_loop(
                             continue;
                         }
                     }
-                    if handle_agent_station_key(key, state, &mut vitals, Some(&codex_runner)) {
+                    if handle_agent_station_key(
+                        key,
+                        state,
+                        &mut vitals,
+                        Some(&codex_runner),
+                        &mut swarm,
+                    ) {
                         needs_redraw = true;
                         continue;
                     }
@@ -896,6 +896,17 @@ fn run_loop(
                 AgentBusEvent::TurnCompleted { .. } | AgentBusEvent::TurnFailed { .. }
             );
             event.apply(state);
+            let swarm_dispatches = swarm.handle_event(state, &event);
+            for dispatch in swarm_dispatches {
+                dispatch_codex_prompt(
+                    state,
+                    &mut vitals,
+                    Some(&codex_runner),
+                    dispatch.agent_id,
+                    Some(dispatch.mission_id),
+                    dispatch.prompt,
+                );
+            }
             if finished {
                 maybe_dispatch_next_queued_codex_turn(state, &mut vitals, Some(&codex_runner));
             }
@@ -1226,6 +1237,7 @@ fn line_looks_fatal(line: &str) -> bool {
     upper.contains("PANIC") || upper.contains("BACKTRACE")
 }
 
+#[allow(clippy::too_many_arguments)]
 fn draw(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     state: &mut AppState,
@@ -1494,9 +1506,7 @@ fn draw(
             Some((x, y))
         } else if let Some((x, y)) = fuzzy_cursor {
             Some((x, y))
-        } else if petri_visible {
-            None
-        } else if state.file_tree.open && state.focus == PaneId::Editor {
+        } else if petri_visible || (state.file_tree.open && state.focus == PaneId::Editor) {
             None
         } else if state.focus == PaneId::Editor {
             editor_cursor.map(|pos| (pos.x, pos.y))
@@ -1526,6 +1536,7 @@ fn handle_agent_station_key(
     state: &mut AppState,
     vitals: &mut VitalsState,
     codex: Option<&CodexRunner>,
+    swarm: &mut SwarmRuntime,
 ) -> bool {
     if let Some(target) = map_focus_hotkey(&key) {
         state.focus = target;
@@ -1549,7 +1560,7 @@ fn handle_agent_station_key(
 
     match state.focus {
         PaneId::JobOutput => handle_agent_ops_key(key, state, vitals, codex),
-        PaneId::Notes => handle_agent_console_key(key, state, vitals, codex),
+        PaneId::Notes => handle_agent_console_key(key, state, vitals, codex, swarm),
         _ => false,
     }
 }
@@ -2178,6 +2189,7 @@ fn handle_agent_console_key(
     state: &mut AppState,
     vitals: &mut VitalsState,
     codex: Option<&CodexRunner>,
+    swarm: &mut SwarmRuntime,
 ) -> bool {
     let mut changed = false;
     let mut handled = false;
@@ -2192,36 +2204,109 @@ fn handle_agent_console_key(
             ..
         } => {
             handled = true;
-            let prompt = state.agents.chat_input.clone();
-            let mission_id = state
-                .agents
-                .selected_context_mission()
-                .map(ToString::to_string);
-            let model = state
-                .agents
-                .selected_context_agent()
-                .map(ToString::to_string);
-            changed = push_chat_message(state);
-            follow_chat_cursor = changed;
-            if changed {
-                let is_busy = !state.agents.active_turns.is_empty()
-                    || !state.agents.queued_codex_turns.is_empty();
-                let is_codex = model.as_deref().is_some_and(|model| {
-                    state
-                        .agents
-                        .agents
-                        .iter()
-                        .find(|lane| lane.id.as_str() == model)
-                        .is_some_and(|lane| lane.is_codex())
-                });
-                if is_codex && is_busy {
-                    enqueue_codex_turn(state, vitals, model, mission_id, prompt);
-                    // If we were "busy" only because there is a local queue, kick the next turn.
-                    maybe_dispatch_next_queued_codex_turn(state, vitals, codex);
+            let raw = state.agents.chat_input.clone();
+            let mut swarm_handled = false;
+            if let Some(cmd) = parse_swarm_command(&raw) {
+                let planner = state
+                    .agents
+                    .selected_context_agent()
+                    .and_then(|id| {
+                        state
+                            .agents
+                            .agents
+                            .iter()
+                            .find(|lane| lane.id == id)
+                            .is_some_and(|lane| lane.is_codex())
+                            .then_some(id.to_string())
+                    })
+                    .or_else(|| {
+                        state
+                            .agents
+                            .agents
+                            .iter()
+                            .find(|lane| lane.is_codex())
+                            .map(|lane| lane.id.clone())
+                    });
+
+                if let Some(planner) = planner {
+                    let agents = select_swarm_agents(state, &planner, cmd.size);
+                    if let Some((_mission_id, dispatches)) = swarm.start(
+                        state,
+                        planner.clone(),
+                        agents,
+                        cmd.template.clone(),
+                        cmd.prompt.clone(),
+                    ) {
+                        state.agents.chat_input = cmd.prompt;
+                        state.agents.chat_input_cursor = state.agents.chat_input.chars().count();
+                        let _ = push_chat_message(state);
+                        changed = true;
+                        follow_chat_cursor = true;
+                        for dispatch in dispatches {
+                            dispatch_codex_prompt(
+                                state,
+                                vitals,
+                                codex,
+                                dispatch.agent_id,
+                                Some(dispatch.mission_id),
+                                dispatch.prompt,
+                            );
+                        }
+                        maybe_dispatch_next_queued_codex_turn(state, vitals, codex);
+                        swarm_handled = true;
+                    } else {
+                        state.agents.chat_input = cmd.prompt;
+                        state.agents.chat_input_cursor = state.agents.chat_input.chars().count();
+                    }
                 } else {
-                    maybe_dispatch_codex_turn(
-                        state, vitals, codex, model, mission_id, prompt, true,
-                    );
+                    state.status = Some("@swarm requires at least one Codex agent".into());
+                    state.agents.chat_input.clear();
+                    state.agents.chat_input_cursor = 0;
+                    changed = true;
+                    follow_chat_cursor = true;
+                    swarm_handled = true;
+                }
+            }
+
+            if !swarm_handled {
+                let mission_id = state
+                    .agents
+                    .selected_context_mission()
+                    .map(ToString::to_string);
+                let selected_agent = state
+                    .agents
+                    .selected_context_agent()
+                    .map(ToString::to_string);
+                let sent = push_chat_message(state);
+                changed = sent.is_some();
+                follow_chat_cursor = changed;
+                if let Some((channel, prompt)) = sent {
+                    let targets = if matches!(channel, AgentChannel::Broadcast) {
+                        broadcast_target_agents(state, mission_id.as_deref())
+                    } else {
+                        selected_agent.clone().into_iter().collect::<Vec<_>>()
+                    };
+                    for model in targets {
+                        let is_codex = state
+                            .agents
+                            .agents
+                            .iter()
+                            .find(|lane| lane.id.as_str() == model.as_str())
+                            .is_some_and(|lane| lane.is_codex());
+                        if !is_codex {
+                            continue;
+                        }
+
+                        dispatch_codex_prompt(
+                            state,
+                            vitals,
+                            codex,
+                            model,
+                            mission_id.clone(),
+                            prompt.clone(),
+                        );
+                    }
+                    maybe_dispatch_next_queued_codex_turn(state, vitals, codex);
                 }
             }
         }
@@ -2602,6 +2687,62 @@ fn chat_line_len(line_starts: &[usize], line_idx: usize, total_chars: usize) -> 
     end.saturating_sub(start)
 }
 
+fn broadcast_target_agents(state: &AppState, mission_id: Option<&str>) -> Vec<String> {
+    if let Some(mission_id) = mission_id {
+        if let Some(mission) = state.agents.missions.iter().find(|m| m.id == mission_id) {
+            let mut targets = Vec::new();
+            for agent_id in mission.assigned_agents.iter() {
+                if targets.iter().any(|id| id == agent_id) {
+                    continue;
+                }
+                let is_codex = state
+                    .agents
+                    .agents
+                    .iter()
+                    .find(|agent| agent.id == *agent_id)
+                    .is_some_and(|agent| agent.is_codex());
+                if is_codex {
+                    targets.push(agent_id.clone());
+                }
+            }
+            if !targets.is_empty() {
+                return targets;
+            }
+        }
+    }
+
+    state
+        .agents
+        .agents
+        .iter()
+        .filter(|agent| agent.is_codex())
+        .map(|agent| agent.id.clone())
+        .collect()
+}
+
+fn dispatch_codex_prompt(
+    state: &mut AppState,
+    vitals: &mut VitalsState,
+    codex: Option<&CodexRunner>,
+    agent_id: String,
+    mission_id: Option<String>,
+    prompt: String,
+) {
+    if is_agent_busy(state, &agent_id) {
+        enqueue_codex_turn(state, vitals, Some(agent_id), mission_id, prompt);
+    } else {
+        maybe_dispatch_codex_turn(
+            state,
+            vitals,
+            codex,
+            Some(agent_id),
+            mission_id,
+            prompt,
+            true,
+        );
+    }
+}
+
 fn enqueue_codex_turn(
     state: &mut AppState,
     vitals: &mut VitalsState,
@@ -2658,16 +2799,25 @@ fn maybe_dispatch_next_queued_codex_turn(
     let Some(codex) = codex else {
         return;
     };
-    if !state.agents.active_turns.is_empty() {
+    if state.agents.queued_codex_turns.is_empty() {
         return;
     }
 
-    loop {
+    // Dispatch at most one queued turn per agent id (multiple agents can advance in parallel).
+    let mut remaining = state.agents.queued_codex_turns.len();
+    while remaining > 0 {
+        remaining = remaining.saturating_sub(1);
         let Some(queued) = state.agents.queued_codex_turns.pop_front() else {
-            return;
+            break;
         };
         let model = queued.agent_id.clone();
         let mission_id = queued.mission_id.clone();
+
+        // Defer when this agent already has an in-flight turn.
+        if state.agents.active_turns.contains_key(&model) {
+            state.agents.queued_codex_turns.push_back(queued);
+            continue;
+        }
 
         // Queue length was incremented when we queued; only dispatch if this is still a Codex lane.
         let is_codex = state
@@ -2695,7 +2845,6 @@ fn maybe_dispatch_next_queued_codex_turn(
             queued.prompt,
             false,
         );
-        return;
     }
 }
 
@@ -2793,24 +2942,22 @@ fn maybe_dispatch_codex_turn(
                 .codex_context_remaining_pct
                 .insert(model.clone(), pct);
         }
-    } else {
-        if let Some(mission_id) = mission_id.as_deref() {
-            if let Some(map) = state
-                .agents
-                .codex_mission_context_remaining_pct
-                .get_mut(mission_id)
-            {
-                map.remove(&model);
-                if map.is_empty() {
-                    state
-                        .agents
-                        .codex_mission_context_remaining_pct
-                        .remove(mission_id);
-                }
+    } else if let Some(mission_id) = mission_id.as_deref() {
+        if let Some(map) = state
+            .agents
+            .codex_mission_context_remaining_pct
+            .get_mut(mission_id)
+        {
+            map.remove(&model);
+            if map.is_empty() {
+                state
+                    .agents
+                    .codex_mission_context_remaining_pct
+                    .remove(mission_id);
             }
-        } else {
-            state.agents.codex_context_remaining_pct.remove(&model);
         }
+    } else {
+        state.agents.codex_context_remaining_pct.remove(&model);
     }
 
     // Immediate UI feedback: mark the model as running and show the loader/breather row.
@@ -2874,8 +3021,8 @@ fn estimate_codex_context_tokens(text: &str) -> u32 {
     if text.is_empty() {
         return 0;
     }
-    let bytes = text.as_bytes().len() as u32;
-    (bytes + 3) / 4
+    let bytes = text.len() as u32;
+    bytes.div_ceil(4)
 }
 
 fn estimate_codex_context_tokens_for_mission(state: &mut AppState, mission_id: &str) -> u32 {
@@ -2902,14 +3049,28 @@ fn estimate_codex_context_tokens_for_mission(state: &mut AppState, mission_id: &
     tokens
 }
 
-fn push_chat_message(state: &mut AppState) -> bool {
-    let text = state.agents.chat_input.clone();
-    if text.trim().is_empty() {
-        return false;
+fn parse_chat_input_channel(raw: &str) -> (AgentChannel, String) {
+    if let Some(after) = raw.strip_prefix("@all") {
+        if after.is_empty() || after.starts_with(char::is_whitespace) {
+            return (AgentChannel::Broadcast, after.trim_start().to_string());
+        }
     }
+    (AgentChannel::Agent, raw.to_string())
+}
+
+fn push_chat_message(state: &mut AppState) -> Option<(AgentChannel, String)> {
+    let raw = state.agents.chat_input.clone();
+    if raw.trim().is_empty() {
+        return None;
+    }
+    let (channel, text) = parse_chat_input_channel(&raw);
+    if text.trim().is_empty() {
+        return None;
+    }
+
     let message = AgentMessage {
         at: timestamp_label(state),
-        channel: state.agents.chat_channel,
+        channel,
         agent_id: None,
         mission_id: state
             .agents
@@ -2931,14 +3092,14 @@ fn push_chat_message(state: &mut AppState) -> bool {
     state.agents.diag_events.push(AgentDiagnosticEvent {
         severity: AgentAlertSeverity::Info,
         source: "thread".into(),
-        message: format!("sent message: {text}"),
+        message: format!("sent message: {raw}"),
         at: timestamp_label(state),
     });
     state.agents.console_scroll = usize::MAX;
     state.agents.chat_input.clear();
     state.agents.chat_input_cursor = 0;
     state.agents.chat_input_scroll = usize::MAX;
-    true
+    Some((channel, text))
 }
 
 fn spawn_mock_mission(state: &mut AppState) {
@@ -3526,7 +3687,7 @@ fn prepare_clipboard_paste(
         if let Ok(text) = cb.get_text() {
             if !text.is_empty() {
                 state.yank = Some(text);
-                state.yank_kind = if state.yank.as_ref().map_or(false, |t| t.contains('\n')) {
+                state.yank_kind = if state.yank.as_ref().is_some_and(|t| t.contains('\n')) {
                     YankKind::Line
                 } else {
                     YankKind::Char
@@ -3980,14 +4141,14 @@ fn visualizer_inspector_action(
 }
 
 fn is_global_run_key(key: &KeyEvent) -> bool {
-    match key {
+    matches!(
+        key,
         KeyEvent {
             code: KeyCode::Enter | KeyCode::Char('\n') | KeyCode::Char('\r'),
             modifiers,
             ..
-        } if modifiers.contains(KeyModifiers::CONTROL) => true,
-        _ => false,
-    }
+        } if modifiers.contains(KeyModifiers::CONTROL)
+    )
 }
 
 fn is_global_quit_key(key: &KeyEvent) -> bool {
@@ -4077,14 +4238,14 @@ fn is_games_history_open_key(key: &KeyEvent, state: &AppState) -> bool {
     if !state.games.running && state.games.last_run.is_none() {
         return false;
     }
-    match key {
+    matches!(
+        key,
         KeyEvent {
             code: KeyCode::Char('*') | KeyCode::Char('8'),
             modifiers,
             ..
-        } if modifiers.contains(KeyModifiers::CONTROL) => true,
-        _ => false,
-    }
+        } if modifiers.contains(KeyModifiers::CONTROL)
+    )
 }
 
 fn games_petri_visible(state: &AppState) -> bool {
@@ -4286,7 +4447,7 @@ fn handle_mouse_event(
                             state.fuzzy_search.selected = state
                                 .fuzzy_search
                                 .selected
-                                .saturating_sub(delta.abs() as usize);
+                                .saturating_sub(delta.unsigned_abs() as usize);
                         } else {
                             state.fuzzy_search.selected =
                                 (state.fuzzy_search.selected + delta as usize).min(len - 1);
@@ -4426,7 +4587,11 @@ fn handle_mouse_event(
             false
         }
         MouseEventKind::Down(crossterm::event::MouseButton::Left) => {
-            handle_mouse_down(mouse, screen, state, input_state, clipboard, theme)
+            if state.fuzzy_search.open {
+                handle_fuzzy_search_mouse_down(mouse, screen, state, fuzzy_runtime)
+            } else {
+                handle_mouse_down(mouse, screen, state, input_state, clipboard, theme)
+            }
         }
         MouseEventKind::Drag(crossterm::event::MouseButton::Left) => {
             handle_mouse_drag(mouse, screen, state, input_state, clipboard, theme)
@@ -4442,9 +4607,68 @@ fn handle_mouse_event(
 const SCROLL_LINES: usize = 1;
 const SCROLL_LINES_FAST: usize = 5;
 
+fn handle_fuzzy_search_mouse_down(
+    mouse: MouseEvent,
+    screen: ratatui::layout::Rect,
+    state: &mut AppState,
+    runtime: &mut FuzzySearchRuntime,
+) -> bool {
+    use ratatui::layout::{Constraint, Direction, Layout, Rect};
+
+    let area = dynamic_popup_rect(screen, fuzzy_popup_size(screen, state));
+    // Modal: ignore clicks outside the popup (and prevent underlying panes from receiving them).
+    if !point_in_rect(mouse.column, mouse.row, area) {
+        return true;
+    }
+
+    let list_height = area
+        .height
+        .saturating_sub(6) // outer(2) + header/footer(2) + results block(2)
+        .max(1) as usize;
+
+    let inner = Rect {
+        x: area.x.saturating_add(1),
+        y: area.y.saturating_add(1),
+        width: area.width.saturating_sub(2),
+        height: area.height.saturating_sub(2),
+    };
+    let body = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Min(1),
+            Constraint::Length(1),
+        ])
+        .split(inner)[1];
+    let halves = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(body);
+
+    // RESULTS block has its own border.
+    let results_inner = Rect {
+        x: halves[0].x.saturating_add(1),
+        y: halves[0].y.saturating_add(1),
+        width: halves[0].width.saturating_sub(2),
+        height: halves[0].height.saturating_sub(2),
+    };
+    if point_in_rect(mouse.column, mouse.row, results_inner) {
+        let idx_in_view = mouse.row.saturating_sub(results_inner.y) as usize;
+        let target = state.fuzzy_search.scroll_offset.saturating_add(idx_in_view);
+        let len = fuzzy_results_len(state);
+        if len > 0 && target < len {
+            state.fuzzy_search.selected = target;
+            adjust_fuzzy_scroll(state, list_height);
+            runtime.request_preview_for_selection(state);
+        }
+    }
+
+    true
+}
+
 fn bump_scroll(value: &mut usize, delta: i32) {
     if delta.is_negative() {
-        *value = value.saturating_sub(delta.abs() as usize);
+        *value = value.saturating_sub(delta.unsigned_abs() as usize);
     } else if delta > 0 {
         *value = value.saturating_add(delta as usize);
     }
@@ -5190,9 +5414,7 @@ fn map_visualizer_side_mouse(
         inner,
         config_result.and_then(|result| result.as_ref().ok()),
     );
-    let Some(side_area) = layout_info.side else {
-        return None;
-    };
+    let side_area = layout_info.side?;
     let side_inner = Block::default().borders(Borders::ALL).inner(side_area);
     if side_inner.width == 0 || side_inner.height == 0 {
         return None;
@@ -5393,8 +5615,12 @@ fn selection_text(lines: &[String], selection: UiSelection) -> String {
     let mut out = String::new();
     let last_line = lines.len().saturating_sub(1);
     let end_line = end_line.min(last_line);
-    for line_idx in start_line..=end_line {
-        let line = &lines[line_idx];
+    for (line_idx, line) in lines
+        .iter()
+        .enumerate()
+        .take(end_line.saturating_add(1))
+        .skip(start_line)
+    {
         let line_len = line.chars().count();
         let sel_start = if line_idx == start_line { start_col } else { 0 };
         let sel_end = if line_idx == end_line {
@@ -5468,8 +5694,7 @@ fn slice_by_char(input: &str, start: usize, end: usize) -> String {
     }
     let mut start_byte = None;
     let mut end_byte = None;
-    let mut count = 0usize;
-    for (idx, _) in input.char_indices() {
+    for (count, (idx, _)) in input.char_indices().enumerate() {
         if count == start {
             start_byte = Some(idx);
         }
@@ -5477,10 +5702,9 @@ fn slice_by_char(input: &str, start: usize, end: usize) -> String {
             end_byte = Some(idx);
             break;
         }
-        count += 1;
     }
-    let start_byte = start_byte.unwrap_or_else(|| input.len());
-    let end_byte = end_byte.unwrap_or_else(|| input.len());
+    let start_byte = start_byte.unwrap_or(input.len());
+    let end_byte = end_byte.unwrap_or(input.len());
     input[start_byte..end_byte].to_string()
 }
 
@@ -6096,55 +6320,42 @@ fn handle_mouse_drag(
                     .map(|(line_idx, col, _text_width, lines)| (line_idx, col, lines)),
                 UiSelectionPane::AgentConsole => {
                     map_agent_console_mouse(mouse, screen, state, true)
-                        .map(|(line_idx, col, lines)| (line_idx, col, lines))
                 }
                 UiSelectionPane::GamesPetriDish => {
                     map_games_petri_mouse(mouse, screen, state, true)
-                        .map(|(line_idx, col, lines)| (line_idx, col, lines))
                 }
                 UiSelectionPane::VisualizerMain => {
                     map_visualizer_main_mouse(mouse, screen, state, theme, true)
-                        .map(|(line_idx, col, lines)| (line_idx, col, lines))
                 }
                 UiSelectionPane::VisualizerSide => {
                     map_visualizer_side_mouse(mouse, screen, state, theme, true)
-                        .map(|(line_idx, col, lines)| (line_idx, col, lines))
                 }
                 UiSelectionPane::GateMonitor => {
                     map_gate_monitor_mouse(mouse, screen, state, theme, true)
-                        .map(|(line_idx, col, lines)| (line_idx, col, lines))
                 }
                 UiSelectionPane::HelpPopup => {
                     map_help_popup_mouse(mouse, screen, state, theme, true)
-                        .map(|(line_idx, col, lines)| (line_idx, col, lines))
                 }
                 UiSelectionPane::GamesAnalysisPopup => {
                     map_analysis_popup_mouse(mouse, screen, state, theme, true)
-                        .map(|(line_idx, col, lines)| (line_idx, col, lines))
                 }
                 UiSelectionPane::GamesRunBrowserPopup => {
                     map_run_browser_popup_mouse(mouse, screen, state, theme, true)
-                        .map(|(line_idx, col, lines)| (line_idx, col, lines))
                 }
                 UiSelectionPane::GamesReplayPopup => {
                     map_replay_popup_mouse(mouse, screen, state, theme, true)
-                        .map(|(line_idx, col, lines)| (line_idx, col, lines))
                 }
                 UiSelectionPane::GamesStrategyPopup => {
                     map_strategy_popup_mouse(mouse, screen, state, theme, true)
-                        .map(|(line_idx, col, lines)| (line_idx, col, lines))
                 }
                 UiSelectionPane::GamesTmSimPopupLeft | UiSelectionPane::GamesTmSimPopupRight => {
                     map_tm_sim_popup_mouse_for_pane(mouse, screen, state, theme, true, pane)
-                        .map(|(line_idx, col, lines)| (line_idx, col, lines))
                 }
                 UiSelectionPane::GamesCaSimPopupLeft | UiSelectionPane::GamesCaSimPopupRight => {
                     map_ca_sim_popup_mouse_for_pane(mouse, screen, state, theme, true, pane)
-                        .map(|(line_idx, col, lines)| (line_idx, col, lines))
                 }
                 UiSelectionPane::GamesMatchHistoryPopup => {
                     map_match_history_popup_mouse(mouse, screen, state, theme, true)
-                        .map(|(line_idx, col, lines)| (line_idx, col, lines))
                 }
             };
             let Some((line_idx, col, lines)) = result else {
@@ -6350,8 +6561,7 @@ fn mouse_to_buffer_pos(
 
 fn display_col_for_char_idx(line: &str, char_idx: usize, tab_width: usize) -> usize {
     let mut col = 0;
-    let mut count = 0;
-    for ch in line.chars() {
+    for (count, ch) in line.chars().enumerate() {
         if count >= char_idx {
             break;
         }
@@ -6365,7 +6575,6 @@ fn display_col_for_char_idx(line: &str, char_idx: usize, tab_width: usize) -> us
                 .max(1);
             col += w;
         }
-        count += 1;
     }
     col
 }
@@ -6741,7 +6950,22 @@ fn handle_file_tree_key(
                     state.file_tree.open = false;
                     true
                 }
-                nit_core::FileTreeKind::Dir => true,
+                nit_core::FileTreeKind::Dir => {
+                    let path = row.path.clone();
+                    if state.file_tree.expanded_dirs.contains(&path) {
+                        // Collapse the directory and any expanded descendants to avoid
+                        // background work for items that are no longer visible.
+                        state
+                            .file_tree
+                            .expanded_dirs
+                            .retain(|p| !p.starts_with(&path));
+                    } else {
+                        state.file_tree.expanded_dirs.insert(path.clone());
+                    }
+                    file_tree::rebuild_view(state, Some(path));
+                    adjust_file_tree_scroll(state, editor_area);
+                    true
+                }
                 nit_core::FileTreeKind::Loading => true,
             }
         }
@@ -6755,7 +6979,6 @@ fn handle_file_tree_key(
         | KeyCode::End => {
             let inner_height = editor_area.height.saturating_sub(2) as usize;
             let page = inner_height.max(1);
-            let old_anchor = file_tree::anchor_dir(state);
             let len = state.file_tree.rows.len();
             if len == 0 {
                 return true;
@@ -6780,11 +7003,6 @@ fn handle_file_tree_key(
                     state.file_tree.selected = len - 1;
                 }
                 _ => {}
-            }
-            let preserve = file_tree::selected_path(state);
-            let new_anchor = file_tree::anchor_dir(state);
-            if new_anchor != old_anchor {
-                file_tree::rebuild_view(state, Some(preserve));
             }
             adjust_file_tree_scroll(state, editor_area);
             true
@@ -6828,9 +7046,10 @@ fn handle_fuzzy_search_key(
             true
         }
         KeyEvent {
-            code: KeyCode::Enter,
+            code: KeyCode::Enter | KeyCode::Char('\n') | KeyCode::Char('\r'),
+            modifiers,
             ..
-        } => match state.fuzzy_search.mode {
+        } if modifiers.is_empty() => match state.fuzzy_search.mode {
             SearchMode::Files => {
                 let Some(item) = state
                     .fuzzy_search
@@ -6846,6 +7065,7 @@ fn handle_fuzzy_search_key(
                 }
                 let path = item.abs_path.clone();
                 let _ = apply_action_with_syntax(state, syntax, Action::OpenFile(path));
+                state.file_tree.open = false;
                 state.fuzzy_search.close();
                 runtime.preview_model = None;
                 runtime.last_preview_key = None;
@@ -6876,6 +7096,7 @@ fn handle_fuzzy_search_key(
                     buf.cursor.col = col.saturating_sub(1);
                     buf.ensure_visible();
                 }
+                state.file_tree.open = false;
                 state.fuzzy_search.close();
                 runtime.preview_model = None;
                 runtime.last_preview_key = None;
@@ -7143,20 +7364,6 @@ fn handle_fuzzy_search_key(
         } if modifiers.is_empty() => {
             // Some terminals report Ctrl+K as a raw control character.
             state.fuzzy_search.selected = state.fuzzy_search.selected.saturating_sub(1);
-            adjust_fuzzy_scroll(state, list_height);
-            runtime.request_preview_for_selection(state);
-            true
-        }
-        KeyEvent {
-            code: KeyCode::Char('\n'),
-            modifiers,
-            ..
-        } if modifiers.is_empty() => {
-            // Some terminals report Ctrl+J as a raw control character.
-            let len = fuzzy_results_len(state);
-            if len > 0 {
-                state.fuzzy_search.selected = (state.fuzzy_search.selected + 1).min(len - 1);
-            }
             adjust_fuzzy_scroll(state, list_height);
             runtime.request_preview_for_selection(state);
             true
@@ -8074,7 +8281,7 @@ fn write_agent_run_provenance(state: &AppState, mission_id: &str) -> io::Result<
             .collect::<Vec<_>>(),
     });
     let run_json = serde_json::to_string_pretty(&run_payload)
-        .map_err(|err| io::Error::new(io::ErrorKind::Other, format!("serde run.json: {err}")))?;
+        .map_err(|err| io::Error::other(format!("serde run.json: {err}")))?;
     fs::write(run_dir.join("run.json"), run_json)?;
 
     let mut thread_md = String::new();
@@ -8245,6 +8452,34 @@ mod tests {
     }
 
     #[test]
+    fn agent_chat_parses_all_prefix_as_broadcast() {
+        let mut state = state_for_test();
+        state.agents.chat_input = "@all hello swarm".into();
+        let sent = push_chat_message(&mut state);
+        assert_eq!(
+            sent,
+            Some((AgentChannel::Broadcast, "hello swarm".to_string()))
+        );
+        let last = state.agents.messages.last().expect("message");
+        assert!(matches!(last.channel, AgentChannel::Broadcast));
+        assert_eq!(last.text, "hello swarm");
+    }
+
+    #[test]
+    fn agent_chat_does_not_treat_allies_as_broadcast() {
+        let mut state = state_for_test();
+        state.agents.chat_input = "@allies hello".into();
+        let sent = push_chat_message(&mut state);
+        assert_eq!(
+            sent,
+            Some((AgentChannel::Agent, "@allies hello".to_string()))
+        );
+        let last = state.agents.messages.last().expect("message");
+        assert!(matches!(last.channel, AgentChannel::Agent));
+        assert_eq!(last.text, "@allies hello");
+    }
+
+    #[test]
     fn codex_turn_completed_stores_mission_thread_id_and_marks_live() {
         let mut state = state_for_test();
         state.agents.missions.push(MissionRecord {
@@ -8355,11 +8590,10 @@ mod tests {
         });
 
         assert!(reset_roster_context(&mut state));
-        assert!(state
+        assert!(!state
             .agents
             .codex_mission_thread_ids
-            .get("mis-001")
-            .is_none());
+            .contains_key("mis-001"));
         assert!(state
             .agents
             .messages
@@ -8420,18 +8654,21 @@ mod tests {
         state.focus = PaneId::Notes;
         state.agents.console_scroll = 9;
         let mut vitals = VitalsState::default();
+        let mut swarm = SwarmRuntime::default();
 
         assert!(handle_agent_station_key(
             KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE),
             &mut state,
             &mut vitals,
-            None
+            None,
+            &mut swarm
         ));
         assert!(handle_agent_station_key(
             KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE),
             &mut state,
             &mut vitals,
-            None
+            None,
+            &mut swarm
         ));
         assert_eq!(state.agents.chat_input, "hi");
         assert_eq!(state.agents.chat_input_cursor, 2);
@@ -8440,7 +8677,8 @@ mod tests {
             KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
             &mut state,
             &mut vitals,
-            None
+            None,
+            &mut swarm
         ));
         assert_eq!(state.agents.chat_input, "");
         assert_eq!(state.agents.chat_input_cursor, 0);
@@ -8456,12 +8694,14 @@ mod tests {
         state.agents.chat_input = "clear me".into();
         state.agents.chat_input_cursor = state.agents.chat_input.chars().count();
         let mut vitals = VitalsState::default();
+        let mut swarm = SwarmRuntime::default();
 
         assert!(handle_agent_station_key(
             KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
             &mut state,
             &mut vitals,
-            None
+            None,
+            &mut swarm
         ));
         assert_eq!(state.agents.chat_input, "");
         assert_eq!(state.agents.chat_input_cursor, 0);
@@ -8474,18 +8714,21 @@ mod tests {
         state.agents.chat_input = "helo".into();
         state.agents.chat_input_cursor = 4;
         let mut vitals = VitalsState::default();
+        let mut swarm = SwarmRuntime::default();
 
         assert!(handle_agent_station_key(
             KeyEvent::new(KeyCode::Left, KeyModifiers::empty()),
             &mut state,
             &mut vitals,
-            None
+            None,
+            &mut swarm
         ));
         assert!(handle_agent_station_key(
             KeyEvent::new(KeyCode::Char('l'), KeyModifiers::empty()),
             &mut state,
             &mut vitals,
-            None
+            None,
+            &mut swarm
         ));
         assert_eq!(state.agents.chat_input, "hello");
 
@@ -8493,7 +8736,8 @@ mod tests {
             KeyEvent::new(KeyCode::Right, KeyModifiers::empty()),
             &mut state,
             &mut vitals,
-            None
+            None,
+            &mut swarm
         ));
         assert_eq!(state.agents.chat_input_cursor, 5);
     }
@@ -8505,12 +8749,14 @@ mod tests {
         state.agents.chat_input = "abcd\nxy\nlast".into();
         state.agents.chat_input_cursor = 3;
         let mut vitals = VitalsState::default();
+        let mut swarm = SwarmRuntime::default();
 
         assert!(handle_agent_station_key(
             KeyEvent::new(KeyCode::Down, KeyModifiers::empty()),
             &mut state,
             &mut vitals,
-            None
+            None,
+            &mut swarm
         ));
         assert_eq!(state.agents.chat_input_cursor, 7);
 
@@ -8518,7 +8764,8 @@ mod tests {
             KeyEvent::new(KeyCode::Down, KeyModifiers::empty()),
             &mut state,
             &mut vitals,
-            None
+            None,
+            &mut swarm
         ));
         assert_eq!(state.agents.chat_input_cursor, 10);
 
@@ -8526,7 +8773,8 @@ mod tests {
             KeyEvent::new(KeyCode::Up, KeyModifiers::empty()),
             &mut state,
             &mut vitals,
-            None
+            None,
+            &mut swarm
         ));
         assert_eq!(state.agents.chat_input_cursor, 7);
     }
@@ -8539,12 +8787,14 @@ mod tests {
         state.agents.chat_input_cursor = 0;
         state.agents.console_scroll = 3;
         let mut vitals = VitalsState::default();
+        let mut swarm = SwarmRuntime::default();
 
         assert!(handle_agent_station_key(
             KeyEvent::new(KeyCode::Down, KeyModifiers::empty()),
             &mut state,
             &mut vitals,
-            None
+            None,
+            &mut swarm
         ));
         assert_eq!(state.agents.chat_input_cursor, 4);
         assert_eq!(state.agents.console_scroll, 3);
@@ -8553,7 +8803,8 @@ mod tests {
             KeyEvent::new(KeyCode::Up, KeyModifiers::empty()),
             &mut state,
             &mut vitals,
-            None
+            None,
+            &mut swarm
         ));
         assert_eq!(state.agents.chat_input_cursor, 0);
         assert_eq!(state.agents.console_scroll, 3);
@@ -8619,12 +8870,14 @@ mod tests {
         state.agents.chat_input = "  code block:\n    let x = 1;\n".into();
         state.agents.chat_input_cursor = state.agents.chat_input.chars().count();
         let mut vitals = VitalsState::default();
+        let mut swarm = SwarmRuntime::default();
 
         assert!(handle_agent_station_key(
             KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
             &mut state,
             &mut vitals,
-            None
+            None,
+            &mut swarm
         ));
         assert_eq!(state.agents.messages.len(), 1);
         assert_eq!(
@@ -8641,12 +8894,14 @@ mod tests {
         state.agents.chat_input = markdown.into();
         state.agents.chat_input_cursor = state.agents.chat_input.chars().count();
         let mut vitals = VitalsState::default();
+        let mut swarm = SwarmRuntime::default();
 
         assert!(handle_agent_station_key(
             KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
             &mut state,
             &mut vitals,
-            None
+            None,
+            &mut swarm
         ));
         assert_eq!(state.agents.messages.len(), 1);
         assert_eq!(state.agents.messages[0].text, markdown);
@@ -9023,7 +9278,7 @@ mod tests {
             let visible = (0..visible_height)
                 .filter_map(|row| {
                     let idx = visible_start.saturating_add(row);
-                    lines.get(idx).map(|line| line.clone())
+                    lines.get(idx).cloned()
                 })
                 .collect::<Vec<_>>();
             panic!("payl line visible after scroll; visible={visible:?}");
@@ -9666,12 +9921,14 @@ mod tests {
         state.agents.chat_input = "draft message".into();
         state.agents.chat_input_cursor = state.agents.chat_input.chars().count();
         let mut vitals = VitalsState::default();
+        let mut swarm = SwarmRuntime::default();
 
         assert!(handle_agent_station_key(
             KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
             &mut state,
             &mut vitals,
-            None
+            None,
+            &mut swarm
         ));
         assert!(state.ui_selection.is_none());
         assert_eq!(state.agents.chat_input, "draft message");
@@ -9685,12 +9942,14 @@ mod tests {
         state.agents.chat_input = "draft message".into();
         state.agents.chat_input_cursor = state.agents.chat_input.chars().count();
         let mut vitals = VitalsState::default();
+        let mut swarm = SwarmRuntime::default();
 
         assert!(!handle_agent_station_key(
             KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
             &mut state,
             &mut vitals,
-            None
+            None,
+            &mut swarm
         ));
         assert!(state.ui_selection.is_none());
         assert_eq!(state.agents.chat_input, "draft message");
@@ -9804,13 +10063,15 @@ mod tests {
         state.mode = Mode::Insert;
         let mut input = InputState::new();
         let mut vitals = VitalsState::default();
+        let mut swarm = SwarmRuntime::default();
 
         // Scratchpad editing should flow through the normal action keymap.
         assert!(!handle_agent_station_key(
             KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE),
             &mut state,
             &mut vitals,
-            None
+            None,
+            &mut swarm
         ));
         let action = map_key_to_action(
             KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE),
@@ -9829,12 +10090,14 @@ mod tests {
         state.agents.dock_tab = AgentOpsTab::Scratchpad;
         state.mode = Mode::Insert;
         let mut vitals = VitalsState::default();
+        let mut swarm = SwarmRuntime::default();
 
         assert!(handle_agent_station_key(
             KeyEvent::new(KeyCode::Tab, KeyModifiers::empty()),
             &mut state,
             &mut vitals,
-            None
+            None,
+            &mut swarm
         ));
         assert_eq!(state.agents.dock_tab, AgentOpsTab::Roster);
         assert_eq!(state.mode, Mode::Normal);
@@ -9846,12 +10109,14 @@ mod tests {
         state.focus = PaneId::JobOutput;
         state.agents.dock_tab = AgentOpsTab::Roster;
         let mut vitals = VitalsState::default();
+        let mut swarm = SwarmRuntime::default();
 
         assert!(handle_agent_station_key(
             KeyEvent::new(KeyCode::Right, KeyModifiers::empty()),
             &mut state,
             &mut vitals,
-            None
+            None,
+            &mut swarm
         ));
         assert_eq!(state.agents.dock_tab, AgentOpsTab::Missions);
 
@@ -9859,7 +10124,8 @@ mod tests {
             KeyEvent::new(KeyCode::Left, KeyModifiers::empty()),
             &mut state,
             &mut vitals,
-            None
+            None,
+            &mut swarm
         ));
         assert_eq!(state.agents.dock_tab, AgentOpsTab::Roster);
     }

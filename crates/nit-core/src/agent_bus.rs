@@ -350,7 +350,7 @@ fn upsert_agent(state: &mut AppState, agent: AgentLane) {
     };
     state.agents.agents[existing_idx] = agent;
     if state.agents.selected_agent.is_none() {
-        state.agents.selected_agent = state.agents.agents.get(0).map(|a| a.id.clone());
+        state.agents.selected_agent = state.agents.agents.first().map(|a| a.id.clone());
     }
     state.agents.roster_selected = state
         .agents
@@ -384,7 +384,7 @@ fn upsert_mission(state: &mut AppState, mission: MissionRecord) {
             state.agents.mission_selected = idx;
         }
     } else if !state.agents.missions.is_empty() {
-        state.agents.selected_mission = state.agents.missions.get(0).map(|m| m.id.clone());
+        state.agents.selected_mission = state.agents.missions.first().map(|m| m.id.clone());
         state.agents.mission_selected = 0;
     }
 
@@ -412,8 +412,8 @@ fn estimate_codex_context_tokens(text: &str) -> u32 {
     if text.is_empty() {
         return 0;
     }
-    let bytes = text.as_bytes().len() as u32;
-    (bytes + 3) / 4
+    let bytes = text.len() as u32;
+    bytes.div_ceil(4)
 }
 
 fn timestamp_label(state: &AppState) -> String {

@@ -294,7 +294,7 @@ fn draw_legend_line(
                 let cols = render_area.width as usize;
                 if cols > 0 {
                     let total = stream.len().max(1);
-                    let stride = (total + cols - 1) / cols;
+                    let stride = total.div_ceil(cols);
                     if stride > 1 {
                         writer.write_sep();
                         writer.write_str("stride=");
@@ -333,7 +333,8 @@ fn draw_inspector_line(
     let idx = y.saturating_mul(w).saturating_add(x);
     match seed.encoder_id {
         SeedEncoderId::AsciiBytes => {
-            let value = seed.base_values.get(x, y) as u8;
+            let value = seed.base_values.get(x, y);
+            let printable = (0x20..=0x7e).contains(&value);
             writer.write_str("IDX:");
             writer.write_u32(idx as u32);
             writer.write_sep();
@@ -346,7 +347,7 @@ fn draw_inspector_line(
             writer.write_hex_u8(value);
             writer.write_sep();
             writer.write_str("ASCII:");
-            if value >= 0x20 && value <= 0x7e {
+            if printable {
                 writer.write_char(value as char);
             } else {
                 writer.write_char('.');
@@ -355,7 +356,7 @@ fn draw_inspector_line(
             writer.write_str("CLASS:");
             if matches!(value, b' ' | b'\t' | b'\n' | b'\r') {
                 writer.write_str("WS");
-            } else if value >= 0x20 && value <= 0x7e {
+            } else if printable {
                 writer.write_str("PRINT");
             } else {
                 writer.write_str("CTRL");
@@ -447,7 +448,7 @@ fn draw_genome_crosshair(
             if let Some(stream) = seed_runtime.render_cache().hilbert_stream.as_ref() {
                 let total = stream.len().max(1);
                 if cols > 0 {
-                    let stride = (total + cols - 1) / cols;
+                    let stride = total.div_ceil(cols);
                     if stride > 0 {
                         let col = idx / stride;
                         if col < cols {
@@ -802,6 +803,7 @@ fn write_line(buf: &mut Buffer, area: ratatui::layout::Rect, y: u16, text: &str,
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn write_kv(
     buf: &mut Buffer,
     area: ratatui::layout::Rect,

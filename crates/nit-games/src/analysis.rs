@@ -369,8 +369,7 @@ pub fn analyze_history(
 
     let summary_path = Path::new(&paths.summary).to_path_buf();
     write_atomic(&summary_path, |writer| {
-        serde_json::to_writer_pretty(writer, &summary)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
+        serde_json::to_writer_pretty(writer, &summary).map_err(std::io::Error::other)
     })
     .map_err(|err| format!("Failed to write analysis summary: {err}"))?;
 

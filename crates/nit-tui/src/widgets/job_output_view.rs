@@ -113,11 +113,7 @@ fn log_style(line: &str, theme: &Theme) -> Style {
             .add_modifier(Modifier::BOLD)
     } else if upper.contains("SECURITY") {
         Style::default().fg(theme.accent)
-    } else if upper.contains("DEBUG") {
-        Style::default()
-            .fg(theme.border)
-            .add_modifier(Modifier::DIM)
-    } else if upper.contains("HEARTBEAT") {
+    } else if upper.contains("DEBUG") || upper.contains("HEARTBEAT") {
         Style::default()
             .fg(theme.border)
             .add_modifier(Modifier::DIM)

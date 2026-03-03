@@ -105,12 +105,10 @@ fn split_at_char(input: &str, idx: usize) -> (String, String) {
     if idx == 0 {
         return ("".into(), input.to_string());
     }
-    let mut count = 0usize;
-    for (byte_idx, _) in input.char_indices() {
+    for (count, (byte_idx, _)) in input.char_indices().enumerate() {
         if count == idx {
             return (input[..byte_idx].to_string(), input[byte_idx..].to_string());
         }
-        count += 1;
     }
     (input.to_string(), "".into())
 }

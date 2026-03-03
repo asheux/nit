@@ -147,10 +147,7 @@ impl SyntaxRuntime {
             let start_version = current_version
                 .saturating_sub(edits.len() as u64)
                 .saturating_add(1);
-            let entry = self
-                .edits_since_snapshot
-                .entry(buffer_id)
-                .or_insert_with(Vec::new);
+            let entry = self.edits_since_snapshot.entry(buffer_id).or_default();
             for (idx, edit) in edits.iter().enumerate() {
                 entry.push(VersionedEdit {
                     version: start_version + idx as u64,
@@ -568,6 +565,44 @@ fn log_rate_limited(lock: &'static OnceLock<Mutex<Instant>>, interval: Duration,
 
 static HIGHLIGHT_SCHEDULE_LOG: OnceLock<Mutex<Instant>> = OnceLock::new();
 
+fn config_to_syntax(config: HighlightConfig) -> nit_syntax::SyntaxConfig {
+    let engine = match config.engine {
+        HighlightEngine::TreeSitter => nit_syntax::EngineKind::TreeSitter,
+        HighlightEngine::Plain => nit_syntax::EngineKind::Plain,
+    };
+    nit_syntax::SyntaxConfig {
+        enabled: config.enabled,
+        engine,
+        debounce_ms: config.debounce_ms,
+        max_file_bytes: config.max_file_bytes,
+        max_spans_per_line: config.max_spans_per_line,
+    }
+}
+
+fn adaptive_debounce_ms(base_ms: u64, bytes: usize) -> u64 {
+    if bytes >= 1_500_000 {
+        base_ms.max(500)
+    } else if bytes >= 800_000 {
+        base_ms.max(300)
+    } else if bytes >= 300_000 {
+        base_ms.max(150)
+    } else {
+        base_ms
+    }
+}
+
+fn adaptive_max_spans_per_line(base: usize, bytes: usize) -> usize {
+    if bytes >= 1_500_000 {
+        base.min(64)
+    } else if bytes >= 800_000 {
+        base.min(96)
+    } else if bytes >= 300_000 {
+        base.min(128)
+    } else {
+        base
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -700,43 +735,5 @@ mod tests {
         assert_eq!(map[2], Some(1));
         assert_eq!(map[3], Some(2));
         assert_eq!(map[4], None);
-    }
-}
-
-fn config_to_syntax(config: HighlightConfig) -> nit_syntax::SyntaxConfig {
-    let engine = match config.engine {
-        HighlightEngine::TreeSitter => nit_syntax::EngineKind::TreeSitter,
-        HighlightEngine::Plain => nit_syntax::EngineKind::Plain,
-    };
-    nit_syntax::SyntaxConfig {
-        enabled: config.enabled,
-        engine,
-        debounce_ms: config.debounce_ms,
-        max_file_bytes: config.max_file_bytes,
-        max_spans_per_line: config.max_spans_per_line,
-    }
-}
-
-fn adaptive_debounce_ms(base_ms: u64, bytes: usize) -> u64 {
-    if bytes >= 1_500_000 {
-        base_ms.max(500)
-    } else if bytes >= 800_000 {
-        base_ms.max(300)
-    } else if bytes >= 300_000 {
-        base_ms.max(150)
-    } else {
-        base_ms
-    }
-}
-
-fn adaptive_max_spans_per_line(base: usize, bytes: usize) -> usize {
-    if bytes >= 1_500_000 {
-        base.min(64)
-    } else if bytes >= 800_000 {
-        base.min(96)
-    } else if bytes >= 300_000 {
-        base.min(128)
-    } else {
-        base
     }
 }

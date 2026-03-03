@@ -79,7 +79,7 @@ pub struct GolRuleConfig {
     pub workspace_override: bool,
 }
 
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, Default)]
 pub struct GolRulesConfig {
     pub user: Vec<GolUserRule>,
 }
@@ -92,7 +92,7 @@ pub struct GolUserRule {
     pub description: String,
 }
 
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, Default)]
 pub struct Settings {
     pub highlight: HighlightConfig,
     pub editor: EditorConfig,
@@ -172,18 +172,4 @@ impl Default for GolRuleConfig {
     }
 }
 
-impl Default for GolRulesConfig {
-    fn default() -> Self {
-        Self { user: Vec::new() }
-    }
-}
-
-impl Default for Settings {
-    fn default() -> Self {
-        Self {
-            highlight: HighlightConfig::default(),
-            editor: EditorConfig::default(),
-            gol: GolConfig::default(),
-        }
-    }
-}
+// Defaults for GolRulesConfig and Settings are derived.

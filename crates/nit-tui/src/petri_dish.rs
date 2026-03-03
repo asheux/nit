@@ -794,9 +794,7 @@ impl PetriDishRuntime {
         }
 
         let grid_hash = grid_fingerprint(&session.grid);
-        let is_new_attractor = self
-            .last_attractor_hash
-            .map_or(true, |prev| prev != grid_hash);
+        let is_new_attractor = self.last_attractor_hash != Some(grid_hash);
         self.last_attractor_hash = Some(grid_hash);
 
         let snapshot_event = event.clone();
@@ -1068,6 +1066,7 @@ impl PetriDishRuntime {
         let _ = self.snapshot.enqueue(req);
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn build_snapshot_meta(
         &self,
         state: &AppState,
@@ -1582,6 +1581,7 @@ fn search_worker_loop(cmd_rx: Receiver<SearchCommand>, event_tx: Sender<WorkerEv
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn handle_search_command(
     cmd: SearchCommand,
     search_active: &mut bool,

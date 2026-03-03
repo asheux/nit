@@ -17,8 +17,8 @@ const MIN_WIDTH: u16 = 64;
 const MIN_HEIGHT: u16 = 18;
 
 pub fn preferred_size(screen: Rect) -> (u16, u16) {
-    let width = screen.width.min(96).max(MIN_WIDTH);
-    let height = screen.height.min(32).max(MIN_HEIGHT);
+    let width = screen.width.clamp(MIN_WIDTH, 96);
+    let height = screen.height.clamp(MIN_HEIGHT, 32);
     (width, height)
 }
 

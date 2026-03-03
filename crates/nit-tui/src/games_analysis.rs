@@ -18,8 +18,8 @@ pub enum AnalysisCommand {
 }
 
 pub enum AnalysisEvent {
-    Started(AnalysisRequest),
-    Finished(HistoryAnalysis),
+    Started(Box<AnalysisRequest>),
+    Finished(Box<HistoryAnalysis>),
     Error(String),
 }
 
@@ -57,10 +57,10 @@ impl GamesAnalysisRunner {
 }
 
 fn runner_loop(cmd_rx: Receiver<AnalysisCommand>, event_tx: Sender<AnalysisEvent>) {
-    loop {
-        match cmd_rx.recv() {
-            Ok(AnalysisCommand::Analyze(request)) => {
-                let _ = event_tx.send(AnalysisEvent::Started(request.clone()));
+    while let Ok(command) = cmd_rx.recv() {
+        match command {
+            AnalysisCommand::Analyze(request) => {
+                let _ = event_tx.send(AnalysisEvent::Started(Box::new(request.clone())));
                 let config = AnalysisConfig {
                     tail_rounds: request.tail_rounds,
                     trajectory_samples: request.trajectory_samples,
@@ -68,14 +68,14 @@ fn runner_loop(cmd_rx: Receiver<AnalysisCommand>, event_tx: Sender<AnalysisEvent
                 };
                 match analyze_history(&request.history_path, &request.out_dir, config) {
                     Ok(result) => {
-                        let _ = event_tx.send(AnalysisEvent::Finished(result));
+                        let _ = event_tx.send(AnalysisEvent::Finished(Box::new(result)));
                     }
                     Err(err) => {
                         let _ = event_tx.send(AnalysisEvent::Error(err));
                     }
                 }
             }
-            Ok(AnalysisCommand::Shutdown) | Err(_) => break,
+            AnalysisCommand::Shutdown => break,
         }
     }
 }

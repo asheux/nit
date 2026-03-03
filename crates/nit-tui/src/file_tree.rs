@@ -14,46 +14,28 @@ pub fn selected_path(state: &AppState) -> PathBuf {
 
 pub fn needed_dirs(state: &AppState) -> Vec<PathBuf> {
     let root = state.file_tree.root.clone();
-    let anchor = anchor_dir(state);
 
     let mut out = Vec::new();
     let mut seen = HashSet::new();
-    let mut cur = anchor;
-    loop {
-        if !cur.starts_with(&root) {
-            break;
-        }
-        if seen.insert(cur.clone()) {
-            out.push(cur.clone());
-        }
-        if cur == root {
-            break;
-        }
-        let Some(parent) = cur.parent() else {
-            break;
-        };
-        cur = parent.to_path_buf();
-    }
     if seen.insert(root.clone()) {
-        out.push(root);
+        out.push(root.clone());
+    }
+    let mut expanded = state
+        .file_tree
+        .expanded_dirs
+        .iter()
+        .cloned()
+        .collect::<Vec<_>>();
+    expanded.sort();
+    for dir in expanded {
+        if !dir.starts_with(&root) {
+            continue;
+        }
+        if seen.insert(dir.clone()) {
+            out.push(dir);
+        }
     }
     out
-}
-
-pub fn anchor_dir(state: &AppState) -> PathBuf {
-    let root = state.file_tree.root.clone();
-    let selected = selected_path(state);
-    let selected_kind = state
-        .file_tree
-        .rows
-        .get(state.file_tree.selected)
-        .map(|r| r.kind)
-        .unwrap_or(FileTreeKind::Dir);
-    match selected_kind {
-        FileTreeKind::Dir => selected,
-        FileTreeKind::File => selected.parent().unwrap_or(root.as_path()).to_path_buf(),
-        FileTreeKind::Loading => root,
-    }
 }
 
 pub fn clear_cache(state: &mut AppState) {
@@ -89,7 +71,7 @@ pub fn rebuild_view(state: &mut AppState, preserve_path: Option<PathBuf>) {
         return;
     }
 
-    append_dir(state, &root, 0, &desired, &mut rows);
+    append_dir(state, &root, 0, &mut rows);
 
     let new_selected = rows
         .iter()
@@ -108,18 +90,12 @@ pub fn rebuild_view(state: &mut AppState, preserve_path: Option<PathBuf>) {
     }
 }
 
-fn append_dir(
-    state: &AppState,
-    dir: &Path,
-    depth: usize,
-    selected_path: &Path,
-    out: &mut Vec<FileTreeRow>,
-) {
+fn append_dir(state: &AppState, dir: &Path, depth: usize, out: &mut Vec<FileTreeRow>) {
     let Some(entries) = state.file_tree.cache.get(dir) else {
         return;
     };
     for entry in entries {
-        let expanded = entry.is_dir && selected_path.starts_with(&entry.path);
+        let expanded = entry.is_dir && state.file_tree.expanded_dirs.contains(&entry.path);
         let mut text = String::new();
         for _ in 0..depth {
             text.push_str("  ");
@@ -151,7 +127,7 @@ fn append_dir(
         });
 
         if expanded {
-            append_dir(state, &entry.path, depth + 1, selected_path, out);
+            append_dir(state, &entry.path, depth + 1, out);
         }
     }
 }

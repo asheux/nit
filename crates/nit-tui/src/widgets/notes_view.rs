@@ -7,6 +7,7 @@ use crate::{
     widgets::editor_view::{render_buffer, CursorPlacement},
 };
 
+#[allow(clippy::too_many_arguments)]
 pub fn render_notes(
     frame: &mut Frame,
     area: ratatui::layout::Rect,

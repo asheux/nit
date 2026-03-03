@@ -1126,8 +1126,8 @@ impl TournamentKernel {
             self.schedule
                 .par_iter()
                 .map(move |matchup| {
-                    let event_tx = event_sender_for_run.as_ref().map(Sender::clone);
-                    let history_tx = history_sender_for_run.as_ref().map(Sender::clone);
+                    let event_tx = event_sender_for_run.clone();
+                    let history_tx = history_sender_for_run.clone();
                     let mut emit_event = move |event: GameEvent| {
                         if let Some(sender) = event_tx.as_ref() {
                             let _ = sender.send(event);
@@ -1191,6 +1191,7 @@ impl TournamentKernel {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_match_core<E, H>(
     matchup: &Matchup,
     config: &NormalizedConfig,

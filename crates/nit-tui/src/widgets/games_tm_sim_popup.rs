@@ -60,8 +60,8 @@ enum SimCacheState {
 }
 
 pub fn preferred_size(screen: Rect) -> (u16, u16) {
-    let width = screen.width.min(140).max(MIN_WIDTH);
-    let height = screen.height.min(45).max(MIN_HEIGHT);
+    let width = screen.width.clamp(MIN_WIDTH, 140);
+    let height = screen.height.clamp(MIN_HEIGHT, 45);
     (width, height)
 }
 
@@ -505,6 +505,7 @@ fn tm_spec_hash(
     hasher.finish()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn simulate_tm_cached(
     key: SimKey,
     input: u64,
@@ -560,6 +561,7 @@ fn simulate_tm_cached(
     tm_sim_pending()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn simulate_tm(
     input: u64,
     symbols: u8,

@@ -62,6 +62,12 @@ impl PlainTextEngine {
     }
 }
 
+impl Default for PlainTextEngine {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SyntaxEngine for PlainTextEngine {
     fn detect_language(
         &self,

@@ -1,15 +1,12 @@
 use std::path::PathBuf;
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Copy, Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize, Default,
+)]
 pub enum SearchMode {
+    #[default]
     Files,
     Content,
-}
-
-impl Default for SearchMode {
-    fn default() -> Self {
-        Self::Files
-    }
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]

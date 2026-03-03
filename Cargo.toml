@@ -44,3 +44,6 @@ criterion = "0.5"
 [profile.release]
 debug = true
 lto = "thin"
+
+[patch.crates-io]
+time = { path = "vendor/time" }

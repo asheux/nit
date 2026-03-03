@@ -85,6 +85,21 @@ It's meant for quick confidence after changes to UI, commands, or engine wiring.
 - Verify a turn over MCP:
   - Focus Agent Chat (from Agent Ops: `Enter`).
   - Send a short prompt; expect: stage updates while running and an agent reply appended to the thread.
+- Verify parallel turns (multi-agent):
+  - Launch with `cargo run -- --agents codex --codex-max-parallel-turns 2`.
+  - In Agent Ops (Roster): select a model, `Enter` to Agent Chat, send a prompt.
+  - While the first turn is running: return to Agent Ops, select a different model, `Enter`, send another prompt.
+  - Expect: both models show `RUNNING` in the roster, Agent Chat shows a multi-agent “Working” table, and replies arrive independently.
+  - Optional: create a mission (`n` in Agent Ops), then in Agent Chat send `@all <prompt>` to broadcast to the mission’s assigned Codex agents.
+- Verify `@swarm` orchestration (task splitting + synthesis):
+  - In Agent Chat (any Codex model selected): send `@swarm 4 template=lab <prompt>` (or omit `template=...` since `lab` is the default).
+  - Expect: a new mission is created (Missions tab shows `SWM yes`) and the planner runs first (phase `PLAN`).
+  - Expect: after the planner returns a JSON plan, tasks run as a DAG (phase `EXECUTE`, status like `EXEC 1/6`), with some tasks queued until their deps finish.
+  - Expect: when all task agents finish, nit runs a verifier turn (phase `VERIFY`, status `VERIFY`) to execute a built-in gate bundle when detected.
+  - Expect: after verification completes, the planner runs a synthesis turn (status `SYNTH`) and the mission status becomes:
+    - `DONE` when gates pass (or no gates were detected)
+    - `FAILED` when gates ran and failed
+    - `ERROR` when verification errored (e.g., missing/invalid gate report JSON)
 - Failure mode sanity:
   - If Codex is offline/misconfigured, expect MCP state ERROR and details in Agent diagnostics/logs.
 

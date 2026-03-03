@@ -828,9 +828,7 @@ fn assign_layers(graph: &GraphSpec) -> HashMap<usize, usize> {
     let max_layer = layers.values().copied().max().unwrap_or(0);
     let unreachable_layer = max_layer.saturating_add(1);
     for n in &graph.nodes {
-        if !layers.contains_key(&n.id) {
-            layers.insert(n.id, unreachable_layer);
-        }
+        layers.entry(n.id).or_insert(unreachable_layer);
     }
 
     layers
@@ -840,7 +838,7 @@ fn port_offset(idx: usize) -> i16 {
     if idx == 0 {
         return 0;
     }
-    let k = ((idx + 1) / 2) as i16;
+    let k = idx.div_ceil(2) as i16;
     if idx % 2 == 1 {
         -k
     } else {
@@ -914,13 +912,14 @@ fn route_path(
     let dy = ey - sy;
     let dirs = preferred_dirs(dx, dy, flow);
 
-    let mut heap: std::collections::BinaryHeap<(
+    type AStarItem = (
         Reverse<u32>,
         Reverse<u32>,
         Reverse<u16>,
         Reverse<u16>,
         usize,
-    )> = std::collections::BinaryHeap::new();
+    );
+    let mut heap: std::collections::BinaryHeap<AStarItem> = std::collections::BinaryHeap::new();
 
     g_score[start_idx] = 0;
     heap.push((
@@ -1092,7 +1091,6 @@ fn wire_char_from_mask(mask: u8) -> char {
     }
 }
 
-const COLOR_NONE: u8 = 0;
 const COLOR_WIRE0: u8 = 1;
 const COLOR_WIRE1: u8 = 2;
 const COLOR_WIRE2: u8 = 3;
@@ -1128,7 +1126,7 @@ fn wire_color_from_kind(kind: u8, theme: &Theme) -> Color {
         COLOR_WIRE3 => Color::Magenta,
         COLOR_JUNCTION => theme.border,
         COLOR_ACCENT => theme.accent,
-        COLOR_NONE | _ => theme.border_focused,
+        _ => theme.border_focused,
     }
 }
 

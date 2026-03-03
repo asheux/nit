@@ -56,8 +56,7 @@ impl HistoryWriter {
     }
 
     pub fn write(&mut self, record: &MatchHistory) -> io::Result<()> {
-        serde_json::to_writer(&mut self.writer, record)
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+        serde_json::to_writer(&mut self.writer, record).map_err(io::Error::other)?;
         self.writer.write_all(b"\n")?;
         Ok(())
     }

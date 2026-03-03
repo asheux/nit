@@ -127,12 +127,7 @@ fn preview_loop(
     let mut cache: HashMap<PreviewKey, PreviewModel> = HashMap::new();
     let mut order: VecDeque<PreviewKey> = VecDeque::new();
 
-    loop {
-        let cmd = match cmd_rx.recv() {
-            Ok(cmd) => cmd,
-            Err(_) => break,
-        };
-
+    while let Ok(cmd) = cmd_rx.recv() {
         let mut request = match cmd {
             PreviewCommand::Request {
                 generation,
@@ -235,6 +230,7 @@ fn touch_lru(order: &mut VecDeque<PreviewKey>, key: &PreviewKey) {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_preview(
     path: &Path,
     mode: SearchMode,

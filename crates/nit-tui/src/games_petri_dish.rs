@@ -39,8 +39,8 @@ const HISTORY_LOAD_CHUNK: usize = 256;
 const HISTORY_LOAD_PREFETCH: usize = 64;
 
 pub fn petri_rect(screen: Rect) -> Rect {
-    let width = screen.width.min(MIN_WIDTH).max(60);
-    let height = screen.height.min(MIN_HEIGHT).max(16);
+    let width = screen.width.clamp(60, MIN_WIDTH);
+    let height = screen.height.clamp(16, MIN_HEIGHT);
     Rect {
         x: screen.x + (screen.width.saturating_sub(width)) / 2,
         y: screen.y + (screen.height.saturating_sub(height)) / 2,
@@ -104,8 +104,7 @@ impl HistoryPreviewStore {
     }
 
     fn push(&mut self, preview: &nit_games::MatchHistoryPreview) -> std::io::Result<()> {
-        let encoded = serde_json::to_vec(preview)
-            .map_err(|err| std::io::Error::new(std::io::ErrorKind::Other, err))?;
+        let encoded = serde_json::to_vec(preview).map_err(std::io::Error::other)?;
         self.offsets.push(self.next_offset);
         self.writer.write_all(&encoded)?;
         self.writer.write_all(b"\n")?;
@@ -448,6 +447,7 @@ impl GamesPetriDishRuntime {
             self.mark_activity();
             match event {
                 AnalysisEvent::Started(request) => {
+                    let request = *request;
                     state.games.analysis.running = true;
                     state.games.analysis.last_error = None;
                     state.games.analysis.source_path =
@@ -455,6 +455,7 @@ impl GamesPetriDishRuntime {
                     state.status = Some("Games analysis started".into());
                 }
                 AnalysisEvent::Finished(result) => {
+                    let result = *result;
                     state.games.analysis.running = false;
                     state.games.analysis.last_error = None;
                     state.games.analysis.summary = Some(result.summary);
@@ -486,6 +487,7 @@ impl GamesPetriDishRuntime {
                     }
                 }
                 RunsEvent::SummaryLoaded(summary) => {
+                    let summary = *summary;
                     let pairs = summary
                         .results
                         .pairwise
@@ -598,6 +600,7 @@ impl GamesPetriDishRuntime {
                     }
                 }
                 RunnerEvent::Finished(summary) => {
+                    let summary = *summary;
                     let pairs = summary
                         .results
                         .pairwise
@@ -698,18 +701,17 @@ impl GamesPetriDishRuntime {
                 Style::default().fg(theme.warning),
             )));
         } else if self.loading_open {
+            let fallback = if state.games.family_building {
+                Some("Preparing family run...")
+            } else if state.games.pending_run {
+                Some("Preparing run config...")
+            } else {
+                None
+            };
             let loading_message = self
                 .loading_message
                 .as_deref()
-                .or_else(|| {
-                    if state.games.family_building {
-                        Some("Preparing family run...")
-                    } else if state.games.pending_run {
-                        Some("Preparing run config...")
-                    } else {
-                        None
-                    }
-                })
+                .or(fallback)
                 .unwrap_or("Starting tournament...");
             lines.push(Line::from(vec![
                 Span::styled("Status: ", label_style),
@@ -930,8 +932,7 @@ impl GamesPetriDishRuntime {
             let turbo_steps = strategy_count
                 .saturating_mul(strategy_count)
                 .saturating_div(8)
-                .max(256)
-                .min(50_000);
+                .clamp(256, 50_000);
             if request_steps_per_tick < turbo_steps {
                 request_steps_per_tick = turbo_steps;
                 state.games.steps_per_tick = turbo_steps;
@@ -996,7 +997,7 @@ impl GamesPetriDishRuntime {
             steps_per_tick: request_steps_per_tick,
         };
 
-        self.runner.send(RunnerCommand::StartRun(request));
+        self.runner.send(RunnerCommand::StartRun(Box::new(request)));
         self.loading_open = false;
         self.loading_message = None;
         self.session = Some(GameSession {
@@ -1252,13 +1253,12 @@ impl GamesPetriDishRuntime {
         }
         if let Err(err) = nit_utils::fs::write_atomic(&layout.definitions_path, |writer| {
             serde_json::to_writer_pretty(writer, &export_run.strategies)
-                .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
+                .map_err(std::io::Error::other)
         }) {
             tracing::warn!("Failed to write games definitions: {err}");
         }
         if let Err(err) = nit_utils::fs::write_atomic(&layout.results_path, |writer| {
-            serde_json::to_writer_pretty(writer, &export_run.results)
-                .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
+            serde_json::to_writer_pretty(writer, &export_run.results).map_err(std::io::Error::other)
         }) {
             tracing::warn!("Failed to write games results: {err}");
         }
@@ -1342,6 +1342,7 @@ fn tournament_progress_percent(progress: &TournamentProgress) -> f32 {
     ((done_rounds as f64 / total_rounds as f64) * 100.0) as f32
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_progress(
     progress: Option<TournamentProgress>,
     definitions: &[StrategyDefinition],
@@ -1490,6 +1491,7 @@ fn render_progress(
     lines
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_match_inspector(
     snapshot: Option<MatchSnapshot>,
     definitions: &[StrategyDefinition],
@@ -1616,6 +1618,7 @@ fn strategy_label_for_pair(id: &str, definitions: &[StrategyDefinition]) -> Stri
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_match_strip(
     snapshot: &MatchSnapshot,
     window: usize,
@@ -1656,18 +1659,24 @@ fn render_match_strip(
     let available = width.saturating_sub(prefix_len);
     let mut max_len = 3usize;
     let window_start = total.saturating_sub(window);
-    for i in window_start..total {
+    for (i, ((&idx_byte, payoff), cumulative)) in snapshot
+        .outcomes
+        .as_bytes()
+        .iter()
+        .take(total)
+        .zip(snapshot.payoffs.iter().take(total))
+        .zip(cumulative.iter())
+        .enumerate()
+        .skip(window_start)
+    {
         let round_len = (i + 1).to_string().chars().count();
-        let idx_char = snapshot.outcomes.as_bytes()[i] as char;
+        let idx_char = idx_byte as char;
         let out_len = match idx_char {
             '0' | '1' | '2' | '3' => 3,
             _ => 2,
         };
-        let payoff = snapshot.payoffs[i];
         let payoff_len = format!("{}/{}", payoff[0], payoff[1]).chars().count();
-        let total_len = format!("{}/{}", cumulative[i].0, cumulative[i].1)
-            .chars()
-            .count();
+        let total_len = format!("{}/{}", cumulative.0, cumulative.1).chars().count();
         let halt_len = halt_token(i).chars().count();
         max_len = max_len
             .max(round_len)
@@ -1706,9 +1715,18 @@ fn render_match_strip(
         format!("{:>label_w$}: ", "Hlt", label_w = label_w),
         label_style,
     ));
-    for i in start..total {
+    for (i, ((&idx_byte, payoff), cumulative)) in snapshot
+        .outcomes
+        .as_bytes()
+        .iter()
+        .take(total)
+        .zip(snapshot.payoffs.iter().take(total))
+        .zip(cumulative.iter())
+        .enumerate()
+        .skip(start)
+    {
         idx_line.push_str(&fit_right(&(i + 1).to_string()));
-        let idx_char = snapshot.outcomes.as_bytes()[i] as char;
+        let idx_char = idx_byte as char;
         let outcome = match idx_char {
             '0' => "C/C",
             '1' => "C/D",
@@ -1734,12 +1752,8 @@ fn render_match_strip(
             _ => dim_style,
         };
         halt_spans.push(Span::styled(fit_right(&halt), halt_style));
-        let payoff = snapshot.payoffs[i];
         pay_line.push_str(&fit_right(&format!("{}/{}", payoff[0], payoff[1])));
-        total_line.push_str(&fit_right(&format!(
-            "{}/{}",
-            cumulative[i].0, cumulative[i].1
-        )));
+        total_line.push_str(&fit_right(&format!("{}/{}", cumulative.0, cumulative.1)));
     }
 
     let separator = "-".repeat(width.min(prefix_len + visible * col_w));
@@ -1844,6 +1858,7 @@ fn top_table_widths(config: &nit_games::NormalizedConfig) -> (usize, usize, usiz
     (rank_w, score_w, wld_w)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_top_table(
     results: &nit_games::output::TournamentResults,
     definitions: &[nit_games::output::StrategyDefinition],
@@ -1861,6 +1876,7 @@ fn render_top_table(
     fixed_wld_w: usize,
 ) -> Vec<Line<'static>> {
     const TOP_LIMIT: usize = 15;
+    type Row = (String, String, String, String, String, u32, u32, u32);
     let mut lines = Vec::new();
     lines.push(Line::from(Span::styled("Top Strategies", header_style)));
     if definitions.is_empty() {
@@ -1878,7 +1894,7 @@ fn render_top_table(
         return lines;
     }
 
-    let rows: Vec<(String, String, String, String, String, u32, u32, u32)> = results
+    let rows: Vec<Row> = results
         .ranking
         .iter()
         .take(TOP_LIMIT)
@@ -2049,6 +2065,7 @@ fn strategy_machine_index(def: &StrategyDefinition) -> Option<u64> {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn wld_cell_spans(
     wins: u32,
     losses: u32,

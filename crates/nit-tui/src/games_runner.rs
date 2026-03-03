@@ -31,7 +31,7 @@ pub struct RunRequest {
 }
 
 pub enum RunnerCommand {
-    StartRun(RunRequest),
+    StartRun(Box<RunRequest>),
     Pause,
     Resume,
     StepOnce,
@@ -46,7 +46,7 @@ pub enum RunnerEvent {
     MatchPreview(MatchSnapshot),
     MatchHistoryPreview(MatchHistoryPreview),
     PartialLeaderboard(TournamentResults),
-    Finished(RunSummary),
+    Finished(Box<RunSummary>),
     Cancelled,
     Error(String),
 }
@@ -109,7 +109,7 @@ fn runner_loop(cmd_rx: Receiver<RunnerCommand>, event_tx: Sender<RunnerEvent>) {
     loop {
         if state.is_none() {
             match cmd_rx.recv() {
-                Ok(RunnerCommand::StartRun(request)) => match start_run(request, &event_tx) {
+                Ok(RunnerCommand::StartRun(request)) => match start_run(*request, &event_tx) {
                     Ok(run_state) => {
                         state = Some(run_state);
                         paused = false;
@@ -210,7 +210,7 @@ fn runner_loop(cmd_rx: Receiver<RunnerCommand>, event_tx: Sender<RunnerEvent>) {
             let _ = event_tx.send(RunnerEvent::PartialLeaderboard(run_state.runner.results()));
             match finalize_run(state.take().expect("run state")) {
                 Ok(summary) => {
-                    let _ = event_tx.send(RunnerEvent::Finished(summary));
+                    let _ = event_tx.send(RunnerEvent::Finished(Box::new(summary)));
                 }
                 Err(err) => {
                     let _ = event_tx.send(RunnerEvent::Error(err));
@@ -279,14 +279,12 @@ fn finalize_run(state: RunState) -> Result<RunSummary, String> {
     summary.history_log = summary.paths.history.clone();
 
     if let Err(err) = nit_utils::fs::write_atomic(&state.definitions_path, |writer| {
-        serde_json::to_writer_pretty(writer, &summary.strategies)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
+        serde_json::to_writer_pretty(writer, &summary.strategies).map_err(std::io::Error::other)
     }) {
         tracing::warn!("Failed to write games definitions: {err}");
     }
     if let Err(err) = nit_utils::fs::write_atomic(&state.results_path, |writer| {
-        serde_json::to_writer_pretty(writer, &summary.results)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
+        serde_json::to_writer_pretty(writer, &summary.results).map_err(std::io::Error::other)
     }) {
         tracing::warn!("Failed to write games results: {err}");
     }
@@ -305,7 +303,7 @@ fn dephase_steps_per_tick(steps_per_tick: u32, rounds_per_match: u32) -> u32 {
     if rounds_per_match <= 1 || steps <= 1 {
         return steps;
     }
-    if steps % rounds_per_match == 0 {
+    if steps.is_multiple_of(rounds_per_match) {
         steps.saturating_add(1)
     } else {
         steps

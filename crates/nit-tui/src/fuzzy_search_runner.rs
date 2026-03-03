@@ -103,11 +103,7 @@ fn index_coordinator_loop(
     active_generation: Arc<AtomicU64>,
 ) {
     let mut workers: Vec<JoinHandle<()>> = Vec::new();
-    loop {
-        let cmd = match cmd_rx.recv() {
-            Ok(cmd) => cmd,
-            Err(_) => break,
-        };
+    while let Ok(cmd) = cmd_rx.recv() {
         match cmd {
             IndexCommand::BuildIndex {
                 generation,
@@ -425,11 +421,7 @@ fn fuzzy_loop(cmd_rx: Receiver<FuzzyCommand>, event_tx: Sender<FuzzyEvent>) {
     let mut query = String::new();
     let mut streamed = 0usize;
 
-    loop {
-        let cmd = match cmd_rx.recv() {
-            Ok(c) => c,
-            Err(_) => break,
-        };
+    while let Ok(cmd) = cmd_rx.recv() {
         let mut recompute = false;
         let mut index_changed = false;
         match cmd {
@@ -720,11 +712,7 @@ fn content_coordinator_loop(
     active_generation: Arc<AtomicU64>,
 ) {
     let mut workers: Vec<JoinHandle<()>> = Vec::new();
-    loop {
-        let first = match cmd_rx.recv() {
-            Ok(cmd) => cmd,
-            Err(_) => break,
-        };
+    while let Ok(first) = cmd_rx.recv() {
         let mut latest = match first {
             ContentCommand::Search { .. } => Some(first),
             ContentCommand::Shutdown => break,
@@ -899,7 +887,7 @@ fn is_probably_binary(path: &Path) -> bool {
         Ok(n) => n,
         Err(_) => return false,
     };
-    buf[..n].iter().any(|b| *b == 0)
+    buf[..n].contains(&0)
 }
 
 fn build_snippet(line: &str, match_start: usize, match_len: usize) -> (String, usize) {
@@ -931,8 +919,7 @@ fn slice_by_char(input: &str, start: usize, end: usize) -> String {
     }
     let mut start_byte = None;
     let mut end_byte = None;
-    let mut count = 0usize;
-    for (idx, _) in input.char_indices() {
+    for (count, (idx, _)) in input.char_indices().enumerate() {
         if count == start {
             start_byte = Some(idx);
         }
@@ -940,10 +927,9 @@ fn slice_by_char(input: &str, start: usize, end: usize) -> String {
             end_byte = Some(idx);
             break;
         }
-        count += 1;
     }
-    let start_byte = start_byte.unwrap_or_else(|| input.len());
-    let end_byte = end_byte.unwrap_or_else(|| input.len());
+    let start_byte = start_byte.unwrap_or(input.len());
+    let end_byte = end_byte.unwrap_or(input.len());
     input[start_byte..end_byte].to_string()
 }
 

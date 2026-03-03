@@ -1556,31 +1556,15 @@ fn trim_to_width(text: &str, max_width: usize) -> String {
     if max_width == 0 {
         return String::new();
     }
-    let mut out = String::new();
-    let mut count = 0usize;
-    for ch in text.chars() {
-        if count >= max_width {
-            break;
-        }
-        out.push(ch);
-        count += 1;
-    }
-    out
+    text.chars().take(max_width).collect()
 }
 
 fn pad_to_width(text: &str, width: usize) -> String {
     if width == 0 {
         return String::new();
     }
-    let mut out = String::new();
-    let mut count = 0usize;
-    for ch in text.chars() {
-        if count >= width {
-            break;
-        }
-        out.push(ch);
-        count += 1;
-    }
+    let mut out: String = text.chars().take(width).collect();
+    let count = out.chars().count();
     if count < width {
         out.push_str(&" ".repeat(width - count));
     }

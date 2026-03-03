@@ -137,17 +137,15 @@ impl LastSnapshotKey {
                 return false;
             }
         }
-        if !event_kind.is_manual() {
-            if now.duration_since(self.last_at) < min_interval {
-                return false;
-            }
+        if !event_kind.is_manual() && now.duration_since(self.last_at) < min_interval {
+            return false;
         }
         true
     }
 }
 
 enum IoCommand {
-    Snapshot(SnapshotRequest),
+    Snapshot(Box<SnapshotRequest>),
     RecordRule(RuleLogEntry),
     Shutdown,
 }
@@ -218,7 +216,7 @@ impl SnapshotManager {
             }
         }
 
-        match self.inner.tx.try_send(IoCommand::Snapshot(req)) {
+        match self.inner.tx.try_send(IoCommand::Snapshot(Box::new(req))) {
             Ok(()) => {
                 let mut guard = self.inner.last_enqueued.lock().unwrap();
                 guard.key = Some(key);
@@ -308,7 +306,7 @@ fn snapshot_worker_loop(rx: Receiver<IoCommand>, inner: Arc<SnapshotManagerInner
     while let Ok(cmd) = rx.recv() {
         match cmd {
             IoCommand::Snapshot(req) => {
-                if let Err(err) = handle_snapshot(req, &inner) {
+                if let Err(err) = handle_snapshot(*req, &inner) {
                     warn!("Snapshot failed: {}", err);
                 }
             }
@@ -350,10 +348,7 @@ fn snapshot_name_base(req: &SnapshotRequest) -> String {
 fn ensure_dir(dir: &Path) -> std::io::Result<()> {
     if let Ok(meta) = fs::symlink_metadata(dir) {
         if meta.file_type().is_symlink() {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "snapshot dir is a symlink",
-            ));
+            return Err(std::io::Error::other("snapshot dir is a symlink"));
         }
         if meta.is_dir() {
             return Ok(());
@@ -401,7 +396,7 @@ pub fn grid_fingerprint(grid: &Grid) -> [u64; 2] {
 
 pub fn pack_grid_bits(grid: &Grid) -> Vec<u64> {
     let total = grid.width().saturating_mul(grid.height());
-    let mut bits = vec![0u64; (total + 63) / 64];
+    let mut bits = vec![0u64; total.div_ceil(64)];
     for (idx, &cell) in grid.cells().iter().enumerate() {
         if cell != 0 {
             let word = idx / 64;
@@ -449,8 +444,7 @@ fn append_rule_entry(entry: RuleLogEntry) -> std::io::Result<()> {
         .create(true)
         .append(true)
         .open(&entry.path)?;
-    serde_json::to_writer(&mut file, &entry)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+    serde_json::to_writer(&mut file, &entry).map_err(std::io::Error::other)?;
     use std::io::Write;
     file.write_all(b"\n")?;
     Ok(())

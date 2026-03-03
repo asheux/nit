@@ -103,16 +103,14 @@ impl GolRenderer for SolidRenderer {
                     cell.set_char('▀');
                     cell.set_fg(color);
                     cell.set_bg(bg_bottom);
+                } else if use_checker {
+                    cell.set_char('▀');
+                    cell.set_fg(bg_top);
+                    cell.set_bg(bg_bottom);
                 } else {
-                    if use_checker {
-                        cell.set_char('▀');
-                        cell.set_fg(bg_top);
-                        cell.set_bg(bg_bottom);
-                    } else {
-                        cell.set_char(' ');
-                        cell.set_fg(bg_bottom);
-                        cell.set_bg(bg_bottom);
-                    }
+                    cell.set_char(' ');
+                    cell.set_fg(bg_bottom);
+                    cell.set_bg(bg_bottom);
                 }
             }
         }
@@ -191,7 +189,7 @@ mod tests {
             height: 2,
         };
         let mut buf = Buffer::empty(area);
-        let mut renderer = SolidRenderer::default();
+        let mut renderer = SolidRenderer;
         renderer.render(area, &mut buf, &grid, &state, &cfg, &palette, &hud);
         let grid_area = Rect {
             x: area.x,
@@ -248,7 +246,7 @@ mod tests {
             height: 2,
         };
         let mut buf = Buffer::empty(area);
-        let mut renderer = SolidRenderer::default();
+        let mut renderer = SolidRenderer;
         renderer.render(area, &mut buf, &next, &state, &cfg, &palette, &hud);
         let cell = buf.get(0, 1);
         assert_eq!(cell.symbol(), "▀");

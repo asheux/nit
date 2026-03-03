@@ -17,6 +17,7 @@ pub struct CursorPlacement {
     pub y: u16,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn render_editor(
     frame: &mut Frame,
     area: Rect,
@@ -44,6 +45,7 @@ pub fn render_editor(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn render_buffer(
     frame: &mut Frame,
     area: Rect,
@@ -98,8 +100,6 @@ pub fn render_buffer(
     let selection = buffer.selection_range();
     let selection_active = mode == Mode::Visual && selection.is_some();
     let mut lines: Vec<Line> = Vec::with_capacity(height);
-    let snapshot = snapshot;
-
     struct LineData {
         content: String,
         chars: Vec<char>,
@@ -342,8 +342,7 @@ fn apply_syntax_spans(
 
 fn display_col_for_char_idx(line: &str, char_idx: usize, tab_width: usize) -> usize {
     let mut col = 0;
-    let mut count = 0;
-    for ch in line.chars() {
+    for (count, ch) in line.chars().enumerate() {
         if count >= char_idx {
             break;
         }
@@ -355,7 +354,6 @@ fn display_col_for_char_idx(line: &str, char_idx: usize, tab_width: usize) -> us
             let w = UnicodeWidthChar::width(ch).unwrap_or(1).max(1);
             col += w;
         }
-        count += 1;
     }
     col
 }

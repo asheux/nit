@@ -23,7 +23,7 @@ pub fn render(
     let max_w = area.width as usize;
     let max_h = area.height as usize;
     let cell_w = grid_w.min(max_w);
-    let cell_h = (grid_h + 1) / 2;
+    let cell_h = grid_h.div_ceil(2);
     let h = cell_h.min(max_h);
 
     for y in 0..h {

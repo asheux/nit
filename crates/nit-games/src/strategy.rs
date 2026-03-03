@@ -22,18 +22,13 @@ pub enum StrategyKind {
     OneSidedTm,
 }
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum InputMode {
+    #[default]
     OpponentLastAction,
     SelfLastAction,
     JointLastAction,
-}
-
-impl Default for InputMode {
-    fn default() -> Self {
-        InputMode::OpponentLastAction
-    }
 }
 
 impl InputMode {
@@ -170,11 +165,11 @@ pub fn decode_fsm_notebook_index(
         .collect::<Vec<_>>();
 
     let mut transitions = vec![vec![0usize; actions]; states];
-    for state_idx in 0..states {
-        for input_idx in 0..actions {
+    for (state_idx, row) in transitions.iter_mut().enumerate() {
+        for (input_idx, cell) in row.iter_mut().enumerate() {
             let flat_idx = state_idx.saturating_mul(actions).saturating_add(input_idx);
             let next = next_digits.get(flat_idx).copied().unwrap_or(0);
-            transitions[state_idx][input_idx] = next.min(states - 1);
+            *cell = next.min(states - 1);
         }
     }
 
@@ -590,9 +585,7 @@ pub fn run_one_sided_tm(
         let mut head_after = head_before;
         match trans.move_dir {
             TmMove::Left => {
-                if head_after > 0 {
-                    head_after -= 1;
-                }
+                head_after = head_after.saturating_sub(1);
             }
             TmMove::Stay => {}
             TmMove::Right => {
@@ -687,7 +680,7 @@ impl OneSidedTmStrategy {
 
     fn action_from_symbol(&self, symbol: u8) -> Action {
         let base = self.symbols.max(1);
-        if symbol % base == 0 {
+        if symbol.is_multiple_of(base) {
             Action::Cooperate
         } else {
             Action::Defect

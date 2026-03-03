@@ -12,8 +12,8 @@ use crate::widgets::text_selection::apply_ui_selection;
 use nit_core::UiSelectionPane;
 
 pub fn preferred_size(screen: Rect) -> (u16, u16) {
-    let width = (screen.width.saturating_sub(4)).min(110).max(30);
-    let height = (screen.height.saturating_sub(4)).min(36).max(12);
+    let width = (screen.width.saturating_sub(4)).clamp(30, 110);
+    let height = (screen.height.saturating_sub(4)).clamp(12, 36);
     (width, height)
 }
 
@@ -21,7 +21,7 @@ pub fn build_lines(theme: &Theme) -> Vec<Line<'static>> {
     let heading_style = Style::default()
         .fg(theme.title_focused)
         .add_modifier(Modifier::BOLD);
-    let mut lines = Vec::new();
+    let mut lines = Vec::with_capacity(256);
 
     lines.push(Line::from(vec![Span::styled("GLOBAL", heading_style)]));
     lines.push(Line::from(vec![

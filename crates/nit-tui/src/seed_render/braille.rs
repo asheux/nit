@@ -22,8 +22,8 @@ pub fn render(
     }
     let max_w = area.width as usize;
     let max_h = area.height as usize;
-    let cell_w = (grid_w + 1) / 2;
-    let cell_h = (grid_h + 3) / 4;
+    let cell_w = grid_w.div_ceil(2);
+    let cell_h = grid_h.div_ceil(4);
     let w = cell_w.min(max_w);
     let h = cell_h.min(max_h);
 

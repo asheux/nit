@@ -16,6 +16,7 @@ pub mod petri_dish;
 pub mod seed_render;
 pub mod seed_runtime;
 pub mod seed_snapshot;
+pub mod swarm;
 pub mod syntax;
 pub mod system_stats;
 pub mod theme;

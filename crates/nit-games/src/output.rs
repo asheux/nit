@@ -127,8 +127,7 @@ pub const RUN_SUMMARY_SCHEMA_VERSION: u32 = 2;
 
 pub fn write_summary(path: &Path, summary: &RunSummary) -> io::Result<()> {
     write_atomic(path, |writer| {
-        serde_json::to_writer_pretty(writer, summary)
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))
+        serde_json::to_writer_pretty(writer, summary).map_err(io::Error::other)
     })
 }
 

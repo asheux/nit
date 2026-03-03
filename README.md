@@ -53,8 +53,12 @@ nit includes an Agent Ops / Agent Chat UI.
 - `nit --agents all` — include all available lanes.
   - Default runtime: `--codex-runtime mcp` (runs a persistent `codex mcp-server`).
   - Exec runtime: `--codex-runtime exec` (spawns `codex exec` per turn).
+  - Parallelism: `--codex-max-parallel-turns <N>` (default `2`).
   - Optional safety knobs: `--codex-sandbox <read-only|workspace-write|danger-full-access>` and
     `--codex-approval-policy <untrusted|on-failure|on-request|never>`.
+  - In Agent Chat:
+    - `@all <prompt>` broadcasts to multiple Codex agents (fan-out).
+    - `@swarm [all|N] [template=lab|parallel] <prompt>` runs an orchestrated multi-agent workflow (plan → DAG tasks → verify → synthesis). (`lab` is the default.)
 
 Examples:
 

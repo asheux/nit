@@ -215,8 +215,7 @@ fn footer_line(state: &AppState, theme: &Theme) -> Line<'static> {
         .add_modifier(Modifier::BOLD);
     let sep_style = label_style;
 
-    let mut spans: Vec<Span<'static>> = Vec::new();
-    spans.push(Span::styled("Keys: ", label_style));
+    let mut spans: Vec<Span<'static>> = vec![Span::styled("Keys: ", label_style)];
 
     // Always present: tab/selection/enter semantics.
     spans.push(Span::styled("Tab", key_style));
@@ -347,12 +346,20 @@ fn roster_lines(state: &AppState, width: usize) -> Vec<String> {
         " Backends".into(),
         format!(
             "  Codex  {}{}",
-            if codex_available { "available" } else { "not found" },
+            if codex_available {
+                "available"
+            } else {
+                "not found"
+            },
             if codex_active { " (active)" } else { "" }
         ),
         format!(
             "  Claude {}{}",
-            if claude_available { "available" } else { "not found" },
+            if claude_available {
+                "available"
+            } else {
+                "not found"
+            },
             if claude_active { " (active)" } else { "" }
         ),
         format!(
@@ -861,7 +868,7 @@ fn mcp_state_style(state: McpConnectionState, theme: &Theme) -> Style {
             .fg(theme.title_focused)
             .add_modifier(Modifier::BOLD),
         McpConnectionState::Connecting => Style::default()
-            .fg(theme.accent)
+            .fg(theme.hl.operator)
             .add_modifier(Modifier::BOLD),
         McpConnectionState::Disconnected => Style::default()
             .fg(theme.border)
@@ -915,7 +922,7 @@ fn roster_styled_line(
         let codex_available = state.agents.codex_cli_available || codex_active;
         let style = if codex_active {
             Style::default()
-                .fg(theme.accent)
+                .fg(theme.hl.operator)
                 .add_modifier(Modifier::BOLD)
         } else if codex_available {
             Style::default().fg(theme.foreground)
@@ -935,7 +942,7 @@ fn roster_styled_line(
         let claude_available = state.agents.claude_cli_available || claude_active;
         let style = if claude_active {
             Style::default()
-                .fg(theme.accent)
+                .fg(theme.hl.operator)
                 .add_modifier(Modifier::BOLD)
         } else if claude_available {
             Style::default().fg(theme.foreground)
@@ -1058,7 +1065,7 @@ fn roster_styled_line(
             let mut spans = Vec::with_capacity(14);
             spans.push(Span::styled(marker, marker_style));
             spans.push(Span::styled(
-                cols.get(0).cloned().unwrap_or_default(),
+                cols.first().cloned().unwrap_or_default(),
                 role_style,
             ));
             spans.push(Span::styled(" ", space_style));
@@ -1129,7 +1136,7 @@ fn roster_styled_line(
             let mut spans = Vec::with_capacity(14);
             spans.push(Span::styled(marker, marker_style));
             spans.push(Span::styled(
-                cols.get(0).cloned().unwrap_or_default(),
+                cols.first().cloned().unwrap_or_default(),
                 role_style,
             ));
             spans.push(Span::styled(" ", cell_style));
@@ -1243,15 +1250,6 @@ fn mission_styled_line(
             striped,
             theme,
         )
-    } else if selected {
-        striped_row_style(
-            Style::default()
-                .fg(theme.border)
-                .add_modifier(Modifier::DIM),
-            selected,
-            striped,
-            theme,
-        )
     } else {
         striped_row_style(
             Style::default()
@@ -1349,7 +1347,7 @@ fn mission_styled_line(
     let mut spans = Vec::with_capacity(20);
     spans.push(Span::styled(marker, marker_style));
     spans.push(Span::styled(
-        cols.get(0).cloned().unwrap_or_default(),
+        cols.first().cloned().unwrap_or_default(),
         id_style,
     ));
     spans.push(Span::styled(" ", space_style));
@@ -1536,7 +1534,7 @@ fn alert_styled_line(
     let mut spans = Vec::with_capacity(12);
     spans.push(Span::styled(marker, marker_style));
     spans.push(Span::styled(
-        cols.get(0).cloned().unwrap_or_default(),
+        cols.first().cloned().unwrap_or_default(),
         sev_style,
     ));
     spans.push(Span::styled(" ", space_style));
@@ -1578,9 +1576,8 @@ fn ops_line_style(line_idx: usize, line: &str, theme: &Theme) -> Style {
         || line.contains("CONNECTED")
         || line.contains("APPLIED")
         || line.contains("REVIEWED")
+        || (line.starts_with('+') && !line.starts_with("+++"))
     {
-        style = style.fg(theme.title_focused);
-    } else if line.starts_with('+') && !line.starts_with("+++") {
         style = style.fg(theme.title_focused);
     } else if line.starts_with('-') && !line.starts_with("---") {
         style = style.fg(theme.error);
@@ -1699,7 +1696,7 @@ fn wrap_cell_text(text: &str, width: usize) -> Vec<String> {
     }
 
     let mut out: Vec<String> = Vec::new();
-    let text = text.trim_end_matches(|c| c == '\n' || c == '\r');
+    let text = text.trim_end_matches(['\n', '\r']);
     for segment in text.split('\n') {
         let mut remaining = segment.trim_end_matches('\r');
         if remaining.is_empty() {

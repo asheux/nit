@@ -19,7 +19,7 @@
 - j/k or Up/Down: Move selection
 - PageUp/PageDown: Page
 - Home/End: Top/Bottom
-- Enter: Open file (closes tree)
+- Enter: Toggle directory / open file (closes tree)
 - r: Refresh
 - .: Toggle hidden files
 - i: Toggle ignored files
@@ -34,6 +34,7 @@
 - Backspace: Delete character
 - Ctrl+Backspace: Delete word
 - Mouse wheel: Scroll results / preview
+- Mouse click: Select result
 - Ctrl+U / Ctrl+D: Scroll preview up/down
 - Ctrl+J / Ctrl+K: Scroll results down/up
 - Ctrl+Y / Ctrl+E: Scroll preview line down/up
@@ -79,7 +80,9 @@
 - Ctrl+Space / F6: Pause/resume active Petri/tournament runtime (global)
 
 ## Agent Chat
-- Type message, Enter to send, Esc or Ctrl+C to clear input (`@all <msg>` broadcasts)
+- Type message, Enter to send, Esc or Ctrl+C to clear input
+  - `@all <msg>`: broadcast (same prompt) to multiple Codex agents
+  - `@swarm [all|N] <msg>`: orchestrated multi-agent workflow (planner splits tasks, agents run in parallel, verifier runs gates, planner synthesizes)
 - Left/Right/Home/End: Move input cursor
 - Up/Down: Move input cursor between lines
 - Ctrl+Up/Ctrl+Down: Scroll chat thread

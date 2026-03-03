@@ -62,13 +62,13 @@ impl FileTreeRunner {
 }
 
 fn runner_loop(cmd_rx: Receiver<FileTreeCommand>, event_tx: Sender<FileTreeEvent>) {
-    loop {
-        match cmd_rx.recv() {
-            Ok(FileTreeCommand::ListDir {
+    while let Ok(command) = cmd_rx.recv() {
+        match command {
+            FileTreeCommand::ListDir {
                 dir,
                 show_hidden,
                 show_ignored,
-            }) => match list_dir(&dir, show_hidden, show_ignored) {
+            } => match list_dir(&dir, show_hidden, show_ignored) {
                 Ok(entries) => {
                     let _ = event_tx.send(FileTreeEvent::DirListed { dir, entries });
                 }
@@ -76,7 +76,7 @@ fn runner_loop(cmd_rx: Receiver<FileTreeCommand>, event_tx: Sender<FileTreeEvent
                     let _ = event_tx.send(FileTreeEvent::Error { dir, message });
                 }
             },
-            Ok(FileTreeCommand::Shutdown) | Err(_) => break,
+            FileTreeCommand::Shutdown => break,
         }
     }
 }

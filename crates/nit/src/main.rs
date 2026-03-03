@@ -54,11 +54,23 @@ struct Cli {
     /// Codex approval policy for executing model-suggested commands (default is Codex's own config)
     #[arg(long, value_enum)]
     codex_approval_policy: Option<CodexApprovalPolicyArg>,
+    /// Maximum number of Codex turns to run concurrently.
+    ///
+    /// - MCP runtime: caps in-flight `tools/call` requests multiplexed over the persistent server.
+    /// - Exec runtime: caps concurrent `codex exec` child processes.
+    #[arg(
+        long,
+        alias = "codex-parallel",
+        default_value_t = 2u8,
+        value_parser = clap::value_parser!(u8).range(1..=16)
+    )]
+    codex_max_parallel_turns: u8,
     #[command(subcommand)]
     command: Option<Command>,
 }
 
 #[derive(Subcommand, Debug)]
+#[allow(clippy::large_enum_variant)]
 enum Command {
     /// Explicit GoL mode (current behavior)
     Gol {
@@ -439,7 +451,7 @@ fn main() -> anyhow::Result<()> {
     if app_kind == AppKind::Gol {
         let rule_config = nit_core::load_rule_config(&state.workspace_root);
         let (catalog, mut rule_warnings) = nit_core::load_rule_catalog(&rule_config.rules.user);
-        rule_warnings.extend(rule_config.warnings.into_iter());
+        rule_warnings.extend(rule_config.warnings);
         for warning in rule_warnings {
             tracing::warn!("{warning}");
         }
@@ -478,6 +490,7 @@ fn main() -> anyhow::Result<()> {
     let codex_config = nit_tui::codex_runner::CodexRunnerConfig {
         sandbox: cli.codex_sandbox.map(|v| v.as_str().to_string()),
         approval_policy: cli.codex_approval_policy.map(|v| v.as_str().to_string()),
+        max_parallel_turns: cli.codex_max_parallel_turns as usize,
     };
     run(state, theme, log_rx, codex_runtime, codex_config)?;
     Ok(())
@@ -722,9 +735,7 @@ fn execute_tournament(
             let handle = thread::spawn(move || {
                 let mut writer = writer;
                 for event in rx {
-                    if let Err(err) = writer.write(&event) {
-                        return Err(err);
-                    }
+                    writer.write(&event)?;
                 }
                 writer.finish()
             });
@@ -738,9 +749,7 @@ fn execute_tournament(
             let handle = thread::spawn(move || {
                 let mut writer = writer;
                 for record in rx {
-                    if let Err(err) = writer.write(&record) {
-                        return Err(err);
-                    }
+                    writer.write(&record)?;
                 }
                 writer.finish()
             });
@@ -910,16 +919,14 @@ fn run_games_headless(
 
     let definitions_path = layout.definitions_path.clone();
     if let Err(err) = nit_utils::fs::write_atomic(&definitions_path, |writer| {
-        serde_json::to_writer_pretty(writer, kernel.definitions())
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
+        serde_json::to_writer_pretty(writer, kernel.definitions()).map_err(std::io::Error::other)
     }) {
         eprintln!("Warning: failed to write definitions: {err}");
     }
 
     let results_path = layout.results_path.clone();
     if let Err(err) = nit_utils::fs::write_atomic(&results_path, |writer| {
-        serde_json::to_writer_pretty(writer, &results)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
+        serde_json::to_writer_pretty(writer, &results).map_err(std::io::Error::other)
     }) {
         eprintln!("Warning: failed to write results: {err}");
     }
@@ -970,6 +977,7 @@ fn run_games_headless(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_games_sweep(
     config_path: Option<PathBuf>,
     strategies_path: Option<PathBuf>,
@@ -1023,8 +1031,7 @@ fn run_games_sweep(
     };
     let preset_values = match payoff_preset.as_deref() {
         Some(name) => resolve_payoff_preset(name)
-            .ok_or_else(|| anyhow::anyhow!("unknown payoff preset '{name}'"))?
-            .into(),
+            .ok_or_else(|| anyhow::anyhow!("unknown payoff preset '{name}'"))?,
         None => (
             config.payoff.r,
             config.payoff.s,
@@ -1230,18 +1237,15 @@ fn run_games_sweep(
                                 if let Err(err) =
                                     nit_utils::fs::write_atomic(&definitions_path, |writer| {
                                         serde_json::to_writer_pretty(writer, kernel.definitions())
-                                            .map_err(|e| {
-                                                std::io::Error::new(std::io::ErrorKind::Other, e)
-                                            })
+                                            .map_err(std::io::Error::other)
                                     })
                                 {
                                     eprintln!("Warning: failed to write definitions: {err}");
                                 }
                                 if let Err(err) =
                                     nit_utils::fs::write_atomic(&results_path, |writer| {
-                                        serde_json::to_writer_pretty(writer, &results).map_err(
-                                            |e| std::io::Error::new(std::io::ErrorKind::Other, e),
-                                        )
+                                        serde_json::to_writer_pretty(writer, &results)
+                                            .map_err(std::io::Error::other)
                                     })
                                 {
                                     eprintln!("Warning: failed to write results: {err}");
@@ -1339,7 +1343,7 @@ fn run_games_sweep(
                 }
             })
             .unwrap_or((0.0, 0.0));
-        let adjusted_present = adjusted_totals_by_strategy.get(&id).is_some();
+        let adjusted_present = adjusted_totals_by_strategy.contains_key(&id);
         let top_count = top_counts.get(&id).copied().unwrap_or(0);
         strategies.push(SweepStrategyAggregate {
             id,
@@ -1385,8 +1389,7 @@ fn run_games_sweep(
 
     let summary_path = sweep_root.join("sweep_summary.json");
     nit_utils::fs::write_atomic(&summary_path, |writer| {
-        serde_json::to_writer_pretty(writer, &summary)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
+        serde_json::to_writer_pretty(writer, &summary).map_err(std::io::Error::other)
     })
     .with_context(|| format!("failed to write {}", summary_path.display()))?;
 
@@ -1528,8 +1531,7 @@ fn run_games_graph(
 
     if is_json {
         nit_utils::fs::write_atomic(&out_path, |writer| {
-            serde_json::to_writer_pretty(writer, &graph)
-                .map_err(|e| io::Error::new(io::ErrorKind::Other, e))
+            serde_json::to_writer_pretty(writer, &graph).map_err(io::Error::other)
         })
         .with_context(|| format!("failed to write {}", out_path.display()))?;
     } else {
@@ -2357,7 +2359,7 @@ fn load_all_available_agents() -> nit_core::AgentsState {
                 agents
                     .codex_selected_reasoning_effort
                     .extend(codex_agents.codex_selected_reasoning_effort.drain());
-                agents.agents.extend(codex_agents.agents.drain(..));
+                agents.agents.append(&mut codex_agents.agents);
                 agents.mcp = codex_agents.mcp;
             }
             Err(err) => {

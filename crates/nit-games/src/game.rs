@@ -14,7 +14,7 @@ impl Action {
         }
     }
 
-    pub fn from_str(value: &str) -> Option<Self> {
+    pub fn parse(value: &str) -> Option<Self> {
         match value.trim().to_ascii_lowercase().as_str() {
             "c" | "coop" | "cooperate" | "cooperation" => Some(Action::Cooperate),
             "d" | "defect" | "defection" => Some(Action::Defect),
@@ -27,6 +27,14 @@ impl Action {
             Action::Cooperate => Action::Defect,
             Action::Defect => Action::Cooperate,
         }
+    }
+}
+
+impl std::str::FromStr for Action {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Action::parse(s).ok_or(())
     }
 }
 

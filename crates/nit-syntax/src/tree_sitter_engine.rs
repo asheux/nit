@@ -82,11 +82,7 @@ fn worker_loop(rx: Receiver<HighlightRequest>, out_tx: Sender<HighlightResult>) 
     let mut query_configs = build_query_configs();
     let mut highlighter = Highlighter::new();
 
-    loop {
-        let first = match rx.recv() {
-            Ok(job) => job,
-            Err(_) => break,
-        };
+    while let Ok(first) = rx.recv() {
         let mut pending: HashMap<usize, HighlightRequest> = HashMap::new();
         pending.insert(first.buffer_id, first);
         while let Ok(job) = rx.try_recv() {
@@ -227,8 +223,9 @@ fn highlight_job(
                     let start_line = start_line.saturating_sub(1);
                     let end_line =
                         cmp::min(end_line.saturating_add(1), new_line_count.saturating_sub(1));
-                    for line in start_line..=end_line {
-                        dirty[line] = true;
+                    let end = end_line.saturating_add(1).min(dirty.len());
+                    for slot in dirty.iter_mut().take(end).skip(start_line) {
+                        *slot = true;
                     }
                 }
             }
@@ -306,7 +303,7 @@ fn highlight_job(
 }
 
 fn apply_spans_to_dirty_lines(
-    spans: &mut Vec<HighlightSpan>,
+    spans: &mut [HighlightSpan],
     dirty: &[bool],
     line_starts: &[usize],
     per_line: &mut [Vec<LineSegment>],
@@ -500,10 +497,10 @@ fn full_highlight(
 ) -> anyhow::Result<HighlightSnapshot> {
     let mut spans = Vec::new();
     let mut stack: Vec<HighlightGroup> = Vec::new();
-    let mut iter = highlighter.highlight(config, job.text.as_bytes(), None, |name| {
+    let iter = highlighter.highlight(config, job.text.as_bytes(), None, |name| {
         LanguageRegistry::from_injection_name(name).and_then(|id| configs.get(&id))
     })?;
-    while let Some(event) = iter.next() {
+    for event in iter {
         match event? {
             HighlightEvent::HighlightStart(s) => {
                 let group = CAPTURE_GROUPS

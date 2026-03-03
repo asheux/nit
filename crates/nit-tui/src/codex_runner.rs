@@ -1,4 +1,4 @@
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
@@ -10,10 +10,25 @@ use std::time::{Duration, Instant};
 
 use nit_core::{AgentBusEvent, AgentTokenCount, McpConnectionState, McpStatus};
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct CodexRunnerConfig {
     pub sandbox: Option<String>,
     pub approval_policy: Option<String>,
+    /// Maximum number of Codex turns to run concurrently.
+    ///
+    /// - Exec runtime: caps concurrent `codex exec` child processes.
+    /// - MCP runtime: caps in-flight `tools/call` requests multiplexed over the persistent server.
+    pub max_parallel_turns: usize,
+}
+
+impl Default for CodexRunnerConfig {
+    fn default() -> Self {
+        Self {
+            sandbox: None,
+            approval_policy: None,
+            max_parallel_turns: 2,
+        }
+    }
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -105,13 +120,14 @@ fn runner_loop_exec(
 ) {
     let mut seq = 0u64;
     let mut queue: VecDeque<CodexCommand> = VecDeque::new();
-    let mut active: Option<ActiveTurn> = None;
+    let mut active: Vec<ActiveTurn> = Vec::new();
     let mut shutting_down = false;
     let mut shutdown_deadline: Option<Instant> = None;
+    let max_parallel = config.max_parallel_turns.max(1);
 
     loop {
         // Keep this control loop responsive so `Shutdown` can cancel an in-flight Codex process.
-        let cmd = if active.is_none() && queue.is_empty() && !shutting_down {
+        let cmd = if active.is_empty() && queue.is_empty() && !shutting_down {
             cmd_rx.recv().ok()
         } else {
             match cmd_rx.recv_timeout(Duration::from_millis(50)) {
@@ -134,26 +150,42 @@ fn runner_loop_exec(
                     shutting_down = true;
                     shutdown_deadline = Some(Instant::now() + Duration::from_millis(400));
                     queue.clear();
-                    if let Some(active) = active.as_ref() {
-                        active.cancel.store(true, Ordering::Relaxed);
+                    for turn in active.iter() {
+                        turn.cancel.store(true, Ordering::Relaxed);
                     }
                 }
             }
         }
 
-        if let Some(turn) = active.as_mut() {
-            match turn.done_rx.try_recv() {
-                Ok(()) | Err(mpsc::TryRecvError::Disconnected) => {
-                    let turn = active.take().expect("active turn");
-                    let _ = turn.handle.join();
-                }
-                Err(mpsc::TryRecvError::Empty) => {}
+        let mut idx = 0usize;
+        while idx < active.len() {
+            let done = match active[idx].done_rx.try_recv() {
+                Ok(()) | Err(mpsc::TryRecvError::Disconnected) => true,
+                Err(mpsc::TryRecvError::Empty) => false,
+            };
+            if done {
+                let turn = active.remove(idx);
+                let _ = turn.handle.join();
+            } else {
+                idx += 1;
             }
         }
 
-        if active.is_none() && !shutting_down {
-            if let Some(cmd) = queue.pop_front() {
-                if let CodexCommand::RunTurn {
+        if !shutting_down {
+            while active.len() < max_parallel {
+                let idx = queue.iter().position(|cmd| match cmd {
+                    CodexCommand::RunTurn { model, .. } => !active
+                        .iter()
+                        .any(|turn| turn.agent_id.as_str() == model.as_str()),
+                    _ => false,
+                });
+                let Some(idx) = idx else {
+                    break;
+                };
+                let Some(cmd) = queue.remove(idx) else {
+                    break;
+                };
+                let CodexCommand::RunTurn {
                     model,
                     cwd,
                     mission_id,
@@ -162,45 +194,43 @@ fn runner_loop_exec(
                     reasoning_effort,
                     prompt,
                 } = cmd
-                {
-                    let _ = event_tx.send(AgentBusEvent::McpStatus {
-                        status: McpStatus {
-                            state: McpConnectionState::Connecting,
-                            endpoint: codex_exec_endpoint_label(
-                                &model,
-                                resume_thread_id.as_deref(),
-                            ),
-                            latency_ms: None,
-                            last_error: None,
-                        },
-                    });
-                    let _ = event_tx.send(AgentBusEvent::TurnStarted {
-                        agent_id: model.clone(),
-                        mission_id: mission_id.clone(),
-                        resume_thread_id: resume_thread_id.clone(),
-                    });
-                    seq = seq.wrapping_add(1);
-                    active = Some(spawn_turn_worker(
-                        &event_tx,
-                        seq,
-                        model,
-                        cwd,
-                        mission_id,
-                        resume_thread_id,
-                        persist_session,
-                        reasoning_effort,
-                        prompt,
-                        config.clone(),
-                    ));
-                }
+                else {
+                    continue;
+                };
+                let _ = event_tx.send(AgentBusEvent::McpStatus {
+                    status: McpStatus {
+                        state: McpConnectionState::Connecting,
+                        endpoint: codex_exec_endpoint_label(&model, resume_thread_id.as_deref()),
+                        latency_ms: None,
+                        last_error: None,
+                    },
+                });
+                let _ = event_tx.send(AgentBusEvent::TurnStarted {
+                    agent_id: model.clone(),
+                    mission_id: mission_id.clone(),
+                    resume_thread_id: resume_thread_id.clone(),
+                });
+                seq = seq.wrapping_add(1);
+                active.push(spawn_turn_worker(
+                    &event_tx,
+                    seq,
+                    model,
+                    cwd,
+                    mission_id,
+                    resume_thread_id,
+                    persist_session,
+                    reasoning_effort,
+                    prompt,
+                    config.clone(),
+                ));
             }
         }
 
         if shutting_down {
-            if let Some(active) = active.as_ref() {
-                active.cancel.store(true, Ordering::Relaxed);
+            for turn in active.iter() {
+                turn.cancel.store(true, Ordering::Relaxed);
             }
-            if active.is_none() {
+            if active.is_empty() {
                 break;
             }
             if let Some(deadline) = shutdown_deadline {
@@ -216,18 +246,6 @@ fn runner_loop_exec(
 enum McpIncoming {
     Json(serde_json::Value),
     StderrLine(String),
-}
-
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-enum McpServerDisposition {
-    Keep,
-    Drop,
-}
-
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-enum McpTurnAbort {
-    Stop,
-    Reconnect,
 }
 
 struct McpServer {
@@ -466,6 +484,17 @@ fn ensure_codex_tools_present(tools_list_resp: &serde_json::Value) -> Result<(),
     Err("MCP server missing required tools: expected `codex` and `codex-reply`".into())
 }
 
+struct InFlightMcpTurn {
+    agent_id: String,
+    mission_id: Option<String>,
+    resume_thread_id: Option<String>,
+    started_at: Instant,
+    last_heartbeat_sent_at: Instant,
+    last_stage: Option<String>,
+    last_stage_sent_at: Instant,
+    last_token_count: Option<AgentTokenCount>,
+}
+
 fn runner_loop_mcp(
     cmd_rx: Receiver<CodexCommand>,
     event_tx: Sender<AgentBusEvent>,
@@ -476,12 +505,22 @@ fn runner_loop_mcp(
     let mut mcp_enabled = true;
     let mut next_connect_attempt_at = Instant::now();
     let mut server: Option<McpServer> = None;
+    let mut in_flight: HashMap<u64, InFlightMcpTurn> = HashMap::new();
+    let mut in_flight_by_agent: HashMap<String, u64> = HashMap::new();
+    let max_parallel = config.max_parallel_turns.max(1);
+    let timeout = mcp_turn_timeout();
+
+    // Global stderr throttling; stderr is not request-id tagged so we avoid spamming all lanes.
+    let mut last_stderr_sent: Option<String> = None;
+    let mut last_stderr_sent_at = Instant::now();
 
     loop {
         if shutting_down {
             if let Some(server) = server.as_mut() {
                 server.stop();
             }
+            in_flight.clear();
+            in_flight_by_agent.clear();
             let _ = event_tx.send(AgentBusEvent::McpStatus {
                 status: McpStatus {
                     state: McpConnectionState::Disconnected,
@@ -496,7 +535,7 @@ fn runner_loop_mcp(
             break;
         }
 
-        match cmd_rx.recv_timeout(Duration::from_millis(50)) {
+        match cmd_rx.recv_timeout(Duration::from_millis(30)) {
             Ok(cmd) => match cmd {
                 CodexCommand::RunTurn { .. } => queue.push_back(cmd),
                 CodexCommand::McpStart | CodexCommand::McpStop | CodexCommand::McpReconnect => {
@@ -514,6 +553,7 @@ fn runner_loop_mcp(
             }
         }
 
+        // Detect unexpected server exit.
         let mut server_exited: Option<(String, String)> = None;
         if let Some(srv) = server.as_mut() {
             let exited = match srv.child.try_wait() {
@@ -527,6 +567,16 @@ fn runner_loop_mcp(
         }
         if let Some((endpoint, err)) = server_exited.take() {
             server = None;
+            for (_id, turn) in in_flight.drain() {
+                let _ = event_tx.send(AgentBusEvent::TurnFailed {
+                    agent_id: turn.agent_id,
+                    mission_id: turn.mission_id,
+                    thread_id: turn.resume_thread_id,
+                    token_count: turn.last_token_count,
+                    message: "MCP server exited".into(),
+                });
+            }
+            in_flight_by_agent.clear();
             let _ = event_tx.send(AgentBusEvent::McpStatus {
                 status: McpStatus {
                     state: McpConnectionState::Error,
@@ -538,13 +588,15 @@ fn runner_loop_mcp(
             next_connect_attempt_at = Instant::now() + Duration::from_secs(2);
         }
 
-        // Process control commands before attempting to (re)connect.
-        if let Some(cmd) = queue.pop_front() {
+        // Drain front-of-queue control commands (start/stop/reconnect/shutdown).
+        loop {
+            let Some(cmd) = queue.pop_front() else {
+                break;
+            };
             match cmd {
                 CodexCommand::McpStart => {
                     mcp_enabled = true;
                     next_connect_attempt_at = Instant::now();
-                    continue;
                 }
                 CodexCommand::McpStop => {
                     mcp_enabled = false;
@@ -552,6 +604,34 @@ fn runner_loop_mcp(
                         server.stop();
                     }
                     server = None;
+                    // Cancel in-flight turns and any turns already queued in this runner.
+                    for (_id, turn) in in_flight.drain() {
+                        let _ = event_tx.send(AgentBusEvent::TurnFailed {
+                            agent_id: turn.agent_id,
+                            mission_id: turn.mission_id,
+                            thread_id: turn.resume_thread_id,
+                            token_count: turn.last_token_count,
+                            message: "Cancelled (MCP stop)".into(),
+                        });
+                    }
+                    in_flight_by_agent.clear();
+                    while let Some(cmd) = queue.pop_front() {
+                        if let CodexCommand::RunTurn {
+                            model,
+                            mission_id,
+                            resume_thread_id,
+                            ..
+                        } = cmd
+                        {
+                            let _ = event_tx.send(AgentBusEvent::TurnFailed {
+                                agent_id: model,
+                                mission_id,
+                                thread_id: resume_thread_id,
+                                token_count: None,
+                                message: "Cancelled (MCP stop)".into(),
+                            });
+                        }
+                    }
                     let _ = event_tx.send(AgentBusEvent::McpStatus {
                         status: McpStatus {
                             state: McpConnectionState::Disconnected,
@@ -560,7 +640,6 @@ fn runner_loop_mcp(
                             last_error: None,
                         },
                     });
-                    continue;
                 }
                 CodexCommand::McpReconnect => {
                     mcp_enabled = true;
@@ -568,16 +647,34 @@ fn runner_loop_mcp(
                         server.stop();
                     }
                     server = None;
+                    // Match previous behavior: reconnect cancels in-flight turns but keeps queued turns.
+                    for (_id, turn) in in_flight.drain() {
+                        let _ = event_tx.send(AgentBusEvent::TurnFailed {
+                            agent_id: turn.agent_id,
+                            mission_id: turn.mission_id,
+                            thread_id: turn.resume_thread_id,
+                            token_count: turn.last_token_count,
+                            message: "Cancelled (MCP reconnect)".into(),
+                        });
+                    }
+                    in_flight_by_agent.clear();
                     next_connect_attempt_at = Instant::now();
-                    continue;
+                    let _ = event_tx.send(AgentBusEvent::McpStatus {
+                        status: McpStatus {
+                            state: McpConnectionState::Connecting,
+                            endpoint: "codex mcp-server".into(),
+                            latency_ms: None,
+                            last_error: None,
+                        },
+                    });
                 }
                 CodexCommand::Shutdown => {
                     shutting_down = true;
                     queue.clear();
-                    continue;
                 }
-                CodexCommand::RunTurn { .. } => {
-                    queue.push_front(cmd);
+                other => {
+                    queue.push_front(other);
+                    break;
                 }
             }
         }
@@ -598,8 +695,10 @@ fn runner_loop_mcp(
             }) {
                 Ok(s) => {
                     let endpoint = s.endpoint.clone();
-                    let latency_ms =
-                        connect_started_at.elapsed().as_millis().min(u64::MAX as u128) as u64;
+                    let latency_ms = connect_started_at
+                        .elapsed()
+                        .as_millis()
+                        .min(u64::MAX as u128) as u64;
                     server = Some(s);
                     let _ = event_tx.send(AgentBusEvent::McpStatus {
                         status: McpStatus {
@@ -624,38 +723,364 @@ fn runner_loop_mcp(
             }
         }
 
-        if matches!(queue.front(), Some(CodexCommand::RunTurn { .. })) && server.is_some() {
-            let cmd = queue.pop_front().expect("queue front");
-            let CodexCommand::RunTurn {
-                model,
-                cwd,
-                mission_id,
-                resume_thread_id,
-                persist_session: _persist_session,
-                reasoning_effort,
-                prompt,
-            } = cmd
-            else {
+        // Per-turn timeouts: if any turn exceeds the timeout, restart the server and fail all turns.
+        if let Some(timeout) = timeout {
+            let now = Instant::now();
+            let timed_out = in_flight
+                .values()
+                .any(|turn| now.duration_since(turn.started_at) >= timeout);
+            if timed_out {
+                let msg = format!("MCP tool call timed out after {}s", timeout.as_secs());
+                if let Some(mut srv) = server.take() {
+                    srv.stop();
+                }
+                for (_id, turn) in in_flight.drain() {
+                    let _ = event_tx.send(AgentBusEvent::TurnFailed {
+                        agent_id: turn.agent_id,
+                        mission_id: turn.mission_id,
+                        thread_id: turn.resume_thread_id,
+                        token_count: turn.last_token_count,
+                        message: msg.clone(),
+                    });
+                }
+                in_flight_by_agent.clear();
+                let _ = event_tx.send(AgentBusEvent::McpStatus {
+                    status: McpStatus {
+                        state: McpConnectionState::Error,
+                        endpoint: "codex mcp-server".into(),
+                        latency_ms: None,
+                        last_error: Some(msg),
+                    },
+                });
+                next_connect_attempt_at = Instant::now() + Duration::from_secs(2);
                 continue;
-            };
-            let disposition = {
-                let srv = server.as_mut().expect("mcp server");
-                run_turn_mcp(
-                    &event_tx,
-                    &cmd_rx,
-                    &mut queue,
-                    srv,
+            }
+        }
+
+        // Heartbeats for all in-flight turns.
+        let now = Instant::now();
+        for turn in in_flight.values_mut() {
+            if now.duration_since(turn.last_heartbeat_sent_at) >= Duration::from_secs(2) {
+                let _ = event_tx.send(AgentBusEvent::TurnHeartbeat {
+                    agent_id: turn.agent_id.clone(),
+                    mission_id: turn.mission_id.clone(),
+                });
+                turn.last_heartbeat_sent_at = now;
+            }
+        }
+
+        // Consume any pending MCP messages (notifications + responses).
+        let mut drop_server_due_to_disconnect = false;
+        if let Some(srv) = server.as_mut() {
+            for _ in 0..50 {
+                match srv.rx.try_recv() {
+                    Ok(McpIncoming::Json(value)) => {
+                        if let Some(id) = value.get("id").and_then(|v| v.as_u64()) {
+                            let Some(turn) = in_flight.remove(&id) else {
+                                continue;
+                            };
+                            in_flight_by_agent.remove(&turn.agent_id);
+
+                            if let Some(err) = value.get("error") {
+                                let msg = format!("MCP tool call failed: {err}");
+                                let _ = event_tx.send(AgentBusEvent::McpStatus {
+                                    status: McpStatus {
+                                        state: McpConnectionState::Error,
+                                        endpoint: srv.endpoint.clone(),
+                                        latency_ms: None,
+                                        last_error: Some(msg.clone()),
+                                    },
+                                });
+                                let _ = event_tx.send(AgentBusEvent::TurnFailed {
+                                    agent_id: turn.agent_id,
+                                    mission_id: turn.mission_id,
+                                    thread_id: turn.resume_thread_id,
+                                    token_count: turn.last_token_count,
+                                    message: msg,
+                                });
+                                continue;
+                            }
+
+                            let Some(result) = value.get("result") else {
+                                let _ = event_tx.send(AgentBusEvent::TurnFailed {
+                                    agent_id: turn.agent_id,
+                                    mission_id: turn.mission_id,
+                                    thread_id: turn.resume_thread_id,
+                                    token_count: turn.last_token_count,
+                                    message: "MCP tool call response missing result".into(),
+                                });
+                                continue;
+                            };
+
+                            match extract_codex_mcp_output(result) {
+                                Some((thread_id, content)) => {
+                                    let latency_ms =
+                                        turn.started_at.elapsed().as_millis().min(u64::MAX as u128)
+                                            as u64;
+                                    let _ = event_tx.send(AgentBusEvent::McpStatus {
+                                        status: McpStatus {
+                                            state: McpConnectionState::Connected,
+                                            endpoint: srv.endpoint.clone(),
+                                            latency_ms: Some(latency_ms),
+                                            last_error: None,
+                                        },
+                                    });
+                                    let _ = event_tx.send(AgentBusEvent::TurnCompleted {
+                                        agent_id: turn.agent_id,
+                                        mission_id: turn.mission_id,
+                                        thread_id: Some(thread_id),
+                                        token_count: turn.last_token_count,
+                                        message: content.trim_end().to_string(),
+                                    });
+                                }
+                                None => {
+                                    let _ = event_tx.send(AgentBusEvent::TurnFailed {
+                                        agent_id: turn.agent_id,
+                                        mission_id: turn.mission_id,
+                                        thread_id: turn.resume_thread_id,
+                                        token_count: turn.last_token_count,
+                                        message: "Unexpected MCP tool result shape".into(),
+                                    });
+                                }
+                            }
+                            continue;
+                        }
+
+                        // Notifications (codex/event) update stage/token counts.
+                        let request_id = value
+                            .get("params")
+                            .and_then(|p| p.get("_meta"))
+                            .and_then(|m| m.get("requestId"))
+                            .and_then(|v| v.as_u64());
+                        if let Some(request_id) = request_id {
+                            if let Some(turn) = in_flight.get_mut(&request_id) {
+                                let _ = handle_codex_mcp_notification(
+                                    &event_tx,
+                                    &turn.agent_id,
+                                    turn.mission_id.as_deref(),
+                                    request_id,
+                                    &value,
+                                    &mut turn.last_stage,
+                                    &mut turn.last_stage_sent_at,
+                                    &mut turn.last_token_count,
+                                );
+                            }
+                        } else if in_flight.len() == 1 {
+                            if let Some((&only_id, turn)) = in_flight.iter_mut().next() {
+                                let _ = handle_codex_mcp_notification(
+                                    &event_tx,
+                                    &turn.agent_id,
+                                    turn.mission_id.as_deref(),
+                                    only_id,
+                                    &value,
+                                    &mut turn.last_stage,
+                                    &mut turn.last_stage_sent_at,
+                                    &mut turn.last_token_count,
+                                );
+                            }
+                        }
+                    }
+                    Ok(McpIncoming::StderrLine(line)) => {
+                        let lowered = line.to_ascii_lowercase();
+                        let important = lowered.contains("error")
+                            || lowered.contains("failed")
+                            || lowered.contains("bad gateway")
+                            || lowered.contains("unauthorized")
+                            || lowered.contains("forbidden")
+                            || lowered.contains("timeout")
+                            || lowered.contains("dns")
+                            || lowered.contains("connection");
+                        if important
+                            && (last_stderr_sent.as_deref() != Some(line.as_str())
+                                || last_stderr_sent_at.elapsed() >= Duration::from_secs(1))
+                        {
+                            last_stderr_sent = Some(line.clone());
+                            last_stderr_sent_at = Instant::now();
+                            for turn in in_flight.values() {
+                                let _ = event_tx.send(AgentBusEvent::TurnLog {
+                                    agent_id: turn.agent_id.clone(),
+                                    message: line.clone(),
+                                });
+                            }
+                        }
+                    }
+                    Err(mpsc::TryRecvError::Empty) => break,
+                    Err(mpsc::TryRecvError::Disconnected) => {
+                        let msg = "MCP server disconnected".to_string();
+                        let _ = event_tx.send(AgentBusEvent::McpStatus {
+                            status: McpStatus {
+                                state: McpConnectionState::Error,
+                                endpoint: srv.endpoint.clone(),
+                                latency_ms: None,
+                                last_error: Some(msg.clone()),
+                            },
+                        });
+                        for (_id, turn) in in_flight.drain() {
+                            let _ = event_tx.send(AgentBusEvent::TurnFailed {
+                                agent_id: turn.agent_id,
+                                mission_id: turn.mission_id,
+                                thread_id: turn.resume_thread_id,
+                                token_count: turn.last_token_count,
+                                message: msg.clone(),
+                            });
+                        }
+                        in_flight_by_agent.clear();
+                        drop_server_due_to_disconnect = true;
+                        break;
+                    }
+                }
+            }
+        }
+        if drop_server_due_to_disconnect {
+            server = None;
+            next_connect_attempt_at = Instant::now() + Duration::from_secs(2);
+        }
+
+        // Dispatch queued turns while under the parallel cap (one in-flight turn per agent id).
+        if mcp_enabled && server.is_some() && in_flight.len() < max_parallel {
+            let mut drop_server = false;
+            while in_flight.len() < max_parallel {
+                let idx = queue.iter().position(|cmd| match cmd {
+                    CodexCommand::RunTurn { model, .. } => !in_flight_by_agent.contains_key(model),
+                    _ => false,
+                });
+                let Some(idx) = idx else {
+                    break;
+                };
+                let Some(cmd) = queue.remove(idx) else {
+                    break;
+                };
+                let CodexCommand::RunTurn {
                     model,
                     cwd,
                     mission_id,
                     resume_thread_id,
+                    persist_session: _persist_session,
                     reasoning_effort,
                     prompt,
-                    &config,
-                    &mut shutting_down,
-                )
-            };
-            if disposition == McpServerDisposition::Drop {
+                } = cmd
+                else {
+                    continue;
+                };
+
+                let Some(srv) = server.as_mut() else {
+                    break;
+                };
+
+                let _ = event_tx.send(AgentBusEvent::TurnStarted {
+                    agent_id: model.clone(),
+                    mission_id: mission_id.clone(),
+                    resume_thread_id: resume_thread_id.clone(),
+                });
+                let _ = event_tx.send(AgentBusEvent::McpStatus {
+                    status: McpStatus {
+                        state: McpConnectionState::Connected,
+                        endpoint: srv.endpoint.clone(),
+                        latency_ms: None,
+                        last_error: None,
+                    },
+                });
+
+                let (tool_name, arguments) = if let Some(thread_id) = resume_thread_id.as_deref() {
+                    (
+                        "codex-reply",
+                        serde_json::json!({ "threadId": thread_id, "prompt": prompt }),
+                    )
+                } else {
+                    let mut args = serde_json::Map::new();
+                    args.insert("prompt".into(), serde_json::Value::String(prompt));
+                    args.insert("model".into(), serde_json::Value::String(model.clone()));
+                    args.insert(
+                        "cwd".into(),
+                        serde_json::Value::String(cwd.to_string_lossy().to_string()),
+                    );
+                    if let Some(effort) = reasoning_effort.as_deref() {
+                        args.insert(
+                            "config".into(),
+                            serde_json::json!({ "model_reasoning_effort": effort }),
+                        );
+                    }
+                    if let Some(sandbox) = config
+                        .sandbox
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                    {
+                        args.insert(
+                            "sandbox".into(),
+                            serde_json::Value::String(sandbox.to_string()),
+                        );
+                    }
+                    if let Some(policy) = config
+                        .approval_policy
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                    {
+                        args.insert(
+                            "approval-policy".into(),
+                            serde_json::Value::String(policy.to_string()),
+                        );
+                    }
+                    ("codex", serde_json::Value::Object(args))
+                };
+
+                let stage = format!("tools/call({tool_name})");
+                let _ = event_tx.send(AgentBusEvent::TurnStage {
+                    agent_id: model.clone(),
+                    mission_id: mission_id.clone(),
+                    stage,
+                });
+
+                srv.next_id = srv.next_id.wrapping_add(1).max(1);
+                let id = srv.next_id;
+                let req = serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "method": "tools/call",
+                    "params": { "name": tool_name, "arguments": arguments },
+                });
+                if let Err(err) = srv.send_json_line(&req) {
+                    let _ = event_tx.send(AgentBusEvent::McpStatus {
+                        status: McpStatus {
+                            state: McpConnectionState::Error,
+                            endpoint: srv.endpoint.clone(),
+                            latency_ms: None,
+                            last_error: Some(err.clone()),
+                        },
+                    });
+                    let _ = event_tx.send(AgentBusEvent::TurnFailed {
+                        agent_id: model,
+                        mission_id,
+                        thread_id: resume_thread_id,
+                        token_count: None,
+                        message: err,
+                    });
+                    drop_server = true;
+                    break;
+                }
+
+                let now = Instant::now();
+                in_flight.insert(
+                    id,
+                    InFlightMcpTurn {
+                        agent_id: model.clone(),
+                        mission_id,
+                        resume_thread_id,
+                        started_at: now,
+                        last_heartbeat_sent_at: now,
+                        last_stage: None,
+                        last_stage_sent_at: now,
+                        last_token_count: None,
+                    },
+                );
+                in_flight_by_agent.insert(model, id);
+            }
+
+            if drop_server {
+                if let Some(server) = server.as_mut() {
+                    server.stop();
+                }
                 server = None;
                 next_connect_attempt_at = Instant::now() + Duration::from_secs(2);
             }
@@ -663,364 +1088,25 @@ fn runner_loop_mcp(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn run_turn_mcp(
-    event_tx: &Sender<AgentBusEvent>,
-    cmd_rx: &Receiver<CodexCommand>,
-    queue: &mut VecDeque<CodexCommand>,
-    server: &mut McpServer,
-    model: String,
-    cwd: PathBuf,
-    mission_id: Option<String>,
-    resume_thread_id: Option<String>,
-    reasoning_effort: Option<String>,
-    prompt: String,
-    config: &CodexRunnerConfig,
-    shutting_down: &mut bool,
-) -> McpServerDisposition {
-    let _ = event_tx.send(AgentBusEvent::TurnStarted {
-        agent_id: model.clone(),
-        mission_id: mission_id.clone(),
-        resume_thread_id: resume_thread_id.clone(),
-    });
-
-    // The MCP server is already initialized by the runner loop; keep the UI connection status
-    // accurate (the turn itself may be "busy" even while the transport is connected).
-    let _ = event_tx.send(AgentBusEvent::McpStatus {
-        status: McpStatus {
-            state: McpConnectionState::Connected,
-            endpoint: server.endpoint.clone(),
-            latency_ms: None,
-            last_error: None,
-        },
-    });
-
-    let (tool_name, arguments) = if let Some(thread_id) = resume_thread_id.as_deref() {
-        (
-            "codex-reply",
-            serde_json::json!({ "threadId": thread_id, "prompt": prompt }),
-        )
-    } else {
-        let mut args = serde_json::Map::new();
-        args.insert("prompt".into(), serde_json::Value::String(prompt));
-        args.insert("model".into(), serde_json::Value::String(model.clone()));
-        args.insert(
-            "cwd".into(),
-            serde_json::Value::String(cwd.to_string_lossy().to_string()),
-        );
-        if let Some(effort) = reasoning_effort.as_deref() {
-            args.insert(
-                "config".into(),
-                serde_json::json!({ "model_reasoning_effort": effort }),
-            );
-        }
-        if let Some(sandbox) = config.sandbox.as_deref().map(str::trim).filter(|s| !s.is_empty())
-        {
-            args.insert(
-                "sandbox".into(),
-                serde_json::Value::String(sandbox.to_string()),
-            );
-        }
-        if let Some(policy) = config
-            .approval_policy
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-        {
-            args.insert(
-                "approval-policy".into(),
-                serde_json::Value::String(policy.to_string()),
-            );
-        }
-        ("codex", serde_json::Value::Object(args))
-    };
-
-    let stage = format!("tools/call({tool_name})");
-    let _ = event_tx.send(AgentBusEvent::TurnStage {
-        agent_id: model.clone(),
-        mission_id: mission_id.clone(),
-        stage,
-    });
-
-    let started_at = Instant::now();
-    server.next_id = server.next_id.wrapping_add(1).max(1);
-    let id = server.next_id;
-    let req = serde_json::json!({
-        "jsonrpc": "2.0",
-        "id": id,
-        "method": "tools/call",
-        "params": { "name": tool_name, "arguments": arguments },
-    });
-    if let Err(err) = server.send_json_line(&req) {
-        let _ = event_tx.send(AgentBusEvent::McpStatus {
-            status: McpStatus {
-                state: McpConnectionState::Error,
-                endpoint: server.endpoint.clone(),
-                latency_ms: None,
-                last_error: Some(err.clone()),
-            },
-        });
-        let _ = event_tx.send(AgentBusEvent::TurnFailed {
-            agent_id: model,
-            mission_id,
-            thread_id: resume_thread_id,
-            token_count: None,
-            message: err,
-        });
-        return McpServerDisposition::Drop;
-    }
-
-    let mut last_stage: Option<String> = None;
-    let mut last_stage_sent_at = Instant::now();
-    let mut last_heartbeat_at = Instant::now();
-    let mut last_stderr: Option<String> = None;
-    let mut last_stderr_sent: Option<String> = None;
-    let mut last_stderr_sent_at = Instant::now();
-    let mut last_token_count: Option<AgentTokenCount> = None;
-    let timeout = mcp_turn_timeout();
-    loop {
-        let mut abort: Option<McpTurnAbort> = None;
-        while let Ok(cmd) = cmd_rx.try_recv() {
-            match cmd {
-                CodexCommand::RunTurn { .. } if !*shutting_down => queue.push_back(cmd),
-                CodexCommand::RunTurn { .. } => {}
-                CodexCommand::McpStart if !*shutting_down => queue.push_front(cmd),
-                CodexCommand::McpStop if !*shutting_down => {
-                    queue.push_front(cmd);
-                    abort = Some(McpTurnAbort::Stop);
-                    break;
-                }
-                CodexCommand::McpReconnect if !*shutting_down => {
-                    queue.push_front(cmd);
-                    abort = Some(McpTurnAbort::Reconnect);
-                    break;
-                }
-                CodexCommand::McpStart | CodexCommand::McpStop | CodexCommand::McpReconnect => {}
-                CodexCommand::Shutdown => {
-                    *shutting_down = true;
-                    queue.clear();
-                    break;
-                }
-            }
-        }
-        if *shutting_down {
-            let _ = server.child.kill();
-            return McpServerDisposition::Drop;
-        }
-        if let Some(abort) = abort {
-            let (state, msg) = match abort {
-                McpTurnAbort::Stop => (McpConnectionState::Disconnected, "Cancelled (MCP stop)"),
-                McpTurnAbort::Reconnect => {
-                    (McpConnectionState::Connecting, "Cancelled (MCP reconnect)")
-                }
-            };
-            server.stop();
-            let _ = event_tx.send(AgentBusEvent::McpStatus {
-                status: McpStatus {
-                    state,
-                    endpoint: server.endpoint.clone(),
-                    latency_ms: None,
-                    last_error: None,
-                },
-            });
-            let _ = event_tx.send(AgentBusEvent::TurnFailed {
-                agent_id: model,
-                mission_id,
-                thread_id: resume_thread_id,
-                token_count: last_token_count.clone(),
-                message: msg.to_string(),
-            });
-            return McpServerDisposition::Drop;
-        }
-        if let Some(timeout) = timeout {
-            if started_at.elapsed() >= timeout {
-                let suffix = last_stderr
-                    .as_deref()
-                    .map(|s| format!(" (last stderr: {s})"))
-                    .unwrap_or_default();
-                let msg = format!(
-                    "MCP tool call timed out after {}s{suffix}",
-                    timeout.as_secs()
-                );
-                server.stop();
-                let _ = event_tx.send(AgentBusEvent::McpStatus {
-                    status: McpStatus {
-                        state: McpConnectionState::Error,
-                        endpoint: server.endpoint.clone(),
-                        latency_ms: None,
-                        last_error: Some(msg.clone()),
-                    },
-                });
-                let _ = event_tx.send(AgentBusEvent::TurnFailed {
-                    agent_id: model,
-                    mission_id,
-                    thread_id: resume_thread_id,
-                    token_count: last_token_count.clone(),
-                    message: msg,
-                });
-                return McpServerDisposition::Drop;
-            }
-        }
-        if last_heartbeat_at.elapsed() >= Duration::from_secs(2) {
-            let _ = event_tx.send(AgentBusEvent::TurnHeartbeat {
-                agent_id: model.clone(),
-                mission_id: mission_id.clone(),
-            });
-            last_heartbeat_at = Instant::now();
-        }
-
-        match server.rx.recv_timeout(Duration::from_millis(100)) {
-            Ok(McpIncoming::Json(value)) => {
-                if value.get("id").and_then(|v| v.as_u64()) != Some(id) {
-                    if handle_codex_mcp_notification(
-                        event_tx,
-                        &model,
-                        mission_id.as_deref(),
-                        id,
-                        &value,
-                        &mut last_stage,
-                        &mut last_stage_sent_at,
-                        &mut last_token_count,
-                    ) {
-                        continue;
-                    }
-                    // Ignore notifications / other responses (we only allow one in-flight request).
-                    continue;
-                }
-                if let Some(err) = value.get("error") {
-                    let msg = format!("MCP tool call failed: {err}");
-                    let _ = event_tx.send(AgentBusEvent::McpStatus {
-                        status: McpStatus {
-                            state: McpConnectionState::Error,
-                            endpoint: server.endpoint.clone(),
-                            latency_ms: None,
-                            last_error: Some(msg.clone()),
-                        },
-                    });
-                    let _ = event_tx.send(AgentBusEvent::TurnFailed {
-                        agent_id: model,
-                        mission_id,
-                        thread_id: resume_thread_id,
-                        token_count: last_token_count.clone(),
-                        message: msg,
-                    });
-                    return McpServerDisposition::Keep;
-                }
-                let Some(result) = value.get("result") else {
-                    let msg = "MCP tool call response missing result".to_string();
-                    let _ = event_tx.send(AgentBusEvent::TurnFailed {
-                        agent_id: model,
-                        mission_id,
-                        thread_id: resume_thread_id,
-                        token_count: last_token_count.clone(),
-                        message: msg,
-                    });
-                    return McpServerDisposition::Keep;
-                };
-                match extract_codex_mcp_output(result) {
-                    Some((thread_id, content)) => {
-                        let latency_ms = started_at.elapsed().as_millis().min(u64::MAX as u128) as u64;
-                        let _ = event_tx.send(AgentBusEvent::McpStatus {
-                            status: McpStatus {
-                                state: McpConnectionState::Connected,
-                                endpoint: server.endpoint.clone(),
-                                latency_ms: Some(latency_ms),
-                                last_error: None,
-                            },
-                        });
-                        let _ = event_tx.send(AgentBusEvent::TurnCompleted {
-                            agent_id: model,
-                            mission_id,
-                            thread_id: Some(thread_id),
-                            token_count: last_token_count.clone(),
-                            message: content.trim_end().to_string(),
-                        });
-                    }
-                    None => {
-                        let suffix = last_stderr
-                            .as_deref()
-                            .map(|s| format!(" (last stderr: {s})"))
-                            .unwrap_or_default();
-                        let msg = format!("Unexpected MCP tool result shape{suffix}");
-                        let _ = event_tx.send(AgentBusEvent::TurnFailed {
-                            agent_id: model,
-                            mission_id,
-                            thread_id: resume_thread_id,
-                            token_count: last_token_count.clone(),
-                            message: msg,
-                        });
-                    }
-                }
-                return McpServerDisposition::Keep;
-            }
-            Ok(McpIncoming::StderrLine(line)) => {
-                let lowered = line.to_ascii_lowercase();
-                let important = lowered.contains("error")
-                    || lowered.contains("failed")
-                    || lowered.contains("bad gateway")
-                    || lowered.contains("unauthorized")
-                    || lowered.contains("forbidden")
-                    || lowered.contains("timeout")
-                    || lowered.contains("dns")
-                    || lowered.contains("connection");
-                if important
-                    && (last_stderr_sent.as_deref() != Some(line.as_str())
-                        || last_stderr_sent_at.elapsed() >= Duration::from_secs(1))
-                {
-                    last_stderr_sent = Some(line.clone());
-                    last_stderr_sent_at = Instant::now();
-                    let _ = event_tx.send(AgentBusEvent::TurnLog {
-                        agent_id: model.clone(),
-                        message: line.clone(),
-                    });
-                }
-                last_stderr = Some(line);
-            }
-            Err(mpsc::RecvTimeoutError::Timeout) => {}
-            Err(mpsc::RecvTimeoutError::Disconnected) => {
-                let msg = "MCP server disconnected".to_string();
-                let _ = event_tx.send(AgentBusEvent::McpStatus {
-                    status: McpStatus {
-                        state: McpConnectionState::Error,
-                        endpoint: server.endpoint.clone(),
-                        latency_ms: None,
-                        last_error: Some(msg.clone()),
-                    },
-                });
-                let _ = event_tx.send(AgentBusEvent::TurnFailed {
-                    agent_id: model,
-                    mission_id,
-                    thread_id: resume_thread_id,
-                    token_count: last_token_count.clone(),
-                    message: msg,
-                });
-                return McpServerDisposition::Drop;
-            }
-        }
-    }
-}
-
 fn mcp_turn_timeout() -> Option<Duration> {
-    const DEFAULT_TIMEOUT: Duration = Duration::from_secs(600);
     match std::env::var("NIT_MCP_TURN_TIMEOUT_SECS") {
         Ok(raw) => {
             let raw = raw.trim();
             if raw.is_empty() {
-                return Some(DEFAULT_TIMEOUT);
+                return None;
             }
-            let Ok(secs) = raw.parse::<u64>() else {
-                return Some(DEFAULT_TIMEOUT);
-            };
+            let secs = raw.parse::<u64>().ok()?;
             if secs == 0 {
                 None
             } else {
                 Some(Duration::from_secs(secs))
             }
         }
-        Err(_) => Some(DEFAULT_TIMEOUT),
+        Err(_) => None,
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn handle_codex_mcp_notification(
     event_tx: &Sender<AgentBusEvent>,
     agent_id: &str,
@@ -1174,6 +1260,7 @@ fn extract_codex_mcp_output(result: &serde_json::Value) -> Option<(String, Strin
 }
 
 struct ActiveTurn {
+    agent_id: String,
     cancel: Arc<AtomicBool>,
     done_rx: Receiver<()>,
     handle: JoinHandle<()>,
@@ -1184,6 +1271,7 @@ struct StdoutCapture {
     json_errors: Vec<String>,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn spawn_turn_worker(
     event_tx: &Sender<AgentBusEvent>,
     seq: u64,
@@ -1196,6 +1284,7 @@ fn spawn_turn_worker(
     prompt: String,
     config: CodexRunnerConfig,
 ) -> ActiveTurn {
+    let agent_id = model.clone();
     let cancel = Arc::new(AtomicBool::new(false));
     let (done_tx, done_rx) = mpsc::channel();
     let event_tx = event_tx.clone();
@@ -1220,12 +1309,14 @@ fn spawn_turn_worker(
         })
         .expect("spawn codex turn worker");
     ActiveTurn {
+        agent_id,
         cancel,
         done_rx,
         handle,
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_turn(
     event_tx: &Sender<AgentBusEvent>,
     seq: u64,
@@ -1620,13 +1711,9 @@ fn extract_token_count_from_jsonl(stdout: &[u8]) -> Option<AgentTokenCount> {
 
 fn token_count_from_value(value: &serde_json::Value) -> Option<AgentTokenCount> {
     let payload = value.get("payload").unwrap_or(value);
-    let Some(kind) = payload.get("type").and_then(|v| v.as_str()) else {
-        return None;
-    };
+    let kind = payload.get("type").and_then(|v| v.as_str())?;
     if kind == "token_count" {
-        let Some(info) = payload.get("info") else {
-            return None;
-        };
+        let info = payload.get("info")?;
         let context_window = extract_context_window(info)?;
         let total_tokens = extract_total_tokens(info)?;
         if context_window > u32::MAX as u64 || total_tokens > u32::MAX as u64 {
@@ -1641,9 +1728,7 @@ fn token_count_from_value(value: &serde_json::Value) -> Option<AgentTokenCount> 
     // Fallback: some Codex CLI versions only report per-turn token usage at `turn.completed`.
     // Those payloads often omit the context window size; the UI can stitch that in from the
     // models cache. We use `context_window=0` to mean "unknown".
-    let Some(usage) = payload.get("usage") else {
-        return None;
-    };
+    let usage = payload.get("usage")?;
     let input = usage
         .get("input_tokens")
         .or_else(|| usage.get("prompt_tokens"))
@@ -1693,11 +1778,11 @@ fn extract_total_tokens(info: &serde_json::Value) -> Option<u64> {
 
 #[cfg(test)]
 mod tests {
-    use super::handle_codex_mcp_notification;
     use super::extract_thread_id_from_jsonl;
     use super::extract_token_count_from_jsonl;
-    use nit_core::AgentTokenCount;
+    use super::handle_codex_mcp_notification;
     use nit_core::AgentBusEvent;
+    use nit_core::AgentTokenCount;
     use std::sync::mpsc;
     use std::time::Instant;
 

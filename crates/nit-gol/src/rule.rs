@@ -81,12 +81,6 @@ impl Rule {
         }
         Ok(Self::new(births, survives))
     }
-
-    pub fn to_string(self) -> String {
-        let births = digits_from_mask(self.births_mask);
-        let survives = digits_from_mask(self.survives_mask);
-        format!("B{}/S{}", births, survives)
-    }
 }
 
 impl std::fmt::Display for Rule {

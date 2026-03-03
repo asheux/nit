@@ -455,6 +455,7 @@ fn payoff_lines(
     lines
 }
 
+#[allow(clippy::too_many_arguments)]
 fn last_run_lines(
     state: &AppState,
     header_style: Style,
@@ -535,6 +536,7 @@ fn last_run_lines(
     lines
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_last_run_table(
     run: &nit_games::output::RunSummary,
     width: usize,
@@ -699,14 +701,14 @@ fn render_payoff_matrix(
         center_text(&dd, cell_width)
     );
 
-    let mut lines = Vec::new();
-    lines.push(centered_line(&top, width, dim_style));
-    lines.push(centered_header_line(&header, width, dim_style, label_style));
-    lines.push(centered_line(&top, width, dim_style));
-    lines.push(centered_line(&row_c, width, value_style));
-    lines.push(centered_line(&row_d, width, value_style));
-    lines.push(centered_line(&top, width, dim_style));
-    lines
+    vec![
+        centered_line(&top, width, dim_style),
+        centered_header_line(&header, width, dim_style, label_style),
+        centered_line(&top, width, dim_style),
+        centered_line(&row_c, width, value_style),
+        centered_line(&row_d, width, value_style),
+        centered_line(&top, width, dim_style),
+    ]
 }
 
 fn center_text(text: &str, width: usize) -> String {
@@ -735,6 +737,7 @@ fn truncate_text(text: &str, width: usize) -> String {
     out
 }
 
+#[allow(clippy::too_many_arguments)]
 fn wld_cell_spans(
     wins: u32,
     losses: u32,

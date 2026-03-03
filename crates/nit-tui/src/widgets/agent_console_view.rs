@@ -82,9 +82,7 @@ pub fn render(
         .style(Style::default().bg(theme.background));
     frame.render_widget(block.clone(), area);
 
-    let Some(layout) = compute_console_layout(area, state) else {
-        return None;
-    };
+    let layout = compute_console_layout(area, state)?;
     let inner = block.inner(area);
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -242,13 +240,9 @@ pub fn render(
 
     let pulse_on = pulse_on(state);
     let thread_width = layout.thread_area.width.max(1) as usize;
-    let (cached_rows_len, last_message_was_user) = refresh_thread_rows_cache(state, thread_width);
+    let (cached_rows_len, _) = refresh_thread_rows_cache(state, thread_width);
     let thread_height = layout.thread_area.height.max(1) as usize;
-    let breather = if last_message_was_user {
-        breather_rows_for_user_prompt(state, pulse_on, thread_width)
-    } else {
-        Vec::new()
-    };
+    let breather = breather_rows_for_user_prompt(state, pulse_on, thread_width);
     let total_rows = cached_rows_len.saturating_add(breather.len());
     let max_scroll = total_rows.saturating_sub(thread_height);
     state.agents.console_scroll = if state.agents.console_scroll == usize::MAX {
@@ -814,7 +808,7 @@ fn push_agent_text_with_inline_highlights(
         return;
     }
     if !text.contains('`') {
-        spans.push(Span::styled(text.to_string(), base));
+        push_agent_plain_text_with_token_highlights(spans, text, base, theme);
         return;
     }
 
@@ -825,14 +819,14 @@ fn push_agent_text_with_inline_highlights(
     while let Some(start) = remaining.find('`') {
         let (before, after_tick) = remaining.split_at(start);
         if !before.is_empty() {
-            spans.push(Span::styled(before.to_string(), base));
+            push_agent_plain_text_with_token_highlights(spans, before, base, theme);
         }
 
         // `after_tick` begins with '`'
         let after_tick = &after_tick[1..];
         let Some(end) = after_tick.find('`') else {
             spans.push(Span::styled("`".to_string(), tick_style));
-            spans.push(Span::styled(after_tick.to_string(), base));
+            push_agent_plain_text_with_token_highlights(spans, after_tick, base, theme);
             return;
         };
 
@@ -847,7 +841,134 @@ fn push_agent_text_with_inline_highlights(
         remaining = after;
     }
     if !remaining.is_empty() {
-        spans.push(Span::styled(remaining.to_string(), base));
+        push_agent_plain_text_with_token_highlights(spans, remaining, base, theme);
+    }
+}
+
+fn push_agent_plain_text_with_token_highlights(
+    spans: &mut Vec<Span<'static>>,
+    text: &str,
+    base: Style,
+    theme: &Theme,
+) {
+    if text.is_empty() {
+        return;
+    }
+    if push_verify_result_with_token_highlights(spans, text, base, theme) {
+        return;
+    }
+    push_agent_plain_text_with_token_highlights_inner(spans, text, base, theme);
+}
+
+fn push_verify_result_with_token_highlights(
+    spans: &mut Vec<Span<'static>>,
+    text: &str,
+    base: Style,
+    theme: &Theme,
+) -> bool {
+    const VERIFY_PREFIX: &str = "VERIFY result:";
+    let Some(prefix_pos) = text.find(VERIFY_PREFIX) else {
+        return false;
+    };
+
+    let after_prefix = &text[prefix_pos + VERIFY_PREFIX.len()..];
+    let Some((rel_start, _)) = after_prefix
+        .char_indices()
+        .find(|(_, ch)| !ch.is_whitespace())
+    else {
+        return false;
+    };
+    let outcome_start = prefix_pos + VERIFY_PREFIX.len() + rel_start;
+
+    let mut outcome_end = outcome_start;
+    for (idx, ch) in text[outcome_start..].char_indices() {
+        if !ch.is_ascii_alphabetic() {
+            break;
+        }
+        outcome_end = outcome_start + idx + ch.len_utf8();
+    }
+    if outcome_end == outcome_start {
+        return false;
+    }
+
+    let before = &text[..outcome_start];
+    let outcome = &text[outcome_start..outcome_end];
+    let after = &text[outcome_end..];
+
+    push_agent_plain_text_with_token_highlights_inner(spans, before, base, theme);
+    spans.push(Span::styled(
+        outcome.to_string(),
+        verify_outcome_style(outcome, theme),
+    ));
+    push_agent_plain_text_with_token_highlights_inner(spans, after, base, theme);
+    true
+}
+
+fn verify_outcome_style(outcome: &str, theme: &Theme) -> Style {
+    let upper = outcome.trim().to_ascii_uppercase();
+    let color = if matches!(upper.as_str(), "PASS" | "SUCCESS") {
+        theme.success
+    } else if matches!(upper.as_str(), "FAIL" | "FAILED") {
+        theme.error
+    } else {
+        theme.warning
+    };
+    Style::default().fg(color).add_modifier(Modifier::BOLD)
+}
+
+fn push_agent_plain_text_with_token_highlights_inner(
+    spans: &mut Vec<Span<'static>>,
+    text: &str,
+    base: Style,
+    theme: &Theme,
+) {
+    if text.is_empty() {
+        return;
+    }
+    let mut idx = 0usize;
+    while idx < text.len() {
+        let ch = text[idx..].chars().next().unwrap_or(' ');
+        let is_token = ch.is_ascii_alphanumeric()
+            || matches!(ch, '_' | '-' | '.' | '/' | '\\' | ':' | '#' | '%');
+        let start = idx;
+        if is_token {
+            while idx < text.len() {
+                let ch = text[idx..].chars().next().unwrap_or(' ');
+                let keep = ch.is_ascii_alphanumeric()
+                    || matches!(ch, '_' | '-' | '.' | '/' | '\\' | ':' | '#' | '%');
+                if !keep {
+                    break;
+                }
+                idx += ch.len_utf8();
+            }
+            let token = &text[start..idx];
+            let style = if looks_like_link_or_path_ref(token) {
+                Style::default()
+                    .fg(theme.hl.link)
+                    .add_modifier(Modifier::UNDERLINED)
+            } else if looks_like_numberish(token) {
+                Style::default()
+                    .fg(theme.accent)
+                    .add_modifier(Modifier::BOLD)
+            } else if looks_like_command(token) {
+                Style::default().fg(theme.hl.operator)
+            } else {
+                base
+            };
+            spans.push(Span::styled(token.to_string(), style));
+        } else {
+            while idx < text.len() {
+                let ch = text[idx..].chars().next().unwrap_or(' ');
+                let is_token = ch.is_ascii_alphanumeric()
+                    || matches!(ch, '_' | '-' | '.' | '/' | '\\' | ':' | '#' | '%');
+                if is_token {
+                    break;
+                }
+                idx += ch.len_utf8();
+            }
+            let sep = &text[start..idx];
+            spans.push(Span::styled(sep.to_string(), base));
+        }
     }
 }
 
@@ -857,13 +978,42 @@ fn inline_code_style(code: &str, theme: &Theme) -> Style {
         Style::default()
             .fg(theme.hl.link)
             .add_modifier(Modifier::UNDERLINED)
-    } else if looks_like_command(code) {
+    } else if looks_like_numberish(code) {
         Style::default()
             .fg(theme.accent)
             .add_modifier(Modifier::BOLD)
+    } else if looks_like_command(code) {
+        Style::default().fg(theme.hl.operator)
     } else {
         Style::default().fg(theme.foreground)
     }
+}
+
+fn looks_like_numberish(text: &str) -> bool {
+    let text = text.trim();
+    if text.is_empty() {
+        return false;
+    }
+    let text = text.trim_matches(|c: char| matches!(c, ',' | '.' | ')' | ']' | '}'));
+    if text.is_empty() {
+        return false;
+    }
+
+    let mut saw_digit = false;
+    for ch in text.chars() {
+        if ch.is_ascii_digit() {
+            saw_digit = true;
+            continue;
+        }
+        if matches!(ch, '.' | ',' | '%' | '+' | '-') {
+            continue;
+        }
+        if saw_digit && ch.is_ascii_alphabetic() {
+            continue;
+        }
+        return false;
+    }
+    saw_digit
 }
 
 fn looks_like_link_or_path_ref(text: &str) -> bool {
@@ -900,10 +1050,8 @@ fn contains_colon_number(text: &str) -> bool {
             continue;
         }
         // Skip Windows drive letter colon (e.g. C:\foo\bar.txt:12).
-        if idx == 1 {
-            if text.chars().next().is_some_and(|c| c.is_ascii_alphabetic()) {
-                continue;
-            }
+        if idx == 1 && text.chars().next().is_some_and(|c| c.is_ascii_alphabetic()) {
+            continue;
         }
         let after = &text[idx + 1..];
         let mut digits = 0usize;
@@ -922,7 +1070,7 @@ fn contains_colon_number(text: &str) -> bool {
 }
 
 fn looks_like_file_path(text: &str) -> bool {
-    let Some(sep) = text.rfind(|c| c == '/' || c == '\\') else {
+    let Some(sep) = text.rfind(['/', '\\']) else {
         return false;
     };
     let tail = &text[sep + 1..];
@@ -1057,17 +1205,13 @@ fn thread_rows(state: &AppState, width: usize, pulse_on: bool) -> Vec<ThreadRow>
     let mission = state.agents.selected_context_mission();
     let agent = state.agents.selected_context_agent();
     let mut rows = Vec::new();
-    let mut last_message_was_user = false;
     for msg in state.agents.messages.iter() {
         if !message_matches_context(msg, mission, agent) {
             continue;
         }
-        last_message_was_user = msg.agent_id.is_none();
         rows.extend(format_message_rows(state, msg, width, pulse_on));
     }
-    if last_message_was_user {
-        rows.extend(breather_rows_for_user_prompt(state, pulse_on, width));
-    }
+    rows.extend(breather_rows_for_user_prompt(state, pulse_on, width));
     rows
 }
 
@@ -1111,6 +1255,12 @@ fn format_message_rows(
             kind: ThreadRowKind::User,
         });
         return out;
+    }
+
+    // Swarm meta is shown in the "Working ..." table footer when in swarm mission context, so
+    // don't also render it as a transcript message.
+    if msg.agent_id.as_deref() == Some("swarm") && msg.text.starts_with("Swarm template:") {
+        return Vec::new();
     }
 
     let src = msg.agent_id.as_deref().unwrap_or("agent");
@@ -1199,26 +1349,27 @@ fn agent_identity_badge(state: &AppState, agent_id: &str) -> String {
 }
 
 fn breather_rows_for_user_prompt(state: &AppState, pulse_on: bool, width: usize) -> Vec<ThreadRow> {
-    let Some(agent) = active_running_agent(state) else {
-        return Vec::new();
-    };
-    let agent_type = agent.role.trim();
-    let agent_type = if agent_type.is_empty() {
-        agent.id.as_str()
-    } else {
-        agent_type
-    };
-    let ecg = ecg_indicator(state.metrics.frame_count, Some(&agent.id), pulse_on, true);
-
-    let mut rows = Vec::new();
-    rows.push(ThreadRow {
-        text: format!("{ecg} [{agent_type}] Working ..."),
-        kind: ThreadRowKind::Breather,
-    });
-
-    let Some(turn) = state.agents.active_turns.get(&agent.id) else {
-        return rows;
-    };
+    let mission_ctx = state.agents.selected_context_mission();
+    let agent_ctx = state.agents.selected_context_agent();
+    let mut primary_ids = Vec::new();
+    let mut secondary_ids = Vec::new();
+    for agent in state.agents.agents.iter() {
+        if !state.agents.active_turns.contains_key(&agent.id) {
+            continue;
+        }
+        let in_context = if let Some(mission_id) = mission_ctx {
+            agent.current_mission.as_deref() == Some(mission_id)
+        } else if let Some(selected_agent) = agent_ctx {
+            agent.id == selected_agent
+        } else {
+            true
+        };
+        if in_context {
+            primary_ids.push(agent.id.clone());
+        } else {
+            secondary_ids.push(agent.id.clone());
+        }
+    }
 
     let width = width.max(1);
     let indent = 2usize.min(width.saturating_sub(1));
@@ -1226,40 +1377,148 @@ fn breather_rows_for_user_prompt(state: &AppState, pulse_on: bool, width: usize)
     let inner = width.saturating_sub(indent);
 
     let now = Instant::now();
-    let stage = turn.stage.as_deref().unwrap_or("starting");
-    let elapsed = now.checked_duration_since(turn.started_at);
-    let hb_age = now
-        .checked_duration_since(turn.last_heartbeat_at)
-        .map(|d| d.as_secs());
-    let out_age = now
-        .checked_duration_since(turn.last_output_at)
-        .map(|d| d.as_secs());
+    let mut swarm_assigned_ids: Vec<String> = Vec::new();
+    let mut swarm_mission_id: Option<&str> = None;
+    if let Some(mission_id) = mission_ctx {
+        if let Some(mission) = state.agents.missions.iter().find(|m| m.id == mission_id) {
+            let status = mission.status.to_ascii_uppercase();
+            let is_final = matches!(status.as_str(), "DONE" | "FAILED" | "ERROR");
+            if mission.swarm && mission.title.starts_with("Swarm:") && !is_final {
+                swarm_mission_id = Some(mission_id);
+                for id in mission.assigned_agents.iter() {
+                    if swarm_assigned_ids.iter().any(|existing| existing == id) {
+                        continue;
+                    }
+                    swarm_assigned_ids.push(id.clone());
+                }
+            }
+        }
+    }
 
-    let elapsed_s = elapsed
-        .map(format_duration_compact)
-        .unwrap_or_else(|| "--".into());
-    let hb_s = hb_age
-        .map(|s| format!("{s}s"))
-        .unwrap_or_else(|| "--".into());
-    let out_s = out_age
-        .map(|s| format!("{s}s"))
-        .unwrap_or_else(|| "--".into());
+    let mut ordered_ids = Vec::new();
+    ordered_ids.extend(swarm_assigned_ids.iter().cloned());
+    for id in primary_ids.iter().chain(secondary_ids.iter()) {
+        if ordered_ids.iter().any(|existing: &String| existing == id) {
+            continue;
+        }
+        ordered_ids.push(id.clone());
+    }
+    if ordered_ids.is_empty() {
+        return Vec::new();
+    }
+
+    let seed_id = primary_ids
+        .first()
+        .or_else(|| secondary_ids.first())
+        .or_else(|| ordered_ids.first())
+        .map(String::as_str);
+    let ecg = ecg_indicator(state.metrics.frame_count, seed_id, pulse_on, true);
+
+    let mut rows = Vec::new();
+    rows.push(ThreadRow {
+        text: format!("{ecg} Working ..."),
+        kind: ThreadRowKind::Breather,
+    });
 
     // Table layout (stage gets the remaining space).
     let elap_w = 6usize;
     let hb_w = 4usize;
     let out_w = 4usize;
-    let fixed = elap_w + hb_w + out_w + 3; // spaces between columns
+    let times_and_spacing = elap_w + hb_w + out_w + 4; // spaces between columns
+
+    let desired_agent_w = ordered_ids
+        .iter()
+        .filter_map(|id| {
+            state
+                .agents
+                .agents
+                .iter()
+                .find(|agent| agent.id == id.as_str())
+                .map(|agent| agent_identity_badge(state, agent.id.as_str()))
+        })
+        .map(|s| s.chars().count())
+        .max()
+        .unwrap_or(8)
+        .clamp(6, 16);
+
+    let max_agent_w = inner.saturating_sub(times_and_spacing + 10).max(1);
+    let agent_w = desired_agent_w.clamp(1, max_agent_w);
+
+    let fixed = agent_w + elap_w + hb_w + out_w + 4; // spaces between columns
 
     if inner.saturating_sub(fixed) < 10 {
         // Narrow fallback: keep it readable without a multi-column layout.
-        rows.push(ThreadRow {
-            text: pad_to_width(
-                &format!("{indent_str}stage={stage} elap={elapsed_s} hb={hb_s} out={out_s}"),
-                width,
-            ),
-            kind: ThreadRowKind::StatusRow,
-        });
+        for id in ordered_ids.iter() {
+            let agent = state
+                .agents
+                .agents
+                .iter()
+                .find(|agent| agent.id == id.as_str());
+            let badge = agent
+                .map(|agent| agent_identity_badge(state, agent.id.as_str()))
+                .unwrap_or_else(|| id.to_string());
+            let turn = state.agents.active_turns.get(id.as_str());
+            let queued = swarm_mission_id.is_some_and(|mid| {
+                state.agents.queued_codex_turns.iter().any(|turn| {
+                    turn.agent_id == id.as_str() && turn.mission_id.as_deref() == Some(mid)
+                })
+            });
+            let has_message = swarm_mission_id.is_some_and(|mid| {
+                state.agents.messages.iter().any(|msg| {
+                    msg.mission_id.as_deref() == Some(mid)
+                        && msg.agent_id.as_deref() == Some(id.as_str())
+                })
+            });
+            let stage_raw = if let Some(turn) = turn {
+                turn.stage.as_deref().unwrap_or("starting")
+            } else if matches!(agent.map(|agent| agent.status), Some(AgentStatus::Error)) {
+                "error"
+            } else if queued {
+                "swarm_queued"
+            } else if swarm_assigned_ids.iter().any(|assigned| assigned == id) {
+                if has_message {
+                    "swarm_done"
+                } else {
+                    "swarm_pending"
+                }
+            } else {
+                "pending"
+            };
+            let stage = agent
+                .map(|agent| format_agent_stage_label(state, agent, stage_raw))
+                .unwrap_or_else(|| stage_raw.to_string());
+
+            let elapsed = turn.and_then(|turn| now.checked_duration_since(turn.started_at));
+            let hb_age = turn
+                .and_then(|turn| now.checked_duration_since(turn.last_heartbeat_at))
+                .map(|d| d.as_secs());
+            let out_age = turn
+                .and_then(|turn| now.checked_duration_since(turn.last_output_at))
+                .map(|d| d.as_secs());
+
+            let elapsed_s = elapsed
+                .map(format_duration_compact)
+                .unwrap_or_else(|| "--".into());
+            let hb_s = hb_age
+                .map(|s| format!("{s}s"))
+                .unwrap_or_else(|| "--".into());
+            let out_s = out_age
+                .map(|s| format!("{s}s"))
+                .unwrap_or_else(|| "--".into());
+
+            rows.push(ThreadRow {
+                text: pad_to_width(
+                    &format!(
+                        "{indent_str}{badge} stage={stage} elap={elapsed_s} hb={hb_s} out={out_s}"
+                    ),
+                    width,
+                ),
+                kind: ThreadRowKind::StatusRow,
+            });
+        }
+        if let Some(mission_id) = swarm_mission_id {
+            append_swarm_meta_footer_rows(&mut rows, state, mission_id, &indent_str, width, inner);
+        }
         return rows;
     }
 
@@ -1267,7 +1526,8 @@ fn breather_rows_for_user_prompt(state: &AppState, pulse_on: bool, width: usize)
     rows.push(ThreadRow {
         text: pad_to_width(
             &format!(
-                "{indent_str}{} {} {} {}",
+                "{indent_str}{} {} {} {} {}",
+                fit_left("AGENT", agent_w),
                 fit_left("STAGE", stage_w),
                 fit_right("ELAP", elap_w),
                 fit_right("HB", hb_w),
@@ -1277,39 +1537,281 @@ fn breather_rows_for_user_prompt(state: &AppState, pulse_on: bool, width: usize)
         ),
         kind: ThreadRowKind::StatusHeader,
     });
-    rows.push(ThreadRow {
-        text: pad_to_width(
-            &format!(
-                "{indent_str}{} {} {} {}",
-                fit_left(stage, stage_w),
-                fit_right(&elapsed_s, elap_w),
-                fit_right(&hb_s, hb_w),
-                fit_right(&out_s, out_w),
+    for id in ordered_ids.iter() {
+        let agent = state
+            .agents
+            .agents
+            .iter()
+            .find(|agent| agent.id == id.as_str());
+        let badge = agent
+            .map(|agent| agent_identity_badge(state, agent.id.as_str()))
+            .unwrap_or_else(|| id.to_string());
+        let turn = state.agents.active_turns.get(id.as_str());
+        let queued =
+            swarm_mission_id.is_some_and(|mid| {
+                state.agents.queued_codex_turns.iter().any(|turn| {
+                    turn.agent_id == id.as_str() && turn.mission_id.as_deref() == Some(mid)
+                })
+            });
+        let has_message = swarm_mission_id.is_some_and(|mid| {
+            state.agents.messages.iter().any(|msg| {
+                msg.mission_id.as_deref() == Some(mid)
+                    && msg.agent_id.as_deref() == Some(id.as_str())
+            })
+        });
+        let stage_raw = if let Some(turn) = turn {
+            turn.stage.as_deref().unwrap_or("starting")
+        } else if matches!(agent.map(|agent| agent.status), Some(AgentStatus::Error)) {
+            "error"
+        } else if queued {
+            "swarm_queued"
+        } else if swarm_assigned_ids.iter().any(|assigned| assigned == id) {
+            if has_message {
+                "swarm_done"
+            } else {
+                "swarm_pending"
+            }
+        } else {
+            "pending"
+        };
+        let stage = agent
+            .map(|agent| format_agent_stage_label(state, agent, stage_raw))
+            .unwrap_or_else(|| stage_raw.to_string());
+
+        let elapsed = turn.and_then(|turn| now.checked_duration_since(turn.started_at));
+        let hb_age = turn
+            .and_then(|turn| now.checked_duration_since(turn.last_heartbeat_at))
+            .map(|d| d.as_secs());
+        let out_age = turn
+            .and_then(|turn| now.checked_duration_since(turn.last_output_at))
+            .map(|d| d.as_secs());
+
+        let elapsed_s = elapsed
+            .map(format_duration_compact)
+            .unwrap_or_else(|| "--".into());
+        let hb_s = hb_age
+            .map(|s| format!("{s}s"))
+            .unwrap_or_else(|| "--".into());
+        let out_s = out_age
+            .map(|s| format!("{s}s"))
+            .unwrap_or_else(|| "--".into());
+
+        rows.push(ThreadRow {
+            text: pad_to_width(
+                &format!(
+                    "{indent_str}{} {} {} {} {}",
+                    fit_left(&badge, agent_w),
+                    fit_left(&stage, stage_w),
+                    fit_right(&elapsed_s, elap_w),
+                    fit_right(&hb_s, hb_w),
+                    fit_right(&out_s, out_w),
+                ),
+                width,
             ),
-            width,
-        ),
-        kind: ThreadRowKind::StatusRow,
-    });
+            kind: ThreadRowKind::StatusRow,
+        });
+    }
+
+    if let Some(mission_id) = swarm_mission_id {
+        append_swarm_meta_footer_rows(&mut rows, state, mission_id, &indent_str, width, inner);
+    }
 
     rows
 }
 
-fn active_running_agent<'a>(state: &'a AppState) -> Option<&'a AgentLane> {
-    if let Some(selected) = state.agents.selected_context_agent() {
-        if let Some(agent) = state
-            .agents
-            .agents
-            .iter()
-            .find(|agent| agent.id == selected && matches!(agent.status, AgentStatus::Running))
-        {
-            return Some(agent);
+fn append_swarm_meta_footer_rows(
+    rows: &mut Vec<ThreadRow>,
+    state: &AppState,
+    mission_id: &str,
+    indent_str: &str,
+    width: usize,
+    inner: usize,
+) {
+    let Some(meta) = state
+        .agents
+        .messages
+        .iter()
+        .rev()
+        .find(|msg| {
+            msg.mission_id.as_deref() == Some(mission_id)
+                && msg.agent_id.as_deref() == Some("swarm")
+                && msg.text.starts_with("Swarm template:")
+        })
+        .map(|msg| msg.text.trim().to_string())
+    else {
+        return;
+    };
+    if meta.is_empty() {
+        return;
+    }
+
+    let max_inner = inner.saturating_sub(1).max(1);
+    rows.push(ThreadRow {
+        text: pad_to_width(&format!("{indent_str}{}", "─".repeat(max_inner)), width),
+        kind: ThreadRowKind::StatusHeader,
+    });
+
+    for seg in wrap_visual_line(&meta, max_inner) {
+        let seg = seg.trim_end_matches(' ');
+        let line = if seg.is_empty() {
+            indent_str.to_string()
+        } else {
+            format!("{indent_str}{seg}")
+        };
+        rows.push(ThreadRow {
+            text: pad_to_width(&line, width),
+            kind: ThreadRowKind::StatusRow,
+        });
+    }
+
+    rows.push(ThreadRow {
+        text: pad_to_width(&format!("{indent_str}{}", "─".repeat(max_inner)), width),
+        kind: ThreadRowKind::StatusHeader,
+    });
+
+    rows.push(ThreadRow {
+        text: pad_to_width(indent_str, width),
+        kind: ThreadRowKind::StatusRow,
+    });
+}
+
+fn format_agent_stage_label(state: &AppState, agent: &AgentLane, stage: &str) -> String {
+    if state.debug {
+        return stage.to_string();
+    }
+    if stage == "token_count" {
+        return format_token_count_stage(state, agent);
+    }
+
+    if let Some((prefix, inner_raw)) = split_stage_with_parens(stage) {
+        match prefix {
+            "item_started" | "item.started" => {
+                return format!("Starting {}", humanize_stage_atom(inner_raw));
+            }
+            "item_completed" | "item.completed" => {
+                return format!("Finished {}", humanize_stage_atom(inner_raw));
+            }
+            "tools/call" => {
+                return match inner_raw {
+                    "codex" => "Starting session".into(),
+                    "codex-reply" => "Continuing session".into(),
+                    _ => format!("Calling {}", humanize_stage_atom(inner_raw)),
+                };
+            }
+            _ => {}
         }
     }
-    state
+
+    match stage {
+        "starting" => "Starting".into(),
+        "queued" => "Queued".into(),
+        "warning" => "Warning".into(),
+        "error" => "Error".into(),
+        "stream_error" | "stream.error" => "Stream error".into(),
+        _ => sentence_case(&humanize_stage_atom(stage)),
+    }
+}
+
+fn format_token_count_stage(state: &AppState, agent: &AgentLane) -> String {
+    if !agent.is_codex() {
+        return "Updating token usage".into();
+    }
+
+    let agent_id = agent.id.as_str();
+    let mission_id = agent
+        .current_mission
+        .as_deref()
+        .or_else(|| state.agents.selected_context_mission());
+
+    let pct = if let Some(mission_id) = mission_id {
+        state
+            .agents
+            .codex_mission_context_remaining_pct
+            .get(mission_id)
+            .and_then(|m| m.get(agent_id))
+            .copied()
+    } else {
+        state
+            .agents
+            .codex_context_remaining_pct
+            .get(agent_id)
+            .copied()
+    };
+    let used = if let Some(mission_id) = mission_id {
+        state
+            .agents
+            .codex_mission_used_tokens
+            .get(mission_id)
+            .and_then(|m| m.get(agent_id))
+            .copied()
+    } else {
+        state.agents.codex_used_tokens.get(agent_id).copied()
+    };
+    let max = state
         .agents
-        .agents
-        .iter()
-        .find(|agent| matches!(agent.status, AgentStatus::Running))
+        .codex_effective_context_window_tokens
+        .get(agent_id)
+        .copied();
+
+    match (pct, used, max) {
+        (Some(pct), Some(used), Some(max)) => format!(
+            "Context: {pct}% left {}/{}",
+            format_token_count_short(used),
+            format_token_count_short(max)
+        ),
+        (None, Some(used), Some(max)) => format!(
+            "Context: {}/{}",
+            format_token_count_short(used),
+            format_token_count_short(max)
+        ),
+        (Some(pct), None, _) => format!("Context: {pct}% left"),
+        (None, Some(used), None) => format!("Tokens: {}", format_token_count_short(used)),
+        _ => "Updating context usage".into(),
+    }
+}
+
+fn split_stage_with_parens(stage: &str) -> Option<(&str, &str)> {
+    if !stage.ends_with(')') {
+        return None;
+    }
+    let open = stage.find('(')?;
+    if open + 1 >= stage.len() {
+        return None;
+    }
+    Some((&stage[..open], &stage[open + 1..stage.len() - 1]))
+}
+
+fn humanize_stage_atom(text: &str) -> String {
+    let mut out = String::new();
+    let mut last_was_space = true;
+    for ch in text.chars() {
+        let mapped = match ch {
+            '_' | '.' | '/' | '-' => ' ',
+            _ => ch,
+        };
+        if mapped == ' ' {
+            if !last_was_space {
+                out.push(' ');
+                last_was_space = true;
+            }
+            continue;
+        }
+        out.push(mapped);
+        last_was_space = false;
+    }
+    out.trim().to_string()
+}
+
+fn sentence_case(text: &str) -> String {
+    let trimmed = text.trim();
+    let mut chars = trimmed.chars();
+    let Some(first) = chars.next() else {
+        return String::new();
+    };
+    let mut out = String::new();
+    out.extend(first.to_uppercase());
+    out.push_str(chars.as_str());
+    out
 }
 
 fn truncate_label(input: &str, max_chars: usize) -> String {
@@ -1317,15 +1819,9 @@ fn truncate_label(input: &str, max_chars: usize) -> String {
         return String::new();
     }
     let mut out = String::new();
-    let mut count = 0usize;
-    for ch in input.chars() {
-        if count >= max_chars {
-            break;
-        }
-        out.push(ch);
-        count += 1;
-    }
-    if input.chars().count() > max_chars {
+    let mut chars = input.chars();
+    out.extend(chars.by_ref().take(max_chars));
+    if chars.next().is_some() {
         if max_chars == 1 {
             return "…".to_string();
         }
@@ -1498,7 +1994,7 @@ fn agent_seed(agent_id: &str) -> u64 {
 }
 
 fn pulse_on(state: &AppState) -> bool {
-    (state.metrics.frame_count / 6) % 2 == 0
+    (state.metrics.frame_count / 6).is_multiple_of(2)
 }
 
 fn cursor_visible(state: &AppState) -> bool {
@@ -1597,9 +2093,14 @@ mod tests {
         USER_PROMPT_BG_BACKGROUND_PCT,
     };
     use crate::theme::Theme;
-    use nit_core::{AgentChannel, AgentLane, AgentMessage, AgentStatus, AppState, Buffer};
+    use nit_core::{
+        AgentChannel, AgentLane, AgentMessage, AgentStatus, AppState, Buffer, MissionPhase,
+        MissionRecord,
+    };
     use ratatui::layout::Rect;
+    use ratatui::style::Modifier;
     use std::path::PathBuf;
+    use std::time::Instant;
 
     fn test_state() -> AppState {
         AppState::new(
@@ -1758,7 +2259,7 @@ mod tests {
     #[test]
     fn agent_ecg_renders_in_accent_color_and_text_is_cyan_theme() {
         let theme = Theme::default();
-        let rows = vec![ThreadRow {
+        let rows = [ThreadRow {
             text: "▁▁▁▁▁▁ hello".to_string(),
             kind: ThreadRowKind::Agent,
         }];
@@ -1766,6 +2267,119 @@ mod tests {
         assert_eq!(lines.len(), 1);
         assert_eq!(lines[0].spans[0].style.fg, Some(theme.accent));
         assert_eq!(lines[0].spans[1].style.fg, Some(theme.title));
+    }
+
+    #[test]
+    fn inline_command_style_is_light_gray_not_accent() {
+        let theme = Theme::default();
+        let rows = [ThreadRow {
+            text: "  try `git status`".to_string(),
+            kind: ThreadRowKind::Agent,
+        }];
+        let lines = thread_lines(rows.iter(), &theme);
+        let code_span = lines[0]
+            .spans
+            .iter()
+            .find(|span| span.content.as_ref() == "git status")
+            .expect("expected inline code span");
+        assert_eq!(code_span.style.fg, Some(theme.hl.operator));
+        assert_ne!(code_span.style.fg, Some(theme.accent));
+    }
+
+    #[test]
+    fn inline_number_style_uses_accent() {
+        let theme = Theme::default();
+        let rows = [ThreadRow {
+            text: "  ctx=`600`".to_string(),
+            kind: ThreadRowKind::Agent,
+        }];
+        let lines = thread_lines(rows.iter(), &theme);
+        let num_span = lines[0]
+            .spans
+            .iter()
+            .find(|span| span.content.as_ref() == "600")
+            .expect("expected numeric inline code span");
+        assert_eq!(num_span.style.fg, Some(theme.accent));
+    }
+
+    #[test]
+    fn plain_text_paths_commands_and_numbers_are_highlighted() {
+        let theme = Theme::default();
+        let rows = [ThreadRow {
+            text: "  see crates/nit-tui/src/widgets/agent_ops_view.rs:906; run cargo; wait 600s"
+                .to_string(),
+            kind: ThreadRowKind::Agent,
+        }];
+        let lines = thread_lines(rows.iter(), &theme);
+        let line = &lines[0];
+
+        let path_span = line
+            .spans
+            .iter()
+            .find(|span| {
+                span.content
+                    .as_ref()
+                    .contains("crates/nit-tui/src/widgets/agent_ops_view.rs:906")
+            })
+            .expect("expected path span");
+        assert_eq!(path_span.style.fg, Some(theme.hl.link));
+        assert!(path_span.style.add_modifier.contains(Modifier::UNDERLINED));
+
+        let cargo_span = line
+            .spans
+            .iter()
+            .find(|span| span.content.as_ref() == "cargo")
+            .expect("expected command span");
+        assert_eq!(cargo_span.style.fg, Some(theme.hl.operator));
+
+        let num_span = line
+            .spans
+            .iter()
+            .find(|span| span.content.as_ref() == "600s")
+            .expect("expected number span");
+        assert_eq!(num_span.style.fg, Some(theme.accent));
+    }
+
+    #[test]
+    fn verify_result_outcome_is_color_coded() {
+        let theme = Theme::default();
+        let rows = [
+            ThreadRow {
+                text: "  VERIFY result: FAIL".to_string(),
+                kind: ThreadRowKind::Agent,
+            },
+            ThreadRow {
+                text: "  VERIFY result: SUCCESS".to_string(),
+                kind: ThreadRowKind::Agent,
+            },
+            ThreadRow {
+                text: "  VERIFY result: ERROR".to_string(),
+                kind: ThreadRowKind::Agent,
+            },
+        ];
+        let lines = thread_lines(rows.iter(), &theme);
+        assert_eq!(lines.len(), 3);
+
+        let fail_span = lines[0]
+            .spans
+            .iter()
+            .find(|span| span.content.as_ref() == "FAIL")
+            .expect("expected FAIL span");
+        assert_eq!(fail_span.style.fg, Some(theme.error));
+
+        let success_span = lines[1]
+            .spans
+            .iter()
+            .find(|span| span.content.as_ref() == "SUCCESS")
+            .expect("expected SUCCESS span");
+        assert_eq!(success_span.style.fg, Some(theme.success));
+
+        let other_span = lines[2]
+            .spans
+            .iter()
+            .find(|span| span.content.as_ref() == "ERROR")
+            .expect("expected ERROR span");
+        assert_eq!(other_span.style.fg, Some(theme.warning));
     }
 
     #[test]
@@ -1819,6 +2433,16 @@ mod tests {
             current_mission: None,
             last_message: "active".into(),
         });
+        let now = Instant::now();
+        state.agents.active_turns.insert(
+            "planner".into(),
+            nit_core::state::AgentTurnState {
+                started_at: now,
+                last_heartbeat_at: now,
+                last_output_at: now,
+                stage: Some("starting".into()),
+            },
+        );
         state.agents.messages.push(AgentMessage {
             at: "10:00:02".into(),
             channel: AgentChannel::Agent,
@@ -1834,7 +2458,8 @@ mod tests {
             .expect("breather row");
         let breather = rows.get(breather_idx).expect("breather row");
         assert!(matches!(breather.kind, ThreadRowKind::Breather));
-        assert!(breather.text.contains("[Planner] Working"));
+        assert!(breather.text.contains("Working ..."));
+        assert!(!breather.text.contains("Planner"));
     }
 
     #[test]
@@ -1849,7 +2474,7 @@ mod tests {
             role: "Planner".into(),
             lane: "Lane A".into(),
             kind: nit_core::AgentLaneKind::Mock,
-            status: AgentStatus::Running,
+            status: AgentStatus::Idle,
             heartbeat_age_secs: 0,
             queue_len: 1,
             current_mission: None,
@@ -1871,7 +2496,162 @@ mod tests {
         });
 
         let rows = thread_rows(&state, 100, true);
-        assert!(!rows.iter().any(|row| row.text.contains("] Working")));
+        assert!(!rows
+            .iter()
+            .any(|row| matches!(row.kind, ThreadRowKind::Breather)));
+    }
+
+    #[test]
+    fn breather_rows_include_multiple_running_agents() {
+        let mut state = test_state();
+        state.agents.selected_mission = None;
+        state.agents.selected_agent = Some("planner".into());
+        state.agents.messages.clear();
+        state.agents.agents.clear();
+        state.agents.agents.push(AgentLane {
+            id: "planner".into(),
+            role: "Planner".into(),
+            lane: "Lane A".into(),
+            kind: nit_core::AgentLaneKind::Mock,
+            status: AgentStatus::Running,
+            heartbeat_age_secs: 0,
+            queue_len: 1,
+            current_mission: None,
+            last_message: "active".into(),
+        });
+        state.agents.agents.push(AgentLane {
+            id: "coder".into(),
+            role: "Coder".into(),
+            lane: "Lane B".into(),
+            kind: nit_core::AgentLaneKind::Mock,
+            status: AgentStatus::Running,
+            heartbeat_age_secs: 0,
+            queue_len: 1,
+            current_mission: None,
+            last_message: "active".into(),
+        });
+
+        let now = Instant::now();
+        state.agents.active_turns.insert(
+            "planner".into(),
+            nit_core::state::AgentTurnState {
+                started_at: now,
+                last_heartbeat_at: now,
+                last_output_at: now,
+                stage: Some("starting".into()),
+            },
+        );
+        state.agents.active_turns.insert(
+            "coder".into(),
+            nit_core::state::AgentTurnState {
+                started_at: now,
+                last_heartbeat_at: now,
+                last_output_at: now,
+                stage: Some("tools/call(codex)".into()),
+            },
+        );
+
+        state.agents.messages.push(AgentMessage {
+            at: "10:00:02".into(),
+            channel: AgentChannel::Agent,
+            agent_id: None,
+            mission_id: None,
+            text: "do the work".into(),
+        });
+
+        let rows = thread_rows(&state, 120, true);
+        let flattened = rows.iter().map(|row| row.text.as_str()).collect::<Vec<_>>();
+        assert!(flattened.iter().any(|line| line.contains("Working ...")));
+        assert!(flattened.iter().any(|line| line.contains("Planner")));
+        assert!(flattened.iter().any(|line| line.contains("Coder")));
+        assert!(flattened
+            .iter()
+            .any(|line| line.contains("Starting session")));
+    }
+
+    #[test]
+    fn breather_rows_include_swarm_assigned_agents_even_when_idle() {
+        let mut state = test_state();
+        state.agents.messages.clear();
+        state.agents.missions.clear();
+        state.agents.agents.clear();
+        state.agents.active_turns.clear();
+
+        state.agents.missions.push(MissionRecord {
+            id: "mis-001".into(),
+            title: "Swarm: demo".into(),
+            phase: MissionPhase::Plan,
+            swarm: true,
+            assigned_agents: vec!["planner".into(), "coder".into()],
+            status: "PLAN".into(),
+            updated_at: "t+0".into(),
+        });
+        state.agents.selected_mission = Some("mis-001".into());
+        state.agents.mission_selected = 0;
+        state.agents.selected_agent = Some("planner".into());
+
+        state.agents.agents.push(AgentLane {
+            id: "planner".into(),
+            role: "Planner".into(),
+            lane: "Lane A".into(),
+            kind: nit_core::AgentLaneKind::Mock,
+            status: AgentStatus::Running,
+            heartbeat_age_secs: 0,
+            queue_len: 1,
+            current_mission: Some("mis-001".into()),
+            last_message: "active".into(),
+        });
+        state.agents.agents.push(AgentLane {
+            id: "coder".into(),
+            role: "Coder".into(),
+            lane: "Lane B".into(),
+            kind: nit_core::AgentLaneKind::Mock,
+            status: AgentStatus::Idle,
+            heartbeat_age_secs: 0,
+            queue_len: 0,
+            current_mission: Some("mis-001".into()),
+            last_message: "idle".into(),
+        });
+
+        let now = Instant::now();
+        state.agents.active_turns.insert(
+            "planner".into(),
+            nit_core::state::AgentTurnState {
+                started_at: now,
+                last_heartbeat_at: now,
+                last_output_at: now,
+                stage: Some("starting".into()),
+            },
+        );
+
+        state.agents.messages.push(AgentMessage {
+            at: "10:00:02".into(),
+            channel: AgentChannel::Agent,
+            agent_id: None,
+            mission_id: Some("mis-001".into()),
+            text: "do the work".into(),
+        });
+        state.agents.messages.push(AgentMessage {
+            at: "10:00:03".into(),
+            channel: AgentChannel::Broadcast,
+            agent_id: Some("swarm".into()),
+            mission_id: Some("mis-001".into()),
+            text: "Swarm template: lab | integrator: planner | verifier: coder | gates: rust-ci"
+                .into(),
+        });
+
+        let rows = thread_rows(&state, 120, true);
+        let flattened = rows.iter().map(|row| row.text.as_str()).collect::<Vec<_>>();
+        assert!(flattened.iter().any(|line| line.contains("Working ...")));
+        assert!(flattened.iter().any(|line| line.contains("Planner")));
+        assert!(flattened.iter().any(|line| line.contains("Coder")));
+        assert!(flattened.iter().any(|line| line.contains("Swarm pending")));
+        assert!(rows.iter().any(|row| {
+            matches!(row.kind, ThreadRowKind::StatusRow) && row.text.contains("Swarm template:")
+        }));
+        assert!(!rows.iter().any(|row| {
+            matches!(row.kind, ThreadRowKind::Agent) && row.text.contains("Swarm template:")
+        }));
     }
 
     #[test]
@@ -1934,7 +2714,7 @@ mod tests {
             theme.background,
             USER_PROMPT_BG_BACKGROUND_PCT,
         );
-        let rows = vec![
+        let rows = [
             ThreadRow {
                 text: "  You      ".to_string(),
                 kind: ThreadRowKind::User,

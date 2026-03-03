@@ -15,3 +15,5 @@ runs/
 perf.data
 perf.data.old
 flamegraph.svg
+.nit/
+vendor/

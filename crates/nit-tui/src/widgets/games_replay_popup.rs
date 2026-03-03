@@ -14,8 +14,8 @@ const MIN_WIDTH: u16 = 70;
 const MIN_HEIGHT: u16 = 20;
 
 pub fn preferred_size(screen: Rect) -> (u16, u16) {
-    let width = screen.width.min(120).max(MIN_WIDTH);
-    let height = screen.height.min(40).max(MIN_HEIGHT);
+    let width = screen.width.clamp(MIN_WIDTH, 120);
+    let height = screen.height.clamp(MIN_HEIGHT, 40);
     (width, height)
 }
 
@@ -66,16 +66,7 @@ fn trim_to_width(text: &str, max_width: usize) -> String {
     if max_width == 0 {
         return String::new();
     }
-    let mut out = String::new();
-    let mut count = 0usize;
-    for ch in text.chars() {
-        if count >= max_width {
-            break;
-        }
-        out.push(ch);
-        count += 1;
-    }
-    out
+    text.chars().take(max_width).collect()
 }
 
 fn line_count(state: &AppState) -> usize {

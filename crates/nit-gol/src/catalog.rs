@@ -180,6 +180,10 @@ impl RuleCatalog {
         self.visible_indices.len()
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.visible_indices.is_empty()
+    }
+
     pub fn builtins(&self) -> impl Iterator<Item = &RuleEntry> {
         self.entries
             .iter()
@@ -239,9 +243,7 @@ impl RuleCatalog {
             .iter()
             .enumerate()
             .filter_map(|(pos, idx)| {
-                let Some(rule) = self.entries.get(*idx) else {
-                    return None;
-                };
+                let rule = self.entries.get(*idx)?;
                 let mut hay = String::new();
                 hay.push_str(&rule.id);
                 hay.push(' ');

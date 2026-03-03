@@ -414,19 +414,14 @@ pub enum AgentChannel {
     Broadcast,
 }
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentLaneKind {
+    #[default]
     Unknown,
     Mock,
     Codex,
     Claude,
-}
-
-impl Default for AgentLaneKind {
-    fn default() -> Self {
-        Self::Unknown
-    }
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -1193,14 +1188,18 @@ impl CommandLine {
         if idx == 0 {
             return 0;
         }
-        let mut count = 0usize;
-        for (byte_idx, _) in self.input.char_indices() {
+        for (count, (byte_idx, _)) in self.input.char_indices().enumerate() {
             if count == idx {
                 return byte_idx;
             }
-            count += 1;
         }
         self.input.len()
+    }
+}
+
+impl Default for CommandLine {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -1260,6 +1259,10 @@ pub struct FileTreeState {
     #[serde(skip)]
     pub rows: Vec<FileTreeRow>,
 
+    // Expanded directories (maintained by the TUI runtime).
+    #[serde(skip)]
+    pub expanded_dirs: HashSet<PathBuf>,
+
     // Async loading + cache (maintained by the TUI runtime):
     #[serde(skip)]
     pub loading_dirs: HashSet<PathBuf>,
@@ -1277,6 +1280,7 @@ impl Default for FileTreeState {
             show_hidden: false,
             show_ignored: false,
             rows: Vec::new(),
+            expanded_dirs: HashSet::new(),
             loading_dirs: HashSet::new(),
             cache: HashMap::new(),
         }
@@ -2475,7 +2479,7 @@ fn handle_command_line(state: &mut AppState, input: &str) -> bool {
             state.status = Some("Petri dish queued".into());
             false
         }
-        _ if tokens.get(0) == Some(&"games")
+        _ if tokens.first() == Some(&"games")
             && tokens.get(1) == Some(&"run")
             && tokens.len() > 2 =>
         {
@@ -2603,7 +2607,7 @@ fn handle_command_line(state: &mut AppState, input: &str) -> bool {
             open_games_history_popup(state);
             false
         }
-        _ if tokens.get(0) == Some(&"games") && tokens.get(1) == Some(&"inspect") => {
+        _ if tokens.first() == Some(&"games") && tokens.get(1) == Some(&"inspect") => {
             let rule_tuple = match parse_tm_rule_tuple(trimmed) {
                 Ok(value) => value,
                 Err(msg) => {
@@ -2957,7 +2961,7 @@ fn handle_command_line(state: &mut AppState, input: &str) -> bool {
             }
             false
         }
-        _ if tokens.get(0) == Some(&"games") && tokens.get(1) == Some(&"tm") => {
+        _ if tokens.first() == Some(&"games") && tokens.get(1) == Some(&"tm") => {
             let mut idx = 2usize;
             let mut source = "config";
             if let Some(token) = tokens.get(idx) {
@@ -3002,7 +3006,7 @@ fn handle_command_line(state: &mut AppState, input: &str) -> bool {
                 }
             }
 
-            let Some(input) = numbers.get(0).copied() else {
+            let Some(input) = numbers.first().copied() else {
                 state.status = Some(
                     "Usage: :games tm [run|config] <input> [steps] [strategy_id] | :games tm {rule_code, states, symbols} <input> [steps]"
                         .into(),
@@ -3155,7 +3159,7 @@ fn handle_command_line(state: &mut AppState, input: &str) -> bool {
                 tm_defs
                     .iter()
                     .position(|def| def.id == *id)
-                    .and_then(|idx| Some(tm_defs.remove(idx)))
+                    .map(|idx| tm_defs.remove(idx))
             } else if tm_defs.len() == 1 {
                 tm_defs.pop()
             } else {
@@ -3186,7 +3190,7 @@ fn handle_command_line(state: &mut AppState, input: &str) -> bool {
             state.status = Some("TM simulation opened".into());
             false
         }
-        _ if tokens.get(0) == Some(&"games") && tokens.get(1) == Some(&"ca") => {
+        _ if tokens.first() == Some(&"games") && tokens.get(1) == Some(&"ca") => {
             let mut idx = 2usize;
             let mut source = "config";
             if let Some(token) = tokens.get(idx) {
@@ -3234,7 +3238,7 @@ fn handle_command_line(state: &mut AppState, input: &str) -> bool {
                 }
             }
 
-            let Some(input) = numbers.get(0).copied() else {
+            let Some(input) = numbers.first().copied() else {
                 state.status = Some(
                     "Usage: :games ca [run|config] <input> [steps] [strategy_id] | :games ca {n,k,r} <input> [steps]"
                         .into(),
@@ -3374,7 +3378,7 @@ fn handle_command_line(state: &mut AppState, input: &str) -> bool {
             state.status = Some("CA simulation opened".into());
             false
         }
-        _ if tokens.get(0) == Some(&"games")
+        _ if tokens.first() == Some(&"games")
             && matches!(tokens.get(1), Some(&"analyze") | Some(&"analyse")) =>
         {
             let defaults = AnalysisConfig::default();
@@ -3462,7 +3466,7 @@ fn handle_command_line(state: &mut AppState, input: &str) -> bool {
             ));
             false
         }
-        _ if tokens.get(0) == Some(&"gol") && tokens.get(1) == Some(&"rule") => {
+        _ if tokens.first() == Some(&"gol") && tokens.get(1) == Some(&"rule") => {
             if tokens.len() == 2 {
                 log_rule_overview(state);
             } else {
@@ -3482,7 +3486,7 @@ fn handle_command_line(state: &mut AppState, input: &str) -> bool {
             }
             false
         }
-        _ if tokens.get(0) == Some(&"gol") && tokens.get(1) == Some(&"rules") => {
+        _ if tokens.first() == Some(&"gol") && tokens.get(1) == Some(&"rules") => {
             log_rule_list(state);
             false
         }
@@ -4170,7 +4174,7 @@ fn strategy_id_prefers_fsm(state: &AppState, id: &str) -> bool {
 
 fn lab_from_tokens(tokens: &[&str]) -> Option<AppKind> {
     tokens
-        .get(0)
+        .first()
         .and_then(|token| lab_from_token(token))
         .or_else(|| tokens.get(1).and_then(|token| lab_from_token(token)))
 }

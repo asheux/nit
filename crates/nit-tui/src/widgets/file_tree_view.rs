@@ -37,7 +37,7 @@ pub fn render(f: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
         "OFF"
     };
     let title = format!(
-        "NITTREE  {}  [Enter open] [Esc/q close] [r refresh] [. hidden:{}] [i ignored:{}]",
+        "NITTREE  {}  [Enter open/toggle] [Esc/q close] [r refresh] [. hidden:{}] [i ignored:{}]",
         root, hidden, ignored
     );
     let focused = state.focus == PaneId::Editor;
@@ -77,8 +77,7 @@ pub fn render(f: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
 
     let end = (scroll + inner_height).min(rows.len());
     let mut lines = Vec::new();
-    for idx in scroll..end {
-        let row = &rows[idx];
+    for (idx, row) in rows.iter().enumerate().take(end).skip(scroll) {
         let mut style = match row.kind {
             FileTreeKind::Dir => Style::default().fg(theme.title),
             FileTreeKind::File => Style::default().fg(file_fg),

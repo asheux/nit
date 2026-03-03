@@ -112,6 +112,12 @@ impl SystemStats {
     }
 }
 
+impl Default for SystemStats {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 fn gpu_label(info: Option<&GpuInfo>) -> String {
     match info {
         Some(info) => {

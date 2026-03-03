@@ -134,7 +134,7 @@ impl LastSeedSnapshotKey {
 }
 
 enum SeedIoCommand {
-    Snapshot(SeedSnapshotRequest),
+    Snapshot(Box<SeedSnapshotRequest>),
     Shutdown,
 }
 
@@ -181,7 +181,11 @@ impl SeedSnapshotManager {
             last.key = Some(key);
             last.last_at = now;
         }
-        match self.inner.tx.try_send(SeedIoCommand::Snapshot(req)) {
+        match self
+            .inner
+            .tx
+            .try_send(SeedIoCommand::Snapshot(Box::new(req)))
+        {
             Ok(_) => true,
             Err(TrySendError::Full(_)) => {
                 self.note_drop();
@@ -239,7 +243,7 @@ fn seed_worker_loop(rx: Receiver<SeedIoCommand>, inner: Arc<SeedSnapshotInner>) 
     while let Ok(cmd) = rx.recv() {
         match cmd {
             SeedIoCommand::Snapshot(req) => {
-                if let Err(err) = handle_seed_snapshot(req, &inner) {
+                if let Err(err) = handle_seed_snapshot(*req, &inner) {
                     warn!("Seed snapshot failed: {}", err);
                 }
             }
@@ -267,10 +271,7 @@ fn handle_seed_snapshot(
 fn ensure_dir(dir: &Path) -> std::io::Result<()> {
     if let Ok(meta) = fs::symlink_metadata(dir) {
         if meta.file_type().is_symlink() {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "snapshot dir is a symlink",
-            ));
+            return Err(std::io::Error::other("snapshot dir is a symlink"));
         }
         if meta.is_dir() {
             return Ok(());
@@ -281,7 +282,7 @@ fn ensure_dir(dir: &Path) -> std::io::Result<()> {
 
 fn write_seed_metadata_atomic(path: &Path, meta: &SeedSnapshotMetadata) -> io::Result<()> {
     write_atomic(path, |writer| {
-        serde_json::to_writer(writer, meta).map_err(|e| io::Error::new(io::ErrorKind::Other, e))
+        serde_json::to_writer(writer, meta).map_err(io::Error::other)
     })
 }
 
@@ -322,7 +323,7 @@ pub fn snapshot_queue_capacity() -> usize {
 
 pub fn pack_grid_bits(grid: &nit_gol::Grid) -> Vec<u64> {
     let total = grid.width().saturating_mul(grid.height());
-    let mut bits = vec![0u64; (total + 63) / 64];
+    let mut bits = vec![0u64; total.div_ceil(64)];
     for (idx, &cell) in grid.cells().iter().enumerate() {
         if cell != 0 {
             let word = idx / 64;

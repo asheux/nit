@@ -223,9 +223,7 @@ impl AttractorDetector {
     ) -> Option<AttractorEvent> {
         let entries = self.seen.get(&fingerprint)?;
         if self.cfg.confirm_on_repeat {
-            let Some(secondary) = secondary else {
-                return None;
-            };
+            let secondary = secondary?;
             let entry = entries
                 .iter()
                 .find(|entry| entry.secondary == Some(secondary))?;

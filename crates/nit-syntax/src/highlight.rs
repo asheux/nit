@@ -131,6 +131,7 @@ impl HighlightSnapshot {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn from_spans(
         buffer_id: usize,
         version: u64,

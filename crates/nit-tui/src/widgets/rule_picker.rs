@@ -395,13 +395,11 @@ fn truncate_text(text: &str, max: usize) -> String {
         return String::new();
     }
     let mut out = String::new();
-    let mut count = 0usize;
-    for ch in text.chars() {
+    for (count, ch) in text.chars().enumerate() {
         if count >= max {
             break;
         }
         out.push(ch);
-        count += 1;
     }
     if text.chars().count() > max && max > 3 {
         let trimmed: String = out.chars().take(max - 3).collect();

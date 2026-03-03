@@ -140,9 +140,9 @@ pub fn prune_oldest(dir: &Path, max_files: usize) -> io::Result<()> {
 }
 
 pub fn write_rle<W: Write>(writer: &mut W, grid: &Grid, rule: Rule) -> io::Result<()> {
-    write!(
+    writeln!(
         writer,
-        "x = {}, y = {}, rule = {}\n",
+        "x = {}, y = {}, rule = {}",
         grid.width(),
         grid.height(),
         rule
@@ -183,14 +183,14 @@ pub fn write_rle_bits<W: Write>(
     let width = width as usize;
     let height = height as usize;
     let total = width.saturating_mul(height);
-    let needed_words = (total + 63) / 64;
+    let needed_words = total.div_ceil(64);
     if bits.len() < needed_words {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "grid bitset too small",
         ));
     }
-    write!(writer, "x = {}, y = {}, rule = {}\n", width, height, rule)?;
+    writeln!(writer, "x = {}, y = {}, rule = {}", width, height, rule)?;
     if width == 0 || height == 0 {
         writer.write_all(b"!")?;
         return Ok(());
@@ -233,10 +233,7 @@ pub fn write_rle_bits_atomic(
 fn ensure_dir(dir: &Path) -> io::Result<()> {
     if let Ok(meta) = fs::symlink_metadata(dir) {
         if meta.file_type().is_symlink() {
-            return Err(io::Error::new(
-                io::ErrorKind::Other,
-                "snapshot dir is a symlink",
-            ));
+            return Err(io::Error::other("snapshot dir is a symlink"));
         }
         if meta.is_dir() {
             return Ok(());
@@ -247,7 +244,7 @@ fn ensure_dir(dir: &Path) -> io::Result<()> {
 
 pub fn write_metadata_atomic(path: &Path, meta: &SnapshotMetadata) -> io::Result<()> {
     write_atomic(path, |writer| {
-        serde_json::to_writer(writer, meta).map_err(|e| io::Error::new(io::ErrorKind::Other, e))
+        serde_json::to_writer(writer, meta).map_err(io::Error::other)
     })
 }
 

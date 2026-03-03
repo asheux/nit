@@ -8,6 +8,7 @@ cursor = "#ffd166"
 cursor_line_bg = "#14344d"
 selection_bg = "#1b3f5c"
 warning = "#f2a541"
+success = "#9ad88f"
 error = "#f25f5c"
 accent = "#ffd166"
 

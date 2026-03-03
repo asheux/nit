@@ -346,11 +346,11 @@ fn decode_fsm_notebook_index_raw(
     };
 
     let mut transitions = vec![vec![0usize; actions]; states];
-    for state_idx in 0..states {
-        for input_idx in 0..actions {
+    for (state_idx, row) in transitions.iter_mut().enumerate() {
+        for (input_idx, cell) in row.iter_mut().enumerate() {
             let flat_idx = state_idx.saturating_mul(actions).saturating_add(input_idx);
             let next = transitions_flat.get(flat_idx).copied().unwrap_or(0);
-            transitions[state_idx][input_idx] = next.min(states - 1);
+            *cell = next.min(states - 1);
         }
     }
 
@@ -424,7 +424,7 @@ fn minimize_raw_fsm(raw: &RawFsm, start_state: usize) -> RawFsm {
     let state_count = machine.states();
     let mut block_by_state = vec![0usize; state_count];
     let mut output_blocks: HashMap<usize, usize> = HashMap::new();
-    for state in 0..state_count {
+    for (state, slot) in block_by_state.iter_mut().enumerate() {
         let output = machine.outputs[state];
         let block = if let Some(existing) = output_blocks.get(&output).copied() {
             existing
@@ -433,17 +433,16 @@ fn minimize_raw_fsm(raw: &RawFsm, start_state: usize) -> RawFsm {
             output_blocks.insert(output, next_block);
             next_block
         };
-        block_by_state[state] = block;
+        *slot = block;
     }
 
     loop {
         let mut signature_blocks: HashMap<Vec<usize>, usize> = HashMap::new();
         let mut refined = vec![0usize; state_count];
-        for state in 0..state_count {
+        for (state, slot) in refined.iter_mut().enumerate() {
             let mut signature = Vec::with_capacity(machine.actions + 1);
             signature.push(machine.outputs[state]);
-            for input in 0..machine.actions {
-                let next = machine.transitions[state][input];
+            for &next in machine.transitions[state].iter() {
                 signature.push(block_by_state[next]);
             }
             let block = if let Some(existing) = signature_blocks.get(&signature).copied() {
@@ -453,7 +452,7 @@ fn minimize_raw_fsm(raw: &RawFsm, start_state: usize) -> RawFsm {
                 signature_blocks.insert(signature, next_block);
                 next_block
             };
-            refined[state] = block;
+            *slot = block;
         }
         if refined == block_by_state {
             break;
@@ -479,9 +478,9 @@ fn minimize_raw_fsm(raw: &RawFsm, start_state: usize) -> RawFsm {
     for block in 0..block_count {
         let state = representative[block].min(state_count.saturating_sub(1));
         outputs[block] = machine.outputs[state];
-        for input in 0..machine.actions {
-            let next = machine.transitions[state][input];
-            transitions[block][input] = block_by_state[next];
+        let row = &mut transitions[block];
+        for (cell, &next) in row.iter_mut().zip(machine.transitions[state].iter()) {
+            *cell = block_by_state[next];
         }
     }
 

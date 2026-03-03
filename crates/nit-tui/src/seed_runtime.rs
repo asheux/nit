@@ -627,6 +627,7 @@ fn seed_search_loop(cmd_rx: Receiver<SeedSearchCommand>, event_tx: Sender<SeedSe
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn handle_seed_search_cmd(
     cmd: SeedSearchCommand,
     search_active: &mut bool,
@@ -697,7 +698,7 @@ fn mutate_params(base: &SeedParams, rng: &mut XorShift64) -> SeedParams {
         };
     }
     if rng.next_u64() % 100 < 30 {
-        params.placement = if rng.next_u64() % 2 == 0 {
+        params.placement = if rng.next_u64().is_multiple_of(2) {
             nit_core::SeedPlacement::Center
         } else {
             nit_core::SeedPlacement::TopLeft
