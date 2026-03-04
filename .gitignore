@@ -16,4 +16,6 @@ perf.data.old
 flamegraph.svg
 .nit/
 vendor/
+!vendor/time/
+!vendor/time/**
 .cargo-local/

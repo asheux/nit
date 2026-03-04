@@ -845,32 +845,43 @@ impl SwarmRuntime {
         }
 
         let mut integrator_locked = false;
-        let mut integrator_agent_id =
-            if matches!(template_kind, SwarmTemplate::Lab | SwarmTemplate::Bulk) {
-                agents
-                    .iter()
-                    .find(|id| id.as_str() != planner_agent_id.as_str())
-                    .cloned()
-            } else {
-                None
-            };
-        if matches!(template_kind, SwarmTemplate::Bulk) {
-            if let Some(integrator) = agents
+        let mut integrator_agent_id: Option<String> = None;
+        if matches!(template_kind, SwarmTemplate::Lab | SwarmTemplate::Bulk) {
+            let eligible = agents
                 .iter()
-                .find(|id| {
-                    id.as_str() != planner_agent_id.as_str()
-                        && state
+                .filter(|id| id.as_str() != planner_agent_id.as_str())
+                .cloned()
+                .collect::<Vec<_>>();
+            let priority_eligible = eligible
+                .iter()
+                .filter(|id| is_priority_agent(state, id.as_str()))
+                .cloned()
+                .collect::<Vec<_>>();
+            let candidates = if !priority_eligible.is_empty() {
+                priority_eligible
+            } else {
+                eligible
+            };
+
+            integrator_agent_id = candidates.first().cloned();
+
+            if matches!(template_kind, SwarmTemplate::Bulk) {
+                if let Some(integrator) = candidates
+                    .iter()
+                    .find(|id| {
+                        state
                             .agents
                             .swarm_role_by_agent_id
                             .get(*id)
                             .map(|role| role.trim())
                             .filter(|role| !role.is_empty())
                             .is_some_and(|role| role.eq_ignore_ascii_case("integrate"))
-                })
-                .cloned()
-            {
-                integrator_agent_id = Some(integrator);
-                integrator_locked = true;
+                    })
+                    .cloned()
+                {
+                    integrator_agent_id = Some(integrator);
+                    integrator_locked = true;
+                }
             }
         }
         let mut priority_agent_ids: Vec<String> = Vec::new();
@@ -879,7 +890,7 @@ impl SwarmRuntime {
                 .iter()
                 .filter(|id| id.as_str() != planner_agent_id.as_str())
             {
-                if state.agents.swarm_priority_agent_ids.contains(id) {
+                if is_priority_agent(state, id.as_str()) {
                     priority_agent_ids.push(id.clone());
                 }
             }
@@ -898,24 +909,30 @@ impl SwarmRuntime {
         let gate_selection = GateBundle::detect(state);
         let gate_bundle = gate_selection.bundle.clone();
         let verifier_agent_id = gate_bundle.as_ref().and_then(|_| {
-            if let Some(integrator) = integrator_agent_id.as_deref() {
-                agents
-                    .iter()
-                    .find(|id| {
-                        id.as_str() != planner_agent_id.as_str() && id.as_str() != integrator
-                    })
-                    .cloned()
-                    .or_else(|| {
-                        agents
-                            .iter()
-                            .find(|id| id.as_str() != planner_agent_id.as_str())
-                            .cloned()
-                    })
+            let eligible = agents
+                .iter()
+                .filter(|id| id.as_str() != planner_agent_id.as_str())
+                .cloned()
+                .collect::<Vec<_>>();
+            let priority_eligible = eligible
+                .iter()
+                .filter(|id| is_priority_agent(state, id.as_str()))
+                .cloned()
+                .collect::<Vec<_>>();
+            let candidates = if !priority_eligible.is_empty() {
+                priority_eligible
             } else {
-                agents
+                eligible
+            };
+
+            if let Some(integrator) = integrator_agent_id.as_deref() {
+                candidates
                     .iter()
-                    .find(|id| id.as_str() != planner_agent_id.as_str())
+                    .find(|id| id.as_str() != integrator)
                     .cloned()
+                    .or_else(|| candidates.first().cloned())
+            } else {
+                candidates.first().cloned()
             }
         });
 
@@ -3670,6 +3687,9 @@ pub fn select_swarm_agents(
         })
         .collect();
 
+    let (mut priority_pool, mut fallback_pool): (Vec<Candidate>, Vec<Candidate>) =
+        pool.drain(..).partition(|candidate| candidate.priority);
+
     let take_best =
         |pool: &mut Vec<Candidate>, target_role: &str, critical: bool| -> Option<Candidate> {
             if pool.is_empty() {
@@ -3720,63 +3740,54 @@ pub fn select_swarm_agents(
     let mut selected: Vec<String> = Vec::new();
 
     if matches!(template_kind, SwarmTemplate::Parallel | SwarmTemplate::Bulk) {
-        if let Some(integrator) =
-            take_best(&mut pool, "integrate", true).or_else(|| take_best(&mut pool, "all", true))
-        {
+        let integrator = if !priority_pool.is_empty() {
+            take_best(&mut priority_pool, "integrate", true)
+        } else {
+            take_best(&mut fallback_pool, "integrate", true)
+        };
+        if let Some(integrator) = integrator {
             selected.push(integrator.id);
         }
 
-        let mut role_specific: Vec<Candidate> = pool
-            .iter()
-            .filter(|c| !c.role_hint.eq_ignore_ascii_case("all"))
-            .cloned()
-            .collect();
-        let mut role_all: Vec<Candidate> = pool
-            .into_iter()
-            .filter(|c| c.role_hint.eq_ignore_ascii_case("all"))
-            .collect();
+        let drain_parallel_pool =
+            |pool: &mut Vec<Candidate>, selected: &mut Vec<String>, take: usize| {
+                if pool.is_empty() {
+                    return;
+                }
+                pool.sort_by(|a, b| {
+                    let role_bucket = |candidate: &Candidate| -> u8 {
+                        if candidate.role_hint.eq_ignore_ascii_case("all") {
+                            1
+                        } else {
+                            0
+                        }
+                    };
+                    (role_bucket(a), a.busy as u8, a.roster_idx, &a.id).cmp(&(
+                        role_bucket(b),
+                        b.busy as u8,
+                        b.roster_idx,
+                        &b.id,
+                    ))
+                });
+                while selected.len() < take {
+                    let Some(candidate) = pool.first().cloned() else {
+                        break;
+                    };
+                    pool.remove(0);
+                    selected.push(candidate.id);
+                }
+            };
 
-        let sort_by_priority = |cands: &mut Vec<Candidate>| {
-            cands.sort_by(|a, b| {
-                let priority_score = |candidate: &Candidate| -> u8 {
-                    if candidate.priority {
-                        0
-                    } else {
-                        1
-                    }
-                };
-                (priority_score(a), a.busy as u8, a.roster_idx, &a.id).cmp(&(
-                    priority_score(b),
-                    b.busy as u8,
-                    b.roster_idx,
-                    &b.id,
-                ))
-            });
-        };
-
-        sort_by_priority(&mut role_specific);
-        sort_by_priority(&mut role_all);
-
-        while selected.len() < take {
-            if let Some(candidate) = role_specific.first().cloned() {
-                role_specific.remove(0);
-                selected.push(candidate.id);
-            } else {
-                break;
-            }
-        }
-
-        while selected.len() < take {
-            if let Some(candidate) = role_all.first().cloned() {
-                role_all.remove(0);
-                selected.push(candidate.id);
-            } else {
-                break;
-            }
-        }
+        drain_parallel_pool(&mut priority_pool, &mut selected, take);
+        drain_parallel_pool(&mut fallback_pool, &mut selected, take);
     } else {
         while selected.len() < take {
-            if let Some(candidate) = take_best(&mut pool, "all", false) {
+            let candidate = if !priority_pool.is_empty() {
+                take_best(&mut priority_pool, "all", false)
+            } else {
+                take_best(&mut fallback_pool, "all", false)
+            };
+            if let Some(candidate) = candidate {
                 selected.push(candidate.id);
             } else {
                 break;
@@ -4026,6 +4037,65 @@ mod tests {
         let agents = select_swarm_agents(&state, "planner", SwarmSize::Count(3), Some("parallel"));
 
         assert_eq!(agents, vec!["planner", "a", "b"]);
+    }
+
+    #[test]
+    fn parallel_priority_overrides_role_hints() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let editor = Buffer::empty("editor", None);
+        let notes = Buffer::empty("notes", None);
+        let mut state = AppState::new(root, editor, notes);
+        state.agents.agents.clear();
+
+        state.agents.agents.push(make_lane("planner", "planner"));
+        state.agents.agents.push(make_lane("a", "worker"));
+        state.agents.agents.push(make_lane("b", "worker"));
+
+        state.agents.swarm_priority_agent_ids.insert("a".into());
+        state
+            .agents
+            .swarm_role_by_agent_id
+            .insert("b".into(), "integrate".into());
+
+        let agents = select_swarm_agents(&state, "planner", SwarmSize::Count(2), Some("parallel"));
+
+        assert_eq!(agents, vec!["planner", "a"]);
+    }
+
+    #[test]
+    fn bulk_integrator_prefers_priority_agents() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let editor = Buffer::empty("editor", None);
+        let notes = Buffer::empty("notes", None);
+        let mut state = AppState::new(root, editor, notes);
+        state.agents.messages.clear();
+        state.agents.missions.clear();
+        state.agents.agents.clear();
+
+        state.agents.agents.push(make_lane("planner", "planner"));
+        state.agents.agents.push(make_lane("a", "worker"));
+        state.agents.agents.push(make_lane("b", "worker"));
+
+        state.agents.swarm_priority_agent_ids.insert("a".into());
+        state
+            .agents
+            .swarm_role_by_agent_id
+            .insert("b".into(), "integrate".into());
+
+        let mut swarm = SwarmRuntime::default();
+        let (mission_id, _dispatches) = swarm
+            .start(
+                &mut state,
+                "planner".into(),
+                vec!["planner".into(), "a".into(), "b".into()],
+                Some("bulk".into()),
+                "root".into(),
+            )
+            .expect("swarm start");
+
+        let run = swarm.runs.get(&mission_id).expect("run");
+        assert_eq!(run.integrator_agent_id.as_deref(), Some("a"));
+        assert!(!run.integrator_locked);
     }
 
     #[test]

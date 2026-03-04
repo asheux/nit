@@ -1313,10 +1313,7 @@ fn status_header_line(text: &str, theme: &Theme) -> Line<'static> {
 fn status_row_line(text: &str, theme: &Theme) -> Line<'static> {
     if text.trim().is_empty() {
         let bg = dim_bg_towards(theme.border, theme.background, 85);
-        return Line::from(Span::styled(
-            text.to_string(),
-            Style::default().bg(bg),
-        ));
+        return Line::from(Span::styled(text.to_string(), Style::default().bg(bg)));
     }
     let bg = dim_bg_towards(theme.border, theme.background, 85);
     Line::from(Span::styled(
@@ -1327,7 +1324,8 @@ fn status_row_line(text: &str, theme: &Theme) -> Line<'static> {
 
 fn status_sub_row_line(text: &str, theme: &Theme) -> Line<'static> {
     let trimmed = text.trim_start();
-    let is_swarm_meta = trimmed.starts_with("Swarm:") || trimmed.starts_with("Verify:");
+    let is_swarm_meta =
+        trimmed.starts_with("Swarm") || trimmed.starts_with("Verify") || trimmed.starts_with("• ");
     if is_swarm_meta {
         let bg = dim_bg_towards(theme.border, theme.background, 85);
         return Line::from(Span::styled(
@@ -1640,21 +1638,8 @@ fn breather_rows_for_user_prompt(
     let elap_w = 6usize;
     let hb_w = 4usize;
     let out_w = 4usize;
-    let size_w = 8usize;
-    let times_and_spacing = elap_w + hb_w + out_w + size_w + 4; // spaces between columns
-    let agent_w = inner.saturating_sub(times_and_spacing);
-    let resolve_size = |agent: Option<&AgentLane>| -> Option<&str> {
-        let agent = agent?;
-        if !agent.is_codex() {
-            return None;
-        }
-        state
-            .agents
-            .codex_selected_reasoning_effort
-            .get(&agent.id)
-            .or_else(|| state.agents.codex_default_reasoning_effort.get(&agent.id))
-            .map(|value| value.as_str())
-    };
+    let times_and_spacing = elap_w + hb_w + out_w + 3; // spaces between columns
+    let agent_w = inner.saturating_sub(times_and_spacing + 1).max(1);
 
     if agent_w < 6 {
         // Narrow fallback: keep it readable without a strict column layout.
@@ -1667,7 +1652,6 @@ fn breather_rows_for_user_prompt(
             let badge = agent
                 .map(agent_roster_label)
                 .unwrap_or_else(|| id.to_string());
-            let size = resolve_size(agent).unwrap_or("--");
             let turn = state.agents.active_turns.get(id.as_str());
             let queued_for_swarm = swarm_mission_id.is_some_and(|mid| {
                 state.agents.queued_codex_turns.iter().any(|turn| {
@@ -1726,7 +1710,7 @@ fn breather_rows_for_user_prompt(
 
             rows.push(ThreadRow {
                 text: pad_to_width(
-                    &format!("{indent_str}{badge} {size} {elapsed_s} {hb_s} {out_s}"),
+                    &format!("{indent_str}{badge} {elapsed_s} {hb_s} {out_s}"),
                     width,
                 ),
                 kind: ThreadRowKind::StatusRow,
@@ -1745,9 +1729,8 @@ fn breather_rows_for_user_prompt(
     rows.push(ThreadRow {
         text: pad_to_width(
             &format!(
-                "{indent_str}{} {} {} {} {}",
+                "{indent_str}{} {} {} {}",
                 fit_left("AGENT", agent_w),
-                fit_left("SIZE", size_w),
                 fit_right("ELAP", elap_w),
                 fit_right("HB", hb_w),
                 fit_right("OUT", out_w),
@@ -1821,14 +1804,11 @@ fn breather_rows_for_user_prompt(
         let out_s = out_age
             .map(|s| format!("{s}s"))
             .unwrap_or_else(|| "--".into());
-        let size = resolve_size(agent).unwrap_or("--");
-
         rows.push(ThreadRow {
             text: pad_to_width(
                 &format!(
-                    "{indent_str}{} {} {} {} {}",
+                    "{indent_str}{} {} {} {}",
                     fit_left(&badge, agent_w),
-                    fit_left(size, size_w),
                     fit_right(&elapsed_s, elap_w),
                     fit_right(&hb_s, hb_w),
                     fit_right(&out_s, out_w),
@@ -1840,9 +1820,8 @@ fn breather_rows_for_user_prompt(
         rows.push(ThreadRow {
             text: pad_to_width(
                 &format!(
-                    "{indent_str}{} {} {} {} {}",
+                    "{indent_str}{} {} {} {}",
                     fit_left(&format!("↳ {stage}"), agent_w),
-                    fit_left("", size_w),
                     fit_right("", elap_w),
                     fit_right("", hb_w),
                     fit_right("", out_w),
@@ -1868,46 +1847,35 @@ fn append_swarm_meta_footer_rows(
     width: usize,
     inner: usize,
 ) {
-    let mut template_meta: Option<String> = None;
-    let mut verify_tag: Option<String> = None;
-    for msg in state.agents.messages.iter().rev() {
-        if msg.mission_id.as_deref() != Some(mission_id) {
-            continue;
-        }
-        if msg.agent_id.as_deref() != Some("swarm") {
-            continue;
-        }
-        let text = msg.text.trim();
-        if verify_tag.is_none() {
-            verify_tag = verify_result_tag(text);
-        }
-        if template_meta.is_none() {
-            template_meta = compact_swarm_template_meta(text);
-        }
-        if template_meta.is_some() && verify_tag.is_some() {
-            break;
-        }
-    }
-
-    let mut line = if let Some(template_meta) = template_meta {
-        template_meta
-    } else if verify_tag.is_some() {
-        "Verify:".to_string()
-    } else {
+    let Some(meta) = collect_swarm_footer_meta(state, mission_id) else {
         return;
     };
-    if let Some(tag) = verify_tag.as_deref() {
-        if !line.is_empty() {
-            line.push_str("  ");
-        }
-        line.push_str(&format!("verify={tag}"));
+
+    let max_inner = inner.max(1);
+    let mut entries: Vec<(&str, String)> = Vec::new();
+    if let Some(value) = meta.template {
+        entries.push(("Template", value));
+    }
+    if let Some(value) = meta.integrator {
+        entries.push(("Integrator", value));
+    }
+    if let Some(value) = meta.verifier {
+        entries.push(("Verifier", value));
+    }
+    if let Some(value) = meta.gates {
+        entries.push(("Gates", value));
+    }
+    if let Some(value) = meta.status {
+        entries.push(("Status", value));
+    }
+    if !meta.notes.is_empty() {
+        entries.push(("Notes", meta.notes.join(" | ")));
     }
 
-    if line.trim().is_empty() {
+    if entries.is_empty() {
         return;
     }
 
-    let max_inner = inner.max(1);
     rows.push(ThreadRow {
         text: pad_to_width(indent_str, width),
         kind: ThreadRowKind::StatusRow,
@@ -1916,18 +1884,15 @@ fn append_swarm_meta_footer_rows(
         text: pad_to_width(&format!("{indent_str}{}", "─".repeat(max_inner)), width),
         kind: ThreadRowKind::StatusHeader,
     });
-    for seg in wrap_visual_line(&line, max_inner) {
-        let seg = seg.trim_end_matches(' ');
-        let line = if seg.is_empty() {
-            indent_str.to_string()
-        } else {
-            format!("{indent_str}{seg}")
-        };
-        rows.push(ThreadRow {
-            text: pad_to_width(&line, width),
-            kind: ThreadRowKind::StatusSubRow,
-        });
+    rows.push(ThreadRow {
+        text: pad_to_width(&format!("{indent_str}Swarm"), width),
+        kind: ThreadRowKind::StatusHeader,
+    });
+
+    for (label, value) in entries.iter() {
+        append_swarm_footer_entry(rows, indent_str, width, max_inner, label, value);
     }
+
     rows.push(ThreadRow {
         text: pad_to_width(&format!("{indent_str}{}", "─".repeat(max_inner)), width),
         kind: ThreadRowKind::StatusHeader,
@@ -1938,7 +1903,121 @@ fn append_swarm_meta_footer_rows(
     });
 }
 
-fn compact_swarm_template_meta(text: &str) -> Option<String> {
+#[derive(Default)]
+struct SwarmFooterMeta {
+    template: Option<String>,
+    integrator: Option<String>,
+    verifier: Option<String>,
+    gates: Option<String>,
+    status: Option<String>,
+    notes: Vec<String>,
+}
+
+impl SwarmFooterMeta {
+    fn is_empty(&self) -> bool {
+        self.template.is_none()
+            && self.integrator.is_none()
+            && self.verifier.is_none()
+            && self.gates.is_none()
+            && self.status.is_none()
+            && self.notes.is_empty()
+    }
+}
+
+fn append_swarm_footer_entry(
+    rows: &mut Vec<ThreadRow>,
+    indent_str: &str,
+    width: usize,
+    max_inner: usize,
+    label: &str,
+    value: &str,
+) {
+    let prefix = format!("• {label}: ");
+    let prefix_len = prefix.chars().count();
+    let available = max_inner.saturating_sub(prefix_len).max(1);
+    let segments = wrap_visual_line(value, available);
+    if segments.is_empty() {
+        rows.push(ThreadRow {
+            text: pad_to_width(&format!("{indent_str}{prefix}"), width),
+            kind: ThreadRowKind::StatusSubRow,
+        });
+        return;
+    }
+
+    for (idx, seg) in segments.iter().enumerate() {
+        let line = if idx == 0 {
+            format!("{indent_str}{prefix}{seg}")
+        } else {
+            format!("{indent_str}{}{}", " ".repeat(prefix_len), seg)
+        };
+        rows.push(ThreadRow {
+            text: pad_to_width(&line, width),
+            kind: ThreadRowKind::StatusSubRow,
+        });
+    }
+}
+
+fn collect_swarm_footer_meta(state: &AppState, mission_id: &str) -> Option<SwarmFooterMeta> {
+    let mut meta = SwarmFooterMeta::default();
+    for msg in state.agents.messages.iter().rev() {
+        if msg.mission_id.as_deref() != Some(mission_id) {
+            continue;
+        }
+        if msg.agent_id.as_deref() != Some("swarm") {
+            continue;
+        }
+        let text = msg.text.trim();
+        if let Some(template_line) = parse_swarm_template_meta(text) {
+            if meta.template.is_none() {
+                meta.template = Some(template_line.template);
+            }
+            if meta.integrator.is_none() {
+                meta.integrator = template_line.integrator;
+            }
+            if meta.verifier.is_none() {
+                meta.verifier = template_line.verifier;
+            }
+            if meta.gates.is_none() {
+                meta.gates = template_line.gates;
+            }
+            continue;
+        }
+        if meta.gates.is_none() {
+            if let Some(gates) = parse_swarm_gates_line(text) {
+                meta.gates = Some(gates);
+                continue;
+            }
+        }
+        if meta.status.is_none() {
+            if let Some(status) = parse_verify_status_line(text) {
+                meta.status = Some(status);
+                continue;
+            }
+        }
+        if text.starts_with("Swarm ") || text.starts_with("VERIFY") {
+            meta.notes.push(text.to_string());
+        }
+    }
+
+    if meta.notes.len() > 3 {
+        meta.notes.truncate(3);
+    }
+
+    if meta.is_empty() {
+        None
+    } else {
+        Some(meta)
+    }
+}
+
+struct SwarmTemplateMeta {
+    template: String,
+    integrator: Option<String>,
+    verifier: Option<String>,
+    gates: Option<String>,
+}
+
+fn parse_swarm_template_meta(text: &str) -> Option<SwarmTemplateMeta> {
     let rest = text.trim().strip_prefix("Swarm template:")?.trim();
     let mut parts = rest.split(" | ");
     let template = parts.next().unwrap_or_default().trim();
@@ -1946,41 +2025,46 @@ fn compact_swarm_template_meta(text: &str) -> Option<String> {
         return None;
     }
 
-    let mut integrator: Option<&str> = None;
-    let mut verifier: Option<&str> = None;
-    let mut gates: Option<&str> = None;
+    let mut integrator: Option<String> = None;
+    let mut verifier: Option<String> = None;
+    let mut gates: Option<String> = None;
     for part in parts {
         let part = part.trim();
         if let Some(value) = part.strip_prefix("integrator:") {
-            integrator = Some(value.trim());
+            integrator = Some(normalize_swarm_meta_value(value));
             continue;
         }
         if let Some(value) = part.strip_prefix("verifier:") {
-            verifier = Some(value.trim());
+            verifier = Some(normalize_swarm_meta_value(value));
             continue;
         }
         if let Some(value) = part.strip_prefix("gates:") {
-            gates = Some(value.trim());
+            gates = Some(normalize_swarm_meta_value(short_gate_bundle_label(value)));
         }
     }
 
-    let mut out = String::new();
-    out.push_str("Swarm:");
-    out.push_str(&format!(" t={template}"));
+    Some(SwarmTemplateMeta {
+        template: normalize_swarm_meta_value(template),
+        integrator,
+        verifier,
+        gates,
+    })
+}
 
-    if let Some(integrator) = integrator {
-        out.push_str(&format!("  i={}", normalize_swarm_meta_value(integrator)));
+fn parse_swarm_gates_line(text: &str) -> Option<String> {
+    let rest = text.trim().strip_prefix("Swarm gates:")?.trim();
+    if rest.is_empty() {
+        return None;
     }
-    if let Some(verifier) = verifier {
-        out.push_str(&format!("  v={}", normalize_swarm_meta_value(verifier)));
+    Some(normalize_swarm_meta_value(short_gate_bundle_label(rest)))
+}
+
+fn parse_verify_status_line(text: &str) -> Option<String> {
+    let rest = text.trim().strip_prefix("VERIFY result:")?.trim();
+    if rest.is_empty() {
+        return None;
     }
-    if let Some(gates) = gates {
-        out.push_str(&format!(
-            "  gates={}",
-            normalize_swarm_meta_value(short_gate_bundle_label(gates))
-        ));
-    }
-    Some(out)
+    Some(rest.to_string())
 }
 
 fn normalize_swarm_meta_value(value: &str) -> String {
@@ -2006,17 +2090,6 @@ fn short_gate_bundle_label(value: &str) -> &str {
         .split_once(" (")
         .map(|(label, _)| label.trim())
         .unwrap_or_else(|| value.trim())
-}
-
-fn verify_result_tag(text: &str) -> Option<String> {
-    let rest = text.trim().strip_prefix("VERIFY result:")?.trim();
-    if rest.is_empty() {
-        return None;
-    }
-    rest.split_whitespace()
-        .next()
-        .map(|word| word.trim().to_string())
-        .filter(|word| !word.is_empty())
 }
 
 fn format_agent_stage_label(state: &AppState, agent: &AgentLane, stage: &str) -> String {
@@ -2930,7 +3003,7 @@ mod tests {
     }
 
     #[test]
-    fn breather_rows_show_codex_agent_size() {
+    fn breather_rows_hide_stage_column_and_show_stage_subrow() {
         let mut state = test_state();
         state.agents.selected_mission = None;
         state.agents.selected_agent = Some("planner".into());
@@ -2973,8 +3046,12 @@ mod tests {
 
         let rows = thread_rows(&state, None, 120, true);
         let flattened = rows.iter().map(|row| row.text.as_str()).collect::<Vec<_>>();
-        assert!(flattened.iter().any(|line| line.contains("SIZE")));
-        assert!(flattened.iter().any(|line| line.contains("high")));
+        assert!(flattened
+            .iter()
+            .any(|line| line.contains("AGENT") && line.contains("ELAP")));
+        assert!(!flattened.iter().any(|line| line.contains("STAGE")));
+        assert!(!flattened.iter().any(|line| line.contains("SIZE")));
+        assert!(flattened.iter().any(|line| line.contains("↳ Starting")));
     }
 
     #[test]
@@ -3092,10 +3169,10 @@ mod tests {
         assert!(flattened.iter().any(|line| line.contains("Coder")));
         assert!(flattened.iter().any(|line| line.contains("Swarm pending")));
         assert!(rows.iter().any(|row| {
-            matches!(row.kind, ThreadRowKind::StatusSubRow) && row.text.contains("Swarm: t=lab")
+            matches!(row.kind, ThreadRowKind::StatusSubRow) && row.text.contains("Template: lab")
         }));
         assert!(!rows.iter().any(|row| {
-            matches!(row.kind, ThreadRowKind::Agent) && row.text.contains("Swarm: t=lab")
+            matches!(row.kind, ThreadRowKind::Agent) && row.text.contains("Template: lab")
         }));
     }
 

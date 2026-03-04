@@ -38,7 +38,6 @@ use crate::{
     },
 };
 use arboard::Clipboard;
-use ctrlc::Error as CtrlcError;
 use crossterm::{
     cursor::{SetCursorStyle, Show},
     event::{
@@ -49,6 +48,7 @@ use crossterm::{
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
+use ctrlc::Error as CtrlcError;
 use nit_core::{
     actions::Action, apply_action, io as core_io, AgentAlert, AgentAlertSeverity, AgentBusEvent,
     AgentChannel, AgentDiagnosticEvent, AgentMessage, AgentOpsTab, AgentStatus, AppKind, AppState,
@@ -420,7 +420,7 @@ pub fn run(
     codex_runtime: CodexRuntimeMode,
     codex_config: CodexRunnerConfig,
 ) -> io::Result<()> {
-    let (mut guard, mut stdout) = TerminalGuard::activate()?;
+    let (guard, mut stdout) = TerminalGuard::activate()?;
     install_terminal_panic_hook(guard.weak_state());
     if let Err(err) = guard.install_sigint_handler() {
         tracing::warn!("Failed to install Ctrl-C handler: {err}");
@@ -4786,11 +4786,6 @@ fn map_key_to_action(key: KeyEvent, state: &AppState, input: &mut InputState) ->
     }
 
     match key {
-        KeyEvent {
-            code: KeyCode::Char('c'),
-            modifiers: KeyModifiers::CONTROL,
-            ..
-        } => Some(Action::Quit),
         KeyEvent {
             code: KeyCode::Char('q'),
             modifiers: KeyModifiers::CONTROL,
@@ -10268,7 +10263,12 @@ impl TerminalGuard {
             alternate_screen: true,
             ..TerminalState::default()
         };
-        Ok((Self { state: Arc::new(Mutex::new(state)) }, stdout))
+        Ok((
+            Self {
+                state: Arc::new(Mutex::new(state)),
+            },
+            stdout,
+        ))
     }
 
     fn weak_state(&self) -> Weak<Mutex<TerminalState>> {
