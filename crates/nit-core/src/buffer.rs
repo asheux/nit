@@ -362,6 +362,9 @@ impl Buffer {
         if s.is_empty() {
             return;
         }
+        if self.selection_range().is_some() {
+            let _ = self.delete_selection();
+        }
         let idx = self.char_index();
         self.record_insert(idx, s);
         self.begin_insert_group(idx);
@@ -563,6 +566,9 @@ impl Buffer {
     }
 
     pub fn insert_char(&mut self, c: char) {
+        if self.selection_range().is_some() {
+            let _ = self.delete_selection();
+        }
         let idx = self.char_index();
         let mut buf = [0u8; 4];
         let s = c.encode_utf8(&mut buf);
@@ -579,12 +585,22 @@ impl Buffer {
     }
 
     pub fn insert_newline(&mut self) {
+        if self.selection_range().is_some() {
+            let _ = self.delete_selection();
+        }
+        let line = self
+            .cursor
+            .line
+            .min(self.rope.len_lines().saturating_sub(1));
+        let indent = self.line_indent(line);
         let idx = self.char_index();
-        self.record_insert(idx, "\n");
+        let mut text = String::from("\n");
+        text.push_str(&indent);
+        self.record_insert(idx, &text);
         self.begin_insert_group(idx);
-        self.rope.insert_char(idx, '\n');
+        self.rope.insert(idx, &text);
         self.cursor.line += 1;
-        self.cursor.col = 0;
+        self.cursor.col = indent.chars().count();
         self.dirty = true;
         self.finish_insert_group();
     }
@@ -614,6 +630,49 @@ impl Buffer {
         }
     }
 
+    pub fn delete_word_back(&mut self) {
+        self.end_edit_group();
+        let len = self.rope.len_chars();
+        let end = self.char_index().min(len);
+        if end == 0 || len == 0 {
+            return;
+        }
+
+        let is_word = |c: char| c.is_alphanumeric() || c == '_';
+
+        let mut idx = end;
+        while idx > 0 && self.rope.char(idx - 1).is_whitespace() {
+            idx = idx.saturating_sub(1);
+        }
+        if idx == 0 {
+            return;
+        }
+        if is_word(self.rope.char(idx - 1)) {
+            while idx > 0 && is_word(self.rope.char(idx - 1)) {
+                idx = idx.saturating_sub(1);
+            }
+        } else {
+            while idx > 0 {
+                let ch = self.rope.char(idx - 1);
+                if ch.is_whitespace() || is_word(ch) {
+                    break;
+                }
+                idx = idx.saturating_sub(1);
+            }
+        }
+
+        let start = idx;
+        if start >= end {
+            return;
+        }
+        self.record_delete(start, end);
+        self.push_undo();
+        self.rope.remove(start..end);
+        self.set_cursor_from_char_index(start.min(self.rope.len_chars()));
+        self.dirty = true;
+        self.clamp_col();
+    }
+
     pub fn delete_forward(&mut self) {
         self.end_edit_group();
         let idx = self.char_index();
@@ -630,6 +689,47 @@ impl Buffer {
             self.rope.remove(idx..idx + 1);
             self.dirty = true;
         }
+    }
+
+    pub fn delete_word_forward(&mut self) {
+        self.end_edit_group();
+        let len = self.rope.len_chars();
+        let start = self.char_index().min(len);
+        if start >= len || len == 0 {
+            return;
+        }
+
+        let is_word = |c: char| c.is_alphanumeric() || c == '_';
+
+        let mut idx = start;
+        if self.rope.char(idx).is_whitespace() {
+            while idx < len && self.rope.char(idx).is_whitespace() {
+                idx += 1;
+            }
+        } else if is_word(self.rope.char(idx)) {
+            while idx < len && is_word(self.rope.char(idx)) {
+                idx += 1;
+            }
+        } else {
+            while idx < len {
+                let ch = self.rope.char(idx);
+                if ch.is_whitespace() || is_word(ch) {
+                    break;
+                }
+                idx += 1;
+            }
+        }
+
+        let end = idx;
+        if end <= start {
+            return;
+        }
+        self.record_delete(start, end);
+        self.push_undo();
+        self.rope.remove(start..end);
+        self.set_cursor_from_char_index(start.min(self.rope.len_chars()));
+        self.dirty = true;
+        self.clamp_col();
     }
 
     pub fn delete_line(&mut self) {

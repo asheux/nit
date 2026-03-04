@@ -306,6 +306,37 @@ pub fn build_lines(theme: &Theme) -> Vec<Line<'static>> {
         heading_style,
     )]));
     lines.push(Line::from(vec![
+        Span::styled("Ctrl/Cmd+A", Style::default().fg(theme.accent)),
+        Span::raw(" select all (also Scratchpad)"),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("Ctrl/Cmd+C", Style::default().fg(theme.accent)),
+        Span::raw(" copy selection (also Scratchpad)"),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("Ctrl/Cmd+X", Style::default().fg(theme.accent)),
+        Span::raw(" cut selection (also Scratchpad)"),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("Ctrl/Cmd+V", Style::default().fg(theme.accent)),
+        Span::raw(" paste (replaces selection; also Scratchpad)"),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("Ctrl/Alt+←/→", Style::default().fg(theme.accent)),
+        Span::raw(" move by word (also Scratchpad)"),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled(
+            "Ctrl/Alt+Backspace/Delete",
+            Style::default().fg(theme.accent),
+        ),
+        Span::raw(" delete word (also Scratchpad)"),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("Enter", Style::default().fg(theme.accent)),
+        Span::raw(" newline (preserves indentation)"),
+    ]));
+    lines.push(Line::from(vec![
         Span::styled("Esc", Style::default().fg(theme.accent)),
         Span::raw(" switch to Normal mode"),
     ]));
@@ -416,15 +447,55 @@ pub fn build_lines(theme: &Theme) -> Vec<Line<'static>> {
         heading_style,
     )]));
     lines.push(Line::from(vec![
-        Span::styled("Enter / Esc", Style::default().fg(theme.accent)),
-        Span::raw(" send message / clear input (@all <msg> broadcasts)"),
+        Span::styled("Enter", Style::default().fg(theme.accent)),
+        Span::raw(" send message (@all <msg> broadcasts)"),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("Shift+Enter", Style::default().fg(theme.accent)),
+        Span::raw(" newline (preserves indentation)"),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("Tab", Style::default().fg(theme.accent)),
+        Span::raw(" insert tab"),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("Ctrl/Cmd+A", Style::default().fg(theme.accent)),
+        Span::raw(" select all"),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("Cmd+C / Ctrl+Shift+C", Style::default().fg(theme.accent)),
+        Span::raw(" copy selection"),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("Cmd+X / Ctrl+Shift+X", Style::default().fg(theme.accent)),
+        Span::raw(" cut selection"),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("Ctrl/Cmd+V", Style::default().fg(theme.accent)),
+        Span::raw(" paste"),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("Ctrl+U", Style::default().fg(theme.accent)),
+        Span::raw(" clear input"),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("Ctrl+C", Style::default().fg(theme.accent)),
+        Span::raw(" clear input (copies if selection)"),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("Esc", Style::default().fg(theme.accent)),
+        Span::raw(" clear selection / thread selection"),
     ]));
     lines.push(Line::from(vec![
         Span::styled("←/→ / Home/End", Style::default().fg(theme.accent)),
-        Span::raw(" move chat input cursor"),
+        Span::raw(" move cursor (Shift selects; Ctrl/Alt moves by word)"),
     ]));
     lines.push(Line::from(vec![
-        Span::styled("j/k or ↑/↓", Style::default().fg(theme.accent)),
+        Span::styled("↑/↓", Style::default().fg(theme.accent)),
+        Span::raw(" move cursor / prompt history"),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("Ctrl+↑/↓", Style::default().fg(theme.accent)),
         Span::raw(" scroll chat thread"),
     ]));
 

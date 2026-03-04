@@ -780,6 +780,10 @@ fn run_loop(
                         needs_redraw = true;
                         continue;
                     }
+                    if handle_editor_buffer_shortcuts(key, state, syntax, &mut clipboard) {
+                        needs_redraw = true;
+                        continue;
+                    }
                     if let Some(action) = map_key_to_action(key, state, &mut input_state) {
                         prepare_clipboard_paste(state, &mut clipboard, &action);
                         let action_copy = action.clone();
@@ -1559,6 +1563,387 @@ fn draw(
     state.metrics.last_render_ms = start.elapsed().as_millis();
     state.metrics.frame_count += 1;
     Ok(())
+}
+
+fn handle_editor_buffer_shortcuts(
+    key: KeyEvent,
+    state: &mut AppState,
+    syntax: &mut SyntaxRuntime,
+    clipboard: &mut Option<Clipboard>,
+) -> bool {
+    if state.command_line.is_some()
+        || state.prompt.is_some()
+        || state.rule_picker.open
+        || state.protocol_picker.open
+        || state.show_help
+        || games_modal_popup_open(state)
+    {
+        return false;
+    }
+    if !pane_accepts_text_input(state, state.focus) {
+        return false;
+    }
+    if state.file_tree.open && state.focus == PaneId::Editor {
+        return false;
+    }
+    let (buffer_id, is_editor) = match state.focus {
+        PaneId::Editor => (state.active_editor_buffer_id, true),
+        PaneId::JobOutput if state.agents.dock_tab == AgentOpsTab::Scratchpad => {
+            (state.notes_buffer_id, false)
+        }
+        _ => return false,
+    };
+
+    let select_all = matches!(
+        key,
+        KeyEvent {
+            code: KeyCode::Char('a') | KeyCode::Char('A'),
+            modifiers,
+            ..
+        } if modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::SUPER)
+    ) || matches!(
+        key,
+        KeyEvent {
+            code: KeyCode::Char('\u{1}'),
+            modifiers: KeyModifiers::NONE,
+            ..
+        }
+    );
+    if select_all {
+        state.mode = Mode::Insert;
+        if is_editor {
+            let buf = state.editor_buffer_mut();
+            buf.go_to_top();
+            buf.move_home();
+            buf.set_selection_anchor();
+            buf.go_to_bottom();
+            buf.move_end();
+            buf.ensure_visible();
+        } else {
+            let buf = state.notes_buffer_mut();
+            buf.go_to_top();
+            buf.move_home();
+            buf.set_selection_anchor();
+            buf.go_to_bottom();
+            buf.move_end();
+            buf.ensure_visible();
+        }
+        return true;
+    }
+
+    let copy = matches!(
+        key,
+        KeyEvent {
+            code: KeyCode::Char('c') | KeyCode::Char('C'),
+            modifiers,
+            ..
+        } if modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::SUPER)
+    ) || matches!(
+        key,
+        KeyEvent {
+            code: KeyCode::Char('\u{3}'),
+            modifiers: KeyModifiers::NONE,
+            ..
+        }
+    ) || matches!(
+        key,
+        KeyEvent {
+            code: KeyCode::Insert,
+            modifiers,
+            ..
+        } if modifiers.contains(KeyModifiers::CONTROL)
+    );
+    if copy {
+        let text = if is_editor {
+            state.editor_buffer().yank_selection()
+        } else {
+            state.notes_buffer().yank_selection()
+        };
+        if let Some(text) = text.filter(|t| !t.is_empty()) {
+            state.yank_kind = if text.contains('\n') {
+                YankKind::Line
+            } else {
+                YankKind::Char
+            };
+            state.yank = Some(text.clone());
+            if let Some(cb) = clipboard.as_mut() {
+                let _ = cb.set_text(text);
+            }
+        }
+        return true;
+    }
+
+    let cut = matches!(
+        key,
+        KeyEvent {
+            code: KeyCode::Char('x') | KeyCode::Char('X'),
+            modifiers,
+            ..
+        } if modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::SUPER)
+    ) || matches!(
+        key,
+        KeyEvent {
+            code: KeyCode::Char('\u{18}'),
+            modifiers: KeyModifiers::NONE,
+            ..
+        }
+    ) || matches!(
+        key,
+        KeyEvent {
+            code: KeyCode::Delete,
+            modifiers,
+            ..
+        } if modifiers.contains(KeyModifiers::SHIFT)
+    );
+    if cut {
+        if matches!(key.code, KeyCode::Delete) {
+            let has_selection = if is_editor {
+                state.editor_buffer().selection_range().is_some()
+            } else {
+                state.notes_buffer().selection_range().is_some()
+            };
+            if !has_selection {
+                return false;
+            }
+        }
+
+        let (selection_text, changed) = if is_editor {
+            let buf = state.editor_buffer_mut();
+            let before_version = buf.version();
+            let selection_text = buf.yank_selection().filter(|t| !t.is_empty());
+            let mut changed = false;
+            if selection_text.is_some() {
+                changed = buf.delete_selection();
+                if changed {
+                    buf.ensure_visible();
+                }
+            }
+            if buf.version() != before_version {
+                syntax.note_buffer_change(buffer_id, buf);
+            }
+            (selection_text, changed)
+        } else {
+            let buf = state.notes_buffer_mut();
+            let before_version = buf.version();
+            let selection_text = buf.yank_selection().filter(|t| !t.is_empty());
+            let mut changed = false;
+            if selection_text.is_some() {
+                changed = buf.delete_selection();
+                if changed {
+                    buf.ensure_visible();
+                }
+            }
+            if buf.version() != before_version {
+                syntax.note_buffer_change(buffer_id, buf);
+            }
+            (selection_text, changed)
+        };
+
+        if let Some(text) = selection_text {
+            state.yank_kind = if text.contains('\n') {
+                YankKind::Line
+            } else {
+                YankKind::Char
+            };
+            state.yank = Some(text.clone());
+            if let Some(cb) = clipboard.as_mut() {
+                let _ = cb.set_text(text);
+            }
+            if changed {
+                state.mode = Mode::Insert;
+            }
+        }
+        return true;
+    }
+
+    let paste = matches!(
+        key,
+        KeyEvent {
+            code: KeyCode::Char('v') | KeyCode::Char('V'),
+            modifiers,
+            ..
+        } if modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::SUPER)
+    ) || matches!(
+        key,
+        KeyEvent {
+            code: KeyCode::Char('\u{16}'),
+            modifiers: KeyModifiers::NONE,
+            ..
+        }
+    ) || matches!(
+        key,
+        KeyEvent {
+            code: KeyCode::Insert,
+            modifiers,
+            ..
+        } if modifiers.contains(KeyModifiers::SHIFT)
+    );
+    if paste {
+        state.mode = Mode::Insert;
+        let Some(cb) = clipboard.as_mut() else {
+            return true;
+        };
+        let Ok(text) = cb.get_text() else {
+            return true;
+        };
+        let normalized = normalize_buffer_input_text(&text);
+        if normalized.is_empty() {
+            return true;
+        }
+        if is_editor {
+            let buf = state.editor_buffer_mut();
+            let before_version = buf.version();
+            let _ = buf.delete_selection();
+            buf.insert_str(normalized.as_ref());
+            buf.ensure_visible();
+            if buf.version() != before_version {
+                syntax.note_buffer_change(buffer_id, buf);
+            }
+        } else {
+            let buf = state.notes_buffer_mut();
+            let before_version = buf.version();
+            let _ = buf.delete_selection();
+            buf.insert_str(normalized.as_ref());
+            buf.ensure_visible();
+            if buf.version() != before_version {
+                syntax.note_buffer_change(buffer_id, buf);
+            }
+        }
+        return true;
+    }
+
+    if matches!(key.code, KeyCode::Backspace | KeyCode::Delete) {
+        let has_selection = if is_editor {
+            state.editor_buffer().selection_range().is_some()
+        } else {
+            state.notes_buffer().selection_range().is_some()
+        };
+        if has_selection {
+            state.mode = Mode::Insert;
+            if is_editor {
+                let buf = state.editor_buffer_mut();
+                let before_version = buf.version();
+                let _ = buf.delete_selection();
+                buf.ensure_visible();
+                if buf.version() != before_version {
+                    syntax.note_buffer_change(buffer_id, buf);
+                }
+            } else {
+                let buf = state.notes_buffer_mut();
+                let before_version = buf.version();
+                let _ = buf.delete_selection();
+                buf.ensure_visible();
+                if buf.version() != before_version {
+                    syntax.note_buffer_change(buffer_id, buf);
+                }
+            }
+            return true;
+        }
+    }
+
+    let word_left = matches!(
+        key,
+        KeyEvent {
+            code: KeyCode::Left,
+            modifiers,
+            ..
+        } if modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+    );
+    if word_left {
+        if is_editor {
+            let buf = state.editor_buffer_mut();
+            buf.move_word_back();
+            buf.ensure_visible();
+        } else {
+            let buf = state.notes_buffer_mut();
+            buf.move_word_back();
+            buf.ensure_visible();
+        }
+        return true;
+    }
+
+    let word_right = matches!(
+        key,
+        KeyEvent {
+            code: KeyCode::Right,
+            modifiers,
+            ..
+        } if modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+    );
+    if word_right {
+        if is_editor {
+            let buf = state.editor_buffer_mut();
+            buf.move_word_end();
+            buf.ensure_visible();
+        } else {
+            let buf = state.notes_buffer_mut();
+            buf.move_word_end();
+            buf.ensure_visible();
+        }
+        return true;
+    }
+
+    let word_backspace = matches!(
+        key,
+        KeyEvent {
+            code: KeyCode::Backspace,
+            modifiers,
+            ..
+        } if modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+    );
+    if word_backspace {
+        state.mode = Mode::Insert;
+        if is_editor {
+            let buf = state.editor_buffer_mut();
+            let before_version = buf.version();
+            buf.delete_word_back();
+            buf.ensure_visible();
+            if buf.version() != before_version {
+                syntax.note_buffer_change(buffer_id, buf);
+            }
+        } else {
+            let buf = state.notes_buffer_mut();
+            let before_version = buf.version();
+            buf.delete_word_back();
+            buf.ensure_visible();
+            if buf.version() != before_version {
+                syntax.note_buffer_change(buffer_id, buf);
+            }
+        }
+        return true;
+    }
+
+    let word_delete = matches!(
+        key,
+        KeyEvent {
+            code: KeyCode::Delete,
+            modifiers,
+            ..
+        } if modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+    );
+    if word_delete {
+        state.mode = Mode::Insert;
+        if is_editor {
+            let buf = state.editor_buffer_mut();
+            let before_version = buf.version();
+            buf.delete_word_forward();
+            buf.ensure_visible();
+            if buf.version() != before_version {
+                syntax.note_buffer_change(buffer_id, buf);
+            }
+        } else {
+            let buf = state.notes_buffer_mut();
+            let before_version = buf.version();
+            buf.delete_word_forward();
+            buf.ensure_visible();
+            if buf.version() != before_version {
+                syntax.note_buffer_change(buffer_id, buf);
+            }
+        }
+        return true;
+    }
+
+    false
 }
 
 #[cfg(test)]
@@ -3380,6 +3765,25 @@ fn normalize_chat_input_text(text: &str) -> String {
     out
 }
 
+fn normalize_buffer_input_text(text: &str) -> std::borrow::Cow<'_, str> {
+    if !text.contains('\r') {
+        return std::borrow::Cow::Borrowed(text);
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\r' {
+            if matches!(chars.peek(), Some('\n')) {
+                chars.next();
+            }
+            out.push('\n');
+        } else {
+            out.push(ch);
+        }
+    }
+    std::borrow::Cow::Owned(out)
+}
+
 fn chat_input_selection_range(state: &AppState) -> Option<(usize, usize)> {
     let total = state.agents.chat_input.chars().count();
     let cursor = state.agents.chat_input_cursor.min(total);
@@ -3433,6 +3837,10 @@ fn insert_text_into_focused_buffer(
     if text.is_empty() {
         return false;
     }
+    let normalized = normalize_buffer_input_text(text);
+    if normalized.is_empty() {
+        return false;
+    }
     let editor_id = state.active_editor_buffer_id;
     let notes_id = state.notes_buffer_id;
     let editor_version = state.editor_buffer().version();
@@ -3441,7 +3849,7 @@ fn insert_text_into_focused_buffer(
         let Some(buffer) = state.focused_buffer_mut() else {
             return false;
         };
-        buffer.insert_str(text);
+        buffer.insert_str(normalized.as_ref());
     }
     if state.editor_buffer().version() != editor_version {
         let buf = state.editor_buffer_mut();
@@ -10705,6 +11113,73 @@ mod tests {
     }
 
     #[test]
+    fn editor_paste_normalizes_crlf_text() {
+        let mut state = state_for_test();
+        state.focus = PaneId::Editor;
+        state.mode = Mode::Insert;
+        let mut vitals = VitalsState::default();
+        let mut syntax = SyntaxRuntime::new(state.settings.highlight.clone());
+        let mut fuzzy_runtime =
+            FuzzySearchRuntime::new(&Theme::default(), state.settings.highlight.clone());
+        let pasted = "# Plan\r\n- item 1\r\n```rust\r\nlet x = 1;\r\n```\r\n";
+
+        assert!(handle_paste_event(
+            pasted,
+            &mut state,
+            &mut syntax,
+            &mut fuzzy_runtime,
+            &mut vitals
+        ));
+        assert_eq!(
+            state.editor_buffer().content_as_string(),
+            "# Plan\n- item 1\n```rust\nlet x = 1;\n```\n"
+        );
+        assert!(!state.editor_buffer().content_as_string().contains('\r'));
+    }
+
+    #[test]
+    fn scratchpad_paste_normalizes_crlf_text() {
+        let mut state = state_for_test();
+        state.focus = PaneId::JobOutput;
+        state.agents.dock_tab = AgentOpsTab::Scratchpad;
+        state.mode = Mode::Insert;
+        let mut vitals = VitalsState::default();
+        let mut syntax = SyntaxRuntime::new(state.settings.highlight.clone());
+        let mut fuzzy_runtime =
+            FuzzySearchRuntime::new(&Theme::default(), state.settings.highlight.clone());
+        let pasted = "first\r\n    indented\r\n";
+
+        assert!(handle_paste_event(
+            pasted,
+            &mut state,
+            &mut syntax,
+            &mut fuzzy_runtime,
+            &mut vitals
+        ));
+        assert_eq!(
+            state.notes_buffer().content_as_string(),
+            "first\n    indented\n"
+        );
+        assert!(!state.notes_buffer().content_as_string().contains('\r'));
+    }
+
+    #[test]
+    fn insert_newline_preserves_indent_in_editor() {
+        let mut state = state_for_test();
+        state.focus = PaneId::Editor;
+        state.mode = Mode::Insert;
+        state.editor_buffer_mut().insert_str("    let x = 1;");
+
+        let _ = apply_action(&mut state, Action::InsertNewline);
+        assert_eq!(
+            state.editor_buffer().content_as_string(),
+            "    let x = 1;\n    "
+        );
+        assert_eq!(state.editor_buffer().cursor.line, 1);
+        assert_eq!(state.editor_buffer().cursor.col, 4);
+    }
+
+    #[test]
     fn agent_chat_send_preserves_pasted_formatting() {
         let mut state = state_for_test();
         state.focus = PaneId::Notes;
@@ -12039,6 +12514,133 @@ mod tests {
         assert_eq!(action, Some(Action::InsertChar('x')));
         let _ = apply_action(&mut state, Action::InsertChar('x'));
         assert!(state.notes_buffer().content_as_string().contains('x'));
+    }
+
+    #[test]
+    fn editor_ctrl_a_selects_all_and_ctrl_c_sets_yank() {
+        let mut state = state_for_test();
+        state.focus = PaneId::Editor;
+        state.mode = Mode::Normal;
+        state.editor_buffer_mut().insert_str("hello\nworld\n");
+        let mut syntax = SyntaxRuntime::new(state.settings.highlight.clone());
+        let mut clipboard = None;
+
+        assert!(handle_editor_buffer_shortcuts(
+            KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL),
+            &mut state,
+            &mut syntax,
+            &mut clipboard
+        ));
+        let len = state.editor_buffer().content_as_string().chars().count();
+        assert_eq!(state.mode, Mode::Insert);
+        assert_eq!(state.editor_buffer().selection_range(), Some((0, len)));
+
+        assert!(handle_editor_buffer_shortcuts(
+            KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+            &mut state,
+            &mut syntax,
+            &mut clipboard
+        ));
+        assert_eq!(state.yank.as_deref(), Some("hello\nworld\n"));
+        assert_eq!(state.yank_kind, YankKind::Line);
+    }
+
+    #[test]
+    fn editor_ctrl_x_cuts_selection_and_clears_buffer() {
+        let mut state = state_for_test();
+        state.focus = PaneId::Editor;
+        state.mode = Mode::Normal;
+        state.editor_buffer_mut().insert_str("hello");
+        let mut syntax = SyntaxRuntime::new(state.settings.highlight.clone());
+        let mut clipboard = None;
+
+        assert!(handle_editor_buffer_shortcuts(
+            KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL),
+            &mut state,
+            &mut syntax,
+            &mut clipboard
+        ));
+        assert!(handle_editor_buffer_shortcuts(
+            KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL),
+            &mut state,
+            &mut syntax,
+            &mut clipboard
+        ));
+
+        assert_eq!(state.mode, Mode::Insert);
+        assert_eq!(state.yank.as_deref(), Some("hello"));
+        assert_eq!(state.yank_kind, YankKind::Char);
+        assert_eq!(state.editor_buffer().content_as_string(), "");
+        assert!(state.editor_buffer().selection_range().is_none());
+    }
+
+    #[test]
+    fn editor_ctrl_left_moves_by_word() {
+        let mut state = state_for_test();
+        state.focus = PaneId::Editor;
+        state.mode = Mode::Insert;
+        state.editor_buffer_mut().insert_str("hello world");
+        state.editor_buffer_mut().move_end();
+        let mut syntax = SyntaxRuntime::new(state.settings.highlight.clone());
+        let mut clipboard = None;
+
+        assert!(handle_editor_buffer_shortcuts(
+            KeyEvent::new(KeyCode::Left, KeyModifiers::CONTROL),
+            &mut state,
+            &mut syntax,
+            &mut clipboard
+        ));
+        assert_eq!(state.editor_buffer().cursor.col, 6);
+    }
+
+    #[test]
+    fn editor_ctrl_backspace_deletes_word_left() {
+        let mut state = state_for_test();
+        state.focus = PaneId::Editor;
+        state.mode = Mode::Insert;
+        state.editor_buffer_mut().insert_str("hello world");
+        state.editor_buffer_mut().move_end();
+        let mut syntax = SyntaxRuntime::new(state.settings.highlight.clone());
+        let mut clipboard = None;
+
+        assert!(handle_editor_buffer_shortcuts(
+            KeyEvent::new(KeyCode::Backspace, KeyModifiers::CONTROL),
+            &mut state,
+            &mut syntax,
+            &mut clipboard
+        ));
+        assert_eq!(state.mode, Mode::Insert);
+        assert_eq!(state.editor_buffer().content_as_string(), "hello ");
+        assert_eq!(state.editor_buffer().cursor.col, 6);
+    }
+
+    #[test]
+    fn scratchpad_ctrl_a_selects_all_and_ctrl_x_cuts() {
+        let mut state = state_for_test();
+        state.focus = PaneId::JobOutput;
+        state.agents.dock_tab = AgentOpsTab::Scratchpad;
+        state.mode = Mode::Insert;
+        state.notes_buffer_mut().insert_str("scratch text");
+        let mut syntax = SyntaxRuntime::new(state.settings.highlight.clone());
+        let mut clipboard = None;
+
+        assert!(handle_editor_buffer_shortcuts(
+            KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL),
+            &mut state,
+            &mut syntax,
+            &mut clipboard
+        ));
+        let len = state.notes_buffer().content_as_string().chars().count();
+        assert_eq!(state.notes_buffer().selection_range(), Some((0, len)));
+
+        assert!(handle_editor_buffer_shortcuts(
+            KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL),
+            &mut state,
+            &mut syntax,
+            &mut clipboard
+        ));
+        assert_eq!(state.notes_buffer().content_as_string(), "");
+        assert_eq!(state.yank.as_deref(), Some("scratch text"));
     }
 
     #[test]
