@@ -1291,16 +1291,16 @@ fn user_line_with_prompt_bg(text: &str, theme: &Theme) -> Line<'static> {
 fn status_header_line(text: &str, theme: &Theme) -> Line<'static> {
     let trimmed = text.trim();
     let is_rule = !trimmed.is_empty() && trimmed.chars().all(|ch| ch == '─');
+    let bg = dim_bg_towards(theme.border, theme.background, 85);
     if is_rule {
         return Line::from(Span::styled(
             text.to_string(),
             Style::default()
                 .fg(theme.border)
-                .bg(theme.background)
+                .bg(bg)
                 .add_modifier(Modifier::DIM),
         ));
     }
-    let bg = dim_bg_towards(theme.border, theme.background, 85);
     Line::from(Span::styled(
         text.to_string(),
         Style::default()
@@ -1312,9 +1312,10 @@ fn status_header_line(text: &str, theme: &Theme) -> Line<'static> {
 
 fn status_row_line(text: &str, theme: &Theme) -> Line<'static> {
     if text.trim().is_empty() {
+        let bg = dim_bg_towards(theme.border, theme.background, 85);
         return Line::from(Span::styled(
             text.to_string(),
-            Style::default().bg(theme.background),
+            Style::default().bg(bg),
         ));
     }
     let bg = dim_bg_towards(theme.border, theme.background, 85);
@@ -1328,11 +1329,12 @@ fn status_sub_row_line(text: &str, theme: &Theme) -> Line<'static> {
     let trimmed = text.trim_start();
     let is_swarm_meta = trimmed.starts_with("Swarm:") || trimmed.starts_with("Verify:");
     if is_swarm_meta {
+        let bg = dim_bg_towards(theme.border, theme.background, 85);
         return Line::from(Span::styled(
             text.to_string(),
             Style::default()
                 .fg(theme.title)
-                .bg(theme.background)
+                .bg(bg)
                 .add_modifier(Modifier::DIM),
         ));
     }
@@ -1905,7 +1907,7 @@ fn append_swarm_meta_footer_rows(
         return;
     }
 
-    let max_inner = inner.saturating_sub(1).max(1);
+    let max_inner = inner.max(1);
     rows.push(ThreadRow {
         text: pad_to_width(indent_str, width),
         kind: ThreadRowKind::StatusRow,

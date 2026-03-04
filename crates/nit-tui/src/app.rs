@@ -2,7 +2,10 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::io::{self, Stdout};
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::{
+    mpsc::{self, Receiver, Sender},
+    Arc, Mutex, Weak,
+};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -35,8 +38,9 @@ use crate::{
     },
 };
 use arboard::Clipboard;
+use ctrlc::Error as CtrlcError;
 use crossterm::{
-    cursor::SetCursorStyle,
+    cursor::{SetCursorStyle, Show},
     event::{
         self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
         Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, KeyboardEnhancementFlags, MouseEvent,
@@ -416,31 +420,26 @@ pub fn run(
     codex_runtime: CodexRuntimeMode,
     codex_config: CodexRunnerConfig,
 ) -> io::Result<()> {
-    enable_raw_mode()?;
-    let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen)?;
-    let mut guard = TerminalGuard {
-        active: true,
-        keyboard_flags_pushed: false,
-        mouse_capture: false,
-        bracketed_paste: false,
-    };
-    if execute!(stdout, EnableMouseCapture).is_ok() {
-        guard.mouse_capture = true;
+    let (mut guard, mut stdout) = TerminalGuard::activate()?;
+    install_terminal_panic_hook(guard.weak_state());
+    if let Err(err) = guard.install_sigint_handler() {
+        tracing::warn!("Failed to install Ctrl-C handler: {err}");
+    }
+    if guard.enable_mouse_capture(&mut stdout).is_err() {
+        tracing::warn!("Mouse capture enable failed; continuing without it");
     }
     let keyboard_flags = KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
         | KeyboardEnhancementFlags::REPORT_EVENT_TYPES
         | KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS
         | KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES;
-    if execute!(stdout, PushKeyboardEnhancementFlags(keyboard_flags)).is_ok() {
-        guard.keyboard_flags_pushed = true;
-    }
-    if execute!(stdout, EnableBracketedPaste).is_ok() {
-        guard.bracketed_paste = true;
+    guard.push_keyboard_flags(&mut stdout, keyboard_flags);
+    if guard.enable_bracketed_paste(&mut stdout).is_err() {
+        tracing::warn!("Bracketed paste enable failed; continuing without it");
     }
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
     terminal.hide_cursor()?;
+    guard.mark_cursor_hidden(true);
 
     let mut syntax = SyntaxRuntime::new(state.settings.highlight.clone());
     let editor_id = state.active_editor_buffer_id;
@@ -460,22 +459,8 @@ pub fn run(
     );
 
     terminal.show_cursor()?;
-    if guard.keyboard_flags_pushed {
-        let _ = execute!(io::stdout(), PopKeyboardEnhancementFlags);
-        guard.keyboard_flags_pushed = false;
-    }
-    if guard.mouse_capture {
-        let _ = execute!(io::stdout(), DisableMouseCapture);
-        guard.mouse_capture = false;
-    }
-    if guard.bracketed_paste {
-        let _ = execute!(io::stdout(), DisableBracketedPaste);
-        guard.bracketed_paste = false;
-    }
-    execute!(io::stdout(), SetCursorStyle::DefaultUserShape)?;
-    disable_raw_mode()?;
-    execute!(io::stdout(), LeaveAlternateScreen)?;
-    guard.active = false;
+    guard.mark_cursor_hidden(false);
+    guard.restore();
     let _ = save_notes_on_exit(&state);
     result
 }
@@ -4801,6 +4786,11 @@ fn map_key_to_action(key: KeyEvent, state: &AppState, input: &mut InputState) ->
     }
 
     match key {
+        KeyEvent {
+            code: KeyCode::Char('c'),
+            modifiers: KeyModifiers::CONTROL,
+            ..
+        } => Some(Action::Quit),
         KeyEvent {
             code: KeyCode::Char('q'),
             modifiers: KeyModifiers::CONTROL,
@@ -10220,30 +10210,136 @@ fn sanitize_for_filename(input: &str) -> String {
         .collect()
 }
 
-struct TerminalGuard {
+#[derive(Default)]
+struct TerminalState {
     active: bool,
+    raw_mode: bool,
+    alternate_screen: bool,
     keyboard_flags_pushed: bool,
     mouse_capture: bool,
     bracketed_paste: bool,
+    cursor_hidden: bool,
+}
+
+impl TerminalState {
+    fn restore(&mut self) {
+        if !self.active {
+            return;
+        }
+        let mut stdout = io::stdout();
+        if self.keyboard_flags_pushed {
+            let _ = execute!(stdout, PopKeyboardEnhancementFlags);
+        }
+        if self.mouse_capture {
+            let _ = execute!(stdout, DisableMouseCapture);
+        }
+        if self.bracketed_paste {
+            let _ = execute!(stdout, DisableBracketedPaste);
+        }
+        let _ = execute!(stdout, SetCursorStyle::DefaultUserShape);
+        if self.cursor_hidden {
+            let _ = execute!(stdout, Show);
+        }
+        if self.raw_mode {
+            let _ = disable_raw_mode();
+        }
+        if self.alternate_screen {
+            let _ = execute!(stdout, LeaveAlternateScreen);
+        }
+        self.active = false;
+    }
+}
+
+struct TerminalGuard {
+    state: Arc<Mutex<TerminalState>>,
+}
+
+impl TerminalGuard {
+    fn activate() -> io::Result<(Self, Stdout)> {
+        enable_raw_mode()?;
+        let mut stdout = io::stdout();
+        if let Err(err) = execute!(stdout, EnterAlternateScreen) {
+            let _ = disable_raw_mode();
+            return Err(err);
+        }
+        let state = TerminalState {
+            active: true,
+            raw_mode: true,
+            alternate_screen: true,
+            ..TerminalState::default()
+        };
+        Ok((Self { state: Arc::new(Mutex::new(state)) }, stdout))
+    }
+
+    fn weak_state(&self) -> Weak<Mutex<TerminalState>> {
+        Arc::downgrade(&self.state)
+    }
+
+    fn enable_mouse_capture(&self, stdout: &mut Stdout) -> io::Result<()> {
+        execute!(stdout, EnableMouseCapture)?;
+        if let Ok(mut state) = self.state.lock() {
+            state.mouse_capture = true;
+        }
+        Ok(())
+    }
+
+    fn push_keyboard_flags(&self, stdout: &mut Stdout, flags: KeyboardEnhancementFlags) {
+        if execute!(stdout, PushKeyboardEnhancementFlags(flags)).is_ok() {
+            if let Ok(mut state) = self.state.lock() {
+                state.keyboard_flags_pushed = true;
+            }
+        }
+    }
+
+    fn enable_bracketed_paste(&self, stdout: &mut Stdout) -> io::Result<()> {
+        execute!(stdout, EnableBracketedPaste)?;
+        if let Ok(mut state) = self.state.lock() {
+            state.bracketed_paste = true;
+        }
+        Ok(())
+    }
+
+    fn mark_cursor_hidden(&self, hidden: bool) {
+        if let Ok(mut state) = self.state.lock() {
+            state.cursor_hidden = hidden;
+        }
+    }
+
+    fn restore(&self) {
+        if let Ok(mut state) = self.state.lock() {
+            state.restore();
+        }
+    }
+
+    fn install_sigint_handler(&self) -> Result<(), CtrlcError> {
+        let weak = Arc::downgrade(&self.state);
+        ctrlc::set_handler(move || {
+            if let Some(state) = weak.upgrade() {
+                if let Ok(mut state) = state.lock() {
+                    state.restore();
+                }
+            }
+            std::process::exit(130);
+        })
+    }
 }
 
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
-        if self.active {
-            if self.keyboard_flags_pushed {
-                let _ = execute!(io::stdout(), PopKeyboardEnhancementFlags);
-            }
-            if self.mouse_capture {
-                let _ = execute!(io::stdout(), DisableMouseCapture);
-            }
-            if self.bracketed_paste {
-                let _ = execute!(io::stdout(), DisableBracketedPaste);
-            }
-            let _ = disable_raw_mode();
-            let _ = execute!(io::stdout(), SetCursorStyle::DefaultUserShape);
-            let _ = execute!(io::stdout(), LeaveAlternateScreen);
-        }
+        self.restore();
     }
+}
+
+fn install_terminal_panic_hook(state: Weak<Mutex<TerminalState>>) {
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        if let Some(state) = state.upgrade() {
+            if let Ok(mut state) = state.lock() {
+                state.restore();
+            }
+        }
+        previous(info);
+    }));
 }
 
 #[cfg(test)]

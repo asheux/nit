@@ -554,6 +554,7 @@ fn roster_lines(state: &AppState, width: usize) -> Vec<String> {
     );
     if state.agents.agents.is_empty() {
         out.push(" No agents available.".into());
+        out.push("─".repeat(width.min(240)));
         return out;
     }
     for (idx, agent) in state.agents.agents.iter().enumerate() {
@@ -704,6 +705,7 @@ fn roster_lines(state: &AppState, width: usize) -> Vec<String> {
             }
         }
     }
+    out.push("─".repeat(width.min(240)));
     out
 }
 
@@ -1842,6 +1844,15 @@ fn roster_styled_line(
         ));
     }
     if line_idx == 8 {
+        return Line::from(Span::styled(
+            line.to_string(),
+            Style::default()
+                .fg(theme.border)
+                .add_modifier(Modifier::DIM)
+                .bg(table_bg),
+        ));
+    }
+    if !line.is_empty() && line.chars().all(|c| c == '─') {
         return Line::from(Span::styled(
             line.to_string(),
             Style::default()
