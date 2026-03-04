@@ -79,7 +79,9 @@
 - Roster:
   - 1/2/3: Select swarm template (lab/parallel/bulk)
   - Space (on an agent row): Toggle priority (used as a planning hint for parallel/bulk)
-  - l / h: Enter/exit the roster tree cursor (Size/Role)
+  - l: Expand + enter the roster tree cursor (Size/Role)
+  - h: Exit the roster tree cursor (then collapse on next h)
+  - Mouse: Click the model name (left column) to expand; click again to collapse
   - Space/Enter (in the tree): Select the highlighted Size/Role option
 - r / s / x: MCP reconnect / start / stop (MCP tab; default runtime for Codex, override with `--codex-runtime exec`)
   - Note: MCP reconnect/stop clears Codex thread context for continuations.

@@ -173,7 +173,7 @@ pub fn render(
         .add_modifier(Modifier::DIM);
     let mission_style = if mission.is_some() {
         Style::default()
-            .fg(theme.accent)
+            .fg(theme.title_focused)
             .add_modifier(Modifier::BOLD)
     } else {
         label_style
@@ -197,7 +197,7 @@ pub fn render(
             codex_size.unwrap_or("--"),
             if codex_size.is_some() {
                 Style::default()
-                    .fg(theme.accent)
+                    .fg(theme.title_focused)
                     .add_modifier(Modifier::BOLD)
             } else {
                 label_style
@@ -311,7 +311,7 @@ pub fn render(
                 format!(" t={swarm_template} "),
                 Style::default()
                     .fg(theme.background)
-                    .bg(theme.accent)
+                    .bg(theme.border_focused)
                     .add_modifier(Modifier::BOLD),
             ));
         }

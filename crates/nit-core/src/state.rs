@@ -625,6 +625,10 @@ pub struct AgentsState {
     /// Runtime-only; UI navigation state.
     #[serde(skip)]
     pub roster_tree_selected: Option<RosterTreeSelection>,
+    /// Agents whose roster tree (Size/Role) is collapsed.
+    /// Runtime-only; UI navigation state.
+    #[serde(skip, default)]
+    pub roster_tree_collapsed_agent_ids: HashSet<String>,
     pub mission_selected: usize,
     pub alert_selected: usize,
     pub patch_selected: usize,
@@ -836,6 +840,7 @@ impl AgentsState {
             },
             roster_selected: 0,
             roster_tree_selected: None,
+            roster_tree_collapsed_agent_ids: HashSet::new(),
             mission_selected: 0,
             alert_selected: 0,
             patch_selected: 0,
@@ -917,6 +922,7 @@ impl Default for AgentsState {
             },
             roster_selected: 0,
             roster_tree_selected: None,
+            roster_tree_collapsed_agent_ids: HashSet::new(),
             mission_selected: 0,
             alert_selected: 0,
             patch_selected: 0,

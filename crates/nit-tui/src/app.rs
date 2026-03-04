@@ -2145,7 +2145,17 @@ fn enter_roster_tree_cursor(state: &mut AppState) -> bool {
         .get(&agent.id)
         .map(|v| v.as_slice())
         .unwrap_or(&[]);
-    if !efforts.is_empty() {
+    let has_size = !efforts.is_empty();
+    let has_roles = show_roles && agent.is_codex();
+    if !has_size && !has_roles {
+        state.agents.roster_tree_selected = None;
+        return false;
+    }
+    state
+        .agents
+        .roster_tree_collapsed_agent_ids
+        .remove(&agent.id);
+    if has_size {
         let current = state
             .agents
             .codex_selected_reasoning_effort
@@ -2163,7 +2173,7 @@ fn enter_roster_tree_cursor(state: &mut AppState) -> bool {
         return true;
     }
 
-    if show_roles && agent.is_codex() {
+    if has_roles {
         let roles = [
             "all",
             "propose",
@@ -2197,6 +2207,16 @@ fn enter_roster_tree_cursor(state: &mut AppState) -> bool {
 fn exit_roster_tree_cursor(state: &mut AppState) -> bool {
     if state.agents.roster_tree_selected.is_some() {
         state.agents.roster_tree_selected = None;
+        return true;
+    }
+    let Some(agent) = state.agents.agents.get(state.agents.roster_selected) else {
+        return false;
+    };
+    if state
+        .agents
+        .roster_tree_collapsed_agent_ids
+        .insert(agent.id.clone())
+    {
         return true;
     }
     false
@@ -6738,6 +6758,25 @@ fn apply_agent_ops_click_selection(
             let Some(meta) = agent_ops_view::roster_meta_for_body_line(state, data_line) else {
                 return;
             };
+            // Clicking the roster priority checkbox should NOT change selection or expand/collapse.
+            if matches!(meta.node, agent_ops_view::RosterBodyNode::Agent) {
+                if let Some(agent) = state.agents.agents.get(meta.agent_idx) {
+                    let checkbox_hit = agent.is_codex() && (1..5).contains(&col);
+                    if checkbox_hit {
+                        if state.agents.swarm_priority_agent_ids.remove(&agent.id) {
+                            // removed
+                        } else {
+                            state
+                                .agents
+                                .swarm_priority_agent_ids
+                                .insert(agent.id.clone());
+                        }
+                        return;
+                    }
+                }
+            }
+
+            let was_selected = meta.agent_idx == state.agents.roster_selected;
             state.agents.roster_selected = meta.agent_idx;
             if let Some(agent) = state.agents.agents.get(meta.agent_idx) {
                 state.agents.selected_agent = Some(agent.id.clone());
@@ -6756,9 +6795,23 @@ fn apply_agent_ops_click_selection(
                 match meta.node {
                     agent_ops_view::RosterBodyNode::Agent => {
                         state.agents.roster_tree_selected = None;
-                        // Toggle priority when clicking the checkbox region.
-                        if agent.is_codex() && (1..5).contains(&col) {
-                            let _ = toggle_roster_priority(state);
+                        let model_hit = agent_ops_view::roster_role_cell_hit(col, text_width);
+                        if model_hit && !was_selected {
+                            state
+                                .agents
+                                .roster_tree_collapsed_agent_ids
+                                .remove(&agent.id);
+                        } else if was_selected
+                            && model_hit
+                            && !state
+                                .agents
+                                .roster_tree_collapsed_agent_ids
+                                .remove(&agent.id)
+                        {
+                            state
+                                .agents
+                                .roster_tree_collapsed_agent_ids
+                                .insert(agent.id.clone());
                         }
                     }
                     agent_ops_view::RosterBodyNode::Branch { branch } => {

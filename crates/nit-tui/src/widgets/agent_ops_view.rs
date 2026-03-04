@@ -69,6 +69,13 @@ pub fn roster_swarm_template_hit(col: usize) -> Option<&'static str> {
     None
 }
 
+pub fn roster_role_cell_hit(col: usize, width: usize) -> bool {
+    let widths = roster_column_widths(width.max(32));
+    let start = 1usize; // selection marker prefix
+    let end = start.saturating_add(widths.first().copied().unwrap_or(0));
+    col >= start && col < end
+}
+
 pub fn alert_index_for_body_line(
     state: &AppState,
     width: usize,
@@ -95,7 +102,12 @@ fn roster_body_meta(state: &AppState, body_line: usize) -> Option<RosterBodyMeta
             });
         }
         cursor = cursor.saturating_add(1);
-        if agent_idx == state.agents.roster_selected {
+        if agent_idx == state.agents.roster_selected
+            && !state
+                .agents
+                .roster_tree_collapsed_agent_ids
+                .contains(&agent.id)
+        {
             let efforts = state
                 .agents
                 .codex_supported_reasoning_efforts
@@ -538,7 +550,12 @@ fn roster_lines(state: &AppState, width: usize) -> Vec<String> {
 
         // Expand the selected model into a small tree: Size (Codex reasoning effort levels) and
         // Role (swarm planning hints).
-        if idx == state.agents.roster_selected {
+        if idx == state.agents.roster_selected
+            && !state
+                .agents
+                .roster_tree_collapsed_agent_ids
+                .contains(&agent.id)
+        {
             let efforts = state
                 .agents
                 .codex_supported_reasoning_efforts
@@ -1734,10 +1751,26 @@ fn roster_styled_line(
 
             let mut spans = Vec::with_capacity(14);
             spans.push(Span::styled(marker, marker_style));
-            spans.push(Span::styled(
-                cols.first().cloned().unwrap_or_default(),
-                role_style,
-            ));
+            let col0 = cols.first().cloned().unwrap_or_default();
+            if agent.is_codex() && (col0.starts_with("[x] ") || col0.starts_with("[ ] ")) {
+                let checked = state.agents.swarm_priority_agent_ids.contains(&agent.id);
+                let prefix = take_chars(&col0, 0, 4);
+                let rest = take_chars(&col0, 4, col0.chars().count().saturating_sub(4));
+                let base_prefix_style = if checked {
+                    Style::default()
+                        .fg(theme.warning)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default()
+                        .fg(theme.border)
+                        .add_modifier(Modifier::DIM)
+                };
+                let prefix_style = selected_row_style(base_prefix_style, selected, theme);
+                spans.push(Span::styled(prefix, prefix_style));
+                spans.push(Span::styled(rest, role_style));
+            } else {
+                spans.push(Span::styled(col0, role_style));
+            }
             spans.push(Span::styled(" ", space_style));
             spans.push(Span::styled(
                 cols.get(1).cloned().unwrap_or_default(),
