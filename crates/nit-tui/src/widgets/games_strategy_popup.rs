@@ -495,7 +495,7 @@ pub fn build_definition_lines(def: &nit_games::output::StrategyDefinition) -> Ve
     let mut lines = Vec::new();
     lines.push(format!("id: {}", def.id));
     if let Some(name) = def.name.as_ref() {
-        lines.push(format!("name: {}", name));
+        lines.push(format!("name: {name}"));
     }
     match &def.kind {
         StrategySpecKind::Fsm {
@@ -525,11 +525,9 @@ pub fn build_definition_lines(def: &nit_games::output::StrategyDefinition) -> Ve
             lines.push("kind: fsm".to_string());
             let outputs_str: String = outputs.iter().map(|a| a.as_char()).collect();
             lines.push(format!(
-                "params: states={} start={} input={} outputs={}",
-                state_count,
+                "params: states={state_count} start={} input={} outputs={outputs_str}",
                 start_state.saturating_add(1),
-                input_mode_label(mode),
-                outputs_str
+                input_mode_label(mode)
             ));
             lines.push(String::new());
             lines.extend(build_fsm_graph_lines(
@@ -542,7 +540,7 @@ pub fn build_definition_lines(def: &nit_games::output::StrategyDefinition) -> Ve
         }
         StrategySpecKind::Ca { n, k, r, t } => {
             lines.push("kind: ca".to_string());
-            lines.push(format!("params: n={} k={} r={} t={}", n, k, r, t));
+            lines.push(format!("params: n={n} k={k} r={r} t={t}"));
             lines.push("input: Flatten[history] (global A,B order)".to_string());
             lines.push("output: last cell of ShrinkingCA final row".to_string());
         }
@@ -561,12 +559,12 @@ pub fn build_definition_lines(def: &nit_games::output::StrategyDefinition) -> Ve
             lines.push("kind: tm".to_string());
             let fallback = fallback_symbol.unwrap_or(*blank);
             if let Some(code) = rule_code {
-                lines.push(format!("rule_code: {}", code));
+                lines.push(format!("rule_code: {code}"));
             }
             let output_str: String = output_map.iter().map(|a| a.as_char()).collect();
             lines.push(format!(
-                "params: states={} symbols={} start={} blank={} fallback={} max_steps={}",
-                states, symbols, start_state, blank, fallback, max_steps_per_round
+                "params: states={states} symbols={symbols} start={start_state} blank={blank} \
+fallback={fallback} max_steps={max_steps_per_round}"
             ));
             lines.push(format!(
                 "io: input={} output_map={output_str}",

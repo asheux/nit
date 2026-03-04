@@ -75,13 +75,13 @@ fn build_metrics_line(
 
     let mut spans = Vec::new();
     spans.push(Span::styled("Ln ", label_style));
-    spans.push(Span::styled(format!("{}, ", line), coord_style));
+    spans.push(Span::styled(format!("{line}, "), coord_style));
     spans.push(Span::styled("Col ", label_style));
     spans.push(Span::styled(format!("{col}"), coord_style));
     spans.push(Span::styled(" | ", sep_style));
 
     spans.push(Span::styled("CPU ", label_style));
-    spans.push(Span::styled(format!("{:02}%", cpu), cpu_style));
+    spans.push(Span::styled(format!("{cpu:02}%"), cpu_style));
 
     spans.push(Span::styled(" | ", sep_style));
     spans.extend(gpu_spans(gpu, label_style, gpu_style));
@@ -90,7 +90,7 @@ fn build_metrics_line(
         spans.push(Span::styled(" | ", sep_style));
         spans.push(Span::styled("MEM ", label_style));
         spans.push(Span::styled(
-            format!("{:.1}/{:.1}G", mem_used, mem_total),
+            format!("{mem_used:.1}/{mem_total:.1}G"),
             mem_style,
         ));
     }
@@ -102,9 +102,9 @@ fn gpu_spans(gpu: GpuSummary, label_style: Style, value_style: Style) -> Vec<Spa
     let mut spans = Vec::new();
     spans.push(Span::styled("GPU ", label_style));
     let value = match (gpu.usage_percent, gpu.mem_total_gb, gpu.name) {
-        (Some(usage), Some(total), _) => format!("{:02}%/{:.1}G", usage, total),
-        (Some(usage), None, _) => format!("{:02}%", usage),
-        (None, Some(total), _) => format!("--/{:.1}G", total),
+        (Some(usage), Some(total), _) => format!("{usage:02}%/{total:.1}G"),
+        (Some(usage), None, _) => format!("{usage:02}%"),
+        (None, Some(total), _) => format!("--/{total:.1}G"),
         (None, None, Some(name)) => name,
         (None, None, None) => "N/A".to_string(),
     };

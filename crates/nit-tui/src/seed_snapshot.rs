@@ -306,10 +306,7 @@ fn prune_oldest_seed(dir: &Path, max_files: usize) -> std::io::Result<()> {
 
 pub fn seed_snapshot_name_base(encoder_id: &str, seed_hash: u64) -> String {
     let timestamp = now_iso8601().replace(':', "-");
-    format!(
-        "seed__{}__enc-{}__seedhash-{seed_hash:08x}",
-        timestamp, encoder_id
-    )
+    format!("seed__{timestamp}__enc-{encoder_id}__seedhash-{seed_hash:08x}")
 }
 
 pub fn snapshot_queue_capacity() -> usize {

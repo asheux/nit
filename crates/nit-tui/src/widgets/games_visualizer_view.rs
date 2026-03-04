@@ -195,7 +195,7 @@ pub fn build_main_lines(
                     lines.push(Line::from(vec![
                         Span::styled(format!("{:<10}", strategy.id), value_style),
                         Span::raw(" "),
-                        Span::styled(format!("{:<10}", kind_label), value_style),
+                        Span::styled(format!("{kind_label:<10}"), value_style),
                         Span::raw(" "),
                         Span::styled(name, value_style),
                     ]));
@@ -598,20 +598,11 @@ fn render_last_run_table(
 
         let mut spans = Vec::new();
         spans.push(Span::styled("|", dim_style));
-        spans.push(Span::styled(
-            format!(" {:>rank_w$} ", rank, rank_w = rank_w),
-            number_style,
-        ));
+        spans.push(Span::styled(format!(" {rank:>rank_w$} "), number_style));
         spans.push(Span::styled("|", dim_style));
-        spans.push(Span::styled(
-            format!(" {:<id_w$} ", id, id_w = id_w),
-            value_style,
-        ));
+        spans.push(Span::styled(format!(" {id:<id_w$} "), value_style));
         spans.push(Span::styled("|", dim_style));
-        spans.push(Span::styled(
-            format!(" {:>score_w$} ", score, score_w = score_w),
-            number_style,
-        ));
+        spans.push(Span::styled(format!(" {score:>score_w$} "), number_style));
         spans.push(Span::styled("|", dim_style));
         spans.extend(wld_cell_spans(
             wins,
@@ -749,7 +740,7 @@ fn wld_cell_spans(
     draw_style: Style,
     dim_style: Style,
 ) -> Vec<Span<'static>> {
-    let base = format!("W{}-L{}-D{}", wins, losses, draws);
+    let base = format!("W{wins}-L{losses}-D{draws}");
     let pad = width.saturating_sub(base.len());
     let mut spans = Vec::new();
     spans.push(Span::styled(" ", dim_style));

@@ -222,10 +222,6 @@ impl Buffer {
     }
 
     fn clamp_col(&mut self) {
-        if self.is_line_blank(self.cursor.line) {
-            self.cursor.col = 0;
-            return;
-        }
         let len = self.line_char_len(self.cursor.line);
         if self.cursor.col > len {
             self.cursor.col = len;
@@ -233,6 +229,7 @@ impl Buffer {
     }
 
     pub fn move_left(&mut self) {
+        self.end_edit_group();
         if self.cursor.col > 0 {
             self.cursor.col -= 1;
         } else if self.cursor.line > 0 {
@@ -242,6 +239,7 @@ impl Buffer {
     }
 
     pub fn move_right(&mut self) {
+        self.end_edit_group();
         let len = self.line_char_len(self.cursor.line);
         if self.cursor.col < len {
             self.cursor.col += 1;
@@ -252,6 +250,7 @@ impl Buffer {
     }
 
     pub fn move_up(&mut self) {
+        self.end_edit_group();
         if self.cursor.line > 0 {
             self.cursor.line -= 1;
             self.clamp_col();
@@ -259,6 +258,7 @@ impl Buffer {
     }
 
     pub fn move_down(&mut self) {
+        self.end_edit_group();
         if self.cursor.line + 1 < self.rope.len_lines() {
             self.cursor.line += 1;
             self.clamp_col();
@@ -266,26 +266,31 @@ impl Buffer {
     }
 
     pub fn page_up(&mut self, count: usize) {
+        self.end_edit_group();
         let jump = count.min(self.cursor.line);
         self.cursor.line -= jump;
         self.clamp_col();
     }
 
     pub fn page_down(&mut self, count: usize) {
+        self.end_edit_group();
         let max_line = self.rope.len_lines().saturating_sub(1);
         self.cursor.line = (self.cursor.line + count).min(max_line);
         self.clamp_col();
     }
 
     pub fn move_home(&mut self) {
+        self.end_edit_group();
         self.cursor.col = 0;
     }
 
     pub fn move_end(&mut self) {
+        self.end_edit_group();
         self.cursor.col = self.line_char_len(self.cursor.line);
     }
 
     pub fn append(&mut self) {
+        self.end_edit_group();
         let len = self.line_char_len(self.cursor.line);
         if self.cursor.col < len {
             self.cursor.col += 1;
@@ -358,12 +363,89 @@ impl Buffer {
         true
     }
 
+    fn replace_selection_with_str(&mut self, s: &str) {
+        let (start, end) = match self.selection_range() {
+            Some(range) => range,
+            None => return,
+        };
+        if start >= end {
+            self.clear_selection();
+            return;
+        }
+
+        self.end_edit_group();
+        self.push_undo();
+
+        self.record_delete(start, end);
+        self.rope.remove(start..end);
+        self.set_cursor_from_char_index(start.min(self.rope.len_chars()));
+        self.clear_selection();
+
+        if s.is_empty() {
+            self.dirty = true;
+            return;
+        }
+
+        let idx = self.char_index();
+        self.record_insert(idx, s);
+        self.rope.insert(idx, s);
+        let mut line = self.cursor.line;
+        let mut col = self.cursor.col;
+        for ch in s.chars() {
+            if ch == '\n' {
+                line += 1;
+                col = 0;
+            } else {
+                col += 1;
+            }
+        }
+        self.cursor.line = line;
+        self.cursor.col = col;
+        self.dirty = true;
+        self.finish_insert_group();
+    }
+
+    fn replace_selection_with_newline_preserve_indent(&mut self) {
+        let (start, end) = match self.selection_range() {
+            Some(range) => range,
+            None => return,
+        };
+        if start >= end {
+            self.clear_selection();
+            return;
+        }
+
+        self.end_edit_group();
+        self.push_undo();
+
+        self.record_delete(start, end);
+        self.rope.remove(start..end);
+        self.set_cursor_from_char_index(start.min(self.rope.len_chars()));
+        self.clear_selection();
+
+        let line = self
+            .cursor
+            .line
+            .min(self.rope.len_lines().saturating_sub(1));
+        let indent = self.line_indent(line);
+        let idx = self.char_index();
+        let mut text = String::from("\n");
+        text.push_str(&indent);
+        self.record_insert(idx, &text);
+        self.rope.insert(idx, &text);
+        self.cursor.line += 1;
+        self.cursor.col = indent.chars().count();
+        self.dirty = true;
+        self.finish_insert_group();
+    }
+
     pub fn insert_str(&mut self, s: &str) {
         if s.is_empty() {
             return;
         }
         if self.selection_range().is_some() {
-            let _ = self.delete_selection();
+            self.replace_selection_with_str(s);
+            return;
         }
         let idx = self.char_index();
         self.record_insert(idx, s);
@@ -498,17 +580,20 @@ impl Buffer {
     }
 
     pub fn go_to_top(&mut self) {
+        self.end_edit_group();
         self.cursor.line = 0;
         self.clamp_col();
     }
 
     pub fn go_to_bottom(&mut self) {
+        self.end_edit_group();
         let last = self.rope.len_lines().saturating_sub(1);
         self.cursor.line = last;
         self.clamp_col();
     }
 
     pub fn move_word_end(&mut self) {
+        self.end_edit_group();
         let len = self.rope.len_chars();
         if len == 0 {
             return;
@@ -534,6 +619,7 @@ impl Buffer {
     }
 
     pub fn move_word_back(&mut self) {
+        self.end_edit_group();
         let len = self.rope.len_chars();
         if len == 0 {
             return;
@@ -567,7 +653,10 @@ impl Buffer {
 
     pub fn insert_char(&mut self, c: char) {
         if self.selection_range().is_some() {
-            let _ = self.delete_selection();
+            let mut buf = [0u8; 4];
+            let s = c.encode_utf8(&mut buf);
+            self.replace_selection_with_str(s);
+            return;
         }
         let idx = self.char_index();
         let mut buf = [0u8; 4];
@@ -586,7 +675,8 @@ impl Buffer {
 
     pub fn insert_newline(&mut self) {
         if self.selection_range().is_some() {
-            let _ = self.delete_selection();
+            self.replace_selection_with_newline_preserve_indent();
+            return;
         }
         let line = self
             .cursor
@@ -780,6 +870,7 @@ impl Buffer {
             self.rope = snapshot.rope;
             self.cursor = snapshot.cursor;
             self.dirty = snapshot.dirty;
+            self.clear_selection();
             self.record_full_reparse();
             return true;
         }
@@ -805,6 +896,7 @@ impl Buffer {
             self.rope = snapshot.rope;
             self.cursor = snapshot.cursor;
             self.dirty = snapshot.dirty;
+            self.clear_selection();
             self.record_full_reparse();
             return true;
         }
@@ -853,6 +945,10 @@ impl Buffer {
 
     fn end_edit_group(&mut self) {
         self.last_edit = None;
+    }
+
+    pub fn break_undo_group(&mut self) {
+        self.end_edit_group();
     }
 
     fn record_insert(&mut self, start_char: usize, text: &str) {
@@ -945,4 +1041,89 @@ fn advance_point(start_byte: usize, start_point: BufferPoint, text: &str) -> (us
         }
     }
     (byte, BufferPoint { row, column })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn undo_single_step_on_selection_replace_char() {
+        let mut buf = Buffer::from_str("test", "hello", None);
+        buf.cursor.line = 0;
+        buf.cursor.col = 0;
+        buf.set_selection_anchor();
+        buf.move_end();
+
+        buf.insert_char('x');
+        assert_eq!(buf.content_as_string(), "x");
+
+        assert!(buf.undo());
+        assert_eq!(buf.content_as_string(), "hello");
+
+        assert!(buf.redo());
+        assert_eq!(buf.content_as_string(), "x");
+    }
+
+    #[test]
+    fn undo_single_step_on_selection_replace_str() {
+        let mut buf = Buffer::from_str("test", "hello world", None);
+        buf.cursor.line = 0;
+        buf.cursor.col = 0;
+        buf.set_selection_anchor();
+        buf.move_end();
+
+        buf.insert_str("XYZ");
+        assert_eq!(buf.content_as_string(), "XYZ");
+
+        assert!(buf.undo());
+        assert_eq!(buf.content_as_string(), "hello world");
+    }
+
+    #[test]
+    fn undo_group_breaks_on_cursor_move() {
+        let mut buf = Buffer::empty("test", None);
+
+        buf.insert_char('a');
+        buf.move_left();
+        buf.move_right();
+        buf.insert_char('b');
+        assert_eq!(buf.content_as_string(), "ab");
+
+        assert!(buf.undo());
+        assert_eq!(buf.content_as_string(), "a");
+
+        assert!(buf.undo());
+        assert_eq!(buf.content_as_string(), "");
+    }
+
+    #[test]
+    fn break_undo_group_splits_inserts() {
+        let mut buf = Buffer::empty("test", None);
+
+        buf.insert_char('a');
+        buf.break_undo_group();
+        buf.insert_str("b");
+        assert_eq!(buf.content_as_string(), "ab");
+
+        assert!(buf.undo());
+        assert_eq!(buf.content_as_string(), "a");
+    }
+
+    #[test]
+    fn undo_single_step_on_selection_replace_newline_preserves_indent() {
+        let mut buf = Buffer::from_str("test", "    foo", None);
+        buf.cursor.line = 0;
+        buf.cursor.col = 4;
+        buf.set_selection_anchor();
+        buf.move_end();
+
+        buf.insert_newline();
+        assert_eq!(buf.content_as_string(), "    \n    ");
+        assert_eq!(buf.cursor.line, 1);
+        assert_eq!(buf.cursor.col, 4);
+
+        assert!(buf.undo());
+        assert_eq!(buf.content_as_string(), "    foo");
+    }
 }

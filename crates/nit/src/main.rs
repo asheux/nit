@@ -954,15 +954,17 @@ fn run_games_headless(
         run_dir: Some(layout.run_dir.display().to_string()),
     };
 
-    write_summary(&summary_path, &summary)
-        .with_context(|| format!("failed to write {}", summary_path.display()))?;
+    write_summary(&summary_path, &summary).with_context(|| {
+        let summary_path_display = summary_path.display().to_string();
+        format!("failed to write {summary_path_display}")
+    })?;
 
     if verbose {
         if let Some(path) = summary.paths.events.as_ref() {
-            eprintln!("Events: {}", path);
+            eprintln!("Events: {path}");
         }
         if let Some(path) = summary.paths.history.as_ref() {
-            eprintln!("History: {}", path);
+            eprintln!("History: {path}");
         }
     }
 
@@ -1156,13 +1158,13 @@ fn run_games_sweep(
                                 let config_text_cell = toml::to_string(&cell_config)
                                     .unwrap_or_else(|_| config_text.clone());
                                 let run_id = run_id_from_seed_config(cell_seed, &config_text_cell);
-                                let noise_label = format!("{:.4}", noise).replace('.', "_");
+                                let noise_label = format!("{noise:.4}").replace('.', "_");
                                 let cell_dir = cells_root.join(format!(
-                                    "{:04}__r{}__n{}__rep{}__R{}__S{}__T{}__P{}",
-                                    cell_id, rounds, noise_label, reps, r, s, t, p
+                                    "{cell_id:04}__r{rounds}__n{noise_label}__rep{reps}__R{r}__S{s}__T{t}__P{p}"
                                 ));
+                                let cell_dir_display = cell_dir.display().to_string();
                                 fs::create_dir_all(&cell_dir).with_context(|| {
-                                    format!("failed to create {}", cell_dir.display())
+                                    format!("failed to create {cell_dir_display}")
                                 })?;
 
                                 let summary_path = cell_dir.join("run_summary.json");
@@ -1425,7 +1427,7 @@ fn run_games_inspect(
         .iter()
         .find(|spec| spec.id == id)
         .cloned()
-        .ok_or_else(|| anyhow::anyhow!("strategy '{}' not found", id))?;
+        .ok_or_else(|| anyhow::anyhow!("strategy '{id}' not found"))?;
     let intro = introspect_strategy(&spec);
     let output = match format {
         OutputFormat::Json => serde_json::to_string(&intro)?,
@@ -1435,12 +1437,14 @@ fn run_games_inspect(
     if let Some(out_path) = out {
         if let Some(parent) = out_path.parent() {
             if !parent.as_os_str().is_empty() {
+                let parent_display = parent.display().to_string();
                 fs::create_dir_all(parent)
-                    .with_context(|| format!("failed to create directory {}", parent.display()))?;
+                    .with_context(|| format!("failed to create directory {parent_display}"))?;
             }
         }
+        let out_path_display = out_path.display().to_string();
         fs::write(&out_path, output)
-            .with_context(|| format!("failed to write {}", out_path.display()))?;
+            .with_context(|| format!("failed to write {out_path_display}"))?;
     } else {
         println!("{output}");
     }
@@ -1485,21 +1489,23 @@ fn run_games_graph(
     out_path: PathBuf,
 ) -> anyhow::Result<()> {
     let spec = if let Some(run_path) = run_path {
+        let run_path_display = run_path.display().to_string();
         let run_text = core_io::load_to_string(&run_path)
-            .with_context(|| format!("failed to read {}", run_path.display()))?;
+            .with_context(|| format!("failed to read {run_path_display}"))?;
         let summary: RunSummary = serde_json::from_str(&run_text)
-            .with_context(|| format!("failed to parse {}", run_path.display()))?;
+            .with_context(|| format!("failed to parse {run_path_display}"))?;
         summary
             .config
             .strategies
             .iter()
             .find(|spec| spec.id == strategy_id)
             .cloned()
-            .ok_or_else(|| anyhow::anyhow!("strategy '{}' not found", strategy_id))?
+            .ok_or_else(|| anyhow::anyhow!("strategy '{strategy_id}' not found"))?
     } else {
         let config_path = config_path.unwrap_or_else(|| PathBuf::from("games.toml"));
+        let config_path_display = config_path.display().to_string();
         let config_text = core_io::load_to_string(&config_path)
-            .with_context(|| format!("failed to read {}", config_path.display()))?;
+            .with_context(|| format!("failed to read {config_path_display}"))?;
         let config = GamesConfig::from_toml_with_root(&config_text, config_path.parent())
             .map_err(|err| anyhow::anyhow!(err))?;
         config
@@ -1507,7 +1513,7 @@ fn run_games_graph(
             .iter()
             .find(|spec| spec.id == strategy_id)
             .cloned()
-            .ok_or_else(|| anyhow::anyhow!("strategy '{}' not found", strategy_id))?
+            .ok_or_else(|| anyhow::anyhow!("strategy '{strategy_id}' not found"))?
     };
     let intro = introspect_strategy(&spec);
     let graph = build_strategy_graph(&intro)?;
@@ -1717,25 +1723,25 @@ fn render_strategy_graph_dot(graph: &StrategyGraph) -> String {
     dot.push_str("  node [shape=box];\n");
     if let Some(start) = &graph.start_state {
         dot.push_str("  start [shape=point];\n");
-        dot.push_str(&format!("  start -> {};\n", dot_id(start)));
+        let start_id = dot_id(start);
+        dot.push_str(&format!("  start -> {start_id};\n"));
     }
     for node in &graph.nodes {
         let label = node.label.replace('"', "\\\"");
-        dot.push_str(&format!("  {} [label=\"{}\"];\n", dot_id(&node.id), label));
+        let node_id = dot_id(&node.id);
+        dot.push_str(&format!("  {node_id} [label=\"{label}\"];\n"));
     }
     for edge in &graph.edges {
         let label = edge.label.replace('"', "\\\"");
-        let mut attrs = vec![format!("label=\"{}\"", label)];
+        let mut attrs = vec![format!("label=\"{label}\"")];
         if let Some(color) = &edge.color {
-            attrs.push(format!("color=\"{}\"", color));
-            attrs.push(format!("fontcolor=\"{}\"", color));
+            attrs.push(format!("color=\"{color}\""));
+            attrs.push(format!("fontcolor=\"{color}\""));
         }
-        dot.push_str(&format!(
-            "  {} -> {} [{}];\n",
-            dot_id(&edge.from),
-            dot_id(&edge.to),
-            attrs.join(", ")
-        ));
+        let from = dot_id(&edge.from);
+        let to = dot_id(&edge.to);
+        let attrs_joined = attrs.join(", ");
+        dot.push_str(&format!("  {from} -> {to} [{attrs_joined}];\n"));
     }
     dot.push_str("}\n");
     dot
@@ -1743,7 +1749,7 @@ fn render_strategy_graph_dot(graph: &StrategyGraph) -> String {
 
 fn dot_id(raw: &str) -> String {
     let escaped = raw.replace('"', "\\\"");
-    format!("\"{}\"", escaped)
+    format!("\"{escaped}\"")
 }
 
 fn parse_states_range(input: &str) -> anyhow::Result<std::ops::RangeInclusive<usize>> {
@@ -1784,8 +1790,7 @@ fn parse_input_mode_arg(input: Option<&str>) -> anyhow::Result<InputMode> {
         "selflastaction" | "self" | "selflast" => InputMode::SelfLastAction,
         "jointlastaction" | "joint" | "jointlast" => InputMode::JointLastAction,
         _ => anyhow::bail!(
-            "invalid input_mode '{}': expected opponent_last_action, self_last_action, or joint_last_action",
-            raw
+            "invalid input_mode '{raw}': expected opponent_last_action, self_last_action, or joint_last_action"
         ),
     };
     Ok(mode)
@@ -1951,7 +1956,7 @@ fn notes_path_for_workspace(workspace_root: &Path) -> Option<PathBuf> {
     let _ = fs::create_dir_all(&notes_dir);
     let key = workspace_root.to_string_lossy();
     let hash = stable_hash_bytes(key.as_bytes());
-    let filename = format!("{:016x}.md", hash);
+    let filename = format!("{hash:016x}.md");
     Some(notes_dir.join(filename))
 }
 
@@ -2038,7 +2043,7 @@ impl Write for ChannelWriter {
             if !msg.is_empty() {
                 if let Some(file) = &self.file {
                     if let Ok(mut file) = file.lock() {
-                        let _ = writeln!(file, "{}", msg);
+                        let _ = writeln!(file, "{msg}");
                     }
                 }
                 let _ = self.tx.send(msg);
@@ -2060,7 +2065,7 @@ impl ChannelWriter {
             if !line.is_empty() {
                 if let Some(file) = &self.file {
                     if let Ok(mut file) = file.lock() {
-                        let _ = writeln!(file, "{}", line);
+                        let _ = writeln!(file, "{line}");
                     }
                 }
                 let _ = self.tx.send(line);
@@ -2078,7 +2083,7 @@ fn log_path_for_workspace(workspace_root: &Path) -> Option<PathBuf> {
     let _ = fs::create_dir_all(&logs_dir);
     let key = workspace_root.to_string_lossy();
     let hash = stable_hash_bytes(key.as_bytes());
-    let filename = format!("{:016x}.log", hash);
+    let filename = format!("{hash:016x}.log");
     Some(logs_dir.join(filename))
 }
 

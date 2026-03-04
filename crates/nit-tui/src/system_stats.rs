@@ -56,11 +56,11 @@ impl SystemStats {
         let gpu_label = gpu_label(self.gpu.as_ref());
         if self.mem_total_gb > 0.0 {
             format!(
-                "CPU {:02}% | {} | MEM {:.1}/{:.1}G",
-                cpu, gpu_label, self.mem_used_gb, self.mem_total_gb
+                "CPU {cpu:02}% | {gpu_label} | MEM {:.1}/{:.1}G",
+                self.mem_used_gb, self.mem_total_gb
             )
         } else {
-            format!("CPU {:02}% | {}", cpu, gpu_label)
+            format!("CPU {cpu:02}% | {gpu_label}")
         }
     }
 
@@ -128,16 +128,16 @@ fn gpu_label(info: Option<&GpuInfo>) -> String {
                 .mem_total_bytes
                 .map(|b| b as f32 / 1024.0 / 1024.0 / 1024.0);
             if let (Some(usage), Some(total)) = (usage, total_gb) {
-                return format!("GPU {:02}%/{:.1}G", usage, total);
+                return format!("GPU {usage:02}%/{total:.1}G");
             }
             if let Some(total) = total_gb {
-                return format!("GPU --/{:.1}G", total);
+                return format!("GPU --/{total:.1}G");
             }
             if let Some(usage) = usage {
-                return format!("GPU {:02}%", usage);
+                return format!("GPU {usage:02}%");
             }
             if let Some(name) = &info.name {
-                return format!("GPU {}", name);
+                return format!("GPU {name}");
             }
             "GPU N/A".to_string()
         }

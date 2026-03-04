@@ -709,12 +709,11 @@ fn simulate_tm(
     }
     if let Some(step) = fixed_point_step {
         lines.push(format!(
-            "note: fixed point at step {} (evolution truncated)",
-            step
+            "note: fixed point at step {step} (evolution truncated)"
         ));
     }
     if !run.halted && matches!(run.stop_reason, TmStopReason::MaxSteps) {
-        lines.push(format!("note: max_steps={}", step_limit));
+        lines.push(format!("note: max_steps={step_limit}"));
     }
     if let Some(last) = steps.last() {
         let move_label = match last.move_dir {
@@ -1023,8 +1022,12 @@ fn build_rule_table_lines(
                     TmMove::Right => "1",
                     TmMove::Stay => "0",
                 };
-                let left = format!("{{{}, {}}}", state, read);
-                let right = format!("{{{}, {}, {}}}", trans.next, trans.write, move_label);
+                let left = format!("{{{state}, {read}}}");
+                let right = format!(
+                    "{{{next}, {write}, {move_label}}}",
+                    next = trans.next,
+                    write = trans.write
+                );
                 max_left = max_left.max(left.len());
                 max_right = max_right.max(right.len());
                 rows.push((left, right));
@@ -1283,7 +1286,7 @@ fn build_grid_lines(frames: &[SimFrame], max_width: usize, theme: &Theme) -> Vec
     for (idx, frame) in frames.iter().enumerate() {
         let mut spans = Vec::new();
         spans.push(Span::styled(
-            format!("t{:02} ", idx),
+            format!("t{idx:02} "),
             Style::default().fg(theme.border),
         ));
         if needs_ellipsis {
@@ -1380,7 +1383,7 @@ fn build_legend_lines(
             } else {
                 Action::Defect.as_char()
             };
-            format!(" {} (mod {symbols} = {symbol} = {action})", value)
+            format!(" {value} (mod {symbols} = {symbol} = {action})")
         }
         (Some(value), None) => format!(" {value}"),
         (None, _) if !halted => " timeout -> D".to_string(),

@@ -54,6 +54,7 @@ use nit_core::{
 use nit_games::config::GamesConfig;
 use ratatui::{
     backend::CrosstermBackend,
+    layout::Rect,
     style::Style,
     widgets::{Block, BorderType, Borders, Clear, Paragraph},
     Terminal,
@@ -65,6 +66,7 @@ const BUSY_PULSE_INTERVAL: Duration = Duration::from_millis(550);
 const CHORD_TIMEOUT: Duration = Duration::from_millis(300);
 const INSPECTOR_JUMP_TIMEOUT: Duration = Duration::from_millis(1500);
 const CHAT_PROMPT_HISTORY_MAX: usize = 200;
+const INITIAL_SIZE_SETTLE: Duration = Duration::from_millis(80);
 
 struct FuzzySearchRuntime {
     indexer: FileIndexRunner,
@@ -491,6 +493,8 @@ fn run_loop(
     let mut last_job = Instant::now();
     let mut last_vitals_sample = Instant::now();
     let mut last_busy_pulse = Instant::now();
+    let app_start = Instant::now();
+    let mut last_resize_event: Option<(Duration, u16, u16)> = None;
     let mut needs_redraw = true;
     let mut input_state = InputState::new();
     let mut system_stats = SystemStats::new();
@@ -539,6 +543,14 @@ fn run_loop(
         .map(|petri| petri.activity_epoch())
         .unwrap_or(0);
     let mut last_agent_event_epoch = state.agents.event_epoch;
+    let initial_size = settle_initial_terminal_size(terminal, INITIAL_SIZE_SETTLE)?;
+    let mut last_screen_size = Some((initial_size.width, initial_size.height));
+    tracing::info!(
+        "init_size size=({},{}) settle_ms={}",
+        initial_size.width,
+        initial_size.height,
+        INITIAL_SIZE_SETTLE.as_millis()
+    );
     tracing::info!(
         "SECURITY: no plugins; nit makes no network calls; external commands only run via explicit agent integrations (e.g. codex)"
     );
@@ -822,7 +834,16 @@ fn run_loop(
                         needs_redraw = true;
                     }
                 }
-                Event::Resize(_, _) => {
+                Event::Resize(w, h) => {
+                    let ts = app_start.elapsed();
+                    tracing::info!(
+                        "resize_event ts_ms={} w={} h={} prev_size={:?}",
+                        ts.as_millis(),
+                        w,
+                        h,
+                        last_screen_size
+                    );
+                    last_resize_event = Some((ts, w, h));
                     needs_redraw = true;
                 }
                 _ => {}
@@ -1080,6 +1101,24 @@ fn run_loop(
 
         // redraw
         if needs_redraw || last_tick.elapsed() >= TICK_RATE {
+            if let Ok(screen) = terminal.size() {
+                let size = (screen.width, screen.height);
+                if Some(size) != last_screen_size {
+                    let ts = app_start.elapsed();
+                    let last_resize = last_resize_event
+                        .as_ref()
+                        .map(|(t, w, h)| (t.as_millis(), *w, *h));
+                    tracing::info!(
+                        "draw_size ts_ms={} size={:?} prev={:?} last_resize_event={:?} trigger_handled_input={}",
+                        ts.as_millis(),
+                        size,
+                        last_screen_size,
+                        last_resize,
+                        handled_input
+                    );
+                    last_screen_size = Some(size);
+                }
+            }
             system_stats.refresh_if_needed();
             let now = Instant::now();
             let dt = now.saturating_duration_since(last_vitals_sample);
@@ -1115,6 +1154,43 @@ fn run_loop(
         runtime.shutdown();
     }
     Ok(())
+}
+
+fn settle_initial_terminal_size(
+    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    max_wait: Duration,
+) -> io::Result<Rect> {
+    let mut size = terminal.size()?;
+    let start = Instant::now();
+    let mut probes = 0;
+    while start.elapsed() < max_wait {
+        thread::sleep(Duration::from_millis(10));
+        let current = terminal.size()?;
+        if current == size {
+            break;
+        }
+        probes += 1;
+        tracing::info!(
+            "init_size_probe ts_ms={} size=({},{}) prev=({},{})",
+            start.elapsed().as_millis(),
+            current.width,
+            current.height,
+            size.width,
+            size.height
+        );
+        size = current;
+    }
+    if probes > 0 {
+        tracing::info!(
+            "init_size_settle ts_ms={} size=({},{}) probes={}",
+            start.elapsed().as_millis(),
+            size.width,
+            size.height,
+            probes
+        );
+    }
+    terminal.resize(size)?;
+    Ok(size)
 }
 
 fn is_lab_job_running(state: &AppState) -> bool {
@@ -1793,7 +1869,7 @@ fn handle_editor_buffer_shortcuts(
         if is_editor {
             let buf = state.editor_buffer_mut();
             let before_version = buf.version();
-            let _ = buf.delete_selection();
+            buf.break_undo_group();
             buf.insert_str(normalized.as_ref());
             buf.ensure_visible();
             if buf.version() != before_version {
@@ -1802,7 +1878,7 @@ fn handle_editor_buffer_shortcuts(
         } else {
             let buf = state.notes_buffer_mut();
             let before_version = buf.version();
-            let _ = buf.delete_selection();
+            buf.break_undo_group();
             buf.insert_str(normalized.as_ref());
             buf.ensure_visible();
             if buf.version() != before_version {
@@ -3228,11 +3304,9 @@ fn handle_agent_console_key(
                 && modifiers.contains(KeyModifiers::SHIFT)) =>
         {
             handled = true;
-            if copy_chat_input_selection(state, clipboard) {
-                if delete_chat_input_selection(state) {
-                    changed = true;
-                    follow_chat_cursor = true;
-                }
+            if copy_chat_input_selection(state, clipboard) && delete_chat_input_selection(state) {
+                changed = true;
+                follow_chat_cursor = true;
             }
         }
         KeyEvent {
@@ -3849,6 +3923,7 @@ fn insert_text_into_focused_buffer(
         let Some(buffer) = state.focused_buffer_mut() else {
             return false;
         };
+        buffer.break_undo_group();
         buffer.insert_str(normalized.as_ref());
     }
     if state.editor_buffer().version() != editor_version {
@@ -4023,8 +4098,7 @@ fn chat_current_line_bounds(input: &str, cursor_char_idx: usize) -> (usize, usiz
 fn chat_current_line_indent(input: &str, cursor_char_idx: usize) -> String {
     let (start, end) = chat_current_line_bounds(input, cursor_char_idx);
     let mut out = String::new();
-    let mut idx = 0usize;
-    for ch in input.chars() {
+    for (idx, ch) in input.chars().enumerate() {
         if idx >= end {
             break;
         }
@@ -4035,7 +4109,6 @@ fn chat_current_line_indent(input: &str, cursor_char_idx: usize) -> String {
                 break;
             }
         }
-        idx += 1;
     }
     out
 }
@@ -4559,7 +4632,7 @@ fn spawn_mock_mission(state: &mut AppState) {
 
     let patch_base = state.agents.patches.len() + 1;
     state.agents.patches.push(PatchProposal {
-        id: format!("patch-{:03}", patch_base),
+        id: format!("patch-{patch_base:03}"),
         mission_id: Some(mission_id.clone()),
         agent_id: assigned_agents
             .first()
@@ -4743,6 +4816,34 @@ fn map_key_to_action(key: KeyEvent, state: &AppState, input: &mut InputState) ->
             modifiers: KeyModifiers::CONTROL,
             ..
         } => Some(Action::ToggleFileTree),
+        KeyEvent {
+            code: KeyCode::Char('z') | KeyCode::Char('Z'),
+            modifiers,
+            ..
+        } if pane_accepts_text_input(state, state.focus)
+            && modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::SUPER) =>
+        {
+            if modifiers.contains(KeyModifiers::SHIFT) {
+                Some(Action::Redo)
+            } else {
+                Some(Action::Undo)
+            }
+        }
+        KeyEvent {
+            code: KeyCode::Char('\u{1a}'),
+            modifiers: KeyModifiers::NONE,
+            ..
+        } if pane_accepts_text_input(state, state.focus) => Some(Action::Undo),
+        KeyEvent {
+            code: KeyCode::Char('y') | KeyCode::Char('Y'),
+            modifiers: KeyModifiers::CONTROL,
+            ..
+        } if pane_accepts_text_input(state, state.focus) => Some(Action::Redo),
+        KeyEvent {
+            code: KeyCode::Char('\u{19}'),
+            modifiers: KeyModifiers::NONE,
+            ..
+        } if pane_accepts_text_input(state, state.focus) => Some(Action::Redo),
         key if is_help_toggle_key(&key) => {
             if state.mode != Mode::Insert {
                 Some(if state.show_help {

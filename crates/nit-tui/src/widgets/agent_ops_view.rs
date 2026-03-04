@@ -1171,7 +1171,7 @@ fn dag_lines_for_dashboard(dashboard: &SwarmDashboardView, width: usize) -> Vec<
                 ));
             }
 
-            let details_1 = format!("agent: {}  role: {}", task.agent_id, role);
+            let details_1 = format!("agent: {}  role: {role}", task.agent_id);
             let details_1_chunks = wrap_cell_text(&details_1, task_widths[2].saturating_sub(2));
             for chunk in details_1_chunks {
                 let line = format!("{} {chunk}", arrow_glyph());
@@ -1184,8 +1184,8 @@ fn dag_lines_for_dashboard(dashboard: &SwarmDashboardView, width: usize) -> Vec<
             }
 
             let details_2 = format!(
-                "deps: {}  block: {}  writes: {}  out: {}  done_when: {}",
-                deps, blocked, writes, out_present, done_when
+                "deps: {deps}  block: {blocked}  writes: {writes}  out: {out_present}  \
+done_when: {done_when}"
             );
             let details_2_chunks = wrap_cell_text(&details_2, task_widths[2].saturating_sub(2));
             for chunk in details_2_chunks {
@@ -1486,14 +1486,12 @@ fn dag_styled_line(_line_idx: usize, line: &str, usable: usize, theme: &Theme) -
     if trimmed.starts_with("Gate:") {
         let label_style = base.fg(theme.border).add_modifier(Modifier::DIM);
         let value = trimmed.strip_prefix("Gate:").unwrap_or(trimmed).trim();
-        let mut spans = Vec::new();
-        spans.push(Span::styled(" ", row_style));
-        spans.push(Span::styled("Gate:", label_style));
-        spans.push(Span::styled(" ", row_style));
-        spans.push(Span::styled(
-            value.to_string(),
-            row_style.fg(theme.title_focused),
-        ));
+        let spans = vec![
+            Span::styled(" ", row_style),
+            Span::styled("Gate:", label_style),
+            Span::styled(" ", row_style),
+            Span::styled(value.to_string(), row_style.fg(theme.title_focused)),
+        ];
         return Line::from(spans);
     }
 

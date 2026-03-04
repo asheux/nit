@@ -1231,8 +1231,7 @@ fn render_metrics(
             Span::raw(" "),
             Span::styled(
                 format!(
-                    "{} | Phase {}/{} \"{}\" | t={}/{}",
-                    proto_name, phase_idx, phase_total, phase_label, step, phase_steps
+                    "{proto_name} | Phase {phase_idx}/{phase_total} \"{phase_label}\" | t={step}/{phase_steps}"
                 ),
                 value,
             ),
@@ -1311,7 +1310,7 @@ fn render_footer(frame: &mut Frame, area: Rect, theme: &Theme, session: &SimSess
     let status = if session.paused { "PAUSED" } else { "RUNNING" };
     let line = Line::from(vec![
         Span::styled(
-            format!("{}  ", status),
+            format!("{status}  "),
             Style::default()
                 .fg(theme.title_focused)
                 .add_modifier(Modifier::BOLD),

@@ -147,14 +147,11 @@ pub fn build_lines(state: &AppState, theme: &Theme, inner_width: u16) -> Vec<Lin
             let rounds = strat.rounds;
             lines.push(Line::from(vec![
                 Span::styled(format!("{:>2} ", idx + 1), dim_style),
-                Span::styled(
-                    format!("{:<id_width$}", id, id_width = id_width),
-                    value_style,
-                ),
+                Span::styled(format!("{id:<id_width$}"), value_style),
                 Span::styled(" ", dim_style),
-                Span::styled(format!("{:>6.2}%", coop), number_style),
+                Span::styled(format!("{coop:>6.2}%"), number_style),
                 Span::styled(" / ", dim_style),
-                Span::styled(format!("{:>6.2}%", tail), number_style),
+                Span::styled(format!("{tail:>6.2}%"), number_style),
                 Span::styled("  r=", dim_style),
                 Span::styled(rounds.to_string(), value_style),
             ]));

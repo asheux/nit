@@ -377,12 +377,15 @@ pub fn build_lines(theme: &Theme) -> Vec<Line<'static>> {
         Span::raw(" top / bottom"),
     ]));
     lines.push(Line::from(vec![
-        Span::styled("u", Style::default().fg(theme.accent)),
-        Span::raw(" undo (Normal mode)"),
+        Span::styled("u / Ctrl/Cmd+Z", Style::default().fg(theme.accent)),
+        Span::raw(" undo"),
     ]));
     lines.push(Line::from(vec![
-        Span::styled("Shift+R", Style::default().fg(theme.accent)),
-        Span::raw(" redo (Normal mode)"),
+        Span::styled(
+            "Shift+R / Ctrl+Y / Ctrl/Cmd+Shift+Z",
+            Style::default().fg(theme.accent),
+        ),
+        Span::raw(" redo"),
     ]));
     lines.push(Line::from(vec![
         Span::styled("e / b", Style::default().fg(theme.accent)),
@@ -521,7 +524,7 @@ pub fn build_lines(theme: &Theme) -> Vec<Line<'static>> {
     ]));
     lines.push(Line::from(vec![
         Span::styled("Ctrl+Y", Style::default().fg(theme.accent)),
-        Span::raw(" toggle seed source (Editor/Notes)"),
+        Span::raw(" toggle seed source"),
     ]));
     lines.push(Line::from(vec![
         Span::styled("Ctrl+A", Style::default().fg(theme.accent)),

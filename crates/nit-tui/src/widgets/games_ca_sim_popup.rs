@@ -467,7 +467,7 @@ fn build_grid_lines(rows: &[Vec<i16>], max_width: usize, theme: &Theme) -> Vec<L
     for (idx, row) in rows.iter().enumerate() {
         let mut spans = Vec::new();
         spans.push(Span::styled(
-            format!("t{:02} ", idx),
+            format!("t{idx:02} "),
             Style::default().fg(theme.border),
         ));
         if needs_ellipsis {
@@ -613,7 +613,7 @@ fn format_radius(two_r: u32) -> String {
     if two_r.is_multiple_of(2) {
         (two_r / 2).to_string()
     } else {
-        format!("{}/2", two_r)
+        format!("{two_r}/2")
     }
 }
 

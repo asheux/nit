@@ -356,7 +356,7 @@ pub fn render(
         frame.render_widget(input_block, layout.input_chunk);
     }
     let input_bg = if focused {
-        let mut bg = dim_bg_towards(theme.border_focused, theme.background, 94);
+        let mut bg = dim_bg_towards(theme.cursor_line_bg, theme.background, 75);
         if bg == theme.selection_bg {
             bg = theme.cursor_line_bg;
         }
@@ -365,7 +365,11 @@ pub fn render(
         }
         bg
     } else {
-        theme.background
+        let mut bg = dim_bg_towards(theme.cursor_line_bg, theme.background, 85);
+        if bg == theme.selection_bg {
+            bg = theme.background;
+        }
+        bg
     };
     frame.render_widget(
         Paragraph::new(input_visible)
@@ -1285,6 +1289,17 @@ fn user_line_with_prompt_bg(text: &str, theme: &Theme) -> Line<'static> {
 }
 
 fn status_header_line(text: &str, theme: &Theme) -> Line<'static> {
+    let trimmed = text.trim();
+    let is_rule = !trimmed.is_empty() && trimmed.chars().all(|ch| ch == '─');
+    if is_rule {
+        return Line::from(Span::styled(
+            text.to_string(),
+            Style::default()
+                .fg(theme.border)
+                .bg(theme.background)
+                .add_modifier(Modifier::DIM),
+        ));
+    }
     let bg = dim_bg_towards(theme.border, theme.background, 85);
     Line::from(Span::styled(
         text.to_string(),
@@ -1296,6 +1311,12 @@ fn status_header_line(text: &str, theme: &Theme) -> Line<'static> {
 }
 
 fn status_row_line(text: &str, theme: &Theme) -> Line<'static> {
+    if text.trim().is_empty() {
+        return Line::from(Span::styled(
+            text.to_string(),
+            Style::default().bg(theme.background),
+        ));
+    }
     let bg = dim_bg_towards(theme.border, theme.background, 85);
     Line::from(Span::styled(
         text.to_string(),
@@ -1304,6 +1325,17 @@ fn status_row_line(text: &str, theme: &Theme) -> Line<'static> {
 }
 
 fn status_sub_row_line(text: &str, theme: &Theme) -> Line<'static> {
+    let trimmed = text.trim_start();
+    let is_swarm_meta = trimmed.starts_with("Swarm:") || trimmed.starts_with("Verify:");
+    if is_swarm_meta {
+        return Line::from(Span::styled(
+            text.to_string(),
+            Style::default()
+                .fg(theme.title)
+                .bg(theme.background)
+                .add_modifier(Modifier::DIM),
+        ));
+    }
     let bg = dim_bg_towards(theme.border, theme.background, 85);
     Line::from(Span::styled(
         text.to_string(),
@@ -1794,7 +1826,7 @@ fn breather_rows_for_user_prompt(
                 &format!(
                     "{indent_str}{} {} {} {} {}",
                     fit_left(&badge, agent_w),
-                    fit_left(&size, size_w),
+                    fit_left(size, size_w),
                     fit_right(&elapsed_s, elap_w),
                     fit_right(&hb_s, hb_w),
                     fit_right(&out_s, out_w),
@@ -1932,7 +1964,7 @@ fn compact_swarm_template_meta(text: &str) -> Option<String> {
 
     let mut out = String::new();
     out.push_str("Swarm:");
-    out.push_str(&format!(" t={}", template));
+    out.push_str(&format!(" t={template}"));
 
     if let Some(integrator) = integrator {
         out.push_str(&format!("  i={}", normalize_swarm_meta_value(integrator)));

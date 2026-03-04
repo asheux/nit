@@ -206,8 +206,8 @@ fn load_replay(
     let file = File::open(history_path)
         .map_err(|e| format!("Failed to open {}: {e}", history_path.display()))?;
     let reader = BufReader::new(file);
-    let a_tag = format!("\"a\":\"{}\"", a_id);
-    let b_tag = format!("\"b\":\"{}\"", b_id);
+    let a_tag = format!("\"a\":\"{a_id}\"");
+    let b_tag = format!("\"b\":\"{b_id}\"");
     for line in reader.lines() {
         let line = line.map_err(|e| e.to_string())?;
         if line.trim().is_empty() {

@@ -3,7 +3,7 @@ use nit_core::{Buffer, Mode, PaneId};
 use nit_syntax::{hash_line_bytes, map_line_segments_to_chars, HighlightSnapshot, SegmentMapError};
 use ratatui::{
     layout::Rect,
-    style::{Modifier, Style},
+    style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, BorderType, Borders, Paragraph},
     Frame,
@@ -61,6 +61,7 @@ pub fn render_buffer(
     mode: Mode,
 ) -> Option<CursorPlacement> {
     let focused = focus == pane_id;
+    let content_bg = buffer_input_bg(theme, focused);
     let border_style = if focused {
         Style::default().fg(theme.border_focused)
     } else {
@@ -122,7 +123,7 @@ pub fn render_buffer(
             content.pop();
         }
         let is_cursor_line = line_idx == buffer.cursor.line;
-        let mut base_style = Style::default().fg(theme.foreground).bg(theme.background);
+        let mut base_style = Style::default().fg(theme.foreground).bg(content_bg);
         if is_cursor_line && !selection_active {
             base_style = base_style
                 .bg(theme.cursor_line_bg)
@@ -241,7 +242,7 @@ pub fn render_buffer(
             let gutter_bg = if data.is_cursor_line {
                 Style::default().bg(theme.cursor_line_bg)
             } else {
-                Style::default().bg(theme.background)
+                Style::default().bg(content_bg)
             };
             let ln_style = if data.is_cursor_line {
                 Style::default()
@@ -261,7 +262,7 @@ pub fn render_buffer(
             let gutter_bg = if data.is_cursor_line {
                 Style::default().bg(theme.cursor_line_bg)
             } else {
-                Style::default().bg(theme.background)
+                Style::default().bg(content_bg)
             };
             let ln_blank = " ".repeat(line_num_width);
             let ln_style = if data.is_cursor_line {
@@ -299,7 +300,7 @@ pub fn render_buffer(
     }
 
     let paragraph = Paragraph::new(lines)
-        .style(Style::default().bg(theme.background).fg(theme.foreground))
+        .style(Style::default().bg(content_bg).fg(theme.foreground))
         .block(block);
 
     frame.render_widget(paragraph, area);
@@ -322,6 +323,37 @@ pub fn render_buffer(
         return Some(CursorPlacement { x, y });
     }
     None
+}
+
+fn buffer_input_bg(theme: &Theme, focused: bool) -> Color {
+    let mut bg = dim_bg_towards(
+        theme.cursor_line_bg,
+        theme.background,
+        if focused { 78 } else { 88 },
+    );
+    if bg == theme.selection_bg {
+        bg = theme.background;
+    }
+    if bg == theme.cursor_line_bg {
+        bg = theme.background;
+    }
+    bg
+}
+
+fn dim_bg_towards(color: Color, background: Color, background_pct: u8) -> Color {
+    let pct = background_pct.min(100) as u16;
+    match (color, background) {
+        (Color::Rgb(r1, g1, b1), Color::Rgb(r0, g0, b0)) => {
+            let inv = 100u16.saturating_sub(pct);
+            let mix = |top: u8, base: u8| -> u8 {
+                let top = top as u16;
+                let base = base as u16;
+                ((top.saturating_mul(inv) + base.saturating_mul(pct) + 50) / 100) as u8
+            };
+            Color::Rgb(mix(r1, r0), mix(g1, g0), mix(b1, b0))
+        }
+        _ => color,
+    }
 }
 
 fn apply_syntax_spans(

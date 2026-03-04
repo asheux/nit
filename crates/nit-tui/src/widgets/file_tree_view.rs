@@ -36,8 +36,7 @@ pub fn render(f: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
         "OFF"
     };
     let commands = format!(
-        "[Enter open/toggle] [Esc/q close] [r refresh] [. hidden:{}] [i ignored:{}]",
-        hidden, ignored
+        "[Enter open/toggle] [Esc/q close] [r refresh] [. hidden:{hidden}] [i ignored:{ignored}]"
     );
     let focused = state.focus == PaneId::Editor;
     let border_style = if focused {

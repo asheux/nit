@@ -1028,10 +1028,9 @@ impl GamesPetriDishRuntime {
         state.games.status = GamesStatus::Running;
         state.games.last_error = None;
         state.status = Some(match run_label {
-            Some(label) if family_mode => format!(
-                "Games tournament started ({label}, turbo x{})",
-                request_steps_per_tick
-            ),
+            Some(label) if family_mode => {
+                format!("Games tournament started ({label}, turbo x{request_steps_per_tick})")
+            }
             Some(label) => format!("Games tournament started ({label})"),
             None => "Games tournament started".into(),
         });
@@ -1404,7 +1403,7 @@ fn render_progress(
             Span::styled("/", dim_style),
             Span::styled(progress.rounds.to_string(), number_style),
             Span::styled(", overall ", dim_style),
-            Span::styled(format!("{:>5.1}%", pct), number_style),
+            Span::styled(format!("{pct:>5.1}%"), number_style),
             Span::styled(")", dim_style),
         ]));
         lines.push(Line::from(vec![
@@ -1854,7 +1853,7 @@ fn top_table_widths(config: &nit_games::NormalizedConfig) -> (usize, usize, usiz
         max_total.to_string().len()
     };
     let rank_w = n.to_string().len();
-    let wld_w = format!("W{}-L{}-D{}", matches_per, matches_per, matches_per).len();
+    let wld_w = format!("W{matches_per}-L{matches_per}-D{matches_per}").len();
     (rank_w, score_w, wld_w)
 }
 
@@ -1940,7 +1939,7 @@ fn render_top_table(
         n_w = n_w.max(machine_n.len());
         name_w = name_w.max(name.chars().count());
         score_w = score_w.max(score.len());
-        let wld_len = format!("W{}-L{}-D{}", wins, losses, draws).len();
+        let wld_len = format!("W{wins}-L{losses}-D{draws}").len();
         wld_w = wld_w.max(wld_len);
     }
 
@@ -1999,18 +1998,15 @@ fn render_top_table(
     for (rank, id, machine_n, name, score, wins, losses, draws) in rows {
         let mut spans = Vec::new();
         spans.push(Span::styled("|", dim_style));
-        spans.push(Span::styled(
-            format!(" {:>width$} ", rank, width = rank_w),
-            number_style,
-        ));
+        spans.push(Span::styled(format!(" {rank:>rank_w$} "), number_style));
         spans.push(Span::styled("|", dim_style));
         spans.push(Span::styled(
-            format!(" {:<width$} ", truncate_text(&id, id_w), width = id_w),
+            format!(" {:<id_w$} ", truncate_text(&id, id_w)),
             label_style,
         ));
         spans.push(Span::styled("|", dim_style));
         spans.push(Span::styled(
-            format!(" {:>width$} ", truncate_text(&machine_n, n_w), width = n_w),
+            format!(" {:>n_w$} ", truncate_text(&machine_n, n_w)),
             if machine_n == "-" {
                 dim_style
             } else {
@@ -2019,14 +2015,11 @@ fn render_top_table(
         ));
         spans.push(Span::styled("|", dim_style));
         spans.push(Span::styled(
-            format!(" {:<width$} ", truncate_text(&name, name_w), width = name_w),
+            format!(" {:<name_w$} ", truncate_text(&name, name_w)),
             value_style,
         ));
         spans.push(Span::styled("|", dim_style));
-        spans.push(Span::styled(
-            format!(" {:>width$} ", score, width = score_w),
-            number_style,
-        ));
+        spans.push(Span::styled(format!(" {score:>score_w$} "), number_style));
         spans.push(Span::styled("|", dim_style));
         spans.extend(wld_cell_spans(
             wins,
@@ -2077,7 +2070,7 @@ fn wld_cell_spans(
     draw_style: Style,
     dim_style: Style,
 ) -> Vec<Span<'static>> {
-    let base = format!("W{}-L{}-D{}", wins, losses, draws);
+    let base = format!("W{wins}-L{losses}-D{draws}");
     let pad = width.saturating_sub(base.len());
     let mut spans = Vec::new();
     spans.push(Span::styled(" ", dim_style));

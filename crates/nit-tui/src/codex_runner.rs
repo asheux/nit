@@ -396,7 +396,7 @@ impl McpServer {
                         continue;
                     }
                     if let Some(err) = value.get("error") {
-                        return Err(format!("MCP error: {}", err));
+                        return Err(format!("MCP error: {err}"));
                     }
                     return Ok(value);
                 }
