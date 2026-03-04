@@ -60,6 +60,7 @@ pub enum CodexCommand {
 pub struct CodexRunner {
     cmd_tx: Sender<CodexCommand>,
     pub events: Receiver<AgentBusEvent>,
+    shutdown: Arc<AtomicBool>,
     handle: Option<JoinHandle<()>>,
 }
 
@@ -67,13 +68,16 @@ impl CodexRunner {
     pub fn spawn(mode: CodexRuntimeMode, config: CodexRunnerConfig) -> Self {
         let (cmd_tx, cmd_rx) = mpsc::channel();
         let (event_tx, event_rx) = mpsc::channel();
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let shutdown_worker = Arc::clone(&shutdown);
         let handle = thread::Builder::new()
             .name("nit-codex".into())
-            .spawn(move || runner_loop(mode, config, cmd_rx, event_tx))
+            .spawn(move || runner_loop(mode, config, shutdown_worker, cmd_rx, event_tx))
             .expect("spawn codex runner");
         Self {
             cmd_tx,
             events: event_rx,
+            shutdown,
             handle: Some(handle),
         }
     }
@@ -83,6 +87,7 @@ impl CodexRunner {
     }
 
     pub fn shutdown(&mut self) {
+        self.shutdown.store(true, Ordering::Relaxed);
         let _ = self.cmd_tx.send(CodexCommand::Shutdown);
         let Some(handle) = self.handle.take() else {
             return;
@@ -101,15 +106,22 @@ impl CodexRunner {
     }
 }
 
+impl Drop for CodexRunner {
+    fn drop(&mut self) {
+        self.shutdown();
+    }
+}
+
 fn runner_loop(
     mode: CodexRuntimeMode,
     config: CodexRunnerConfig,
+    shutdown: Arc<AtomicBool>,
     cmd_rx: Receiver<CodexCommand>,
     event_tx: Sender<AgentBusEvent>,
 ) {
     match mode {
         CodexRuntimeMode::Exec => runner_loop_exec(cmd_rx, event_tx, config),
-        CodexRuntimeMode::Mcp => runner_loop_mcp(cmd_rx, event_tx, config),
+        CodexRuntimeMode::Mcp => runner_loop_mcp(cmd_rx, event_tx, config, shutdown),
     }
 }
 
@@ -256,10 +268,11 @@ struct McpServer {
     _stderr_handle: JoinHandle<()>,
     next_id: u64,
     endpoint: String,
+    shutdown: Arc<AtomicBool>,
 }
 
 impl McpServer {
-    fn start() -> Result<Self, String> {
+    fn start(shutdown: Arc<AtomicBool>) -> Result<Self, String> {
         let mut child = Command::new("codex")
             .arg("mcp-server")
             .stdin(Stdio::piped())
@@ -303,6 +316,7 @@ impl McpServer {
             _stderr_handle: stderr_handle,
             next_id: 0,
             endpoint: "stdio://codex-mcp-server".into(),
+            shutdown,
         })
     }
 
@@ -362,6 +376,9 @@ impl McpServer {
         let deadline = Instant::now() + timeout;
         let mut last_stderr: Option<String> = None;
         loop {
+            if self.shutdown.load(Ordering::Relaxed) {
+                return Err("MCP request cancelled (shutdown)".into());
+            }
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
                 let suffix = last_stderr
@@ -397,6 +414,12 @@ impl McpServer {
     fn stop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
+    }
+}
+
+impl Drop for McpServer {
+    fn drop(&mut self) {
+        self.stop();
     }
 }
 
@@ -489,6 +512,7 @@ struct InFlightMcpTurn {
     mission_id: Option<String>,
     resume_thread_id: Option<String>,
     started_at: Instant,
+    last_activity_at: Instant,
     last_heartbeat_sent_at: Instant,
     last_stage: Option<String>,
     last_stage_sent_at: Instant,
@@ -499,6 +523,7 @@ fn runner_loop_mcp(
     cmd_rx: Receiver<CodexCommand>,
     event_tx: Sender<AgentBusEvent>,
     config: CodexRunnerConfig,
+    shutdown: Arc<AtomicBool>,
 ) {
     let mut queue: VecDeque<CodexCommand> = VecDeque::new();
     let mut shutting_down = false;
@@ -509,12 +534,17 @@ fn runner_loop_mcp(
     let mut in_flight_by_agent: HashMap<String, u64> = HashMap::new();
     let max_parallel = config.max_parallel_turns.max(1);
     let timeout = mcp_turn_timeout();
+    let idle_timeout = mcp_turn_idle_timeout();
 
     // Global stderr throttling; stderr is not request-id tagged so we avoid spamming all lanes.
     let mut last_stderr_sent: Option<String> = None;
     let mut last_stderr_sent_at = Instant::now();
 
     loop {
+        if shutdown.load(Ordering::Relaxed) {
+            shutting_down = true;
+            queue.clear();
+        }
         if shutting_down {
             if let Some(server) = server.as_mut() {
                 server.stop();
@@ -609,7 +639,7 @@ fn runner_loop_mcp(
                         let _ = event_tx.send(AgentBusEvent::TurnFailed {
                             agent_id: turn.agent_id,
                             mission_id: turn.mission_id,
-                            thread_id: turn.resume_thread_id,
+                            thread_id: None,
                             token_count: turn.last_token_count,
                             message: "Cancelled (MCP stop)".into(),
                         });
@@ -617,16 +647,13 @@ fn runner_loop_mcp(
                     in_flight_by_agent.clear();
                     while let Some(cmd) = queue.pop_front() {
                         if let CodexCommand::RunTurn {
-                            model,
-                            mission_id,
-                            resume_thread_id,
-                            ..
+                            model, mission_id, ..
                         } = cmd
                         {
                             let _ = event_tx.send(AgentBusEvent::TurnFailed {
                                 agent_id: model,
                                 mission_id,
-                                thread_id: resume_thread_id,
+                                thread_id: None,
                                 token_count: None,
                                 message: "Cancelled (MCP stop)".into(),
                             });
@@ -652,7 +679,7 @@ fn runner_loop_mcp(
                         let _ = event_tx.send(AgentBusEvent::TurnFailed {
                             agent_id: turn.agent_id,
                             mission_id: turn.mission_id,
-                            thread_id: turn.resume_thread_id,
+                            thread_id: None,
                             token_count: turn.last_token_count,
                             message: "Cancelled (MCP reconnect)".into(),
                         });
@@ -689,7 +716,7 @@ fn runner_loop_mcp(
                     last_error: None,
                 },
             });
-            match McpServer::start().and_then(|mut s| {
+            match McpServer::start(Arc::clone(&shutdown)).and_then(|mut s| {
                 s.initialize()?;
                 Ok(s)
             }) {
@@ -731,6 +758,44 @@ fn runner_loop_mcp(
                 .any(|turn| now.duration_since(turn.started_at) >= timeout);
             if timed_out {
                 let msg = format!("MCP tool call timed out after {}s", timeout.as_secs());
+                if let Some(mut srv) = server.take() {
+                    srv.stop();
+                }
+                for (_id, turn) in in_flight.drain() {
+                    let _ = event_tx.send(AgentBusEvent::TurnFailed {
+                        agent_id: turn.agent_id,
+                        mission_id: turn.mission_id,
+                        thread_id: turn.resume_thread_id,
+                        token_count: turn.last_token_count,
+                        message: msg.clone(),
+                    });
+                }
+                in_flight_by_agent.clear();
+                let _ = event_tx.send(AgentBusEvent::McpStatus {
+                    status: McpStatus {
+                        state: McpConnectionState::Error,
+                        endpoint: "codex mcp-server".into(),
+                        latency_ms: None,
+                        last_error: Some(msg),
+                    },
+                });
+                next_connect_attempt_at = Instant::now() + Duration::from_secs(2);
+                continue;
+            }
+        }
+
+        // Per-turn idle timeouts: if a turn stops producing any events, restart the server and
+        // fail all turns so the UI doesn't get pinned in "Working ..." indefinitely.
+        if let Some(idle_timeout) = idle_timeout {
+            let now = Instant::now();
+            let stalled = in_flight
+                .values()
+                .any(|turn| now.duration_since(turn.last_activity_at) >= idle_timeout);
+            if stalled {
+                let msg = format!(
+                    "MCP tool call stalled after {}s without events",
+                    idle_timeout.as_secs()
+                );
                 if let Some(mut srv) = server.take() {
                     srv.stop();
                 }
@@ -854,6 +919,7 @@ fn runner_loop_mcp(
                             .and_then(|v| v.as_u64());
                         if let Some(request_id) = request_id {
                             if let Some(turn) = in_flight.get_mut(&request_id) {
+                                turn.last_activity_at = Instant::now();
                                 let _ = handle_codex_mcp_notification(
                                     &event_tx,
                                     &turn.agent_id,
@@ -867,6 +933,7 @@ fn runner_loop_mcp(
                             }
                         } else if in_flight.len() == 1 {
                             if let Some((&only_id, turn)) = in_flight.iter_mut().next() {
+                                turn.last_activity_at = Instant::now();
                                 let _ = handle_codex_mcp_notification(
                                     &event_tx,
                                     &turn.agent_id,
@@ -1068,6 +1135,7 @@ fn runner_loop_mcp(
                         mission_id,
                         resume_thread_id,
                         started_at: now,
+                        last_activity_at: now,
                         last_heartbeat_sent_at: now,
                         last_stage: None,
                         last_stage_sent_at: now,
@@ -1100,6 +1168,24 @@ fn mcp_turn_timeout() -> Option<Duration> {
                 None
             } else {
                 Some(Duration::from_secs(secs))
+            }
+        }
+        Err(_) => None,
+    }
+}
+
+fn mcp_turn_idle_timeout() -> Option<Duration> {
+    const DEFAULT_IDLE_TIMEOUT_SECS: u64 = 10 * 60;
+    match std::env::var("NIT_MCP_TURN_IDLE_TIMEOUT_SECS") {
+        Ok(raw) => {
+            let raw = raw.trim();
+            if raw.is_empty() {
+                return Some(Duration::from_secs(DEFAULT_IDLE_TIMEOUT_SECS));
+            }
+            match raw.parse::<u64>() {
+                Ok(0) => None,
+                Ok(secs) => Some(Duration::from_secs(secs)),
+                Err(_) => Some(Duration::from_secs(DEFAULT_IDLE_TIMEOUT_SECS)),
             }
         }
         Err(_) => None,

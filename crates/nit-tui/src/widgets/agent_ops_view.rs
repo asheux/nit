@@ -29,8 +29,32 @@ pub fn roster_meta_for_body_line(state: &AppState, body_line: usize) -> Option<R
 
 pub fn roster_body_offset(state: &AppState) -> usize {
     let _ = state;
-    // Backends header (4 lines) + blank spacer (1) + table header/separator (2)
-    7
+    // Backends header (4 lines) + blank spacer (1) + swarm template buttons (1) + table
+    // header/separator (2)
+    8
+}
+
+pub const ROSTER_SWARM_TEMPLATE_LINE_IDX: usize = 5;
+
+const ROSTER_SWARM_TEMPLATE_LINE: &str = " Swarm template:  lab   parallel   bulk ";
+
+pub fn roster_swarm_template_hit(col: usize) -> Option<&'static str> {
+    for label in ["lab", "parallel", "bulk"] {
+        let needle = match label {
+            "lab" => " lab ",
+            "parallel" => " parallel ",
+            "bulk" => " bulk ",
+            _ => continue,
+        };
+        let Some(start) = ROSTER_SWARM_TEMPLATE_LINE.find(needle) else {
+            continue;
+        };
+        let end = start.saturating_add(needle.len());
+        if col >= start && col < end {
+            return Some(label);
+        }
+    }
+    None
 }
 
 pub fn alert_index_for_body_line(
@@ -237,6 +261,9 @@ fn footer_line(state: &AppState, theme: &Theme) -> Line<'static> {
             spans.push(Span::styled("h/l", key_style));
             spans.push(Span::styled(" size", label_style));
             spans.push(Span::styled("  ", sep_style));
+            spans.push(Span::styled("1/2/3", key_style));
+            spans.push(Span::styled(" template", label_style));
+            spans.push(Span::styled("  ", sep_style));
             spans.push(Span::styled("Space", key_style));
             spans.push(Span::styled(" set", label_style));
             spans.push(Span::styled("  ", sep_style));
@@ -412,6 +439,7 @@ fn roster_lines(state: &AppState, width: usize) -> Vec<String> {
             if local_active { " (active)" } else { "" }
         ),
         String::new(),
+        ROSTER_SWARM_TEMPLATE_LINE.into(),
         format!(
             " {} {} {} {} {}",
             fit_left("ROLE", widths[0]),
@@ -791,6 +819,7 @@ fn dag_lines_for_dashboard(dashboard: &SwarmDashboardView, width: usize) -> Vec<
         }
     };
 
+    let mut out = vec![" DAG".into(), "─".repeat(width.min(240))];
     let summary = format!(
         "Swarm DAG {} [{status_word}] template={} phase={} done={}/{} failed={} skipped={} running={} queued={} pending={}",
         dashboard.mission_id,
@@ -804,12 +833,14 @@ fn dag_lines_for_dashboard(dashboard: &SwarmDashboardView, width: usize) -> Vec<
         dashboard.queued,
         dashboard.pending
     );
-
-    let mut out = vec![" DAG".into(), "─".repeat(width.min(240))];
-    out.push(format!(" {}", fit_left(&summary, cols_total)));
+    for chunk in wrap_cell_text(&summary, cols_total) {
+        out.push(format!(" {chunk}"));
+    }
     if let Some(bundle) = dashboard.gate_bundle.as_deref() {
         let line = format!("Gate bundle: {bundle}");
-        out.push(format!(" {}", fit_left(&line, cols_total)));
+        for chunk in wrap_cell_text(&line, cols_total) {
+            out.push(format!(" {chunk}"));
+        }
     }
 
     let task_widths = dag_task_widths(cols_total);
@@ -825,8 +856,7 @@ fn dag_lines_for_dashboard(dashboard: &SwarmDashboardView, width: usize) -> Vec<
 
     if dashboard.tasks.is_empty() {
         if dashboard.phase == "PLAN" {
-            let line =
-                "Planning: waiting for planner output (tasks will appear here once the plan is parsed).";
+            let line = "Planning: waiting for planner output";
             out.push(format!(
                 " {} {} {}",
                 empty_id,
@@ -863,23 +893,47 @@ fn dag_lines_for_dashboard(dashboard: &SwarmDashboardView, width: usize) -> Vec<
                 .filter(|s| !s.is_empty())
                 .unwrap_or("-");
 
-            let details = format!(
-                "↳ agent: {}  role: {}  deps: {}  block: {}  writes: {}  out: {}  done_when: {}",
-                task.agent_id, role, deps, blocked, writes, out_present, done_when
-            );
+            let title_chunks = wrap_cell_text(task.title.as_str(), task_widths[2]);
+            for (idx, chunk) in title_chunks.iter().enumerate() {
+                let (id_cell, state_cell) = if idx == 0 {
+                    (task.id.as_str(), task.state.as_str())
+                } else {
+                    ("", "")
+                };
+                out.push(format!(
+                    " {} {} {}",
+                    fit_left(id_cell, task_widths[0]),
+                    fit_left(state_cell, task_widths[1]),
+                    fit_left(chunk, task_widths[2]),
+                ));
+            }
 
-            out.push(format!(
-                " {} {} {}",
-                fit_left(task.id.as_str(), task_widths[0]),
-                fit_left(task.state.as_str(), task_widths[1]),
-                fit_left(task.title.as_str(), task_widths[2]),
-            ));
-            out.push(format!(
-                " {} {} {}",
-                empty_id,
-                empty_state,
-                fit_left(&details, task_widths[2]),
-            ));
+            let details_1 = format!("agent: {}  role: {}", task.agent_id, role);
+            let details_1_chunks = wrap_cell_text(&details_1, task_widths[2].saturating_sub(2));
+            for chunk in details_1_chunks {
+                let line = format!("↳ {chunk}");
+                out.push(format!(
+                    " {} {} {}",
+                    empty_id,
+                    empty_state,
+                    fit_left(&line, task_widths[2]),
+                ));
+            }
+
+            let details_2 = format!(
+                "deps: {}  block: {}  writes: {}  out: {}  done_when: {}",
+                deps, blocked, writes, out_present, done_when
+            );
+            let details_2_chunks = wrap_cell_text(&details_2, task_widths[2].saturating_sub(2));
+            for chunk in details_2_chunks {
+                let line = format!("↳ {chunk}");
+                out.push(format!(
+                    " {} {} {}",
+                    empty_id,
+                    empty_state,
+                    fit_left(&line, task_widths[2]),
+                ));
+            }
         }
     }
 
@@ -893,16 +947,54 @@ fn dag_lines_for_dashboard(dashboard: &SwarmDashboardView, width: usize) -> Vec<
             fit_left("COMMAND", gate_widths[2]),
         ));
         for gate in dashboard.gates.iter() {
-            let command = match gate.notes.as_deref() {
-                Some(notes) if !notes.is_empty() => format!("{} ({notes})", gate.command),
-                _ => gate.command.clone(),
+            // Always render the raw command first so the user can see/copy it even when notes are
+            // long. Notes are rendered on separate continuation lines.
+            let cmd_width = gate_widths[2];
+            let wrap_width = if cmd_width > 2 {
+                cmd_width.saturating_sub(2)
+            } else {
+                cmd_width
             };
-            out.push(format!(
-                " {} {} {}",
-                fit_left(gate.name.as_str(), gate_widths[0]),
-                fit_left(gate.status.as_str(), gate_widths[1]),
-                fit_left(command.as_str(), gate_widths[2]),
-            ));
+            let mut chunks = wrap_cell_text(gate.command.as_str(), wrap_width);
+            if chunks.len() > 1 {
+                let cont_len = chunks.len().saturating_sub(1);
+                for chunk in chunks.iter_mut().take(cont_len) {
+                    if cmd_width > 2 {
+                        chunk.push_str(" \\");
+                    } else {
+                        chunk.push('\\');
+                    }
+                }
+            }
+            for (idx, chunk) in chunks.iter().enumerate() {
+                let gate_cell = if idx == 0 { gate.name.as_str() } else { "" };
+                out.push(format!(
+                    " {} {} {}",
+                    fit_left(gate_cell, gate_widths[0]),
+                    fit_left(gate.status.as_str(), gate_widths[1]),
+                    fit_left(chunk, gate_widths[2]),
+                ));
+            }
+
+            let Some(notes) = gate
+                .notes
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            else {
+                continue;
+            };
+
+            let note_chunks = wrap_cell_text(notes, gate_widths[2].saturating_sub(2));
+            for chunk in note_chunks {
+                let line = format!("↳ {chunk}");
+                out.push(format!(
+                    " {} {} {}",
+                    fit_left("", gate_widths[0]),
+                    fit_left(gate.status.as_str(), gate_widths[1]),
+                    fit_left(&line, gate_widths[2]),
+                ));
+            }
         }
     }
 
@@ -1087,7 +1179,11 @@ fn dag_styled_line(_line_idx: usize, line: &str, usable: usize, theme: &Theme) -
                 .fg(theme.title_focused)
                 .add_modifier(Modifier::BOLD);
             let status_style = dag_gate_status_style(status, row_style, theme);
-            let cmd_style = row_style;
+            let cmd_style = if cols.first().map(|s| s.trim().is_empty()).unwrap_or(false) {
+                row_style.add_modifier(Modifier::DIM)
+            } else {
+                row_style
+            };
             let space_style = row_style;
             let mut spans = Vec::with_capacity(8);
             spans.push(Span::styled(marker, row_style));
@@ -1109,7 +1205,7 @@ fn dag_styled_line(_line_idx: usize, line: &str, usable: usize, theme: &Theme) -
         }
     }
 
-    // Task cards: ID | STATE | TITLE (2 lines per task; details lines have empty ID/STATE).
+    // Task cards: ID | STATE | TITLE (variable-height; details lines have empty ID/STATE).
     if trimmed.starts_with("No ")
         || trimmed.starts_with("Mission ")
         || trimmed.starts_with("Swarm runtime")
@@ -1122,13 +1218,18 @@ fn dag_styled_line(_line_idx: usize, line: &str, usable: usize, theme: &Theme) -
 
     let task_widths = dag_task_widths(cols_total);
     let Some((marker, cols)) = split_marker_and_columns(line, &task_widths) else {
-        return Line::from(Span::styled(line.to_string(), row_style));
+        return Line::from(Span::styled(
+            line.to_string(),
+            Style::default().fg(theme.foreground),
+        ));
     };
     let id_cell = cols.first().cloned().unwrap_or_default();
     let state_cell = cols.get(1).cloned().unwrap_or_default();
     let title_cell = cols.get(2).cloned().unwrap_or_default();
 
-    let is_details = id_cell.trim().is_empty() && state_cell.trim().is_empty();
+    let is_details = id_cell.trim().is_empty()
+        && state_cell.trim().is_empty()
+        && title_cell.trim_start().starts_with('↳');
     let marker_style = row_style.fg(theme.border).add_modifier(Modifier::DIM);
     let id_style = if is_details {
         dim_row_style
@@ -1361,6 +1462,37 @@ fn roster_styled_line(
         ));
     }
     if line_idx == 5 {
+        let label_style = Style::default()
+            .fg(theme.border)
+            .add_modifier(Modifier::DIM);
+        let selected_style = Style::default()
+            .fg(theme.background)
+            .bg(theme.border_focused)
+            .add_modifier(Modifier::BOLD);
+        let unselected_style = Style::default()
+            .fg(theme.foreground)
+            .bg(theme.cursor_line_bg);
+
+        let mut spans: Vec<Span<'static>> = Vec::with_capacity(8);
+        spans.push(Span::styled(" Swarm template: ", label_style));
+        for (idx, tmpl) in ["lab", "parallel", "bulk"].iter().enumerate() {
+            let selected = state
+                .agents
+                .swarm_default_template
+                .eq_ignore_ascii_case(tmpl);
+            let style = if selected {
+                selected_style
+            } else {
+                unselected_style
+            };
+            spans.push(Span::styled(format!(" {tmpl} "), style));
+            if idx + 1 < 3 {
+                spans.push(Span::styled(" ", label_style));
+            }
+        }
+        return Line::from(spans);
+    }
+    if line_idx == 6 {
         return Line::from(Span::styled(
             line.to_string(),
             Style::default()
@@ -1368,7 +1500,7 @@ fn roster_styled_line(
                 .add_modifier(Modifier::BOLD),
         ));
     }
-    if line_idx == 6 {
+    if line_idx == 7 {
         return Line::from(Span::styled(
             line.to_string(),
             Style::default()
@@ -2177,5 +2309,54 @@ mod tests {
         assert!(lines.iter().any(|line| line.contains("Swarm DAG")));
         assert!(lines.iter().any(|line| line.contains("t1")));
         assert!(lines.iter().any(|line| line.contains("fmt")));
+    }
+
+    #[test]
+    fn dag_lines_wrap_instead_of_ellipsis() {
+        let dashboard = SwarmDashboardView {
+            mission_id: "mis-010".into(),
+            template: "plan-v2".into(),
+            phase: "EXEC".into(),
+            done: 0,
+            failed: 0,
+            skipped: 0,
+            running: 1,
+            queued: 0,
+            pending: 0,
+            tasks: vec![SwarmTaskDashboardRow {
+                id: "t1".into(),
+                title: "This is a very long title that should wrap across multiple lines".into(),
+                role: Some("integrator".into()),
+                agent_id: "agent-1".into(),
+                state: "Running".into(),
+                deps: vec!["t0".into(), "t2".into(), "t3".into(), "t4".into()],
+                blocked_on: vec!["gate-fmt".into(), "gate-clippy".into()],
+                writes: true,
+                done_when: Some(
+                    "Ensure the DAG view never truncates with ellipsis; wrap instead.".into(),
+                ),
+                output_present: false,
+            }],
+            gate_bundle: Some(
+                "bundle-with-a-very-long-name-that-must-wrap-instead-of-truncating".into(),
+            ),
+            gates: vec![SwarmGateDashboardRow {
+                name: "fmt".into(),
+                command: "cargo fmt --all -- --check && echo \"hello world\" && echo \"more\""
+                    .into(),
+                status: "PENDING".into(),
+                notes: None,
+            }],
+        };
+
+        let lines = dag_lines_for_dashboard(&dashboard, 48);
+        assert!(
+            !lines.iter().any(|line| line.contains('…')),
+            "expected DAG output to wrap without ellipsis"
+        );
+        assert!(
+            lines.iter().any(|line| line.trim_end().ends_with('\\')),
+            "expected wrapped commands to use backslash continuation"
+        );
     }
 }

@@ -6,7 +6,9 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use crate::swarm::{is_agent_busy, parse_swarm_command, select_swarm_agents, SwarmRuntime};
+use crate::swarm::{
+    is_agent_busy, parse_swarm_command, select_swarm_agents, SwarmCommand, SwarmRuntime, SwarmSize,
+};
 use crate::{
     codex_runner::{CodexCommand, CodexRunner, CodexRunnerConfig, CodexRuntimeMode},
     file_tree,
@@ -500,6 +502,7 @@ fn run_loop(
     } else {
         CodexRuntimeMode::Exec
     };
+    state.agents.codex_max_parallel_turns = codex_config.max_parallel_turns;
     let mut codex_runner = CodexRunner::spawn(codex_runtime, codex_config);
     let mut swarm = SwarmRuntime::default();
     let mut fuzzy_runtime = FuzzySearchRuntime::new(theme, state.settings.highlight.clone());
@@ -1709,6 +1712,48 @@ fn handle_agent_ops_key(
             changed = reset_roster_context(state);
         }
         KeyEvent {
+            code: KeyCode::Char('1'),
+            modifiers: KeyModifiers::NONE,
+            ..
+        } if state.agents.dock_tab == AgentOpsTab::Roster => {
+            if !state
+                .agents
+                .swarm_default_template
+                .eq_ignore_ascii_case("lab")
+            {
+                state.agents.swarm_default_template = "lab".into();
+                changed = true;
+            }
+        }
+        KeyEvent {
+            code: KeyCode::Char('2'),
+            modifiers: KeyModifiers::NONE,
+            ..
+        } if state.agents.dock_tab == AgentOpsTab::Roster => {
+            if !state
+                .agents
+                .swarm_default_template
+                .eq_ignore_ascii_case("parallel")
+            {
+                state.agents.swarm_default_template = "parallel".into();
+                changed = true;
+            }
+        }
+        KeyEvent {
+            code: KeyCode::Char('3'),
+            modifiers: KeyModifiers::NONE,
+            ..
+        } if state.agents.dock_tab == AgentOpsTab::Roster => {
+            if !state
+                .agents
+                .swarm_default_template
+                .eq_ignore_ascii_case("bulk")
+            {
+                state.agents.swarm_default_template = "bulk".into();
+                changed = true;
+            }
+        }
+        KeyEvent {
             code: KeyCode::Tab,
             modifiers: KeyModifiers::SHIFT,
             ..
@@ -1818,6 +1863,7 @@ fn handle_agent_ops_key(
             ..
         } if modifiers.is_empty() && state.agents.dock_tab == AgentOpsTab::Mcp => {
             if let Some(codex) = codex {
+                reset_codex_mcp_sessions(state, "MCP reconnect clears Codex thread context");
                 codex.send(CodexCommand::McpReconnect);
                 changed = true;
             }
@@ -1838,6 +1884,7 @@ fn handle_agent_ops_key(
             ..
         } if modifiers.is_empty() && state.agents.dock_tab == AgentOpsTab::Mcp => {
             if let Some(codex) = codex {
+                reset_codex_mcp_sessions(state, "MCP stop clears Codex thread context");
                 codex.send(CodexCommand::McpStop);
                 changed = true;
             }
@@ -1849,6 +1896,17 @@ fn handle_agent_ops_key(
         vitals.record_agent_event(Instant::now());
     }
     changed
+}
+
+fn reset_codex_mcp_sessions(state: &mut AppState, status: &str) {
+    state.agents.codex_thread_ids.clear();
+    state.agents.codex_mission_thread_ids.clear();
+    state.agents.codex_used_tokens.clear();
+    state.agents.codex_mission_used_tokens.clear();
+    state.agents.codex_context_remaining_pct.clear();
+    state.agents.codex_mission_context_remaining_pct.clear();
+    state.agents.codex_estimated_tokens_used_by_mission.clear();
+    state.status = Some(status.to_string());
 }
 
 fn move_agent_ops_selection(state: &mut AppState, delta: i32) -> bool {
@@ -2189,6 +2247,99 @@ fn reset_roster_context(state: &mut AppState) -> bool {
     true
 }
 
+fn detect_swarm_template_from_prompt(raw: &str) -> Option<String> {
+    for line in raw.lines() {
+        let trimmed = line.trim().trim_start_matches(['-', '*', '•']).trim_start();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let lower = trimmed.to_ascii_lowercase();
+        let Some(rest) = lower.strip_prefix("template:") else {
+            continue;
+        };
+        let value = rest.trim();
+        if value.is_empty() {
+            continue;
+        }
+        let value = value
+            .trim_matches(|ch: char| matches!(ch, '`' | '"' | '\''))
+            .trim();
+        let token = value
+            .split_whitespace()
+            .next()
+            .unwrap_or_default()
+            .trim_matches(|ch: char| matches!(ch, ',' | '.' | ';' | ')'));
+        let canonical =
+            if token.eq_ignore_ascii_case("parallel") || token.eq_ignore_ascii_case("v1") {
+                Some("parallel")
+            } else if token.eq_ignore_ascii_case("bulk") || token.eq_ignore_ascii_case("bo") {
+                Some("bulk")
+            } else if token.eq_ignore_ascii_case("lab")
+                || token.eq_ignore_ascii_case("default")
+                || token.eq_ignore_ascii_case("v2")
+            {
+                Some("lab")
+            } else {
+                None
+            };
+        if let Some(canonical) = canonical {
+            return Some(canonical.to_string());
+        }
+    }
+    None
+}
+
+fn detect_implicit_swarm_command(state: &AppState, raw: &str) -> Option<SwarmCommand> {
+    if raw.trim().is_empty() {
+        return None;
+    }
+    // Avoid hijacking explicit `@all`/`@swarm`/etc. prefixes.
+    if raw.trim_start().starts_with('@') {
+        return None;
+    }
+
+    let template = detect_swarm_template_from_prompt(raw)
+        .or_else(|| {
+            let upper = raw.to_ascii_uppercase();
+            if upper.contains("SWARM PLANNER") || upper.contains("SWARM SYNTHESIZER") {
+                Some(state.agents.swarm_default_template.clone())
+            } else {
+                None
+            }
+        })
+        .or_else(|| {
+            // Operator-selected template in the roster: treat the next prompt as a swarm launch.
+            if matches!(
+                state.agents.swarm_default_template.as_str(),
+                "bulk" | "parallel"
+            ) && state
+                .agents
+                .agents
+                .iter()
+                .filter(|lane| lane.is_codex())
+                .count()
+                >= 2
+            {
+                Some(state.agents.swarm_default_template.clone())
+            } else {
+                None
+            }
+        })?;
+
+    let size = if state.agents.codex_max_parallel_turns
+        != CodexRunnerConfig::default().max_parallel_turns
+    {
+        SwarmSize::Count(state.agents.codex_max_parallel_turns)
+    } else {
+        SwarmSize::Default
+    };
+    Some(SwarmCommand {
+        size,
+        template: Some(template),
+        prompt: raw.to_string(),
+    })
+}
+
 fn handle_agent_console_key(
     key: KeyEvent,
     state: &mut AppState,
@@ -2211,7 +2362,19 @@ fn handle_agent_console_key(
             handled = true;
             let raw = state.agents.chat_input.clone();
             let mut swarm_handled = false;
-            if let Some(cmd) = parse_swarm_command(&raw) {
+            let mut cmd = parse_swarm_command(&raw)
+                .map(|mut cmd| {
+                    if cmd.template.is_none() {
+                        cmd.template = Some(state.agents.swarm_default_template.clone());
+                    }
+                    cmd
+                })
+                .or_else(|| detect_implicit_swarm_command(state, &raw));
+            if let Some(cmd) = cmd.as_mut() {
+                let auto_switch_ops_dag = cmd
+                    .template
+                    .as_deref()
+                    .is_some_and(|t| matches!(t, "bulk" | "bo"));
                 chat_history_remember(state, &raw);
                 let planner = state
                     .agents
@@ -2243,7 +2406,10 @@ fn handle_agent_console_key(
                         cmd.template.clone(),
                         cmd.prompt.clone(),
                     ) {
-                        state.agents.chat_input = cmd.prompt;
+                        if auto_switch_ops_dag {
+                            state.agents.dock_tab = AgentOpsTab::Dag;
+                        }
+                        state.agents.chat_input = cmd.prompt.clone();
                         state.agents.chat_input_cursor = state.agents.chat_input.chars().count();
                         let _ = push_chat_message(state);
                         changed = true;
@@ -2261,7 +2427,7 @@ fn handle_agent_console_key(
                         maybe_dispatch_next_queued_codex_turn(state, vitals, codex);
                         swarm_handled = true;
                     } else {
-                        state.agents.chat_input = cmd.prompt;
+                        state.agents.chat_input = cmd.prompt.clone();
                         state.agents.chat_input_cursor = state.agents.chat_input.chars().count();
                     }
                 } else {
@@ -6342,7 +6508,7 @@ fn handle_mouse_down_with_swarm(
         map_job_output_mouse_with_swarm(swarm, mouse, screen, state, false)
     {
         state.focus = PaneId::JobOutput;
-        apply_agent_ops_click_selection(state, line_idx, text_width);
+        apply_agent_ops_click_selection(state, line_idx, col, text_width);
         if state.agents.dock_tab == AgentOpsTab::Scratchpad {
             state.mode = Mode::Insert;
         }
@@ -6370,11 +6536,24 @@ fn handle_mouse_down_with_swarm(
     false
 }
 
-fn apply_agent_ops_click_selection(state: &mut AppState, line_idx: usize, text_width: usize) {
+fn apply_agent_ops_click_selection(
+    state: &mut AppState,
+    line_idx: usize,
+    col: usize,
+    text_width: usize,
+) {
     let offset = match state.agents.dock_tab {
         AgentOpsTab::Roster => agent_ops_view::roster_body_offset(state),
         _ => 2,
     };
+    if state.agents.dock_tab == AgentOpsTab::Roster
+        && line_idx == agent_ops_view::ROSTER_SWARM_TEMPLATE_LINE_IDX
+    {
+        if let Some(template) = agent_ops_view::roster_swarm_template_hit(col) {
+            state.agents.swarm_default_template = template.to_string();
+        }
+        return;
+    }
     if line_idx < offset {
         return;
     }
@@ -9032,6 +9211,283 @@ mod tests {
         assert_eq!(state.agents.console_scroll, usize::MAX);
         assert_eq!(state.agents.messages.len(), 1);
         assert_eq!(state.agents.messages[0].text, "hi");
+    }
+
+    #[test]
+    fn swarm_bulk_auto_switches_ops_to_dag() {
+        let mut state = state_for_test();
+        state.focus = PaneId::Notes;
+        state.agents.dock_tab = AgentOpsTab::Roster;
+        state.agents.agents.push(nit_core::AgentLane {
+            id: "planner".into(),
+            role: "Planner".into(),
+            lane: "codex".into(),
+            kind: nit_core::AgentLaneKind::Codex,
+            status: nit_core::AgentStatus::Idle,
+            heartbeat_age_secs: 0,
+            queue_len: 0,
+            current_mission: None,
+            last_message: String::new(),
+        });
+        state.agents.agents.push(nit_core::AgentLane {
+            id: "worker".into(),
+            role: "Worker".into(),
+            lane: "codex".into(),
+            kind: nit_core::AgentLaneKind::Codex,
+            status: nit_core::AgentStatus::Idle,
+            heartbeat_age_secs: 0,
+            queue_len: 0,
+            current_mission: None,
+            last_message: String::new(),
+        });
+        state.agents.chat_input = "@swarm 2 template=bulk do thing".into();
+        state.agents.chat_input_cursor = state.agents.chat_input.chars().count();
+        let mut vitals = VitalsState::default();
+        let mut swarm = SwarmRuntime::default();
+
+        assert!(handle_agent_station_key(
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &mut state,
+            &mut vitals,
+            None,
+            &mut swarm
+        ));
+        assert_eq!(state.agents.dock_tab, AgentOpsTab::Dag);
+    }
+
+    #[test]
+    fn swarm_auto_detects_template_line_without_prefix() {
+        let mut state = state_for_test();
+        state.focus = PaneId::Notes;
+        state.agents.agents.push(nit_core::AgentLane {
+            id: "planner".into(),
+            role: "Planner".into(),
+            lane: "codex".into(),
+            kind: nit_core::AgentLaneKind::Codex,
+            status: nit_core::AgentStatus::Idle,
+            heartbeat_age_secs: 0,
+            queue_len: 0,
+            current_mission: None,
+            last_message: String::new(),
+        });
+        state.agents.agents.push(nit_core::AgentLane {
+            id: "worker".into(),
+            role: "Worker".into(),
+            lane: "codex".into(),
+            kind: nit_core::AgentLaneKind::Codex,
+            status: nit_core::AgentStatus::Idle,
+            heartbeat_age_secs: 0,
+            queue_len: 0,
+            current_mission: None,
+            last_message: String::new(),
+        });
+
+        state.agents.chat_input =
+            "You are the SWARM PLANNER inside nit.\nTemplate: `parallel`\nDo thing.".into();
+        state.agents.chat_input_cursor = state.agents.chat_input.chars().count();
+        let mut vitals = VitalsState::default();
+        let mut swarm = SwarmRuntime::default();
+
+        assert!(handle_agent_station_key(
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &mut state,
+            &mut vitals,
+            None,
+            &mut swarm
+        ));
+        assert!(state.agents.missions.iter().any(|mission| mission.swarm));
+        assert!(state
+            .agents
+            .missions
+            .first()
+            .is_some_and(|mission| mission.title.contains("Swarm[parallel]")));
+    }
+
+    #[test]
+    fn swarm_auto_detects_swarm_role_and_uses_default_template() {
+        let mut state = state_for_test();
+        state.focus = PaneId::Notes;
+        state.agents.dock_tab = AgentOpsTab::Roster;
+        state.agents.swarm_default_template = "bulk".into();
+        state.agents.agents.push(nit_core::AgentLane {
+            id: "planner".into(),
+            role: "Planner".into(),
+            lane: "codex".into(),
+            kind: nit_core::AgentLaneKind::Codex,
+            status: nit_core::AgentStatus::Idle,
+            heartbeat_age_secs: 0,
+            queue_len: 0,
+            current_mission: None,
+            last_message: String::new(),
+        });
+        state.agents.agents.push(nit_core::AgentLane {
+            id: "worker".into(),
+            role: "Worker".into(),
+            lane: "codex".into(),
+            kind: nit_core::AgentLaneKind::Codex,
+            status: nit_core::AgentStatus::Idle,
+            heartbeat_age_secs: 0,
+            queue_len: 0,
+            current_mission: None,
+            last_message: String::new(),
+        });
+        state.agents.chat_input = "You are the SWARM SYNTHESIZER.\nCombine agent outputs.".into();
+        state.agents.chat_input_cursor = state.agents.chat_input.chars().count();
+        let mut vitals = VitalsState::default();
+        let mut swarm = SwarmRuntime::default();
+
+        assert!(handle_agent_station_key(
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &mut state,
+            &mut vitals,
+            None,
+            &mut swarm
+        ));
+        assert_eq!(state.agents.dock_tab, AgentOpsTab::Dag);
+        assert!(state
+            .agents
+            .missions
+            .first()
+            .is_some_and(|mission| mission.title.contains("Swarm[bulk]")));
+    }
+
+    #[test]
+    fn swarm_auto_detects_plain_prompt_when_bulk_template_selected() {
+        let mut state = state_for_test();
+        state.focus = PaneId::Notes;
+        state.agents.dock_tab = AgentOpsTab::Roster;
+        state.agents.swarm_default_template = "bulk".into();
+        state.agents.agents.push(nit_core::AgentLane {
+            id: "planner".into(),
+            role: "Planner".into(),
+            lane: "codex".into(),
+            kind: nit_core::AgentLaneKind::Codex,
+            status: nit_core::AgentStatus::Idle,
+            heartbeat_age_secs: 0,
+            queue_len: 0,
+            current_mission: None,
+            last_message: String::new(),
+        });
+        state.agents.agents.push(nit_core::AgentLane {
+            id: "worker".into(),
+            role: "Worker".into(),
+            lane: "codex".into(),
+            kind: nit_core::AgentLaneKind::Codex,
+            status: nit_core::AgentStatus::Idle,
+            heartbeat_age_secs: 0,
+            queue_len: 0,
+            current_mission: None,
+            last_message: String::new(),
+        });
+        state.agents.chat_input = "do a quick repo health check and suggest next steps".into();
+        state.agents.chat_input_cursor = state.agents.chat_input.chars().count();
+        let mut vitals = VitalsState::default();
+        let mut swarm = SwarmRuntime::default();
+
+        assert!(handle_agent_station_key(
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &mut state,
+            &mut vitals,
+            None,
+            &mut swarm
+        ));
+        assert_eq!(state.agents.dock_tab, AgentOpsTab::Dag);
+        assert!(state
+            .agents
+            .missions
+            .first()
+            .is_some_and(|mission| mission.title.contains("Swarm[bulk]")));
+    }
+
+    #[test]
+    fn swarm_autostart_uses_codex_max_parallel_turns_as_size_hint() {
+        let mut state = state_for_test();
+        state.focus = PaneId::Notes;
+        state.agents.swarm_default_template = "bulk".into();
+        state.agents.codex_max_parallel_turns = 6;
+        for idx in 0..6 {
+            let id = if idx == 0 {
+                "planner".to_string()
+            } else {
+                format!("worker-{idx}")
+            };
+            state.agents.agents.push(nit_core::AgentLane {
+                id,
+                role: "Codex".into(),
+                lane: "codex".into(),
+                kind: nit_core::AgentLaneKind::Codex,
+                status: nit_core::AgentStatus::Idle,
+                heartbeat_age_secs: 0,
+                queue_len: 0,
+                current_mission: None,
+                last_message: String::new(),
+            });
+        }
+        state.agents.chat_input = "do a quick repo health check and suggest next steps".into();
+        state.agents.chat_input_cursor = state.agents.chat_input.chars().count();
+        let mut vitals = VitalsState::default();
+        let mut swarm = SwarmRuntime::default();
+
+        assert!(handle_agent_station_key(
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &mut state,
+            &mut vitals,
+            None,
+            &mut swarm
+        ));
+        let assigned = state
+            .agents
+            .missions
+            .first()
+            .map(|mission| mission.assigned_agents.len())
+            .unwrap_or(0);
+        assert_eq!(assigned, 6);
+    }
+
+    #[test]
+    fn swarm_uses_roster_default_template_when_argument_missing() {
+        let mut state = state_for_test();
+        state.focus = PaneId::Notes;
+        state.agents.swarm_default_template = "parallel".into();
+        state.agents.agents.push(nit_core::AgentLane {
+            id: "planner".into(),
+            role: "Planner".into(),
+            lane: "codex".into(),
+            kind: nit_core::AgentLaneKind::Codex,
+            status: nit_core::AgentStatus::Idle,
+            heartbeat_age_secs: 0,
+            queue_len: 0,
+            current_mission: None,
+            last_message: String::new(),
+        });
+        state.agents.agents.push(nit_core::AgentLane {
+            id: "worker".into(),
+            role: "Worker".into(),
+            lane: "codex".into(),
+            kind: nit_core::AgentLaneKind::Codex,
+            status: nit_core::AgentStatus::Idle,
+            heartbeat_age_secs: 0,
+            queue_len: 0,
+            current_mission: None,
+            last_message: String::new(),
+        });
+        state.agents.chat_input = "@swarm 2 do thing".into();
+        state.agents.chat_input_cursor = state.agents.chat_input.chars().count();
+        let mut vitals = VitalsState::default();
+        let mut swarm = SwarmRuntime::default();
+
+        assert!(handle_agent_station_key(
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &mut state,
+            &mut vitals,
+            None,
+            &mut swarm
+        ));
+        assert!(state
+            .agents
+            .missions
+            .first()
+            .is_some_and(|mission| mission.title.contains("Swarm[parallel]")));
     }
 
     #[test]

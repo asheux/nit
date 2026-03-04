@@ -72,17 +72,20 @@
 - Esc: Switch to Normal mode
 
 ## Agent Ops
-- Tab / Shift+Tab / Left/Right: Cycle Ops tabs (Roster/Missions/MCP/Alerts/Diagnostics/Scratchpad)
+- Tab / Shift+Tab / Left/Right: Cycle Ops tabs (Roster/Missions/DAG/MCP/Alerts/Diagnostics/Scratchpad)
 - j/k or Up/Down: Move selection
 - Enter: Focus Agent Chat with selected context
 - n: New mission (mock runner in MVP)
+- Roster:
+  - 1/2/3: Select swarm template (lab/parallel/bulk)
 - r / s / x: MCP reconnect / start / stop (MCP tab; default runtime for Codex, override with `--codex-runtime exec`)
+  - Note: MCP reconnect/stop clears Codex thread context for continuations.
 - Ctrl+Space / F6: Pause/resume active Petri/tournament runtime (global)
 
 ## Agent Chat
 - Type message, Enter to send, Esc or Ctrl+C to clear input
   - `@all <msg>`: broadcast (same prompt) to multiple Codex agents
-  - `@swarm [all|N] <msg>`: orchestrated multi-agent workflow (planner splits tasks, agents run in parallel, verifier runs gates, planner synthesizes)
+  - `@swarm [all|N] [template=lab|parallel|bulk] <msg>`: orchestrated multi-agent workflow
 - Left/Right/Home/End: Move input cursor
 - Up/Down: Move input cursor between lines
 - Ctrl+Up/Ctrl+Down: Scroll chat thread

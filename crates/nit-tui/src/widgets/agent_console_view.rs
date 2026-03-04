@@ -304,6 +304,17 @@ pub fn render(
                 })
                 .add_modifier(Modifier::BOLD),
         ));
+        let swarm_template = state.agents.swarm_default_template.trim();
+        if !swarm_template.is_empty() {
+            title_spans.push(Span::raw("  "));
+            title_spans.push(Span::styled(
+                format!(" t={swarm_template} "),
+                Style::default()
+                    .fg(theme.background)
+                    .bg(theme.accent)
+                    .add_modifier(Modifier::BOLD),
+            ));
+        }
         if queued_count > 0 {
             title_spans.push(Span::raw("  "));
             let label = if queued_count > 1 {

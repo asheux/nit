@@ -584,6 +584,14 @@ pub struct AgentsState {
     #[serde(skip)]
     pub chat_prompt_history_draft: Option<String>,
     pub chat_channel: AgentChannel,
+    /// Default swarm template used when auto-detecting swarm prompts or when `@swarm` omits an
+    /// explicit `template=...` argument.
+    #[serde(default = "swarm_default_template_default")]
+    pub swarm_default_template: String,
+    /// Maximum number of Codex turns to run concurrently (from `--codex-max-parallel-turns`).
+    /// Runtime-only; used as a hint for auto-starting swarm sizes.
+    #[serde(skip, default = "codex_max_parallel_turns_default")]
+    pub codex_max_parallel_turns: usize,
     pub agents: Vec<AgentLane>,
     pub missions: Vec<MissionRecord>,
     pub patches: Vec<PatchProposal>,
@@ -680,6 +688,14 @@ pub struct AgentsState {
 
 fn chat_input_scroll_default() -> usize {
     usize::MAX
+}
+
+fn swarm_default_template_default() -> String {
+    "lab".into()
+}
+
+fn codex_max_parallel_turns_default() -> usize {
+    2
 }
 
 impl AgentsState {
@@ -782,6 +798,8 @@ impl AgentsState {
             chat_prompt_history_pos: None,
             chat_prompt_history_draft: None,
             chat_channel: AgentChannel::Agent,
+            swarm_default_template: swarm_default_template_default(),
+            codex_max_parallel_turns: codex_max_parallel_turns_default(),
             agents,
             missions,
             patches,
@@ -859,6 +877,8 @@ impl Default for AgentsState {
             chat_prompt_history_pos: None,
             chat_prompt_history_draft: None,
             chat_channel: AgentChannel::Agent,
+            swarm_default_template: swarm_default_template_default(),
+            codex_max_parallel_turns: codex_max_parallel_turns_default(),
             agents: Vec::new(),
             missions: Vec::new(),
             patches: Vec::new(),

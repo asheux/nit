@@ -82,6 +82,7 @@ It's meant for quick confidence after changes to UI, commands, or engine wiring.
   - In Agent Ops: switch to the MCP tab.
   - Expect: status transitions to CONNECTED and endpoint shows `stdio://...` (backed by `codex mcp-server`).
   - Press `x` (stop), `s` (start), `r` (reconnect); expect status updates accordingly.
+  - Note: `r`/`x` clears saved Codex thread ids for continuations; the next prompt starts a new thread.
 - Verify a turn over MCP:
   - Focus Agent Chat (from Agent Ops: `Enter`).
   - Send a short prompt; expect: stage updates while running and an agent reply appended to the thread.
@@ -94,17 +95,24 @@ It's meant for quick confidence after changes to UI, commands, or engine wiring.
 - Verify `@swarm` orchestration (task splitting + synthesis):
   - In Agent Chat (any Codex model selected): send `@swarm 4 template=lab <prompt>` (or omit `template=...` since `lab` is the default).
   - Expect: a new mission is created (Missions tab shows `SWM yes`) and the planner runs first (phase `PLAN`).
-  - Expect: after the planner returns a JSON plan, Agent Chat shows a `Swarm DAG` table with task rows (`ID/ASSIGNEE/ROLE/STATE/BLOCKED/DEPS/TITLE`) and accurate `Pending` vs `Queued` vs `Skipped` states.
+  - Expect: during planning, Agent Ops → DAG shows `Planning: waiting for planner output`.
+  - Expect: after the planner returns a JSON plan, Agent Ops → DAG shows task cards (multi-line, wraps instead of `...`) with accurate `Pending` vs `Queued` vs `Skipped` states.
+  - Expect: Agent Chat continues to show the compact “Working/Queued” table; swarm metadata is appended below it (template/integrator/verifier/gates).
   - Expect: tasks run as a DAG (phase `EXECUTE`, status like `EXEC 1/6`), with some tasks queued until their deps finish.
   - Expect: when all task agents finish, nit runs a verifier turn (phase `VERIFY`, status `VERIFY`) to execute a built-in gate bundle when detected.
-  - Expect: per-gate verifier outcomes are visible in Agent Chat (`GATE STATUS COMMAND` rows) and include PASS/FAIL (and SKIP when reported).
+  - Expect: per-gate outcomes are visible in Agent Ops → DAG, and include PASS/FAIL (and SKIP when reported).
   - Expect: after verification completes, the planner runs a synthesis turn (status `SYNTH`) and the mission status becomes:
     - `DONE` when gates pass (or no gates were detected)
     - `FAILED` when gates ran and failed
     - `ERROR` when verification errored (e.g., missing/invalid gate report JSON)
   - Template `bulk` sanity:
     - Send `@swarm 5 template=bulk <prompt>`.
-    - Expect: multiple “propose” tasks run first (parallel), then a “judge” task runs, then an integrator task runs before VERIFY/SYNTH.
+    - Expect: multiple “propose” tasks run first (parallel), then a “judge” task runs, then an integrator task (`writes=true`) runs before VERIFY/SYNTH.
+    - Expect: Agent Ops auto-switches to the DAG tab at swarm start for bulk.
+  - Implicit bulk launch sanity (no `@swarm`):
+    - In Agent Ops → Roster, select swarm template `bulk` (press `3`).
+    - In Agent Chat, send a plain prompt (e.g. `do a quick repo health check and suggest next steps`).
+    - Expect: swarm starts as if `@swarm template=bulk ...` was used.
   - Deadlock sanity (cyclic plan):
     - If the planner returns a cyclic plan where no tasks can ever become ready, expect a system message like `Swarm deadlock: skipping tasks with unresolvable deps: ...`, followed immediately by `VERIFY`/`SYNTH`, and the mission ends `FAILED`.
   - Structured artifacts persistence sanity:
