@@ -560,6 +560,18 @@ pub struct QueuedCodexTurn {
     pub prompt: String,
 }
 
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum RosterTreeBranch {
+    Size,
+    Role,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct RosterTreeSelection {
+    pub branch: RosterTreeBranch,
+    pub leaf_idx: usize,
+}
+
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct AgentsState {
     pub selected_agent: Option<String>,
@@ -588,6 +600,13 @@ pub struct AgentsState {
     /// explicit `template=...` argument.
     #[serde(default = "swarm_default_template_default")]
     pub swarm_default_template: String,
+    /// Per-agent role hint for swarm planning (used by `parallel`/`bulk`).
+    /// Missing entry means "all roles".
+    #[serde(default)]
+    pub swarm_role_by_agent_id: HashMap<String, String>,
+    /// Agents marked as priority in the roster (used as a planning hint for `parallel`/`bulk`).
+    #[serde(default)]
+    pub swarm_priority_agent_ids: HashSet<String>,
     /// Maximum number of Codex turns to run concurrently (from `--codex-max-parallel-turns`).
     /// Runtime-only; used as a hint for auto-starting swarm sizes.
     #[serde(skip, default = "codex_max_parallel_turns_default")]
@@ -601,11 +620,11 @@ pub struct AgentsState {
     pub diag_events: Vec<AgentDiagnosticEvent>,
     pub mcp: McpStatus,
     pub roster_selected: usize,
-    /// When selecting Codex reasoning effort "sizes" in the roster tree, this stores the selected
-    /// child-row index for the currently selected model.
+    /// When selecting in the roster "tree" under the selected model, this stores the selected
+    /// child-row (Size/Role) leaf index for keyboard navigation.
     /// Runtime-only; UI navigation state.
     #[serde(skip)]
-    pub roster_effort_selected: Option<usize>,
+    pub roster_tree_selected: Option<RosterTreeSelection>,
     pub mission_selected: usize,
     pub alert_selected: usize,
     pub patch_selected: usize,
@@ -799,6 +818,8 @@ impl AgentsState {
             chat_prompt_history_draft: None,
             chat_channel: AgentChannel::Agent,
             swarm_default_template: swarm_default_template_default(),
+            swarm_role_by_agent_id: HashMap::new(),
+            swarm_priority_agent_ids: HashSet::new(),
             codex_max_parallel_turns: codex_max_parallel_turns_default(),
             agents,
             missions,
@@ -814,7 +835,7 @@ impl AgentsState {
                 last_error: None,
             },
             roster_selected: 0,
-            roster_effort_selected: None,
+            roster_tree_selected: None,
             mission_selected: 0,
             alert_selected: 0,
             patch_selected: 0,
@@ -878,6 +899,8 @@ impl Default for AgentsState {
             chat_prompt_history_draft: None,
             chat_channel: AgentChannel::Agent,
             swarm_default_template: swarm_default_template_default(),
+            swarm_role_by_agent_id: HashMap::new(),
+            swarm_priority_agent_ids: HashSet::new(),
             codex_max_parallel_turns: codex_max_parallel_turns_default(),
             agents: Vec::new(),
             missions: Vec::new(),
@@ -893,7 +916,7 @@ impl Default for AgentsState {
                 last_error: None,
             },
             roster_selected: 0,
-            roster_effort_selected: None,
+            roster_tree_selected: None,
             mission_selected: 0,
             alert_selected: 0,
             patch_selected: 0,

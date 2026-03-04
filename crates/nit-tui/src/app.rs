@@ -1607,7 +1607,7 @@ fn handle_agent_ops_key(
                 ..
             } => {
                 state.agents.dock_tab = state.agents.dock_tab.prev();
-                state.agents.roster_effort_selected = None;
+                state.agents.roster_tree_selected = None;
                 state.agents.ops_scroll = 0;
                 state.mode = if state.agents.dock_tab == AgentOpsTab::Scratchpad {
                     Mode::Insert
@@ -1622,7 +1622,7 @@ fn handle_agent_ops_key(
                 code: KeyCode::Tab, ..
             } => {
                 state.agents.dock_tab = state.agents.dock_tab.next();
-                state.agents.roster_effort_selected = None;
+                state.agents.roster_tree_selected = None;
                 state.agents.ops_scroll = 0;
                 state.mode = if state.agents.dock_tab == AgentOpsTab::Scratchpad {
                     Mode::Insert
@@ -1638,7 +1638,7 @@ fn handle_agent_ops_key(
                 ..
             } if state.mode != Mode::Insert => {
                 state.agents.dock_tab = state.agents.dock_tab.prev();
-                state.agents.roster_effort_selected = None;
+                state.agents.roster_tree_selected = None;
                 state.agents.ops_scroll = 0;
                 state.mode = if state.agents.dock_tab == AgentOpsTab::Scratchpad {
                     Mode::Insert
@@ -1654,7 +1654,7 @@ fn handle_agent_ops_key(
                 ..
             } if state.mode != Mode::Insert => {
                 state.agents.dock_tab = state.agents.dock_tab.next();
-                state.agents.roster_effort_selected = None;
+                state.agents.roster_tree_selected = None;
                 state.agents.ops_scroll = 0;
                 state.mode = if state.agents.dock_tab == AgentOpsTab::Scratchpad {
                     Mode::Insert
@@ -1695,14 +1695,14 @@ fn handle_agent_ops_key(
             modifiers: KeyModifiers::NONE,
             ..
         } if state.agents.dock_tab == AgentOpsTab::Roster => {
-            changed = enter_roster_effort_cursor(state);
+            changed = enter_roster_tree_cursor(state);
         }
         KeyEvent {
             code: KeyCode::Char('h'),
             modifiers: KeyModifiers::NONE,
             ..
         } if state.agents.dock_tab == AgentOpsTab::Roster => {
-            changed = exit_roster_effort_cursor(state);
+            changed = exit_roster_tree_cursor(state);
         }
         KeyEvent {
             code: KeyCode::Char('c'),
@@ -1722,6 +1722,7 @@ fn handle_agent_ops_key(
                 .eq_ignore_ascii_case("lab")
             {
                 state.agents.swarm_default_template = "lab".into();
+                state.agents.roster_tree_selected = None;
                 changed = true;
             }
         }
@@ -1736,6 +1737,7 @@ fn handle_agent_ops_key(
                 .eq_ignore_ascii_case("parallel")
             {
                 state.agents.swarm_default_template = "parallel".into();
+                state.agents.roster_tree_selected = None;
                 changed = true;
             }
         }
@@ -1750,6 +1752,7 @@ fn handle_agent_ops_key(
                 .eq_ignore_ascii_case("bulk")
             {
                 state.agents.swarm_default_template = "bulk".into();
+                state.agents.roster_tree_selected = None;
                 changed = true;
             }
         }
@@ -1759,7 +1762,7 @@ fn handle_agent_ops_key(
             ..
         } => {
             state.agents.dock_tab = state.agents.dock_tab.prev();
-            state.agents.roster_effort_selected = None;
+            state.agents.roster_tree_selected = None;
             state.agents.ops_scroll = 0;
             if state.agents.dock_tab == AgentOpsTab::Scratchpad {
                 state.mode = Mode::Insert;
@@ -1770,7 +1773,7 @@ fn handle_agent_ops_key(
             code: KeyCode::Tab, ..
         } => {
             state.agents.dock_tab = state.agents.dock_tab.next();
-            state.agents.roster_effort_selected = None;
+            state.agents.roster_tree_selected = None;
             state.agents.ops_scroll = 0;
             if state.agents.dock_tab == AgentOpsTab::Scratchpad {
                 state.mode = Mode::Insert;
@@ -1782,7 +1785,7 @@ fn handle_agent_ops_key(
             ..
         } => {
             state.agents.dock_tab = state.agents.dock_tab.prev();
-            state.agents.roster_effort_selected = None;
+            state.agents.roster_tree_selected = None;
             state.agents.ops_scroll = 0;
             if state.agents.dock_tab == AgentOpsTab::Scratchpad {
                 state.mode = Mode::Insert;
@@ -1794,7 +1797,7 @@ fn handle_agent_ops_key(
             ..
         } => {
             state.agents.dock_tab = state.agents.dock_tab.next();
-            state.agents.roster_effort_selected = None;
+            state.agents.roster_tree_selected = None;
             state.agents.ops_scroll = 0;
             if state.agents.dock_tab == AgentOpsTab::Scratchpad {
                 state.mode = Mode::Insert;
@@ -1827,18 +1830,27 @@ fn handle_agent_ops_key(
             modifiers: KeyModifiers::NONE,
             ..
         } if state.agents.dock_tab == AgentOpsTab::Roster
-            && state.agents.roster_effort_selected.is_some() =>
+            && state.agents.roster_tree_selected.is_none() =>
         {
-            changed = select_roster_effort(state);
+            changed = toggle_roster_priority(state);
+        }
+        KeyEvent {
+            code: KeyCode::Char(' '),
+            modifiers: KeyModifiers::NONE,
+            ..
+        } if state.agents.dock_tab == AgentOpsTab::Roster
+            && state.agents.roster_tree_selected.is_some() =>
+        {
+            changed = select_roster_tree_leaf(state);
         }
         KeyEvent {
             code: KeyCode::Enter,
             modifiers: KeyModifiers::NONE,
             ..
         } if state.agents.dock_tab == AgentOpsTab::Roster
-            && state.agents.roster_effort_selected.is_some() =>
+            && state.agents.roster_tree_selected.is_some() =>
         {
-            changed = select_roster_effort(state);
+            changed = select_roster_tree_leaf(state);
         }
         KeyEvent {
             code: KeyCode::Enter,
@@ -1915,44 +1927,108 @@ fn move_agent_ops_selection(state: &mut AppState, delta: i32) -> bool {
             if state.agents.agents.is_empty() {
                 return false;
             }
-            if let Some(effort_idx) = state.agents.roster_effort_selected {
+            if let Some(sel) = state.agents.roster_tree_selected {
                 let Some(agent) = state.agents.agents.get(state.agents.roster_selected) else {
-                    state.agents.roster_effort_selected = None;
+                    state.agents.roster_tree_selected = None;
                     return true;
                 };
+                let show_roles = state
+                    .agents
+                    .swarm_default_template
+                    .eq_ignore_ascii_case("bulk")
+                    || state
+                        .agents
+                        .swarm_default_template
+                        .eq_ignore_ascii_case("parallel");
                 let efforts = state
                     .agents
                     .codex_supported_reasoning_efforts
                     .get(&agent.id)
                     .map(|v| v.as_slice())
                     .unwrap_or(&[]);
-                if efforts.is_empty() {
-                    state.agents.roster_effort_selected = None;
-                    return true;
-                }
-                let max = efforts.len().saturating_sub(1);
-                if delta.is_negative() {
-                    if effort_idx > 0 {
-                        let next = effort_idx.saturating_sub(1);
-                        if next != effort_idx {
-                            state.agents.roster_effort_selected = Some(next);
-                            return true;
-                        }
-                    }
-                    state.agents.roster_effort_selected = None;
-                    return true;
-                }
-                if delta > 0 {
-                    if effort_idx < max {
-                        let next = (effort_idx + 1).min(max);
-                        if next != effort_idx {
-                            state.agents.roster_effort_selected = Some(next);
-                            return true;
-                        }
-                    }
+                let size_len = efforts.len();
+                let has_roles = show_roles && agent.is_codex();
+                let roles_len = if has_roles { 7usize } else { 0usize };
 
-                    // Walk out of the effort list when we hit the end.
-                    state.agents.roster_effort_selected = None;
+                match sel.branch {
+                    nit_core::RosterTreeBranch::Size => {
+                        if size_len == 0 {
+                            state.agents.roster_tree_selected = None;
+                            return true;
+                        }
+                        let max = size_len.saturating_sub(1);
+                        if delta.is_negative() {
+                            if sel.leaf_idx > 0 {
+                                state.agents.roster_tree_selected =
+                                    Some(nit_core::RosterTreeSelection {
+                                        branch: nit_core::RosterTreeBranch::Size,
+                                        leaf_idx: sel.leaf_idx.saturating_sub(1),
+                                    });
+                                return true;
+                            }
+                            state.agents.roster_tree_selected = None;
+                            return true;
+                        }
+                        if delta > 0 {
+                            if sel.leaf_idx < max {
+                                state.agents.roster_tree_selected =
+                                    Some(nit_core::RosterTreeSelection {
+                                        branch: nit_core::RosterTreeBranch::Size,
+                                        leaf_idx: (sel.leaf_idx + 1).min(max),
+                                    });
+                                return true;
+                            }
+
+                            if roles_len > 0 {
+                                state.agents.roster_tree_selected =
+                                    Some(nit_core::RosterTreeSelection {
+                                        branch: nit_core::RosterTreeBranch::Role,
+                                        leaf_idx: 0,
+                                    });
+                                return true;
+                            }
+                        }
+                    }
+                    nit_core::RosterTreeBranch::Role => {
+                        if roles_len == 0 {
+                            state.agents.roster_tree_selected = None;
+                            return true;
+                        }
+                        let max = roles_len.saturating_sub(1);
+                        if delta.is_negative() {
+                            if sel.leaf_idx > 0 {
+                                state.agents.roster_tree_selected =
+                                    Some(nit_core::RosterTreeSelection {
+                                        branch: nit_core::RosterTreeBranch::Role,
+                                        leaf_idx: sel.leaf_idx.saturating_sub(1),
+                                    });
+                                return true;
+                            }
+                            if size_len > 0 {
+                                state.agents.roster_tree_selected =
+                                    Some(nit_core::RosterTreeSelection {
+                                        branch: nit_core::RosterTreeBranch::Size,
+                                        leaf_idx: size_len.saturating_sub(1),
+                                    });
+                                return true;
+                            }
+                            state.agents.roster_tree_selected = None;
+                            return true;
+                        }
+                        if delta > 0 && sel.leaf_idx < max {
+                            state.agents.roster_tree_selected =
+                                Some(nit_core::RosterTreeSelection {
+                                    branch: nit_core::RosterTreeBranch::Role,
+                                    leaf_idx: (sel.leaf_idx + 1).min(max),
+                                });
+                            return true;
+                        }
+                    }
+                }
+
+                // Walk out of the tree when we hit the end and press Down.
+                if delta > 0 {
+                    state.agents.roster_tree_selected = None;
                     let agent_max = state.agents.agents.len().saturating_sub(1) as i32;
                     let next_agent =
                         (state.agents.roster_selected as i32 + 1).clamp(0, agent_max) as usize;
@@ -1985,7 +2061,7 @@ fn move_agent_ops_selection(state: &mut AppState, delta: i32) -> bool {
                 return false;
             }
             state.agents.roster_selected = next;
-            state.agents.roster_effort_selected = None;
+            state.agents.roster_tree_selected = None;
             if let Some(agent) = state.agents.agents.get(next) {
                 state.agents.selected_agent = Some(agent.id.clone());
                 if let Some(mission_id) = agent.current_mission.as_deref() {
@@ -2045,87 +2121,184 @@ fn move_agent_ops_selection(state: &mut AppState, delta: i32) -> bool {
     }
 }
 
-fn enter_roster_effort_cursor(state: &mut AppState) -> bool {
+fn enter_roster_tree_cursor(state: &mut AppState) -> bool {
+    if state.agents.roster_tree_selected.is_some() {
+        return false;
+    }
     let Some(agent) = state.agents.agents.get(state.agents.roster_selected) else {
-        state.agents.roster_effort_selected = None;
+        state.agents.roster_tree_selected = None;
         return false;
     };
-    let Some(efforts) = state
+
+    let show_roles = state
+        .agents
+        .swarm_default_template
+        .eq_ignore_ascii_case("bulk")
+        || state
+            .agents
+            .swarm_default_template
+            .eq_ignore_ascii_case("parallel");
+
+    let efforts = state
         .agents
         .codex_supported_reasoning_efforts
         .get(&agent.id)
         .map(|v| v.as_slice())
-    else {
-        state.agents.roster_effort_selected = None;
-        return false;
-    };
-    if efforts.is_empty() {
-        state.agents.roster_effort_selected = None;
-        return false;
+        .unwrap_or(&[]);
+    if !efforts.is_empty() {
+        let current = state
+            .agents
+            .codex_selected_reasoning_effort
+            .get(&agent.id)
+            .or_else(|| state.agents.codex_default_reasoning_effort.get(&agent.id))
+            .map(|s| s.as_str());
+        let idx = current
+            .and_then(|effort| efforts.iter().position(|e| e == effort))
+            .unwrap_or(0)
+            .min(efforts.len().saturating_sub(1));
+        state.agents.roster_tree_selected = Some(nit_core::RosterTreeSelection {
+            branch: nit_core::RosterTreeBranch::Size,
+            leaf_idx: idx,
+        });
+        return true;
     }
 
-    let current = state
-        .agents
-        .codex_selected_reasoning_effort
-        .get(&agent.id)
-        .or_else(|| state.agents.codex_default_reasoning_effort.get(&agent.id))
-        .map(|s| s.as_str());
-    let idx = current
-        .and_then(|effort| efforts.iter().position(|e| e == effort))
-        .unwrap_or(0)
-        .min(efforts.len().saturating_sub(1));
-
-    if state.agents.roster_effort_selected == Some(idx) {
-        return false;
+    if show_roles && agent.is_codex() {
+        let roles = [
+            "all",
+            "propose",
+            "research",
+            "judge",
+            "integrate",
+            "review",
+            "test",
+        ];
+        let current = state
+            .agents
+            .swarm_role_by_agent_id
+            .get(&agent.id)
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty());
+        let idx = current
+            .and_then(|role| roles.iter().position(|r| r.eq_ignore_ascii_case(role)))
+            .unwrap_or(0)
+            .min(roles.len().saturating_sub(1));
+        state.agents.roster_tree_selected = Some(nit_core::RosterTreeSelection {
+            branch: nit_core::RosterTreeBranch::Role,
+            leaf_idx: idx,
+        });
+        return true;
     }
-    state.agents.roster_effort_selected = Some(idx);
-    true
+
+    state.agents.roster_tree_selected = None;
+    false
 }
 
-fn exit_roster_effort_cursor(state: &mut AppState) -> bool {
-    if state.agents.roster_effort_selected.is_some() {
-        state.agents.roster_effort_selected = None;
+fn exit_roster_tree_cursor(state: &mut AppState) -> bool {
+    if state.agents.roster_tree_selected.is_some() {
+        state.agents.roster_tree_selected = None;
         return true;
     }
     false
 }
 
-fn select_roster_effort(state: &mut AppState) -> bool {
-    let Some(effort_idx) = state.agents.roster_effort_selected else {
+fn select_roster_tree_leaf(state: &mut AppState) -> bool {
+    let Some(sel) = state.agents.roster_tree_selected else {
         return false;
     };
     let Some(agent) = state.agents.agents.get(state.agents.roster_selected) else {
         return false;
     };
-    let Some(efforts) = state
-        .agents
-        .codex_supported_reasoning_efforts
-        .get(&agent.id)
-    else {
-        return false;
-    };
-    let Some(effort) = efforts.get(effort_idx) else {
-        return false;
-    };
 
-    let effort = effort.trim();
-    if effort.is_empty() {
+    match sel.branch {
+        nit_core::RosterTreeBranch::Size => {
+            let Some(efforts) = state
+                .agents
+                .codex_supported_reasoning_efforts
+                .get(&agent.id)
+            else {
+                return false;
+            };
+            let Some(effort) = efforts.get(sel.leaf_idx) else {
+                return false;
+            };
+
+            let effort = effort.trim();
+            if effort.is_empty() {
+                return false;
+            }
+
+            let current = state
+                .agents
+                .codex_selected_reasoning_effort
+                .get(&agent.id)
+                .map(|s| s.as_str());
+            if current == Some(effort) {
+                return false;
+            }
+            state
+                .agents
+                .codex_selected_reasoning_effort
+                .insert(agent.id.clone(), effort.to_string());
+            true
+        }
+        nit_core::RosterTreeBranch::Role => {
+            let roles = [
+                "all",
+                "propose",
+                "research",
+                "judge",
+                "integrate",
+                "review",
+                "test",
+            ];
+            let Some(role) = roles.get(sel.leaf_idx).copied() else {
+                return false;
+            };
+
+            if role.eq_ignore_ascii_case("all") {
+                if state
+                    .agents
+                    .swarm_role_by_agent_id
+                    .remove(&agent.id)
+                    .is_some()
+                {
+                    return true;
+                }
+                return false;
+            }
+
+            let current = state
+                .agents
+                .swarm_role_by_agent_id
+                .get(&agent.id)
+                .map(|s| s.as_str());
+            if current.is_some_and(|cur| cur.eq_ignore_ascii_case(role)) {
+                return false;
+            }
+            state
+                .agents
+                .swarm_role_by_agent_id
+                .insert(agent.id.clone(), role.to_string());
+            true
+        }
+    }
+}
+
+fn toggle_roster_priority(state: &mut AppState) -> bool {
+    let Some(agent) = state.agents.agents.get(state.agents.roster_selected) else {
+        return false;
+    };
+    if !agent.is_codex() {
         return false;
     }
-
-    let current = state
-        .agents
-        .codex_selected_reasoning_effort
-        .get(&agent.id)
-        .map(|s| s.as_str());
-    if current == Some(effort) {
-        return false;
+    if state.agents.swarm_priority_agent_ids.remove(&agent.id) {
+        return true;
     }
     state
         .agents
-        .codex_selected_reasoning_effort
-        .insert(agent.id.clone(), effort.to_string());
-    true
+        .swarm_priority_agent_ids
+        .insert(agent.id.clone())
 }
 
 fn reset_roster_context(state: &mut AppState) -> bool {
@@ -2140,7 +2313,7 @@ fn reset_roster_context(state: &mut AppState) -> bool {
         .selected_context_mission()
         .map(ToString::to_string);
 
-    state.agents.roster_effort_selected = None;
+    state.agents.roster_tree_selected = None;
     // Clear any in-flight liveness tracking for this agent context.
     state.agents.active_turns.remove(&agent_id);
     if is_codex {
@@ -2398,7 +2571,8 @@ fn handle_agent_console_key(
                     });
 
                 if let Some(planner) = planner {
-                    let agents = select_swarm_agents(state, &planner, cmd.size);
+                    let agents =
+                        select_swarm_agents(state, &planner, cmd.size, cmd.template.as_deref());
                     if let Some((_mission_id, dispatches)) = swarm.start(
                         state,
                         planner.clone(),
@@ -6386,7 +6560,7 @@ fn handle_mouse_down_with_swarm(
         if let Some(tab) = agent_ops_view::tab_at_column(rel_col) {
             if state.agents.dock_tab != tab {
                 state.agents.dock_tab = tab;
-                state.agents.roster_effort_selected = None;
+                state.agents.roster_tree_selected = None;
                 state.agents.ops_scroll = 0;
             }
             state.mode = if state.agents.dock_tab == AgentOpsTab::Scratchpad {
@@ -6551,6 +6725,7 @@ fn apply_agent_ops_click_selection(
     {
         if let Some(template) = agent_ops_view::roster_swarm_template_hit(col) {
             state.agents.swarm_default_template = template.to_string();
+            state.agents.roster_tree_selected = None;
         }
         return;
     }
@@ -6564,7 +6739,6 @@ fn apply_agent_ops_click_selection(
                 return;
             };
             state.agents.roster_selected = meta.agent_idx;
-            state.agents.roster_effort_selected = meta.effort_idx;
             if let Some(agent) = state.agents.agents.get(meta.agent_idx) {
                 state.agents.selected_agent = Some(agent.id.clone());
                 if let Some(mission_id) = agent.current_mission.as_deref() {
@@ -6579,18 +6753,67 @@ fn apply_agent_ops_click_selection(
                     }
                 }
 
-                if let Some(effort_idx) = meta.effort_idx {
-                    if let Some(efforts) = state
-                        .agents
-                        .codex_supported_reasoning_efforts
-                        .get(&agent.id)
-                    {
-                        if let Some(effort) = efforts.get(effort_idx).cloned() {
-                            state
-                                .agents
-                                .codex_selected_reasoning_effort
-                                .insert(agent.id.clone(), effort);
+                match meta.node {
+                    agent_ops_view::RosterBodyNode::Agent => {
+                        state.agents.roster_tree_selected = None;
+                        // Toggle priority when clicking the checkbox region.
+                        if agent.is_codex() && (1..5).contains(&col) {
+                            let _ = toggle_roster_priority(state);
                         }
+                    }
+                    agent_ops_view::RosterBodyNode::Branch { branch } => {
+                        let leaf_idx = match branch {
+                            nit_core::RosterTreeBranch::Size => {
+                                let efforts = state
+                                    .agents
+                                    .codex_supported_reasoning_efforts
+                                    .get(&agent.id)
+                                    .map(|v| v.as_slice())
+                                    .unwrap_or(&[]);
+                                let current = state
+                                    .agents
+                                    .codex_selected_reasoning_effort
+                                    .get(&agent.id)
+                                    .or_else(|| {
+                                        state.agents.codex_default_reasoning_effort.get(&agent.id)
+                                    })
+                                    .map(|s| s.as_str());
+                                current
+                                    .and_then(|effort| efforts.iter().position(|e| e == effort))
+                                    .unwrap_or(0)
+                                    .min(efforts.len().saturating_sub(1))
+                            }
+                            nit_core::RosterTreeBranch::Role => {
+                                let roles = [
+                                    "all",
+                                    "propose",
+                                    "research",
+                                    "judge",
+                                    "integrate",
+                                    "review",
+                                    "test",
+                                ];
+                                let current = state
+                                    .agents
+                                    .swarm_role_by_agent_id
+                                    .get(&agent.id)
+                                    .map(|s| s.trim())
+                                    .filter(|s| !s.is_empty());
+                                current
+                                    .and_then(|role| {
+                                        roles.iter().position(|r| r.eq_ignore_ascii_case(role))
+                                    })
+                                    .unwrap_or(0)
+                                    .min(roles.len().saturating_sub(1))
+                            }
+                        };
+                        state.agents.roster_tree_selected =
+                            Some(nit_core::RosterTreeSelection { branch, leaf_idx });
+                    }
+                    agent_ops_view::RosterBodyNode::Leaf { branch, leaf_idx } => {
+                        state.agents.roster_tree_selected =
+                            Some(nit_core::RosterTreeSelection { branch, leaf_idx });
+                        let _ = select_roster_tree_leaf(state);
                     }
                 }
             }

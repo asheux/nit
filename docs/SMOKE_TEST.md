@@ -109,6 +109,17 @@ It's meant for quick confidence after changes to UI, commands, or engine wiring.
     - Send `@swarm 5 template=bulk <prompt>`.
     - Expect: multiple “propose” tasks run first (parallel), then a “judge” task runs, then an integrator task (`writes=true`) runs before VERIFY/SYNTH.
     - Expect: Agent Ops auto-switches to the DAG tab at swarm start for bulk.
+  - Bulk roster roles sanity:
+    - In Agent Ops → Roster, select swarm template `bulk` (press `3`).
+    - Expand a model row; expect a `Size` branch and a `Role` branch.
+    - Pick `Role → integrate` for a non-planner model.
+    - Launch a bulk swarm (`@swarm 5 template=bulk <prompt>` or implicit bulk).
+    - Expect: swarm metadata shows the chosen model as the integrator and the `integrate` task is assigned to it.
+  - Priority roster hint sanity:
+    - In Agent Ops → Roster, mark one Codex model as priority (`[x]`) via Space (on the model row) or mouse click.
+    - Launch a `parallel` or `bulk` swarm with a limited size (`@swarm 4 template=parallel <prompt>`).
+    - Expect: the created swarm mission includes the priority model among the selected agents (especially if more models exist than the swarm size).
+    - Expect: the planner prompt includes a “Priority agents” section listing the selected model.
   - Implicit bulk launch sanity (no `@swarm`):
     - In Agent Ops → Roster, select swarm template `bulk` (press `3`).
     - In Agent Chat, send a plain prompt (e.g. `do a quick repo health check and suggest next steps`).

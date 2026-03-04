@@ -533,6 +533,7 @@ struct SwarmRun {
     template: SwarmTemplate,
     planner_agent_id: String,
     integrator_agent_id: Option<String>,
+    integrator_locked: bool,
     verifier_agent_id: Option<String>,
     gate_bundle: Option<GateBundle>,
     gate_selection: String,
@@ -697,7 +698,25 @@ impl SwarmRuntime {
             at,
         });
 
-        let integrator_agent_id =
+        let mut role_hints: Vec<(String, String)> = Vec::new();
+        if matches!(template_kind, SwarmTemplate::Parallel | SwarmTemplate::Bulk) {
+            for id in agents
+                .iter()
+                .filter(|id| id.as_str() != planner_agent_id.as_str())
+            {
+                let role = state
+                    .agents
+                    .swarm_role_by_agent_id
+                    .get(id)
+                    .map(|s| s.trim().to_ascii_lowercase())
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or_else(|| "all".into());
+                role_hints.push((id.clone(), role));
+            }
+        }
+
+        let mut integrator_locked = false;
+        let mut integrator_agent_id =
             if matches!(template_kind, SwarmTemplate::Lab | SwarmTemplate::Bulk) {
                 agents
                     .iter()
@@ -706,12 +725,45 @@ impl SwarmRuntime {
             } else {
                 None
             };
+        if matches!(template_kind, SwarmTemplate::Bulk) {
+            if let Some(integrator) = agents
+                .iter()
+                .find(|id| {
+                    id.as_str() != planner_agent_id.as_str()
+                        && state
+                            .agents
+                            .swarm_role_by_agent_id
+                            .get(*id)
+                            .map(|role| role.trim())
+                            .filter(|role| !role.is_empty())
+                            .is_some_and(|role| role.eq_ignore_ascii_case("integrate"))
+                })
+                .cloned()
+            {
+                integrator_agent_id = Some(integrator);
+                integrator_locked = true;
+            }
+        }
+        let mut priority_agent_ids: Vec<String> = Vec::new();
+        if matches!(template_kind, SwarmTemplate::Parallel | SwarmTemplate::Bulk) {
+            for id in agents
+                .iter()
+                .filter(|id| id.as_str() != planner_agent_id.as_str())
+            {
+                if state.agents.swarm_priority_agent_ids.contains(id) {
+                    priority_agent_ids.push(id.clone());
+                }
+            }
+        }
+
         let plan_prompt = build_planner_prompt(
             &root_prompt,
             template_kind,
             &planner_agent_id,
             &agents,
             integrator_agent_id.as_deref(),
+            &role_hints,
+            &priority_agent_ids,
         );
 
         let gate_selection = GateBundle::detect(state);
@@ -759,6 +811,7 @@ impl SwarmRuntime {
                 template: template_kind,
                 planner_agent_id: planner_agent_id.clone(),
                 integrator_agent_id: integrator_agent_id.clone(),
+                integrator_locked,
                 verifier_agent_id,
                 gate_bundle,
                 gate_selection: gate_selection.source,
@@ -822,6 +875,7 @@ impl SwarmRuntime {
                             &run.root_prompt,
                             &available,
                             run.integrator_agent_id.as_deref(),
+                            run.integrator_locked,
                         );
                         for warning in parsed.warnings.iter() {
                             push_system_message_to_mission(
@@ -1100,6 +1154,7 @@ impl SwarmRuntime {
                             &run.root_prompt,
                             &available,
                             Some(message),
+                            run.integrator_agent_id.as_deref(),
                         );
                         let prev_integrator = run.integrator_agent_id.clone();
                         let prev_verifier = run.verifier_agent_id.clone();
@@ -1534,13 +1589,26 @@ fn parse_plan_from_planner(
     root_prompt: &str,
     available_agents: &[String],
     integrator_hint: Option<&str>,
+    integrator_locked: bool,
 ) -> ParsedSwarmPlan {
     let Some(json) = extract_json_code_block(planner_message) else {
-        return fallback_tasks(template, root_prompt, available_agents, None);
+        return fallback_tasks(
+            template,
+            root_prompt,
+            available_agents,
+            None,
+            integrator_hint,
+        );
     };
 
     if let Ok(plan) = serde_json::from_str::<SwarmPlanV2>(&json) {
-        if let Some(mut parsed) = parse_v2_plan(plan, template, available_agents, integrator_hint) {
+        if let Some(mut parsed) = parse_v2_plan(
+            plan,
+            template,
+            available_agents,
+            integrator_hint,
+            integrator_locked,
+        ) {
             if matches!(template, SwarmTemplate::Bulk) {
                 let integrator = parsed
                     .integrator_agent_id
@@ -1551,8 +1619,13 @@ fn parse_plan_from_planner(
                 parsed.warnings.append(&mut warnings);
                 if let Err(issue) = validate_bulk_plan(&parsed.tasks, available_agents, integrator)
                 {
-                    let mut fallback =
-                        fallback_tasks(template, root_prompt, available_agents, Some(&issue));
+                    let mut fallback = fallback_tasks(
+                        template,
+                        root_prompt,
+                        available_agents,
+                        Some(&issue),
+                        integrator_hint,
+                    );
                     fallback.warnings.push(format!(
                         "Planner did not produce a usable bulk plan; using built-in bulk workflow. Reason: {issue}"
                     ));
@@ -1569,6 +1642,7 @@ fn parse_plan_from_planner(
             root_prompt,
             available_agents,
             Some("Planner did not return a valid v2 bulk plan."),
+            integrator_hint,
         );
         fallback.warnings.push(
             "Bulk template requires the v2 JSON schema (with deps); using built-in bulk workflow."
@@ -1578,7 +1652,13 @@ fn parse_plan_from_planner(
     }
 
     let Ok(plan) = serde_json::from_str::<SwarmPlanV1>(&json) else {
-        return fallback_tasks(template, root_prompt, available_agents, None);
+        return fallback_tasks(
+            template,
+            root_prompt,
+            available_agents,
+            None,
+            integrator_hint,
+        );
     };
     let mut tasks = Vec::new();
     let mut idx = 0usize;
@@ -1620,7 +1700,13 @@ fn parse_plan_from_planner(
     }
 
     if tasks.is_empty() {
-        return fallback_tasks(template, root_prompt, available_agents, None);
+        return fallback_tasks(
+            template,
+            root_prompt,
+            available_agents,
+            None,
+            integrator_hint,
+        );
     }
     tasks.truncate(available_agents.len());
 
@@ -1637,6 +1723,7 @@ fn parse_v2_plan(
     template: SwarmTemplate,
     available_agents: &[String],
     integrator_hint: Option<&str>,
+    integrator_locked: bool,
 ) -> Option<ParsedSwarmPlan> {
     if plan.tasks.is_empty() {
         return None;
@@ -1647,18 +1734,35 @@ fn parse_v2_plan(
         }
     }
 
-    let integrator_plan = plan.integrator_agent_id.as_deref().map(str::trim);
-    let integrator = integrator_plan
-        .filter(|id| !id.is_empty())
-        .or(integrator_hint)
-        .and_then(|id| {
-            available_agents
-                .iter()
-                .find(|candidate| candidate.as_str() == id)
-                .map(|id| id.to_string())
-        });
+    let integrator_plan = plan
+        .integrator_agent_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty());
+    let integrator_hint = integrator_hint.map(str::trim).filter(|id| !id.is_empty());
+    let integrator_locked = integrator_locked && integrator_hint.is_some();
 
     let mut warnings = Vec::new();
+    if integrator_locked {
+        if let (Some(plan_id), Some(hint_id)) = (integrator_plan, integrator_hint) {
+            if !plan_id.eq_ignore_ascii_case(hint_id) {
+                warnings.push(format!(
+                    "Planner returned integrator_agent_id '{plan_id}' but integrator is locked to '{hint_id}'; ignoring planner override."
+                ));
+            }
+        }
+    }
+    let integrator_candidate = if integrator_locked {
+        integrator_hint
+    } else {
+        integrator_plan.or(integrator_hint)
+    };
+    let integrator = integrator_candidate.and_then(|id| {
+        available_agents
+            .iter()
+            .find(|candidate| candidate.as_str() == id)
+            .map(|id| id.to_string())
+    });
     if let Some(plan_template) = plan
         .template
         .as_deref()
@@ -1772,18 +1876,30 @@ fn fallback_tasks(
     _root_prompt: &str,
     available_agents: &[String],
     plan_error: Option<&str>,
+    integrator_hint: Option<&str>,
 ) -> ParsedSwarmPlan {
     if matches!(template, SwarmTemplate::Bulk) {
-        let integrator = available_agents.first().cloned();
+        let integrator = integrator_hint
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+            .and_then(|id| {
+                available_agents
+                    .iter()
+                    .find(|candidate| candidate.as_str() == id)
+                    .cloned()
+            })
+            .or_else(|| available_agents.first().cloned());
         let judge_agent = available_agents
-            .get(1)
-            .or_else(|| available_agents.first())
-            .cloned();
+            .iter()
+            .find(|id| integrator.as_ref() != Some(*id))
+            .cloned()
+            .or_else(|| integrator.clone());
         let review_agent = available_agents
-            .get(2)
-            .or_else(|| available_agents.get(1))
-            .or_else(|| available_agents.first())
-            .cloned();
+            .iter()
+            .find(|id| integrator.as_ref() != Some(*id) && judge_agent.as_ref() != Some(*id))
+            .cloned()
+            .or_else(|| judge_agent.clone())
+            .or_else(|| integrator.clone());
 
         let mut proposer_ids = available_agents
             .iter()
@@ -1916,21 +2032,38 @@ fn fallback_tasks(
         };
     }
     if matches!(template, SwarmTemplate::Lab) {
-        let integrator = available_agents.first().cloned();
+        let integrator = integrator_hint
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+            .and_then(|id| {
+                available_agents
+                    .iter()
+                    .find(|candidate| candidate.as_str() == id)
+                    .cloned()
+            })
+            .or_else(|| available_agents.first().cloned());
         let recon_agent = available_agents
-            .get(1)
-            .or_else(|| available_agents.first())
-            .cloned();
+            .iter()
+            .find(|id| integrator.as_ref() != Some(*id))
+            .cloned()
+            .or_else(|| integrator.clone());
         let design_agent = available_agents
-            .get(2)
-            .or_else(|| available_agents.get(1))
-            .or_else(|| available_agents.first())
-            .cloned();
+            .iter()
+            .find(|id| integrator.as_ref() != Some(*id) && recon_agent.as_ref() != Some(*id))
+            .cloned()
+            .or_else(|| recon_agent.clone())
+            .or_else(|| integrator.clone());
         let review_agent = available_agents
-            .get(3)
-            .or_else(|| available_agents.get(1))
-            .or_else(|| available_agents.first())
-            .cloned();
+            .iter()
+            .find(|id| {
+                integrator.as_ref() != Some(*id)
+                    && recon_agent.as_ref() != Some(*id)
+                    && design_agent.as_ref() != Some(*id)
+            })
+            .cloned()
+            .or_else(|| design_agent.clone())
+            .or_else(|| recon_agent.clone())
+            .or_else(|| integrator.clone());
 
         let mut tasks = Vec::new();
         if let Some(agent_id) = recon_agent {
@@ -2909,6 +3042,8 @@ fn build_planner_prompt(
     planner_agent_id: &str,
     agent_ids: &[String],
     integrator_agent_id: Option<&str>,
+    role_hints: &[(String, String)],
+    priority_agent_ids: &[String],
 ) -> String {
     let available = agent_ids
         .iter()
@@ -2934,6 +3069,26 @@ fn build_planner_prompt(
     out.push_str("- Only assign tasks to these agent ids:\n");
     for id in available.iter() {
         out.push_str(&format!("  - {id}\n"));
+    }
+    if matches!(template, SwarmTemplate::Parallel | SwarmTemplate::Bulk) && !role_hints.is_empty() {
+        out.push_str("- Agent role hints (from roster; 'all' means no constraint):\n");
+        for (id, role) in role_hints.iter() {
+            out.push_str(&format!("  - {id}: {role}\n"));
+        }
+        out.push_str(
+            "- Prefer assigning tasks whose `role` matches each agent's hint (unless role=all).\n",
+        );
+    }
+    if matches!(template, SwarmTemplate::Parallel | SwarmTemplate::Bulk)
+        && !priority_agent_ids.is_empty()
+    {
+        out.push_str("- Priority agents (from roster):\n");
+        for id in priority_agent_ids.iter() {
+            out.push_str(&format!("  - {id}\n"));
+        }
+        out.push_str(
+            "- When multiple assignments are viable, prefer priority agents for the most critical/high-impact work.\n",
+        );
     }
     match template {
         SwarmTemplate::Parallel => {
@@ -3315,8 +3470,14 @@ fn update_mission_status(state: &mut AppState, run: &SwarmRun, done_override: Op
     mission.updated_at = at;
 }
 
-pub fn select_swarm_agents(state: &AppState, planner: &str, size: SwarmSize) -> Vec<String> {
-    let mut codex = state
+pub fn select_swarm_agents(
+    state: &AppState,
+    planner: &str,
+    size: SwarmSize,
+    template: Option<&str>,
+) -> Vec<String> {
+    let template_kind = parse_swarm_template(template);
+    let codex = state
         .agents
         .agents
         .iter()
@@ -3326,7 +3487,10 @@ pub fn select_swarm_agents(state: &AppState, planner: &str, size: SwarmSize) -> 
     if codex.is_empty() {
         return Vec::new();
     }
-    codex.retain(|id| id != planner);
+    let codex_others = codex
+        .into_iter()
+        .filter(|id| id.as_str() != planner)
+        .collect::<Vec<_>>();
     let mut agents = vec![planner.to_string()];
     let target = match size {
         SwarmSize::Default => DEFAULT_SWARM_SIZE,
@@ -3335,7 +3499,35 @@ pub fn select_swarm_agents(state: &AppState, planner: &str, size: SwarmSize) -> 
     }
     .clamp(1, MAX_SWARM_SIZE);
     let take = target.saturating_sub(1);
-    agents.extend(codex.into_iter().take(take));
+
+    let selected = if matches!(template_kind, SwarmTemplate::Parallel | SwarmTemplate::Bulk)
+        && take > 0
+        && !state.agents.swarm_priority_agent_ids.is_empty()
+    {
+        let mut priority = Vec::new();
+        let mut non_priority = Vec::new();
+        for id in codex_others.iter() {
+            if state.agents.swarm_priority_agent_ids.contains(id) {
+                priority.push(id.clone());
+            } else {
+                non_priority.push(id.clone());
+            }
+        }
+        let mut selected = Vec::new();
+        selected.extend(priority.into_iter().take(take));
+        let remaining = take.saturating_sub(selected.len());
+        selected.extend(non_priority.into_iter().take(remaining));
+        let selected_set = selected.into_iter().collect::<HashSet<_>>();
+        codex_others
+            .into_iter()
+            .filter(|id| selected_set.contains(id))
+            .take(take)
+            .collect::<Vec<_>>()
+    } else {
+        codex_others.into_iter().take(take).collect::<Vec<_>>()
+    };
+
+    agents.extend(selected);
     agents
 }
 
@@ -3444,6 +3636,7 @@ Plan:
             "root",
             &available,
             Some("a1"),
+            false,
         );
         assert_eq!(parsed.integrator_agent_id.as_deref(), Some("a1"));
         assert!(parsed
@@ -3478,6 +3671,7 @@ Plan:
             "root",
             &available,
             Some("a1"),
+            false,
         );
 
         assert!(parsed
@@ -3515,6 +3709,7 @@ Plan:
             "root",
             &available,
             Some("a1"),
+            false,
         );
 
         assert_eq!(parsed.tasks.len(), 3);
@@ -3542,6 +3737,7 @@ Plan:
             template: SwarmTemplate::Lab,
             planner_agent_id: "planner".into(),
             integrator_agent_id: Some("a1".into()),
+            integrator_locked: false,
             verifier_agent_id: None,
             gate_bundle: None,
             gate_selection: "auto:none".into(),
@@ -3655,6 +3851,7 @@ Plan:
             template: SwarmTemplate::Lab,
             planner_agent_id: "planner".into(),
             integrator_agent_id: Some("a1".into()),
+            integrator_locked: false,
             verifier_agent_id: None,
             gate_bundle: None,
             gate_selection: "auto:none".into(),
@@ -3740,6 +3937,7 @@ Plan:
             template: SwarmTemplate::Lab,
             planner_agent_id: "planner".into(),
             integrator_agent_id: Some("a1".into()),
+            integrator_locked: false,
             verifier_agent_id: None,
             gate_bundle: None,
             gate_selection: "auto:none".into(),
@@ -3939,6 +4137,7 @@ notes
             template: SwarmTemplate::Lab,
             planner_agent_id: "planner".into(),
             integrator_agent_id: Some("a1".into()),
+            integrator_locked: false,
             verifier_agent_id: Some("a2".into()),
             gate_bundle: Some(GateBundle::Rust),
             gate_selection: "auto:rust-ci(Cargo.toml)".into(),

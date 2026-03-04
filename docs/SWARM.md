@@ -131,10 +131,21 @@ proposer “lenses” (minimal diff, correctness, UX, perf, testing, docs, secur
 
 ## Role Assignment (especially for bulk)
 
-There is no separate “roles” CLI flag today; roles are assigned via:
+Roles exist at two layers:
 
 1) **Planner output**: each task has optional `role` (`propose|judge|integrate|research|review|test`).
-2) **Operator guidance** in the root prompt (recommended).
+2) **Roster role hints** (recommended for `parallel`/`bulk`): in **Agent Ops → Roster**, expand a
+   model and use the `Role` branch to pick a preferred role (or `All`).
+
+Notes:
+
+- The roster role hint is passed to the planner as a constraint/preference. It does not by itself
+  grant write access; `writes=true` still controls workspace edits.
+- In `bulk`, if you set an agent’s roster role to `integrate`, nit uses it as the single-writer
+  integrator and locks it (planner overrides are ignored).
+- You can also mark agents as **priority** in **Agent Ops → Roster** (`[x]` on the model row). For
+  `parallel`/`bulk`, priority agents are passed to the planner as a hint and are preferred when
+  selecting a limited swarm size (so they’re more likely to be included).
 
 ### Choosing the planner
 
@@ -152,6 +163,9 @@ For `lab` and `bulk`, nit prefers a single-writer integrator. You can guide the 
 
 - “Make `<agent-id>` the integrator (only writer).”
 - “Make `<agent-id>` the judge.”
+
+For `bulk`, you can also pick the integrator explicitly via **Agent Ops → Roster → Role → integrate**
+(this locks the integrator).
 
 ### Best-practice bulk prompt skeleton
 

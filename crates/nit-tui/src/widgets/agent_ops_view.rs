@@ -1,6 +1,6 @@
 use nit_core::{
     AgentAlertSeverity, AgentLaneKind, AgentOpsTab, AgentStatus, AppState, McpConnectionState,
-    PaneId, UiSelectionPane,
+    PaneId, RosterTreeBranch, RosterTreeSelection, UiSelectionPane,
 };
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
@@ -18,9 +18,21 @@ pub fn mission_index_for_body_line(state: &AppState, body_line: usize) -> Option
     mission_body_meta(state, body_line).map(|meta| meta.mission_idx)
 }
 
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum RosterBodyNode {
+    Agent,
+    Branch {
+        branch: RosterTreeBranch,
+    },
+    Leaf {
+        branch: RosterTreeBranch,
+        leaf_idx: usize,
+    },
+}
+
 pub struct RosterBodyMeta {
     pub agent_idx: usize,
-    pub effort_idx: Option<usize>,
+    pub node: RosterBodyNode,
 }
 
 pub fn roster_meta_for_body_line(state: &AppState, body_line: usize) -> Option<RosterBodyMeta> {
@@ -29,9 +41,9 @@ pub fn roster_meta_for_body_line(state: &AppState, body_line: usize) -> Option<R
 
 pub fn roster_body_offset(state: &AppState) -> usize {
     let _ = state;
-    // Backends header (4 lines) + blank spacer (1) + swarm template buttons (1) + table
-    // header/separator (2)
-    8
+    // Backends header (4 lines) + blank spacer (1) + swarm template buttons (1)
+    // + blank spacer (1) + table header/separator (2)
+    9
 }
 
 pub const ROSTER_SWARM_TEMPLATE_LINE_IDX: usize = 5;
@@ -66,29 +78,64 @@ pub fn alert_index_for_body_line(
 }
 
 fn roster_body_meta(state: &AppState, body_line: usize) -> Option<RosterBodyMeta> {
+    let show_roles = matches!(
+        state
+            .agents
+            .swarm_default_template
+            .to_ascii_lowercase()
+            .as_str(),
+        "bulk" | "parallel"
+    );
     let mut cursor = 0usize;
     for (agent_idx, agent) in state.agents.agents.iter().enumerate() {
         if body_line == cursor {
             return Some(RosterBodyMeta {
                 agent_idx,
-                effort_idx: None,
+                node: RosterBodyNode::Agent,
             });
         }
         cursor = cursor.saturating_add(1);
         if agent_idx == state.agents.roster_selected {
-            let effort_len = state
+            let efforts = state
                 .agents
                 .codex_supported_reasoning_efforts
                 .get(&agent.id)
-                .map(|v| v.len())
-                .unwrap_or(0);
-            if body_line < cursor.saturating_add(effort_len) {
-                return Some(RosterBodyMeta {
-                    agent_idx,
-                    effort_idx: Some(body_line.saturating_sub(cursor)),
-                });
+                .map(|v| v.as_slice())
+                .unwrap_or(&[]);
+            let has_size = !efforts.is_empty();
+            let has_roles = show_roles && agent.is_codex();
+
+            for branch in [RosterTreeBranch::Size, RosterTreeBranch::Role] {
+                if matches!(branch, RosterTreeBranch::Size) && !has_size {
+                    continue;
+                }
+                if matches!(branch, RosterTreeBranch::Role) && !has_roles {
+                    continue;
+                }
+
+                if body_line == cursor {
+                    return Some(RosterBodyMeta {
+                        agent_idx,
+                        node: RosterBodyNode::Branch { branch },
+                    });
+                }
+                cursor = cursor.saturating_add(1);
+
+                let leaf_len = match branch {
+                    RosterTreeBranch::Size => efforts.len(),
+                    RosterTreeBranch::Role => 7, // All + propose/research/judge/integrate/review/test
+                };
+                if body_line < cursor.saturating_add(leaf_len) {
+                    return Some(RosterBodyMeta {
+                        agent_idx,
+                        node: RosterBodyNode::Leaf {
+                            branch,
+                            leaf_idx: body_line.saturating_sub(cursor),
+                        },
+                    });
+                }
+                cursor = cursor.saturating_add(leaf_len);
             }
-            cursor = cursor.saturating_add(effort_len);
         }
     }
     None
@@ -440,9 +487,10 @@ fn roster_lines(state: &AppState, width: usize) -> Vec<String> {
         ),
         String::new(),
         ROSTER_SWARM_TEMPLATE_LINE.into(),
+        String::new(),
         format!(
             " {} {} {} {} {}",
-            fit_left("ROLE", widths[0]),
+            fit_left("PRI+ROLE", widths[0]),
             fit_left("STATUS", widths[1]),
             fit_right("HB", widths[2]),
             fit_right("Q", widths[3]),
@@ -451,28 +499,45 @@ fn roster_lines(state: &AppState, width: usize) -> Vec<String> {
         "─".repeat(width.min(240)),
     ];
 
+    let show_roles = matches!(
+        state
+            .agents
+            .swarm_default_template
+            .to_ascii_lowercase()
+            .as_str(),
+        "bulk" | "parallel"
+    );
     if state.agents.agents.is_empty() {
         out.push(" No agents available.".into());
         return out;
     }
     for (idx, agent) in state.agents.agents.iter().enumerate() {
-        let marker = if idx == state.agents.roster_selected
-            && state.agents.roster_effort_selected.is_none()
-        {
-            ">"
+        let priority_prefix = if agent.is_codex() {
+            if state.agents.swarm_priority_agent_ids.contains(&agent.id) {
+                "[x] "
+            } else {
+                "[ ] "
+            }
         } else {
-            " "
+            "    "
         };
+        let marker =
+            if idx == state.agents.roster_selected && state.agents.roster_tree_selected.is_none() {
+                ">"
+            } else {
+                " "
+            };
         out.push(format!(
             "{marker}{} {} {} {} {}",
-            fit_left(&agent.role, widths[0]),
+            fit_left(&format!("{priority_prefix}{}", agent.role), widths[0]),
             fit_left(agent.status.label(), widths[1]),
             fit_right(&format!("{}s", agent.heartbeat_age_secs), widths[2]),
             fit_right(&agent.queue_len.to_string(), widths[3]),
             fit_left(agent.current_mission.as_deref().unwrap_or("--"), widths[4]),
         ));
 
-        // Expand the selected model into a "size" tree (Codex reasoning effort levels).
+        // Expand the selected model into a small tree: Size (Codex reasoning effort levels) and
+        // Role (swarm planning hints).
         if idx == state.agents.roster_selected {
             let efforts = state
                 .agents
@@ -480,40 +545,121 @@ fn roster_lines(state: &AppState, width: usize) -> Vec<String> {
                 .get(&agent.id)
                 .map(|v| v.as_slice())
                 .unwrap_or(&[]);
-            if efforts.is_empty() {
+            let has_size = !efforts.is_empty();
+            let has_roles = show_roles && agent.is_codex();
+            if !has_size && !has_roles {
                 continue;
             }
-            let chosen = state
-                .agents
-                .codex_selected_reasoning_effort
-                .get(&agent.id)
-                .or_else(|| state.agents.codex_default_reasoning_effort.get(&agent.id))
-                .map(|s| s.as_str());
-            for (effort_idx, effort) in efforts.iter().enumerate() {
-                let marker = if state.agents.roster_effort_selected == Some(effort_idx) {
-                    ">"
-                } else {
-                    " "
-                };
-                let branch = if effort_idx + 1 == efforts.len() {
-                    "└"
-                } else {
-                    "├"
-                };
-                let checked = if chosen == Some(effort.as_str()) {
-                    "*"
-                } else {
-                    " "
-                };
-                let label = format!("  {branch}─ [{checked}] {effort}");
+
+            if has_size {
+                let branch = if has_roles { "├" } else { "└" };
+                let label = format!("    {branch}─ Size");
                 out.push(format!(
-                    "{marker}{} {} {} {} {}",
+                    " {} {} {} {} {}",
                     fit_left(&label, widths[0]),
                     fit_left("", widths[1]),
                     fit_right("", widths[2]),
                     fit_right("", widths[3]),
                     fit_left("", widths[4]),
                 ));
+
+                let chosen = state
+                    .agents
+                    .codex_selected_reasoning_effort
+                    .get(&agent.id)
+                    .or_else(|| state.agents.codex_default_reasoning_effort.get(&agent.id))
+                    .map(|s| s.as_str());
+                let continuation = if has_roles { "│" } else { " " };
+                for (effort_idx, effort) in efforts.iter().enumerate() {
+                    let marker = if state.agents.roster_tree_selected
+                        == Some(RosterTreeSelection {
+                            branch: RosterTreeBranch::Size,
+                            leaf_idx: effort_idx,
+                        }) {
+                        ">"
+                    } else {
+                        " "
+                    };
+                    let leaf_branch = if effort_idx + 1 == efforts.len() {
+                        "└"
+                    } else {
+                        "├"
+                    };
+                    let checked = if chosen == Some(effort.as_str()) {
+                        "*"
+                    } else {
+                        " "
+                    };
+                    let label = format!("    {continuation}  {leaf_branch}─ [{checked}] {effort}");
+                    out.push(format!(
+                        "{marker}{} {} {} {} {}",
+                        fit_left(&label, widths[0]),
+                        fit_left("", widths[1]),
+                        fit_right("", widths[2]),
+                        fit_right("", widths[3]),
+                        fit_left("", widths[4]),
+                    ));
+                }
+            }
+
+            if has_roles {
+                let label = "    └─ Role";
+                out.push(format!(
+                    " {} {} {} {} {}",
+                    fit_left(label, widths[0]),
+                    fit_left("", widths[1]),
+                    fit_right("", widths[2]),
+                    fit_right("", widths[3]),
+                    fit_left("", widths[4]),
+                ));
+
+                let chosen = state
+                    .agents
+                    .swarm_role_by_agent_id
+                    .get(&agent.id)
+                    .map(|s| s.trim().to_ascii_lowercase())
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or_else(|| "all".into());
+                let roles = [
+                    "all",
+                    "propose",
+                    "research",
+                    "judge",
+                    "integrate",
+                    "review",
+                    "test",
+                ];
+                for (role_idx, role) in roles.iter().enumerate() {
+                    let marker = if state.agents.roster_tree_selected
+                        == Some(RosterTreeSelection {
+                            branch: RosterTreeBranch::Role,
+                            leaf_idx: role_idx,
+                        }) {
+                        ">"
+                    } else {
+                        " "
+                    };
+                    let leaf_branch = if role_idx + 1 == roles.len() {
+                        "└"
+                    } else {
+                        "├"
+                    };
+                    let checked = if chosen.eq_ignore_ascii_case(role) {
+                        "*"
+                    } else {
+                        " "
+                    };
+                    let display = if *role == "all" { "All" } else { role };
+                    let label = format!("       {leaf_branch}─ [{checked}] {display}");
+                    out.push(format!(
+                        "{marker}{} {} {} {} {}",
+                        fit_left(&label, widths[0]),
+                        fit_left("", widths[1]),
+                        fit_right("", widths[2]),
+                        fit_right("", widths[3]),
+                        fit_left("", widths[4]),
+                    ));
+                }
             }
         }
     }
@@ -1495,12 +1641,18 @@ fn roster_styled_line(
     if line_idx == 6 {
         return Line::from(Span::styled(
             line.to_string(),
+            Style::default().fg(theme.foreground),
+        ));
+    }
+    if line_idx == 7 {
+        return Line::from(Span::styled(
+            line.to_string(),
             Style::default()
                 .fg(theme.border)
                 .add_modifier(Modifier::BOLD),
         ));
     }
-    if line_idx == 7 {
+    if line_idx == 8 {
         return Line::from(Span::styled(
             line.to_string(),
             Style::default()
@@ -1537,10 +1689,10 @@ fn roster_styled_line(
             Style::default().fg(theme.foreground),
         ));
     };
-    match meta.effort_idx {
-        None => {
+    match meta.node {
+        RosterBodyNode::Agent => {
             let selected = meta.agent_idx == state.agents.roster_selected
-                && state.agents.roster_effort_selected.is_none();
+                && state.agents.roster_tree_selected.is_none();
 
             let marker_style = if selected {
                 selected_row_style(
@@ -1608,22 +1760,66 @@ fn roster_styled_line(
             ));
             Line::from(spans)
         }
-        Some(effort_idx) => {
+        RosterBodyNode::Branch { branch } => {
+            let active = meta.agent_idx == state.agents.roster_selected
+                && state
+                    .agents
+                    .roster_tree_selected
+                    .is_some_and(|sel| sel.branch == branch);
+
+            let marker_style = Style::default()
+                .fg(theme.border)
+                .add_modifier(Modifier::DIM);
+            let base_role_style = if active {
+                Style::default()
+                    .fg(theme.foreground)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+                    .fg(theme.border)
+                    .add_modifier(Modifier::DIM)
+            };
+            let role_style = selected_row_style(base_role_style, false, theme);
+            let cell_style = selected_row_style(
+                Style::default()
+                    .fg(theme.border)
+                    .add_modifier(Modifier::DIM),
+                false,
+                theme,
+            );
+
+            let mut spans = Vec::with_capacity(14);
+            spans.push(Span::styled(marker, marker_style));
+            spans.push(Span::styled(
+                cols.first().cloned().unwrap_or_default(),
+                role_style,
+            ));
+            spans.push(Span::styled(" ", cell_style));
+            spans.push(Span::styled(
+                cols.get(1).cloned().unwrap_or_default(),
+                cell_style,
+            ));
+            spans.push(Span::styled(" ", cell_style));
+            spans.push(Span::styled(
+                cols.get(2).cloned().unwrap_or_default(),
+                cell_style,
+            ));
+            spans.push(Span::styled(" ", cell_style));
+            spans.push(Span::styled(
+                cols.get(3).cloned().unwrap_or_default(),
+                cell_style,
+            ));
+            spans.push(Span::styled(" ", cell_style));
+            spans.push(Span::styled(
+                cols.get(4).cloned().unwrap_or_default(),
+                cell_style,
+            ));
+            Line::from(spans)
+        }
+        RosterBodyNode::Leaf { branch, leaf_idx } => {
             let selected = meta.agent_idx == state.agents.roster_selected
-                && state.agents.roster_effort_selected == Some(effort_idx);
-            let chosen = state
-                .agents
-                .codex_selected_reasoning_effort
-                .get(&agent.id)
-                .or_else(|| state.agents.codex_default_reasoning_effort.get(&agent.id))
-                .map(|s| s.as_str());
-            let effort = state
-                .agents
-                .codex_supported_reasoning_efforts
-                .get(&agent.id)
-                .and_then(|v| v.get(effort_idx))
-                .map(|s| s.as_str());
-            let is_chosen = effort.is_some_and(|effort| chosen == Some(effort));
+                && state.agents.roster_tree_selected
+                    == Some(RosterTreeSelection { branch, leaf_idx });
 
             let marker_style = if selected {
                 selected_row_style(
@@ -1637,6 +1833,45 @@ fn roster_styled_line(
                 Style::default()
                     .fg(theme.border)
                     .add_modifier(Modifier::DIM)
+            };
+
+            let is_chosen = match branch {
+                RosterTreeBranch::Size => {
+                    let chosen = state
+                        .agents
+                        .codex_selected_reasoning_effort
+                        .get(&agent.id)
+                        .or_else(|| state.agents.codex_default_reasoning_effort.get(&agent.id))
+                        .map(|s| s.as_str());
+                    let effort = state
+                        .agents
+                        .codex_supported_reasoning_efforts
+                        .get(&agent.id)
+                        .and_then(|v| v.get(leaf_idx))
+                        .map(|s| s.as_str());
+                    effort.is_some_and(|effort| chosen == Some(effort))
+                }
+                RosterTreeBranch::Role => {
+                    let chosen = state
+                        .agents
+                        .swarm_role_by_agent_id
+                        .get(&agent.id)
+                        .map(|s| s.trim())
+                        .filter(|s| !s.is_empty())
+                        .unwrap_or("all");
+                    let roles = [
+                        "all",
+                        "propose",
+                        "research",
+                        "judge",
+                        "integrate",
+                        "review",
+                        "test",
+                    ];
+                    roles
+                        .get(leaf_idx)
+                        .is_some_and(|role| chosen.eq_ignore_ascii_case(role))
+                }
             };
 
             let base_role_style = if is_chosen {
