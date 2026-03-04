@@ -25,7 +25,6 @@ fn blend(a: ratatui::style::Color, b: ratatui::style::Color, t: f32) -> ratatui:
 }
 
 pub fn render(f: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
-    let root = state.file_tree.root.display().to_string();
     let hidden = if state.file_tree.show_hidden {
         "ON"
     } else {
@@ -36,9 +35,9 @@ pub fn render(f: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
     } else {
         "OFF"
     };
-    let title = format!(
-        "NITTREE  {}  [Enter open/toggle] [Esc/q close] [r refresh] [. hidden:{}] [i ignored:{}]",
-        root, hidden, ignored
+    let commands = format!(
+        "[Enter open/toggle] [Esc/q close] [r refresh] [. hidden:{}] [i ignored:{}]",
+        hidden, ignored
     );
     let focused = state.focus == PaneId::Editor;
     let border_style = if focused {
@@ -56,18 +55,29 @@ pub fn render(f: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
     } else {
         theme.title
     };
+    let title = Line::from(vec![
+        Span::styled(
+            "NITTREE",
+            Style::default()
+                .fg(title_color)
+                .bg(theme.background)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(" "),
+        Span::styled(
+            commands,
+            Style::default()
+                .fg(theme.border)
+                .bg(theme.background)
+                .add_modifier(Modifier::DIM),
+        ),
+    ]);
     let block = Block::default()
         .borders(Borders::ALL)
         .style(Style::default().bg(theme.background))
         .border_style(border_style)
         .border_type(border_type)
-        .title(Span::styled(
-            title,
-            Style::default()
-                .fg(title_color)
-                .bg(theme.background)
-                .add_modifier(Modifier::BOLD),
-        ));
+        .title(title);
 
     let inner_height = area.height.saturating_sub(2) as usize;
     let rows = &state.file_tree.rows;
@@ -87,13 +97,13 @@ pub fn render(f: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
             style = style.bg(theme.selection_bg).add_modifier(Modifier::BOLD);
         }
         if matches!(row.kind, FileTreeKind::Dir) {
-            let indent_len = row.depth.saturating_mul(2);
-            let arrow_len = 2;
-            let split_at = indent_len.saturating_add(arrow_len);
-            if row.text.len() >= split_at {
-                let indent = row.text[..indent_len].to_string();
-                let arrow = row.text[indent_len..split_at].to_string();
-                let rest = row.text[split_at..].to_string();
+            let indent_chars = row.depth.saturating_mul(2);
+            let arrow_chars = 2;
+            let mut chars = row.text.chars();
+            let indent: String = chars.by_ref().take(indent_chars).collect();
+            let arrow: String = chars.by_ref().take(arrow_chars).collect();
+            let rest: String = chars.collect();
+            if !arrow.is_empty() {
                 let arrow_style = style.fg(theme.accent).add_modifier(Modifier::BOLD);
                 lines.push(Line::from(vec![
                     Span::styled(indent, style),

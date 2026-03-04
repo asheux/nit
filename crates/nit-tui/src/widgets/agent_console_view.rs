@@ -97,23 +97,6 @@ pub fn render(
 
     let mission = state.agents.selected_context_mission();
     let agent = state.agents.selected_context_agent();
-    let codex_size = agent.and_then(|agent_id| {
-        let is_codex = state
-            .agents
-            .agents
-            .iter()
-            .find(|lane| lane.id == agent_id)
-            .is_some_and(|lane| lane.is_codex());
-        if !is_codex {
-            return None;
-        }
-        state
-            .agents
-            .codex_selected_reasoning_effort
-            .get(agent_id)
-            .or_else(|| state.agents.codex_default_reasoning_effort.get(agent_id))
-            .map(|s| s.as_str())
-    });
     let codex_ctx_pct = agent.and_then(|agent_id| {
         let is_codex = state
             .agents
@@ -178,32 +161,10 @@ pub fn render(
     } else {
         label_style
     };
-    let agent_style = if agent.is_some() {
-        Style::default()
-            .fg(theme.title_focused)
-            .add_modifier(Modifier::BOLD)
-    } else {
-        label_style
-    };
     let context_line = Line::from(vec![
         Span::styled("mission=", label_style),
         Span::styled(mission.unwrap_or("--"), mission_style),
-        Span::styled("  ", label_style),
-        Span::styled("agent=", label_style),
-        Span::styled(agent.unwrap_or("--"), agent_style),
-        Span::styled("  ", label_style),
-        Span::styled("size=", label_style),
-        Span::styled(
-            codex_size.unwrap_or("--"),
-            if codex_size.is_some() {
-                Style::default()
-                    .fg(theme.title_focused)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                label_style
-            },
-        ),
-        Span::styled("  ", label_style),
+        Span::styled("     ", label_style),
         Span::styled("ctx=", label_style),
         Span::styled(
             if let Some(pct) = codex_ctx_pct {
@@ -280,7 +241,55 @@ pub fn render(
         .skip(layout.input_window_start)
         .take(layout.input_inner_height)
         .cloned()
-        .map(Line::from)
+        .collect::<Vec<_>>();
+    let input_len_chars = state.agents.chat_input.chars().count();
+    let input_cursor = state.agents.chat_input_cursor.min(input_len_chars);
+    let selection_range = state
+        .agents
+        .chat_input_selection_anchor
+        .map(|anchor| anchor.min(input_len_chars))
+        .and_then(|anchor| {
+            if anchor == input_cursor {
+                None
+            } else {
+                Some((anchor.min(input_cursor), anchor.max(input_cursor)))
+            }
+        });
+    let (sel_start_line, sel_start_col, sel_end_line, sel_end_col) = selection_range
+        .map(|(start, end)| {
+            let wrap_width = layout.input_area.width.max(1) as usize;
+            let (start_line, start_col) =
+                chat_input_display_pos_for_char_idx(&state.agents.chat_input, wrap_width, start);
+            let (end_line, end_col) =
+                chat_input_display_pos_for_char_idx(&state.agents.chat_input, wrap_width, end);
+            (start_line, start_col, end_line, end_col)
+        })
+        .unwrap_or((0, 0, 0, 0));
+    let input_visible = input_visible
+        .into_iter()
+        .enumerate()
+        .map(|(idx, text)| {
+            if selection_range.is_none() {
+                return Line::from(text);
+            }
+            let line_idx = layout.input_window_start.saturating_add(idx);
+            if line_idx < sel_start_line || line_idx > sel_end_line {
+                return Line::from(text);
+            }
+            let line_len = text.chars().count();
+            let (sel_start, sel_end) = if sel_start_line == sel_end_line {
+                (sel_start_col, sel_end_col)
+            } else if line_idx == sel_start_line {
+                (sel_start_col, line_len)
+            } else if line_idx == sel_end_line {
+                (0, sel_end_col)
+            } else {
+                (0, line_len)
+            };
+            let sel_start = sel_start.min(line_len);
+            let sel_end = sel_end.min(line_len);
+            highlight_plain_line(&text, sel_start, sel_end, theme.selection_bg)
+        })
         .collect::<Vec<_>>();
     let input_max_row = layout.input_inner_height.saturating_sub(1);
     if layout.input_boxed {
@@ -347,7 +356,14 @@ pub fn render(
         frame.render_widget(input_block, layout.input_chunk);
     }
     let input_bg = if focused {
-        theme.cursor_line_bg
+        let mut bg = dim_bg_towards(theme.border_focused, theme.background, 94);
+        if bg == theme.selection_bg {
+            bg = theme.cursor_line_bg;
+        }
+        if bg == theme.selection_bg {
+            bg = theme.background;
+        }
+        bg
     } else {
         theme.background
     };
@@ -496,7 +512,7 @@ fn refresh_thread_rows_cache(state: &mut AppState, width: usize) -> (usize, bool
             continue;
         }
         last_message_was_user = msg.agent_id.is_none();
-        rows.extend(format_message_rows(state, msg, width, false));
+        rows.extend(format_message_rows(state, msg, width));
     }
 
     let key = AgentConsoleRowsCacheKey {
@@ -656,6 +672,90 @@ fn chat_input_char_index_for_display_pos(
     input.chars().count()
 }
 
+fn chat_input_display_pos_for_char_idx(
+    input: &str,
+    width: usize,
+    target_char_idx: usize,
+) -> (usize, usize) {
+    let width = width.max(1);
+    let total_chars = input.chars().count();
+    let target = target_char_idx.min(total_chars);
+
+    let mut line = 0usize;
+    let mut cell_col = 0usize;
+    let mut char_col = 0usize;
+
+    for (idx, ch) in input.chars().enumerate() {
+        if idx == target {
+            return (line, char_col);
+        }
+        match ch {
+            '\n' | '\r' => {
+                line = line.saturating_add(1);
+                cell_col = 0;
+                char_col = 0;
+            }
+            '\t' => {
+                let tab_width = next_tab_width(cell_col, width);
+                if cell_col + tab_width > width {
+                    line = line.saturating_add(1);
+                    cell_col = 0;
+                    char_col = 0;
+                }
+                cell_col += tab_width;
+                char_col += tab_width;
+            }
+            _ => {
+                let ch_width = UnicodeWidthChar::width(ch).unwrap_or(1).max(1);
+                if cell_col + ch_width > width {
+                    line = line.saturating_add(1);
+                    cell_col = 0;
+                    char_col = 0;
+                }
+                cell_col += ch_width;
+                char_col += 1;
+            }
+        }
+    }
+    (line, char_col)
+}
+
+fn highlight_plain_line(
+    text: &str,
+    sel_start: usize,
+    sel_end: usize,
+    selection_bg: Color,
+) -> Line<'static> {
+    if sel_start >= sel_end {
+        return Line::from(text.to_string());
+    }
+    let (left, rest) = split_at_char(text, sel_start);
+    let (mid, right) = split_at_char(&rest, sel_end.saturating_sub(sel_start));
+    let mut spans = Vec::new();
+    if !left.is_empty() {
+        spans.push(Span::raw(left));
+    }
+    if !mid.is_empty() {
+        spans.push(Span::styled(mid, Style::default().bg(selection_bg)));
+    }
+    if !right.is_empty() {
+        spans.push(Span::raw(right));
+    }
+    Line::from(spans)
+}
+
+fn split_at_char(input: &str, idx: usize) -> (String, String) {
+    if idx == 0 {
+        return ("".into(), input.to_string());
+    }
+    for (count, (byte_idx, _)) in input.char_indices().enumerate() {
+        if count == idx {
+            return (input[..byte_idx].to_string(), input[byte_idx..].to_string());
+        }
+    }
+    (input.to_string(), "".into())
+}
+
 fn wrap_input_with_cursor(
     prefix: &str,
     input: &str,
@@ -732,6 +832,7 @@ fn thread_lines<'a>(
             ThreadRowKind::Breather => breather_line(&row.text, theme),
             ThreadRowKind::StatusHeader => status_header_line(&row.text, theme),
             ThreadRowKind::StatusRow => status_row_line(&row.text, theme),
+            ThreadRowKind::StatusSubRow => status_sub_row_line(&row.text, theme),
         })
         .collect()
 }
@@ -764,7 +865,7 @@ fn agent_line_with_accent_ecg(text: &str, theme: &Theme) -> Line<'static> {
     // terminals). Use a brighter cyan tone from the theme.
     let agent_style = Style::default().fg(theme.title);
     let badge_style = Style::default()
-        .fg(theme.accent)
+        .fg(theme.warning)
         .add_modifier(Modifier::BOLD);
 
     let leading_spaces = text.bytes().take_while(|b| *b == b' ').count();
@@ -786,8 +887,8 @@ fn agent_line_with_accent_ecg(text: &str, theme: &Theme) -> Line<'static> {
             return Line::from(spans);
         }
 
-        // Highlight the agent/model badge (e.g. "[gpt-5.3-codex]") using the same accent color as
-        // the breather ECG. Keep the surrounding text cyan so headers remain scannable.
+        // Highlight the agent/model badge (e.g. "[gpt-5.3-codex]") in orange so it's easy to
+        // spot who spoke. Keep the surrounding text cyan so headers remain scannable.
         let rest = format!(" {rest}");
         let badge_start = rest.find('[');
         let badge_end =
@@ -806,6 +907,13 @@ fn agent_line_with_accent_ecg(text: &str, theme: &Theme) -> Line<'static> {
         } else {
             push_agent_text_with_inline_highlights(&mut spans, &rest, agent_style, theme);
         }
+    } else if first.starts_with('[') && first.ends_with(']') {
+        spans.push(Span::styled(first.to_string(), badge_style));
+        if rest.is_empty() {
+            return Line::from(spans);
+        }
+        let rest = format!(" {rest}");
+        push_agent_text_with_inline_highlights(&mut spans, &rest, agent_style, theme);
     } else {
         push_agent_text_with_inline_highlights(&mut spans, &body, agent_style, theme);
     }
@@ -1150,11 +1258,8 @@ fn user_line_with_prompt_bg(text: &str, theme: &Theme) -> Line<'static> {
 
     // User prompts are rendered as a padded block with a subtle background instead of ASCII
     // borders. Pad spaces are included in the string so the background fills the whole row.
-    let base = Style::default().fg(theme.foreground).bg(prompt_bg);
-    let label_style = Style::default()
-        .fg(theme.accent)
-        .bg(prompt_bg)
-        .add_modifier(Modifier::BOLD);
+    let base = Style::default().fg(Color::Gray).bg(prompt_bg);
+    let label_style = base.add_modifier(Modifier::BOLD);
 
     let trimmed = text.trim();
     if trimmed != "You" {
@@ -1198,6 +1303,17 @@ fn status_row_line(text: &str, theme: &Theme) -> Line<'static> {
     ))
 }
 
+fn status_sub_row_line(text: &str, theme: &Theme) -> Line<'static> {
+    let bg = dim_bg_towards(theme.border, theme.background, 85);
+    Line::from(Span::styled(
+        text.to_string(),
+        Style::default()
+            .fg(theme.title)
+            .bg(bg)
+            .add_modifier(Modifier::DIM),
+    ))
+}
+
 fn looks_like_ecg(token: &str) -> bool {
     let mut count = 0usize;
     for ch in token.chars() {
@@ -1238,7 +1354,7 @@ fn thread_rows(
         if !message_matches_context(msg, mission, agent) {
             continue;
         }
-        rows.extend(format_message_rows(state, msg, width, pulse_on));
+        rows.extend(format_message_rows(state, msg, width));
     }
     rows.extend(breather_rows_for_user_prompt(state, swarm, pulse_on, width));
     rows
@@ -1257,12 +1373,7 @@ fn message_matches_context(msg: &AgentMessage, mission: Option<&str>, agent: Opt
     true
 }
 
-fn format_message_rows(
-    state: &AppState,
-    msg: &AgentMessage,
-    width: usize,
-    pulse_on: bool,
-) -> Vec<ThreadRow> {
+fn format_message_rows(state: &AppState, msg: &AgentMessage, width: usize) -> Vec<ThreadRow> {
     let width = width.max(1);
     let text_lines: Vec<&str> = if msg.text.is_empty() {
         vec![""]
@@ -1293,28 +1404,10 @@ fn format_message_rows(
     }
 
     let src = msg.agent_id.as_deref().unwrap_or("agent");
-    let mission_ctx = state.agents.selected_context_mission();
-    let agent_ctx = state.agents.selected_context_agent();
-    let show_badge = if mission_ctx.is_some() {
-        // Mission context can include multiple agents, so always label who spoke.
-        true
-    } else if let Some(selected) = agent_ctx {
-        // In single-agent chat context, don't repeat the model name on every line.
-        msg.agent_id.as_deref() != Some(selected)
-    } else {
-        true
-    };
-    let agent_badge = show_badge.then(|| agent_identity_badge(state, src));
-    // Agent transcript entries should be stable (non-animated). The live "working" indicator is
-    // represented by the dedicated breather row appended after the latest prompt.
-    let ecg = ecg_indicator(state.metrics.frame_count, None, pulse_on, false);
-
-    let mut header = ecg.to_string();
+    let agent_badge = agent_identity_badge(state, src);
+    let mut header = format!("[{agent_badge}]");
     if matches!(msg.channel, nit_core::AgentChannel::Broadcast) {
         header.push_str(" @all");
-    }
-    if let Some(agent_badge) = agent_badge.as_deref() {
-        header.push_str(&format!(" [{agent_badge}]"));
     }
 
     let indent = 2usize.min(width.saturating_sub(1));
@@ -1377,6 +1470,18 @@ fn agent_identity_badge(state: &AppState, agent_id: &str) -> String {
     truncate_label(&format!("{role}/{id}"), AGENT_BADGE_MAX_CHARS)
 }
 
+fn agent_roster_label(agent: &AgentLane) -> String {
+    let id_full = agent.id.trim();
+    let role_full = agent.role.trim();
+    if role_full.is_empty() {
+        return id_full.to_string();
+    }
+    if role_full.eq_ignore_ascii_case(id_full) {
+        return role_full.to_string();
+    }
+    format!("{role_full}/{id_full}")
+}
+
 fn breather_rows_for_user_prompt(
     state: &AppState,
     _swarm: Option<&SwarmRuntime>,
@@ -1417,9 +1522,9 @@ fn breather_rows_for_user_prompt(
     }
 
     let width = width.max(1);
-    let indent = 2usize.min(width.saturating_sub(1));
-    let indent_str = " ".repeat(indent);
-    let inner = width.saturating_sub(indent);
+    // Keep the roster table flush to the pane's left edge so it matches the right side alignment.
+    let indent_str = String::new();
+    let inner = width;
 
     let now = Instant::now();
     let mut swarm_assigned_ids: Vec<String> = Vec::new();
@@ -1497,34 +1602,28 @@ fn breather_rows_for_user_prompt(
         kind: ThreadRowKind::Breather,
     });
 
-    // Table layout (stage gets the remaining space).
+    // Table layout: show the agent roster with a stable right-aligned timing column.
     let elap_w = 6usize;
     let hb_w = 4usize;
     let out_w = 4usize;
-    let times_and_spacing = elap_w + hb_w + out_w + 4; // spaces between columns
+    let size_w = 8usize;
+    let times_and_spacing = elap_w + hb_w + out_w + size_w + 4; // spaces between columns
+    let agent_w = inner.saturating_sub(times_and_spacing);
+    let resolve_size = |agent: Option<&AgentLane>| -> Option<&str> {
+        let agent = agent?;
+        if !agent.is_codex() {
+            return None;
+        }
+        state
+            .agents
+            .codex_selected_reasoning_effort
+            .get(&agent.id)
+            .or_else(|| state.agents.codex_default_reasoning_effort.get(&agent.id))
+            .map(|value| value.as_str())
+    };
 
-    let desired_agent_w = ordered_ids
-        .iter()
-        .filter_map(|id| {
-            state
-                .agents
-                .agents
-                .iter()
-                .find(|agent| agent.id == id.as_str())
-                .map(|agent| agent_identity_badge(state, agent.id.as_str()))
-        })
-        .map(|s| s.chars().count())
-        .max()
-        .unwrap_or(8)
-        .clamp(6, 16);
-
-    let max_agent_w = inner.saturating_sub(times_and_spacing + 10).max(1);
-    let agent_w = desired_agent_w.clamp(1, max_agent_w);
-
-    let fixed = agent_w + elap_w + hb_w + out_w + 4; // spaces between columns
-
-    if inner.saturating_sub(fixed) < 10 {
-        // Narrow fallback: keep it readable without a multi-column layout.
+    if agent_w < 6 {
+        // Narrow fallback: keep it readable without a strict column layout.
         for id in ordered_ids.iter() {
             let agent = state
                 .agents
@@ -1532,8 +1631,9 @@ fn breather_rows_for_user_prompt(
                 .iter()
                 .find(|agent| agent.id == id.as_str());
             let badge = agent
-                .map(|agent| agent_identity_badge(state, agent.id.as_str()))
+                .map(agent_roster_label)
                 .unwrap_or_else(|| id.to_string());
+            let size = resolve_size(agent).unwrap_or("--");
             let turn = state.agents.active_turns.get(id.as_str());
             let queued_for_swarm = swarm_mission_id.is_some_and(|mid| {
                 state.agents.queued_codex_turns.iter().any(|turn| {
@@ -1592,12 +1692,14 @@ fn breather_rows_for_user_prompt(
 
             rows.push(ThreadRow {
                 text: pad_to_width(
-                    &format!(
-                        "{indent_str}{badge} stage={stage} elap={elapsed_s} hb={hb_s} out={out_s}"
-                    ),
+                    &format!("{indent_str}{badge} {size} {elapsed_s} {hb_s} {out_s}"),
                     width,
                 ),
                 kind: ThreadRowKind::StatusRow,
+            });
+            rows.push(ThreadRow {
+                text: pad_to_width(&format!("{indent_str}↳ {stage}"), width),
+                kind: ThreadRowKind::StatusSubRow,
             });
         }
         if let Some(mission_id) = swarm_mission_id {
@@ -1606,13 +1708,12 @@ fn breather_rows_for_user_prompt(
         return rows;
     }
 
-    let stage_w = inner.saturating_sub(fixed);
     rows.push(ThreadRow {
         text: pad_to_width(
             &format!(
                 "{indent_str}{} {} {} {} {}",
                 fit_left("AGENT", agent_w),
-                fit_left("STAGE", stage_w),
+                fit_left("SIZE", size_w),
                 fit_right("ELAP", elap_w),
                 fit_right("HB", hb_w),
                 fit_right("OUT", out_w),
@@ -1628,7 +1729,7 @@ fn breather_rows_for_user_prompt(
             .iter()
             .find(|agent| agent.id == id.as_str());
         let badge = agent
-            .map(|agent| agent_identity_badge(state, agent.id.as_str()))
+            .map(agent_roster_label)
             .unwrap_or_else(|| id.to_string());
         let turn = state.agents.active_turns.get(id.as_str());
         let queued_for_swarm =
@@ -1686,13 +1787,14 @@ fn breather_rows_for_user_prompt(
         let out_s = out_age
             .map(|s| format!("{s}s"))
             .unwrap_or_else(|| "--".into());
+        let size = resolve_size(agent).unwrap_or("--");
 
         rows.push(ThreadRow {
             text: pad_to_width(
                 &format!(
                     "{indent_str}{} {} {} {} {}",
                     fit_left(&badge, agent_w),
-                    fit_left(&stage, stage_w),
+                    fit_left(&size, size_w),
                     fit_right(&elapsed_s, elap_w),
                     fit_right(&hb_s, hb_w),
                     fit_right(&out_s, out_w),
@@ -1700,6 +1802,20 @@ fn breather_rows_for_user_prompt(
                 width,
             ),
             kind: ThreadRowKind::StatusRow,
+        });
+        rows.push(ThreadRow {
+            text: pad_to_width(
+                &format!(
+                    "{indent_str}{} {} {} {} {}",
+                    fit_left(&format!("↳ {stage}"), agent_w),
+                    fit_left("", size_w),
+                    fit_right("", elap_w),
+                    fit_right("", hb_w),
+                    fit_right("", out_w),
+                ),
+                width,
+            ),
+            kind: ThreadRowKind::StatusSubRow,
         });
     }
 
@@ -1718,53 +1834,155 @@ fn append_swarm_meta_footer_rows(
     width: usize,
     inner: usize,
 ) {
-    let metas = state
-        .agents
-        .messages
-        .iter()
-        .filter(|msg| {
-            msg.mission_id.as_deref() == Some(mission_id)
-                && msg.agent_id.as_deref() == Some("swarm")
-                && msg.text.starts_with("Swarm ")
-        })
-        .map(|msg| msg.text.trim().to_string())
-        .collect::<Vec<_>>();
-    if metas.is_empty() {
-        return;
-    }
-    let start = metas.len().saturating_sub(6);
-    let metas = &metas[start..];
-
-    let max_inner = inner.saturating_sub(1).max(1);
-    rows.push(ThreadRow {
-        text: pad_to_width(&format!("{indent_str}{}", "─".repeat(max_inner)), width),
-        kind: ThreadRowKind::StatusHeader,
-    });
-
-    for meta in metas.iter() {
-        for seg in wrap_visual_line(meta, max_inner) {
-            let seg = seg.trim_end_matches(' ');
-            let line = if seg.is_empty() {
-                indent_str.to_string()
-            } else {
-                format!("{indent_str}{seg}")
-            };
-            rows.push(ThreadRow {
-                text: pad_to_width(&line, width),
-                kind: ThreadRowKind::StatusRow,
-            });
+    let mut template_meta: Option<String> = None;
+    let mut verify_tag: Option<String> = None;
+    for msg in state.agents.messages.iter().rev() {
+        if msg.mission_id.as_deref() != Some(mission_id) {
+            continue;
+        }
+        if msg.agent_id.as_deref() != Some("swarm") {
+            continue;
+        }
+        let text = msg.text.trim();
+        if verify_tag.is_none() {
+            verify_tag = verify_result_tag(text);
+        }
+        if template_meta.is_none() {
+            template_meta = compact_swarm_template_meta(text);
+        }
+        if template_meta.is_some() && verify_tag.is_some() {
+            break;
         }
     }
 
-    rows.push(ThreadRow {
-        text: pad_to_width(&format!("{indent_str}{}", "─".repeat(max_inner)), width),
-        kind: ThreadRowKind::StatusHeader,
-    });
+    let mut line = if let Some(template_meta) = template_meta {
+        template_meta
+    } else if verify_tag.is_some() {
+        "Verify:".to_string()
+    } else {
+        return;
+    };
+    if let Some(tag) = verify_tag.as_deref() {
+        if !line.is_empty() {
+            line.push_str("  ");
+        }
+        line.push_str(&format!("verify={tag}"));
+    }
 
+    if line.trim().is_empty() {
+        return;
+    }
+
+    let max_inner = inner.saturating_sub(1).max(1);
     rows.push(ThreadRow {
         text: pad_to_width(indent_str, width),
         kind: ThreadRowKind::StatusRow,
     });
+    rows.push(ThreadRow {
+        text: pad_to_width(&format!("{indent_str}{}", "─".repeat(max_inner)), width),
+        kind: ThreadRowKind::StatusHeader,
+    });
+    for seg in wrap_visual_line(&line, max_inner) {
+        let seg = seg.trim_end_matches(' ');
+        let line = if seg.is_empty() {
+            indent_str.to_string()
+        } else {
+            format!("{indent_str}{seg}")
+        };
+        rows.push(ThreadRow {
+            text: pad_to_width(&line, width),
+            kind: ThreadRowKind::StatusSubRow,
+        });
+    }
+    rows.push(ThreadRow {
+        text: pad_to_width(&format!("{indent_str}{}", "─".repeat(max_inner)), width),
+        kind: ThreadRowKind::StatusHeader,
+    });
+    rows.push(ThreadRow {
+        text: pad_to_width(indent_str, width),
+        kind: ThreadRowKind::StatusRow,
+    });
+}
+
+fn compact_swarm_template_meta(text: &str) -> Option<String> {
+    let rest = text.trim().strip_prefix("Swarm template:")?.trim();
+    let mut parts = rest.split(" | ");
+    let template = parts.next().unwrap_or_default().trim();
+    if template.is_empty() {
+        return None;
+    }
+
+    let mut integrator: Option<&str> = None;
+    let mut verifier: Option<&str> = None;
+    let mut gates: Option<&str> = None;
+    for part in parts {
+        let part = part.trim();
+        if let Some(value) = part.strip_prefix("integrator:") {
+            integrator = Some(value.trim());
+            continue;
+        }
+        if let Some(value) = part.strip_prefix("verifier:") {
+            verifier = Some(value.trim());
+            continue;
+        }
+        if let Some(value) = part.strip_prefix("gates:") {
+            gates = Some(value.trim());
+        }
+    }
+
+    let mut out = String::new();
+    out.push_str("Swarm:");
+    out.push_str(&format!(" t={}", template));
+
+    if let Some(integrator) = integrator {
+        out.push_str(&format!("  i={}", normalize_swarm_meta_value(integrator)));
+    }
+    if let Some(verifier) = verifier {
+        out.push_str(&format!("  v={}", normalize_swarm_meta_value(verifier)));
+    }
+    if let Some(gates) = gates {
+        out.push_str(&format!(
+            "  gates={}",
+            normalize_swarm_meta_value(short_gate_bundle_label(gates))
+        ));
+    }
+    Some(out)
+}
+
+fn normalize_swarm_meta_value(value: &str) -> String {
+    let trimmed = value.trim();
+    if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("(none)") {
+        return "—".to_string();
+    }
+    if trimmed.eq_ignore_ascii_case("none") {
+        return "none".to_string();
+    }
+    if trimmed.eq_ignore_ascii_case("none (config)") {
+        return "none".to_string();
+    }
+    if trimmed.starts_with("(none)") {
+        return "none".to_string();
+    }
+    trimmed.to_string()
+}
+
+fn short_gate_bundle_label(value: &str) -> &str {
+    value
+        .trim()
+        .split_once(" (")
+        .map(|(label, _)| label.trim())
+        .unwrap_or_else(|| value.trim())
+}
+
+fn verify_result_tag(text: &str) -> Option<String> {
+    let rest = text.trim().strip_prefix("VERIFY result:")?.trim();
+    if rest.is_empty() {
+        return None;
+    }
+    rest.split_whitespace()
+        .next()
+        .map(|word| word.trim().to_string())
+        .filter(|word| !word.is_empty())
 }
 
 fn format_agent_stage_label(state: &AppState, agent: &AgentLane, stage: &str) -> String {
@@ -2190,7 +2408,7 @@ mod tests {
         MissionRecord, QueuedCodexTurn,
     };
     use ratatui::layout::Rect;
-    use ratatui::style::Modifier;
+    use ratatui::style::{Color, Modifier};
     use std::path::PathBuf;
     use std::time::Instant;
 
@@ -2233,7 +2451,7 @@ mod tests {
             mission_id: None,
             text: "line one\nline two".into(),
         };
-        let rows = format_message_rows(&state, &msg, 48, true);
+        let rows = format_message_rows(&state, &msg, 48);
         assert!(rows.len() >= 6);
         assert!(matches!(rows[0].kind, ThreadRowKind::User));
         // Top padding row + label row.
@@ -2256,7 +2474,7 @@ mod tests {
     }
 
     #[test]
-    fn agent_messages_use_stable_ecg_header() {
+    fn agent_messages_use_stable_badge_header() {
         let mut state = test_state();
         state.agents.agents.push(AgentLane {
             id: "coder".into(),
@@ -2277,20 +2495,20 @@ mod tests {
             text: "working".into(),
         };
         state.metrics.frame_count = 3;
-        let first_rows = format_message_rows(&state, &msg, 80, true);
+        let first_rows = format_message_rows(&state, &msg, 80);
         state.metrics.frame_count = 30;
-        let second_rows = format_message_rows(&state, &msg, 80, true);
-        // Stable header row (no animation on agent transcript lines).
-        assert_eq!(first_rows[0].text, "  ▁▁▁▁▁▁");
-        assert_eq!(second_rows[0].text, "  ▁▁▁▁▁▁");
+        let second_rows = format_message_rows(&state, &msg, 80);
+        // Stable header row (avoid animated separators in the transcript).
+        assert_eq!(first_rows[0].text, "  [Coder]");
+        assert_eq!(second_rows[0].text, "  [Coder]");
         assert_eq!(first_rows[1].text, "  working");
         assert_eq!(second_rows[1].text, "  working");
-        assert!(!first_rows[0].text.contains("[Coder]"));
-        assert!(!second_rows[0].text.contains("[Coder]"));
+        assert!(first_rows[0].text.contains("[Coder]"));
+        assert!(second_rows[0].text.contains("[Coder]"));
     }
 
     #[test]
-    fn agent_badge_hidden_when_single_agent_context_selected() {
+    fn agent_badge_shown_when_single_agent_context_selected() {
         let mut state = test_state();
         state.agents.selected_mission = None;
         state.agents.selected_agent = Some("coder".into());
@@ -2312,16 +2530,15 @@ mod tests {
             mission_id: None,
             text: "hello".into(),
         };
-        let rows = format_message_rows(&state, &msg, 120, true);
+        let rows = format_message_rows(&state, &msg, 120);
         // Header row, then message.
-        assert!(!rows[0].text.contains("[Coder]"));
+        assert!(rows[0].text.contains("[Coder]"));
         assert_eq!(rows[1].text, "  hello");
     }
 
     #[test]
     fn agent_header_includes_truncated_role_badge() {
         let mut state = test_state();
-        // Force the badge to show even though we're rendering the selected agent.
         state.agents.selected_agent = Some("planner".into());
         state.agents.agents.push(AgentLane {
             id: "reviewer".into(),
@@ -2341,7 +2558,7 @@ mod tests {
             mission_id: None,
             text: "ok".into(),
         };
-        let row = format_message_rows(&state, &msg, 120, true)
+        let row = format_message_rows(&state, &msg, 120)
             .into_iter()
             .find(|row| !row.text.trim().is_empty())
             .expect("row");
@@ -2359,6 +2576,23 @@ mod tests {
         assert_eq!(lines.len(), 1);
         assert_eq!(lines[0].spans[0].style.fg, Some(theme.accent));
         assert_eq!(lines[0].spans[1].style.fg, Some(theme.title));
+    }
+
+    #[test]
+    fn agent_badge_renders_in_warning_color() {
+        let theme = Theme::default();
+        let rows = [ThreadRow {
+            text: "  [Coder] hello".to_string(),
+            kind: ThreadRowKind::Agent,
+        }];
+        let lines = thread_lines(rows.iter(), &theme);
+        let badge_span = lines[0]
+            .spans
+            .iter()
+            .find(|span| span.content.as_ref() == "[Coder]")
+            .expect("badge span");
+        assert_eq!(badge_span.style.fg, Some(theme.warning));
+        assert!(badge_span.style.add_modifier.contains(Modifier::BOLD));
     }
 
     #[test]
@@ -2662,6 +2896,54 @@ mod tests {
     }
 
     #[test]
+    fn breather_rows_show_codex_agent_size() {
+        let mut state = test_state();
+        state.agents.selected_mission = None;
+        state.agents.selected_agent = Some("planner".into());
+        state.agents.messages.clear();
+        state.agents.agents.clear();
+        state.agents.agents.push(AgentLane {
+            id: "planner".into(),
+            role: "Planner".into(),
+            lane: "Lane A".into(),
+            kind: nit_core::AgentLaneKind::Codex,
+            status: AgentStatus::Running,
+            heartbeat_age_secs: 0,
+            queue_len: 1,
+            current_mission: None,
+            last_message: "active".into(),
+        });
+
+        let now = Instant::now();
+        state.agents.active_turns.insert(
+            "planner".into(),
+            nit_core::state::AgentTurnState {
+                started_at: now,
+                last_heartbeat_at: now,
+                last_output_at: now,
+                stage: Some("starting".into()),
+            },
+        );
+        state
+            .agents
+            .codex_default_reasoning_effort
+            .insert("planner".into(), "high".into());
+
+        state.agents.messages.push(AgentMessage {
+            at: "10:00:02".into(),
+            channel: AgentChannel::Agent,
+            agent_id: None,
+            mission_id: None,
+            text: "do the work".into(),
+        });
+
+        let rows = thread_rows(&state, None, 120, true);
+        let flattened = rows.iter().map(|row| row.text.as_str()).collect::<Vec<_>>();
+        assert!(flattened.iter().any(|line| line.contains("SIZE")));
+        assert!(flattened.iter().any(|line| line.contains("high")));
+    }
+
+    #[test]
     fn breather_rows_show_when_prompt_queued_but_not_yet_started() {
         let mut state = test_state();
         state.agents.selected_mission = None;
@@ -2776,10 +3058,10 @@ mod tests {
         assert!(flattened.iter().any(|line| line.contains("Coder")));
         assert!(flattened.iter().any(|line| line.contains("Swarm pending")));
         assert!(rows.iter().any(|row| {
-            matches!(row.kind, ThreadRowKind::StatusRow) && row.text.contains("Swarm template:")
+            matches!(row.kind, ThreadRowKind::StatusSubRow) && row.text.contains("Swarm: t=lab")
         }));
         assert!(!rows.iter().any(|row| {
-            matches!(row.kind, ThreadRowKind::Agent) && row.text.contains("Swarm template:")
+            matches!(row.kind, ThreadRowKind::Agent) && row.text.contains("Swarm: t=lab")
         }));
     }
 
@@ -2943,8 +3225,17 @@ mod tests {
                 .spans
                 .iter()
                 .any(|span| span.content.as_ref().contains("You")
-                    && span.style.fg == Some(theme.accent)),
-            "expected 'You' label span to use accent color"
+                    && span.style.fg == Some(Color::Gray)
+                    && span.style.add_modifier.contains(Modifier::BOLD)),
+            "expected 'You' label span to use gray + bold style"
+        );
+        assert!(
+            lines[1]
+                .spans
+                .iter()
+                .any(|span| span.content.as_ref().contains("hello")
+                    && span.style.fg == Some(Color::Gray)),
+            "expected user prompt text to use gray foreground"
         );
     }
 }

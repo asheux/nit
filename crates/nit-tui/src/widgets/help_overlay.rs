@@ -76,6 +76,43 @@ pub fn build_lines(theme: &Theme) -> Vec<Line<'static>> {
         Span::styled(":", Style::default().fg(theme.accent)),
         Span::raw(" command prompt (Normal mode)"),
     ]));
+
+    lines.push(Line::from(vec![Span::styled(
+        "NITTREE (EDITOR OVERLAY)",
+        heading_style,
+    )]));
+    lines.push(Line::from(vec![
+        Span::styled("Esc / q", Style::default().fg(theme.accent)),
+        Span::raw(" close tree"),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("j/k / Up/Down", Style::default().fg(theme.accent)),
+        Span::raw(" move selection"),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("PageUp/PageDown", Style::default().fg(theme.accent)),
+        Span::raw(" jump by page"),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("Home/End", Style::default().fg(theme.accent)),
+        Span::raw(" jump to top/bottom"),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("Enter", Style::default().fg(theme.accent)),
+        Span::raw(" open file (closes tree)"),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("r", Style::default().fg(theme.accent)),
+        Span::raw(" refresh tree"),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled(".", Style::default().fg(theme.accent)),
+        Span::raw(" toggle hidden files"),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("i", Style::default().fg(theme.accent)),
+        Span::raw(" toggle ignored files"),
+    ]));
     lines.push(Line::from(vec![Span::styled(
         "COMMANDS (:)",
         heading_style,
@@ -229,43 +266,6 @@ pub fn build_lines(theme: &Theme) -> Vec<Line<'static>> {
             Style::default().fg(theme.accent),
         ),
         Span::raw(" analyze last/specified history log"),
-    ]));
-
-    lines.push(Line::from(vec![Span::styled(
-        "NITTREE (EDITOR OVERLAY)",
-        heading_style,
-    )]));
-    lines.push(Line::from(vec![
-        Span::styled("Esc / q", Style::default().fg(theme.accent)),
-        Span::raw(" close tree"),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled("j/k / Up/Down", Style::default().fg(theme.accent)),
-        Span::raw(" move selection"),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled("PageUp/PageDown", Style::default().fg(theme.accent)),
-        Span::raw(" jump by page"),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled("Home/End", Style::default().fg(theme.accent)),
-        Span::raw(" jump to top/bottom"),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled("Enter", Style::default().fg(theme.accent)),
-        Span::raw(" open file (closes tree)"),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled("r", Style::default().fg(theme.accent)),
-        Span::raw(" refresh tree"),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled(".", Style::default().fg(theme.accent)),
-        Span::raw(" toggle hidden files"),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled("i", Style::default().fg(theme.accent)),
-        Span::raw(" toggle ignored files"),
     ]));
 
     lines.push(Line::from(vec![Span::styled(

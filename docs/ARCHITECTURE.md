@@ -135,14 +135,16 @@ Cancellation/timeouts in MCP mode:
 - MCP Stop/Reconnect stops the server process, which cancels **all** in-flight requests (they
   share the same transport). nit emits `TurnFailed` for each in-flight turn and clears the in-flight
   maps before reconnecting.
-- Because reconnecting the MCP server can invalidate Codex session ids, nit clears saved Codex
-  `threadId` mappings for continuations on MCP stop/reconnect (avoids “Session not found for thread_id …” loops).
-- Turns have an optional timeout via `NIT_MCP_TURN_TIMEOUT_SECS`. If any in-flight turn exceeds the
-  timeout, nit restarts the MCP server and fails all in-flight turns.
+- MCP reconnect preserves saved Codex `threadId` mappings for continuations; if Codex later reports
+  “Session not found for thread_id …”, nit drops the stored thread id for that agent so the next turn
+  starts a fresh thread (avoids broken “resume” loops).
+- Turns have an optional total timeout via `NIT_MCP_TURN_TIMEOUT_SECS` (default disabled; set to
+  `600` to enable; set to `0` to disable). If any in-flight turn exceeds the timeout, nit restarts
+  the MCP server and fails all in-flight turns.
 - Turns can have an idle timeout via `NIT_MCP_TURN_IDLE_TIMEOUT_SECS` (default disabled; set to
-  `600` for a 10-minute idle timeout; set to `0` to disable). If any in-flight turn stops producing
-  `codex/event` notifications for longer than the idle timeout, nit restarts the MCP server and
-  fails all in-flight turns.
+  `600` to enable; set to `0` to disable). If any in-flight turn stops producing `codex/event`
+  notifications for longer than the idle timeout, nit restarts the MCP server and fails all
+  in-flight turns.
 
 #### UI visibility + interaction model
 
@@ -297,10 +299,10 @@ Implementation notes:
 - Cancellation/timeouts:
   - MCP Stop/Reconnect cancels in-flight turns by stopping the server process.
   - Turns have an optional total timeout via `NIT_MCP_TURN_TIMEOUT_SECS` (default disabled; set to
-    `600` to restore the previous default; set to `0` to disable).
+    `600` to enable; set to `0` to disable).
   - Turns can have an idle timeout via `NIT_MCP_TURN_IDLE_TIMEOUT_SECS` (default disabled; set to
     `600` to enable; set to `0` to disable).
-- Reconnect robustness: the runner checks for unexpected `codex mcp-server` exit, drops the dead
+  - Reconnect robustness: the runner checks for unexpected `codex mcp-server` exit, drops the dead
   handle, and retries with a short backoff (operator can still use MCP tab `r`).
 - Latency: `latency_ms` is best-effort; it is updated on connect and on successful turns.
 - Sandbox/approval pass-through:

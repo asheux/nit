@@ -101,7 +101,7 @@ fn append_dir(state: &AppState, dir: &Path, depth: usize, out: &mut Vec<FileTree
             text.push_str("  ");
         }
         if entry.is_dir {
-            text.push_str(if expanded { "v " } else { "> " });
+            text.push_str(if expanded { "↓ " } else { "→ " });
         } else {
             text.push_str("  ");
         }

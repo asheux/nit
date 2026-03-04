@@ -76,6 +76,29 @@ pub fn roster_role_cell_hit(col: usize, width: usize) -> bool {
     col >= start && col < end
 }
 
+const ARROW_PRIMARY: char = '↳';
+const ARROW_FALLBACK: char = '>';
+const CURSOR_PRIMARY: char = '➜';
+const CURSOR_FALLBACK: char = '>';
+
+fn arrow_glyph() -> char {
+    // Allow users/CI to opt into ASCII-safe markers if the font lacks the arrow glyph.
+    if std::env::var("NIT_ASCII_FALLBACK").is_ok() {
+        ARROW_FALLBACK
+    } else {
+        ARROW_PRIMARY
+    }
+}
+
+fn cursor_glyph() -> char {
+    // Keep this in lock-step with `arrow_glyph()` so users can flip one env var to avoid Unicode.
+    if std::env::var("NIT_ASCII_FALLBACK").is_ok() {
+        CURSOR_FALLBACK
+    } else {
+        CURSOR_PRIMARY
+    }
+}
+
 pub fn alert_index_for_body_line(
     state: &AppState,
     width: usize,
@@ -250,15 +273,17 @@ pub fn render(
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(1), // tabs
+            Constraint::Length(1), // spacer below tabs
             Constraint::Min(1),    // body
             Constraint::Length(1), // footer hints
         ])
         .split(inner);
 
     render_tab_bar(frame, chunks[0], state, theme);
+    render_tab_spacer(frame, chunks[1], theme);
 
-    let rows = current_lines_for_width_with_swarm(state, Some(swarm), chunks[1].width as usize);
-    let height = chunks[1].height as usize;
+    let rows = current_lines_for_width_with_swarm(state, Some(swarm), chunks[2].width as usize);
+    let height = chunks[2].height as usize;
     let max_scroll = rows.len().saturating_sub(height);
     let scroll = state.agents.ops_scroll.min(max_scroll);
     let visible = rows
@@ -266,7 +291,7 @@ pub fn render(
         .enumerate()
         .skip(scroll)
         .take(height)
-        .map(|(idx, line)| ops_styled_line(state, idx, line, chunks[1].width as usize, theme))
+        .map(|(idx, line)| ops_styled_line(state, idx, line, chunks[2].width as usize, theme))
         .collect::<Vec<_>>();
     let visible = apply_ui_selection(
         visible,
@@ -277,15 +302,23 @@ pub fn render(
     );
     frame.render_widget(
         Paragraph::new(visible).style(Style::default().bg(theme.background)),
-        chunks[1],
+        chunks[2],
     );
 
-    render_footer(frame, chunks[2], state, theme);
+    render_footer(frame, chunks[3], state, theme);
 }
 
 pub fn render_tab_bar(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
     let tabs = tab_line(state, theme);
     frame.render_widget(Paragraph::new(tabs), area);
+}
+
+fn render_tab_spacer(frame: &mut Frame, area: Rect, theme: &Theme) {
+    // Provide breathing room between the tab labels and the body content.
+    frame.render_widget(
+        Paragraph::new(Line::from("")).style(Style::default().bg(theme.background)),
+        area,
+    );
 }
 
 fn render_footer(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
@@ -533,12 +566,15 @@ fn roster_lines(state: &AppState, width: usize) -> Vec<String> {
         } else {
             "    "
         };
-        let marker =
-            if idx == state.agents.roster_selected && state.agents.roster_tree_selected.is_none() {
-                ">"
+        let marker = if idx == state.agents.roster_selected {
+            if state.agents.roster_tree_selected.is_none() {
+                cursor_glyph()
             } else {
-                " "
-            };
+                ' '
+            }
+        } else {
+            arrow_glyph()
+        };
         out.push(format!(
             "{marker}{} {} {} {} {}",
             fit_left(&format!("{priority_prefix}{}", agent.role), widths[0]),
@@ -569,8 +605,7 @@ fn roster_lines(state: &AppState, width: usize) -> Vec<String> {
             }
 
             if has_size {
-                let branch = if has_roles { "├" } else { "└" };
-                let label = format!("    {branch}─ Size");
+                let label = format!("    {} Size", arrow_glyph());
                 out.push(format!(
                     " {} {} {} {} {}",
                     fit_left(&label, widths[0]),
@@ -586,28 +621,22 @@ fn roster_lines(state: &AppState, width: usize) -> Vec<String> {
                     .get(&agent.id)
                     .or_else(|| state.agents.codex_default_reasoning_effort.get(&agent.id))
                     .map(|s| s.as_str());
-                let continuation = if has_roles { "│" } else { " " };
                 for (effort_idx, effort) in efforts.iter().enumerate() {
                     let marker = if state.agents.roster_tree_selected
                         == Some(RosterTreeSelection {
                             branch: RosterTreeBranch::Size,
                             leaf_idx: effort_idx,
                         }) {
-                        ">"
+                        cursor_glyph()
                     } else {
-                        " "
-                    };
-                    let leaf_branch = if effort_idx + 1 == efforts.len() {
-                        "└"
-                    } else {
-                        "├"
+                        ' '
                     };
                     let checked = if chosen == Some(effort.as_str()) {
-                        "*"
+                        "x"
                     } else {
                         " "
                     };
-                    let label = format!("    {continuation}  {leaf_branch}─ [{checked}] {effort}");
+                    let label = format!("      {} [{checked}] {effort}", arrow_glyph());
                     out.push(format!(
                         "{marker}{} {} {} {} {}",
                         fit_left(&label, widths[0]),
@@ -620,10 +649,10 @@ fn roster_lines(state: &AppState, width: usize) -> Vec<String> {
             }
 
             if has_roles {
-                let label = "    └─ Role";
+                let label = format!("    {} Role", arrow_glyph());
                 out.push(format!(
                     " {} {} {} {} {}",
-                    fit_left(label, widths[0]),
+                    fit_left(&label, widths[0]),
                     fit_left("", widths[1]),
                     fit_right("", widths[2]),
                     fit_right("", widths[3]),
@@ -652,22 +681,17 @@ fn roster_lines(state: &AppState, width: usize) -> Vec<String> {
                             branch: RosterTreeBranch::Role,
                             leaf_idx: role_idx,
                         }) {
-                        ">"
+                        cursor_glyph()
                     } else {
-                        " "
-                    };
-                    let leaf_branch = if role_idx + 1 == roles.len() {
-                        "└"
-                    } else {
-                        "├"
+                        ' '
                     };
                     let checked = if chosen.eq_ignore_ascii_case(role) {
-                        "*"
+                        "x"
                     } else {
                         " "
                     };
                     let display = if *role == "all" { "All" } else { role };
-                    let label = format!("       {leaf_branch}─ [{checked}] {display}");
+                    let label = format!("      {} [{checked}] {display}", arrow_glyph());
                     out.push(format!(
                         "{marker}{} {} {} {} {}",
                         fit_left(&label, widths[0]),
@@ -718,10 +742,14 @@ fn mission_lines(state: &AppState, width: usize) -> Vec<String> {
         ));
         let agent_lines = mission.assigned_agents.len().max(1);
         for agent_idx in 0..agent_lines {
-            let marker = if idx == state.agents.mission_selected && agent_idx == 0 {
-                ">"
+            let marker = if idx == state.agents.mission_selected {
+                if agent_idx == 0 {
+                    cursor_glyph()
+                } else {
+                    arrow_glyph()
+                }
             } else {
-                " "
+                arrow_glyph()
             };
             let agent_label = mission
                 .assigned_agents
@@ -899,7 +927,13 @@ fn alert_lines(state: &AppState, width: usize) -> Vec<String> {
         let chunks = wrap_cell_text(&alert.message, widths[3]);
         for (row, chunk) in chunks.iter().enumerate() {
             let selected = idx == state.agents.alert_selected;
-            let marker = if row == 0 && selected { ">" } else { " " };
+            let marker = if row == 0 && selected {
+                cursor_glyph()
+            } else if row == 0 {
+                arrow_glyph()
+            } else {
+                ' '
+            };
             let (sev_cell, time_cell, src_cell) = if row == 0 {
                 (sev, alert.at.as_str(), alert.source.as_str())
             } else {
@@ -954,6 +988,68 @@ fn dag_gate_widths(cols_total: usize) -> Vec<usize> {
     allocate_columns(cols_total, &[4, 6, 10], &[10, 8, 24], 2)
 }
 
+fn dag_kv_block_lines(pairs: &[(&str, String)], width: usize) -> Vec<String> {
+    let width = width.max(32);
+    let indent = " ";
+    let indent_len = indent.chars().count();
+    let sep = " | ";
+    let sep_len = sep.chars().count();
+    let max_seg_len = width.saturating_sub(indent_len);
+
+    let mut segments: Vec<String> = Vec::new();
+    for (label, value) in pairs {
+        let label = label.trim();
+        let value = value.trim();
+        let segment = format!("{label}: {value}");
+        if segment.chars().count() <= max_seg_len {
+            segments.push(segment);
+            continue;
+        }
+
+        let prefix = format!("{label}: ");
+        let avail = max_seg_len.saturating_sub(prefix.chars().count());
+        if avail == 0 {
+            segments.push(format!("{label}:"));
+            continue;
+        }
+        for chunk in wrap_cell_text(value, avail) {
+            segments.push(format!("{label}: {chunk}"));
+        }
+    }
+
+    let mut out: Vec<String> = Vec::new();
+    let mut current: Vec<String> = Vec::new();
+    let mut current_len = indent_len;
+
+    for segment in segments {
+        let seg_len = segment.chars().count();
+        if current.is_empty() {
+            current.push(segment);
+            current_len = indent_len.saturating_add(seg_len);
+            continue;
+        }
+
+        if current_len.saturating_add(sep_len).saturating_add(seg_len) <= width {
+            current.push(segment);
+            current_len = current_len.saturating_add(sep_len).saturating_add(seg_len);
+            continue;
+        }
+
+        out.push(format!("{indent}{}", current.join(sep)));
+        current.clear();
+        current.push(segment);
+        current_len = indent_len.saturating_add(seg_len);
+    }
+
+    if !current.is_empty() {
+        out.push(format!("{indent}{}", current.join(sep)));
+    }
+    if out.is_empty() {
+        out.push(indent.to_string());
+    }
+    out
+}
+
 fn dag_lines_for_dashboard(dashboard: &SwarmDashboardView, width: usize) -> Vec<String> {
     let width = width.max(32);
     let cols_total = width.saturating_sub(1);
@@ -983,27 +1079,30 @@ fn dag_lines_for_dashboard(dashboard: &SwarmDashboardView, width: usize) -> Vec<
     };
 
     let mut out = vec![" DAG".into(), "─".repeat(width.min(240))];
-    let summary = format!(
-        "Swarm DAG {} [{status_word}] template={} phase={} done={}/{} failed={} skipped={} running={} queued={} pending={}",
-        dashboard.mission_id,
-        dashboard.template,
-        dashboard.phase,
-        dashboard.done,
-        total,
-        dashboard.failed,
-        dashboard.skipped,
-        dashboard.running,
-        dashboard.queued,
-        dashboard.pending
-    );
-    for chunk in wrap_cell_text(&summary, cols_total) {
-        out.push(format!(" {chunk}"));
-    }
+    out.extend(dag_kv_block_lines(
+        &[
+            ("Status", status_word.to_string()),
+            ("Mission", dashboard.mission_id.clone()),
+            ("Template", dashboard.template.clone()),
+            ("Phase", dashboard.phase.clone()),
+        ],
+        width,
+    ));
+
+    out.extend(dag_kv_block_lines(
+        &[
+            ("Done", format!("{}/{}", dashboard.done, total)),
+            ("Fail", dashboard.failed.to_string()),
+            ("Run", dashboard.running.to_string()),
+            ("Queue", dashboard.queued.to_string()),
+            ("Pending", dashboard.pending.to_string()),
+            ("Skip", dashboard.skipped.to_string()),
+        ],
+        width,
+    ));
+
     if let Some(bundle) = dashboard.gate_bundle.as_deref() {
-        let line = format!("Gate bundle: {bundle}");
-        for chunk in wrap_cell_text(&line, cols_total) {
-            out.push(format!(" {chunk}"));
-        }
+        out.extend(dag_kv_block_lines(&[("Gate", bundle.to_string())], width));
     }
 
     let task_widths = dag_task_widths(cols_total);
@@ -1063,8 +1162,9 @@ fn dag_lines_for_dashboard(dashboard: &SwarmDashboardView, width: usize) -> Vec<
                 } else {
                     ("", "")
                 };
+                let marker = if idx == 0 { arrow_glyph() } else { ' ' };
                 out.push(format!(
-                    " {} {} {}",
+                    "{marker} {} {} {}",
                     fit_left(id_cell, task_widths[0]),
                     fit_left(state_cell, task_widths[1]),
                     fit_left(chunk, task_widths[2]),
@@ -1074,7 +1174,7 @@ fn dag_lines_for_dashboard(dashboard: &SwarmDashboardView, width: usize) -> Vec<
             let details_1 = format!("agent: {}  role: {}", task.agent_id, role);
             let details_1_chunks = wrap_cell_text(&details_1, task_widths[2].saturating_sub(2));
             for chunk in details_1_chunks {
-                let line = format!("↳ {chunk}");
+                let line = format!("{} {chunk}", arrow_glyph());
                 out.push(format!(
                     " {} {} {}",
                     empty_id,
@@ -1089,7 +1189,7 @@ fn dag_lines_for_dashboard(dashboard: &SwarmDashboardView, width: usize) -> Vec<
             );
             let details_2_chunks = wrap_cell_text(&details_2, task_widths[2].saturating_sub(2));
             for chunk in details_2_chunks {
-                let line = format!("↳ {chunk}");
+                let line = format!("{} {chunk}", arrow_glyph());
                 out.push(format!(
                     " {} {} {}",
                     empty_id,
@@ -1150,7 +1250,7 @@ fn dag_lines_for_dashboard(dashboard: &SwarmDashboardView, width: usize) -> Vec<
 
             let note_chunks = wrap_cell_text(notes, gate_widths[2].saturating_sub(2));
             for chunk in note_chunks {
-                let line = format!("↳ {chunk}");
+                let line = format!("{} {chunk}", arrow_glyph());
                 out.push(format!(
                     " {} {} {}",
                     fit_left("", gate_widths[0]),
@@ -1225,9 +1325,7 @@ fn ops_styled_line(
     if line_idx == 0 {
         return Line::from(Span::styled(
             line.to_string(),
-            Style::default()
-                .fg(theme.title)
-                .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
+            Style::default().fg(theme.title),
         ));
     }
     if line_idx == 1 {
@@ -1257,24 +1355,43 @@ fn ops_styled_line(
     }
 }
 
-fn dag_table_bg(theme: &Theme) -> Color {
+fn ops_table_bg(theme: &Theme) -> Color {
     dim_bg_towards(theme.border, theme.background, 85)
 }
 
+fn dag_table_bg(theme: &Theme) -> Color {
+    ops_table_bg(theme)
+}
+
 fn dag_state_style(state: &str, base: Style, theme: &Theme) -> Style {
-    match state {
-        "Running" => base.fg(theme.title_focused).add_modifier(Modifier::BOLD),
-        "Queued" | "Pending" => base.fg(theme.accent).add_modifier(Modifier::BOLD),
-        "Failed" => base.fg(theme.error).add_modifier(Modifier::BOLD),
-        "Done" | "Skipped" => base.fg(theme.border).add_modifier(Modifier::DIM),
-        _ => base.fg(theme.foreground),
+    let state = state.trim();
+    if state.eq_ignore_ascii_case("running") {
+        base.fg(theme.title_focused)
+    } else if state.eq_ignore_ascii_case("queued") || state.eq_ignore_ascii_case("pending") {
+        base.fg(theme.accent)
+    } else if state.eq_ignore_ascii_case("failed") || state.eq_ignore_ascii_case("fail") {
+        base.fg(theme.error)
+    } else if state.eq_ignore_ascii_case("done")
+        || state.eq_ignore_ascii_case("skipped")
+        || state.eq_ignore_ascii_case("skip")
+    {
+        base.fg(theme.border).add_modifier(Modifier::DIM)
+    } else if state.eq_ignore_ascii_case("plan")
+        || state.eq_ignore_ascii_case("verify")
+        || state.eq_ignore_ascii_case("synth")
+    {
+        base.fg(theme.accent).add_modifier(Modifier::BOLD)
+    } else if state.eq_ignore_ascii_case("idle") || state.eq_ignore_ascii_case("empty") {
+        base.fg(theme.border).add_modifier(Modifier::DIM)
+    } else {
+        base.fg(theme.foreground)
     }
 }
 
 fn dag_gate_status_style(status: &str, base: Style, theme: &Theme) -> Style {
     match status {
-        "PASS" => base.fg(theme.title_focused).add_modifier(Modifier::BOLD),
-        "FAIL" => base.fg(theme.error).add_modifier(Modifier::BOLD),
+        "PASS" => base.fg(theme.title_focused),
+        "FAIL" => base.fg(theme.error),
         "PENDING" => base.fg(theme.border).add_modifier(Modifier::DIM),
         _ => base.fg(theme.foreground),
     }
@@ -1284,13 +1401,102 @@ fn dag_styled_line(_line_idx: usize, line: &str, usable: usize, theme: &Theme) -
     let cols_total = usable.saturating_sub(1);
     let bg = dag_table_bg(theme);
     let base = Style::default().bg(bg);
-    let header_style = base
-        .fg(theme.border)
-        .add_modifier(Modifier::DIM | Modifier::BOLD);
+    let header_style = base.fg(theme.border).add_modifier(Modifier::DIM);
     let row_style = base.fg(theme.foreground);
     let dim_row_style = base.fg(theme.border).add_modifier(Modifier::DIM);
 
     let trimmed = line.trim_start();
+    let kv_label = trimmed.split_once(':').map(|(label, _)| label.trim());
+    if kv_label.is_some_and(|label| {
+        label.eq_ignore_ascii_case("status")
+            || label.eq_ignore_ascii_case("mission")
+            || label.eq_ignore_ascii_case("template")
+            || label.eq_ignore_ascii_case("phase")
+    }) {
+        let label_style = base.fg(theme.border).add_modifier(Modifier::DIM);
+        let mut spans = Vec::new();
+        spans.push(Span::styled(" ", row_style));
+        let segments = trimmed.split('|').collect::<Vec<_>>();
+        for (idx, seg) in segments.iter().enumerate() {
+            let (label, value) = seg
+                .split_once(':')
+                .map(|(l, v)| (l.trim(), v.trim()))
+                .unwrap_or((seg.trim(), ""));
+            spans.push(Span::styled(format!("{label}:"), label_style));
+            if !value.is_empty() {
+                spans.push(Span::styled(" ", row_style));
+                let value_style = if label.eq_ignore_ascii_case("status") {
+                    dag_state_style(value, row_style, theme)
+                } else if label.eq_ignore_ascii_case("phase") {
+                    row_style.fg(theme.accent).add_modifier(Modifier::BOLD)
+                } else {
+                    row_style
+                };
+                spans.push(Span::styled(value.to_string(), value_style));
+            }
+            if idx + 1 < segments.len() {
+                spans.push(Span::styled(" | ", label_style));
+            }
+        }
+        return Line::from(spans);
+    }
+
+    if kv_label.is_some_and(|label| {
+        label.eq_ignore_ascii_case("done")
+            || label.eq_ignore_ascii_case("fail")
+            || label.eq_ignore_ascii_case("run")
+            || label.eq_ignore_ascii_case("queue")
+            || label.eq_ignore_ascii_case("pending")
+            || label.eq_ignore_ascii_case("skip")
+    }) {
+        let label_style = base.fg(theme.border).add_modifier(Modifier::DIM);
+        let mut spans = Vec::new();
+        spans.push(Span::styled(" ", row_style));
+        let segments = trimmed.split('|').collect::<Vec<_>>();
+        for (idx, seg) in segments.iter().enumerate() {
+            let (label, value) = seg
+                .split_once(':')
+                .map(|(l, v)| (l.trim(), v.trim()))
+                .unwrap_or((seg.trim(), ""));
+            let value_style = if label.eq_ignore_ascii_case("fail") {
+                row_style.fg(theme.error)
+            } else if label.eq_ignore_ascii_case("run") {
+                row_style.fg(theme.title_focused)
+            } else if label.eq_ignore_ascii_case("queue") || label.eq_ignore_ascii_case("pending") {
+                row_style.fg(theme.accent)
+            } else if label.eq_ignore_ascii_case("done") {
+                row_style.fg(theme.title)
+            } else if label.eq_ignore_ascii_case("skip") {
+                row_style.fg(theme.border).add_modifier(Modifier::DIM)
+            } else {
+                row_style
+            };
+            spans.push(Span::styled(format!("{label}:"), label_style));
+            if !value.is_empty() {
+                spans.push(Span::styled(" ", row_style));
+                spans.push(Span::styled(value.to_string(), value_style));
+            }
+            if idx + 1 < segments.len() {
+                spans.push(Span::styled(" | ", label_style));
+            }
+        }
+        return Line::from(spans);
+    }
+
+    if trimmed.starts_with("Gate:") {
+        let label_style = base.fg(theme.border).add_modifier(Modifier::DIM);
+        let value = trimmed.strip_prefix("Gate:").unwrap_or(trimmed).trim();
+        let mut spans = Vec::new();
+        spans.push(Span::styled(" ", row_style));
+        spans.push(Span::styled("Gate:", label_style));
+        spans.push(Span::styled(" ", row_style));
+        spans.push(Span::styled(
+            value.to_string(),
+            row_style.fg(theme.title_focused),
+        ));
+        return Line::from(spans);
+    }
+
     if trimmed.starts_with("Swarm DAG") || trimmed.starts_with("Gate bundle:") {
         return Line::from(Span::styled(
             line.to_string(),
@@ -1338,9 +1544,7 @@ fn dag_styled_line(_line_idx: usize, line: &str, usable: usize, theme: &Theme) -
     if let Some((marker, cols)) = split_marker_and_columns(line, &gate_widths) {
         let status = cols.get(1).map(|s| s.trim()).unwrap_or_default();
         if matches!(status, "PENDING" | "PASS" | "FAIL") {
-            let gate_style = row_style
-                .fg(theme.title_focused)
-                .add_modifier(Modifier::BOLD);
+            let gate_style = row_style.fg(theme.title_focused);
             let status_style = dag_gate_status_style(status, row_style, theme);
             let cmd_style = if cols.first().map(|s| s.trim().is_empty()).unwrap_or(false) {
                 row_style.add_modifier(Modifier::DIM)
@@ -1392,14 +1596,12 @@ fn dag_styled_line(_line_idx: usize, line: &str, usable: usize, theme: &Theme) -
 
     let is_details = id_cell.trim().is_empty()
         && state_cell.trim().is_empty()
-        && title_cell.trim_start().starts_with('↳');
+        && title_cell.trim_start().starts_with(arrow_glyph());
     let marker_style = row_style.fg(theme.border).add_modifier(Modifier::DIM);
     let id_style = if is_details {
         dim_row_style
     } else {
-        row_style
-            .fg(theme.title_focused)
-            .add_modifier(Modifier::BOLD)
+        row_style.fg(theme.title_focused)
     };
     let state_style = if is_details {
         dim_row_style
@@ -1409,7 +1611,7 @@ fn dag_styled_line(_line_idx: usize, line: &str, usable: usize, theme: &Theme) -
     let title_style = if is_details {
         row_style.add_modifier(Modifier::DIM)
     } else {
-        row_style.add_modifier(Modifier::BOLD)
+        row_style
     };
     let space_style = row_style;
 
@@ -1425,7 +1627,7 @@ fn dag_styled_line(_line_idx: usize, line: &str, usable: usize, theme: &Theme) -
 
 fn selected_row_style(style: Style, selected: bool, theme: &Theme) -> Style {
     if selected {
-        style.bg(theme.selection_bg).add_modifier(Modifier::BOLD)
+        style.bg(theme.selection_bg)
     } else {
         style
     }
@@ -1433,7 +1635,7 @@ fn selected_row_style(style: Style, selected: bool, theme: &Theme) -> Style {
 
 fn striped_row_style(style: Style, selected: bool, striped: bool, theme: &Theme) -> Style {
     if selected {
-        style.bg(theme.selection_bg).add_modifier(Modifier::BOLD)
+        style.bg(theme.selection_bg)
     } else if striped {
         // Mission zebra stripes should read as "dim background", clearly distinct from the selected
         // row highlight. Derive the stripe bg from the theme instead of hardcoding colors.
@@ -1461,18 +1663,14 @@ fn dim_bg_towards(color: Color, background: Color, background_pct: u8) -> Color 
 
 fn agent_status_style(status: AgentStatus, theme: &Theme) -> Style {
     match status {
-        AgentStatus::Running => Style::default()
-            .fg(theme.title_focused)
-            .add_modifier(Modifier::BOLD),
+        AgentStatus::Running => Style::default().fg(theme.title_focused),
         AgentStatus::Waiting => Style::default()
             .fg(theme.border)
             .add_modifier(Modifier::DIM),
         AgentStatus::Idle => Style::default()
             .fg(theme.border)
             .add_modifier(Modifier::DIM),
-        AgentStatus::Error => Style::default()
-            .fg(theme.error)
-            .add_modifier(Modifier::BOLD),
+        AgentStatus::Error => Style::default().fg(theme.error),
     }
 }
 
@@ -1482,17 +1680,13 @@ fn heartbeat_age_style(age_secs: u64, theme: &Theme) -> Style {
     } else if age_secs <= 5 {
         Style::default().fg(theme.warning)
     } else {
-        Style::default()
-            .fg(theme.error)
-            .add_modifier(Modifier::BOLD)
+        Style::default().fg(theme.error)
     }
 }
 
 fn queue_len_style(queue_len: usize, theme: &Theme) -> Style {
     if queue_len > 0 {
-        Style::default()
-            .fg(theme.accent)
-            .add_modifier(Modifier::BOLD)
+        Style::default().fg(theme.accent)
     } else {
         Style::default()
             .fg(theme.border)
@@ -1503,29 +1697,19 @@ fn queue_len_style(queue_len: usize, theme: &Theme) -> Style {
 fn alert_severity_style(severity: AgentAlertSeverity, theme: &Theme) -> Style {
     match severity {
         AgentAlertSeverity::Info => Style::default().fg(theme.title_focused),
-        AgentAlertSeverity::Warn => Style::default()
-            .fg(theme.warning)
-            .add_modifier(Modifier::BOLD),
-        AgentAlertSeverity::Error => Style::default()
-            .fg(theme.error)
-            .add_modifier(Modifier::BOLD),
+        AgentAlertSeverity::Warn => Style::default().fg(theme.warning),
+        AgentAlertSeverity::Error => Style::default().fg(theme.error),
     }
 }
 
 fn mcp_state_style(state: McpConnectionState, theme: &Theme) -> Style {
     match state {
-        McpConnectionState::Connected => Style::default()
-            .fg(theme.title_focused)
-            .add_modifier(Modifier::BOLD),
-        McpConnectionState::Connecting => Style::default()
-            .fg(theme.hl.operator)
-            .add_modifier(Modifier::BOLD),
+        McpConnectionState::Connected => Style::default().fg(theme.title_focused),
+        McpConnectionState::Connecting => Style::default().fg(theme.hl.operator),
         McpConnectionState::Disconnected => Style::default()
             .fg(theme.border)
             .add_modifier(Modifier::DIM),
-        McpConnectionState::Error => Style::default()
-            .fg(theme.error)
-            .add_modifier(Modifier::BOLD),
+        McpConnectionState::Error => Style::default().fg(theme.error),
     }
 }
 
@@ -1559,21 +1743,18 @@ fn roster_styled_line(
     usable: usize,
     theme: &Theme,
 ) -> Line<'static> {
+    let table_bg = ops_table_bg(theme);
     if line_idx == 0 {
         return Line::from(Span::styled(
             line.to_string(),
-            Style::default()
-                .fg(theme.title)
-                .add_modifier(Modifier::BOLD),
+            Style::default().fg(theme.title),
         ));
     }
     if line_idx == 1 {
         let codex_active = state.agents.agents.iter().any(|agent| agent.is_codex());
         let codex_available = state.agents.codex_cli_available || codex_active;
         let style = if codex_active {
-            Style::default()
-                .fg(theme.hl.operator)
-                .add_modifier(Modifier::BOLD)
+            Style::default().fg(theme.hl.operator)
         } else if codex_available {
             Style::default().fg(theme.foreground)
         } else {
@@ -1591,9 +1772,7 @@ fn roster_styled_line(
             .any(|agent| matches!(agent.kind, AgentLaneKind::Claude));
         let claude_available = state.agents.claude_cli_available || claude_active;
         let style = if claude_active {
-            Style::default()
-                .fg(theme.hl.operator)
-                .add_modifier(Modifier::BOLD)
+            Style::default().fg(theme.hl.operator)
         } else if claude_available {
             Style::default().fg(theme.foreground)
         } else {
@@ -1610,9 +1789,7 @@ fn roster_styled_line(
             .iter()
             .any(|agent| matches!(agent.kind, AgentLaneKind::Mock));
         let style = if local_active {
-            Style::default()
-                .fg(theme.seed.accent_2)
-                .add_modifier(Modifier::BOLD)
+            Style::default().fg(theme.seed.accent_2)
         } else {
             Style::default().fg(theme.foreground)
         };
@@ -1630,8 +1807,7 @@ fn roster_styled_line(
             .add_modifier(Modifier::DIM);
         let selected_style = Style::default()
             .fg(theme.background)
-            .bg(theme.border_focused)
-            .add_modifier(Modifier::BOLD);
+            .bg(theme.border_focused);
         let unselected_style = Style::default()
             .fg(theme.foreground)
             .bg(theme.cursor_line_bg);
@@ -1664,9 +1840,7 @@ fn roster_styled_line(
     if line_idx == 7 {
         return Line::from(Span::styled(
             line.to_string(),
-            Style::default()
-                .fg(theme.border)
-                .add_modifier(Modifier::BOLD),
+            Style::default().fg(theme.border).bg(table_bg),
         ));
     }
     if line_idx == 8 {
@@ -1674,7 +1848,8 @@ fn roster_styled_line(
             line.to_string(),
             Style::default()
                 .fg(theme.border)
-                .add_modifier(Modifier::DIM),
+                .add_modifier(Modifier::DIM)
+                .bg(table_bg),
         ));
     }
     let body_line = line_idx.saturating_sub(roster_body_offset(state));
@@ -1712,42 +1887,47 @@ fn roster_styled_line(
                 && state.agents.roster_tree_selected.is_none();
 
             let marker_style = if selected {
-                selected_row_style(
-                    Style::default()
-                        .fg(theme.accent)
-                        .add_modifier(Modifier::BOLD),
-                    true,
-                    theme,
-                )
+                selected_row_style(Style::default().fg(theme.accent).bg(table_bg), true, theme)
             } else {
                 Style::default()
                     .fg(theme.border)
                     .add_modifier(Modifier::DIM)
+                    .bg(table_bg)
             };
 
-            let role_style =
-                selected_row_style(Style::default().fg(theme.foreground), selected, theme);
-            let status_style =
-                selected_row_style(agent_status_style(agent.status, theme), selected, theme);
-            let hb_style = selected_row_style(
-                heartbeat_age_style(agent.heartbeat_age_secs, theme),
+            let role_style = selected_row_style(
+                Style::default().fg(theme.foreground).bg(table_bg),
                 selected,
                 theme,
             );
-            let q_style =
-                selected_row_style(queue_len_style(agent.queue_len, theme), selected, theme);
+            let status_style = selected_row_style(
+                agent_status_style(agent.status, theme).bg(table_bg),
+                selected,
+                theme,
+            );
+            let hb_style = selected_row_style(
+                heartbeat_age_style(agent.heartbeat_age_secs, theme).bg(table_bg),
+                selected,
+                theme,
+            );
+            let q_style = selected_row_style(
+                queue_len_style(agent.queue_len, theme).bg(table_bg),
+                selected,
+                theme,
+            );
             let mission_style = selected_row_style(
                 if agent.current_mission.is_some() {
-                    Style::default().fg(theme.title)
+                    Style::default().fg(theme.title).bg(table_bg)
                 } else {
                     Style::default()
                         .fg(theme.border)
                         .add_modifier(Modifier::DIM)
+                        .bg(table_bg)
                 },
                 selected,
                 theme,
             );
-            let space_style = selected_row_style(Style::default(), selected, theme);
+            let space_style = selected_row_style(Style::default().bg(table_bg), selected, theme);
 
             let mut spans = Vec::with_capacity(14);
             spans.push(Span::styled(marker, marker_style));
@@ -1757,13 +1937,12 @@ fn roster_styled_line(
                 let prefix = take_chars(&col0, 0, 4);
                 let rest = take_chars(&col0, 4, col0.chars().count().saturating_sub(4));
                 let base_prefix_style = if checked {
-                    Style::default()
-                        .fg(theme.warning)
-                        .add_modifier(Modifier::BOLD)
+                    Style::default().fg(theme.warning).bg(table_bg)
                 } else {
                     Style::default()
                         .fg(theme.border)
                         .add_modifier(Modifier::DIM)
+                        .bg(table_bg)
                 };
                 let prefix_style = selected_row_style(base_prefix_style, selected, theme);
                 spans.push(Span::styled(prefix, prefix_style));
@@ -1802,21 +1981,22 @@ fn roster_styled_line(
 
             let marker_style = Style::default()
                 .fg(theme.border)
-                .add_modifier(Modifier::DIM);
+                .add_modifier(Modifier::DIM)
+                .bg(table_bg);
             let base_role_style = if active {
-                Style::default()
-                    .fg(theme.foreground)
-                    .add_modifier(Modifier::BOLD)
+                Style::default().fg(theme.foreground).bg(table_bg)
             } else {
                 Style::default()
                     .fg(theme.border)
                     .add_modifier(Modifier::DIM)
+                    .bg(table_bg)
             };
             let role_style = selected_row_style(base_role_style, false, theme);
             let cell_style = selected_row_style(
                 Style::default()
                     .fg(theme.border)
-                    .add_modifier(Modifier::DIM),
+                    .add_modifier(Modifier::DIM)
+                    .bg(table_bg),
                 false,
                 theme,
             );
@@ -1855,17 +2035,12 @@ fn roster_styled_line(
                     == Some(RosterTreeSelection { branch, leaf_idx });
 
             let marker_style = if selected {
-                selected_row_style(
-                    Style::default()
-                        .fg(theme.accent)
-                        .add_modifier(Modifier::BOLD),
-                    true,
-                    theme,
-                )
+                selected_row_style(Style::default().fg(theme.accent).bg(table_bg), true, theme)
             } else {
                 Style::default()
                     .fg(theme.border)
                     .add_modifier(Modifier::DIM)
+                    .bg(table_bg)
             };
 
             let is_chosen = match branch {
@@ -1908,16 +2083,15 @@ fn roster_styled_line(
             };
 
             let base_role_style = if is_chosen {
-                Style::default()
-                    .fg(theme.title_focused)
-                    .add_modifier(Modifier::BOLD)
+                Style::default().fg(theme.title_focused).bg(table_bg)
             } else {
                 Style::default()
                     .fg(theme.border)
                     .add_modifier(Modifier::DIM)
+                    .bg(table_bg)
             };
             let role_style = selected_row_style(base_role_style, selected, theme);
-            let cell_style = selected_row_style(Style::default(), selected, theme);
+            let cell_style = selected_row_style(Style::default().bg(table_bg), selected, theme);
 
             let mut spans = Vec::with_capacity(14);
             spans.push(Span::styled(marker, marker_style));
@@ -1968,13 +2142,9 @@ fn mission_phase_style(phase: nit_core::MissionPhase, theme: &Theme) -> Style {
 fn mission_status_style(status: &str, theme: &Theme) -> Style {
     let upper = status.to_ascii_uppercase();
     if upper.contains("ERROR") || upper.contains("FAILED") {
-        Style::default()
-            .fg(theme.error)
-            .add_modifier(Modifier::BOLD)
+        Style::default().fg(theme.error)
     } else if upper.contains("WARN") {
-        Style::default()
-            .fg(theme.warning)
-            .add_modifier(Modifier::BOLD)
+        Style::default().fg(theme.warning)
     } else if upper.contains("RUNNING")
         || upper.contains("ACTIVE")
         || upper.contains("APPLIED")
@@ -2028,14 +2198,7 @@ fn mission_styled_line(
     let striped = !selected && meta.mission_idx % 2 == 1;
 
     let marker_style = if selected && meta.agent_row == Some(0) {
-        striped_row_style(
-            Style::default()
-                .fg(theme.accent)
-                .add_modifier(Modifier::BOLD),
-            selected,
-            striped,
-            theme,
-        )
+        striped_row_style(Style::default().fg(theme.accent), selected, striped, theme)
     } else {
         striped_row_style(
             Style::default()
@@ -2078,9 +2241,7 @@ fn mission_styled_line(
     let swarm_style = if is_primary_line {
         striped_row_style(
             if mission.swarm {
-                Style::default()
-                    .fg(theme.accent)
-                    .add_modifier(Modifier::BOLD)
+                Style::default().fg(theme.accent)
             } else {
                 Style::default()
                     .fg(theme.border)
@@ -2114,9 +2275,7 @@ fn mission_styled_line(
         theme,
     );
     let agent_assigned = striped_row_style(
-        Style::default()
-            .fg(theme.title_focused)
-            .add_modifier(Modifier::BOLD),
+        Style::default().fg(theme.title_focused),
         selected,
         striped,
         theme,
@@ -2211,13 +2370,9 @@ fn mcp_styled_line(
         let value_style = if key.trim() == "STATE" {
             mcp_state_style(mcp.state, theme)
         } else if key.trim() == "LATENCY" {
-            Style::default()
-                .fg(theme.accent)
-                .add_modifier(Modifier::BOLD)
+            Style::default().fg(theme.accent)
         } else if key.trim() == "LAST ERR" {
-            Style::default()
-                .fg(theme.error)
-                .add_modifier(Modifier::BOLD)
+            Style::default().fg(theme.error)
         } else {
             Style::default().fg(theme.foreground)
         };
@@ -2273,13 +2428,7 @@ fn alert_styled_line(
     let selected = meta.alert_idx == state.agents.alert_selected;
 
     let marker_style = if selected {
-        selected_row_style(
-            Style::default()
-                .fg(theme.accent)
-                .add_modifier(Modifier::BOLD),
-            true,
-            theme,
-        )
+        selected_row_style(Style::default().fg(theme.accent), true, theme)
     } else {
         Style::default()
             .fg(theme.border)
@@ -2343,9 +2492,7 @@ fn alert_styled_line(
 
 fn ops_line_style(line_idx: usize, line: &str, theme: &Theme) -> Style {
     if line_idx == 0 {
-        return Style::default()
-            .fg(theme.title)
-            .add_modifier(Modifier::BOLD | Modifier::UNDERLINED);
+        return Style::default().fg(theme.title);
     }
     if line_idx == 1 {
         return Style::default()
@@ -2373,7 +2520,7 @@ fn ops_line_style(line_idx: usize, line: &str, theme: &Theme) -> Style {
         style = style.fg(theme.border).add_modifier(Modifier::DIM);
     }
     if selected {
-        style = style.bg(theme.selection_bg).add_modifier(Modifier::BOLD);
+        style = style.bg(theme.selection_bg);
     }
     style
 }
@@ -2574,7 +2721,7 @@ mod tests {
         };
 
         let lines = dag_lines_for_dashboard(&dashboard, 80);
-        assert!(lines.iter().any(|line| line.contains("Swarm DAG")));
+        assert!(lines.iter().any(|line| line.contains("Status:")));
         assert!(lines.iter().any(|line| line.contains("t1")));
         assert!(lines.iter().any(|line| line.contains("fmt")));
     }

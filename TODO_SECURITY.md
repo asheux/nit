@@ -23,7 +23,7 @@ items with longer-term defense-in-depth work.
   - [ ] Display clear UI warning when editing a symlinked path.
 
 - [ ] **External process boundary hardening**
-  - [ ] Treat `git` and `codex` as untrusted boundaries; document that `nit` spawns both.
+  - [x] Treat `git` and `codex` as untrusted boundaries; document that `nit` spawns both.
   - [ ] Reduce PATH hijack risk:
     - resolve and display the full resolved path to `git`/`codex` at startup
     - optionally allow pinning absolute paths in config
@@ -36,10 +36,10 @@ items with longer-term defense-in-depth work.
   - [ ] Add optional redaction for obvious secret patterns before writing logs to disk.
 
 - [ ] **Dependency hygiene**
-  - [ ] Fix RustSec advisory currently flagged by `cargo deny` (e.g. update `time` to a patched version).
+  - [x] Fix RustSec advisory currently flagged by `cargo deny` (e.g. update `time` to a patched version).
   - [ ] Decide policy for BSL-1.0 dependencies (allow vs replace).
-  - [ ] Stop ignoring `Cargo.lock` for the app (commit lockfile for reproducible builds) or document why not.
-  - [ ] Add CI gates for `cargo deny` (advisories + licenses) and for `cargo clippy` correctness.
+  - [x] Stop ignoring `Cargo.lock` for the app (commit lockfile for reproducible builds) or document why not.
+  - [x] Add CI gates for `cargo deny` (advisories + licenses) and for `cargo clippy` correctness.
 
 ## Medium priority (defense in depth)
 
@@ -75,7 +75,7 @@ items with longer-term defense-in-depth work.
   - [ ] Regression corpus for terminal escape payloads and weird Unicode edge cases.
 
 - [ ] **Security documentation & process**
-  - [ ] Update `SECURITY.md` to match reality (spawns `git` as well as `codex`).
+  - [x] Update `SECURITY.md` to match reality (spawns `git` as well as `codex`).
   - [ ] Maintain a “security checklist” for releases (deny/audit, escape sanitization, safe defaults).
   - [ ] Document recommended settings for working on untrusted repos.
 
@@ -84,4 +84,3 @@ items with longer-term defense-in-depth work.
 - Prefer “secure-by-default” behavior with explicit opt-outs.
 - Assume **file contents, repo contents, and agent output are untrusted** unless user explicitly trusts them.
 - When in doubt: *don’t execute*, *don’t write outside workspace*, and *don’t render raw control sequences*.
-

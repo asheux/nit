@@ -31,7 +31,12 @@ pub fn render(
     } else {
         ""
     };
-    let file_text = file.unwrap_or_else(|| state.editor_buffer().name().to_string());
+    let buffer_name = state.editor_buffer().name().to_string();
+    let file_text = match file {
+        Some(path) => path,
+        None if buffer_name == "untitled" => state.file_tree.root.display().to_string(),
+        None => buffer_name,
+    };
     let status_text_raw = state.status.as_deref().unwrap_or_default();
     let status_text = if state.debug {
         status_text_raw.to_string()

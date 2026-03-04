@@ -190,7 +190,7 @@ pub fn write_rle_bits<W: Write>(
             "grid bitset too small",
         ));
     }
-    writeln!(writer, "x = {}, y = {}, rule = {}", width, height, rule)?;
+    writeln!(writer, "x = {width}, y = {height}, rule = {rule}")?;
     if width == 0 || height == 0 {
         writer.write_all(b"!")?;
         return Ok(());

@@ -3,6 +3,7 @@ name = "nit-gol"
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
+rust-version.workspace = true
 
 [dependencies]
 blake3 = { workspace = true }

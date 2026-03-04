@@ -506,9 +506,7 @@ pub enum RuleSelectError {
 impl std::fmt::Display for RuleSelectError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            RuleSelectError::UnknownId(value) => {
-                write!(f, "unknown rule id '{}'", value)
-            }
+            RuleSelectError::UnknownId(value) => write!(f, "unknown rule id '{value}'"),
             RuleSelectError::Parse(err) => write!(f, "{err}"),
         }
     }

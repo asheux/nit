@@ -5,7 +5,6 @@ target/
 .DS_Store
 .idea/
 .vscode/
-Cargo.lock
 gol-snapshots/
 games-runs/
 output/
@@ -17,3 +16,4 @@ perf.data.old
 flamegraph.svg
 .nit/
 vendor/
+.cargo-local/

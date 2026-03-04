@@ -115,7 +115,7 @@ fn workspace_config_path(workspace_root: &Path) -> Option<PathBuf> {
     if let Some(base) = paths::config_dir() {
         let key = workspace_root.to_string_lossy();
         let hash = stable_hash_bytes(key.as_bytes());
-        return Some(base.join("workspaces").join(format!("{:016x}.toml", hash)));
+        return Some(base.join("workspaces").join(format!("{hash:016x}.toml")));
     }
     Some(local)
 }

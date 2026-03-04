@@ -97,9 +97,9 @@ fn render_ascii_bytes(area: Rect, buf: &mut Buffer, seed: &EncodedSeed, palette:
     if cols == 0 {
         return;
     }
-    // Keep genome byte colors in the cyan family so the view doesn't become a rainbow of accents.
-    // Reserve the full accent yellow for selection/crosshair.
-    let printable_fg = mix_towards(palette.accent, palette.hud_text, 65);
+    // Keep the byte grid low-chroma: printable bytes are marked with a neutral gray, while the
+    // full accent color remains reserved for selection/crosshair.
+    let printable_fg = gray_from(palette.hud_text, 60);
     let rows = max_rows.max(1);
     let stride = digits + gap;
     for y in 0..rows {
@@ -392,6 +392,19 @@ fn mix_towards(
                 ((top.saturating_mul(inv) + base.saturating_mul(pct) + 50) / 100) as u8
             };
             ratatui::style::Color::Rgb(mix(r1, r0), mix(g1, g0), mix(b1, b0))
+        }
+        _ => color,
+    }
+}
+
+fn gray_from(color: ratatui::style::Color, strength_pct: u8) -> ratatui::style::Color {
+    let pct = strength_pct.min(100) as u16;
+    match color {
+        ratatui::style::Color::Rgb(r, g, b) => {
+            // Rec. 601 luma, then scale to keep it muted but readable on a dark background.
+            let lum = (r as u16 * 30 + g as u16 * 59 + b as u16 * 11 + 50) / 100;
+            let scaled = ((lum.saturating_mul(pct) + 50) / 100).min(255) as u8;
+            ratatui::style::Color::Rgb(scaled, scaled, scaled)
         }
         _ => color,
     }

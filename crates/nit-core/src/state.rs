@@ -522,6 +522,7 @@ pub enum AgentConsoleRowKind {
     Breather,
     StatusHeader,
     StatusRow,
+    StatusSubRow,
 }
 
 #[derive(Clone, Debug)]
@@ -581,6 +582,10 @@ pub struct AgentsState {
     pub chat_input: String,
     #[serde(default)]
     pub chat_input_cursor: usize,
+    /// Selection anchor in the Agent Chat compose box (char index in `chat_input`).
+    /// Runtime-only.
+    #[serde(skip)]
+    pub chat_input_selection_anchor: Option<usize>,
     #[serde(skip, default = "chat_input_scroll_default")]
     pub chat_input_scroll: usize,
     /// Previously submitted prompts from the Agent Chat compose box.
@@ -816,6 +821,7 @@ impl AgentsState {
             console_tab: AgentConsoleTab::Thread,
             chat_input: String::new(),
             chat_input_cursor: 0,
+            chat_input_selection_anchor: None,
             chat_input_scroll: chat_input_scroll_default(),
             chat_prompt_history: Vec::new(),
             chat_prompt_history_pos: None,
@@ -898,6 +904,7 @@ impl Default for AgentsState {
             console_tab: AgentConsoleTab::Thread,
             chat_input: String::new(),
             chat_input_cursor: 0,
+            chat_input_selection_anchor: None,
             chat_input_scroll: chat_input_scroll_default(),
             chat_prompt_history: Vec::new(),
             chat_prompt_history_pos: None,
@@ -2918,10 +2925,8 @@ fn handle_command_line(state: &mut AppState, input: &str) -> bool {
                 state.games.ca_sim.open = false;
                 state.games.analysis.open = false;
                 state.games.strategy_inspect.open = true;
-                state.games.strategy_inspect.last_error = Some(format!(
-                    "Strategy '{}' not found in run or config",
-                    target_id
-                ));
+                state.games.strategy_inspect.last_error =
+                    Some(format!("Strategy '{target_id}' not found in run or config"));
                 state.games.strategy_inspect.title = None;
                 state.games.strategy_inspect.lines.clear();
                 state.games.strategy_inspect.definition = None;
@@ -3326,7 +3331,7 @@ fn handle_command_line(state: &mut AppState, input: &str) -> bool {
 
             if let Some((n, k, two_r, t)) = rule_tuple {
                 let def = nit_games::output::StrategyDefinition {
-                    id: format!("ca_rule_{n}_{k}_{}_{}", two_r, t),
+                    id: format!("ca_rule_{n}_{k}_{two_r}_{t}"),
                     name: Some(format!(
                         "CA rule {n} (k={k}, r={}, t={t})",
                         two_r as f32 / 2.0

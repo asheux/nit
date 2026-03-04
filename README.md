@@ -29,15 +29,20 @@ just run -- path/to/file
 
 ### Toolchain
 
-- Rust stable (pinned via `rust-toolchain.toml`)
+- Rust 1.88.0 (pinned via `rust-toolchain.toml`; CI also tests `stable`)
 - ratatui + crossterm for UI/input
 - ropey, unicode-segmentation, unicode-width for text correctness
+
+### Reproducibility
+
+- `Cargo.lock` is checked in; CI uses `--locked`.
+- `time` is patched to a vendored copy at `vendor/time` (see `Cargo.toml`).
 
 ## Security Notes
 
 - No plugins.
 - No network calls from `nit` itself.
-- No arbitrary command execution; Agent Station can invoke the local `codex` CLI (no shell).
+- No arbitrary command execution; `nit` may invoke `git` and the local `codex` CLI directly (no shell).
 - Atomic file writes.
 - Terminal restored on exit and panic.
 For details see `SECURITY.md`.

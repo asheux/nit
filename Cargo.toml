@@ -16,7 +16,7 @@ edition = "2021"
 license = "MIT"
 version = "0.1.0"
 authors = ["nit contributors"]
-rust-version = "1.74"
+rust-version = "1.88.0"
 
 [workspace.dependencies]
 anyhow = "1.0"

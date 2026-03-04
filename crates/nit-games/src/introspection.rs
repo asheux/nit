@@ -233,10 +233,10 @@ pub fn format_strategy_introspection(intro: &StrategyIntrospection) -> Vec<Strin
             transitions,
             index,
         } => {
-            lines.push(format!("states: {}", states));
+            lines.push(format!("states: {states}"));
             lines.push(format!("start_state: {}", start_state.saturating_add(1)));
             if let Some(index) = index {
-                lines.push(format!("notebook_index: {}", index));
+                lines.push(format!("notebook_index: {index}"));
             }
             let outputs_str: String = outputs.iter().map(|a| a.as_char()).collect();
             lines.push(format!("outputs: {outputs_str}"));
@@ -264,10 +264,10 @@ pub fn format_strategy_introspection(intro: &StrategyIntrospection) -> Vec<Strin
             lines.extend(build_table(&headers, &rows));
         }
         StrategyIntrospectionParameters::Ca { n, k, r, t } => {
-            lines.push(format!("rule_code: {}", n));
-            lines.push(format!("symbols: {}", k));
-            lines.push(format!("radius: {}", r));
-            lines.push(format!("steps: {}", t));
+            lines.push(format!("rule_code: {n}"));
+            lines.push(format!("symbols: {k}"));
+            lines.push(format!("radius: {r}"));
+            lines.push(format!("steps: {t}"));
             lines.push("input_semantics: Flatten[history] (global A,B order)".to_string());
             lines.push("output: last cell of ShrinkingCA final row".to_string());
         }
@@ -281,14 +281,14 @@ pub fn format_strategy_introspection(intro: &StrategyIntrospection) -> Vec<Strin
             transitions,
             rule_code,
         } => {
-            lines.push(format!("states: {}", states));
-            lines.push(format!("symbols: {}", symbols));
-            lines.push(format!("start_state: {}", start_state));
-            lines.push(format!("blank: {}", blank));
-            lines.push(format!("fallback_symbol: {}", fallback_symbol));
-            lines.push(format!("max_steps_per_round: {}", max_steps_per_round));
+            lines.push(format!("states: {states}"));
+            lines.push(format!("symbols: {symbols}"));
+            lines.push(format!("start_state: {start_state}"));
+            lines.push(format!("blank: {blank}"));
+            lines.push(format!("fallback_symbol: {fallback_symbol}"));
+            lines.push(format!("max_steps_per_round: {max_steps_per_round}"));
             if let Some(code) = rule_code {
-                lines.push(format!("rule_code: {}", code));
+                lines.push(format!("rule_code: {code}"));
             }
             lines.push("input_semantics: input = FromDigits[Flatten[history], 2]".to_string());
             lines.push(

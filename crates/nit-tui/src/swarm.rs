@@ -11,6 +11,132 @@ const MAX_SWARM_SIZE: usize = 16;
 const SWARM_VERIFY_MAX_CHARS: usize = 12_000;
 const SWARM_DEP_OUTPUT_MAX_CHARS: usize = 8_000;
 
+const SWARM_ROLE_CLONES: &[(&str, &str)] = &[
+    ("propose-01", "propose"),
+    ("research", "research"),
+    ("judge", "judge"),
+    ("review", "review"),
+    ("test", "test"),
+];
+
+fn swarm_clone_base_id(agent_id: &str) -> Option<&str> {
+    agent_id.split_once("#swarm-").map(|(base_id, _)| base_id)
+}
+
+fn is_swarm_clone_agent_id(agent_id: &str) -> bool {
+    swarm_clone_base_id(agent_id).is_some()
+}
+
+fn should_spawn_role_clones(state: &AppState, agent_id: &str) -> bool {
+    state
+        .agents
+        .swarm_role_by_agent_id
+        .get(agent_id)
+        .map(|role| role.trim())
+        .is_some_and(|role| role.eq_ignore_ascii_case("all"))
+}
+
+fn copy_codex_runtime_metadata(state: &mut AppState, base_id: &str, clone_id: &str) {
+    if let Some(tokens) = state
+        .agents
+        .codex_effective_context_window_tokens
+        .get(base_id)
+        .copied()
+    {
+        state
+            .agents
+            .codex_effective_context_window_tokens
+            .insert(clone_id.to_string(), tokens);
+    }
+    if let Some(effort) = state
+        .agents
+        .codex_default_reasoning_effort
+        .get(base_id)
+        .cloned()
+    {
+        state
+            .agents
+            .codex_default_reasoning_effort
+            .insert(clone_id.to_string(), effort);
+    }
+    if let Some(efforts) = state
+        .agents
+        .codex_supported_reasoning_efforts
+        .get(base_id)
+        .cloned()
+    {
+        state
+            .agents
+            .codex_supported_reasoning_efforts
+            .insert(clone_id.to_string(), efforts);
+    }
+    if let Some(effort) = state
+        .agents
+        .codex_selected_reasoning_effort
+        .get(base_id)
+        .cloned()
+    {
+        state
+            .agents
+            .codex_selected_reasoning_effort
+            .insert(clone_id.to_string(), effort);
+    }
+}
+
+fn ensure_role_clones(state: &mut AppState, mission_id: &str, agents: &mut Vec<String>) {
+    let base_ids = agents.clone();
+    for base_id in base_ids.iter() {
+        if is_swarm_clone_agent_id(base_id) {
+            continue;
+        }
+        if !should_spawn_role_clones(state, base_id.as_str()) {
+            continue;
+        }
+        let Some(base_lane) = state
+            .agents
+            .agents
+            .iter()
+            .find(|lane| lane.id == *base_id)
+            .filter(|lane| lane.is_codex())
+            .cloned()
+        else {
+            continue;
+        };
+
+        for (clone_suffix, role_hint) in SWARM_ROLE_CLONES {
+            let clone_id = format!("{base_id}#swarm-{mission_id}-{clone_suffix}");
+            if agents.iter().any(|id| id == &clone_id) {
+                continue;
+            }
+
+            if state.agents.agents.iter().all(|lane| lane.id != clone_id) {
+                let mut lane = base_lane.clone();
+                lane.id = clone_id.clone();
+                let base_role = base_lane.role.trim();
+                let display_role = if base_role.is_empty() {
+                    format!("({role_hint})")
+                } else {
+                    format!("{base_role} ({role_hint})")
+                };
+                lane.role = display_role;
+                lane.status = AgentStatus::Idle;
+                lane.heartbeat_age_secs = 0;
+                lane.queue_len = 0;
+                lane.current_mission = None;
+                lane.last_message = String::new();
+                state.agents.agents.push(lane);
+            }
+
+            copy_codex_runtime_metadata(state, base_id, clone_id.as_str());
+            state
+                .agents
+                .swarm_role_by_agent_id
+                .insert(clone_id.clone(), role_hint.to_string());
+            agents.push(clone_id);
+        }
+    }
+}
+
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum SwarmSize {
     Default,
@@ -665,15 +791,18 @@ impl SwarmRuntime {
                 agents.push(agent_id);
             }
         }
-        if agents.len() < 2 {
-            return None;
-        }
         if !agents.iter().any(|id| id == &planner_agent_id) {
             agents.insert(0, planner_agent_id.clone());
         }
 
         let template_kind = parse_swarm_template(template.as_deref());
         let mission_id = next_mission_id(state);
+
+        ensure_role_clones(state, &mission_id, &mut agents);
+        if agents.len() < 2 {
+            return None;
+        }
+
         let title = swarm_mission_title(&root_prompt, &mission_id, template_kind);
         let at = timestamp_label(state);
         state.agents.missions.push(MissionRecord {
@@ -3477,21 +3606,39 @@ pub fn select_swarm_agents(
     template: Option<&str>,
 ) -> Vec<String> {
     let template_kind = parse_swarm_template(template);
-    let codex = state
+    let mut agents = vec![planner.to_string()];
+
+    let roster_index = state
+        .agents
+        .agents
+        .iter()
+        .enumerate()
+        .map(|(idx, lane)| (lane.id.clone(), idx))
+        .collect::<HashMap<_, _>>();
+
+    let role_hint = |state: &AppState, agent_id: &str| -> String {
+        state
+            .agents
+            .swarm_role_by_agent_id
+            .get(agent_id)
+            .map(|s| s.trim().to_ascii_lowercase())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "all".into())
+    };
+
+    let codex_pool = state
         .agents
         .agents
         .iter()
         .filter(|lane| lane.is_codex())
+        .filter(|lane| lane.id.as_str() != planner)
+        .filter(|lane| !is_swarm_clone_agent_id(lane.id.as_str()))
         .map(|lane| lane.id.clone())
         .collect::<Vec<_>>();
-    if codex.is_empty() {
-        return Vec::new();
+    if codex_pool.is_empty() {
+        return agents;
     }
-    let codex_others = codex
-        .into_iter()
-        .filter(|id| id.as_str() != planner)
-        .collect::<Vec<_>>();
-    let mut agents = vec![planner.to_string()];
+
     let target = match size {
         SwarmSize::Default => DEFAULT_SWARM_SIZE,
         SwarmSize::All => usize::MAX,
@@ -3499,33 +3646,143 @@ pub fn select_swarm_agents(
     }
     .clamp(1, MAX_SWARM_SIZE);
     let take = target.saturating_sub(1);
+    if take == 0 {
+        return agents;
+    }
 
-    let selected = if matches!(template_kind, SwarmTemplate::Parallel | SwarmTemplate::Bulk)
-        && take > 0
-        && !state.agents.swarm_priority_agent_ids.is_empty()
-    {
-        let mut priority = Vec::new();
-        let mut non_priority = Vec::new();
-        for id in codex_others.iter() {
-            if state.agents.swarm_priority_agent_ids.contains(id) {
-                priority.push(id.clone());
+    #[derive(Clone)]
+    struct Candidate {
+        id: String,
+        role_hint: String,
+        priority: bool,
+        busy: bool,
+        roster_idx: usize,
+    }
+
+    let mut pool: Vec<Candidate> = codex_pool
+        .into_iter()
+        .map(|id| Candidate {
+            roster_idx: *roster_index.get(&id).unwrap_or(&usize::MAX),
+            busy: is_agent_busy(state, id.as_str()),
+            priority: is_priority_agent(state, id.as_str()),
+            role_hint: role_hint(state, id.as_str()),
+            id,
+        })
+        .collect();
+
+    let take_best =
+        |pool: &mut Vec<Candidate>, target_role: &str, critical: bool| -> Option<Candidate> {
+            if pool.is_empty() {
+                return None;
+            }
+            pool.sort_by(|a, b| {
+                let role_match = |candidate: &Candidate| -> u8 {
+                    if candidate.role_hint.eq_ignore_ascii_case(target_role) {
+                        0
+                    } else if candidate.role_hint.eq_ignore_ascii_case("all") {
+                        1
+                    } else {
+                        2
+                    }
+                };
+
+                let priority_score = |candidate: &Candidate| -> u8 {
+                    if candidate.priority {
+                        0
+                    } else if critical {
+                        1
+                    } else {
+                        2
+                    }
+                };
+
+                (
+                    role_match(a),
+                    priority_score(a),
+                    a.busy as u8,
+                    a.roster_idx,
+                    &a.id,
+                )
+                    .cmp(&(
+                        role_match(b),
+                        priority_score(b),
+                        b.busy as u8,
+                        b.roster_idx,
+                        &b.id,
+                    ))
+            });
+            pool.first().cloned().map(|pick| {
+                let pos = pool.iter().position(|cand| cand.id == pick.id).unwrap();
+                pool.remove(pos)
+            })
+        };
+
+    let mut selected: Vec<String> = Vec::new();
+
+    if matches!(template_kind, SwarmTemplate::Parallel | SwarmTemplate::Bulk) {
+        if let Some(integrator) =
+            take_best(&mut pool, "integrate", true).or_else(|| take_best(&mut pool, "all", true))
+        {
+            selected.push(integrator.id);
+        }
+
+        let mut role_specific: Vec<Candidate> = pool
+            .iter()
+            .filter(|c| !c.role_hint.eq_ignore_ascii_case("all"))
+            .cloned()
+            .collect();
+        let mut role_all: Vec<Candidate> = pool
+            .into_iter()
+            .filter(|c| c.role_hint.eq_ignore_ascii_case("all"))
+            .collect();
+
+        let sort_by_priority = |cands: &mut Vec<Candidate>| {
+            cands.sort_by(|a, b| {
+                let priority_score = |candidate: &Candidate| -> u8 {
+                    if candidate.priority {
+                        0
+                    } else {
+                        1
+                    }
+                };
+                (priority_score(a), a.busy as u8, a.roster_idx, &a.id).cmp(&(
+                    priority_score(b),
+                    b.busy as u8,
+                    b.roster_idx,
+                    &b.id,
+                ))
+            });
+        };
+
+        sort_by_priority(&mut role_specific);
+        sort_by_priority(&mut role_all);
+
+        while selected.len() < take {
+            if let Some(candidate) = role_specific.first().cloned() {
+                role_specific.remove(0);
+                selected.push(candidate.id);
             } else {
-                non_priority.push(id.clone());
+                break;
             }
         }
-        let mut selected = Vec::new();
-        selected.extend(priority.into_iter().take(take));
-        let remaining = take.saturating_sub(selected.len());
-        selected.extend(non_priority.into_iter().take(remaining));
-        let selected_set = selected.into_iter().collect::<HashSet<_>>();
-        codex_others
-            .into_iter()
-            .filter(|id| selected_set.contains(id))
-            .take(take)
-            .collect::<Vec<_>>()
+
+        while selected.len() < take {
+            if let Some(candidate) = role_all.first().cloned() {
+                role_all.remove(0);
+                selected.push(candidate.id);
+            } else {
+                break;
+            }
+        }
     } else {
-        codex_others.into_iter().take(take).collect::<Vec<_>>()
-    };
+        while selected.len() < take {
+            if let Some(candidate) = take_best(&mut pool, "all", false) {
+                selected.push(candidate.id);
+            } else {
+                break;
+            }
+        }
+    }
 
     agents.extend(selected);
     agents
@@ -3544,6 +3801,16 @@ pub fn is_agent_busy(state: &AppState, agent_id: &str) -> bool {
             .iter()
             .find(|lane| lane.id.as_str() == agent_id)
             .is_some_and(|lane| matches!(lane.status, AgentStatus::Running))
+}
+
+fn is_priority_agent(state: &AppState, agent_id: &str) -> bool {
+    if state.agents.swarm_priority_agent_ids.contains(agent_id) {
+        return true;
+    }
+    if let Some(base_id) = swarm_clone_base_id(agent_id) {
+        return state.agents.swarm_priority_agent_ids.contains(base_id);
+    }
+    false
 }
 
 pub fn push_system_message_to_mission(state: &mut AppState, mission_id: &str, text: String) {
@@ -3609,6 +3876,217 @@ mod tests {
         assert_eq!(cmd.size, SwarmSize::Count(6));
         assert_eq!(cmd.template.as_deref(), Some("bulk"));
         assert_eq!(cmd.prompt, "do thing");
+    }
+
+    fn make_lane(id: &str, role: &str) -> AgentLane {
+        AgentLane {
+            id: id.into(),
+            role: role.into(),
+            lane: "Lane".into(),
+            kind: AgentLaneKind::Codex,
+            status: AgentStatus::Idle,
+            heartbeat_age_secs: 0,
+            queue_len: 0,
+            current_mission: None,
+            last_message: String::new(),
+        }
+    }
+
+    #[test]
+    fn swarm_clones_do_not_count_towards_swarm_size() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let editor = Buffer::empty("editor", None);
+        let notes = Buffer::empty("notes", None);
+        let mut state = AppState::new(root, editor, notes);
+        state.agents.messages.clear();
+        state.agents.agents.clear();
+
+        state.agents.agents.push(make_lane("planner", "planner"));
+        state.agents.agents.push(make_lane("a", "worker"));
+        state.agents.agents.push(make_lane("b", "worker"));
+        state.agents.agents.push(make_lane("c", "worker"));
+        state
+            .agents
+            .swarm_role_by_agent_id
+            .insert("a".into(), "integrate".into());
+
+        // These lanes are mission-scoped swarm clones and should never displace roster picks.
+        state
+            .agents
+            .agents
+            .push(make_lane("a#swarm-mis-000-propose-01", "worker"));
+        state
+            .agents
+            .agents
+            .push(make_lane("a#swarm-mis-000-judge", "worker"));
+        state
+            .agents
+            .swarm_role_by_agent_id
+            .insert("a#swarm-mis-000-propose-01".into(), "propose".into());
+        state
+            .agents
+            .swarm_role_by_agent_id
+            .insert("a#swarm-mis-000-judge".into(), "judge".into());
+
+        let agents = select_swarm_agents(&state, "planner", SwarmSize::Count(4), Some("parallel"));
+
+        assert_eq!(agents, vec!["planner", "a", "b", "c"]);
+    }
+
+    #[test]
+    fn role_all_agent_spawns_all_role_clones() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let editor = Buffer::empty("editor", None);
+        let notes = Buffer::empty("notes", None);
+        let mut state = AppState::new(root, editor, notes);
+        state.agents.messages.clear();
+        state.agents.missions.clear();
+        state.agents.agents.clear();
+
+        state.agents.agents.push(make_lane("planner", "planner"));
+        state.agents.agents.push(make_lane("a", "worker"));
+        state
+            .agents
+            .swarm_role_by_agent_id
+            .insert("a".into(), "all".into());
+
+        let mut swarm = SwarmRuntime::default();
+        let (mission_id, _dispatches) = swarm
+            .start(
+                &mut state,
+                "planner".into(),
+                vec!["planner".into(), "a".into()],
+                Some("parallel".into()),
+                "root".into(),
+            )
+            .expect("swarm start");
+
+        assert_eq!(mission_id, "mis-001");
+        let mission = state
+            .agents
+            .missions
+            .iter()
+            .find(|mission| mission.id == mission_id)
+            .expect("mission");
+        assert_eq!(
+            mission.assigned_agents,
+            vec![
+                "planner",
+                "a",
+                "a#swarm-mis-001-propose-01",
+                "a#swarm-mis-001-research",
+                "a#swarm-mis-001-judge",
+                "a#swarm-mis-001-review",
+                "a#swarm-mis-001-test",
+            ]
+        );
+    }
+
+    #[test]
+    fn parallel_priority_agents_ranked_before_non_priority() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let editor = Buffer::empty("editor", None);
+        let notes = Buffer::empty("notes", None);
+        let mut state = AppState::new(root, editor, notes);
+        state.agents.messages.clear();
+        state.agents.agents.clear();
+
+        state.agents.agents.push(make_lane("planner", "planner"));
+        state.agents.agents.push(make_lane("a", "worker"));
+        state.agents.agents.push(make_lane("b", "worker"));
+        state.agents.agents.push(make_lane("c", "worker"));
+        state.agents.agents.push(make_lane("d", "worker"));
+
+        state.agents.swarm_priority_agent_ids.insert("b".into());
+        state.agents.swarm_priority_agent_ids.insert("d".into());
+
+        let agents = select_swarm_agents(&state, "planner", SwarmSize::Count(4), Some("parallel"));
+
+        assert_eq!(agents, vec!["planner", "b", "d", "a"]);
+    }
+
+    #[test]
+    fn parallel_priority_ties_keep_priority_order() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let editor = Buffer::empty("editor", None);
+        let notes = Buffer::empty("notes", None);
+        let mut state = AppState::new(root, editor, notes);
+        state.agents.agents.clear();
+
+        for id in ["planner", "a", "b", "c"] {
+            state.agents.agents.push(make_lane(id, "worker"));
+            state
+                .agents
+                .swarm_role_by_agent_id
+                .insert(id.into(), "all".into());
+        }
+        state.agents.swarm_priority_agent_ids.insert("a".into());
+        state.agents.swarm_priority_agent_ids.insert("b".into());
+
+        let agents = select_swarm_agents(&state, "planner", SwarmSize::Count(3), Some("parallel"));
+
+        assert_eq!(agents, vec!["planner", "a", "b"]);
+    }
+
+    #[test]
+    fn bulk_priority_respects_role_hints() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let editor = Buffer::empty("editor", None);
+        let notes = Buffer::empty("notes", None);
+        let mut state = AppState::new(root, editor, notes);
+        state.agents.agents.clear();
+
+        state.agents.agents.push(make_lane("planner", "planner"));
+        state.agents.agents.push(make_lane("a", "worker"));
+        state.agents.agents.push(make_lane("b", "worker"));
+        state.agents.agents.push(make_lane("c", "worker"));
+        state.agents.agents.push(make_lane("d", "worker"));
+
+        state
+            .agents
+            .swarm_role_by_agent_id
+            .insert("a".into(), "all".into());
+        state
+            .agents
+            .swarm_role_by_agent_id
+            .insert("b".into(), "all".into());
+        state
+            .agents
+            .swarm_role_by_agent_id
+            .insert("c".into(), "propose".into());
+        state
+            .agents
+            .swarm_role_by_agent_id
+            .insert("d".into(), "propose".into());
+
+        state.agents.swarm_priority_agent_ids.insert("b".into());
+        state.agents.swarm_priority_agent_ids.insert("c".into());
+
+        let agents = select_swarm_agents(&state, "planner", SwarmSize::Count(4), Some("bulk"));
+
+        assert_eq!(agents, vec!["planner", "b", "c", "d"]);
+    }
+
+    #[test]
+    fn bulk_priority_agents_ranked_before_non_priority() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let editor = Buffer::empty("editor", None);
+        let notes = Buffer::empty("notes", None);
+        let mut state = AppState::new(root, editor, notes);
+        state.agents.agents.clear();
+
+        state.agents.agents.push(make_lane("planner", "planner"));
+        state.agents.agents.push(make_lane("a", "worker"));
+        state.agents.agents.push(make_lane("b", "worker"));
+        state.agents.agents.push(make_lane("c", "worker"));
+        state.agents.agents.push(make_lane("d", "worker"));
+
+        state.agents.swarm_priority_agent_ids.insert("b".into());
+        state.agents.swarm_priority_agent_ids.insert("d".into());
+
+        let agents = select_swarm_agents(&state, "planner", SwarmSize::Count(4), Some("bulk"));
+
+        assert_eq!(agents, vec!["planner", "b", "d", "a"]);
     }
 
     #[test]

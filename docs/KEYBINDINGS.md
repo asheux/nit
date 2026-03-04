@@ -84,7 +84,7 @@
   - Mouse: Click the model name (left column) to expand; click again to collapse
   - Space/Enter (in the tree): Select the highlighted Size/Role option
 - r / s / x: MCP reconnect / start / stop (MCP tab; default runtime for Codex, override with `--codex-runtime exec`)
-  - Note: MCP reconnect/stop clears Codex thread context for continuations.
+  - Note: MCP reconnect preserves thread context; MCP stop clears it. If Codex reports “Session not found for thread_id …”, nit drops that agent’s saved thread id.
 - Ctrl+Space / F6: Pause/resume active Petri/tournament runtime (global)
 
 ## Agent Chat

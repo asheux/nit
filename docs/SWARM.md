@@ -293,13 +293,14 @@ Quick checks:
 ### MCP reconnect and context (“Session not found for thread_id …”)
 
 In MCP mode, reconnecting can invalidate the Codex “thread/session id” that nit uses for
-continuations (`codex-reply`). To avoid a broken state where every prompt fails with
-`Session not found for thread_id …`, nit clears saved Codex thread ids on MCP reconnect/stop.
+continuations (`codex-reply`).
 
-Implication:
+Behavior:
 
-- After MCP reconnect/stop, **your next prompt starts a new Codex thread** (context does not
-  continue automatically).
+- **MCP reconnect (`r`) preserves** saved Codex thread ids for continuations.
+- If Codex later reports `Session not found for thread_id …`, nit **drops the stored thread id for
+  that agent** so the next prompt starts a fresh thread (avoids broken “resume” loops).
+- **MCP stop (`x`) clears** saved thread ids (next prompt starts a new thread).
 
 If you need more stable “resume” semantics under a flaky MCP transport, run with:
 
