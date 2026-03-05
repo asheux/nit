@@ -10,7 +10,8 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use crate::swarm::{
-    is_agent_busy, parse_swarm_command, select_swarm_agents, SwarmCommand, SwarmRuntime, SwarmSize,
+    is_agent_busy, normalize_role_label, parse_swarm_command, select_swarm_agents, SwarmCommand,
+    SwarmRuntime, SwarmSize,
 };
 use crate::{
     codex_runner::{CodexCommand, CodexRunner, CodexRunnerConfig, CodexRuntimeMode},
@@ -2490,7 +2491,7 @@ fn move_agent_ops_selection(state: &mut AppState, delta: i32) -> bool {
                     .unwrap_or(&[]);
                 let size_len = efforts.len();
                 let has_roles = show_roles && agent.is_codex();
-                let roles_len = if has_roles { 7usize } else { 0usize };
+                let roles_len = if has_roles { 8usize } else { 0usize };
 
                 match sel.branch {
                     nit_core::RosterTreeBranch::Size => {
@@ -2663,6 +2664,25 @@ fn move_agent_ops_selection(state: &mut AppState, delta: i32) -> bool {
     }
 }
 
+const SWARM_ROLE_OPTIONS: [&str; 8] = [
+    "all",
+    "propose",
+    "research",
+    "computational-research",
+    "judge",
+    "integrate",
+    "review",
+    "test",
+];
+
+fn normalize_swarm_role_hint_for_roster(raw: &str) -> String {
+    let role = raw.trim();
+    if role.eq_ignore_ascii_case("all") {
+        return "all".into();
+    }
+    normalize_role_label(role).unwrap_or_else(|| role.to_ascii_lowercase())
+}
+
 fn enter_roster_tree_cursor(state: &mut AppState) -> bool {
     if state.agents.roster_tree_selected.is_some() {
         return false;
@@ -2716,15 +2736,6 @@ fn enter_roster_tree_cursor(state: &mut AppState) -> bool {
     }
 
     if has_roles {
-        let roles = [
-            "all",
-            "propose",
-            "research",
-            "judge",
-            "integrate",
-            "review",
-            "test",
-        ];
         let current = state
             .agents
             .swarm_role_by_agent_id
@@ -2732,9 +2743,14 @@ fn enter_roster_tree_cursor(state: &mut AppState) -> bool {
             .map(|s| s.trim())
             .filter(|s| !s.is_empty());
         let idx = current
-            .and_then(|role| roles.iter().position(|r| r.eq_ignore_ascii_case(role)))
+            .and_then(|role| {
+                let current = normalize_swarm_role_hint_for_roster(role);
+                SWARM_ROLE_OPTIONS.iter().position(|candidate| {
+                    current == normalize_swarm_role_hint_for_roster(candidate)
+                })
+            })
             .unwrap_or(0)
-            .min(roles.len().saturating_sub(1));
+            .min(SWARM_ROLE_OPTIONS.len().saturating_sub(1));
         state.agents.roster_tree_selected = Some(nit_core::RosterTreeSelection {
             branch: nit_core::RosterTreeBranch::Role,
             leaf_idx: idx,
@@ -2805,16 +2821,7 @@ fn select_roster_tree_leaf(state: &mut AppState) -> bool {
             true
         }
         nit_core::RosterTreeBranch::Role => {
-            let roles = [
-                "all",
-                "propose",
-                "research",
-                "judge",
-                "integrate",
-                "review",
-                "test",
-            ];
-            let Some(role) = roles.get(sel.leaf_idx).copied() else {
+            let Some(role) = SWARM_ROLE_OPTIONS.get(sel.leaf_idx).copied() else {
                 return false;
             };
 
@@ -2839,7 +2846,10 @@ fn select_roster_tree_leaf(state: &mut AppState) -> bool {
                 .swarm_role_by_agent_id
                 .get(&agent.id)
                 .map(|s| s.as_str());
-            if current.is_some_and(|cur| cur.eq_ignore_ascii_case(role)) {
+            if current.is_some_and(|cur| {
+                normalize_swarm_role_hint_for_roster(cur)
+                    == normalize_swarm_role_hint_for_roster(role)
+            }) {
                 return false;
             }
             state
@@ -7893,15 +7903,6 @@ fn apply_agent_ops_click_selection(
                                     .min(efforts.len().saturating_sub(1))
                             }
                             nit_core::RosterTreeBranch::Role => {
-                                let roles = [
-                                    "all",
-                                    "propose",
-                                    "research",
-                                    "judge",
-                                    "integrate",
-                                    "review",
-                                    "test",
-                                ];
                                 let current = state
                                     .agents
                                     .swarm_role_by_agent_id
@@ -7910,10 +7911,14 @@ fn apply_agent_ops_click_selection(
                                     .filter(|s| !s.is_empty());
                                 current
                                     .and_then(|role| {
-                                        roles.iter().position(|r| r.eq_ignore_ascii_case(role))
+                                        let current = normalize_swarm_role_hint_for_roster(role);
+                                        SWARM_ROLE_OPTIONS.iter().position(|candidate| {
+                                            current
+                                                == normalize_swarm_role_hint_for_roster(candidate)
+                                        })
                                     })
                                     .unwrap_or(0)
-                                    .min(roles.len().saturating_sub(1))
+                                    .min(SWARM_ROLE_OPTIONS.len().saturating_sub(1))
                             }
                         };
                         state.agents.roster_tree_selected =

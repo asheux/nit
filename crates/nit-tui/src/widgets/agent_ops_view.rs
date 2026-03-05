@@ -10,7 +10,7 @@ use ratatui::{
     Frame,
 };
 
-use crate::swarm::{SwarmDashboardView, SwarmRuntime};
+use crate::swarm::{normalize_role_label, SwarmDashboardView, SwarmRuntime};
 use crate::theme::Theme;
 use crate::widgets::text_selection::apply_ui_selection;
 
@@ -49,6 +49,16 @@ pub fn roster_body_offset(state: &AppState) -> usize {
 pub const ROSTER_SWARM_TEMPLATE_LINE_IDX: usize = 5;
 
 const ROSTER_SWARM_TEMPLATE_LINE: &str = " Swarm template:  lab   parallel   bulk ";
+const ROSTER_ROLE_OPTIONS: [&str; 8] = [
+    "all",
+    "propose",
+    "research",
+    "computational-research",
+    "judge",
+    "integrate",
+    "review",
+    "test",
+];
 
 pub fn roster_swarm_template_hit(col: usize) -> Option<&'static str> {
     for label in ["lab", "parallel", "bulk"] {
@@ -97,6 +107,29 @@ fn cursor_glyph() -> char {
     } else {
         CURSOR_PRIMARY
     }
+}
+
+fn normalize_roster_role_hint(raw: &str) -> String {
+    let role = raw.trim();
+    if role.eq_ignore_ascii_case("all") {
+        return "all".into();
+    }
+    normalize_role_label(role).unwrap_or_else(|| role.to_ascii_lowercase())
+}
+
+fn table_role_label(role: &str) -> String {
+    let role = role.trim();
+    if role.is_empty() {
+        return String::new();
+    }
+
+    // Keep existing role casing/labels, but force a single canonical display spelling for this
+    // legacy role variant.
+    if normalize_role_label(role).as_deref() == Some("computational-research") {
+        return "computational-research".into();
+    }
+
+    role.to_string()
 }
 
 pub fn alert_index_for_body_line(
@@ -158,7 +191,7 @@ fn roster_body_meta(state: &AppState, body_line: usize) -> Option<RosterBodyMeta
 
                 let leaf_len = match branch {
                     RosterTreeBranch::Size => efforts.len(),
-                    RosterTreeBranch::Role => 7, // All + propose/research/judge/integrate/review/test
+                    RosterTreeBranch::Role => ROSTER_ROLE_OPTIONS.len(),
                 };
                 if body_line < cursor.saturating_add(leaf_len) {
                     return Some(RosterBodyMeta {
@@ -578,7 +611,10 @@ fn roster_lines(state: &AppState, width: usize) -> Vec<String> {
         };
         out.push(format!(
             "{marker}{} {} {} {} {}",
-            fit_left(&format!("{priority_prefix}{}", agent.role), widths[0]),
+            fit_left(
+                &format!("{priority_prefix}{}", table_role_label(agent.role.as_str())),
+                widths[0],
+            ),
             fit_left(agent.status.label(), widths[1]),
             fit_right(&format!("{}s", agent.heartbeat_age_secs), widths[2]),
             fit_right(&agent.queue_len.to_string(), widths[3]),
@@ -667,16 +703,8 @@ fn roster_lines(state: &AppState, width: usize) -> Vec<String> {
                     .map(|s| s.trim().to_ascii_lowercase())
                     .filter(|s| !s.is_empty())
                     .unwrap_or_else(|| "all".into());
-                let roles = [
-                    "all",
-                    "propose",
-                    "research",
-                    "judge",
-                    "integrate",
-                    "review",
-                    "test",
-                ];
-                for (role_idx, role) in roles.iter().enumerate() {
+                let chosen = normalize_roster_role_hint(chosen.as_str());
+                for (role_idx, role) in ROSTER_ROLE_OPTIONS.iter().enumerate() {
                     let marker = if state.agents.roster_tree_selected
                         == Some(RosterTreeSelection {
                             branch: RosterTreeBranch::Role,
@@ -686,7 +714,7 @@ fn roster_lines(state: &AppState, width: usize) -> Vec<String> {
                     } else {
                         ' '
                     };
-                    let checked = if chosen.eq_ignore_ascii_case(role) {
+                    let checked = if chosen == normalize_roster_role_hint(role) {
                         "x"
                     } else {
                         " "
@@ -1147,7 +1175,11 @@ fn dag_lines_for_dashboard(dashboard: &SwarmDashboardView, width: usize) -> Vec<
             } else {
                 task.deps.join(",")
             };
-            let role = task.role.as_deref().unwrap_or("-");
+            let role = task
+                .role
+                .as_deref()
+                .map(table_role_label)
+                .unwrap_or_else(|| "-".into());
             let writes = if task.writes { "yes" } else { "no" };
             let out_present = if task.output_present { "yes" } else { "no" };
             let done_when = task
@@ -2076,18 +2108,10 @@ fn roster_styled_line(
                         .map(|s| s.trim())
                         .filter(|s| !s.is_empty())
                         .unwrap_or("all");
-                    let roles = [
-                        "all",
-                        "propose",
-                        "research",
-                        "judge",
-                        "integrate",
-                        "review",
-                        "test",
-                    ];
-                    roles
+                    let chosen = normalize_roster_role_hint(chosen);
+                    ROSTER_ROLE_OPTIONS
                         .get(leaf_idx)
-                        .is_some_and(|role| chosen.eq_ignore_ascii_case(role))
+                        .is_some_and(|role| chosen == normalize_roster_role_hint(role))
                 }
             };
 
@@ -2618,11 +2642,12 @@ fn roster_column_widths(width: usize) -> Vec<usize> {
     // listing model slugs). Keep MISSION readable, but bias extra width to ROLE instead of letting
     // it all pool in the last column.
     let cols_total = width.saturating_sub(1);
-    let mut widths = allocate_columns(cols_total, &[4, 6, 2, 1, 7], &[24, 10, 4, 2, 14], 4);
+    // +2 ROLE / -2 MISSION vs prior sizing so `computational-research` fits more comfortably.
+    let mut widths = allocate_columns(cols_total, &[4, 6, 2, 1, 7], &[28, 10, 4, 2, 10], 4);
 
     // `allocate_columns` gives any extra space to the last column (MISSION). Shift surplus back to
     // ROLE so long model slugs don't get truncated while the right side sits empty.
-    let mission_cap = 14usize;
+    let mission_cap = 10usize;
     if widths.len() == 5 && widths[4] > mission_cap {
         let extra = widths[4].saturating_sub(mission_cap);
         widths[4] = widths[4].saturating_sub(extra);
@@ -2693,7 +2718,7 @@ fn split_at_chars(text: &str, count: usize) -> (&str, &str) {
 
 #[cfg(test)]
 mod tests {
-    use super::dag_lines_for_dashboard;
+    use super::{dag_lines_for_dashboard, roster_column_widths, table_role_label};
     use crate::swarm::{SwarmDashboardView, SwarmGateDashboardRow, SwarmTaskDashboardRow};
 
     #[test]
@@ -2782,5 +2807,31 @@ mod tests {
             lines.iter().any(|line| line.trim_end().ends_with('\\')),
             "expected wrapped commands to use backslash continuation"
         );
+    }
+
+    #[test]
+    fn role_label_canonicalizes_computational_research_display_only() {
+        assert_eq!(
+            table_role_label("computational research"),
+            "computational-research"
+        );
+        assert_eq!(
+            table_role_label("Computational Research"),
+            "computational-research"
+        );
+        assert_eq!(
+            table_role_label("computational-research"),
+            "computational-research"
+        );
+        assert_eq!(table_role_label("Planner"), "Planner");
+    }
+
+    #[test]
+    fn roster_column_widths_prioritize_pri_role_with_stable_total_width() {
+        let widths = roster_column_widths(80);
+        assert_eq!(widths.len(), 5);
+        assert_eq!(widths.iter().sum::<usize>() + 4, 79);
+        assert_eq!(widths[4], 10);
+        assert!(widths[0] > widths[4]);
     }
 }

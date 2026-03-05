@@ -25,7 +25,7 @@ impl Default for CodexRunnerConfig {
     fn default() -> Self {
         Self {
             sandbox: None,
-            approval_policy: None,
+            approval_policy: Some("never".into()),
             max_parallel_turns: 2,
         }
     }

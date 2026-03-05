@@ -10,10 +10,13 @@ const DEFAULT_SWARM_SIZE: usize = 4;
 const MAX_SWARM_SIZE: usize = 16;
 const SWARM_VERIFY_MAX_CHARS: usize = 12_000;
 const SWARM_DEP_OUTPUT_MAX_CHARS: usize = 8_000;
+const COMPUTATIONAL_RESEARCH_ROLE: &str = "computational-research";
+const COMPUTATIONAL_RESEARCH_ROLE_LEGACY: &str = "computational research";
 
 const SWARM_ROLE_CLONES: &[(&str, &str)] = &[
     ("propose-01", "propose"),
     ("research", "research"),
+    ("computational-research", COMPUTATIONAL_RESEARCH_ROLE),
     ("judge", "judge"),
     ("review", "review"),
     ("test", "test"),
@@ -506,6 +509,16 @@ impl SwarmTaskState {
         )
     }
 }
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum SwarmDagValidationMode {
+    /// Reject plans with cycles/unknown deps (do not auto-repair).
+    Strict,
+    /// Attempt to make the graph runnable (drop unknown deps + break cycles) with warnings.
+    Repair,
+}
+
+const DEFAULT_DAG_VALIDATION_MODE: SwarmDagValidationMode = SwarmDagValidationMode::Strict;
 
 #[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct SwarmTaskArtifacts {
@@ -1015,7 +1028,7 @@ impl SwarmRuntime {
                             .filter(|id| *id != &run.planner_agent_id)
                             .cloned()
                             .collect::<Vec<_>>();
-                        let parsed = parse_plan_from_planner(
+                        let mut parsed = parse_plan_from_planner(
                             message,
                             run.template,
                             &run.root_prompt,
@@ -1023,6 +1036,91 @@ impl SwarmRuntime {
                             run.integrator_agent_id.as_deref(),
                             run.integrator_locked,
                         );
+                        parsed.warnings.extend(apply_role_dependency_ordering(
+                            state.workspace_root.as_path(),
+                            &state.agents.swarm_role_by_agent_id,
+                            parsed.tasks.as_mut_slice(),
+                        ));
+
+                        let dag_mode = match read_workspace_dag_validation_mode(
+                            state.workspace_root.as_path(),
+                        ) {
+                            Ok(Some(mode)) => mode,
+                            Ok(None) => DEFAULT_DAG_VALIDATION_MODE,
+                            Err(err) => {
+                                push_system_message_to_mission(
+                                    state,
+                                    &run.mission_id,
+                                    format!(
+                                        "PLAN warning: DAG validation config error: {err}; using default mode 'strict'."
+                                    ),
+                                );
+                                DEFAULT_DAG_VALIDATION_MODE
+                            }
+                        };
+
+                        let dag_issues = analyze_swarm_dag(parsed.tasks.as_slice());
+                        if !dag_issues.is_empty() {
+                            match dag_mode {
+                                SwarmDagValidationMode::Strict => {
+                                    push_system_message_to_mission(
+                                        state,
+                                        &run.mission_id,
+                                        format!(
+                                            "PLAN error: invalid task DAG ({}). Set `[swarm] dag_validation = \"repair\"` in `.nit/config.toml` to auto-repair.",
+                                            dag_issues.summary()
+                                        ),
+                                    );
+                                    for task in parsed.tasks.iter_mut() {
+                                        if task.state.is_terminal() {
+                                            continue;
+                                        }
+                                        task.state = SwarmTaskState::Skipped;
+                                        task.failed = true;
+                                        if task.output.is_none() {
+                                            task.output = Some(
+                                                "SKIPPED (preflight: invalid task DAG)".into(),
+                                            );
+                                        }
+                                    }
+                                }
+                                SwarmDagValidationMode::Repair => {
+                                    let mut warnings =
+                                        repair_swarm_dag(parsed.tasks.as_mut_slice());
+                                    let after = analyze_swarm_dag(parsed.tasks.as_slice());
+                                    if !after.is_empty() {
+                                        push_system_message_to_mission(
+                                            state,
+                                            &run.mission_id,
+                                            format!(
+                                                "PLAN error: DAG auto-repair failed ({}); aborting.",
+                                                after.summary()
+                                            ),
+                                        );
+                                        for task in parsed.tasks.iter_mut() {
+                                            if task.state.is_terminal() {
+                                                continue;
+                                            }
+                                            task.state = SwarmTaskState::Skipped;
+                                            task.failed = true;
+                                            if task.output.is_none() {
+                                                task.output = Some(
+                                                    "SKIPPED (preflight: DAG auto-repair failed)"
+                                                        .into(),
+                                                );
+                                            }
+                                        }
+                                    } else if warnings.is_empty() {
+                                        warnings.push(
+                                            "DAG repair: plan had DAG issues; no changes needed."
+                                                .into(),
+                                        );
+                                    }
+                                    parsed.warnings.append(&mut warnings);
+                                }
+                            }
+                        }
+
                         for warning in parsed.warnings.iter() {
                             push_system_message_to_mission(
                                 state,
@@ -1088,15 +1186,11 @@ impl SwarmRuntime {
                         update_mission_phase(state, &run.mission_id, MissionPhase::Execute);
                         refresh_task_readiness(&mut run);
                         dispatches.extend(dispatch_ready_tasks(&mut run));
-                        let skipped = maybe_resolve_deadlock(&mut run);
-                        if !skipped.is_empty() {
+                        if let Some(deadlock) = maybe_resolve_deadlock(&mut run) {
                             push_system_message_to_mission(
                                 state,
                                 &run.mission_id,
-                                format!(
-                                    "Swarm deadlock: skipping tasks with unresolvable deps: {}",
-                                    skipped.join(", ")
-                                ),
+                                deadlock.message,
                             );
                         }
                         let done = tasks_terminal_count(&run.tasks);
@@ -1153,15 +1247,11 @@ impl SwarmRuntime {
                         }
                         refresh_task_readiness(&mut run);
                         dispatches.extend(dispatch_ready_tasks(&mut run));
-                        let skipped = maybe_resolve_deadlock(&mut run);
-                        if !skipped.is_empty() {
+                        if let Some(deadlock) = maybe_resolve_deadlock(&mut run) {
                             push_system_message_to_mission(
                                 state,
                                 &run.mission_id,
-                                format!(
-                                    "Swarm deadlock: skipping tasks with unresolvable deps: {}",
-                                    skipped.join(", ")
-                                ),
+                                deadlock.message,
                             );
                         }
                         let done = tasks_terminal_count(&run.tasks);
@@ -1295,13 +1385,105 @@ impl SwarmRuntime {
                             .filter(|id| *id != &run.planner_agent_id)
                             .cloned()
                             .collect::<Vec<_>>();
-                        let parsed = fallback_tasks(
+                        let mut parsed = fallback_tasks(
                             run.template,
                             &run.root_prompt,
                             &available,
                             Some(message),
                             run.integrator_agent_id.as_deref(),
                         );
+                        parsed.warnings.extend(apply_role_dependency_ordering(
+                            state.workspace_root.as_path(),
+                            &state.agents.swarm_role_by_agent_id,
+                            parsed.tasks.as_mut_slice(),
+                        ));
+
+                        let dag_mode = match read_workspace_dag_validation_mode(
+                            state.workspace_root.as_path(),
+                        ) {
+                            Ok(Some(mode)) => mode,
+                            Ok(None) => DEFAULT_DAG_VALIDATION_MODE,
+                            Err(err) => {
+                                push_system_message_to_mission(
+                                    state,
+                                    &run.mission_id,
+                                    format!(
+                                        "PLAN warning: DAG validation config error: {err}; using default mode 'strict'."
+                                    ),
+                                );
+                                DEFAULT_DAG_VALIDATION_MODE
+                            }
+                        };
+
+                        let dag_issues = analyze_swarm_dag(parsed.tasks.as_slice());
+                        if !dag_issues.is_empty() {
+                            match dag_mode {
+                                SwarmDagValidationMode::Strict => {
+                                    push_system_message_to_mission(
+                                        state,
+                                        &run.mission_id,
+                                        format!(
+                                            "PLAN error: invalid task DAG ({}). Set `[swarm] dag_validation = \"repair\"` in `.nit/config.toml` to auto-repair.",
+                                            dag_issues.summary()
+                                        ),
+                                    );
+                                    for task in parsed.tasks.iter_mut() {
+                                        if task.state.is_terminal() {
+                                            continue;
+                                        }
+                                        task.state = SwarmTaskState::Skipped;
+                                        task.failed = true;
+                                        if task.output.is_none() {
+                                            task.output = Some(
+                                                "SKIPPED (preflight: invalid task DAG)".into(),
+                                            );
+                                        }
+                                    }
+                                }
+                                SwarmDagValidationMode::Repair => {
+                                    let mut warnings =
+                                        repair_swarm_dag(parsed.tasks.as_mut_slice());
+                                    let after = analyze_swarm_dag(parsed.tasks.as_slice());
+                                    if !after.is_empty() {
+                                        push_system_message_to_mission(
+                                            state,
+                                            &run.mission_id,
+                                            format!(
+                                                "PLAN error: DAG auto-repair failed ({}); aborting.",
+                                                after.summary()
+                                            ),
+                                        );
+                                        for task in parsed.tasks.iter_mut() {
+                                            if task.state.is_terminal() {
+                                                continue;
+                                            }
+                                            task.state = SwarmTaskState::Skipped;
+                                            task.failed = true;
+                                            if task.output.is_none() {
+                                                task.output = Some(
+                                                    "SKIPPED (preflight: DAG auto-repair failed)"
+                                                        .into(),
+                                                );
+                                            }
+                                        }
+                                    } else if warnings.is_empty() {
+                                        warnings.push(
+                                            "DAG repair: plan had DAG issues; no changes needed."
+                                                .into(),
+                                        );
+                                    }
+                                    parsed.warnings.append(&mut warnings);
+                                }
+                            }
+                        }
+
+                        for warning in parsed.warnings.iter() {
+                            push_system_message_to_mission(
+                                state,
+                                &run.mission_id,
+                                format!("PLAN warning: {warning}"),
+                            );
+                        }
                         let prev_integrator = run.integrator_agent_id.clone();
                         let prev_verifier = run.verifier_agent_id.clone();
                         if parsed.integrator_agent_id.is_some() {
@@ -1360,15 +1542,11 @@ impl SwarmRuntime {
                         initialize_task_graph(&mut run);
                         refresh_task_readiness(&mut run);
                         dispatches.extend(dispatch_ready_tasks(&mut run));
-                        let skipped = maybe_resolve_deadlock(&mut run);
-                        if !skipped.is_empty() {
+                        if let Some(deadlock) = maybe_resolve_deadlock(&mut run) {
                             push_system_message_to_mission(
                                 state,
                                 &run.mission_id,
-                                format!(
-                                    "Swarm deadlock: skipping tasks with unresolvable deps: {}",
-                                    skipped.join(", ")
-                                ),
+                                deadlock.message,
                             );
                         }
                         let done = tasks_terminal_count(&run.tasks);
@@ -1425,15 +1603,11 @@ impl SwarmRuntime {
                         }
                         refresh_task_readiness(&mut run);
                         dispatches.extend(dispatch_ready_tasks(&mut run));
-                        let skipped = maybe_resolve_deadlock(&mut run);
-                        if !skipped.is_empty() {
+                        if let Some(deadlock) = maybe_resolve_deadlock(&mut run) {
                             push_system_message_to_mission(
                                 state,
                                 &run.mission_id,
-                                format!(
-                                    "Swarm deadlock: skipping tasks with unresolvable deps: {}",
-                                    skipped.join(", ")
-                                ),
+                                deadlock.message,
                             );
                         }
                         let done = tasks_terminal_count(&run.tasks);
@@ -1727,6 +1901,308 @@ fn validate_bulk_plan(
     } else {
         Err(issues.join("; "))
     }
+}
+
+#[derive(Copy, Clone, Debug, Default)]
+struct RoleDepStats {
+    added: usize,
+    skipped_cycle: usize,
+}
+
+pub(crate) fn normalize_role_label(raw: &str) -> Option<String> {
+    let role = raw.trim().to_ascii_lowercase();
+    if role.is_empty() {
+        return None;
+    }
+    if role.eq_ignore_ascii_case("all") {
+        return None;
+    }
+    if role.eq_ignore_ascii_case(COMPUTATIONAL_RESEARCH_ROLE_LEGACY) {
+        return Some(COMPUTATIONAL_RESEARCH_ROLE.into());
+    }
+    Some(role)
+}
+
+fn infer_role_from_task_id(task_id: &str) -> Option<&'static str> {
+    let id = task_id.trim();
+    if id.is_empty() {
+        return None;
+    }
+    if id.to_ascii_lowercase().starts_with("propose-") {
+        return Some("propose");
+    }
+    if id.eq_ignore_ascii_case("judge") {
+        return Some("judge");
+    }
+    if id.eq_ignore_ascii_case("integrate") || id.eq_ignore_ascii_case("implement") {
+        return Some("integrate");
+    }
+    if id.eq_ignore_ascii_case("review") {
+        return Some("review");
+    }
+    if id.eq_ignore_ascii_case("test") {
+        return Some("test");
+    }
+    None
+}
+
+fn default_role_deps() -> HashMap<String, Vec<String>> {
+    let mut map = HashMap::new();
+    map.insert("consumer".into(), vec!["producer".into()]);
+    map.insert(
+        "judge".into(),
+        vec![
+            "research".into(),
+            COMPUTATIONAL_RESEARCH_ROLE.into(),
+            "propose".into(),
+        ],
+    );
+    map.insert(
+        "integrate".into(),
+        vec![
+            "judge".into(),
+            "research".into(),
+            COMPUTATIONAL_RESEARCH_ROLE.into(),
+            "propose".into(),
+        ],
+    );
+    map.insert("review".into(), vec!["integrate".into()]);
+    map.insert("test".into(), vec!["integrate".into()]);
+    map
+}
+
+fn read_workspace_role_deps(
+    workspace_root: &Path,
+) -> Result<Option<HashMap<String, Vec<String>>>, String> {
+    let path = workspace_root.join(".nit").join("config.toml");
+    if !path.exists() {
+        return Ok(None);
+    }
+    let contents = fs::read_to_string(&path)
+        .map_err(|err| format!("failed reading {}: {err}", path.display()))?;
+    let value = toml::from_str::<toml::Value>(&contents)
+        .map_err(|err| format!("failed parsing {}: {err}", path.display()))?;
+    let table = value
+        .get("swarm")
+        .and_then(|value| value.get("role_deps"))
+        .and_then(|value| value.as_table());
+    let Some(table) = table else {
+        return Ok(None);
+    };
+
+    let mut out: HashMap<String, Vec<String>> = HashMap::new();
+    for (consumer, producers) in table.iter() {
+        let Some(consumer) = normalize_role_label(consumer) else {
+            continue;
+        };
+        let mut normalized = Vec::new();
+        if let Some(producers) = producers.as_array() {
+            for producer in producers.iter() {
+                let Some(producer) = producer.as_str().and_then(normalize_role_label) else {
+                    continue;
+                };
+                if normalized
+                    .iter()
+                    .any(|existing: &String| existing == &producer)
+                {
+                    continue;
+                }
+                normalized.push(producer);
+            }
+        } else if let Some(producer) = producers.as_str().and_then(normalize_role_label) {
+            normalized.push(producer);
+        } else {
+            continue;
+        }
+        if !normalized.is_empty() {
+            out.insert(consumer, normalized);
+        }
+    }
+
+    if out.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(out))
+    }
+}
+
+fn would_create_cycle(
+    tasks: &[SwarmTask],
+    idx_by_id: &HashMap<String, usize>,
+    task_id: &str,
+    dep_id: &str,
+) -> bool {
+    if task_id == dep_id {
+        return true;
+    }
+    let Some(&start) = idx_by_id.get(dep_id) else {
+        return false;
+    };
+    let Some(&target) = idx_by_id.get(task_id) else {
+        return false;
+    };
+
+    let mut seen: HashSet<usize> = HashSet::new();
+    let mut stack = vec![start];
+    while let Some(idx) = stack.pop() {
+        if idx == target {
+            return true;
+        }
+        if !seen.insert(idx) {
+            continue;
+        }
+        for dep in tasks[idx].deps.iter() {
+            if let Some(&next) = idx_by_id.get(dep) {
+                stack.push(next);
+            }
+        }
+    }
+    false
+}
+
+fn apply_role_deps(
+    tasks: &mut [SwarmTask],
+    role_deps: &HashMap<String, Vec<String>>,
+) -> RoleDepStats {
+    let mut stats = RoleDepStats::default();
+    if tasks.is_empty() || role_deps.is_empty() {
+        return stats;
+    }
+
+    let idx_by_id = tasks
+        .iter()
+        .enumerate()
+        .map(|(idx, task)| (task.id.clone(), idx))
+        .collect::<HashMap<_, _>>();
+
+    let mut tasks_by_role: HashMap<String, Vec<String>> = HashMap::new();
+    for task in tasks.iter() {
+        if let Some(role) = task.role.as_deref().and_then(normalize_role_label) {
+            tasks_by_role.entry(role).or_default().push(task.id.clone());
+        }
+        if task.writes {
+            // Treat writer tasks as integrate-like for role-based ordering.
+            let entry = tasks_by_role.entry("integrate".into()).or_default();
+            if !entry.iter().any(|id| id == &task.id) {
+                entry.push(task.id.clone());
+            }
+        }
+    }
+
+    let mut consumer_roles = role_deps.keys().cloned().collect::<Vec<_>>();
+    consumer_roles.sort();
+    for consumer_role in consumer_roles.iter() {
+        let Some(producer_roles) = role_deps.get(consumer_role) else {
+            continue;
+        };
+        let Some(consumer_task_ids) = tasks_by_role.get(consumer_role) else {
+            continue;
+        };
+        if consumer_task_ids.is_empty() {
+            continue;
+        }
+        for consumer_task_id in consumer_task_ids.iter() {
+            let Some(&consumer_idx) = idx_by_id.get(consumer_task_id) else {
+                continue;
+            };
+            for producer_role in producer_roles.iter() {
+                let Some(producer_task_ids) = tasks_by_role.get(producer_role) else {
+                    continue;
+                };
+                for producer_task_id in producer_task_ids.iter() {
+                    if producer_task_id == consumer_task_id {
+                        continue;
+                    }
+                    if tasks[consumer_idx]
+                        .deps
+                        .iter()
+                        .any(|existing| existing == producer_task_id)
+                    {
+                        continue;
+                    }
+                    if would_create_cycle(
+                        tasks,
+                        &idx_by_id,
+                        consumer_task_id.as_str(),
+                        producer_task_id.as_str(),
+                    ) {
+                        stats.skipped_cycle = stats.skipped_cycle.saturating_add(1);
+                        continue;
+                    }
+                    tasks[consumer_idx].deps.push(producer_task_id.clone());
+                    stats.added = stats.added.saturating_add(1);
+                }
+            }
+        }
+    }
+
+    stats
+}
+
+fn apply_role_dependency_ordering(
+    workspace_root: &Path,
+    role_hints_by_agent_id: &HashMap<String, String>,
+    tasks: &mut [SwarmTask],
+) -> Vec<String> {
+    if tasks.is_empty() {
+        return Vec::new();
+    }
+
+    let mut warnings = Vec::new();
+    let mut inferred_roles = 0usize;
+    for task in tasks.iter_mut() {
+        if task.role.as_deref().is_some_and(|r| !r.trim().is_empty()) {
+            continue;
+        }
+        if task.writes {
+            task.role = Some("integrate".into());
+            inferred_roles = inferred_roles.saturating_add(1);
+            continue;
+        }
+        if let Some(inferred) = infer_role_from_task_id(task.id.as_str()) {
+            task.role = Some(inferred.to_string());
+            inferred_roles = inferred_roles.saturating_add(1);
+            continue;
+        }
+        let hint = role_hints_by_agent_id.get(&task.agent_id).or_else(|| {
+            swarm_clone_base_id(task.agent_id.as_str())
+                .and_then(|base| role_hints_by_agent_id.get(base))
+        });
+        let Some(hint) = hint.and_then(|hint| normalize_role_label(hint.as_str())) else {
+            continue;
+        };
+        task.role = Some(hint);
+        inferred_roles = inferred_roles.saturating_add(1);
+    }
+
+    let (role_deps, source) = match read_workspace_role_deps(workspace_root) {
+        Ok(Some(map)) => (map, "config"),
+        Ok(None) => (default_role_deps(), "built-in"),
+        Err(err) => {
+            warnings.push(format!("Role ordering: {err}; using built-in role deps."));
+            (default_role_deps(), "built-in")
+        }
+    };
+
+    let stats = apply_role_deps(tasks, &role_deps);
+    if stats.added > 0 || stats.skipped_cycle > 0 {
+        let mut parts = Vec::new();
+        if inferred_roles > 0 {
+            parts.push(format!("inferred {inferred_roles} role(s)"));
+        }
+        if stats.added > 0 {
+            parts.push(format!("added {} dep(s)", stats.added));
+        }
+        if stats.skipped_cycle > 0 {
+            parts.push(format!("skipped {} dep(s) (cycle)", stats.skipped_cycle));
+        }
+        if parts.is_empty() {
+            parts.push("no changes".into());
+        }
+        warnings.push(format!("Role ordering ({source}): {}.", parts.join(", ")));
+    }
+
+    warnings
 }
 
 fn parse_plan_from_planner(
@@ -2393,6 +2869,278 @@ fn fallback_tasks(
     }
 }
 
+#[derive(Clone, Debug, Default)]
+struct SwarmDagIssues {
+    unknown_deps: Vec<(String, String)>,
+    cycle: Option<Vec<String>>,
+}
+
+impl SwarmDagIssues {
+    fn is_empty(&self) -> bool {
+        self.unknown_deps.is_empty() && self.cycle.is_none()
+    }
+
+    fn summary(&self) -> String {
+        let mut parts = Vec::new();
+
+        if !self.unknown_deps.is_empty() {
+            let mut examples = self
+                .unknown_deps
+                .iter()
+                .take(6)
+                .map(|(task, dep)| format!("{task}->{dep}"))
+                .collect::<Vec<_>>();
+            if self.unknown_deps.len() > examples.len() {
+                examples.push("…".into());
+            }
+            parts.push(format!(
+                "unknown deps: {} ({} total)",
+                examples.join(", "),
+                self.unknown_deps.len()
+            ));
+        }
+
+        if let Some(cycle) = self.cycle.as_ref() {
+            let mut items = cycle.clone();
+            if items.len() > 12 {
+                items.truncate(12);
+                items.push("…".into());
+            }
+            parts.push(format!("cycle: {}", items.join(" -> ")));
+        }
+
+        if parts.is_empty() {
+            "ok".into()
+        } else {
+            parts.join("; ")
+        }
+    }
+}
+
+fn analyze_swarm_dag(tasks: &[SwarmTask]) -> SwarmDagIssues {
+    let mut issues = SwarmDagIssues::default();
+    if tasks.is_empty() {
+        return issues;
+    }
+
+    let ids = tasks
+        .iter()
+        .map(|task| task.id.as_str())
+        .collect::<HashSet<_>>();
+    for task in tasks.iter() {
+        for dep in task.deps.iter() {
+            if !ids.contains(dep.as_str()) {
+                issues.unknown_deps.push((task.id.clone(), dep.clone()));
+            }
+        }
+    }
+
+    issues.cycle = find_swarm_cycle_path(tasks);
+    issues
+}
+
+fn find_swarm_cycle_path(tasks: &[SwarmTask]) -> Option<Vec<String>> {
+    if tasks.is_empty() {
+        return None;
+    }
+    let idx_by_id = tasks
+        .iter()
+        .enumerate()
+        .map(|(idx, task)| (task.id.as_str(), idx))
+        .collect::<HashMap<_, _>>();
+    let mut state = vec![0u8; tasks.len()];
+    let mut stack: Vec<usize> = Vec::new();
+    let mut on_stack = vec![false; tasks.len()];
+
+    fn dfs(
+        v: usize,
+        tasks: &[SwarmTask],
+        idx_by_id: &HashMap<&str, usize>,
+        state: &mut [u8],
+        stack: &mut Vec<usize>,
+        on_stack: &mut [bool],
+    ) -> Option<Vec<String>> {
+        state[v] = 1;
+        stack.push(v);
+        on_stack[v] = true;
+
+        for dep in tasks[v].deps.iter() {
+            let Some(&u) = idx_by_id.get(dep.as_str()) else {
+                continue;
+            };
+            if state[u] == 0 {
+                if let Some(cycle) = dfs(u, tasks, idx_by_id, state, stack, on_stack) {
+                    return Some(cycle);
+                }
+            } else if on_stack[u] {
+                let Some(pos) = stack.iter().position(|&idx| idx == u) else {
+                    continue;
+                };
+                let mut cycle = stack[pos..]
+                    .iter()
+                    .map(|&idx| tasks[idx].id.clone())
+                    .collect::<Vec<_>>();
+                cycle.push(tasks[u].id.clone());
+                return Some(cycle);
+            }
+        }
+
+        stack.pop();
+        on_stack[v] = false;
+        state[v] = 2;
+        None
+    }
+
+    for v in 0..tasks.len() {
+        if state[v] != 0 {
+            continue;
+        }
+        if let Some(cycle) = dfs(v, tasks, &idx_by_id, &mut state, &mut stack, &mut on_stack) {
+            return Some(cycle);
+        }
+    }
+
+    None
+}
+
+fn find_swarm_cycle_back_edge(tasks: &[SwarmTask]) -> Option<(usize, String)> {
+    if tasks.is_empty() {
+        return None;
+    }
+    let idx_by_id = tasks
+        .iter()
+        .enumerate()
+        .map(|(idx, task)| (task.id.as_str(), idx))
+        .collect::<HashMap<_, _>>();
+    let mut state = vec![0u8; tasks.len()];
+    let mut on_stack = vec![false; tasks.len()];
+
+    fn dfs(
+        v: usize,
+        tasks: &[SwarmTask],
+        idx_by_id: &HashMap<&str, usize>,
+        state: &mut [u8],
+        on_stack: &mut [bool],
+    ) -> Option<(usize, String)> {
+        state[v] = 1;
+        on_stack[v] = true;
+
+        for dep in tasks[v].deps.iter() {
+            let Some(&u) = idx_by_id.get(dep.as_str()) else {
+                continue;
+            };
+            if state[u] == 0 {
+                if let Some(edge) = dfs(u, tasks, idx_by_id, state, on_stack) {
+                    return Some(edge);
+                }
+            } else if on_stack[u] {
+                return Some((v, dep.clone()));
+            }
+        }
+
+        on_stack[v] = false;
+        state[v] = 2;
+        None
+    }
+
+    for v in 0..tasks.len() {
+        if state[v] != 0 {
+            continue;
+        }
+        if let Some(edge) = dfs(v, tasks, &idx_by_id, &mut state, &mut on_stack) {
+            return Some(edge);
+        }
+    }
+    None
+}
+
+fn repair_swarm_dag(tasks: &mut [SwarmTask]) -> Vec<String> {
+    if tasks.is_empty() {
+        return Vec::new();
+    }
+
+    let ids = tasks
+        .iter()
+        .map(|task| task.id.clone())
+        .collect::<HashSet<_>>();
+
+    let mut removed_unknown_total = 0usize;
+    let mut removed_unknown_examples: Vec<(String, String)> = Vec::new();
+    let mut removed_dupe_total = 0usize;
+    for task in tasks.iter_mut() {
+        let mut seen: HashSet<String> = HashSet::new();
+        task.deps.retain(|dep| {
+            if dep == &task.id {
+                return false;
+            }
+            if !ids.contains(dep) {
+                removed_unknown_total = removed_unknown_total.saturating_add(1);
+                if removed_unknown_examples.len() < 6 {
+                    removed_unknown_examples.push((task.id.clone(), dep.clone()));
+                }
+                return false;
+            }
+            if !seen.insert(dep.clone()) {
+                removed_dupe_total = removed_dupe_total.saturating_add(1);
+                return false;
+            }
+            true
+        });
+    }
+
+    let mut removed_cycle_total = 0usize;
+    let mut removed_cycle_examples: Vec<(String, String)> = Vec::new();
+    while let Some((task_idx, dep_id)) = find_swarm_cycle_back_edge(tasks) {
+        let Some(pos) = tasks[task_idx].deps.iter().position(|dep| dep == &dep_id) else {
+            break;
+        };
+        tasks[task_idx].deps.remove(pos);
+        removed_cycle_total = removed_cycle_total.saturating_add(1);
+        if removed_cycle_examples.len() < 6 {
+            removed_cycle_examples.push((tasks[task_idx].id.clone(), dep_id));
+        }
+    }
+
+    let mut warnings = Vec::new();
+    if removed_unknown_total > 0 {
+        let examples = removed_unknown_examples
+            .into_iter()
+            .map(|(task, dep)| format!("{task}->{dep}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        warnings.push(format!(
+            "DAG repair: removed {removed_unknown_total} unknown dep(s){}",
+            if examples.is_empty() {
+                ".".into()
+            } else {
+                format!(" (examples: {examples}).")
+            }
+        ));
+    }
+    if removed_dupe_total > 0 {
+        warnings.push(format!(
+            "DAG repair: removed {removed_dupe_total} duplicate dep(s)."
+        ));
+    }
+    if removed_cycle_total > 0 {
+        let examples = removed_cycle_examples
+            .into_iter()
+            .map(|(task, dep)| format!("{task}->{dep}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        warnings.push(format!(
+            "DAG repair: removed {removed_cycle_total} dep(s) to break cycle(s){}",
+            if examples.is_empty() {
+                ".".into()
+            } else {
+                format!(" (examples: {examples}).")
+            }
+        ));
+    }
+
+    warnings
+}
+
 fn initialize_task_graph(run: &mut SwarmRun) {
     let ids = run
         .tasks
@@ -2507,7 +3255,13 @@ fn refresh_task_readiness(run: &mut SwarmRun) {
     }
 }
 
-fn maybe_resolve_deadlock(run: &mut SwarmRun) -> Vec<String> {
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct SwarmDeadlock {
+    skipped: Vec<String>,
+    message: String,
+}
+
+fn maybe_resolve_deadlock(run: &mut SwarmRun) -> Option<SwarmDeadlock> {
     let has_active_or_ready = run.tasks.iter().any(|task| {
         matches!(
             task.state,
@@ -2515,7 +3269,7 @@ fn maybe_resolve_deadlock(run: &mut SwarmRun) -> Vec<String> {
         )
     });
     if has_active_or_ready {
-        return Vec::new();
+        return None;
     }
 
     let pending = run
@@ -2525,7 +3279,45 @@ fn maybe_resolve_deadlock(run: &mut SwarmRun) -> Vec<String> {
         .map(|task| task.id.clone())
         .collect::<Vec<_>>();
     if pending.is_empty() {
-        return Vec::new();
+        return None;
+    }
+
+    let pending_ids = pending.iter().map(|id| id.as_str()).collect::<HashSet<_>>();
+    let pending_tasks = run
+        .tasks
+        .iter()
+        .filter(|task| matches!(task.state, SwarmTaskState::Pending))
+        .cloned()
+        .collect::<Vec<_>>();
+
+    let mut message = String::new();
+    message.push_str(&format!(
+        "Swarm deadlock: skipping tasks with unresolvable deps: {}",
+        pending.join(", ")
+    ));
+
+    if let Some(cycle) = find_swarm_cycle_path(pending_tasks.as_slice()) {
+        let mut cycle = cycle;
+        if cycle.len() > 12 {
+            cycle.truncate(12);
+            cycle.push("…".into());
+        }
+        message.push_str(&format!("\nCycle detected: {}", cycle.join(" -> ")));
+    }
+
+    message.push_str("\nBlocked on:");
+    for task in pending_tasks.iter().take(12) {
+        let deps = task
+            .deps
+            .iter()
+            .filter(|dep| pending_ids.contains(dep.as_str()))
+            .cloned()
+            .collect::<Vec<_>>();
+        if deps.is_empty() {
+            message.push_str(&format!("\n- {} waits on: (none)", task.id));
+        } else {
+            message.push_str(&format!("\n- {} waits on: {}", task.id, deps.join(", ")));
+        }
     }
 
     for task in run.tasks.iter_mut() {
@@ -2537,7 +3329,11 @@ fn maybe_resolve_deadlock(run: &mut SwarmRun) -> Vec<String> {
             }
         }
     }
-    pending
+
+    Some(SwarmDeadlock {
+        skipped: pending,
+        message,
+    })
 }
 
 fn dispatch_ready_tasks(run: &mut SwarmRun) -> Vec<SwarmDispatch> {
@@ -3169,6 +3965,45 @@ fn read_workspace_gate_default(workspace_root: &Path) -> Result<Option<String>, 
         .map(|value| value.to_ascii_lowercase()))
 }
 
+fn read_workspace_dag_validation_mode(
+    workspace_root: &Path,
+) -> Result<Option<SwarmDagValidationMode>, String> {
+    let path = workspace_root.join(".nit").join("config.toml");
+    if !path.exists() {
+        return Ok(None);
+    }
+    let contents = fs::read_to_string(&path)
+        .map_err(|err| format!("failed reading {}: {err}", path.display()))?;
+    let value = toml::from_str::<toml::Value>(&contents)
+        .map_err(|err| format!("failed parsing {}: {err}", path.display()))?;
+    let Some(mode) = value
+        .get("swarm")
+        .and_then(|value| value.get("dag_validation"))
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return Ok(None);
+    };
+
+    let mode = mode.to_ascii_lowercase();
+    if mode == "strict" || mode == "hard-fail" || mode == "hard_fail" || mode == "hardfail" {
+        return Ok(Some(SwarmDagValidationMode::Strict));
+    }
+    if mode == "repair"
+        || mode == "best-effort"
+        || mode == "best_effort"
+        || mode == "auto-repair"
+        || mode == "auto_repair"
+    {
+        return Ok(Some(SwarmDagValidationMode::Repair));
+    }
+
+    Err(format!(
+        "invalid swarm.dag_validation value '{mode}' (expected 'strict' or 'repair')"
+    ))
+}
+
 fn sanitize_for_filename(input: &str) -> String {
     input
         .chars()
@@ -3245,6 +4080,9 @@ fn build_planner_prompt(
                 "- Prefer tasks that can run in parallel (deps should usually be empty).\n",
             );
             out.push_str(
+                "- If you assign producer/consumer-style roles (e.g. research or computational-research → judge), use deps to express required ordering.\n",
+            );
+            out.push_str(
                 "- If code changes are needed, avoid having multiple agents edit the same files.\n",
             );
         }
@@ -3287,7 +4125,7 @@ fn build_planner_prompt(
     out.push_str("    {\n");
     out.push_str("      \"id\": \"task-id\",\n");
     out.push_str("      \"agent_id\": \"one-of-the-listed-agent-ids\",\n");
-    out.push_str("      \"role\": \"(optional: propose|judge|research|integrate|review|test)\",\n");
+    out.push_str("      \"role\": \"(optional: propose|judge|research|computational-research|integrate|review|test)\",\n");
     out.push_str("      \"title\": \"short title\",\n");
     out.push_str("      \"prompt\": \"task instructions\",\n");
     out.push_str("      \"deps\": [\"task-id\"],\n");
@@ -3986,6 +4824,7 @@ mod tests {
                 "a",
                 "a#swarm-mis-001-propose-01",
                 "a#swarm-mis-001-research",
+                "a#swarm-mis-001-computational-research",
                 "a#swarm-mis-001-judge",
                 "a#swarm-mis-001-review",
                 "a#swarm-mis-001-test",
@@ -4159,6 +4998,25 @@ mod tests {
         assert_eq!(agents, vec!["planner", "b", "d", "a"]);
     }
 
+    fn make_task(id: &str, agent_id: &str, role: Option<&str>, deps: Vec<&str>) -> SwarmTask {
+        SwarmTask {
+            id: id.into(),
+            agent_id: agent_id.into(),
+            role: role.map(str::to_string),
+            title: id.into(),
+            task_prompt: "prompt".into(),
+            deps: deps.into_iter().map(str::to_string).collect(),
+            writes: false,
+            artifacts: Vec::new(),
+            done_when: None,
+            state: SwarmTaskState::Pending,
+            output: None,
+            parsed_artifacts: None,
+            expected_artifacts_missing: false,
+            failed: false,
+        }
+    }
+
     #[test]
     fn plan_v2_enforces_single_writer_integrator() {
         let planner_message = r#"
@@ -4196,6 +5054,57 @@ Plan:
         let t2 = parsed.tasks.iter().find(|t| t.id == "t2").expect("t2");
         assert!(!t1.writes);
         assert!(t2.writes);
+    }
+
+    #[test]
+    fn role_ordering_adds_research_before_judge() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let mut tasks = vec![
+            make_task("research-1", "a1", Some("research"), Vec::new()),
+            make_task("judge-1", "a2", Some("judge"), Vec::new()),
+        ];
+
+        let warnings = apply_role_dependency_ordering(root.as_path(), &HashMap::new(), &mut tasks);
+
+        let judge = tasks.iter().find(|t| t.id == "judge-1").expect("judge");
+        assert!(judge.deps.iter().any(|dep| dep == "research-1"));
+        assert!(!warnings.is_empty());
+    }
+
+    #[test]
+    fn role_ordering_uses_roster_hints_when_task_roles_missing() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let mut tasks = vec![
+            make_task("t1", "a1", None, Vec::new()),
+            make_task("t2", "a2", None, Vec::new()),
+        ];
+
+        let mut hints = HashMap::new();
+        hints.insert("a1".into(), "research".into());
+        hints.insert("a2".into(), "judge".into());
+
+        apply_role_dependency_ordering(root.as_path(), &hints, &mut tasks);
+
+        let t1 = tasks.iter().find(|t| t.id == "t1").expect("t1");
+        let t2 = tasks.iter().find(|t| t.id == "t2").expect("t2");
+        assert_eq!(t1.role.as_deref(), Some("research"));
+        assert_eq!(t2.role.as_deref(), Some("judge"));
+        assert!(t2.deps.iter().any(|dep| dep == "t1"));
+    }
+
+    #[test]
+    fn role_ordering_does_not_introduce_cycles() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let mut tasks = vec![
+            make_task("r", "a1", Some("research"), vec!["j"]),
+            make_task("j", "a2", Some("judge"), Vec::new()),
+        ];
+
+        let warnings = apply_role_dependency_ordering(root.as_path(), &HashMap::new(), &mut tasks);
+
+        let judge = tasks.iter().find(|t| t.id == "j").expect("judge");
+        assert!(judge.deps.is_empty());
+        assert!(warnings.iter().any(|w| w.contains("skipped")));
     }
 
     #[test]
@@ -4533,8 +5442,9 @@ Plan:
         refresh_task_readiness(&mut run);
         assert!(dispatch_ready_tasks(&mut run).is_empty());
 
-        let skipped = maybe_resolve_deadlock(&mut run);
-        assert_eq!(skipped.len(), 2);
+        let deadlock = maybe_resolve_deadlock(&mut run).expect("deadlock");
+        assert_eq!(deadlock.skipped.len(), 2);
+        assert!(deadlock.message.contains("Swarm deadlock:"));
         assert!(run
             .tasks
             .iter()
@@ -4615,7 +5525,8 @@ Plan:
         assert!(state.agents.messages.iter().any(|msg| {
             msg.mission_id.as_deref() == Some(mission_id.as_str())
                 && msg.agent_id.as_deref() == Some("swarm")
-                && msg.text.contains("Swarm deadlock:")
+                && msg.text.contains("PLAN error: invalid task DAG")
+                && msg.text.contains("cycle:")
                 && msg.text.contains("t1")
                 && msg.text.contains("t2")
         }));

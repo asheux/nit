@@ -232,6 +232,11 @@ Execution rules:
 - Tasks are dispatched as Codex turns in the new mission when they become runnable:
   - tasks with `deps=[]` start immediately,
   - a task becomes runnable when all its deps have reached a terminal state.
+- If tasks have recognizable roles (from the plan or roster hints), nit may add missing deps based on
+  role-based producer/consumer ordering (configurable via `.nit/config.toml` `[swarm.role_deps]`).
+- DAG validation is preflighted before dispatch:
+  - default `strict`: aborts execution on cycles or unknown deps,
+  - opt-in `repair`: drops unknown deps and removes deps that create cycles (`.nit/config.toml` `[swarm] dag_validation = "repair"`).
 - Multiple tasks may target the same agent id; they will run sequentially (queued).
 - Tasks run in parallel subject to `--codex-max-parallel-turns` (the runner may queue excess turns).
 - Single-writer enforcement:
@@ -307,7 +312,7 @@ Implementation notes:
 - Latency: `latency_ms` is best-effort; it is updated on connect and on successful turns.
 - Sandbox/approval pass-through:
   - `nit --codex-sandbox <read-only|workspace-write|danger-full-access>`
-  - `nit --codex-approval-policy <untrusted|on-failure|on-request|never>`
+  - `nit --codex-approval-policy <untrusted|on-failure|on-request|never>` (default: `never`)
   - In MCP mode these are applied when starting new sessions via the `codex` tool; `codex-reply`
     continues an existing session and does not accept these options.
 

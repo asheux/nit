@@ -51,9 +51,12 @@ struct Cli {
     /// Codex sandbox mode (forwarded to Codex runs; default is Codex's own config)
     #[arg(long, value_enum)]
     codex_sandbox: Option<CodexSandboxArg>,
-    /// Codex approval policy for executing model-suggested commands (default is Codex's own config)
-    #[arg(long, value_enum)]
-    codex_approval_policy: Option<CodexApprovalPolicyArg>,
+    /// Codex approval policy for executing model-suggested commands.
+    ///
+    /// nit drives Codex non-interactively (via `codex exec` / `codex mcp-server`), so the safe
+    /// default is `never` to avoid hanging on interactive approval prompts.
+    #[arg(long, value_enum, default_value_t = CodexApprovalPolicyArg::Never)]
+    codex_approval_policy: CodexApprovalPolicyArg,
     /// Maximum number of Codex turns to run concurrently.
     ///
     /// - MCP runtime: caps in-flight `tools/call` requests multiplexed over the persistent server.
@@ -489,7 +492,7 @@ fn main() -> anyhow::Result<()> {
     };
     let codex_config = nit_tui::codex_runner::CodexRunnerConfig {
         sandbox: cli.codex_sandbox.map(|v| v.as_str().to_string()),
-        approval_policy: cli.codex_approval_policy.map(|v| v.as_str().to_string()),
+        approval_policy: Some(cli.codex_approval_policy.as_str().to_string()),
         max_parallel_turns: cli.codex_max_parallel_turns as usize,
     };
     run(state, theme, log_rx, codex_runtime, codex_config)?;

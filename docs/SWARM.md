@@ -133,7 +133,7 @@ proposer “lenses” (minimal diff, correctness, UX, perf, testing, docs, secur
 
 Roles exist at two layers:
 
-1) **Planner output**: each task has optional `role` (`propose|judge|integrate|research|review|test`).
+1) **Planner output**: each task has optional `role` (`propose|judge|research|computational-research|integrate|review|test`).
 2) **Roster role hints** (recommended for `parallel`/`bulk`): in **Agent Ops → Roster**, expand a
    model and use the `Role` branch to pick a preferred role (or `All`).
 
@@ -146,6 +146,51 @@ Notes:
 - You can also mark agents as **priority** in **Agent Ops → Roster** (`[x]` on the model row). For
   `parallel`/`bulk`, priority agents are passed to the planner as a hint and are preferred when
   selecting a limited swarm size (so they’re more likely to be included).
+
+### Role-based ordering (producer/consumer)
+
+Sometimes roles are **producer/consumer** pairs (e.g. `research` or `computational-research` → `judge`): the consumer task is only
+useful *after* producer tasks finish.
+
+Swarm is fundamentally a **DAG scheduler** (`deps`), so nit can express this as dependencies:
+
+- If the plan omits `deps` but tasks/agents have recognizable roles, nit will automatically add
+  missing deps so consumer roles run after their producers.
+- Default role deps (built-in):
+  - `judge` depends on `research` + `computational-research` + `propose`
+  - `integrate` depends on `judge` + `research` + `computational-research` + `propose`
+  - `review` + `test` depend on `integrate`
+- Cycle safety: if adding a role-based dep would introduce a cycle, nit skips that dep and logs a
+  `PLAN warning`.
+
+You can override role deps per workspace via `.nit/config.toml`:
+
+```toml
+[swarm.role_deps]
+judge = ["research", "computational-research", "propose"]
+integrate = ["judge", "research", "computational-research", "propose"]
+review = ["integrate"]
+test = ["integrate"]
+```
+
+### DAG validation (cycles / unknown deps)
+
+nit preflights the planner’s task DAG before dispatching.
+
+Default behavior (`strict`):
+
+- Unknown deps (deps that reference missing task ids) cause the swarm run to abort.
+- Cycles cause the swarm run to abort.
+- You’ll see a `PLAN error` explaining the issue.
+
+Opt-in “best effort” auto-repair:
+
+```toml
+[swarm]
+dag_validation = "repair"
+```
+
+In `repair` mode, nit drops unknown deps and removes deps that would cause cycles, emitting `PLAN warning`s.
 
 ### Choosing the planner
 
