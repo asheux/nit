@@ -2868,6 +2868,9 @@ fn toggle_roster_priority(state: &mut AppState) -> bool {
     if !agent.is_codex() {
         return false;
     }
+    if agent.id.contains("#swarm-") {
+        return false;
+    }
     if state.agents.swarm_priority_agent_ids.remove(&agent.id) {
         return true;
     }
@@ -3186,6 +3189,7 @@ fn handle_agent_console_key(
                         state,
                         planner.clone(),
                         agents,
+                        cmd.size,
                         cmd.template.clone(),
                         cmd.prompt.clone(),
                     ) {

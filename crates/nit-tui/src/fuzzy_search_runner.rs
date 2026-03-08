@@ -974,7 +974,7 @@ mod tests {
             .args(cmd)
             .status()
             .expect("git command");
-        assert!(status.success(), "git {:?} failed", cmd);
+        assert!(status.success(), "git {cmd:?} failed");
     }
 
     fn write(path: &Path, content: &str) {

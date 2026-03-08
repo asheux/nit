@@ -109,6 +109,99 @@ fn cursor_glyph() -> char {
     }
 }
 
+fn is_swarm_clone_agent_id(agent_id: &str) -> bool {
+    agent_id.split_once("#swarm-").is_some()
+}
+
+fn swarm_clone_label_parts(agent_id: &str) -> Option<(&str, &str)> {
+    let (_base, rest) = agent_id.split_once("#swarm-")?;
+    let rest = rest.trim();
+    if rest.is_empty() {
+        return None;
+    }
+
+    let first_dash = rest.find('-')?;
+    let second_dash_rel = rest[first_dash.saturating_add(1)..].find('-')?;
+    let second_dash = first_dash.saturating_add(1).saturating_add(second_dash_rel);
+    let (mission_id, suffix) = rest.split_at(second_dash);
+    let mission_id = mission_id.trim();
+    let suffix = suffix.trim_start_matches('-').trim();
+    if mission_id.is_empty() || suffix.is_empty() {
+        return None;
+    }
+    Some((mission_id, suffix))
+}
+
+fn compact_swarm_clone_suffix(suffix: &str) -> String {
+    let parts = suffix
+        .split('-')
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>();
+    if parts.is_empty() {
+        suffix.trim().to_string()
+    } else {
+        parts.join(" ")
+    }
+}
+
+fn swarm_assigned_roles_for_agent(
+    dashboard: &SwarmDashboardView,
+    agent_id: &str,
+) -> Option<String> {
+    let mut roles: Vec<String> = Vec::new();
+    for task in dashboard
+        .tasks
+        .iter()
+        .filter(|task| task.agent_id == agent_id)
+    {
+        let Some(role) = task
+            .role
+            .as_deref()
+            .and_then(normalize_role_label)
+            .filter(|role| !role.is_empty())
+        else {
+            continue;
+        };
+        if roles.iter().any(|existing| existing == &role) {
+            continue;
+        }
+        roles.push(role);
+    }
+    if roles.is_empty() {
+        None
+    } else {
+        Some(roles.join("+"))
+    }
+}
+
+fn swarm_clone_display_label(agent_id: &str, role: Option<&str>) -> Option<String> {
+    let (_base, rest) = agent_id.split_once("#swarm-")?;
+    let rest = rest.trim();
+    if rest.is_empty() {
+        return None;
+    }
+
+    let role = role
+        .map(str::trim)
+        .filter(|role| !role.is_empty())
+        .map(normalize_roster_role_hint);
+
+    let Some((_mission_id, suffix)) = swarm_clone_label_parts(agent_id) else {
+        let label = compact_swarm_clone_suffix(rest);
+        return Some(match role {
+            Some(role) => format!("{label} [{role}]"),
+            None => label,
+        });
+    };
+
+    let label = compact_swarm_clone_suffix(suffix);
+    Some(match role {
+        Some(role) => format!("{label} [{role}]"),
+        None => label,
+    })
+}
+
 fn normalize_roster_role_hint(raw: &str) -> String {
     let role = raw.trim();
     if role.eq_ignore_ascii_case("all") {
@@ -159,6 +252,7 @@ fn roster_body_meta(state: &AppState, body_line: usize) -> Option<RosterBodyMeta
         }
         cursor = cursor.saturating_add(1);
         if agent_idx == state.agents.roster_selected
+            && !is_swarm_clone_agent_id(agent.id.as_str())
             && !state
                 .agents
                 .roster_tree_collapsed_agent_ids
@@ -511,7 +605,7 @@ pub fn current_lines_for_width_with_swarm(
 ) -> Vec<String> {
     let usable = width.max(32);
     match state.agents.dock_tab {
-        AgentOpsTab::Roster => roster_lines(state, usable),
+        AgentOpsTab::Roster => roster_lines(state, swarm, usable),
         AgentOpsTab::Missions => mission_lines(state, usable),
         AgentOpsTab::Dag => dag_lines(state, swarm, usable),
         AgentOpsTab::Mcp => mcp_lines(state, usable),
@@ -523,7 +617,7 @@ pub fn current_lines_for_width_with_swarm(
     }
 }
 
-fn roster_lines(state: &AppState, width: usize) -> Vec<String> {
+fn roster_lines(state: &AppState, swarm: Option<&SwarmRuntime>, width: usize) -> Vec<String> {
     let widths = roster_column_widths(width);
     let codex_active = state.agents.agents.iter().any(|agent| agent.is_codex());
     let local_active = state
@@ -590,8 +684,14 @@ fn roster_lines(state: &AppState, width: usize) -> Vec<String> {
         out.push("─".repeat(width.min(240)));
         return out;
     }
+
+    let mut swarm_dash_by_mission_id: std::collections::HashMap<
+        String,
+        Option<SwarmDashboardView>,
+    > = std::collections::HashMap::new();
     for (idx, agent) in state.agents.agents.iter().enumerate() {
-        let priority_prefix = if agent.is_codex() {
+        let is_clone = is_swarm_clone_agent_id(agent.id.as_str());
+        let priority_prefix = if agent.is_codex() && !is_clone {
             if state.agents.swarm_priority_agent_ids.contains(&agent.id) {
                 "[x] "
             } else {
@@ -609,12 +709,25 @@ fn roster_lines(state: &AppState, width: usize) -> Vec<String> {
         } else {
             arrow_glyph()
         };
+        let role_label = if is_clone {
+            let assigned_role = (|| {
+                let swarm = swarm?;
+                let (mission_id, _suffix) = swarm_clone_label_parts(agent.id.as_str())?;
+                let dashboard = swarm_dash_by_mission_id
+                    .entry(mission_id.to_string())
+                    .or_insert_with(|| swarm.swarm_dashboard(mission_id));
+                let dashboard = dashboard.as_ref()?;
+                swarm_assigned_roles_for_agent(dashboard, agent.id.as_str())
+            })();
+            let label = swarm_clone_display_label(agent.id.as_str(), assigned_role.as_deref())
+                .unwrap_or_else(|| "swarm clone".into());
+            format!("    {} {label}", arrow_glyph())
+        } else {
+            format!("{priority_prefix}{}", table_role_label(agent.role.as_str()))
+        };
         out.push(format!(
             "{marker}{} {} {} {} {}",
-            fit_left(
-                &format!("{priority_prefix}{}", table_role_label(agent.role.as_str())),
-                widths[0],
-            ),
+            fit_left(&role_label, widths[0]),
             fit_left(agent.status.label(), widths[1]),
             fit_right(&format!("{}s", agent.heartbeat_age_secs), widths[2]),
             fit_right(&agent.queue_len.to_string(), widths[3]),
@@ -624,6 +737,7 @@ fn roster_lines(state: &AppState, width: usize) -> Vec<String> {
         // Expand the selected model into a small tree: Size (Codex reasoning effort levels) and
         // Role (swarm planning hints).
         if idx == state.agents.roster_selected
+            && !is_clone
             && !state
                 .agents
                 .roster_tree_collapsed_agent_ids
@@ -784,8 +898,8 @@ fn mission_lines(state: &AppState, width: usize) -> Vec<String> {
             let agent_label = mission
                 .assigned_agents
                 .get(agent_idx)
-                .map(|s| s.as_str())
-                .unwrap_or("--");
+                .map(|s| swarm_clone_display_label(s.as_str(), None).unwrap_or_else(|| s.clone()))
+                .unwrap_or_else(|| "--".into());
             if agent_idx == 0 {
                 out.push(format!(
                     "{marker}{} {} {} {} {}",
@@ -793,7 +907,7 @@ fn mission_lines(state: &AppState, width: usize) -> Vec<String> {
                     fit_left(mission.phase.label(), widths[1]),
                     fit_left(if mission.swarm { "yes" } else { "no" }, widths[2]),
                     fit_left(&mission.status, widths[3]),
-                    agent_pane_mid(agent_label, widths[4]),
+                    agent_pane_mid(&agent_label, widths[4]),
                 ));
             } else {
                 out.push(format!(
@@ -802,7 +916,7 @@ fn mission_lines(state: &AppState, width: usize) -> Vec<String> {
                     empty1,
                     empty2,
                     empty3,
-                    agent_pane_mid(agent_label, widths[4]),
+                    agent_pane_mid(&agent_label, widths[4]),
                 ));
             }
         }
@@ -1926,6 +2040,7 @@ fn roster_styled_line(
         RosterBodyNode::Agent => {
             let selected = meta.agent_idx == state.agents.roster_selected
                 && state.agents.roster_tree_selected.is_none();
+            let is_clone = is_swarm_clone_agent_id(agent.id.as_str());
 
             let marker_style = if selected {
                 selected_row_style(Style::default().fg(theme.accent).bg(table_bg), true, theme)
@@ -1937,7 +2052,11 @@ fn roster_styled_line(
             };
 
             let role_style = selected_row_style(
-                Style::default().fg(theme.foreground).bg(table_bg),
+                if is_clone {
+                    Style::default().fg(theme.seed.accent_2).bg(table_bg)
+                } else {
+                    Style::default().fg(theme.foreground).bg(table_bg)
+                },
                 selected,
                 theme,
             );
@@ -2718,7 +2837,9 @@ fn split_at_chars(text: &str, count: usize) -> (&str, &str) {
 
 #[cfg(test)]
 mod tests {
-    use super::{dag_lines_for_dashboard, roster_column_widths, table_role_label};
+    use super::{
+        dag_lines_for_dashboard, roster_column_widths, swarm_clone_display_label, table_role_label,
+    };
     use crate::swarm::{SwarmDashboardView, SwarmGateDashboardRow, SwarmTaskDashboardRow};
 
     #[test]
@@ -2824,6 +2945,14 @@ mod tests {
             "computational-research"
         );
         assert_eq!(table_role_label("Planner"), "Planner");
+    }
+
+    #[test]
+    fn swarm_clone_display_label_omits_mission_id_and_compacts_suffix() {
+        let label = swarm_clone_display_label("planner#swarm-mis-001-clone-01", Some("propose"))
+            .expect("clone label");
+        assert_eq!(label, "clone 01 [propose]");
+        assert!(!label.contains("mis-001"));
     }
 
     #[test]

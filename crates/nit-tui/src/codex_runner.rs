@@ -1,6 +1,6 @@
 use std::collections::{HashMap, VecDeque};
 use std::io::{BufRead, BufReader, Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -1048,49 +1048,14 @@ fn runner_loop_mcp(
                     },
                 });
 
-                let (tool_name, arguments) = if let Some(thread_id) = resume_thread_id.as_deref() {
-                    (
-                        "codex-reply",
-                        serde_json::json!({ "threadId": thread_id, "prompt": prompt }),
-                    )
-                } else {
-                    let mut args = serde_json::Map::new();
-                    args.insert("prompt".into(), serde_json::Value::String(prompt));
-                    args.insert("model".into(), serde_json::Value::String(model.clone()));
-                    args.insert(
-                        "cwd".into(),
-                        serde_json::Value::String(cwd.to_string_lossy().to_string()),
-                    );
-                    if let Some(effort) = reasoning_effort.as_deref() {
-                        args.insert(
-                            "config".into(),
-                            serde_json::json!({ "model_reasoning_effort": effort }),
-                        );
-                    }
-                    if let Some(sandbox) = config
-                        .sandbox
-                        .as_deref()
-                        .map(str::trim)
-                        .filter(|s| !s.is_empty())
-                    {
-                        args.insert(
-                            "sandbox".into(),
-                            serde_json::Value::String(sandbox.to_string()),
-                        );
-                    }
-                    if let Some(policy) = config
-                        .approval_policy
-                        .as_deref()
-                        .map(str::trim)
-                        .filter(|s| !s.is_empty())
-                    {
-                        args.insert(
-                            "approval-policy".into(),
-                            serde_json::Value::String(policy.to_string()),
-                        );
-                    }
-                    ("codex", serde_json::Value::Object(args))
-                };
+                let (tool_name, arguments) = build_codex_mcp_tool_call(
+                    model.as_str(),
+                    prompt.as_str(),
+                    cwd.as_path(),
+                    reasoning_effort.as_deref(),
+                    &config,
+                    resume_thread_id.as_deref(),
+                );
 
                 let stage = format!("tools/call({tool_name})");
                 let _ = event_tx.send(AgentBusEvent::TurnStage {
@@ -1420,51 +1385,19 @@ fn run_turn(
     let out_file = std::env::temp_dir().join(format!("nit-codex-last-message-{seq}.txt"));
 
     let mut cmd = Command::new("codex");
-    if let Some(policy) = config
-        .approval_policy
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-    {
-        cmd.arg("-a").arg(policy);
-    }
-    if let Some(sandbox) = config
-        .sandbox
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-    {
-        cmd.arg("-s").arg(sandbox);
-    }
-    if let Some(_thread_id) = resume_thread_id.as_deref() {
-        cmd.arg("exec")
-            .arg("resume")
-            .arg("--json")
-            .arg("-m")
-            .arg(&model);
-    } else {
-        cmd.arg("exec").arg("--json").arg("--color").arg("never");
-        if !persist_session {
-            cmd.arg("--ephemeral");
-        }
-        cmd.arg("-m").arg(&model).arg("-C").arg(&cwd);
-    }
-    if let Some(effort) = reasoning_effort.as_deref() {
-        // Override any global config (e.g. `xhigh`) that some models don't support.
-        cmd.arg("-c")
-            .arg(format!("model_reasoning_effort={:?}", effort.trim()));
-    }
-    cmd.arg("-o").arg(&out_file);
-    if let Some(thread_id) = resume_thread_id.as_deref() {
-        // Positional SESSION_ID comes after options for `codex exec resume`.
-        cmd.arg(thread_id);
-    }
-    cmd
-        // Read prompt from stdin so multi-line input works without shell escaping.
-        .arg("-")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+    cmd.args(build_codex_exec_args(
+        model.as_str(),
+        cwd.as_path(),
+        persist_session,
+        reasoning_effort.as_deref(),
+        out_file.as_path(),
+        resume_thread_id.as_deref(),
+        &config,
+    ))
+    // Read prompt from stdin so multi-line input works without shell escaping.
+    .stdin(Stdio::piped())
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped());
 
     let mut child = match cmd.spawn() {
         Ok(child) => child,
@@ -1672,7 +1605,7 @@ fn run_turn(
         let _ = event_tx.send(AgentBusEvent::McpStatus {
             status: McpStatus {
                 state: McpConnectionState::Error,
-                endpoint: format!("codex exec -m {model}"),
+                endpoint: codex_exec_endpoint_label(&model, resume_thread_id.as_deref()),
                 latency_ms: Some(latency_ms),
                 last_error: Some(message.clone()),
             },
@@ -1709,10 +1642,11 @@ fn run_turn(
     let thread_id = extract_thread_id_from_jsonl(&stdout);
     let token_count = extract_token_count_from_jsonl(&stdout);
     let latency_ms = started_at.elapsed().as_millis().min(u64::MAX as u128) as u64;
+    let endpoint = codex_exec_endpoint_label(&model, resume_thread_id.as_deref());
     let _ = event_tx.send(AgentBusEvent::McpStatus {
         status: McpStatus {
             state: McpConnectionState::Connected,
-            endpoint: format!("codex exec -m {model}"),
+            endpoint,
             latency_ms: Some(latency_ms),
             last_error: None,
         },
@@ -1727,14 +1661,163 @@ fn run_turn(
 }
 
 fn codex_exec_endpoint_label(agent_id: &str, resume_thread_id: Option<&str>) -> String {
+    let model_slug = codex_model_slug_for_agent_id(agent_id);
+    let suffix = if model_slug == agent_id {
+        String::new()
+    } else {
+        format!(" (agent {agent_id})")
+    };
     if let Some(thread_id) = resume_thread_id {
         format!(
-            "codex exec resume {} -m {agent_id}",
-            shorten_thread_id(thread_id)
+            "codex exec resume {} -m {model_slug}{suffix}",
+            shorten_thread_id(thread_id),
         )
     } else {
-        format!("codex exec -m {agent_id}")
+        format!("codex exec -m {model_slug}{suffix}")
     }
+}
+
+fn codex_model_slug_for_agent_id(agent_id: &str) -> &str {
+    agent_id
+        .split_once("#swarm-")
+        .map(|(base, _)| {
+            if base.trim().is_empty() {
+                agent_id
+            } else {
+                base
+            }
+        })
+        .unwrap_or(agent_id)
+}
+
+fn build_codex_mcp_tool_call(
+    agent_id: &str,
+    prompt: &str,
+    cwd: &Path,
+    reasoning_effort: Option<&str>,
+    config: &CodexRunnerConfig,
+    resume_thread_id: Option<&str>,
+) -> (&'static str, serde_json::Value) {
+    if let Some(thread_id) = resume_thread_id {
+        return (
+            "codex-reply",
+            serde_json::json!({ "threadId": thread_id, "prompt": prompt }),
+        );
+    }
+
+    let mut args = serde_json::Map::new();
+    args.insert(
+        "prompt".into(),
+        serde_json::Value::String(prompt.to_string()),
+    );
+    args.insert(
+        "model".into(),
+        serde_json::Value::String(codex_model_slug_for_agent_id(agent_id).to_string()),
+    );
+    args.insert(
+        "cwd".into(),
+        serde_json::Value::String(cwd.to_string_lossy().to_string()),
+    );
+    if let Some(effort) = reasoning_effort.map(str::trim).filter(|s| !s.is_empty()) {
+        args.insert(
+            "config".into(),
+            serde_json::json!({ "model_reasoning_effort": effort }),
+        );
+    }
+    if let Some(sandbox) = config
+        .sandbox
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        args.insert(
+            "sandbox".into(),
+            serde_json::Value::String(sandbox.to_string()),
+        );
+    }
+    if let Some(policy) = config
+        .approval_policy
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        args.insert(
+            "approval-policy".into(),
+            serde_json::Value::String(policy.to_string()),
+        );
+    }
+    ("codex", serde_json::Value::Object(args))
+}
+
+fn build_codex_exec_args(
+    agent_id: &str,
+    cwd: &Path,
+    persist_session: bool,
+    reasoning_effort: Option<&str>,
+    out_file: &Path,
+    resume_thread_id: Option<&str>,
+    config: &CodexRunnerConfig,
+) -> Vec<String> {
+    let mut args = Vec::new();
+    if let Some(policy) = config
+        .approval_policy
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        args.push("-a".into());
+        args.push(policy.to_string());
+    }
+    if let Some(sandbox) = config
+        .sandbox
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        args.push("-s".into());
+        args.push(sandbox.to_string());
+    }
+
+    let model_slug = codex_model_slug_for_agent_id(agent_id);
+    if let Some(thread_id) = resume_thread_id {
+        args.push("exec".into());
+        args.push("resume".into());
+        args.push("--json".into());
+        args.push("-m".into());
+        args.push(model_slug.to_string());
+        if let Some(effort) = reasoning_effort.map(str::trim).filter(|s| !s.is_empty()) {
+            // Override any global config (e.g. `xhigh`) that some models don't support.
+            args.push("-c".into());
+            args.push(format!("model_reasoning_effort={effort:?}"));
+        }
+        args.push("-o".into());
+        args.push(out_file.to_string_lossy().to_string());
+        // Positional SESSION_ID comes after options for `codex exec resume`.
+        args.push(thread_id.to_string());
+        args.push("-".into());
+        return args;
+    }
+
+    args.push("exec".into());
+    args.push("--json".into());
+    args.push("--color".into());
+    args.push("never".into());
+    if !persist_session {
+        args.push("--ephemeral".into());
+    }
+    args.push("-m".into());
+    args.push(model_slug.to_string());
+    args.push("-C".into());
+    args.push(cwd.to_string_lossy().to_string());
+    if let Some(effort) = reasoning_effort.map(str::trim).filter(|s| !s.is_empty()) {
+        // Override any global config (e.g. `xhigh`) that some models don't support.
+        args.push("-c".into());
+        args.push(format!("model_reasoning_effort={effort:?}"));
+    }
+    args.push("-o".into());
+    args.push(out_file.to_string_lossy().to_string());
+    args.push("-".into());
+    args
 }
 
 fn shorten_thread_id(thread_id: &str) -> String {
@@ -1864,9 +1947,17 @@ fn extract_total_tokens(info: &serde_json::Value) -> Option<u64> {
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
+    use serde_json::json;
+
+    use super::build_codex_exec_args;
+    use super::build_codex_mcp_tool_call;
+    use super::codex_model_slug_for_agent_id;
     use super::extract_thread_id_from_jsonl;
     use super::extract_token_count_from_jsonl;
     use super::handle_codex_mcp_notification;
+    use super::CodexRunnerConfig;
     use nit_core::AgentBusEvent;
     use nit_core::AgentTokenCount;
     use std::sync::mpsc;
@@ -1889,6 +1980,146 @@ mod tests {
         let jsonl = br#"{"type":"thread.started","thread_id":"  "}
 {"type":"turn.started"}"#;
         assert!(extract_thread_id_from_jsonl(jsonl).is_none());
+    }
+
+    #[test]
+    fn swarm_clone_agent_ids_resolve_to_base_model_slug() {
+        assert_eq!(
+            codex_model_slug_for_agent_id("gpt-5.2#swarm-mis-001-clone-01"),
+            "gpt-5.2"
+        );
+        assert_eq!(codex_model_slug_for_agent_id("gpt-5.2"), "gpt-5.2");
+    }
+
+    #[test]
+    fn mcp_new_session_uses_base_model_slug_for_swarm_clone() {
+        let config = CodexRunnerConfig {
+            sandbox: Some("workspace-write".into()),
+            approval_policy: Some("never".into()),
+            max_parallel_turns: 2,
+        };
+
+        let (tool_name, arguments) = build_codex_mcp_tool_call(
+            "gpt-5.2#swarm-mis-001-clone-01",
+            "solve it",
+            Path::new("/tmp/work"),
+            Some("high"),
+            &config,
+            None,
+        );
+
+        assert_eq!(tool_name, "codex");
+        assert_eq!(
+            arguments,
+            json!({
+                "prompt": "solve it",
+                "model": "gpt-5.2",
+                "cwd": "/tmp/work",
+                "config": { "model_reasoning_effort": "high" },
+                "sandbox": "workspace-write",
+                "approval-policy": "never"
+            })
+        );
+    }
+
+    #[test]
+    fn mcp_resume_uses_codex_reply_without_model_lookup() {
+        let config = CodexRunnerConfig::default();
+
+        let (tool_name, arguments) = build_codex_mcp_tool_call(
+            "gpt-5.2#swarm-mis-001-clone-01",
+            "continue",
+            Path::new("/tmp/work"),
+            Some("high"),
+            &config,
+            Some("thread-123"),
+        );
+
+        assert_eq!(tool_name, "codex-reply");
+        assert_eq!(
+            arguments,
+            json!({
+                "threadId": "thread-123",
+                "prompt": "continue"
+            })
+        );
+    }
+
+    #[test]
+    fn exec_args_use_base_model_slug_for_swarm_clone() {
+        let config = CodexRunnerConfig {
+            sandbox: Some("workspace-write".into()),
+            approval_policy: Some("never".into()),
+            max_parallel_turns: 2,
+        };
+
+        let args = build_codex_exec_args(
+            "gpt-5.2#swarm-mis-001-clone-01",
+            Path::new("/tmp/work"),
+            false,
+            Some("high"),
+            Path::new("/tmp/out.txt"),
+            None,
+            &config,
+        );
+
+        assert_eq!(
+            args,
+            vec![
+                "-a",
+                "never",
+                "-s",
+                "workspace-write",
+                "exec",
+                "--json",
+                "--color",
+                "never",
+                "--ephemeral",
+                "-m",
+                "gpt-5.2",
+                "-C",
+                "/tmp/work",
+                "-c",
+                "model_reasoning_effort=\"high\"",
+                "-o",
+                "/tmp/out.txt",
+                "-",
+            ]
+        );
+    }
+
+    #[test]
+    fn exec_resume_args_use_base_model_slug_for_swarm_clone() {
+        let config = CodexRunnerConfig::default();
+
+        let args = build_codex_exec_args(
+            "gpt-5.2#swarm-mis-001-clone-01",
+            Path::new("/tmp/work"),
+            true,
+            Some("medium"),
+            Path::new("/tmp/out.txt"),
+            Some("thread-123"),
+            &config,
+        );
+
+        assert_eq!(
+            args,
+            vec![
+                "-a",
+                "never",
+                "exec",
+                "resume",
+                "--json",
+                "-m",
+                "gpt-5.2",
+                "-c",
+                "model_reasoning_effort=\"medium\"",
+                "-o",
+                "/tmp/out.txt",
+                "thread-123",
+                "-",
+            ]
+        );
     }
 
     #[test]

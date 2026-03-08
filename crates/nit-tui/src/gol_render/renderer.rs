@@ -953,10 +953,7 @@ mod tests {
                     assert_eq!(
                         (v, h),
                         (expected_v, expected_h),
-                        "mode={:?} tx={} ty={}",
-                        mode,
-                        tx,
-                        ty
+                        "mode={mode:?} tx={tx} ty={ty}",
                     );
                 }
             }

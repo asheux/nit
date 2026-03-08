@@ -13,30 +13,12 @@ const SWARM_DEP_OUTPUT_MAX_CHARS: usize = 8_000;
 const COMPUTATIONAL_RESEARCH_ROLE: &str = "computational-research";
 const COMPUTATIONAL_RESEARCH_ROLE_LEGACY: &str = "computational research";
 
-const SWARM_ROLE_CLONES: &[(&str, &str)] = &[
-    ("propose-01", "propose"),
-    ("research", "research"),
-    ("computational-research", COMPUTATIONAL_RESEARCH_ROLE),
-    ("judge", "judge"),
-    ("review", "review"),
-    ("test", "test"),
-];
-
 fn swarm_clone_base_id(agent_id: &str) -> Option<&str> {
     agent_id.split_once("#swarm-").map(|(base_id, _)| base_id)
 }
 
 fn is_swarm_clone_agent_id(agent_id: &str) -> bool {
     swarm_clone_base_id(agent_id).is_some()
-}
-
-fn should_spawn_role_clones(state: &AppState, agent_id: &str) -> bool {
-    state
-        .agents
-        .swarm_role_by_agent_id
-        .get(agent_id)
-        .map(|role| role.trim())
-        .is_some_and(|role| role.eq_ignore_ascii_case("all"))
 }
 
 fn copy_codex_runtime_metadata(state: &mut AppState, base_id: &str, clone_id: &str) {
@@ -86,57 +68,132 @@ fn copy_codex_runtime_metadata(state: &mut AppState, base_id: &str, clone_id: &s
     }
 }
 
-fn ensure_role_clones(state: &mut AppState, mission_id: &str, agents: &mut Vec<String>) {
-    let base_ids = agents.clone();
-    for base_id in base_ids.iter() {
-        if is_swarm_clone_agent_id(base_id) {
-            continue;
+fn insert_swarm_clone_lane(state: &mut AppState, base_id: &str, clone_lane: nit_core::AgentLane) {
+    if state
+        .agents
+        .agents
+        .iter()
+        .any(|existing| existing.id == clone_lane.id)
+    {
+        return;
+    }
+
+    let Some(base_pos) = state
+        .agents
+        .agents
+        .iter()
+        .position(|lane| lane.id == base_id)
+    else {
+        state.agents.agents.push(clone_lane);
+        return;
+    };
+
+    let mut insert_pos = base_pos.saturating_add(1);
+    while insert_pos < state.agents.agents.len() {
+        let lane = &state.agents.agents[insert_pos];
+        if swarm_clone_base_id(lane.id.as_str()) == Some(base_id) {
+            insert_pos = insert_pos.saturating_add(1);
+        } else {
+            break;
         }
-        if !should_spawn_role_clones(state, base_id.as_str()) {
-            continue;
+    }
+    state.agents.agents.insert(insert_pos, clone_lane);
+}
+
+fn ensure_size_clones(
+    state: &mut AppState,
+    mission_id: &str,
+    template: SwarmTemplate,
+    size: SwarmSize,
+    planner_agent_id: &str,
+    agents: &mut Vec<String>,
+) {
+    if !matches!(template, SwarmTemplate::Parallel | SwarmTemplate::Bulk) {
+        return;
+    }
+    if matches!(size, SwarmSize::All) {
+        return;
+    }
+
+    let target = match size {
+        SwarmSize::Default => DEFAULT_SWARM_SIZE,
+        SwarmSize::All => MAX_SWARM_SIZE,
+        SwarmSize::Count(n) => n,
+    }
+    .clamp(1, MAX_SWARM_SIZE);
+    if agents.len() >= target {
+        return;
+    }
+
+    let mut sources: Vec<String> = Vec::new();
+    if !state.agents.swarm_priority_agent_ids.is_empty() {
+        for lane in state.agents.agents.iter() {
+            if !lane.is_codex() {
+                continue;
+            }
+            if lane.id.as_str() == planner_agent_id {
+                continue;
+            }
+            if is_swarm_clone_agent_id(lane.id.as_str()) {
+                continue;
+            }
+            if state.agents.swarm_priority_agent_ids.contains(&lane.id) {
+                sources.push(lane.id.clone());
+            }
         }
+    }
+    if sources.is_empty() {
+        sources.push(planner_agent_id.to_string());
+    }
+
+    let mut source_lanes = Vec::new();
+    for source_id in sources.iter() {
         let Some(base_lane) = state
             .agents
             .agents
             .iter()
-            .find(|lane| lane.id == *base_id)
+            .find(|lane| lane.id == *source_id)
             .filter(|lane| lane.is_codex())
             .cloned()
         else {
             continue;
         };
+        source_lanes.push((source_id.clone(), base_lane));
+    }
+    if source_lanes.is_empty() {
+        return;
+    }
 
-        for (clone_suffix, role_hint) in SWARM_ROLE_CLONES {
-            let clone_id = format!("{base_id}#swarm-{mission_id}-{clone_suffix}");
-            if agents.iter().any(|id| id == &clone_id) {
-                continue;
-            }
+    let mut clone_num: usize = 0;
+    while agents.len() < target {
+        clone_num = clone_num.saturating_add(1);
+        let (source_id, base_lane) = &source_lanes[(clone_num - 1) % source_lanes.len()];
+        let clone_id = format!("{source_id}#swarm-{mission_id}-clone-{clone_num:02}");
 
-            if state.agents.agents.iter().all(|lane| lane.id != clone_id) {
-                let mut lane = base_lane.clone();
-                lane.id = clone_id.clone();
-                let base_role = base_lane.role.trim();
-                let display_role = if base_role.is_empty() {
-                    format!("({role_hint})")
-                } else {
-                    format!("{base_role} ({role_hint})")
-                };
-                lane.role = display_role;
-                lane.status = AgentStatus::Idle;
-                lane.heartbeat_age_secs = 0;
-                lane.queue_len = 0;
-                lane.current_mission = None;
-                lane.last_message = String::new();
-                state.agents.agents.push(lane);
-            }
-
-            copy_codex_runtime_metadata(state, base_id, clone_id.as_str());
-            state
-                .agents
-                .swarm_role_by_agent_id
-                .insert(clone_id.clone(), role_hint.to_string());
-            agents.push(clone_id);
+        if agents.iter().any(|id| id == &clone_id) {
+            continue;
         }
+
+        if state.agents.agents.iter().all(|lane| lane.id != clone_id) {
+            let mut lane = base_lane.clone();
+            lane.id = clone_id.clone();
+            let base_role = base_lane.role.trim();
+            let display_role = if base_role.is_empty() {
+                format!("(clone {clone_num:02})")
+            } else {
+                format!("{base_role} (clone {clone_num:02})")
+            };
+            lane.role = display_role;
+            lane.status = AgentStatus::Idle;
+            lane.heartbeat_age_secs = 0;
+            lane.queue_len = 0;
+            lane.current_mission = None;
+            lane.last_message = String::new();
+            insert_swarm_clone_lane(state, source_id.as_str(), lane);
+        }
+
+        copy_codex_runtime_metadata(state, source_id.as_str(), clone_id.as_str());
+        agents.push(clone_id);
     }
 }
 
@@ -786,6 +843,7 @@ impl SwarmRuntime {
         state: &mut AppState,
         planner_agent_id: String,
         agent_ids: Vec<String>,
+        size: SwarmSize,
         template: Option<String>,
         root_prompt: String,
     ) -> Option<(String, Vec<SwarmDispatch>)> {
@@ -811,7 +869,31 @@ impl SwarmRuntime {
         let template_kind = parse_swarm_template(template.as_deref());
         let mission_id = next_mission_id(state);
 
-        ensure_role_clones(state, &mission_id, &mut agents);
+        let restore_roster_selected = state
+            .agents
+            .agents
+            .get(state.agents.roster_selected)
+            .map(|lane| lane.id.clone());
+
+        ensure_size_clones(
+            state,
+            &mission_id,
+            template_kind,
+            size,
+            planner_agent_id.as_str(),
+            &mut agents,
+        );
+
+        if let Some(selected_id) = restore_roster_selected {
+            if let Some(idx) = state
+                .agents
+                .agents
+                .iter()
+                .position(|lane| lane.id == selected_id)
+            {
+                state.agents.roster_selected = idx;
+            }
+        }
         if agents.len() < 2 {
             return None;
         }
@@ -1059,6 +1141,7 @@ impl SwarmRuntime {
                             }
                         };
 
+                        let mut abort_execution = false;
                         let dag_issues = analyze_swarm_dag(parsed.tasks.as_slice());
                         if !dag_issues.is_empty() {
                             match dag_mode {
@@ -1083,6 +1166,7 @@ impl SwarmRuntime {
                                             );
                                         }
                                     }
+                                    abort_execution = true;
                                 }
                                 SwarmDagValidationMode::Repair => {
                                     let mut warnings =
@@ -1110,6 +1194,7 @@ impl SwarmRuntime {
                                                 );
                                             }
                                         }
+                                        abort_execution = true;
                                     } else if warnings.is_empty() {
                                         warnings.push(
                                             "DAG repair: plan had DAG issues; no changes needed."
@@ -1127,6 +1212,11 @@ impl SwarmRuntime {
                                 &run.mission_id,
                                 format!("PLAN warning: {warning}"),
                             );
+                        }
+                        if abort_execution {
+                            abort_swarm_plan_preflight(state, &mut run, parsed);
+                            self.completed_runs.insert(mid.clone(), run);
+                            return dispatches;
                         }
                         let prev_integrator = run.integrator_agent_id.clone();
                         let prev_verifier = run.verifier_agent_id.clone();
@@ -1415,6 +1505,7 @@ impl SwarmRuntime {
                             }
                         };
 
+                        let mut abort_execution = false;
                         let dag_issues = analyze_swarm_dag(parsed.tasks.as_slice());
                         if !dag_issues.is_empty() {
                             match dag_mode {
@@ -1439,6 +1530,7 @@ impl SwarmRuntime {
                                             );
                                         }
                                     }
+                                    abort_execution = true;
                                 }
                                 SwarmDagValidationMode::Repair => {
                                     let mut warnings =
@@ -1466,6 +1558,7 @@ impl SwarmRuntime {
                                                 );
                                             }
                                         }
+                                        abort_execution = true;
                                     } else if warnings.is_empty() {
                                         warnings.push(
                                             "DAG repair: plan had DAG issues; no changes needed."
@@ -1483,6 +1576,11 @@ impl SwarmRuntime {
                                 &run.mission_id,
                                 format!("PLAN warning: {warning}"),
                             );
+                        }
+                        if abort_execution {
+                            abort_swarm_plan_preflight(state, &mut run, parsed);
+                            self.completed_runs.insert(mid.clone(), run);
+                            return dispatches;
                         }
                         let prev_integrator = run.integrator_agent_id.clone();
                         let prev_verifier = run.verifier_agent_id.clone();
@@ -1946,6 +2044,66 @@ fn infer_role_from_task_id(task_id: &str) -> Option<&'static str> {
     None
 }
 
+fn infer_integrator_agent_id_from_v2_tasks(
+    tasks: &[SwarmPlanTaskV2],
+    available_agents: &[String],
+) -> Option<(String, &'static str)> {
+    let normalize_agent_id = |raw: &str| {
+        let raw = raw.trim();
+        available_agents
+            .iter()
+            .find(|candidate| candidate.as_str() == raw)
+            .cloned()
+    };
+
+    let mut integrate_agents = Vec::new();
+    let mut writer_agents = Vec::new();
+    for task in tasks.iter() {
+        let Some(agent_id) = normalize_agent_id(task.agent_id.as_str()) else {
+            continue;
+        };
+
+        let has_integrate_role = task
+            .role
+            .as_deref()
+            .and_then(normalize_role_label)
+            .as_deref()
+            == Some("integrate")
+            || task
+                .id
+                .as_deref()
+                .and_then(infer_role_from_task_id)
+                .is_some_and(|role| role == "integrate");
+        if has_integrate_role
+            && !integrate_agents
+                .iter()
+                .any(|existing| existing == &agent_id)
+        {
+            integrate_agents.push(agent_id.clone());
+        }
+        if task.writes && !writer_agents.iter().any(|existing| existing == &agent_id) {
+            writer_agents.push(agent_id);
+        }
+    }
+
+    if integrate_agents.len() == 1
+        && (writer_agents.is_empty() || writer_agents.iter().all(|id| id == &integrate_agents[0]))
+    {
+        let reason = if writer_agents.is_empty() {
+            "integrate task"
+        } else {
+            "integrate task + writes=true task"
+        };
+        return Some((integrate_agents.remove(0), reason));
+    }
+
+    if writer_agents.len() == 1 && integrate_agents.is_empty() {
+        return Some((writer_agents.remove(0), "writes=true task"));
+    }
+
+    None
+}
+
 fn default_role_deps() -> HashMap<String, Vec<String>> {
     let mut map = HashMap::new();
     map.insert("consumer".into(), vec!["producer".into()]);
@@ -2374,10 +2532,25 @@ fn parse_v2_plan(
             }
         }
     }
+    let inferred_integrator = if integrator_locked || integrator_plan.is_some() {
+        None
+    } else {
+        infer_integrator_agent_id_from_v2_tasks(plan.tasks.as_slice(), available_agents)
+    };
+    if let Some((agent_id, reason)) = inferred_integrator.as_ref() {
+        warnings.push(format!(
+            "Planner omitted integrator_agent_id; inferred integrator '{agent_id}' from {reason}."
+        ));
+    }
+
     let integrator_candidate = if integrator_locked {
         integrator_hint
     } else {
-        integrator_plan.or(integrator_hint)
+        integrator_plan
+            .or(inferred_integrator
+                .as_ref()
+                .map(|(agent_id, _)| agent_id.as_str()))
+            .or(integrator_hint)
     };
     let integrator = integrator_candidate.and_then(|id| {
         available_agents
@@ -4329,7 +4502,7 @@ fn extract_json_code_blocks(text: &str) -> Vec<String> {
             buf.push_str(inner);
             buf.push('\n');
         }
-        let candidate = buf.trim().to_string();
+        let candidate = buf.trim().trim_end_matches('`').trim().to_string();
         if !candidate.is_empty() {
             blocks.push(candidate);
         }
@@ -4417,6 +4590,27 @@ fn update_mission_phase(state: &mut AppState, mission_id: &str, phase: MissionPh
     }
 }
 
+fn abort_swarm_plan_preflight(state: &mut AppState, run: &mut SwarmRun, parsed: ParsedSwarmPlan) {
+    if parsed.integrator_agent_id.is_some() {
+        run.integrator_agent_id = parsed.integrator_agent_id;
+    }
+    run.tasks = parsed.tasks;
+    run.synthesis_prompt = parsed.synthesis_prompt;
+    run.stage = SwarmStage::Planning;
+
+    let at = timestamp_label(state);
+    if let Some(mission) = state
+        .agents
+        .missions
+        .iter_mut()
+        .find(|mission| mission.id == run.mission_id)
+    {
+        mission.status = "FAILED".into();
+        mission.phase = MissionPhase::Plan;
+        mission.updated_at = at;
+    }
+}
+
 fn update_mission_final(state: &mut AppState, mission_id: &str, status: &str) {
     let at = timestamp_label(state);
     if let Some(mission) = state
@@ -4467,6 +4661,7 @@ pub fn select_swarm_agents(
         .agents
         .agents
         .iter()
+        .filter(|lane| !is_swarm_clone_agent_id(lane.id.as_str()))
         .enumerate()
         .map(|(idx, lane)| (lane.id.clone(), idx))
         .collect::<HashMap<_, _>>();
@@ -4578,6 +4773,10 @@ pub fn select_swarm_agents(
     let mut selected: Vec<String> = Vec::new();
 
     if matches!(template_kind, SwarmTemplate::Parallel | SwarmTemplate::Bulk) {
+        let has_priority_selection = !priority_pool.is_empty();
+        if !has_priority_selection && !matches!(size, SwarmSize::All) {
+            return agents;
+        }
         let integrator = if !priority_pool.is_empty() {
             take_best(&mut priority_pool, "integrate", true)
         } else {
@@ -4616,8 +4815,11 @@ pub fn select_swarm_agents(
                 }
             };
 
-        drain_parallel_pool(&mut priority_pool, &mut selected, take);
-        drain_parallel_pool(&mut fallback_pool, &mut selected, take);
+        if has_priority_selection {
+            drain_parallel_pool(&mut priority_pool, &mut selected, take);
+        } else {
+            drain_parallel_pool(&mut fallback_pool, &mut selected, take);
+        }
     } else {
         while selected.len() < take {
             let candidate = if !priority_pool.is_empty() {
@@ -4758,6 +4960,9 @@ mod tests {
             .agents
             .swarm_role_by_agent_id
             .insert("a".into(), "integrate".into());
+        state.agents.swarm_priority_agent_ids.insert("a".into());
+        state.agents.swarm_priority_agent_ids.insert("b".into());
+        state.agents.swarm_priority_agent_ids.insert("c".into());
 
         // These lanes are mission-scoped swarm clones and should never displace roster picks.
         state
@@ -4783,7 +4988,7 @@ mod tests {
     }
 
     #[test]
-    fn role_all_agent_spawns_all_role_clones() {
+    fn role_all_is_no_constraint_and_does_not_spawn_extra_agents() {
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         let editor = Buffer::empty("editor", None);
         let notes = Buffer::empty("notes", None);
@@ -4805,6 +5010,7 @@ mod tests {
                 &mut state,
                 "planner".into(),
                 vec!["planner".into(), "a".into()],
+                SwarmSize::Count(2),
                 Some("parallel".into()),
                 "root".into(),
             )
@@ -4817,18 +5023,108 @@ mod tests {
             .iter()
             .find(|mission| mission.id == mission_id)
             .expect("mission");
+        assert_eq!(mission.assigned_agents, vec!["planner", "a"]);
+    }
+
+    #[test]
+    fn parallel_without_priorities_returns_planner_only() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let editor = Buffer::empty("editor", None);
+        let notes = Buffer::empty("notes", None);
+        let mut state = AppState::new(root, editor, notes);
+        state.agents.agents.clear();
+
+        state.agents.agents.push(make_lane("planner", "planner"));
+        state.agents.agents.push(make_lane("a", "worker"));
+        state.agents.agents.push(make_lane("b", "worker"));
+
+        let agents = select_swarm_agents(&state, "planner", SwarmSize::Count(4), Some("parallel"));
+
+        assert_eq!(agents, vec!["planner"]);
+    }
+
+    #[test]
+    fn parallel_without_priorities_clones_planner_to_swarm_size() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let editor = Buffer::empty("editor", None);
+        let notes = Buffer::empty("notes", None);
+        let mut state = AppState::new(root, editor, notes);
+        state.agents.messages.clear();
+        state.agents.missions.clear();
+        state.agents.agents.clear();
+
+        state.agents.agents.push(make_lane("planner", "planner"));
+        state.agents.agents.push(make_lane("a", "worker"));
+
+        let mut swarm = SwarmRuntime::default();
+        let (mission_id, _dispatches) = swarm
+            .start(
+                &mut state,
+                "planner".into(),
+                vec!["planner".into()],
+                SwarmSize::Count(4),
+                Some("parallel".into()),
+                "root".into(),
+            )
+            .expect("swarm start");
+
+        let mission = state
+            .agents
+            .missions
+            .iter()
+            .find(|mission| mission.id == mission_id)
+            .expect("mission");
         assert_eq!(
             mission.assigned_agents,
             vec![
                 "planner",
-                "a",
-                "a#swarm-mis-001-propose-01",
-                "a#swarm-mis-001-research",
-                "a#swarm-mis-001-computational-research",
-                "a#swarm-mis-001-judge",
-                "a#swarm-mis-001-review",
-                "a#swarm-mis-001-test",
+                "planner#swarm-mis-001-clone-01",
+                "planner#swarm-mis-001-clone-02",
+                "planner#swarm-mis-001-clone-03",
             ]
+        );
+    }
+
+    #[test]
+    fn parallel_priority_selection_clones_from_selected_models() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let editor = Buffer::empty("editor", None);
+        let notes = Buffer::empty("notes", None);
+        let mut state = AppState::new(root, editor, notes);
+        state.agents.messages.clear();
+        state.agents.missions.clear();
+        state.agents.agents.clear();
+
+        state.agents.agents.push(make_lane("planner", "planner"));
+        state.agents.agents.push(make_lane("a", "worker"));
+        state.agents.agents.push(make_lane("b", "worker"));
+        state.agents.agents.push(make_lane("c", "worker"));
+        state.agents.agents.push(make_lane("d", "worker"));
+
+        state.agents.swarm_priority_agent_ids.insert("b".into());
+        state.agents.swarm_priority_agent_ids.insert("d".into());
+
+        let mut swarm = SwarmRuntime::default();
+        let (mission_id, _dispatches) = swarm
+            .start(
+                &mut state,
+                "planner".into(),
+                vec!["planner".into(), "b".into(), "d".into()],
+                SwarmSize::Count(4),
+                Some("parallel".into()),
+                "root".into(),
+            )
+            .expect("swarm start");
+
+        let mission = state
+            .agents
+            .missions
+            .iter()
+            .find(|mission| mission.id == mission_id)
+            .expect("mission");
+        assert_eq!(
+            mission.assigned_agents,
+            vec!["planner", "b", "d", "b#swarm-mis-001-clone-01",]
         );
     }
 
@@ -4852,7 +5148,7 @@ mod tests {
 
         let agents = select_swarm_agents(&state, "planner", SwarmSize::Count(4), Some("parallel"));
 
-        assert_eq!(agents, vec!["planner", "b", "d", "a"]);
+        assert_eq!(agents, vec!["planner", "b", "d"]);
     }
 
     #[test]
@@ -4927,6 +5223,7 @@ mod tests {
                 &mut state,
                 "planner".into(),
                 vec!["planner".into(), "a".into(), "b".into()],
+                SwarmSize::Count(3),
                 Some("bulk".into()),
                 "root".into(),
             )
@@ -4973,7 +5270,7 @@ mod tests {
 
         let agents = select_swarm_agents(&state, "planner", SwarmSize::Count(4), Some("bulk"));
 
-        assert_eq!(agents, vec!["planner", "b", "c", "d"]);
+        assert_eq!(agents, vec!["planner", "b", "c"]);
     }
 
     #[test]
@@ -4995,7 +5292,7 @@ mod tests {
 
         let agents = select_swarm_agents(&state, "planner", SwarmSize::Count(4), Some("bulk"));
 
-        assert_eq!(agents, vec!["planner", "b", "d", "a"]);
+        assert_eq!(agents, vec!["planner", "b", "d"]);
     }
 
     fn make_task(id: &str, agent_id: &str, role: Option<&str>, deps: Vec<&str>) -> SwarmTask {
@@ -5184,6 +5481,48 @@ Plan:
             .expect("integrate");
         assert!(integrate.writes);
         assert!(integrate.deps.iter().any(|dep| dep == "judge"));
+    }
+
+    #[test]
+    fn bulk_template_infers_integrator_from_integrate_task_when_field_missing() {
+        let planner_message = r#"
+Plan:
+- bulk
+
+```json
+{
+  "version": 2,
+  "template": "bulk",
+  "tasks": [
+    { "id": "propose-01", "agent_id": "a1", "role": "propose", "title": "Proposal", "prompt": "x", "deps": [], "writes": false },
+    { "id": "judge", "agent_id": "a1", "role": "judge", "title": "Judge", "prompt": "y", "deps": ["propose-01"], "writes": false },
+    { "id": "integrate", "agent_id": "a2", "role": "integrate", "title": "Integrate", "prompt": "z", "deps": ["judge"], "writes": true }
+  ]
+}
+```
+"#;
+        let available = vec!["a1".to_string(), "a2".to_string()];
+        let parsed = parse_plan_from_planner(
+            planner_message,
+            SwarmTemplate::Bulk,
+            "root",
+            &available,
+            Some("a1"),
+            false,
+        );
+
+        assert_eq!(parsed.integrator_agent_id.as_deref(), Some("a2"));
+        assert!(parsed
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("inferred integrator 'a2'")));
+
+        let integrate = parsed
+            .tasks
+            .iter()
+            .find(|task| task.id == "integrate")
+            .expect("integrate");
+        assert!(integrate.writes);
     }
 
     #[test]
@@ -5452,7 +5791,7 @@ Plan:
     }
 
     #[test]
-    fn deadlock_detection_emits_system_message() {
+    fn strict_dag_validation_aborts_before_execute() {
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         let editor = Buffer::empty("editor", None);
         let notes = Buffer::empty("notes", None);
@@ -5490,6 +5829,7 @@ Plan:
                 &mut state,
                 "planner".into(),
                 vec!["planner".into(), "a1".into()],
+                SwarmSize::Count(2),
                 Some("lab".into()),
                 "root".into(),
             )
@@ -5531,22 +5871,25 @@ Plan:
                 && msg.text.contains("t2")
         }));
 
-        assert_eq!(dispatches.len(), 1);
-        assert_eq!(dispatches[0].mission_id, mission_id);
-        assert!(
-            dispatches[0].prompt.contains("SWARM VERIFIER")
-                || dispatches[0].prompt.contains("SWARM SYNTHESIZER")
-        );
-
-        let run = swarm.runs.get(mission_id.as_str()).expect("swarm run");
-        assert!(matches!(
-            run.stage,
-            SwarmStage::Verifying | SwarmStage::Synthesizing
-        ));
+        assert!(dispatches.is_empty());
+        assert!(!swarm.runs.contains_key(mission_id.as_str()));
+        let run = swarm
+            .completed_runs
+            .get(mission_id.as_str())
+            .expect("completed swarm run");
+        assert!(matches!(run.stage, SwarmStage::Planning));
         assert!(run
             .tasks
             .iter()
             .all(|task| matches!(task.state, SwarmTaskState::Skipped)));
+        let mission = state
+            .agents
+            .missions
+            .iter()
+            .find(|mission| mission.id == mission_id)
+            .expect("mission");
+        assert_eq!(mission.status, "FAILED");
+        assert!(matches!(mission.phase, MissionPhase::Plan));
     }
 
     #[test]
@@ -5586,6 +5929,17 @@ notes
         assert_eq!(artifacts.commands.len(), 1);
         assert_eq!(artifacts.risks.len(), 1);
         assert_eq!(artifacts.notes, vec!["remember fallback".to_string()]);
+    }
+
+    #[test]
+    fn parse_task_artifacts_tolerates_malformed_fence_suffix() {
+        let message = r#"
+```json
+{"type":"swarm_artifacts","version":1,"task_id":"repo-recon","artifacts":{"notes":["ok"]}}``
+"#;
+
+        let artifacts = parse_task_artifacts("repo-recon", message).expect("artifacts");
+        assert_eq!(artifacts.notes, vec!["ok".to_string()]);
     }
 
     #[test]

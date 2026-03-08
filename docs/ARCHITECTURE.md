@@ -175,11 +175,19 @@ final report.
 Agent selection rules:
 
 - The currently selected Codex model becomes the **planner/synthesizer**.
-- Additional Codex agents are selected from the roster in priority order:
+- Swarm size:
   - `@swarm <prompt>` defaults to 4 agents total (planner + 3), capped at 16.
   - `@swarm N <prompt>` uses `N` agents total (1–16).
   - `@swarm all <prompt>` uses all available Codex agents (still capped at 16).
-- If fewer than 2 Codex agents are available, `@swarm` falls back to a normal single-agent send.
+- Agent selection:
+  - `lab`: selects additional Codex agents from the roster (priority agents are preferred).
+  - `parallel`/`bulk`: if any roster models are marked **priority**, Swarm restricts worker lanes
+    to that selected pool; if you request more agents than selected, nit spawns mission-scoped
+    clones of the selected models to reach the swarm size.
+  - `parallel`/`bulk` fallback: if *no* priority models are selected, nit clones the planner model
+    for worker lanes (so Swarm can still run even with a single Codex model configured).
+- If Swarm ends up with fewer than 2 Codex agents (e.g. `@swarm 1 ...`), it falls back to a normal
+  single-agent send.
 
 Templates:
 

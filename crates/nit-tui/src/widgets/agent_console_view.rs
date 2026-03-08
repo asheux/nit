@@ -1479,6 +1479,9 @@ fn format_message_rows(state: &AppState, msg: &AgentMessage, width: usize) -> Ve
 
 fn agent_identity_badge(state: &AppState, agent_id: &str) -> String {
     let id_full = agent_id.trim();
+    if let Some(label) = compact_swarm_clone_label(id_full) {
+        return truncate_label(&label, AGENT_BADGE_MAX_CHARS);
+    }
     let id = truncate_label(id_full, 10);
     let Some(agent) = state
         .agents
@@ -1502,8 +1505,58 @@ fn agent_identity_badge(state: &AppState, agent_id: &str) -> String {
     truncate_label(&format!("{role}/{id}"), AGENT_BADGE_MAX_CHARS)
 }
 
+fn compact_swarm_clone_label(agent_id: &str) -> Option<String> {
+    let (_base, rest) = agent_id.split_once("#swarm-")?;
+    let rest = rest.trim();
+    if rest.is_empty() {
+        return None;
+    }
+
+    let first_dash = rest.find('-')?;
+    let second_dash_rel = rest[first_dash.saturating_add(1)..].find('-')?;
+    let second_dash = first_dash.saturating_add(1).saturating_add(second_dash_rel);
+    let (_mission_id, suffix) = rest.split_at(second_dash);
+    let suffix = suffix.trim_start_matches('-').trim();
+    if suffix.is_empty() {
+        return Some(rest.to_string());
+    }
+
+    let parts = suffix
+        .split('-')
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>();
+    if parts.is_empty() {
+        Some(suffix.to_string())
+    } else {
+        Some(parts.join(" "))
+    }
+}
+
+fn swarm_clone_source_label(agent_id: &str) -> Option<String> {
+    let (base, rest) = agent_id.split_once("#swarm-")?;
+    let base = base.trim();
+    let rest = rest.trim();
+    if base.is_empty() || rest.is_empty() {
+        return None;
+    }
+
+    let first_dash = rest.find('-')?;
+    let second_dash_rel = rest[first_dash.saturating_add(1)..].find('-')?;
+    let second_dash = first_dash.saturating_add(1).saturating_add(second_dash_rel);
+    let (_mission_id, suffix) = rest.split_at(second_dash);
+    let suffix = suffix.trim_start_matches('-').trim();
+    if suffix.is_empty() {
+        return Some(base.to_string());
+    }
+    Some(format!("{base}#{suffix}"))
+}
+
 fn agent_roster_label(agent: &AgentLane) -> String {
     let id_full = agent.id.trim();
+    if let Some(label) = swarm_clone_source_label(id_full) {
+        return label;
+    }
     let role_full = agent.role.trim();
     if role_full.is_empty() {
         return id_full.to_string();
@@ -1686,27 +1739,34 @@ fn breather_rows_for_user_prompt(
             } else {
                 "pending"
             };
+            let suppress_times = matches!(stage_raw, "queued" | "swarm_queued");
             let stage = agent
                 .map(|agent| format_agent_stage_label(state, agent, stage_raw))
                 .unwrap_or_else(|| stage_raw.to_string());
 
-            let elapsed = turn.and_then(|turn| now.checked_duration_since(turn.started_at));
-            let hb_age = turn
-                .and_then(|turn| now.checked_duration_since(turn.last_heartbeat_at))
-                .map(|d| d.as_secs());
-            let out_age = turn
-                .and_then(|turn| now.checked_duration_since(turn.last_output_at))
-                .map(|d| d.as_secs());
+            let (elapsed_s, hb_s, out_s) = if suppress_times {
+                ("--".into(), "--".into(), "--".into())
+            } else {
+                let elapsed = turn.and_then(|turn| now.checked_duration_since(turn.started_at));
+                let hb_age = turn
+                    .and_then(|turn| now.checked_duration_since(turn.last_heartbeat_at))
+                    .map(|d| d.as_secs());
+                let out_age = turn
+                    .and_then(|turn| now.checked_duration_since(turn.last_output_at))
+                    .map(|d| d.as_secs());
 
-            let elapsed_s = elapsed
-                .map(format_duration_compact)
-                .unwrap_or_else(|| "--".into());
-            let hb_s = hb_age
-                .map(|s| format!("{s}s"))
-                .unwrap_or_else(|| "--".into());
-            let out_s = out_age
-                .map(|s| format!("{s}s"))
-                .unwrap_or_else(|| "--".into());
+                let elapsed_s = elapsed
+                    .map(format_duration_compact)
+                    .unwrap_or_else(|| "--".into());
+                let hb_s = hb_age
+                    .map(|s| format!("{s}s"))
+                    .unwrap_or_else(|| "--".into());
+                let out_s = out_age
+                    .map(|s| format!("{s}s"))
+                    .unwrap_or_else(|| "--".into());
+
+                (elapsed_s, hb_s, out_s)
+            };
 
             rows.push(ThreadRow {
                 text: pad_to_width(
@@ -1783,27 +1843,34 @@ fn breather_rows_for_user_prompt(
         } else {
             "pending"
         };
+        let suppress_times = matches!(stage_raw, "queued" | "swarm_queued");
         let stage = agent
             .map(|agent| format_agent_stage_label(state, agent, stage_raw))
             .unwrap_or_else(|| stage_raw.to_string());
 
-        let elapsed = turn.and_then(|turn| now.checked_duration_since(turn.started_at));
-        let hb_age = turn
-            .and_then(|turn| now.checked_duration_since(turn.last_heartbeat_at))
-            .map(|d| d.as_secs());
-        let out_age = turn
-            .and_then(|turn| now.checked_duration_since(turn.last_output_at))
-            .map(|d| d.as_secs());
+        let (elapsed_s, hb_s, out_s) = if suppress_times {
+            ("--".into(), "--".into(), "--".into())
+        } else {
+            let elapsed = turn.and_then(|turn| now.checked_duration_since(turn.started_at));
+            let hb_age = turn
+                .and_then(|turn| now.checked_duration_since(turn.last_heartbeat_at))
+                .map(|d| d.as_secs());
+            let out_age = turn
+                .and_then(|turn| now.checked_duration_since(turn.last_output_at))
+                .map(|d| d.as_secs());
 
-        let elapsed_s = elapsed
-            .map(format_duration_compact)
-            .unwrap_or_else(|| "--".into());
-        let hb_s = hb_age
-            .map(|s| format!("{s}s"))
-            .unwrap_or_else(|| "--".into());
-        let out_s = out_age
-            .map(|s| format!("{s}s"))
-            .unwrap_or_else(|| "--".into());
+            let elapsed_s = elapsed
+                .map(format_duration_compact)
+                .unwrap_or_else(|| "--".into());
+            let hb_s = hb_age
+                .map(|s| format!("{s}s"))
+                .unwrap_or_else(|| "--".into());
+            let out_s = out_age
+                .map(|s| format!("{s}s"))
+                .unwrap_or_else(|| "--".into());
+
+            (elapsed_s, hb_s, out_s)
+        };
         rows.push(ThreadRow {
             text: pad_to_width(
                 &format!(
@@ -2615,6 +2682,104 @@ mod tests {
     }
 
     #[test]
+    fn clone_identity_badge_uses_compact_label() {
+        let mut state = test_state();
+        state.agents.agents.push(AgentLane {
+            id: "planner#swarm-mis-001-clone-01".into(),
+            role: "Planner (clone 01)".into(),
+            lane: "Lane A".into(),
+            kind: nit_core::AgentLaneKind::Mock,
+            status: AgentStatus::Running,
+            heartbeat_age_secs: 0,
+            queue_len: 1,
+            current_mission: Some("mis-001".into()),
+            last_message: String::new(),
+        });
+
+        assert_eq!(
+            super::agent_identity_badge(&state, "planner#swarm-mis-001-clone-01"),
+            "clone 01"
+        );
+    }
+
+    #[test]
+    fn clone_roster_label_shows_base_model_and_clone_suffix() {
+        let agent = AgentLane {
+            id: "planner#swarm-mis-001-clone-01".into(),
+            role: "Planner (clone 01)".into(),
+            lane: "Lane A".into(),
+            kind: nit_core::AgentLaneKind::Mock,
+            status: AgentStatus::Idle,
+            heartbeat_age_secs: 0,
+            queue_len: 0,
+            current_mission: Some("mis-001".into()),
+            last_message: String::new(),
+        };
+
+        assert_eq!(super::agent_roster_label(&agent), "planner#clone-01");
+    }
+
+    #[test]
+    fn breather_rows_show_clone_source_model_name() {
+        let mut state = test_state();
+        state.agents.messages.clear();
+        state.agents.missions.clear();
+        state.agents.agents.clear();
+        state.agents.active_turns.clear();
+
+        let clone_id = "gpt-5.4#swarm-mis-001-clone-01";
+        state.agents.missions.push(MissionRecord {
+            id: "mis-001".into(),
+            title: "Swarm: clone demo".into(),
+            phase: MissionPhase::Execute,
+            swarm: true,
+            assigned_agents: vec![clone_id.into()],
+            status: "EXEC".into(),
+            updated_at: "t+0".into(),
+        });
+        state.agents.selected_mission = Some("mis-001".into());
+        state.agents.mission_selected = 0;
+        state.agents.selected_agent = Some(clone_id.into());
+
+        state.agents.agents.push(AgentLane {
+            id: clone_id.into(),
+            role: "GPT-5.4 (clone 01)".into(),
+            lane: "Codex".into(),
+            kind: nit_core::AgentLaneKind::Codex,
+            status: AgentStatus::Running,
+            heartbeat_age_secs: 0,
+            queue_len: 1,
+            current_mission: Some("mis-001".into()),
+            last_message: "active".into(),
+        });
+
+        let now = Instant::now();
+        state.agents.active_turns.insert(
+            clone_id.into(),
+            nit_core::state::AgentTurnState {
+                started_at: now,
+                last_heartbeat_at: now,
+                last_output_at: now,
+                stage: Some("starting".into()),
+            },
+        );
+
+        state.agents.messages.push(AgentMessage {
+            at: "10:00:01".into(),
+            channel: AgentChannel::Agent,
+            agent_id: None,
+            mission_id: Some("mis-001".into()),
+            text: "do the work".into(),
+        });
+
+        let rows = thread_rows(&state, None, 120, true);
+        assert!(rows.iter().any(|row| row.text.contains("gpt-5.4#clone-01")));
+        assert!(!rows
+            .iter()
+            .any(|row| row.text.contains("gpt-5.4#swarm-mis-001-clone-01")));
+    }
+
+    #[test]
     fn agent_badge_shown_when_single_agent_context_selected() {
         let mut state = test_state();
         state.agents.selected_mission = None;
@@ -3089,6 +3254,95 @@ mod tests {
         let flattened = rows.iter().map(|row| row.text.as_str()).collect::<Vec<_>>();
         assert!(flattened.iter().any(|line| line.contains("Queued ...")));
         assert!(flattened.iter().any(|line| line.contains("Queued")));
+    }
+
+    #[test]
+    fn breather_rows_suppress_turn_metrics_when_queued_in_wide_layout() {
+        let mut state = test_state();
+        state.agents.selected_mission = None;
+        state.agents.selected_agent = Some("planner".into());
+        state.agents.messages.clear();
+        state.agents.agents.clear();
+        state.agents.agents.push(AgentLane {
+            id: "planner".into(),
+            role: "Planner".into(),
+            lane: "Lane A".into(),
+            kind: nit_core::AgentLaneKind::Mock,
+            status: AgentStatus::Waiting,
+            heartbeat_age_secs: 0,
+            queue_len: 1,
+            current_mission: None,
+            last_message: "queued".into(),
+        });
+        let now = Instant::now();
+        state.agents.active_turns.insert(
+            "planner".into(),
+            nit_core::state::AgentTurnState {
+                started_at: now,
+                last_heartbeat_at: now,
+                last_output_at: now,
+                stage: Some("queued".into()),
+            },
+        );
+
+        let rows = thread_rows(&state, None, 120, true);
+        let flattened = rows.iter().map(|row| row.text.as_str()).collect::<Vec<_>>();
+        assert!(flattened.iter().any(|line| line.contains("Queued")));
+        let roster_line = flattened
+            .iter()
+            .find(|line| line.contains("Planner"))
+            .expect("missing queued roster row");
+        assert_eq!(roster_line.matches("--").count(), 3);
+    }
+
+    #[test]
+    fn breather_rows_suppress_turn_metrics_when_queued_in_narrow_layout() {
+        let mut state = test_state();
+        state.agents.selected_mission = None;
+        state.agents.selected_agent = Some("a".into());
+        state.agents.messages.clear();
+        state.agents.agents.clear();
+        state.agents.agents.push(AgentLane {
+            id: "a".into(),
+            role: "".into(),
+            lane: "Lane A".into(),
+            kind: nit_core::AgentLaneKind::Mock,
+            status: AgentStatus::Waiting,
+            heartbeat_age_secs: 0,
+            queue_len: 1,
+            current_mission: None,
+            last_message: "queued".into(),
+        });
+        state.agents.queued_codex_turns.push_back(QueuedCodexTurn {
+            agent_id: "a".into(),
+            mission_id: None,
+            prompt: "do the thing".into(),
+        });
+        let now = Instant::now();
+        state.agents.active_turns.insert(
+            "a".into(),
+            nit_core::state::AgentTurnState {
+                started_at: now,
+                last_heartbeat_at: now,
+                last_output_at: now,
+                stage: Some("queued".into()),
+            },
+        );
+        state.agents.messages.push(AgentMessage {
+            at: "10:00:01".into(),
+            channel: AgentChannel::Agent,
+            agent_id: Some("a".into()),
+            mission_id: None,
+            text: "finished previous turn".into(),
+        });
+
+        let rows = thread_rows(&state, None, 23, true);
+        let flattened = rows.iter().map(|row| row.text.as_str()).collect::<Vec<_>>();
+        let roster_line = flattened
+            .iter()
+            .find(|line| line.trim_end().starts_with("a "))
+            .expect("missing queued roster row");
+        assert_eq!(roster_line.trim_end(), "a -- -- --");
     }
 
     #[test]

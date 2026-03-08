@@ -141,11 +141,14 @@ Notes:
 
 - The roster role hint is passed to the planner as a constraint/preference. It does not by itself
   grant write access; `writes=true` still controls workspace edits.
+- `All` means “no role constraint”. It does not spawn extra agents or role-specific worker lanes.
 - In `bulk`, if you set an agent’s roster role to `integrate`, nit uses it as the single-writer
   integrator and locks it (planner overrides are ignored).
 - You can also mark agents as **priority** in **Agent Ops → Roster** (`[x]` on the model row). For
-  `parallel`/`bulk`, priority agents are passed to the planner as a hint and are preferred when
-  selecting a limited swarm size (so they’re more likely to be included).
+  `parallel`/`bulk`, priority agents act as an explicit **selection pool**: Swarm will only use
+  the priority-marked models for worker lanes. If you request more agents than you selected, nit
+  spawns mission-scoped **clones** of the selected models to reach the swarm size. If you select
+  *no* priority models, nit clones the currently selected model for the worker lanes.
 
 ### Role-based ordering (producer/consumer)
 
@@ -241,6 +244,9 @@ Explicit:
 - `@swarm <prompt>` defaults to 4 agents (planner + 3), capped at 16.
 - `@swarm N <prompt>` uses N agents total (1–16).
 - `@swarm all <prompt>` uses all available Codex agents (cap 16).
+- For `parallel`/`bulk`, if the selected pool is smaller than `N`, nit fills the remainder with
+  mission-scoped clones of the selected models (or clones of the planner model if none are
+  priority-marked).
 
 Implicit launches:
 

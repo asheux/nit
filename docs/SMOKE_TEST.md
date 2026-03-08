@@ -82,7 +82,7 @@ It's meant for quick confidence after changes to UI, commands, or engine wiring.
   - In Agent Ops: switch to the MCP tab.
   - Expect: status transitions to CONNECTED and endpoint shows `stdio://...` (backed by `codex mcp-server`).
   - Press `x` (stop), `s` (start), `r` (reconnect); expect status updates accordingly.
-  - Note: `r`/`x` clears saved Codex thread ids for continuations; the next prompt starts a new thread.
+  - Note: `r` preserves saved Codex thread ids for continuations; `x` clears them, so the next prompt starts a new thread.
 - Verify a turn over MCP:
   - Focus Agent Chat (from Agent Ops: `Enter`).
   - Send a short prompt; expect: stage updates while running and an agent reply appended to the thread.
@@ -125,7 +125,7 @@ It's meant for quick confidence after changes to UI, commands, or engine wiring.
     - In Agent Chat, send a plain prompt (e.g. `do a quick repo health check and suggest next steps`).
     - Expect: swarm starts as if `@swarm template=bulk ...` was used.
   - Deadlock sanity (cyclic plan):
-    - If the planner returns a cyclic plan where no tasks can ever become ready, expect a system message like `Swarm deadlock: skipping tasks with unresolvable deps: ...`, followed immediately by `VERIFY`/`SYNTH`, and the mission ends `FAILED`.
+    - If the planner returns a cyclic plan or unknown deps under the default strict DAG mode, expect a `PLAN error` explaining the invalid DAG and the mission to stop before `VERIFY`/`SYNTH` with status `FAILED`.
   - Structured artifacts persistence sanity:
     - Have a task emit a `swarm_artifacts` JSON block (files/diffs/commands/risks/notes).
     - Expect persistence under `.nit/swarm/<mission>/` (`run.json`, `tasks/<task-id>/artifacts.json`, `tasks/<task-id>/output.md`, optional `gates/report.json`).
