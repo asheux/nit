@@ -85,12 +85,14 @@ It's meant for quick confidence after changes to UI, commands, or engine wiring.
   - Note: `r` preserves saved Codex thread ids for continuations; `x` clears them, so the next prompt starts a new thread.
 - Verify a turn over MCP:
   - Focus Agent Chat (from Agent Ops: `Enter`).
-  - Send a short prompt; expect: stage updates while running and an agent reply appended to the thread.
+  - Send a short prompt; expect: stage updates while running and the thread shows `done (see ARTIFACTS)` when finished.
+  - Expect: the full formatted reply is available in Agent Ops → ARTIFACTS (open the REPLY card).
 - Verify parallel turns (multi-agent):
   - Launch with `cargo run -- --agents codex --codex-max-parallel-turns 2`.
   - In Agent Ops (Roster): select a model, `Enter` to Agent Chat, send a prompt.
   - While the first turn is running: return to Agent Ops, select a different model, `Enter`, send another prompt.
-  - Expect: both models show `RUNNING` in the roster, Agent Chat shows a multi-agent “Working” table, and replies arrive independently.
+  - Expect: both models show `RUNNING` in the roster and Agent Chat shows a multi-agent “Working” table.
+  - Expect: each agent finishes independently (thread shows `done (see ARTIFACTS)` per agent); full outputs are in Agent Ops → ARTIFACTS.
   - Optional: create a mission (`n` in Agent Ops), then in Agent Chat send `@all <prompt>` to broadcast to the mission’s assigned Codex agents.
 - Verify `@swarm` orchestration (task splitting + synthesis):
   - In Agent Chat (any Codex model selected): send `@swarm 4 template=lab <prompt>` (or omit `template=...` since `lab` is the default).
@@ -128,7 +130,8 @@ It's meant for quick confidence after changes to UI, commands, or engine wiring.
     - If the planner returns a cyclic plan or unknown deps under the default strict DAG mode, expect a `PLAN error` explaining the invalid DAG and the mission to stop before `VERIFY`/`SYNTH` with status `FAILED`.
   - Structured artifacts persistence sanity:
     - Have a task emit a `swarm_artifacts` JSON block (files/diffs/commands/risks/notes).
-    - Expect persistence under `.nit/swarm/<mission>/` (`run.json`, `tasks/<task-id>/artifacts.json`, `tasks/<task-id>/output.md`, optional `gates/report.json`).
+    - Expect the selected mission to show task artifacts in `Agent Ops → Artifacts`.
+    - Expect persistence under `.nit/swarm/<mission>/` (`run.json`, `tasks/<task-id>/artifacts.json`, `tasks/<task-id>/output.md`, optional `gates/report.json`, `gates/output.txt`, `gates/verify.md`).
   - Gate bundle override sanity:
     - Add `.nit/config.toml` with:
       - `[swarm.gates]`

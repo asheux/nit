@@ -1,153 +1,194 @@
-# Antigravity (antigravity.google) — notes + ideas for nit
+# Antigravity (antigravity.google) — nit mapping and next moves
 
-This doc is a quick reverse‑engineering pass of **Google Antigravity** from public materials, with
-specific product ideas that map well onto nit’s existing Agent Station (`Agent Ops` + `Agent Chat`)
-and security posture.
+This is a practical reverse-engineering pass of **Google Antigravity** from public materials,
+translated into nit terms. The goal is not to copy the product surface literally; it is to identify
+the parts that fit nit’s terminal-first agent station and security model.
+
+As of March 9, 2026, nit already implements more of this shape than the first draft of this doc
+captured. The biggest change since then is that swarm artifacts are now both:
+
+- persisted under `.nit/swarm/<mission-id>/...`, and
+- surfaced in **Agent Ops → Artifacts** instead of being hidden behind legacy `Evidence` plumbing.
 
 ## What Antigravity is (high level)
 
-From Google’s own description (public preview, Nov–Dec 2025), Antigravity is an **agentic
-development platform**: it combines a familiar IDE/editor surface with a **manager/mission‑control
-surface** for spawning and supervising multiple agents across workspaces.
+From Google’s public preview materials (Nov–Dec 2025), Antigravity is an **agentic development
+platform** with two core operator surfaces:
 
-Key product primitives:
+- **Editor View**: IDE/editor with inline completions, commands, and agent assistance.
+- **Manager Surface**: a mission-control view for spawning, observing, and steering multiple agents
+  asynchronously.
 
-- **Two primary surfaces**
-  - **Editor View**: IDE-like editing with agent panel, tab completions, and inline commands.
-  - **Manager Surface**: a dedicated agent-first interface to spawn/orchestrate/observe multiple
-    agents working asynchronously across different workspaces.
-- **Multi-surface autonomy**: agents can operate across **editor + terminal + browser**, and can
-  plan/execute/verify end-to-end tasks without constant user intervention.
-- **Artifacts over raw logs**: agents produce “Artifacts” (task lists, implementation plans,
-  screenshots, browser recordings) designed to be reviewable at a glance.
-- **Artifact-level feedback loop**: users can comment on artifacts (doc-style comments; also
-  feedback on screenshots), and the agent incorporates the feedback without needing to stop.
-- **Knowledge base**: agents can save useful context/snippets into a knowledge base to improve
-  future work.
-- **Model optionality**: supports multiple model providers (Gemini + Claude + GPT-OSS were
-  explicitly called out in 2025 launch materials).
+The product ideas that matter most for nit are:
 
-## How Antigravity’s tool integration works (MCP)
+- multi-agent orchestration across workspaces
+- explicit autonomy/review controls
+- structured artifacts instead of raw logs
+- artifact-level feedback loops
+- MCP/tool discovery and credential setup
+- long-lived knowledge capture
 
-Antigravity leans heavily on **Model Context Protocol (MCP)** to give agents executable tools and
-data access.
+## Current nit status vs. Antigravity
 
-Observed design choices:
+### Already strong
 
-- **Built-in “MCP Store” UI** for discovering/installing servers, with **UI forms** for setup.
-- **Credential handling**: setup flows can store credentials securely so agents can use tools
-  without pasting secrets into chat.
-- **A generated JSON config file**: docs reference a `mcp_config.json` that Antigravity updates
-  automatically; there’s a “View raw config” entry point to edit/inspect the config.
-- **Prebuilt servers (via MCP Toolbox for Databases)**: Google Cloud positions MCP Toolbox as a
-  standardized server layer between IDE and services like BigQuery / AlloyDB / Spanner / Looker.
+- **Mission control**: nit already has `Agent Chat`, `Agent Ops`, missions, swarm orchestration,
+  planner/integrator/judge roles, DAG validation, mission-scoped clones, and gate execution.
+- **Artifact schema**: swarm tasks can emit structured `swarm_artifacts` JSON with files, diffs,
+  commands, risks, and notes.
+- **Artifact persistence**: nit writes mission data under `.nit/swarm/<mission-id>/`, including
+  `run.json`, `summary.json`, task `artifacts.json`, task `output.md`, gate `report.json`, gate
+  `output.txt`, and now `gates/verify.md`.
+- **Artifact UI**: `Agent Ops → Artifacts` now shows parsed task artifacts, missing-artifact
+  warnings, output paths, and verification status for the selected mission.
+- **Model optionality**: nit already supports local/mock, Codex, and Claude-backed lanes.
+- **Operator-controlled safety**: sandbox and approval settings already exist through Codex runtime
+  configuration.
 
-Example from Google Cloud docs (BigQuery via MCP Toolbox):
+### Partial
 
-```json
-{
-  "mcpServers": {
-    "bigquery": {
-      "command": "npx",
-      "args": ["-y", "@toolbox-sdk/server", "--prebuilt", "bigquery", "--stdio"],
-      "env": { "BIGQUERY_PROJECT": "PROJECT_ID" }
-    }
-  }
-}
-```
+- **Review policy UX**: the controls exist, but mostly as CLI/runtime config rather than an obvious
+  per-mission UI.
+- **MCP UX**: nit exposes runtime connection status and reconnect/start/stop, but not an
+  Antigravity-style MCP template store or guided config editor.
+- **Verification artifacts**: nit now stores readable verification summaries, but not richer
+  evidence like screenshots, timing charts, or “next actions” summaries.
 
-## Ideas that map cleanly into nit
+### Missing
 
-nit already has many of the same building blocks (missions, DAG view, MCP connection status, swarm
-orchestration, gate monitor, sandbox/approval settings). The main gap vs. Antigravity is the
-**artifact/feedback/knowledge** layer and the **MCP Store-like UX**.
+- **Artifact comments / feedback threads**
+- **Approved repo-local knowledge cards**
+- **MCP template/install flows**
+- **Browser-loop harness surfaced as a first-class mission tool**
+- **Cross-mission artifact compare/replay UI**
 
-### 1) “Artifacts” as a first-class UI + file format
+## nit-specific direction
 
-Goal: turn “agent work” into reviewable deliverables, not scrolling chat transcripts.
+The right move for nit is not “become Antigravity in a terminal.” It is:
 
-Concrete proposal:
+1. keep mission state explicit and repo-local
+2. make artifacts cheap to review
+3. add feedback loops without hidden background state
+4. keep tool setup transparent and auditable
 
-- Add a mission-scoped artifact store at `.nit/artifacts/<mission_id>/...` with types:
-  - `plan.md` (task list + approach)
-  - `diff.patch` or `diff.md` (human-readable + applyable)
-  - `verify.md` (gates run + results summary)
-  - `ui/` screenshots (`.png`) + small metadata (`.json`)
-  - `walkthrough.md` (what changed + why)
-- Add an `Agent Ops` tab (or repurpose the existing hidden `Evidence` tab) to browse artifacts by
-  mission and open them in-place.
-- Add quick actions: “Send feedback”, “Ask to revise”, “Apply patch”, “Re-run gates”.
+That leads to the following priority order.
 
-### 2) Artifact-level feedback (comment threads)
+## Priority improvements
 
-Goal: let the operator correct 10–20% mistakes cheaply without rewriting the whole prompt.
+### 1) Artifacts as the default review surface
 
-Concrete proposal:
+Status: **now partially shipped**
 
-- Allow inline comments on text artifacts (line-anchored threads) stored as
-  `.nit/artifacts/<mission_id>/<artifact>.comments.json`.
-- A “feedback inbox” inside Agent Ops, similar to Antigravity’s “comment on doc” loop:
-  - selecting a comment turns it into a structured follow-up prompt that the agent must address.
-- For images: start simple (file-level comments), then later add coordinate-based annotations.
+What nit has now:
 
-### 3) Knowledge base with human approval
+- `swarm_artifacts` JSON emitted by tasks
+- persistence under `.nit/swarm/<mission-id>/...`
+- `Agent Ops → Artifacts`
+- readable `gates/verify.md`
+- Agent Chat keeps the transcript compact by hiding full agent replies; it shows `done (see ARTIFACTS)` and expects review to happen in the Artifacts popup.
 
-Goal: reduce repeated “teach the agent the repo” overhead while staying safe-by-default.
+What to add next:
 
-Concrete proposal:
+- allow opening artifact files directly from the Artifacts tab
+- add mission-level “walkthrough” and “implementation summary” markdown artifacts
+- add quick actions beside artifacts: re-run gates, ask for revision, send to integrator
 
-- A repo-local knowledge base at `.nit/knowledge/` (small Markdown “cards”).
-- Add a “Propose knowledge item” flow:
-  - agent suggests a knowledge card,
-  - user approves/edits,
-  - nit includes approved cards as context for future missions.
-- Keep it explicit to preserve nit’s “no hidden background state” vibe.
+Important nit choice:
 
-### 4) MCP “Store” UX (without becoming a plugin platform)
+- keep the canonical store under `.nit/swarm/<mission-id>/...`
+- do **not** invent a second artifact root unless there is a compelling schema reason
 
-Goal: make MCP servers discoverable and safe to run, without “random scripts”.
+### 2) Artifact-level feedback threads
 
-Concrete proposal:
+Status: **missing**
 
-- Extend `Agent Ops → MCP` to support **multiple MCP servers** (not just the Codex runtime), with:
-  - a local config file (compatible with `mcp_config.json` shape),
-  - “View raw config” and “Install from template” flows,
-  - tool list + per-tool enable/disable (checkboxes), similar to other MCP clients.
-- Curate templates that are “safe-ish” and transparent:
-  - git, ripgrep, filesystem (already local)
-  - optional: database toolbox (if user explicitly opts in)
-- Secrets: integrate with OS keychain (or an encrypted file) and inject env vars at spawn time;
-  never print secrets into Agent Chat.
+Best nit shape:
 
-### 5) Review policy UI (operator-controlled autonomy)
+- store comments beside artifacts, e.g.
+  `.nit/swarm/<mission-id>/tasks/<task-id>/artifacts.comments.json`
+- start with file-level and line-anchored text comments
+- turn a selected comment into a structured follow-up prompt for the responsible task/agent
 
-Antigravity surfaces “review policy” explicitly. nit already has Codex sandbox + approval policy,
-but they’re mostly CLI flags today.
+This matches Antigravity’s “comment on the artifact, not the whole transcript” loop without adding
+opaque state.
 
-Concrete proposal:
+### 3) Knowledge cards with human approval
 
-- Add an in-UI toggle (per mission) mapping to:
-  - sandbox level (read-only vs workspace-write),
-  - approval policy (untrusted/on-failure/on-request/never),
-  - optional “destructive ops require confirm” guardrail (even in `never`).
+Status: **missing**
 
-### 6) “Verify with evidence” gate bundles become artifacts
+Best nit shape:
 
-nit already has a Gate Monitor; we can make it more “artifact-like”:
+- repo-local cards under `.nit/knowledge/`
+- each card is plain Markdown plus a tiny metadata header
+- agents may propose a card, but it is only activated after operator approval/edit
 
-- Each gate run emits a `verify.md` artifact with:
-  - commands run, pass/fail, key output excerpts, timing.
-- Gate failures show a small “What to try next” section (agent-proposed).
+This keeps nit’s current “explicit local state” posture while reducing repeated repo-explaining.
 
-### 7) Browser-loop as an optional “harness”
+### 4) MCP templates, not a plugin marketplace
 
-Antigravity’s browser integration enables agents to verify UI flows.
+Status: **partial**
 
-Concrete proposal:
+nit should lean into a narrow, auditable version of Antigravity’s MCP store idea:
 
-- Start as an **external tool** (Playwright) invoked via a dedicated “UI verify” gate bundle.
-- Store screenshots/videos as artifacts and show them in the artifacts UI (even if nit can’t render
-  images directly, it can open them externally and track them in the mission timeline).
+- guided templates for a small curated set of MCP servers
+- visible generated config
+- no hidden secret pasting into chat
+- per-server enable/disable and tool listing
+
+The right product is “transparent templates + keychain/env injection”, not an open-ended plugin
+platform.
+
+### 5) Review policy as a mission-scoped UI control
+
+Status: **partial**
+
+Antigravity is right to surface autonomy/review policy explicitly. nit should expose the existing
+concepts per mission:
+
+- sandbox level
+- approval policy
+- destructive-op confirmation guardrail
+
+The important nit constraint is that the selected policy must be obvious in Agent Ops and recorded
+in mission provenance.
+
+### 6) Verification with richer evidence
+
+Status: **partial**
+
+Current nit output:
+
+- gate bundle selection
+- gate report JSON
+- raw gate output
+- human-readable `verify.md`
+
+Next additions that would matter:
+
+- per-gate timing
+- operator-facing “what failed / what to try next”
+- optional UI evidence attachments (screenshots, recordings, external files)
+
+### 7) Browser loop as a gate bundle, not a magic background agent
+
+Status: **missing**
+
+The most nit-native way to absorb Antigravity’s browser loop is:
+
+- add a dedicated browser verification gate bundle
+- use Playwright or similar as an explicit external tool
+- store screenshots/videos under the same mission artifact tree
+
+That keeps browser work inspectable and replayable.
+
+## Recommended near-term roadmap
+
+1. Add artifact quick actions in `Agent Ops → Artifacts`.
+2. Add comment threads for text artifacts.
+3. Add repo-local approved knowledge cards.
+4. Add guided MCP templates and raw-config editing.
+5. Add per-mission review-policy UI.
+6. Add browser verification as an optional gate bundle.
 
 ## References (public)
 
@@ -155,7 +196,7 @@ Concrete proposal:
   (Nov 20, 2025): https://developers.googleblog.com/en/build-with-google-antigravity-our-new-agentic-development-platform/
 - Google Cloud Blog — *Connect your enterprise data to Google’s new Antigravity IDE* (Dec 15, 2025):
   https://cloud.google.com/blog/products/data-analytics/connect-google-antigravity-ide-to-googles-data-cloud-services
-- Google Cloud Docs — *Connect LLMs to BigQuery with MCP* (includes Antigravity + `mcp_config.json`
-  steps): https://docs.cloud.google.com/bigquery/docs/pre-built-tools-with-mcp-toolbox
-- Firebase Docs — *Firebase MCP server* (Antigravity install path + `mcp_config.json` example):
+- Google Cloud Docs — *Connect LLMs to BigQuery with MCP*:
+  https://docs.cloud.google.com/bigquery/docs/pre-built-tools-with-mcp-toolbox
+- Firebase Docs — *Firebase MCP server*:
   https://firebase.google.com/docs/cli/mcp-server

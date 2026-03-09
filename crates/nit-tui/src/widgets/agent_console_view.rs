@@ -29,6 +29,12 @@ pub struct ChatInputScrollMetrics {
     pub total_lines: usize,
 }
 
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum MessageRenderMode {
+    Transcript,
+    Full,
+}
+
 const TAB_STOP: usize = 4;
 const CHAT_INPUT_MAX_INNER_LINES: usize = 12;
 const CHAT_INPUT_MAX_INNER_LINES_COMPACT: usize = 8;
@@ -527,7 +533,12 @@ fn refresh_thread_rows_cache(state: &mut AppState, width: usize) -> (usize, bool
             continue;
         }
         last_message_was_user = msg.agent_id.is_none();
-        rows.extend(format_message_rows(state, msg, width));
+        rows.extend(format_message_rows(
+            state,
+            msg,
+            width,
+            MessageRenderMode::Transcript,
+        ));
     }
 
     let key = AgentConsoleRowsCacheKey {
@@ -850,6 +861,21 @@ fn thread_lines<'a>(
             ThreadRowKind::StatusSubRow => status_sub_row_line(&row.text, theme),
         })
         .collect()
+}
+
+pub(crate) fn message_lines_for_popup(
+    state: &AppState,
+    msg: &AgentMessage,
+    theme: &Theme,
+    width: usize,
+) -> Vec<Line<'static>> {
+    let width = width.max(1);
+    let mut rows = format_message_rows(state, msg, width, MessageRenderMode::Full);
+    // `format_message_rows` may add spacing rows meant for the full transcript.
+    while rows.last().is_some_and(|row| row.text.trim().is_empty()) {
+        rows.pop();
+    }
+    thread_lines(rows.iter(), theme)
 }
 
 fn breather_line(text: &str, theme: &Theme) -> Line<'static> {
@@ -1397,7 +1423,12 @@ fn thread_rows(
         if !message_matches_context(msg, mission, agent) {
             continue;
         }
-        rows.extend(format_message_rows(state, msg, width));
+        rows.extend(format_message_rows(
+            state,
+            msg,
+            width,
+            MessageRenderMode::Transcript,
+        ));
     }
     rows.extend(breather_rows_for_user_prompt(state, swarm, pulse_on, width));
     rows
@@ -1416,7 +1447,12 @@ fn message_matches_context(msg: &AgentMessage, mission: Option<&str>, agent: Opt
     true
 }
 
-fn format_message_rows(state: &AppState, msg: &AgentMessage, width: usize) -> Vec<ThreadRow> {
+fn format_message_rows(
+    state: &AppState,
+    msg: &AgentMessage,
+    width: usize,
+    mode: MessageRenderMode,
+) -> Vec<ThreadRow> {
     let width = width.max(1);
     let text_lines: Vec<&str> = if msg.text.is_empty() {
         vec![""]
@@ -1472,17 +1508,27 @@ fn format_message_rows(state: &AppState, msg: &AgentMessage, width: usize) -> Ve
             kind: ThreadRowKind::Agent,
         });
     }
-    for line in text_lines {
-        for segment in wrap_visual_line(line, max_inner) {
-            let segment = segment.trim_end_matches(' ');
+    match mode {
+        MessageRenderMode::Transcript => {
             out.push(ThreadRow {
-                text: if segment.is_empty() {
-                    String::new()
-                } else {
-                    format!("{indent_str}{segment}")
-                },
+                text: format!("{indent_str}done (see ARTIFACTS)"),
                 kind: ThreadRowKind::Agent,
             });
+        }
+        MessageRenderMode::Full => {
+            for line in text_lines {
+                for segment in wrap_visual_line(line, max_inner) {
+                    let segment = segment.trim_end_matches(' ');
+                    out.push(ThreadRow {
+                        text: if segment.is_empty() {
+                            String::new()
+                        } else {
+                            format!("{indent_str}{segment}")
+                        },
+                        kind: ThreadRowKind::Agent,
+                    });
+                }
+            }
         }
     }
     out
@@ -2599,7 +2645,7 @@ mod tests {
     use super::{
         chat_input_scroll_metrics, chat_input_text_area, dim_bg_towards, ecg_indicator,
         format_message_rows, map_chat_input_point_to_cursor, thread_lines, thread_rows,
-        wrap_input_with_cursor, wrap_visual_line, ThreadRow, ThreadRowKind,
+        wrap_input_with_cursor, wrap_visual_line, MessageRenderMode, ThreadRow, ThreadRowKind,
         USER_PROMPT_BG_BACKGROUND_PCT,
     };
     use crate::theme::Theme;
@@ -2651,7 +2697,7 @@ mod tests {
             mission_id: None,
             text: "line one\nline two".into(),
         };
-        let rows = format_message_rows(&state, &msg, 48);
+        let rows = format_message_rows(&state, &msg, 48, MessageRenderMode::Transcript);
         assert!(rows.len() >= 6);
         assert!(matches!(rows[0].kind, ThreadRowKind::User));
         // Top padding row + label row.
@@ -2695,14 +2741,14 @@ mod tests {
             text: "working".into(),
         };
         state.metrics.frame_count = 3;
-        let first_rows = format_message_rows(&state, &msg, 80);
+        let first_rows = format_message_rows(&state, &msg, 80, MessageRenderMode::Transcript);
         state.metrics.frame_count = 30;
-        let second_rows = format_message_rows(&state, &msg, 80);
+        let second_rows = format_message_rows(&state, &msg, 80, MessageRenderMode::Transcript);
         // Stable header row (avoid animated separators in the transcript).
         assert_eq!(first_rows[0].text, "  [Coder]");
         assert_eq!(second_rows[0].text, "  [Coder]");
-        assert_eq!(first_rows[1].text, "  working");
-        assert_eq!(second_rows[1].text, "  working");
+        assert_eq!(first_rows[1].text, "  done (see ARTIFACTS)");
+        assert_eq!(second_rows[1].text, "  done (see ARTIFACTS)");
         assert!(first_rows[0].text.contains("[Coder]"));
         assert!(second_rows[0].text.contains("[Coder]"));
     }
@@ -2828,10 +2874,11 @@ mod tests {
             mission_id: None,
             text: "hello".into(),
         };
-        let rows = format_message_rows(&state, &msg, 120);
+        let rows = format_message_rows(&state, &msg, 120, MessageRenderMode::Transcript);
         // Header row, then message.
         assert!(rows[0].text.contains("[Coder]"));
-        assert_eq!(rows[1].text, "  hello");
+        assert_eq!(rows[1].text, "  done (see ARTIFACTS)");
+        assert!(!rows.iter().any(|row| row.text.contains("hello")));
     }
 
     #[test]
@@ -2856,7 +2903,7 @@ mod tests {
             mission_id: None,
             text: "ok".into(),
         };
-        let row = format_message_rows(&state, &msg, 120)
+        let row = format_message_rows(&state, &msg, 120, MessageRenderMode::Transcript)
             .into_iter()
             .find(|row| !row.text.trim().is_empty())
             .expect("row");
@@ -3034,9 +3081,9 @@ mod tests {
             .map(|row| row.text.as_str())
             .collect::<Vec<_>>()
             .join("\n");
-        let newest_pos = flattened.find("newest message").expect("newest present");
-        let older_pos = flattened.find("older message").expect("older present");
-        assert!(newest_pos > older_pos);
+        let newer_pos = flattened.find("[coder]").expect("newer badge present");
+        let older_pos = flattened.find("[planner]").expect("older badge present");
+        assert!(newer_pos > older_pos);
     }
 
     #[test]

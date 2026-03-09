@@ -1,6 +1,7 @@
 use nit_core::{
-    AgentAlertSeverity, AgentLaneKind, AgentOpsTab, AgentStatus, AppState, McpConnectionState,
-    PaneId, RosterTreeBranch, RosterTreeSelection, UiSelectionPane,
+    AgentAlertSeverity, AgentLaneKind, AgentMessage, AgentOpsTab, AgentStatus, AppKind, AppState,
+    EvidenceItem, McpConnectionState, PaneId, RosterTreeBranch, RosterTreeSelection,
+    UiSelectionPane,
 };
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
@@ -9,8 +10,12 @@ use ratatui::{
     widgets::{Block, BorderType, Borders, Paragraph},
     Frame,
 };
+use std::{collections::BTreeMap, fs, path::PathBuf};
 
-use crate::swarm::{normalize_role_label, SwarmDashboardView, SwarmRuntime};
+use crate::swarm::{
+    normalize_role_label, GateReportGate, SwarmDashboardView, SwarmPersistenceView, SwarmRuntime,
+    SwarmTaskArtifacts,
+};
 use crate::theme::Theme;
 use crate::widgets::text_selection::apply_ui_selection;
 
@@ -20,6 +25,9 @@ pub fn mission_index_for_body_line(state: &AppState, body_line: usize) -> Option
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum RosterBodyNode {
+    Backend {
+        backend: AgentLaneKind,
+    },
     Agent,
     Branch {
         branch: RosterTreeBranch,
@@ -30,8 +38,14 @@ pub enum RosterBodyNode {
     },
 }
 
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum RosterSelectableRow {
+    Backend { backend: AgentLaneKind },
+    Agent { agent_idx: usize },
+}
+
 pub struct RosterBodyMeta {
-    pub agent_idx: usize,
+    pub agent_idx: Option<usize>,
     pub node: RosterBodyNode,
 }
 
@@ -40,14 +54,59 @@ pub fn roster_meta_for_body_line(state: &AppState, body_line: usize) -> Option<R
 }
 
 pub fn roster_body_offset(state: &AppState) -> usize {
-    let _ = state;
-    // Backends header (4 lines) + blank spacer (1) + swarm template buttons (1)
-    // + swarm mission buttons (1) + blank spacer (1) + table header/separator (2)
-    10
+    roster_header_offsets(state).body_offset
 }
 
-pub const ROSTER_SWARM_TEMPLATE_LINE_IDX: usize = 5;
-pub const ROSTER_SWARM_MISSION_LINE_IDX: usize = 6;
+pub fn roster_selection_rows(state: &AppState) -> Vec<RosterSelectableRow> {
+    let mut out = Vec::with_capacity(state.agents.agents.len().saturating_add(5));
+    for (backend, agent_indices) in roster_grouped_agent_indices(state) {
+        out.push(RosterSelectableRow::Backend { backend });
+        if !roster_backend_is_expanded(state, backend) {
+            continue;
+        }
+        out.extend(
+            agent_indices
+                .into_iter()
+                .map(|agent_idx| RosterSelectableRow::Agent { agent_idx }),
+        );
+    }
+    out
+}
+
+pub fn roster_selected_row(state: &AppState) -> Option<RosterSelectableRow> {
+    let grouped = roster_grouped_agent_indices(state);
+    if let Some(backend) = state.agents.roster_selected_backend {
+        if grouped.iter().any(|(kind, _)| *kind == backend) {
+            return Some(RosterSelectableRow::Backend { backend });
+        }
+    }
+
+    if roster_agent_display_order(state).contains(&state.agents.roster_selected) {
+        return Some(RosterSelectableRow::Agent {
+            agent_idx: state.agents.roster_selected,
+        });
+    }
+
+    if let Some(agent) = state.agents.agents.get(state.agents.roster_selected) {
+        let backend = roster_backend_group_for_agent(agent);
+        if grouped.iter().any(|(kind, _)| *kind == backend) {
+            return Some(RosterSelectableRow::Backend { backend });
+        }
+    }
+
+    grouped
+        .into_iter()
+        .next()
+        .map(|(backend, _)| RosterSelectableRow::Backend { backend })
+}
+
+pub fn roster_swarm_template_line_idx(state: &AppState) -> usize {
+    roster_header_offsets(state).template_line
+}
+
+pub fn roster_swarm_mission_line_idx(state: &AppState) -> usize {
+    roster_header_offsets(state).mission_line
+}
 
 const ROSTER_BACKEND_NAME_W: usize = 7;
 const ROSTER_SWARM_TEMPLATE_LINE: &str = " Template:  lab   parallel   bulk ";
@@ -112,6 +171,108 @@ const ARROW_PRIMARY: char = '↳';
 const ARROW_FALLBACK: char = '>';
 const CURSOR_PRIMARY: char = '➜';
 const CURSOR_FALLBACK: char = '>';
+const TREE_CLOSED_PRIMARY: char = '▸';
+const TREE_CLOSED_FALLBACK: char = '>';
+const TREE_OPEN_PRIMARY: char = '▾';
+const TREE_OPEN_FALLBACK: char = 'v';
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum BackendInventoryBackend {
+    Codex,
+    Claude,
+    Gemini,
+    Local,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+struct BackendInventoryRow {
+    backend: BackendInventoryBackend,
+    available: bool,
+    active: bool,
+}
+
+struct RosterHeaderOffsets {
+    blank_after_backends: usize,
+    template_line: usize,
+    mission_line: usize,
+    blank_after_mission: usize,
+    table_header: usize,
+    table_separator: usize,
+    body_offset: usize,
+}
+
+fn roster_backend_inventory_rows(state: &AppState) -> Vec<BackendInventoryRow> {
+    let codex_available = state.agents.codex_cli_available
+        || state.agents.agents.iter().any(|agent| agent.is_codex());
+    let codex_active = codex_available;
+
+    let claude_active = state
+        .agents
+        .agents
+        .iter()
+        .any(|agent| matches!(agent.kind, AgentLaneKind::Claude));
+    let claude_available = state.agents.claude_cli_available || claude_active;
+    let claude_active = claude_available;
+
+    let gemini_active = state
+        .agents
+        .agents
+        .iter()
+        .any(|agent| matches!(agent.kind, AgentLaneKind::Gemini));
+    let gemini_available = state.agents.gemini_cli_available || gemini_active;
+    let gemini_active = gemini_available;
+
+    let local_active = state
+        .agents
+        .agents
+        .iter()
+        .any(|agent| matches!(agent.kind, AgentLaneKind::Mock));
+
+    let mut out = Vec::with_capacity(4);
+    out.push(BackendInventoryRow {
+        backend: BackendInventoryBackend::Codex,
+        available: codex_available,
+        active: codex_active,
+    });
+    out.push(BackendInventoryRow {
+        backend: BackendInventoryBackend::Claude,
+        available: claude_available,
+        active: claude_active,
+    });
+    out.push(BackendInventoryRow {
+        backend: BackendInventoryBackend::Gemini,
+        available: gemini_available,
+        active: gemini_active,
+    });
+    out.push(BackendInventoryRow {
+        backend: BackendInventoryBackend::Local,
+        available: true,
+        active: local_active,
+    });
+
+    out
+}
+
+fn roster_header_offsets(state: &AppState) -> RosterHeaderOffsets {
+    let backend_rows = roster_backend_inventory_rows(state).len();
+    let blank_after_backends = 1usize.saturating_add(backend_rows);
+    let template_line = blank_after_backends.saturating_add(1);
+    let mission_line = template_line.saturating_add(1);
+    let blank_after_mission = mission_line.saturating_add(1);
+    let table_header = blank_after_mission.saturating_add(1);
+    let table_separator = table_header.saturating_add(1);
+    let body_offset = table_separator.saturating_add(1);
+
+    RosterHeaderOffsets {
+        blank_after_backends,
+        template_line,
+        mission_line,
+        blank_after_mission,
+        table_header,
+        table_separator,
+        body_offset,
+    }
+}
 
 fn arrow_glyph() -> char {
     // Allow users/CI to opt into ASCII-safe markers if the font lacks the arrow glyph.
@@ -128,6 +289,22 @@ fn cursor_glyph() -> char {
         CURSOR_FALLBACK
     } else {
         CURSOR_PRIMARY
+    }
+}
+
+fn tree_closed_glyph() -> char {
+    if std::env::var("NIT_ASCII_FALLBACK").is_ok() {
+        TREE_CLOSED_FALLBACK
+    } else {
+        TREE_CLOSED_PRIMARY
+    }
+}
+
+fn tree_open_glyph() -> char {
+    if std::env::var("NIT_ASCII_FALLBACK").is_ok() {
+        TREE_OPEN_FALLBACK
+    } else {
+        TREE_OPEN_PRIMARY
     }
 }
 
@@ -265,60 +442,78 @@ fn roster_body_meta(state: &AppState, body_line: usize) -> Option<RosterBodyMeta
         "bulk" | "parallel"
     );
     let mut cursor = 0usize;
-    for (agent_idx, agent) in state.agents.agents.iter().enumerate() {
+    for (backend, agent_indices) in roster_grouped_agent_indices(state) {
         if body_line == cursor {
             return Some(RosterBodyMeta {
-                agent_idx,
-                node: RosterBodyNode::Agent,
+                agent_idx: None,
+                node: RosterBodyNode::Backend { backend },
             });
         }
         cursor = cursor.saturating_add(1);
-        if agent_idx == state.agents.roster_selected
-            && !is_swarm_clone_agent_id(agent.id.as_str())
-            && !state
-                .agents
-                .roster_tree_collapsed_agent_ids
-                .contains(&agent.id)
-        {
-            let efforts = state
-                .agents
-                .codex_supported_reasoning_efforts
-                .get(&agent.id)
-                .map(|v| v.as_slice())
-                .unwrap_or(&[]);
-            let has_size = !efforts.is_empty();
-            let has_roles = show_roles && agent.is_codex();
+        if !roster_backend_is_expanded(state, backend) {
+            continue;
+        }
 
-            for branch in [RosterTreeBranch::Size, RosterTreeBranch::Role] {
-                if matches!(branch, RosterTreeBranch::Size) && !has_size {
-                    continue;
-                }
-                if matches!(branch, RosterTreeBranch::Role) && !has_roles {
-                    continue;
-                }
+        for agent_idx in agent_indices {
+            let Some(agent) = state.agents.agents.get(agent_idx) else {
+                continue;
+            };
 
-                if body_line == cursor {
-                    return Some(RosterBodyMeta {
-                        agent_idx,
-                        node: RosterBodyNode::Branch { branch },
-                    });
-                }
-                cursor = cursor.saturating_add(1);
+            if body_line == cursor {
+                return Some(RosterBodyMeta {
+                    agent_idx: Some(agent_idx),
+                    node: RosterBodyNode::Agent,
+                });
+            }
+            cursor = cursor.saturating_add(1);
 
-                let leaf_len = match branch {
-                    RosterTreeBranch::Size => efforts.len(),
-                    RosterTreeBranch::Role => ROSTER_ROLE_OPTIONS.len(),
-                };
-                if body_line < cursor.saturating_add(leaf_len) {
-                    return Some(RosterBodyMeta {
-                        agent_idx,
-                        node: RosterBodyNode::Leaf {
-                            branch,
-                            leaf_idx: body_line.saturating_sub(cursor),
-                        },
-                    });
+            if agent_idx == state.agents.roster_selected
+                && !is_swarm_clone_agent_id(agent.id.as_str())
+                && !state
+                    .agents
+                    .roster_tree_collapsed_agent_ids
+                    .contains(&agent.id)
+            {
+                let efforts = state
+                    .agents
+                    .codex_supported_reasoning_efforts
+                    .get(&agent.id)
+                    .map(|v| v.as_slice())
+                    .unwrap_or(&[]);
+                let has_size = !efforts.is_empty();
+                let has_roles = show_roles && agent.is_codex();
+
+                for branch in [RosterTreeBranch::Size, RosterTreeBranch::Role] {
+                    if matches!(branch, RosterTreeBranch::Size) && !has_size {
+                        continue;
+                    }
+                    if matches!(branch, RosterTreeBranch::Role) && !has_roles {
+                        continue;
+                    }
+
+                    if body_line == cursor {
+                        return Some(RosterBodyMeta {
+                            agent_idx: Some(agent_idx),
+                            node: RosterBodyNode::Branch { branch },
+                        });
+                    }
+                    cursor = cursor.saturating_add(1);
+
+                    let leaf_len = match branch {
+                        RosterTreeBranch::Size => efforts.len(),
+                        RosterTreeBranch::Role => ROSTER_ROLE_OPTIONS.len(),
+                    };
+                    if body_line < cursor.saturating_add(leaf_len) {
+                        return Some(RosterBodyMeta {
+                            agent_idx: Some(agent_idx),
+                            node: RosterBodyNode::Leaf {
+                                branch,
+                                leaf_idx: body_line.saturating_sub(cursor),
+                            },
+                        });
+                    }
+                    cursor = cursor.saturating_add(leaf_len);
                 }
-                cursor = cursor.saturating_add(leaf_len);
             }
         }
     }
@@ -524,6 +719,13 @@ fn footer_line(state: &AppState, theme: &Theme) -> Line<'static> {
             spans.push(Span::styled("Enter", key_style));
             spans.push(Span::styled(" chat", label_style));
         }
+        AgentOpsTab::Evidence => {
+            spans.push(Span::styled("Enter", key_style));
+            spans.push(Span::styled(" open", label_style));
+            spans.push(Span::styled("  ", sep_style));
+            spans.push(Span::styled("Esc", key_style));
+            spans.push(Span::styled(" close", label_style));
+        }
         AgentOpsTab::Mcp => {
             spans.push(Span::styled("r", key_style));
             spans.push(Span::styled(" reconnect", label_style));
@@ -546,8 +748,8 @@ fn footer_line(state: &AppState, theme: &Theme) -> Line<'static> {
             spans.push(Span::styled("Enter", key_style));
             spans.push(Span::styled(" chat", label_style));
         }
-        // Patch/Evidence are legacy; render them like Diagnostics.
-        AgentOpsTab::Patch | AgentOpsTab::Evidence => {
+        // Patch is legacy/hidden; render it like Diagnostics.
+        AgentOpsTab::Patch => {
             spans.push(Span::styled("j/k", key_style));
             spans.push(Span::styled(" scroll", label_style));
         }
@@ -557,10 +759,11 @@ fn footer_line(state: &AppState, theme: &Theme) -> Line<'static> {
 }
 
 fn tab_line(state: &AppState, theme: &Theme) -> Line<'static> {
-    const TABS: [AgentOpsTab; 7] = [
+    const TABS: [AgentOpsTab; 8] = [
         AgentOpsTab::Roster,
         AgentOpsTab::Missions,
         AgentOpsTab::Dag,
+        AgentOpsTab::Evidence,
         AgentOpsTab::Mcp,
         AgentOpsTab::Alerts,
         AgentOpsTab::Diagnostics,
@@ -568,7 +771,7 @@ fn tab_line(state: &AppState, theme: &Theme) -> Line<'static> {
     ];
     const TAB_SPACING: &str = "  ";
     let active = match state.agents.dock_tab {
-        AgentOpsTab::Patch | AgentOpsTab::Evidence => AgentOpsTab::Diagnostics,
+        AgentOpsTab::Patch => AgentOpsTab::Diagnostics,
         other => other,
     };
     let mut spans = Vec::new();
@@ -589,10 +792,11 @@ fn tab_line(state: &AppState, theme: &Theme) -> Line<'static> {
 }
 
 pub fn tab_at_column(col: usize) -> Option<AgentOpsTab> {
-    const TABS: [AgentOpsTab; 7] = [
+    const TABS: [AgentOpsTab; 8] = [
         AgentOpsTab::Roster,
         AgentOpsTab::Missions,
         AgentOpsTab::Dag,
+        AgentOpsTab::Evidence,
         AgentOpsTab::Mcp,
         AgentOpsTab::Alerts,
         AgentOpsTab::Diagnostics,
@@ -633,70 +837,158 @@ pub fn current_lines_for_width_with_swarm(
         AgentOpsTab::Roster => roster_lines(state, swarm, usable),
         AgentOpsTab::Missions => mission_lines(state, usable),
         AgentOpsTab::Dag => dag_lines(state, swarm, usable),
+        AgentOpsTab::Evidence => artifacts_lines(state, swarm, usable),
         AgentOpsTab::Mcp => mcp_lines(state, usable),
         AgentOpsTab::Alerts => alert_lines(state, usable),
-        // Patch/Evidence are hidden from the UI; treat as Diagnostics for legacy state.
-        AgentOpsTab::Patch | AgentOpsTab::Evidence => diagnostics_lines(state, usable),
+        // Patch is hidden from the UI; treat it as Diagnostics for legacy state.
+        AgentOpsTab::Patch => diagnostics_lines(state, usable),
         AgentOpsTab::Diagnostics => diagnostics_lines(state, usable),
         AgentOpsTab::Scratchpad => scratchpad_lines(state, usable),
     }
 }
 
+pub fn roster_agent_display_order(state: &AppState) -> Vec<usize> {
+    let mut out: Vec<usize> = Vec::with_capacity(state.agents.agents.len());
+    for (backend, agent_indices) in roster_grouped_agent_indices(state) {
+        if !roster_backend_is_expanded(state, backend) {
+            continue;
+        }
+        out.extend(agent_indices);
+    }
+    out
+}
+
+pub fn roster_first_agent_idx_for_backend(
+    state: &AppState,
+    backend: AgentLaneKind,
+) -> Option<usize> {
+    roster_grouped_agent_indices(state)
+        .into_iter()
+        .find(|(kind, _)| *kind == backend)
+        .and_then(|(_, agent_indices)| agent_indices.into_iter().next())
+}
+
+fn roster_backend_group_for_agent(agent: &nit_core::AgentLane) -> AgentLaneKind {
+    if agent.is_codex() {
+        AgentLaneKind::Codex
+    } else if matches!(agent.kind, AgentLaneKind::Claude) {
+        AgentLaneKind::Claude
+    } else if matches!(agent.kind, AgentLaneKind::Gemini) {
+        AgentLaneKind::Gemini
+    } else if matches!(agent.kind, AgentLaneKind::Mock) {
+        AgentLaneKind::Mock
+    } else {
+        AgentLaneKind::Unknown
+    }
+}
+
+fn roster_backend_group_label(kind: AgentLaneKind) -> &'static str {
+    match kind {
+        AgentLaneKind::Codex => "Codex",
+        AgentLaneKind::Claude => "Claude",
+        AgentLaneKind::Gemini => "Gemini",
+        AgentLaneKind::Mock => "Local",
+        AgentLaneKind::Unknown => "Other",
+    }
+}
+
+fn roster_grouped_agent_indices(state: &AppState) -> Vec<(AgentLaneKind, Vec<usize>)> {
+    let mut codex: Vec<usize> = Vec::new();
+    let mut claude: Vec<usize> = Vec::new();
+    let mut gemini: Vec<usize> = Vec::new();
+    let mut local: Vec<usize> = Vec::new();
+    let mut other: Vec<usize> = Vec::new();
+
+    for (idx, agent) in state.agents.agents.iter().enumerate() {
+        match roster_backend_group_for_agent(agent) {
+            AgentLaneKind::Codex => codex.push(idx),
+            AgentLaneKind::Claude => claude.push(idx),
+            AgentLaneKind::Gemini => gemini.push(idx),
+            AgentLaneKind::Mock => local.push(idx),
+            AgentLaneKind::Unknown => other.push(idx),
+        }
+    }
+
+    let mut out: Vec<(AgentLaneKind, Vec<usize>)> = Vec::with_capacity(5);
+    if !codex.is_empty() {
+        out.push((AgentLaneKind::Codex, codex));
+    }
+    if !claude.is_empty() {
+        out.push((AgentLaneKind::Claude, claude));
+    }
+    if !gemini.is_empty() {
+        out.push((AgentLaneKind::Gemini, gemini));
+    }
+    if !local.is_empty() {
+        out.push((AgentLaneKind::Mock, local));
+    }
+    if !other.is_empty() {
+        out.push((AgentLaneKind::Unknown, other));
+    }
+    out
+}
+
+fn roster_backend_is_expanded(state: &AppState, backend: AgentLaneKind) -> bool {
+    state
+        .agents
+        .roster_expanded_backend_kinds
+        .contains(&backend)
+}
+
 fn roster_lines(state: &AppState, swarm: Option<&SwarmRuntime>, width: usize) -> Vec<String> {
     let widths = roster_column_widths(width);
-    let codex_active = state.agents.agents.iter().any(|agent| agent.is_codex());
-    let local_active = state
-        .agents
-        .agents
-        .iter()
-        .any(|agent| matches!(agent.kind, AgentLaneKind::Mock));
-    let codex_available = state.agents.codex_cli_available || codex_active;
-    let claude_active = state
-        .agents
-        .agents
-        .iter()
-        .any(|agent| matches!(agent.kind, AgentLaneKind::Claude));
-    let claude_available = state.agents.claude_cli_available || claude_active;
+    let selected_row = roster_selected_row(state);
+    let mut out = vec![" Backends".into()];
+    for row in roster_backend_inventory_rows(state) {
+        match row.backend {
+            BackendInventoryBackend::Codex => out.push(roster_backend_line(
+                "Codex",
+                if row.available {
+                    "available"
+                } else {
+                    "not found"
+                },
+                if row.active { "active" } else { "idle" },
+            )),
+            BackendInventoryBackend::Claude => out.push(roster_backend_line(
+                "Claude",
+                if row.available {
+                    "available"
+                } else {
+                    "not found"
+                },
+                if row.active { "active" } else { "idle" },
+            )),
+            BackendInventoryBackend::Gemini => out.push(roster_backend_line(
+                "Gemini",
+                if row.available {
+                    "available"
+                } else {
+                    "not found"
+                },
+                if row.active { "active" } else { "idle" },
+            )),
+            BackendInventoryBackend::Local => out.push(roster_backend_line(
+                "Local",
+                "built-in",
+                if row.active { "active" } else { "idle" },
+            )),
+        }
+    }
 
-    let mut out = vec![
-        " Backends".into(),
-        roster_backend_line(
-            "Codex",
-            if codex_available {
-                "available"
-            } else {
-                "not found"
-            },
-            if codex_active { "active" } else { "idle" },
-        ),
-        roster_backend_line(
-            "Claude",
-            if claude_available {
-                "available"
-            } else {
-                "not found"
-            },
-            if claude_active { "active" } else { "idle" },
-        ),
-        roster_backend_line(
-            "Local",
-            "built-in",
-            if local_active { "active" } else { "idle" },
-        ),
-        String::new(),
-        ROSTER_SWARM_TEMPLATE_LINE.into(),
-        ROSTER_SWARM_MISSION_LINE.into(),
-        String::new(),
-        format!(
-            " {} {} {} {} {}",
-            fit_left("PRI+ROLE", widths[0]),
-            fit_left("STATUS", widths[1]),
-            fit_right("HB", widths[2]),
-            fit_right("Q", widths[3]),
-            fit_left("MISSION", widths[4]),
-        ),
-        "─".repeat(width.min(240)),
-    ];
+    out.push(String::new());
+    out.push(ROSTER_SWARM_TEMPLATE_LINE.into());
+    out.push(ROSTER_SWARM_MISSION_LINE.into());
+    out.push(String::new());
+    out.push(format!(
+        " {} {} {} {} {}",
+        fit_left("PRI+ROLE", widths[0]),
+        fit_left("STATUS", widths[1]),
+        fit_right("HB", widths[2]),
+        fit_right("Q", widths[3]),
+        fit_left("MISSION", widths[4]),
+    ));
+    out.push("─".repeat(width.min(240)));
 
     let show_roles = matches!(
         state
@@ -716,160 +1008,190 @@ fn roster_lines(state: &AppState, swarm: Option<&SwarmRuntime>, width: usize) ->
         String,
         Option<SwarmDashboardView>,
     > = std::collections::HashMap::new();
-    for (idx, agent) in state.agents.agents.iter().enumerate() {
-        let is_clone = is_swarm_clone_agent_id(agent.id.as_str());
-        let priority_prefix = if agent.is_codex() && !is_clone {
-            if state.agents.swarm_priority_agent_ids.contains(&agent.id) {
-                "[x] "
+    for (backend, agent_indices) in roster_grouped_agent_indices(state) {
+        let backend_selected = selected_row == Some(RosterSelectableRow::Backend { backend });
+        let label = format!(
+            "{} {}",
+            if roster_backend_is_expanded(state, backend) {
+                tree_open_glyph()
             } else {
-                "[ ] "
-            }
-        } else {
-            "    "
-        };
-        let marker = if idx == state.agents.roster_selected {
-            if state.agents.roster_tree_selected.is_none() {
+                tree_closed_glyph()
+            },
+            roster_backend_group_label(backend)
+        );
+        out.push(format!(
+            "{}{} {} {} {} {}",
+            if backend_selected {
                 cursor_glyph()
             } else {
                 ' '
-            }
-        } else {
-            arrow_glyph()
-        };
-        let role_label = if is_clone {
-            let assigned_role = (|| {
-                let swarm = swarm?;
-                let (mission_id, _suffix) = swarm_clone_label_parts(agent.id.as_str())?;
-                let dashboard = swarm_dash_by_mission_id
-                    .entry(mission_id.to_string())
-                    .or_insert_with(|| swarm.swarm_dashboard(mission_id));
-                let dashboard = dashboard.as_ref()?;
-                swarm_assigned_roles_for_agent(dashboard, agent.id.as_str())
-            })();
-            let label = swarm_clone_display_label(agent.id.as_str(), assigned_role.as_deref())
-                .unwrap_or_else(|| "swarm clone".into());
-            format!("    {} {label}", arrow_glyph())
-        } else {
-            format!("{priority_prefix}{}", table_role_label(agent.role.as_str()))
-        };
-        out.push(format!(
-            "{marker}{} {} {} {} {}",
-            fit_left(&role_label, widths[0]),
-            fit_left(agent.status.label(), widths[1]),
-            fit_right(&format!("{}s", agent.heartbeat_age_secs), widths[2]),
-            fit_right(&agent.queue_len.to_string(), widths[3]),
-            fit_left(agent.current_mission.as_deref().unwrap_or("--"), widths[4]),
+            },
+            fit_left(&label, widths[0]),
+            fit_left("", widths[1]),
+            fit_right("", widths[2]),
+            fit_right("", widths[3]),
+            fit_left("", widths[4]),
         ));
+        if !roster_backend_is_expanded(state, backend) {
+            continue;
+        }
 
-        // Expand the selected model into a small tree: Size (Codex reasoning effort levels) and
-        // Role (swarm planning hints).
-        if idx == state.agents.roster_selected
-            && !is_clone
-            && !state
-                .agents
-                .roster_tree_collapsed_agent_ids
-                .contains(&agent.id)
-        {
-            let efforts = state
-                .agents
-                .codex_supported_reasoning_efforts
-                .get(&agent.id)
-                .map(|v| v.as_slice())
-                .unwrap_or(&[]);
-            let has_size = !efforts.is_empty();
-            let has_roles = show_roles && agent.is_codex();
-            if !has_size && !has_roles {
+        for agent_idx in agent_indices {
+            let Some(agent) = state.agents.agents.get(agent_idx) else {
                 continue;
-            }
+            };
 
-            if has_size {
-                let label = format!("    {} Size", arrow_glyph());
-                out.push(format!(
-                    " {} {} {} {} {}",
-                    fit_left(&label, widths[0]),
-                    fit_left("", widths[1]),
-                    fit_right("", widths[2]),
-                    fit_right("", widths[3]),
-                    fit_left("", widths[4]),
-                ));
-
-                let chosen = state
-                    .agents
-                    .codex_selected_reasoning_effort
-                    .get(&agent.id)
-                    .or_else(|| state.agents.codex_default_reasoning_effort.get(&agent.id))
-                    .map(|s| s.as_str());
-                for (effort_idx, effort) in efforts.iter().enumerate() {
-                    let marker = if state.agents.roster_tree_selected
-                        == Some(RosterTreeSelection {
-                            branch: RosterTreeBranch::Size,
-                            leaf_idx: effort_idx,
-                        }) {
-                        cursor_glyph()
-                    } else {
-                        ' '
-                    };
-                    let checked = if chosen == Some(effort.as_str()) {
-                        "x"
-                    } else {
-                        " "
-                    };
-                    let label = format!("      {} [{checked}] {effort}", arrow_glyph());
-                    out.push(format!(
-                        "{marker}{} {} {} {} {}",
-                        fit_left(&label, widths[0]),
-                        fit_left("", widths[1]),
-                        fit_right("", widths[2]),
-                        fit_right("", widths[3]),
-                        fit_left("", widths[4]),
-                    ));
+            let is_clone = is_swarm_clone_agent_id(agent.id.as_str());
+            let agent_selected = selected_row == Some(RosterSelectableRow::Agent { agent_idx });
+            let priority_prefix = if agent.supports_swarm_priority() && !is_clone {
+                if state.agents.swarm_priority_agent_ids.contains(&agent.id) {
+                    "[x] "
+                } else {
+                    "[ ] "
                 }
-            }
+            } else {
+                "    "
+            };
+            let marker = if agent_selected && state.agents.roster_tree_selected.is_none() {
+                cursor_glyph()
+            } else {
+                arrow_glyph()
+            };
+            let role_label = if is_clone {
+                let assigned_role = (|| {
+                    let swarm = swarm?;
+                    let (mission_id, _suffix) = swarm_clone_label_parts(agent.id.as_str())?;
+                    let dashboard = swarm_dash_by_mission_id
+                        .entry(mission_id.to_string())
+                        .or_insert_with(|| swarm.swarm_dashboard(mission_id));
+                    let dashboard = dashboard.as_ref()?;
+                    swarm_assigned_roles_for_agent(dashboard, agent.id.as_str())
+                })();
+                let label = swarm_clone_display_label(agent.id.as_str(), assigned_role.as_deref())
+                    .unwrap_or_else(|| "swarm clone".into());
+                format!("    {} {label}", arrow_glyph())
+            } else {
+                format!("{priority_prefix}{}", table_role_label(agent.role.as_str()))
+            };
+            out.push(format!(
+                "{marker}{} {} {} {} {}",
+                fit_left(&role_label, widths[0]),
+                fit_left(agent.status.label(), widths[1]),
+                fit_right(&format!("{}s", agent.heartbeat_age_secs), widths[2]),
+                fit_right(&agent.queue_len.to_string(), widths[3]),
+                fit_left(agent.current_mission.as_deref().unwrap_or("--"), widths[4]),
+            ));
 
-            if has_roles {
-                let label = format!("    {} Role", arrow_glyph());
-                out.push(format!(
-                    " {} {} {} {} {}",
-                    fit_left(&label, widths[0]),
-                    fit_left("", widths[1]),
-                    fit_right("", widths[2]),
-                    fit_right("", widths[3]),
-                    fit_left("", widths[4]),
-                ));
-
-                let chosen = state
+            // Expand the selected model into a small tree: Size (Codex reasoning effort levels) and
+            // Role (swarm planning hints).
+            if agent_idx == state.agents.roster_selected
+                && !is_clone
+                && !state
                     .agents
-                    .swarm_role_by_agent_id
+                    .roster_tree_collapsed_agent_ids
+                    .contains(&agent.id)
+            {
+                let efforts = state
+                    .agents
+                    .codex_supported_reasoning_efforts
                     .get(&agent.id)
-                    .map(|s| s.trim().to_ascii_lowercase())
-                    .filter(|s| !s.is_empty())
-                    .unwrap_or_else(|| "all".into());
-                let chosen = normalize_roster_role_hint(chosen.as_str());
-                for (role_idx, role) in ROSTER_ROLE_OPTIONS.iter().enumerate() {
-                    let marker = if state.agents.roster_tree_selected
-                        == Some(RosterTreeSelection {
-                            branch: RosterTreeBranch::Role,
-                            leaf_idx: role_idx,
-                        }) {
-                        cursor_glyph()
-                    } else {
-                        ' '
-                    };
-                    let checked = if chosen == normalize_roster_role_hint(role) {
-                        "x"
-                    } else {
-                        " "
-                    };
-                    let display = if *role == "all" { "All" } else { role };
-                    let label = format!("      {} [{checked}] {display}", arrow_glyph());
+                    .map(|v| v.as_slice())
+                    .unwrap_or(&[]);
+                let has_size = !efforts.is_empty();
+                let has_roles = show_roles && agent.is_codex();
+                if !has_size && !has_roles {
+                    continue;
+                }
+
+                if has_size {
+                    let label = format!("    {} Size", arrow_glyph());
                     out.push(format!(
-                        "{marker}{} {} {} {} {}",
+                        " {} {} {} {} {}",
                         fit_left(&label, widths[0]),
                         fit_left("", widths[1]),
                         fit_right("", widths[2]),
                         fit_right("", widths[3]),
                         fit_left("", widths[4]),
                     ));
+
+                    let chosen = state
+                        .agents
+                        .codex_selected_reasoning_effort
+                        .get(&agent.id)
+                        .or_else(|| state.agents.codex_default_reasoning_effort.get(&agent.id))
+                        .map(|s| s.as_str());
+                    for (effort_idx, effort) in efforts.iter().enumerate() {
+                        let marker = if state.agents.roster_tree_selected
+                            == Some(RosterTreeSelection {
+                                branch: RosterTreeBranch::Size,
+                                leaf_idx: effort_idx,
+                            }) {
+                            cursor_glyph()
+                        } else {
+                            ' '
+                        };
+                        let checked = if chosen == Some(effort.as_str()) {
+                            "x"
+                        } else {
+                            " "
+                        };
+                        let label = format!("      {} [{checked}] {effort}", arrow_glyph());
+                        out.push(format!(
+                            "{marker}{} {} {} {} {}",
+                            fit_left(&label, widths[0]),
+                            fit_left("", widths[1]),
+                            fit_right("", widths[2]),
+                            fit_right("", widths[3]),
+                            fit_left("", widths[4]),
+                        ));
+                    }
+                }
+
+                if has_roles {
+                    let label = format!("    {} Role", arrow_glyph());
+                    out.push(format!(
+                        " {} {} {} {} {}",
+                        fit_left(&label, widths[0]),
+                        fit_left("", widths[1]),
+                        fit_right("", widths[2]),
+                        fit_right("", widths[3]),
+                        fit_left("", widths[4]),
+                    ));
+
+                    let chosen = state
+                        .agents
+                        .swarm_role_by_agent_id
+                        .get(&agent.id)
+                        .map(|s| s.trim().to_ascii_lowercase())
+                        .filter(|s| !s.is_empty())
+                        .unwrap_or_else(|| "all".into());
+                    let chosen = normalize_roster_role_hint(chosen.as_str());
+                    for (role_idx, role) in ROSTER_ROLE_OPTIONS.iter().enumerate() {
+                        let marker = if state.agents.roster_tree_selected
+                            == Some(RosterTreeSelection {
+                                branch: RosterTreeBranch::Role,
+                                leaf_idx: role_idx,
+                            }) {
+                            cursor_glyph()
+                        } else {
+                            ' '
+                        };
+                        let checked = if chosen == normalize_roster_role_hint(role) {
+                            "x"
+                        } else {
+                            " "
+                        };
+                        let display = if *role == "all" { "All" } else { role };
+                        let label = format!("      {} [{checked}] {display}", arrow_glyph());
+                        out.push(format!(
+                            "{marker}{} {} {} {} {}",
+                            fit_left(&label, widths[0]),
+                            fit_left("", widths[1]),
+                            fit_right("", widths[2]),
+                            fit_right("", widths[3]),
+                            fit_left("", widths[4]),
+                        ));
+                    }
                 }
             }
         }
@@ -1446,30 +1768,1994 @@ done_when: {done_when}"
     out
 }
 
-fn diagnostics_lines(state: &AppState, width: usize) -> Vec<String> {
-    let mut out = vec![" DIAGNOSTICS".into(), "─".repeat(width.min(240))];
-    for event in &state.agents.diag_events {
-        out.push(format!(
-            "[{}] [{}] {} - {}",
-            event.at,
-            event.severity.label(),
-            event.source,
-            fit_left(&event.message, width.saturating_sub(24))
+fn task_artifacts_present(artifacts: &SwarmTaskArtifacts) -> bool {
+    artifacts
+        .summary
+        .as_deref()
+        .is_some_and(|summary| !summary.trim().is_empty())
+        || !artifacts.files.is_empty()
+        || !artifacts.diffs.is_empty()
+        || !artifacts.commands.is_empty()
+        || !artifacts.risks.is_empty()
+        || !artifacts.notes.is_empty()
+}
+
+fn sanitize_artifact_path_segment(input: &str) -> String {
+    input
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+fn summarize_items(items: Vec<String>, limit: usize) -> String {
+    let total = items.len();
+    let shown = items.into_iter().take(limit).collect::<Vec<_>>();
+    if shown.is_empty() {
+        return String::new();
+    }
+    if total > shown.len() {
+        format!("{}; +{} more", shown.join("; "), total - shown.len())
+    } else {
+        shown.join("; ")
+    }
+}
+
+fn gate_report_status_label(gate: &GateReportGate) -> &'static str {
+    if let Some(status) = gate.status.as_deref() {
+        if status.eq_ignore_ascii_case("pass")
+            || status.eq_ignore_ascii_case("ok")
+            || status.eq_ignore_ascii_case("success")
+        {
+            return "PASS";
+        }
+        if status.eq_ignore_ascii_case("skip") || status.eq_ignore_ascii_case("skipped") {
+            return "SKIP";
+        }
+        if status.eq_ignore_ascii_case("fail") || status.eq_ignore_ascii_case("failed") {
+            return "FAIL";
+        }
+    }
+    if gate.ok {
+        "PASS"
+    } else {
+        "FAIL"
+    }
+}
+
+fn push_wrapped_detail(out: &mut Vec<String>, label: &str, value: &str, width: usize) {
+    let value = value.trim();
+    if value.is_empty() {
+        return;
+    }
+    let prefix = format!(" {}: ", label.trim());
+    let available = width.saturating_sub(prefix.chars().count()).max(8);
+    for chunk in wrap_cell_text(value, available) {
+        out.push(format!("{prefix}{chunk}"));
+    }
+}
+
+fn summarize_text_preview(text: &str, max_chars: usize) -> String {
+    let compact = text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join(" / ");
+    if compact.chars().count() <= max_chars {
+        compact
+    } else {
+        let head = compact.chars().take(max_chars).collect::<String>();
+        format!("{head}...")
+    }
+}
+
+#[derive(Clone, Debug)]
+enum ArtifactRef {
+    Message {
+        idx: usize,
+    },
+    Patch {
+        idx: usize,
+    },
+    Evidence {
+        idx: usize,
+    },
+    PersistedMessage {
+        message: AgentMessage,
+    },
+    PersistedPatch {
+        patch: PersistedPatchRecord,
+        path: Option<String>,
+    },
+    PersistedEvidence {
+        item: EvidenceItem,
+    },
+    SwarmTask {
+        mission_id: String,
+        task_id: String,
+    },
+    SwarmVerify {
+        mission_id: String,
+    },
+}
+
+#[derive(Clone, Debug)]
+struct ArtifactCard {
+    kind: &'static str,
+    at: String,
+    owner: String,
+    preview: String,
+    reference: ArtifactRef,
+}
+
+const ARTIFACT_CARD_LIMIT_REPLIES: usize = 48;
+const ARTIFACT_CARD_LIMIT_PATCHES: usize = 24;
+const ARTIFACT_CARD_LIMIT_EVIDENCE: usize = 24;
+
+#[derive(Clone, Debug, Default, serde::Deserialize)]
+struct PersistedPatchRecord {
+    id: String,
+    #[serde(default)]
+    mission_id: Option<String>,
+    #[serde(default)]
+    agent_id: String,
+    #[serde(default)]
+    title: String,
+    #[serde(default)]
+    summary: String,
+    #[serde(default)]
+    diff: String,
+    #[serde(default)]
+    status: String,
+}
+
+#[derive(Clone, Debug, Default, serde::Deserialize)]
+struct PersistedArtifactsRun {
+    #[serde(default)]
+    messages: Vec<AgentMessage>,
+    #[serde(default)]
+    patches: Vec<PersistedPatchRecord>,
+    #[serde(default)]
+    evidence: Vec<EvidenceItem>,
+    #[serde(default)]
+    codex_thread_id: Option<String>,
+    #[serde(default)]
+    codex_thread_ids: Option<BTreeMap<String, String>>,
+}
+
+fn persisted_mission_run_path(state: &AppState, mission_id: &str) -> PathBuf {
+    state
+        .workspace_root
+        .join(".nit")
+        .join("agents")
+        .join("runs")
+        .join(mission_id)
+        .join("run.json")
+}
+
+fn persisted_ad_hoc_run_path(state: &AppState, agent_id: &str) -> PathBuf {
+    state
+        .workspace_root
+        .join(".nit")
+        .join("agents")
+        .join("ad-hoc")
+        .join(sanitize_artifact_path_segment(agent_id))
+        .join("run.json")
+}
+
+fn load_persisted_artifacts_run(path: PathBuf) -> Option<PersistedArtifactsRun> {
+    let text = fs::read_to_string(path).ok()?;
+    serde_json::from_str(&text).ok()
+}
+
+fn load_persisted_mission_run(state: &AppState, mission_id: &str) -> Option<PersistedArtifactsRun> {
+    load_persisted_artifacts_run(persisted_mission_run_path(state, mission_id))
+}
+
+fn load_persisted_ad_hoc_run(state: &AppState, agent_id: &str) -> Option<PersistedArtifactsRun> {
+    load_persisted_artifacts_run(persisted_ad_hoc_run_path(state, agent_id))
+}
+
+fn persisted_ad_hoc_root(agent_id: &str) -> String {
+    format!(
+        ".nit/agents/ad-hoc/{}/",
+        sanitize_artifact_path_segment(agent_id)
+    )
+}
+
+fn persisted_patch_diff_excerpt(patch: &PersistedPatchRecord, path: Option<&str>) -> String {
+    if !patch.diff.trim().is_empty() {
+        return patch.diff.clone();
+    }
+    let Some(path) = path else {
+        return String::new();
+    };
+    fs::read_to_string(path).unwrap_or_default()
+}
+
+fn artifact_list_widths(width: usize) -> Vec<usize> {
+    // Two leading glyphs + spacer: `>➜ `
+    let cols_total = width.saturating_sub(3);
+    // Prefer giving preview text as much space as possible.
+    allocate_columns(cols_total, &[6, 6, 8, 12], &[8, 8, 10, 50], 3)
+}
+
+fn artifact_card_row(card: &ArtifactCard, widths: &[usize], selected: bool) -> String {
+    let selected_marker = if selected { '>' } else { ' ' };
+    let glyph = if selected {
+        cursor_glyph()
+    } else {
+        arrow_glyph()
+    };
+    format!(
+        "{selected_marker}{glyph} {} {} {} {}",
+        fit_left(card.kind, *widths.first().unwrap_or(&0)),
+        fit_left(card.at.as_str(), *widths.get(1).unwrap_or(&0)),
+        fit_left(card.owner.as_str(), *widths.get(2).unwrap_or(&0)),
+        fit_left(card.preview.as_str(), *widths.get(3).unwrap_or(&0)),
+    )
+}
+
+fn build_mission_cards(
+    state: &AppState,
+    mission_id: &str,
+    preview_chars: usize,
+) -> Vec<ArtifactCard> {
+    let mut prompt_idx = None;
+    let mut reply_indices = Vec::new();
+    for (idx, message) in state.agents.messages.iter().enumerate() {
+        if message.mission_id.as_deref() != Some(mission_id) {
+            continue;
+        }
+        if message.agent_id.is_none() {
+            prompt_idx = Some(idx);
+        } else {
+            reply_indices.push(idx);
+        }
+    }
+
+    let mut patch_indices = state
+        .agents
+        .patches
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, patch)| (patch.mission_id.as_deref() == Some(mission_id)).then_some(idx))
+        .collect::<Vec<_>>();
+    let mut evidence_indices = state
+        .agents
+        .evidence
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, item)| (item.mission_id.as_deref() == Some(mission_id)).then_some(idx))
+        .collect::<Vec<_>>();
+
+    if reply_indices.len() > ARTIFACT_CARD_LIMIT_REPLIES {
+        reply_indices = reply_indices.split_off(reply_indices.len() - ARTIFACT_CARD_LIMIT_REPLIES);
+    }
+    if patch_indices.len() > ARTIFACT_CARD_LIMIT_PATCHES {
+        patch_indices = patch_indices.split_off(patch_indices.len() - ARTIFACT_CARD_LIMIT_PATCHES);
+    }
+    if evidence_indices.len() > ARTIFACT_CARD_LIMIT_EVIDENCE {
+        evidence_indices =
+            evidence_indices.split_off(evidence_indices.len() - ARTIFACT_CARD_LIMIT_EVIDENCE);
+    }
+
+    let mut cards = Vec::new();
+    if let Some(idx) = prompt_idx {
+        if let Some(message) = state.agents.messages.get(idx) {
+            cards.push(ArtifactCard {
+                kind: "PROMPT",
+                at: message.at.clone(),
+                owner: "You".into(),
+                preview: summarize_text_preview(message.text.as_str(), preview_chars),
+                reference: ArtifactRef::Message { idx },
+            });
+        }
+    }
+    for idx in reply_indices.into_iter().rev() {
+        if let Some(message) = state.agents.messages.get(idx) {
+            let owner = message.agent_id.as_deref().unwrap_or("agent");
+            cards.push(ArtifactCard {
+                kind: "REPLY",
+                at: message.at.clone(),
+                owner: owner.into(),
+                preview: summarize_text_preview(message.text.as_str(), preview_chars),
+                reference: ArtifactRef::Message { idx },
+            });
+        }
+    }
+    for idx in patch_indices.into_iter().rev() {
+        if let Some(patch) = state.agents.patches.get(idx) {
+            cards.push(ArtifactCard {
+                kind: "PATCH",
+                at: patch.status.label().into(),
+                owner: patch.agent_id.clone(),
+                preview: patch.title.clone(),
+                reference: ArtifactRef::Patch { idx },
+            });
+        }
+    }
+    for idx in evidence_indices.into_iter().rev() {
+        if let Some(item) = state.agents.evidence.get(idx) {
+            let owner = item.agent_id.as_deref().unwrap_or("system");
+            cards.push(ArtifactCard {
+                kind: "EVIDENCE",
+                at: String::new(),
+                owner: owner.into(),
+                preview: item.title.clone(),
+                reference: ArtifactRef::Evidence { idx },
+            });
+        }
+    }
+    cards
+}
+
+fn build_ad_hoc_cards(state: &AppState, agent_id: &str, preview_chars: usize) -> Vec<ArtifactCard> {
+    let mut prompt_idx = None;
+    let mut reply_indices = Vec::new();
+    for (idx, message) in state.agents.messages.iter().enumerate() {
+        if message.mission_id.is_some() {
+            continue;
+        }
+        if message.agent_id.is_none() {
+            prompt_idx = Some(idx);
+            continue;
+        }
+        if message.agent_id.as_deref() == Some(agent_id) {
+            reply_indices.push(idx);
+        }
+    }
+
+    let mut patch_indices = state
+        .agents
+        .patches
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, patch)| {
+            (patch.mission_id.is_none() && patch.agent_id == agent_id).then_some(idx)
+        })
+        .collect::<Vec<_>>();
+
+    if reply_indices.len() > ARTIFACT_CARD_LIMIT_REPLIES {
+        reply_indices = reply_indices.split_off(reply_indices.len() - ARTIFACT_CARD_LIMIT_REPLIES);
+    }
+    if patch_indices.len() > ARTIFACT_CARD_LIMIT_PATCHES {
+        patch_indices = patch_indices.split_off(patch_indices.len() - ARTIFACT_CARD_LIMIT_PATCHES);
+    }
+
+    let mut cards = Vec::new();
+    if let Some(idx) = prompt_idx {
+        if let Some(message) = state.agents.messages.get(idx) {
+            cards.push(ArtifactCard {
+                kind: "PROMPT",
+                at: message.at.clone(),
+                owner: "You".into(),
+                preview: summarize_text_preview(message.text.as_str(), preview_chars),
+                reference: ArtifactRef::Message { idx },
+            });
+        }
+    }
+    for idx in reply_indices.into_iter().rev() {
+        if let Some(message) = state.agents.messages.get(idx) {
+            cards.push(ArtifactCard {
+                kind: "REPLY",
+                at: message.at.clone(),
+                owner: agent_id.into(),
+                preview: summarize_text_preview(message.text.as_str(), preview_chars),
+                reference: ArtifactRef::Message { idx },
+            });
+        }
+    }
+    for idx in patch_indices.into_iter().rev() {
+        if let Some(patch) = state.agents.patches.get(idx) {
+            cards.push(ArtifactCard {
+                kind: "PATCH",
+                at: patch.status.label().into(),
+                owner: patch.agent_id.clone(),
+                preview: patch.title.clone(),
+                reference: ArtifactRef::Patch { idx },
+            });
+        }
+    }
+    cards
+}
+
+fn build_persisted_mission_cards(
+    run: &PersistedArtifactsRun,
+    mission_id: &str,
+    preview_chars: usize,
+) -> Vec<ArtifactCard> {
+    let mut prompt = None;
+    let mut replies = Vec::new();
+    for message in run.messages.iter() {
+        if message.mission_id.as_deref() != Some(mission_id) {
+            continue;
+        }
+        if message.agent_id.is_none() {
+            prompt = Some(message.clone());
+        } else {
+            replies.push(message.clone());
+        }
+    }
+
+    let mut patches = run
+        .patches
+        .iter()
+        .filter(|patch| patch.mission_id.as_deref() == Some(mission_id))
+        .cloned()
+        .collect::<Vec<_>>();
+    let mut evidence = run
+        .evidence
+        .iter()
+        .filter(|item| item.mission_id.as_deref() == Some(mission_id))
+        .cloned()
+        .collect::<Vec<_>>();
+
+    if replies.len() > ARTIFACT_CARD_LIMIT_REPLIES {
+        replies = replies.split_off(replies.len() - ARTIFACT_CARD_LIMIT_REPLIES);
+    }
+    if patches.len() > ARTIFACT_CARD_LIMIT_PATCHES {
+        patches = patches.split_off(patches.len() - ARTIFACT_CARD_LIMIT_PATCHES);
+    }
+    if evidence.len() > ARTIFACT_CARD_LIMIT_EVIDENCE {
+        evidence = evidence.split_off(evidence.len() - ARTIFACT_CARD_LIMIT_EVIDENCE);
+    }
+
+    let mut cards = Vec::new();
+    if let Some(message) = prompt {
+        cards.push(ArtifactCard {
+            kind: "PROMPT",
+            at: message.at.clone(),
+            owner: "You".into(),
+            preview: summarize_text_preview(message.text.as_str(), preview_chars),
+            reference: ArtifactRef::PersistedMessage { message },
+        });
+    }
+    for message in replies.into_iter().rev() {
+        let owner = message.agent_id.as_deref().unwrap_or("agent").to_string();
+        cards.push(ArtifactCard {
+            kind: "REPLY",
+            at: message.at.clone(),
+            owner,
+            preview: summarize_text_preview(message.text.as_str(), preview_chars),
+            reference: ArtifactRef::PersistedMessage { message },
+        });
+    }
+    for patch in patches.into_iter().rev() {
+        cards.push(ArtifactCard {
+            kind: "PATCH",
+            at: if patch.status.trim().is_empty() {
+                "--".into()
+            } else {
+                patch.status.clone()
+            },
+            owner: patch.agent_id.clone(),
+            preview: patch.title.clone(),
+            reference: ArtifactRef::PersistedPatch {
+                path: Some(format!(
+                    ".nit/agents/runs/{mission_id}/patches/{}.diff",
+                    sanitize_artifact_path_segment(patch.id.as_str())
+                )),
+                patch,
+            },
+        });
+    }
+    for item in evidence.into_iter().rev() {
+        let owner = item.agent_id.as_deref().unwrap_or("system").to_string();
+        cards.push(ArtifactCard {
+            kind: "EVIDENCE",
+            at: String::new(),
+            owner,
+            preview: item.title.clone(),
+            reference: ArtifactRef::PersistedEvidence { item },
+        });
+    }
+    cards
+}
+
+fn build_persisted_ad_hoc_cards(
+    run: &PersistedArtifactsRun,
+    agent_id: &str,
+    preview_chars: usize,
+) -> Vec<ArtifactCard> {
+    let mut prompt = None;
+    let mut replies = Vec::new();
+    for message in run.messages.iter() {
+        if message.mission_id.is_some() {
+            continue;
+        }
+        if message.agent_id.is_none() {
+            prompt = Some(message.clone());
+        } else if message.agent_id.as_deref() == Some(agent_id) {
+            replies.push(message.clone());
+        }
+    }
+
+    let mut patches = run
+        .patches
+        .iter()
+        .filter(|patch| patch.mission_id.is_none() && patch.agent_id == agent_id)
+        .cloned()
+        .collect::<Vec<_>>();
+    let mut evidence = run
+        .evidence
+        .iter()
+        .filter(|item| item.mission_id.is_none() && item.agent_id.as_deref() == Some(agent_id))
+        .cloned()
+        .collect::<Vec<_>>();
+
+    if replies.len() > ARTIFACT_CARD_LIMIT_REPLIES {
+        replies = replies.split_off(replies.len() - ARTIFACT_CARD_LIMIT_REPLIES);
+    }
+    if patches.len() > ARTIFACT_CARD_LIMIT_PATCHES {
+        patches = patches.split_off(patches.len() - ARTIFACT_CARD_LIMIT_PATCHES);
+    }
+    if evidence.len() > ARTIFACT_CARD_LIMIT_EVIDENCE {
+        evidence = evidence.split_off(evidence.len() - ARTIFACT_CARD_LIMIT_EVIDENCE);
+    }
+
+    let mut cards = Vec::new();
+    if let Some(message) = prompt {
+        cards.push(ArtifactCard {
+            kind: "PROMPT",
+            at: message.at.clone(),
+            owner: "You".into(),
+            preview: summarize_text_preview(message.text.as_str(), preview_chars),
+            reference: ArtifactRef::PersistedMessage { message },
+        });
+    }
+    for message in replies.into_iter().rev() {
+        cards.push(ArtifactCard {
+            kind: "REPLY",
+            at: message.at.clone(),
+            owner: agent_id.into(),
+            preview: summarize_text_preview(message.text.as_str(), preview_chars),
+            reference: ArtifactRef::PersistedMessage { message },
+        });
+    }
+    for patch in patches.into_iter().rev() {
+        cards.push(ArtifactCard {
+            kind: "PATCH",
+            at: if patch.status.trim().is_empty() {
+                "--".into()
+            } else {
+                patch.status.clone()
+            },
+            owner: patch.agent_id.clone(),
+            preview: patch.title.clone(),
+            reference: ArtifactRef::PersistedPatch {
+                path: Some(format!(
+                    "{}patches/{}.diff",
+                    persisted_ad_hoc_root(agent_id),
+                    sanitize_artifact_path_segment(patch.id.as_str())
+                )),
+                patch,
+            },
+        });
+    }
+    for item in evidence.into_iter().rev() {
+        let owner = item.agent_id.as_deref().unwrap_or("system").to_string();
+        cards.push(ArtifactCard {
+            kind: "EVIDENCE",
+            at: String::new(),
+            owner,
+            preview: item.title.clone(),
+            reference: ArtifactRef::PersistedEvidence { item },
+        });
+    }
+    cards
+}
+
+fn swarm_verify_status(view: &SwarmPersistenceView) -> &'static str {
+    if let Some(report) = view.gate_report.as_ref() {
+        if report.overall_ok {
+            "PASS"
+        } else {
+            "FAIL"
+        }
+    } else if view.gate_bundle.is_some() {
+        "PENDING"
+    } else {
+        "--"
+    }
+}
+
+fn append_swarm_summary_lines(out: &mut Vec<String>, view: &SwarmPersistenceView, width: usize) {
+    let parsed_tasks = view
+        .tasks
+        .iter()
+        .filter(|task| task.artifacts.as_ref().is_some_and(task_artifacts_present))
+        .count();
+    let missing_tasks = view
+        .tasks
+        .iter()
+        .filter(|task| task.expected_artifacts_missing)
+        .count();
+    let output_tasks = view.tasks.iter().filter(|task| task.output_present).count();
+    let total_files = view
+        .tasks
+        .iter()
+        .map(|task| {
+            task.artifacts
+                .as_ref()
+                .map(|artifacts| artifacts.files.len())
+                .unwrap_or(0)
+        })
+        .sum::<usize>();
+    let total_commands = view
+        .tasks
+        .iter()
+        .map(|task| {
+            task.artifacts
+                .as_ref()
+                .map(|artifacts| artifacts.commands.len())
+                .unwrap_or(0)
+        })
+        .sum::<usize>();
+    let verify_status = swarm_verify_status(view);
+
+    out.extend(dag_kv_block_lines(
+        &[
+            ("Mission", view.mission_id.clone()),
+            ("Template", view.template.clone()),
+            ("Phase", view.phase.clone()),
+        ],
+        width,
+    ));
+    out.extend(dag_kv_block_lines(
+        &[
+            ("Tasks", view.tasks.len().to_string()),
+            ("Parsed", parsed_tasks.to_string()),
+            ("Missing", missing_tasks.to_string()),
+            ("Outputs", output_tasks.to_string()),
+            ("Files", total_files.to_string()),
+            ("Cmds", total_commands.to_string()),
+            ("Verify", verify_status.to_string()),
+        ],
+        width,
+    ));
+    out.extend(dag_kv_block_lines(
+        &[("Root", format!(".nit/swarm/{}/", view.mission_id))],
+        width,
+    ));
+}
+
+#[cfg(test)]
+fn append_swarm_artifact_lines(out: &mut Vec<String>, view: &SwarmPersistenceView, width: usize) {
+    append_swarm_summary_lines(out, view, width);
+    out.push(String::new());
+    append_swarm_verify_detail_lines(out, view, width);
+    for task in view.tasks.iter() {
+        out.push(String::new());
+        append_swarm_task_detail_lines(out, view, task, width);
+    }
+}
+
+fn build_swarm_cards(view: &SwarmPersistenceView, preview_chars: usize) -> Vec<ArtifactCard> {
+    let mut cards = Vec::new();
+    if view.gate_bundle.is_some() || view.gate_report.is_some() || view.gate_output.is_some() {
+        let status = swarm_verify_status(view);
+        let preview = if let Some(report) = view.gate_report.as_ref() {
+            let failures = report
+                .gates
+                .iter()
+                .filter(|gate| gate_report_status_label(gate).eq_ignore_ascii_case("FAIL"))
+                .count();
+            if failures > 0 {
+                format!("{failures} failing gate(s)")
+            } else {
+                "all gates passed".into()
+            }
+        } else if view.gate_bundle.is_some() {
+            "gate bundle selected; report pending".into()
+        } else {
+            String::new()
+        };
+        cards.push(ArtifactCard {
+            kind: "VERIFY",
+            at: status.into(),
+            owner: view.gate_bundle.clone().unwrap_or_else(|| "gates".into()),
+            preview: summarize_text_preview(preview.as_str(), preview_chars),
+            reference: ArtifactRef::SwarmVerify {
+                mission_id: view.mission_id.clone(),
+            },
+        });
+    }
+
+    let task_rows = view
+        .tasks
+        .iter()
+        .filter(|task| {
+            task.artifacts.as_ref().is_some_and(task_artifacts_present)
+                || task.expected_artifacts_missing
+                || task.output_present
+        })
+        .collect::<Vec<_>>();
+    for task in task_rows {
+        let mut preview = format!("{}: {}", task.id, task.title);
+        if task.expected_artifacts_missing {
+            preview.push_str(" (missing artifacts)");
+        } else if let Some(artifacts) = task.artifacts.as_ref() {
+            if let Some(summary) = artifacts.summary.as_deref() {
+                preview = format!("{}: {}", task.id, summary);
+            }
+        }
+        cards.push(ArtifactCard {
+            kind: "TASK",
+            at: task.state.clone(),
+            owner: task.agent_id.clone(),
+            preview: summarize_text_preview(preview.as_str(), preview_chars),
+            reference: ArtifactRef::SwarmTask {
+                mission_id: view.mission_id.clone(),
+                task_id: task.id.clone(),
+            },
+        });
+    }
+    cards
+}
+
+fn append_swarm_task_detail_lines(
+    out: &mut Vec<String>,
+    view: &SwarmPersistenceView,
+    task: &crate::swarm::SwarmTaskPersistenceView,
+    width: usize,
+) {
+    let role = task
+        .role
+        .as_deref()
+        .map(table_role_label)
+        .unwrap_or_else(|| "-".into());
+    push_wrapped_detail(
+        out,
+        "task",
+        &format!("{} [{}] {}", task.id, task.state, task.title),
+        width,
+    );
+    push_wrapped_detail(
+        out,
+        "meta",
+        &format!(
+            "agent={} role={} writes={} output={}",
+            task.agent_id,
+            role,
+            if task.writes { "yes" } else { "no" },
+            if task.output_present { "yes" } else { "no" }
+        ),
+        width,
+    );
+    if !task.deps.is_empty() {
+        push_wrapped_detail(out, "deps", task.deps.join(", ").as_str(), width);
+    }
+    if !task.blocked_on.is_empty() {
+        push_wrapped_detail(
+            out,
+            "blocked_on",
+            task.blocked_on.join(", ").as_str(),
+            width,
+        );
+    }
+    if !task.expected_artifacts.is_empty() {
+        push_wrapped_detail(
+            out,
+            "expected",
+            task.expected_artifacts.join(", ").as_str(),
+            width,
+        );
+    }
+    if task.expected_artifacts_missing {
+        push_wrapped_detail(
+            out,
+            "status",
+            "expected artifacts but no parseable swarm_artifacts JSON block was captured",
+            width,
+        );
+    }
+    if let Some(done_when) = task.done_when.as_deref() {
+        push_wrapped_detail(out, "done_when", done_when, width);
+    }
+    if let Some(artifacts) = task.artifacts.as_ref() {
+        append_swarm_task_artifacts_detail_lines(out, view, task, artifacts, width);
+    }
+    if task.output_present {
+        push_wrapped_detail(
+            out,
+            "output",
+            &format!(
+                ".nit/swarm/{}/tasks/{}/output.md",
+                view.mission_id,
+                sanitize_artifact_path_segment(task.id.as_str())
+            ),
+            width,
+        );
+        if let Some(output) = task.output.as_deref() {
+            let max_lines = 120usize;
+            let total_lines = output.lines().count();
+            let excerpt = output
+                .lines()
+                .take(max_lines)
+                .collect::<Vec<_>>()
+                .join("\n");
+            out.push(String::new());
+            out.push(" Output (excerpt)".into());
+            for line in wrap_cell_text(excerpt.as_str(), width.saturating_sub(1)) {
+                out.push(format!(" {line}"));
+            }
+            if total_lines > max_lines {
+                out.push(format!(
+                    " (output truncated; showing first {max_lines} lines)"
+                ));
+            }
+        }
+    }
+}
+
+fn append_swarm_task_artifacts_detail_lines(
+    out: &mut Vec<String>,
+    view: &SwarmPersistenceView,
+    task: &crate::swarm::SwarmTaskPersistenceView,
+    artifacts: &SwarmTaskArtifacts,
+    width: usize,
+) {
+    if let Some(summary) = artifacts.summary.as_deref() {
+        push_wrapped_detail(out, "summary", summary, width);
+    }
+    if !artifacts.files.is_empty() {
+        let files = summarize_items(
+            artifacts
+                .files
+                .iter()
+                .map(|entry| match entry.notes.as_deref() {
+                    Some(notes) if !notes.trim().is_empty() => {
+                        format!("{} ({})", entry.path, notes.trim())
+                    }
+                    _ => entry.path.clone(),
+                })
+                .collect(),
+            12,
+        );
+        push_wrapped_detail(out, "files", files.as_str(), width);
+    }
+    if !artifacts.diffs.is_empty() {
+        let diffs = summarize_items(
+            artifacts
+                .diffs
+                .iter()
+                .map(|entry| match entry.path.as_deref() {
+                    Some(path) if !path.trim().is_empty() => {
+                        format!("{} ({})", entry.summary, path.trim())
+                    }
+                    _ => entry.summary.clone(),
+                })
+                .collect(),
+            12,
+        );
+        push_wrapped_detail(out, "diffs", diffs.as_str(), width);
+    }
+    if !artifacts.commands.is_empty() {
+        let commands = summarize_items(
+            artifacts
+                .commands
+                .iter()
+                .map(|entry| match entry.purpose.as_deref() {
+                    Some(purpose) if !purpose.trim().is_empty() => {
+                        format!("{} ({})", entry.cmd, purpose.trim())
+                    }
+                    _ => entry.cmd.clone(),
+                })
+                .collect(),
+            10,
+        );
+        push_wrapped_detail(out, "commands", commands.as_str(), width);
+    }
+    if !artifacts.risks.is_empty() {
+        let risks = summarize_items(
+            artifacts
+                .risks
+                .iter()
+                .map(|entry| {
+                    let level = entry
+                        .level
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|level| !level.is_empty())
+                        .map(|level| format!("[{level}] "))
+                        .unwrap_or_default();
+                    match entry.mitigation.as_deref() {
+                        Some(mitigation) if !mitigation.trim().is_empty() => {
+                            format!("{}{} -> {}", level, entry.item, mitigation.trim())
+                        }
+                        _ => format!("{}{}", level, entry.item),
+                    }
+                })
+                .collect(),
+            10,
+        );
+        push_wrapped_detail(out, "risks", risks.as_str(), width);
+    }
+    if !artifacts.notes.is_empty() {
+        let notes = summarize_items(artifacts.notes.clone(), 10);
+        push_wrapped_detail(out, "notes", notes.as_str(), width);
+    }
+    push_wrapped_detail(
+        out,
+        "artifact",
+        &format!(
+            ".nit/swarm/{}/tasks/{}/artifacts.json",
+            view.mission_id,
+            sanitize_artifact_path_segment(task.id.as_str())
+        ),
+        width,
+    );
+}
+
+fn append_swarm_verify_detail_lines(
+    out: &mut Vec<String>,
+    view: &SwarmPersistenceView,
+    width: usize,
+) {
+    let status = swarm_verify_status(view);
+    out.extend(dag_kv_block_lines(
+        &[
+            (
+                "Bundle",
+                view.gate_bundle.clone().unwrap_or_else(|| "none".into()),
+            ),
+            ("Status", status.to_string()),
+            (
+                "Artifact",
+                format!(".nit/swarm/{}/gates/verify.md", view.mission_id),
+            ),
+        ],
+        width,
+    ));
+    if let Some(report) = view.gate_report.as_ref() {
+        for gate in report.gates.iter() {
+            push_wrapped_detail(
+                out,
+                "gate",
+                &format!(
+                    "{} [{}] {}",
+                    gate.name,
+                    gate_report_status_label(gate),
+                    gate.command
+                ),
+                width,
+            );
+            if let Some(notes) = gate.notes.as_deref() {
+                push_wrapped_detail(out, "notes", notes, width);
+            }
+        }
+        push_wrapped_detail(
+            out,
+            "report",
+            &format!(".nit/swarm/{}/gates/report.json", view.mission_id),
+            width,
+        );
+    }
+    if let Some(output) = view.gate_output.as_deref() {
+        push_wrapped_detail(
+            out,
+            "output_path",
+            &format!(".nit/swarm/{}/gates/output.txt", view.mission_id),
+            width,
+        );
+        let max_lines = 120usize;
+        let total_lines = output.lines().count();
+        let excerpt = output
+            .lines()
+            .take(max_lines)
+            .collect::<Vec<_>>()
+            .join("\n");
+        out.push(String::new());
+        out.push(" Output (excerpt)".into());
+        for line in wrap_cell_text(excerpt.as_str(), width.saturating_sub(1)) {
+            out.push(format!(" {line}"));
+        }
+        if total_lines > max_lines {
+            out.push(format!(
+                " (output truncated; showing first {max_lines} lines)"
+            ));
+        }
+    }
+}
+
+fn append_mission_provenance_lines(
+    out: &mut Vec<String>,
+    state: &AppState,
+    mission_id: &str,
+    width: usize,
+) {
+    let Some(mission) = state
+        .agents
+        .missions
+        .iter()
+        .find(|mission| mission.id == mission_id)
+    else {
+        out.push(format!(" Mission {mission_id} not found."));
+        return;
+    };
+
+    let live_messages = state
+        .agents
+        .messages
+        .iter()
+        .filter(|message| message.mission_id.as_deref() == Some(mission_id))
+        .collect::<Vec<_>>();
+    let live_agent_messages = live_messages
+        .iter()
+        .copied()
+        .filter(|message| message.agent_id.is_some())
+        .collect::<Vec<_>>();
+    let live_patches = state
+        .agents
+        .patches
+        .iter()
+        .filter(|patch| patch.mission_id.as_deref() == Some(mission_id))
+        .collect::<Vec<_>>();
+    let live_evidence = state
+        .agents
+        .evidence
+        .iter()
+        .filter(|item| item.mission_id.as_deref() == Some(mission_id))
+        .collect::<Vec<_>>();
+    let persisted = load_persisted_mission_run(state, mission_id);
+    let persisted_messages = persisted
+        .as_ref()
+        .map(|run| {
+            run.messages
+                .iter()
+                .filter(|message| message.mission_id.as_deref() == Some(mission_id))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let persisted_agent_messages = persisted_messages
+        .iter()
+        .copied()
+        .filter(|message| message.agent_id.is_some())
+        .collect::<Vec<_>>();
+    let persisted_patches = persisted
+        .as_ref()
+        .map(|run| {
+            run.patches
+                .iter()
+                .filter(|patch| patch.mission_id.as_deref() == Some(mission_id))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let persisted_evidence = persisted
+        .as_ref()
+        .map(|run| {
+            run.evidence
+                .iter()
+                .filter(|item| item.mission_id.as_deref() == Some(mission_id))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let using_persisted =
+        live_messages.is_empty() && live_patches.is_empty() && live_evidence.is_empty();
+    let messages = if using_persisted {
+        persisted_messages.len()
+    } else {
+        live_messages.len()
+    };
+    let agent_messages = if using_persisted {
+        persisted_agent_messages.len()
+    } else {
+        live_agent_messages.len()
+    };
+    let patches = if using_persisted {
+        persisted_patches.len()
+    } else {
+        live_patches.len()
+    };
+    let evidence = if using_persisted {
+        persisted_evidence.len()
+    } else {
+        live_evidence.len()
+    };
+    let thread_id = state
+        .agents
+        .selected_context_agent()
+        .and_then(|agent_id| {
+            state
+                .agents
+                .codex_mission_thread_ids
+                .get(mission_id)?
+                .get(agent_id)
+        })
+        .cloned()
+        .or_else(|| {
+            state
+                .agents
+                .codex_mission_thread_ids
+                .get(mission_id)
+                .and_then(|threads| threads.values().next().cloned())
+        });
+    let thread_id = thread_id.or_else(|| {
+        let Some(run) = persisted.as_ref() else {
+            return None;
+        };
+        state
+            .agents
+            .selected_context_agent()
+            .and_then(|agent_id| run.codex_thread_ids.as_ref()?.get(agent_id).cloned())
+            .or_else(|| {
+                run.codex_thread_ids
+                    .as_ref()
+                    .and_then(|threads| threads.values().next().cloned())
+            })
+            .or_else(|| run.codex_thread_id.clone())
+    });
+
+    out.extend(dag_kv_block_lines(
+        &[
+            ("Mission", mission.id.clone()),
+            (
+                "Mode",
+                if mission.swarm {
+                    "swarm".into()
+                } else {
+                    "single-agent".into()
+                },
+            ),
+            ("Phase", mission.phase.label().into()),
+            ("Status", mission.status.clone()),
+        ],
+        width,
+    ));
+    out.extend(dag_kv_block_lines(
+        &[
+            ("Agents", mission.assigned_agents.len().to_string()),
+            ("Msgs", messages.to_string()),
+            ("Replies", agent_messages.to_string()),
+            ("Patches", patches.to_string()),
+            ("Evidence", evidence.to_string()),
+        ],
+        width,
+    ));
+    push_wrapped_detail(
+        out,
+        "root",
+        &format!(".nit/agents/runs/{mission_id}/"),
+        width,
+    );
+    push_wrapped_detail(
+        out,
+        "run",
+        &format!(".nit/agents/runs/{mission_id}/run.json"),
+        width,
+    );
+    push_wrapped_detail(
+        out,
+        "thread",
+        &format!(".nit/agents/runs/{mission_id}/thread.md"),
+        width,
+    );
+    if let Some(thread_id) = thread_id.as_deref() {
+        push_wrapped_detail(out, "codex_thread", thread_id, width);
+    }
+    if !mission.assigned_agents.is_empty() {
+        push_wrapped_detail(
+            out,
+            "assigned",
+            mission.assigned_agents.join(", ").as_str(),
+            width,
+        );
+    }
+    push_wrapped_detail(
+        out,
+        "note",
+        if mission.swarm {
+            "Showing mission provenance fallback because no live swarm artifact view was available."
+        } else if using_persisted {
+            "Showing saved single-agent mission provenance from disk because the live thread is empty."
+        } else {
+            "Showing single-agent mission provenance from the saved run and thread."
+        },
+        width,
+    );
+}
+
+fn append_ad_hoc_agent_lines(
+    out: &mut Vec<String>,
+    state: &AppState,
+    agent_id: &str,
+    width: usize,
+) {
+    let live_messages = state
+        .agents
+        .messages
+        .iter()
+        .filter(|message| {
+            message.mission_id.is_none()
+                && (message.agent_id.is_none() || message.agent_id.as_deref() == Some(agent_id))
+        })
+        .collect::<Vec<_>>();
+    let live_agent_messages = live_messages
+        .iter()
+        .copied()
+        .filter(|message| message.agent_id.as_deref() == Some(agent_id))
+        .collect::<Vec<_>>();
+    let live_patches = state
+        .agents
+        .patches
+        .iter()
+        .filter(|patch| patch.mission_id.is_none() && patch.agent_id == agent_id)
+        .collect::<Vec<_>>();
+    let live_evidence = state
+        .agents
+        .evidence
+        .iter()
+        .filter(|item| item.mission_id.is_none() && item.agent_id.as_deref() == Some(agent_id))
+        .collect::<Vec<_>>();
+    let persisted = load_persisted_ad_hoc_run(state, agent_id);
+    let persisted_messages = persisted
+        .as_ref()
+        .map(|run| {
+            run.messages
+                .iter()
+                .filter(|message| {
+                    message.mission_id.is_none()
+                        && (message.agent_id.is_none()
+                            || message.agent_id.as_deref() == Some(agent_id))
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let persisted_agent_messages = persisted_messages
+        .iter()
+        .copied()
+        .filter(|message| message.agent_id.as_deref() == Some(agent_id))
+        .collect::<Vec<_>>();
+    let persisted_patches = persisted
+        .as_ref()
+        .map(|run| {
+            run.patches
+                .iter()
+                .filter(|patch| patch.mission_id.is_none() && patch.agent_id == agent_id)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let _persisted_evidence = persisted
+        .as_ref()
+        .map(|run| {
+            run.evidence
+                .iter()
+                .filter(|item| {
+                    item.mission_id.is_none() && item.agent_id.as_deref() == Some(agent_id)
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let using_persisted =
+        live_messages.is_empty() && live_patches.is_empty() && live_evidence.is_empty();
+    let messages = if using_persisted {
+        persisted_messages.len()
+    } else {
+        live_messages.len()
+    };
+    let agent_messages = if using_persisted {
+        persisted_agent_messages.len()
+    } else {
+        live_agent_messages.len()
+    };
+    let patches = if using_persisted {
+        persisted_patches.len()
+    } else {
+        live_patches.len()
+    };
+    let thread_present = state.agents.codex_thread_ids.contains_key(agent_id)
+        || persisted
+            .as_ref()
+            .and_then(|run| run.codex_thread_id.as_ref())
+            .is_some();
+
+    out.extend(dag_kv_block_lines(
+        &[
+            ("Agent", agent_id.to_string()),
+            ("Context", "ad-hoc".into()),
+        ],
+        width,
+    ));
+    out.extend(dag_kv_block_lines(
+        &[
+            ("Msgs", messages.to_string()),
+            ("Replies", agent_messages.to_string()),
+            ("Patches", patches.to_string()),
+            (
+                "Thread",
+                if thread_present {
+                    "yes".into()
+                } else {
+                    "no".into()
+                },
+            ),
+        ],
+        width,
+    ));
+    push_wrapped_detail(out, "root", persisted_ad_hoc_root(agent_id).as_str(), width);
+    push_wrapped_detail(
+        out,
+        "run",
+        &format!("{}run.json", persisted_ad_hoc_root(agent_id)),
+        width,
+    );
+    push_wrapped_detail(
+        out,
+        "thread",
+        &format!("{}thread.md", persisted_ad_hoc_root(agent_id)),
+        width,
+    );
+    push_wrapped_detail(
+        out,
+        "note",
+        if using_persisted {
+            "No mission is selected. Showing saved ad-hoc artifacts from disk because the live thread is empty."
+        } else {
+            "No mission is selected. This view is built from the live ad-hoc thread for the selected agent. Select a mission in MISSIONS to see mission artifacts."
+        },
+        width,
+    );
+    if let Some(thread_id) = state
+        .agents
+        .codex_thread_ids
+        .get(agent_id)
+        .cloned()
+        .or_else(|| persisted.and_then(|run| run.codex_thread_id))
+    {
+        push_wrapped_detail(out, "codex_thread", thread_id.as_str(), width);
+    }
+}
+
+fn artifact_cards_for_context(
+    state: &AppState,
+    swarm: Option<&SwarmRuntime>,
+    preview_chars: usize,
+) -> Vec<ArtifactCard> {
+    if let Some(mission_id) = state.agents.selected_context_mission() {
+        if let Some(view) = swarm.and_then(|runtime| runtime.swarm_persistence(mission_id)) {
+            return build_swarm_cards(&view, preview_chars);
+        }
+        let live = build_mission_cards(state, mission_id, preview_chars);
+        if !live.is_empty() {
+            return live;
+        }
+        if let Some(run) = load_persisted_mission_run(state, mission_id) {
+            return build_persisted_mission_cards(&run, mission_id, preview_chars);
+        }
+        return live;
+    }
+
+    if let Some(agent_id) = state.agents.selected_context_agent() {
+        let live = build_ad_hoc_cards(state, agent_id, preview_chars);
+        if !live.is_empty() {
+            return live;
+        }
+        if let Some(run) = load_persisted_ad_hoc_run(state, agent_id) {
+            return build_persisted_ad_hoc_cards(&run, agent_id, preview_chars);
+        }
+        return live;
+    }
+
+    Vec::new()
+}
+
+fn artifacts_lines(state: &AppState, swarm: Option<&SwarmRuntime>, width: usize) -> Vec<String> {
+    let width = width.max(32);
+    let mut out = vec![" ARTIFACTS".into(), "─".repeat(width.min(240))];
+
+    let widths = artifact_list_widths(width);
+    let preview_chars = widths
+        .get(3)
+        .copied()
+        .unwrap_or(120)
+        .saturating_sub(1)
+        .max(10);
+
+    let cards = if let Some(mission_id) = state.agents.selected_context_mission() {
+        if let Some(view) = swarm.and_then(|runtime| runtime.swarm_persistence(mission_id)) {
+            append_swarm_summary_lines(&mut out, &view, width);
+        } else {
+            append_mission_provenance_lines(&mut out, state, mission_id, width);
+        }
+        artifact_cards_for_context(state, swarm, preview_chars)
+    } else if let Some(agent_id) = state.agents.selected_context_agent() {
+        append_ad_hoc_agent_lines(&mut out, state, agent_id, width);
+        artifact_cards_for_context(state, swarm, preview_chars)
+    } else {
+        out.push(" No mission or agent selected.".into());
+        return out;
+    };
+
+    out.push("─".repeat(width.min(240)));
+    out.push(" Items".into());
+    if cards.is_empty() {
+        out.push(" No artifacts captured yet.".into());
+        return out;
+    }
+    let selected_idx = state
+        .agents
+        .artifacts_selected
+        .min(cards.len().saturating_sub(1));
+    for (idx, card) in cards.iter().enumerate() {
+        out.push(artifact_card_row(
+            card,
+            widths.as_slice(),
+            idx == selected_idx,
         ));
     }
+
+    out
+}
+
+fn is_artifacts_card_row(line: &str) -> bool {
+    let mut chars = line.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if first != ' ' && first != '>' {
+        return false;
+    }
+    let Some(glyph) = chars.next() else {
+        return false;
+    };
+    if glyph != ARROW_PRIMARY && glyph != CURSOR_PRIMARY && glyph != '>' {
+        return false;
+    }
+    chars.next() == Some(' ')
+}
+
+pub fn artifacts_card_index_for_line(lines: &[String], line_idx: usize) -> Option<usize> {
+    let mut card_idx = 0usize;
+    for (idx, line) in lines.iter().enumerate() {
+        if !is_artifacts_card_row(line) {
+            continue;
+        }
+        if idx == line_idx {
+            return Some(card_idx);
+        }
+        card_idx = card_idx.saturating_add(1);
+    }
+    None
+}
+
+pub fn artifacts_card_line_for_index(lines: &[String], card_idx: usize) -> Option<usize> {
+    let mut cursor = 0usize;
+    for (idx, line) in lines.iter().enumerate() {
+        if !is_artifacts_card_row(line) {
+            continue;
+        }
+        if cursor == card_idx {
+            return Some(idx);
+        }
+        cursor = cursor.saturating_add(1);
+    }
+    None
+}
+
+pub fn artifacts_card_count(lines: &[String]) -> usize {
+    lines
+        .iter()
+        .filter(|line| is_artifacts_card_row(line.as_str()))
+        .count()
+}
+
+#[derive(Clone, Debug)]
+pub enum ArtifactsPopupRef {
+    Message { idx: usize },
+    Patch { idx: usize },
+    Evidence { idx: usize },
+    SwarmTask { mission_id: String, task_id: String },
+    SwarmVerify { mission_id: String },
+}
+
+pub fn artifacts_popup_ref(
+    state: &AppState,
+    swarm: &SwarmRuntime,
+    width: usize,
+) -> Option<ArtifactsPopupRef> {
+    let width = width.max(32);
+    let widths = artifact_list_widths(width);
+    let preview_chars = widths
+        .get(3)
+        .copied()
+        .unwrap_or(120)
+        .saturating_sub(1)
+        .max(10);
+
+    let cards = artifact_cards_for_context(state, Some(swarm), preview_chars);
+
+    if cards.is_empty() {
+        return None;
+    }
+    let selected_idx = state
+        .agents
+        .artifacts_selected
+        .min(cards.len().saturating_sub(1));
+    let card = &cards[selected_idx];
+
+    match &card.reference {
+        ArtifactRef::Message { idx } => Some(ArtifactsPopupRef::Message { idx: *idx }),
+        ArtifactRef::Patch { idx } => Some(ArtifactsPopupRef::Patch { idx: *idx }),
+        ArtifactRef::Evidence { idx } => Some(ArtifactsPopupRef::Evidence { idx: *idx }),
+        ArtifactRef::PersistedMessage { .. }
+        | ArtifactRef::PersistedPatch { .. }
+        | ArtifactRef::PersistedEvidence { .. } => None,
+        ArtifactRef::SwarmTask {
+            mission_id,
+            task_id,
+        } => Some(ArtifactsPopupRef::SwarmTask {
+            mission_id: mission_id.clone(),
+            task_id: task_id.clone(),
+        }),
+        ArtifactRef::SwarmVerify { mission_id } => Some(ArtifactsPopupRef::SwarmVerify {
+            mission_id: mission_id.clone(),
+        }),
+    }
+}
+
+pub fn artifacts_popup_strings(
+    state: &AppState,
+    swarm: &SwarmRuntime,
+    width: usize,
+) -> Vec<String> {
+    let width = width.max(32);
+    let widths = artifact_list_widths(width);
+    let preview_chars = widths
+        .get(3)
+        .copied()
+        .unwrap_or(120)
+        .saturating_sub(1)
+        .max(10);
+
+    let cards = artifact_cards_for_context(state, Some(swarm), preview_chars);
+
+    if cards.is_empty() {
+        return vec![" No artifacts captured yet.".into()];
+    }
+    let selected_idx = state
+        .agents
+        .artifacts_selected
+        .min(cards.len().saturating_sub(1));
+    let card = &cards[selected_idx];
+
+    let mut out = vec![format!(
+        " {}  {}  {}",
+        card.kind,
+        card.owner.as_str(),
+        if card.at.trim().is_empty() {
+            "--"
+        } else {
+            card.at.as_str()
+        }
+    )];
+    out.push("─".repeat(width.min(240)));
+
+    match &card.reference {
+        ArtifactRef::Message { idx } => {
+            let Some(message) = state.agents.messages.get(*idx) else {
+                out.push(" Message not found.".into());
+                return out;
+            };
+            push_wrapped_detail(&mut out, "at", message.at.as_str(), width);
+            if let Some(agent) = message.agent_id.as_deref() {
+                push_wrapped_detail(&mut out, "agent", agent, width);
+            } else {
+                push_wrapped_detail(&mut out, "agent", "You", width);
+            }
+            if let Some(mission_id) = message.mission_id.as_deref() {
+                push_wrapped_detail(&mut out, "mission", mission_id, width);
+            } else {
+                push_wrapped_detail(&mut out, "mission", "ad-hoc", width);
+            }
+            out.push("─".repeat(width.min(240)));
+            out.push(" Content".into());
+            for line in wrap_cell_text(message.text.as_str(), width.saturating_sub(1)) {
+                out.push(format!(" {line}"));
+            }
+        }
+        ArtifactRef::PersistedMessage { message } => {
+            push_wrapped_detail(&mut out, "at", message.at.as_str(), width);
+            if let Some(agent) = message.agent_id.as_deref() {
+                push_wrapped_detail(&mut out, "agent", agent, width);
+            } else {
+                push_wrapped_detail(&mut out, "agent", "You", width);
+            }
+            if let Some(mission_id) = message.mission_id.as_deref() {
+                push_wrapped_detail(&mut out, "mission", mission_id, width);
+            } else {
+                push_wrapped_detail(&mut out, "mission", "ad-hoc", width);
+            }
+            out.push("─".repeat(width.min(240)));
+            out.push(" Content".into());
+            for line in wrap_cell_text(message.text.as_str(), width.saturating_sub(1)) {
+                out.push(format!(" {line}"));
+            }
+        }
+        ArtifactRef::Patch { idx } => {
+            let Some(patch) = state.agents.patches.get(*idx) else {
+                out.push(" Patch not found.".into());
+                return out;
+            };
+            push_wrapped_detail(&mut out, "id", patch.id.as_str(), width);
+            push_wrapped_detail(&mut out, "status", patch.status.label(), width);
+            push_wrapped_detail(&mut out, "agent", patch.agent_id.as_str(), width);
+            if let Some(mission_id) = patch.mission_id.as_deref() {
+                push_wrapped_detail(&mut out, "mission", mission_id, width);
+                push_wrapped_detail(
+                    &mut out,
+                    "path",
+                    &format!(
+                        ".nit/agents/runs/{}/patches/{}.diff",
+                        mission_id,
+                        sanitize_artifact_path_segment(patch.id.as_str())
+                    ),
+                    width,
+                );
+            } else {
+                push_wrapped_detail(&mut out, "mission", "ad-hoc", width);
+            }
+            push_wrapped_detail(&mut out, "title", patch.title.as_str(), width);
+            push_wrapped_detail(&mut out, "summary", patch.summary.as_str(), width);
+
+            out.push("─".repeat(width.min(240)));
+            out.push(" Diff (excerpt)".into());
+            let max_lines = 180usize;
+            let total_lines = patch.diff.lines().count();
+            let excerpt = patch
+                .diff
+                .lines()
+                .take(max_lines)
+                .collect::<Vec<_>>()
+                .join("\n");
+            for line in wrap_cell_text(excerpt.as_str(), width.saturating_sub(1)) {
+                out.push(format!(" {line}"));
+            }
+            if total_lines > max_lines {
+                out.push(format!(
+                    " (diff truncated; showing first {max_lines} lines)"
+                ));
+            }
+        }
+        ArtifactRef::PersistedPatch { patch, path } => {
+            push_wrapped_detail(&mut out, "id", patch.id.as_str(), width);
+            push_wrapped_detail(
+                &mut out,
+                "status",
+                if patch.status.trim().is_empty() {
+                    "--"
+                } else {
+                    patch.status.as_str()
+                },
+                width,
+            );
+            if !patch.agent_id.trim().is_empty() {
+                push_wrapped_detail(&mut out, "agent", patch.agent_id.as_str(), width);
+            }
+            if let Some(mission_id) = patch.mission_id.as_deref() {
+                push_wrapped_detail(&mut out, "mission", mission_id, width);
+            } else {
+                push_wrapped_detail(&mut out, "mission", "ad-hoc", width);
+            }
+            if let Some(path) = path.as_deref() {
+                push_wrapped_detail(&mut out, "path", path, width);
+            }
+            if !patch.title.trim().is_empty() {
+                push_wrapped_detail(&mut out, "title", patch.title.as_str(), width);
+            }
+            if !patch.summary.trim().is_empty() {
+                push_wrapped_detail(&mut out, "summary", patch.summary.as_str(), width);
+            }
+
+            out.push("─".repeat(width.min(240)));
+            out.push(" Diff (excerpt)".into());
+            let diff = persisted_patch_diff_excerpt(patch, path.as_deref());
+            let max_lines = 180usize;
+            let total_lines = diff.lines().count();
+            let excerpt = diff.lines().take(max_lines).collect::<Vec<_>>().join("\n");
+            for line in wrap_cell_text(excerpt.as_str(), width.saturating_sub(1)) {
+                out.push(format!(" {line}"));
+            }
+            if total_lines > max_lines {
+                out.push(format!(
+                    " (diff truncated; showing first {max_lines} lines)"
+                ));
+            }
+        }
+        ArtifactRef::Evidence { idx } => {
+            let Some(item) = state.agents.evidence.get(*idx) else {
+                out.push(" Evidence item not found.".into());
+                return out;
+            };
+            push_wrapped_detail(&mut out, "id", item.id.as_str(), width);
+            if let Some(agent) = item.agent_id.as_deref() {
+                push_wrapped_detail(&mut out, "agent", agent, width);
+            }
+            if let Some(mission_id) = item.mission_id.as_deref() {
+                push_wrapped_detail(&mut out, "mission", mission_id, width);
+            } else {
+                push_wrapped_detail(&mut out, "mission", "ad-hoc", width);
+            }
+            push_wrapped_detail(&mut out, "title", item.title.as_str(), width);
+            push_wrapped_detail(&mut out, "detail", item.detail.as_str(), width);
+            if let Some(link) = item.link.as_deref() {
+                push_wrapped_detail(&mut out, "link", link, width);
+            }
+        }
+        ArtifactRef::PersistedEvidence { item } => {
+            push_wrapped_detail(&mut out, "id", item.id.as_str(), width);
+            if let Some(agent) = item.agent_id.as_deref() {
+                push_wrapped_detail(&mut out, "agent", agent, width);
+            }
+            if let Some(mission_id) = item.mission_id.as_deref() {
+                push_wrapped_detail(&mut out, "mission", mission_id, width);
+            } else {
+                push_wrapped_detail(&mut out, "mission", "ad-hoc", width);
+            }
+            push_wrapped_detail(&mut out, "title", item.title.as_str(), width);
+            push_wrapped_detail(&mut out, "detail", item.detail.as_str(), width);
+            if let Some(link) = item.link.as_deref() {
+                push_wrapped_detail(&mut out, "link", link, width);
+            }
+        }
+        ArtifactRef::SwarmTask {
+            mission_id,
+            task_id,
+        } => {
+            let Some(view) = swarm.swarm_persistence(mission_id.as_str()) else {
+                out.push(" Swarm persistence not available.".into());
+                return out;
+            };
+            let Some(task) = view.tasks.iter().find(|task| task.id == *task_id) else {
+                out.push(" Swarm task not found.".into());
+                return out;
+            };
+            append_swarm_task_detail_lines(&mut out, &view, task, width);
+        }
+        ArtifactRef::SwarmVerify { mission_id } => {
+            let Some(view) = swarm.swarm_persistence(mission_id.as_str()) else {
+                out.push(" Swarm persistence not available.".into());
+                return out;
+            };
+            append_swarm_verify_detail_lines(&mut out, &view, width);
+        }
+    }
+
+    while out.last().is_some_and(|line| line.is_empty()) {
+        out.pop();
+    }
+    out
+}
+
+fn diagnostics_lines(state: &AppState, width: usize) -> Vec<String> {
+    let usable = width.max(32);
+    let mut out = vec![" DIAG".into(), "─".repeat(usable.min(240))];
+    let (errors, warns, infos) = state.agents.diag_events.iter().fold(
+        (0usize, 0usize, 0usize),
+        |(errors, warns, infos), event| match event.severity {
+            AgentAlertSeverity::Error => (errors + 1, warns, infos),
+            AgentAlertSeverity::Warn => (errors, warns + 1, infos),
+            AgentAlertSeverity::Info => (errors, warns, infos + 1),
+        },
+    );
+    let issues = state
+        .agents
+        .diag_events
+        .iter()
+        .filter(|event| {
+            matches!(
+                event.severity,
+                AgentAlertSeverity::Error | AgentAlertSeverity::Warn
+            )
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    out.push(" Summary".into());
+    push_wrapped_kv_line(&mut out, "app", diagnostics_app_label(state), usable);
+    push_wrapped_kv_line(&mut out, "job", &diagnostics_job_status(state), usable);
+    if let Some(accel) = diagnostics_accelerator_status(state) {
+        push_wrapped_kv_line(&mut out, "accel", &accel, usable);
+    }
+    if let Some(path) = diagnostics_log_file_path(state) {
+        push_wrapped_kv_line(&mut out, "log", path.as_str(), usable);
+    }
+    push_wrapped_kv_line(
+        &mut out,
+        "diagnostics",
+        &format!("{errors} error  {warns} warn  {infos} info"),
+        usable,
+    );
+    if let Some(issue) = issues.last() {
+        push_wrapped_kv_line(
+            &mut out,
+            "latest_issue",
+            &format_diagnostic_event(issue),
+            usable,
+        );
+    } else {
+        push_wrapped_kv_line(&mut out, "latest_issue", "none", usable);
+    }
+    out.push(String::new());
+    out.push(" Recent issues".into());
+    if issues.is_empty() {
+        push_wrapped_prefixed_line(&mut out, " · ", "   ", "none", usable);
+    } else {
+        let recent = if issues.len() > 12 {
+            &issues[issues.len().saturating_sub(12)..]
+        } else {
+            issues.as_slice()
+        };
+        for event in recent {
+            push_wrapped_diagnostic_event(&mut out, event, usable);
+        }
+    }
+
     let mut logs = state.logs.iter().cloned().collect::<Vec<_>>();
-    if logs.len() > 32 {
-        logs = logs.split_off(logs.len() - 32);
+    if logs.len() > 12 {
+        logs = logs.split_off(logs.len() - 12);
     }
     if !logs.is_empty() {
         out.push(String::new());
         out.push(" Runtime log tail".into());
-        out.push(" ────────────────".into());
         for line in logs {
-            out.push(fit_left(&line, width.saturating_sub(1)));
+            push_wrapped_prefixed_line(
+                &mut out,
+                " · ",
+                "   ",
+                &compact_runtime_log_line(&line),
+                usable,
+            );
         }
     }
     out
+}
+
+fn diagnostics_app_label(state: &AppState) -> &'static str {
+    match state.app_kind {
+        AppKind::Gol => "gol",
+        AppKind::Games => "games",
+    }
+}
+
+fn diagnostics_job_status(state: &AppState) -> String {
+    match state.app_kind {
+        AppKind::Games => match state.games.status {
+            nit_core::GamesStatus::Idle => "games/idle".into(),
+            nit_core::GamesStatus::Running => "games/running".into(),
+            nit_core::GamesStatus::Paused => "games/paused".into(),
+            nit_core::GamesStatus::Done => "games/done".into(),
+            nit_core::GamesStatus::Error => "games/error".into(),
+        },
+        AppKind::Gol => {
+            let state = if state.visualizer.running {
+                if state.visualizer.paused {
+                    "gol/paused"
+                } else {
+                    "gol/running"
+                }
+            } else {
+                "gol/idle"
+            };
+            state.into()
+        }
+    }
+}
+
+fn diagnostics_accelerator_status(state: &AppState) -> Option<String> {
+    if !matches!(state.app_kind, AppKind::Games) {
+        return None;
+    }
+    let runtime = &state.games.runtime;
+    match runtime.backend {
+        nit_games::RuntimeAcceleratorBackend::Metal => Some(format!(
+            "metal active (gpu {} / cpu {})",
+            runtime.metal_matches, runtime.cpu_matches
+        )),
+        nit_games::RuntimeAcceleratorBackend::Cpu if state.games.running => {
+            Some(format!("cpu (matches {})", runtime.cpu_matches))
+        }
+        _ => None,
+    }
+}
+
+fn format_diagnostic_event(event: &nit_core::AgentDiagnosticEvent) -> String {
+    format!(
+        "{} {} {} {}",
+        event.at,
+        event.severity.label(),
+        event.source,
+        event.message
+    )
+}
+
+fn compact_runtime_log_line(line: &str) -> String {
+    let mut parts = line.splitn(4, ' ');
+    let Some(timestamp) = parts.next() else {
+        return line.to_string();
+    };
+    let Some(level) = parts.next() else {
+        return line.to_string();
+    };
+    let Some(target) = parts.next() else {
+        return line.to_string();
+    };
+    let Some(message) = parts.next() else {
+        return line.to_string();
+    };
+    let time = timestamp
+        .rsplit('T')
+        .next()
+        .unwrap_or(timestamp)
+        .trim_end_matches('Z')
+        .split('.')
+        .next()
+        .unwrap_or(timestamp);
+    let target = target.trim_end_matches(':');
+    format!("{time} {level} {target} {message}")
+}
+
+fn diagnostics_log_file_path(state: &AppState) -> Option<String> {
+    let marker = "Log file:";
+    let mut candidate: Option<String> = None;
+    for line in state.logs.iter() {
+        if let Some((_, path)) = line.split_once(marker) {
+            let path = path.trim();
+            if !path.is_empty() {
+                candidate = Some(path.to_string());
+            }
+        }
+    }
+    candidate
+}
+
+fn push_wrapped_kv_line(out: &mut Vec<String>, label: &str, value: &str, width: usize) {
+    let prefix = format!(" {:<11} ", format!("{label}:"));
+    push_wrapped_prefixed_line(out, &prefix, &" ".repeat(prefix.len()), value, width);
+}
+
+fn push_wrapped_diagnostic_event(
+    out: &mut Vec<String>,
+    event: &nit_core::AgentDiagnosticEvent,
+    width: usize,
+) {
+    let prefix = format!(
+        " {:<5} {:<7} {:<10} ",
+        event.severity.label(),
+        event.at,
+        event.source
+    );
+    push_wrapped_prefixed_line(
+        out,
+        &prefix,
+        &" ".repeat(prefix.len()),
+        &event.message,
+        width,
+    );
+}
+
+fn push_wrapped_prefixed_line(
+    out: &mut Vec<String>,
+    first_prefix: &str,
+    continuation_prefix: &str,
+    value: &str,
+    width: usize,
+) {
+    let available = width.saturating_sub(first_prefix.chars().count()).max(1);
+    let wrapped = wrap_cell_text(value, available);
+    for (idx, line) in wrapped.into_iter().enumerate() {
+        let prefix = if idx == 0 {
+            first_prefix
+        } else {
+            continuation_prefix
+        };
+        out.push(format!("{prefix}{line}"));
+    }
 }
 
 fn scratchpad_lines(state: &AppState, width: usize) -> Vec<String> {
@@ -1526,15 +3812,300 @@ fn ops_styled_line(
         AgentOpsTab::Mcp => mcp_styled_line(state, line_idx, line, usable, theme),
         AgentOpsTab::Alerts => alert_styled_line(state, line_idx, line, usable, theme),
         AgentOpsTab::Dag => dag_styled_line(line_idx, line, usable, theme),
-        // Patch/Evidence are hidden from the UI; render them like Diagnostics for legacy state.
-        AgentOpsTab::Patch | AgentOpsTab::Evidence | AgentOpsTab::Diagnostics => Line::from(
-            Span::styled(line.to_string(), ops_line_style(line_idx, line, theme)),
-        ),
+        AgentOpsTab::Diagnostics => diagnostics_styled_line(line, theme),
+        AgentOpsTab::Evidence => artifacts_styled_line(state, line_idx, line, usable, theme),
+        // Patch is legacy/hidden; treat it as Diagnostics.
+        AgentOpsTab::Patch => diagnostics_styled_line(line, theme),
         AgentOpsTab::Scratchpad => Line::from(Span::styled(
             line.to_string(),
             Style::default().fg(theme.foreground),
         )),
     }
+}
+
+fn artifacts_styled_line(
+    _state: &AppState,
+    line_idx: usize,
+    line: &str,
+    usable: usize,
+    theme: &Theme,
+) -> Line<'static> {
+    if line.is_empty() {
+        return Line::from("");
+    }
+    if line.chars().all(|ch| ch == '─') {
+        return Line::from(Span::styled(
+            line.to_string(),
+            Style::default()
+                .fg(theme.border)
+                .add_modifier(Modifier::DIM),
+        ));
+    }
+    if matches!(line, " Items") {
+        return Line::from(Span::styled(
+            line.to_string(),
+            Style::default()
+                .fg(theme.title_focused)
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
+    if is_artifacts_card_row(line) {
+        return Line::from(Span::styled(
+            line.to_string(),
+            ops_line_style(line_idx, line, theme),
+        ));
+    }
+
+    let selected = line.starts_with('>');
+    let base = if selected {
+        Style::default().fg(theme.foreground).bg(theme.selection_bg)
+    } else {
+        Style::default().fg(theme.foreground)
+    };
+
+    let trimmed = line.trim_start();
+    if trimmed.contains(':') {
+        let label_style = base.fg(theme.border).add_modifier(Modifier::DIM);
+        let mut spans = Vec::new();
+        let leading_spaces = line.bytes().take_while(|b| *b == b' ').count();
+        if leading_spaces > 0 {
+            spans.push(Span::styled(" ".repeat(leading_spaces), base));
+        }
+        let segments = trimmed.split('|').collect::<Vec<_>>();
+        for (idx, seg) in segments.iter().enumerate() {
+            let (label, value) = seg
+                .split_once(':')
+                .map(|(l, v)| (l.trim(), v.trim()))
+                .unwrap_or((seg.trim(), ""));
+            spans.push(Span::styled(format!("{label}:"), label_style));
+            if !value.is_empty() {
+                spans.push(Span::styled(" ".to_string(), base));
+                spans.push(Span::styled(
+                    value.to_string(),
+                    artifact_kv_value_style(label, value, base, usable, theme),
+                ));
+            }
+            if idx + 1 < segments.len() {
+                spans.push(Span::styled(" | ".to_string(), label_style));
+            }
+        }
+        return Line::from(spans);
+    }
+
+    Line::from(Span::styled(
+        line.to_string(),
+        ops_line_style(line_idx, line, theme),
+    ))
+}
+
+fn artifact_kv_value_style(
+    label: &str,
+    value: &str,
+    base: Style,
+    _usable: usize,
+    theme: &Theme,
+) -> Style {
+    let label = label.trim().to_ascii_lowercase();
+    let value = value.trim();
+
+    match label.as_str() {
+        "agent" => base.fg(theme.warning).add_modifier(Modifier::BOLD),
+        "context" => base.fg(theme.accent).add_modifier(Modifier::BOLD),
+        "thread" => {
+            if value.eq_ignore_ascii_case("yes") {
+                base.fg(theme.success).add_modifier(Modifier::BOLD)
+            } else if value.eq_ignore_ascii_case("no") {
+                base.fg(theme.border).add_modifier(Modifier::DIM)
+            } else {
+                base.fg(theme.hl.link).add_modifier(Modifier::UNDERLINED)
+            }
+        }
+        "msgs" | "replies" | "patches" | "agents" | "evidence" => {
+            if value.parse::<u64>().unwrap_or(0) == 0 {
+                base.fg(theme.border).add_modifier(Modifier::DIM)
+            } else {
+                base.fg(theme.accent).add_modifier(Modifier::BOLD)
+            }
+        }
+        "mission" | "mode" | "phase" | "status" => {
+            base.fg(theme.accent).add_modifier(Modifier::BOLD)
+        }
+        "codex_thread" | "root" | "run" | "path" | "log" | "link" => {
+            base.fg(theme.hl.link).add_modifier(Modifier::UNDERLINED)
+        }
+        "note" => base.fg(theme.border).add_modifier(Modifier::DIM),
+        _ => base,
+    }
+}
+
+fn diagnostics_styled_line(line: &str, theme: &Theme) -> Line<'static> {
+    if line.is_empty() {
+        return Line::from("");
+    }
+    if matches!(line, " Summary" | " Recent issues" | " Runtime log tail") {
+        return Line::from(Span::styled(
+            line.to_string(),
+            Style::default()
+                .fg(theme.title_focused)
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
+    if let Some((label, value)) = line
+        .trim_start_matches(' ')
+        .split_once(' ')
+        .filter(|(label, _)| label.ends_with(':'))
+    {
+        let label_text = format!(" {label} ");
+        let label_span = Span::styled(
+            label_text,
+            Style::default()
+                .fg(theme.border)
+                .add_modifier(Modifier::DIM),
+        );
+        if label.eq_ignore_ascii_case("latest_issue:") {
+            let value = value.trim_start();
+            if value.eq_ignore_ascii_case("none") {
+                return Line::from(vec![
+                    label_span,
+                    Span::styled(value.to_string(), Style::default().fg(theme.border)),
+                ]);
+            }
+            let mut parts = value.splitn(4, ' ');
+            let sev = parts.next().unwrap_or_default();
+            let at = parts.next().unwrap_or_default();
+            let source = parts.next().unwrap_or_default();
+            let message = parts.next().unwrap_or_default();
+            let sev_color = if sev.eq_ignore_ascii_case("ERROR") {
+                theme.error
+            } else if sev.eq_ignore_ascii_case("WARN") {
+                theme.warning
+            } else {
+                theme.title
+            };
+            return Line::from(vec![
+                label_span,
+                Span::styled(
+                    format!("{sev} "),
+                    Style::default().fg(sev_color).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    format!("{at} "),
+                    Style::default()
+                        .fg(theme.border)
+                        .add_modifier(Modifier::DIM),
+                ),
+                Span::styled(
+                    format!("{source} "),
+                    Style::default()
+                        .fg(theme.accent)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(message.to_string(), Style::default().fg(sev_color)),
+            ]);
+        }
+        if label.eq_ignore_ascii_case("log:") {
+            return Line::from(vec![
+                label_span,
+                Span::styled(
+                    value.to_string(),
+                    Style::default()
+                        .fg(theme.accent)
+                        .add_modifier(Modifier::BOLD),
+                ),
+            ]);
+        }
+        return Line::from(vec![
+            label_span,
+            Span::styled(value.to_string(), Style::default().fg(theme.foreground)),
+        ]);
+    }
+    if let Some(rest) = line.strip_prefix(" ERROR ") {
+        return diagnostics_severity_line(" ERROR ", rest, theme.error, theme);
+    }
+    if let Some(rest) = line.strip_prefix(" WARN  ") {
+        return diagnostics_severity_line(" WARN  ", rest, theme.warning, theme);
+    }
+    if let Some(rest) = line.strip_prefix(" INFO  ") {
+        return diagnostics_severity_line(" INFO  ", rest, theme.title, theme);
+    }
+    if let Some(rest) = line.strip_prefix(" · ") {
+        return diagnostics_runtime_line(rest, theme);
+    }
+    if line.starts_with("   ") {
+        return Line::from(Span::styled(
+            line.to_string(),
+            Style::default().fg(theme.foreground),
+        ));
+    }
+    Line::from(Span::styled(
+        line.to_string(),
+        Style::default().fg(theme.foreground),
+    ))
+}
+
+fn diagnostics_severity_line(
+    prefix: &str,
+    rest: &str,
+    severity_color: Color,
+    theme: &Theme,
+) -> Line<'static> {
+    let mut parts = rest.splitn(3, ' ');
+    let at = parts.next().unwrap_or_default();
+    let source = parts.next().unwrap_or_default();
+    let message = parts.next().unwrap_or_default();
+    Line::from(vec![
+        Span::styled(prefix.to_string(), Style::default().fg(severity_color)),
+        Span::styled(
+            format!("{at} "),
+            Style::default()
+                .fg(theme.border)
+                .add_modifier(Modifier::DIM),
+        ),
+        Span::styled(
+            format!("{source} "),
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(message.to_string(), Style::default().fg(severity_color)),
+    ])
+}
+
+fn diagnostics_runtime_line(rest: &str, theme: &Theme) -> Line<'static> {
+    let mut parts = rest.splitn(4, ' ');
+    let time = parts.next().unwrap_or_default();
+    let level = parts.next().unwrap_or_default();
+    let target = parts.next().unwrap_or_default();
+    let message = parts.next().unwrap_or_default();
+    let level_color = if level.eq_ignore_ascii_case("ERROR") {
+        theme.error
+    } else if level.eq_ignore_ascii_case("WARN") {
+        theme.warning
+    } else {
+        theme.title
+    };
+    Line::from(vec![
+        Span::styled(
+            " · ",
+            Style::default()
+                .fg(theme.border)
+                .add_modifier(Modifier::DIM),
+        ),
+        Span::styled(
+            format!("{time} "),
+            Style::default()
+                .fg(theme.border)
+                .add_modifier(Modifier::DIM),
+        ),
+        Span::styled(
+            format!("{level} "),
+            Style::default()
+                .fg(level_color)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(format!("{target} "), Style::default().fg(theme.accent)),
+        Span::styled(message.to_string(), Style::default().fg(theme.foreground)),
+    ])
 }
 
 fn ops_table_bg(theme: &Theme) -> Color {
@@ -1968,73 +4539,102 @@ fn roster_styled_line(
     theme: &Theme,
 ) -> Line<'static> {
     let table_bg = ops_table_bg(theme);
+    let offsets = roster_header_offsets(state);
     if line_idx == 0 {
         return Line::from(Span::styled(
             line.to_string(),
             Style::default().fg(theme.title),
         ));
     }
-    if line_idx == 1 {
-        let active = state.agents.agents.iter().any(|agent| agent.is_codex());
-        let available = state.agents.codex_cli_available || active;
-        return roster_backend_styled_line(
-            "Codex",
-            if available { "available" } else { "not found" },
-            if active { "active" } else { "idle" },
-            if active {
-                theme.hl.operator
-            } else {
-                theme.title
-            },
-            available,
-            active,
-            theme,
-        );
+
+    if line_idx >= 1 && line_idx < offsets.blank_after_backends {
+        let rows = roster_backend_inventory_rows(state);
+        let Some(row) = rows.get(line_idx.saturating_sub(1)) else {
+            return Line::from(Span::styled(
+                line.to_string(),
+                Style::default().fg(theme.foreground),
+            ));
+        };
+
+        match row.backend {
+            BackendInventoryBackend::Codex => {
+                return roster_backend_styled_line(
+                    "Codex",
+                    if row.available {
+                        "available"
+                    } else {
+                        "not found"
+                    },
+                    if row.active { "active" } else { "idle" },
+                    if row.active {
+                        theme.title_focused
+                    } else {
+                        theme.title
+                    },
+                    row.available,
+                    row.active,
+                    theme,
+                );
+            }
+            BackendInventoryBackend::Claude => {
+                return roster_backend_styled_line(
+                    "Claude",
+                    if row.available {
+                        "available"
+                    } else {
+                        "not found"
+                    },
+                    if row.active { "active" } else { "idle" },
+                    if row.active {
+                        theme.border_focused
+                    } else {
+                        theme.title
+                    },
+                    row.available,
+                    row.active,
+                    theme,
+                );
+            }
+            BackendInventoryBackend::Gemini => {
+                return roster_backend_styled_line(
+                    "Gemini",
+                    if row.available {
+                        "available"
+                    } else {
+                        "not found"
+                    },
+                    if row.active { "active" } else { "idle" },
+                    if row.active {
+                        theme.success
+                    } else {
+                        theme.title
+                    },
+                    row.available,
+                    row.active,
+                    theme,
+                );
+            }
+            BackendInventoryBackend::Local => {
+                return roster_backend_styled_line(
+                    "Local",
+                    "built-in",
+                    if row.active { "active" } else { "idle" },
+                    theme.seed.accent_2,
+                    true,
+                    row.active,
+                    theme,
+                );
+            }
+        }
     }
-    if line_idx == 2 {
-        let active = state
-            .agents
-            .agents
-            .iter()
-            .any(|agent| matches!(agent.kind, AgentLaneKind::Claude));
-        let available = state.agents.claude_cli_available || active;
-        return roster_backend_styled_line(
-            "Claude",
-            if available { "available" } else { "not found" },
-            if active { "active" } else { "idle" },
-            if active {
-                theme.border_focused
-            } else {
-                theme.title
-            },
-            available,
-            active,
-            theme,
-        );
-    }
-    if line_idx == 3 {
-        let active = state
-            .agents
-            .agents
-            .iter()
-            .any(|agent| matches!(agent.kind, AgentLaneKind::Mock));
-        return roster_backend_styled_line(
-            "Local",
-            "built-in",
-            if active { "active" } else { "idle" },
-            theme.seed.accent_2,
-            true,
-            active,
-            theme,
-        );
-    }
-    if line_idx == 4 {
+
+    if line_idx == offsets.blank_after_backends {
         return Line::from(Span::styled(
             line.to_string(),
             Style::default().fg(theme.foreground),
         ));
     }
-    if line_idx == 5 {
+    if line_idx == offsets.template_line {
         let label_style = Style::default()
             .fg(theme.border)
             .add_modifier(Modifier::DIM);
@@ -2067,7 +4667,7 @@ fn roster_styled_line(
         }
         return Line::from(spans);
     }
-    if line_idx == 6 {
+    if line_idx == offsets.mission_line {
         let label_style = Style::default()
             .fg(theme.border)
             .add_modifier(Modifier::DIM);
@@ -2108,19 +4708,19 @@ fn roster_styled_line(
         }
         return Line::from(spans);
     }
-    if line_idx == 7 {
+    if line_idx == offsets.blank_after_mission {
         return Line::from(Span::styled(
             line.to_string(),
             Style::default().fg(theme.foreground),
         ));
     }
-    if line_idx == 8 {
+    if line_idx == offsets.table_header {
         return Line::from(Span::styled(
             line.to_string(),
             Style::default().fg(theme.border).bg(table_bg),
         ));
     }
-    if line_idx == 9 {
+    if line_idx == offsets.table_separator {
         return Line::from(Span::styled(
             line.to_string(),
             Style::default()
@@ -2153,12 +4753,6 @@ fn roster_styled_line(
             Style::default().fg(theme.foreground),
         ));
     };
-    let Some(agent) = state.agents.agents.get(meta.agent_idx) else {
-        return Line::from(Span::styled(
-            line.to_string(),
-            Style::default().fg(theme.foreground),
-        ));
-    };
 
     let widths = roster_column_widths(usable);
     let Some((marker, cols)) = split_marker_and_columns(line, &widths) else {
@@ -2167,9 +4761,89 @@ fn roster_styled_line(
             Style::default().fg(theme.foreground),
         ));
     };
+    let selected_row = roster_selected_row(state);
     match meta.node {
+        RosterBodyNode::Backend { backend } => {
+            let selected = selected_row == Some(RosterSelectableRow::Backend { backend });
+            let marker_style = selected_row_style(
+                if selected {
+                    Style::default().fg(theme.accent).bg(table_bg)
+                } else {
+                    Style::default()
+                        .fg(theme.border)
+                        .add_modifier(Modifier::DIM)
+                        .bg(table_bg)
+                },
+                selected,
+                theme,
+            );
+            let backend_style = selected_row_style(
+                Style::default()
+                    .fg(match backend {
+                        AgentLaneKind::Codex => theme.title_focused,
+                        AgentLaneKind::Claude => theme.border_focused,
+                        AgentLaneKind::Gemini => theme.seed.accent,
+                        AgentLaneKind::Mock => theme.seed.accent_2,
+                        AgentLaneKind::Unknown => theme.title,
+                    })
+                    .add_modifier(Modifier::BOLD)
+                    .bg(table_bg),
+                selected,
+                theme,
+            );
+            let cell_style = selected_row_style(
+                Style::default()
+                    .fg(theme.border)
+                    .add_modifier(Modifier::DIM)
+                    .bg(table_bg),
+                selected,
+                theme,
+            );
+            let space_style = selected_row_style(Style::default().bg(table_bg), selected, theme);
+
+            let mut spans = Vec::with_capacity(14);
+            spans.push(Span::styled(marker, marker_style));
+            spans.push(Span::styled(
+                cols.first().cloned().unwrap_or_default(),
+                backend_style,
+            ));
+            spans.push(Span::styled(" ", space_style));
+            spans.push(Span::styled(
+                cols.get(1).cloned().unwrap_or_default(),
+                cell_style,
+            ));
+            spans.push(Span::styled(" ", space_style));
+            spans.push(Span::styled(
+                cols.get(2).cloned().unwrap_or_default(),
+                cell_style,
+            ));
+            spans.push(Span::styled(" ", space_style));
+            spans.push(Span::styled(
+                cols.get(3).cloned().unwrap_or_default(),
+                cell_style,
+            ));
+            spans.push(Span::styled(" ", space_style));
+            spans.push(Span::styled(
+                cols.get(4).cloned().unwrap_or_default(),
+                cell_style,
+            ));
+            Line::from(spans)
+        }
         RosterBodyNode::Agent => {
-            let selected = meta.agent_idx == state.agents.roster_selected
+            let Some(agent_idx) = meta.agent_idx else {
+                return Line::from(Span::styled(
+                    line.to_string(),
+                    Style::default().fg(theme.foreground).bg(table_bg),
+                ));
+            };
+            let Some(agent) = state.agents.agents.get(agent_idx) else {
+                return Line::from(Span::styled(
+                    line.to_string(),
+                    Style::default().fg(theme.foreground).bg(table_bg),
+                ));
+            };
+
+            let selected = selected_row == Some(RosterSelectableRow::Agent { agent_idx })
                 && state.agents.roster_tree_selected.is_none();
             let is_clone = is_swarm_clone_agent_id(agent.id.as_str());
 
@@ -2223,7 +4897,9 @@ fn roster_styled_line(
             let mut spans = Vec::with_capacity(14);
             spans.push(Span::styled(marker, marker_style));
             let col0 = cols.first().cloned().unwrap_or_default();
-            if agent.is_codex() && (col0.starts_with("[x] ") || col0.starts_with("[ ] ")) {
+            if agent.supports_swarm_priority()
+                && (col0.starts_with("[x] ") || col0.starts_with("[ ] "))
+            {
                 let checked = state.agents.swarm_priority_agent_ids.contains(&agent.id);
                 let prefix = take_chars(&col0, 0, 4);
                 let rest = take_chars(&col0, 4, col0.chars().count().saturating_sub(4));
@@ -2264,7 +4940,13 @@ fn roster_styled_line(
             Line::from(spans)
         }
         RosterBodyNode::Branch { branch } => {
-            let active = meta.agent_idx == state.agents.roster_selected
+            let Some(agent_idx) = meta.agent_idx else {
+                return Line::from(Span::styled(
+                    line.to_string(),
+                    Style::default().fg(theme.foreground).bg(table_bg),
+                ));
+            };
+            let active = agent_idx == state.agents.roster_selected
                 && state
                     .agents
                     .roster_tree_selected
@@ -2321,7 +5003,20 @@ fn roster_styled_line(
             Line::from(spans)
         }
         RosterBodyNode::Leaf { branch, leaf_idx } => {
-            let selected = meta.agent_idx == state.agents.roster_selected
+            let Some(agent_idx) = meta.agent_idx else {
+                return Line::from(Span::styled(
+                    line.to_string(),
+                    Style::default().fg(theme.foreground).bg(table_bg),
+                ));
+            };
+            let Some(agent) = state.agents.agents.get(agent_idx) else {
+                return Line::from(Span::styled(
+                    line.to_string(),
+                    Style::default().fg(theme.foreground).bg(table_bg),
+                ));
+            };
+
+            let selected = agent_idx == state.agents.roster_selected
                 && state.agents.roster_tree_selected
                     == Some(RosterTreeSelection { branch, leaf_idx });
 
@@ -2782,6 +5477,11 @@ fn ops_line_style(line_idx: usize, line: &str, theme: &Theme) -> Style {
             .fg(theme.border)
             .add_modifier(Modifier::DIM);
     }
+    if line.chars().all(|ch| ch == '─') {
+        return Style::default()
+            .fg(theme.border)
+            .add_modifier(Modifier::DIM);
+    }
     let selected = line.starts_with('>');
     let mut style = Style::default().fg(theme.foreground);
     if line.contains("ERROR") || line.contains("REJECTED") {
@@ -2969,12 +5669,40 @@ fn split_at_chars(text: &str, count: usize) -> (&str, &str) {
 #[cfg(test)]
 mod tests {
     use super::{
-        current_lines_for_width, dag_lines_for_dashboard, roster_column_widths,
-        roster_swarm_mission_hit, roster_swarm_template_hit, swarm_clone_display_label,
-        table_role_label,
+        append_swarm_artifact_lines, arrow_glyph, current_lines_for_width, cursor_glyph,
+        dag_lines_for_dashboard, diagnostics_lines, roster_column_widths, roster_styled_line,
+        roster_swarm_mission_hit, roster_swarm_mission_line_idx, roster_swarm_template_hit,
+        roster_swarm_template_line_idx, swarm_clone_display_label, table_role_label,
+        tree_closed_glyph, tree_open_glyph,
     };
-    use crate::swarm::{SwarmDashboardView, SwarmGateDashboardRow, SwarmTaskDashboardRow};
-    use nit_core::{AgentOpsTab, AppState, Buffer};
+    use crate::swarm::{
+        GateReport, GateReportGate, SwarmDashboardView, SwarmGateDashboardRow,
+        SwarmPersistenceView, SwarmTaskDashboardRow, SwarmTaskPersistenceView,
+    };
+    use crate::theme::Theme;
+    use nit_core::{
+        AgentAlertSeverity, AgentChannel, AgentMessage, AgentOpsTab, AgentStatus, AppKind,
+        AppState, Buffer, MissionPhase, MissionRecord, PatchProposal, PatchStatus,
+    };
+    use ratatui::style::Modifier;
+    use std::{
+        fs,
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
+    fn unique_test_workspace(label: &str) -> std::path::PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "nit-artifacts-{label}-{}-{nanos}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&path);
+        fs::create_dir_all(&path).expect("create workspace");
+        path
+    }
 
     #[test]
     fn dag_lines_include_tasks_and_gates() {
@@ -3065,6 +5793,330 @@ mod tests {
     }
 
     #[test]
+    fn artifact_lines_include_task_and_verify_paths() {
+        let view = SwarmPersistenceView {
+            mission_id: "mis-011".into(),
+            template: "bulk".into(),
+            phase: "REPORT".into(),
+            gate_bundle: Some("rust-ci".into()),
+            gate_selection: "auto".into(),
+            gate_report: Some(GateReport {
+                overall_ok: false,
+                gates: vec![GateReportGate {
+                    name: "fmt".into(),
+                    command: "cargo fmt --all -- --check".into(),
+                    ok: false,
+                    status: Some("fail".into()),
+                    notes: Some("formatting drift".into()),
+                }],
+            }),
+            gate_output: Some("fmt failed".into()),
+            tasks: vec![
+                SwarmTaskPersistenceView {
+                    id: "integrate".into(),
+                    title: "Integrate artifacts tab".into(),
+                    role: Some("integrate".into()),
+                    agent_id: "agent-1".into(),
+                    state: "DONE".into(),
+                    deps: vec!["judge".into()],
+                    blocked_on: Vec::new(),
+                    writes: true,
+                    done_when: Some("Artifacts visible in Agent Ops".into()),
+                    expected_artifacts: vec!["files".into(), "commands".into()],
+                    expected_artifacts_missing: false,
+                    output_present: true,
+                    output: Some("done".into()),
+                    artifacts: Some(crate::swarm::SwarmTaskArtifacts {
+                        summary: Some("Surfaced mission artifacts in the TUI".into()),
+                        files: vec![crate::swarm::SwarmArtifactFile {
+                            path: "crates/nit-tui/src/widgets/agent_ops_view.rs".into(),
+                            notes: Some("new Artifacts tab".into()),
+                        }],
+                        diffs: Vec::new(),
+                        commands: vec![crate::swarm::SwarmArtifactCommand {
+                            cmd: "cargo test -p nit-tui agent_ops_view::tests".into(),
+                            purpose: Some("validate rendering".into()),
+                        }],
+                        risks: Vec::new(),
+                        notes: vec!["needs follow-up for artifact comments".into()],
+                    }),
+                },
+                SwarmTaskPersistenceView {
+                    id: "review".into(),
+                    title: "Review artifacts output".into(),
+                    role: Some("review".into()),
+                    agent_id: "agent-2".into(),
+                    state: "DONE".into(),
+                    deps: vec!["integrate".into()],
+                    blocked_on: Vec::new(),
+                    writes: false,
+                    done_when: None,
+                    expected_artifacts: vec!["risks".into()],
+                    expected_artifacts_missing: true,
+                    output_present: false,
+                    output: None,
+                    artifacts: None,
+                },
+            ],
+        };
+
+        let mut lines = vec![" ARTIFACTS".into(), "─".repeat(80)];
+        append_swarm_artifact_lines(&mut lines, &view, 80);
+
+        assert!(lines
+            .iter()
+            .any(|line| line.contains(".nit/swarm/mis-011/tasks/integrate/artifacts.json")));
+        assert!(lines
+            .iter()
+            .any(|line| line.contains(".nit/swarm/mis-011/gates/verify.md")));
+        assert!(lines
+            .iter()
+            .any(|line| line.contains("no parseable swarm_artifacts JSON block")));
+        assert!(lines.iter().any(|line| line.contains("fmt [FAIL]")));
+    }
+
+    #[test]
+    fn artifacts_tab_shows_non_swarm_mission_provenance() {
+        let mut state = AppState::new(
+            std::env::temp_dir(),
+            Buffer::empty("x", None),
+            Buffer::empty("n", None),
+        );
+        state.agents.dock_tab = AgentOpsTab::Evidence;
+        state.agents.missions = vec![MissionRecord {
+            id: "mis-201".into(),
+            title: "Repo review".into(),
+            phase: MissionPhase::Report,
+            swarm: false,
+            assigned_agents: vec!["gpt-5.4".into()],
+            status: "DONE".into(),
+            updated_at: "now".into(),
+        }];
+        state.agents.mission_selected = 0;
+        state.agents.selected_mission = Some("mis-201".into());
+        state.agents.messages = vec![
+            AgentMessage {
+                at: "10:00".into(),
+                channel: AgentChannel::Agent,
+                agent_id: None,
+                mission_id: Some("mis-201".into()),
+                text: "Review the repo carefully.".into(),
+            },
+            AgentMessage {
+                at: "10:01".into(),
+                channel: AgentChannel::Agent,
+                agent_id: Some("gpt-5.4".into()),
+                mission_id: Some("mis-201".into()),
+                text: "Bulk orchestration looks mostly correct; docs need follow-up.".into(),
+            },
+        ];
+        state.agents.patches = vec![PatchProposal {
+            id: "patch-201".into(),
+            mission_id: Some("mis-201".into()),
+            agent_id: "gpt-5.4".into(),
+            title: "Review notes".into(),
+            summary: "No code changes; notes only.".into(),
+            diff: "diff --git a/docs/SWARM.md b/docs/SWARM.md".into(),
+            status: PatchStatus::Reviewed,
+        }];
+
+        let lines = current_lines_for_width(&state, 96);
+        assert!(lines
+            .iter()
+            .any(|line| line.contains(".nit/agents/runs/mis-201/thread.md")));
+        assert!(lines
+            .iter()
+            .any(|line| line.contains(".nit/agents/runs/mis-201/run.json")));
+        assert!(lines.iter().any(|line| line.contains("single-agent")));
+        assert!(lines
+            .iter()
+            .any(|line| line.contains("Bulk orchestration looks mostly correct")));
+        assert!(lines
+            .iter()
+            .any(|line| line.contains("PATCH") && line.contains("Review notes")));
+    }
+
+    #[test]
+    fn artifacts_tab_shows_ad_hoc_selected_agent_output_without_mission() {
+        let mut state = AppState::new(
+            std::env::temp_dir(),
+            Buffer::empty("x", None),
+            Buffer::empty("n", None),
+        );
+        state.agents.dock_tab = AgentOpsTab::Evidence;
+        state.agents.missions.clear();
+        state.agents.selected_mission = None;
+        state.agents.selected_agent = Some("gpt-5.4".into());
+        state.agents.messages = vec![
+            AgentMessage {
+                at: "11:00".into(),
+                channel: AgentChannel::Agent,
+                agent_id: None,
+                mission_id: None,
+                text: "Review the repo and report only.".into(),
+            },
+            AgentMessage {
+                at: "11:01".into(),
+                channel: AgentChannel::Agent,
+                agent_id: Some("gpt-5.4".into()),
+                mission_id: None,
+                text: "I checked the repo health; no flickering issue was reproduced.".into(),
+            },
+        ];
+        state
+            .agents
+            .codex_thread_ids
+            .insert("gpt-5.4".into(), "thread-123".into());
+
+        let lines = current_lines_for_width(&state, 96);
+        assert!(lines.iter().any(|line| line.contains("Context: ad-hoc")));
+        assert!(lines.iter().any(|line| line.contains("thread-123")));
+        assert!(lines
+            .iter()
+            .any(|line| line.contains("no flickering issue was reproduced")));
+    }
+
+    #[test]
+    fn artifacts_tab_falls_back_to_saved_mission_run_when_live_context_is_empty() {
+        let workspace = unique_test_workspace("mission");
+        let run_dir = workspace.join(".nit/agents/runs/mis-301");
+        fs::create_dir_all(&run_dir).expect("create run dir");
+        fs::write(
+            run_dir.join("run.json"),
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "messages": [
+                    {
+                        "at": "12:00",
+                        "channel": "Agent",
+                        "agent_id": null,
+                        "mission_id": "mis-301",
+                        "text": "Review this subsystem."
+                    },
+                    {
+                        "at": "12:01",
+                        "channel": "Agent",
+                        "agent_id": "gpt-5.4",
+                        "mission_id": "mis-301",
+                        "text": "Saved mission reply from disk."
+                    }
+                ],
+                "patches": [
+                    {
+                        "id": "patch-301",
+                        "mission_id": "mis-301",
+                        "agent_id": "gpt-5.4",
+                        "title": "Persisted patch",
+                        "summary": "loaded from disk",
+                        "diff": "diff --git a/a b/a",
+                        "status": "Reviewed"
+                    }
+                ],
+                "evidence": [
+                    {
+                        "id": "evidence-301",
+                        "mission_id": "mis-301",
+                        "agent_id": "gpt-5.4",
+                        "title": "Persisted evidence",
+                        "detail": "saved detail",
+                        "link": null
+                    }
+                ],
+                "codex_thread_ids": {
+                    "gpt-5.4": "thread-301"
+                }
+            }))
+            .expect("serialize run"),
+        )
+        .expect("write run");
+
+        let mut state = AppState::new(
+            workspace,
+            Buffer::empty("x", None),
+            Buffer::empty("n", None),
+        );
+        state.agents.dock_tab = AgentOpsTab::Evidence;
+        state.agents.missions = vec![MissionRecord {
+            id: "mis-301".into(),
+            title: "Saved mission".into(),
+            phase: MissionPhase::Report,
+            swarm: false,
+            assigned_agents: vec!["gpt-5.4".into()],
+            status: "DONE".into(),
+            updated_at: "now".into(),
+        }];
+        state.agents.mission_selected = 0;
+        state.agents.selected_mission = Some("mis-301".into());
+        state.agents.selected_agent = Some("gpt-5.4".into());
+        state.agents.messages.clear();
+        state.agents.patches.clear();
+        state.agents.evidence.clear();
+
+        let lines = current_lines_for_width(&state, 96);
+        assert!(lines.iter().any(|line| line.contains("thread-301")));
+        assert!(lines
+            .iter()
+            .any(|line| line.contains("Saved mission reply from disk")));
+        assert!(lines
+            .iter()
+            .any(|line| line.contains("PATCH") && line.contains("Persisted patch")));
+    }
+
+    #[test]
+    fn artifacts_tab_falls_back_to_saved_ad_hoc_run_when_live_context_is_empty() {
+        let workspace = unique_test_workspace("adhoc");
+        let run_dir = workspace.join(".nit/agents/ad-hoc/gpt-5_4");
+        fs::create_dir_all(&run_dir).expect("create ad-hoc dir");
+        fs::write(
+            run_dir.join("run.json"),
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "agent_id": "gpt-5.4",
+                "codex_thread_id": "thread-adhoc",
+                "messages": [
+                    {
+                        "at": "13:00",
+                        "channel": "Agent",
+                        "agent_id": null,
+                        "mission_id": null,
+                        "text": "Explain the failure."
+                    },
+                    {
+                        "at": "13:01",
+                        "channel": "Agent",
+                        "agent_id": "gpt-5.4",
+                        "mission_id": null,
+                        "text": "Saved ad-hoc reply from disk."
+                    }
+                ],
+                "patches": [],
+                "evidence": []
+            }))
+            .expect("serialize ad-hoc run"),
+        )
+        .expect("write ad-hoc run");
+
+        let mut state = AppState::new(
+            workspace,
+            Buffer::empty("x", None),
+            Buffer::empty("n", None),
+        );
+        state.agents.dock_tab = AgentOpsTab::Evidence;
+        state.agents.selected_mission = None;
+        state.agents.selected_agent = Some("gpt-5.4".into());
+        state.agents.messages.clear();
+        state.agents.patches.clear();
+        state.agents.evidence.clear();
+
+        let lines = current_lines_for_width(&state, 96);
+        assert!(lines.iter().any(|line| line.contains("thread-adhoc")));
+        assert!(lines
+            .iter()
+            .any(|line| line.contains("Saved ad-hoc reply from disk")));
+        assert!(lines
+            .iter()
+            .any(|line| line.contains(".nit/agents/ad-hoc/gpt-5_4/run.json")));
+    }
+
+    #[test]
     fn role_label_canonicalizes_computational_research_display_only() {
         assert_eq!(
             table_role_label("computational research"),
@@ -3101,9 +6153,317 @@ mod tests {
         let lines = current_lines_for_width(&state, 72);
         assert_eq!(lines[1], "  Codex    not found  idle");
         assert_eq!(lines[2], "  Claude   not found  idle");
-        assert_eq!(lines[3], "  Local    built-in  idle");
-        assert!(lines[5].starts_with(" Template:"));
-        assert!(lines[6].starts_with(" Mission:"));
+        assert_eq!(lines[3], "  Gemini   not found  idle");
+        assert_eq!(lines[4], "  Local    built-in  idle");
+        assert!(lines[roster_swarm_template_line_idx(&state)].starts_with(" Template:"));
+        assert!(lines[roster_swarm_mission_line_idx(&state)].starts_with(" Mission:"));
+    }
+
+    #[test]
+    fn roster_header_marks_detected_backends_active() {
+        let mut state = AppState::new(
+            std::env::temp_dir(),
+            Buffer::empty("x", None),
+            Buffer::empty("n", None),
+        );
+        state.agents.dock_tab = AgentOpsTab::Roster;
+        state.agents.claude_cli_available = true;
+        state.agents.gemini_cli_available = true;
+
+        let lines = current_lines_for_width(&state, 72);
+        assert_eq!(lines[2], "  Claude   available  active");
+        assert_eq!(lines[3], "  Gemini   available  active");
+    }
+
+    #[test]
+    fn roster_backend_group_rows_render_plain_backend_labels() {
+        let mut state = AppState::new(
+            std::env::temp_dir(),
+            Buffer::empty("x", None),
+            Buffer::empty("n", None),
+        );
+        state.agents.dock_tab = AgentOpsTab::Roster;
+        state.agents.codex_cli_available = true;
+        state.agents.agents.push(nit_core::AgentLane {
+            id: "gpt-5.4".into(),
+            role: "gpt-5.4".into(),
+            lane: "Codex".into(),
+            kind: nit_core::AgentLaneKind::Codex,
+            status: AgentStatus::Idle,
+            heartbeat_age_secs: 0,
+            queue_len: 0,
+            current_mission: None,
+            last_message: String::new(),
+        });
+
+        let lines = current_lines_for_width(&state, 96);
+
+        assert!(lines
+            .iter()
+            .any(|line| line.contains(&format!("{} Codex", tree_closed_glyph()))));
+        assert!(!lines
+            .iter()
+            .any(|line| line.contains(&format!("{} Codex", arrow_glyph()))));
+        assert!(!lines.iter().any(|line| line.contains("gpt-5.4")));
+    }
+
+    #[test]
+    fn roster_backend_rows_expand_and_collapse_model_lists() {
+        let mut state = AppState::new(
+            std::env::temp_dir(),
+            Buffer::empty("x", None),
+            Buffer::empty("n", None),
+        );
+        state.agents.dock_tab = AgentOpsTab::Roster;
+        state.agents.agents.push(nit_core::AgentLane {
+            id: "gpt-5.4".into(),
+            role: "gpt-5.4".into(),
+            lane: "Codex".into(),
+            kind: nit_core::AgentLaneKind::Codex,
+            status: AgentStatus::Idle,
+            heartbeat_age_secs: 0,
+            queue_len: 0,
+            current_mission: None,
+            last_message: String::new(),
+        });
+
+        let collapsed = current_lines_for_width(&state, 96);
+        assert!(collapsed
+            .iter()
+            .any(|line| line.contains(&format!("{} Codex", tree_closed_glyph()))));
+        assert!(!collapsed.iter().any(|line| line.contains("gpt-5.4")));
+
+        state
+            .agents
+            .roster_expanded_backend_kinds
+            .insert(nit_core::AgentLaneKind::Codex);
+
+        let expanded = current_lines_for_width(&state, 96);
+        assert!(expanded
+            .iter()
+            .any(|line| line.contains(&format!("{} Codex", tree_open_glyph()))));
+        assert!(expanded.iter().any(|line| line.contains("gpt-5.4")));
+    }
+
+    #[test]
+    fn roster_selected_backend_row_shows_cursor_marker() {
+        let mut state = AppState::new(
+            std::env::temp_dir(),
+            Buffer::empty("x", None),
+            Buffer::empty("n", None),
+        );
+        state.agents.dock_tab = AgentOpsTab::Roster;
+        state.agents.agents.push(nit_core::AgentLane {
+            id: "gpt-5.4".into(),
+            role: "gpt-5.4".into(),
+            lane: "Codex".into(),
+            kind: nit_core::AgentLaneKind::Codex,
+            status: AgentStatus::Idle,
+            heartbeat_age_secs: 0,
+            queue_len: 0,
+            current_mission: None,
+            last_message: String::new(),
+        });
+
+        let lines = current_lines_for_width(&state, 96);
+
+        assert!(lines.iter().any(|line| line.contains(&format!(
+            "{}{} Codex",
+            cursor_glyph(),
+            tree_closed_glyph()
+        ))));
+    }
+
+    #[test]
+    fn roster_lists_discovered_claude_and_gemini_models_as_rows() {
+        let mut state = AppState::new(
+            std::env::temp_dir(),
+            Buffer::empty("x", None),
+            Buffer::empty("n", None),
+        );
+        state.agents.dock_tab = AgentOpsTab::Roster;
+        state.agents.claude_cli_available = true;
+        state.agents.gemini_cli_available = true;
+        state
+            .agents
+            .roster_expanded_backend_kinds
+            .insert(nit_core::AgentLaneKind::Claude);
+        state
+            .agents
+            .roster_expanded_backend_kinds
+            .insert(nit_core::AgentLaneKind::Gemini);
+        state.agents.agents.push(nit_core::AgentLane {
+            id: "claude-sonnet-4".into(),
+            role: "claude-sonnet-4".into(),
+            lane: "Claude".into(),
+            kind: nit_core::AgentLaneKind::Claude,
+            status: nit_core::AgentStatus::Idle,
+            heartbeat_age_secs: 0,
+            queue_len: 0,
+            current_mission: None,
+            last_message: String::new(),
+        });
+        state.agents.agents.push(nit_core::AgentLane {
+            id: "gemini-2.5-pro".into(),
+            role: "gemini-2.5-pro".into(),
+            lane: "Gemini".into(),
+            kind: nit_core::AgentLaneKind::Gemini,
+            status: nit_core::AgentStatus::Idle,
+            heartbeat_age_secs: 0,
+            queue_len: 0,
+            current_mission: None,
+            last_message: String::new(),
+        });
+
+        let lines = current_lines_for_width(&state, 96);
+
+        assert!(lines
+            .iter()
+            .any(|line| line.contains("  Claude   available  active")));
+        assert!(lines
+            .iter()
+            .any(|line| line.contains("  Gemini   available  active")));
+        assert!(lines.iter().any(|line| line.contains("claude-sonnet-4")));
+        assert!(lines.iter().any(|line| line.contains("gemini-2.5-pro")));
+    }
+
+    #[test]
+    fn roster_shows_priority_checkbox_for_supported_backend_models() {
+        let mut state = AppState::new(
+            std::env::temp_dir(),
+            Buffer::empty("x", None),
+            Buffer::empty("n", None),
+        );
+        state.agents.dock_tab = AgentOpsTab::Roster;
+        state.agents.codex_cli_available = true;
+        state.agents.claude_cli_available = true;
+        state.agents.gemini_cli_available = true;
+        state
+            .agents
+            .roster_expanded_backend_kinds
+            .insert(nit_core::AgentLaneKind::Codex);
+        state
+            .agents
+            .roster_expanded_backend_kinds
+            .insert(nit_core::AgentLaneKind::Claude);
+        state
+            .agents
+            .roster_expanded_backend_kinds
+            .insert(nit_core::AgentLaneKind::Gemini);
+        state.agents.agents.push(nit_core::AgentLane {
+            id: "gpt-5.4".into(),
+            role: "gpt-5.4".into(),
+            lane: "Codex".into(),
+            kind: nit_core::AgentLaneKind::Codex,
+            status: nit_core::AgentStatus::Idle,
+            heartbeat_age_secs: 0,
+            queue_len: 0,
+            current_mission: None,
+            last_message: String::new(),
+        });
+        state.agents.agents.push(nit_core::AgentLane {
+            id: "claude-sonnet-4".into(),
+            role: "claude-sonnet-4".into(),
+            lane: "Claude".into(),
+            kind: nit_core::AgentLaneKind::Claude,
+            status: nit_core::AgentStatus::Idle,
+            heartbeat_age_secs: 0,
+            queue_len: 0,
+            current_mission: None,
+            last_message: String::new(),
+        });
+        state.agents.agents.push(nit_core::AgentLane {
+            id: "gemini-2.5-pro".into(),
+            role: "gemini-2.5-pro".into(),
+            lane: "Gemini".into(),
+            kind: nit_core::AgentLaneKind::Gemini,
+            status: nit_core::AgentStatus::Idle,
+            heartbeat_age_secs: 0,
+            queue_len: 0,
+            current_mission: None,
+            last_message: String::new(),
+        });
+
+        let lines = current_lines_for_width(&state, 120);
+
+        assert!(lines.iter().any(|line| line.contains("[ ] gpt-5.4")));
+        assert!(lines
+            .iter()
+            .any(|line| line.contains("[ ] claude-sonnet-4")));
+        assert!(lines.iter().any(|line| line.contains("[ ] gemini-2.5-pro")));
+    }
+
+    #[test]
+    fn roster_header_uses_bold_accent_for_active_codex_backend() {
+        let mut state = AppState::new(
+            std::env::temp_dir(),
+            Buffer::empty("x", None),
+            Buffer::empty("n", None),
+        );
+        state.agents.dock_tab = AgentOpsTab::Roster;
+        state.agents.codex_cli_available = true;
+
+        let theme = Theme::default();
+        let lines = current_lines_for_width(&state, 72);
+        let styled = roster_styled_line(&state, 1, &lines[1], 72, &theme);
+
+        assert_eq!(styled.spans[1].style.fg, Some(theme.title_focused));
+        assert!(styled.spans[1].style.add_modifier.contains(Modifier::BOLD));
+        assert_eq!(styled.spans[5].style.fg, Some(theme.title_focused));
+        assert!(styled.spans[5].style.add_modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn diagnostics_view_summarizes_state_and_dedupes_runtime_info_noise() {
+        let mut state = AppState::new(
+            std::env::temp_dir(),
+            Buffer::empty("x", None),
+            Buffer::empty("n", None),
+        );
+        state.app_kind = AppKind::Games;
+        state.games.status = nit_core::GamesStatus::Running;
+        state.games.runtime.backend = nit_games::RuntimeAcceleratorBackend::Metal;
+        state.games.runtime.metal_matches = 8192;
+        state.games.runtime.cpu_matches = 7;
+        state
+            .agents
+            .diag_events
+            .push(nit_core::AgentDiagnosticEvent {
+                severity: AgentAlertSeverity::Info,
+                source: "runtime".into(),
+                message: "nit: Log file: /tmp/nit.log".into(),
+                at: "t+0".into(),
+            });
+        state
+            .agents
+            .diag_events
+            .push(nit_core::AgentDiagnosticEvent {
+                severity: AgentAlertSeverity::Warn,
+                source: "codex".into(),
+                message: "[planner] cleared invalid thread context".into(),
+                at: "t+1".into(),
+            });
+        state
+            .logs
+            .push("2026-03-09T18:26:35.337654Z INFO nit: Log file: /tmp/nit.log");
+
+        let lines = diagnostics_lines(&state, 96);
+
+        assert!(lines.iter().any(|line| line.contains(" Summary")));
+        assert!(lines.iter().any(|line| line.contains("games/running")));
+        assert!(lines
+            .iter()
+            .any(|line| line.contains("metal active (gpu 8192 / cpu 7)")));
+        assert!(lines.iter().any(|line| line.contains(" Recent issues")));
+        assert!(lines
+            .iter()
+            .any(|line| line.contains("WARN  t+1") && line.contains("codex")));
+        assert!(!lines
+            .iter()
+            .any(|line| line.contains("t+0") && line.contains("runtime")));
+        assert!(lines
+            .iter()
+            .any(|line| line.contains("18:26:35 INFO nit Log file: /tmp/nit.log")));
     }
 
     #[test]

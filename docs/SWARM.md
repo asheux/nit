@@ -362,8 +362,16 @@ Supported shape (recommended):
 Persistence:
 
 - Swarm data is persisted under `.nit/swarm/<mission-id>/…`
+- `Agent Ops → Artifacts` surfaces the parsed task artifacts and verification summary for the
+  selected mission
 - Each task’s parsed artifacts are written under:
   - `.nit/swarm/<mission-id>/tasks/<task-id>/artifacts.json`
+- Task outputs are written under:
+  - `.nit/swarm/<mission-id>/tasks/<task-id>/output.md`
+- Gate verification is written under:
+  - `.nit/swarm/<mission-id>/gates/report.json`
+  - `.nit/swarm/<mission-id>/gates/output.txt`
+  - `.nit/swarm/<mission-id>/gates/verify.md`
 
 If a task declares artifacts but no parseable JSON block is found, nit emits a mission message like:
 

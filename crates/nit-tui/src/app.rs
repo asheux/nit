@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 use crate::swarm::{
     detect_swarm_mission_kind_from_prompt, explicit_swarm_mission_kind_from_prompt, is_agent_busy,
     normalize_role_label, parse_swarm_command, parse_swarm_mission_kind, select_swarm_agents,
-    SwarmCommand, SwarmMissionKind, SwarmRuntime, SwarmSize,
+    GateReport, GateReportGate, SwarmCommand, SwarmMissionKind, SwarmRuntime, SwarmSize,
 };
 use crate::{
     codex_runner::{CodexCommand, CodexRunner, CodexRunnerConfig, CodexRuntimeMode},
@@ -32,11 +32,11 @@ use crate::{
     theme::Theme,
     vitals::{AgentVitalsState, DiagSeverity, LabVitalsSnapshot, VitalsState},
     widgets::{
-        agent_console_view, agent_ops_view, bottom_bar, editor_view, file_tree_view,
-        fuzzy_search_popup, games_analysis_popup, games_ca_sim_popup, games_match_history_popup,
-        games_replay_popup, games_run_browser_popup, games_strategy_popup, games_tm_sim_popup,
-        games_visualizer_view, gate_monitor_view, help_overlay, protocol_picker, rule_picker,
-        top_bar, visualizer_view,
+        agent_console_view, agent_ops_view, artifacts_popup, bottom_bar, editor_view,
+        file_tree_view, fuzzy_search_popup, games_analysis_popup, games_ca_sim_popup,
+        games_match_history_popup, games_replay_popup, games_run_browser_popup,
+        games_strategy_popup, games_tm_sim_popup, games_visualizer_view, gate_monitor_view,
+        help_overlay, protocol_picker, rule_picker, top_bar, visualizer_view,
     },
 };
 use arboard::Clipboard;
@@ -73,6 +73,7 @@ const CHORD_TIMEOUT: Duration = Duration::from_millis(300);
 const INSPECTOR_JUMP_TIMEOUT: Duration = Duration::from_millis(1500);
 const CHAT_PROMPT_HISTORY_MAX: usize = 200;
 const INITIAL_SIZE_SETTLE: Duration = Duration::from_millis(80);
+const VERIFY_OUTPUT_MD_MAX_CHARS: usize = 4_000;
 
 struct FuzzySearchRuntime {
     indexer: FileIndexRunner,
@@ -675,13 +676,27 @@ fn run_loop(
                         needs_redraw = true;
                         continue;
                     }
-                    if state.show_help && handle_help_popup_key(&key, state) {
-                        needs_redraw = true;
-                        continue;
+                    if state.agents.artifacts_popup_open {
+                        let screen = terminal.size().unwrap_or_default();
+                        if handle_artifacts_popup_key(&key, state, &swarm, screen, theme) {
+                            needs_redraw = true;
+                            continue;
+                        }
                     }
-                    if state.games.analysis.open && handle_analysis_popup_key(&key, state) {
-                        needs_redraw = true;
-                        continue;
+                    if state.show_help {
+                        let screen = terminal.size().unwrap_or_default();
+                        if handle_help_popup_key(&key, state, screen, theme) {
+                            needs_redraw = true;
+                            continue;
+                        }
+                    }
+                    if state.games.analysis.open {
+                        let screen = terminal.size().unwrap_or_default();
+                        if handle_analysis_popup_key(&key, state, screen, theme) {
+                            clamp_modal_scroll_offsets(state, screen, theme);
+                            needs_redraw = true;
+                            continue;
+                        }
                     }
                     if state.app_kind == AppKind::Games && state.games.run_browser.open {
                         let screen = terminal.size().unwrap_or_default();
@@ -1391,6 +1406,11 @@ fn draw(
             )
         };
         let notes_cursor = agent_console_view::render(f, layout.notes, state, swarm, theme);
+        {
+            let text_area = job_output_text_area(layout.job);
+            state.agents.ops_viewport_width = text_area.width.max(1) as usize;
+            state.agents.ops_viewport_height = text_area.height.max(1) as usize;
+        }
         let job_cursor = if state.agents.dock_tab == AgentOpsTab::Scratchpad {
             let focused = state.focus == PaneId::JobOutput;
             let border_style = if focused {
@@ -1550,6 +1570,10 @@ fn draw(
         }
         if state.rule_picker.open {
             rule_picker::render(f, screen, state, theme);
+        }
+        if state.agents.artifacts_popup_open {
+            let area = dynamic_popup_rect(screen, artifacts_popup::preferred_size(screen));
+            artifacts_popup::render(f, area, state, swarm, theme);
         }
         if state.show_help {
             let area = dynamic_popup_rect(screen, help_overlay::preferred_size(screen));
@@ -2050,7 +2074,7 @@ fn handle_agent_station_key_with_clipboard(
     }
 
     match state.focus {
-        PaneId::JobOutput => handle_agent_ops_key(key, state, vitals, codex),
+        PaneId::JobOutput => handle_agent_ops_key(key, state, vitals, codex, swarm),
         PaneId::Notes => handle_agent_console_key(key, state, vitals, codex, swarm, clipboard),
         _ => false,
     }
@@ -2082,6 +2106,7 @@ fn handle_agent_ops_key(
     state: &mut AppState,
     vitals: &mut VitalsState,
     codex: Option<&CodexRunner>,
+    swarm: &SwarmRuntime,
 ) -> bool {
     if state.agents.dock_tab == AgentOpsTab::Scratchpad {
         match key {
@@ -2179,21 +2204,51 @@ fn handle_agent_ops_key(
             modifiers: KeyModifiers::NONE,
             ..
         } if state.agents.dock_tab == AgentOpsTab::Roster => {
-            changed = enter_roster_tree_cursor(state);
+            if let Some(agent_ops_view::RosterSelectableRow::Backend { backend }) =
+                agent_ops_view::roster_selected_row(state)
+            {
+                select_roster_backend(state, backend);
+                changed = if !state
+                    .agents
+                    .roster_expanded_backend_kinds
+                    .contains(&backend)
+                {
+                    toggle_roster_backend_expanded(state, backend)
+                } else {
+                    false
+                };
+            } else {
+                changed = enter_roster_tree_cursor(state);
+            }
         }
         KeyEvent {
             code: KeyCode::Char('h'),
             modifiers: KeyModifiers::NONE,
             ..
         } if state.agents.dock_tab == AgentOpsTab::Roster => {
-            changed = exit_roster_tree_cursor(state);
+            if let Some(agent_ops_view::RosterSelectableRow::Backend { backend }) =
+                agent_ops_view::roster_selected_row(state)
+            {
+                select_roster_backend(state, backend);
+                changed = if state
+                    .agents
+                    .roster_expanded_backend_kinds
+                    .contains(&backend)
+                {
+                    toggle_roster_backend_expanded(state, backend)
+                } else {
+                    false
+                };
+            } else {
+                changed = exit_roster_tree_cursor(state);
+            }
         }
         KeyEvent {
             code: KeyCode::Char('c'),
             modifiers: KeyModifiers::NONE,
             ..
         } if state.agents.dock_tab == AgentOpsTab::Roster => {
-            changed = reset_roster_context(state);
+            changed = reset_roster_context(state, swarm);
         }
         KeyEvent {
             code: KeyCode::Char('1'),
@@ -2356,7 +2411,7 @@ fn handle_agent_ops_key(
             modifiers: KeyModifiers::NONE,
             ..
         } => {
-            changed = move_agent_ops_selection(state, -1);
+            changed = move_agent_ops_selection(state, swarm, -1);
         }
         KeyEvent {
             code: KeyCode::Down,
@@ -2367,7 +2422,7 @@ fn handle_agent_ops_key(
             modifiers: KeyModifiers::NONE,
             ..
         } => {
-            changed = move_agent_ops_selection(state, 1);
+            changed = move_agent_ops_selection(state, swarm, 1);
         }
         KeyEvent {
             code: KeyCode::Char(' '),
@@ -2395,6 +2450,32 @@ fn handle_agent_ops_key(
             && state.agents.roster_tree_selected.is_some() =>
         {
             changed = select_roster_tree_leaf(state);
+        }
+        KeyEvent {
+            code: KeyCode::Enter,
+            modifiers: KeyModifiers::NONE,
+            ..
+        } if state.agents.dock_tab == AgentOpsTab::Roster => {
+            if let Some(agent_ops_view::RosterSelectableRow::Backend { backend }) =
+                agent_ops_view::roster_selected_row(state)
+            {
+                select_roster_backend(state, backend);
+                changed = toggle_roster_backend_expanded(state, backend);
+            } else {
+                state.focus = PaneId::Notes;
+                state.mode = Mode::Normal;
+                state.agents.console_scroll = usize::MAX;
+                changed = true;
+            }
+        }
+        KeyEvent {
+            code: KeyCode::Enter,
+            modifiers: KeyModifiers::NONE,
+            ..
+        } if state.agents.dock_tab == AgentOpsTab::Evidence => {
+            state.agents.artifacts_popup_open = true;
+            state.agents.artifacts_popup_scroll = 0;
+            changed = true;
         }
         KeyEvent {
             code: KeyCode::Enter,
@@ -2525,7 +2606,92 @@ fn clear_codex_thread_context_for_agent(
     });
 }
 
-fn move_agent_ops_selection(state: &mut AppState, delta: i32) -> bool {
+fn sync_roster_selected_agent(state: &mut AppState, agent_idx: usize) {
+    state.agents.roster_selected = agent_idx;
+    state.agents.roster_selected_backend = None;
+    state.agents.roster_tree_selected = None;
+    if let Some(agent) = state.agents.agents.get(agent_idx) {
+        state.agents.selected_agent = Some(agent.id.clone());
+        if let Some(mission_id) = agent.current_mission.as_deref() {
+            state.agents.selected_mission = Some(mission_id.to_string());
+            if let Some(idx) = state
+                .agents
+                .missions
+                .iter()
+                .position(|mission| mission.id == mission_id)
+            {
+                state.agents.mission_selected = idx;
+            }
+        }
+    }
+}
+
+fn select_roster_backend(state: &mut AppState, backend: nit_core::AgentLaneKind) {
+    state.agents.roster_selected_backend = Some(backend);
+    state.agents.roster_tree_selected = None;
+}
+
+fn toggle_roster_backend_expanded(state: &mut AppState, backend: nit_core::AgentLaneKind) -> bool {
+    let keep_backend_selected = state.agents.roster_selected_backend == Some(backend);
+    if state.agents.roster_expanded_backend_kinds.remove(&backend) {
+        if keep_backend_selected {
+            state.agents.roster_tree_selected = None;
+            return true;
+        }
+        let visible = agent_ops_view::roster_agent_display_order(state);
+        if !visible.contains(&state.agents.roster_selected) {
+            state.agents.roster_tree_selected = None;
+            if let Some(&first_visible) = visible.first() {
+                sync_roster_selected_agent(state, first_visible);
+            }
+        }
+        return true;
+    }
+
+    if !state.agents.roster_expanded_backend_kinds.insert(backend) {
+        return false;
+    }
+    if keep_backend_selected {
+        state.agents.roster_tree_selected = None;
+        return true;
+    }
+    if let Some(first_agent_idx) =
+        agent_ops_view::roster_first_agent_idx_for_backend(state, backend)
+    {
+        sync_roster_selected_agent(state, first_agent_idx);
+    }
+    true
+}
+
+fn roster_selected_agent_is_visible(state: &AppState) -> bool {
+    agent_ops_view::roster_agent_display_order(state).contains(&state.agents.roster_selected)
+}
+
+fn move_roster_primary_selection(state: &mut AppState, delta: i32) -> bool {
+    let order = agent_ops_view::roster_selection_rows(state);
+    if order.is_empty() {
+        return false;
+    }
+
+    let current = agent_ops_view::roster_selected_row(state).unwrap_or(order[0]);
+    let cur_pos = order.iter().position(|row| *row == current).unwrap_or(0);
+    let next_pos = (cur_pos as i32 + delta).clamp(0, order.len().saturating_sub(1) as i32) as usize;
+    if next_pos == cur_pos {
+        return false;
+    }
+
+    match order[next_pos] {
+        agent_ops_view::RosterSelectableRow::Backend { backend } => {
+            select_roster_backend(state, backend);
+        }
+        agent_ops_view::RosterSelectableRow::Agent { agent_idx } => {
+            sync_roster_selected_agent(state, agent_idx);
+        }
+    }
+    true
+}
+
+fn move_agent_ops_selection(state: &mut AppState, swarm: &SwarmRuntime, delta: i32) -> bool {
     match state.agents.dock_tab {
         AgentOpsTab::Roster => {
             if state.agents.agents.is_empty() {
@@ -2633,54 +2799,12 @@ fn move_agent_ops_selection(state: &mut AppState, delta: i32) -> bool {
                 // Walk out of the tree when we hit the end and press Down.
                 if delta > 0 {
                     state.agents.roster_tree_selected = None;
-                    let agent_max = state.agents.agents.len().saturating_sub(1) as i32;
-                    let next_agent =
-                        (state.agents.roster_selected as i32 + 1).clamp(0, agent_max) as usize;
-                    if next_agent == state.agents.roster_selected {
-                        return true;
-                    }
-                    state.agents.roster_selected = next_agent;
-                    if let Some(agent) = state.agents.agents.get(next_agent) {
-                        state.agents.selected_agent = Some(agent.id.clone());
-                        if let Some(mission_id) = agent.current_mission.as_deref() {
-                            state.agents.selected_mission = Some(mission_id.to_string());
-                            if let Some(idx) = state
-                                .agents
-                                .missions
-                                .iter()
-                                .position(|mission| mission.id == mission_id)
-                            {
-                                state.agents.mission_selected = idx;
-                            }
-                        }
-                    }
-                    return true;
+                    return move_roster_primary_selection(state, 1);
                 }
                 return false;
             }
 
-            let max = state.agents.agents.len().saturating_sub(1) as i32;
-            let next = (state.agents.roster_selected as i32 + delta).clamp(0, max) as usize;
-            if next == state.agents.roster_selected {
-                return false;
-            }
-            state.agents.roster_selected = next;
-            state.agents.roster_tree_selected = None;
-            if let Some(agent) = state.agents.agents.get(next) {
-                state.agents.selected_agent = Some(agent.id.clone());
-                if let Some(mission_id) = agent.current_mission.as_deref() {
-                    state.agents.selected_mission = Some(mission_id.to_string());
-                    if let Some(idx) = state
-                        .agents
-                        .missions
-                        .iter()
-                        .position(|mission| mission.id == mission_id)
-                    {
-                        state.agents.mission_selected = idx;
-                    }
-                }
-            }
-            true
+            move_roster_primary_selection(state, delta)
         }
         AgentOpsTab::Missions => {
             if state.agents.missions.is_empty() {
@@ -2697,6 +2821,31 @@ fn move_agent_ops_selection(state: &mut AppState, delta: i32) -> bool {
             }
             true
         }
+        AgentOpsTab::Evidence => {
+            let text_width = state.agents.ops_viewport_width.max(32).max(1);
+            let lines =
+                agent_ops_view::current_lines_for_width_with_swarm(state, Some(swarm), text_width);
+            let count = agent_ops_view::artifacts_card_count(&lines);
+            if count == 0 {
+                return false;
+            }
+            let max = count.saturating_sub(1) as i32;
+            let next = (state.agents.artifacts_selected as i32 + delta).clamp(0, max) as usize;
+            if next == state.agents.artifacts_selected {
+                return false;
+            }
+            state.agents.artifacts_selected = next;
+
+            if let Some(line_idx) = agent_ops_view::artifacts_card_line_for_index(&lines, next) {
+                let height = state.agents.ops_viewport_height.max(1);
+                if line_idx < state.agents.ops_scroll {
+                    state.agents.ops_scroll = line_idx;
+                } else if line_idx >= state.agents.ops_scroll.saturating_add(height) {
+                    state.agents.ops_scroll = line_idx.saturating_sub(height.saturating_sub(1));
+                }
+            }
+            true
+        }
         AgentOpsTab::Alerts => {
             if state.agents.alerts.is_empty() {
                 return false;
@@ -2710,7 +2859,6 @@ fn move_agent_ops_selection(state: &mut AppState, delta: i32) -> bool {
             true
         }
         AgentOpsTab::Patch
-        | AgentOpsTab::Evidence
         | AgentOpsTab::Diagnostics
         | AgentOpsTab::Dag
         | AgentOpsTab::Scratchpad => {
@@ -2746,6 +2894,9 @@ fn normalize_swarm_role_hint_for_roster(raw: &str) -> String {
 
 fn enter_roster_tree_cursor(state: &mut AppState) -> bool {
     if state.agents.roster_tree_selected.is_some() {
+        return false;
+    }
+    if !roster_selected_agent_is_visible(state) {
         return false;
     }
     let Some(agent) = state.agents.agents.get(state.agents.roster_selected) else {
@@ -2827,6 +2978,9 @@ fn exit_roster_tree_cursor(state: &mut AppState) -> bool {
     if state.agents.roster_tree_selected.is_some() {
         state.agents.roster_tree_selected = None;
         return true;
+    }
+    if !roster_selected_agent_is_visible(state) {
+        return false;
     }
     let Some(agent) = state.agents.agents.get(state.agents.roster_selected) else {
         return false;
@@ -2923,10 +3077,13 @@ fn select_roster_tree_leaf(state: &mut AppState) -> bool {
 }
 
 fn toggle_roster_priority(state: &mut AppState) -> bool {
+    if !roster_selected_agent_is_visible(state) {
+        return false;
+    }
     let Some(agent) = state.agents.agents.get(state.agents.roster_selected) else {
         return false;
     };
-    if !agent.is_codex() {
+    if !agent.supports_swarm_priority() {
         return false;
     }
     if agent.id.contains("#swarm-") {
@@ -2941,7 +3098,7 @@ fn toggle_roster_priority(state: &mut AppState) -> bool {
         .insert(agent.id.clone())
 }
 
-fn reset_roster_context(state: &mut AppState) -> bool {
+fn reset_roster_context(state: &mut AppState, swarm: &SwarmRuntime) -> bool {
     let Some(agent) = state.agents.agents.get(state.agents.roster_selected) else {
         return false;
     };
@@ -2968,6 +3125,21 @@ fn reset_roster_context(state: &mut AppState) -> bool {
 
     let before = state.agents.messages.len();
     if let Some(mission_id) = mission_ctx.as_deref() {
+        if let Err(err) = write_agent_run_provenance(state, swarm, mission_id) {
+            state.agents.diag_events.push(AgentDiagnosticEvent {
+                severity: AgentAlertSeverity::Warn,
+                source: "artifacts".into(),
+                message: format!(
+                    "failed to persist mission artifacts before reset for {mission_id}: {err}"
+                ),
+                at: timestamp_label(state),
+            });
+        } else {
+            state
+                .agents
+                .pending_provenance_mission_ids
+                .retain(|id| id != mission_id);
+        }
         // In mission context, the Codex session is shared by mission id. Resetting context should
         // clear the mission transcript and forget the session id so the next prompt starts fresh.
         state.agents.codex_mission_thread_ids.remove(mission_id);
@@ -2985,6 +3157,21 @@ fn reset_roster_context(state: &mut AppState) -> bool {
             .messages
             .retain(|msg| msg.mission_id.as_deref() != Some(mission_id));
     } else {
+        if let Err(err) = write_ad_hoc_run_provenance(state, &agent_id) {
+            state.agents.diag_events.push(AgentDiagnosticEvent {
+                severity: AgentAlertSeverity::Warn,
+                source: "artifacts".into(),
+                message: format!(
+                    "failed to persist ad-hoc artifacts before reset for {agent_id}: {err}"
+                ),
+                at: timestamp_label(state),
+            });
+        } else {
+            state
+                .agents
+                .pending_provenance_agent_ids
+                .retain(|id| id != &agent_id);
+        }
         // In non-mission chat, the thread isn't partitioned by agent; reset the whole local thread.
         state.agents.codex_thread_ids.clear();
         state.agents.codex_used_tokens.clear();
@@ -4644,6 +4831,8 @@ fn push_chat_message(state: &mut AppState) -> Option<(AgentChannel, String)> {
             .entry(mission_id.to_string())
             .or_insert(0);
         *entry = entry.saturating_add(delta);
+    } else if let Some(agent_id) = state.agents.selected_context_agent().map(str::to_string) {
+        mark_ad_hoc_provenance_dirty(state, &agent_id);
     }
     state.agents.messages.push(message);
     state.agents.diag_events.push(AgentDiagnosticEvent {
@@ -4757,6 +4946,20 @@ fn mark_mission_provenance_dirty(state: &mut AppState, mission_id: &str) {
             .agents
             .pending_provenance_mission_ids
             .push(mission_id.to_string());
+    }
+}
+
+fn mark_ad_hoc_provenance_dirty(state: &mut AppState, agent_id: &str) {
+    if state
+        .agents
+        .pending_provenance_agent_ids
+        .iter()
+        .all(|id| id != agent_id)
+    {
+        state
+            .agents
+            .pending_provenance_agent_ids
+            .push(agent_id.to_string());
     }
 }
 
@@ -6061,10 +6264,25 @@ fn handle_mouse_event_with_swarm(
                 return true;
             }
 
+            if state.agents.artifacts_popup_open {
+                let area = dynamic_popup_rect(screen, artifacts_popup::preferred_size(screen));
+                if point_in_rect(mouse.column, mouse.row, area) {
+                    let (max_scroll, _) =
+                        artifacts_popup_scroll_metrics(state, swarm, screen, theme);
+                    bump_scroll_clamped(
+                        &mut state.agents.artifacts_popup_scroll,
+                        delta,
+                        max_scroll,
+                    );
+                }
+                return true;
+            }
+
             if state.show_help {
                 let area = dynamic_popup_rect(screen, help_overlay::preferred_size(screen));
                 if point_in_rect(mouse.column, mouse.row, area) {
-                    bump_scroll(&mut state.help_scroll, delta);
+                    let max_scroll = help_popup_max_scroll(screen, theme);
+                    bump_scroll_clamped(&mut state.help_scroll, delta, max_scroll);
                 }
                 return true;
             }
@@ -6072,7 +6290,8 @@ fn handle_mouse_event_with_swarm(
             if state.app_kind == AppKind::Games && state.games.analysis.open {
                 let area = dynamic_popup_rect(screen, games_analysis_popup::preferred_size(screen));
                 if point_in_rect(mouse.column, mouse.row, area) {
-                    bump_scroll(&mut state.games.analysis.scroll_offset, delta);
+                    let max_scroll = games_analysis_popup_max_scroll(state, screen, theme);
+                    bump_scroll_clamped(&mut state.games.analysis.scroll_offset, delta, max_scroll);
                 }
                 return true;
             }
@@ -6081,7 +6300,12 @@ fn handle_mouse_event_with_swarm(
                 let area =
                     dynamic_popup_rect(screen, games_run_browser_popup::preferred_size(screen));
                 if point_in_rect(mouse.column, mouse.row, area) {
-                    bump_scroll(&mut state.games.run_browser.scroll_offset, delta);
+                    let max_scroll = games_run_browser_popup_max_scroll(state, screen, theme);
+                    bump_scroll_clamped(
+                        &mut state.games.run_browser.scroll_offset,
+                        delta,
+                        max_scroll,
+                    );
                 }
                 return true;
             }
@@ -6089,7 +6313,8 @@ fn handle_mouse_event_with_swarm(
             if state.app_kind == AppKind::Games && state.games.replay.open {
                 let area = dynamic_popup_rect(screen, games_replay_popup::preferred_size(screen));
                 if point_in_rect(mouse.column, mouse.row, area) {
-                    bump_scroll(&mut state.games.replay.scroll_offset, delta);
+                    let max_scroll = games_replay_popup_max_scroll(state, screen, theme);
+                    bump_scroll_clamped(&mut state.games.replay.scroll_offset, delta, max_scroll);
                 }
                 return true;
             }
@@ -6097,21 +6322,28 @@ fn handle_mouse_event_with_swarm(
             if state.app_kind == AppKind::Games && state.games.strategy_inspect.open {
                 let area = dynamic_popup_rect(screen, games_strategy_popup::preferred_size(screen));
                 if point_in_rect(mouse.column, mouse.row, area) {
-                    bump_scroll(&mut state.games.strategy_inspect.scroll_offset, delta);
+                    let max_scroll = games_strategy_popup_max_scroll(state, screen);
+                    bump_scroll_clamped(
+                        &mut state.games.strategy_inspect.scroll_offset,
+                        delta,
+                        max_scroll,
+                    );
                 }
                 return true;
             }
             if state.app_kind == AppKind::Games && state.games.tm_sim.open {
                 let area = dynamic_popup_rect(screen, games_tm_sim_popup::preferred_size(screen));
                 if point_in_rect(mouse.column, mouse.row, area) {
-                    bump_scroll(&mut state.games.tm_sim.scroll_offset, delta);
+                    let max_scroll = games_tm_sim_popup_max_scroll(state, screen, theme);
+                    bump_scroll_clamped(&mut state.games.tm_sim.scroll_offset, delta, max_scroll);
                 }
                 return true;
             }
             if state.app_kind == AppKind::Games && state.games.ca_sim.open {
                 let area = dynamic_popup_rect(screen, games_ca_sim_popup::preferred_size(screen));
                 if point_in_rect(mouse.column, mouse.row, area) {
-                    bump_scroll(&mut state.games.ca_sim.scroll_offset, delta);
+                    let max_scroll = games_ca_sim_popup_max_scroll(state, screen, theme);
+                    bump_scroll_clamped(&mut state.games.ca_sim.scroll_offset, delta, max_scroll);
                 }
                 return true;
             }
@@ -6211,6 +6443,14 @@ fn handle_mouse_event_with_swarm(
             handle_mouse_drag_with_swarm(swarm, mouse, screen, state, input_state, clipboard, theme)
         }
         MouseEventKind::Up(crossterm::event::MouseButton::Left) => {
+            maybe_open_artifacts_popup_url_on_click(
+                swarm,
+                mouse,
+                screen,
+                state,
+                input_state,
+                theme,
+            );
             input_state.mouse_select_anchor = None;
             true
         }
@@ -6310,6 +6550,12 @@ fn bump_scroll(value: &mut usize, delta: i32) {
     }
 }
 
+fn bump_scroll_clamped(value: &mut usize, delta: i32, max_scroll: usize) {
+    let mut scroll = (*value).min(max_scroll);
+    bump_scroll(&mut scroll, delta);
+    *value = scroll.min(max_scroll);
+}
+
 fn popup_max_scroll(line_count: usize, text_area: ratatui::layout::Rect) -> usize {
     line_count.saturating_sub(text_area.height as usize)
 }
@@ -6318,11 +6564,43 @@ fn max_scroll_for_height(line_count: usize, height: usize) -> usize {
     line_count.saturating_sub(height)
 }
 
+fn popup_page_step(text_area: ratatui::layout::Rect) -> usize {
+    text_area.height.max(1) as usize
+}
+
+fn popup_text_metrics(area: ratatui::layout::Rect, line_count: usize) -> (usize, usize) {
+    let text_area = popup_text_area(area);
+    (
+        popup_max_scroll(line_count, text_area),
+        popup_page_step(text_area),
+    )
+}
+
+fn artifacts_popup_scroll_metrics(
+    state: &AppState,
+    swarm: &SwarmRuntime,
+    screen: ratatui::layout::Rect,
+    theme: &Theme,
+) -> (usize, usize) {
+    let area = dynamic_popup_rect(screen, artifacts_popup::preferred_size(screen));
+    let text_area = popup_text_area(area);
+    let lines = artifacts_popup::build_lines(state, swarm, theme, text_area.width);
+    (
+        popup_max_scroll(lines.len(), text_area),
+        popup_page_step(text_area),
+    )
+}
+
 fn help_popup_max_scroll(screen: ratatui::layout::Rect, theme: &Theme) -> usize {
     let area = dynamic_popup_rect(screen, help_overlay::preferred_size(screen));
     let text_area = popup_text_area(area);
     let lines = help_overlay::build_lines(theme);
     popup_max_scroll(lines.len(), text_area)
+}
+
+fn help_popup_scroll_metrics(screen: ratatui::layout::Rect, theme: &Theme) -> (usize, usize) {
+    let area = dynamic_popup_rect(screen, help_overlay::preferred_size(screen));
+    popup_text_metrics(area, help_overlay::build_lines(theme).len())
 }
 
 fn games_analysis_popup_max_scroll(
@@ -6334,6 +6612,20 @@ fn games_analysis_popup_max_scroll(
     let text_area = popup_text_area(area);
     let lines = games_analysis_popup::build_lines(state, theme, text_area.width);
     popup_max_scroll(lines.len(), text_area)
+}
+
+fn games_analysis_popup_scroll_metrics(
+    state: &AppState,
+    screen: ratatui::layout::Rect,
+    theme: &Theme,
+) -> (usize, usize) {
+    let area = dynamic_popup_rect(screen, games_analysis_popup::preferred_size(screen));
+    let text_area = popup_text_area(area);
+    let lines = games_analysis_popup::build_lines(state, theme, text_area.width);
+    (
+        popup_max_scroll(lines.len(), text_area),
+        popup_page_step(text_area),
+    )
 }
 
 fn games_run_browser_popup_max_scroll(
@@ -6619,6 +6911,326 @@ fn map_help_popup_mouse(
         clamp,
     )?;
     Some((line_idx, col, text_lines))
+}
+
+fn map_artifacts_popup_mouse_with_swarm(
+    swarm: &SwarmRuntime,
+    mouse: MouseEvent,
+    screen: ratatui::layout::Rect,
+    state: &AppState,
+    theme: &Theme,
+    clamp: bool,
+) -> Option<(usize, usize, Vec<String>)> {
+    if !state.agents.artifacts_popup_open {
+        return None;
+    }
+    let area = dynamic_popup_rect(screen, artifacts_popup::preferred_size(screen));
+    let text_area = popup_text_area(area);
+    if !point_in_rect(mouse.column, mouse.row, text_area) && !clamp {
+        return None;
+    }
+    let lines = artifacts_popup::build_lines(state, swarm, theme, text_area.width);
+    let text_lines = lines_to_strings(&lines);
+    if text_lines.is_empty() {
+        return None;
+    }
+    let height = text_area.height as usize;
+    let max_scroll = text_lines.len().saturating_sub(height);
+    let scroll = state.agents.artifacts_popup_scroll.min(max_scroll);
+    let (line_idx, col) = map_mouse_to_line_col(
+        mouse,
+        text_area,
+        &text_lines,
+        scroll,
+        state.settings.editor.tab_width as usize,
+        clamp,
+    )?;
+    Some((line_idx, col, text_lines))
+}
+
+fn maybe_open_artifacts_popup_url_on_click(
+    swarm: &SwarmRuntime,
+    mouse: MouseEvent,
+    screen: ratatui::layout::Rect,
+    state: &mut AppState,
+    input_state: &InputState,
+    theme: &Theme,
+) {
+    if !state.agents.artifacts_popup_open {
+        return;
+    }
+    let Some(anchor) = input_state.mouse_select_anchor else {
+        return;
+    };
+    if !matches!(
+        anchor.target,
+        MouseSelectTarget::Ui(UiSelectionPane::ArtifactsPopup)
+    ) {
+        return;
+    }
+
+    let Some(selection) = state.ui_selection else {
+        return;
+    };
+    if selection.pane != UiSelectionPane::ArtifactsPopup {
+        return;
+    }
+    if selection.start_line != selection.end_line || selection.start_col != selection.end_col {
+        // Drag selection: never open.
+        return;
+    }
+    if selection.start_line != anchor.line || selection.start_col != anchor.col {
+        return;
+    }
+
+    let Some((line_idx, col, lines)) =
+        map_artifacts_popup_mouse_with_swarm(swarm, mouse, screen, state, theme, false)
+    else {
+        return;
+    };
+    if line_idx != anchor.line || col != anchor.col {
+        return;
+    }
+
+    let Some(url) = http_url_at_line_col(&lines, line_idx, col) else {
+        return;
+    };
+    match open_url_in_browser(&url) {
+        Ok(()) => {
+            state.status = Some(format!("Opened {url}"));
+        }
+        Err(err) => {
+            state.status = Some(format!("Open URL failed: {err}"));
+        }
+    }
+}
+
+fn open_url_in_browser(url: &str) -> Result<(), String> {
+    let url = url.trim();
+    if url.is_empty() {
+        return Err("empty url".into());
+    }
+    if !(url.starts_with("http://") || url.starts_with("https://")) {
+        return Err("url must start with http:// or https://".into());
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open")
+            .arg(url)
+            .spawn()
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
+    #[cfg(target_os = "linux")]
+    {
+        std::process::Command::new("xdg-open")
+            .arg(url)
+            .spawn()
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
+    #[cfg(target_os = "windows")]
+    {
+        std::process::Command::new("cmd")
+            .args(["/C", "start", "", url])
+            .spawn()
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+    {
+        let _ = url;
+        Err("unsupported platform".into())
+    }
+}
+
+fn http_url_at_line_col(lines: &[String], line_idx: usize, col: usize) -> Option<String> {
+    let line = lines.get(line_idx)?.as_str();
+    let (start, end) = token_bounds_at_col(line, col)?;
+    let token = slice_by_char(line, start, end);
+    if let Some(url) = normalize_http_url(&token) {
+        return Some(url);
+    }
+
+    // Best-effort: if a long URL was wrapped mid-token, stitch contiguous chunks from adjacent
+    // lines (where the token touches the line boundary) and then re-scan.
+    let mut blob = token;
+    let mut start_line = line_idx;
+    let mut end_line = line_idx;
+    let mut token_start = start;
+    let mut token_end = end;
+
+    for _ in 0..8 {
+        if start_line == 0 {
+            break;
+        }
+        let current = lines.get(start_line)?.as_str();
+        let first_nonspace = current.chars().take_while(|ch| ch.is_whitespace()).count();
+        if token_start > first_nonspace {
+            break;
+        }
+        let prev = lines.get(start_line.saturating_sub(1))?.as_str();
+        let (prev_token, prev_start, prev_end) = last_token(prev)?;
+        let prev_trim_len = prev
+            .trim_end_matches(|ch: char| ch.is_whitespace())
+            .chars()
+            .count();
+        if prev_end != prev_trim_len {
+            break;
+        }
+        if !looks_like_url_token(prev_token.as_str()) {
+            break;
+        }
+        blob = format!("{prev_token}{blob}");
+        start_line = start_line.saturating_sub(1);
+        token_start = prev_start;
+    }
+
+    for _ in 0..8 {
+        let current = lines.get(end_line)?.as_str();
+        let trim_len = current
+            .trim_end_matches(|ch: char| ch.is_whitespace())
+            .chars()
+            .count();
+        if token_end < trim_len {
+            break;
+        }
+        let next_line = end_line.saturating_add(1);
+        if next_line >= lines.len() {
+            break;
+        }
+        let next = lines.get(next_line)?.as_str();
+        let (next_token, _next_start, next_end) = first_token(next)?;
+        if !looks_like_url_token(next_token.as_str()) {
+            break;
+        }
+        blob = format!("{blob}{next_token}");
+        end_line = next_line;
+        token_end = next_end;
+    }
+
+    normalize_http_url(&blob)
+}
+
+fn token_bounds_at_col(line: &str, col: usize) -> Option<(usize, usize)> {
+    let chars = line.chars().collect::<Vec<_>>();
+    if chars.is_empty() {
+        return None;
+    }
+    let mut pos = col.min(chars.len());
+    if pos == chars.len() && pos > 0 {
+        pos = pos.saturating_sub(1);
+    }
+    while pos > 0 && chars[pos].is_whitespace() {
+        pos = pos.saturating_sub(1);
+    }
+    if chars[pos].is_whitespace() {
+        return None;
+    }
+    let mut start = pos;
+    while start > 0 && !chars[start - 1].is_whitespace() {
+        start = start.saturating_sub(1);
+    }
+    let mut end = pos.saturating_add(1);
+    while end < chars.len() && !chars[end].is_whitespace() {
+        end = end.saturating_add(1);
+    }
+    Some((start, end))
+}
+
+fn first_token(line: &str) -> Option<(String, usize, usize)> {
+    let len = line.chars().count();
+    if len == 0 {
+        return None;
+    }
+    let start = line.chars().take_while(|ch| ch.is_whitespace()).count();
+    if start >= len {
+        return None;
+    }
+    let mut end = start;
+    for (idx, ch) in line.chars().enumerate().skip(start) {
+        if ch.is_whitespace() {
+            break;
+        }
+        end = idx.saturating_add(1);
+    }
+    let token = slice_by_char(line, start, end);
+    Some((token, start, end))
+}
+
+fn last_token(line: &str) -> Option<(String, usize, usize)> {
+    let trimmed = line.trim_end_matches(|ch: char| ch.is_whitespace());
+    let len = trimmed.chars().count();
+    if len == 0 {
+        return None;
+    }
+    let end = len;
+    let mut start = end.saturating_sub(1);
+    let chars = trimmed.chars().collect::<Vec<_>>();
+    while start > 0 && !chars[start - 1].is_whitespace() {
+        start = start.saturating_sub(1);
+    }
+    let token = slice_by_char(trimmed, start, end);
+    Some((token, start, end))
+}
+
+fn looks_like_url_token(token: &str) -> bool {
+    let token = token.trim_matches(|ch: char| matches!(ch, '`' | '<' | '>' | '"' | '\''));
+    if token.is_empty() {
+        return false;
+    }
+    token.chars().all(|ch| {
+        ch.is_ascii_alphanumeric()
+            || matches!(
+                ch,
+                ':' | '/'
+                    | '?'
+                    | '#'
+                    | '['
+                    | ']'
+                    | '@'
+                    | '!'
+                    | '$'
+                    | '&'
+                    | '\''
+                    | '('
+                    | ')'
+                    | '*'
+                    | '+'
+                    | ','
+                    | ';'
+                    | '='
+                    | '.'
+                    | '_'
+                    | '-'
+                    | '~'
+                    | '%'
+            )
+    })
+}
+
+fn normalize_http_url(text: &str) -> Option<String> {
+    let text = text.trim();
+    if text.is_empty() {
+        return None;
+    }
+    let https = text.find("https://");
+    let http = text.find("http://");
+    let start = match (https, http) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (Some(a), None) => Some(a),
+        (None, Some(b)) => Some(b),
+        (None, None) => None,
+    }?;
+    let mut url = &text[start..];
+    url = url.trim_matches(|ch: char| matches!(ch, '`' | '<' | '>' | '"' | '\''));
+    url = url.trim_end_matches(|ch: char| matches!(ch, '.' | ',' | ';' | ':' | ')' | ']' | '}'));
+    if url.starts_with("http://") || url.starts_with("https://") {
+        Some(url.to_string())
+    } else {
+        None
+    }
 }
 
 fn map_analysis_popup_mouse(
@@ -7419,6 +8031,33 @@ fn handle_mouse_down_with_swarm(
     if state.rule_picker.open || state.protocol_picker.open {
         return true;
     }
+    if state.agents.artifacts_popup_open {
+        if let Some((line_idx, col, lines)) =
+            map_artifacts_popup_mouse_with_swarm(swarm, mouse, screen, state, theme, false)
+        {
+            reset_ui_selection(state, input_state);
+            state.ui_selection = Some(UiSelection {
+                pane: UiSelectionPane::ArtifactsPopup,
+                start_line: line_idx,
+                start_col: col,
+                end_line: line_idx,
+                end_col: col,
+            });
+            input_state.mouse_select_anchor = Some(MouseSelectAnchor {
+                target: MouseSelectTarget::Ui(UiSelectionPane::ArtifactsPopup),
+                line: line_idx,
+                col,
+            });
+            update_ui_selection_text(
+                state,
+                UiSelectionPane::ArtifactsPopup,
+                &lines,
+                clipboard,
+                input_state,
+            );
+        }
+        return true;
+    }
     if state.show_help {
         if let Some((line_idx, col, lines)) =
             map_help_popup_mouse(mouse, screen, state, theme, false)
@@ -7864,7 +8503,7 @@ fn handle_mouse_down_with_swarm(
         map_job_output_mouse_with_swarm(swarm, mouse, screen, state, false)
     {
         state.focus = PaneId::JobOutput;
-        apply_agent_ops_click_selection(state, line_idx, col, text_width);
+        apply_agent_ops_click_selection(state, line_idx, col, text_width, &lines);
         if state.agents.dock_tab == AgentOpsTab::Scratchpad {
             state.mode = Mode::Insert;
         }
@@ -7897,13 +8536,14 @@ fn apply_agent_ops_click_selection(
     line_idx: usize,
     col: usize,
     text_width: usize,
+    lines: &[String],
 ) {
     let offset = match state.agents.dock_tab {
         AgentOpsTab::Roster => agent_ops_view::roster_body_offset(state),
         _ => 2,
     };
     if state.agents.dock_tab == AgentOpsTab::Roster
-        && line_idx == agent_ops_view::ROSTER_SWARM_TEMPLATE_LINE_IDX
+        && line_idx == agent_ops_view::roster_swarm_template_line_idx(state)
     {
         if let Some(template) = agent_ops_view::roster_swarm_template_hit(col) {
             state.agents.swarm_default_template = template.to_string();
@@ -7912,7 +8552,7 @@ fn apply_agent_ops_click_selection(
         return;
     }
     if state.agents.dock_tab == AgentOpsTab::Roster
-        && line_idx == agent_ops_view::ROSTER_SWARM_MISSION_LINE_IDX
+        && line_idx == agent_ops_view::roster_swarm_mission_line_idx(state)
     {
         if let Some(mission) = agent_ops_view::roster_swarm_mission_hit(col) {
             state.agents.swarm_default_mission = mission.to_string();
@@ -7929,10 +8569,20 @@ fn apply_agent_ops_click_selection(
             let Some(meta) = agent_ops_view::roster_meta_for_body_line(state, data_line) else {
                 return;
             };
+            if let agent_ops_view::RosterBodyNode::Backend { backend } = meta.node {
+                select_roster_backend(state, backend);
+                let _ = toggle_roster_backend_expanded(state, backend);
+                return;
+            }
+            let Some(agent_idx) = meta.agent_idx else {
+                return;
+            };
             // Clicking the roster priority checkbox should NOT change selection or expand/collapse.
             if matches!(meta.node, agent_ops_view::RosterBodyNode::Agent) {
-                if let Some(agent) = state.agents.agents.get(meta.agent_idx) {
-                    let checkbox_hit = agent.is_codex() && (1..5).contains(&col);
+                if let Some(agent) = state.agents.agents.get(agent_idx) {
+                    let checkbox_hit = agent.supports_swarm_priority()
+                        && !agent.id.contains("#swarm-")
+                        && (1..5).contains(&col);
                     if checkbox_hit {
                         if state.agents.swarm_priority_agent_ids.remove(&agent.id) {
                             // removed
@@ -7947,25 +8597,11 @@ fn apply_agent_ops_click_selection(
                 }
             }
 
-            let was_selected = meta.agent_idx == state.agents.roster_selected;
-            state.agents.roster_selected = meta.agent_idx;
-            if let Some(agent) = state.agents.agents.get(meta.agent_idx) {
-                state.agents.selected_agent = Some(agent.id.clone());
-                if let Some(mission_id) = agent.current_mission.as_deref() {
-                    state.agents.selected_mission = Some(mission_id.to_string());
-                    if let Some(idx) = state
-                        .agents
-                        .missions
-                        .iter()
-                        .position(|mission| mission.id == mission_id)
-                    {
-                        state.agents.mission_selected = idx;
-                    }
-                }
-
+            let was_selected = agent_idx == state.agents.roster_selected;
+            sync_roster_selected_agent(state, agent_idx);
+            if let Some(agent) = state.agents.agents.get(agent_idx) {
                 match meta.node {
                     agent_ops_view::RosterBodyNode::Agent => {
-                        state.agents.roster_tree_selected = None;
                         let model_hit = agent_ops_view::roster_role_cell_hit(col, text_width);
                         if model_hit && !was_selected {
                             state
@@ -8034,6 +8670,7 @@ fn apply_agent_ops_click_selection(
                             Some(nit_core::RosterTreeSelection { branch, leaf_idx });
                         let _ = select_roster_tree_leaf(state);
                     }
+                    agent_ops_view::RosterBodyNode::Backend { .. } => return,
                 }
             }
         }
@@ -8055,8 +8692,14 @@ fn apply_agent_ops_click_selection(
             };
             state.agents.alert_selected = alert_idx;
         }
+        AgentOpsTab::Evidence => {
+            if let Some(card_idx) = agent_ops_view::artifacts_card_index_for_line(lines, line_idx) {
+                state.agents.artifacts_selected = card_idx;
+                state.agents.artifacts_popup_open = true;
+                state.agents.artifacts_popup_scroll = 0;
+            }
+        }
         AgentOpsTab::Patch
-        | AgentOpsTab::Evidence
         | AgentOpsTab::Diagnostics
         | AgentOpsTab::Dag
         | AgentOpsTab::Scratchpad => {}
@@ -8182,6 +8825,9 @@ fn handle_mouse_drag_with_swarm(
                 UiSelectionPane::HelpPopup => {
                     map_help_popup_mouse(mouse, screen, state, theme, true)
                 }
+                UiSelectionPane::ArtifactsPopup => {
+                    map_artifacts_popup_mouse_with_swarm(swarm, mouse, screen, state, theme, true)
+                }
                 UiSelectionPane::GamesAnalysisPopup => {
                     map_analysis_popup_mouse(mouse, screen, state, theme, true)
                 }
@@ -8285,6 +8931,12 @@ fn mouse_drag_allowed(state: &AppState, anchor: MouseSelectAnchor) -> bool {
     }
     if state.rule_picker.open || state.protocol_picker.open {
         return false;
+    }
+    if state.agents.artifacts_popup_open {
+        return matches!(
+            anchor.target,
+            MouseSelectTarget::Ui(UiSelectionPane::ArtifactsPopup)
+        );
     }
     if state.show_help {
         return matches!(
@@ -8466,13 +9118,19 @@ fn char_idx_for_display_col(line: &str, target_col: usize, tab_width: usize) -> 
     idx
 }
 
-fn handle_analysis_popup_key(key: &KeyEvent, state: &mut AppState) -> bool {
+fn handle_analysis_popup_key(
+    key: &KeyEvent,
+    state: &mut AppState,
+    screen: ratatui::layout::Rect,
+    theme: &Theme,
+) -> bool {
     if !state.games.analysis.open {
         return false;
     }
     if is_global_quit_key(key) {
         return false;
     }
+    let (max_scroll, page_step) = games_analysis_popup_scroll_metrics(state, screen, theme);
     match key.code {
         KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') => {
             state.games.analysis.open = false;
@@ -8481,6 +9139,38 @@ fn handle_analysis_popup_key(key: &KeyEvent, state: &mut AppState) -> bool {
                     state.ui_selection = None;
                 }
             }
+            true
+        }
+        KeyCode::Up | KeyCode::Char('k') => {
+            bump_scroll_clamped(&mut state.games.analysis.scroll_offset, -1, max_scroll);
+            true
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            bump_scroll_clamped(&mut state.games.analysis.scroll_offset, 1, max_scroll);
+            true
+        }
+        KeyCode::PageUp => {
+            bump_scroll_clamped(
+                &mut state.games.analysis.scroll_offset,
+                -(page_step as i32),
+                max_scroll,
+            );
+            true
+        }
+        KeyCode::PageDown => {
+            bump_scroll_clamped(
+                &mut state.games.analysis.scroll_offset,
+                page_step as i32,
+                max_scroll,
+            );
+            true
+        }
+        KeyCode::Home => {
+            state.games.analysis.scroll_offset = 0;
+            true
+        }
+        KeyCode::End => {
+            state.games.analysis.scroll_offset = max_scroll;
             true
         }
         _ => true,
@@ -9405,6 +10095,10 @@ fn handle_run_browser_key(
     if is_global_quit_key(key) {
         return false;
     }
+    let page_step = popup_page_step(popup_text_area(dynamic_popup_rect(
+        screen,
+        games_run_browser_popup::preferred_size(screen),
+    )));
     match key.code {
         KeyCode::Esc | KeyCode::Char('q') => {
             state.games.run_browser.open = false;
@@ -9447,13 +10141,15 @@ fn handle_run_browser_key(
             true
         }
         KeyCode::PageUp => {
-            state.games.run_browser.selected = state.games.run_browser.selected.saturating_sub(10);
+            state.games.run_browser.selected =
+                state.games.run_browser.selected.saturating_sub(page_step);
             adjust_run_browser_scroll(state, screen);
             true
         }
         KeyCode::PageDown => {
             let max = state.games.run_browser.entries.len().saturating_sub(1);
-            state.games.run_browser.selected = (state.games.run_browser.selected + 10).min(max);
+            state.games.run_browser.selected =
+                (state.games.run_browser.selected + page_step).min(max);
             adjust_run_browser_scroll(state, screen);
             true
         }
@@ -9486,6 +10182,10 @@ fn handle_replay_popup_key(
     if is_global_quit_key(key) {
         return false;
     }
+    let page_step = popup_page_step(popup_text_area(dynamic_popup_rect(
+        screen,
+        games_replay_popup::preferred_size(screen),
+    )));
     match key.code {
         KeyCode::Esc | KeyCode::Char('q') => {
             state.games.replay.open = false;
@@ -9546,10 +10246,10 @@ fn handle_replay_popup_key(
         KeyCode::PageUp => {
             if state.games.replay.lines.is_empty() {
                 state.games.replay.selected_index =
-                    state.games.replay.selected_index.saturating_sub(10);
+                    state.games.replay.selected_index.saturating_sub(page_step);
                 adjust_replay_scroll(state, screen);
             } else {
-                bump_scroll(&mut state.games.replay.scroll_offset, -10);
+                bump_scroll(&mut state.games.replay.scroll_offset, -(page_step as i32));
             }
             true
         }
@@ -9557,10 +10257,10 @@ fn handle_replay_popup_key(
             if state.games.replay.lines.is_empty() {
                 let max = games_replay_popup::pair_list(state).len().saturating_sub(1);
                 state.games.replay.selected_index =
-                    (state.games.replay.selected_index + 10).min(max);
+                    (state.games.replay.selected_index + page_step).min(max);
                 adjust_replay_scroll(state, screen);
             } else {
-                bump_scroll(&mut state.games.replay.scroll_offset, 10);
+                bump_scroll(&mut state.games.replay.scroll_offset, page_step as i32);
             }
             true
         }
@@ -9593,6 +10293,10 @@ fn handle_strategy_popup_key(
     if is_global_quit_key(key) {
         return false;
     }
+    let page_step = popup_page_step(popup_text_area(dynamic_popup_rect(
+        screen,
+        games_strategy_popup::preferred_size(screen),
+    )));
     match key.code {
         KeyCode::Esc | KeyCode::Char('q') => {
             state.games.strategy_inspect.open = false;
@@ -9697,10 +10401,13 @@ fn handle_strategy_popup_key(
                     .games
                     .strategy_inspect
                     .selected_index
-                    .saturating_sub(10);
+                    .saturating_sub(page_step);
                 adjust_strategy_scroll(state, screen);
             } else {
-                bump_scroll(&mut state.games.strategy_inspect.scroll_offset, -10);
+                bump_scroll(
+                    &mut state.games.strategy_inspect.scroll_offset,
+                    -(page_step as i32),
+                );
             }
             true
         }
@@ -9713,10 +10420,13 @@ fn handle_strategy_popup_key(
                     .len()
                     .saturating_sub(1);
                 state.games.strategy_inspect.selected_index =
-                    (state.games.strategy_inspect.selected_index + 10).min(max);
+                    (state.games.strategy_inspect.selected_index + page_step).min(max);
                 adjust_strategy_scroll(state, screen);
             } else {
-                bump_scroll(&mut state.games.strategy_inspect.scroll_offset, 10);
+                bump_scroll(
+                    &mut state.games.strategy_inspect.scroll_offset,
+                    page_step as i32,
+                );
             }
             true
         }
@@ -9727,7 +10437,7 @@ fn handle_strategy_popup_key(
 fn handle_tm_sim_popup_key(
     key: &KeyEvent,
     state: &mut AppState,
-    _screen: ratatui::layout::Rect,
+    screen: ratatui::layout::Rect,
 ) -> bool {
     if state.app_kind != AppKind::Games || !state.games.tm_sim.open {
         return false;
@@ -9741,6 +10451,10 @@ fn handle_tm_sim_popup_key(
     if is_command_prompt_open_key(key) {
         return false;
     }
+    let page_step = popup_page_step(popup_text_area(dynamic_popup_rect(
+        screen,
+        games_tm_sim_popup::preferred_size(screen),
+    )));
     match key.code {
         KeyCode::Esc | KeyCode::Char('q') => {
             state.games.tm_sim.open = false;
@@ -9767,11 +10481,11 @@ fn handle_tm_sim_popup_key(
             true
         }
         KeyCode::PageUp => {
-            bump_scroll(&mut state.games.tm_sim.scroll_offset, -10);
+            bump_scroll(&mut state.games.tm_sim.scroll_offset, -(page_step as i32));
             true
         }
         KeyCode::PageDown => {
-            bump_scroll(&mut state.games.tm_sim.scroll_offset, 10);
+            bump_scroll(&mut state.games.tm_sim.scroll_offset, page_step as i32);
             true
         }
         _ => true,
@@ -9781,7 +10495,7 @@ fn handle_tm_sim_popup_key(
 fn handle_ca_sim_popup_key(
     key: &KeyEvent,
     state: &mut AppState,
-    _screen: ratatui::layout::Rect,
+    screen: ratatui::layout::Rect,
 ) -> bool {
     if state.app_kind != AppKind::Games || !state.games.ca_sim.open {
         return false;
@@ -9795,6 +10509,10 @@ fn handle_ca_sim_popup_key(
     if is_command_prompt_open_key(key) {
         return false;
     }
+    let page_step = popup_page_step(popup_text_area(dynamic_popup_rect(
+        screen,
+        games_ca_sim_popup::preferred_size(screen),
+    )));
     match key.code {
         KeyCode::Esc | KeyCode::Char('q') => {
             state.games.ca_sim.open = false;
@@ -9821,11 +10539,11 @@ fn handle_ca_sim_popup_key(
             true
         }
         KeyCode::PageUp => {
-            bump_scroll(&mut state.games.ca_sim.scroll_offset, -10);
+            bump_scroll(&mut state.games.ca_sim.scroll_offset, -(page_step as i32));
             true
         }
         KeyCode::PageDown => {
-            bump_scroll(&mut state.games.ca_sim.scroll_offset, 10);
+            bump_scroll(&mut state.games.ca_sim.scroll_offset, page_step as i32);
             true
         }
         _ => true,
@@ -9947,13 +10665,82 @@ fn adjust_strategy_scroll(state: &mut AppState, screen: ratatui::layout::Rect) {
     }
 }
 
-fn handle_help_popup_key(key: &KeyEvent, state: &mut AppState) -> bool {
+fn handle_artifacts_popup_key(
+    key: &KeyEvent,
+    state: &mut AppState,
+    swarm: &SwarmRuntime,
+    screen: ratatui::layout::Rect,
+    theme: &Theme,
+) -> bool {
+    if !state.agents.artifacts_popup_open {
+        return false;
+    }
+    if is_global_quit_key(key) {
+        return false;
+    }
+    let (max_scroll, page_step) = artifacts_popup_scroll_metrics(state, swarm, screen, theme);
+    let close = matches!(key.code, KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q'));
+    if close {
+        state.agents.artifacts_popup_open = false;
+        state.agents.artifacts_popup_scroll = 0;
+        if let Some(selection) = state.ui_selection {
+            if matches!(selection.pane, UiSelectionPane::ArtifactsPopup) {
+                state.ui_selection = None;
+            }
+        }
+        return true;
+    }
+
+    match key.code {
+        KeyCode::Up | KeyCode::Char('k') => {
+            bump_scroll_clamped(&mut state.agents.artifacts_popup_scroll, -1, max_scroll);
+            true
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            bump_scroll_clamped(&mut state.agents.artifacts_popup_scroll, 1, max_scroll);
+            true
+        }
+        KeyCode::PageUp => {
+            bump_scroll_clamped(
+                &mut state.agents.artifacts_popup_scroll,
+                -(page_step as i32),
+                max_scroll,
+            );
+            true
+        }
+        KeyCode::PageDown => {
+            bump_scroll_clamped(
+                &mut state.agents.artifacts_popup_scroll,
+                page_step as i32,
+                max_scroll,
+            );
+            true
+        }
+        KeyCode::Home => {
+            state.agents.artifacts_popup_scroll = 0;
+            true
+        }
+        KeyCode::End => {
+            state.agents.artifacts_popup_scroll = max_scroll;
+            true
+        }
+        _ => true, // swallow all input while modal is open
+    }
+}
+
+fn handle_help_popup_key(
+    key: &KeyEvent,
+    state: &mut AppState,
+    screen: ratatui::layout::Rect,
+    theme: &Theme,
+) -> bool {
     if !state.show_help {
         return false;
     }
     if is_global_quit_key(key) {
         return false;
     }
+    let (max_scroll, page_step) = help_popup_scroll_metrics(screen, theme);
     let close = match key.code {
         KeyCode::Esc | KeyCode::F(1) | KeyCode::Enter | KeyCode::Char('q') => true,
         KeyCode::Char('?') if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT => {
@@ -9971,7 +10758,33 @@ fn handle_help_popup_key(key: &KeyEvent, state: &mut AppState) -> bool {
         }
         true
     } else {
-        true
+        match key.code {
+            KeyCode::Up | KeyCode::Char('k') => {
+                bump_scroll_clamped(&mut state.help_scroll, -1, max_scroll);
+                true
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                bump_scroll_clamped(&mut state.help_scroll, 1, max_scroll);
+                true
+            }
+            KeyCode::PageUp => {
+                bump_scroll_clamped(&mut state.help_scroll, -(page_step as i32), max_scroll);
+                true
+            }
+            KeyCode::PageDown => {
+                bump_scroll_clamped(&mut state.help_scroll, page_step as i32, max_scroll);
+                true
+            }
+            KeyCode::Home => {
+                state.help_scroll = 0;
+                true
+            }
+            KeyCode::End => {
+                state.help_scroll = max_scroll;
+                true
+            }
+            _ => true,
+        }
     }
 }
 
@@ -10080,12 +10893,18 @@ fn save_notes_on_exit(state: &AppState) -> core_io::Result<()> {
 
 fn flush_agent_run_provenance(state: &mut AppState, swarm: &SwarmRuntime) -> io::Result<()> {
     let pending = std::mem::take(&mut state.agents.pending_provenance_mission_ids);
-    if pending.is_empty() {
-        return Ok(());
+    let pending_agents = std::mem::take(&mut state.agents.pending_provenance_agent_ids);
+    if !pending.is_empty() {
+        let unique = pending.into_iter().collect::<BTreeSet<_>>();
+        for mission_id in unique {
+            write_agent_run_provenance(state, swarm, &mission_id)?;
+        }
     }
-    let unique = pending.into_iter().collect::<BTreeSet<_>>();
-    for mission_id in unique {
-        write_agent_run_provenance(state, swarm, &mission_id)?;
+    if !pending_agents.is_empty() {
+        let unique = pending_agents.into_iter().collect::<BTreeSet<_>>();
+        for agent_id in unique {
+            write_ad_hoc_run_provenance(state, &agent_id)?;
+        }
     }
     Ok(())
 }
@@ -10112,11 +10931,26 @@ fn write_agent_run_provenance(
     let patches_dir = run_dir.join("patches");
     fs::create_dir_all(&patches_dir)?;
 
+    let messages = state
+        .agents
+        .messages
+        .iter()
+        .filter(|msg| msg.mission_id.as_deref() == Some(mission_id))
+        .cloned()
+        .collect::<Vec<_>>();
     let patches = state
         .agents
         .patches
         .iter()
         .filter(|patch| patch.mission_id.as_deref() == Some(mission_id))
+        .cloned()
+        .collect::<Vec<_>>();
+    let evidence = state
+        .agents
+        .evidence
+        .iter()
+        .filter(|item| item.mission_id.as_deref() == Some(mission_id))
+        .cloned()
         .collect::<Vec<_>>();
     let run_payload = serde_json::json!({
             "id": mission.id,
@@ -10138,17 +10972,9 @@ fn write_agent_run_provenance(
                 "latency_ms": state.agents.mcp.latency_ms,
             "last_error": state.agents.mcp.last_error,
         },
-        "patches": patches
-            .iter()
-            .map(|patch| {
-                serde_json::json!({
-                    "id": patch.id,
-                    "agent_id": patch.agent_id,
-                    "title": patch.title,
-                    "status": patch.status.label(),
-                })
-            })
-            .collect::<Vec<_>>(),
+        "messages": messages.clone(),
+        "patches": patches.clone(),
+        "evidence": evidence,
     });
     let run_json = serde_json::to_string_pretty(&run_payload)
         .map_err(|err| io::Error::other(format!("serde run.json: {err}")))?;
@@ -10158,10 +10984,7 @@ fn write_agent_run_provenance(
     thread_md.push_str(&format!("# Mission {}\n\n", mission.id));
     thread_md.push_str(&format!("Title: {}\n\n", mission.title));
     thread_md.push_str("## Thread\n\n");
-    for msg in state.agents.messages.iter().filter(|msg| {
-        msg.mission_id.as_deref() == Some(mission_id)
-            || (msg.mission_id.is_none() && matches!(msg.channel, AgentChannel::Broadcast))
-    }) {
+    for msg in messages.iter() {
         let channel = match msg.channel {
             AgentChannel::Agent => "",
             AgentChannel::Broadcast => "@all ",
@@ -10174,11 +10997,83 @@ fn write_agent_run_provenance(
     }
     fs::write(run_dir.join("thread.md"), thread_md)?;
 
-    for patch in patches {
+    for patch in patches.iter() {
         let filename = format!("{}.diff", sanitize_for_filename(&patch.id));
         fs::write(patches_dir.join(filename), &patch.diff)?;
     }
     write_swarm_run_provenance(state, swarm, mission_id)?;
+    Ok(())
+}
+
+fn write_ad_hoc_run_provenance(state: &AppState, agent_id: &str) -> io::Result<()> {
+    let run_dir = state
+        .workspace_root
+        .join(".nit")
+        .join("agents")
+        .join("ad-hoc")
+        .join(sanitize_for_filename(agent_id));
+    let patches_dir = run_dir.join("patches");
+    fs::create_dir_all(&patches_dir)?;
+
+    let messages = state
+        .agents
+        .messages
+        .iter()
+        .filter(|message| {
+            message.mission_id.is_none()
+                && (message.agent_id.is_none() || message.agent_id.as_deref() == Some(agent_id))
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    let patches = state
+        .agents
+        .patches
+        .iter()
+        .filter(|patch| patch.mission_id.is_none() && patch.agent_id == agent_id)
+        .cloned()
+        .collect::<Vec<_>>();
+    let evidence = state
+        .agents
+        .evidence
+        .iter()
+        .filter(|item| item.mission_id.is_none() && item.agent_id.as_deref() == Some(agent_id))
+        .cloned()
+        .collect::<Vec<_>>();
+
+    let run_payload = serde_json::json!({
+        "agent_id": agent_id,
+        "context": "ad-hoc",
+        "updated_at": timestamp_label(state),
+        "codex_thread_id": state.agents.codex_thread_ids.get(agent_id),
+        "messages": messages.clone(),
+        "patches": patches.clone(),
+        "evidence": evidence,
+    });
+    let run_json = serde_json::to_vec_pretty(&run_payload)
+        .map_err(|err| io::Error::other(format!("serde ad-hoc run.json: {err}")))?;
+    write_file_atomic(&run_dir.join("run.json"), &run_json)?;
+
+    let mut thread_md = String::new();
+    thread_md.push_str(&format!("# Ad-hoc thread for {agent_id}\n\n"));
+    thread_md.push_str("## Thread\n\n");
+    for msg in messages.iter() {
+        let channel = match msg.channel {
+            AgentChannel::Agent => "",
+            AgentChannel::Broadcast => "@all ",
+        };
+        let src = msg.agent_id.as_deref().unwrap_or("user");
+        thread_md.push_str(&format!(
+            "- [{}] {}{}: {}\n",
+            msg.at, channel, src, msg.text
+        ));
+    }
+    write_file_atomic(&run_dir.join("thread.md"), thread_md.as_bytes())?;
+
+    for patch in patches.iter() {
+        let filename = format!("{}.diff", sanitize_for_filename(&patch.id));
+        write_file_atomic(&patches_dir.join(filename), patch.diff.as_bytes())?;
+    }
+
     Ok(())
 }
 
@@ -10284,8 +11179,117 @@ fn write_swarm_run_provenance(
     if let Some(output) = view.gate_output.as_deref() {
         write_file_atomic(&gates_dir.join("output.txt"), output.as_bytes())?;
     }
+    if view.gate_bundle.is_some() || view.gate_report.is_some() || view.gate_output.is_some() {
+        let verify_md = render_verify_markdown(
+            mission_id,
+            view.gate_bundle.as_deref(),
+            view.gate_selection.as_str(),
+            view.gate_report.as_ref(),
+            view.gate_output.as_deref(),
+        );
+        write_file_atomic(&gates_dir.join("verify.md"), verify_md.as_bytes())?;
+    }
 
     Ok(())
+}
+
+fn verify_gate_status_label(gate: &GateReportGate) -> &'static str {
+    if let Some(status) = gate.status.as_deref() {
+        if status.eq_ignore_ascii_case("pass")
+            || status.eq_ignore_ascii_case("ok")
+            || status.eq_ignore_ascii_case("success")
+        {
+            return "PASS";
+        }
+        if status.eq_ignore_ascii_case("skip") || status.eq_ignore_ascii_case("skipped") {
+            return "SKIP";
+        }
+        if status.eq_ignore_ascii_case("fail") || status.eq_ignore_ascii_case("failed") {
+            return "FAIL";
+        }
+    }
+    if gate.ok {
+        "PASS"
+    } else {
+        "FAIL"
+    }
+}
+
+fn truncate_for_markdown(text: &str, max_chars: usize) -> String {
+    let total = text.chars().count();
+    if total <= max_chars {
+        return text.to_string();
+    }
+    let truncated = text.chars().take(max_chars).collect::<String>();
+    format!("{truncated}\n\n... [truncated {} chars]", total - max_chars)
+}
+
+fn render_verify_markdown(
+    mission_id: &str,
+    gate_bundle: Option<&str>,
+    gate_selection: &str,
+    report: Option<&GateReport>,
+    output: Option<&str>,
+) -> String {
+    let mut out = String::new();
+    out.push_str("# Verify\n\n");
+    out.push_str(&format!("Mission: `{mission_id}`\n\n"));
+    out.push_str(&format!("Bundle: `{}`\n\n", gate_bundle.unwrap_or("none")));
+    out.push_str(&format!("Selection: `{}`\n\n", gate_selection.trim()));
+
+    let status = if let Some(report) = report {
+        if report.overall_ok {
+            "PASS"
+        } else {
+            "FAIL"
+        }
+    } else if gate_bundle.is_some() {
+        "PENDING"
+    } else {
+        "NONE"
+    };
+    out.push_str(&format!("Status: `{status}`\n\n"));
+
+    if let Some(report) = report {
+        out.push_str("## Gates\n\n");
+        for gate in report.gates.iter() {
+            out.push_str(&format!(
+                "- `{}`: `{}`\n",
+                gate.name,
+                verify_gate_status_label(gate)
+            ));
+            out.push_str(&format!("  - Command: `{}`\n", gate.command));
+            if let Some(notes) = gate
+                .notes
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
+                out.push_str(&format!("  - Notes: {}\n", notes));
+            }
+        }
+        out.push('\n');
+    }
+
+    out.push_str("## Files\n\n");
+    if report.is_some() {
+        out.push_str("- `report.json`\n");
+    }
+    if output.is_some() {
+        out.push_str("- `output.txt`\n");
+    }
+    if gate_bundle.is_some() || report.is_some() || output.is_some() {
+        out.push_str("- `verify.md`\n");
+    }
+    out.push('\n');
+
+    if let Some(output) = output.map(str::trim).filter(|s| !s.is_empty()) {
+        out.push_str("## Output Excerpt\n\n```text\n");
+        out.push_str(&truncate_for_markdown(output, VERIFY_OUTPUT_MD_MAX_CHARS));
+        out.push_str("\n```\n");
+    }
+
+    out
 }
 
 fn write_file_atomic(path: &Path, contents: &[u8]) -> io::Result<()> {
@@ -10457,11 +11461,29 @@ mod tests {
     use super::*;
     use crate::widgets::{agent_console_view, agent_ops_view};
     use nit_core::AgentBusEvent;
+    use std::{
+        fs,
+        time::{SystemTime, UNIX_EPOCH},
+    };
 
     fn state_for_test() -> AppState {
         let editor = nit_core::Buffer::from_str("editor", "", None);
         let notes = nit_core::Buffer::from_str("notes", "", None);
         AppState::new(std::path::PathBuf::from("."), editor, notes)
+    }
+
+    fn state_for_test_in_workspace(label: &str) -> AppState {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let workspace =
+            std::env::temp_dir().join(format!("nit-app-{label}-{}-{nanos}", std::process::id()));
+        let _ = fs::remove_dir_all(&workspace);
+        fs::create_dir_all(&workspace).expect("create workspace");
+        let editor = nit_core::Buffer::from_str("editor", "", None);
+        let notes = nit_core::Buffer::from_str("notes", "", None);
+        AppState::new(workspace, editor, notes)
     }
 
     #[test]
@@ -10524,6 +11546,10 @@ mod tests {
 
         // Roster tab should show the Codex agent.
         state.agents.dock_tab = AgentOpsTab::Roster;
+        state
+            .agents
+            .roster_expanded_backend_kinds
+            .insert(nit_core::AgentLaneKind::Unknown);
         let roster = agent_ops_view::current_lines_for_width(&state, 72);
         assert!(roster.iter().any(|line| line.contains("Coder")));
 
@@ -10547,10 +11573,12 @@ mod tests {
             Some(0)
         );
 
-        // Thread selection/export should include both user and agent message content.
+        // Thread selection/export suppresses agent reply bodies so the transcript stays readable.
         let thread = agent_console_view::thread_lines_for_selection(&state, 80).join("\n");
         assert!(thread.contains("Please integrate Codex."));
-        assert!(thread.contains("Streaming events into AgentsState"));
+        assert!(thread.contains("[Coder/codex]"));
+        assert!(thread.contains("done (see ARTIFACTS)"));
+        assert!(!thread.contains("Streaming events into AgentsState"));
     }
 
     #[test]
@@ -10723,7 +11751,7 @@ mod tests {
             last_message: String::new(),
         });
         state.agents.selected_agent = Some("gpt-5.1-codex-mini".into());
-        state.agents.roster_selected = 0;
+        state.agents.roster_selected = state.agents.agents.len().saturating_sub(1);
 
         state
             .agents
@@ -10753,7 +11781,7 @@ mod tests {
             text: "other mission".into(),
         });
 
-        assert!(reset_roster_context(&mut state));
+        assert!(reset_roster_context(&mut state, &SwarmRuntime::default()));
         assert!(!state
             .agents
             .codex_mission_thread_ids
@@ -10768,6 +11796,99 @@ mod tests {
             .messages
             .iter()
             .any(|msg| msg.mission_id.as_deref() == Some("mis-999")));
+    }
+
+    #[test]
+    fn reset_context_persists_mission_artifacts_before_clearing_live_thread() {
+        let mut state = state_for_test_in_workspace("mission-persist");
+        state.agents.missions.push(MissionRecord {
+            id: "mis-401".into(),
+            title: "Persist mission".into(),
+            phase: MissionPhase::Execute,
+            swarm: false,
+            assigned_agents: vec!["gpt-5.1-codex-mini".into()],
+            status: "LIVE".into(),
+            updated_at: "t+0".into(),
+        });
+        state.agents.selected_mission = Some("mis-401".into());
+        state.agents.mission_selected = 0;
+        state.agents.agents.push(nit_core::AgentLane {
+            id: "gpt-5.1-codex-mini".into(),
+            role: "gpt-5.1-codex-mini".into(),
+            lane: "Codex".into(),
+            kind: nit_core::AgentLaneKind::Codex,
+            status: AgentStatus::Idle,
+            heartbeat_age_secs: 0,
+            queue_len: 0,
+            current_mission: Some("mis-401".into()),
+            last_message: String::new(),
+        });
+        state.agents.selected_agent = Some("gpt-5.1-codex-mini".into());
+        state.agents.roster_selected = 0;
+        state.agents.messages.push(AgentMessage {
+            at: "t+1".into(),
+            channel: AgentChannel::Agent,
+            agent_id: None,
+            mission_id: Some("mis-401".into()),
+            text: "persist me".into(),
+        });
+
+        assert!(reset_roster_context(&mut state, &SwarmRuntime::default()));
+
+        let run_path = state
+            .workspace_root
+            .join(".nit/agents/runs/mis-401/run.json");
+        let run: serde_json::Value =
+            serde_json::from_slice(&fs::read(&run_path).expect("read run")).expect("parse run");
+        assert_eq!(run["messages"][0]["text"], "persist me");
+    }
+
+    #[test]
+    fn reset_context_persists_ad_hoc_artifacts_before_clearing_live_thread() {
+        let mut state = state_for_test_in_workspace("adhoc-persist");
+        state.agents.agents.push(nit_core::AgentLane {
+            id: "gpt-5.1-codex-mini".into(),
+            role: "gpt-5.1-codex-mini".into(),
+            lane: "Codex".into(),
+            kind: nit_core::AgentLaneKind::Codex,
+            status: AgentStatus::Idle,
+            heartbeat_age_secs: 0,
+            queue_len: 0,
+            current_mission: None,
+            last_message: String::new(),
+        });
+        state.agents.selected_mission = None;
+        state.agents.selected_agent = Some("gpt-5.1-codex-mini".into());
+        state.agents.roster_selected = state.agents.agents.len().saturating_sub(1);
+        state.agents.messages.push(AgentMessage {
+            at: "t+1".into(),
+            channel: AgentChannel::Agent,
+            agent_id: None,
+            mission_id: None,
+            text: "keep this prompt".into(),
+        });
+        state.agents.messages.push(AgentMessage {
+            at: "t+2".into(),
+            channel: AgentChannel::Agent,
+            agent_id: Some("gpt-5.1-codex-mini".into()),
+            mission_id: None,
+            text: "keep this reply".into(),
+        });
+        state
+            .agents
+            .codex_thread_ids
+            .insert("gpt-5.1-codex-mini".into(), "thread-adhoc".into());
+
+        assert!(reset_roster_context(&mut state, &SwarmRuntime::default()));
+
+        let run_path = state
+            .workspace_root
+            .join(".nit/agents/ad-hoc/gpt-5_1-codex-mini/run.json");
+        let run: serde_json::Value =
+            serde_json::from_slice(&fs::read(&run_path).expect("read run")).expect("parse run");
+        assert_eq!(run["messages"][0]["text"], "keep this prompt");
+        assert_eq!(run["messages"][1]["text"], "keep this reply");
+        assert_eq!(run["codex_thread_id"], "thread-adhoc");
     }
 
     #[test]
@@ -11671,7 +12792,8 @@ mod tests {
         assert_eq!(line_idx, 0);
         assert_eq!(col, 0);
         let flattened = lines.concat();
-        assert!(flattened.contains("hello world"));
+        assert!(flattened.contains("[Planner]"));
+        assert!(flattened.contains("done (see ARTIFACTS)"));
     }
 
     #[test]
@@ -11820,6 +12942,10 @@ mod tests {
                 last_message: "idle".into(),
             },
         ];
+        state
+            .agents
+            .roster_expanded_backend_kinds
+            .insert(nit_core::AgentLaneKind::Mock);
         state.agents.roster_selected = 1;
 
         let mut input_state = InputState::new();
@@ -11847,7 +12973,9 @@ mod tests {
             ])
             .split(inner);
         let body_area = chunks[2];
-        let agent_row_line = agent_ops_view::roster_body_offset(&state);
+        // The roster body now includes backend group headers; skip the first header row to land
+        // on the first actual agent row.
+        let agent_row_line = agent_ops_view::roster_body_offset(&state) + 1;
         let click = MouseEvent {
             kind: MouseEventKind::Down(crossterm::event::MouseButton::Left),
             column: body_area.x.saturating_add(10),
@@ -11864,6 +12992,281 @@ mod tests {
             &theme
         ));
         assert_eq!(state.agents.roster_selected, 0);
+    }
+
+    #[test]
+    fn roster_backend_row_click_toggles_backend_expansion() {
+        let mut state = state_for_test();
+        state.focus = PaneId::Editor;
+        state.mode = Mode::Normal;
+        state.agents.dock_tab = AgentOpsTab::Roster;
+        state.agents.agents = vec![nit_core::AgentLane {
+            id: "agent-1".into(),
+            role: "Planner".into(),
+            lane: "Local".into(),
+            kind: nit_core::AgentLaneKind::Mock,
+            status: nit_core::AgentStatus::Idle,
+            heartbeat_age_secs: 0,
+            queue_len: 0,
+            current_mission: None,
+            last_message: "idle".into(),
+        }];
+
+        let mut input_state = InputState::new();
+        let mut clipboard = None;
+        let theme = Theme::default();
+        let screen = ratatui::layout::Rect {
+            x: 0,
+            y: 0,
+            width: 200,
+            height: 42,
+        };
+        let layout = layout::split(screen);
+        let inner = ratatui::widgets::Block::default()
+            .borders(ratatui::widgets::Borders::ALL)
+            .inner(layout.job);
+        let chunks = ratatui::layout::Layout::default()
+            .direction(ratatui::layout::Direction::Vertical)
+            .constraints([
+                ratatui::layout::Constraint::Length(1),
+                ratatui::layout::Constraint::Length(1),
+                ratatui::layout::Constraint::Min(1),
+                ratatui::layout::Constraint::Length(1),
+            ])
+            .split(inner);
+        let body_area = chunks[2];
+        let backend_row_line = agent_ops_view::roster_body_offset(&state);
+        let click = MouseEvent {
+            kind: MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            column: body_area.x.saturating_add(6),
+            row: body_area.y.saturating_add(backend_row_line as u16),
+            modifiers: KeyModifiers::NONE,
+        };
+
+        assert!(handle_mouse_down(
+            click,
+            screen,
+            &mut state,
+            &mut input_state,
+            &mut clipboard,
+            &theme
+        ));
+        assert!(state
+            .agents
+            .roster_expanded_backend_kinds
+            .contains(&nit_core::AgentLaneKind::Mock));
+        assert_eq!(
+            state.agents.roster_selected_backend,
+            Some(nit_core::AgentLaneKind::Mock)
+        );
+
+        assert!(handle_mouse_down(
+            click,
+            screen,
+            &mut state,
+            &mut input_state,
+            &mut clipboard,
+            &theme
+        ));
+        assert!(!state
+            .agents
+            .roster_expanded_backend_kinds
+            .contains(&nit_core::AgentLaneKind::Mock));
+        assert_eq!(
+            state.agents.roster_selected_backend,
+            Some(nit_core::AgentLaneKind::Mock)
+        );
+    }
+
+    #[test]
+    fn roster_keyboard_navigation_includes_backend_rows() {
+        let mut state = state_for_test();
+        state.agents.dock_tab = AgentOpsTab::Roster;
+        state.agents.agents = vec![
+            nit_core::AgentLane {
+                id: "gpt-5.4".into(),
+                role: "gpt-5.4".into(),
+                lane: "Codex".into(),
+                kind: nit_core::AgentLaneKind::Codex,
+                status: nit_core::AgentStatus::Idle,
+                heartbeat_age_secs: 0,
+                queue_len: 0,
+                current_mission: None,
+                last_message: String::new(),
+            },
+            nit_core::AgentLane {
+                id: "claude-sonnet-4".into(),
+                role: "claude-sonnet-4".into(),
+                lane: "Claude".into(),
+                kind: nit_core::AgentLaneKind::Claude,
+                status: nit_core::AgentStatus::Idle,
+                heartbeat_age_secs: 0,
+                queue_len: 0,
+                current_mission: None,
+                last_message: String::new(),
+            },
+        ];
+        state
+            .agents
+            .roster_expanded_backend_kinds
+            .insert(nit_core::AgentLaneKind::Codex);
+        state
+            .agents
+            .roster_expanded_backend_kinds
+            .insert(nit_core::AgentLaneKind::Claude);
+        state.agents.roster_selected = 1;
+
+        assert!(move_agent_ops_selection(
+            &mut state,
+            &SwarmRuntime::default(),
+            -1
+        ));
+        assert_eq!(
+            agent_ops_view::roster_selected_row(&state),
+            Some(agent_ops_view::RosterSelectableRow::Backend {
+                backend: nit_core::AgentLaneKind::Claude,
+            })
+        );
+
+        assert!(move_agent_ops_selection(
+            &mut state,
+            &SwarmRuntime::default(),
+            -1
+        ));
+        assert_eq!(
+            agent_ops_view::roster_selected_row(&state),
+            Some(agent_ops_view::RosterSelectableRow::Agent { agent_idx: 0 })
+        );
+        assert_eq!(state.agents.roster_selected_backend, None);
+    }
+
+    #[test]
+    fn roster_enter_toggles_selected_backend() {
+        let mut state = state_for_test();
+        state.agents.dock_tab = AgentOpsTab::Roster;
+        state.agents.agents.push(nit_core::AgentLane {
+            id: "local".into(),
+            role: "Local".into(),
+            lane: "Local".into(),
+            kind: nit_core::AgentLaneKind::Mock,
+            status: nit_core::AgentStatus::Idle,
+            heartbeat_age_secs: 0,
+            queue_len: 0,
+            current_mission: None,
+            last_message: String::new(),
+        });
+
+        let mut vitals = VitalsState::default();
+        let swarm = SwarmRuntime::default();
+
+        assert_eq!(
+            agent_ops_view::roster_selected_row(&state),
+            Some(agent_ops_view::RosterSelectableRow::Backend {
+                backend: nit_core::AgentLaneKind::Mock,
+            })
+        );
+        assert!(handle_agent_ops_key(
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &mut state,
+            &mut vitals,
+            None,
+            &swarm,
+        ));
+        assert!(state
+            .agents
+            .roster_expanded_backend_kinds
+            .contains(&nit_core::AgentLaneKind::Mock));
+        assert_eq!(
+            state.agents.roster_selected_backend,
+            Some(nit_core::AgentLaneKind::Mock)
+        );
+
+        assert!(handle_agent_ops_key(
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &mut state,
+            &mut vitals,
+            None,
+            &swarm,
+        ));
+        assert!(!state
+            .agents
+            .roster_expanded_backend_kinds
+            .contains(&nit_core::AgentLaneKind::Mock));
+        assert_eq!(
+            state.agents.roster_selected_backend,
+            Some(nit_core::AgentLaneKind::Mock)
+        );
+    }
+
+    #[test]
+    fn help_popup_scroll_clamps_before_moving_back_up() {
+        let mut state = state_for_test();
+        state.show_help = true;
+        let theme = Theme::default();
+        let screen = ratatui::layout::Rect {
+            x: 0,
+            y: 0,
+            width: 120,
+            height: 36,
+        };
+        let (max_scroll, _) = help_popup_scroll_metrics(screen, &theme);
+        state.help_scroll = max_scroll.saturating_add(25);
+
+        assert!(handle_help_popup_key(
+            &KeyEvent::new(KeyCode::Up, KeyModifiers::NONE),
+            &mut state,
+            screen,
+            &theme,
+        ));
+        assert_eq!(state.help_scroll, max_scroll.saturating_sub(1));
+    }
+
+    #[test]
+    fn artifacts_popup_scroll_clamps_before_moving_back_up() {
+        let mut state = state_for_test();
+        state.agents.artifacts_popup_open = true;
+        state.agents.selected_agent = Some("planner".into());
+        state.agents.agents.push(nit_core::AgentLane {
+            id: "planner".into(),
+            role: "Planner".into(),
+            lane: "Local".into(),
+            kind: nit_core::AgentLaneKind::Mock,
+            status: nit_core::AgentStatus::Idle,
+            heartbeat_age_secs: 0,
+            queue_len: 0,
+            current_mission: None,
+            last_message: String::new(),
+        });
+        state.agents.messages.push(AgentMessage {
+            at: "10:00:00".into(),
+            channel: AgentChannel::Agent,
+            agent_id: None,
+            mission_id: None,
+            text: (0..80).map(|idx| format!("prompt-line-{idx}\n")).collect(),
+        });
+
+        let theme = Theme::default();
+        let screen = ratatui::layout::Rect {
+            x: 0,
+            y: 0,
+            width: 120,
+            height: 36,
+        };
+        let swarm = SwarmRuntime::default();
+        let (max_scroll, _) = artifacts_popup_scroll_metrics(&state, &swarm, screen, &theme);
+        state.agents.artifacts_popup_scroll = max_scroll.saturating_add(25);
+
+        assert!(handle_artifacts_popup_key(
+            &KeyEvent::new(KeyCode::Up, KeyModifiers::NONE),
+            &mut state,
+            &swarm,
+            screen,
+            &theme,
+        ));
+        assert_eq!(
+            state.agents.artifacts_popup_scroll,
+            max_scroll.saturating_sub(1)
+        );
     }
 
     #[test]
@@ -11888,7 +13291,7 @@ mod tests {
         state.agents.messages.push(AgentMessage {
             at: "10:00:00".into(),
             channel: AgentChannel::Agent,
-            agent_id: Some("planner".into()),
+            agent_id: None,
             mission_id: None,
             text: "selection precision".into(),
         });
@@ -12059,7 +13462,7 @@ mod tests {
             state.agents.messages.push(AgentMessage {
                 at: format!("10:00:{:02}", i % 60),
                 channel: AgentChannel::Agent,
-                agent_id: Some("planner".into()),
+                agent_id: None,
                 mission_id: None,
                 text: format!("payload-{i:03}"),
             });
@@ -12704,8 +14107,8 @@ mod tests {
         let down = MouseEvent {
             kind: MouseEventKind::Down(crossterm::event::MouseButton::Left),
             column: text_area.x,
-            // Agent messages include a top padding row, then ECG header, then message text.
-            row: text_area.y.saturating_add(2),
+            // Agent messages are rendered as: badge header, then a "done" placeholder.
+            row: text_area.y.saturating_add(1),
             modifiers: KeyModifiers::NONE,
         };
         assert!(handle_mouse_down(
@@ -12739,7 +14142,7 @@ mod tests {
             .yank
             .as_deref()
             .unwrap_or_default()
-            .contains("selection copy works"));
+            .contains("done (see ARTIFACTS)"));
     }
 
     #[test]
@@ -12833,7 +14236,7 @@ mod tests {
     }
 
     #[test]
-    fn agent_console_selection_does_not_strip_markdown_table_pipes_in_agent_output() {
+    fn agent_console_selection_does_not_strip_markdown_table_pipes_in_user_prompt() {
         let mut state = state_for_test();
         state.agents.selected_mission = None;
         state.agents.selected_agent = None;
@@ -12853,7 +14256,7 @@ mod tests {
         state.agents.messages.push(AgentMessage {
             at: "10:00:00".into(),
             channel: AgentChannel::Agent,
-            agent_id: Some("coder".into()),
+            agent_id: None,
             mission_id: None,
             text: "intro\n| table row |".into(),
         });
@@ -12887,7 +14290,7 @@ mod tests {
             text.contains("| table row |"),
             "unexpected stripped text: {text:?}"
         );
-        assert_eq!(text, line.as_str());
+        assert_eq!(text, "| table row |");
     }
 
     #[test]
@@ -13066,6 +14469,33 @@ mod tests {
     }
 
     #[test]
+    fn render_verify_markdown_includes_gate_summary_and_output_excerpt() {
+        let markdown = render_verify_markdown(
+            "mis-012",
+            Some("rust-ci"),
+            "auto",
+            Some(&GateReport {
+                overall_ok: false,
+                gates: vec![GateReportGate {
+                    name: "clippy".into(),
+                    command: "cargo clippy --workspace --all-targets".into(),
+                    ok: false,
+                    status: Some("fail".into()),
+                    notes: Some("lint regression".into()),
+                }],
+            }),
+            Some("warning: something went wrong"),
+        );
+
+        assert!(markdown.contains("# Verify"));
+        assert!(markdown.contains("Mission: `mis-012`"));
+        assert!(markdown.contains("Bundle: `rust-ci`"));
+        assert!(markdown.contains("`clippy`: `FAIL`"));
+        assert!(markdown.contains("`report.json`"));
+        assert!(markdown.contains("warning: something went wrong"));
+    }
+
+    #[test]
     fn agent_ops_left_right_arrows_switch_tabs() {
         let mut state = state_for_test();
         state.focus = PaneId::JobOutput;
@@ -13233,6 +14663,55 @@ mod tests {
             &mut syntax,
             area
         ));
+    }
+
+    #[test]
+    fn toggle_roster_priority_supports_claude_and_gemini_models() {
+        let mut state = state_for_test();
+        state
+            .agents
+            .roster_expanded_backend_kinds
+            .insert(nit_core::AgentLaneKind::Claude);
+        state
+            .agents
+            .roster_expanded_backend_kinds
+            .insert(nit_core::AgentLaneKind::Gemini);
+        state.agents.agents.push(nit_core::AgentLane {
+            id: "claude-sonnet-4".into(),
+            role: "claude-sonnet-4".into(),
+            lane: "Claude".into(),
+            kind: nit_core::AgentLaneKind::Claude,
+            status: AgentStatus::Idle,
+            heartbeat_age_secs: 0,
+            queue_len: 0,
+            current_mission: None,
+            last_message: String::new(),
+        });
+        state.agents.agents.push(nit_core::AgentLane {
+            id: "gemini-2.5-pro".into(),
+            role: "gemini-2.5-pro".into(),
+            lane: "Gemini".into(),
+            kind: nit_core::AgentLaneKind::Gemini,
+            status: AgentStatus::Idle,
+            heartbeat_age_secs: 0,
+            queue_len: 0,
+            current_mission: None,
+            last_message: String::new(),
+        });
+
+        state.agents.roster_selected = 0;
+        assert!(toggle_roster_priority(&mut state));
+        assert!(state
+            .agents
+            .swarm_priority_agent_ids
+            .contains("claude-sonnet-4"));
+
+        state.agents.roster_selected = 1;
+        assert!(toggle_roster_priority(&mut state));
+        assert!(state
+            .agents
+            .swarm_priority_agent_ids
+            .contains("gemini-2.5-pro"));
     }
 
     #[test]

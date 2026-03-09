@@ -91,6 +91,8 @@ impl AgentBusEvent {
                         .entry(mission_id.to_string())
                         .or_insert(0);
                     *entry = entry.saturating_add(delta);
+                } else if let Some(agent_id) = message.agent_id.as_deref() {
+                    mark_ad_hoc_provenance_dirty(state, agent_id);
                 }
                 state.agents.messages.push(message.clone());
                 // If the operator was following the tail, keep following it.
@@ -306,6 +308,9 @@ impl AgentBusEvent {
                         .agents
                         .codex_thread_ids
                         .insert(agent_id.clone(), thread_id.to_string());
+                    mark_ad_hoc_provenance_dirty(state, agent_id);
+                } else {
+                    mark_ad_hoc_provenance_dirty(state, agent_id);
                 }
                 if let Some(mission_id) = mission_id.as_deref() {
                     let delta = estimate_codex_context_tokens(message);
@@ -405,6 +410,20 @@ fn mark_mission_provenance_dirty(state: &mut AppState, mission_id: &str) {
             .agents
             .pending_provenance_mission_ids
             .push(mission_id.to_string());
+    }
+}
+
+fn mark_ad_hoc_provenance_dirty(state: &mut AppState, agent_id: &str) {
+    if state
+        .agents
+        .pending_provenance_agent_ids
+        .iter()
+        .all(|id| id != agent_id)
+    {
+        state
+            .agents
+            .pending_provenance_agent_ids
+            .push(agent_id.to_string());
     }
 }
 

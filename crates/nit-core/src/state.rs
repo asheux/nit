@@ -204,6 +204,7 @@ pub enum UiSelectionPane {
     GateMonitor,
     GamesPetriDish,
     HelpPopup,
+    ArtifactsPopup,
     GamesAnalysisPopup,
     GamesRunBrowserPopup,
     GamesReplayPopup,
@@ -246,8 +247,8 @@ impl AgentOpsTab {
             AgentOpsTab::Mcp => "MCP",
             AgentOpsTab::Alerts => "ALERTS",
             AgentOpsTab::Patch => "PATCH",
-            AgentOpsTab::Evidence => "EVIDENCE",
-            AgentOpsTab::Diagnostics => "DIAGNOSTICS",
+            AgentOpsTab::Evidence => "ARTIFACTS",
+            AgentOpsTab::Diagnostics => "DIAG",
             AgentOpsTab::Scratchpad => "SCRATCHPAD",
         }
     }
@@ -256,11 +257,12 @@ impl AgentOpsTab {
         match self {
             AgentOpsTab::Roster => AgentOpsTab::Missions,
             AgentOpsTab::Missions => AgentOpsTab::Dag,
-            AgentOpsTab::Dag => AgentOpsTab::Mcp,
+            AgentOpsTab::Dag => AgentOpsTab::Evidence,
+            AgentOpsTab::Evidence => AgentOpsTab::Mcp,
             AgentOpsTab::Mcp => AgentOpsTab::Alerts,
             AgentOpsTab::Alerts => AgentOpsTab::Diagnostics,
-            // Legacy/hidden tabs: skip forward into Diagnostics.
-            AgentOpsTab::Patch | AgentOpsTab::Evidence => AgentOpsTab::Diagnostics,
+            // Legacy/hidden patch tab: skip forward into Artifacts.
+            AgentOpsTab::Patch => AgentOpsTab::Evidence,
             AgentOpsTab::Diagnostics => AgentOpsTab::Scratchpad,
             AgentOpsTab::Scratchpad => AgentOpsTab::Roster,
         }
@@ -271,10 +273,11 @@ impl AgentOpsTab {
             AgentOpsTab::Roster => AgentOpsTab::Scratchpad,
             AgentOpsTab::Missions => AgentOpsTab::Roster,
             AgentOpsTab::Dag => AgentOpsTab::Missions,
-            AgentOpsTab::Mcp => AgentOpsTab::Dag,
+            AgentOpsTab::Evidence => AgentOpsTab::Dag,
+            AgentOpsTab::Mcp => AgentOpsTab::Evidence,
             AgentOpsTab::Alerts => AgentOpsTab::Mcp,
-            // Legacy/hidden tabs: skip backward into Alerts.
-            AgentOpsTab::Patch | AgentOpsTab::Evidence => AgentOpsTab::Alerts,
+            // Legacy/hidden patch tab: skip backward into Alerts.
+            AgentOpsTab::Patch => AgentOpsTab::Alerts,
             AgentOpsTab::Diagnostics => AgentOpsTab::Alerts,
             AgentOpsTab::Scratchpad => AgentOpsTab::Diagnostics,
         }
@@ -295,8 +298,8 @@ impl AgentConsoleTab {
         match self {
             AgentConsoleTab::Thread => "THREAD",
             AgentConsoleTab::Patch => "PATCH",
-            AgentConsoleTab::Evidence => "EVIDENCE",
-            AgentConsoleTab::Diagnostics => "DIAGNOSTICS",
+            AgentConsoleTab::Evidence => "ARTIFACTS",
+            AgentConsoleTab::Diagnostics => "DIAG",
             AgentConsoleTab::Scratchpad => "SCRATCHPAD",
         }
     }
@@ -421,7 +424,9 @@ pub enum AgentChannel {
     Broadcast,
 }
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
+#[derive(
+    Copy, Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize, Default,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentLaneKind {
     #[default]
@@ -429,6 +434,7 @@ pub enum AgentLaneKind {
     Mock,
     Codex,
     Claude,
+    Gemini,
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -450,6 +456,17 @@ impl AgentLane {
         matches!(self.kind, AgentLaneKind::Codex)
             || (matches!(self.kind, AgentLaneKind::Unknown)
                 && self.lane.eq_ignore_ascii_case("codex"))
+    }
+
+    pub fn supports_swarm_priority(&self) -> bool {
+        let backend_supports_priority = matches!(
+            self.kind,
+            AgentLaneKind::Codex | AgentLaneKind::Claude | AgentLaneKind::Gemini
+        ) || (matches!(self.kind, AgentLaneKind::Unknown)
+            && (self.lane.eq_ignore_ascii_case("codex")
+                || self.lane.eq_ignore_ascii_case("claude")
+                || self.lane.eq_ignore_ascii_case("gemini")));
+        backend_supports_priority && !self.role.eq_ignore_ascii_case(&self.lane)
     }
 }
 
@@ -632,11 +649,20 @@ pub struct AgentsState {
     pub diag_events: Vec<AgentDiagnosticEvent>,
     pub mcp: McpStatus,
     pub roster_selected: usize,
+    /// Selected backend group row in the roster, when keyboard/mouse focus is on a backend
+    /// instead of a concrete model row.
+    /// Runtime-only; UI navigation state.
+    #[serde(skip)]
+    pub roster_selected_backend: Option<AgentLaneKind>,
     /// When selecting in the roster "tree" under the selected model, this stores the selected
     /// child-row (Size/Role) leaf index for keyboard navigation.
     /// Runtime-only; UI navigation state.
     #[serde(skip)]
     pub roster_tree_selected: Option<RosterTreeSelection>,
+    /// Backends whose model rows are expanded in the roster.
+    /// Runtime-only; UI navigation state.
+    #[serde(skip, default)]
+    pub roster_expanded_backend_kinds: HashSet<AgentLaneKind>,
     /// Agents whose roster tree (Size/Role) is collapsed.
     /// Runtime-only; UI navigation state.
     #[serde(skip, default)]
@@ -645,7 +671,19 @@ pub struct AgentsState {
     pub alert_selected: usize,
     pub patch_selected: usize,
     #[serde(skip)]
+    pub artifacts_selected: usize,
+    #[serde(skip)]
+    pub artifacts_popup_open: bool,
+    #[serde(skip)]
+    pub artifacts_popup_scroll: usize,
+    #[serde(skip)]
     pub ops_scroll: usize,
+    /// Job output viewport dimensions (Agent Ops body area). Runtime-only.
+    #[serde(skip)]
+    pub ops_viewport_width: usize,
+    /// Job output viewport dimensions (Agent Ops body area). Runtime-only.
+    #[serde(skip)]
+    pub ops_viewport_height: usize,
     #[serde(skip)]
     pub console_scroll: usize,
     #[serde(skip)]
@@ -654,6 +692,8 @@ pub struct AgentsState {
     pub event_epoch: u64,
     #[serde(skip)]
     pub pending_provenance_mission_ids: Vec<String>,
+    #[serde(skip)]
+    pub pending_provenance_agent_ids: Vec<String>,
     #[serde(skip)]
     pub pending_legacy_notes_alert: Option<String>,
     /// Codex model metadata (effective context window tokens) keyed by model slug.
@@ -719,6 +759,22 @@ pub struct AgentsState {
     /// Runtime-only.
     #[serde(skip)]
     pub claude_cli_available: bool,
+    /// Whether the `gemini` CLI is available in PATH (used for backend inventory in the roster UI).
+    /// Runtime-only.
+    #[serde(skip)]
+    pub gemini_cli_available: bool,
+    /// Claude models discovered from the backend (CLI/API). Runtime-only.
+    #[serde(skip)]
+    pub claude_models: Vec<String>,
+    /// Claude model discovery error (if any). Runtime-only.
+    #[serde(skip)]
+    pub claude_models_error: Option<String>,
+    /// Gemini models discovered from the backend (CLI/API). Runtime-only.
+    #[serde(skip)]
+    pub gemini_models: Vec<String>,
+    /// Gemini model discovery error (if any). Runtime-only.
+    #[serde(skip)]
+    pub gemini_models_error: Option<String>,
 }
 
 fn chat_input_scroll_default() -> usize {
@@ -857,16 +913,24 @@ impl AgentsState {
                 last_error: None,
             },
             roster_selected: 0,
+            roster_selected_backend: None,
             roster_tree_selected: None,
+            roster_expanded_backend_kinds: HashSet::new(),
             roster_tree_collapsed_agent_ids: HashSet::new(),
             mission_selected: 0,
             alert_selected: 0,
             patch_selected: 0,
+            artifacts_selected: 0,
+            artifacts_popup_open: false,
+            artifacts_popup_scroll: 0,
             ops_scroll: 0,
+            ops_viewport_width: 0,
+            ops_viewport_height: 0,
             console_scroll: usize::MAX,
             console_rows_cache: AgentConsoleRowsCache::default(),
             event_epoch: 0,
             pending_provenance_mission_ids: vec!["mis-001".into()],
+            pending_provenance_agent_ids: Vec::new(),
             pending_legacy_notes_alert: None,
             codex_effective_context_window_tokens: HashMap::new(),
             codex_estimated_tokens_used_by_mission: HashMap::new(),
@@ -883,6 +947,11 @@ impl AgentsState {
             queued_codex_turns: VecDeque::new(),
             codex_cli_available: false,
             claude_cli_available: false,
+            gemini_cli_available: false,
+            claude_models: Vec::new(),
+            claude_models_error: None,
+            gemini_models: Vec::new(),
+            gemini_models_error: None,
         }
     }
 
@@ -941,16 +1010,24 @@ impl Default for AgentsState {
                 last_error: None,
             },
             roster_selected: 0,
+            roster_selected_backend: None,
             roster_tree_selected: None,
+            roster_expanded_backend_kinds: HashSet::new(),
             roster_tree_collapsed_agent_ids: HashSet::new(),
             mission_selected: 0,
             alert_selected: 0,
             patch_selected: 0,
+            artifacts_selected: 0,
+            artifacts_popup_open: false,
+            artifacts_popup_scroll: 0,
             ops_scroll: 0,
+            ops_viewport_width: 0,
+            ops_viewport_height: 0,
             console_scroll: usize::MAX,
             console_rows_cache: AgentConsoleRowsCache::default(),
             event_epoch: 0,
             pending_provenance_mission_ids: Vec::new(),
+            pending_provenance_agent_ids: Vec::new(),
             pending_legacy_notes_alert: None,
             codex_effective_context_window_tokens: HashMap::new(),
             codex_estimated_tokens_used_by_mission: HashMap::new(),
@@ -967,6 +1044,11 @@ impl Default for AgentsState {
             queued_codex_turns: VecDeque::new(),
             codex_cli_available: false,
             claude_cli_available: false,
+            gemini_cli_available: false,
+            claude_models: Vec::new(),
+            claude_models_error: None,
+            gemini_models: Vec::new(),
+            gemini_models_error: None,
         }
     }
 }
