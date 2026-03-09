@@ -21,6 +21,14 @@ fn is_swarm_clone_agent_id(agent_id: &str) -> bool {
     swarm_clone_base_id(agent_id).is_some()
 }
 
+fn is_swarm_clone_for_mission(agent_id: &str, mission_id: &str) -> bool {
+    let Some((_base_id, rest)) = agent_id.split_once("#swarm-") else {
+        return false;
+    };
+    rest.strip_prefix(mission_id)
+        .is_some_and(|suffix| suffix.starts_with('-'))
+}
+
 fn copy_codex_runtime_metadata(state: &mut AppState, base_id: &str, clone_id: &str) {
     if let Some(tokens) = state
         .agents
@@ -98,6 +106,125 @@ fn insert_swarm_clone_lane(state: &mut AppState, base_id: &str, clone_lane: nit_
         }
     }
     state.agents.agents.insert(insert_pos, clone_lane);
+}
+
+fn cleanup_swarm_clones_for_mission(state: &mut AppState, mission_id: &str) {
+    let clone_ids = state
+        .agents
+        .agents
+        .iter()
+        .filter(|lane| is_swarm_clone_for_mission(lane.id.as_str(), mission_id))
+        .map(|lane| lane.id.clone())
+        .collect::<HashSet<_>>();
+    if clone_ids.is_empty() {
+        return;
+    }
+
+    state
+        .agents
+        .queued_codex_turns
+        .retain(|turn| !clone_ids.contains(turn.agent_id.as_str()));
+
+    for clone_id in clone_ids.iter() {
+        state.agents.active_turns.remove(clone_id);
+        state.agents.codex_thread_ids.remove(clone_id);
+        state.agents.codex_used_tokens.remove(clone_id);
+        state.agents.codex_context_remaining_pct.remove(clone_id);
+        state
+            .agents
+            .codex_effective_context_window_tokens
+            .remove(clone_id);
+        state.agents.codex_default_reasoning_effort.remove(clone_id);
+        state
+            .agents
+            .codex_supported_reasoning_efforts
+            .remove(clone_id);
+        state
+            .agents
+            .codex_selected_reasoning_effort
+            .remove(clone_id);
+        state.agents.swarm_role_by_agent_id.remove(clone_id);
+        state.agents.swarm_priority_agent_ids.remove(clone_id);
+        state
+            .agents
+            .roster_tree_collapsed_agent_ids
+            .remove(clone_id);
+    }
+
+    let mut remove_mission_thread_ids = false;
+    if let Some(map) = state.agents.codex_mission_thread_ids.get_mut(mission_id) {
+        map.retain(|agent_id, _| !clone_ids.contains(agent_id.as_str()));
+        remove_mission_thread_ids = map.is_empty();
+    }
+    if remove_mission_thread_ids {
+        state.agents.codex_mission_thread_ids.remove(mission_id);
+    }
+
+    let mut remove_mission_used_tokens = false;
+    if let Some(map) = state.agents.codex_mission_used_tokens.get_mut(mission_id) {
+        map.retain(|agent_id, _| !clone_ids.contains(agent_id.as_str()));
+        remove_mission_used_tokens = map.is_empty();
+    }
+    if remove_mission_used_tokens {
+        state.agents.codex_mission_used_tokens.remove(mission_id);
+    }
+
+    let mut remove_mission_context_remaining = false;
+    if let Some(map) = state
+        .agents
+        .codex_mission_context_remaining_pct
+        .get_mut(mission_id)
+    {
+        map.retain(|agent_id, _| !clone_ids.contains(agent_id.as_str()));
+        remove_mission_context_remaining = map.is_empty();
+    }
+    if remove_mission_context_remaining {
+        state
+            .agents
+            .codex_mission_context_remaining_pct
+            .remove(mission_id);
+    }
+
+    let old_selected_agent = state.agents.selected_agent.clone();
+    let old_roster_selected = state.agents.roster_selected;
+    let selected_clone_removed = old_selected_agent
+        .as_deref()
+        .is_some_and(|agent_id| clone_ids.contains(agent_id));
+
+    state
+        .agents
+        .agents
+        .retain(|lane| !clone_ids.contains(lane.id.as_str()));
+
+    if state.agents.agents.is_empty() {
+        state.agents.selected_agent = None;
+        state.agents.roster_selected = 0;
+        state.agents.roster_tree_selected = None;
+        return;
+    }
+
+    if let Some(selected_id) = old_selected_agent.as_deref() {
+        if let Some(idx) = state
+            .agents
+            .agents
+            .iter()
+            .position(|lane| lane.id == selected_id)
+        {
+            state.agents.selected_agent = Some(selected_id.to_string());
+            state.agents.roster_selected = idx;
+            return;
+        }
+    }
+
+    state.agents.roster_selected = old_roster_selected.min(state.agents.agents.len() - 1);
+    state.agents.selected_agent = state
+        .agents
+        .agents
+        .get(state.agents.roster_selected)
+        .map(|lane| lane.id.clone());
+    if selected_clone_removed {
+        state.agents.roster_tree_selected = None;
+    }
 }
 
 fn ensure_size_clones(
@@ -208,7 +335,7 @@ pub enum SwarmSize {
 enum SwarmTemplate {
     /// Parallel task splitting (v1-style): keep tasks independent and preferably one per agent.
     Parallel,
-    /// "Lab" workflow: read-only research/review feeding a single-writer integrator.
+    /// "Lab" workflow: read-only analysis/proposal/review feeding a single-writer integrator.
     Lab,
     /// "Bulk orchestration": propose many candidate solutions in parallel, then converge via a
     /// judge step feeding a single-writer integrator.
@@ -245,10 +372,102 @@ impl SwarmTemplate {
     }
 }
 
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum SwarmMissionKind {
+    General,
+    Research,
+    ComputationalResearch,
+}
+
+impl SwarmMissionKind {
+    fn label(&self) -> &'static str {
+        match self {
+            SwarmMissionKind::General => "general",
+            SwarmMissionKind::Research => "research",
+            SwarmMissionKind::ComputationalResearch => COMPUTATIONAL_RESEARCH_ROLE,
+        }
+    }
+
+    fn allows_research_roles(&self) -> bool {
+        !matches!(self, SwarmMissionKind::General)
+    }
+
+    fn allows_role(&self, role: &str) -> bool {
+        match normalize_role_label(role).as_deref() {
+            Some("research") => matches!(
+                self,
+                SwarmMissionKind::Research | SwarmMissionKind::ComputationalResearch
+            ),
+            Some(COMPUTATIONAL_RESEARCH_ROLE) => {
+                matches!(self, SwarmMissionKind::ComputationalResearch)
+            }
+            _ => true,
+        }
+    }
+}
+
+pub(crate) fn parse_swarm_mission_kind(value: Option<&str>) -> Option<SwarmMissionKind> {
+    let value = value?.trim();
+    if value.is_empty() {
+        return None;
+    }
+    if value.eq_ignore_ascii_case("general")
+        || value.eq_ignore_ascii_case("default")
+        || value.eq_ignore_ascii_case("code")
+        || value.eq_ignore_ascii_case("coding")
+    {
+        return Some(SwarmMissionKind::General);
+    }
+    if value.eq_ignore_ascii_case("research") {
+        return Some(SwarmMissionKind::Research);
+    }
+    if value.eq_ignore_ascii_case("computational")
+        || value.eq_ignore_ascii_case("computational-research")
+        || value.eq_ignore_ascii_case("computational research")
+        || value.eq_ignore_ascii_case("comp-research")
+        || value.eq_ignore_ascii_case("comp_research")
+    {
+        return Some(SwarmMissionKind::ComputationalResearch);
+    }
+    None
+}
+
+pub(crate) fn explicit_swarm_mission_kind_from_prompt(
+    root_prompt: &str,
+) -> Option<SwarmMissionKind> {
+    for line in root_prompt.lines() {
+        let trimmed = line.trim().trim_start_matches(['-', '*', '•']).trim_start();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let lower = trimmed.to_ascii_lowercase();
+        let Some(rest) = lower.strip_prefix("mission:") else {
+            continue;
+        };
+        let value = rest.trim();
+        if value.is_empty() {
+            continue;
+        }
+        let value = value
+            .trim_matches(|ch: char| matches!(ch, '`' | '"' | '\''))
+            .trim();
+        let token = value
+            .split_whitespace()
+            .next()
+            .unwrap_or_default()
+            .trim_matches(|ch: char| matches!(ch, ',' | '.' | ';' | ')'));
+        if let Some(kind) = parse_swarm_mission_kind(Some(token)) {
+            return Some(kind);
+        }
+    }
+    None
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SwarmCommand {
     pub size: SwarmSize,
     pub template: Option<String>,
+    pub mission_kind: Option<SwarmMissionKind>,
     pub prompt: String,
 }
 
@@ -280,7 +499,11 @@ pub fn parse_swarm_command(raw: &str) -> Option<SwarmCommand> {
     }
 
     let mut template = None;
-    if let Some(next) = rest.split_whitespace().next() {
+    let mut mission_kind = None;
+    loop {
+        let Some(next) = rest.split_whitespace().next() else {
+            break;
+        };
         if let Some(value) = next
             .strip_prefix("template=")
             .or_else(|| next.strip_prefix("t="))
@@ -290,7 +513,17 @@ pub fn parse_swarm_command(raw: &str) -> Option<SwarmCommand> {
                 template = Some(value.to_ascii_lowercase());
             }
             rest = rest.strip_prefix(next).unwrap_or(rest).trim_start();
+            continue;
         }
+        if let Some(value) = next
+            .strip_prefix("mission=")
+            .or_else(|| next.strip_prefix("m="))
+        {
+            mission_kind = parse_swarm_mission_kind(Some(value));
+            rest = rest.strip_prefix(next).unwrap_or(rest).trim_start();
+            continue;
+        }
+        break;
     }
 
     let prompt = rest.to_string();
@@ -301,6 +534,7 @@ pub fn parse_swarm_command(raw: &str) -> Option<SwarmCommand> {
     Some(SwarmCommand {
         size,
         template,
+        mission_kind,
         prompt,
     })
 }
@@ -727,6 +961,7 @@ struct SwarmRun {
     mission_id: String,
     root_prompt: String,
     template: SwarmTemplate,
+    mission_kind: SwarmMissionKind,
     planner_agent_id: String,
     integrator_agent_id: Option<String>,
     integrator_locked: bool,
@@ -845,6 +1080,7 @@ impl SwarmRuntime {
         agent_ids: Vec<String>,
         size: SwarmSize,
         template: Option<String>,
+        mission_kind: Option<SwarmMissionKind>,
         root_prompt: String,
     ) -> Option<(String, Vec<SwarmDispatch>)> {
         let mut agents = Vec::new();
@@ -867,6 +1103,7 @@ impl SwarmRuntime {
         }
 
         let template_kind = parse_swarm_template(template.as_deref());
+        let mission_kind = classify_swarm_mission_kind(&root_prompt, mission_kind);
         let mission_id = next_mission_id(state);
 
         let restore_roster_selected = state
@@ -898,7 +1135,7 @@ impl SwarmRuntime {
             return None;
         }
 
-        let title = swarm_mission_title(&root_prompt, &mission_id, template_kind);
+        let title = swarm_mission_title(&root_prompt, &mission_id, template_kind, mission_kind);
         let at = timestamp_label(state);
         state.agents.missions.push(MissionRecord {
             id: mission_id.clone(),
@@ -922,25 +1159,19 @@ impl SwarmRuntime {
             at,
         });
 
-        let mut role_hints: Vec<(String, String)> = Vec::new();
-        if matches!(template_kind, SwarmTemplate::Parallel | SwarmTemplate::Bulk) {
-            for id in agents
-                .iter()
-                .filter(|id| id.as_str() != planner_agent_id.as_str())
-            {
-                let role = state
-                    .agents
-                    .swarm_role_by_agent_id
-                    .get(id)
-                    .map(|s| s.trim().to_ascii_lowercase())
-                    .filter(|s| !s.is_empty())
-                    .unwrap_or_else(|| "all".into());
-                role_hints.push((id.clone(), role));
-            }
-        }
-
         let mut integrator_locked = false;
         let mut integrator_agent_id: Option<String> = None;
+        if matches!(template_kind, SwarmTemplate::Parallel) {
+            integrator_agent_id = agents
+                .iter()
+                .filter(|id| id.as_str() != planner_agent_id.as_str())
+                .find(|id| {
+                    direct_role_hint_for_agent(&state.agents.swarm_role_by_agent_id, id.as_str())
+                        .as_deref()
+                        == Some("integrate")
+                })
+                .cloned();
+        }
         if matches!(template_kind, SwarmTemplate::Lab | SwarmTemplate::Bulk) {
             let eligible = agents
                 .iter()
@@ -979,6 +1210,23 @@ impl SwarmRuntime {
                 }
             }
         }
+        let mut role_hints: Vec<(String, String)> = Vec::new();
+        if matches!(template_kind, SwarmTemplate::Parallel | SwarmTemplate::Bulk) {
+            for id in agents
+                .iter()
+                .filter(|id| id.as_str() != planner_agent_id.as_str())
+            {
+                role_hints.push((
+                    id.clone(),
+                    planner_role_hint_for_agent(
+                        &state.agents.swarm_role_by_agent_id,
+                        id.as_str(),
+                        integrator_agent_id.as_deref(),
+                        mission_kind,
+                    ),
+                ));
+            }
+        }
         let mut priority_agent_ids: Vec<String> = Vec::new();
         if matches!(template_kind, SwarmTemplate::Parallel | SwarmTemplate::Bulk) {
             for id in agents
@@ -994,6 +1242,7 @@ impl SwarmRuntime {
         let plan_prompt = build_planner_prompt(
             &root_prompt,
             template_kind,
+            mission_kind,
             &planner_agent_id,
             &agents,
             integrator_agent_id.as_deref(),
@@ -1035,8 +1284,9 @@ impl SwarmRuntime {
             state,
             &mission_id,
             format!(
-                "Swarm template: {} | integrator: {} | verifier: {} | gates: {}",
+                "Swarm template: {} | mission: {} | integrator: {} | verifier: {} | gates: {}",
                 template_kind.label(),
+                mission_kind.label(),
                 integrator_agent_id.as_deref().unwrap_or("(none)"),
                 verifier_agent_id.as_deref().unwrap_or("(none)"),
                 gate_bundle_label(gate_bundle.as_ref(), &gate_selection.source)
@@ -1050,6 +1300,7 @@ impl SwarmRuntime {
                 mission_id: mission_id.clone(),
                 root_prompt,
                 template: template_kind,
+                mission_kind,
                 planner_agent_id: planner_agent_id.clone(),
                 integrator_agent_id: integrator_agent_id.clone(),
                 integrator_locked,
@@ -1113,6 +1364,7 @@ impl SwarmRuntime {
                         let mut parsed = parse_plan_from_planner(
                             message,
                             run.template,
+                            run.mission_kind,
                             &run.root_prompt,
                             &available,
                             run.integrator_agent_id.as_deref(),
@@ -1121,6 +1373,8 @@ impl SwarmRuntime {
                         parsed.warnings.extend(apply_role_dependency_ordering(
                             state.workspace_root.as_path(),
                             &state.agents.swarm_role_by_agent_id,
+                            run.mission_kind,
+                            run.integrator_agent_id.as_deref(),
                             parsed.tasks.as_mut_slice(),
                         ));
 
@@ -1215,6 +1469,7 @@ impl SwarmRuntime {
                         }
                         if abort_execution {
                             abort_swarm_plan_preflight(state, &mut run, parsed);
+                            cleanup_swarm_clones_for_mission(state, &run.mission_id);
                             self.completed_runs.insert(mid.clone(), run);
                             return dispatches;
                         }
@@ -1450,6 +1705,7 @@ impl SwarmRuntime {
                             "FAILED"
                         };
                         update_mission_final(state, &run.mission_id, final_status);
+                        cleanup_swarm_clones_for_mission(state, &run.mission_id);
                         self.completed_runs.insert(mid.clone(), run);
                     }
                     _ => {
@@ -1477,6 +1733,7 @@ impl SwarmRuntime {
                             .collect::<Vec<_>>();
                         let mut parsed = fallback_tasks(
                             run.template,
+                            run.mission_kind,
                             &run.root_prompt,
                             &available,
                             Some(message),
@@ -1485,6 +1742,8 @@ impl SwarmRuntime {
                         parsed.warnings.extend(apply_role_dependency_ordering(
                             state.workspace_root.as_path(),
                             &state.agents.swarm_role_by_agent_id,
+                            run.mission_kind,
+                            run.integrator_agent_id.as_deref(),
                             parsed.tasks.as_mut_slice(),
                         ));
 
@@ -1579,6 +1838,7 @@ impl SwarmRuntime {
                         }
                         if abort_execution {
                             abort_swarm_plan_preflight(state, &mut run, parsed);
+                            cleanup_swarm_clones_for_mission(state, &run.mission_id);
                             self.completed_runs.insert(mid.clone(), run);
                             return dispatches;
                         }
@@ -1771,6 +2031,7 @@ impl SwarmRuntime {
                     }
                     SwarmStage::Synthesizing if agent_id == &run.planner_agent_id => {
                         update_mission_final(state, &run.mission_id, "ERROR");
+                        cleanup_swarm_clones_for_mission(state, &run.mission_id);
                         self.completed_runs.insert(mid.clone(), run);
                     }
                     _ => {
@@ -2019,6 +2280,281 @@ pub(crate) fn normalize_role_label(raw: &str) -> Option<String> {
         return Some(COMPUTATIONAL_RESEARCH_ROLE.into());
     }
     Some(role)
+}
+
+fn role_is_singleton(role: &str) -> bool {
+    matches!(
+        normalize_role_label(role).as_deref(),
+        Some("judge" | "integrate")
+    )
+}
+
+fn role_requires_research_intent(role: &str) -> bool {
+    matches!(
+        normalize_role_label(role).as_deref(),
+        Some("research" | COMPUTATIONAL_RESEARCH_ROLE)
+    )
+}
+
+fn prompt_contains_any(prompt: &str, needles: &[&str]) -> bool {
+    needles.iter().any(|needle| prompt.contains(needle))
+}
+
+fn prompt_explicitly_requests_research_role(prompt: &str) -> bool {
+    prompt_contains_any(
+        prompt,
+        &[
+            "mission=research",
+            "mission: research",
+            "use research",
+            "assign research",
+            "need research",
+            "want research",
+            "with research role",
+            "research agent",
+            "research lane",
+        ],
+    )
+}
+
+fn prompt_explicitly_requests_computational_research_role(prompt: &str) -> bool {
+    prompt_contains_any(
+        prompt,
+        &[
+            "mission=computational",
+            "mission=computational-research",
+            "mission: computational",
+            "mission: computational-research",
+            "mission: computational research",
+            "use computational research",
+            "use computational-research",
+            "assign computational research",
+            "assign computational-research",
+            "need computational research",
+            "need computational-research",
+            "want computational research",
+            "want computational-research",
+            "with computational research role",
+            "with computational-research role",
+            "computational research agent",
+            "computational-research agent",
+            "computational research lane",
+            "computational-research lane",
+        ],
+    )
+}
+
+fn prompt_has_research_intent(prompt: &str) -> bool {
+    if prompt_contains_any(
+        prompt,
+        &[
+            "do research",
+            "conduct research",
+            "research the",
+            "research this topic",
+            "survey the literature",
+            "literature review",
+            "read papers",
+            "read the papers",
+            "search the web",
+            "browse the web",
+            "search online",
+            "find sources",
+            "find references",
+            "gather citations",
+            "prior art",
+            "related work",
+            "explore ideas",
+            "explore topics",
+            "new ideas",
+        ],
+    ) {
+        return true;
+    }
+
+    prompt_contains_any(
+        prompt,
+        &[
+            "research",
+            "investigate",
+            "survey",
+            "study",
+            "search",
+            "browse",
+            "read",
+            "compare",
+            "evaluate",
+            "explore",
+        ],
+    ) && prompt_contains_any(
+        prompt,
+        &[
+            "papers",
+            "literature",
+            "web",
+            "online",
+            "sources",
+            "references",
+            "citations",
+            "resources",
+            "prior art",
+            "related work",
+            "topic",
+            "topics",
+            "ideas",
+            "hypothesis",
+            "hypotheses",
+        ],
+    )
+}
+
+fn prompt_has_computational_research_intent(prompt: &str) -> bool {
+    if prompt_contains_any(
+        prompt,
+        &[
+            "computational research",
+            "run simulations",
+            "build a model",
+            "model this",
+            "numerical study",
+            "optimization study",
+            "design an experiment",
+            "reproducible analysis",
+        ],
+    ) {
+        return true;
+    }
+
+    prompt_contains_any(
+        prompt,
+        &[
+            "simulation",
+            "simulate",
+            "modeling",
+            "modelling",
+            "numerical",
+            "optimization",
+            "optimisation",
+            "data fitting",
+            "model fitting",
+            "network analysis",
+            "pattern analysis",
+            "reproducible",
+            "benchmark",
+            "experiment",
+            "measurement",
+        ],
+    ) && prompt_contains_any(
+        prompt,
+        &[
+            "research",
+            "study",
+            "evaluate",
+            "compare",
+            "topic",
+            "topics",
+            "hypothesis",
+            "hypotheses",
+            "papers",
+            "literature",
+            "sources",
+            "evidence",
+            "dataset",
+            "datasets",
+            "methods",
+        ],
+    )
+}
+
+pub(crate) fn detect_swarm_mission_kind_from_prompt(root_prompt: &str) -> Option<SwarmMissionKind> {
+    let prompt = root_prompt.trim().to_ascii_lowercase();
+    if prompt.is_empty() {
+        return None;
+    }
+
+    if let Some(kind) = explicit_swarm_mission_kind_from_prompt(root_prompt) {
+        return Some(kind);
+    }
+
+    if prompt_explicitly_requests_computational_research_role(prompt.as_str())
+        || prompt_has_computational_research_intent(prompt.as_str())
+    {
+        return Some(SwarmMissionKind::ComputationalResearch);
+    }
+
+    if prompt_explicitly_requests_research_role(prompt.as_str())
+        || prompt_has_research_intent(prompt.as_str())
+    {
+        return Some(SwarmMissionKind::Research);
+    }
+
+    None
+}
+
+fn classify_swarm_mission_kind(
+    root_prompt: &str,
+    explicit: Option<SwarmMissionKind>,
+) -> SwarmMissionKind {
+    explicit
+        .or_else(|| detect_swarm_mission_kind_from_prompt(root_prompt))
+        .unwrap_or(SwarmMissionKind::General)
+}
+
+fn role_allowed_for_mission(mission_kind: SwarmMissionKind, role: &str) -> bool {
+    if !role_requires_research_intent(role) {
+        return true;
+    }
+    mission_kind.allows_role(role)
+}
+
+fn direct_role_hint_for_agent(
+    role_hints_by_agent_id: &HashMap<String, String>,
+    agent_id: &str,
+) -> Option<String> {
+    role_hints_by_agent_id
+        .get(agent_id)
+        .and_then(|hint| normalize_role_label(hint.as_str()))
+}
+
+fn inherited_clone_role_hint_for_agent(
+    role_hints_by_agent_id: &HashMap<String, String>,
+    agent_id: &str,
+) -> Option<String> {
+    let base_id = swarm_clone_base_id(agent_id)?;
+    let hint = direct_role_hint_for_agent(role_hints_by_agent_id, base_id)?;
+    (!role_is_singleton(hint.as_str())).then_some(hint)
+}
+
+fn inferred_role_hint_for_agent(
+    role_hints_by_agent_id: &HashMap<String, String>,
+    agent_id: &str,
+    integrator_agent_id: Option<&str>,
+    mission_kind: SwarmMissionKind,
+) -> Option<String> {
+    let hint = direct_role_hint_for_agent(role_hints_by_agent_id, agent_id)
+        .or_else(|| inherited_clone_role_hint_for_agent(role_hints_by_agent_id, agent_id))?;
+    if hint == "integrate" && integrator_agent_id.is_some_and(|integrator| integrator != agent_id) {
+        return None;
+    }
+    if !role_allowed_for_mission(mission_kind, hint.as_str()) {
+        return None;
+    }
+    Some(hint)
+}
+
+fn planner_role_hint_for_agent(
+    role_hints_by_agent_id: &HashMap<String, String>,
+    agent_id: &str,
+    integrator_agent_id: Option<&str>,
+    mission_kind: SwarmMissionKind,
+) -> String {
+    inferred_role_hint_for_agent(
+        role_hints_by_agent_id,
+        agent_id,
+        integrator_agent_id,
+        mission_kind,
+    )
+    .unwrap_or_else(|| "all".into())
 }
 
 fn infer_role_from_task_id(task_id: &str) -> Option<&'static str> {
@@ -2300,6 +2836,8 @@ fn apply_role_deps(
 fn apply_role_dependency_ordering(
     workspace_root: &Path,
     role_hints_by_agent_id: &HashMap<String, String>,
+    mission_kind: SwarmMissionKind,
+    integrator_agent_id: Option<&str>,
     tasks: &mut [SwarmTask],
 ) -> Vec<String> {
     if tasks.is_empty() {
@@ -2307,9 +2845,41 @@ fn apply_role_dependency_ordering(
     }
 
     let mut warnings = Vec::new();
+    let integrator_agent_id = integrator_agent_id
+        .map(str::trim)
+        .filter(|id| !id.is_empty());
+
+    for task in tasks.iter_mut() {
+        let Some(role) = task.role.as_deref().and_then(normalize_role_label) else {
+            task.role = None;
+            continue;
+        };
+        if !role_allowed_for_mission(mission_kind, role.as_str()) {
+            warnings.push(format!(
+                "Role ordering: cleared role '{}' on task '{}' because mission focus '{}' does not permit that research role.",
+                role,
+                task.id,
+                mission_kind.label()
+            ));
+            task.role = None;
+            continue;
+        }
+        if role == "integrate"
+            && integrator_agent_id.is_some_and(|integrator| task.agent_id != integrator)
+        {
+            warnings.push(format!(
+                "Role ordering: cleared invalid integrate role on task '{}' because agent '{}' is not the integrator.",
+                task.id, task.agent_id
+            ));
+            task.role = None;
+            continue;
+        }
+        task.role = Some(role);
+    }
+
     let mut inferred_roles = 0usize;
     for task in tasks.iter_mut() {
-        if task.role.as_deref().is_some_and(|r| !r.trim().is_empty()) {
+        if task.role.is_some() {
             continue;
         }
         if task.writes {
@@ -2318,15 +2888,25 @@ fn apply_role_dependency_ordering(
             continue;
         }
         if let Some(inferred) = infer_role_from_task_id(task.id.as_str()) {
+            if inferred == "integrate"
+                && integrator_agent_id.is_some_and(|integrator| task.agent_id != integrator)
+            {
+                warnings.push(format!(
+                    "Role ordering: left task '{}' without role because its id implies integrate but agent '{}' is not the integrator.",
+                    task.id, task.agent_id
+                ));
+                continue;
+            }
             task.role = Some(inferred.to_string());
             inferred_roles = inferred_roles.saturating_add(1);
             continue;
         }
-        let hint = role_hints_by_agent_id.get(&task.agent_id).or_else(|| {
-            swarm_clone_base_id(task.agent_id.as_str())
-                .and_then(|base| role_hints_by_agent_id.get(base))
-        });
-        let Some(hint) = hint.and_then(|hint| normalize_role_label(hint.as_str())) else {
+        let Some(hint) = inferred_role_hint_for_agent(
+            role_hints_by_agent_id,
+            task.agent_id.as_str(),
+            integrator_agent_id,
+            mission_kind,
+        ) else {
             continue;
         };
         task.role = Some(hint);
@@ -2366,6 +2946,7 @@ fn apply_role_dependency_ordering(
 fn parse_plan_from_planner(
     planner_message: &str,
     template: SwarmTemplate,
+    mission_kind: SwarmMissionKind,
     root_prompt: &str,
     available_agents: &[String],
     integrator_hint: Option<&str>,
@@ -2374,6 +2955,7 @@ fn parse_plan_from_planner(
     let Some(json) = extract_json_code_block(planner_message) else {
         return fallback_tasks(
             template,
+            mission_kind,
             root_prompt,
             available_agents,
             None,
@@ -2401,6 +2983,7 @@ fn parse_plan_from_planner(
                 {
                     let mut fallback = fallback_tasks(
                         template,
+                        mission_kind,
                         root_prompt,
                         available_agents,
                         Some(&issue),
@@ -2419,6 +3002,7 @@ fn parse_plan_from_planner(
     if matches!(template, SwarmTemplate::Bulk) {
         let mut fallback = fallback_tasks(
             template,
+            mission_kind,
             root_prompt,
             available_agents,
             Some("Planner did not return a valid v2 bulk plan."),
@@ -2434,6 +3018,7 @@ fn parse_plan_from_planner(
     let Ok(plan) = serde_json::from_str::<SwarmPlanV1>(&json) else {
         return fallback_tasks(
             template,
+            mission_kind,
             root_prompt,
             available_agents,
             None,
@@ -2482,6 +3067,7 @@ fn parse_plan_from_planner(
     if tasks.is_empty() {
         return fallback_tasks(
             template,
+            mission_kind,
             root_prompt,
             available_agents,
             None,
@@ -2668,6 +3254,7 @@ fn parse_v2_plan(
 
 fn fallback_tasks(
     template: SwarmTemplate,
+    mission_kind: SwarmMissionKind,
     _root_prompt: &str,
     available_agents: &[String],
     plan_error: Option<&str>,
@@ -2861,17 +3448,41 @@ fn fallback_tasks(
             .or_else(|| integrator.clone());
 
         let mut tasks = Vec::new();
+        let research_mission = mission_kind.allows_research_roles();
         if let Some(agent_id) = recon_agent {
+            let (role, title, task_prompt, artifacts, done_when) = match mission_kind {
+                SwarmMissionKind::Research => (
+                    Some("research".into()),
+                    "Sources + prior-art survey".into(),
+                    "Survey papers, docs, web resources, and related references for the operator request. Extract the strongest sources, competing ideas, and the key assumptions or unknowns. Stay read-only and keep the output grounded in evidence.".into(),
+                    vec!["sources".into(), "notes".into(), "risks".into()],
+                    Some("We have a grounded map of the best sources, references, and research directions.".into()),
+                ),
+                SwarmMissionKind::ComputationalResearch => (
+                    Some("research".into()),
+                    "Sources + problem framing".into(),
+                    "Survey papers, docs, datasets, and web resources to frame the problem. Summarize the strongest prior work, data sources, evaluation criteria, and the assumptions the computational lane should test. Stay read-only.".into(),
+                    vec!["sources".into(), "methods".into(), "risks".into()],
+                    Some("We have a solid source base and a clear problem framing for computational work.".into()),
+                ),
+                SwarmMissionKind::General => (
+                    None,
+                    "Codebase recon".into(),
+                    "Scan the repository for the most relevant files/modules and summarize where changes should happen. Provide concrete file paths and key functions/symbols. Avoid proposing large diffs; focus on mapping the terrain and risks.".into(),
+                    vec!["files".into(), "risks".into()],
+                    Some("We know exactly where changes should happen and the main risks.".into()),
+                ),
+            };
             tasks.push(SwarmTask {
                 id: "recon".into(),
                 agent_id,
-                role: Some("research".into()),
-                title: "Codebase recon".into(),
-                task_prompt: "Scan the repository for the most relevant files/modules and summarize where changes should happen. Provide concrete file paths and key functions/symbols. Avoid proposing large diffs; focus on mapping the terrain and risks.".into(),
+                role,
+                title,
+                task_prompt,
                 deps: Vec::new(),
                 writes: false,
-                artifacts: vec!["files".into(), "risks".into()],
-                done_when: Some("We know exactly where changes should happen and the main risks.".into()),
+                artifacts,
+                done_when,
                 state: SwarmTaskState::Pending,
                 output: None,
                 parsed_artifacts: None,
@@ -2880,16 +3491,39 @@ fn fallback_tasks(
             });
         }
         if let Some(agent_id) = design_agent {
+            let (role, title, task_prompt, artifacts, done_when) = match mission_kind {
+                SwarmMissionKind::Research => (
+                    Some("research".into()),
+                    "Compare directions + rank strategies".into(),
+                    "Use the strongest sources to compare competing ideas, strategies, or solution paths. Rank the best options, explain tradeoffs, and call out what still needs validation. Stay read-only.".into(),
+                    vec!["sources".into(), "methods".into(), "options".into()],
+                    Some("We have ranked strategy options with evidence, tradeoffs, and open questions.".into()),
+                ),
+                SwarmMissionKind::ComputationalResearch => (
+                    Some(COMPUTATIONAL_RESEARCH_ROLE.into()),
+                    "Model + evaluate candidates".into(),
+                    "Run the computation-heavy lane: use calculations, simulations, modeling, numerical methods, experiments, optimization, or reproducible analysis when helpful. Compare candidate strategies quantitatively, explain methods, and surface assumptions or data gaps. Stay read-only.".into(),
+                    vec!["methods".into(), "options".into(), "commands".into()],
+                    Some("We have a computationally grounded ranking of candidate strategies and the methods behind it.".into()),
+                ),
+                SwarmMissionKind::General => (
+                    Some("propose".into()),
+                    "Design options".into(),
+                    "Propose 2-3 plausible implementation approaches (with tradeoffs) and call out which files/modules each approach touches. Keep it specific and repo-grounded.".into(),
+                    vec!["options".into(), "files".into()],
+                    Some("We have 1-2 clear, repo-grounded approaches with tradeoffs.".into()),
+                ),
+            };
             tasks.push(SwarmTask {
                 id: "design".into(),
                 agent_id,
-                role: Some("research".into()),
-                title: "Design options".into(),
-                task_prompt: "Propose 2-3 plausible implementation approaches (with tradeoffs) and call out which files/modules each approach touches. Keep it specific and repo-grounded.".into(),
+                role,
+                title,
+                task_prompt,
                 deps: Vec::new(),
                 writes: false,
-                artifacts: vec!["options".into(), "files".into()],
-                done_when: Some("We have 1-2 clear, repo-grounded approaches with tradeoffs.".into()),
+                artifacts,
+                done_when,
                 state: SwarmTaskState::Pending,
                 output: None,
                 parsed_artifacts: None,
@@ -2898,16 +3532,39 @@ fn fallback_tasks(
             });
         }
         if let Some(agent_id) = integrator.clone() {
+            let (title, task_prompt, writes, artifacts, done_when) = match mission_kind {
+                SwarmMissionKind::Research => (
+                    "Synthesize findings + recommendation".into(),
+                    "Integrate the upstream research into a decisive recommendation for the operator. Produce a concise synthesis, ranked next steps, and any follow-up research gaps. Stay read-only unless the operator explicitly asked for repo changes.".into(),
+                    false,
+                    vec!["notes".into(), "sources".into(), "commands".into()],
+                    Some("We have a clear recommendation backed by sources, assumptions, and ranked follow-ups.".into()),
+                ),
+                SwarmMissionKind::ComputationalResearch => (
+                    "Synthesize evidence + next-step plan".into(),
+                    "Integrate the upstream source survey and computational analysis into a decisive recommendation. Summarize the strongest evidence, methods, assumptions, ranked next steps, and any follow-up experiments. Stay read-only unless the operator explicitly asked for repo changes.".into(),
+                    false,
+                    vec!["notes".into(), "methods".into(), "commands".into()],
+                    Some("We have a computationally grounded recommendation with methods, assumptions, and next experiments.".into()),
+                ),
+                SwarmMissionKind::General => (
+                    "Integrate + implement".into(),
+                    "Implement the best approach using the dependency outputs. You are the only agent allowed to make workspace edits in this swarm. Prefer small, safe diffs and keep tests green.".into(),
+                    true,
+                    vec!["diffs".into(), "commands".into()],
+                    Some("Changes are implemented cleanly with validations to run.".into()),
+                ),
+            };
             tasks.push(SwarmTask {
                 id: "implement".into(),
                 agent_id,
                 role: Some("integrate".into()),
-                title: "Integrate + implement".into(),
-                task_prompt: "Implement the best approach using the dependency outputs. You are the only agent allowed to make workspace edits in this swarm. Prefer small, safe diffs and keep tests green.".into(),
+                title,
+                task_prompt,
                 deps: vec!["recon".into(), "design".into()],
-                writes: true,
-                artifacts: vec!["diffs".into(), "commands".into()],
-                done_when: Some("Changes are implemented cleanly with validations to run.".into()),
+                writes,
+                artifacts,
+                done_when,
                 state: SwarmTaskState::Pending,
                 output: None,
                 parsed_artifacts: None,
@@ -2916,16 +3573,29 @@ fn fallback_tasks(
             });
         }
         if let Some(agent_id) = review_agent {
+            let (task_prompt, artifacts, done_when) = if research_mission {
+                (
+                    "Review the synthesized findings for weak evidence, missing sources, shaky assumptions, and overlooked follow-up questions. Suggest better references, validation steps, or experiments as text only; do not apply changes.".into(),
+                    vec!["risks".into(), "sources".into(), "commands".into()],
+                    Some("We know the main evidence gaps, risks, and the next checks to run.".into()),
+                )
+            } else {
+                (
+                    "Review the implemented approach for correctness, UX, and maintainability. Suggest verification steps (exact commands) and edge cases. If you propose edits, do so as text/diff; do not apply changes.".into(),
+                    vec!["risks".into(), "commands".into()],
+                    Some("We have confidence in correctness and a clear test plan.".into()),
+                )
+            };
             tasks.push(SwarmTask {
                 id: "review".into(),
                 agent_id,
                 role: Some("review".into()),
                 title: "Review & verification".into(),
-                task_prompt: "Review the implemented approach for correctness, UX, and maintainability. Suggest verification steps (exact commands) and edge cases. If you propose edits, do so as text/diff; do not apply changes.".into(),
+                task_prompt,
                 deps: vec!["implement".into()],
                 writes: false,
-                artifacts: vec!["risks".into(), "commands".into()],
-                done_when: Some("We have confidence in correctness and a clear test plan.".into()),
+                artifacts,
+                done_when,
                 state: SwarmTaskState::Pending,
                 output: None,
                 parsed_artifacts: None,
@@ -2952,63 +3622,125 @@ fn fallback_tasks(
     let mut idx = 0usize;
     for (agent_idx, agent_id) in available_agents.iter().enumerate() {
         idx = idx.saturating_add(1);
-        let (role, title, prompt, deps, writes) = match (template, agent_idx) {
-            (SwarmTemplate::Lab, 0) => (
-                Some("research".to_string()),
-                "Codebase recon",
-                "Scan the repository for the most relevant files/modules and summarize where changes should happen. Provide concrete file paths and key functions/symbols. Avoid proposing large diffs; focus on mapping the terrain and risks.",
-                Vec::new(),
-                false,
-            ),
-            (SwarmTemplate::Lab, 1) => (
-                Some("research".to_string()),
-                "Design options",
-                "Propose 2-3 plausible implementation approaches (with tradeoffs) and call out which files/modules each approach touches. Keep it specific and repo-grounded.",
-                Vec::new(),
-                false,
-            ),
-            (SwarmTemplate::Lab, 2) => (
-                Some("integrate".to_string()),
-                "Integrate + implement",
-                "Implement the best approach using the dependency outputs. You are the only agent allowed to make workspace edits in this swarm. Prefer small, safe diffs and keep tests green.",
-                vec!["task-01".into(), "task-02".into()],
-                true,
-            ),
-            (SwarmTemplate::Lab, _) => (
-                Some("review".to_string()),
-                "Review & verification",
-                "Review the proposed approach for correctness, UX, and maintainability. Suggest verification steps (exact commands) and edge cases. If you propose edits, do so as text/diff; do not apply changes.",
-                vec!["task-03".into()],
-                false,
-            ),
-            (_, 0) => (
-                Some("recon".to_string()),
-                "Codebase recon",
-                "Scan the repository for the most relevant files/modules and summarize where changes should happen. Provide concrete file paths and key functions/symbols. Avoid proposing large diffs; focus on mapping the terrain and risks.",
-                Vec::new(),
-                false,
-            ),
-            (_, 1) => (
-                Some("plan".to_string()),
-                "Implementation plan",
-                "Propose an implementation approach and the specific code changes needed. If appropriate, provide a concise unified diff for the most important edits. Call out any concurrency/file-conflict risks with multiple agents.",
-                Vec::new(),
-                false,
-            ),
-            (_, 2) => (
-                Some("test".to_string()),
-                "Tests & verification",
-                "Propose how to verify the change (tests, manual checks, edge cases). If tests likely exist, suggest exact commands and where to add/update test coverage.",
-                Vec::new(),
-                false,
-            ),
-            (_, _) => (
-                Some("review".to_string()),
-                "Review & pitfalls",
-                "Review the planned approach for correctness, UX, and maintainability. Point out edge cases, failure modes, and simpler alternatives.",
-                Vec::new(),
-                false,
-            ),
+        let (role, title, prompt, deps, writes) = match mission_kind {
+            SwarmMissionKind::Research => match agent_idx {
+                0 => (
+                    Some("research".to_string()),
+                    "Source survey",
+                    "Survey papers, docs, web resources, and related references. Identify the strongest sources, competing ideas, and missing information.",
+                    Vec::new(),
+                    false,
+                ),
+                1 => (
+                    Some("research".to_string()),
+                    "Strategy comparison",
+                    "Compare the best ideas from the sources, rank the strongest strategies, and explain their tradeoffs, assumptions, and open questions.",
+                    Vec::new(),
+                    false,
+                ),
+                2 => (
+                    Some("review".to_string()),
+                    "Gap review",
+                    "Review the research outputs for weak evidence, missing sources, shaky assumptions, and better follow-up directions.",
+                    Vec::new(),
+                    false,
+                ),
+                _ => (
+                    Some("review".to_string()),
+                    "Review & pitfalls",
+                    "Review the proposed research direction for evidence quality, missing citations, and strategic blind spots.",
+                    Vec::new(),
+                    false,
+                ),
+            },
+            SwarmMissionKind::ComputationalResearch => match agent_idx {
+                0 => (
+                    Some("research".to_string()),
+                    "Source survey",
+                    "Survey papers, docs, datasets, and related resources. Summarize prior work, evaluation criteria, and the most useful evidence for downstream computational analysis.",
+                    Vec::new(),
+                    false,
+                ),
+                1 => (
+                    Some(COMPUTATIONAL_RESEARCH_ROLE.to_string()),
+                    "Model + experiment lane",
+                    "Use simulations, modeling, numerical methods, optimization, calculations, or reproducible analysis when helpful. Compare candidate strategies and explain methods, commands, and assumptions.",
+                    Vec::new(),
+                    false,
+                ),
+                2 => (
+                    Some("review".to_string()),
+                    "Evidence review",
+                    "Review the research and computational outputs for weak methods, missing baselines, data issues, and follow-up experiments.",
+                    Vec::new(),
+                    false,
+                ),
+                _ => (
+                    Some("review".to_string()),
+                    "Review & pitfalls",
+                    "Review the proposed computational research direction for evidence quality, methodological risks, and better alternatives.",
+                    Vec::new(),
+                    false,
+                ),
+            },
+            SwarmMissionKind::General => match (template, agent_idx) {
+                (SwarmTemplate::Lab, 0) => (
+                    Some("research".to_string()),
+                    "Codebase recon",
+                    "Scan the repository for the most relevant files/modules and summarize where changes should happen. Provide concrete file paths and key functions/symbols. Avoid proposing large diffs; focus on mapping the terrain and risks.",
+                    Vec::new(),
+                    false,
+                ),
+                (SwarmTemplate::Lab, 1) => (
+                    Some("research".to_string()),
+                    "Design options",
+                    "Propose 2-3 plausible implementation approaches (with tradeoffs) and call out which files/modules each approach touches. Keep it specific and repo-grounded.",
+                    Vec::new(),
+                    false,
+                ),
+                (SwarmTemplate::Lab, 2) => (
+                    Some("integrate".to_string()),
+                    "Integrate + implement",
+                    "Implement the best approach using the dependency outputs. You are the only agent allowed to make workspace edits in this swarm. Prefer small, safe diffs and keep tests green.",
+                    vec!["task-01".into(), "task-02".into()],
+                    true,
+                ),
+                (SwarmTemplate::Lab, _) => (
+                    Some("review".to_string()),
+                    "Review & verification",
+                    "Review the proposed approach for correctness, UX, and maintainability. Suggest verification steps (exact commands) and edge cases. If you propose edits, do so as text/diff; do not apply changes.",
+                    vec!["task-03".into()],
+                    false,
+                ),
+                (_, 0) => (
+                    Some("recon".to_string()),
+                    "Codebase recon",
+                    "Scan the repository for the most relevant files/modules and summarize where changes should happen. Provide concrete file paths and key functions/symbols. Avoid proposing large diffs; focus on mapping the terrain and risks.",
+                    Vec::new(),
+                    false,
+                ),
+                (_, 1) => (
+                    Some("plan".to_string()),
+                    "Implementation plan",
+                    "Propose an implementation approach and the specific code changes needed. If appropriate, provide a concise unified diff for the most important edits. Call out any concurrency/file-conflict risks with multiple agents.",
+                    Vec::new(),
+                    false,
+                ),
+                (_, 2) => (
+                    Some("test".to_string()),
+                    "Tests & verification",
+                    "Propose how to verify the change (tests, manual checks, edge cases). If tests likely exist, suggest exact commands and where to add/update test coverage.",
+                    Vec::new(),
+                    false,
+                ),
+                (_, _) => (
+                    Some("review".to_string()),
+                    "Review & pitfalls",
+                    "Review the planned approach for correctness, UX, and maintainability. Point out edge cases, failure modes, and simpler alternatives.",
+                    Vec::new(),
+                    false,
+                ),
+            },
         };
 
         let task_id = format!("task-{idx:02}");
@@ -3516,9 +4248,14 @@ fn dispatch_ready_tasks(run: &mut SwarmRun) -> Vec<SwarmDispatch> {
         let task = &run.tasks[idx];
         let deps_payload = collect_dependency_payload(run, task);
         let prompt = if deps_payload.is_empty() {
-            wrap_task_prompt(&run.root_prompt, task, None)
+            wrap_task_prompt(&run.root_prompt, run.mission_kind, task, None)
         } else {
-            wrap_task_prompt(&run.root_prompt, task, Some(deps_payload.as_slice()))
+            wrap_task_prompt(
+                &run.root_prompt,
+                run.mission_kind,
+                task,
+                Some(deps_payload.as_slice()),
+            )
         };
         let agent_id = task.agent_id.clone();
         run.tasks[idx].state = SwarmTaskState::Dispatched;
@@ -4193,6 +4930,7 @@ fn sanitize_for_filename(input: &str) -> String {
 fn build_planner_prompt(
     root_prompt: &str,
     template: SwarmTemplate,
+    mission_kind: SwarmMissionKind,
     planner_agent_id: &str,
     agent_ids: &[String],
     integrator_agent_id: Option<&str>,
@@ -4209,14 +4947,13 @@ fn build_planner_prompt(
         "You are the SWARM PLANNER inside nit. Create an execution plan for a multi-agent workflow.\n\n",
     );
     out.push_str(&format!("Template: `{}`\n\n", template.label()));
-    if matches!(template, SwarmTemplate::Lab | SwarmTemplate::Bulk) {
-        if let Some(integrator_agent_id) = integrator_agent_id {
-            out.push_str(&format!(
-                "Single-writer integrator: `{integrator_agent_id}` (only this agent may do workspace writes).\n\n"
-            ));
-        } else {
-            out.push_str("Single-writer integrator: (none)\n\n");
-        }
+    out.push_str(&format!("Mission focus: `{}`\n\n", mission_kind.label()));
+    if let Some(integrator_agent_id) = integrator_agent_id {
+        out.push_str(&format!(
+            "Single-writer integrator: `{integrator_agent_id}` (only this agent may do workspace writes, and only this agent may receive the `integrate` role).\n\n"
+        ));
+    } else if matches!(template, SwarmTemplate::Lab | SwarmTemplate::Bulk) {
+        out.push_str("Single-writer integrator: (none)\n\n");
     }
 
     out.push_str("Constraints:\n");
@@ -4232,6 +4969,55 @@ fn build_planner_prompt(
         out.push_str(
             "- Prefer assigning tasks whose `role` matches each agent's hint (unless role=all).\n",
         );
+    }
+    out.push_str(
+        "- Role guide: use `research` for web/paper/resource exploration and idea discovery; use `computational-research` for tool-assisted or quantitative research, experiments, and evidence gathering.\n",
+    );
+    out.push_str(
+        "- Reserve `research`/`computational-research` for topic investigation and strategy discovery, not routine codebase recon, unless the operator explicitly wants outside research.\n",
+    );
+    out.push_str(
+        "- `computational-research` is the broad computation-heavy lane: simulations, modeling, numerical methods, optimization, data/model fitting, pattern or network analysis, reproducibility, and research-computing workflows across technical domains.\n",
+    );
+    out.push_str(
+        "- If you assign `research` or `computational-research`, ensure the task output asks for sources, methods, assumptions, and ranked strategy recommendations.\n",
+    );
+    match mission_kind {
+        SwarmMissionKind::General => out.push_str(
+            "- This mission is not research-oriented, so avoid `research` / `computational-research` roles unless the operator explicitly changes the mission focus.\n",
+        ),
+        SwarmMissionKind::Research => {
+            out.push_str(
+                "- This is a research mission: prefer a workflow like source survey -> evidence comparison -> synthesis / ranked strategy recommendation.\n",
+            );
+            out.push_str(
+                "- `research` is the primary mission-specific role here; only use `computational-research` if the mission clearly needs simulations, modeling, or quantitative analysis.\n",
+            );
+            out.push_str(
+                "- Prefer read-only investigation and synthesis tasks unless the operator explicitly asked for repo edits or docs changes.\n",
+            );
+        }
+        SwarmMissionKind::ComputationalResearch => {
+            out.push_str(
+                "- This is a computational-research mission: prefer a workflow like source survey -> modeling / experiments / analysis -> synthesis / ranked strategy recommendation.\n",
+            );
+            out.push_str(
+                "- `computational-research` is valid and preferred for quantitative or tool-driven lanes; `research` can support source survey and literature/context gathering.\n",
+            );
+            out.push_str(
+                "- Prefer read-only investigation and synthesis tasks unless the operator explicitly asked for repo edits or docs changes.\n",
+            );
+        }
+    }
+    if matches!(template, SwarmTemplate::Parallel | SwarmTemplate::Bulk) {
+        out.push_str(
+            "- Treat `judge` and `integrate` as singleton roles: assign at most one task for each role unless the operator explicitly asks for duplicates.\n",
+        );
+    }
+    if let Some(integrator_agent_id) = integrator_agent_id {
+        out.push_str(&format!(
+            "- If code changes are needed, assign `writes=true` and `role=integrate` only to `{integrator_agent_id}`.\n"
+        ));
     }
     if matches!(template, SwarmTemplate::Parallel | SwarmTemplate::Bulk)
         && !priority_agent_ids.is_empty()
@@ -4256,7 +5042,7 @@ fn build_planner_prompt(
                 "- If you assign producer/consumer-style roles (e.g. research or computational-research → judge), use deps to express required ordering.\n",
             );
             out.push_str(
-                "- If code changes are needed, avoid having multiple agents edit the same files.\n",
+                "- Use `propose`, `research`, `review`, and `test` for the remaining lanes instead of repeating singleton roles.\n",
             );
         }
         SwarmTemplate::Lab => {
@@ -4265,7 +5051,9 @@ fn build_planner_prompt(
             );
             out.push_str("- Use deps to express ordering (DAG). Avoid cycles.\n");
             out.push_str("- Only the integrator agent may have `writes=true` tasks.\n");
-            out.push_str("- Use read-only researcher/reviewer tasks to feed the integrator.\n");
+            out.push_str(
+                "- Use read-only proposal/review tasks for codebase work; use research roles only when external/topic research is part of the mission.\n",
+            );
         }
         SwarmTemplate::Bulk => {
             out.push_str(
@@ -4319,8 +5107,65 @@ fn build_planner_prompt(
     out
 }
 
+fn role_contract_lines(role: &str) -> &'static [&'static str] {
+    match role {
+        "propose" => &[
+            "Advance one concrete solution candidate from your assigned lens.",
+            "Do not judge between candidates or claim final implementation ownership.",
+            "Be specific about files, commands, and risks.",
+        ],
+        "research" => &[
+            "Explore the topic through papers, docs, web resources, and related references when available.",
+            "Surface competing ideas, promising directions, and the best strategy candidates with evidence.",
+            "Do not turn this into a final implementation or winner-picking step; hand off concrete findings.",
+        ],
+        COMPUTATIONAL_RESEARCH_ROLE => &[
+            "Handle the broad computation-heavy lane: simulations, modeling, numerical methods, optimization, data/model fitting, pattern or network analysis, and reproducible research workflows.",
+            "Perform tool-assisted research with explicit methods, commands, sources, assumptions, and computations.",
+            "Use the findings to recommend strong strategies or narrow the search space for downstream roles across technical domains.",
+        ],
+        "judge" => &[
+            "Compare the dependency outputs and choose the best path forward.",
+            "Produce a decisive recommendation, acceptance criteria, and verification steps.",
+            "Do not edit the workspace or perform the final implementation.",
+        ],
+        "integrate" => &[
+            "Implement the chosen plan and convert it into concrete edits.",
+            "Do not restart broad ideation; focus on carrying the selected approach through.",
+            "Report exact files changed and validation results.",
+        ],
+        "review" => &[
+            "Critique the current output or diff for correctness, UX, and maintainability.",
+            "Call out risks, regressions, and missing tests.",
+            "Do not edit the workspace; suggest follow-ups as text only.",
+        ],
+        "test" => &[
+            "Focus on validation commands, expected results, and edge cases.",
+            "Differentiate confirmed results from unrun suggestions.",
+            "Do not redesign the solution unless a test failure makes it necessary.",
+        ],
+        _ => &[
+            "Stay within the assigned task scope.",
+            "Do not silently switch into a different swarm role.",
+        ],
+    }
+}
+
+fn role_response_format_lines(role: &str) -> Option<&'static [&'static str]> {
+    match role {
+        "research" | COMPUTATIONAL_RESEARCH_ROLE => Some(&[
+            "Sources: list the key papers, docs, web resources, or datasets you relied on.",
+            "Methods: explain how you searched, compared, computed, simulated, or evaluated the topic.",
+            "Assumptions: call out the main assumptions, uncertainties, and missing information.",
+            "Ranked strategies: provide the best options in ranked order with brief rationale and tradeoffs.",
+        ]),
+        _ => None,
+    }
+}
+
 fn wrap_task_prompt(
     root_prompt: &str,
+    mission_kind: SwarmMissionKind,
     task: &SwarmTask,
     deps: Option<&[(String, String)]>,
 ) -> String {
@@ -4339,6 +5184,32 @@ fn wrap_task_prompt(
         out.push_str("MODE: single-writer integrator (workspace writes allowed)\n");
     } else {
         out.push_str("MODE: read-only (do not edit the workspace)\n");
+    }
+    if mission_kind.allows_research_roles() {
+        out.push_str(&format!("MISSION FOCUS: {}\n", mission_kind.label()));
+        out.push_str("MISSION CONTRACT:\n");
+        match mission_kind {
+            SwarmMissionKind::Research => out.push_str(
+                "- This is a research mission: prioritize external sources, evidence, and ranked strategy discovery over routine code implementation.\n",
+            ),
+            SwarmMissionKind::ComputationalResearch => out.push_str(
+                "- This is a computational-research mission: prioritize modeling, experiments, quantitative evidence, and reproducible analysis over routine code implementation.\n",
+            ),
+            SwarmMissionKind::General => {}
+        }
+    }
+    if let Some(role) = task.role.as_deref().and_then(normalize_role_label) {
+        out.push_str("ROLE CONTRACT:\n");
+        out.push_str("- Act strictly as the assigned role for this task.\n");
+        for line in role_contract_lines(role.as_str()) {
+            out.push_str(&format!("- {line}\n"));
+        }
+        if let Some(lines) = role_response_format_lines(role.as_str()) {
+            out.push_str("RESPONSE FORMAT:\n");
+            for line in lines {
+                out.push_str(&format!("- {line}\n"));
+            }
+        }
     }
     if let Some(done_when) = task.done_when.as_deref() {
         if !done_when.trim().is_empty() {
@@ -4560,17 +5431,30 @@ fn next_mission_id(state: &AppState) -> String {
     format!("mis-{:03}", state.agents.missions.len() + 1)
 }
 
-fn swarm_mission_title(root_prompt: &str, mission_id: &str, template: SwarmTemplate) -> String {
+fn swarm_mission_title(
+    root_prompt: &str,
+    mission_id: &str,
+    template: SwarmTemplate,
+    mission_kind: SwarmMissionKind,
+) -> String {
     let first = root_prompt.lines().next().unwrap_or("Swarm mission").trim();
     let label = template.label();
     if first.is_empty() {
-        return format!("{mission_id} swarm[{label}]");
+        return if matches!(mission_kind, SwarmMissionKind::General) {
+            format!("{mission_id} swarm[{label}]")
+        } else {
+            format!("{mission_id} swarm[{label}] ({})", mission_kind.label())
+        };
     }
     let mut title = String::new();
     for ch in first.chars().take(48) {
         title.push(ch);
     }
-    format!("Swarm[{label}]: {title}")
+    if matches!(mission_kind, SwarmMissionKind::General) {
+        format!("Swarm[{label}]: {title}")
+    } else {
+        format!("Swarm[{label}] ({}): {title}", mission_kind.label())
+    }
 }
 
 fn timestamp_label(state: &AppState) -> String {
@@ -4929,6 +5813,41 @@ mod tests {
         assert_eq!(cmd.prompt, "do thing");
     }
 
+    #[test]
+    fn parse_swarm_mission_focus() {
+        let cmd = parse_swarm_command("@swarm mission=research read papers").expect("cmd");
+        assert_eq!(cmd.mission_kind, Some(SwarmMissionKind::Research));
+        assert_eq!(cmd.prompt, "read papers");
+
+        let cmd =
+            parse_swarm_command("@swarm 4 m=computational-research model this topic").expect("cmd");
+        assert_eq!(
+            cmd.mission_kind,
+            Some(SwarmMissionKind::ComputationalResearch)
+        );
+        assert_eq!(cmd.prompt, "model this topic");
+    }
+
+    #[test]
+    fn detect_swarm_mission_kind_requires_actual_research_intent() {
+        assert_eq!(
+            detect_swarm_mission_kind_from_prompt("Fix research role assignment in the TUI"),
+            None
+        );
+        assert_eq!(
+            detect_swarm_mission_kind_from_prompt(
+                "Read papers, search the web, and rank strategies for this topic"
+            ),
+            Some(SwarmMissionKind::Research)
+        );
+        assert_eq!(
+            detect_swarm_mission_kind_from_prompt(
+                "Run simulations and compare modeling strategies for this research topic"
+            ),
+            Some(SwarmMissionKind::ComputationalResearch)
+        );
+    }
+
     fn make_lane(id: &str, role: &str) -> AgentLane {
         AgentLane {
             id: id.into(),
@@ -5012,6 +5931,7 @@ mod tests {
                 vec!["planner".into(), "a".into()],
                 SwarmSize::Count(2),
                 Some("parallel".into()),
+                None,
                 "root".into(),
             )
             .expect("swarm start");
@@ -5064,6 +5984,7 @@ mod tests {
                 vec!["planner".into()],
                 SwarmSize::Count(4),
                 Some("parallel".into()),
+                None,
                 "root".into(),
             )
             .expect("swarm start");
@@ -5083,6 +6004,146 @@ mod tests {
                 "planner#swarm-mis-001-clone-03",
             ]
         );
+    }
+
+    #[test]
+    fn completed_swarm_cleans_up_mission_clone_lanes_from_roster() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let editor = Buffer::empty("editor", None);
+        let notes = Buffer::empty("notes", None);
+        let mut state = AppState::new(root, editor, notes);
+        state.agents.messages.clear();
+        state.agents.missions.clear();
+        state.agents.agents.clear();
+        state
+            .agents
+            .codex_effective_context_window_tokens
+            .insert("planner".into(), 200_000);
+        state
+            .agents
+            .codex_selected_reasoning_effort
+            .insert("planner".into(), "medium".into());
+
+        state.agents.agents.push(make_lane("planner", "planner"));
+
+        let mut swarm = SwarmRuntime::default();
+        let (mission_id, _dispatches) = swarm
+            .start(
+                &mut state,
+                "planner".into(),
+                vec!["planner".into()],
+                SwarmSize::Count(2),
+                Some("parallel".into()),
+                None,
+                "root".into(),
+            )
+            .expect("swarm start");
+
+        let clone_id = format!("planner#swarm-{mission_id}-clone-01");
+        assert!(state.agents.agents.iter().any(|lane| lane.id == clone_id));
+        assert!(state
+            .agents
+            .codex_effective_context_window_tokens
+            .contains_key(&clone_id));
+        assert!(state
+            .agents
+            .codex_selected_reasoning_effort
+            .contains_key(&clone_id));
+
+        state.agents.selected_agent = Some(clone_id.clone());
+        state.agents.roster_selected = state
+            .agents
+            .agents
+            .iter()
+            .position(|lane| lane.id == clone_id)
+            .expect("clone roster index");
+
+        let run = swarm.runs.get_mut(&mission_id).expect("active run");
+        run.gate_bundle = None;
+        run.verifier_agent_id = None;
+        run.gate_selection = "auto:none".into();
+
+        let planner_message = format!(
+            r#"
+```json
+{{
+  "version": 2,
+  "template": "parallel",
+  "tasks": [
+    {{ "id": "task-1", "agent_id": "{clone_id}", "title": "Task 1", "prompt": "ship it" }}
+  ],
+  "synthesis_prompt": "summarize"
+}}
+```
+"#
+        );
+        let planner_event = AgentBusEvent::TurnCompleted {
+            agent_id: "planner".into(),
+            mission_id: Some(mission_id.clone()),
+            thread_id: None,
+            token_count: None,
+            message: planner_message,
+        };
+        planner_event.apply(&mut state);
+        let dispatches = swarm.handle_event(&mut state, &planner_event);
+        assert_eq!(dispatches.len(), 1);
+        assert_eq!(dispatches[0].agent_id, clone_id);
+
+        let clone_event = AgentBusEvent::TurnCompleted {
+            agent_id: clone_id.clone(),
+            mission_id: Some(mission_id.clone()),
+            thread_id: Some("thr-clone".into()),
+            token_count: None,
+            message: "done".into(),
+        };
+        clone_event.apply(&mut state);
+        let dispatches = swarm.handle_event(&mut state, &clone_event);
+        assert_eq!(dispatches.len(), 1);
+        assert_eq!(dispatches[0].agent_id, "planner");
+
+        let planner_finish = AgentBusEvent::TurnCompleted {
+            agent_id: "planner".into(),
+            mission_id: Some(mission_id.clone()),
+            thread_id: None,
+            token_count: None,
+            message: "final report".into(),
+        };
+        planner_finish.apply(&mut state);
+        let dispatches = swarm.handle_event(&mut state, &planner_finish);
+        assert!(dispatches.is_empty());
+
+        assert!(!state.agents.agents.iter().any(|lane| lane.id == clone_id));
+        assert_eq!(state.agents.selected_agent.as_deref(), Some("planner"));
+        assert_eq!(
+            state.agents.roster_selected,
+            state
+                .agents
+                .agents
+                .iter()
+                .position(|lane| lane.id == "planner")
+                .expect("planner roster index")
+        );
+        assert!(!state
+            .agents
+            .codex_effective_context_window_tokens
+            .contains_key(&clone_id));
+        assert!(!state
+            .agents
+            .codex_selected_reasoning_effort
+            .contains_key(&clone_id));
+        assert!(!state
+            .agents
+            .codex_mission_thread_ids
+            .get(&mission_id)
+            .is_some_and(|map| map.contains_key(&clone_id)));
+
+        let mission = state
+            .agents
+            .missions
+            .iter()
+            .find(|mission| mission.id == mission_id)
+            .expect("mission");
+        assert_eq!(mission.status, "DONE");
     }
 
     #[test]
@@ -5112,6 +6173,7 @@ mod tests {
                 vec!["planner".into(), "b".into(), "d".into()],
                 SwarmSize::Count(4),
                 Some("parallel".into()),
+                None,
                 "root".into(),
             )
             .expect("swarm start");
@@ -5198,6 +6260,43 @@ mod tests {
     }
 
     #[test]
+    fn parallel_tracks_single_integrator_hint_without_cloning_it() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let editor = Buffer::empty("editor", None);
+        let notes = Buffer::empty("notes", None);
+        let mut state = AppState::new(root, editor, notes);
+        state.agents.messages.clear();
+        state.agents.missions.clear();
+        state.agents.agents.clear();
+
+        state.agents.agents.push(make_lane("planner", "planner"));
+        state.agents.agents.push(make_lane("a", "worker"));
+        state.agents.agents.push(make_lane("b", "worker"));
+        state
+            .agents
+            .swarm_role_by_agent_id
+            .insert("a".into(), "integrate".into());
+        state.agents.swarm_priority_agent_ids.insert("a".into());
+        state.agents.swarm_priority_agent_ids.insert("b".into());
+
+        let mut swarm = SwarmRuntime::default();
+        let (mission_id, _dispatches) = swarm
+            .start(
+                &mut state,
+                "planner".into(),
+                vec!["planner".into(), "a".into(), "b".into()],
+                SwarmSize::Count(4),
+                Some("parallel".into()),
+                None,
+                "root".into(),
+            )
+            .expect("swarm start");
+
+        let run = swarm.runs.get(&mission_id).expect("run");
+        assert_eq!(run.integrator_agent_id.as_deref(), Some("a"));
+    }
+
+    #[test]
     fn bulk_integrator_prefers_priority_agents() {
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         let editor = Buffer::empty("editor", None);
@@ -5225,6 +6324,7 @@ mod tests {
                 vec!["planner".into(), "a".into(), "b".into()],
                 SwarmSize::Count(3),
                 Some("bulk".into()),
+                None,
                 "root".into(),
             )
             .expect("swarm start");
@@ -5336,6 +6436,7 @@ Plan:
         let parsed = parse_plan_from_planner(
             planner_message,
             SwarmTemplate::Lab,
+            SwarmMissionKind::General,
             "root",
             &available,
             Some("a1"),
@@ -5361,7 +6462,13 @@ Plan:
             make_task("judge-1", "a2", Some("judge"), Vec::new()),
         ];
 
-        let warnings = apply_role_dependency_ordering(root.as_path(), &HashMap::new(), &mut tasks);
+        let warnings = apply_role_dependency_ordering(
+            root.as_path(),
+            &HashMap::new(),
+            SwarmMissionKind::Research,
+            None,
+            &mut tasks,
+        );
 
         let judge = tasks.iter().find(|t| t.id == "judge-1").expect("judge");
         assert!(judge.deps.iter().any(|dep| dep == "research-1"));
@@ -5380,7 +6487,13 @@ Plan:
         hints.insert("a1".into(), "research".into());
         hints.insert("a2".into(), "judge".into());
 
-        apply_role_dependency_ordering(root.as_path(), &hints, &mut tasks);
+        apply_role_dependency_ordering(
+            root.as_path(),
+            &hints,
+            SwarmMissionKind::Research,
+            None,
+            &mut tasks,
+        );
 
         let t1 = tasks.iter().find(|t| t.id == "t1").expect("t1");
         let t2 = tasks.iter().find(|t| t.id == "t2").expect("t2");
@@ -5397,11 +6510,206 @@ Plan:
             make_task("j", "a2", Some("judge"), Vec::new()),
         ];
 
-        let warnings = apply_role_dependency_ordering(root.as_path(), &HashMap::new(), &mut tasks);
+        let warnings = apply_role_dependency_ordering(
+            root.as_path(),
+            &HashMap::new(),
+            SwarmMissionKind::Research,
+            None,
+            &mut tasks,
+        );
 
         let judge = tasks.iter().find(|t| t.id == "j").expect("judge");
         assert!(judge.deps.is_empty());
         assert!(warnings.iter().any(|w| w.contains("skipped")));
+    }
+
+    #[test]
+    fn role_ordering_does_not_inherit_singleton_role_hints_to_clones() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let mut tasks = vec![
+            make_task("base", "a1", None, Vec::new()),
+            make_task("clone", "a1#swarm-mis-001-clone-01", None, Vec::new()),
+        ];
+
+        let mut hints = HashMap::new();
+        hints.insert("a1".into(), "integrate".into());
+
+        apply_role_dependency_ordering(
+            root.as_path(),
+            &hints,
+            SwarmMissionKind::General,
+            Some("a1"),
+            &mut tasks,
+        );
+
+        let base = tasks.iter().find(|t| t.id == "base").expect("base");
+        let clone = tasks.iter().find(|t| t.id == "clone").expect("clone");
+        assert_eq!(base.role.as_deref(), Some("integrate"));
+        assert_eq!(clone.role.as_deref(), None);
+    }
+
+    #[test]
+    fn role_ordering_clears_integrate_role_for_non_integrator() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let mut tasks = vec![
+            make_task("good", "a1", Some("integrate"), Vec::new()),
+            make_task("bad", "a2", Some("integrate"), Vec::new()),
+        ];
+
+        let warnings = apply_role_dependency_ordering(
+            root.as_path(),
+            &HashMap::new(),
+            SwarmMissionKind::General,
+            Some("a1"),
+            &mut tasks,
+        );
+
+        let good = tasks.iter().find(|t| t.id == "good").expect("good");
+        let bad = tasks.iter().find(|t| t.id == "bad").expect("bad");
+        assert_eq!(good.role.as_deref(), Some("integrate"));
+        assert_eq!(bad.role.as_deref(), None);
+        assert!(warnings
+            .iter()
+            .any(|warning| warning.contains("cleared invalid integrate role")));
+    }
+
+    #[test]
+    fn role_ordering_clears_research_role_for_non_research_prompts() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let mut tasks = vec![make_task(
+            "research-task",
+            "a1",
+            Some("research"),
+            Vec::new(),
+        )];
+
+        let warnings = apply_role_dependency_ordering(
+            root.as_path(),
+            &HashMap::new(),
+            SwarmMissionKind::General,
+            None,
+            &mut tasks,
+        );
+
+        let task = tasks.first().expect("task");
+        assert_eq!(task.role, None);
+        assert!(warnings
+            .iter()
+            .any(|warning| warning.contains("does not permit that research role")));
+    }
+
+    #[test]
+    fn planner_role_hint_downgrades_research_hint_for_non_research_prompts() {
+        let mut hints = HashMap::new();
+        hints.insert("a1".into(), "research".into());
+
+        let role = planner_role_hint_for_agent(&hints, "a1", None, SwarmMissionKind::General);
+        assert_eq!(role, "all");
+
+        let role = planner_role_hint_for_agent(&hints, "a1", None, SwarmMissionKind::Research);
+        assert_eq!(role, "research");
+    }
+
+    #[test]
+    fn planner_role_hint_only_keeps_computational_role_for_computational_missions() {
+        let mut hints = HashMap::new();
+        hints.insert("a1".into(), COMPUTATIONAL_RESEARCH_ROLE.into());
+
+        let role = planner_role_hint_for_agent(&hints, "a1", None, SwarmMissionKind::Research);
+        assert_eq!(role, "all");
+
+        let role = planner_role_hint_for_agent(
+            &hints,
+            "a1",
+            None,
+            SwarmMissionKind::ComputationalResearch,
+        );
+        assert_eq!(role, COMPUTATIONAL_RESEARCH_ROLE);
+    }
+
+    #[test]
+    fn lab_fallback_reserves_research_roles_for_external_research() {
+        let available = vec!["a1".to_string(), "a2".to_string(), "a3".to_string()];
+        let parsed = fallback_tasks(
+            SwarmTemplate::Lab,
+            SwarmMissionKind::General,
+            "root",
+            &available,
+            None,
+            Some("a1"),
+        );
+
+        let recon = parsed
+            .tasks
+            .iter()
+            .find(|task| task.id == "recon")
+            .expect("recon");
+        let design = parsed
+            .tasks
+            .iter()
+            .find(|task| task.id == "design")
+            .expect("design");
+        assert_eq!(recon.role, None);
+        assert_eq!(design.role.as_deref(), Some("propose"));
+    }
+
+    #[test]
+    fn lab_fallback_uses_research_shape_for_research_missions() {
+        let available = vec!["a1".to_string(), "a2".to_string(), "a3".to_string()];
+        let parsed = fallback_tasks(
+            SwarmTemplate::Lab,
+            SwarmMissionKind::Research,
+            "research this topic",
+            &available,
+            None,
+            Some("a1"),
+        );
+
+        let recon = parsed
+            .tasks
+            .iter()
+            .find(|task| task.id == "recon")
+            .expect("recon");
+        let design = parsed
+            .tasks
+            .iter()
+            .find(|task| task.id == "design")
+            .expect("design");
+        let implement = parsed
+            .tasks
+            .iter()
+            .find(|task| task.id == "implement")
+            .expect("implement");
+        assert_eq!(recon.role.as_deref(), Some("research"));
+        assert_eq!(design.role.as_deref(), Some("research"));
+        assert_eq!(implement.role.as_deref(), Some("integrate"));
+        assert!(!implement.writes);
+    }
+
+    #[test]
+    fn lab_fallback_uses_computational_lane_for_computational_missions() {
+        let available = vec!["a1".to_string(), "a2".to_string(), "a3".to_string()];
+        let parsed = fallback_tasks(
+            SwarmTemplate::Lab,
+            SwarmMissionKind::ComputationalResearch,
+            "run simulations for this topic",
+            &available,
+            None,
+            Some("a1"),
+        );
+
+        let design = parsed
+            .tasks
+            .iter()
+            .find(|task| task.id == "design")
+            .expect("design");
+        let implement = parsed
+            .tasks
+            .iter()
+            .find(|task| task.id == "implement")
+            .expect("implement");
+        assert_eq!(design.role.as_deref(), Some(COMPUTATIONAL_RESEARCH_ROLE));
+        assert!(!implement.writes);
     }
 
     #[test]
@@ -5422,6 +6730,7 @@ Plan:
         let parsed = parse_plan_from_planner(
             planner_message,
             SwarmTemplate::Bulk,
+            SwarmMissionKind::General,
             "root",
             &available,
             Some("a1"),
@@ -5460,6 +6769,7 @@ Plan:
         let parsed = parse_plan_from_planner(
             planner_message,
             SwarmTemplate::Bulk,
+            SwarmMissionKind::General,
             "root",
             &available,
             Some("a1"),
@@ -5505,6 +6815,7 @@ Plan:
         let parsed = parse_plan_from_planner(
             planner_message,
             SwarmTemplate::Bulk,
+            SwarmMissionKind::General,
             "root",
             &available,
             Some("a1"),
@@ -5531,6 +6842,7 @@ Plan:
             mission_id: "mis-001".into(),
             root_prompt: "root".into(),
             template: SwarmTemplate::Lab,
+            mission_kind: SwarmMissionKind::General,
             planner_agent_id: "planner".into(),
             integrator_agent_id: Some("a1".into()),
             integrator_locked: false,
@@ -5645,6 +6957,7 @@ Plan:
             mission_id: "mis-001".into(),
             root_prompt: "root".into(),
             template: SwarmTemplate::Lab,
+            mission_kind: SwarmMissionKind::General,
             planner_agent_id: "planner".into(),
             integrator_agent_id: Some("a1".into()),
             integrator_locked: false,
@@ -5726,11 +7039,87 @@ Plan:
     }
 
     #[test]
+    fn task_prompt_includes_role_contract_guidance() {
+        let task = make_task("judge", "a1", Some("judge"), vec!["propose-01"]);
+        let prompt = wrap_task_prompt("root", SwarmMissionKind::General, &task, None);
+
+        assert!(prompt.contains("ROLE CONTRACT:"));
+        assert!(prompt.contains("Act strictly as the assigned role"));
+        assert!(prompt.contains("Compare the dependency outputs"));
+    }
+
+    #[test]
+    fn research_role_contract_mentions_external_sources() {
+        let task = make_task("research", "a1", Some("research"), Vec::new());
+        let prompt = wrap_task_prompt("root", SwarmMissionKind::Research, &task, None);
+
+        assert!(prompt.contains("papers, docs, web resources"));
+        assert!(prompt.contains("best strategy candidates"));
+        assert!(prompt.contains("MISSION FOCUS: research"));
+        assert!(prompt.contains("Sources:"));
+        assert!(prompt.contains("Methods:"));
+        assert!(prompt.contains("Assumptions:"));
+        assert!(prompt.contains("Ranked strategies:"));
+    }
+
+    #[test]
+    fn computational_research_role_contract_mentions_modeling_and_simulation() {
+        let task = make_task(
+            "comp-research",
+            "a1",
+            Some(COMPUTATIONAL_RESEARCH_ROLE),
+            Vec::new(),
+        );
+        let prompt = wrap_task_prompt("root", SwarmMissionKind::ComputationalResearch, &task, None);
+
+        assert!(prompt.contains("simulations, modeling, numerical methods, optimization"));
+        assert!(prompt.contains("reproducible research workflows"));
+        assert!(prompt.contains("MISSION FOCUS: computational-research"));
+    }
+
+    #[test]
+    fn planner_prompt_describes_research_roles_as_topic_research() {
+        let prompt = build_planner_prompt(
+            "root",
+            SwarmTemplate::Parallel,
+            SwarmMissionKind::General,
+            "planner",
+            &["planner".into(), "a1".into()],
+            None,
+            &[],
+            &[],
+        );
+
+        assert!(prompt.contains("web/paper/resource exploration"));
+        assert!(prompt.contains("not routine codebase recon"));
+        assert!(prompt.contains("simulations, modeling, numerical methods, optimization"));
+    }
+
+    #[test]
+    fn planner_prompt_describes_computational_research_mission_shape() {
+        let prompt = build_planner_prompt(
+            "root",
+            SwarmTemplate::Lab,
+            SwarmMissionKind::ComputationalResearch,
+            "planner",
+            &["planner".into(), "a1".into()],
+            None,
+            &[],
+            &[],
+        );
+
+        assert!(prompt.contains("source survey -> modeling / experiments / analysis"));
+        assert!(prompt.contains("preferred for quantitative or tool-driven lanes"));
+        assert!(prompt.contains("Prefer read-only investigation and synthesis tasks"));
+    }
+
+    #[test]
     fn deadlock_detection_skips_pending_tasks() {
         let mut run = SwarmRun {
             mission_id: "mis-001".into(),
             root_prompt: "root".into(),
             template: SwarmTemplate::Lab,
+            mission_kind: SwarmMissionKind::General,
             planner_agent_id: "planner".into(),
             integrator_agent_id: Some("a1".into()),
             integrator_locked: false,
@@ -5831,6 +7220,7 @@ Plan:
                 vec!["planner".into(), "a1".into()],
                 SwarmSize::Count(2),
                 Some("lab".into()),
+                None,
                 "root".into(),
             )
             .expect("swarm start");
@@ -5893,6 +7283,73 @@ Plan:
     }
 
     #[test]
+    fn strict_dag_abort_cleans_up_mission_clone_lanes_from_roster() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let editor = Buffer::empty("editor", None);
+        let notes = Buffer::empty("notes", None);
+        let mut state = AppState::new(root, editor, notes);
+        state.agents.messages.clear();
+        state.agents.missions.clear();
+        state.agents.agents.clear();
+
+        state.agents.agents.push(make_lane("planner", "planner"));
+
+        let mut swarm = SwarmRuntime::default();
+        let (mission_id, _dispatches) = swarm
+            .start(
+                &mut state,
+                "planner".into(),
+                vec!["planner".into()],
+                SwarmSize::Count(2),
+                Some("parallel".into()),
+                None,
+                "root".into(),
+            )
+            .expect("swarm start");
+
+        let clone_id = format!("planner#swarm-{mission_id}-clone-01");
+        assert!(state.agents.agents.iter().any(|lane| lane.id == clone_id));
+
+        let planner_message = format!(
+            r#"
+```json
+{{
+  "version": 2,
+  "template": "parallel",
+  "tasks": [
+    {{ "id": "t1", "agent_id": "{clone_id}", "title": "T1", "prompt": "DONE t1", "deps": ["t2"] }},
+    {{ "id": "t2", "agent_id": "{clone_id}", "title": "T2", "prompt": "DONE t2", "deps": ["t1"] }}
+  ]
+}}
+```
+"#
+        );
+
+        let event = AgentBusEvent::TurnCompleted {
+            agent_id: "planner".into(),
+            mission_id: Some(mission_id.clone()),
+            thread_id: None,
+            token_count: None,
+            message: planner_message,
+        };
+        event.apply(&mut state);
+        let dispatches = swarm.handle_event(&mut state, &event);
+
+        assert!(dispatches.is_empty());
+        assert!(!swarm.runs.contains_key(mission_id.as_str()));
+        assert!(swarm.completed_runs.contains_key(mission_id.as_str()));
+        assert!(!state.agents.agents.iter().any(|lane| lane.id == clone_id));
+
+        let mission = state
+            .agents
+            .missions
+            .iter()
+            .find(|mission| mission.id == mission_id)
+            .expect("mission");
+        assert_eq!(mission.status, "FAILED");
+    }
+
+    #[test]
     fn parse_task_artifacts_merges_json_blocks() {
         let message = r#"
 notes
@@ -5948,6 +7405,7 @@ notes
             mission_id: "mis-001".into(),
             root_prompt: "root".into(),
             template: SwarmTemplate::Lab,
+            mission_kind: SwarmMissionKind::General,
             planner_agent_id: "planner".into(),
             integrator_agent_id: Some("a1".into()),
             integrator_locked: false,

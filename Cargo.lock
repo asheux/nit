@@ -922,6 +922,7 @@ name = "nit-games"
 version = "0.1.0"
 dependencies = [
  "criterion",
+ "nit-metal",
  "nit-utils",
  "rayon",
  "serde",
@@ -943,6 +944,13 @@ dependencies = [
  "time",
  "toml",
  "tracing",
+]
+
+[[package]]
+name = "nit-metal"
+version = "0.1.0"
+dependencies = [
+ "metal",
 ]
 
 [[package]]

@@ -17,7 +17,8 @@ use nit_games::analysis::AnalysisConfig;
 use nit_gol::Rule;
 use nit_gol::{AttractorEvent, AutoStopPolicy};
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::path::PathBuf;
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 const DEFAULT_LOG_CAPACITY: usize = 512;
@@ -605,6 +606,10 @@ pub struct AgentsState {
     /// explicit `template=...` argument.
     #[serde(default = "swarm_default_template_default")]
     pub swarm_default_template: String,
+    /// Default swarm mission preset used when swarm prompts omit an explicit mission focus.
+    /// `auto` preserves prompt-based detection; other values pin the mission kind.
+    #[serde(default = "swarm_default_mission_default")]
+    pub swarm_default_mission: String,
     /// Per-agent role hint for swarm planning (used by `parallel`/`bulk`).
     /// Missing entry means "all roles".
     #[serde(default)]
@@ -722,6 +727,10 @@ fn swarm_default_template_default() -> String {
     "lab".into()
 }
 
+fn swarm_default_mission_default() -> String {
+    "auto".into()
+}
+
 fn codex_max_parallel_turns_default() -> usize {
     2
 }
@@ -828,6 +837,7 @@ impl AgentsState {
             chat_prompt_history_draft: None,
             chat_channel: AgentChannel::Agent,
             swarm_default_template: swarm_default_template_default(),
+            swarm_default_mission: swarm_default_mission_default(),
             swarm_role_by_agent_id: HashMap::new(),
             swarm_priority_agent_ids: HashSet::new(),
             codex_max_parallel_turns: codex_max_parallel_turns_default(),
@@ -911,6 +921,7 @@ impl Default for AgentsState {
             chat_prompt_history_draft: None,
             chat_channel: AgentChannel::Agent,
             swarm_default_template: swarm_default_template_default(),
+            swarm_default_mission: swarm_default_mission_default(),
             swarm_role_by_agent_id: HashMap::new(),
             swarm_priority_agent_ids: HashSet::new(),
             codex_max_parallel_turns: codex_max_parallel_turns_default(),
@@ -966,6 +977,8 @@ pub struct GamesState {
     pub petri_hidden: bool,
     pub steps_per_tick: u32,
     pub last_error: Option<String>,
+    #[serde(default)]
+    pub runtime: nit_games::RuntimeAcceleratorStats,
     pub last_run: Option<nit_games::output::RunSummary>,
     pub last_run_path: Option<String>,
     pub last_event_path: Option<String>,
@@ -1546,6 +1559,7 @@ impl AppState {
                 petri_hidden: false,
                 steps_per_tick: 1,
                 last_error: None,
+                runtime: nit_games::RuntimeAcceleratorStats::default(),
                 last_run: None,
                 last_run_path: None,
                 last_event_path: None,
@@ -3686,8 +3700,12 @@ pub fn build_family_run_override_for_request(
     let (strategies, label) = match request.family.as_str() {
         "fsm" => {
             let (states, actions) = parse_fsm_family_tuple(&request.input)?;
-            let (specs, stats) =
-                generate_fsm_family_strategies(states, actions, config.engine.fsm_grouping)?;
+            let (specs, stats) = generate_fsm_family_strategies(
+                workspace_root,
+                states,
+                actions,
+                config.engine.fsm_grouping,
+            )?;
             (
                 specs,
                 format!(
@@ -3949,6 +3967,18 @@ struct FsmFamilyStats {
     unique_behavior_count: usize,
 }
 
+const FSM_FAMILY_CACHE_SCHEMA_VERSION: u32 = 1;
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+struct FsmFamilyCacheEntry {
+    schema_version: u32,
+    states: usize,
+    actions: usize,
+    grouping_mode: nit_games::FsmGroupingMode,
+    canonical_count: usize,
+    representative_indices: Vec<u64>,
+}
+
 fn fsm_grouping_mode_label(mode: nit_games::FsmGroupingMode) -> &'static str {
     match mode {
         nit_games::FsmGroupingMode::Wnbm => "wnbm",
@@ -3956,28 +3986,97 @@ fn fsm_grouping_mode_label(mode: nit_games::FsmGroupingMode) -> &'static str {
     }
 }
 
+fn fsm_family_cache_dir(workspace_root: &Path) -> PathBuf {
+    workspace_root
+        .join(".nit")
+        .join("cache")
+        .join("games")
+        .join("fsm")
+}
+
+fn fsm_family_cache_path(
+    workspace_root: &Path,
+    states: usize,
+    actions: usize,
+    grouping_mode: nit_games::FsmGroupingMode,
+) -> PathBuf {
+    fsm_family_cache_dir(workspace_root).join(format!(
+        "s{states}_k{actions}_{}_v{FSM_FAMILY_CACHE_SCHEMA_VERSION}.json",
+        fsm_grouping_mode_label(grouping_mode)
+    ))
+}
+
+fn load_fsm_family_cache_entry(
+    workspace_root: &Path,
+    states: usize,
+    actions: usize,
+    grouping_mode: nit_games::FsmGroupingMode,
+) -> Option<FsmFamilyCacheEntry> {
+    let path = fsm_family_cache_path(workspace_root, states, actions, grouping_mode);
+    let contents = fs::read(path).ok()?;
+    let entry: FsmFamilyCacheEntry = serde_json::from_slice(&contents).ok()?;
+    if entry.schema_version != FSM_FAMILY_CACHE_SCHEMA_VERSION
+        || entry.states != states
+        || entry.actions != actions
+        || entry.grouping_mode != grouping_mode
+    {
+        return None;
+    }
+    Some(entry)
+}
+
+fn persist_fsm_family_cache_entry(workspace_root: &Path, entry: &FsmFamilyCacheEntry) {
+    let path = fsm_family_cache_path(
+        workspace_root,
+        entry.states,
+        entry.actions,
+        entry.grouping_mode,
+    );
+    let Some(parent) = path.parent() else {
+        return;
+    };
+    if fs::create_dir_all(parent).is_err() {
+        return;
+    }
+    let Ok(encoded) = serde_json::to_vec(entry) else {
+        return;
+    };
+    let _ = fs::write(path, encoded);
+}
+
 fn generate_fsm_family_strategies(
+    workspace_root: &Path,
     states: usize,
     actions: usize,
     grouping_mode: nit_games::FsmGroupingMode,
 ) -> Result<(Vec<nit_games::StrategySpec>, FsmFamilyStats), String> {
     let total_count = nit_games::fsm_count(states, actions)
         .ok_or_else(|| "FSM family count overflow".to_string())?;
-    checked_machine_count(total_count, "FSM")?;
-    let groups = nit_games::group_canonical_fsm_indices_by_behavior_with_mode(
-        states,
-        actions,
-        grouping_mode,
-    )?;
-    let representative_indices = groups
-        .iter()
-        .filter_map(|group| group.first().copied())
-        .collect::<Vec<_>>();
-    let unique_behavior_count = groups.len();
-    let canonical_indices = nit_games::canonical_fsm_indices(states, actions)?;
-    let canonical_count = canonical_indices.len();
-    let machine_count = checked_machine_count(unique_behavior_count as u128, "FSM")?;
-    let mut specs = Vec::with_capacity(machine_count);
+    let cache_entry = load_fsm_family_cache_entry(workspace_root, states, actions, grouping_mode);
+    let (representative_indices, canonical_count) = if let Some(entry) = cache_entry {
+        (entry.representative_indices, entry.canonical_count)
+    } else {
+        let representative_indices = nit_games::unique_fsm_behavior_representatives_with_mode(
+            states,
+            actions,
+            grouping_mode,
+        )?;
+        let canonical_count = nit_games::canonical_fsm_indices(states, actions)?.len();
+        persist_fsm_family_cache_entry(
+            workspace_root,
+            &FsmFamilyCacheEntry {
+                schema_version: FSM_FAMILY_CACHE_SCHEMA_VERSION,
+                states,
+                actions,
+                grouping_mode,
+                canonical_count,
+                representative_indices: representative_indices.clone(),
+            },
+        );
+        (representative_indices, canonical_count)
+    };
+    let unique_behavior_count = representative_indices.len();
+    let mut specs = Vec::with_capacity(unique_behavior_count);
     for rule_index in representative_indices {
         let (outputs, transitions) =
             nit_games::decode_fsm_notebook_index(rule_index, states, actions)
@@ -4860,6 +4959,99 @@ transitions = [[0, 0]]
     }
 
     #[test]
+    fn fsm_family_build_persists_disk_cache() {
+        let root = temp_dir("fsm-family-disk-cache");
+        let config = r#"
+schema_version = 1
+game = "ipd"
+rounds = 10
+repetitions = 1
+noise = 0.0
+
+[[strategy]]
+id = "fsm_allc"
+type = "fsm"
+num_states = 1
+outputs = ["C"]
+transitions = [[0, 0]]
+"#;
+        let request = GamesFamilyRunRequest {
+            family: "fsm".into(),
+            input: "{2, 2}".into(),
+            force: false,
+        };
+        let override_run = build_family_run_override_for_request(&root, config, &request)
+            .expect("expected generated override");
+        assert_eq!(override_run.config.strategies.len(), 22);
+
+        let cache_path = fsm_family_cache_path(&root, 2, 2, nit_games::FsmGroupingMode::Wnbm);
+        assert!(cache_path.exists(), "expected cache file at {cache_path:?}");
+
+        let cached: FsmFamilyCacheEntry =
+            serde_json::from_slice(&fs::read(&cache_path).expect("cache file"))
+                .expect("valid cache json");
+        assert_eq!(cached.states, 2);
+        assert_eq!(cached.actions, 2);
+        assert_eq!(cached.grouping_mode, nit_games::FsmGroupingMode::Wnbm);
+        assert_eq!(cached.canonical_count, 49);
+        assert_eq!(cached.representative_indices.len(), 22);
+    }
+
+    #[test]
+    fn fsm_family_build_uses_persisted_disk_cache_when_present() {
+        let root = temp_dir("fsm-family-disk-cache-hit");
+        let config = r#"
+schema_version = 1
+game = "ipd"
+rounds = 10
+repetitions = 1
+noise = 0.0
+
+[[strategy]]
+id = "fsm_allc"
+type = "fsm"
+num_states = 1
+outputs = ["C"]
+transitions = [[0, 0]]
+"#;
+        let cache_path = fsm_family_cache_path(&root, 1, 2, nit_games::FsmGroupingMode::Wnbm);
+        fs::create_dir_all(
+            cache_path
+                .parent()
+                .expect("expected parent cache directory"),
+        )
+        .expect("create cache dir");
+        fs::write(
+            &cache_path,
+            serde_json::to_vec(&FsmFamilyCacheEntry {
+                schema_version: FSM_FAMILY_CACHE_SCHEMA_VERSION,
+                states: 1,
+                actions: 2,
+                grouping_mode: nit_games::FsmGroupingMode::Wnbm,
+                canonical_count: 2,
+                representative_indices: vec![1, 0],
+            })
+            .expect("encode cache entry"),
+        )
+        .expect("write cache entry");
+
+        let request = GamesFamilyRunRequest {
+            family: "fsm".into(),
+            input: "{1, 2}".into(),
+            force: false,
+        };
+        let override_run = build_family_run_override_for_request(&root, config, &request)
+            .expect("expected generated override from cache");
+        let ids = override_run
+            .config
+            .strategies
+            .iter()
+            .map(|spec| spec.id.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(ids, vec!["fsm_1", "fsm_0"]);
+    }
+
+    #[test]
     fn command_games_run_fsm_family_accepts_named_tuple_keys() {
         let root = temp_dir("cmd-games-run-fsm-family-named");
         let config = r#"
@@ -5010,6 +5202,12 @@ transitions = [[0, 0]]
     }
 
     #[test]
+    fn fsm_family_raw_count_can_exceed_legacy_machine_cap() {
+        let raw_count = nit_games::fsm_count(4, 2).expect("expected finite raw FSM count");
+        assert!(raw_count > MAX_FAMILY_RUN_MACHINES as u128);
+    }
+
+    #[test]
     fn command_games_run_tm_family_queues_generated_override() {
         let root = temp_dir("cmd-games-run-tm-family");
         let config = r#"
@@ -5119,7 +5317,7 @@ t = 2
                 a: "fsm_allc".into(),
                 b: "fsm_alld".into(),
                 rounds_total: 4,
-                outcomes_prefix: "0123".into(),
+                outcomes: "0123".into(),
             });
         assert!(!handle_command_line(&mut state, ":games history"));
         assert!(state.games.match_history.open);
@@ -5145,7 +5343,7 @@ t = 2
                 a: "fsm_allc".into(),
                 b: "fsm_alld".into(),
                 rounds_total: 4,
-                outcomes_prefix: "0123".into(),
+                outcomes: "0123".into(),
             });
         assert!(!handle_command_line(&mut state, ":history"));
         assert!(state.games.match_history.open);

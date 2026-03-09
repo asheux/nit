@@ -324,6 +324,17 @@ pub fn render(
                     .add_modifier(Modifier::BOLD),
             ));
         }
+        let swarm_mission = state.agents.swarm_default_mission.trim();
+        if !swarm_mission.is_empty() {
+            title_spans.push(Span::raw("  "));
+            title_spans.push(Span::styled(
+                format!(" m={swarm_mission} "),
+                Style::default()
+                    .fg(theme.background)
+                    .bg(theme.hl.operator)
+                    .add_modifier(Modifier::BOLD),
+            ));
+        }
         if queued_count > 0 {
             title_spans.push(Span::raw("  "));
             let label = if queued_count > 1 {
@@ -1923,6 +1934,9 @@ fn append_swarm_meta_footer_rows(
     if let Some(value) = meta.template {
         entries.push(("Template", value));
     }
+    if let Some(value) = meta.mission {
+        entries.push(("Mission", value));
+    }
     if let Some(value) = meta.integrator {
         entries.push(("Integrator", value));
     }
@@ -1973,6 +1987,7 @@ fn append_swarm_meta_footer_rows(
 #[derive(Default)]
 struct SwarmFooterMeta {
     template: Option<String>,
+    mission: Option<String>,
     integrator: Option<String>,
     verifier: Option<String>,
     gates: Option<String>,
@@ -1983,6 +1998,7 @@ struct SwarmFooterMeta {
 impl SwarmFooterMeta {
     fn is_empty(&self) -> bool {
         self.template.is_none()
+            && self.mission.is_none()
             && self.integrator.is_none()
             && self.verifier.is_none()
             && self.gates.is_none()
@@ -2038,6 +2054,9 @@ fn collect_swarm_footer_meta(state: &AppState, mission_id: &str) -> Option<Swarm
             if meta.template.is_none() {
                 meta.template = Some(template_line.template);
             }
+            if meta.mission.is_none() {
+                meta.mission = template_line.mission;
+            }
             if meta.integrator.is_none() {
                 meta.integrator = template_line.integrator;
             }
@@ -2079,6 +2098,7 @@ fn collect_swarm_footer_meta(state: &AppState, mission_id: &str) -> Option<Swarm
 
 struct SwarmTemplateMeta {
     template: String,
+    mission: Option<String>,
     integrator: Option<String>,
     verifier: Option<String>,
     gates: Option<String>,
@@ -2092,11 +2112,16 @@ fn parse_swarm_template_meta(text: &str) -> Option<SwarmTemplateMeta> {
         return None;
     }
 
+    let mut mission: Option<String> = None;
     let mut integrator: Option<String> = None;
     let mut verifier: Option<String> = None;
     let mut gates: Option<String> = None;
     for part in parts {
         let part = part.trim();
+        if let Some(value) = part.strip_prefix("mission:") {
+            mission = Some(normalize_swarm_meta_value(value));
+            continue;
+        }
         if let Some(value) = part.strip_prefix("integrator:") {
             integrator = Some(normalize_swarm_meta_value(value));
             continue;
@@ -2112,6 +2137,7 @@ fn parse_swarm_template_meta(text: &str) -> Option<SwarmTemplateMeta> {
 
     Some(SwarmTemplateMeta {
         template: normalize_swarm_meta_value(template),
+        mission,
         integrator,
         verifier,
         gates,

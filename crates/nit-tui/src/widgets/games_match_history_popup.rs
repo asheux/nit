@@ -35,7 +35,7 @@ pub fn max_column_offset(total_matches: usize, inner_width: u16) -> usize {
 pub fn max_round_limit(entries: &[nit_games::MatchHistoryPreview]) -> usize {
     entries
         .iter()
-        .map(|entry| entry.outcomes_prefix.len())
+        .map(|entry| entry.preview_rounds())
         .max()
         .unwrap_or(0)
 }
@@ -242,7 +242,7 @@ pub fn build_lines(state: &AppState, theme: &Theme, inner: Rect) -> Vec<Line<'st
             }
             spans.push(Span::styled(format!("{:>3} ", round_idx + 1), dim_style));
             let (a_bit, b_bit) =
-                decode_outcome(entry.outcomes_prefix.as_bytes().get(round_idx).copied());
+                decode_outcome(entry.preview_outcomes().as_bytes().get(round_idx).copied());
             spans.push(Span::styled(
                 history_cell_text(a_bit),
                 history_cell_style(a_bit, zero_style, one_style, empty_cell_style),
@@ -286,7 +286,7 @@ pub fn build_lines(state: &AppState, theme: &Theme, inner: Rect) -> Vec<Line<'st
         .unwrap_or(0);
     let clipped_for_capture = visible
         .iter()
-        .any(|entry| entry.rounds_total as usize > entry.outcomes_prefix.len());
+        .any(|entry| entry.rounds_total as usize > entry.preview_rounds());
     let mut footer = String::from("Esc close | ←/→ pan");
     if round_limit > 0 {
         let shown = round_limit.saturating_sub(round_start);
@@ -302,7 +302,10 @@ pub fn build_lines(state: &AppState, theme: &Theme, inner: Rect) -> Vec<Line<'st
     }
     footer.push_str(" | +/- rounds (default 30)");
     if clipped_for_capture {
-        footer.push_str(" | preview capture capped");
+        footer.push_str(&format!(
+            " | preview capped at {} rounds",
+            nit_games::MatchHistoryPreview::DISPLAY_ROUND_CAP
+        ));
     }
     lines.push(Line::from(Span::styled(footer, dim_style)));
     lines
@@ -481,4 +484,30 @@ fn truncate_text(text: &str, width: usize) -> String {
     let mut out: String = text.chars().take(width - 3).collect();
     out.push_str("...");
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn max_round_limit_caps_preview_at_500() {
+        let entries = vec![nit_games::MatchHistoryPreview {
+            match_index: 1,
+            total_matches: 1,
+            a: "0".into(),
+            b: "867".into(),
+            rounds_total: 700,
+            outcomes: "2".repeat(700),
+        }];
+
+        assert_eq!(
+            max_round_limit(&entries),
+            nit_games::MatchHistoryPreview::DISPLAY_ROUND_CAP
+        );
+        assert_eq!(
+            entries[0].preview_outcomes().len(),
+            nit_games::MatchHistoryPreview::DISPLAY_ROUND_CAP
+        );
+    }
 }

@@ -121,6 +121,10 @@ pub struct EngineConfig {
     #[serde(default = "default_fast_eval")]
     pub fast_eval: bool,
     #[serde(default)]
+    pub accelerator: AcceleratorMode,
+    #[serde(default)]
+    pub score_aggregation: ScoreAggregation,
+    #[serde(default)]
     pub fsm_grouping: FsmGroupingMode,
     #[serde(default)]
     pub complexity_cost: ComplexityCostConfig,
@@ -133,6 +137,8 @@ impl Default for EngineConfig {
             parallelism: ParallelismConfig::default(),
             progress_interval_ms: default_progress_interval_ms(),
             fast_eval: default_fast_eval(),
+            accelerator: AcceleratorMode::default(),
+            score_aggregation: ScoreAggregation::default(),
             fsm_grouping: FsmGroupingMode::default(),
             complexity_cost: ComplexityCostConfig::default(),
         }
@@ -140,6 +146,35 @@ impl Default for EngineConfig {
 }
 
 #[derive(Copy, Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum AcceleratorMode {
+    #[default]
+    Auto,
+    Cpu,
+    Metal,
+}
+
+impl AcceleratorMode {
+    pub fn allows_metal(self) -> bool {
+        !matches!(self, Self::Cpu)
+    }
+
+    pub fn requires_metal(self) -> bool {
+        matches!(self, Self::Metal)
+    }
+}
+
+#[derive(Copy, Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ScoreAggregation {
+    #[default]
+    #[serde(alias = "average", alias = "avg")]
+    Mean,
+    #[serde(alias = "sum")]
+    Total,
+}
+
+#[derive(Copy, Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum FsmGroupingMode {
     #[default]
@@ -287,7 +322,7 @@ impl GamesConfig {
         };
         let rounds = self.rounds.unwrap_or(200);
         let repetitions = self.repetitions.unwrap_or(1);
-        let self_play = self.self_play.unwrap_or(false);
+        let self_play = self.self_play.unwrap_or(true);
         let noise = self.noise.unwrap_or(0.0).clamp(0.0, 1.0);
 
         if rounds == 0 {

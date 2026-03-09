@@ -18,8 +18,8 @@ pub use analysis::{
     HistoryAnalysisSummary, MatchSummary, StrategySummary, TrajectoryPreview, TrajectorySample,
 };
 pub use config::{
-    ConfigError, EngineConfig, EngineMode, FsmGroupingMode, GamesConfig, NormalizedConfig,
-    ParallelismConfig, ParallelismMode, StrategySpec,
+    AcceleratorMode, ConfigError, EngineConfig, EngineMode, FsmGroupingMode, GamesConfig,
+    NormalizedConfig, ParallelismConfig, ParallelismMode, ScoreAggregation, StrategySpec,
 };
 pub use events::{EventLogConfig, EventWriter, GameEvent};
 pub use fast_eval::{CycleMetadata, FastEvalResult, FastStrategyModel};
@@ -37,8 +37,8 @@ pub use introspection::{
     StrategyIntrospectionKind, StrategyIntrospectionParameters, TmTransitionRecord,
 };
 pub use output::{
-    run_id_from_seed_config, RunLayout, RunPaths, RunSummary, TournamentResults,
-    RUN_SUMMARY_SCHEMA_VERSION,
+    run_id_from_seed_config, RunLayout, RunPaths, RunSummary, RuntimeAcceleratorBackend,
+    RuntimeAcceleratorStats, TournamentResults, RUN_SUMMARY_SCHEMA_VERSION,
 };
 pub use strategy::{
     decode_fsm_notebook_index, decode_tm_rule_code_wolfram, fsm_count, history_to_input_u64,
@@ -47,8 +47,8 @@ pub use strategy::{
     TmStopReason, TmTrace, TmTraceStep, TmTransition,
 };
 pub use tournament::{
-    KernelRunMode, MatchHistoryPreview, MatchResult, MatchSnapshot, Parallelism, TournamentKernel,
-    TournamentProgress, TournamentRunner,
+    accelerator_preflight, KernelRunMode, MatchHistoryPreview, MatchResult, MatchSnapshot,
+    Parallelism, TournamentKernel, TournamentProgress, TournamentRunner,
 };
 
 #[cfg(test)]

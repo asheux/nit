@@ -205,6 +205,16 @@ enabled = true
 Each history line encodes the match outcomes as digits from player A’s perspective:
 `0=CC`, `1=CD`, `2=DC`, `3=DD`.
 
+### Games config (scoring)
+
+Choose how leaderboard scores are aggregated:
+
+```toml
+[engine]
+accelerator = "auto"      # auto|cpu|metal
+score_aggregation = "mean" # Code-02 semantics: per-round average score; TotalPayoff sums matchup means
+```
+
 ## Known limitations (MVP)
 
 - Horizontal scrolling uses character columns; tabs before the viewport can shift alignment.

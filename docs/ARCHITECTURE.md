@@ -191,8 +191,25 @@ Agent selection rules:
 
 Templates:
 
-- `lab` (default): DAG-style workflow optimized for “research lab” collaboration:
-  - read-only researcher/reviewer tasks feed a single-writer integrator task,
+  - `lab` (default): DAG-style workflow optimized for “research lab” collaboration:
+  - read-only proposal/review tasks feed a single-writer integrator task,
+  - `research` / `computational-research` are reserved for external topic, paper, resource, or
+    evidence-gathering work,
+  - the roster stores both a default swarm template and a default swarm mission preset
+    (`auto|general|research|computational-research`),
+  - nit classifies each swarm mission as `general`, `research`, or `computational-research`,
+  - mission focus can be explicit (`mission=...` / `Mission: ...`) or inferred from the operator
+    request, with explicit prompt mission taking precedence over the roster preset and `auto`
+    falling back to inference,
+  - `general` blocks research roles, `research` allows `research`, and
+    `computational-research` allows both `research` and `computational-research`,
+  - `computational-research` additionally covers simulation, modeling, numerical methods,
+    optimization, data/model fitting, pattern/network analysis, and reproducible research-computing
+    workflows,
+  - research-focused lab fallbacks shift from repo recon toward source survey, evidence comparison,
+    and synthesis,
+  - research-role outputs are expected to include sources, methods, assumptions, and ranked
+    strategy recommendations,
   - tasks can have dependencies (`deps`) and multiple tasks can target the same agent id
     (they run sequentially),
   - only `writes=true` tasks are allowed to touch the workspace (enforced to the integrator agent),
@@ -223,11 +240,11 @@ Plan schema (v2):
       "id": "recon",
       "agent_id": "gpt-5.2",
       "role": "research",
-      "title": "Codebase recon",
+      "title": "Topic scan",
       "prompt": "...",
       "deps": [],
       "writes": false,
-      "artifacts": ["files", "risks"],
+      "artifacts": ["sources", "notes", "risks"],
       "done_when": "..."
     }
   ],

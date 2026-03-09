@@ -10,7 +10,7 @@ use nit_games::output::{
 use nit_games::tournament::{
     MatchHistoryPreview, MatchSnapshot, TournamentProgress, TournamentRunner,
 };
-use nit_games::{HistoryWriter, NormalizedConfig};
+use nit_games::{EngineMode, HistoryWriter, NormalizedConfig};
 
 #[derive(Clone)]
 pub struct RunRequest {
@@ -169,7 +169,11 @@ fn runner_loop(cmd_rx: Receiver<RunnerCommand>, event_tx: Sender<RunnerEvent>) {
         let steps = if step_once {
             1
         } else {
-            dephase_steps_per_tick(run_state.steps_per_tick, rounds_per_match)
+            steps_for_tick(
+                run_state.steps_per_tick,
+                rounds_per_match,
+                run_state.runner.config().engine.mode,
+            )
         };
         run_state.runner.step_rounds(steps);
         for preview in run_state.runner.drain_match_history_previews() {
@@ -178,7 +182,7 @@ fn runner_loop(cmd_rx: Receiver<RunnerCommand>, event_tx: Sender<RunnerEvent>) {
 
         let completed = run_state.runner.completed_matches();
         if completed > run_state.last_completed {
-            let results = run_state.runner.results();
+            let results = run_state.runner.leaderboard();
             let _ = event_tx.send(RunnerEvent::PartialLeaderboard(results));
             run_state.last_completed = completed;
         }
@@ -207,7 +211,9 @@ fn runner_loop(cmd_rx: Receiver<RunnerCommand>, event_tx: Sender<RunnerEvent>) {
             if let Some(snapshot) = run_state.runner.match_snapshot() {
                 let _ = event_tx.send(RunnerEvent::MatchPreview(snapshot));
             }
-            let _ = event_tx.send(RunnerEvent::PartialLeaderboard(run_state.runner.results()));
+            let _ = event_tx.send(RunnerEvent::PartialLeaderboard(
+                run_state.runner.leaderboard(),
+            ));
             match finalize_run(state.take().expect("run state")) {
                 Ok(summary) => {
                     let _ = event_tx.send(RunnerEvent::Finished(Box::new(summary)));
@@ -222,6 +228,9 @@ fn runner_loop(cmd_rx: Receiver<RunnerCommand>, event_tx: Sender<RunnerEvent>) {
 
 fn start_run(request: RunRequest, event_tx: &Sender<RunnerEvent>) -> Result<RunState, String> {
     let mut runner = TournamentRunner::new(request.config);
+    if matches!(runner.config().engine.mode, EngineMode::Batch) {
+        runner = runner.with_match_history_previews(false);
+    }
     if let Some(path) = request.event_path {
         let include_rounds = runner.config().event_log.include_rounds;
         match EventWriter::new(path, include_rounds) {
@@ -310,9 +319,18 @@ fn dephase_steps_per_tick(steps_per_tick: u32, rounds_per_match: u32) -> u32 {
     }
 }
 
+fn steps_for_tick(steps_per_tick: u32, rounds_per_match: u32, mode: EngineMode) -> u32 {
+    if matches!(mode, EngineMode::Batch) {
+        steps_per_tick.max(1)
+    } else {
+        dephase_steps_per_tick(steps_per_tick, rounds_per_match)
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::dephase_steps_per_tick;
+    use super::{dephase_steps_per_tick, steps_for_tick};
+    use nit_games::EngineMode;
 
     #[test]
     fn dephase_steps_breaks_round_alignment() {
@@ -325,5 +343,11 @@ mod tests {
         assert_eq!(dephase_steps_per_tick(50_001, 20), 50_001);
         assert_eq!(dephase_steps_per_tick(1, 20), 1);
         assert_eq!(dephase_steps_per_tick(20, 1), 20);
+    }
+
+    #[test]
+    fn batch_steps_skip_dephase() {
+        assert_eq!(steps_for_tick(50_000, 20, EngineMode::Batch), 50_000);
+        assert_eq!(steps_for_tick(20, 20, EngineMode::Interactive), 21);
     }
 }

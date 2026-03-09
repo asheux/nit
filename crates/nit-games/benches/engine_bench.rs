@@ -725,6 +725,7 @@ fn bench_sweep_io(c: &mut Criterion) {
         results: results.clone(),
         event_log: None,
         history_log: None,
+        runtime: nit_games::RuntimeAcceleratorStats::new(config.engine.accelerator),
         run_dir: None,
     };
 

@@ -82,14 +82,6 @@ pub fn build_main_lines(
     let number_style = Style::default()
         .fg(theme.accent)
         .add_modifier(Modifier::BOLD);
-    let win_style = Style::default()
-        .fg(theme.accent)
-        .add_modifier(Modifier::BOLD);
-    let loss_style = Style::default()
-        .fg(theme.warning)
-        .add_modifier(Modifier::BOLD);
-    let draw_style = Style::default().fg(theme.title);
-
     let mut lines = Vec::new();
     lines.push(Line::from(vec![
         Span::styled("Games Dashboard", header_style),
@@ -118,9 +110,6 @@ pub fn build_main_lines(
             dim_style,
             file_dim_style,
             number_style,
-            win_style,
-            loss_style,
-            draw_style,
             width,
         ));
     }
@@ -254,13 +243,6 @@ pub fn build_side_lines(state: &AppState, theme: &Theme, width: usize) -> Vec<Li
     let number_style = Style::default()
         .fg(theme.accent)
         .add_modifier(Modifier::BOLD);
-    let win_style = Style::default()
-        .fg(theme.accent)
-        .add_modifier(Modifier::BOLD);
-    let loss_style = Style::default()
-        .fg(theme.warning)
-        .add_modifier(Modifier::BOLD);
-    let draw_style = Style::default().fg(theme.title);
     last_run_lines(
         state,
         header_style,
@@ -269,9 +251,6 @@ pub fn build_side_lines(state: &AppState, theme: &Theme, width: usize) -> Vec<Li
         dim_style,
         file_dim_style,
         number_style,
-        win_style,
-        loss_style,
-        draw_style,
         width,
     )
 }
@@ -464,9 +443,6 @@ fn last_run_lines(
     dim_style: Style,
     file_dim_style: Style,
     number_style: Style,
-    win_style: Style,
-    loss_style: Style,
-    draw_style: Style,
     width: usize,
 ) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
@@ -483,6 +459,16 @@ fn last_run_lines(
             Span::styled("run_id: ", label_style),
             Span::styled(run.run_id.clone(), value_style),
         ]));
+        lines.push(Line::from(vec![
+            Span::styled("accelerator: ", label_style),
+            Span::styled(format_runtime_accelerator(&run.runtime), value_style),
+        ]));
+        if let Some(reason) = run.runtime.metal_fallback_reason.as_ref() {
+            lines.push(Line::from(vec![
+                Span::styled("accel_note: ", label_style),
+                Span::styled(reason.clone(), dim_style),
+            ]));
+        }
         lines.extend(render_last_run_table(
             run,
             width,
@@ -490,9 +476,6 @@ fn last_run_lines(
             value_style,
             dim_style,
             number_style,
-            win_style,
-            loss_style,
-            draw_style,
         ));
         let summary_path = run
             .paths
@@ -536,6 +519,29 @@ fn last_run_lines(
     lines
 }
 
+fn format_runtime_accelerator(runtime: &nit_games::RuntimeAcceleratorStats) -> String {
+    let backend = match runtime.backend {
+        nit_games::RuntimeAcceleratorBackend::Metal => "metal",
+        nit_games::RuntimeAcceleratorBackend::Cpu => "cpu",
+        nit_games::RuntimeAcceleratorBackend::None => match runtime.requested {
+            nit_games::AcceleratorMode::Cpu => "cpu?",
+            nit_games::AcceleratorMode::Metal => "metal?",
+            nit_games::AcceleratorMode::Auto => "auto",
+        },
+    };
+    let mut parts = vec![backend.to_string()];
+    if runtime.metal_matches > 0 {
+        parts.push(format!("gpu {}", runtime.metal_matches));
+    }
+    if runtime.cpu_matches > 0 {
+        parts.push(format!("cpu {}", runtime.cpu_matches));
+    }
+    if runtime.metal_fallbacks > 0 {
+        parts.push(format!("fallback {}", runtime.metal_fallbacks));
+    }
+    parts.join(", ")
+}
+
 #[allow(clippy::too_many_arguments)]
 fn render_last_run_table(
     run: &nit_games::output::RunSummary,
@@ -544,26 +550,39 @@ fn render_last_run_table(
     value_style: Style,
     dim_style: Style,
     number_style: Style,
-    win_style: Style,
-    loss_style: Style,
-    draw_style: Style,
 ) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
     let mut rank_w = "#".len();
     let mut id_w = "id".len();
-    let mut score_w = "Score".len();
-    let mut wld_w = "W-L-D".len();
+    let score_header = score_column_label(&run.config);
+    let total_header = total_payoff_column_label(&run.config);
+    let mut score_w = score_header.len();
+    let mut total_w = total_header.len();
 
     for (idx, entry) in run.results.ranking.iter().take(5).enumerate() {
         rank_w = rank_w.max((idx + 1).to_string().len());
         id_w = id_w.max(entry.id.len());
-        score_w = score_w.max(entry.total_payoff.to_string().len());
-        let wld_len = format!("W{}-L{}-D{}", entry.wins, entry.losses, entry.draws).len();
-        wld_w = wld_w.max(wld_len);
+        score_w = score_w.max(
+            entry
+                .formatted_score(
+                    run.config.engine.score_aggregation,
+                    run.config.engine.complexity_cost.enabled,
+                )
+                .len(),
+        );
+        total_w = total_w.max(
+            entry
+                .formatted_total_payoff(
+                    run.config.engine.score_aggregation,
+                    run.config.engine.complexity_cost.enabled,
+                )
+                .len(),
+        );
     }
 
-    let overhead = 5 + (2 * 4);
-    let fixed = rank_w + score_w + wld_w;
+    let columns = 4usize;
+    let overhead = (columns + 1) + (2 * columns);
+    let fixed = rank_w + score_w + total_w;
     let max_id = width.saturating_sub(overhead + fixed).max(1);
     id_w = id_w.min(max_id);
 
@@ -572,7 +591,7 @@ fn render_last_run_table(
         "-".repeat(rank_w + 2),
         "-".repeat(id_w + 2),
         "-".repeat(score_w + 2),
-        "-".repeat(wld_w + 2)
+        "-".repeat(total_w + 2)
     );
     lines.push(Line::from(Span::styled(sep.clone(), dim_style)));
     lines.push(Line::from(vec![
@@ -581,9 +600,15 @@ fn render_last_run_table(
         Span::styled("|", dim_style),
         Span::styled(format!(" {} ", center_text("id", id_w)), label_style),
         Span::styled("|", dim_style),
-        Span::styled(format!(" {} ", center_text("Score", score_w)), label_style),
+        Span::styled(
+            format!(" {} ", center_text(score_header, score_w)),
+            label_style,
+        ),
         Span::styled("|", dim_style),
-        Span::styled(format!(" {} ", center_text("W-L-D", wld_w)), label_style),
+        Span::styled(
+            format!(" {} ", center_text(total_header, total_w)),
+            label_style,
+        ),
         Span::styled("|", dim_style),
     ]));
     lines.push(Line::from(Span::styled(sep.clone(), dim_style)));
@@ -591,10 +616,14 @@ fn render_last_run_table(
     for (idx, entry) in run.results.ranking.iter().take(5).enumerate() {
         let rank = (idx + 1).to_string();
         let id = truncate_text(&entry.id, id_w);
-        let score = entry.total_payoff.to_string();
-        let wins = entry.wins;
-        let losses = entry.losses;
-        let draws = entry.draws;
+        let score = entry.formatted_score(
+            run.config.engine.score_aggregation,
+            run.config.engine.complexity_cost.enabled,
+        );
+        let total = entry.formatted_total_payoff(
+            run.config.engine.score_aggregation,
+            run.config.engine.complexity_cost.enabled,
+        );
 
         let mut spans = Vec::new();
         spans.push(Span::styled("|", dim_style));
@@ -604,23 +633,27 @@ fn render_last_run_table(
         spans.push(Span::styled("|", dim_style));
         spans.push(Span::styled(format!(" {score:>score_w$} "), number_style));
         spans.push(Span::styled("|", dim_style));
-        spans.extend(wld_cell_spans(
-            wins,
-            losses,
-            draws,
-            wld_w,
-            label_style,
-            win_style,
-            loss_style,
-            draw_style,
-            dim_style,
-        ));
+        spans.push(Span::styled(format!(" {total:>total_w$} "), number_style));
         spans.push(Span::styled("|", dim_style));
         lines.push(Line::from(spans));
     }
 
     lines.push(Line::from(Span::styled(sep, dim_style)));
     lines
+}
+
+fn score_column_label(config: &nit_games::config::NormalizedConfig) -> &'static str {
+    match config.engine.score_aggregation {
+        nit_games::ScoreAggregation::Mean => "Score(mean)",
+        nit_games::ScoreAggregation::Total => "Score(total)",
+    }
+}
+
+fn total_payoff_column_label(config: &nit_games::config::NormalizedConfig) -> &'static str {
+    match config.engine.score_aggregation {
+        nit_games::ScoreAggregation::Mean => "AggPayoff",
+        nit_games::ScoreAggregation::Total => "TotalPayoff",
+    }
 }
 
 fn payoff_panel_width(payoff: &nit_games::game::PayoffMatrix) -> usize {
@@ -728,35 +761,6 @@ fn truncate_text(text: &str, width: usize) -> String {
     out
 }
 
-#[allow(clippy::too_many_arguments)]
-fn wld_cell_spans(
-    wins: u32,
-    losses: u32,
-    draws: u32,
-    width: usize,
-    label_style: Style,
-    win_style: Style,
-    loss_style: Style,
-    draw_style: Style,
-    dim_style: Style,
-) -> Vec<Span<'static>> {
-    let base = format!("W{wins}-L{losses}-D{draws}");
-    let pad = width.saturating_sub(base.len());
-    let mut spans = Vec::new();
-    spans.push(Span::styled(" ", dim_style));
-    if pad > 0 {
-        spans.push(Span::styled(" ".repeat(pad), dim_style));
-    }
-    spans.push(Span::styled("W", label_style));
-    spans.push(Span::styled(wins.to_string(), win_style));
-    spans.push(Span::styled("-L", label_style));
-    spans.push(Span::styled(losses.to_string(), loss_style));
-    spans.push(Span::styled("-D", label_style));
-    spans.push(Span::styled(draws.to_string(), draw_style));
-    spans.push(Span::styled(" ", dim_style));
-    spans
-}
-
 fn centered_line(line: &str, width: usize, style: Style) -> Line<'static> {
     let pad = center_pad(width, line.len());
     Line::from(vec![
@@ -801,4 +805,111 @@ fn center_pad(width: usize, line_len: usize) -> String {
     }
     let pad = (width - line_len) / 2;
     " ".repeat(pad)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn line_text(line: &Line<'_>) -> String {
+        line.spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect()
+    }
+
+    #[test]
+    fn last_run_table_shows_total_payoff_column_without_wld() {
+        let config = nit_games::GamesConfig::from_toml(
+            r#"
+schema_version = 1
+game = "ipd"
+rounds = 2
+repetitions = 1
+self_play = true
+
+[[strategy]]
+id = "all_c"
+type = "fsm"
+index = 1
+num_states = 1
+k = 2
+"#,
+        )
+        .expect("parse config");
+        let requested_accelerator = config.engine.accelerator;
+
+        let run = nit_games::output::RunSummary {
+            schema_version: nit_games::output::RUN_SUMMARY_SCHEMA_VERSION,
+            timestamp: "2026-03-08T00:00:00Z".into(),
+            run_id: "run".into(),
+            seed: 42,
+            config_text: String::new(),
+            config,
+            paths: nit_games::output::RunPaths {
+                summary: None,
+                events: None,
+                history: None,
+                definitions: None,
+                results: None,
+                config: None,
+                analysis_dir: None,
+            },
+            strategies: Vec::new(),
+            results: nit_games::output::TournamentResults {
+                ranking: vec![nit_games::output::StrategyResult {
+                    id: "all_c".into(),
+                    name: None,
+                    total_payoff: -4,
+                    average_payoff: -1.0,
+                    adjusted_total_payoff: Some(-4.0),
+                    adjusted_average_payoff: Some(-1.0),
+                    matches: 2,
+                    wins: 0,
+                    losses: 0,
+                    draws: 2,
+                    crashed: false,
+                    crash_count: 0,
+                    tm_metrics: None,
+                }],
+                pairwise: Vec::new(),
+                dominance: Vec::new(),
+            },
+            event_log: None,
+            history_log: None,
+            runtime: nit_games::RuntimeAcceleratorStats::new(requested_accelerator),
+            run_dir: None,
+        };
+
+        let lines = render_last_run_table(
+            &run,
+            120,
+            Style::default(),
+            Style::default(),
+            Style::default(),
+            Style::default(),
+        );
+
+        assert!(lines
+            .iter()
+            .any(|line| line_text(line).contains("Score(mean)")));
+        assert!(lines
+            .iter()
+            .any(|line| line_text(line).contains("AggPayoff")));
+        assert!(lines.iter().any(|line| line_text(line).contains(" -2 ")));
+        assert!(lines.iter().all(|line| !line_text(line).contains("W-L-D")));
+    }
+
+    #[test]
+    fn runtime_accelerator_formatter_includes_gpu_counts() {
+        let mut runtime =
+            nit_games::RuntimeAcceleratorStats::new(nit_games::AcceleratorMode::Metal);
+        runtime.note_metal_batches(2, 32);
+        runtime.note_cpu_matches(1);
+
+        let text = format_runtime_accelerator(&runtime);
+        assert!(text.contains("metal"));
+        assert!(text.contains("gpu 32"));
+        assert!(text.contains("cpu 1"));
+    }
 }

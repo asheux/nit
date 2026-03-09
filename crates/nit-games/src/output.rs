@@ -1,4 +1,4 @@
-use crate::config::{NormalizedConfig, StrategySpecKind};
+use crate::config::{AcceleratorMode, NormalizedConfig, ScoreAggregation, StrategySpecKind};
 use nit_utils::fs::write_atomic;
 use nit_utils::hashing::stable_hash_bytes;
 use serde::{Deserialize, Serialize};
@@ -33,6 +33,68 @@ pub struct StrategyResult {
     pub crash_count: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tm_metrics: Option<TmDerivedMetrics>,
+}
+
+impl StrategyResult {
+    pub fn score(&self, aggregation: ScoreAggregation, adjusted: bool) -> f64 {
+        match (aggregation, adjusted) {
+            (ScoreAggregation::Mean, true) => {
+                self.adjusted_average_payoff.unwrap_or(self.average_payoff)
+            }
+            (ScoreAggregation::Total, true) => self
+                .adjusted_total_payoff
+                .unwrap_or(self.total_payoff as f64),
+            (ScoreAggregation::Mean, false) => self.average_payoff,
+            (ScoreAggregation::Total, false) => self.total_payoff as f64,
+        }
+    }
+
+    pub fn total_payoff_for_scoreboard(
+        &self,
+        aggregation: ScoreAggregation,
+        adjusted: bool,
+    ) -> f64 {
+        match aggregation {
+            ScoreAggregation::Mean => self.score(aggregation, adjusted) * self.matches as f64,
+            ScoreAggregation::Total => self.score(aggregation, adjusted),
+        }
+    }
+
+    pub fn formatted_score(&self, aggregation: ScoreAggregation, adjusted: bool) -> String {
+        match (aggregation, adjusted) {
+            (ScoreAggregation::Total, false) => self.total_payoff.to_string(),
+            _ => format_score_value(self.score(aggregation, adjusted)),
+        }
+    }
+
+    pub fn formatted_total_payoff(&self, aggregation: ScoreAggregation, adjusted: bool) -> String {
+        format_score_value(self.total_payoff_for_scoreboard(aggregation, adjusted))
+    }
+}
+
+pub fn format_score_value(value: f64) -> String {
+    if !value.is_finite() {
+        return value.to_string();
+    }
+    if value.abs() < 1e-9 {
+        return "0".to_string();
+    }
+    let rounded = value.round();
+    if (value - rounded).abs() < 1e-9 {
+        return (rounded as i64).to_string();
+    }
+    let mut formatted = format!("{value:.3}");
+    while formatted.contains('.') && formatted.ends_with('0') {
+        formatted.pop();
+    }
+    if formatted.ends_with('.') {
+        formatted.pop();
+    }
+    if formatted == "-0" {
+        "0".to_string()
+    } else {
+        formatted
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -86,6 +148,92 @@ impl TournamentResults {
     }
 }
 
+#[derive(Copy, Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeAcceleratorBackend {
+    #[default]
+    None,
+    Cpu,
+    Metal,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RuntimeAcceleratorStats {
+    #[serde(default)]
+    pub requested: AcceleratorMode,
+    #[serde(default)]
+    pub backend: RuntimeAcceleratorBackend,
+    #[serde(default)]
+    pub metal_batches: u64,
+    #[serde(default)]
+    pub metal_matches: u64,
+    #[serde(default)]
+    pub cpu_matches: u64,
+    #[serde(default)]
+    pub metal_fallbacks: u64,
+    #[serde(default)]
+    pub metal_fallback_reason: Option<String>,
+}
+
+impl RuntimeAcceleratorStats {
+    pub fn new(requested: AcceleratorMode) -> Self {
+        Self {
+            requested,
+            ..Self::default()
+        }
+    }
+
+    pub fn note_cpu_matches(&mut self, matches: usize) {
+        self.cpu_matches = self.cpu_matches.saturating_add(matches as u64);
+        if matches > 0 && matches!(self.backend, RuntimeAcceleratorBackend::None) {
+            self.backend = RuntimeAcceleratorBackend::Cpu;
+        }
+    }
+
+    pub fn note_cpu_activity(&mut self) {
+        if matches!(self.backend, RuntimeAcceleratorBackend::None) {
+            self.backend = RuntimeAcceleratorBackend::Cpu;
+        }
+    }
+
+    pub fn note_metal_batch(&mut self, matches: usize) {
+        self.metal_batches = self.metal_batches.saturating_add(1);
+        self.metal_matches = self.metal_matches.saturating_add(matches as u64);
+        self.backend = RuntimeAcceleratorBackend::Metal;
+    }
+
+    pub fn note_metal_batches(&mut self, batches: usize, matches: usize) {
+        self.metal_batches = self.metal_batches.saturating_add(batches as u64);
+        self.metal_matches = self.metal_matches.saturating_add(matches as u64);
+        if batches > 0 || matches > 0 {
+            self.backend = RuntimeAcceleratorBackend::Metal;
+        }
+    }
+
+    pub fn note_metal_fallback(&mut self) {
+        self.metal_fallbacks = self.metal_fallbacks.saturating_add(1);
+    }
+
+    pub fn note_metal_fallback_reason(&mut self, reason: impl Into<String>) {
+        self.note_metal_fallback();
+        self.metal_fallback_reason = Some(reason.into());
+    }
+}
+
+impl Default for RuntimeAcceleratorStats {
+    fn default() -> Self {
+        Self {
+            requested: AcceleratorMode::default(),
+            backend: RuntimeAcceleratorBackend::None,
+            metal_batches: 0,
+            metal_matches: 0,
+            cpu_matches: 0,
+            metal_fallbacks: 0,
+            metal_fallback_reason: None,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RunPaths {
     pub summary: Option<String>,
@@ -119,6 +267,8 @@ pub struct RunSummary {
     pub results: TournamentResults,
     pub event_log: Option<String>,
     pub history_log: Option<String>,
+    #[serde(default)]
+    pub runtime: RuntimeAcceleratorStats,
     #[serde(default)]
     pub run_dir: Option<String>,
 }

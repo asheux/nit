@@ -10,8 +10,9 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use crate::swarm::{
-    is_agent_busy, normalize_role_label, parse_swarm_command, select_swarm_agents, SwarmCommand,
-    SwarmRuntime, SwarmSize,
+    detect_swarm_mission_kind_from_prompt, explicit_swarm_mission_kind_from_prompt, is_agent_busy,
+    normalize_role_label, parse_swarm_command, parse_swarm_mission_kind, select_swarm_agents,
+    SwarmCommand, SwarmMissionKind, SwarmRuntime, SwarmSize,
 };
 use crate::{
     codex_runner::{CodexCommand, CodexRunner, CodexRunnerConfig, CodexRuntimeMode},
@@ -2240,6 +2241,66 @@ fn handle_agent_ops_key(
             }
         }
         KeyEvent {
+            code: KeyCode::Char('4'),
+            modifiers: KeyModifiers::NONE,
+            ..
+        } if state.agents.dock_tab == AgentOpsTab::Roster => {
+            if !state
+                .agents
+                .swarm_default_mission
+                .eq_ignore_ascii_case("auto")
+            {
+                state.agents.swarm_default_mission = "auto".into();
+                state.agents.roster_tree_selected = None;
+                changed = true;
+            }
+        }
+        KeyEvent {
+            code: KeyCode::Char('5'),
+            modifiers: KeyModifiers::NONE,
+            ..
+        } if state.agents.dock_tab == AgentOpsTab::Roster => {
+            if !state
+                .agents
+                .swarm_default_mission
+                .eq_ignore_ascii_case("general")
+            {
+                state.agents.swarm_default_mission = "general".into();
+                state.agents.roster_tree_selected = None;
+                changed = true;
+            }
+        }
+        KeyEvent {
+            code: KeyCode::Char('6'),
+            modifiers: KeyModifiers::NONE,
+            ..
+        } if state.agents.dock_tab == AgentOpsTab::Roster => {
+            if !state
+                .agents
+                .swarm_default_mission
+                .eq_ignore_ascii_case("research")
+            {
+                state.agents.swarm_default_mission = "research".into();
+                state.agents.roster_tree_selected = None;
+                changed = true;
+            }
+        }
+        KeyEvent {
+            code: KeyCode::Char('7'),
+            modifiers: KeyModifiers::NONE,
+            ..
+        } if state.agents.dock_tab == AgentOpsTab::Roster => {
+            if !state
+                .agents
+                .swarm_default_mission
+                .eq_ignore_ascii_case("computational-research")
+            {
+                state.agents.swarm_default_mission = "computational-research".into();
+                state.agents.roster_tree_selected = None;
+                changed = true;
+            }
+        }
+        KeyEvent {
             code: KeyCode::Tab,
             modifiers: KeyModifiers::SHIFT,
             ..
@@ -3041,6 +3102,21 @@ fn detect_swarm_template_from_prompt(raw: &str) -> Option<String> {
     None
 }
 
+fn roster_default_swarm_mission_kind(state: &AppState) -> Option<SwarmMissionKind> {
+    parse_swarm_mission_kind(Some(state.agents.swarm_default_mission.as_str()))
+}
+
+fn effective_swarm_mission_kind(
+    state: &AppState,
+    raw: &str,
+    current: Option<SwarmMissionKind>,
+) -> Option<SwarmMissionKind> {
+    current
+        .or_else(|| explicit_swarm_mission_kind_from_prompt(raw))
+        .or_else(|| roster_default_swarm_mission_kind(state))
+        .or_else(|| detect_swarm_mission_kind_from_prompt(raw))
+}
+
 fn detect_implicit_swarm_command(state: &AppState, raw: &str) -> Option<SwarmCommand> {
     if raw.trim().is_empty() {
         return None;
@@ -3088,6 +3164,7 @@ fn detect_implicit_swarm_command(state: &AppState, raw: &str) -> Option<SwarmCom
     Some(SwarmCommand {
         size,
         template: Some(template),
+        mission_kind: effective_swarm_mission_kind(state, raw, None),
         prompt: raw.to_string(),
     })
 }
@@ -3152,6 +3229,8 @@ fn handle_agent_console_key(
                     if cmd.template.is_none() {
                         cmd.template = Some(state.agents.swarm_default_template.clone());
                     }
+                    cmd.mission_kind =
+                        effective_swarm_mission_kind(state, cmd.prompt.as_str(), cmd.mission_kind);
                     cmd
                 })
                 .or_else(|| detect_implicit_swarm_command(state, &raw));
@@ -3191,6 +3270,7 @@ fn handle_agent_console_key(
                         agents,
                         cmd.size,
                         cmd.template.clone(),
+                        cmd.mission_kind,
                         cmd.prompt.clone(),
                     ) {
                         if auto_switch_ops_dag {
@@ -7819,6 +7899,15 @@ fn apply_agent_ops_click_selection(
         }
         return;
     }
+    if state.agents.dock_tab == AgentOpsTab::Roster
+        && line_idx == agent_ops_view::ROSTER_SWARM_MISSION_LINE_IDX
+    {
+        if let Some(mission) = agent_ops_view::roster_swarm_mission_hit(col) {
+            state.agents.swarm_default_mission = mission.to_string();
+            state.agents.roster_tree_selected = None;
+        }
+        return;
+    }
     if line_idx < offset {
         return;
     }
@@ -11025,6 +11114,101 @@ mod tests {
             .missions
             .first()
             .is_some_and(|mission| mission.title.contains("Swarm[parallel]")));
+    }
+
+    #[test]
+    fn swarm_uses_roster_default_mission_when_argument_missing() {
+        let mut state = state_for_test();
+        state.focus = PaneId::Notes;
+        state.agents.swarm_default_template = "parallel".into();
+        state.agents.swarm_default_mission = "research".into();
+        state.agents.agents.push(nit_core::AgentLane {
+            id: "planner".into(),
+            role: "Planner".into(),
+            lane: "codex".into(),
+            kind: nit_core::AgentLaneKind::Codex,
+            status: nit_core::AgentStatus::Idle,
+            heartbeat_age_secs: 0,
+            queue_len: 0,
+            current_mission: None,
+            last_message: String::new(),
+        });
+        state.agents.agents.push(nit_core::AgentLane {
+            id: "worker".into(),
+            role: "Worker".into(),
+            lane: "codex".into(),
+            kind: nit_core::AgentLaneKind::Codex,
+            status: nit_core::AgentStatus::Idle,
+            heartbeat_age_secs: 0,
+            queue_len: 0,
+            current_mission: None,
+            last_message: String::new(),
+        });
+        state.agents.chat_input = "@swarm 2 read papers and compare ideas".into();
+        state.agents.chat_input_cursor = state.agents.chat_input.chars().count();
+        let mut vitals = VitalsState::default();
+        let mut swarm = SwarmRuntime::default();
+
+        assert!(handle_agent_station_key(
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &mut state,
+            &mut vitals,
+            None,
+            &mut swarm
+        ));
+        assert!(state
+            .agents
+            .missions
+            .first()
+            .is_some_and(|mission| mission.title.contains("(research)")));
+    }
+
+    #[test]
+    fn explicit_prompt_mission_overrides_roster_default_mission() {
+        let mut state = state_for_test();
+        state.focus = PaneId::Notes;
+        state.agents.swarm_default_template = "parallel".into();
+        state.agents.swarm_default_mission = "general".into();
+        state.agents.agents.push(nit_core::AgentLane {
+            id: "planner".into(),
+            role: "Planner".into(),
+            lane: "codex".into(),
+            kind: nit_core::AgentLaneKind::Codex,
+            status: nit_core::AgentStatus::Idle,
+            heartbeat_age_secs: 0,
+            queue_len: 0,
+            current_mission: None,
+            last_message: String::new(),
+        });
+        state.agents.agents.push(nit_core::AgentLane {
+            id: "worker".into(),
+            role: "Worker".into(),
+            lane: "codex".into(),
+            kind: nit_core::AgentLaneKind::Codex,
+            status: nit_core::AgentStatus::Idle,
+            heartbeat_age_secs: 0,
+            queue_len: 0,
+            current_mission: None,
+            last_message: String::new(),
+        });
+        state.agents.chat_input =
+            "@swarm 2 Mission: research\nread papers and compare ideas".into();
+        state.agents.chat_input_cursor = state.agents.chat_input.chars().count();
+        let mut vitals = VitalsState::default();
+        let mut swarm = SwarmRuntime::default();
+
+        assert!(handle_agent_station_key(
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &mut state,
+            &mut vitals,
+            None,
+            &mut swarm
+        ));
+        assert!(state
+            .agents
+            .missions
+            .first()
+            .is_some_and(|mission| mission.title.contains("(research)")));
     }
 
     #[test]

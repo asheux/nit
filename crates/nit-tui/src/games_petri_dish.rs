@@ -14,7 +14,7 @@ use nit_games::output::StrategyDefinition;
 use nit_games::{
     events::EventWriter,
     output::{RunLayout, TournamentResults},
-    run_id_from_seed_config, MatchSnapshot, TournamentProgress,
+    run_id_from_seed_config, FastStrategyModel, MatchSnapshot, TournamentProgress,
 };
 use nit_utils::hashing::stable_hash_bytes;
 use ratatui::{
@@ -88,6 +88,7 @@ struct FamilyBuildOutcome {
 struct HistoryPreviewStore {
     path: PathBuf,
     writer: BufWriter<File>,
+    wolfram_writer: BufWriter<File>,
     offsets: Vec<u64>,
     next_offset: u64,
 }
@@ -95,9 +96,11 @@ struct HistoryPreviewStore {
 impl HistoryPreviewStore {
     fn create(path: PathBuf) -> std::io::Result<Self> {
         let file = File::create(&path)?;
+        let wolfram_file = File::create(path.with_extension("wl"))?;
         Ok(Self {
             path,
             writer: BufWriter::new(file),
+            wolfram_writer: BufWriter::new(wolfram_file),
             offsets: Vec::new(),
             next_offset: 0,
         })
@@ -105,9 +108,12 @@ impl HistoryPreviewStore {
 
     fn push(&mut self, preview: &nit_games::MatchHistoryPreview) -> std::io::Result<()> {
         let encoded = serde_json::to_vec(preview).map_err(std::io::Error::other)?;
+        let wolfram = wolfram_preview_line(preview);
         self.offsets.push(self.next_offset);
         self.writer.write_all(&encoded)?;
         self.writer.write_all(b"\n")?;
+        self.wolfram_writer.write_all(wolfram.as_bytes())?;
+        self.wolfram_writer.write_all(b"\n")?;
         self.next_offset = self
             .next_offset
             .saturating_add(encoded.len() as u64)
@@ -128,6 +134,7 @@ impl HistoryPreviewStore {
             return Ok(Vec::new());
         }
         self.writer.flush()?;
+        self.wolfram_writer.flush()?;
         let end = start.saturating_add(count).min(self.offsets.len());
         let mut file = File::open(&self.path)?;
         file.seek(SeekFrom::Start(self.offsets[start]))?;
@@ -147,6 +154,33 @@ impl HistoryPreviewStore {
         }
         Ok(entries)
     }
+}
+
+fn wolfram_preview_line(preview: &nit_games::MatchHistoryPreview) -> String {
+    format!(
+        "<|\"match_index\" -> {}, \"total_matches\" -> {}, \"a\" -> \"{}\", \"b\" -> \"{}\", \"rounds_total\" -> {}, \"outcomes\" -> \"{}\"|>",
+        preview.match_index,
+        preview.total_matches,
+        escape_wolfram_string(&preview.a),
+        escape_wolfram_string(&preview.b),
+        preview.rounds_total,
+        escape_wolfram_string(&preview.outcomes),
+    )
+}
+
+fn escape_wolfram_string(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for ch in value.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            _ => out.push(ch),
+        }
+    }
+    out
 }
 
 impl GamesPetriDishRuntime {
@@ -267,13 +301,16 @@ impl GamesPetriDishRuntime {
         let workspace_root = state.workspace_root.clone();
         let config_text = state.editor_buffer().content_as_string();
         let family_label = request.family.clone();
+        let family_input = request.input.trim().to_string();
         let mode = if request.force { "forced, " } else { "" };
         let force = request.force;
         state.games.family_building = true;
-        self.open_loading_popup(
-            state,
-            format!("Preparing family run ({mode}{family_label})..."),
-        );
+        let detail = if family_input.is_empty() {
+            family_label.clone()
+        } else {
+            format!("{family_label} {family_input}")
+        };
+        self.open_loading_popup(state, format!("Preparing family run ({mode}{detail})..."));
         state.status = None;
         let (tx, rx) = mpsc::channel();
         thread::spawn(move || {
@@ -497,6 +534,7 @@ impl GamesPetriDishRuntime {
                     state.games.last_run_path = summary.paths.summary.clone();
                     state.games.last_event_path = summary.event_log.clone();
                     state.games.last_history_path = summary.history_log.clone();
+                    state.games.runtime = summary.runtime.clone();
                     state.games.last_run = Some(summary);
                     state.games.replay.pairs = pairs;
                     state.games.replay.title = None;
@@ -553,6 +591,7 @@ impl GamesPetriDishRuntime {
                         .match_history
                         .total_entries
                         .max(progress.total_matches);
+                    state.games.runtime = progress.runtime.clone();
                     if let Some(session) = self.session.as_mut() {
                         session.progress = Some(progress);
                     }
@@ -568,7 +607,7 @@ impl GamesPetriDishRuntime {
                         .match_history
                         .max_rounds_seen
                         .max(preview.rounds_total as usize)
-                        .max(preview.outcomes_prefix.len());
+                        .max(preview.outcomes.len());
                     if let Some(store) = self.history_store.as_mut() {
                         if let Err(err) = store.push(&preview) {
                             state.games.match_history.last_error =
@@ -615,6 +654,7 @@ impl GamesPetriDishRuntime {
                     state.games.last_run_path = summary.paths.summary.clone();
                     state.games.last_event_path = summary.event_log.clone();
                     state.games.last_history_path = summary.history_log.clone();
+                    state.games.runtime = summary.runtime.clone();
                     state.games.last_run = Some(summary);
                     state.games.replay.pairs = pairs;
                     reset_strategy_inspect(state);
@@ -769,9 +809,10 @@ impl GamesPetriDishRuntime {
                     lines.push(Line::from(""));
                     let results = &session.results;
                     let definitions = &session.definitions;
-                    let (rank_w, score_w, wld_w) = top_table_widths(&session.config);
+                    let (rank_w, score_w, total_w, wld_w) = top_table_widths(&session.config);
                     lines.extend(render_top_table(
                         results,
+                        &session.config,
                         definitions,
                         inner.width as usize,
                         header_style,
@@ -784,6 +825,7 @@ impl GamesPetriDishRuntime {
                         dim_style,
                         rank_w,
                         score_w,
+                        total_w,
                         wld_w,
                     ));
                 }
@@ -929,10 +971,15 @@ impl GamesPetriDishRuntime {
         let mut request_steps_per_tick = state.games.steps_per_tick.max(1);
         if family_mode {
             let strategy_count = config.strategies.len() as u32;
-            let turbo_steps = strategy_count
+            let fast_family = config
+                .strategies
+                .iter()
+                .all(|spec| FastStrategyModel::from_spec(spec).is_some());
+            let turbo_matches = strategy_count
                 .saturating_mul(strategy_count)
                 .saturating_div(8)
-                .clamp(256, 50_000);
+                .clamp(256, if fast_family { 250_000 } else { 4_096 });
+            let turbo_steps = turbo_matches.saturating_mul(config.rounds.max(1));
             if request_steps_per_tick < turbo_steps {
                 request_steps_per_tick = turbo_steps;
                 state.games.steps_per_tick = turbo_steps;
@@ -954,15 +1001,17 @@ impl GamesPetriDishRuntime {
             state.status = Some(msg);
             return;
         }
-        self.history_store = match HistoryPreviewStore::create(
-            layout.run_dir.join("match_history_preview.ndjson"),
-        ) {
-            Ok(store) => Some(store),
-            Err(err) => {
-                tracing::warn!("Failed to create match history preview cache: {err}");
-                state.games.match_history.last_error =
-                    Some(format!("History preview cache disabled: {err}"));
-                None
+        self.history_store = if family_mode {
+            None
+        } else {
+            match HistoryPreviewStore::create(layout.run_dir.join("match_history_preview.ndjson")) {
+                Ok(store) => Some(store),
+                Err(err) => {
+                    tracing::warn!("Failed to create match history preview cache: {err}");
+                    state.games.match_history.last_error =
+                        Some(format!("History preview cache disabled: {err}"));
+                    None
+                }
             }
         };
 
@@ -980,6 +1029,7 @@ impl GamesPetriDishRuntime {
         }
         let progress_interval =
             std::time::Duration::from_millis(config.engine.progress_interval_ms);
+        let requested_accelerator = config.engine.accelerator;
         let request = RunRequest {
             config: config.clone(),
             config_text: config_text.clone(),
@@ -1027,6 +1077,7 @@ impl GamesPetriDishRuntime {
         state.games.paused = false;
         state.games.status = GamesStatus::Running;
         state.games.last_error = None;
+        state.games.runtime = nit_games::RuntimeAcceleratorStats::new(requested_accelerator);
         state.status = Some(match run_label {
             Some(label) if family_mode => {
                 format!("Games tournament started ({label}, turbo x{request_steps_per_tick})")
@@ -1388,6 +1439,16 @@ fn render_progress(
                 Span::styled(" / ", dim_style),
                 Span::styled("0", number_style),
             ]));
+            lines.push(accelerator_progress_line(
+                &progress.runtime,
+                label_style,
+                value_style,
+                number_style,
+                dim_style,
+            ));
+            if let Some(note) = accelerator_note_line(&progress.runtime, label_style, dim_style) {
+                lines.push(note);
+            }
             return lines;
         }
         let a_label = strategy_label_for_pair(&progress.a, definitions);
@@ -1461,6 +1522,16 @@ fn render_progress(
             Span::styled(" / ", dim_style),
             Span::styled(progress.total_payoff_b.to_string(), number_style),
         ]));
+        lines.push(accelerator_progress_line(
+            &progress.runtime,
+            label_style,
+            value_style,
+            number_style,
+            dim_style,
+        ));
+        if let Some(note) = accelerator_note_line(&progress.runtime, label_style, dim_style) {
+            lines.push(note);
+        }
     } else {
         lines.push(Line::from(vec![
             Span::styled("Match: ", label_style),
@@ -1486,8 +1557,74 @@ fn render_progress(
             Span::styled("Total: ", label_style),
             Span::styled(waiting_text, dim_style),
         ]));
+        lines.push(accelerator_progress_line(
+            &state.games.runtime,
+            label_style,
+            value_style,
+            number_style,
+            dim_style,
+        ));
+        if let Some(note) = accelerator_note_line(&state.games.runtime, label_style, dim_style) {
+            lines.push(note);
+        }
     }
     lines
+}
+
+fn accelerator_progress_line(
+    runtime: &nit_games::RuntimeAcceleratorStats,
+    label_style: Style,
+    value_style: Style,
+    number_style: Style,
+    dim_style: Style,
+) -> Line<'static> {
+    let backend = match runtime.backend {
+        nit_games::RuntimeAcceleratorBackend::Metal => "metal",
+        nit_games::RuntimeAcceleratorBackend::Cpu => "cpu",
+        nit_games::RuntimeAcceleratorBackend::None => match runtime.requested {
+            nit_games::AcceleratorMode::Cpu => "cpu",
+            nit_games::AcceleratorMode::Metal => "metal",
+            nit_games::AcceleratorMode::Auto => "auto",
+        },
+    };
+    let mut spans = vec![
+        Span::styled("Accel: ", label_style),
+        Span::styled(backend.to_ascii_uppercase(), value_style),
+    ];
+    if runtime.metal_matches > 0 {
+        spans.push(Span::styled(" ", dim_style));
+        spans.push(Span::styled(
+            format!("gpu {}", runtime.metal_matches),
+            number_style,
+        ));
+    }
+    if runtime.cpu_matches > 0 {
+        spans.push(Span::styled(" ", dim_style));
+        spans.push(Span::styled(
+            format!("cpu {}", runtime.cpu_matches),
+            number_style,
+        ));
+    }
+    if runtime.metal_fallbacks > 0 {
+        spans.push(Span::styled(" ", dim_style));
+        spans.push(Span::styled(
+            format!("fallback {}", runtime.metal_fallbacks),
+            dim_style,
+        ));
+    }
+    Line::from(spans)
+}
+
+fn accelerator_note_line(
+    runtime: &nit_games::RuntimeAcceleratorStats,
+    label_style: Style,
+    dim_style: Style,
+) -> Option<Line<'static>> {
+    let reason = runtime.metal_fallback_reason.as_ref()?;
+    Some(Line::from(vec![
+        Span::styled("AccelNote: ", label_style),
+        Span::styled(reason.clone(), dim_style),
+    ]))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1822,12 +1959,12 @@ fn lines_to_strings(lines: &[Line<'_>]) -> Vec<String> {
         .collect()
 }
 
-fn top_table_widths(config: &nit_games::NormalizedConfig) -> (usize, usize, usize) {
+fn top_table_widths(config: &nit_games::NormalizedConfig) -> (usize, usize, usize, usize) {
     let n = config.strategies.len().max(1);
     let matches_per = if config.self_play {
-        n
+        n.saturating_mul(2)
     } else {
-        n.saturating_sub(1)
+        n.saturating_sub(1).saturating_mul(2)
     };
     let matches_per = matches_per.saturating_mul(config.repetitions.max(1) as usize);
     let rounds = config.rounds.max(1) as i64;
@@ -1844,22 +1981,41 @@ fn top_table_widths(config: &nit_games::NormalizedConfig) -> (usize, usize, usiz
     let max_payoff = max_payoff as i64;
     let min_payoff = min_payoff as i64;
     let max_abs = max_payoff.abs().max(min_payoff.abs());
-    let max_total = max_abs
-        .saturating_mul(matches_per as i64)
-        .saturating_mul(rounds);
-    let score_w = if min_payoff < 0 {
-        (-max_total).to_string().len()
-    } else {
-        max_total.to_string().len()
+    let score_header = score_column_label(config);
+    let total_header = total_payoff_column_label(config);
+    let score_bound = match config.engine.score_aggregation {
+        nit_games::ScoreAggregation::Mean => max_abs as f64,
+        nit_games::ScoreAggregation::Total => max_abs
+            .saturating_mul(matches_per as i64)
+            .saturating_mul(rounds) as f64,
     };
+    let total_bound = match config.engine.score_aggregation {
+        nit_games::ScoreAggregation::Mean => max_abs.saturating_mul(matches_per as i64) as f64,
+        nit_games::ScoreAggregation::Total => max_abs
+            .saturating_mul(matches_per as i64)
+            .saturating_mul(rounds) as f64,
+    };
+    let score_w = if min_payoff < 0 {
+        nit_games::output::format_score_value(-score_bound).len()
+    } else {
+        nit_games::output::format_score_value(score_bound).len()
+    }
+    .max(score_header.len());
+    let total_w = if min_payoff < 0 {
+        nit_games::output::format_score_value(-total_bound).len()
+    } else {
+        nit_games::output::format_score_value(total_bound).len()
+    }
+    .max(total_header.len());
     let rank_w = n.to_string().len();
     let wld_w = format!("W{matches_per}-L{matches_per}-D{matches_per}").len();
-    (rank_w, score_w, wld_w)
+    (rank_w, score_w, total_w, wld_w)
 }
 
 #[allow(clippy::too_many_arguments)]
 fn render_top_table(
     results: &nit_games::output::TournamentResults,
+    config: &nit_games::NormalizedConfig,
     definitions: &[nit_games::output::StrategyDefinition],
     width: usize,
     header_style: Style,
@@ -1872,10 +2028,21 @@ fn render_top_table(
     dim_style: Style,
     fixed_rank_w: usize,
     fixed_score_w: usize,
+    fixed_total_w: usize,
     fixed_wld_w: usize,
 ) -> Vec<Line<'static>> {
     const TOP_LIMIT: usize = 15;
-    type Row = (String, String, String, String, String, u32, u32, u32);
+    type Row = (
+        String,
+        String,
+        String,
+        String,
+        String,
+        String,
+        u32,
+        u32,
+        u32,
+    );
     let mut lines = Vec::new();
     lines.push(Line::from(Span::styled("Top Strategies", header_style)));
     if definitions.is_empty() {
@@ -1893,6 +2060,8 @@ fn render_top_table(
         return lines;
     }
 
+    let score_header = score_column_label(config);
+    let total_header = total_payoff_column_label(config);
     let rows: Vec<Row> = results
         .ranking
         .iter()
@@ -1911,13 +2080,21 @@ fn render_top_table(
                 .unwrap_or_else(|| "-".to_string());
             let rank = format!("{}", idx + 1);
             let id = entry.id.clone();
-            let score = format!("{}", entry.total_payoff);
+            let score = entry.formatted_score(
+                config.engine.score_aggregation,
+                config.engine.complexity_cost.enabled,
+            );
+            let total = entry.formatted_total_payoff(
+                config.engine.score_aggregation,
+                config.engine.complexity_cost.enabled,
+            );
             (
                 rank,
                 id,
                 machine_n,
                 display,
                 score,
+                total,
                 entry.wins,
                 entry.losses,
                 entry.draws,
@@ -1925,28 +2102,39 @@ fn render_top_table(
         })
         .collect();
 
-    let headers = ["#", "id", "n", "Strategy", "Score", "W-L-D"];
+    let headers = [
+        "#",
+        "id",
+        "n",
+        "Strategy",
+        score_header,
+        total_header,
+        "W-L-D",
+    ];
     let mut rank_w = headers[0].len().max(fixed_rank_w);
     let mut id_w = headers[1].len();
     let mut n_w = headers[2].len();
     let mut name_w = headers[3].len();
     let mut score_w = headers[4].len().max(fixed_score_w);
-    let mut wld_w = headers[5].len().max(fixed_wld_w);
+    let mut total_w = headers[5].len().max(fixed_total_w);
+    let mut wld_w = headers[6].len().max(fixed_wld_w);
 
-    for (rank, id, machine_n, name, score, wins, losses, draws) in &rows {
+    for (rank, id, machine_n, name, score, total, wins, losses, draws) in &rows {
         rank_w = rank_w.max(rank.len());
         id_w = id_w.max(id.len());
         n_w = n_w.max(machine_n.len());
         name_w = name_w.max(name.chars().count());
         score_w = score_w.max(score.len());
+        total_w = total_w.max(total.len());
         let wld_len = format!("W{wins}-L{losses}-D{draws}").len();
         wld_w = wld_w.max(wld_len);
     }
 
     let min_id = 4usize;
     let min_name = 10usize;
-    let overhead = 7 + (2 * 6);
-    let fixed = rank_w + n_w + score_w + wld_w;
+    let columns = headers.len();
+    let overhead = (columns + 1) + (2 * columns);
+    let fixed = rank_w + n_w + score_w + total_w + wld_w;
     let available = width.saturating_sub(overhead + fixed);
     if available >= min_id + min_name {
         id_w = id_w.min(available.saturating_sub(min_name));
@@ -1957,12 +2145,13 @@ fn render_top_table(
     }
 
     let sep = format!(
-        "+{}+{}+{}+{}+{}+{}+",
+        "+{}+{}+{}+{}+{}+{}+{}+",
         "-".repeat(rank_w + 2),
         "-".repeat(id_w + 2),
         "-".repeat(n_w + 2),
         "-".repeat(name_w + 2),
         "-".repeat(score_w + 2),
+        "-".repeat(total_w + 2),
         "-".repeat(wld_w + 2)
     );
     lines.push(Line::from(Span::styled(sep.clone(), dim_style)));
@@ -1988,14 +2177,19 @@ fn render_top_table(
         ),
         Span::styled("|", dim_style),
         Span::styled(
-            format!(" {} ", center_text(headers[5], wld_w)),
+            format!(" {} ", center_text(headers[5], total_w)),
+            header_style,
+        ),
+        Span::styled("|", dim_style),
+        Span::styled(
+            format!(" {} ", center_text(headers[6], wld_w)),
             header_style,
         ),
         Span::styled("|", dim_style),
     ]));
     lines.push(Line::from(Span::styled(sep.clone(), dim_style)));
 
-    for (rank, id, machine_n, name, score, wins, losses, draws) in rows {
+    for (rank, id, machine_n, name, score, total, wins, losses, draws) in rows {
         let mut spans = Vec::new();
         spans.push(Span::styled("|", dim_style));
         spans.push(Span::styled(format!(" {rank:>rank_w$} "), number_style));
@@ -2020,6 +2214,8 @@ fn render_top_table(
         ));
         spans.push(Span::styled("|", dim_style));
         spans.push(Span::styled(format!(" {score:>score_w$} "), number_style));
+        spans.push(Span::styled("|", dim_style));
+        spans.push(Span::styled(format!(" {total:>total_w$} "), number_style));
         spans.push(Span::styled("|", dim_style));
         spans.extend(wld_cell_spans(
             wins,
@@ -2048,6 +2244,20 @@ fn render_top_table(
 
     lines.push(Line::from(Span::styled(sep, dim_style)));
     lines
+}
+
+fn score_column_label(config: &nit_games::NormalizedConfig) -> &'static str {
+    match config.engine.score_aggregation {
+        nit_games::ScoreAggregation::Mean => "Score(mean)",
+        nit_games::ScoreAggregation::Total => "Score(total)",
+    }
+}
+
+fn total_payoff_column_label(config: &nit_games::NormalizedConfig) -> &'static str {
+    match config.engine.score_aggregation {
+        nit_games::ScoreAggregation::Mean => "AggPayoff",
+        nit_games::ScoreAggregation::Total => "TotalPayoff",
+    }
 }
 
 fn strategy_machine_index(def: &StrategyDefinition) -> Option<u64> {
@@ -2219,9 +2429,93 @@ mod tests {
             last_halted_a: None,
             last_halted_b: None,
             last_outcome: None,
+            runtime: nit_games::RuntimeAcceleratorStats::default(),
         };
         let pct = tournament_progress_percent(&progress);
         assert!(pct > 20.0);
         assert!(pct < 22.5);
+    }
+
+    #[test]
+    fn top_table_shows_aggregate_payoff_column_in_mean_mode() {
+        let config = nit_games::GamesConfig::from_toml(
+            r#"
+schema_version = 1
+game = "ipd"
+rounds = 2
+repetitions = 1
+self_play = true
+
+[[strategy]]
+id = "all_c"
+type = "fsm"
+index = 1
+num_states = 1
+k = 2
+"#,
+        )
+        .expect("parse config");
+        let kernel = nit_games::TournamentKernel::new(config.clone());
+        let results = nit_games::output::TournamentResults {
+            ranking: vec![nit_games::output::StrategyResult {
+                id: "all_c".into(),
+                name: None,
+                total_payoff: -4,
+                average_payoff: -1.0,
+                adjusted_total_payoff: Some(-4.0),
+                adjusted_average_payoff: Some(-1.0),
+                matches: 2,
+                wins: 0,
+                losses: 0,
+                draws: 2,
+                crashed: false,
+                crash_count: 0,
+                tm_metrics: None,
+            }],
+            pairwise: Vec::new(),
+            dominance: Vec::new(),
+        };
+        let (rank_w, score_w, total_w, wld_w) = top_table_widths(&config);
+        let lines = render_top_table(
+            &results,
+            &config,
+            kernel.definitions(),
+            120,
+            Style::default(),
+            Style::default(),
+            Style::default(),
+            Style::default(),
+            Style::default(),
+            Style::default(),
+            Style::default(),
+            Style::default(),
+            rank_w,
+            score_w,
+            total_w,
+            wld_w,
+        );
+
+        assert!(lines
+            .iter()
+            .any(|line| line_text(line).contains("AggPayoff")));
+        assert!(lines.iter().any(|line| line_text(line).contains(" -2 ")));
+    }
+
+    #[test]
+    fn wolfram_preview_line_is_expression_friendly() {
+        let preview = nit_games::MatchHistoryPreview {
+            match_index: 53,
+            total_matches: 913_936,
+            a: "0".into(),
+            b: "867".into(),
+            rounds_total: 4,
+            outcomes: "2323".into(),
+        };
+
+        let line = wolfram_preview_line(&preview);
+        assert_eq!(
+            line,
+            "<|\"match_index\" -> 53, \"total_matches\" -> 913936, \"a\" -> \"0\", \"b\" -> \"867\", \"rounds_total\" -> 4, \"outcomes\" -> \"2323\"|>"
+        );
     }
 }

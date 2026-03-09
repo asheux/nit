@@ -77,7 +77,7 @@ pub struct PayoffMatrix {
 
 impl PayoffMatrix {
     pub fn default_pd() -> Self {
-        let matrix = [[[3, 3], [0, 5]], [[5, 0], [1, 1]]];
+        let matrix = [[[-1, -1], [-3, 0]], [[0, -3], [-2, -2]]];
         Self::from_matrix(matrix)
     }
 

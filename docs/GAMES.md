@@ -43,6 +43,8 @@ mode = "interactive" | "batch"
 parallelism = "auto" | "off" | { threads = N }
 progress_interval_ms = 0.. (UI update/log throttling)
 fast_eval = true | false
+accelerator = "auto" | "cpu" | "metal"
+score_aggregation = "mean" | "total"
 complexity_cost.enabled = true | false
 complexity_cost.tm_step_cost = 0.0
 complexity_cost.fsm_state_cost = 0.0
@@ -52,6 +54,20 @@ enabled = true | false
 include_cycle_metadata = true | false
   # when enabled, history.ndjson also includes per-match TM metrics (if applicable)
 ```
+
+`score_aggregation` controls which per-strategy score is shown and aggregated:
+- `mean` (default): average payoff per round
+- `total`: cumulative payoff across all matches
+
+Tournament scheduling is notebook-compatible:
+- ordered pairs are played in both directions (`A vs B` and `B vs A`)
+- `self_play` defaults to `true`
+- in `mean` mode, the table shows `AggPayoff`, which follows Code-02 and sums matchup means rather than raw cumulative payoff
+
+`accelerator` controls optional GPU offload on macOS:
+- `auto` (default): use Metal opportunistically for compatible homogeneous batch paths
+- `cpu`: disable Metal and stay on CPU/Rayon
+- `metal`: prefer Metal on those same paths, with CPU fallback when the current run shape is unsupported
 
 ## Strategies (programs)
 
@@ -241,6 +257,7 @@ Runs are stored under `runs/games/<timestamp>__seed-<seed>/` and include:
 - `run_summary.json` (schema v2)
 - `definitions.json` and `results.json`
 - `events.ndjson` and `history.ndjson` (when enabled)
+- `match_history_preview.ndjson` plus `match_history_preview.wl` while the live TUI run is active; previews store full outcomes, while the popup display caps to 500 rounds
 - `config.toml` snapshot
 - `analysis/` outputs
 
@@ -249,6 +266,8 @@ Legacy `run__*.json` summaries under `games-runs/` or `output/` are still readab
 ### Migration notes (schema v2)
 - `run_summary.json` now includes `run_dir` and expanded `paths` entries
   (`definitions`, `results`, `config`, `analysis_dir`).
+- `run_summary.json` also records runtime accelerator usage (`runtime.backend`,
+  `runtime.metal_matches`, `runtime.cpu_matches`, `runtime.metal_fallbacks`).
 - Older schema v1 summaries still load, but those fields will be missing (`null`).
 
 ## History analysis
@@ -274,12 +293,16 @@ Random matchups are detected by strategy ids containing `rand` or `random` (case
 
 ## Fast evaluator (Phase 3)
 
-When `engine.fast_eval = true`, the kernel uses an analytical evaluator if **both**
+When `engine.fast_eval = true`, the CPU kernel uses an analytical evaluator if **both**
 strategies are FSMs and `noise = 0`.
 It performs cycle detection and sums rounds in `O(mu + lambda)` time.
 
 Cycle metadata (transient length, cycle length, cooperation rates) can be emitted
 into `history.ndjson` by setting `history.include_cycle_metadata = true`.
 
-Note: one-sided TMs are deterministic but **not** currently fast-evaluated; they
-run via the standard simulator.
+On macOS, if `engine.accelerator != "cpu"`, homogeneous no-noise batch paths for
+FSM, CA, and one-sided TM families may also be offloaded to Metal. The Metal path
+currently requires:
+- no event/history logging for that execution path
+- same-kind strategies with uniform per-kind parameters
+- `complexity_cost.tm_step_cost = 0.0` for TM runs

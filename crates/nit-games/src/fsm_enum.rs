@@ -2,7 +2,10 @@ use crate::config::{FsmGroupingMode, StrategySpec, StrategySpecKind};
 use crate::game::Action;
 use crate::strategy::InputMode;
 use nit_utils::hashing::stable_hash_bytes;
+use rayon::prelude::*;
 use std::collections::{HashMap, VecDeque};
+use std::hash::Hash;
+use std::sync::{Mutex, OnceLock};
 
 #[derive(Clone, Debug)]
 pub struct FsmDefinition {
@@ -228,18 +231,64 @@ impl RawFsm {
     }
 }
 
-pub fn canonical_fsm_indices(states: usize, actions: usize) -> Result<Vec<u64>, String> {
-    let all = fsm_indices(states, actions)?;
-    let mut first_by_key: HashMap<Vec<u16>, u64> = HashMap::new();
-    for idx in all {
-        let raw = decode_fsm_notebook_index_raw(idx, states, actions)?;
-        let canonical = canonicalize_raw_fsm(&raw, 0);
-        let key = raw_fsm_key(&canonical)?;
-        first_by_key.entry(key).or_insert(idx);
+type CanonicalFsmCache = HashMap<(usize, usize), Result<Vec<u64>, String>>;
+type BehaviorRepCache = HashMap<(usize, usize, FsmGroupingMode), Result<Vec<u64>, String>>;
+
+fn canonical_fsm_cache() -> &'static Mutex<CanonicalFsmCache> {
+    static CACHE: OnceLock<Mutex<CanonicalFsmCache>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn behavior_rep_cache() -> &'static Mutex<BehaviorRepCache> {
+    static CACHE: OnceLock<Mutex<BehaviorRepCache>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn clone_cached_vec_result<K>(
+    cache: &Mutex<HashMap<K, Result<Vec<u64>, String>>>,
+    key: K,
+    compute: impl FnOnce(&K) -> Result<Vec<u64>, String>,
+) -> Result<Vec<u64>, String>
+where
+    K: Eq + Hash + Clone,
+{
+    if let Some(cached) = cache
+        .lock()
+        .expect("fsm cache lock poisoned")
+        .get(&key)
+        .cloned()
+    {
+        return cached;
     }
-    let mut canonical: Vec<u64> = first_by_key.into_values().collect();
-    canonical.sort_unstable();
-    Ok(canonical)
+
+    let computed = compute(&key);
+    cache
+        .lock()
+        .expect("fsm cache lock poisoned")
+        .insert(key, computed.clone());
+    computed
+}
+
+fn insert_min_index(map: &mut HashMap<Vec<u16>, u64>, key: Vec<u16>, idx: u64) {
+    if let Some(existing) = map.get_mut(&key) {
+        *existing = (*existing).min(idx);
+    } else {
+        map.insert(key, idx);
+    }
+}
+
+fn merge_min_index_maps(left: &mut HashMap<Vec<u16>, u64>, right: HashMap<Vec<u16>, u64>) {
+    for (key, idx) in right {
+        insert_min_index(left, key, idx);
+    }
+}
+
+pub fn canonical_fsm_indices(states: usize, actions: usize) -> Result<Vec<u64>, String> {
+    clone_cached_vec_result(
+        canonical_fsm_cache(),
+        (states, actions),
+        |&(states, actions)| canonical_fsm_indices_uncached(states, actions),
+    )
 }
 
 const NOTEBOOK_BEHAVIOR_TRACE_STEPS: usize = 12;
@@ -289,24 +338,77 @@ pub fn unique_fsm_behavior_representatives_with_mode(
     actions: usize,
     mode: FsmGroupingMode,
 ) -> Result<Vec<u64>, String> {
-    let groups = group_canonical_fsm_indices_by_behavior_with_mode(states, actions, mode)?;
-    Ok(groups
-        .into_iter()
-        .filter_map(|group| group.into_iter().next())
-        .collect())
+    clone_cached_vec_result(
+        behavior_rep_cache(),
+        (states, actions, mode),
+        |&(states, actions, mode)| {
+            unique_fsm_behavior_representatives_with_mode_uncached(states, actions, mode)
+        },
+    )
 }
 
-fn fsm_indices(states: usize, actions: usize) -> Result<Vec<u64>, String> {
+fn fsm_index_limit(states: usize, actions: usize) -> Result<u64, String> {
     let Some(count) = crate::strategy::fsm_count(states, actions) else {
         return Err("fsm index space overflows u128 for this (states, actions)".to_string());
     };
     if count == 0 {
-        return Ok(Vec::new());
+        return Ok(0);
     }
     if count > u64::MAX as u128 {
         return Err("fsm index space exceeds u64 range".to_string());
     }
-    Ok((0..(count as u64)).collect())
+    Ok(count as u64)
+}
+
+fn canonical_fsm_indices_uncached(states: usize, actions: usize) -> Result<Vec<u64>, String> {
+    let limit = fsm_index_limit(states, actions)?;
+    if limit == 0 {
+        return Ok(Vec::new());
+    }
+    let first_by_key = (0..limit)
+        .into_par_iter()
+        .try_fold(HashMap::new, |mut local, idx| {
+            let raw = decode_fsm_notebook_index_raw(idx, states, actions)?;
+            let canonical = canonicalize_raw_fsm(&raw, 0);
+            let key = raw_fsm_key(&canonical)?;
+            insert_min_index(&mut local, key, idx);
+            Ok::<_, String>(local)
+        })
+        .try_reduce(HashMap::new, |mut left, right| {
+            merge_min_index_maps(&mut left, right);
+            Ok::<_, String>(left)
+        })?;
+    let mut canonical = first_by_key.into_values().collect::<Vec<_>>();
+    canonical.sort_unstable();
+    Ok(canonical)
+}
+
+fn unique_fsm_behavior_representatives_with_mode_uncached(
+    states: usize,
+    actions: usize,
+    mode: FsmGroupingMode,
+) -> Result<Vec<u64>, String> {
+    let canonical = canonical_fsm_indices(states, actions)?;
+    let reps_by_key = canonical
+        .into_par_iter()
+        .try_fold(HashMap::new, |mut local, idx| {
+            let raw = decode_fsm_notebook_index_raw(idx, states, actions)?;
+            let key = match mode {
+                FsmGroupingMode::Wnbm => {
+                    behavior_trace_signature(&raw, NOTEBOOK_BEHAVIOR_TRACE_STEPS)?
+                }
+                FsmGroupingMode::Moorem => raw_fsm_key(&minimize_raw_fsm(&raw, 0))?,
+            };
+            insert_min_index(&mut local, key, idx);
+            Ok::<_, String>(local)
+        })
+        .try_reduce(HashMap::new, |mut left, right| {
+            merge_min_index_maps(&mut left, right);
+            Ok::<_, String>(left)
+        })?;
+    let mut reps = reps_by_key.into_values().collect::<Vec<_>>();
+    reps.sort_unstable();
+    Ok(reps)
 }
 
 fn decode_fsm_notebook_index_raw(

@@ -1,8 +1,8 @@
 schema_version = 1
 game = "ipd"
-rounds = 2000
+rounds = 10
 repetitions = 1
-self_play = false
+self_play = true
 seed = 42
 noise = 0.0
 
@@ -24,6 +24,8 @@ mode = "interactive"
 parallelism = "auto"
 progress_interval_ms = 80
 fast_eval = true
+accelerator = "metal" # auto|cpu|metal
+score_aggregation = "mean" # Code-02 semantics: per-round average score; TotalPayoff sums matchup means
 fsm_grouping = "wnbm"  # or "moorem"
 
 [engine.complexity_cost]

@@ -20,8 +20,9 @@ use nit_games::output::{
 use nit_games::tournament::{KernelRunMode, Parallelism, TournamentKernel};
 use nit_games::{
     enumerate_fsms, format_strategy_introspection, introspect_strategy, run_id_from_seed_config,
-    Action, FsmDefinition, GamesConfig, HistoryWriter, InputMode, StrategyIntrospection,
-    StrategyIntrospectionKind, StrategyIntrospectionParameters, StrategySpec, TmTransitionRecord,
+    Action, FsmDefinition, GamesConfig, HistoryWriter, InputMode, ScoreAggregation,
+    StrategyIntrospection, StrategyIntrospectionKind, StrategyIntrospectionParameters,
+    StrategySpec, TmTransitionRecord,
 };
 use nit_tui::{run, Theme};
 use nit_utils::hashing::stable_hash_bytes;
@@ -604,15 +605,15 @@ fn games_template() -> &'static str {
 game = "ipd"
 rounds = 200
 repetitions = 1
-self_play = false
+self_play = true
 seed = 12345
 noise = 0.0
 
 [payoff]
-R = 3
-S = 0
-T = 5
-P = 1
+R = -1
+S = -3
+T = 0
+P = -2
 
 [history]
 enabled = true
@@ -623,6 +624,7 @@ mode = "interactive"
 parallelism = "auto"
 progress_interval_ms = 80
 fast_eval = true
+score_aggregation = "mean" # Code-02 semantics: per-round average score; TotalPayoff sums matchup means
 
 [engine.complexity_cost]
 enabled = false
@@ -675,6 +677,7 @@ fn execute_tournament(
     history_path: Option<PathBuf>,
 ) -> anyhow::Result<(
     nit_games::output::TournamentResults,
+    nit_games::RuntimeAcceleratorStats,
     Option<String>,
     Option<String>,
 )> {
@@ -682,7 +685,7 @@ fn execute_tournament(
     let event_log_enabled = event_path.is_some();
     let history_log_enabled = history_path.is_some();
 
-    let (results, event_log, history_log) = if matches!(parallelism, Parallelism::Off) {
+    let (results, runtime, event_log, history_log) = if matches!(parallelism, Parallelism::Off) {
         let mut event_writer = if event_log_enabled {
             Some(EventWriter::new(
                 event_path.clone().expect("event path"),
@@ -698,7 +701,7 @@ fn execute_tournament(
         } else {
             None
         };
-        let results = kernel.run(KernelRunMode::Sequential {
+        let (results, runtime) = kernel.run_with_runtime(KernelRunMode::Sequential {
             event_writer: event_writer.as_mut(),
             history_writer: history_writer.as_mut(),
         });
@@ -722,7 +725,7 @@ fn execute_tournament(
             ),
             None => None,
         };
-        (results, event_log, history_log)
+        (results, runtime, event_log, history_log)
     } else {
         let mut event_sender = None;
         let mut history_sender = None;
@@ -760,7 +763,7 @@ fn execute_tournament(
             history_handle = Some(handle);
         }
 
-        let results = kernel.run(KernelRunMode::Parallel {
+        let (results, runtime) = kernel.run_with_runtime(KernelRunMode::Parallel {
             parallelism,
             event_sender: event_sender.clone(),
             include_rounds: config.event_log.include_rounds,
@@ -792,10 +795,10 @@ fn execute_tournament(
             ),
             None => None,
         };
-        (results, event_log, history_log)
+        (results, runtime, event_log, history_log)
     };
 
-    Ok((results, event_log, history_log))
+    Ok((results, runtime, event_log, history_log))
 }
 
 fn resolve_relative_path(path: &Path, base_dir: Option<&Path>) -> PathBuf {
@@ -909,7 +912,7 @@ fn run_games_headless(
     let kernel = TournamentKernel::new(config.clone());
     let event_log_enabled = config.event_log.enabled;
     let history_log_enabled = config.history.enabled;
-    let (results, event_log, history_log) = execute_tournament(
+    let (results, runtime, event_log, history_log) = execute_tournament(
         &kernel,
         &config,
         event_log_enabled.then_some(event_path.clone()),
@@ -954,6 +957,7 @@ fn run_games_headless(
         results,
         event_log,
         history_log,
+        runtime,
         run_dir: Some(layout.run_dir.display().to_string()),
     };
 
@@ -1095,22 +1099,21 @@ fn run_games_sweep(
         .with_context(|| format!("failed to create {}", cells_root.display()))?;
 
     let mut cell_summaries = Vec::new();
-    let mut raw_totals_by_strategy: HashMap<String, Vec<f64>> = HashMap::new();
-    let mut adjusted_totals_by_strategy: HashMap<String, Vec<f64>> = HashMap::new();
+    let score_aggregation = config.engine.score_aggregation;
+    let adjusted_scores = config.engine.complexity_cost.enabled;
+    let mut scores_by_strategy: HashMap<String, Vec<f64>> = HashMap::new();
     let mut top_counts: HashMap<String, u32> = HashMap::new();
     let mut cell_id = 0usize;
     let top_k = 3usize;
 
     let collect_results = |results: &nit_games::output::TournamentResults,
-                           raw_totals: &mut HashMap<String, Vec<f64>>,
-                           adjusted_totals: &mut HashMap<String, Vec<f64>>,
+                           scores: &mut HashMap<String, Vec<f64>>,
                            top_counts: &mut HashMap<String, u32>| {
         let mut top_entries = Vec::new();
         for entry in results.ranking.iter().take(top_k) {
             top_entries.push(SweepTopEntry {
                 id: entry.id.clone(),
-                total_payoff: entry.total_payoff,
-                adjusted_total_payoff: entry.adjusted_total_payoff,
+                score: entry.score(score_aggregation, adjusted_scores),
             });
         }
         let top_id = top_entries
@@ -1120,16 +1123,10 @@ fn run_games_sweep(
         *top_counts.entry(top_id.clone()).or_insert(0) += 1;
 
         for strategy in &results.ranking {
-            raw_totals
+            scores
                 .entry(strategy.id.clone())
                 .or_default()
-                .push(strategy.total_payoff as f64);
-            if let Some(adj) = strategy.adjusted_total_payoff {
-                adjusted_totals
-                    .entry(strategy.id.clone())
-                    .or_default()
-                    .push(adj);
-            }
+                .push(strategy.score(score_aggregation, adjusted_scores));
         }
 
         (top_id, top_entries)
@@ -1185,8 +1182,7 @@ fn run_games_sweep(
                                         {
                                             let (top_id, top_entries) = collect_results(
                                                 &summary.results,
-                                                &mut raw_totals_by_strategy,
-                                                &mut adjusted_totals_by_strategy,
+                                                &mut scores_by_strategy,
                                                 &mut top_counts,
                                             );
                                             cell_summaries.push(SweepCellSummary {
@@ -1232,12 +1228,16 @@ fn run_games_sweep(
                                 }
 
                                 let kernel = TournamentKernel::new(cell_config.clone());
-                                let (results, event_log, history_log) = execute_tournament(
-                                    &kernel,
-                                    &cell_config,
-                                    cell_config.event_log.enabled.then_some(events_path.clone()),
-                                    cell_config.history.enabled.then_some(history_path.clone()),
-                                )?;
+                                let (results, runtime, event_log, history_log) =
+                                    execute_tournament(
+                                        &kernel,
+                                        &cell_config,
+                                        cell_config
+                                            .event_log
+                                            .enabled
+                                            .then_some(events_path.clone()),
+                                        cell_config.history.enabled.then_some(history_path.clone()),
+                                    )?;
 
                                 if let Err(err) =
                                     nit_utils::fs::write_atomic(&definitions_path, |writer| {
@@ -1276,6 +1276,7 @@ fn run_games_sweep(
                                     results: results.clone(),
                                     event_log,
                                     history_log,
+                                    runtime,
                                     run_dir: Some(cell_dir.display().to_string()),
                                 };
 
@@ -1285,8 +1286,7 @@ fn run_games_sweep(
 
                                 let (top_id, top_entries) = collect_results(
                                     &results,
-                                    &mut raw_totals_by_strategy,
-                                    &mut adjusted_totals_by_strategy,
+                                    &mut scores_by_strategy,
                                     &mut top_counts,
                                 );
                                 cell_summaries.push(SweepCellSummary {
@@ -1315,11 +1315,10 @@ fn run_games_sweep(
     }
 
     let mut strategies = Vec::new();
-    let sort_by_adjusted = config.engine.complexity_cost.enabled;
-    for (id, totals) in raw_totals_by_strategy {
-        let count = totals.len() as f64;
-        let mean = totals.iter().sum::<f64>() / count.max(1.0);
-        let var = totals
+    for (id, scores) in scores_by_strategy {
+        let count = scores.len() as f64;
+        let mean = scores.iter().sum::<f64>() / count.max(1.0);
+        let var = scores
             .iter()
             .map(|v| {
                 let diff = *v - mean;
@@ -1327,51 +1326,15 @@ fn run_games_sweep(
             })
             .sum::<f64>()
             / count.max(1.0);
-        let std = var.sqrt();
-        let (mean_adj, std_adj) = adjusted_totals_by_strategy
-            .get(&id)
-            .and_then(|vals| {
-                if vals.is_empty() {
-                    None
-                } else {
-                    let count = vals.len() as f64;
-                    let mean = vals.iter().sum::<f64>() / count.max(1.0);
-                    let var = vals
-                        .iter()
-                        .map(|v| {
-                            let diff = *v - mean;
-                            diff * diff
-                        })
-                        .sum::<f64>()
-                        / count.max(1.0);
-                    Some((mean, var.sqrt()))
-                }
-            })
-            .unwrap_or((0.0, 0.0));
-        let adjusted_present = adjusted_totals_by_strategy.contains_key(&id);
         let top_count = top_counts.get(&id).copied().unwrap_or(0);
         strategies.push(SweepStrategyAggregate {
             id,
-            mean_total_payoff: mean,
-            std_total_payoff: std,
-            mean_adjusted_payoff: adjusted_present.then_some(mean_adj),
-            std_adjusted_payoff: adjusted_present.then_some(std_adj),
+            mean_score: mean,
+            std_score: var.sqrt(),
             top1_count: top_count,
         });
     }
-    if sort_by_adjusted {
-        strategies.sort_by(|a, b| {
-            let a_score = a.mean_adjusted_payoff.unwrap_or(a.mean_total_payoff);
-            let b_score = b.mean_adjusted_payoff.unwrap_or(b.mean_total_payoff);
-            b_score.partial_cmp(&a_score).unwrap()
-        });
-    } else {
-        strategies.sort_by(|a, b| {
-            b.mean_total_payoff
-                .partial_cmp(&a.mean_total_payoff)
-                .unwrap()
-        });
-    }
+    strategies.sort_by(|a, b| b.mean_score.partial_cmp(&a.mean_score).unwrap());
 
     let summary = SweepSummary {
         schema_version: 1,
@@ -1389,7 +1352,11 @@ fn run_games_sweep(
             payoff_p: payoff_p_grid.clone(),
         },
         cells: cell_summaries,
-        aggregate: SweepAggregate { strategies },
+        aggregate: SweepAggregate {
+            score_aggregation,
+            adjusted_scores,
+            strategies,
+        },
     };
 
     let summary_path = sweep_root.join("sweep_summary.json");
@@ -1909,27 +1876,23 @@ struct SweepCellSummary {
 
 #[derive(Serialize)]
 struct SweepAggregate {
+    score_aggregation: ScoreAggregation,
+    adjusted_scores: bool,
     strategies: Vec<SweepStrategyAggregate>,
 }
 
 #[derive(Serialize)]
 struct SweepStrategyAggregate {
     id: String,
-    mean_total_payoff: f64,
-    std_total_payoff: f64,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    mean_adjusted_payoff: Option<f64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    std_adjusted_payoff: Option<f64>,
+    mean_score: f64,
+    std_score: f64,
     top1_count: u32,
 }
 
 #[derive(Serialize)]
 struct SweepTopEntry {
     id: String,
-    total_payoff: i64,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    adjusted_total_payoff: Option<f64>,
+    score: f64,
 }
 
 fn find_theme() -> Option<PathBuf> {

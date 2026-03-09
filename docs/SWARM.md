@@ -27,12 +27,20 @@ You can launch Swarm in two ways:
 1) **Explicit command** (always works):
 
 ```text
-@swarm [all|N] [template=lab|parallel|bulk] <prompt>
+@swarm [all|N] [template=lab|parallel|bulk] [mission=general|research|computational-research] <prompt>
 ```
 
 Notes:
 
 - `template=` can also be written as `t=`.
+- `mission=` can also be written as `m=`.
+- In **Agent Ops → Roster**, you can pin a default template and a default mission preset.
+  `mission=...` or `Mission: ...` overrides the roster preset; otherwise the roster preset applies,
+  and `auto` falls back to prompt-based mission detection.
+- Accepted mission aliases:
+  - `general` (aka `default`, `code`, `coding`)
+  - `research`
+  - `computational-research` (aka `computational`, `computational research`, `comp-research`)
 - Accepted template aliases:
   - `parallel` (aka `v1`)
   - `lab` (aka `default`, `v2`)
@@ -44,15 +52,23 @@ Examples:
 @swarm template=bulk do a quick repo health check and suggest next steps
 @swarm 5 template=parallel triage this UI regression and propose a fix
 @swarm all template=lab audit the repo for security footguns
+@swarm template=lab mission=research read papers and rank the best strategies for this topic
+@swarm 4 t=parallel m=computational-research model competing approaches and compare them
 ```
 
 2) **Implicit swarm launch** (no `@swarm` needed):
 
 - If your prompt includes a `Template: ...` line, Swarm auto-launches.
   - Examples: `Template: bulk`, `Template: "parallel"`, `- Template: \`lab\``
+- If your prompt includes a `Mission: ...` line, Swarm uses it as the mission focus.
+  - Examples: `Mission: research`, `Mission: computational-research`
 - If your prompt contains “SWARM PLANNER” or “SWARM SYNTHESIZER”, Swarm auto-launches.
 - If the roster-selected template is `bulk` or `parallel` and there are at least two Codex agents,
   a plain prompt auto-launches Swarm.
+- Without an explicit `mission=...` or `Mission: ...`, nit infers mission focus from the operator
+  request. It only enables research roles when the request actually asks for research work (papers,
+  web/resources, source survey, modeling/experiments, etc.), not just because the word “research”
+  appears in a code-change prompt.
 
 Guardrail: prompts starting with `@` (e.g. `@all ...`) are never auto-converted to Swarm.
 
@@ -83,7 +99,7 @@ Where to watch it:
 
 Use this for “research lab” workflows where you want:
 
-- multiple read-only researchers/reviewers feeding
+- multiple read-only proposal/review tasks feeding
 - a **single-writer integrator** who is the only one allowed to edit the workspace (`writes=true`).
 
 Key properties:
@@ -94,9 +110,16 @@ Key properties:
 
 Typical shape:
 
-- `research`/`review` tasks (read-only, parallel)
-- `integrate` task (single writer, depends on research outputs)
+- `propose`/`review` tasks for codebase work, or `research`/`computational-research` tasks when
+  the mission is external topic/literature/web research
+- `integrate` task (single writer, depends on upstream investigation outputs)
 - optional review/verification follow-ups
+
+Mission-aware fallback shapes:
+
+- `general`: repo recon -> design options -> integrate/implement -> review
+- `research`: source survey -> evidence comparison / ranked strategies -> synthesis -> review
+- `computational-research`: source survey -> modeling / experiments / analysis -> synthesis -> review
 
 ### `template=parallel`
 
@@ -136,11 +159,31 @@ Roles exist at two layers:
 1) **Planner output**: each task has optional `role` (`propose|judge|research|computational-research|integrate|review|test`).
 2) **Roster role hints** (recommended for `parallel`/`bulk`): in **Agent Ops → Roster**, expand a
    model and use the `Role` branch to pick a preferred role (or `All`).
+3) **Roster mission preset**: in **Agent Ops → Roster**, set the global swarm mission preset to
+   `auto`, `general`, `research`, or `computational-research`.
 
 Notes:
 
 - The roster role hint is passed to the planner as a constraint/preference. It does not by itself
   grant write access; `writes=true` still controls workspace edits.
+- `research` means topic exploration: papers, docs, web resources, related ideas, and strategy
+  discovery.
+- `computational-research` means tool-assisted evidence gathering: targeted searches, calculations,
+  experiments, measurements, and comparative analysis.
+- `computational-research` also covers broader research-computing work such as simulation,
+  modeling, numerical methods, optimization, data/model fitting, pattern or network analysis, and
+  reproducible computational workflows across technical domains.
+- Mission focus is role-aware:
+  - `general` blocks `research` and `computational-research`
+  - `research` allows `research`
+  - `computational-research` allows both `research` and `computational-research`
+- nit only keeps research-role assignments when the operator request is actually research-oriented
+  or explicitly asks for those mission-specific roles.
+- For `research` and `computational-research` tasks, expect outputs to include sources, methods,
+  assumptions, and ranked strategy recommendations.
+- Mission-scoped clones do not automatically inherit singleton roles like `integrate` or `judge`
+  as actual task roles when the planner omits them; those hints stay planning preferences, not
+  implicit assignments.
 - `All` means “no role constraint”. It does not spawn extra agents or role-specific worker lanes.
 - In `bulk`, if you set an agent’s roster role to `integrate`, nit uses it as the single-writer
   integrator and locks it (planner overrides are ignored).

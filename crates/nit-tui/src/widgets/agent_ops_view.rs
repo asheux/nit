@@ -42,13 +42,16 @@ pub fn roster_meta_for_body_line(state: &AppState, body_line: usize) -> Option<R
 pub fn roster_body_offset(state: &AppState) -> usize {
     let _ = state;
     // Backends header (4 lines) + blank spacer (1) + swarm template buttons (1)
-    // + blank spacer (1) + table header/separator (2)
-    9
+    // + swarm mission buttons (1) + blank spacer (1) + table header/separator (2)
+    10
 }
 
 pub const ROSTER_SWARM_TEMPLATE_LINE_IDX: usize = 5;
+pub const ROSTER_SWARM_MISSION_LINE_IDX: usize = 6;
 
 const ROSTER_SWARM_TEMPLATE_LINE: &str = " Swarm template:  lab   parallel   bulk ";
+const ROSTER_SWARM_MISSION_LINE: &str =
+    " Swarm mission:  auto   general   research   computational ";
 const ROSTER_ROLE_OPTIONS: [&str; 8] = [
     "all",
     "propose",
@@ -74,6 +77,25 @@ pub fn roster_swarm_template_hit(col: usize) -> Option<&'static str> {
         let end = start.saturating_add(needle.len());
         if col >= start && col < end {
             return Some(label);
+        }
+    }
+    None
+}
+
+pub fn roster_swarm_mission_hit(col: usize) -> Option<&'static str> {
+    for (label, value) in [
+        ("auto", "auto"),
+        ("general", "general"),
+        ("research", "research"),
+        ("computational", "computational-research"),
+    ] {
+        let needle = format!(" {label} ");
+        let Some(start) = ROSTER_SWARM_MISSION_LINE.find(needle.as_str()) else {
+            continue;
+        };
+        let end = start.saturating_add(needle.len());
+        if col >= start && col < end {
+            return Some(value);
         }
     }
     None
@@ -483,6 +505,9 @@ fn footer_line(state: &AppState, theme: &Theme) -> Line<'static> {
             spans.push(Span::styled("1/2/3", key_style));
             spans.push(Span::styled(" template", label_style));
             spans.push(Span::styled("  ", sep_style));
+            spans.push(Span::styled("4/5/6/7", key_style));
+            spans.push(Span::styled(" mission", label_style));
+            spans.push(Span::styled("  ", sep_style));
             spans.push(Span::styled("Space", key_style));
             spans.push(Span::styled(" set", label_style));
             spans.push(Span::styled("  ", sep_style));
@@ -659,6 +684,7 @@ fn roster_lines(state: &AppState, swarm: Option<&SwarmRuntime>, width: usize) ->
         ),
         String::new(),
         ROSTER_SWARM_TEMPLATE_LINE.into(),
+        ROSTER_SWARM_MISSION_LINE.into(),
         String::new(),
         format!(
             " {} {} {} {} {}",
@@ -1978,18 +2004,56 @@ fn roster_styled_line(
         return Line::from(spans);
     }
     if line_idx == 6 {
+        let label_style = Style::default()
+            .fg(theme.border)
+            .add_modifier(Modifier::DIM);
+        let selected_style = Style::default()
+            .fg(theme.background)
+            .bg(theme.border_focused);
+        let unselected_style = Style::default()
+            .fg(theme.foreground)
+            .bg(theme.cursor_line_bg);
+
+        let mut spans: Vec<Span<'static>> = Vec::with_capacity(10);
+        spans.push(Span::styled(" Swarm mission: ", label_style));
+        for (idx, (display, value)) in [
+            ("auto", "auto"),
+            ("general", "general"),
+            ("research", "research"),
+            ("computational", "computational-research"),
+        ]
+        .iter()
+        .enumerate()
+        {
+            let selected = state
+                .agents
+                .swarm_default_mission
+                .eq_ignore_ascii_case(value);
+            let style = if selected {
+                selected_style
+            } else {
+                unselected_style
+            };
+            spans.push(Span::styled(format!(" {display} "), style));
+            if idx + 1 < 4 {
+                spans.push(Span::styled(" ", label_style));
+            }
+        }
+        return Line::from(spans);
+    }
+    if line_idx == 7 {
         return Line::from(Span::styled(
             line.to_string(),
             Style::default().fg(theme.foreground),
         ));
     }
-    if line_idx == 7 {
+    if line_idx == 8 {
         return Line::from(Span::styled(
             line.to_string(),
             Style::default().fg(theme.border).bg(table_bg),
         ));
     }
-    if line_idx == 8 {
+    if line_idx == 9 {
         return Line::from(Span::styled(
             line.to_string(),
             Style::default()
