@@ -118,10 +118,19 @@ pub fn build_lines(state: &AppState, theme: &Theme, inner: Rect) -> Vec<Line<'st
 
     if total == 0 {
         lines.push(Line::from(""));
-        lines.push(Line::from(vec![Span::styled(
-            "No completed matches to plot yet.",
-            dim_style,
-        )]));
+        if state.games.match_history.capture_disabled_for_run {
+            lines.extend(history_capture_disabled_lines(
+                state,
+                label_style,
+                value_style,
+                dim_style,
+            ));
+        } else {
+            lines.push(Line::from(vec![Span::styled(
+                "No completed matches to plot yet.",
+                dim_style,
+            )]));
+        }
         lines.push(Line::from(""));
         lines.push(Line::from(vec![
             Span::styled("Esc", value_style),
@@ -311,6 +320,51 @@ pub fn build_lines(state: &AppState, theme: &Theme, inner: Rect) -> Vec<Line<'st
     lines
 }
 
+fn history_capture_disabled_lines(
+    state: &AppState,
+    label_style: Style,
+    value_style: Style,
+    dim_style: Style,
+) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    let gpu_batching = state.games.runtime.metal_matches > 0
+        || matches!(
+            state.games.runtime.backend,
+            nit_games::RuntimeAcceleratorBackend::Metal
+        );
+    let running = matches!(
+        state.games.status,
+        nit_core::GamesStatus::Running | nit_core::GamesStatus::Paused
+    );
+
+    let summary = if running {
+        if gpu_batching {
+            "Detailed history previews are disabled during batch/GPU runs."
+        } else {
+            "Detailed history previews are disabled during batch family runs."
+        }
+    } else {
+        "This run did not capture match history previews."
+    };
+    lines.push(Line::from(vec![Span::styled(summary, dim_style)]));
+
+    let followup = if running {
+        "This view only plots captured previews, so live round tiles are unavailable here."
+    } else {
+        "Re-run in interactive mode if you need per-round history plots."
+    };
+    lines.push(Line::from(vec![Span::styled(followup, dim_style)]));
+
+    if gpu_batching {
+        lines.push(Line::from(vec![
+            Span::styled("accel: ", label_style),
+            Span::styled("Metal batching active", value_style),
+        ]));
+    }
+
+    lines
+}
+
 fn panel_capacity(inner_width: u16) -> usize {
     let width = inner_width.max(1) as usize;
     ((width + PANEL_GAP) / (PANEL_WIDTH + PANEL_GAP)).max(1)
@@ -489,6 +543,16 @@ fn truncate_text(text: &str, width: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::theme::Theme;
+    use ratatui::layout::Rect;
+    use ratatui::text::Line;
+
+    fn line_text(line: &Line<'_>) -> String {
+        line.spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect()
+    }
 
     #[test]
     fn max_round_limit_caps_preview_at_500() {
@@ -509,5 +573,39 @@ mod tests {
             entries[0].preview_outcomes().len(),
             nit_games::MatchHistoryPreview::DISPLAY_ROUND_CAP
         );
+    }
+
+    #[test]
+    fn empty_history_popup_explains_disabled_batch_capture() {
+        let mut state = AppState::new(
+            std::env::temp_dir(),
+            nit_core::Buffer::empty("x", None),
+            nit_core::Buffer::empty("n", None),
+        );
+        state.games.match_history.capture_disabled_for_run = true;
+        state.games.status = nit_core::GamesStatus::Running;
+        state.games.runtime.backend = nit_games::RuntimeAcceleratorBackend::Metal;
+        state.games.runtime.metal_matches = 4096;
+
+        let lines = build_lines(
+            &state,
+            &Theme::default(),
+            Rect {
+                x: 0,
+                y: 0,
+                width: 100,
+                height: 30,
+            },
+        );
+
+        assert!(lines.iter().any(|line| {
+            line_text(line).contains("Detailed history previews are disabled during batch/GPU runs")
+        }));
+        assert!(lines
+            .iter()
+            .any(|line| { line_text(line).contains("live round tiles are unavailable here") }));
+        assert!(lines
+            .iter()
+            .any(|line| line_text(line).contains("Metal batching active")));
     }
 }

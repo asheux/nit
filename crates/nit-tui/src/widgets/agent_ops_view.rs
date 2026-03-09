@@ -49,9 +49,9 @@ pub fn roster_body_offset(state: &AppState) -> usize {
 pub const ROSTER_SWARM_TEMPLATE_LINE_IDX: usize = 5;
 pub const ROSTER_SWARM_MISSION_LINE_IDX: usize = 6;
 
-const ROSTER_SWARM_TEMPLATE_LINE: &str = " Swarm template:  lab   parallel   bulk ";
-const ROSTER_SWARM_MISSION_LINE: &str =
-    " Swarm mission:  auto   general   research   computational ";
+const ROSTER_BACKEND_NAME_W: usize = 7;
+const ROSTER_SWARM_TEMPLATE_LINE: &str = " Template:  lab   parallel   bulk ";
+const ROSTER_SWARM_MISSION_LINE: &str = " Mission:   auto   general   research   computational ";
 const ROSTER_ROLE_OPTIONS: [&str; 8] = [
     "all",
     "propose",
@@ -660,27 +660,28 @@ fn roster_lines(state: &AppState, swarm: Option<&SwarmRuntime>, width: usize) ->
 
     let mut out = vec![
         " Backends".into(),
-        format!(
-            "  Codex  {}{}",
+        roster_backend_line(
+            "Codex",
             if codex_available {
                 "available"
             } else {
                 "not found"
             },
-            if codex_active { " (active)" } else { "" }
+            if codex_active { "active" } else { "idle" },
         ),
-        format!(
-            "  Claude {}{}",
+        roster_backend_line(
+            "Claude",
             if claude_available {
                 "available"
             } else {
                 "not found"
             },
-            if claude_active { " (active)" } else { "" }
+            if claude_active { "active" } else { "idle" },
         ),
-        format!(
-            "  Local  built-in{}",
-            if local_active { " (active)" } else { "" }
+        roster_backend_line(
+            "Local",
+            "built-in",
+            if local_active { "active" } else { "idle" },
         ),
         String::new(),
         ROSTER_SWARM_TEMPLATE_LINE.into(),
@@ -956,6 +957,13 @@ fn mission_lines(state: &AppState, width: usize) -> Vec<String> {
         ));
     }
     out
+}
+
+fn roster_backend_line(name: &str, primary: &str, secondary: &str) -> String {
+    format!(
+        "  {name:<width$}  {primary}  {secondary}",
+        width = ROSTER_BACKEND_NAME_W
+    )
 }
 
 fn agent_pane_inner_width(col_width: usize) -> usize {
@@ -1908,6 +1916,50 @@ fn split_marker_and_columns(line: &str, widths: &[usize]) -> Option<(String, Vec
     Some((marker, cols))
 }
 
+fn roster_backend_styled_line(
+    name: &str,
+    primary: &str,
+    secondary: &str,
+    accent: Color,
+    available: bool,
+    active: bool,
+    theme: &Theme,
+) -> Line<'static> {
+    let name_style = if available {
+        Style::default().fg(accent).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default()
+            .fg(theme.border)
+            .add_modifier(Modifier::DIM)
+    };
+    let primary_style = if available {
+        Style::default().fg(theme.foreground)
+    } else {
+        Style::default()
+            .fg(theme.border)
+            .add_modifier(Modifier::DIM)
+    };
+    let secondary_style = if active {
+        Style::default().fg(accent).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default()
+            .fg(theme.border)
+            .add_modifier(Modifier::DIM)
+    };
+
+    Line::from(vec![
+        Span::styled("  ", Style::default().fg(theme.foreground)),
+        Span::styled(
+            format!("{name:<width$}", width = ROSTER_BACKEND_NAME_W),
+            name_style,
+        ),
+        Span::styled("  ", Style::default().fg(theme.foreground)),
+        Span::styled(primary.to_string(), primary_style),
+        Span::styled("  ", Style::default().fg(theme.foreground)),
+        Span::styled(secondary.to_string(), secondary_style),
+    ])
+}
+
 fn roster_styled_line(
     state: &AppState,
     line_idx: usize,
@@ -1923,49 +1975,58 @@ fn roster_styled_line(
         ));
     }
     if line_idx == 1 {
-        let codex_active = state.agents.agents.iter().any(|agent| agent.is_codex());
-        let codex_available = state.agents.codex_cli_available || codex_active;
-        let style = if codex_active {
-            Style::default().fg(theme.hl.operator)
-        } else if codex_available {
-            Style::default().fg(theme.foreground)
-        } else {
-            Style::default()
-                .fg(theme.border)
-                .add_modifier(Modifier::DIM)
-        };
-        return Line::from(Span::styled(line.to_string(), style));
+        let active = state.agents.agents.iter().any(|agent| agent.is_codex());
+        let available = state.agents.codex_cli_available || active;
+        return roster_backend_styled_line(
+            "Codex",
+            if available { "available" } else { "not found" },
+            if active { "active" } else { "idle" },
+            if active {
+                theme.hl.operator
+            } else {
+                theme.title
+            },
+            available,
+            active,
+            theme,
+        );
     }
     if line_idx == 2 {
-        let claude_active = state
+        let active = state
             .agents
             .agents
             .iter()
             .any(|agent| matches!(agent.kind, AgentLaneKind::Claude));
-        let claude_available = state.agents.claude_cli_available || claude_active;
-        let style = if claude_active {
-            Style::default().fg(theme.hl.operator)
-        } else if claude_available {
-            Style::default().fg(theme.foreground)
-        } else {
-            Style::default()
-                .fg(theme.border)
-                .add_modifier(Modifier::DIM)
-        };
-        return Line::from(Span::styled(line.to_string(), style));
+        let available = state.agents.claude_cli_available || active;
+        return roster_backend_styled_line(
+            "Claude",
+            if available { "available" } else { "not found" },
+            if active { "active" } else { "idle" },
+            if active {
+                theme.border_focused
+            } else {
+                theme.title
+            },
+            available,
+            active,
+            theme,
+        );
     }
     if line_idx == 3 {
-        let local_active = state
+        let active = state
             .agents
             .agents
             .iter()
             .any(|agent| matches!(agent.kind, AgentLaneKind::Mock));
-        let style = if local_active {
-            Style::default().fg(theme.seed.accent_2)
-        } else {
-            Style::default().fg(theme.foreground)
-        };
-        return Line::from(Span::styled(line.to_string(), style));
+        return roster_backend_styled_line(
+            "Local",
+            "built-in",
+            if active { "active" } else { "idle" },
+            theme.seed.accent_2,
+            true,
+            active,
+            theme,
+        );
     }
     if line_idx == 4 {
         return Line::from(Span::styled(
@@ -1979,13 +2040,16 @@ fn roster_styled_line(
             .add_modifier(Modifier::DIM);
         let selected_style = Style::default()
             .fg(theme.background)
-            .bg(theme.border_focused);
-        let unselected_style = Style::default()
-            .fg(theme.foreground)
-            .bg(theme.cursor_line_bg);
+            .bg(theme.border_focused)
+            .add_modifier(Modifier::BOLD);
+        let unselected_style = Style::default().fg(theme.foreground).bg(dim_bg_towards(
+            theme.cursor_line_bg,
+            theme.background,
+            45,
+        ));
 
         let mut spans: Vec<Span<'static>> = Vec::with_capacity(8);
-        spans.push(Span::styled(" Swarm template: ", label_style));
+        spans.push(Span::styled(" Template: ", label_style));
         for (idx, tmpl) in ["lab", "parallel", "bulk"].iter().enumerate() {
             let selected = state
                 .agents
@@ -2009,13 +2073,16 @@ fn roster_styled_line(
             .add_modifier(Modifier::DIM);
         let selected_style = Style::default()
             .fg(theme.background)
-            .bg(theme.border_focused);
-        let unselected_style = Style::default()
-            .fg(theme.foreground)
-            .bg(theme.cursor_line_bg);
+            .bg(theme.border_focused)
+            .add_modifier(Modifier::BOLD);
+        let unselected_style = Style::default().fg(theme.foreground).bg(dim_bg_towards(
+            theme.cursor_line_bg,
+            theme.background,
+            45,
+        ));
 
         let mut spans: Vec<Span<'static>> = Vec::with_capacity(10);
-        spans.push(Span::styled(" Swarm mission: ", label_style));
+        spans.push(Span::styled(" Mission: ", label_style));
         for (idx, (display, value)) in [
             ("auto", "auto"),
             ("general", "general"),
@@ -2902,9 +2969,12 @@ fn split_at_chars(text: &str, count: usize) -> (&str, &str) {
 #[cfg(test)]
 mod tests {
     use super::{
-        dag_lines_for_dashboard, roster_column_widths, swarm_clone_display_label, table_role_label,
+        current_lines_for_width, dag_lines_for_dashboard, roster_column_widths,
+        roster_swarm_mission_hit, roster_swarm_template_hit, swarm_clone_display_label,
+        table_role_label,
     };
     use crate::swarm::{SwarmDashboardView, SwarmGateDashboardRow, SwarmTaskDashboardRow};
+    use nit_core::{AgentOpsTab, AppState, Buffer};
 
     #[test]
     fn dag_lines_include_tasks_and_gates() {
@@ -3017,6 +3087,58 @@ mod tests {
             .expect("clone label");
         assert_eq!(label, "clone 01 [propose]");
         assert!(!label.contains("mis-001"));
+    }
+
+    #[test]
+    fn roster_header_uses_compact_template_and_backend_labels() {
+        let mut state = AppState::new(
+            std::env::temp_dir(),
+            Buffer::empty("x", None),
+            Buffer::empty("n", None),
+        );
+        state.agents.dock_tab = AgentOpsTab::Roster;
+
+        let lines = current_lines_for_width(&state, 72);
+        assert_eq!(lines[1], "  Codex    not found  idle");
+        assert_eq!(lines[2], "  Claude   not found  idle");
+        assert_eq!(lines[3], "  Local    built-in  idle");
+        assert!(lines[5].starts_with(" Template:"));
+        assert!(lines[6].starts_with(" Mission:"));
+    }
+
+    #[test]
+    fn template_hit_targets_all_buttons() {
+        for label in ["lab", "parallel", "bulk"] {
+            let needle = format!(" {label} ");
+            let start = super::ROSTER_SWARM_TEMPLATE_LINE
+                .find(needle.as_str())
+                .expect("template button");
+            assert_eq!(roster_swarm_template_hit(start), Some(label));
+            assert_eq!(
+                roster_swarm_template_hit(start + needle.len().saturating_sub(1)),
+                Some(label)
+            );
+        }
+    }
+
+    #[test]
+    fn mission_hit_targets_all_buttons() {
+        for (label, value) in [
+            ("auto", "auto"),
+            ("general", "general"),
+            ("research", "research"),
+            ("computational", "computational-research"),
+        ] {
+            let needle = format!(" {label} ");
+            let start = super::ROSTER_SWARM_MISSION_LINE
+                .find(needle.as_str())
+                .expect("mission button");
+            assert_eq!(roster_swarm_mission_hit(start), Some(value));
+            assert_eq!(
+                roster_swarm_mission_hit(start + needle.len().saturating_sub(1)),
+                Some(value)
+            );
+        }
     }
 
     #[test]

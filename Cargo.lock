@@ -951,6 +951,9 @@ name = "nit-metal"
 version = "0.1.0"
 dependencies = [
  "metal",
+ "nit-utils",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -987,6 +990,7 @@ dependencies = [
  "nit-core",
  "nit-games",
  "nit-gol",
+ "nit-metal",
  "nit-syntax",
  "nit-utils",
  "ratatui",

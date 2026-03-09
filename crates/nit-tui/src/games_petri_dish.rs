@@ -16,6 +16,7 @@ use nit_games::{
     output::{RunLayout, TournamentResults},
     run_id_from_seed_config, FastStrategyModel, MatchSnapshot, TournamentProgress,
 };
+use nit_metal::BatchPolicyCacheSnapshot;
 use nit_utils::hashing::stable_hash_bytes;
 use ratatui::{
     layout::Rect,
@@ -34,7 +35,7 @@ use crate::widgets::games_visualizer_view::strategy_display_name_from_def;
 use crate::widgets::text_selection::apply_ui_selection;
 
 const MIN_WIDTH: u16 = 120;
-const MIN_HEIGHT: u16 = 32;
+const MIN_HEIGHT: u16 = 40;
 const HISTORY_LOAD_CHUNK: usize = 256;
 const HISTORY_LOAD_PREFETCH: usize = 64;
 
@@ -53,6 +54,7 @@ pub fn petri_rect(screen: Rect) -> Rect {
 enum PetriView {
     Tournament,
     Inspector,
+    Cache,
 }
 
 pub struct GamesPetriDishRuntime {
@@ -63,9 +65,12 @@ pub struct GamesPetriDishRuntime {
     history_store: Option<HistoryPreviewStore>,
     hidden: bool,
     warning: Option<String>,
+    confirm_clear_all_cache: bool,
     last_tick: Instant,
     view: PetriView,
     inspector_window: usize,
+    cache_snapshot: BatchPolicyCacheSnapshot,
+    cache_selected: usize,
     family_run_rx: Option<Receiver<FamilyBuildOutcome>>,
     loading_open: bool,
     loading_message: Option<String>,
@@ -193,9 +198,12 @@ impl GamesPetriDishRuntime {
             history_store: None,
             hidden: false,
             warning: None,
+            confirm_clear_all_cache: false,
             last_tick: Instant::now(),
             view: PetriView::Tournament,
             inspector_window: 50,
+            cache_snapshot: BatchPolicyCacheSnapshot::default(),
+            cache_selected: 0,
             family_run_rx: None,
             loading_open: false,
             loading_message: None,
@@ -209,6 +217,88 @@ impl GamesPetriDishRuntime {
 
     fn mark_activity(&mut self) {
         self.activity_epoch = self.activity_epoch.wrapping_add(1);
+    }
+
+    fn refresh_cache_snapshot(&mut self, state: &mut AppState) {
+        match nit_metal::batch_policy_cache_snapshot() {
+            Ok(snapshot) => {
+                if let Some(active_path) = state.games.runtime.metal_policy_cache_path.as_ref() {
+                    if let Some(idx) = snapshot
+                        .entries
+                        .iter()
+                        .position(|entry| &entry.path == active_path)
+                    {
+                        self.cache_selected = idx;
+                    } else {
+                        self.cache_selected = self
+                            .cache_selected
+                            .min(snapshot.entries.len().saturating_sub(1));
+                    }
+                } else {
+                    self.cache_selected = self
+                        .cache_selected
+                        .min(snapshot.entries.len().saturating_sub(1));
+                }
+                self.cache_snapshot = snapshot;
+            }
+            Err(err) => {
+                self.warning = Some(format!("Metal cache refresh failed: {err}"));
+            }
+        }
+    }
+
+    fn open_cache_view(&mut self, state: &mut AppState) {
+        self.refresh_cache_snapshot(state);
+        self.view = PetriView::Cache;
+    }
+
+    fn adjust_cache_selection(&mut self, delta: isize) {
+        let len = self.cache_snapshot.entries.len();
+        if len == 0 {
+            self.cache_selected = 0;
+            return;
+        }
+        let next = (self.cache_selected as isize + delta).clamp(0, len.saturating_sub(1) as isize);
+        self.cache_selected = next as usize;
+    }
+
+    fn remove_selected_cache_entry(&mut self, state: &mut AppState) {
+        let Some(entry) = self.cache_snapshot.entries.get(self.cache_selected) else {
+            state.status = Some("No Metal cache entry selected".into());
+            return;
+        };
+        match nit_metal::clear_batch_policy_cache_entry(&entry.path) {
+            Ok(true) => {
+                state.status = Some(format!("Removed Metal cache entry {}", entry.key));
+                self.refresh_cache_snapshot(state);
+            }
+            Ok(false) => {
+                state.status = Some("Metal cache entry was already gone".into());
+                self.refresh_cache_snapshot(state);
+            }
+            Err(err) => {
+                self.warning = Some(format!("Metal cache delete failed: {err}"));
+            }
+        }
+    }
+
+    fn clear_all_cache_entries(&mut self, state: &mut AppState) {
+        match nit_metal::clear_batch_policy_cache() {
+            Ok(0) => {
+                state.status = Some("Metal cache was already empty".into());
+                self.refresh_cache_snapshot(state);
+            }
+            Ok(removed) => {
+                state.status = Some(format!(
+                    "Removed {removed} Metal cache entr{}",
+                    if removed == 1 { "y" } else { "ies" }
+                ));
+                self.refresh_cache_snapshot(state);
+            }
+            Err(err) => {
+                self.warning = Some(format!("Metal cache clear failed: {err}"));
+            }
+        }
     }
 
     pub fn is_open(&self) -> bool {
@@ -366,6 +456,20 @@ impl GamesPetriDishRuntime {
     }
 
     pub fn handle_key(&mut self, key: &KeyEvent, state: &mut AppState) -> bool {
+        if self.confirm_clear_all_cache {
+            match key.code {
+                KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
+                    self.confirm_clear_all_cache = false;
+                    self.clear_all_cache_entries(state);
+                }
+                KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                    self.confirm_clear_all_cache = false;
+                    state.status = Some("Metal cache clear cancelled".into());
+                }
+                _ => {}
+            }
+            return true;
+        }
         if self.warning.is_some() {
             if matches!(key.code, KeyCode::Esc | KeyCode::Enter | KeyCode::Char(' ')) {
                 self.warning = None;
@@ -407,8 +511,12 @@ impl GamesPetriDishRuntime {
             KeyCode::Tab => {
                 self.view = match self.view {
                     PetriView::Tournament => PetriView::Inspector,
-                    PetriView::Inspector => PetriView::Tournament,
+                    PetriView::Inspector | PetriView::Cache => PetriView::Tournament,
                 };
+                true
+            }
+            KeyCode::Char('c') | KeyCode::Char('C') => {
+                self.open_cache_view(state);
                 true
             }
             KeyCode::Left => {
@@ -422,6 +530,22 @@ impl GamesPetriDishRuntime {
             KeyCode::Right => {
                 if self.view == PetriView::Inspector {
                     self.adjust_inspector_window(1);
+                    true
+                } else {
+                    false
+                }
+            }
+            KeyCode::Up => {
+                if self.view == PetriView::Cache {
+                    self.adjust_cache_selection(-1);
+                    true
+                } else {
+                    false
+                }
+            }
+            KeyCode::Down => {
+                if self.view == PetriView::Cache {
+                    self.adjust_cache_selection(1);
                     true
                 } else {
                     false
@@ -466,6 +590,31 @@ impl GamesPetriDishRuntime {
                 self.runner
                     .send(RunnerCommand::UpdateSpeed(state.games.steps_per_tick));
                 true
+            }
+            KeyCode::Char('r') | KeyCode::Char('R') => {
+                if self.view == PetriView::Cache {
+                    self.refresh_cache_snapshot(state);
+                    state.status = Some("Metal cache refreshed".into());
+                    true
+                } else {
+                    false
+                }
+            }
+            KeyCode::Char('x') => {
+                if self.view == PetriView::Cache {
+                    self.remove_selected_cache_entry(state);
+                    true
+                } else {
+                    false
+                }
+            }
+            KeyCode::Char('X') => {
+                if self.view == PetriView::Cache {
+                    self.confirm_clear_all_cache = true;
+                    true
+                } else {
+                    false
+                }
             }
             _ => false,
         }
@@ -735,7 +884,22 @@ impl GamesPetriDishRuntime {
             .add_modifier(Modifier::DIM);
 
         let mut lines = Vec::new();
-        if let Some(warning) = self.warning.as_ref() {
+        if self.confirm_clear_all_cache {
+            lines.push(Line::from(Span::styled(
+                "Confirm clearing all Metal cache entries?",
+                Style::default().fg(theme.warning),
+            )));
+            lines.push(Line::from(vec![
+                Span::styled("Y", key_style),
+                Span::styled(" / ", help_style),
+                Span::styled("Enter", key_style),
+                Span::styled(" confirm | ", help_style),
+                Span::styled("N", key_style),
+                Span::styled(" / ", help_style),
+                Span::styled("Esc", key_style),
+                Span::styled(" cancel", help_style),
+            ]));
+        } else if let Some(warning) = self.warning.as_ref() {
             lines.push(Line::from(Span::styled(
                 warning.clone(),
                 Style::default().fg(theme.warning),
@@ -831,8 +995,10 @@ impl GamesPetriDishRuntime {
                 }
                 PetriView::Inspector => {
                     let snapshot = session.snapshot.clone();
+                    let progress = session.progress.clone();
                     lines.extend(render_match_inspector(
                         snapshot,
+                        progress,
                         &session.definitions,
                         state.games.status,
                         self.inspector_window,
@@ -843,6 +1009,18 @@ impl GamesPetriDishRuntime {
                         number_style,
                         dim_style,
                         loss_style,
+                    ));
+                }
+                PetriView::Cache => {
+                    lines.extend(render_cache_browser(
+                        &self.cache_snapshot,
+                        self.cache_selected,
+                        inner.width as usize,
+                        header_style,
+                        label_style,
+                        value_style,
+                        dim_style,
+                        key_style,
                     ));
                 }
             }
@@ -875,6 +1053,8 @@ impl GamesPetriDishRuntime {
                     Span::styled(" inspect | ", help_style),
                     Span::styled("Ctrl+*", key_style),
                     Span::styled(" history | ", help_style),
+                    Span::styled("C", key_style),
+                    Span::styled(" cache | ", help_style),
                     Span::styled("H", key_style),
                     Span::styled(" hide", help_style),
                 ],
@@ -889,10 +1069,50 @@ impl GamesPetriDishRuntime {
                     Span::styled(" speed | ", help_style),
                     Span::styled("Tab", key_style),
                     Span::styled(" tournament | ", help_style),
-                    Span::styled("←/→", key_style),
-                    Span::styled(" window | ", help_style),
+                    Span::styled(
+                        if session.snapshot.is_some() {
+                            "←/→"
+                        } else {
+                            "C"
+                        },
+                        key_style,
+                    ),
+                    Span::styled(
+                        if session.snapshot.is_some() {
+                            " window | "
+                        } else {
+                            " cache | "
+                        },
+                        help_style,
+                    ),
                     Span::styled("Ctrl+*", key_style),
                     Span::styled(" history | ", help_style),
+                    if session.snapshot.is_some() {
+                        Span::styled("C", key_style)
+                    } else {
+                        Span::styled("R", key_style)
+                    },
+                    if session.snapshot.is_some() {
+                        Span::styled(" cache | ", help_style)
+                    } else {
+                        Span::styled(" refresh | ", help_style)
+                    },
+                    Span::styled("H", key_style),
+                    Span::styled(" hide", help_style),
+                ],
+                PetriView::Cache => vec![
+                    Span::styled("Esc", key_style),
+                    Span::styled(" close | ", help_style),
+                    Span::styled("Tab", key_style),
+                    Span::styled(" tournament | ", help_style),
+                    Span::styled("↑/↓", key_style),
+                    Span::styled(" select | ", help_style),
+                    Span::styled("R", key_style),
+                    Span::styled(" refresh | ", help_style),
+                    Span::styled("x", key_style),
+                    Span::styled(" remove | ", help_style),
+                    Span::styled("X", key_style),
+                    Span::styled(" clear all | ", help_style),
                     Span::styled("H", key_style),
                     Span::styled(" hide", help_style),
                 ],
@@ -1066,6 +1286,7 @@ impl GamesPetriDishRuntime {
         state.games.match_history.max_rounds_seen = 0;
         state.games.match_history.column_offset = 0;
         state.games.match_history.round_limit = None;
+        state.games.match_history.capture_disabled_for_run = family_mode;
         state.games.run_browser.open = false;
         state.games.replay.open = false;
         state.games.strategy_inspect.open = false;
@@ -1449,24 +1670,44 @@ fn render_progress(
             if let Some(note) = accelerator_note_line(&progress.runtime, label_style, dim_style) {
                 lines.push(note);
             }
+            if let Some(cache) = accelerator_cache_line(&progress.runtime, label_style, dim_style) {
+                lines.push(cache);
+            }
             return lines;
         }
         let a_label = strategy_label_for_pair(&progress.a, definitions);
         let b_label = strategy_label_for_pair(&progress.b, definitions);
         let pct = tournament_progress_percent(&progress);
-        lines.push(Line::from(vec![
+        let running_completed_snapshot =
+            progress.match_complete && progress.match_index < progress.total_matches;
+        let mut match_spans = vec![
             Span::styled("Match: ", label_style),
             Span::styled(progress.match_index.to_string(), number_style),
             Span::styled("/", dim_style),
             Span::styled(progress.total_matches.to_string(), number_style),
-            Span::styled(" (round ", dim_style),
-            Span::styled(progress.round.to_string(), number_style),
-            Span::styled("/", dim_style),
-            Span::styled(progress.rounds.to_string(), number_style),
-            Span::styled(", overall ", dim_style),
-            Span::styled(format!("{pct:>5.1}%"), number_style),
-            Span::styled(")", dim_style),
-        ]));
+            Span::styled(" (", dim_style),
+        ];
+        if running_completed_snapshot {
+            match_spans.push(Span::styled("last complete, overall ", dim_style));
+        } else {
+            match_spans.push(Span::styled("round ", dim_style));
+            match_spans.push(Span::styled(progress.round.to_string(), number_style));
+            match_spans.push(Span::styled("/", dim_style));
+            match_spans.push(Span::styled(progress.rounds.to_string(), number_style));
+            match_spans.push(Span::styled(", overall ", dim_style));
+        }
+        match_spans.push(Span::styled(format!("{pct:>5.1}%"), number_style));
+        match_spans.push(Span::styled(")", dim_style));
+        lines.push(Line::from(match_spans));
+        if running_completed_snapshot {
+            lines.push(Line::from(vec![
+                Span::styled("Live: ", label_style),
+                Span::styled(
+                    "GPU batching; showing last completed match snapshot",
+                    dim_style,
+                ),
+            ]));
+        }
         lines.push(Line::from(vec![
             Span::styled("Pair: ", label_style),
             Span::styled(a_label, value_style),
@@ -1532,6 +1773,9 @@ fn render_progress(
         if let Some(note) = accelerator_note_line(&progress.runtime, label_style, dim_style) {
             lines.push(note);
         }
+        if let Some(cache) = accelerator_cache_line(&progress.runtime, label_style, dim_style) {
+            lines.push(cache);
+        }
     } else {
         lines.push(Line::from(vec![
             Span::styled("Match: ", label_style),
@@ -1566,6 +1810,9 @@ fn render_progress(
         ));
         if let Some(note) = accelerator_note_line(&state.games.runtime, label_style, dim_style) {
             lines.push(note);
+        }
+        if let Some(cache) = accelerator_cache_line(&state.games.runtime, label_style, dim_style) {
+            lines.push(cache);
         }
     }
     lines
@@ -1612,6 +1859,17 @@ fn accelerator_progress_line(
             dim_style,
         ));
     }
+    if let (Some(batch), Some(inflight)) = (
+        runtime.metal_matches_per_batch,
+        runtime.metal_inflight_batches,
+    ) {
+        spans.push(Span::styled(" ", dim_style));
+        let policy_label = runtime
+            .metal_policy_source_label()
+            .map(|source| format!("policy {}x{} {}", batch, inflight, source))
+            .unwrap_or_else(|| format!("policy {}x{}", batch, inflight));
+        spans.push(Span::styled(policy_label, dim_style));
+    }
     Line::from(spans)
 }
 
@@ -1627,9 +1885,117 @@ fn accelerator_note_line(
     ]))
 }
 
+fn accelerator_cache_line(
+    runtime: &nit_games::RuntimeAcceleratorStats,
+    label_style: Style,
+    dim_style: Style,
+) -> Option<Line<'static>> {
+    let value = runtime
+        .metal_policy_cache_path
+        .as_ref()
+        .cloned()
+        .or_else(|| runtime.metal_policy_cache_key.as_ref().cloned())?;
+    Some(Line::from(vec![
+        Span::styled("AccelCache: ", label_style),
+        Span::styled(value, dim_style),
+    ]))
+}
+
+fn render_cache_browser(
+    snapshot: &BatchPolicyCacheSnapshot,
+    selected: usize,
+    width: usize,
+    header_style: Style,
+    label_style: Style,
+    value_style: Style,
+    dim_style: Style,
+    key_style: Style,
+) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    lines.push(Line::from(Span::styled("Metal Cache", header_style)));
+    lines.push(Line::from(vec![
+        Span::styled("root: ", label_style),
+        Span::styled(
+            truncate_text(
+                &snapshot
+                    .root
+                    .clone()
+                    .unwrap_or_else(|| "unavailable".to_string()),
+                width.saturating_sub(6),
+            ),
+            dim_style,
+        ),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("entries: ", label_style),
+        Span::styled(snapshot.entries.len().to_string(), value_style),
+    ]));
+    lines.push(Line::from(""));
+
+    if snapshot.entries.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "No Metal cache entries.",
+            dim_style,
+        )));
+        return lines;
+    }
+
+    let selected = selected.min(snapshot.entries.len().saturating_sub(1));
+    let visible = 8usize.min(snapshot.entries.len());
+    let start = selected
+        .saturating_sub(visible / 2)
+        .min(snapshot.entries.len() - visible);
+    let end = start + visible;
+    let row_width = width.saturating_sub(4).max(16);
+    for (idx, entry) in snapshot.entries[start..end].iter().enumerate() {
+        let absolute_idx = start + idx;
+        let marker = if absolute_idx == selected { ">" } else { " " };
+        let marker_style = if absolute_idx == selected {
+            key_style
+        } else {
+            dim_style
+        };
+        let summary = format!(
+            "{:>2}. {} {}x{}",
+            absolute_idx + 1,
+            entry.key,
+            entry.matches_per_batch,
+            entry.inflight_batches
+        );
+        lines.push(Line::from(vec![
+            Span::styled(marker, marker_style),
+            Span::styled(" ", dim_style),
+            Span::styled(truncate_text(&summary, row_width), value_style),
+        ]));
+    }
+
+    let selected_entry = &snapshot.entries[selected];
+    lines.push(Line::from(""));
+    lines.push(Line::from(vec![
+        Span::styled("key: ", label_style),
+        Span::styled(selected_entry.key.clone(), value_style),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("payload: ", label_style),
+        Span::styled(
+            truncate_text(&selected_entry.payload_signature, width.saturating_sub(9)),
+            dim_style,
+        ),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("path: ", label_style),
+        Span::styled(
+            truncate_text(&selected_entry.path, width.saturating_sub(6)),
+            dim_style,
+        ),
+    ]));
+    lines
+}
+
 #[allow(clippy::too_many_arguments)]
 fn render_match_inspector(
     snapshot: Option<MatchSnapshot>,
+    progress: Option<TournamentProgress>,
     definitions: &[StrategyDefinition],
     status: GamesStatus,
     window: usize,
@@ -1643,14 +2009,23 @@ fn render_match_inspector(
 ) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
     let waiting_text = progress_waiting_text(status);
-    lines.push(Line::from(Span::styled("Match Inspector", header_style)));
-    lines.push(Line::from(vec![
-        Span::styled("window: ", label_style),
-        Span::styled(window.to_string(), number_style),
-        Span::styled(" rounds", dim_style),
-    ]));
+    let title = if snapshot.is_some() {
+        "Live Match"
+    } else if progress.as_ref().is_some_and(|progress| {
+        progress.match_complete && progress.match_index < progress.total_matches
+    }) {
+        "Last Completed Match"
+    } else {
+        "Match Inspector"
+    };
+    lines.push(Line::from(Span::styled(title, header_style)));
 
     if let Some(snapshot) = snapshot {
+        lines.push(Line::from(vec![
+            Span::styled("window: ", label_style),
+            Span::styled(window.to_string(), number_style),
+            Span::styled(" rounds", dim_style),
+        ]));
         let a_label = strategy_label_for_pair(&snapshot.a, definitions);
         let b_label = strategy_label_for_pair(&snapshot.b, definitions);
         lines.push(Line::from(vec![
@@ -1690,6 +2065,87 @@ fn render_match_inspector(
             dim_style,
             warn_style,
         ));
+    } else if let Some(progress) = progress {
+        let a_label = strategy_label_for_pair(&progress.a, definitions);
+        let b_label = strategy_label_for_pair(&progress.b, definitions);
+        let running_completed_snapshot =
+            progress.match_complete && progress.match_index < progress.total_matches;
+        let match_detail = if running_completed_snapshot {
+            "last complete".to_string()
+        } else if progress.round > 0 {
+            format!("round {}/{}", progress.round, progress.rounds)
+        } else {
+            waiting_text.to_string()
+        };
+        let last_detail = match (
+            progress.last_action_a,
+            progress.last_action_b,
+            progress.last_payoff_a,
+            progress.last_payoff_b,
+        ) {
+            (Some(a), Some(b), Some(payoff_a), Some(payoff_b)) => {
+                format!(
+                    "{} / {} ({payoff_a} / {payoff_b})",
+                    a.as_char(),
+                    b.as_char()
+                )
+            }
+            _ => waiting_text.to_string(),
+        };
+        let halt_detail = match (progress.last_halted_a, progress.last_halted_b) {
+            (Some(a), Some(b)) => format!("{} / {} (1=halt, 0=timeout)", a as u8, b as u8),
+            _ => waiting_text.to_string(),
+        };
+        let halt_waiting = halt_detail == waiting_text;
+        let note = if running_completed_snapshot {
+            if matches!(
+                progress.runtime.backend,
+                nit_games::RuntimeAcceleratorBackend::Metal
+            ) || progress.runtime.metal_matches > 0
+            {
+                "Detailed round history is unavailable during GPU batching; showing the last completed match summary."
+            } else {
+                "Detailed round history is unavailable; showing the last completed match summary."
+            }
+        } else {
+            "Waiting for a live per-round match snapshot."
+        };
+        lines.push(Line::from(vec![
+            Span::styled("Match: ", label_style),
+            Span::styled(progress.match_index.to_string(), number_style),
+            Span::styled("/", dim_style),
+            Span::styled(progress.total_matches.to_string(), number_style),
+            Span::styled(" (", dim_style),
+            Span::styled(match_detail, dim_style),
+            Span::styled(")", dim_style),
+        ]));
+        lines.push(Line::from(vec![
+            Span::styled("Pair: ", label_style),
+            Span::styled(a_label, value_style),
+            Span::styled(" vs ", dim_style),
+            Span::styled(b_label, value_style),
+        ]));
+        lines.push(Line::from(vec![
+            Span::styled("Total: ", label_style),
+            Span::styled(progress.total_payoff_a.to_string(), number_style),
+            Span::styled(" / ", dim_style),
+            Span::styled(progress.total_payoff_b.to_string(), number_style),
+        ]));
+        lines.push(Line::from(vec![
+            Span::styled("Last: ", label_style),
+            Span::styled(last_detail, value_style),
+        ]));
+        lines.push(Line::from(vec![
+            Span::styled("Halt: ", label_style),
+            Span::styled(
+                halt_detail,
+                if halt_waiting { dim_style } else { warn_style },
+            ),
+        ]));
+        lines.push(Line::from(vec![
+            Span::styled("Note: ", label_style),
+            Span::styled(truncate_text(note, width.saturating_sub(6)), dim_style),
+        ]));
     } else {
         lines.push(Line::from(vec![
             Span::styled("Match: ", label_style),
@@ -2352,6 +2808,215 @@ mod tests {
             .collect()
     }
 
+    fn sample_config() -> nit_games::NormalizedConfig {
+        nit_games::GamesConfig::from_toml(
+            r#"
+schema_version = 1
+game = "ipd"
+rounds = 2
+repetitions = 1
+self_play = true
+
+[[strategy]]
+id = "all_c"
+type = "fsm"
+index = 1
+num_states = 1
+k = 2
+"#,
+        )
+        .expect("parse config")
+    }
+
+    fn cache_test_runtime() -> (GamesPetriDishRuntime, AppState) {
+        let mut state = AppState::new(
+            std::env::temp_dir(),
+            nit_core::Buffer::empty("x", None),
+            nit_core::Buffer::empty("n", None),
+        );
+        let mut runtime = GamesPetriDishRuntime::new(&state);
+        runtime.session = Some(GameSession {
+            config: sample_config(),
+            progress: None,
+            snapshot: None,
+            results: TournamentResults::empty(),
+            definitions: Vec::new(),
+        });
+        runtime.view = PetriView::Cache;
+        runtime.cache_snapshot = nit_metal::BatchPolicyCacheSnapshot {
+            root: Some("/tmp/metal-policy".into()),
+            entries: vec![nit_metal::BatchPolicyCacheEntryInfo {
+                key: "apple_m4_max_a".into(),
+                path: "/tmp/metal-policy/apple_m4_max_a_v1.json".into(),
+                device_name: "Apple M4 Max".into(),
+                payload_signature: "fsm_s4_a2_n51924_static1mib".into(),
+                matches_per_batch: 262_144,
+                inflight_batches: 4,
+            }],
+        };
+        state.games.status = GamesStatus::Running;
+        (runtime, state)
+    }
+
+    #[test]
+    fn render_cache_browser_shows_selected_entry_details() {
+        let snapshot = nit_metal::BatchPolicyCacheSnapshot {
+            root: Some("/tmp/metal-policy".into()),
+            entries: vec![
+                nit_metal::BatchPolicyCacheEntryInfo {
+                    key: "apple_m4_max_a".into(),
+                    path: "/tmp/metal-policy/apple_m4_max_a_v1.json".into(),
+                    device_name: "Apple M4 Max".into(),
+                    payload_signature: "fsm_s4_a2_n51924_static1mib".into(),
+                    matches_per_batch: 262_144,
+                    inflight_batches: 4,
+                },
+                nit_metal::BatchPolicyCacheEntryInfo {
+                    key: "apple_m4_max_b".into(),
+                    path: "/tmp/metal-policy/apple_m4_max_b_v1.json".into(),
+                    device_name: "Apple M4 Max".into(),
+                    payload_signature: "tm_s2_sym2_steps64_n128_static1mib".into(),
+                    matches_per_batch: 32_768,
+                    inflight_batches: 4,
+                },
+            ],
+        };
+
+        let lines = render_cache_browser(
+            &snapshot,
+            1,
+            96,
+            Style::default(),
+            Style::default(),
+            Style::default(),
+            Style::default(),
+            Style::default(),
+        );
+        assert!(line_text(&lines[0]).contains("Metal Cache"));
+        assert!(line_text(&lines[1]).contains("/tmp/metal-policy"));
+        assert!(lines
+            .iter()
+            .any(|line| line_text(line).contains("apple_m4_max_b 32768x4")));
+        assert!(lines
+            .iter()
+            .any(|line| line_text(line).contains("payload: tm_s2_sym2_steps64_n128_static1mib")));
+        assert!(
+            lines
+                .iter()
+                .any(|line| line_text(line)
+                    .contains("path: /tmp/metal-policy/apple_m4_max_b_v1.json"))
+        );
+    }
+
+    #[test]
+    fn cache_clear_all_requires_confirmation() {
+        let (mut runtime, mut state) = cache_test_runtime();
+        assert!(runtime.handle_key(
+            &KeyEvent::new(KeyCode::Char('X'), KeyModifiers::NONE),
+            &mut state
+        ));
+        assert!(runtime.confirm_clear_all_cache);
+    }
+
+    #[test]
+    fn cache_clear_all_confirmation_can_be_cancelled() {
+        let (mut runtime, mut state) = cache_test_runtime();
+        runtime.confirm_clear_all_cache = true;
+        assert!(runtime.handle_key(
+            &KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE),
+            &mut state
+        ));
+        assert!(!runtime.confirm_clear_all_cache);
+        assert_eq!(state.status.as_deref(), Some("Metal cache clear cancelled"));
+    }
+
+    #[test]
+    fn match_inspector_uses_progress_summary_when_snapshot_is_missing() {
+        let mut runtime = nit_games::RuntimeAcceleratorStats::default();
+        runtime.backend = nit_games::RuntimeAcceleratorBackend::Metal;
+        runtime.metal_matches = 1024;
+        let lines = render_match_inspector(
+            None,
+            Some(TournamentProgress {
+                match_index: 345,
+                total_matches: 1000,
+                round: 200,
+                rounds: 200,
+                match_complete: true,
+                a: "a".into(),
+                b: "b".into(),
+                total_payoff_a: 0,
+                total_payoff_b: -600,
+                last_action_a: Some(nit_games::Action::Defect),
+                last_action_b: Some(nit_games::Action::Cooperate),
+                last_payoff_a: Some(0),
+                last_payoff_b: Some(-3),
+                last_halted_a: Some(true),
+                last_halted_b: Some(true),
+                last_outcome: Some(nit_games::game::Outcome::DC),
+                runtime,
+            }),
+            &[],
+            GamesStatus::Running,
+            50,
+            120,
+            Style::default(),
+            Style::default(),
+            Style::default(),
+            Style::default(),
+            Style::default(),
+            Style::default(),
+        );
+        assert!(line_text(&lines[0]).contains("Last Completed Match"));
+        assert!(lines
+            .iter()
+            .any(|line| line_text(line).contains("last complete")));
+        assert!(lines
+            .iter()
+            .any(|line| line_text(line).contains("Total: 0 / -600")));
+        assert!(lines
+            .iter()
+            .any(|line| line_text(line).contains("Last: D / C (0 / -3)")));
+        assert!(lines.iter().any(|line| {
+            line_text(line).contains("Detailed round history is unavailable during GPU batching")
+        }));
+    }
+
+    #[test]
+    fn match_inspector_uses_live_title_for_snapshot_mode() {
+        let lines = render_match_inspector(
+            Some(sample_snapshot()),
+            None,
+            &[],
+            GamesStatus::Running,
+            50,
+            120,
+            Style::default(),
+            Style::default(),
+            Style::default(),
+            Style::default(),
+            Style::default(),
+            Style::default(),
+        );
+
+        assert!(line_text(&lines[0]).contains("Live Match"));
+        assert!(lines
+            .iter()
+            .any(|line| line_text(line).contains("Match: 1/1 (round 3/3)")));
+    }
+
+    #[test]
+    fn petri_rect_uses_taller_height_on_large_screens() {
+        let rect = petri_rect(Rect {
+            x: 0,
+            y: 0,
+            width: 160,
+            height: 48,
+        });
+
+        assert_eq!(rect.height, 40);
+    }
+
     #[test]
     fn match_strip_renders_halt_row_and_timeout_markers() {
         let lines = render_match_strip(
@@ -2418,6 +3083,7 @@ mod tests {
             total_matches: 456_490,
             round: 0,
             rounds: 20,
+            match_complete: false,
             a: "a".into(),
             b: "b".into(),
             total_payoff_a: 0,
@@ -2434,6 +3100,67 @@ mod tests {
         let pct = tournament_progress_percent(&progress);
         assert!(pct > 20.0);
         assert!(pct < 22.5);
+    }
+
+    #[test]
+    fn render_progress_labels_completed_batch_snapshot_without_round_counter() {
+        let mut state = AppState::new(
+            std::env::temp_dir(),
+            nit_core::Buffer::empty("x", None),
+            nit_core::Buffer::empty("n", None),
+        );
+        state.games.status = GamesStatus::Running;
+        let progress = TournamentProgress {
+            match_index: 345,
+            total_matches: 1000,
+            round: 200,
+            rounds: 200,
+            match_complete: true,
+            a: "a".into(),
+            b: "b".into(),
+            total_payoff_a: 0,
+            total_payoff_b: -600,
+            last_action_a: Some(nit_games::Action::Defect),
+            last_action_b: Some(nit_games::Action::Cooperate),
+            last_payoff_a: Some(0),
+            last_payoff_b: Some(-3),
+            last_halted_a: Some(true),
+            last_halted_b: Some(true),
+            last_outcome: Some(nit_games::game::Outcome::DC),
+            runtime: {
+                let mut runtime = nit_games::RuntimeAcceleratorStats::default();
+                runtime.note_metal_policy(
+                    131_072,
+                    4,
+                    nit_games::BatchPolicySource::Cached,
+                    Some("apple_m4_max_demo".into()),
+                    Some("/tmp/apple_m4_max_demo_v1.json".into()),
+                );
+                runtime
+            },
+        };
+
+        let lines = render_progress(
+            Some(progress),
+            &[],
+            &state,
+            Style::default(),
+            Style::default(),
+            Style::default(),
+            Style::default(),
+            Style::default(),
+        );
+        let match_line = line_text(&lines[1]);
+        assert!(match_line.contains("last complete"));
+        assert!(!match_line.contains("round 200/200"));
+        let live_line = line_text(&lines[2]);
+        assert!(live_line.contains("GPU batching"));
+        assert!(lines
+            .iter()
+            .any(|line| line_text(line).contains("policy 131072x4 cached")));
+        assert!(lines
+            .iter()
+            .any(|line| line_text(line).contains("AccelCache: /tmp/apple_m4_max_demo_v1.json")));
     }
 
     #[test]

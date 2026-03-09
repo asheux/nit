@@ -173,6 +173,16 @@ pub struct RuntimeAcceleratorStats {
     pub metal_fallbacks: u64,
     #[serde(default)]
     pub metal_fallback_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metal_matches_per_batch: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metal_inflight_batches: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metal_policy_source: Option<nit_metal::BatchPolicySource>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metal_policy_cache_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metal_policy_cache_path: Option<String>,
 }
 
 impl RuntimeAcceleratorStats {
@@ -210,6 +220,21 @@ impl RuntimeAcceleratorStats {
         }
     }
 
+    pub fn note_metal_policy(
+        &mut self,
+        matches_per_batch: usize,
+        inflight_batches: usize,
+        source: nit_metal::BatchPolicySource,
+        cache_key: Option<String>,
+        cache_path: Option<String>,
+    ) {
+        self.metal_matches_per_batch = Some(matches_per_batch.min(u32::MAX as usize) as u32);
+        self.metal_inflight_batches = Some(inflight_batches.min(u32::MAX as usize) as u32);
+        self.metal_policy_source = Some(source);
+        self.metal_policy_cache_key = cache_key;
+        self.metal_policy_cache_path = cache_path;
+    }
+
     pub fn note_metal_fallback(&mut self) {
         self.metal_fallbacks = self.metal_fallbacks.saturating_add(1);
     }
@@ -217,6 +242,14 @@ impl RuntimeAcceleratorStats {
     pub fn note_metal_fallback_reason(&mut self, reason: impl Into<String>) {
         self.note_metal_fallback();
         self.metal_fallback_reason = Some(reason.into());
+    }
+
+    pub fn metal_policy_source_label(&self) -> Option<&'static str> {
+        match self.metal_policy_source? {
+            nit_metal::BatchPolicySource::Heuristic => Some("default"),
+            nit_metal::BatchPolicySource::Cached => Some("cached"),
+            nit_metal::BatchPolicySource::Benchmarked => Some("tuned"),
+        }
     }
 }
 
@@ -230,6 +263,11 @@ impl Default for RuntimeAcceleratorStats {
             cpu_matches: 0,
             metal_fallbacks: 0,
             metal_fallback_reason: None,
+            metal_matches_per_batch: None,
+            metal_inflight_batches: None,
+            metal_policy_source: None,
+            metal_policy_cache_key: None,
+            metal_policy_cache_path: None,
         }
     }
 }

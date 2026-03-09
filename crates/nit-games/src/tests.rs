@@ -1291,6 +1291,9 @@ k = 2
     assert_eq!(runtime.backend, RuntimeAcceleratorBackend::Metal);
     assert_eq!(runtime.metal_matches, 2);
     assert!(runtime.cpu_matches == 0);
+    assert!(runtime.metal_policy_source.is_some());
+    assert!(runtime.metal_policy_cache_key.is_some());
+    assert!(runtime.metal_policy_cache_path.is_some());
 }
 
 #[cfg(target_os = "macos")]
@@ -1405,6 +1408,115 @@ transitions = [[0, 0]]
         return;
     };
     assert_eq!(totals.len(), pairs.len());
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "local Metal throughput profiling"]
+fn metal_policy_profiles_four_state_fsm_on_local_device() {
+    let mut cfg = GamesConfig::from_toml(
+        r#"
+schema_version = 1
+game = "ipd"
+rounds = 10
+repetitions = 1
+self_play = false
+noise = 0.0
+
+[engine]
+mode = "batch"
+fast_eval = true
+accelerator = "metal"
+
+[[strategy]]
+id = "placeholder"
+type = "fsm"
+num_states = 1
+outputs = ["C"]
+transitions = [[0, 0]]
+"#,
+    )
+    .expect("parse config");
+
+    cfg.strategies = (0..52_000)
+        .map(|idx| simple_four_state_fsm_spec(format!("fsm_{idx}")))
+        .collect();
+
+    let pairs = (0..524_288usize)
+        .map(|idx| (idx % 52_000, 51_999usize.saturating_sub(idx % 52_000)))
+        .collect::<Vec<_>>();
+
+    let candidates = [
+        (65_536usize, 3usize),
+        (65_536usize, 4usize),
+        (98_304usize, 4usize),
+        (131_072usize, 3usize),
+        (131_072usize, 4usize),
+        (131_072usize, 5usize),
+        (196_608usize, 4usize),
+        (262_144usize, 3usize),
+        (262_144usize, 4usize),
+    ];
+
+    const SAMPLES_PER_CANDIDATE: usize = 3;
+
+    let mut baseline = None;
+    let mut fastest = None;
+    for (matches_per_batch, inflight_batches) in candidates {
+        let mut total_elapsed = 0.0f64;
+        let mut best_elapsed = f64::INFINITY;
+        let mut checksum = (0i64, 0i64);
+        for _ in 0..SAMPLES_PER_CANDIDATE {
+            let Some((totals, elapsed)) = crate::tournament::metal_policy_probe_for_test(
+                &cfg,
+                &pairs,
+                matches_per_batch,
+                inflight_batches,
+            )
+            .expect("policy probe") else {
+                return;
+            };
+            let sample_checksum = totals.iter().fold((0i64, 0i64), |acc, value| {
+                (acc.0 + value.0, acc.1 + value.1)
+            });
+            if let Some(reference) = baseline.as_ref() {
+                assert_eq!(&totals, reference, "policy changed Metal results");
+            } else {
+                baseline = Some(totals);
+            }
+            checksum = sample_checksum;
+            let elapsed_secs = elapsed.as_secs_f64();
+            total_elapsed += elapsed_secs;
+            best_elapsed = best_elapsed.min(elapsed_secs);
+        }
+        let average_elapsed = total_elapsed / SAMPLES_PER_CANDIDATE as f64;
+        let average_matches_per_second = pairs.len() as f64 / average_elapsed;
+        let best_matches_per_second = pairs.len() as f64 / best_elapsed;
+        println!(
+            "metal_policy batch={} inflight={} avg={:.3}s avg_rate={:.0} best={:.3}s best_rate={:.0} checksum=({}, {})",
+            matches_per_batch,
+            inflight_batches,
+            average_elapsed,
+            average_matches_per_second,
+            best_elapsed,
+            best_matches_per_second,
+            checksum.0,
+            checksum.1
+        );
+        if fastest
+            .as_ref()
+            .map(|(_, _, best_average): &(usize, usize, f64)| average_elapsed < *best_average)
+            .unwrap_or(true)
+        {
+            fastest = Some((matches_per_batch, inflight_batches, average_elapsed));
+        }
+    }
+    if let Some((matches_per_batch, inflight_batches, average_elapsed)) = fastest {
+        println!(
+            "metal_policy best batch={} inflight={} avg={:.3}s",
+            matches_per_batch, inflight_batches, average_elapsed
+        );
+    }
 }
 
 fn run_tournament_from_toml(src: &str) -> crate::output::TournamentResults {

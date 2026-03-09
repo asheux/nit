@@ -12,12 +12,16 @@ use crate::output::{
     StrategyResult, TournamentResults,
 };
 use crate::strategy::{CaStrategy, FsmStrategy, OneSidedTmStrategy, Strategy, TmRunStats};
-use nit_metal::{BatchPayload, BatchRequest, CaBatch, EvalCommon, FsmBatch, MatchPair, TmBatch};
+use nit_metal::{
+    BatchEvalConfig, BatchExecutionPolicy, BatchPayload, BatchPolicySource, CaBatch, FsmBatch,
+    MatchPair, PreparedBatch, TmBatch,
+};
 use nit_utils::hashing::{stable_hash_bytes, XorShift64};
 use rayon::prelude::*;
 use rayon::ThreadPoolBuilder;
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
+use std::collections::VecDeque;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::mpsc::Sender;
 
@@ -27,6 +31,7 @@ pub struct TournamentProgress {
     pub total_matches: usize,
     pub round: u32,
     pub rounds: u32,
+    pub match_complete: bool,
     pub a: String,
     pub b: String,
     pub total_payoff_a: i64,
@@ -180,8 +185,23 @@ pub struct TournamentRunner {
     last_round: Option<RoundSnapshot>,
     last_progress: Option<TournamentProgress>,
     runtime: RuntimeAcceleratorStats,
+    metal_batch: MetalBatchState,
     collect_match_history_previews: bool,
     completed_history_previews: Vec<MatchHistoryPreview>,
+}
+
+enum MetalBatchState {
+    Uninitialized,
+    Prepared(PreparedMetalBatch),
+    Unavailable,
+}
+
+struct PreparedMetalBatch {
+    prepared: PreparedBatch,
+    policy: BatchExecutionPolicy,
+    policy_source: BatchPolicySource,
+    policy_cache_key: Option<String>,
+    policy_cache_path: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -326,8 +346,6 @@ struct TournamentAccumulator {
     use_adjusted: bool,
     score_aggregation: ScoreAggregation,
 }
-
-const METAL_BATCH_MATCHES: usize = 16_384;
 
 fn tm_metrics_from_stats(stats: &TmRunStats) -> crate::output::TmDerivedMetrics {
     let rounds = stats.rounds.max(1);
@@ -597,6 +615,54 @@ fn build_metal_tm_payload(strategies: &[StrategySpec]) -> Option<TmBatch> {
     })
 }
 
+fn metal_batch_eval_config(config: &NormalizedConfig) -> BatchEvalConfig {
+    let (timeout_lose, timeout_win) = timeout_extrema(config.payoff);
+    BatchEvalConfig {
+        rounds: config.rounds,
+        payoff: config.payoff.matrix,
+        timeout_lose,
+        timeout_win,
+    }
+}
+
+fn try_prepare_metal_batch(
+    config: &NormalizedConfig,
+    strategies: &[StrategySpec],
+) -> Result<Option<PreparedMetalBatch>, String> {
+    if !config.engine.fast_eval || !config.engine.accelerator.allows_metal() || config.noise != 0.0
+    {
+        return Ok(None);
+    }
+    if strategies.is_empty() {
+        return Ok(None);
+    }
+    if strategies
+        .iter()
+        .all(|spec| matches!(spec.kind, StrategySpecKind::OneSidedTm { .. }))
+        && config.engine.complexity_cost.enabled
+        && config.engine.complexity_cost.tm_step_cost != 0.0
+    {
+        return Ok(None);
+    }
+    let Some(payload) = build_metal_batch_payload(strategies) else {
+        return Ok(None);
+    };
+    let eval = metal_batch_eval_config(config);
+    let Some(policy) = nit_metal::recommended_batch_policy(&eval, &payload)? else {
+        return Ok(None);
+    };
+    let Some(prepared) = nit_metal::try_prepare_batch(&eval, &payload)? else {
+        return Ok(None);
+    };
+    Ok(Some(PreparedMetalBatch {
+        prepared,
+        policy: policy.policy,
+        policy_source: policy.source,
+        policy_cache_key: policy.cache_key,
+        policy_cache_path: policy.cache_path,
+    }))
+}
+
 fn metal_batch_decline_reason(
     config: &NormalizedConfig,
     strategies: &[StrategySpec],
@@ -653,54 +719,51 @@ fn metal_batch_decline_reason(
     }
 }
 
+#[cfg(test)]
 fn try_metal_batch_outcomes(
     config: &NormalizedConfig,
     strategies: &[StrategySpec],
     matchups: &[Matchup],
 ) -> Result<Option<Vec<MatchOutcome>>, String> {
-    if matchups.is_empty()
-        || !config.engine.fast_eval
-        || !config.engine.accelerator.allows_metal()
-        || config.noise != 0.0
-    {
+    let Some(prepared) = try_prepare_metal_batch(config, strategies)? else {
         return Ok(None);
-    }
-    if strategies.is_empty() {
+    };
+    try_metal_batch_outcomes_prepared(config, strategies, &prepared, matchups)
+}
+
+#[cfg(test)]
+fn try_metal_batch_outcomes_prepared(
+    config: &NormalizedConfig,
+    strategies: &[StrategySpec],
+    prepared: &PreparedMetalBatch,
+    matchups: &[Matchup],
+) -> Result<Option<Vec<MatchOutcome>>, String> {
+    if matchups.is_empty() {
         return Ok(Some(Vec::new()));
     }
-    if strategies
+    let pairs = matchups
         .iter()
-        .all(|spec| matches!(spec.kind, StrategySpecKind::OneSidedTm { .. }))
-        && config.engine.complexity_cost.enabled
-        && config.engine.complexity_cost.tm_step_cost != 0.0
-    {
-        return Ok(None);
-    }
-    let Some(payload) = build_metal_batch_payload(strategies) else {
-        return Ok(None);
-    };
-    let (timeout_lose, timeout_win) = timeout_extrema(config.payoff);
-    let request = BatchRequest {
-        common: EvalCommon {
-            rounds: config.rounds,
-            payoff: config.payoff.matrix,
-            timeout_lose,
-            timeout_win,
-            pairs: matchups
-                .iter()
-                .map(|matchup| MatchPair {
-                    a_idx: matchup.a_idx as u32,
-                    b_idx: matchup.b_idx as u32,
-                })
-                .collect(),
-        },
-        payload,
-    };
-    let Some(scores) = nit_metal::try_evaluate_batch(&request)? else {
+        .map(|matchup| MatchPair {
+            a_idx: matchup.a_idx as u32,
+            b_idx: matchup.b_idx as u32,
+        })
+        .collect::<Vec<_>>();
+    let Some(scores) = nit_metal::try_evaluate_prepared_batch(&prepared.prepared, &pairs)? else {
         return Ok(None);
     };
+    Ok(Some(match_outcomes_from_scores(
+        config, strategies, matchups, scores,
+    )))
+}
+
+fn match_outcomes_from_scores(
+    config: &NormalizedConfig,
+    strategies: &[StrategySpec],
+    matchups: &[Matchup],
+    scores: Vec<nit_metal::ScorePair>,
+) -> Vec<MatchOutcome> {
     let cost = &config.engine.complexity_cost;
-    let outcomes = matchups
+    matchups
         .iter()
         .zip(scores.into_iter())
         .map(|(matchup, score)| {
@@ -737,8 +800,7 @@ fn try_metal_batch_outcomes(
                 last_round: None,
             }
         })
-        .collect();
-    Ok(Some(outcomes))
+        .collect()
 }
 
 pub fn accelerator_preflight(config: &NormalizedConfig) -> Result<(), String> {
@@ -793,17 +855,17 @@ pub fn accelerator_preflight(config: &NormalizedConfig) -> Result<(), String> {
         _ => {}
     }
 
-    let request = BatchRequest {
-        common: EvalCommon {
-            rounds: config.rounds,
-            payoff: config.payoff.matrix,
-            timeout_lose: timeout_extrema(config.payoff).0,
-            timeout_win: timeout_extrema(config.payoff).1,
-            pairs: vec![MatchPair { a_idx: 0, b_idx: 0 }],
-        },
-        payload,
+    let eval = metal_batch_eval_config(config);
+    let Some(prepared) = nit_metal::try_prepare_batch(&eval, &payload)? else {
+        return Err(
+            "Metal accelerator was requested, but this run is not supported by the active Metal backend."
+                .into(),
+        );
     };
-    match nit_metal::try_evaluate_batch(&request) {
+    match nit_metal::try_evaluate_prepared_batch(
+        &prepared,
+        &[MatchPair { a_idx: 0, b_idx: 0 }],
+    ) {
         Ok(Some(_)) => Ok(()),
         Ok(None) => Err(
             "Metal accelerator was requested, but this run is not supported by the active Metal backend."
@@ -813,22 +875,58 @@ pub fn accelerator_preflight(config: &NormalizedConfig) -> Result<(), String> {
     }
 }
 
-fn try_metal_batch_outcomes_chunked(
+fn try_metal_batch_outcomes_chunked_prepared(
     config: &NormalizedConfig,
     strategies: &[StrategySpec],
+    prepared: &PreparedMetalBatch,
     matchups: &[Matchup],
 ) -> Result<Option<(Vec<MatchOutcome>, usize)>, String> {
+    struct PendingChunk<'a> {
+        matchups: &'a [Matchup],
+        pending: nit_metal::PendingBatch,
+    }
+
     if matchups.is_empty() {
         return Ok(Some((Vec::new(), 0)));
     }
     let mut outcomes = Vec::with_capacity(matchups.len());
     let mut batches = 0usize;
-    for chunk in matchups.chunks(METAL_BATCH_MATCHES) {
-        let Some(mut chunk_outcomes) = try_metal_batch_outcomes(config, strategies, chunk)? else {
+    let mut pending = VecDeque::new();
+    for chunk in matchups.chunks(prepared.policy.matches_per_batch) {
+        let pairs = chunk
+            .iter()
+            .map(|matchup| MatchPair {
+                a_idx: matchup.a_idx as u32,
+                b_idx: matchup.b_idx as u32,
+            })
+            .collect::<Vec<_>>();
+        let Some(batch) = nit_metal::try_begin_prepared_batch(&prepared.prepared, &pairs)? else {
             return Ok(None);
         };
         batches += 1;
-        outcomes.append(&mut chunk_outcomes);
+        pending.push_back(PendingChunk {
+            matchups: chunk,
+            pending: batch,
+        });
+        if pending.len() >= prepared.policy.inflight_batches {
+            let ready = pending.pop_front().expect("pending chunk");
+            let scores = nit_metal::try_finish_prepared_batch(ready.pending)?;
+            outcomes.extend(match_outcomes_from_scores(
+                config,
+                strategies,
+                ready.matchups,
+                scores,
+            ));
+        }
+    }
+    while let Some(ready) = pending.pop_front() {
+        let scores = nit_metal::try_finish_prepared_batch(ready.pending)?;
+        outcomes.extend(match_outcomes_from_scores(
+            config,
+            strategies,
+            ready.matchups,
+            scores,
+        ));
     }
     Ok(Some((outcomes, batches)))
 }
@@ -856,6 +954,46 @@ pub(crate) fn metal_batch_totals_for_test(
                 .collect()
         }),
     )
+}
+
+#[cfg(test)]
+pub(crate) fn metal_policy_probe_for_test(
+    config: &NormalizedConfig,
+    pairs: &[(usize, usize)],
+    matches_per_batch: usize,
+    inflight_batches: usize,
+) -> Result<Option<(Vec<(i64, i64)>, std::time::Duration)>, String> {
+    let matchups = pairs
+        .iter()
+        .enumerate()
+        .map(|(match_id, (a_idx, b_idx))| Matchup {
+            match_id,
+            a_idx: *a_idx,
+            b_idx: *b_idx,
+            repetition: 0,
+        })
+        .collect::<Vec<_>>();
+    let Some(mut prepared) = try_prepare_metal_batch(config, &config.strategies)? else {
+        return Ok(None);
+    };
+    prepared.policy.matches_per_batch = matches_per_batch.max(1);
+    prepared.policy.inflight_batches = inflight_batches.max(1);
+    let started = std::time::Instant::now();
+    let Some((outcomes, _batches)) = try_metal_batch_outcomes_chunked_prepared(
+        config,
+        &config.strategies,
+        &prepared,
+        &matchups,
+    )?
+    else {
+        return Ok(None);
+    };
+    let elapsed = started.elapsed();
+    let totals = outcomes
+        .into_iter()
+        .map(|outcome| (outcome.result.a_total, outcome.result.b_total))
+        .collect();
+    Ok(Some((totals, elapsed)))
 }
 
 fn compare_scores(a: f64, b: f64) -> Ordering {
@@ -908,6 +1046,7 @@ impl TournamentRunner {
             last_round: None,
             last_progress: None,
             runtime: RuntimeAcceleratorStats::new(config.engine.accelerator),
+            metal_batch: MetalBatchState::Uninitialized,
             collect_match_history_previews: true,
             completed_history_previews: Vec::new(),
         }
@@ -946,6 +1085,7 @@ impl TournamentRunner {
                 total_matches: 0,
                 round: 0,
                 rounds: self.config.rounds,
+                match_complete: false,
                 a: "-".into(),
                 b: "-".into(),
                 total_payoff_a: 0,
@@ -974,6 +1114,7 @@ impl TournamentRunner {
                 total_matches: self.schedule.len().max(1),
                 round: current.round,
                 rounds: current.rounds_total,
+                match_complete: false,
                 a,
                 b,
                 total_payoff_a: current.a_total,
@@ -1002,6 +1143,7 @@ impl TournamentRunner {
                 total_matches: self.schedule.len().max(1),
                 round: 0,
                 rounds: self.config.rounds,
+                match_complete: false,
                 a,
                 b,
                 total_payoff_a: 0,
@@ -1081,6 +1223,7 @@ impl TournamentRunner {
                         total_matches: self.schedule.len().max(1),
                         round: 0,
                         rounds: session.rounds_total,
+                        match_complete: false,
                         a: self.strategies[session.matchup.a_idx].id.clone(),
                         b: self.strategies[session.matchup.b_idx].id.clone(),
                         total_payoff_a: 0,
@@ -1108,6 +1251,7 @@ impl TournamentRunner {
                     total_matches: self.schedule.len().max(1),
                     round: session.round,
                     rounds: session.rounds_total,
+                    match_complete: false,
                     a: strategy_log_id(&self.strategies[session.matchup.a_idx]),
                     b: strategy_log_id(&self.strategies[session.matchup.b_idx]),
                     total_payoff_a: session.a_total,
@@ -1329,6 +1473,41 @@ impl TournamentRunner {
             && !self.collect_match_history_previews
     }
 
+    fn ensure_metal_batch(&mut self) {
+        if matches!(self.metal_batch, MetalBatchState::Uninitialized) {
+            match try_prepare_metal_batch(&self.config, &self.strategies) {
+                Ok(Some(prepared)) => {
+                    self.runtime.note_metal_policy(
+                        prepared.policy.matches_per_batch,
+                        prepared.policy.inflight_batches,
+                        prepared.policy_source,
+                        prepared.policy_cache_key.clone(),
+                        prepared.policy_cache_path.clone(),
+                    );
+                    self.metal_batch = MetalBatchState::Prepared(prepared);
+                }
+                Ok(None) => {
+                    if self.config.engine.accelerator.allows_metal() {
+                        self.runtime.note_metal_fallback_reason(
+                            metal_batch_decline_reason(&self.config, &self.strategies, 1)
+                                .unwrap_or_else(|| {
+                                    "Metal batch evaluator declined this workload".into()
+                                }),
+                        );
+                    }
+                    self.metal_batch = MetalBatchState::Unavailable;
+                }
+                Err(err) => {
+                    if self.config.engine.accelerator.allows_metal() {
+                        self.runtime
+                            .note_metal_fallback_reason(format!("Metal backend error: {err}"));
+                    }
+                    self.metal_batch = MetalBatchState::Unavailable;
+                }
+            }
+        }
+    }
+
     fn try_fast_forward_matches(&mut self, remaining_steps: &mut u32) {
         if !self.fast_forward_allowed() {
             return;
@@ -1346,6 +1525,7 @@ impl TournamentRunner {
 
         let total_matches = self.schedule.len();
         let matchups = self.schedule.matchups(self.match_index, matches_to_run);
+        self.ensure_metal_batch();
         let config = &self.config;
         let strategies = &self.strategies;
         let seed_deriver = &self.seed_deriver;
@@ -1378,64 +1558,65 @@ impl TournamentRunner {
                 .map(|matchup| run_matchup(matchup, true))
                 .collect::<Vec<_>>()
         };
-        let (mut outcomes, gpu_used) =
-            match try_metal_batch_outcomes_chunked(config, strategies, head_matchups) {
-                Ok(Some((gpu_outcomes, metal_batches))) => {
+        let metal_result = match &self.metal_batch {
+            MetalBatchState::Prepared(prepared) => try_metal_batch_outcomes_chunked_prepared(
+                config,
+                strategies,
+                prepared,
+                head_matchups,
+            ),
+            MetalBatchState::Uninitialized | MetalBatchState::Unavailable => Ok(None),
+        };
+        let (mut outcomes, gpu_used) = match metal_result {
+            Ok(Some((gpu_outcomes, metal_batches))) => {
+                self.runtime
+                    .note_metal_batches(metal_batches, head_matchups.len());
+                (gpu_outcomes, true)
+            }
+            Ok(None) => {
+                let outcomes = match Parallelism::from_config(&self.config.engine.parallelism) {
+                    Parallelism::Off => head_matchups
+                        .iter()
+                        .map(|matchup| run_matchup(matchup, true))
+                        .collect(),
+                    Parallelism::Threads(threads) if threads > 0 => {
+                        let pool = ThreadPoolBuilder::new()
+                            .num_threads(threads)
+                            .build()
+                            .unwrap_or_else(|_| {
+                                ThreadPoolBuilder::new().build().expect("thread pool")
+                            });
+                        pool.install(run_parallel)
+                    }
+                    _ => run_parallel(),
+                };
+                (outcomes, false)
+            }
+            Err(err) => {
+                if !head_matchups.is_empty() && self.config.engine.accelerator.allows_metal() {
                     self.runtime
-                        .note_metal_batches(metal_batches, head_matchups.len());
-                    (gpu_outcomes, true)
+                        .note_metal_fallback_reason(format!("Metal backend error: {err}"));
+                    self.metal_batch = MetalBatchState::Unavailable;
                 }
-                Ok(None) => {
-                    if !head_matchups.is_empty() && self.config.engine.accelerator.allows_metal() {
-                        self.runtime.note_metal_fallback_reason(
-                            metal_batch_decline_reason(config, strategies, head_matchups.len())
-                                .unwrap_or_else(|| {
-                                    "Metal batch evaluator declined this workload".into()
-                                }),
-                        );
+                let outcomes = match Parallelism::from_config(&self.config.engine.parallelism) {
+                    Parallelism::Off => head_matchups
+                        .iter()
+                        .map(|matchup| run_matchup(matchup, true))
+                        .collect(),
+                    Parallelism::Threads(threads) if threads > 0 => {
+                        let pool = ThreadPoolBuilder::new()
+                            .num_threads(threads)
+                            .build()
+                            .unwrap_or_else(|_| {
+                                ThreadPoolBuilder::new().build().expect("thread pool")
+                            });
+                        pool.install(run_parallel)
                     }
-                    let outcomes = match Parallelism::from_config(&self.config.engine.parallelism) {
-                        Parallelism::Off => head_matchups
-                            .iter()
-                            .map(|matchup| run_matchup(matchup, true))
-                            .collect(),
-                        Parallelism::Threads(threads) if threads > 0 => {
-                            let pool = ThreadPoolBuilder::new()
-                                .num_threads(threads)
-                                .build()
-                                .unwrap_or_else(|_| {
-                                    ThreadPoolBuilder::new().build().expect("thread pool")
-                                });
-                            pool.install(run_parallel)
-                        }
-                        _ => run_parallel(),
-                    };
-                    (outcomes, false)
-                }
-                Err(err) => {
-                    if !head_matchups.is_empty() && self.config.engine.accelerator.allows_metal() {
-                        self.runtime
-                            .note_metal_fallback_reason(format!("Metal backend error: {err}"));
-                    }
-                    let outcomes = match Parallelism::from_config(&self.config.engine.parallelism) {
-                        Parallelism::Off => head_matchups
-                            .iter()
-                            .map(|matchup| run_matchup(matchup, true))
-                            .collect(),
-                        Parallelism::Threads(threads) if threads > 0 => {
-                            let pool = ThreadPoolBuilder::new()
-                                .num_threads(threads)
-                                .build()
-                                .unwrap_or_else(|_| {
-                                    ThreadPoolBuilder::new().build().expect("thread pool")
-                                });
-                            pool.install(run_parallel)
-                        }
-                        _ => run_parallel(),
-                    };
-                    (outcomes, false)
-                }
-            };
+                    _ => run_parallel(),
+                };
+                (outcomes, false)
+            }
+        };
         self.runtime.note_cpu_matches(1);
         if !gpu_used {
             self.runtime.note_cpu_matches(head_matchups.len());
@@ -1477,6 +1658,7 @@ impl TournamentRunner {
                 total_matches: self.schedule.len().max(1),
                 round: result.rounds,
                 rounds: result.rounds,
+                match_complete: true,
                 a: strategy_log_id(&self.strategies[result.a_idx]),
                 b: strategy_log_id(&self.strategies[result.b_idx]),
                 total_payoff_a: result.a_total,
@@ -1858,34 +2040,32 @@ impl TournamentKernel {
             && !log_history
             && self.schedule.len() > 0
         {
-            let probe = self
-                .schedule
-                .matchups(0, METAL_BATCH_MATCHES.min(self.schedule.len()));
-            match try_metal_batch_outcomes(&self.config, &self.config.strategies, &probe) {
-                Ok(Some(_)) => {
-                    let mut next_match = 0usize;
-                    let mut batches = 0usize;
-                    while next_match < self.schedule.len() {
-                        let count = METAL_BATCH_MATCHES.min(self.schedule.len() - next_match);
-                        let matchups = self.schedule.matchups(next_match, count);
-                        let outcomes = try_metal_batch_outcomes(
-                            &self.config,
-                            &self.config.strategies,
-                            &matchups,
-                        )
-                        .expect("metal batch support should remain stable across chunks")
-                        .expect("metal batch support should remain stable across chunks");
-                        batches += 1;
-                        for outcome in outcomes {
-                            results.apply_match(
-                                outcome.result,
-                                outcome.a_crashed,
-                                outcome.b_crashed,
-                                outcome.a_tm_stats,
-                                outcome.b_tm_stats,
-                            );
-                        }
-                        next_match += count;
+            match try_prepare_metal_batch(&self.config, &self.config.strategies) {
+                Ok(Some(prepared)) => {
+                    runtime.note_metal_policy(
+                        prepared.policy.matches_per_batch,
+                        prepared.policy.inflight_batches,
+                        prepared.policy_source,
+                        prepared.policy_cache_key.clone(),
+                        prepared.policy_cache_path.clone(),
+                    );
+                    let matchups = self.schedule.matchups(0, self.schedule.len());
+                    let (outcomes, batches) = try_metal_batch_outcomes_chunked_prepared(
+                        &self.config,
+                        &self.config.strategies,
+                        &prepared,
+                        &matchups,
+                    )
+                    .expect("metal batch support should remain stable across chunks")
+                    .expect("metal batch support should remain stable across chunks");
+                    for outcome in outcomes {
+                        results.apply_match(
+                            outcome.result,
+                            outcome.a_crashed,
+                            outcome.b_crashed,
+                            outcome.a_tm_stats,
+                            outcome.b_tm_stats,
+                        );
                     }
                     runtime.note_metal_batches(batches, self.schedule.len());
                     if let Some(writer) = event_writer.as_mut() {
@@ -1896,7 +2076,7 @@ impl TournamentKernel {
                     return (results.finalize(&self.config.strategies), runtime);
                 }
                 Ok(None) => runtime.note_metal_fallback_reason(
-                    metal_batch_decline_reason(&self.config, &self.config.strategies, probe.len())
+                    metal_batch_decline_reason(&self.config, &self.config.strategies, 1)
                         .unwrap_or_else(|| "Metal batch evaluator declined the probe".into()),
                 ),
                 Err(err) => {
@@ -1989,28 +2169,24 @@ impl TournamentKernel {
             && !log_history
             && self.schedule.len() > 0
         {
-            let probe = self
-                .schedule
-                .matchups(0, METAL_BATCH_MATCHES.min(self.schedule.len()));
-            match try_metal_batch_outcomes(&self.config, &self.config.strategies, &probe) {
-                Ok(Some(_)) => {
-                    let mut all_outcomes = Vec::with_capacity(self.schedule.len());
-                    let mut next_match = 0usize;
-                    let mut batches = 0usize;
-                    while next_match < self.schedule.len() {
-                        let count = METAL_BATCH_MATCHES.min(self.schedule.len() - next_match);
-                        let matchups = self.schedule.matchups(next_match, count);
-                        let mut outcomes = try_metal_batch_outcomes(
-                            &self.config,
-                            &self.config.strategies,
-                            &matchups,
-                        )
-                        .expect("metal batch support should remain stable across chunks")
-                        .expect("metal batch support should remain stable across chunks");
-                        batches += 1;
-                        all_outcomes.append(&mut outcomes);
-                        next_match += count;
-                    }
+            match try_prepare_metal_batch(&self.config, &self.config.strategies) {
+                Ok(Some(prepared)) => {
+                    runtime.note_metal_policy(
+                        prepared.policy.matches_per_batch,
+                        prepared.policy.inflight_batches,
+                        prepared.policy_source,
+                        prepared.policy_cache_key.clone(),
+                        prepared.policy_cache_path.clone(),
+                    );
+                    let matchups = self.schedule.matchups(0, self.schedule.len());
+                    let (all_outcomes, batches) = try_metal_batch_outcomes_chunked_prepared(
+                        &self.config,
+                        &self.config.strategies,
+                        &prepared,
+                        &matchups,
+                    )
+                    .expect("metal batch support should remain stable across chunks")
+                    .expect("metal batch support should remain stable across chunks");
                     runtime.note_metal_batches(batches, self.schedule.len());
                     if let Some(sender) = event_sender.as_ref() {
                         let _ = sender.send(GameEvent::TournamentEnd {
@@ -2035,7 +2211,7 @@ impl TournamentKernel {
                     return (results.finalize(&self.config.strategies), runtime);
                 }
                 Ok(None) => runtime.note_metal_fallback_reason(
-                    metal_batch_decline_reason(&self.config, &self.config.strategies, probe.len())
+                    metal_batch_decline_reason(&self.config, &self.config.strategies, 1)
                         .unwrap_or_else(|| "Metal batch evaluator declined the probe".into()),
                 ),
                 Err(err) => {

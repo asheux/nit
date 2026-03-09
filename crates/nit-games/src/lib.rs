@@ -36,6 +36,7 @@ pub use introspection::{
     format_strategy_introspection, introspect_strategy, StrategyIntrospection,
     StrategyIntrospectionKind, StrategyIntrospectionParameters, TmTransitionRecord,
 };
+pub use nit_metal::BatchPolicySource;
 pub use output::{
     run_id_from_seed_config, RunLayout, RunPaths, RunSummary, RuntimeAcceleratorBackend,
     RuntimeAcceleratorStats, TournamentResults, RUN_SUMMARY_SCHEMA_VERSION,

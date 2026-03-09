@@ -469,6 +469,18 @@ fn last_run_lines(
                 Span::styled(reason.clone(), dim_style),
             ]));
         }
+        if let Some(key) = run.runtime.metal_policy_cache_key.as_ref() {
+            lines.push(Line::from(vec![
+                Span::styled("accel_key: ", label_style),
+                Span::styled(key.clone(), dim_style),
+            ]));
+        }
+        if let Some(path) = run.runtime.metal_policy_cache_path.as_ref() {
+            lines.push(Line::from(vec![
+                Span::styled("accel_cache: ", label_style),
+                Span::styled(path.clone(), file_dim_style),
+            ]));
+        }
         lines.extend(render_last_run_table(
             run,
             width,
@@ -538,6 +550,16 @@ fn format_runtime_accelerator(runtime: &nit_games::RuntimeAcceleratorStats) -> S
     }
     if runtime.metal_fallbacks > 0 {
         parts.push(format!("fallback {}", runtime.metal_fallbacks));
+    }
+    if let (Some(batch), Some(inflight)) = (
+        runtime.metal_matches_per_batch,
+        runtime.metal_inflight_batches,
+    ) {
+        let label = runtime
+            .metal_policy_source_label()
+            .map(|source| format!("policy {}x{} {}", batch, inflight, source))
+            .unwrap_or_else(|| format!("policy {}x{}", batch, inflight));
+        parts.push(label);
     }
     parts.join(", ")
 }
@@ -839,6 +861,15 @@ k = 2
         .expect("parse config");
         let requested_accelerator = config.engine.accelerator;
 
+        let mut runtime = nit_games::RuntimeAcceleratorStats::new(requested_accelerator);
+        runtime.note_metal_policy(
+            131_072,
+            4,
+            nit_games::BatchPolicySource::Cached,
+            Some("apple_m4_max_demo".into()),
+            Some("/tmp/apple_m4_max_demo_v1.json".into()),
+        );
+
         let run = nit_games::output::RunSummary {
             schema_version: nit_games::output::RUN_SUMMARY_SCHEMA_VERSION,
             timestamp: "2026-03-08T00:00:00Z".into(),
@@ -877,7 +908,7 @@ k = 2
             },
             event_log: None,
             history_log: None,
-            runtime: nit_games::RuntimeAcceleratorStats::new(requested_accelerator),
+            runtime,
             run_dir: None,
         };
 
@@ -906,10 +937,18 @@ k = 2
             nit_games::RuntimeAcceleratorStats::new(nit_games::AcceleratorMode::Metal);
         runtime.note_metal_batches(2, 32);
         runtime.note_cpu_matches(1);
+        runtime.note_metal_policy(
+            131_072,
+            4,
+            nit_games::BatchPolicySource::Cached,
+            Some("apple_m4_max_demo".into()),
+            Some("/tmp/apple_m4_max_demo_v1.json".into()),
+        );
 
         let text = format_runtime_accelerator(&runtime);
         assert!(text.contains("metal"));
         assert!(text.contains("gpu 32"));
         assert!(text.contains("cpu 1"));
+        assert!(text.contains("policy 131072x4 cached"));
     }
 }

@@ -149,6 +149,19 @@ fn accelerator_spans(
         }
         detail.push_str(&format!("{}fb", runtime.metal_fallbacks));
     }
+    if let (Some(batch), Some(inflight)) = (
+        runtime.metal_matches_per_batch,
+        runtime.metal_inflight_batches,
+    ) {
+        if !detail.is_empty() {
+            detail.push('/');
+        }
+        detail.push_str(&format!("{}bx{}", batch, inflight));
+        if let Some(source) = runtime.metal_policy_source_label() {
+            detail.push('/');
+            detail.push_str(source);
+        }
+    }
 
     let mut spans = vec![
         Span::styled("ACC ", label_style),

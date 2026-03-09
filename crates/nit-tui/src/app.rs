@@ -5879,8 +5879,20 @@ fn is_games_petri_control_key(key: &KeyEvent) -> bool {
             | KeyCode::Tab
             | KeyCode::Left
             | KeyCode::Right
+            | KeyCode::Up
+            | KeyCode::Down
+            | KeyCode::Char('c')
+            | KeyCode::Char('C')
             | KeyCode::Char('h')
             | KeyCode::Char('H')
+            | KeyCode::Char('r')
+            | KeyCode::Char('R')
+            | KeyCode::Char('x')
+            | KeyCode::Char('X')
+            | KeyCode::Char('y')
+            | KeyCode::Char('Y')
+            | KeyCode::Char('n')
+            | KeyCode::Char('N')
     )
 }
 

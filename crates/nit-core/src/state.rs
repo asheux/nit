@@ -159,6 +159,8 @@ pub struct GamesMatchHistoryState {
     pub open: bool,
     pub last_error: Option<String>,
     #[serde(skip)]
+    pub capture_disabled_for_run: bool,
+    #[serde(skip)]
     pub entries: Vec<nit_games::MatchHistoryPreview>,
     #[serde(skip)]
     pub total_entries: usize,
@@ -2461,8 +2463,12 @@ fn open_games_history_popup(state: &mut AppState) {
             .unwrap_or(0);
     }
     if state.games.match_history.total_entries == 0 {
-        state.games.match_history.last_error =
-            Some("No completed matches available yet. Start a tournament first.".into());
+        state.games.match_history.last_error = if state.games.match_history.capture_disabled_for_run
+        {
+            None
+        } else {
+            Some("No completed matches available yet. Start a tournament first.".into())
+        };
     } else {
         state.games.match_history.last_error = None;
     }
@@ -5346,6 +5352,22 @@ t = 2
                 outcomes: "0123".into(),
             });
         assert!(!handle_command_line(&mut state, ":history"));
+        assert!(state.games.match_history.open);
+        assert!(state.games.match_history.last_error.is_none());
+    }
+
+    #[test]
+    fn command_games_history_avoids_empty_error_when_capture_is_disabled() {
+        let root = temp_dir("cmd-games-history-disabled");
+        let mut state = AppState::new(
+            root.clone(),
+            Buffer::empty("x", None),
+            Buffer::empty("n", None),
+        );
+        state.app_kind = AppKind::Games;
+        state.games.match_history.capture_disabled_for_run = true;
+
+        assert!(!handle_command_line(&mut state, ":games history"));
         assert!(state.games.match_history.open);
         assert!(state.games.match_history.last_error.is_none());
     }
