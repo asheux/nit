@@ -17,6 +17,7 @@ pub struct FastEvalResult {
     pub a_total: i64,
     pub b_total: i64,
     pub cycle: Option<CycleMetadata>,
+    pub outcomes: Option<String>,
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -105,6 +106,7 @@ pub fn evaluate_match(
     rounds: u32,
     payoff: PayoffMatrix,
     record_cycle: bool,
+    record_outcomes: bool,
 ) -> FastEvalResult {
     let mut state = CombinedState {
         a: a.start,
@@ -118,6 +120,7 @@ pub fn evaluate_match(
     let mut counts: [u64; 4] = [0; 4];
     let mut cycle_meta: Option<CycleMetadata> = None;
     let mut detect_cycles = true;
+    let mut outcomes = record_outcomes.then(|| Vec::with_capacity(rounds.min(4096) as usize));
 
     while round < rounds {
         if detect_cycles {
@@ -143,6 +146,13 @@ pub fn evaluate_match(
                         b_total += cycle_b_total * cycles as i64;
                         for i in 0..4 {
                             counts[i] += cycle_counts[i] * cycles as u64;
+                        }
+                        if let Some(history) = outcomes.as_mut() {
+                            let cycle = history[prev.round as usize..round as usize].to_vec();
+                            history.reserve(cycle.len().saturating_mul(cycles as usize));
+                            for _ in 0..cycles {
+                                history.extend_from_slice(&cycle);
+                            }
                         }
                         round += cycle_len * cycles;
                     }
@@ -175,6 +185,14 @@ pub fn evaluate_match(
         b_total += b_payoff as i64;
         let outcome = Outcome::from_actions(a_action, b_action);
         counts[outcome.index()] += 1;
+        if let Some(history) = outcomes.as_mut() {
+            history.push(match outcome {
+                Outcome::CC => b'0',
+                Outcome::CD => b'1',
+                Outcome::DC => b'2',
+                Outcome::DD => b'3',
+            });
+        }
         state.a = a.next_state(state.a, b_action);
         state.b = b.next_state(state.b, a_action);
         round += 1;
@@ -184,6 +202,7 @@ pub fn evaluate_match(
         a_total,
         b_total,
         cycle: cycle_meta,
+        outcomes: outcomes.and_then(|bytes| String::from_utf8(bytes).ok()),
     }
 }
 
@@ -205,5 +224,42 @@ fn build_cycle_metadata(
         cycle_dd: dd,
         a_cycle_coop_rate: a_coop,
         b_cycle_coop_rate: b_coop,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{evaluate_match, FastStrategyModel};
+    use crate::game::{Action, PayoffMatrix};
+
+    #[test]
+    fn evaluate_match_can_record_outcomes_without_round_trace() {
+        let always_cooperate = FastStrategyModel {
+            id: "all_c".into(),
+            start: 0,
+            outputs: vec![Action::Cooperate],
+            transitions: vec![0, 0],
+            alphabet: 2,
+        };
+        let always_defect = FastStrategyModel {
+            id: "all_d".into(),
+            start: 0,
+            outputs: vec![Action::Defect],
+            transitions: vec![0, 0],
+            alphabet: 2,
+        };
+
+        let eval = evaluate_match(
+            &always_cooperate,
+            &always_defect,
+            8,
+            PayoffMatrix::default_pd(),
+            false,
+            true,
+        );
+
+        assert_eq!(eval.outcomes.as_deref(), Some("11111111"));
+        assert_eq!(eval.a_total, -24);
+        assert_eq!(eval.b_total, 0);
     }
 }

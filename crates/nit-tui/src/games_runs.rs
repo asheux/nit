@@ -238,7 +238,9 @@ fn build_replay(record: MatchHistory, payoff: PayoffMatrix) -> ReplayData {
     );
     lines.push(format!(
         "rounds: {}  score: {} - {}",
-        record.rounds, record.a_score, record.b_score
+        record.resolved_rounds(),
+        record.a_score,
+        record.b_score
     ));
     if let Some(cycle) = record.cycle.clone() {
         let cycle_start = cycle.transient_rounds.saturating_add(1);
@@ -250,24 +252,13 @@ fn build_replay(record: MatchHistory, payoff: PayoffMatrix) -> ReplayData {
     lines.push("".into());
     lines.push("round  a  b  outcome  payoff".into());
 
-    let a_moves = record.a_moves.chars().collect::<Vec<_>>();
-    let b_moves = record.b_moves.chars().collect::<Vec<_>>();
     let scores = record.score_idx.chars().collect::<Vec<_>>();
-    let rounds = a_moves.len().min(b_moves.len()).min(scores.len());
-    for idx in 0..rounds {
-        let a_char = a_moves[idx];
-        let b_char = b_moves[idx];
-        let outcome = scores[idx];
-        let a_action = if a_char == 'D' {
-            Action::Defect
-        } else {
-            Action::Cooperate
+    for (idx, outcome) in scores.into_iter().enumerate() {
+        let Some((a_action, b_action)) = actions_from_outcome(outcome) else {
+            continue;
         };
-        let b_action = if b_char == 'D' {
-            Action::Defect
-        } else {
-            Action::Cooperate
-        };
+        let a_char = a_action.as_char();
+        let b_char = b_action.as_char();
         let (a_pay, b_pay) = payoff.payoffs(a_action, b_action);
         lines.push(format!(
             "{:>4}  {}  {}   {}      {:>2} {:>2}",
@@ -284,6 +275,53 @@ fn build_replay(record: MatchHistory, payoff: PayoffMatrix) -> ReplayData {
         title,
         lines,
         cycle: record.cycle,
+    }
+}
+
+fn actions_from_outcome(ch: char) -> Option<(Action, Action)> {
+    match ch {
+        '0' => Some((Action::Cooperate, Action::Cooperate)),
+        '1' => Some((Action::Cooperate, Action::Defect)),
+        '2' => Some((Action::Defect, Action::Cooperate)),
+        '3' => Some((Action::Defect, Action::Defect)),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{build_replay, ReplayData};
+    use nit_games::game::PayoffMatrix;
+    use nit_games::history_log::MatchHistory;
+
+    fn compact_history(score_idx: &str) -> MatchHistory {
+        MatchHistory {
+            match_id: 7,
+            match_index: 8,
+            total_matches: 12,
+            a: "all_c".into(),
+            b: "all_d".into(),
+            repetition: 1,
+            rounds: score_idx.len() as u32,
+            score_idx: score_idx.into(),
+            a_score: -6,
+            b_score: -2,
+            cycle: None,
+            a_tm_metrics: None,
+            b_tm_metrics: None,
+        }
+    }
+
+    #[test]
+    fn build_replay_reconstructs_actions_from_compact_history() {
+        let ReplayData { title, lines, .. } =
+            build_replay(compact_history("0123"), PayoffMatrix::default_pd());
+
+        assert!(title.contains("all_c vs all_d"));
+        assert!(lines.iter().any(|line| line.contains("   1  C  C   CC")));
+        assert!(lines.iter().any(|line| line.contains("   2  C  D   CD")));
+        assert!(lines.iter().any(|line| line.contains("   3  D  C   DC")));
+        assert!(lines.iter().any(|line| line.contains("   4  D  D   DD")));
     }
 }
 

@@ -9,10 +9,10 @@ use crate::strategy::{
     FsmStrategy, InputMode, OneSidedTmStrategy, Strategy, TmMove, TmTransition,
 };
 use crate::{
-    accelerator_preflight, canonical_fsm_indices, group_canonical_fsm_indices_by_behavior,
-    group_canonical_fsm_indices_by_behavior_with_mode, unique_fsm_behavior_representatives,
-    unique_fsm_behavior_representatives_with_mode, KernelRunMode, TournamentKernel,
-    TournamentRunner,
+    accelerator_preflight, accelerator_run_preflight, canonical_fsm_indices,
+    group_canonical_fsm_indices_by_behavior, group_canonical_fsm_indices_by_behavior_with_mode,
+    unique_fsm_behavior_representatives, unique_fsm_behavior_representatives_with_mode,
+    KernelRunMode, TournamentKernel, TournamentRunner,
 };
 
 fn push_round(history: &mut History, a: Action, b: Action) {
@@ -1146,6 +1146,65 @@ rule_code = 0
 }
 
 #[test]
+fn metal_run_preflight_rejects_logging_paths_before_backend_probe() {
+    let src = r#"
+schema_version = 1
+game = "ipd"
+rounds = 2
+repetitions = 1
+
+[engine]
+accelerator = "metal"
+fast_eval = true
+
+[[strategy]]
+id = "fsm_auto"
+states = 2
+start_state = 0
+outputs = ["C", "D"]
+transitions = [
+  [0, 1],
+  [0, 1],
+]
+"#;
+
+    let cfg = GamesConfig::from_toml(src).expect("parse config");
+    let err = accelerator_run_preflight(&cfg, true, true, false)
+        .expect_err("metal should reject CPU-only logging features");
+    assert!(err.contains("event logging"));
+    assert!(err.contains("history logging"));
+}
+
+#[test]
+fn metal_run_preflight_rejects_match_history_previews() {
+    let src = r#"
+schema_version = 1
+game = "ipd"
+rounds = 2
+repetitions = 1
+
+[engine]
+accelerator = "metal"
+fast_eval = true
+
+[[strategy]]
+id = "fsm_auto"
+states = 2
+start_state = 0
+outputs = ["C", "D"]
+transitions = [
+  [0, 1],
+  [0, 1],
+]
+"#;
+
+    let cfg = GamesConfig::from_toml(src).expect("parse config");
+    let err = accelerator_run_preflight(&cfg, false, false, true)
+        .expect_err("metal should reject interactive previews");
+    assert!(err.contains("interactive match history previews"));
+}
+
+#[test]
 fn config_parses_total_score_aggregation() {
     let src = r#"
 schema_version = 1
@@ -1169,6 +1228,31 @@ transitions = [
 
     let cfg = GamesConfig::from_toml(src).expect("parse config");
     assert_eq!(cfg.engine.score_aggregation, ScoreAggregation::Total);
+}
+
+#[test]
+fn config_parses_save_data_false() {
+    let src = r#"
+schema_version = 1
+game = "ipd"
+rounds = 2
+repetitions = 1
+self_play = false
+save_data = false
+
+[[strategy]]
+id = "fsm_auto"
+states = 2
+start_state = 0
+outputs = ["C", "D"]
+transitions = [
+  [0, 1],
+  [0, 1],
+]
+"#;
+
+    let cfg = GamesConfig::from_toml(src).expect("parse config");
+    assert!(!cfg.save_data);
 }
 
 #[test]
@@ -1408,6 +1492,59 @@ transitions = [[0, 0]]
         return;
     };
     assert_eq!(totals.len(), pairs.len());
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn metal_fast_forward_keeps_last_round_snapshot_for_single_match_chunk() {
+    let src = r#"
+schema_version = 1
+game = "ipd"
+rounds = 5000
+repetitions = 1
+self_play = false
+noise = 0.0
+
+[engine]
+mode = "batch"
+fast_eval = true
+accelerator = "metal"
+
+[[strategy]]
+id = "fsm_0"
+type = "fsm"
+index = 0
+num_states = 1
+k = 2
+
+[[strategy]]
+id = "fsm_1"
+type = "fsm"
+index = 1
+num_states = 1
+k = 2
+"#;
+
+    let cfg = GamesConfig::from_toml(src).expect("parse config");
+    let Some(_) = metal_totals_or_skip(&cfg, &[(0, 1)]) else {
+        return;
+    };
+
+    let mut runner = TournamentRunner::new(cfg).with_match_history_previews(false);
+    runner.step_rounds(5_000);
+
+    let progress = runner.progress().expect("progress should exist");
+    assert!(progress.match_complete);
+    assert_eq!(progress.match_index, 1);
+    assert_eq!(progress.last_action_a, Some(Action::Cooperate));
+    assert_eq!(progress.last_action_b, Some(Action::Cooperate));
+    assert_eq!(progress.last_payoff_a, Some(-1));
+    assert_eq!(progress.last_payoff_b, Some(-1));
+    assert_eq!(progress.last_halted_a, Some(false));
+    assert_eq!(progress.last_halted_b, Some(false));
+    assert_eq!(progress.runtime.backend, RuntimeAcceleratorBackend::Metal);
+    assert_eq!(progress.runtime.metal_matches, 1);
+    assert_eq!(progress.runtime.cpu_matches, 0);
 }
 
 #[cfg(target_os = "macos")]

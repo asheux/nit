@@ -197,6 +197,25 @@ struct BackendInventoryRow {
     active: bool,
 }
 
+fn roster_inventory_backend_accent(backend: BackendInventoryBackend, theme: &Theme) -> Color {
+    match backend {
+        BackendInventoryBackend::Codex => theme.title_focused,
+        BackendInventoryBackend::Claude => theme.border_focused,
+        BackendInventoryBackend::Gemini => theme.accent,
+        BackendInventoryBackend::Local => theme.border,
+    }
+}
+
+fn roster_lane_backend_accent(backend: AgentLaneKind, theme: &Theme) -> Color {
+    match backend {
+        AgentLaneKind::Codex => theme.title_focused,
+        AgentLaneKind::Claude => theme.border_focused,
+        AgentLaneKind::Gemini => theme.accent,
+        AgentLaneKind::Mock => theme.border,
+        AgentLaneKind::Unknown => theme.title,
+    }
+}
+
 struct RosterHeaderOffsets {
     blank_after_backends: usize,
     template_line: usize,
@@ -5320,11 +5339,7 @@ fn roster_styled_line(
                         "not found"
                     },
                     if row.active { "active" } else { "idle" },
-                    if row.active {
-                        theme.title_focused
-                    } else {
-                        theme.title
-                    },
+                    roster_inventory_backend_accent(row.backend, theme),
                     row.available,
                     row.active,
                     theme,
@@ -5339,11 +5354,7 @@ fn roster_styled_line(
                         "not found"
                     },
                     if row.active { "active" } else { "idle" },
-                    if row.active {
-                        theme.border_focused
-                    } else {
-                        theme.title
-                    },
+                    roster_inventory_backend_accent(row.backend, theme),
                     row.available,
                     row.active,
                     theme,
@@ -5358,11 +5369,7 @@ fn roster_styled_line(
                         "not found"
                     },
                     if row.active { "active" } else { "idle" },
-                    if row.active {
-                        theme.success
-                    } else {
-                        theme.title
-                    },
+                    roster_inventory_backend_accent(row.backend, theme),
                     row.available,
                     row.active,
                     theme,
@@ -5373,7 +5380,7 @@ fn roster_styled_line(
                     "Local",
                     "built-in",
                     if row.active { "active" } else { "idle" },
-                    theme.seed.accent_2,
+                    roster_inventory_backend_accent(row.backend, theme),
                     true,
                     row.active,
                     theme,
@@ -5533,13 +5540,7 @@ fn roster_styled_line(
             );
             let backend_style = selected_row_style(
                 Style::default()
-                    .fg(match backend {
-                        AgentLaneKind::Codex => theme.title_focused,
-                        AgentLaneKind::Claude => theme.border_focused,
-                        AgentLaneKind::Gemini => theme.seed.accent,
-                        AgentLaneKind::Mock => theme.seed.accent_2,
-                        AgentLaneKind::Unknown => theme.title,
-                    })
+                    .fg(roster_lane_backend_accent(backend, theme))
                     .add_modifier(Modifier::BOLD)
                     .bg(table_bg),
                 selected,
@@ -6426,10 +6427,11 @@ mod tests {
         append_swarm_artifact_lines, arrow_glyph, artifacts_history_entries,
         artifacts_history_visible_entries, current_lines_for_width, cursor_glyph,
         dag_lines_for_dashboard, diagnostics_lines, format_saved_run_relative_label_from_micros,
-        roster_column_widths, roster_styled_line, roster_swarm_mission_hit,
-        roster_swarm_mission_line_idx, roster_swarm_template_hit, roster_swarm_template_line_idx,
-        saved_run_detail_label, swarm_clone_display_label, table_role_label, tree_closed_glyph,
-        tree_open_glyph,
+        roster_column_widths, roster_inventory_backend_accent, roster_lane_backend_accent,
+        roster_styled_line, roster_swarm_mission_hit, roster_swarm_mission_line_idx,
+        roster_swarm_template_hit, roster_swarm_template_line_idx, saved_run_detail_label,
+        swarm_clone_display_label, table_role_label, tree_closed_glyph, tree_open_glyph,
+        BackendInventoryBackend,
     };
     use crate::swarm::{
         GateReport, GateReportGate, SwarmDashboardView, SwarmGateDashboardRow,
@@ -7174,6 +7176,36 @@ mod tests {
         assert!(styled.spans[1].style.add_modifier.contains(Modifier::BOLD));
         assert_eq!(styled.spans[5].style.fg, Some(theme.title_focused));
         assert!(styled.spans[5].style.add_modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn roster_backend_palette_stays_on_primary_theme_colors() {
+        let theme = Theme::default();
+
+        assert_eq!(
+            roster_inventory_backend_accent(BackendInventoryBackend::Gemini, &theme),
+            theme.accent
+        );
+        assert_eq!(
+            roster_inventory_backend_accent(BackendInventoryBackend::Local, &theme),
+            theme.border
+        );
+        assert_eq!(
+            roster_lane_backend_accent(nit_core::AgentLaneKind::Gemini, &theme),
+            theme.accent
+        );
+        assert_eq!(
+            roster_lane_backend_accent(nit_core::AgentLaneKind::Mock, &theme),
+            theme.border
+        );
+        assert_ne!(
+            roster_inventory_backend_accent(BackendInventoryBackend::Gemini, &theme),
+            theme.success
+        );
+        assert_ne!(
+            roster_inventory_backend_accent(BackendInventoryBackend::Local, &theme),
+            theme.seed.accent_2
+        );
     }
 
     #[test]

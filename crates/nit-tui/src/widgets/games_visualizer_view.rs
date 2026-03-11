@@ -12,7 +12,8 @@ use ratatui::{
 use crate::theme::Theme;
 use crate::widgets::text_selection::apply_ui_selection;
 
-const LAST_RUN_PANEL_EXTRA_WIDTH: usize = 4;
+const LAST_RUN_PANEL_TARGET_WIDTH: usize = 34;
+const LAST_RUN_PANEL_EXTRA_WIDTH: usize = 6;
 
 pub struct VisualizerLayout {
     pub main: Rect,
@@ -22,17 +23,23 @@ pub struct VisualizerLayout {
 
 pub fn layout_for_config(
     inner: Rect,
+    _state: &AppState,
     config: Option<&nit_games::config::NormalizedConfig>,
 ) -> VisualizerLayout {
     let mut show_payoff_side = false;
     let (main_area, right_area) = if let Some(config) = config {
-        let desired = payoff_panel_width(&config.payoff) + 2 + LAST_RUN_PANEL_EXTRA_WIDTH;
-        let min_main = 44usize;
+        let desired = payoff_panel_width(&config.payoff)
+            .max(LAST_RUN_PANEL_TARGET_WIDTH)
+            .saturating_add(2 + LAST_RUN_PANEL_EXTRA_WIDTH);
+        let min_main = 32usize;
         if inner.width as usize >= min_main + desired {
             show_payoff_side = true;
             let cols = Layout::default()
                 .direction(Direction::Horizontal)
-                .constraints([Constraint::Min(44), Constraint::Length(desired as u16)])
+                .constraints([
+                    Constraint::Min(min_main as u16),
+                    Constraint::Length(desired as u16),
+                ])
                 .split(inner);
             (cols[0], cols[1])
         } else {
@@ -163,32 +170,13 @@ pub fn build_main_lines(
                     dim_style,
                 )));
             } else {
-                lines.push(Line::from(vec![
-                    Span::styled(format!("{:<10}", "id"), label_style),
-                    Span::raw(" "),
-                    Span::styled(format!("{:<10}", "type"), label_style),
-                    Span::raw(" "),
-                    Span::styled("name", label_style),
-                ]));
-                lines.push(Line::from(Span::styled(
-                    format!("{:-<10} {:-<10} {:-<16}", "", "", ""),
+                lines.extend(render_strategy_table(
+                    &interesting,
+                    width,
+                    label_style,
+                    value_style,
                     dim_style,
-                )));
-                for strategy in interesting {
-                    let kind_label = match strategy.kind {
-                        StrategySpecKind::Fsm { .. } => "fsm",
-                        StrategySpecKind::Ca { .. } => "ca",
-                        StrategySpecKind::OneSidedTm { .. } => "tm",
-                    };
-                    let name = strategy_display_name(strategy);
-                    lines.push(Line::from(vec![
-                        Span::styled(format!("{:<10}", strategy.id), value_style),
-                        Span::raw(" "),
-                        Span::styled(format!("{kind_label:<10}"), value_style),
-                        Span::raw(" "),
-                        Span::styled(name, value_style),
-                    ]));
-                }
+                ));
             }
             lines.push(Line::from(Span::styled(
                 "Use :games strategies all to list every strategy.",
@@ -289,7 +277,11 @@ pub fn render(
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    let layout = layout_for_config(inner, config_result.and_then(|result| result.as_ref().ok()));
+    let layout = layout_for_config(
+        inner,
+        state,
+        config_result.and_then(|result| result.as_ref().ok()),
+    );
 
     let mut lines = build_main_lines(
         state,
@@ -359,6 +351,14 @@ pub fn strategy_display_name_from_def(def: &nit_games::output::StrategyDefinitio
     strategy_display_name_from_kind(&def.kind)
 }
 
+fn strategy_kind_label(kind: &StrategySpecKind) -> &'static str {
+    match kind {
+        StrategySpecKind::Fsm { .. } => "fsm",
+        StrategySpecKind::Ca { .. } => "ca",
+        StrategySpecKind::OneSidedTm { .. } => "tm",
+    }
+}
+
 fn strategy_display_name_from_kind(kind: &StrategySpecKind) -> String {
     match kind {
         StrategySpecKind::Fsm {
@@ -372,13 +372,10 @@ fn strategy_display_name_from_kind(kind: &StrategySpecKind) -> String {
             } else {
                 *num_states
             };
-            let mode = input_mode.unwrap_or(InputMode::OpponentLastAction);
-            let mode_label = match mode {
-                InputMode::OpponentLastAction => "opponent",
-                InputMode::SelfLastAction => "self",
-                InputMode::JointLastAction => "joint",
-            };
-            format!("FSM (states={states}, mode={mode_label})")
+            let symbols = input_mode
+                .unwrap_or(InputMode::OpponentLastAction)
+                .alphabet_size();
+            format!("FSM (s={states}, k={symbols})")
         }
         StrategySpecKind::Ca { k, r, t, .. } => {
             format!("CA (k={k}, r={r}, t={t})")
@@ -386,9 +383,124 @@ fn strategy_display_name_from_kind(kind: &StrategySpecKind) -> String {
         StrategySpecKind::OneSidedTm {
             states, symbols, ..
         } => {
-            format!("TM (states={states}, symbols={symbols})")
+            format!("TM (s={states}, k={symbols})")
         }
     }
+}
+
+fn render_strategy_table(
+    strategies: &[&nit_games::config::StrategySpec],
+    width: usize,
+    label_style: Style,
+    value_style: Style,
+    dim_style: Style,
+) -> Vec<Line<'static>> {
+    let id_header = "id";
+    let type_header = "type";
+    let summary_header = "summary";
+    let summaries: Vec<String> = strategies
+        .iter()
+        .map(|strategy| strategy_display_name(strategy))
+        .collect();
+
+    let mut id_w = strategies
+        .iter()
+        .map(|strategy| strategy.id.len())
+        .max()
+        .unwrap_or(id_header.len())
+        .max(id_header.len())
+        .min(18);
+    let mut type_w = strategies
+        .iter()
+        .map(|strategy| strategy_kind_label(&strategy.kind).len())
+        .max()
+        .unwrap_or(type_header.len())
+        .max(type_header.len())
+        .min(6);
+    let columns = 3usize;
+    let overhead = (columns + 1) + (2 * columns);
+    let available = width.saturating_sub(overhead);
+    let mut summary_w = summaries
+        .iter()
+        .map(|summary| summary.len())
+        .max()
+        .unwrap_or(summary_header.len())
+        .max(summary_header.len())
+        .max(18);
+
+    let total = id_w + type_w + summary_w;
+    if total > available {
+        let overflow = total - available;
+        let id_shrink = id_w.saturating_sub(id_header.len()).min(overflow);
+        id_w -= id_shrink;
+        let remaining = overflow.saturating_sub(id_shrink);
+        let type_shrink = type_w.saturating_sub(type_header.len()).min(remaining);
+        type_w -= type_shrink;
+        let remaining = remaining.saturating_sub(type_shrink);
+        summary_w = summary_w.saturating_sub(remaining);
+    }
+
+    if id_w == 0 {
+        id_w = 1;
+    }
+    if type_w == 0 {
+        type_w = 1;
+    }
+    if summary_w == 0 {
+        summary_w = 1;
+    }
+
+    let sep = format!(
+        "+{}+{}+{}+",
+        "-".repeat(id_w + 2),
+        "-".repeat(type_w + 2),
+        "-".repeat(summary_w + 2)
+    );
+    let mut lines = Vec::new();
+    lines.push(Line::from(Span::styled(sep.clone(), dim_style)));
+    lines.push(Line::from(vec![
+        Span::styled("|", dim_style),
+        Span::styled(
+            format!(" {} ", center_text(&truncate_text(id_header, id_w), id_w)),
+            label_style,
+        ),
+        Span::styled("|", dim_style),
+        Span::styled(
+            format!(
+                " {} ",
+                center_text(&truncate_text(type_header, type_w), type_w)
+            ),
+            label_style,
+        ),
+        Span::styled("|", dim_style),
+        Span::styled(
+            format!(
+                " {} ",
+                center_text(&truncate_text(summary_header, summary_w), summary_w)
+            ),
+            label_style,
+        ),
+        Span::styled("|", dim_style),
+    ]));
+    lines.push(Line::from(Span::styled(sep.clone(), dim_style)));
+
+    for (strategy, summary) in strategies.iter().zip(summaries.iter()) {
+        let id = truncate_text(&strategy.id, id_w);
+        let kind = truncate_text(strategy_kind_label(&strategy.kind), type_w);
+        let summary = truncate_text(summary, summary_w);
+        lines.push(Line::from(vec![
+            Span::styled("|", dim_style),
+            Span::styled(format!(" {id:<id_w$} "), value_style),
+            Span::styled("|", dim_style),
+            Span::styled(format!(" {kind:<type_w$} "), value_style),
+            Span::styled("|", dim_style),
+            Span::styled(format!(" {summary:<summary_w$} "), value_style),
+            Span::styled("|", dim_style),
+        ]));
+    }
+
+    lines.push(Line::from(Span::styled(sep, dim_style)));
+    lines
 }
 
 fn payoff_lines(
@@ -417,20 +529,6 @@ fn payoff_lines(
         dim_style,
         label_style,
     ));
-    lines.push(Line::from(vec![
-        Span::styled("R=", label_style),
-        Span::styled("reward (C,C)", dim_style),
-        Span::raw("  "),
-        Span::styled("S=", label_style),
-        Span::styled("sucker (C,D)", dim_style),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled("T=", label_style),
-        Span::styled("temptation (D,C)", dim_style),
-        Span::raw("  "),
-        Span::styled("P=", label_style),
-        Span::styled("punishment (D,D)", dim_style),
-    ]));
     lines
 }
 
@@ -666,15 +764,14 @@ fn render_last_run_table(
 
 fn score_column_label(config: &nit_games::config::NormalizedConfig) -> &'static str {
     match config.engine.score_aggregation {
-        nit_games::ScoreAggregation::Mean => "Score(mean)",
-        nit_games::ScoreAggregation::Total => "Score(total)",
+        nit_games::ScoreAggregation::Mean => "mean",
+        nit_games::ScoreAggregation::Total => "score",
     }
 }
 
 fn total_payoff_column_label(config: &nit_games::config::NormalizedConfig) -> &'static str {
     match config.engine.score_aggregation {
-        nit_games::ScoreAggregation::Mean => "AggPayoff",
-        nit_games::ScoreAggregation::Total => "TotalPayoff",
+        nit_games::ScoreAggregation::Mean | nit_games::ScoreAggregation::Total => "payoff",
     }
 }
 
@@ -684,10 +781,8 @@ fn payoff_panel_width(payoff: &nit_games::game::PayoffMatrix) -> usize {
         payoff.r, payoff.s, payoff.t, payoff.p
     )
     .len();
-    let rs_line = "R= reward (C,C)  S= sucker (C,D)".len();
-    let tp_line = "T= temptation (D,C)  P= punishment (D,D)".len();
     let matrix_width = payoff_matrix_width(payoff);
-    payoff_summary.max(rs_line).max(tp_line).max(matrix_width)
+    payoff_summary.max(matrix_width)
 }
 
 fn payoff_matrix_width(payoff: &nit_games::game::PayoffMatrix) -> usize {
@@ -921,12 +1016,8 @@ k = 2
             Style::default(),
         );
 
-        assert!(lines
-            .iter()
-            .any(|line| line_text(line).contains("Score(mean)")));
-        assert!(lines
-            .iter()
-            .any(|line| line_text(line).contains("AggPayoff")));
+        assert!(lines.iter().any(|line| line_text(line).contains("mean")));
+        assert!(lines.iter().any(|line| line_text(line).contains("payoff")));
         assert!(lines.iter().any(|line| line_text(line).contains(" -2 ")));
         assert!(lines.iter().all(|line| !line_text(line).contains("W-L-D")));
     }
@@ -950,5 +1041,265 @@ k = 2
         assert!(text.contains("gpu 32"));
         assert!(text.contains("cpu 1"));
         assert!(text.contains("policy 131072x4 cached"));
+    }
+
+    #[test]
+    fn fsm_strategy_display_name_uses_symbol_count() {
+        let opponent = strategy_display_name_from_kind(&StrategySpecKind::Fsm {
+            outputs: vec![],
+            start_state: 0,
+            transitions: vec![],
+            num_states: 1,
+            input_mode: Some(InputMode::OpponentLastAction),
+            index: None,
+        });
+        let joint = strategy_display_name_from_kind(&StrategySpecKind::Fsm {
+            outputs: vec![],
+            start_state: 0,
+            transitions: vec![],
+            num_states: 1,
+            input_mode: Some(InputMode::JointLastAction),
+            index: None,
+        });
+
+        assert_eq!(opponent, "FSM (s=1, k=2)");
+        assert_eq!(joint, "FSM (s=1, k=4)");
+    }
+
+    #[test]
+    fn tm_strategy_display_name_uses_short_state_and_symbol_labels() {
+        let tm = strategy_display_name_from_kind(&StrategySpecKind::OneSidedTm {
+            states: 2,
+            symbols: 3,
+            start_state: 1,
+            blank: 0,
+            fallback_symbol: None,
+            max_steps_per_round: 8,
+            input_mode: InputMode::OpponentLastAction,
+            output_map: vec![],
+            transitions: vec![],
+            rule_code: None,
+        });
+
+        assert_eq!(tm, "TM (s=2, k=3)");
+    }
+
+    #[test]
+    fn strategy_table_renders_bordered_summary_layout() {
+        let strategies = vec![
+            nit_games::config::StrategySpec {
+                id: "fsm_allc".into(),
+                name: None,
+                kind: StrategySpecKind::Fsm {
+                    num_states: 1,
+                    start_state: 0,
+                    outputs: vec![],
+                    input_mode: Some(InputMode::OpponentLastAction),
+                    transitions: vec![],
+                    index: None,
+                },
+            },
+            nit_games::config::StrategySpec {
+                id: "tm_timeout".into(),
+                name: None,
+                kind: StrategySpecKind::OneSidedTm {
+                    states: 1,
+                    symbols: 2,
+                    start_state: 1,
+                    blank: 0,
+                    fallback_symbol: None,
+                    max_steps_per_round: 8,
+                    input_mode: InputMode::OpponentLastAction,
+                    output_map: vec![],
+                    transitions: vec![],
+                    rule_code: None,
+                },
+            },
+        ];
+        let refs: Vec<_> = strategies.iter().collect();
+
+        let lines = render_strategy_table(
+            &refs,
+            54,
+            Style::default(),
+            Style::default(),
+            Style::default(),
+        );
+        let rendered: Vec<String> = lines.iter().map(line_text).collect();
+
+        assert!(rendered[0].starts_with('+'));
+        assert!(rendered[0].chars().count() < 54);
+        assert!(rendered[1].starts_with('|'));
+        assert!(rendered[1].contains("id"));
+        assert!(rendered[1].contains("summary"));
+        assert!(rendered.iter().any(|line| line.contains("fsm_allc")));
+        assert!(rendered.iter().any(|line| line.contains("FSM (s=1, k=2)")));
+        assert!(rendered.iter().any(|line| line.contains("TM (s=1, k=2)")));
+    }
+
+    #[test]
+    fn payoff_lines_omit_payoff_legend_copy() {
+        let payoff = nit_games::game::PayoffMatrix::default_pd();
+        let lines = payoff_lines(
+            &payoff,
+            60,
+            Style::default(),
+            Style::default(),
+            Style::default(),
+        );
+        let rendered: Vec<String> = lines.iter().map(line_text).collect();
+
+        assert!(rendered.iter().any(|line| line.contains("payoff: R=")));
+        assert!(rendered.iter().any(|line| line.contains("matrix:")));
+        assert!(rendered.iter().all(|line| !line.contains("reward (C,C)")));
+        assert!(rendered.iter().all(|line| !line.contains("sucker (C,D)")));
+        assert!(rendered
+            .iter()
+            .all(|line| !line.contains("temptation (D,C)")));
+        assert!(rendered
+            .iter()
+            .all(|line| !line.contains("punishment (D,D)")));
+    }
+
+    #[test]
+    fn layout_for_config_keeps_side_panel_width_stable_across_last_run_content() {
+        let config = nit_games::GamesConfig::from_toml(
+            r#"
+schema_version = 1
+game = "ipd"
+rounds = 2
+repetitions = 1
+self_play = true
+
+[[strategy]]
+id = "all_c"
+type = "fsm"
+index = 1
+num_states = 1
+k = 2
+"#,
+        )
+        .expect("parse config");
+        let state = AppState::new(
+            std::env::temp_dir(),
+            nit_core::Buffer::empty("x", None),
+            nit_core::Buffer::empty("n", None),
+        );
+        let empty_layout = layout_for_config(
+            Rect {
+                x: 0,
+                y: 0,
+                width: 90,
+                height: 30,
+            },
+            &state,
+            Some(&config),
+        );
+        let empty_side = empty_layout.side.expect("empty side panel");
+
+        let mut state_with_run = AppState::new(
+            std::env::temp_dir(),
+            nit_core::Buffer::empty("x", None),
+            nit_core::Buffer::empty("n", None),
+        );
+        state_with_run.games.last_run = Some(nit_games::output::RunSummary {
+            schema_version: nit_games::output::RUN_SUMMARY_SCHEMA_VERSION,
+            timestamp: "2026-03-11T23:00:28.511548Z".into(),
+            run_id: "82d85202af92c04e".into(),
+            seed: 42,
+            config_text: String::new(),
+            config: config.clone(),
+            paths: nit_games::output::RunPaths {
+                summary: None,
+                events: None,
+                history: None,
+                definitions: None,
+                results: None,
+                config: None,
+                analysis_dir: None,
+            },
+            strategies: Vec::new(),
+            results: nit_games::output::TournamentResults {
+                ranking: vec![nit_games::output::StrategyResult {
+                    id: "fsm_alld".into(),
+                    name: None,
+                    total_payoff: -1690,
+                    average_payoff: -0.884,
+                    adjusted_total_payoff: Some(-1690.0),
+                    adjusted_average_payoff: Some(-0.884),
+                    matches: 1,
+                    wins: 0,
+                    losses: 0,
+                    draws: 1,
+                    crashed: false,
+                    crash_count: 0,
+                    tm_metrics: None,
+                }],
+                pairwise: Vec::new(),
+                dominance: Vec::new(),
+            },
+            event_log: None,
+            history_log: None,
+            runtime: nit_games::RuntimeAcceleratorStats::default(),
+            run_dir: None,
+        });
+
+        let layout = layout_for_config(
+            Rect {
+                x: 0,
+                y: 0,
+                width: 90,
+                height: 30,
+            },
+            &state_with_run,
+            Some(&config),
+        );
+
+        let side = layout.side.expect("side panel");
+        assert!(layout.show_payoff_side);
+        assert_eq!(side.width, empty_side.width);
+    }
+
+    #[test]
+    fn layout_for_config_keeps_empty_last_run_panel_wide_enough() {
+        let config = nit_games::GamesConfig::from_toml(
+            r#"
+schema_version = 1
+game = "ipd"
+rounds = 2
+repetitions = 1
+self_play = true
+
+[[strategy]]
+id = "all_c"
+type = "fsm"
+index = 1
+num_states = 1
+k = 2
+"#,
+        )
+        .expect("parse config");
+        let state = AppState::new(
+            std::env::temp_dir(),
+            nit_core::Buffer::empty("x", None),
+            nit_core::Buffer::empty("n", None),
+        );
+
+        let layout = layout_for_config(
+            Rect {
+                x: 0,
+                y: 0,
+                width: 90,
+                height: 30,
+            },
+            &state,
+            Some(&config),
+        );
+
+        let side = layout.side.expect("side panel");
+        assert!(layout.show_payoff_side);
+        assert!(
+            side.width as usize >= LAST_RUN_PANEL_TARGET_WIDTH + 2 + LAST_RUN_PANEL_EXTRA_WIDTH
+        );
     }
 }

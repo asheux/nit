@@ -22,10 +22,10 @@ use nit_games::output::{
 };
 use nit_games::tournament::{KernelRunMode, Parallelism, TournamentKernel};
 use nit_games::{
-    enumerate_fsms, format_strategy_introspection, introspect_strategy, run_id_from_seed_config,
-    Action, FsmDefinition, GamesConfig, HistoryWriter, InputMode, ScoreAggregation,
-    StrategyIntrospection, StrategyIntrospectionKind, StrategyIntrospectionParameters,
-    StrategySpec, TmTransitionRecord,
+    accelerator_run_preflight, enumerate_fsms, format_strategy_introspection, introspect_strategy,
+    run_id_from_seed_config, Action, FsmDefinition, GamesConfig, HistoryWriter, InputMode,
+    ScoreAggregation, StrategyIntrospection, StrategyIntrospectionKind,
+    StrategyIntrospectionParameters, StrategySpec, TmTransitionRecord,
 };
 use nit_tui::{run, Theme};
 use nit_utils::hashing::stable_hash_bytes;
@@ -629,6 +629,7 @@ game = "ipd"
 rounds = 200
 repetitions = 1
 self_play = true
+save_data = true
 seed = 12345
 noise = 0.0
 
@@ -883,6 +884,10 @@ fn run_games_headless(
     let mut config = GamesConfig::from_toml_with_root(&config_text, config_path.parent())
         .map_err(|err| anyhow::anyhow!(err))?;
 
+    if !config.save_data {
+        anyhow::bail!("`save_data = false` is not supported for `games sweep`.");
+    }
+
     if let Some(strategies_path) = strategies_path {
         let resolved = resolve_relative_path(&strategies_path, config_path.parent());
         append_strategies_from_ndjson(&mut config, &resolved)?;
@@ -898,6 +903,13 @@ fn run_games_headless(
         .seed
         .unwrap_or_else(|| stable_hash_bytes(format!("{timestamp}\n{config_text}").as_bytes()));
     config.seed = Some(seed);
+    accelerator_run_preflight(
+        &config,
+        config.save_data && config.event_log.enabled,
+        config.save_data && config.history.enabled,
+        false,
+    )
+    .map_err(|err| anyhow::anyhow!(err))?;
 
     let run_id = run_id_from_seed_config(seed, &config_text);
     let cwd = std::env::current_dir()?;
@@ -919,45 +931,68 @@ fn run_games_headless(
         base_dir.join(out_dir)
     };
 
-    let layout = RunLayout::for_base(&out_dir, &timestamp, seed, &run_id);
-    fs::create_dir_all(&layout.run_dir)
-        .with_context(|| format!("failed to create {}", layout.run_dir.display()))?;
+    let layout = config
+        .save_data
+        .then(|| RunLayout::for_base(&out_dir, &timestamp, seed, &run_id));
+    if let Some(layout) = layout.as_ref() {
+        fs::create_dir_all(&layout.run_dir)
+            .with_context(|| format!("failed to create {}", layout.run_dir.display()))?;
+    }
 
-    let summary_path = layout.summary_path.clone();
-    let event_path = layout.events_path.clone();
-    let history_path = layout.history_path.clone();
+    let summary_path = layout.as_ref().map(|layout| layout.summary_path.clone());
+    let event_path = layout.as_ref().map(|layout| layout.events_path.clone());
+    let history_path = layout.as_ref().map(|layout| layout.history_path.clone());
 
     if verbose {
         eprintln!("Games config: {}", config_path.display());
-        eprintln!("Games summary: {}", summary_path.display());
+        match summary_path.as_ref() {
+            Some(path) => eprintln!("Games summary: {}", path.display()),
+            None => eprintln!("Games summary: disabled (`save_data = false`)"),
+        }
     }
 
     let kernel = TournamentKernel::new(config.clone());
-    let event_log_enabled = config.event_log.enabled;
-    let history_log_enabled = config.history.enabled;
+    let event_log_enabled = config.save_data && config.event_log.enabled;
+    let history_log_enabled = config.save_data && config.history.enabled;
     let (results, runtime, event_log, history_log) = execute_tournament(
         &kernel,
         &config,
-        event_log_enabled.then_some(event_path.clone()),
-        history_log_enabled.then_some(history_path.clone()),
+        if event_log_enabled {
+            event_path.clone()
+        } else {
+            None
+        },
+        if history_log_enabled {
+            history_path.clone()
+        } else {
+            None
+        },
     )?;
 
-    if let Err(err) = fs::write(&layout.config_path, &config_text) {
-        eprintln!("Warning: failed to write config snapshot: {err}");
+    if let Some(layout) = layout.as_ref() {
+        if let Err(err) = fs::write(&layout.config_path, &config_text) {
+            eprintln!("Warning: failed to write config snapshot: {err}");
+        }
     }
 
-    let definitions_path = layout.definitions_path.clone();
-    if let Err(err) = nit_utils::fs::write_atomic(&definitions_path, |writer| {
-        serde_json::to_writer_pretty(writer, kernel.definitions()).map_err(std::io::Error::other)
-    }) {
-        eprintln!("Warning: failed to write definitions: {err}");
+    if let Some(definitions_path) = layout
+        .as_ref()
+        .map(|layout| layout.definitions_path.clone())
+    {
+        if let Err(err) = nit_utils::fs::write_atomic(&definitions_path, |writer| {
+            serde_json::to_writer_pretty(writer, kernel.definitions())
+                .map_err(std::io::Error::other)
+        }) {
+            eprintln!("Warning: failed to write definitions: {err}");
+        }
     }
 
-    let results_path = layout.results_path.clone();
-    if let Err(err) = nit_utils::fs::write_atomic(&results_path, |writer| {
-        serde_json::to_writer_pretty(writer, &results).map_err(std::io::Error::other)
-    }) {
-        eprintln!("Warning: failed to write results: {err}");
+    if let Some(results_path) = layout.as_ref().map(|layout| layout.results_path.clone()) {
+        if let Err(err) = nit_utils::fs::write_atomic(&results_path, |writer| {
+            serde_json::to_writer_pretty(writer, &results).map_err(std::io::Error::other)
+        }) {
+            eprintln!("Warning: failed to write results: {err}");
+        }
     }
 
     let summary = RunSummary {
@@ -968,26 +1003,38 @@ fn run_games_headless(
         config_text: config_text.clone(),
         config: config.clone(),
         paths: RunPaths {
-            summary: Some(summary_path.display().to_string()),
+            summary: summary_path.as_ref().map(|path| path.display().to_string()),
             events: event_log.clone(),
             history: history_log.clone(),
-            definitions: Some(definitions_path.display().to_string()),
-            results: Some(results_path.display().to_string()),
-            config: Some(layout.config_path.display().to_string()),
-            analysis_dir: Some(layout.analysis_dir.display().to_string()),
+            definitions: layout
+                .as_ref()
+                .map(|layout| layout.definitions_path.display().to_string()),
+            results: layout
+                .as_ref()
+                .map(|layout| layout.results_path.display().to_string()),
+            config: layout
+                .as_ref()
+                .map(|layout| layout.config_path.display().to_string()),
+            analysis_dir: layout
+                .as_ref()
+                .map(|layout| layout.analysis_dir.display().to_string()),
         },
         strategies: kernel.definitions().to_vec(),
         results,
         event_log,
         history_log,
         runtime,
-        run_dir: Some(layout.run_dir.display().to_string()),
+        run_dir: layout
+            .as_ref()
+            .map(|layout| layout.run_dir.display().to_string()),
     };
 
-    write_summary(&summary_path, &summary).with_context(|| {
-        let summary_path_display = summary_path.display().to_string();
-        format!("failed to write {summary_path_display}")
-    })?;
+    if let Some(summary_path) = summary_path.as_ref() {
+        write_summary(summary_path, &summary).with_context(|| {
+            let summary_path_display = summary_path.display().to_string();
+            format!("failed to write {summary_path_display}")
+        })?;
+    }
 
     if verbose {
         if let Some(path) = summary.paths.events.as_ref() {
@@ -1177,6 +1224,13 @@ fn run_games_sweep(
                                 cell_config.payoff = payoff_from_rsp(*r, *s, *t, *p);
                                 cell_config.seed = Some(cell_seed);
                                 cell_config.engine.mode = EngineMode::Batch;
+                                accelerator_run_preflight(
+                                    &cell_config,
+                                    cell_config.save_data && cell_config.event_log.enabled,
+                                    cell_config.save_data && cell_config.history.enabled,
+                                    false,
+                                )
+                                .map_err(|err| anyhow::anyhow!(err))?;
 
                                 let config_text_cell = toml::to_string(&cell_config)
                                     .unwrap_or_else(|_| config_text.clone());

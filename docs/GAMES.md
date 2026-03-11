@@ -38,6 +38,8 @@ Use these fields to reconstruct order.
 ## Config knobs
 
 ```
+save_data = true | false
+
 [engine]
 mode = "interactive" | "batch"
 parallelism = "auto" | "off" | { threads = N }
@@ -54,6 +56,8 @@ enabled = true | false
 include_cycle_metadata = true | false
   # when enabled, history.ndjson also includes per-match TM metrics (if applicable)
 ```
+
+`save_data = false` disables all persisted run artifacts for normal tournament runs.
 
 `score_aggregation` controls which per-strategy score is shown and aggregated:
 - `mean` (default): average payoff per round

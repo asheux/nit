@@ -7764,6 +7764,7 @@ fn map_visualizer_main_mouse(
     let config_result = current_games_config_result(state);
     let layout_info = games_visualizer_view::layout_for_config(
         inner,
+        state,
         config_result.and_then(|result| result.as_ref().ok()),
     );
     let area = layout_info.main;
@@ -7813,6 +7814,7 @@ fn map_visualizer_side_mouse(
     let config_result = current_games_config_result(state);
     let layout_info = games_visualizer_view::layout_for_config(
         inner,
+        state,
         config_result.and_then(|result| result.as_ref().ok()),
     );
     let side_area = layout_info.side?;
@@ -16384,6 +16386,23 @@ mod tests {
         assert!(games_petri_active(&state));
         state.games.petri_hidden = false;
         assert!(games_petri_visible(&state));
+    }
+
+    #[test]
+    fn map_key_to_action_can_show_hidden_games_petri_from_editor_focus() {
+        let mut state = state_for_test();
+        state.app_kind = AppKind::Games;
+        state.focus = PaneId::Editor;
+        state.mode = Mode::Insert;
+        state.games.running = true;
+        state.games.petri_hidden = true;
+        let mut input = InputState::new();
+
+        let ctrl_six = KeyEvent::new(KeyCode::Char('6'), KeyModifiers::CONTROL);
+        assert_eq!(
+            map_key_to_action(ctrl_six, &state, &mut input),
+            Some(Action::GamesShow)
+        );
     }
 
     #[test]

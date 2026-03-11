@@ -140,17 +140,22 @@ pub struct HistoryAnalysis {
 
 #[derive(Deserialize)]
 struct MatchHistoryLite {
+    #[serde(default)]
     match_id: usize,
+    #[serde(default)]
     match_index: usize,
+    #[serde(default)]
     total_matches: usize,
     a: String,
     b: String,
+    #[serde(default)]
     repetition: u32,
+    #[serde(default, alias = "outcomes")]
     score_idx: String,
+    #[serde(default)]
     a_score: i64,
+    #[serde(default)]
     b_score: i64,
-    a_initial: Option<char>,
-    b_initial: Option<char>,
 }
 
 #[derive(Default)]
@@ -255,11 +260,22 @@ pub fn analyze_history(
         };
         let (a_tail, b_tail) = coop_counts(&tail_counts);
         let (a_tail_rate, b_tail_rate) = coop_rates(a_tail, b_tail, tail_len as u32);
+        let (a_initial, b_initial) = initial_actions(&record.score_idx);
+        let match_index = if record.match_index == 0 {
+            record.match_id.saturating_add(1)
+        } else {
+            record.match_index
+        };
+        let total_matches_reported = if record.total_matches == 0 {
+            match_index.max(total_matches.saturating_add(1))
+        } else {
+            record.total_matches
+        };
 
         let summary = MatchSummary {
             match_id: record.match_id,
-            match_index: record.match_index,
-            total_matches: record.total_matches,
+            match_index,
+            total_matches: total_matches_reported,
             repetition: record.repetition,
             rounds,
             a: record.a.clone(),
@@ -273,8 +289,8 @@ pub fn analyze_history(
             tail_outcomes: tail_counts.clone(),
             a_tail_coop_rate: a_tail_rate,
             b_tail_coop_rate: b_tail_rate,
-            a_initial: record.a_initial,
-            b_initial: record.b_initial,
+            a_initial,
+            b_initial,
         };
 
         write_match_summary(&mut matches_ndjson, &summary)?;
@@ -305,7 +321,7 @@ pub fn analyze_history(
             write_trajectory_samples(
                 &mut trajectories_csv,
                 record.match_id,
-                record.match_index,
+                match_index,
                 &record.a,
                 &record.b,
                 rounds,
@@ -314,7 +330,7 @@ pub fn analyze_history(
             if preview_trajectories.len() < config.preview_limit {
                 preview_trajectories.push(TrajectoryPreview {
                     match_id: record.match_id,
-                    match_index: record.match_index,
+                    match_index,
                     a: record.a.clone(),
                     b: record.b.clone(),
                     rounds,
@@ -413,6 +429,16 @@ fn count_outcomes(bytes: &[u8]) -> OutcomeCounts {
         }
     }
     counts
+}
+
+fn initial_actions(outcomes: &str) -> (Option<char>, Option<char>) {
+    match outcomes.as_bytes().first().copied() {
+        Some(b'0') => (Some('C'), Some('C')),
+        Some(b'1') => (Some('C'), Some('D')),
+        Some(b'2') => (Some('D'), Some('C')),
+        Some(b'3') => (Some('D'), Some('D')),
+        _ => (None, None),
+    }
 }
 
 fn coop_counts(counts: &OutcomeCounts) -> (u32, u32) {

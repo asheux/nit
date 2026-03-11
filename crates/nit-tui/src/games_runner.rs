@@ -10,7 +10,10 @@ use nit_games::output::{
 use nit_games::tournament::{
     MatchHistoryPreview, MatchSnapshot, TournamentProgress, TournamentRunner,
 };
-use nit_games::{EngineMode, HistoryWriter, NormalizedConfig};
+use nit_games::{accelerator_run_preflight, EngineMode, HistoryWriter, NormalizedConfig};
+
+const RUNNER_CHUNK_TARGET: Duration = Duration::from_millis(120);
+const RUNNER_CHUNK_INITIAL: u32 = 4_096;
 
 #[derive(Clone)]
 pub struct RunRequest {
@@ -18,12 +21,12 @@ pub struct RunRequest {
     pub config_text: String,
     pub timestamp: String,
     pub run_id: String,
-    pub run_dir: PathBuf,
-    pub summary_path: PathBuf,
-    pub definitions_path: PathBuf,
-    pub results_path: PathBuf,
-    pub config_path: PathBuf,
-    pub analysis_dir: PathBuf,
+    pub run_dir: Option<PathBuf>,
+    pub summary_path: Option<PathBuf>,
+    pub definitions_path: Option<PathBuf>,
+    pub results_path: Option<PathBuf>,
+    pub config_path: Option<PathBuf>,
+    pub analysis_dir: Option<PathBuf>,
     pub event_path: Option<PathBuf>,
     pub history_path: Option<PathBuf>,
     pub progress_interval: Duration,
@@ -89,17 +92,18 @@ struct RunState {
     config_text: String,
     timestamp: String,
     run_id: String,
-    run_dir: PathBuf,
-    summary_path: PathBuf,
-    definitions_path: PathBuf,
-    results_path: PathBuf,
-    config_path: PathBuf,
-    analysis_dir: PathBuf,
+    run_dir: Option<PathBuf>,
+    summary_path: Option<PathBuf>,
+    definitions_path: Option<PathBuf>,
+    results_path: Option<PathBuf>,
+    config_path: Option<PathBuf>,
+    analysis_dir: Option<PathBuf>,
     steps_per_tick: u32,
     progress_interval: Duration,
     last_progress: Instant,
     last_progress_match: Option<usize>,
     last_completed: usize,
+    chunk_hint_steps: Option<u32>,
 }
 
 fn runner_loop(cmd_rx: Receiver<RunnerCommand>, event_tx: Sender<RunnerEvent>) {
@@ -175,7 +179,26 @@ fn runner_loop(cmd_rx: Receiver<RunnerCommand>, event_tx: Sender<RunnerEvent>) {
                 run_state.runner.config().engine.mode,
             )
         };
-        run_state.runner.step_rounds(steps);
+        let chunk_steps = if step_once {
+            1
+        } else {
+            adaptive_chunk_steps(
+                steps,
+                run_state.chunk_hint_steps,
+                rounds_per_match,
+                run_state.runner.config().engine.mode,
+            )
+        };
+        let chunk_started_at = Instant::now();
+        run_state.runner.step_rounds(chunk_steps);
+        if !step_once {
+            run_state.chunk_hint_steps = Some(next_adaptive_chunk_steps(
+                chunk_steps,
+                chunk_started_at.elapsed(),
+                rounds_per_match,
+                run_state.runner.config().engine.mode,
+            ));
+        }
         for preview in run_state.runner.drain_match_history_previews() {
             let _ = event_tx.send(RunnerEvent::MatchHistoryPreview(preview));
         }
@@ -227,6 +250,14 @@ fn runner_loop(cmd_rx: Receiver<RunnerCommand>, event_tx: Sender<RunnerEvent>) {
 }
 
 fn start_run(request: RunRequest, event_tx: &Sender<RunnerEvent>) -> Result<RunState, String> {
+    let match_history_previews = !matches!(request.config.engine.mode, EngineMode::Batch);
+    accelerator_run_preflight(
+        &request.config,
+        request.event_path.is_some(),
+        request.history_path.is_some(),
+        match_history_previews,
+    )?;
+
     let mut runner = TournamentRunner::new(request.config);
     if matches!(runner.config().engine.mode, EngineMode::Batch) {
         runner = runner.with_match_history_previews(false);
@@ -264,12 +295,15 @@ fn start_run(request: RunRequest, event_tx: &Sender<RunnerEvent>) -> Result<RunS
         last_progress: Instant::now(),
         last_progress_match: None,
         last_completed: 0,
+        chunk_hint_steps: None,
     })
 }
 
 fn finalize_run(state: RunState) -> Result<RunSummary, String> {
-    if let Err(err) = std::fs::write(&state.config_path, &state.config_text) {
-        tracing::warn!("Failed to write games config snapshot: {err}");
+    if let Some(config_path) = state.config_path.as_ref() {
+        if let Err(err) = std::fs::write(config_path, &state.config_text) {
+            tracing::warn!("Failed to write games config snapshot: {err}");
+        }
     }
 
     let mut summary = state.runner.finish(
@@ -278,26 +312,50 @@ fn finalize_run(state: RunState) -> Result<RunSummary, String> {
         state.config_text.clone(),
     );
     summary.schema_version = RUN_SUMMARY_SCHEMA_VERSION;
-    summary.paths.summary = Some(state.summary_path.display().to_string());
-    summary.paths.definitions = Some(state.definitions_path.display().to_string());
-    summary.paths.results = Some(state.results_path.display().to_string());
-    summary.paths.config = Some(state.config_path.display().to_string());
-    summary.paths.analysis_dir = Some(state.analysis_dir.display().to_string());
-    summary.run_dir = Some(state.run_dir.display().to_string());
+    summary.paths.summary = state
+        .summary_path
+        .as_ref()
+        .map(|path| path.display().to_string());
+    summary.paths.definitions = state
+        .definitions_path
+        .as_ref()
+        .map(|path| path.display().to_string());
+    summary.paths.results = state
+        .results_path
+        .as_ref()
+        .map(|path| path.display().to_string());
+    summary.paths.config = state
+        .config_path
+        .as_ref()
+        .map(|path| path.display().to_string());
+    summary.paths.analysis_dir = state
+        .analysis_dir
+        .as_ref()
+        .map(|path| path.display().to_string());
+    summary.run_dir = state
+        .run_dir
+        .as_ref()
+        .map(|path| path.display().to_string());
     summary.event_log = summary.paths.events.clone();
     summary.history_log = summary.paths.history.clone();
 
-    if let Err(err) = nit_utils::fs::write_atomic(&state.definitions_path, |writer| {
-        serde_json::to_writer_pretty(writer, &summary.strategies).map_err(std::io::Error::other)
-    }) {
-        tracing::warn!("Failed to write games definitions: {err}");
+    if let Some(definitions_path) = state.definitions_path.as_ref() {
+        if let Err(err) = nit_utils::fs::write_atomic(definitions_path, |writer| {
+            serde_json::to_writer_pretty(writer, &summary.strategies).map_err(std::io::Error::other)
+        }) {
+            tracing::warn!("Failed to write games definitions: {err}");
+        }
     }
-    if let Err(err) = nit_utils::fs::write_atomic(&state.results_path, |writer| {
-        serde_json::to_writer_pretty(writer, &summary.results).map_err(std::io::Error::other)
-    }) {
-        tracing::warn!("Failed to write games results: {err}");
+    if let Some(results_path) = state.results_path.as_ref() {
+        if let Err(err) = nit_utils::fs::write_atomic(results_path, |writer| {
+            serde_json::to_writer_pretty(writer, &summary.results).map_err(std::io::Error::other)
+        }) {
+            tracing::warn!("Failed to write games results: {err}");
+        }
     }
-    write_summary(&state.summary_path, &summary).map_err(|err| err.to_string())?;
+    if let Some(summary_path) = state.summary_path.as_ref() {
+        write_summary(summary_path, &summary).map_err(|err| err.to_string())?;
+    }
     Ok(summary)
 }
 
@@ -327,10 +385,93 @@ fn steps_for_tick(steps_per_tick: u32, rounds_per_match: u32, mode: EngineMode) 
     }
 }
 
+fn adaptive_chunk_steps(
+    requested_steps: u32,
+    chunk_hint_steps: Option<u32>,
+    rounds_per_match: u32,
+    mode: EngineMode,
+) -> u32 {
+    let requested_steps = requested_steps.max(1);
+    let base = chunk_hint_steps
+        .unwrap_or_else(|| requested_steps.min(initial_chunk_steps(rounds_per_match, mode)));
+    normalize_chunk_steps(base, requested_steps, rounds_per_match, mode)
+}
+
+fn next_adaptive_chunk_steps(
+    chunk_steps: u32,
+    chunk_elapsed: Duration,
+    rounds_per_match: u32,
+    mode: EngineMode,
+) -> u32 {
+    let min_steps = minimum_chunk_steps(rounds_per_match, mode);
+    let elapsed_nanos = chunk_elapsed.as_nanos().max(1);
+    let target_nanos = RUNNER_CHUNK_TARGET.as_nanos();
+    let scaled = ((chunk_steps as u128).saturating_mul(target_nanos) / elapsed_nanos)
+        .min(u32::MAX as u128) as u32;
+    let shrink_floor = (chunk_steps / 2).max(min_steps);
+    let growth_ceiling = chunk_steps.saturating_mul(4).max(min_steps);
+    normalize_chunk_steps(
+        scaled.clamp(shrink_floor, growth_ceiling),
+        u32::MAX,
+        rounds_per_match,
+        mode,
+    )
+}
+
+fn initial_chunk_steps(rounds_per_match: u32, mode: EngineMode) -> u32 {
+    let rounds_per_match = rounds_per_match.max(1);
+    match mode {
+        EngineMode::Batch => rounds_per_match
+            .saturating_mul(32)
+            .max(rounds_per_match)
+            .min(RUNNER_CHUNK_INITIAL),
+        EngineMode::Interactive => rounds_per_match
+            .saturating_mul(16)
+            .max(256)
+            .min(RUNNER_CHUNK_INITIAL),
+    }
+}
+
+fn minimum_chunk_steps(rounds_per_match: u32, mode: EngineMode) -> u32 {
+    match mode {
+        EngineMode::Batch => rounds_per_match.max(1),
+        EngineMode::Interactive => 1,
+    }
+}
+
+fn normalize_chunk_steps(
+    candidate_steps: u32,
+    requested_steps: u32,
+    rounds_per_match: u32,
+    mode: EngineMode,
+) -> u32 {
+    let requested_steps = requested_steps.max(1);
+    let min_steps = minimum_chunk_steps(rounds_per_match, mode).min(requested_steps);
+    let chunk_steps = candidate_steps.clamp(min_steps, requested_steps);
+    if !matches!(mode, EngineMode::Interactive)
+        || rounds_per_match <= 1
+        || chunk_steps <= 1
+        || !chunk_steps.is_multiple_of(rounds_per_match)
+    {
+        return chunk_steps;
+    }
+    if chunk_steps < requested_steps {
+        chunk_steps.saturating_add(1)
+    } else {
+        chunk_steps.saturating_sub(1).max(1)
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{dephase_steps_per_tick, steps_for_tick};
-    use nit_games::EngineMode;
+    use super::{
+        adaptive_chunk_steps, dephase_steps_per_tick, finalize_run, next_adaptive_chunk_steps,
+        start_run, steps_for_tick, RunRequest,
+    };
+    use nit_games::{EngineMode, GamesConfig};
+    use std::path::PathBuf;
+    use std::sync::mpsc;
+    use std::time::Duration;
 
     #[test]
     fn dephase_steps_breaks_round_alignment() {
@@ -349,5 +490,167 @@ mod tests {
     fn batch_steps_skip_dephase() {
         assert_eq!(steps_for_tick(50_000, 20, EngineMode::Batch), 50_000);
         assert_eq!(steps_for_tick(20, 20, EngineMode::Interactive), 21);
+    }
+
+    #[test]
+    fn adaptive_chunk_steps_caps_large_batch_runs_initially() {
+        let chunk = adaptive_chunk_steps(250_000, None, 200, EngineMode::Batch);
+
+        assert_eq!(chunk, 4_096);
+    }
+
+    #[test]
+    fn adaptive_chunk_steps_preserves_batch_match_floor() {
+        let chunk = adaptive_chunk_steps(400, Some(25), 200, EngineMode::Batch);
+
+        assert_eq!(chunk, 200);
+    }
+
+    #[test]
+    fn next_adaptive_chunk_steps_grows_after_fast_chunk() {
+        let next =
+            next_adaptive_chunk_steps(4_096, Duration::from_millis(30), 200, EngineMode::Batch);
+
+        assert_eq!(next, 16_384);
+    }
+
+    #[test]
+    fn next_adaptive_chunk_steps_shrinks_after_slow_chunk() {
+        let next =
+            next_adaptive_chunk_steps(4_096, Duration::from_millis(480), 200, EngineMode::Batch);
+
+        assert_eq!(next, 2_048);
+    }
+
+    #[test]
+    fn next_adaptive_chunk_steps_can_grow_from_batch_match_floor() {
+        let next =
+            next_adaptive_chunk_steps(5_000, Duration::from_millis(30), 5_000, EngineMode::Batch);
+
+        assert_eq!(next, 20_000);
+    }
+
+    #[test]
+    fn start_run_rejects_interactive_metal_requests_that_need_cpu_previews() {
+        let config = GamesConfig::from_toml(
+            r#"
+schema_version = 1
+game = "ipd"
+rounds = 4
+repetitions = 1
+self_play = false
+
+[engine]
+mode = "interactive"
+fast_eval = true
+accelerator = "metal"
+
+[event_log]
+enabled = false
+include_rounds = false
+
+[history]
+enabled = false
+
+[[strategy]]
+id = "fsm_0"
+type = "fsm"
+index = 0
+num_states = 1
+k = 2
+
+[[strategy]]
+id = "fsm_1"
+type = "fsm"
+index = 1
+num_states = 1
+k = 2
+"#,
+        )
+        .expect("parse config");
+        let (event_tx, _event_rx) = mpsc::channel();
+        let request = RunRequest {
+            config,
+            config_text: String::new(),
+            timestamp: "2026-03-11T00:00:00Z".into(),
+            run_id: "run".into(),
+            run_dir: Some(PathBuf::from("/tmp/run")),
+            summary_path: Some(PathBuf::from("/tmp/run/run_summary.json")),
+            definitions_path: Some(PathBuf::from("/tmp/run/definitions.json")),
+            results_path: Some(PathBuf::from("/tmp/run/results.json")),
+            config_path: Some(PathBuf::from("/tmp/run/config.toml")),
+            analysis_dir: Some(PathBuf::from("/tmp/run/analysis")),
+            event_path: None,
+            history_path: None,
+            progress_interval: Duration::from_millis(10),
+            steps_per_tick: 128,
+        };
+
+        let err = start_run(request, &event_tx)
+            .err()
+            .expect("interactive metal should fail fast");
+        assert!(err.contains("interactive match history previews"));
+    }
+
+    #[test]
+    fn finalize_run_keeps_paths_empty_for_ephemeral_runs() {
+        let config = GamesConfig::from_toml(
+            r#"
+schema_version = 1
+game = "ipd"
+rounds = 4
+repetitions = 1
+self_play = false
+save_data = false
+
+[engine]
+mode = "batch"
+fast_eval = true
+accelerator = "cpu"
+
+[event_log]
+enabled = true
+include_rounds = false
+
+[history]
+enabled = true
+
+[[strategy]]
+id = "fsm_0"
+type = "fsm"
+index = 0
+num_states = 1
+k = 2
+"#,
+        )
+        .expect("parse config");
+        let (event_tx, _event_rx) = mpsc::channel();
+        let request = RunRequest {
+            config,
+            config_text: String::new(),
+            timestamp: "2026-03-12T00:00:00Z".into(),
+            run_id: "run".into(),
+            run_dir: None,
+            summary_path: None,
+            definitions_path: None,
+            results_path: None,
+            config_path: None,
+            analysis_dir: None,
+            event_path: None,
+            history_path: None,
+            progress_interval: Duration::from_millis(10),
+            steps_per_tick: 128,
+        };
+
+        let state = start_run(request, &event_tx).expect("ephemeral run should start");
+        let summary = finalize_run(state).expect("ephemeral run should finalize");
+        assert!(summary.paths.summary.is_none());
+        assert!(summary.paths.definitions.is_none());
+        assert!(summary.paths.results.is_none());
+        assert!(summary.paths.config.is_none());
+        assert!(summary.paths.analysis_dir.is_none());
+        assert!(summary.run_dir.is_none());
+        assert!(summary.event_log.is_none());
+        assert!(summary.history_log.is_none());
     }
 }

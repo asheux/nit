@@ -198,12 +198,17 @@ Matrix layout (rows = player A, cols = player B):
 Enable per-match outcome history logging (NDJSON) for later graphing:
 
 ```toml
+save_data = true
+
 [history]
 enabled = true
 ```
 
 Each history line encodes the match outcomes as digits from player A’s perspective:
 `0=CC`, `1=CD`, `2=DC`, `3=DD`.
+
+Set `save_data = false` to keep the run in-memory only and skip writing the run directory,
+summary, results, config snapshot, and logs.
 
 ### Games config (scoring)
 

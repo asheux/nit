@@ -875,6 +875,44 @@ pub fn accelerator_preflight(config: &NormalizedConfig) -> Result<(), String> {
     }
 }
 
+pub fn accelerator_run_preflight(
+    config: &NormalizedConfig,
+    event_logging: bool,
+    history_logging: bool,
+    match_history_previews: bool,
+) -> Result<(), String> {
+    if !config.engine.accelerator.requires_metal() {
+        return Ok(());
+    }
+
+    let mut blockers = Vec::new();
+    if event_logging {
+        blockers.push("event logging");
+    }
+    if history_logging {
+        blockers.push("history logging");
+    }
+    if match_history_previews {
+        blockers.push("interactive match history previews");
+    }
+    if !blockers.is_empty() {
+        let blockers = match blockers.as_slice() {
+            [one] => one.to_string(),
+            [left, right] => format!("{left} and {right}"),
+            _ => format!(
+                "{}, and {}",
+                blockers[..blockers.len() - 1].join(", "),
+                blockers[blockers.len() - 1]
+            ),
+        };
+        return Err(format!(
+            "Metal accelerator was requested, but {blockers} currently requires the CPU path. Disable those features or use `accelerator = \"auto\"`."
+        ));
+    }
+
+    accelerator_preflight(config)
+}
+
 fn try_metal_batch_outcomes_chunked_prepared(
     config: &NormalizedConfig,
     strategies: &[StrategySpec],
@@ -1421,10 +1459,6 @@ impl TournamentRunner {
         };
         let a = strategy_log_id(&self.strategies[session.matchup.a_idx]);
         let b = strategy_log_id(&self.strategies[session.matchup.b_idx]);
-        let a_moves = session.history_actions_a.clone();
-        let b_moves = session.history_actions_b.clone();
-        let a_halted = session.history_halted_a.clone();
-        let b_halted = session.history_halted_b.clone();
         let include_tm_metrics = self.config.history.include_cycle_metadata;
         let a_tm_metrics = if include_tm_metrics {
             session.a_strategy.tm_stats().map(tm_metrics_from_stats)
@@ -1437,8 +1471,6 @@ impl TournamentRunner {
             None
         };
         let record = MatchHistory {
-            event: "match_history".into(),
-            timestamp: EventWriter::timestamp(),
             match_id: session.matchup.match_id,
             match_index: self.match_index + 1,
             total_matches: self.schedule.len(),
@@ -1446,17 +1478,9 @@ impl TournamentRunner {
             b,
             repetition: session.matchup.repetition + 1,
             rounds: session.rounds_total,
-            a_moves: a_moves.clone(),
-            b_moves: b_moves.clone(),
-            a_halted,
-            b_halted,
-            a_incoming: b_moves,
-            b_incoming: a_moves,
             score_idx: session.history_scores.clone(),
             a_score: session.a_total,
             b_score: session.b_total,
-            a_initial: session.history_actions_a.chars().next(),
-            b_initial: session.history_actions_b.chars().next(),
             cycle: None,
             a_tm_metrics,
             b_tm_metrics,
@@ -1525,6 +1549,9 @@ impl TournamentRunner {
 
         let total_matches = self.schedule.len();
         let matchups = self.schedule.matchups(self.match_index, matches_to_run);
+        if matchups.is_empty() {
+            return;
+        }
         self.ensure_metal_batch();
         let config = &self.config;
         let strategies = &self.strategies;
@@ -1549,11 +1576,9 @@ impl TournamentRunner {
                 false,
             )
         };
-        let (tail_matchup, head_matchups) = matchups
-            .split_last()
-            .expect("fast-forward batches are non-empty");
+        let fast_forward_matchups = matchups.as_slice();
         let run_parallel = || {
-            head_matchups
+            fast_forward_matchups
                 .par_iter()
                 .map(|matchup| run_matchup(matchup, true))
                 .collect::<Vec<_>>()
@@ -1563,19 +1588,19 @@ impl TournamentRunner {
                 config,
                 strategies,
                 prepared,
-                head_matchups,
+                fast_forward_matchups,
             ),
             MetalBatchState::Uninitialized | MetalBatchState::Unavailable => Ok(None),
         };
-        let (mut outcomes, gpu_used) = match metal_result {
+        let (outcomes, gpu_used) = match metal_result {
             Ok(Some((gpu_outcomes, metal_batches))) => {
                 self.runtime
-                    .note_metal_batches(metal_batches, head_matchups.len());
+                    .note_metal_batches(metal_batches, fast_forward_matchups.len());
                 (gpu_outcomes, true)
             }
             Ok(None) => {
                 let outcomes = match Parallelism::from_config(&self.config.engine.parallelism) {
-                    Parallelism::Off => head_matchups
+                    Parallelism::Off => fast_forward_matchups
                         .iter()
                         .map(|matchup| run_matchup(matchup, true))
                         .collect(),
@@ -1593,13 +1618,15 @@ impl TournamentRunner {
                 (outcomes, false)
             }
             Err(err) => {
-                if !head_matchups.is_empty() && self.config.engine.accelerator.allows_metal() {
+                if !fast_forward_matchups.is_empty()
+                    && self.config.engine.accelerator.allows_metal()
+                {
                     self.runtime
                         .note_metal_fallback_reason(format!("Metal backend error: {err}"));
                     self.metal_batch = MetalBatchState::Unavailable;
                 }
                 let outcomes = match Parallelism::from_config(&self.config.engine.parallelism) {
-                    Parallelism::Off => head_matchups
+                    Parallelism::Off => fast_forward_matchups
                         .iter()
                         .map(|matchup| run_matchup(matchup, true))
                         .collect(),
@@ -1617,14 +1644,24 @@ impl TournamentRunner {
                 (outcomes, false)
             }
         };
-        self.runtime.note_cpu_matches(1);
+        let snapshot_sample = outcomes
+            .last()
+            .and_then(|outcome| outcome.last_round.as_ref())
+            .is_none()
+            .then(|| fast_forward_matchups.last().cloned())
+            .flatten()
+            .map(|matchup| run_matchup(&matchup, false));
         if !gpu_used {
-            self.runtime.note_cpu_matches(head_matchups.len());
+            self.runtime.note_cpu_matches(fast_forward_matchups.len());
         }
-        outcomes.push(run_matchup(tail_matchup, false));
 
         self.last_round = None;
-        for outcome in outcomes {
+        for (idx, mut outcome) in outcomes.into_iter().enumerate() {
+            if idx + 1 == fast_forward_matchups.len() {
+                if let Some(sample) = snapshot_sample.as_ref() {
+                    outcome.last_round = sample.last_round.clone();
+                }
+            }
             self.record_completed_outcome(outcome);
         }
         *remaining_steps = remaining_steps
@@ -2031,7 +2068,6 @@ impl TournamentKernel {
 
         let fast_eval_allowed = self.config.engine.fast_eval
             && self.config.noise == 0.0
-            && !log_history
             && !(log_events && include_rounds);
 
         if fast_eval_allowed
@@ -2160,7 +2196,6 @@ impl TournamentKernel {
 
         let fast_eval_allowed = self.config.engine.fast_eval
             && self.config.noise == 0.0
-            && !log_history
             && !(log_events && include_rounds);
 
         if fast_eval_allowed
@@ -2347,7 +2382,15 @@ where
             let b = models.get(matchup.b_idx).and_then(|m| m.as_ref());
             a.zip(b)
         }) {
-            let eval = evaluate_match(a_model, b_model, config.rounds, config.payoff, false);
+            let record_cycle = log_history && config.history.include_cycle_metadata;
+            let eval = evaluate_match(
+                a_model,
+                b_model,
+                config.rounds,
+                config.payoff,
+                record_cycle,
+                log_history,
+            );
             if log_events {
                 emit_event(GameEvent::MatchEnd {
                     timestamp: EventWriter::timestamp(),
@@ -2355,6 +2398,24 @@ where
                     match_index,
                     a_total: eval.a_total,
                     b_total: eval.b_total,
+                });
+            }
+            if log_history {
+                let (a_owned, b_owned) = owned_ids.as_ref().expect("owned ids");
+                emit_history(MatchHistory {
+                    match_id: matchup.match_id,
+                    match_index,
+                    total_matches,
+                    a: a_owned.clone(),
+                    b: b_owned.clone(),
+                    repetition: matchup.repetition + 1,
+                    rounds: config.rounds,
+                    score_idx: eval.outcomes.unwrap_or_default(),
+                    a_score: eval.a_total,
+                    b_score: eval.b_total,
+                    cycle: eval.cycle.clone(),
+                    a_tm_metrics: None,
+                    b_tm_metrics: None,
                 });
             }
             let a_adjusted_total =
@@ -2441,15 +2502,12 @@ where
             let b = models.get(matchup.b_idx).and_then(|m| m.as_ref());
             a.zip(b)
         }) {
-            cycle_meta = evaluate_match(a_model, b_model, config.rounds, config.payoff, true).cycle;
+            cycle_meta =
+                evaluate_match(a_model, b_model, config.rounds, config.payoff, true, false).cycle;
         }
     }
 
     if log_history {
-        let a_moves = session.history_actions_a.clone();
-        let b_moves = session.history_actions_b.clone();
-        let a_halted = session.history_halted_a.clone();
-        let b_halted = session.history_halted_b.clone();
         let (a_owned, b_owned) = owned_ids.as_ref().expect("owned ids");
         let include_tm_metrics = config.history.include_cycle_metadata;
         let a_tm_metrics = if include_tm_metrics {
@@ -2463,8 +2521,6 @@ where
             None
         };
         emit_history(MatchHistory {
-            event: "match_history".into(),
-            timestamp: EventWriter::timestamp(),
             match_id: matchup.match_id,
             match_index,
             total_matches,
@@ -2472,17 +2528,9 @@ where
             b: b_owned.clone(),
             repetition: matchup.repetition + 1,
             rounds: session.rounds_total,
-            a_moves: a_moves.clone(),
-            b_moves: b_moves.clone(),
-            a_halted,
-            b_halted,
-            a_incoming: b_moves,
-            b_incoming: a_moves,
             score_idx: session.history_scores.clone(),
             a_score: session.a_total,
             b_score: session.b_total,
-            a_initial: session.history_actions_a.chars().next(),
-            b_initial: session.history_actions_b.chars().next(),
             cycle: cycle_meta,
             a_tm_metrics,
             b_tm_metrics,

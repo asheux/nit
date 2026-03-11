@@ -26,6 +26,7 @@ pub struct GamesConfig {
     pub rounds: Option<u32>,
     pub repetitions: Option<u32>,
     pub self_play: Option<bool>,
+    pub save_data: Option<bool>,
     pub seed: Option<u64>,
     pub noise: Option<f32>,
     pub payoff: Option<PayoffConfig>,
@@ -99,6 +100,8 @@ pub struct NormalizedConfig {
     pub rounds: u32,
     pub repetitions: u32,
     pub self_play: bool,
+    #[serde(default = "default_save_data")]
+    pub save_data: bool,
     pub seed: Option<u64>,
     pub noise: f32,
     pub payoff: PayoffMatrix,
@@ -240,6 +243,10 @@ fn default_fast_eval() -> bool {
     true
 }
 
+fn default_save_data() -> bool {
+    true
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct StrategySpec {
     pub id: String,
@@ -369,6 +376,7 @@ impl GamesConfig {
             rounds,
             repetitions,
             self_play,
+            save_data: self.save_data.unwrap_or_else(default_save_data),
             seed: self.seed,
             noise,
             payoff,

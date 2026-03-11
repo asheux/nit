@@ -806,41 +806,7 @@ impl GamesPetriDishRuntime {
                     }
                 }
                 RunnerEvent::Finished(summary) => {
-                    let summary = *summary;
-                    let pairs = summary
-                        .results
-                        .pairwise
-                        .iter()
-                        .map(|p| (p.a.clone(), p.b.clone()))
-                        .collect::<Vec<_>>();
-                    let elapsed = if let Some(session) = self.session.as_mut() {
-                        let elapsed = session.freeze_elapsed();
-                        session.results = summary.results.clone();
-                        session.definitions = summary.strategies.clone();
-                        Some(elapsed)
-                    } else {
-                        None
-                    };
-                    state.games.last_error = None;
-                    state.games.last_run_path = summary.paths.summary.clone();
-                    state.games.last_event_path = summary.event_log.clone();
-                    state.games.last_history_path = summary.history_log.clone();
-                    state.games.runtime = summary.runtime.clone();
-                    state.games.last_run = Some(summary);
-                    state.games.replay.pairs = pairs;
-                    reset_strategy_inspect(state);
-                    state.games.status = GamesStatus::Done;
-                    state.games.running = false;
-                    state.games.paused = false;
-                    state.games.petri_hidden = false;
-                    state.games.petri_lines.clear();
-                    state.status = Some(match elapsed {
-                        Some(elapsed) => format!(
-                            "Games tournament completed in {}",
-                            format_tournament_elapsed(elapsed)
-                        ),
-                        None => "Games tournament completed".into(),
-                    });
+                    self.finish_session(state, *summary);
                 }
                 RunnerEvent::Cancelled => {
                     let elapsed = self.session.as_mut().map(GameSession::freeze_elapsed);
@@ -876,6 +842,44 @@ impl GamesPetriDishRuntime {
                 }
             }
         }
+    }
+
+    fn finish_session(&mut self, state: &mut AppState, summary: nit_games::output::RunSummary) {
+        let pairs = summary
+            .results
+            .pairwise
+            .iter()
+            .map(|p| (p.a.clone(), p.b.clone()))
+            .collect::<Vec<_>>();
+        let elapsed = if let Some(session) = self.session.as_mut() {
+            let elapsed = session.freeze_elapsed();
+            session.results = summary.results.clone();
+            session.definitions = summary.strategies.clone();
+            Some(elapsed)
+        } else {
+            None
+        };
+        state.games.last_error = None;
+        state.games.last_run_path = summary.paths.summary.clone();
+        state.games.last_event_path = summary.event_log.clone();
+        state.games.last_history_path = summary.history_log.clone();
+        state.games.runtime = summary.runtime.clone();
+        state.games.last_run = Some(summary);
+        state.games.replay.pairs = pairs;
+        reset_strategy_inspect(state);
+        state.games.status = GamesStatus::Done;
+        state.games.running = false;
+        state.games.paused = false;
+        self.hidden = false;
+        state.games.petri_hidden = false;
+        state.games.petri_lines.clear();
+        state.status = Some(match elapsed {
+            Some(elapsed) => format!(
+                "Games tournament completed in {}",
+                format_tournament_elapsed(elapsed)
+            ),
+            None => "Games tournament completed".into(),
+        });
     }
 
     pub fn render(&mut self, frame: &mut Frame, screen: Rect, state: &mut AppState, theme: &Theme) {
@@ -1257,17 +1261,21 @@ impl GamesPetriDishRuntime {
         config.seed = Some(seed);
 
         let run_id = run_id_from_seed_config(seed, &config_text);
-        let layout = RunLayout::for_base(&state.workspace_root, &timestamp, seed, &run_id);
-        if let Err(err) = fs::create_dir_all(&layout.run_dir) {
-            let msg = format!("Failed to create games runs: {err}");
-            state.games.status = GamesStatus::Error;
-            state.games.last_error = Some(msg.clone());
-            state.status = Some(msg);
-            return;
+        let layout = config
+            .save_data
+            .then(|| RunLayout::for_base(&state.workspace_root, &timestamp, seed, &run_id));
+        if let Some(layout) = layout.as_ref() {
+            if let Err(err) = fs::create_dir_all(&layout.run_dir) {
+                let msg = format!("Failed to create games runs: {err}");
+                state.games.status = GamesStatus::Error;
+                state.games.last_error = Some(msg.clone());
+                state.status = Some(msg);
+                return;
+            }
         }
-        self.history_store = if family_mode {
+        self.history_store = if family_mode || !config.save_data {
             None
-        } else {
+        } else if let Some(layout) = layout.as_ref() {
             match HistoryPreviewStore::create(layout.run_dir.join("match_history_preview.ndjson")) {
                 Ok(store) => Some(store),
                 Err(err) => {
@@ -1277,18 +1285,22 @@ impl GamesPetriDishRuntime {
                     None
                 }
             }
+        } else {
+            None
         };
 
-        let event_log_enabled = config.event_log.enabled;
-        let history_log_enabled = config.history.enabled;
-        let summary_path = layout.summary_path.clone();
-        let event_path = layout.events_path.clone();
-        let history_path = layout.history_path.clone();
-        info!("Games summary path: {}", summary_path.display());
-        if event_log_enabled {
+        let event_log_enabled = config.save_data && config.event_log.enabled;
+        let history_log_enabled = config.save_data && config.history.enabled;
+        let summary_path = layout.as_ref().map(|layout| layout.summary_path.clone());
+        let event_path = layout.as_ref().map(|layout| layout.events_path.clone());
+        let history_path = layout.as_ref().map(|layout| layout.history_path.clone());
+        if let Some(summary_path) = summary_path.as_ref() {
+            info!("Games summary path: {}", summary_path.display());
+        }
+        if let Some(event_path) = event_path.as_ref().filter(|_| event_log_enabled) {
             info!("Games event log path: {}", event_path.display());
         }
-        if history_log_enabled {
+        if let Some(history_path) = history_path.as_ref().filter(|_| history_log_enabled) {
             info!("Games history log path: {}", history_path.display());
         }
         let progress_interval =
@@ -1299,14 +1311,20 @@ impl GamesPetriDishRuntime {
             config_text: config_text.clone(),
             timestamp: timestamp.clone(),
             run_id: run_id.clone(),
-            run_dir: layout.run_dir.clone(),
+            run_dir: layout.as_ref().map(|layout| layout.run_dir.clone()),
             summary_path: summary_path.clone(),
-            definitions_path: layout.definitions_path.clone(),
-            results_path: layout.results_path.clone(),
-            config_path: layout.config_path.clone(),
-            analysis_dir: layout.analysis_dir.clone(),
-            event_path: event_log_enabled.then_some(event_path),
-            history_path: history_log_enabled.then_some(history_path),
+            definitions_path: layout
+                .as_ref()
+                .map(|layout| layout.definitions_path.clone()),
+            results_path: layout.as_ref().map(|layout| layout.results_path.clone()),
+            config_path: layout.as_ref().map(|layout| layout.config_path.clone()),
+            analysis_dir: layout.as_ref().map(|layout| layout.analysis_dir.clone()),
+            event_path: if event_log_enabled { event_path } else { None },
+            history_path: if history_log_enabled {
+                history_path
+            } else {
+                None
+            },
             progress_interval,
             steps_per_tick: request_steps_per_tick,
         };
@@ -1785,12 +1803,14 @@ fn render_progress(
         match_spans.push(Span::styled(")", dim_style));
         lines.push(Line::from(match_spans));
         if running_completed_snapshot {
+            let live_copy = if uses_metal_batching(&progress.runtime) {
+                "GPU batching; showing last completed match snapshot"
+            } else {
+                "Showing last completed match snapshot"
+            };
             lines.push(Line::from(vec![
                 Span::styled("Live: ", label_style),
-                Span::styled(
-                    "GPU batching; showing last completed match snapshot",
-                    dim_style,
-                ),
+                Span::styled(live_copy, dim_style),
             ]));
         }
         lines.push(Line::from(vec![
@@ -1956,6 +1976,11 @@ fn accelerator_progress_line(
         spans.push(Span::styled(policy_label, dim_style));
     }
     Line::from(spans)
+}
+
+fn uses_metal_batching(runtime: &nit_games::RuntimeAcceleratorStats) -> bool {
+    matches!(runtime.backend, nit_games::RuntimeAcceleratorBackend::Metal)
+        || runtime.metal_matches > 0
 }
 
 fn accelerator_note_line(
@@ -2183,11 +2208,7 @@ fn render_match_inspector(
         };
         let halt_waiting = halt_detail == waiting_text;
         let note = if running_completed_snapshot {
-            if matches!(
-                progress.runtime.backend,
-                nit_games::RuntimeAcceleratorBackend::Metal
-            ) || progress.runtime.metal_matches > 0
-            {
+            if uses_metal_batching(&progress.runtime) {
                 "Detailed round history is unavailable during GPU batching; showing the last completed match summary."
             } else {
                 "Detailed round history is unavailable; showing the last completed match summary."
@@ -3294,13 +3315,97 @@ k = 2
         assert!(match_line.contains("last complete"));
         assert!(!match_line.contains("round 200/200"));
         let live_line = line_text(&lines[2]);
-        assert!(live_line.contains("GPU batching"));
+        assert!(live_line.contains("Showing last completed match snapshot"));
+        assert!(!live_line.contains("GPU batching"));
         assert!(lines
             .iter()
             .any(|line| line_text(line).contains("policy 131072x4 cached")));
         assert!(lines
             .iter()
             .any(|line| line_text(line).contains("AccelCache: /tmp/apple_m4_max_demo_v1.json")));
+    }
+
+    #[test]
+    fn family_mode_disables_history_to_preserve_metal_batching() {
+        let mut state = AppState::new(
+            std::env::temp_dir(),
+            nit_core::Buffer::empty("x", None),
+            nit_core::Buffer::empty("n", None),
+        );
+        let mut runtime = GamesPetriDishRuntime::new(&state);
+        state.games.pending_run_override = Some(nit_core::GamesRunOverride {
+            config: sample_config(),
+            config_text: "schema_version = 1".into(),
+            label: "fsm family".into(),
+            family_mode: true,
+        });
+
+        runtime.start_session(&mut state);
+
+        let session = runtime.session.as_ref().expect("session started");
+        assert!(matches!(
+            session.config.engine.mode,
+            nit_games::EngineMode::Batch
+        ));
+        assert!(session.config.engine.fast_eval);
+        assert!(!session.config.event_log.enabled);
+        assert!(!session.config.history.enabled);
+        assert!(state.games.match_history.capture_disabled_for_run);
+    }
+
+    #[test]
+    fn finished_hidden_session_reopens_games_petri_dish() {
+        let mut state = AppState::new(
+            std::env::temp_dir(),
+            nit_core::Buffer::empty("x", None),
+            nit_core::Buffer::empty("n", None),
+        );
+        let mut runtime = GamesPetriDishRuntime::new(&state);
+        runtime.session = Some(GameSession {
+            config: sample_config(),
+            progress: None,
+            snapshot: None,
+            results: TournamentResults::empty(),
+            definitions: Vec::new(),
+            started_at: Instant::now(),
+            finished_elapsed: None,
+        });
+        runtime.hidden = true;
+        state.games.running = true;
+        state.games.status = GamesStatus::Running;
+        state.games.petri_hidden = true;
+
+        runtime.finish_session(
+            &mut state,
+            nit_games::output::RunSummary {
+                schema_version: nit_games::output::RUN_SUMMARY_SCHEMA_VERSION,
+                timestamp: "2026-03-11T12:00:00Z".into(),
+                run_id: "run".into(),
+                seed: 7,
+                config_text: String::new(),
+                config: sample_config(),
+                paths: nit_games::output::RunPaths {
+                    summary: None,
+                    events: None,
+                    history: None,
+                    definitions: None,
+                    results: None,
+                    config: None,
+                    analysis_dir: None,
+                },
+                strategies: Vec::new(),
+                results: TournamentResults::empty(),
+                event_log: None,
+                history_log: None,
+                runtime: nit_games::RuntimeAcceleratorStats::default(),
+                run_dir: None,
+            },
+        );
+
+        assert_eq!(state.games.status, GamesStatus::Done);
+        assert!(!runtime.hidden);
+        assert!(!state.games.petri_hidden);
+        assert!(runtime.is_visible());
     }
 
     #[test]

@@ -48,8 +48,9 @@ pub use strategy::{
     TmStopReason, TmTrace, TmTraceStep, TmTransition,
 };
 pub use tournament::{
-    accelerator_preflight, KernelRunMode, MatchHistoryPreview, MatchResult, MatchSnapshot,
-    Parallelism, TournamentKernel, TournamentProgress, TournamentRunner,
+    accelerator_preflight, accelerator_run_preflight, KernelRunMode, MatchHistoryPreview,
+    MatchResult, MatchSnapshot, Parallelism, TournamentKernel, TournamentProgress,
+    TournamentRunner,
 };
 
 #[cfg(test)]
