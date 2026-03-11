@@ -7,12 +7,13 @@ use std::sync::{
     Arc, Mutex, Weak,
 };
 use std::thread::{self, JoinHandle};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::swarm::{
     detect_swarm_mission_kind_from_prompt, explicit_swarm_mission_kind_from_prompt, is_agent_busy,
     normalize_role_label, parse_swarm_command, parse_swarm_mission_kind, select_swarm_agents,
-    GateReport, GateReportGate, SwarmCommand, SwarmMissionKind, SwarmRuntime, SwarmSize,
+    GateReport, GateReportGate, SwarmArtifactFocus, SwarmCommand, SwarmMissionKind, SwarmRuntime,
+    SwarmSize,
 };
 use crate::{
     codex_runner::{CodexCommand, CodexRunner, CodexRunnerConfig, CodexRuntimeMode},
@@ -32,8 +33,8 @@ use crate::{
     theme::Theme,
     vitals::{AgentVitalsState, DiagSeverity, LabVitalsSnapshot, VitalsState},
     widgets::{
-        agent_console_view, agent_ops_view, artifacts_popup, bottom_bar, editor_view,
-        file_tree_view, fuzzy_search_popup, games_analysis_popup, games_ca_sim_popup,
+        agent_console_view, agent_ops_view, artifacts_history_popup, artifacts_popup, bottom_bar,
+        editor_view, file_tree_view, fuzzy_search_popup, games_analysis_popup, games_ca_sim_popup,
         games_match_history_popup, games_replay_popup, games_run_browser_popup,
         games_strategy_popup, games_tm_sim_popup, games_visualizer_view, gate_monitor_view,
         help_overlay, protocol_picker, rule_picker, top_bar, visualizer_view,
@@ -55,7 +56,8 @@ use nit_core::{
     actions::Action, apply_action, io as core_io, AgentAlert, AgentAlertSeverity, AgentBusEvent,
     AgentChannel, AgentDiagnosticEvent, AgentMessage, AgentOpsTab, AgentStatus, AppKind, AppState,
     McpConnectionState, MissionPhase, MissionRecord, Mode, PaneId, PatchProposal, PatchStatus,
-    Prompt, SearchMode, UiSelection, UiSelectionPane, YankKind,
+    Prompt, SavedRunHistoryFilter, SavedRunHistoryPendingAction, SearchMode, UiSelection,
+    UiSelectionPane, YankKind,
 };
 use nit_games::config::GamesConfig;
 use ratatui::{
@@ -676,6 +678,13 @@ fn run_loop(
                         needs_redraw = true;
                         continue;
                     }
+                    if state.agents.artifacts_history_popup_open {
+                        let screen = terminal.size().unwrap_or_default();
+                        if handle_artifacts_history_popup_key(&key, state, screen, theme) {
+                            needs_redraw = true;
+                            continue;
+                        }
+                    }
                     if state.agents.artifacts_popup_open {
                         let screen = terminal.size().unwrap_or_default();
                         if handle_artifacts_popup_key(&key, state, &swarm, screen, theme) {
@@ -708,7 +717,7 @@ fn run_loop(
                     }
                     if state.app_kind == AppKind::Games && state.games.replay.open {
                         let screen = terminal.size().unwrap_or_default();
-                        if handle_replay_popup_key(&key, state, screen) {
+                        if handle_replay_popup_key(&key, state, screen, theme) {
                             clamp_modal_scroll_offsets(state, screen, theme);
                             needs_redraw = true;
                             continue;
@@ -724,7 +733,7 @@ fn run_loop(
                     }
                     if state.app_kind == AppKind::Games && state.games.tm_sim.open {
                         let screen = terminal.size().unwrap_or_default();
-                        if handle_tm_sim_popup_key(&key, state, screen) {
+                        if handle_tm_sim_popup_key(&key, state, screen, theme) {
                             clamp_modal_scroll_offsets(state, screen, theme);
                             needs_redraw = true;
                             continue;
@@ -732,7 +741,7 @@ fn run_loop(
                     }
                     if state.app_kind == AppKind::Games && state.games.ca_sim.open {
                         let screen = terminal.size().unwrap_or_default();
-                        if handle_ca_sim_popup_key(&key, state, screen) {
+                        if handle_ca_sim_popup_key(&key, state, screen, theme) {
                             clamp_modal_scroll_offsets(state, screen, theme);
                             needs_redraw = true;
                             continue;
@@ -947,8 +956,13 @@ fn run_loop(
                     mission_id.as_deref(),
                 );
             }
-            let swarm_dispatches = swarm.handle_event(state, &event);
-            for dispatch in swarm_dispatches {
+            let swarm_outcome = swarm.handle_event_outcome(state, &event);
+            maybe_follow_swarm_artifact_in_popup(
+                state,
+                &swarm,
+                swarm_outcome.artifact_focus.as_ref(),
+            );
+            for dispatch in swarm_outcome.dispatches {
                 dispatch_codex_prompt(
                     state,
                     &mut vitals,
@@ -1570,6 +1584,10 @@ fn draw(
         }
         if state.rule_picker.open {
             rule_picker::render(f, screen, state, theme);
+        }
+        if state.agents.artifacts_history_popup_open {
+            let area = dynamic_popup_rect(screen, artifacts_history_popup::preferred_size(screen));
+            artifacts_history_popup::render(f, area, state, theme);
         }
         if state.agents.artifacts_popup_open {
             let area = dynamic_popup_rect(screen, artifacts_popup::preferred_size(screen));
@@ -2478,6 +2496,18 @@ fn handle_agent_ops_key(
             changed = true;
         }
         KeyEvent {
+            code: KeyCode::Char('r') | KeyCode::Char('R'),
+            modifiers,
+            ..
+        } if modifiers.is_empty() && state.agents.dock_tab == AgentOpsTab::Evidence => {
+            state.agents.artifacts_history_popup_open = true;
+            state.agents.artifacts_history_selected =
+                agent_ops_view::artifacts_selected_visible_history_entry(state);
+            state.agents.artifacts_history_popup_scroll = 0;
+            state.agents.artifacts_history_pending_action = None;
+            changed = true;
+        }
+        KeyEvent {
             code: KeyCode::Enter,
             ..
         } => {
@@ -3135,6 +3165,20 @@ fn reset_roster_context(state: &mut AppState, swarm: &SwarmRuntime) -> bool {
                 at: timestamp_label(state),
             });
         } else {
+            let run_dir = state
+                .workspace_root
+                .join(".nit")
+                .join("agents")
+                .join("runs")
+                .join(mission_id);
+            if let Err(err) = archive_saved_run_snapshot(&run_dir) {
+                state.agents.diag_events.push(AgentDiagnosticEvent {
+                    severity: AgentAlertSeverity::Warn,
+                    source: "artifacts".into(),
+                    message: format!("failed to archive saved mission run for {mission_id}: {err}"),
+                    at: timestamp_label(state),
+                });
+            }
             state
                 .agents
                 .pending_provenance_mission_ids
@@ -3167,6 +3211,20 @@ fn reset_roster_context(state: &mut AppState, swarm: &SwarmRuntime) -> bool {
                 at: timestamp_label(state),
             });
         } else {
+            let run_dir = state
+                .workspace_root
+                .join(".nit")
+                .join("agents")
+                .join("ad-hoc")
+                .join(sanitize_for_filename(&agent_id));
+            if let Err(err) = archive_saved_run_snapshot(&run_dir) {
+                state.agents.diag_events.push(AgentDiagnosticEvent {
+                    severity: AgentAlertSeverity::Warn,
+                    source: "artifacts".into(),
+                    message: format!("failed to archive saved ad-hoc run for {agent_id}: {err}"),
+                    at: timestamp_label(state),
+                });
+            }
             state
                 .agents
                 .pending_provenance_agent_ids
@@ -3214,6 +3272,11 @@ fn reset_roster_context(state: &mut AppState, swarm: &SwarmRuntime) -> bool {
     }
     let removed = before.saturating_sub(state.agents.messages.len());
     state.agents.console_scroll = usize::MAX;
+    state.agents.artifacts_selected_saved_run_path = None;
+    state.agents.artifacts_history_selected = 0;
+    state.agents.artifacts_history_popup_scroll = 0;
+    state.agents.artifacts_history_popup_open = false;
+    state.agents.artifacts_history_pending_action = None;
 
     state.agents.diag_events.push(AgentDiagnosticEvent {
         severity: AgentAlertSeverity::Info,
@@ -5339,31 +5402,33 @@ fn apply_action_with_syntax(
     let before_focus = state.focus;
     let before_mode = state.mode;
     let before_debug = state.debug;
-    let editor_id = state.active_editor_buffer_id;
-    let notes_id = state.notes_buffer_id;
+    let before_editor_id = state.active_editor_buffer_id;
+    let before_notes_id = state.notes_buffer_id;
     let editor_version = state.editor_buffer().version();
     let notes_version = state.notes_buffer().version();
     let outcome = apply_action(state, action.clone());
+    let after_editor_id = state.active_editor_buffer_id;
+    let after_notes_id = state.notes_buffer_id;
 
     log_action(state, &action, before_focus, before_mode, before_debug);
 
-    if state.editor_buffer().version() != editor_version {
+    if after_editor_id == before_editor_id && state.editor_buffer().version() != editor_version {
         let buf = state.editor_buffer_mut();
-        syntax.note_buffer_change(editor_id, buf);
+        syntax.note_buffer_change(after_editor_id, buf);
     }
-    if state.notes_buffer().version() != notes_version {
+    if after_notes_id == before_notes_id && state.notes_buffer().version() != notes_version {
         let buf = state.notes_buffer_mut();
-        syntax.note_buffer_change(notes_id, buf);
+        syntax.note_buffer_change(after_notes_id, buf);
     }
 
     if matches!(action, Action::ToggleSyntax) {
         syntax.update_config(state.settings.highlight.clone());
-        syntax.prime_buffer(editor_id, state.editor_buffer(), true);
-        syntax.prime_buffer(notes_id, state.notes_buffer(), false);
+        syntax.prime_buffer(after_editor_id, state.editor_buffer(), true);
+        syntax.prime_buffer(after_notes_id, state.notes_buffer(), false);
     }
     if matches!(action, Action::OpenFile(_)) {
         // Avoid blocking highlight warmup when hopping files from NITTree.
-        syntax.prime_buffer(editor_id, state.editor_buffer(), false);
+        syntax.prime_buffer(after_editor_id, state.editor_buffer(), false);
     }
 
     outcome
@@ -6264,6 +6329,21 @@ fn handle_mouse_event_with_swarm(
                 return true;
             }
 
+            if state.agents.artifacts_history_popup_open {
+                let area =
+                    dynamic_popup_rect(screen, artifacts_history_popup::preferred_size(screen));
+                if point_in_rect(mouse.column, mouse.row, area) {
+                    let (max_scroll, _) =
+                        artifacts_history_popup_scroll_metrics(state, screen, theme);
+                    bump_scroll_clamped(
+                        &mut state.agents.artifacts_history_popup_scroll,
+                        delta,
+                        max_scroll,
+                    );
+                }
+                return true;
+            }
+
             if state.agents.artifacts_popup_open {
                 let area = dynamic_popup_rect(screen, artifacts_popup::preferred_size(screen));
                 if point_in_rect(mouse.column, mouse.row, area) {
@@ -6591,6 +6671,20 @@ fn artifacts_popup_scroll_metrics(
     )
 }
 
+fn artifacts_history_popup_scroll_metrics(
+    state: &AppState,
+    screen: ratatui::layout::Rect,
+    theme: &Theme,
+) -> (usize, usize) {
+    let area = dynamic_popup_rect(screen, artifacts_history_popup::preferred_size(screen));
+    let text_area = popup_text_area(area);
+    let lines = artifacts_history_popup::build_lines(state, theme, text_area.width);
+    (
+        popup_max_scroll(lines.len(), text_area),
+        popup_page_step(text_area),
+    )
+}
+
 fn help_popup_max_scroll(screen: ratatui::layout::Rect, theme: &Theme) -> usize {
     let area = dynamic_popup_rect(screen, help_overlay::preferred_size(screen));
     let text_area = popup_text_area(area);
@@ -6739,6 +6833,15 @@ fn clamp_modal_scroll_offsets(state: &mut AppState, screen: ratatui::layout::Rec
     if state.show_help {
         let max_scroll = help_popup_max_scroll(screen, theme);
         state.help_scroll = state.help_scroll.min(max_scroll);
+    }
+    if state.agents.artifacts_history_popup_open {
+        let (max_scroll, _) = artifacts_history_popup_scroll_metrics(state, screen, theme);
+        state.agents.artifacts_history_popup_scroll =
+            state.agents.artifacts_history_popup_scroll.min(max_scroll);
+        let max = agent_ops_view::artifacts_history_visible_entries(state)
+            .len()
+            .saturating_sub(1);
+        state.agents.artifacts_history_selected = state.agents.artifacts_history_selected.min(max);
     }
     if state.app_kind != AppKind::Games {
         return;
@@ -6937,6 +7040,40 @@ fn map_artifacts_popup_mouse_with_swarm(
     let height = text_area.height as usize;
     let max_scroll = text_lines.len().saturating_sub(height);
     let scroll = state.agents.artifacts_popup_scroll.min(max_scroll);
+    let (line_idx, col) = map_mouse_to_line_col(
+        mouse,
+        text_area,
+        &text_lines,
+        scroll,
+        state.settings.editor.tab_width as usize,
+        clamp,
+    )?;
+    Some((line_idx, col, text_lines))
+}
+
+fn map_artifacts_history_popup_mouse(
+    mouse: MouseEvent,
+    screen: ratatui::layout::Rect,
+    state: &AppState,
+    theme: &Theme,
+    clamp: bool,
+) -> Option<(usize, usize, Vec<String>)> {
+    if !state.agents.artifacts_history_popup_open {
+        return None;
+    }
+    let area = dynamic_popup_rect(screen, artifacts_history_popup::preferred_size(screen));
+    let text_area = popup_text_area(area);
+    if !point_in_rect(mouse.column, mouse.row, text_area) && !clamp {
+        return None;
+    }
+    let lines = artifacts_history_popup::build_lines(state, theme, text_area.width);
+    let text_lines = lines_to_strings(&lines);
+    if text_lines.is_empty() {
+        return None;
+    }
+    let height = text_area.height as usize;
+    let max_scroll = text_lines.len().saturating_sub(height);
+    let scroll = state.agents.artifacts_history_popup_scroll.min(max_scroll);
     let (line_idx, col) = map_mouse_to_line_col(
         mouse,
         text_area,
@@ -8031,6 +8168,38 @@ fn handle_mouse_down_with_swarm(
     if state.rule_picker.open || state.protocol_picker.open {
         return true;
     }
+    if state.agents.artifacts_history_popup_open {
+        if let Some((line_idx, col, lines)) =
+            map_artifacts_history_popup_mouse(mouse, screen, state, theme, false)
+        {
+            if let Some(entry_idx) = artifacts_history_popup::entry_index_for_line(state, line_idx)
+            {
+                clear_artifacts_history_pending_action(state);
+                state.agents.artifacts_history_selected = entry_idx;
+            }
+            reset_ui_selection(state, input_state);
+            state.ui_selection = Some(UiSelection {
+                pane: UiSelectionPane::ArtifactsHistoryPopup,
+                start_line: line_idx,
+                start_col: col,
+                end_line: line_idx,
+                end_col: col,
+            });
+            input_state.mouse_select_anchor = Some(MouseSelectAnchor {
+                target: MouseSelectTarget::Ui(UiSelectionPane::ArtifactsHistoryPopup),
+                line: line_idx,
+                col,
+            });
+            update_ui_selection_text(
+                state,
+                UiSelectionPane::ArtifactsHistoryPopup,
+                &lines,
+                clipboard,
+                input_state,
+            );
+        }
+        return true;
+    }
     if state.agents.artifacts_popup_open {
         if let Some((line_idx, col, lines)) =
             map_artifacts_popup_mouse_with_swarm(swarm, mouse, screen, state, theme, false)
@@ -8055,6 +8224,13 @@ fn handle_mouse_down_with_swarm(
                 clipboard,
                 input_state,
             );
+        } else {
+            let area = dynamic_popup_rect(screen, artifacts_popup::preferred_size(screen));
+            if !point_in_rect(mouse.column, mouse.row, area) {
+                reset_ui_selection(state, input_state);
+                state.agents.artifacts_popup_open = false;
+                state.agents.artifacts_popup_scroll = 0;
+            }
         }
         return true;
     }
@@ -8344,6 +8520,17 @@ fn handle_mouse_down_with_swarm(
         state.focus = PaneId::Notes;
         state.mode = Mode::Normal;
         state.agents.chat_input_selection_anchor = None;
+        if let Some(text_area) = agent_console_view::thread_text_area(layout.notes, state) {
+            if maybe_open_artifact_popup_from_console_line(
+                state,
+                swarm,
+                text_area.width as usize,
+                line_idx,
+            ) {
+                input_state.mouse_select_anchor = None;
+                return true;
+            }
+        }
         state.ui_selection = Some(UiSelection {
             pane: UiSelectionPane::AgentConsole,
             start_line: line_idx,
@@ -8825,6 +9012,9 @@ fn handle_mouse_drag_with_swarm(
                 UiSelectionPane::HelpPopup => {
                     map_help_popup_mouse(mouse, screen, state, theme, true)
                 }
+                UiSelectionPane::ArtifactsHistoryPopup => {
+                    map_artifacts_history_popup_mouse(mouse, screen, state, theme, true)
+                }
                 UiSelectionPane::ArtifactsPopup => {
                     map_artifacts_popup_mouse_with_swarm(swarm, mouse, screen, state, theme, true)
                 }
@@ -8931,6 +9121,12 @@ fn mouse_drag_allowed(state: &AppState, anchor: MouseSelectAnchor) -> bool {
     }
     if state.rule_picker.open || state.protocol_picker.open {
         return false;
+    }
+    if state.agents.artifacts_history_popup_open {
+        return matches!(
+            anchor.target,
+            MouseSelectTarget::Ui(UiSelectionPane::ArtifactsHistoryPopup)
+        );
     }
     if state.agents.artifacts_popup_open {
         return matches!(
@@ -9496,11 +9692,6 @@ fn handle_file_tree_key(
             };
             match row.kind {
                 nit_core::FileTreeKind::File => {
-                    if state.editor_buffer().is_dirty() {
-                        state.status =
-                            Some("Unsaved changes - save (Ctrl+S) before opening a file".into());
-                        return true;
-                    }
                     let path = row.path.clone();
                     let _ = apply_action_with_syntax(state, syntax, Action::OpenFile(path));
                     state.file_tree.open = false;
@@ -9614,11 +9805,6 @@ fn handle_fuzzy_search_key(
                 else {
                     return true;
                 };
-                if state.editor_buffer().is_dirty() {
-                    state.status =
-                        Some("Unsaved changes - save (Ctrl+S) before opening a file".into());
-                    return true;
-                }
                 let path = item.abs_path.clone();
                 let _ = apply_action_with_syntax(state, syntax, Action::OpenFile(path));
                 state.file_tree.open = false;
@@ -9635,11 +9821,6 @@ fn handle_fuzzy_search_key(
                 else {
                     return true;
                 };
-                if state.editor_buffer().is_dirty() {
-                    state.status =
-                        Some("Unsaved changes - save (Ctrl+S) before opening a file".into());
-                    return true;
-                }
                 let path = item.abs_path.clone();
                 let line = item.line;
                 let col = item.col;
@@ -10175,6 +10356,7 @@ fn handle_replay_popup_key(
     key: &KeyEvent,
     state: &mut AppState,
     screen: ratatui::layout::Rect,
+    theme: &Theme,
 ) -> bool {
     if state.app_kind != AppKind::Games || !state.games.replay.open {
         return false;
@@ -10186,6 +10368,7 @@ fn handle_replay_popup_key(
         screen,
         games_replay_popup::preferred_size(screen),
     )));
+    let max_scroll = games_replay_popup_max_scroll(state, screen, theme);
     match key.code {
         KeyCode::Esc | KeyCode::Char('q') => {
             state.games.replay.open = false;
@@ -10227,7 +10410,7 @@ fn handle_replay_popup_key(
                 }
                 adjust_replay_scroll(state, screen);
             } else {
-                bump_scroll(&mut state.games.replay.scroll_offset, -1);
+                bump_scroll_clamped(&mut state.games.replay.scroll_offset, -1, max_scroll);
             }
             true
         }
@@ -10239,7 +10422,7 @@ fn handle_replay_popup_key(
                 }
                 adjust_replay_scroll(state, screen);
             } else {
-                bump_scroll(&mut state.games.replay.scroll_offset, 1);
+                bump_scroll_clamped(&mut state.games.replay.scroll_offset, 1, max_scroll);
             }
             true
         }
@@ -10249,7 +10432,11 @@ fn handle_replay_popup_key(
                     state.games.replay.selected_index.saturating_sub(page_step);
                 adjust_replay_scroll(state, screen);
             } else {
-                bump_scroll(&mut state.games.replay.scroll_offset, -(page_step as i32));
+                bump_scroll_clamped(
+                    &mut state.games.replay.scroll_offset,
+                    -(page_step as i32),
+                    max_scroll,
+                );
             }
             true
         }
@@ -10260,7 +10447,11 @@ fn handle_replay_popup_key(
                     (state.games.replay.selected_index + page_step).min(max);
                 adjust_replay_scroll(state, screen);
             } else {
-                bump_scroll(&mut state.games.replay.scroll_offset, page_step as i32);
+                bump_scroll_clamped(
+                    &mut state.games.replay.scroll_offset,
+                    page_step as i32,
+                    max_scroll,
+                );
             }
             true
         }
@@ -10297,6 +10488,7 @@ fn handle_strategy_popup_key(
         screen,
         games_strategy_popup::preferred_size(screen),
     )));
+    let max_scroll = games_strategy_popup_max_scroll(state, screen);
     match key.code {
         KeyCode::Esc | KeyCode::Char('q') => {
             state.games.strategy_inspect.open = false;
@@ -10374,7 +10566,11 @@ fn handle_strategy_popup_key(
                 }
                 adjust_strategy_scroll(state, screen);
             } else {
-                bump_scroll(&mut state.games.strategy_inspect.scroll_offset, -1);
+                bump_scroll_clamped(
+                    &mut state.games.strategy_inspect.scroll_offset,
+                    -1,
+                    max_scroll,
+                );
             }
             true
         }
@@ -10391,7 +10587,11 @@ fn handle_strategy_popup_key(
                 }
                 adjust_strategy_scroll(state, screen);
             } else {
-                bump_scroll(&mut state.games.strategy_inspect.scroll_offset, 1);
+                bump_scroll_clamped(
+                    &mut state.games.strategy_inspect.scroll_offset,
+                    1,
+                    max_scroll,
+                );
             }
             true
         }
@@ -10404,9 +10604,10 @@ fn handle_strategy_popup_key(
                     .saturating_sub(page_step);
                 adjust_strategy_scroll(state, screen);
             } else {
-                bump_scroll(
+                bump_scroll_clamped(
                     &mut state.games.strategy_inspect.scroll_offset,
                     -(page_step as i32),
+                    max_scroll,
                 );
             }
             true
@@ -10423,9 +10624,10 @@ fn handle_strategy_popup_key(
                     (state.games.strategy_inspect.selected_index + page_step).min(max);
                 adjust_strategy_scroll(state, screen);
             } else {
-                bump_scroll(
+                bump_scroll_clamped(
                     &mut state.games.strategy_inspect.scroll_offset,
                     page_step as i32,
+                    max_scroll,
                 );
             }
             true
@@ -10438,6 +10640,7 @@ fn handle_tm_sim_popup_key(
     key: &KeyEvent,
     state: &mut AppState,
     screen: ratatui::layout::Rect,
+    theme: &Theme,
 ) -> bool {
     if state.app_kind != AppKind::Games || !state.games.tm_sim.open {
         return false;
@@ -10455,6 +10658,7 @@ fn handle_tm_sim_popup_key(
         screen,
         games_tm_sim_popup::preferred_size(screen),
     )));
+    let max_scroll = games_tm_sim_popup_max_scroll(state, screen, theme);
     match key.code {
         KeyCode::Esc | KeyCode::Char('q') => {
             state.games.tm_sim.open = false;
@@ -10473,19 +10677,27 @@ fn handle_tm_sim_popup_key(
             true
         }
         KeyCode::Up | KeyCode::Char('k') => {
-            bump_scroll(&mut state.games.tm_sim.scroll_offset, -1);
+            bump_scroll_clamped(&mut state.games.tm_sim.scroll_offset, -1, max_scroll);
             true
         }
         KeyCode::Down | KeyCode::Char('j') => {
-            bump_scroll(&mut state.games.tm_sim.scroll_offset, 1);
+            bump_scroll_clamped(&mut state.games.tm_sim.scroll_offset, 1, max_scroll);
             true
         }
         KeyCode::PageUp => {
-            bump_scroll(&mut state.games.tm_sim.scroll_offset, -(page_step as i32));
+            bump_scroll_clamped(
+                &mut state.games.tm_sim.scroll_offset,
+                -(page_step as i32),
+                max_scroll,
+            );
             true
         }
         KeyCode::PageDown => {
-            bump_scroll(&mut state.games.tm_sim.scroll_offset, page_step as i32);
+            bump_scroll_clamped(
+                &mut state.games.tm_sim.scroll_offset,
+                page_step as i32,
+                max_scroll,
+            );
             true
         }
         _ => true,
@@ -10496,6 +10708,7 @@ fn handle_ca_sim_popup_key(
     key: &KeyEvent,
     state: &mut AppState,
     screen: ratatui::layout::Rect,
+    theme: &Theme,
 ) -> bool {
     if state.app_kind != AppKind::Games || !state.games.ca_sim.open {
         return false;
@@ -10513,6 +10726,7 @@ fn handle_ca_sim_popup_key(
         screen,
         games_ca_sim_popup::preferred_size(screen),
     )));
+    let max_scroll = games_ca_sim_popup_max_scroll(state, screen, theme);
     match key.code {
         KeyCode::Esc | KeyCode::Char('q') => {
             state.games.ca_sim.open = false;
@@ -10531,19 +10745,27 @@ fn handle_ca_sim_popup_key(
             true
         }
         KeyCode::Up | KeyCode::Char('k') => {
-            bump_scroll(&mut state.games.ca_sim.scroll_offset, -1);
+            bump_scroll_clamped(&mut state.games.ca_sim.scroll_offset, -1, max_scroll);
             true
         }
         KeyCode::Down | KeyCode::Char('j') => {
-            bump_scroll(&mut state.games.ca_sim.scroll_offset, 1);
+            bump_scroll_clamped(&mut state.games.ca_sim.scroll_offset, 1, max_scroll);
             true
         }
         KeyCode::PageUp => {
-            bump_scroll(&mut state.games.ca_sim.scroll_offset, -(page_step as i32));
+            bump_scroll_clamped(
+                &mut state.games.ca_sim.scroll_offset,
+                -(page_step as i32),
+                max_scroll,
+            );
             true
         }
         KeyCode::PageDown => {
-            bump_scroll(&mut state.games.ca_sim.scroll_offset, page_step as i32);
+            bump_scroll_clamped(
+                &mut state.games.ca_sim.scroll_offset,
+                page_step as i32,
+                max_scroll,
+            );
             true
         }
         _ => true,
@@ -10665,6 +10887,110 @@ fn adjust_strategy_scroll(state: &mut AppState, screen: ratatui::layout::Rect) {
     }
 }
 
+fn maybe_follow_swarm_artifact_in_popup(
+    state: &mut AppState,
+    swarm: &SwarmRuntime,
+    focus: Option<&SwarmArtifactFocus>,
+) {
+    let Some(focus) = focus else {
+        return;
+    };
+    if !state.agents.artifacts_popup_open
+        || state.agents.artifacts_selected_saved_run_path.is_some()
+    {
+        return;
+    }
+    let mission_id = match focus {
+        SwarmArtifactFocus::Task { mission_id, .. } => mission_id.as_str(),
+        SwarmArtifactFocus::Report { mission_id } => mission_id.as_str(),
+    };
+    if state.agents.selected_context_mission() != Some(mission_id) {
+        return;
+    }
+
+    let width = state.agents.ops_viewport_width.max(32);
+    let card_idx = match focus {
+        SwarmArtifactFocus::Task {
+            mission_id,
+            task_id,
+        } => agent_ops_view::artifacts_card_index_for_swarm_task(
+            state, swarm, width, mission_id, task_id,
+        ),
+        SwarmArtifactFocus::Report { mission_id } => {
+            agent_ops_view::artifacts_card_index_for_swarm_report(state, swarm, width, mission_id)
+        }
+    };
+    let Some(card_idx) = card_idx else {
+        return;
+    };
+
+    state.agents.artifacts_selected = card_idx;
+    state.agents.artifacts_popup_scroll = 0;
+    if let Some(selection) = state.ui_selection {
+        if matches!(selection.pane, UiSelectionPane::ArtifactsPopup) {
+            state.ui_selection = None;
+        }
+    }
+}
+
+fn maybe_open_artifact_popup_from_console_line(
+    state: &mut AppState,
+    swarm: &SwarmRuntime,
+    text_width: usize,
+    line_idx: usize,
+) -> bool {
+    let Some(message_idx) = agent_console_view::artifact_message_index_for_line_with_swarm(
+        state,
+        Some(swarm),
+        text_width,
+        line_idx,
+    ) else {
+        return false;
+    };
+    let Some(message) = state.agents.messages.get(message_idx).cloned() else {
+        return false;
+    };
+
+    if let Some(mission_id) = message.mission_id.as_deref() {
+        state.agents.selected_mission = Some(mission_id.to_string());
+        if let Some(mission_idx) = state
+            .agents
+            .missions
+            .iter()
+            .position(|mission| mission.id == mission_id)
+        {
+            state.agents.mission_selected = mission_idx;
+        }
+    } else if let Some(agent_id) = message.agent_id.as_deref() {
+        state.agents.selected_mission = None;
+        state.agents.selected_agent = Some(agent_id.to_string());
+    }
+
+    let selected = agent_ops_view::artifacts_popup_ref_for_message(
+        state,
+        Some(swarm),
+        text_width,
+        message_idx,
+    )
+    .and_then(|popup_ref| {
+        agent_ops_view::artifacts_card_index_for_popup_ref(
+            state,
+            Some(swarm),
+            text_width,
+            &popup_ref,
+        )
+    });
+    let Some(card_idx) = selected else {
+        return false;
+    };
+
+    state.agents.artifacts_selected_saved_run_path = None;
+    state.agents.artifacts_selected = card_idx;
+    state.agents.artifacts_popup_open = true;
+    state.agents.artifacts_popup_scroll = 0;
+    true
+}
+
 fn handle_artifacts_popup_key(
     key: &KeyEvent,
     state: &mut AppState,
@@ -10725,6 +11051,317 @@ fn handle_artifacts_popup_key(
             true
         }
         _ => true, // swallow all input while modal is open
+    }
+}
+
+fn load_selected_artifacts_history_entry(state: &mut AppState) {
+    let entries = agent_ops_view::artifacts_history_visible_entries(state);
+    if entries.is_empty() {
+        state.agents.artifacts_selected_saved_run_path = None;
+    } else {
+        let selected = state
+            .agents
+            .artifacts_history_selected
+            .min(entries.len().saturating_sub(1));
+        state.agents.artifacts_selected_saved_run_path = entries
+            .get(selected)
+            .and_then(|entry| entry.run_path.clone());
+    }
+    state.agents.artifacts_selected = 0;
+    state.agents.ops_scroll = 0;
+    state.agents.artifacts_history_pending_action = None;
+}
+
+fn sync_artifacts_history_popup_selection(state: &mut AppState) {
+    let entries = agent_ops_view::artifacts_history_visible_entries(state);
+    if entries.is_empty() {
+        state.agents.artifacts_history_selected = 0;
+        state.agents.artifacts_selected_saved_run_path = None;
+        return;
+    }
+    let selected_path = state.agents.artifacts_selected_saved_run_path.as_deref();
+    let selected = entries
+        .iter()
+        .position(|entry| entry.run_path.as_deref() == selected_path)
+        .unwrap_or_else(|| {
+            state
+                .agents
+                .artifacts_history_selected
+                .min(entries.len().saturating_sub(1))
+        });
+    state.agents.artifacts_history_selected = selected.min(entries.len().saturating_sub(1));
+}
+
+fn clear_artifacts_history_pending_action(state: &mut AppState) {
+    state.agents.artifacts_history_pending_action = None;
+}
+
+fn remove_saved_run_entry(entry: &agent_ops_view::SavedArtifactsRunEntry) -> io::Result<bool> {
+    let Some(run_path) = entry.run_path.as_deref() else {
+        return Ok(false);
+    };
+    let run_path = PathBuf::from(run_path);
+    let target = if run_path.file_name().and_then(|name| name.to_str()) == Some("run.json") {
+        run_path.parent().map(Path::to_path_buf).unwrap_or(run_path)
+    } else {
+        run_path
+    };
+    if !target.exists() {
+        return Ok(false);
+    }
+    fs::remove_dir_all(target)?;
+    Ok(true)
+}
+
+fn delete_selected_artifacts_history_entry(
+    state: &mut AppState,
+    screen: ratatui::layout::Rect,
+    theme: &Theme,
+) -> bool {
+    let entries = agent_ops_view::artifacts_history_visible_entries(state);
+    let Some(entry) = entries.get(
+        state
+            .agents
+            .artifacts_history_selected
+            .min(entries.len().saturating_sub(1)),
+    ) else {
+        state.status = Some("No saved run selected.".into());
+        clear_artifacts_history_pending_action(state);
+        return true;
+    };
+    if !matches!(entry.kind, agent_ops_view::SavedArtifactsRunKind::Archived) {
+        state.status = Some("Current/latest saved run cannot be deleted.".into());
+        clear_artifacts_history_pending_action(state);
+        return true;
+    }
+    if !matches!(
+        state.agents.artifacts_history_pending_action,
+        Some(SavedRunHistoryPendingAction::DeleteSelected)
+    ) {
+        state.agents.artifacts_history_pending_action =
+            Some(SavedRunHistoryPendingAction::DeleteSelected);
+        state.status = Some(format!("Confirm delete for {}.", entry.label));
+        return true;
+    }
+    let deleted = match remove_saved_run_entry(entry) {
+        Ok(deleted) => deleted,
+        Err(err) => {
+            state.status = Some(format!("Failed to delete saved run: {err}"));
+            clear_artifacts_history_pending_action(state);
+            return true;
+        }
+    };
+    if deleted
+        && state.agents.artifacts_selected_saved_run_path.as_deref() == entry.run_path.as_deref()
+    {
+        state.agents.artifacts_selected_saved_run_path = None;
+    }
+    clear_artifacts_history_pending_action(state);
+    sync_artifacts_history_popup_selection(state);
+    adjust_artifacts_history_popup_scroll(state, screen, theme);
+    state.status = Some(if deleted {
+        format!("Deleted {}.", entry.label)
+    } else {
+        format!("Saved run {} was already missing.", entry.label)
+    });
+    true
+}
+
+fn prune_filtered_artifacts_history_entries(
+    state: &mut AppState,
+    screen: ratatui::layout::Rect,
+    theme: &Theme,
+) -> bool {
+    let prunable = agent_ops_view::artifacts_history_prunable_entries(state);
+    if prunable.is_empty() {
+        state.status = Some("No saved runs match the current filter.".into());
+        clear_artifacts_history_pending_action(state);
+        return true;
+    }
+    if !matches!(
+        state.agents.artifacts_history_pending_action,
+        Some(SavedRunHistoryPendingAction::PruneFiltered)
+    ) {
+        state.agents.artifacts_history_pending_action =
+            Some(SavedRunHistoryPendingAction::PruneFiltered);
+        state.status = Some(format!("Confirm prune for {} saved runs.", prunable.len()));
+        return true;
+    }
+    let selected_path = state.agents.artifacts_selected_saved_run_path.clone();
+    let mut removed = 0usize;
+    for entry in &prunable {
+        match remove_saved_run_entry(entry) {
+            Ok(true) => removed = removed.saturating_add(1),
+            Ok(false) => {}
+            Err(err) => {
+                state.status = Some(format!("Failed to prune saved runs: {err}"));
+                clear_artifacts_history_pending_action(state);
+                sync_artifacts_history_popup_selection(state);
+                adjust_artifacts_history_popup_scroll(state, screen, theme);
+                return true;
+            }
+        }
+    }
+    if selected_path.as_deref().is_some_and(|path| {
+        prunable
+            .iter()
+            .any(|entry| entry.run_path.as_deref() == Some(path))
+    }) {
+        state.agents.artifacts_selected_saved_run_path = None;
+    }
+    clear_artifacts_history_pending_action(state);
+    sync_artifacts_history_popup_selection(state);
+    adjust_artifacts_history_popup_scroll(state, screen, theme);
+    state.status = Some(format!("Pruned {removed} saved runs."));
+    true
+}
+
+fn adjust_artifacts_history_popup_scroll(
+    state: &mut AppState,
+    screen: ratatui::layout::Rect,
+    theme: &Theme,
+) {
+    let area = dynamic_popup_rect(screen, artifacts_history_popup::preferred_size(screen));
+    let text_area = popup_text_area(area);
+    let inner_height = text_area.height.max(1) as usize;
+    let total = artifacts_history_popup::build_lines(state, theme, text_area.width).len();
+    let max_scroll = total.saturating_sub(inner_height);
+    let selected_line = 6usize.saturating_add(state.agents.artifacts_history_selected);
+    if selected_line < state.agents.artifacts_history_popup_scroll {
+        state.agents.artifacts_history_popup_scroll = selected_line;
+    } else if selected_line
+        >= state
+            .agents
+            .artifacts_history_popup_scroll
+            .saturating_add(inner_height)
+    {
+        state.agents.artifacts_history_popup_scroll =
+            selected_line.saturating_sub(inner_height.saturating_sub(1));
+    }
+    state.agents.artifacts_history_popup_scroll =
+        state.agents.artifacts_history_popup_scroll.min(max_scroll);
+}
+
+fn handle_artifacts_history_popup_key(
+    key: &KeyEvent,
+    state: &mut AppState,
+    screen: ratatui::layout::Rect,
+    theme: &Theme,
+) -> bool {
+    if !state.agents.artifacts_history_popup_open {
+        return false;
+    }
+    if is_global_quit_key(key) {
+        return false;
+    }
+    let entries = agent_ops_view::artifacts_history_visible_entries(state);
+    let max = entries.len().saturating_sub(1);
+    let (_, page_step) = artifacts_history_popup_scroll_metrics(state, screen, theme);
+    match key.code {
+        KeyCode::Esc | KeyCode::Char('q') => {
+            clear_artifacts_history_pending_action(state);
+            state.agents.artifacts_history_popup_open = false;
+            state.agents.artifacts_history_popup_scroll = 0;
+            if let Some(selection) = state.ui_selection {
+                if matches!(selection.pane, UiSelectionPane::ArtifactsHistoryPopup) {
+                    state.ui_selection = None;
+                }
+            }
+            true
+        }
+        KeyCode::Enter => {
+            load_selected_artifacts_history_entry(state);
+            state.agents.artifacts_history_popup_open = false;
+            state.status = Some(format!(
+                "Artifacts source: {}",
+                agent_ops_view::artifacts_history_summary_label(state)
+            ));
+            true
+        }
+        KeyCode::Char('r') | KeyCode::Char('R') | KeyCode::Char('c') | KeyCode::Char('C') => {
+            state.agents.artifacts_history_selected = 0;
+            load_selected_artifacts_history_entry(state);
+            state.agents.artifacts_history_popup_open = false;
+            state.status = Some("Artifacts source: current / latest saved run".into());
+            true
+        }
+        KeyCode::Delete | KeyCode::Char('x') | KeyCode::Char('X') => {
+            delete_selected_artifacts_history_entry(state, screen, theme)
+        }
+        KeyCode::Char('p') | KeyCode::Char('P') => {
+            prune_filtered_artifacts_history_entries(state, screen, theme)
+        }
+        KeyCode::Char('a') | KeyCode::Char('A') => {
+            clear_artifacts_history_pending_action(state);
+            state.agents.artifacts_history_filter = SavedRunHistoryFilter::All;
+            sync_artifacts_history_popup_selection(state);
+            adjust_artifacts_history_popup_scroll(state, screen, theme);
+            true
+        }
+        KeyCode::Char('d') | KeyCode::Char('D') => {
+            clear_artifacts_history_pending_action(state);
+            state.agents.artifacts_history_filter = SavedRunHistoryFilter::LastDay;
+            sync_artifacts_history_popup_selection(state);
+            adjust_artifacts_history_popup_scroll(state, screen, theme);
+            true
+        }
+        KeyCode::Char('w') | KeyCode::Char('W') => {
+            clear_artifacts_history_pending_action(state);
+            state.agents.artifacts_history_filter = SavedRunHistoryFilter::LastWeek;
+            sync_artifacts_history_popup_selection(state);
+            adjust_artifacts_history_popup_scroll(state, screen, theme);
+            true
+        }
+        KeyCode::Char('m') | KeyCode::Char('M') => {
+            clear_artifacts_history_pending_action(state);
+            state.agents.artifacts_history_filter = SavedRunHistoryFilter::LastMonth;
+            sync_artifacts_history_popup_selection(state);
+            adjust_artifacts_history_popup_scroll(state, screen, theme);
+            true
+        }
+        KeyCode::Up | KeyCode::Char('k') => {
+            clear_artifacts_history_pending_action(state);
+            state.agents.artifacts_history_selected =
+                state.agents.artifacts_history_selected.saturating_sub(1);
+            adjust_artifacts_history_popup_scroll(state, screen, theme);
+            true
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            clear_artifacts_history_pending_action(state);
+            state.agents.artifacts_history_selected =
+                (state.agents.artifacts_history_selected + 1).min(max);
+            adjust_artifacts_history_popup_scroll(state, screen, theme);
+            true
+        }
+        KeyCode::PageUp => {
+            clear_artifacts_history_pending_action(state);
+            state.agents.artifacts_history_selected = state
+                .agents
+                .artifacts_history_selected
+                .saturating_sub(page_step);
+            adjust_artifacts_history_popup_scroll(state, screen, theme);
+            true
+        }
+        KeyCode::PageDown => {
+            clear_artifacts_history_pending_action(state);
+            state.agents.artifacts_history_selected =
+                (state.agents.artifacts_history_selected + page_step).min(max);
+            adjust_artifacts_history_popup_scroll(state, screen, theme);
+            true
+        }
+        KeyCode::Home => {
+            clear_artifacts_history_pending_action(state);
+            state.agents.artifacts_history_selected = 0;
+            adjust_artifacts_history_popup_scroll(state, screen, theme);
+            true
+        }
+        KeyCode::End => {
+            clear_artifacts_history_pending_action(state);
+            state.agents.artifacts_history_selected = max;
+            adjust_artifacts_history_popup_scroll(state, screen, theme);
+            true
+        }
+        _ => true,
     }
 }
 
@@ -11104,8 +11741,10 @@ fn write_swarm_run_provenance(
         .join(mission_id);
     let tasks_dir = run_dir.join("tasks");
     let gates_dir = run_dir.join("gates");
+    let report_dir = run_dir.join("report");
     fs::create_dir_all(&tasks_dir)?;
     fs::create_dir_all(&gates_dir)?;
+    fs::create_dir_all(&report_dir)?;
 
     let run_payload = serde_json::json!({
         "id": mission.id,
@@ -11117,6 +11756,9 @@ fn write_swarm_run_provenance(
         "updated_at": mission.updated_at,
         "gate_bundle": view.gate_bundle,
         "gate_selection": view.gate_selection,
+        "report_status": view.report_status,
+        "report_agent_id": view.report_agent_id,
+        "report_present": view.report_output.is_some(),
         "task_count": view.tasks.len(),
         "tasks": view.tasks.iter().map(|task| {
             serde_json::json!({
@@ -11189,8 +11831,88 @@ fn write_swarm_run_provenance(
         );
         write_file_atomic(&gates_dir.join("verify.md"), verify_md.as_bytes())?;
     }
+    if let Some(report_output) = view.report_output.as_deref() {
+        write_file_atomic(&report_dir.join("final.md"), report_output.as_bytes())?;
+    }
 
     Ok(())
+}
+
+const MAX_SAVED_RUN_HISTORY_PER_CONTEXT: usize = 200;
+
+fn prune_saved_run_history(history_root: &Path, keep_latest: usize) -> io::Result<()> {
+    let read_dir = match fs::read_dir(history_root) {
+        Ok(read_dir) => read_dir,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(err),
+    };
+    let mut archive_dirs = read_dir
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.path())
+        .filter(|path| path.is_dir())
+        .collect::<Vec<_>>();
+    archive_dirs.sort_by(|left, right| right.cmp(left));
+    for archive_dir in archive_dirs.into_iter().skip(keep_latest) {
+        fs::remove_dir_all(archive_dir)?;
+    }
+    Ok(())
+}
+
+fn archive_saved_run_snapshot(run_dir: &Path) -> io::Result<Option<PathBuf>> {
+    let run_json = run_dir.join("run.json");
+    if !run_json.exists() {
+        return Ok(None);
+    }
+
+    let archive_id_base = format!(
+        "{:020}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_micros()
+    );
+    let history_root = run_dir.join("history");
+    fs::create_dir_all(&history_root)?;
+
+    let mut archive_dir = history_root.join(&archive_id_base);
+    let mut suffix = 1usize;
+    while archive_dir.exists() {
+        archive_dir = history_root.join(format!("{archive_id_base}-{suffix}"));
+        suffix = suffix.saturating_add(1);
+    }
+    fs::create_dir_all(archive_dir.join("patches"))?;
+
+    for file_name in ["run.json", "thread.md"] {
+        let src = run_dir.join(file_name);
+        if !src.is_file() {
+            continue;
+        }
+        let contents = fs::read(&src)?;
+        write_file_atomic(&archive_dir.join(file_name), &contents)?;
+    }
+
+    let patches_src = run_dir.join("patches");
+    if patches_src.is_dir() {
+        for entry in fs::read_dir(&patches_src)? {
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(_) => continue,
+            };
+            let path = entry.path();
+            if !path.is_file() {
+                continue;
+            }
+            let Some(file_name) = path.file_name() else {
+                continue;
+            };
+            let contents = fs::read(&path)?;
+            write_file_atomic(&archive_dir.join("patches").join(file_name), &contents)?;
+        }
+    }
+
+    prune_saved_run_history(&history_root, MAX_SAVED_RUN_HISTORY_PER_CONTEXT)?;
+
+    Ok(Some(archive_dir))
 }
 
 fn verify_gate_status_label(gate: &GateReportGate) -> &'static str {
@@ -11460,7 +12182,7 @@ fn install_terminal_panic_hook(state: Weak<Mutex<TerminalState>>) {
 mod tests {
     use super::*;
     use crate::widgets::{agent_console_view, agent_ops_view};
-    use nit_core::AgentBusEvent;
+    use nit_core::{AgentBusEvent, SavedRunHistoryPendingAction};
     use std::{
         fs,
         time::{SystemTime, UNIX_EPOCH},
@@ -11889,6 +12611,357 @@ mod tests {
         assert_eq!(run["messages"][0]["text"], "keep this prompt");
         assert_eq!(run["messages"][1]["text"], "keep this reply");
         assert_eq!(run["codex_thread_id"], "thread-adhoc");
+    }
+
+    #[test]
+    fn reset_context_archives_saved_run_history_snapshot() {
+        let mut state = state_for_test_in_workspace("mission-history-archive");
+        state.agents.missions.push(MissionRecord {
+            id: "mis-777".into(),
+            title: "Archive mission".into(),
+            phase: MissionPhase::Execute,
+            swarm: false,
+            assigned_agents: vec!["gpt-5.1-codex-mini".into()],
+            status: "DONE".into(),
+            updated_at: "t+0".into(),
+        });
+        state.agents.selected_mission = Some("mis-777".into());
+        state.agents.agents.push(nit_core::AgentLane {
+            id: "gpt-5.1-codex-mini".into(),
+            role: "gpt-5.1-codex-mini".into(),
+            lane: "Codex".into(),
+            kind: nit_core::AgentLaneKind::Codex,
+            status: AgentStatus::Idle,
+            heartbeat_age_secs: 0,
+            queue_len: 0,
+            current_mission: Some("mis-777".into()),
+            last_message: String::new(),
+        });
+        state.agents.selected_agent = Some("gpt-5.1-codex-mini".into());
+        state.agents.roster_selected = 0;
+        state.agents.messages.push(AgentMessage {
+            at: "t+1".into(),
+            channel: AgentChannel::Agent,
+            agent_id: None,
+            mission_id: Some("mis-777".into()),
+            text: "archive me".into(),
+        });
+
+        assert!(reset_roster_context(&mut state, &SwarmRuntime::default()));
+
+        let history_root = state
+            .workspace_root
+            .join(".nit/agents/runs/mis-777/history");
+        let mut history_entries = fs::read_dir(&history_root)
+            .expect("history dir")
+            .filter_map(|entry| entry.ok())
+            .collect::<Vec<_>>();
+        history_entries.sort_by_key(|entry| entry.file_name());
+        assert_eq!(history_entries.len(), 1);
+        let archived_run = history_entries[0].path().join("run.json");
+        let run: serde_json::Value =
+            serde_json::from_slice(&fs::read(&archived_run).expect("read archived run"))
+                .expect("parse archived run");
+        assert_eq!(run["messages"][0]["text"], "archive me");
+    }
+
+    #[test]
+    fn archive_saved_run_snapshot_prunes_old_history_entries() {
+        let workspace = state_for_test_in_workspace("history-prune").workspace_root;
+        let run_dir = workspace.join(".nit/agents/runs/mis-prune");
+        fs::create_dir_all(&run_dir).expect("run dir");
+        fs::write(
+            run_dir.join("run.json"),
+            serde_json::json!({
+                "id": "mis-prune",
+                "updated_at": "t+1",
+                "messages": [],
+                "patches": [],
+                "evidence": []
+            })
+            .to_string(),
+        )
+        .expect("write run");
+
+        let history_root = run_dir.join("history");
+        fs::create_dir_all(&history_root).expect("history root");
+        for idx in 0..=MAX_SAVED_RUN_HISTORY_PER_CONTEXT {
+            let archive_dir = history_root.join(format!("{idx:020}"));
+            fs::create_dir_all(&archive_dir).expect("archive dir");
+            fs::write(
+                archive_dir.join("run.json"),
+                serde_json::json!({
+                    "id": "mis-prune",
+                    "updated_at": "t+0",
+                    "messages": [],
+                    "patches": [],
+                    "evidence": []
+                })
+                .to_string(),
+            )
+            .expect("write archived run");
+        }
+
+        archive_saved_run_snapshot(&run_dir).expect("archive snapshot");
+
+        let archive_dirs = fs::read_dir(&history_root)
+            .expect("read history")
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| entry.path().is_dir())
+            .count();
+        assert_eq!(archive_dirs, MAX_SAVED_RUN_HISTORY_PER_CONTEXT);
+        assert!(!history_root.join(format!("{:020}", 0)).exists());
+    }
+
+    #[test]
+    fn artifacts_history_popup_enter_selects_archived_run() {
+        let mut state = state_for_test_in_workspace("history-popup-select");
+        state.agents.dock_tab = AgentOpsTab::Evidence;
+        state.agents.selected_mission = Some("mis-888".into());
+        state.agents.missions.push(MissionRecord {
+            id: "mis-888".into(),
+            title: "History popup".into(),
+            phase: MissionPhase::Execute,
+            swarm: false,
+            assigned_agents: vec!["gpt-5.1-codex-mini".into()],
+            status: "DONE".into(),
+            updated_at: "t+0".into(),
+        });
+        let run_dir = state
+            .workspace_root
+            .join(".nit/agents/runs/mis-888/history/00000000000000000009");
+        fs::create_dir_all(&run_dir).expect("history dir");
+        let run_path = run_dir.join("run.json");
+        fs::write(
+            &run_path,
+            serde_json::json!({
+                "id": "mis-888",
+                "updated_at": "t+5",
+                "messages": [{"at":"t+1","channel":"Agent","agent_id":"gpt-5.1-codex-mini","mission_id":"mis-888","text":"saved reply"}],
+                "patches": [],
+                "evidence": []
+            })
+            .to_string(),
+        )
+        .expect("write run");
+        state.agents.artifacts_history_popup_open = true;
+        state.agents.artifacts_history_selected = 1;
+
+        let screen = ratatui::layout::Rect {
+            x: 0,
+            y: 0,
+            width: 120,
+            height: 40,
+        };
+        let theme = Theme::default();
+        assert!(handle_artifacts_history_popup_key(
+            &KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &mut state,
+            screen,
+            &theme,
+        ));
+        assert!(!state.agents.artifacts_history_popup_open);
+        assert_eq!(
+            state.agents.artifacts_selected_saved_run_path.as_deref(),
+            Some(run_path.to_string_lossy().as_ref())
+        );
+    }
+
+    #[test]
+    fn artifacts_history_popup_filter_hotkeys_update_visible_scope() {
+        let mut state = state_for_test_in_workspace("history-popup-filter-hotkeys");
+        state.agents.selected_mission = Some("mis-889".into());
+        state.agents.missions.push(MissionRecord {
+            id: "mis-889".into(),
+            title: "History filter keys".into(),
+            phase: MissionPhase::Execute,
+            swarm: false,
+            assigned_agents: vec!["gpt-5.1-codex-mini".into()],
+            status: "DONE".into(),
+            updated_at: "t+0".into(),
+        });
+        let now_micros = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_micros();
+        for archive_micros in [
+            now_micros.saturating_sub(3 * 24 * 60 * 60 * 1_000_000),
+            now_micros.saturating_sub(60 * 60 * 1_000_000),
+        ] {
+            let run_dir = state
+                .workspace_root
+                .join(".nit/agents/runs/mis-889/history")
+                .join(format!("{archive_micros:020}"));
+            fs::create_dir_all(&run_dir).expect("history dir");
+            fs::write(
+                run_dir.join("run.json"),
+                serde_json::json!({
+                    "id": "mis-889",
+                    "updated_at": "t+1",
+                    "messages": [],
+                    "patches": [],
+                    "evidence": []
+                })
+                .to_string(),
+            )
+            .expect("write run");
+        }
+        state.agents.artifacts_history_popup_open = true;
+
+        let screen = ratatui::layout::Rect {
+            x: 0,
+            y: 0,
+            width: 120,
+            height: 40,
+        };
+        let theme = Theme::default();
+        assert!(handle_artifacts_history_popup_key(
+            &KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE),
+            &mut state,
+            screen,
+            &theme,
+        ));
+        assert_eq!(
+            state.agents.artifacts_history_filter,
+            SavedRunHistoryFilter::LastDay
+        );
+        assert_eq!(
+            agent_ops_view::artifacts_history_visible_entries(&state).len(),
+            2
+        );
+    }
+
+    #[test]
+    fn artifacts_history_popup_delete_selected_archived_run_with_confirmation() {
+        let mut state = state_for_test_in_workspace("history-popup-delete");
+        state.agents.selected_mission = Some("mis-890".into());
+        state.agents.missions.push(MissionRecord {
+            id: "mis-890".into(),
+            title: "History delete".into(),
+            phase: MissionPhase::Execute,
+            swarm: false,
+            assigned_agents: vec!["gpt-5.1-codex-mini".into()],
+            status: "DONE".into(),
+            updated_at: "t+0".into(),
+        });
+        let run_dir = state
+            .workspace_root
+            .join(".nit/agents/runs/mis-890/history/00000000000000000009");
+        fs::create_dir_all(&run_dir).expect("history dir");
+        fs::write(
+            run_dir.join("run.json"),
+            serde_json::json!({
+                "id": "mis-890",
+                "updated_at": "t+5",
+                "messages": [],
+                "patches": [],
+                "evidence": []
+            })
+            .to_string(),
+        )
+        .expect("write run");
+        state.agents.artifacts_history_popup_open = true;
+        state.agents.artifacts_history_selected = 1;
+        state.agents.artifacts_selected_saved_run_path =
+            Some(run_dir.join("run.json").to_string_lossy().to_string());
+
+        let screen = ratatui::layout::Rect {
+            x: 0,
+            y: 0,
+            width: 120,
+            height: 40,
+        };
+        let theme = Theme::default();
+        assert!(handle_artifacts_history_popup_key(
+            &KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE),
+            &mut state,
+            screen,
+            &theme,
+        ));
+        assert_eq!(
+            state.agents.artifacts_history_pending_action,
+            Some(SavedRunHistoryPendingAction::DeleteSelected)
+        );
+        assert!(handle_artifacts_history_popup_key(
+            &KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE),
+            &mut state,
+            screen,
+            &theme,
+        ));
+        assert!(!run_dir.exists());
+        assert_eq!(state.agents.artifacts_history_pending_action, None);
+        assert_eq!(state.agents.artifacts_selected_saved_run_path, None);
+    }
+
+    #[test]
+    fn artifacts_history_popup_prune_filtered_runs_with_confirmation() {
+        let mut state = state_for_test_in_workspace("history-popup-prune");
+        state.agents.selected_mission = Some("mis-891".into());
+        state.agents.missions.push(MissionRecord {
+            id: "mis-891".into(),
+            title: "History prune".into(),
+            phase: MissionPhase::Execute,
+            swarm: false,
+            assigned_agents: vec!["gpt-5.1-codex-mini".into()],
+            status: "DONE".into(),
+            updated_at: "t+0".into(),
+        });
+        let now_micros = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_micros();
+        let old_dir = state.workspace_root.join(format!(
+            ".nit/agents/runs/mis-891/history/{:020}",
+            now_micros.saturating_sub(3 * 24 * 60 * 60 * 1_000_000)
+        ));
+        let recent_dir = state.workspace_root.join(format!(
+            ".nit/agents/runs/mis-891/history/{:020}",
+            now_micros.saturating_sub(2 * 60 * 60 * 1_000_000)
+        ));
+        for dir in [&old_dir, &recent_dir] {
+            fs::create_dir_all(dir).expect("history dir");
+            fs::write(
+                dir.join("run.json"),
+                serde_json::json!({
+                    "id": "mis-891",
+                    "updated_at": "t+1",
+                    "messages": [],
+                    "patches": [],
+                    "evidence": []
+                })
+                .to_string(),
+            )
+            .expect("write run");
+        }
+        state.agents.artifacts_history_popup_open = true;
+        state.agents.artifacts_history_filter = SavedRunHistoryFilter::LastDay;
+
+        let screen = ratatui::layout::Rect {
+            x: 0,
+            y: 0,
+            width: 120,
+            height: 40,
+        };
+        let theme = Theme::default();
+        assert!(handle_artifacts_history_popup_key(
+            &KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE),
+            &mut state,
+            screen,
+            &theme,
+        ));
+        assert_eq!(
+            state.agents.artifacts_history_pending_action,
+            Some(SavedRunHistoryPendingAction::PruneFiltered)
+        );
+        assert!(handle_artifacts_history_popup_key(
+            &KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE),
+            &mut state,
+            screen,
+            &theme,
+        ));
+        assert!(old_dir.exists());
+        assert!(!recent_dir.exists());
+        assert_eq!(state.agents.artifacts_history_pending_action, None);
     }
 
     #[test]
@@ -12797,6 +13870,123 @@ mod tests {
     }
 
     #[test]
+    fn clicking_agent_console_artifact_row_opens_matching_artifact_popup() {
+        let mut state = state_for_test();
+        state.agents.selected_agent = Some("planner".into());
+        state.agents.agents.push(nit_core::AgentLane {
+            id: "planner".into(),
+            role: "Planner".into(),
+            lane: "Lane A".into(),
+            kind: nit_core::AgentLaneKind::Mock,
+            status: nit_core::AgentStatus::Idle,
+            heartbeat_age_secs: 0,
+            queue_len: 0,
+            current_mission: None,
+            last_message: "idle".into(),
+        });
+        state.agents.messages.push(AgentMessage {
+            at: "10:00:00".into(),
+            channel: AgentChannel::Agent,
+            agent_id: Some("planner".into()),
+            mission_id: None,
+            text: "hello world".into(),
+        });
+
+        let mut input_state = InputState::new();
+        let mut clipboard = None;
+        let theme = Theme::default();
+        let screen = ratatui::layout::Rect {
+            x: 0,
+            y: 0,
+            width: 160,
+            height: 48,
+        };
+        let layout = layout::split(screen);
+        let text_area = agent_console_view::thread_text_area(layout.notes, &state)
+            .expect("thread area should be available");
+        let lines =
+            agent_console_view::thread_lines_for_selection(&state, text_area.width as usize);
+        let line_idx = lines
+            .iter()
+            .position(|line| line.contains("ARTIFACTS"))
+            .expect("artifact row");
+        let click = MouseEvent {
+            kind: MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            column: text_area
+                .x
+                .saturating_add(text_area.width.saturating_sub(1)),
+            row: text_area.y.saturating_add(line_idx as u16),
+            modifiers: KeyModifiers::NONE,
+        };
+
+        assert!(handle_mouse_down(
+            click,
+            screen,
+            &mut state,
+            &mut input_state,
+            &mut clipboard,
+            &theme
+        ));
+        assert!(state.agents.artifacts_popup_open);
+        assert!(matches!(
+            agent_ops_view::artifacts_popup_ref(&state, &SwarmRuntime::default(), 120),
+            Some(agent_ops_view::ArtifactsPopupRef::Message { idx: 0 })
+        ));
+    }
+
+    #[test]
+    fn clicking_outside_artifacts_popup_closes_it() {
+        let mut state = state_for_test();
+        state.agents.artifacts_popup_open = true;
+        state.ui_selection = Some(UiSelection {
+            pane: UiSelectionPane::ArtifactsPopup,
+            start_line: 0,
+            start_col: 0,
+            end_line: 0,
+            end_col: 0,
+        });
+
+        let mut input_state = InputState::new();
+        input_state.mouse_select_anchor = Some(MouseSelectAnchor {
+            target: MouseSelectTarget::Ui(UiSelectionPane::ArtifactsPopup),
+            line: 0,
+            col: 0,
+        });
+        let mut clipboard = None;
+        let theme = Theme::default();
+        let screen = ratatui::layout::Rect {
+            x: 0,
+            y: 0,
+            width: 160,
+            height: 48,
+        };
+        let area = dynamic_popup_rect(screen, artifacts_popup::preferred_size(screen));
+        let click = MouseEvent {
+            kind: MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            column: if area.x > 0 {
+                area.x - 1
+            } else {
+                area.x.saturating_add(area.width)
+            },
+            row: area.y,
+            modifiers: KeyModifiers::NONE,
+        };
+
+        assert!(handle_mouse_down(
+            click,
+            screen,
+            &mut state,
+            &mut input_state,
+            &mut clipboard,
+            &theme
+        ));
+        assert!(!state.agents.artifacts_popup_open);
+        assert_eq!(state.agents.artifacts_popup_scroll, 0);
+        assert!(state.ui_selection.is_none());
+        assert!(input_state.mouse_select_anchor.is_none());
+    }
+
+    #[test]
     fn click_in_chat_input_box_moves_chat_cursor() {
         let mut state = state_for_test();
         state.agents.chat_input = "hello\nworld".into();
@@ -13267,6 +14457,594 @@ mod tests {
             state.agents.artifacts_popup_scroll,
             max_scroll.saturating_sub(1)
         );
+    }
+
+    #[test]
+    fn replay_popup_scroll_clamps_before_moving_back_up() {
+        let mut state = state_for_test();
+        state.app_kind = AppKind::Games;
+        state.games.replay.open = true;
+        state.games.replay.lines = (0..80).map(|idx| format!("replay-line-{idx}")).collect();
+
+        let theme = Theme::default();
+        let screen = ratatui::layout::Rect {
+            x: 0,
+            y: 0,
+            width: 120,
+            height: 36,
+        };
+        let max_scroll = games_replay_popup_max_scroll(&state, screen, &theme);
+        state.games.replay.scroll_offset = max_scroll.saturating_add(25);
+
+        assert!(handle_replay_popup_key(
+            &KeyEvent::new(KeyCode::Up, KeyModifiers::NONE),
+            &mut state,
+            screen,
+            &theme,
+        ));
+        assert_eq!(
+            state.games.replay.scroll_offset,
+            max_scroll.saturating_sub(1)
+        );
+    }
+
+    #[test]
+    fn strategy_popup_scroll_clamps_before_moving_back_up() {
+        let mut state = state_for_test();
+        state.app_kind = AppKind::Games;
+        state.games.strategy_inspect.open = true;
+        state.games.strategy_inspect.lines =
+            (0..80).map(|idx| format!("strategy-line-{idx}")).collect();
+
+        let screen = ratatui::layout::Rect {
+            x: 0,
+            y: 0,
+            width: 120,
+            height: 36,
+        };
+        let max_scroll = games_strategy_popup_max_scroll(&state, screen);
+        state.games.strategy_inspect.scroll_offset = max_scroll.saturating_add(25);
+
+        assert!(handle_strategy_popup_key(
+            &KeyEvent::new(KeyCode::Up, KeyModifiers::NONE),
+            &mut state,
+            screen,
+        ));
+        assert_eq!(
+            state.games.strategy_inspect.scroll_offset,
+            max_scroll.saturating_sub(1)
+        );
+    }
+
+    #[test]
+    fn swarm_artifacts_popup_follows_completed_clone_task() {
+        let editor = nit_core::Buffer::from_str("editor", "", None);
+        let notes = nit_core::Buffer::from_str("notes", "", None);
+        let mut state = AppState::new(
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")),
+            editor,
+            notes,
+        );
+        state.agents.messages.clear();
+        state.agents.missions.clear();
+        state.agents.agents.clear();
+        state.agents.ops_viewport_width = 120;
+        state.agents.artifacts_popup_open = true;
+        state.agents.artifacts_selected = 0;
+        state.agents.agents.push(nit_core::AgentLane {
+            id: "planner".into(),
+            role: "Planner".into(),
+            lane: "Codex".into(),
+            kind: nit_core::AgentLaneKind::Codex,
+            status: nit_core::AgentStatus::Idle,
+            heartbeat_age_secs: 0,
+            queue_len: 0,
+            current_mission: None,
+            last_message: String::new(),
+        });
+
+        let mut swarm = SwarmRuntime::default();
+        let (mission_id, _dispatches) = swarm
+            .start(
+                &mut state,
+                "planner".into(),
+                vec!["planner".into()],
+                SwarmSize::Count(2),
+                Some("parallel".into()),
+                None,
+                "root".into(),
+            )
+            .expect("swarm start");
+        let clone_id = format!("planner#swarm-{mission_id}-clone-01");
+
+        let planner_message = format!(
+            r#"
+```json
+{{
+  "version": 2,
+  "template": "parallel",
+  "tasks": [
+    {{ "id": "t1", "agent_id": "{clone_id}", "title": "T1", "prompt": "DONE t1" }}
+  ]
+}}
+```
+"#
+        );
+        let planner_event = AgentBusEvent::TurnCompleted {
+            agent_id: "planner".into(),
+            mission_id: Some(mission_id.clone()),
+            thread_id: None,
+            token_count: None,
+            message: planner_message,
+        };
+        planner_event.apply(&mut state);
+        let planner_outcome = swarm.handle_event_outcome(&mut state, &planner_event);
+        assert_eq!(planner_outcome.dispatches.len(), 1);
+        assert!(matches!(
+            agent_ops_view::artifacts_popup_ref(&state, &swarm, 120),
+            Some(agent_ops_view::ArtifactsPopupRef::SwarmVerify { mission_id: ref mid })
+                if mid == &mission_id
+        ));
+
+        let clone_event = AgentBusEvent::TurnCompleted {
+            agent_id: clone_id,
+            mission_id: Some(mission_id.clone()),
+            thread_id: Some("thr-clone".into()),
+            token_count: None,
+            message: "clone output".into(),
+        };
+        clone_event.apply(&mut state);
+        let clone_outcome = swarm.handle_event_outcome(&mut state, &clone_event);
+        maybe_follow_swarm_artifact_in_popup(
+            &mut state,
+            &swarm,
+            clone_outcome.artifact_focus.as_ref(),
+        );
+
+        assert!(matches!(
+            agent_ops_view::artifacts_popup_ref(&state, &swarm, 120),
+            Some(agent_ops_view::ArtifactsPopupRef::SwarmTask {
+                mission_id: ref mid,
+                ref task_id,
+            }) if mid == &mission_id && task_id == "t1"
+        ));
+        assert_eq!(state.agents.artifacts_popup_scroll, 0);
+    }
+
+    #[test]
+    fn swarm_artifacts_popup_follows_final_report() {
+        let editor = nit_core::Buffer::from_str("editor", "", None);
+        let notes = nit_core::Buffer::from_str("notes", "", None);
+        let mut state = AppState::new(
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")),
+            editor,
+            notes,
+        );
+        state.agents.messages.clear();
+        state.agents.missions.clear();
+        state.agents.agents.clear();
+        state.agents.ops_viewport_width = 120;
+        state.agents.artifacts_popup_open = true;
+        state.agents.artifacts_selected = 0;
+        state.agents.agents.push(nit_core::AgentLane {
+            id: "planner".into(),
+            role: "Planner".into(),
+            lane: "Codex".into(),
+            kind: nit_core::AgentLaneKind::Codex,
+            status: nit_core::AgentStatus::Idle,
+            heartbeat_age_secs: 0,
+            queue_len: 0,
+            current_mission: None,
+            last_message: String::new(),
+        });
+
+        let mut swarm = SwarmRuntime::default();
+        let (mission_id, _dispatches) = swarm
+            .start(
+                &mut state,
+                "planner".into(),
+                vec!["planner".into()],
+                SwarmSize::Count(2),
+                Some("parallel".into()),
+                None,
+                "root".into(),
+            )
+            .expect("swarm start");
+        let clone_id = format!("planner#swarm-{mission_id}-clone-01");
+
+        let planner_message = format!(
+            r#"
+```json
+{{
+  "version": 2,
+  "template": "parallel",
+  "tasks": [
+    {{ "id": "t1", "agent_id": "{clone_id}", "title": "T1", "prompt": "DONE t1" }}
+  ]
+}}
+```
+"#
+        );
+        let planner_event = AgentBusEvent::TurnCompleted {
+            agent_id: "planner".into(),
+            mission_id: Some(mission_id.clone()),
+            thread_id: None,
+            token_count: None,
+            message: planner_message,
+        };
+        planner_event.apply(&mut state);
+        let _ = swarm.handle_event_outcome(&mut state, &planner_event);
+
+        let clone_event = AgentBusEvent::TurnCompleted {
+            agent_id: clone_id.clone(),
+            mission_id: Some(mission_id.clone()),
+            thread_id: Some("thr-clone".into()),
+            token_count: None,
+            message: "clone output".into(),
+        };
+        clone_event.apply(&mut state);
+        let clone_outcome = swarm.handle_event_outcome(&mut state, &clone_event);
+        maybe_follow_swarm_artifact_in_popup(
+            &mut state,
+            &swarm,
+            clone_outcome.artifact_focus.as_ref(),
+        );
+
+        assert!(matches!(
+            agent_ops_view::artifacts_popup_ref(&state, &swarm, 120),
+            Some(agent_ops_view::ArtifactsPopupRef::SwarmTask {
+                mission_id: ref mid,
+                ref task_id,
+            }) if mid == &mission_id && task_id == "t1"
+        ));
+
+        let verify_event = AgentBusEvent::TurnCompleted {
+            agent_id: clone_id,
+            mission_id: Some(mission_id.clone()),
+            thread_id: Some("thr-verify".into()),
+            token_count: None,
+            message: "verify output".into(),
+        };
+        verify_event.apply(&mut state);
+        let verify_outcome = swarm.handle_event_outcome(&mut state, &verify_event);
+        assert_eq!(verify_outcome.dispatches.len(), 1);
+        assert_eq!(verify_outcome.dispatches[0].agent_id, "planner");
+
+        let report_event = AgentBusEvent::TurnCompleted {
+            agent_id: "planner".into(),
+            mission_id: Some(mission_id.clone()),
+            thread_id: None,
+            token_count: None,
+            message: "# Final Report\n\nShip it.\n".into(),
+        };
+        report_event.apply(&mut state);
+        let report_outcome = swarm.handle_event_outcome(&mut state, &report_event);
+        maybe_follow_swarm_artifact_in_popup(
+            &mut state,
+            &swarm,
+            report_outcome.artifact_focus.as_ref(),
+        );
+
+        assert!(matches!(
+            report_outcome.artifact_focus,
+            Some(SwarmArtifactFocus::Report { mission_id: ref mid }) if mid == &mission_id
+        ));
+        assert!(matches!(
+            agent_ops_view::artifacts_popup_ref(&state, &swarm, 120),
+            Some(agent_ops_view::ArtifactsPopupRef::SwarmReport { mission_id: ref mid })
+                if mid == &mission_id
+        ));
+        assert_eq!(state.agents.artifacts_popup_scroll, 0);
+    }
+
+    #[test]
+    fn write_swarm_run_provenance_persists_final_report_markdown() {
+        let mut state = state_for_test_in_workspace("swarm-final-report");
+        state.agents.messages.clear();
+        state.agents.missions.clear();
+        state.agents.agents.clear();
+        state.agents.agents.push(nit_core::AgentLane {
+            id: "planner".into(),
+            role: "Planner".into(),
+            lane: "Codex".into(),
+            kind: nit_core::AgentLaneKind::Codex,
+            status: nit_core::AgentStatus::Idle,
+            heartbeat_age_secs: 0,
+            queue_len: 0,
+            current_mission: None,
+            last_message: String::new(),
+        });
+
+        let mut swarm = SwarmRuntime::default();
+        let (mission_id, _dispatches) = swarm
+            .start(
+                &mut state,
+                "planner".into(),
+                vec!["planner".into()],
+                SwarmSize::Count(2),
+                Some("parallel".into()),
+                None,
+                "root".into(),
+            )
+            .expect("swarm start");
+        let clone_id = format!("planner#swarm-{mission_id}-clone-01");
+
+        let planner_message = format!(
+            r#"
+```json
+{{
+  "version": 2,
+  "template": "parallel",
+  "tasks": [
+    {{ "id": "t1", "agent_id": "{clone_id}", "title": "T1", "prompt": "DONE t1" }}
+  ]
+}}
+```
+"#
+        );
+        let planner_event = AgentBusEvent::TurnCompleted {
+            agent_id: "planner".into(),
+            mission_id: Some(mission_id.clone()),
+            thread_id: None,
+            token_count: None,
+            message: planner_message,
+        };
+        planner_event.apply(&mut state);
+        let _ = swarm.handle_event_outcome(&mut state, &planner_event);
+
+        let clone_event = AgentBusEvent::TurnCompleted {
+            agent_id: clone_id.clone(),
+            mission_id: Some(mission_id.clone()),
+            thread_id: Some("thr-clone".into()),
+            token_count: None,
+            message: "clone output".into(),
+        };
+        clone_event.apply(&mut state);
+        let _ = swarm.handle_event_outcome(&mut state, &clone_event);
+
+        let verify_event = AgentBusEvent::TurnCompleted {
+            agent_id: clone_id,
+            mission_id: Some(mission_id.clone()),
+            thread_id: Some("thr-verify".into()),
+            token_count: None,
+            message: "verify output".into(),
+        };
+        verify_event.apply(&mut state);
+        let _ = swarm.handle_event_outcome(&mut state, &verify_event);
+
+        let final_report = "# Final Report\n\nShip it.\n";
+        let report_event = AgentBusEvent::TurnCompleted {
+            agent_id: "planner".into(),
+            mission_id: Some(mission_id.clone()),
+            thread_id: None,
+            token_count: None,
+            message: final_report.into(),
+        };
+        report_event.apply(&mut state);
+        let _ = swarm.handle_event_outcome(&mut state, &report_event);
+
+        write_swarm_run_provenance(&state, &swarm, &mission_id).expect("write swarm provenance");
+
+        let report_path = state
+            .workspace_root
+            .join(".nit")
+            .join("swarm")
+            .join(&mission_id)
+            .join("report")
+            .join("final.md");
+        let saved = fs::read_to_string(report_path).expect("saved final report");
+        assert!(saved.contains("# Final Report"));
+        assert!(saved.contains("Ship it."));
+    }
+
+    #[test]
+    fn clicking_swarm_clone_artifact_row_opens_matching_task_card() {
+        let editor = nit_core::Buffer::from_str("editor", "", None);
+        let notes = nit_core::Buffer::from_str("notes", "", None);
+        let mut state = AppState::new(
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")),
+            editor,
+            notes,
+        );
+        state.agents.messages.clear();
+        state.agents.missions.clear();
+        state.agents.agents.clear();
+        state.agents.ops_viewport_width = 120;
+        state.agents.agents.push(nit_core::AgentLane {
+            id: "planner".into(),
+            role: "Planner".into(),
+            lane: "Codex".into(),
+            kind: nit_core::AgentLaneKind::Codex,
+            status: nit_core::AgentStatus::Idle,
+            heartbeat_age_secs: 0,
+            queue_len: 0,
+            current_mission: None,
+            last_message: String::new(),
+        });
+
+        let mut swarm = SwarmRuntime::default();
+        let (mission_id, _dispatches) = swarm
+            .start(
+                &mut state,
+                "planner".into(),
+                vec!["planner".into()],
+                SwarmSize::Count(2),
+                Some("parallel".into()),
+                None,
+                "root".into(),
+            )
+            .expect("swarm start");
+        let clone_id = format!("planner#swarm-{mission_id}-clone-01");
+
+        let planner_message = format!(
+            r#"
+```json
+{{
+  "version": 2,
+  "template": "parallel",
+  "tasks": [
+    {{ "id": "t1", "agent_id": "{clone_id}", "title": "T1", "prompt": "DONE t1" }}
+  ]
+}}
+```
+"#
+        );
+        let planner_event = AgentBusEvent::TurnCompleted {
+            agent_id: "planner".into(),
+            mission_id: Some(mission_id.clone()),
+            thread_id: None,
+            token_count: None,
+            message: planner_message,
+        };
+        planner_event.apply(&mut state);
+        let _ = swarm.handle_event_outcome(&mut state, &planner_event);
+
+        let clone_event = AgentBusEvent::TurnCompleted {
+            agent_id: clone_id.clone(),
+            mission_id: Some(mission_id.clone()),
+            thread_id: Some("thr-clone".into()),
+            token_count: None,
+            message: "clone output".into(),
+        };
+        clone_event.apply(&mut state);
+        let _ = swarm.handle_event_outcome(&mut state, &clone_event);
+        state.agents.selected_mission = Some(mission_id.clone());
+        state.agents.console_scroll = 0;
+        if let Some(mission_idx) = state
+            .agents
+            .missions
+            .iter()
+            .position(|mission| mission.id == mission_id)
+        {
+            state.agents.mission_selected = mission_idx;
+        }
+
+        let mut input_state = InputState::new();
+        let mut clipboard = None;
+        let theme = Theme::default();
+        let screen = ratatui::layout::Rect {
+            x: 0,
+            y: 0,
+            width: 160,
+            height: 48,
+        };
+        let layout = layout::split(screen);
+        let text_area = agent_console_view::thread_text_area(layout.notes, &state)
+            .expect("thread area should be available");
+        let width = text_area.width as usize;
+        let lines =
+            agent_console_view::thread_lines_for_selection_with_swarm(&state, &swarm, width);
+        let line_idx = lines
+            .iter()
+            .enumerate()
+            .find_map(|(idx, _)| {
+                let message_idx = agent_console_view::artifact_message_index_for_line_with_swarm(
+                    &state,
+                    Some(&swarm),
+                    width,
+                    idx,
+                )?;
+                (state.agents.messages[message_idx].agent_id.as_deref() == Some(clone_id.as_str()))
+                    .then_some(idx)
+            })
+            .expect("clone artifact row");
+        let click = MouseEvent {
+            kind: MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            column: text_area.x.saturating_add(4),
+            row: text_area.y.saturating_add(line_idx as u16),
+            modifiers: KeyModifiers::NONE,
+        };
+
+        assert!(handle_mouse_down_with_swarm(
+            &swarm,
+            click,
+            screen,
+            &mut state,
+            &mut input_state,
+            &mut clipboard,
+            &theme
+        ));
+        assert!(state.agents.artifacts_popup_open);
+        assert!(matches!(
+            agent_ops_view::artifacts_popup_ref(&state, &swarm, 120),
+            Some(agent_ops_view::ArtifactsPopupRef::SwarmTask {
+                mission_id: ref mid,
+                ref task_id,
+            }) if mid == &mission_id && task_id == "t1"
+        ));
+    }
+
+    #[test]
+    fn non_artifact_swarm_console_row_does_not_open_artifact_popup() {
+        let editor = nit_core::Buffer::from_str("editor", "", None);
+        let notes = nit_core::Buffer::from_str("notes", "", None);
+        let mut state = AppState::new(
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")),
+            editor,
+            notes,
+        );
+        state.agents.messages.clear();
+        state.agents.missions.clear();
+        state.agents.agents.clear();
+        state.agents.ops_viewport_width = 120;
+        state.agents.agents.push(nit_core::AgentLane {
+            id: "planner".into(),
+            role: "Planner".into(),
+            lane: "Codex".into(),
+            kind: nit_core::AgentLaneKind::Codex,
+            status: nit_core::AgentStatus::Idle,
+            heartbeat_age_secs: 0,
+            queue_len: 0,
+            current_mission: None,
+            last_message: String::new(),
+        });
+
+        let mut swarm = SwarmRuntime::default();
+        let (mission_id, _dispatches) = swarm
+            .start(
+                &mut state,
+                "planner".into(),
+                vec!["planner".into()],
+                SwarmSize::Count(2),
+                Some("parallel".into()),
+                None,
+                "root".into(),
+            )
+            .expect("swarm start");
+        let clone_id = format!("planner#swarm-{mission_id}-clone-01");
+        let planner_message = format!(
+            r#"
+```json
+{{
+  "version": 2,
+  "template": "parallel",
+  "tasks": [
+    {{ "id": "t1", "agent_id": "{clone_id}", "title": "T1", "prompt": "DONE t1" }}
+  ]
+}}
+```
+"#
+        );
+        let planner_event = AgentBusEvent::TurnCompleted {
+            agent_id: "planner".into(),
+            mission_id: Some(mission_id),
+            thread_id: None,
+            token_count: None,
+            message: planner_message,
+        };
+        planner_event.apply(&mut state);
+        let _ = swarm.handle_event_outcome(&mut state, &planner_event);
+
+        let lines = agent_console_view::thread_lines_for_selection_with_swarm(&state, &swarm, 120);
+        let line_idx = lines
+            .iter()
+            .position(|line| line == "done")
+            .expect("plain done row");
+
+        assert!(!maybe_open_artifact_popup_from_console_line(
+            &mut state, &swarm, 120, line_idx
+        ));
+        assert!(!state.agents.artifacts_popup_open);
     }
 
     #[test]
@@ -14663,6 +16441,91 @@ mod tests {
             &mut syntax,
             area
         ));
+    }
+
+    #[test]
+    fn file_tree_opens_selected_file_when_current_editor_buffer_is_dirty() {
+        let mut state = state_for_test_in_workspace("file-tree-dirty-open");
+        let file_a = state.workspace_root.join("a.txt");
+        let file_b = state.workspace_root.join("b.txt");
+        fs::write(&file_a, "alpha").expect("write a");
+        fs::write(&file_b, "beta").expect("write b");
+        state.buffers[state.active_editor_buffer_id] =
+            nit_core::Buffer::from_str("a.txt", "alpha", Some(file_a.clone()));
+        state.editor_buffer_mut().insert_char('!');
+        state.file_tree.open = true;
+        state.file_tree.rows = vec![nit_core::FileTreeRow {
+            text: "b.txt".into(),
+            path: file_b.clone(),
+            kind: nit_core::FileTreeKind::File,
+            depth: 0,
+        }];
+        state.file_tree.selected = 0;
+
+        let mut syntax = SyntaxRuntime::new(state.settings.highlight.clone());
+        let area = ratatui::layout::Rect {
+            x: 0,
+            y: 0,
+            width: 80,
+            height: 24,
+        };
+        let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::empty());
+
+        assert!(handle_file_tree_key(&enter, &mut state, &mut syntax, area));
+        assert!(!state.file_tree.open);
+        assert_eq!(state.editor_buffer().path(), Some(&file_b));
+        assert_eq!(state.editor_buffer().content_as_string(), "beta");
+
+        let original = state.buffer(0).expect("original editor buffer");
+        assert_eq!(original.path(), Some(&file_a));
+        assert!(original.is_dirty());
+    }
+
+    #[test]
+    fn fuzzy_file_search_opens_selected_file_when_current_editor_buffer_is_dirty() {
+        let mut state = state_for_test_in_workspace("fuzzy-dirty-open");
+        let file_a = state.workspace_root.join("a.txt");
+        let file_b = state.workspace_root.join("b.txt");
+        fs::write(&file_a, "alpha").expect("write a");
+        fs::write(&file_b, "beta").expect("write b");
+        state.buffers[state.active_editor_buffer_id] =
+            nit_core::Buffer::from_str("a.txt", "alpha", Some(file_a.clone()));
+        state.editor_buffer_mut().insert_char('!');
+        state.fuzzy_search.open = true;
+        state.fuzzy_search.mode = SearchMode::Files;
+        state.fuzzy_search.file_results = vec![nit_core::SearchResultFile {
+            rel_path: "b.txt".into(),
+            abs_path: file_b.clone(),
+            score: 42,
+            matched_indices: vec![0],
+        }];
+        state.fuzzy_search.selected = 0;
+
+        let mut syntax = SyntaxRuntime::new(state.settings.highlight.clone());
+        let mut fuzzy_runtime =
+            FuzzySearchRuntime::new(&Theme::default(), state.settings.highlight.clone());
+        let screen = ratatui::layout::Rect {
+            x: 0,
+            y: 0,
+            width: 120,
+            height: 40,
+        };
+        let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::empty());
+
+        assert!(handle_fuzzy_search_key(
+            &enter,
+            &mut state,
+            &mut syntax,
+            &mut fuzzy_runtime,
+            screen
+        ));
+        assert!(!state.fuzzy_search.open);
+        assert_eq!(state.editor_buffer().path(), Some(&file_b));
+        assert_eq!(state.editor_buffer().content_as_string(), "beta");
+
+        let original = state.buffer(0).expect("original editor buffer");
+        assert_eq!(original.path(), Some(&file_a));
+        assert!(original.is_dirty());
     }
 
     #[test]

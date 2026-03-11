@@ -546,6 +546,18 @@ pub struct SwarmDispatch {
     pub prompt: String,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum SwarmArtifactFocus {
+    Task { mission_id: String, task_id: String },
+    Report { mission_id: String },
+}
+
+#[derive(Default)]
+pub(crate) struct SwarmEventOutcome {
+    pub dispatches: Vec<SwarmDispatch>,
+    pub artifact_focus: Option<SwarmArtifactFocus>,
+}
+
 #[derive(Default)]
 pub struct SwarmRuntime {
     runs: HashMap<String, SwarmRun>,
@@ -935,6 +947,9 @@ pub struct SwarmPersistenceView {
     pub gate_selection: String,
     pub gate_report: Option<GateReport>,
     pub gate_output: Option<String>,
+    pub report_status: Option<String>,
+    pub report_agent_id: Option<String>,
+    pub report_output: Option<String>,
     pub tasks: Vec<SwarmTaskPersistenceView>,
 }
 
@@ -974,6 +989,8 @@ struct SwarmRun {
     synthesis_prompt: Option<String>,
     gate_output: Option<String>,
     gate_report: Option<GateReport>,
+    report_status: Option<String>,
+    report_output: Option<String>,
 }
 
 impl SwarmRuntime {
@@ -1069,6 +1086,12 @@ impl SwarmRuntime {
             gate_selection: run.gate_selection.clone(),
             gate_report: run.gate_report.clone(),
             gate_output: run.gate_output.clone(),
+            report_status: run.report_status.clone(),
+            report_agent_id: run
+                .report_output
+                .as_ref()
+                .map(|_| run.planner_agent_id.clone()),
+            report_output: run.report_output.clone(),
             tasks,
         })
     }
@@ -1313,6 +1336,8 @@ impl SwarmRuntime {
                 synthesis_prompt: None,
                 gate_output: None,
                 gate_report: None,
+                report_status: None,
+                report_output: None,
             },
         );
 
@@ -1331,7 +1356,16 @@ impl SwarmRuntime {
         state: &mut AppState,
         event: &AgentBusEvent,
     ) -> Vec<SwarmDispatch> {
-        let mut dispatches = Vec::new();
+        self.handle_event_outcome(state, event).dispatches
+    }
+
+    pub(crate) fn handle_event_outcome(
+        &mut self,
+        state: &mut AppState,
+        event: &AgentBusEvent,
+    ) -> SwarmEventOutcome {
+        let mut outcome = SwarmEventOutcome::default();
+        let dispatches = &mut outcome.dispatches;
 
         match event {
             AgentBusEvent::TurnStarted {
@@ -1351,7 +1385,7 @@ impl SwarmRuntime {
                 ..
             } => {
                 let Some(mut run) = self.runs.remove(mid) else {
-                    return dispatches;
+                    return outcome;
                 };
                 match run.stage {
                     SwarmStage::Planning if agent_id == &run.planner_agent_id => {
@@ -1471,7 +1505,7 @@ impl SwarmRuntime {
                             abort_swarm_plan_preflight(state, &mut run, parsed);
                             cleanup_swarm_clones_for_mission(state, &run.mission_id);
                             self.completed_runs.insert(mid.clone(), run);
-                            return dispatches;
+                            return outcome;
                         }
                         let prev_integrator = run.integrator_agent_id.clone();
                         let prev_verifier = run.verifier_agent_id.clone();
@@ -1579,6 +1613,10 @@ impl SwarmRuntime {
                         if let Some(completed) =
                             mark_task_finished(&mut run, agent_id, message.clone(), false)
                         {
+                            outcome.artifact_focus = Some(SwarmArtifactFocus::Task {
+                                mission_id: run.mission_id.clone(),
+                                task_id: completed.task_id.clone(),
+                            });
                             if completed.expected_artifacts_missing {
                                 push_system_message_to_mission(
                                     state,
@@ -1639,7 +1677,7 @@ impl SwarmRuntime {
                     SwarmStage::Verifying => {
                         if run.verifier_agent_id.as_deref() != Some(agent_id.as_str()) {
                             self.runs.insert(mid.clone(), run);
-                            return dispatches;
+                            return outcome;
                         }
                         run.gate_output = Some(message.clone());
                         run.gate_report = parse_gate_report(message);
@@ -1683,6 +1721,11 @@ impl SwarmRuntime {
                         self.runs.insert(mid.clone(), run);
                     }
                     SwarmStage::Synthesizing if agent_id == &run.planner_agent_id => {
+                        run.report_status = Some("DONE".into());
+                        run.report_output = Some(message.clone());
+                        outcome.artifact_focus = Some(SwarmArtifactFocus::Report {
+                            mission_id: run.mission_id.clone(),
+                        });
                         run.stage = SwarmStage::Synthesizing;
                         update_mission_phase(state, &run.mission_id, MissionPhase::Report);
                         let tasks_ok = run
@@ -1720,7 +1763,7 @@ impl SwarmRuntime {
                 ..
             } => {
                 let Some(mut run) = self.runs.remove(mid) else {
-                    return dispatches;
+                    return outcome;
                 };
 
                 match run.stage {
@@ -1840,7 +1883,7 @@ impl SwarmRuntime {
                             abort_swarm_plan_preflight(state, &mut run, parsed);
                             cleanup_swarm_clones_for_mission(state, &run.mission_id);
                             self.completed_runs.insert(mid.clone(), run);
-                            return dispatches;
+                            return outcome;
                         }
                         let prev_integrator = run.integrator_agent_id.clone();
                         let prev_verifier = run.verifier_agent_id.clone();
@@ -1948,6 +1991,10 @@ impl SwarmRuntime {
                         if let Some(completed) =
                             mark_task_finished(&mut run, agent_id, message.clone(), true)
                         {
+                            outcome.artifact_focus = Some(SwarmArtifactFocus::Task {
+                                mission_id: run.mission_id.clone(),
+                                task_id: completed.task_id.clone(),
+                            });
                             if completed.expected_artifacts_missing {
                                 push_system_message_to_mission(
                                     state,
@@ -2008,7 +2055,7 @@ impl SwarmRuntime {
                     SwarmStage::Verifying => {
                         if run.verifier_agent_id.as_deref() != Some(agent_id.as_str()) {
                             self.runs.insert(mid.clone(), run);
-                            return dispatches;
+                            return outcome;
                         }
                         run.gate_output = Some(message.clone());
                         run.gate_report = None;
@@ -2030,6 +2077,11 @@ impl SwarmRuntime {
                         self.runs.insert(mid.clone(), run);
                     }
                     SwarmStage::Synthesizing if agent_id == &run.planner_agent_id => {
+                        run.report_status = Some("ERROR".into());
+                        run.report_output = Some(message.clone());
+                        outcome.artifact_focus = Some(SwarmArtifactFocus::Report {
+                            mission_id: run.mission_id.clone(),
+                        });
                         update_mission_final(state, &run.mission_id, "ERROR");
                         cleanup_swarm_clones_for_mission(state, &run.mission_id);
                         self.completed_runs.insert(mid.clone(), run);
@@ -2042,7 +2094,7 @@ impl SwarmRuntime {
             _ => {}
         }
 
-        dispatches
+        outcome
     }
 
     fn run_for_mission(&self, mission_id: &str) -> Option<&SwarmRun> {
@@ -6926,6 +6978,8 @@ Plan:
             synthesis_prompt: None,
             gate_output: None,
             gate_report: None,
+            report_status: None,
+            report_output: None,
         };
 
         initialize_task_graph(&mut run);
@@ -7019,6 +7073,8 @@ Plan:
             synthesis_prompt: None,
             gate_output: None,
             gate_report: None,
+            report_status: None,
+            report_output: None,
         };
 
         initialize_task_graph(&mut run);
@@ -7165,6 +7221,8 @@ Plan:
             synthesis_prompt: None,
             gate_output: None,
             gate_report: None,
+            report_status: None,
+            report_output: None,
         };
         initialize_task_graph(&mut run);
         refresh_task_readiness(&mut run);
@@ -7492,6 +7550,8 @@ notes
                     notes: Some("formatting".into()),
                 }],
             }),
+            report_status: None,
+            report_output: None,
         };
         let mut runtime = SwarmRuntime::default();
         runtime.runs.insert("mis-001".into(), run);

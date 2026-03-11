@@ -23,6 +23,7 @@ unicode-width = { workspace = true }
 sysinfo = { workspace = true }
 arboard = "3.2"
 ctrlc = "3.4"
+time = { workspace = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 metal = "0.27.0"

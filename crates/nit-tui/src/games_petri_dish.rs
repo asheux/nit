@@ -3,7 +3,7 @@ use std::io::{BufRead, BufReader, BufWriter, Seek, SeekFrom, Write};
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::thread;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use nit_core::{
@@ -83,6 +83,24 @@ struct GameSession {
     snapshot: Option<MatchSnapshot>,
     results: TournamentResults,
     definitions: Vec<StrategyDefinition>,
+    started_at: Instant,
+    finished_elapsed: Option<Duration>,
+}
+
+impl GameSession {
+    fn elapsed(&self) -> Duration {
+        self.elapsed_at(Instant::now())
+    }
+
+    fn elapsed_at(&self, now: Instant) -> Duration {
+        self.finished_elapsed
+            .unwrap_or_else(|| now.saturating_duration_since(self.started_at))
+    }
+
+    fn freeze_elapsed(&mut self) -> Duration {
+        let elapsed = self.started_at.elapsed();
+        *self.finished_elapsed.get_or_insert(elapsed)
+    }
 }
 
 struct FamilyBuildOutcome {
@@ -795,10 +813,14 @@ impl GamesPetriDishRuntime {
                         .iter()
                         .map(|p| (p.a.clone(), p.b.clone()))
                         .collect::<Vec<_>>();
-                    if let Some(session) = self.session.as_mut() {
+                    let elapsed = if let Some(session) = self.session.as_mut() {
+                        let elapsed = session.freeze_elapsed();
                         session.results = summary.results.clone();
                         session.definitions = summary.strategies.clone();
-                    }
+                        Some(elapsed)
+                    } else {
+                        None
+                    };
                     state.games.last_error = None;
                     state.games.last_run_path = summary.paths.summary.clone();
                     state.games.last_event_path = summary.event_log.clone();
@@ -812,9 +834,16 @@ impl GamesPetriDishRuntime {
                     state.games.paused = false;
                     state.games.petri_hidden = false;
                     state.games.petri_lines.clear();
-                    state.status = Some("Games tournament completed".into());
+                    state.status = Some(match elapsed {
+                        Some(elapsed) => format!(
+                            "Games tournament completed in {}",
+                            format_tournament_elapsed(elapsed)
+                        ),
+                        None => "Games tournament completed".into(),
+                    });
                 }
                 RunnerEvent::Cancelled => {
+                    let elapsed = self.session.as_mut().map(GameSession::freeze_elapsed);
                     self.session = None;
                     state.games.last_error = None;
                     state.games.running = false;
@@ -822,16 +851,28 @@ impl GamesPetriDishRuntime {
                     state.games.status = GamesStatus::Idle;
                     state.games.petri_hidden = false;
                     state.games.petri_lines.clear();
-                    state.status = Some("Games tournament cancelled".into());
+                    state.status = Some(match elapsed {
+                        Some(elapsed) => format!(
+                            "Games tournament cancelled after {}",
+                            format_tournament_elapsed(elapsed)
+                        ),
+                        None => "Games tournament cancelled".into(),
+                    });
                 }
                 RunnerEvent::Error(err) => {
+                    let elapsed = self.session.as_mut().map(GameSession::freeze_elapsed);
                     self.session = None;
                     state.games.running = false;
                     state.games.paused = false;
                     state.games.status = GamesStatus::Error;
                     state.games.last_error = Some(err.clone());
                     state.games.petri_lines.clear();
-                    state.status = Some(err);
+                    state.status = Some(match elapsed {
+                        Some(elapsed) => {
+                            format!("{err} (after {})", format_tournament_elapsed(elapsed))
+                        }
+                        None => err,
+                    });
                 }
             }
         }
@@ -957,6 +998,7 @@ impl GamesPetriDishRuntime {
                 Span::styled(" hide", help_style),
             ]));
         } else if let Some(session) = self.session.as_ref() {
+            let elapsed = session.elapsed();
             match self.view {
                 PetriView::Tournament => {
                     let progress = session.progress.clone();
@@ -1032,13 +1074,15 @@ impl GamesPetriDishRuntime {
             } else {
                 Style::default().fg(theme.accent)
             };
-            lines.push(Line::from(vec![
-                Span::styled("steps/tick: ", label_style),
-                Span::styled(state.games.steps_per_tick.to_string(), number_style),
-                Span::styled("  ", dim_style),
-                Span::styled("paused: ", label_style),
-                Span::styled(if state.games.paused { "yes" } else { "no" }, paused_style),
-            ]));
+            lines.push(session_footer_line(
+                state.games.steps_per_tick,
+                state.games.paused,
+                elapsed,
+                label_style,
+                number_style,
+                paused_style,
+                dim_style,
+            ));
             lines.push(Line::from(match self.view {
                 PetriView::Tournament => vec![
                     Span::styled("Esc", key_style),
@@ -1276,6 +1320,8 @@ impl GamesPetriDishRuntime {
             snapshot: None,
             results: TournamentResults::empty(),
             definitions: Vec::new(),
+            started_at: Instant::now(),
+            finished_elapsed: None,
         });
         self.hidden = false;
         state.games.match_history.open = false;
@@ -1594,6 +1640,45 @@ fn progress_pending_round_text(status: GamesStatus) -> &'static str {
         GamesStatus::Paused => "Paused",
         _ => progress_waiting_text(status),
     }
+}
+
+fn format_tournament_elapsed(duration: Duration) -> String {
+    if duration.as_secs() == 0 {
+        return format!("{}ms", duration.as_millis());
+    }
+    let total_secs = duration.as_secs();
+    let millis = duration.subsec_millis();
+    let hours = total_secs / 3_600;
+    let minutes = (total_secs / 60) % 60;
+    let seconds = total_secs % 60;
+    if hours > 0 {
+        format!("{hours}h{minutes:02}m{seconds:02}.{millis:03}s")
+    } else if minutes > 0 {
+        format!("{minutes}m{seconds:02}.{millis:03}s")
+    } else {
+        format!("{seconds}.{millis:03}s")
+    }
+}
+
+fn session_footer_line(
+    steps_per_tick: u32,
+    paused: bool,
+    elapsed: Duration,
+    label_style: Style,
+    number_style: Style,
+    paused_style: Style,
+    dim_style: Style,
+) -> Line<'static> {
+    Line::from(vec![
+        Span::styled("steps/tick: ", label_style),
+        Span::styled(steps_per_tick.to_string(), number_style),
+        Span::styled("  ", dim_style),
+        Span::styled("paused: ", label_style),
+        Span::styled(if paused { "yes" } else { "no" }, paused_style),
+        Span::styled("  ", dim_style),
+        Span::styled("elapsed: ", label_style),
+        Span::styled(format_tournament_elapsed(elapsed), number_style),
+    ])
 }
 
 fn tournament_progress_percent(progress: &TournamentProgress) -> f32 {
@@ -2841,6 +2926,8 @@ k = 2
             snapshot: None,
             results: TournamentResults::empty(),
             definitions: Vec::new(),
+            started_at: Instant::now(),
+            finished_elapsed: None,
         });
         runtime.view = PetriView::Cache;
         runtime.cache_snapshot = nit_metal::BatchPolicyCacheSnapshot {
@@ -3073,6 +3160,59 @@ k = 2
         assert_eq!(
             progress_waiting_text(GamesStatus::Done),
             "Tournament complete"
+        );
+    }
+
+    #[test]
+    fn format_tournament_elapsed_uses_readable_units() {
+        assert_eq!(
+            format_tournament_elapsed(Duration::from_millis(875)),
+            "875ms"
+        );
+        assert_eq!(
+            format_tournament_elapsed(Duration::from_millis(12_345)),
+            "12.345s"
+        );
+        assert_eq!(
+            format_tournament_elapsed(Duration::from_millis(125_678)),
+            "2m05.678s"
+        );
+    }
+
+    #[test]
+    fn finished_session_elapsed_stays_frozen() {
+        let frozen = Duration::from_millis(12_345);
+        let session = GameSession {
+            config: sample_config(),
+            progress: None,
+            snapshot: None,
+            results: TournamentResults::empty(),
+            definitions: Vec::new(),
+            started_at: Instant::now() - Duration::from_secs(90),
+            finished_elapsed: Some(frozen),
+        };
+
+        assert_eq!(
+            session.elapsed_at(Instant::now() + Duration::from_secs(30)),
+            frozen
+        );
+    }
+
+    #[test]
+    fn session_footer_line_shows_elapsed_runtime() {
+        let line = session_footer_line(
+            2_048,
+            false,
+            Duration::from_millis(12_345),
+            Style::default(),
+            Style::default(),
+            Style::default(),
+            Style::default(),
+        );
+
+        assert_eq!(
+            line_text(&line),
+            "steps/tick: 2048  paused: no  elapsed: 12.345s"
         );
     }
 

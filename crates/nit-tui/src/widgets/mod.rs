@@ -1,5 +1,6 @@
 pub mod agent_console_view;
 pub mod agent_ops_view;
+pub mod artifacts_history_popup;
 pub mod artifacts_popup;
 pub mod bottom_bar;
 pub mod editor_view;

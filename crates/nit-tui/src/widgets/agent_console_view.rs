@@ -14,7 +14,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::swarm::SwarmRuntime;
 use crate::theme::Theme;
-use crate::widgets::text_selection::apply_ui_selection;
+use crate::widgets::{agent_ops_view, text_selection::apply_ui_selection};
 
 pub struct ChatCursor {
     pub x: u16,
@@ -209,7 +209,7 @@ pub fn render(
 
     let pulse_on = pulse_on(state);
     let thread_width = layout.thread_area.width.max(1) as usize;
-    let (cached_rows_len, _) = refresh_thread_rows_cache(state, thread_width);
+    let (cached_rows_len, _) = refresh_thread_rows_cache(state, Some(swarm), thread_width);
     let thread_height = layout.thread_area.height.max(1) as usize;
     let breather = breather_rows_for_user_prompt(state, Some(swarm), pulse_on, thread_width);
     let total_rows = cached_rows_len.saturating_add(breather.len());
@@ -498,7 +498,51 @@ pub fn thread_lines_for_selection_with_swarm(
         .collect()
 }
 
-fn refresh_thread_rows_cache(state: &mut AppState, width: usize) -> (usize, bool) {
+pub fn artifact_message_index_for_line(
+    state: &AppState,
+    width: usize,
+    line_idx: usize,
+) -> Option<usize> {
+    artifact_message_index_for_line_with_swarm(state, None, width, line_idx)
+}
+
+pub fn artifact_message_index_for_line_with_swarm(
+    state: &AppState,
+    swarm: Option<&SwarmRuntime>,
+    width: usize,
+    line_idx: usize,
+) -> Option<usize> {
+    let mission = state.agents.selected_context_mission();
+    let agent = state.agents.selected_context_agent();
+    let mut row_cursor = 0usize;
+    for (msg_idx, msg) in state.agents.messages.iter().enumerate() {
+        if !message_matches_context(msg, mission, agent) {
+            continue;
+        }
+        let rows = format_message_rows(
+            state,
+            swarm,
+            msg,
+            width.max(1),
+            MessageRenderMode::Transcript,
+        );
+        if rows
+            .last()
+            .is_some_and(|row| matches!(row.kind, ThreadRowKind::ArtifactLink))
+            && row_cursor + rows.len().saturating_sub(1) == line_idx
+        {
+            return Some(msg_idx);
+        }
+        row_cursor = row_cursor.saturating_add(rows.len());
+    }
+    None
+}
+
+fn refresh_thread_rows_cache(
+    state: &mut AppState,
+    swarm: Option<&SwarmRuntime>,
+    width: usize,
+) -> (usize, bool) {
     let width = width.max(1);
     let mission_ref = state.agents.selected_context_mission();
     let agent_ref = if mission_ref.is_some() {
@@ -535,6 +579,7 @@ fn refresh_thread_rows_cache(state: &mut AppState, width: usize) -> (usize, bool
         last_message_was_user = msg.agent_id.is_none();
         rows.extend(format_message_rows(
             state,
+            swarm,
             msg,
             width,
             MessageRenderMode::Transcript,
@@ -855,6 +900,7 @@ fn thread_lines<'a>(
         .map(|row| match row.kind {
             ThreadRowKind::User => user_line_with_prompt_bg(&row.text, theme),
             ThreadRowKind::Agent => agent_line_with_accent_ecg(&row.text, theme),
+            ThreadRowKind::ArtifactLink => artifact_link_line(&row.text, theme),
             ThreadRowKind::Breather => breather_line(&row.text, theme),
             ThreadRowKind::StatusHeader => status_header_line(&row.text, theme),
             ThreadRowKind::StatusRow => status_row_line(&row.text, theme),
@@ -870,7 +916,7 @@ pub(crate) fn message_lines_for_popup(
     width: usize,
 ) -> Vec<Line<'static>> {
     let width = width.max(1);
-    let mut rows = format_message_rows(state, msg, width, MessageRenderMode::Full);
+    let mut rows = format_message_rows(state, None, msg, width, MessageRenderMode::Full);
     // `format_message_rows` may add spacing rows meant for the full transcript.
     while rows.last().is_some_and(|row| row.text.trim().is_empty()) {
         rows.pop();
@@ -958,6 +1004,39 @@ fn agent_line_with_accent_ecg(text: &str, theme: &Theme) -> Line<'static> {
     } else {
         push_agent_text_with_inline_highlights(&mut spans, &body, agent_style, theme);
     }
+    Line::from(spans)
+}
+
+fn artifact_link_line(text: &str, theme: &Theme) -> Line<'static> {
+    let leading_spaces = text.bytes().take_while(|b| *b == b' ').count();
+    let body = &text[leading_spaces..];
+    let prompt_bg = user_prompt_bg(theme);
+    let body_style = Style::default()
+        .fg(theme.foreground)
+        .bg(prompt_bg)
+        .add_modifier(Modifier::BOLD);
+    let accent_style = Style::default()
+        .fg(theme.background)
+        .bg(theme.title_focused)
+        .add_modifier(Modifier::BOLD);
+
+    let mut spans = Vec::new();
+    if leading_spaces > 0 {
+        spans.push(Span::styled(" ".repeat(leading_spaces), body_style));
+    }
+    if let Some(start) = body.find("ARTIFACTS") {
+        let end = start + "ARTIFACTS".len();
+        if start > 0 {
+            spans.push(Span::styled(body[..start].to_string(), body_style));
+        }
+        spans.push(Span::styled(body[start..end].to_string(), accent_style));
+        if end < body.len() {
+            spans.push(Span::styled(body[end..].to_string(), body_style));
+        }
+    } else {
+        spans.push(Span::styled(body.to_string(), body_style));
+    }
+
     Line::from(spans)
 }
 
@@ -1291,11 +1370,7 @@ fn user_line_with_prompt_bg(text: &str, theme: &Theme) -> Line<'static> {
         return Line::from(Span::styled(String::new(), Style::default()));
     }
 
-    let prompt_bg = dim_bg_towards(
-        theme.cursor_line_bg,
-        theme.background,
-        USER_PROMPT_BG_BACKGROUND_PCT,
-    );
+    let prompt_bg = user_prompt_bg(theme);
 
     // User prompts are rendered as a padded block with a subtle background instead of ASCII
     // borders. Pad spaces are included in the string so the background fills the whole row.
@@ -1323,6 +1398,14 @@ fn user_line_with_prompt_bg(text: &str, theme: &Theme) -> Line<'static> {
         spans.push(Span::styled(" ".repeat(rest_len), base));
     }
     Line::from(spans)
+}
+
+fn user_prompt_bg(theme: &Theme) -> Color {
+    dim_bg_towards(
+        theme.cursor_line_bg,
+        theme.background,
+        USER_PROMPT_BG_BACKGROUND_PCT,
+    )
 }
 
 fn status_header_line(text: &str, theme: &Theme) -> Line<'static> {
@@ -1425,6 +1508,7 @@ fn thread_rows(
         }
         rows.extend(format_message_rows(
             state,
+            swarm,
             msg,
             width,
             MessageRenderMode::Transcript,
@@ -1449,6 +1533,7 @@ fn message_matches_context(msg: &AgentMessage, mission: Option<&str>, agent: Opt
 
 fn format_message_rows(
     state: &AppState,
+    swarm: Option<&SwarmRuntime>,
     msg: &AgentMessage,
     width: usize,
     mode: MessageRenderMode,
@@ -1489,7 +1574,10 @@ fn format_message_rows(
         header.push_str(" @all");
     }
 
-    let indent = 2usize.min(width.saturating_sub(1));
+    let indent = match mode {
+        MessageRenderMode::Transcript => 0,
+        MessageRenderMode::Full => 2usize.min(width.saturating_sub(1)),
+    };
     // Keep at least one trailing column free so transcript text doesn't hug the right edge.
     let max_inner = width.saturating_sub(indent + 1).max(1);
     let indent_str = " ".repeat(indent);
@@ -1510,10 +1598,32 @@ fn format_message_rows(
     }
     match mode {
         MessageRenderMode::Transcript => {
-            out.push(ThreadRow {
-                text: format!("{indent_str}done (see ARTIFACTS)"),
-                kind: ThreadRowKind::Agent,
-            });
+            let artifact_target = state
+                .agents
+                .messages
+                .iter()
+                .enumerate()
+                .find_map(|(idx, candidate)| std::ptr::eq(candidate, msg).then_some(idx))
+                .and_then(|message_idx| {
+                    agent_ops_view::artifacts_popup_ref_for_message(
+                        state,
+                        swarm,
+                        width,
+                        message_idx,
+                    )
+                });
+            if artifact_target.is_some() {
+                let artifact_row = format!("{indent_str}done (see ARTIFACTS)");
+                out.push(ThreadRow {
+                    text: pad_line_right(&artifact_row, width),
+                    kind: ThreadRowKind::ArtifactLink,
+                });
+            } else {
+                out.push(ThreadRow {
+                    text: format!("{indent_str}done"),
+                    kind: ThreadRowKind::Agent,
+                });
+            }
         }
         MessageRenderMode::Full => {
             for line in text_lines {
@@ -2456,6 +2566,17 @@ fn format_token_count_short(tokens: u32) -> String {
     }
 }
 
+fn pad_line_right(text: &str, width: usize) -> String {
+    let text_width = UnicodeWidthStr::width(text);
+    if text_width >= width {
+        return text.to_string();
+    }
+    let mut out = String::with_capacity(text.len() + (width - text_width));
+    out.push_str(text);
+    out.push_str(&" ".repeat(width - text_width));
+    out
+}
+
 fn format_user_bubble_rows(_msg: &AgentMessage, text_lines: &[&str], width: usize) -> Vec<String> {
     // Render user prompts as a background-tinted block (no ASCII borders).
     // We pad every line out to the full thread width so the background is continuous.
@@ -2643,20 +2764,22 @@ fn wrap_visual_line(text: &str, width: usize) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        chat_input_scroll_metrics, chat_input_text_area, dim_bg_towards, ecg_indicator,
-        format_message_rows, map_chat_input_point_to_cursor, thread_lines, thread_rows,
-        wrap_input_with_cursor, wrap_visual_line, MessageRenderMode, ThreadRow, ThreadRowKind,
-        USER_PROMPT_BG_BACKGROUND_PCT,
+        artifact_message_index_for_line, chat_input_scroll_metrics, chat_input_text_area,
+        ecg_indicator, format_message_rows, map_chat_input_point_to_cursor, thread_lines,
+        thread_rows, user_prompt_bg, wrap_input_with_cursor, wrap_visual_line, MessageRenderMode,
+        ThreadRow, ThreadRowKind,
     };
+    use crate::swarm::{SwarmRuntime, SwarmSize};
     use crate::theme::Theme;
     use nit_core::{
-        AgentChannel, AgentLane, AgentMessage, AgentStatus, AppState, Buffer, MissionPhase,
-        MissionRecord, QueuedCodexTurn,
+        AgentBusEvent, AgentChannel, AgentLane, AgentMessage, AgentStatus, AppState, Buffer,
+        MissionPhase, MissionRecord, QueuedCodexTurn,
     };
     use ratatui::layout::Rect;
     use ratatui::style::{Color, Modifier};
     use std::path::PathBuf;
     use std::time::Instant;
+    use unicode_width::UnicodeWidthStr;
 
     fn test_state() -> AppState {
         AppState::new(
@@ -2697,7 +2820,7 @@ mod tests {
             mission_id: None,
             text: "line one\nline two".into(),
         };
-        let rows = format_message_rows(&state, &msg, 48, MessageRenderMode::Transcript);
+        let rows = format_message_rows(&state, None, &msg, 48, MessageRenderMode::Transcript);
         assert!(rows.len() >= 6);
         assert!(matches!(rows[0].kind, ThreadRowKind::User));
         // Top padding row + label row.
@@ -2740,15 +2863,32 @@ mod tests {
             mission_id: None,
             text: "working".into(),
         };
+        state.agents.messages.push(msg.clone());
         state.metrics.frame_count = 3;
-        let first_rows = format_message_rows(&state, &msg, 80, MessageRenderMode::Transcript);
+        let first_rows = format_message_rows(
+            &state,
+            None,
+            state.agents.messages.last().expect("reply"),
+            80,
+            MessageRenderMode::Transcript,
+        );
         state.metrics.frame_count = 30;
-        let second_rows = format_message_rows(&state, &msg, 80, MessageRenderMode::Transcript);
+        let second_rows = format_message_rows(
+            &state,
+            None,
+            state.agents.messages.last().expect("reply"),
+            80,
+            MessageRenderMode::Transcript,
+        );
         // Stable header row (avoid animated separators in the transcript).
-        assert_eq!(first_rows[0].text, "  [Coder]");
-        assert_eq!(second_rows[0].text, "  [Coder]");
-        assert_eq!(first_rows[1].text, "  done (see ARTIFACTS)");
-        assert_eq!(second_rows[1].text, "  done (see ARTIFACTS)");
+        assert_eq!(first_rows[0].text, "[Coder]");
+        assert_eq!(second_rows[0].text, "[Coder]");
+        assert!(first_rows[1].text.starts_with("done (see ARTIFACTS)"));
+        assert!(second_rows[1].text.starts_with("done (see ARTIFACTS)"));
+        assert_eq!(UnicodeWidthStr::width(first_rows[1].text.as_str()), 80);
+        assert_eq!(UnicodeWidthStr::width(second_rows[1].text.as_str()), 80);
+        assert!(matches!(first_rows[1].kind, ThreadRowKind::ArtifactLink));
+        assert!(matches!(second_rows[1].kind, ThreadRowKind::ArtifactLink));
         assert!(first_rows[0].text.contains("[Coder]"));
         assert!(second_rows[0].text.contains("[Coder]"));
     }
@@ -2874,11 +3014,222 @@ mod tests {
             mission_id: None,
             text: "hello".into(),
         };
-        let rows = format_message_rows(&state, &msg, 120, MessageRenderMode::Transcript);
+        state.agents.messages.push(msg.clone());
+        let rows = format_message_rows(
+            &state,
+            None,
+            state.agents.messages.last().expect("reply"),
+            120,
+            MessageRenderMode::Transcript,
+        );
         // Header row, then message.
         assert!(rows[0].text.contains("[Coder]"));
-        assert_eq!(rows[1].text, "  done (see ARTIFACTS)");
+        assert!(rows[1].text.starts_with("done (see ARTIFACTS)"));
+        assert_eq!(UnicodeWidthStr::width(rows[1].text.as_str()), 120);
+        assert!(matches!(rows[1].kind, ThreadRowKind::ArtifactLink));
         assert!(!rows.iter().any(|row| row.text.contains("hello")));
+    }
+
+    #[test]
+    fn artifact_message_index_for_line_maps_transcript_artifact_row() {
+        let mut state = test_state();
+        state.agents.selected_agent = Some("coder".into());
+        state.agents.agents.push(AgentLane {
+            id: "coder".into(),
+            role: "Coder".into(),
+            lane: "Lane B".into(),
+            kind: nit_core::AgentLaneKind::Mock,
+            status: AgentStatus::Idle,
+            heartbeat_age_secs: 0,
+            queue_len: 0,
+            current_mission: None,
+            last_message: String::new(),
+        });
+        state.agents.messages.push(AgentMessage {
+            at: "10:00:00".into(),
+            channel: AgentChannel::Agent,
+            agent_id: Some("coder".into()),
+            mission_id: None,
+            text: "hello".into(),
+        });
+
+        assert_eq!(artifact_message_index_for_line(&state, 120, 1), Some(0));
+        assert_eq!(artifact_message_index_for_line(&state, 120, 0), None);
+    }
+
+    #[test]
+    fn swarm_planning_message_stays_plain_done_when_no_artifact_exists() {
+        let mut state = AppState::new(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")),
+            Buffer::empty("editor", None),
+            Buffer::empty("notes", None),
+        );
+        state.agents.messages.clear();
+        state.agents.missions.clear();
+        state.agents.agents.clear();
+        state.agents.agents.push(AgentLane {
+            id: "planner".into(),
+            role: "Planner".into(),
+            lane: "Codex".into(),
+            kind: nit_core::AgentLaneKind::Codex,
+            status: AgentStatus::Idle,
+            heartbeat_age_secs: 0,
+            queue_len: 0,
+            current_mission: None,
+            last_message: String::new(),
+        });
+
+        let mut swarm = SwarmRuntime::default();
+        let (mission_id, _dispatches) = swarm
+            .start(
+                &mut state,
+                "planner".into(),
+                vec!["planner".into()],
+                SwarmSize::Count(2),
+                Some("parallel".into()),
+                None,
+                "root".into(),
+            )
+            .expect("swarm start");
+        let clone_id = format!("planner#swarm-{mission_id}-clone-01");
+        let planner_message = format!(
+            r#"
+```json
+{{
+  "version": 2,
+  "template": "parallel",
+  "tasks": [
+    {{ "id": "t1", "agent_id": "{clone_id}", "title": "T1", "prompt": "DONE t1" }}
+  ]
+}}
+```
+"#
+        );
+        let planner_event = AgentBusEvent::TurnCompleted {
+            agent_id: "planner".into(),
+            mission_id: Some(mission_id.clone()),
+            thread_id: None,
+            token_count: None,
+            message: planner_message,
+        };
+        planner_event.apply(&mut state);
+        let _ = swarm.handle_event_outcome(&mut state, &planner_event);
+        let planner_message = state
+            .agents
+            .messages
+            .iter()
+            .find(|message| message.agent_id.as_deref() == Some("planner"))
+            .expect("planner message");
+        let rows = format_message_rows(
+            &state,
+            Some(&swarm),
+            planner_message,
+            120,
+            MessageRenderMode::Transcript,
+        );
+
+        assert_eq!(rows[1].text, "done");
+        assert!(matches!(rows[1].kind, ThreadRowKind::Agent));
+    }
+
+    #[test]
+    fn swarm_report_message_renders_artifact_link() {
+        let mut state = AppState::new(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")),
+            Buffer::empty("editor", None),
+            Buffer::empty("notes", None),
+        );
+        state.agents.messages.clear();
+        state.agents.missions.clear();
+        state.agents.agents.clear();
+        state.agents.agents.push(AgentLane {
+            id: "planner".into(),
+            role: "Planner".into(),
+            lane: "Codex".into(),
+            kind: nit_core::AgentLaneKind::Codex,
+            status: AgentStatus::Idle,
+            heartbeat_age_secs: 0,
+            queue_len: 0,
+            current_mission: None,
+            last_message: String::new(),
+        });
+
+        let mut swarm = SwarmRuntime::default();
+        let (mission_id, _dispatches) = swarm
+            .start(
+                &mut state,
+                "planner".into(),
+                vec!["planner".into()],
+                SwarmSize::Count(2),
+                Some("parallel".into()),
+                None,
+                "root".into(),
+            )
+            .expect("swarm start");
+        let clone_id = format!("planner#swarm-{mission_id}-clone-01");
+        let planner_message = format!(
+            r#"
+```json
+{{
+  "version": 2,
+  "template": "parallel",
+  "tasks": [
+    {{ "id": "t1", "agent_id": "{clone_id}", "title": "T1", "prompt": "DONE t1" }}
+  ]
+}}
+```
+"#
+        );
+        let planner_event = AgentBusEvent::TurnCompleted {
+            agent_id: "planner".into(),
+            mission_id: Some(mission_id.clone()),
+            thread_id: None,
+            token_count: None,
+            message: planner_message,
+        };
+        planner_event.apply(&mut state);
+        let _ = swarm.handle_event_outcome(&mut state, &planner_event);
+
+        let clone_event = AgentBusEvent::TurnCompleted {
+            agent_id: clone_id.clone(),
+            mission_id: Some(mission_id.clone()),
+            thread_id: Some("thr-clone".into()),
+            token_count: None,
+            message: "clone output".into(),
+        };
+        clone_event.apply(&mut state);
+        let _ = swarm.handle_event_outcome(&mut state, &clone_event);
+
+        let verify_event = AgentBusEvent::TurnCompleted {
+            agent_id: clone_id,
+            mission_id: Some(mission_id.clone()),
+            thread_id: Some("thr-verify".into()),
+            token_count: None,
+            message: "verify output".into(),
+        };
+        verify_event.apply(&mut state);
+        let _ = swarm.handle_event_outcome(&mut state, &verify_event);
+
+        let report_event = AgentBusEvent::TurnCompleted {
+            agent_id: "planner".into(),
+            mission_id: Some(mission_id),
+            thread_id: None,
+            token_count: None,
+            message: "# Final Report\n\nShip it.\n".into(),
+        };
+        report_event.apply(&mut state);
+        let _ = swarm.handle_event_outcome(&mut state, &report_event);
+        let rows = format_message_rows(
+            &state,
+            Some(&swarm),
+            state.agents.messages.last().expect("report message"),
+            120,
+            MessageRenderMode::Transcript,
+        );
+
+        assert!(rows[1].text.starts_with("done (see ARTIFACTS)"));
+        assert_eq!(UnicodeWidthStr::width(rows[1].text.as_str()), 120);
+        assert!(matches!(rows[1].kind, ThreadRowKind::ArtifactLink));
     }
 
     #[test]
@@ -2903,7 +3254,7 @@ mod tests {
             mission_id: None,
             text: "ok".into(),
         };
-        let row = format_message_rows(&state, &msg, 120, MessageRenderMode::Transcript)
+        let row = format_message_rows(&state, None, &msg, 120, MessageRenderMode::Transcript)
             .into_iter()
             .find(|row| !row.text.trim().is_empty())
             .expect("row");
@@ -2927,7 +3278,7 @@ mod tests {
     fn agent_badge_renders_in_warning_color() {
         let theme = Theme::default();
         let rows = [ThreadRow {
-            text: "  [Coder] hello".to_string(),
+            text: "[Coder] hello".to_string(),
             kind: ThreadRowKind::Agent,
         }];
         let lines = thread_lines(rows.iter(), &theme);
@@ -3633,11 +3984,7 @@ mod tests {
     #[test]
     fn user_bubble_rows_use_dim_prompt_bg_and_highlight_you_label() {
         let theme = Theme::default();
-        let prompt_bg = dim_bg_towards(
-            theme.cursor_line_bg,
-            theme.background,
-            USER_PROMPT_BG_BACKGROUND_PCT,
-        );
+        let prompt_bg = user_prompt_bg(&theme);
         let rows = [
             ThreadRow {
                 text: "  You      ".to_string(),
@@ -3674,6 +4021,34 @@ mod tests {
                 .any(|span| span.content.as_ref().contains("hello")
                     && span.style.fg == Some(Color::Gray)),
             "expected user prompt text to use gray foreground"
+        );
+    }
+
+    #[test]
+    fn artifact_link_rows_use_user_prompt_bg() {
+        let theme = Theme::default();
+        let prompt_bg = user_prompt_bg(&theme);
+        let rows = [ThreadRow {
+            text: "done (see ARTIFACTS)    ".to_string(),
+            kind: ThreadRowKind::ArtifactLink,
+        }];
+        let lines = thread_lines(rows.iter(), &theme);
+
+        assert!(
+            lines[0]
+                .spans
+                .iter()
+                .filter(|span| span.content.as_ref() != "ARTIFACTS")
+                .all(|span| span.style.bg == Some(prompt_bg)),
+            "expected artifact link stripe to reuse the user prompt background"
+        );
+        assert!(
+            lines[0]
+                .spans
+                .iter()
+                .any(|span| span.content.as_ref() == "ARTIFACTS"
+                    && span.style.bg == Some(theme.title_focused)),
+            "expected ARTIFACTS badge to keep its focused accent background"
         );
     }
 }

@@ -1,7 +1,7 @@
 use nit_core::{
     AgentAlertSeverity, AgentLaneKind, AgentMessage, AgentOpsTab, AgentStatus, AppKind, AppState,
     EvidenceItem, McpConnectionState, PaneId, RosterTreeBranch, RosterTreeSelection,
-    UiSelectionPane,
+    SavedRunHistoryFilter, UiSelectionPane,
 };
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
@@ -10,7 +10,13 @@ use ratatui::{
     widgets::{Block, BorderType, Borders, Paragraph},
     Frame,
 };
-use std::{collections::BTreeMap, fs, path::PathBuf};
+use std::{
+    collections::BTreeMap,
+    fs,
+    path::{Path, PathBuf},
+    time::{SystemTime, UNIX_EPOCH},
+};
+use time::OffsetDateTime;
 
 use crate::swarm::{
     normalize_role_label, GateReportGate, SwarmDashboardView, SwarmPersistenceView, SwarmRuntime,
@@ -1880,6 +1886,9 @@ enum ArtifactRef {
         mission_id: String,
         task_id: String,
     },
+    SwarmReport {
+        mission_id: String,
+    },
     SwarmVerify {
         mission_id: String,
     },
@@ -1918,6 +1927,8 @@ struct PersistedPatchRecord {
 #[derive(Clone, Debug, Default, serde::Deserialize)]
 struct PersistedArtifactsRun {
     #[serde(default)]
+    updated_at: Option<String>,
+    #[serde(default)]
     messages: Vec<AgentMessage>,
     #[serde(default)]
     patches: Vec<PersistedPatchRecord>,
@@ -1927,6 +1938,21 @@ struct PersistedArtifactsRun {
     codex_thread_id: Option<String>,
     #[serde(default)]
     codex_thread_ids: Option<BTreeMap<String, String>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SavedArtifactsRunKind {
+    Current,
+    Archived,
+}
+
+#[derive(Clone, Debug)]
+pub struct SavedArtifactsRunEntry {
+    pub kind: SavedArtifactsRunKind,
+    pub label: String,
+    pub detail: String,
+    pub run_path: Option<String>,
+    pub archive_micros: Option<u128>,
 }
 
 fn persisted_mission_run_path(state: &AppState, mission_id: &str) -> PathBuf {
@@ -1939,6 +1965,16 @@ fn persisted_mission_run_path(state: &AppState, mission_id: &str) -> PathBuf {
         .join("run.json")
 }
 
+fn persisted_mission_history_root(state: &AppState, mission_id: &str) -> PathBuf {
+    state
+        .workspace_root
+        .join(".nit")
+        .join("agents")
+        .join("runs")
+        .join(mission_id)
+        .join("history")
+}
+
 fn persisted_ad_hoc_run_path(state: &AppState, agent_id: &str) -> PathBuf {
     state
         .workspace_root
@@ -1947,6 +1983,16 @@ fn persisted_ad_hoc_run_path(state: &AppState, agent_id: &str) -> PathBuf {
         .join("ad-hoc")
         .join(sanitize_artifact_path_segment(agent_id))
         .join("run.json")
+}
+
+fn persisted_ad_hoc_history_root(state: &AppState, agent_id: &str) -> PathBuf {
+    state
+        .workspace_root
+        .join(".nit")
+        .join("agents")
+        .join("ad-hoc")
+        .join(sanitize_artifact_path_segment(agent_id))
+        .join("history")
 }
 
 fn load_persisted_artifacts_run(path: PathBuf) -> Option<PersistedArtifactsRun> {
@@ -1967,6 +2013,312 @@ fn persisted_ad_hoc_root(agent_id: &str) -> String {
         ".nit/agents/ad-hoc/{}/",
         sanitize_artifact_path_segment(agent_id)
     )
+}
+
+fn persisted_run_updated_label(run: &PersistedArtifactsRun) -> String {
+    run.updated_at
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("--")
+        .to_string()
+}
+
+fn persisted_history_archive_micros(path: &Path) -> Option<u128> {
+    let file_name = path.file_name()?.to_string_lossy();
+    let prefix = file_name
+        .split_once('-')
+        .map(|(prefix, _)| prefix)
+        .unwrap_or(file_name.as_ref());
+    Some(prefix)
+        .filter(|value| !value.is_empty() && value.chars().all(|ch| ch.is_ascii_digit()))
+        .and_then(|value| value.parse::<u128>().ok())
+}
+
+fn format_saved_run_relative_label_from_micros(
+    archive_micros: Option<u128>,
+    now_micros: u128,
+) -> String {
+    let Some(archive_micros) = archive_micros else {
+        return "saved run".into();
+    };
+    let elapsed = now_micros.saturating_sub(archive_micros) / 1_000_000;
+    if elapsed < 30 {
+        return "saved just now".into();
+    }
+    if elapsed < 60 * 60 {
+        return format!("saved {}m ago", elapsed / 60);
+    }
+    if elapsed < 24 * 60 * 60 {
+        return format!("saved {}h ago", elapsed / (60 * 60));
+    }
+    if elapsed < 30 * 24 * 60 * 60 {
+        return format!("saved {}d ago", elapsed / (24 * 60 * 60));
+    }
+    if elapsed < 365 * 24 * 60 * 60 {
+        return format!("saved {}mo ago", elapsed / (30 * 24 * 60 * 60));
+    }
+    format!("saved {}y ago", elapsed / (365 * 24 * 60 * 60))
+}
+
+fn format_saved_run_absolute_label_from_micros(archive_micros: Option<u128>) -> Option<String> {
+    let nanos = archive_micros?.checked_mul(1_000)?;
+    let nanos = i128::try_from(nanos).ok()?;
+    let datetime = OffsetDateTime::from_unix_timestamp_nanos(nanos).ok()?;
+    Some(format!(
+        "{:04}-{:02}-{:02} {:02}:{:02} UTC",
+        datetime.year(),
+        datetime.month() as u8,
+        datetime.day(),
+        datetime.hour(),
+        datetime.minute()
+    ))
+}
+
+fn saved_run_detail_label(archive_micros: Option<u128>, run_updated: &str, counts: &str) -> String {
+    let absolute = format_saved_run_absolute_label_from_micros(archive_micros);
+    match (
+        absolute.as_deref().filter(|value| !value.is_empty()),
+        run_updated.trim(),
+    ) {
+        (Some(absolute), run_updated) if !run_updated.is_empty() && run_updated != "--" => {
+            format!("{absolute} · run {run_updated} · {counts}")
+        }
+        (Some(absolute), _) => format!("{absolute} · {counts}"),
+        (None, run_updated) if !run_updated.is_empty() && run_updated != "--" => {
+            format!("{run_updated} · {counts}")
+        }
+        (None, _) => counts.to_string(),
+    }
+}
+
+pub fn saved_run_history_filter_label(filter: SavedRunHistoryFilter) -> &'static str {
+    match filter {
+        SavedRunHistoryFilter::All => "all",
+        SavedRunHistoryFilter::LastDay => "24h",
+        SavedRunHistoryFilter::LastWeek => "7d",
+        SavedRunHistoryFilter::LastMonth => "30d",
+    }
+}
+
+fn saved_run_history_filter_window_micros(filter: SavedRunHistoryFilter) -> Option<u128> {
+    const DAY_MICROS: u128 = 24 * 60 * 60 * 1_000_000;
+    match filter {
+        SavedRunHistoryFilter::All => None,
+        SavedRunHistoryFilter::LastDay => Some(DAY_MICROS),
+        SavedRunHistoryFilter::LastWeek => Some(7 * DAY_MICROS),
+        SavedRunHistoryFilter::LastMonth => Some(30 * DAY_MICROS),
+    }
+}
+
+fn saved_run_entry_matches_filter(
+    entry: &SavedArtifactsRunEntry,
+    filter: SavedRunHistoryFilter,
+    now_micros: u128,
+) -> bool {
+    if matches!(entry.kind, SavedArtifactsRunKind::Current) {
+        return true;
+    }
+    let Some(window_micros) = saved_run_history_filter_window_micros(filter) else {
+        return true;
+    };
+    let Some(archive_micros) = entry.archive_micros else {
+        return true;
+    };
+    now_micros.saturating_sub(archive_micros) <= window_micros
+}
+
+fn history_entries_for_root<F>(history_root: PathBuf, make_detail: F) -> Vec<SavedArtifactsRunEntry>
+where
+    F: Fn(&PersistedArtifactsRun) -> String,
+{
+    let mut entries = Vec::new();
+    let now_micros = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_micros();
+    let read_dir = match fs::read_dir(&history_root) {
+        Ok(read_dir) => read_dir,
+        Err(_) => return entries,
+    };
+
+    let mut archive_dirs = read_dir
+        .filter_map(|entry| entry.ok())
+        .filter_map(|entry| {
+            let path = entry.path();
+            path.is_dir().then_some(path)
+        })
+        .collect::<Vec<_>>();
+    archive_dirs.sort_by(|left, right| right.cmp(left));
+
+    for archive_dir in archive_dirs {
+        let run_path = archive_dir.join("run.json");
+        let Some(run) = load_persisted_artifacts_run(run_path.clone()) else {
+            continue;
+        };
+        let archive_micros = persisted_history_archive_micros(&archive_dir);
+        let updated = persisted_run_updated_label(&run);
+        let counts = make_detail(&run);
+        entries.push(SavedArtifactsRunEntry {
+            kind: SavedArtifactsRunKind::Archived,
+            label: format_saved_run_relative_label_from_micros(archive_micros, now_micros),
+            detail: saved_run_detail_label(archive_micros, &updated, &counts),
+            run_path: Some(run_path.to_string_lossy().to_string()),
+            archive_micros,
+        });
+    }
+
+    entries
+}
+
+fn mission_run_counts(run: &PersistedArtifactsRun, mission_id: &str) -> (usize, usize, usize) {
+    let messages = run
+        .messages
+        .iter()
+        .filter(|message| message.mission_id.as_deref() == Some(mission_id))
+        .count();
+    let patches = run
+        .patches
+        .iter()
+        .filter(|patch| patch.mission_id.as_deref() == Some(mission_id))
+        .count();
+    let evidence = run
+        .evidence
+        .iter()
+        .filter(|item| item.mission_id.as_deref() == Some(mission_id))
+        .count();
+    (messages, patches, evidence)
+}
+
+fn ad_hoc_run_counts(run: &PersistedArtifactsRun, agent_id: &str) -> (usize, usize, usize) {
+    let messages = run
+        .messages
+        .iter()
+        .filter(|message| {
+            message.mission_id.is_none()
+                && (message.agent_id.is_none() || message.agent_id.as_deref() == Some(agent_id))
+        })
+        .count();
+    let patches = run
+        .patches
+        .iter()
+        .filter(|patch| patch.mission_id.is_none() && patch.agent_id == agent_id)
+        .count();
+    let evidence = run
+        .evidence
+        .iter()
+        .filter(|item| item.mission_id.is_none() && item.agent_id.as_deref() == Some(agent_id))
+        .count();
+    (messages, patches, evidence)
+}
+
+pub fn artifacts_history_entries(state: &AppState) -> Vec<SavedArtifactsRunEntry> {
+    let mut entries = vec![SavedArtifactsRunEntry {
+        kind: SavedArtifactsRunKind::Current,
+        label: "current / latest saved run".into(),
+        detail: "Use the live thread when available, otherwise the latest saved run.".into(),
+        run_path: None,
+        archive_micros: None,
+    }];
+
+    if let Some(mission_id) = state.agents.selected_context_mission() {
+        entries.extend(history_entries_for_root(
+            persisted_mission_history_root(state, mission_id),
+            |run| {
+                let (messages, patches, evidence) = mission_run_counts(run, mission_id);
+                format!("{messages} msgs · {patches} patches · {evidence} evidence")
+            },
+        ));
+    } else if let Some(agent_id) = state.agents.selected_context_agent() {
+        entries.extend(history_entries_for_root(
+            persisted_ad_hoc_history_root(state, agent_id),
+            |run| {
+                let (messages, patches, evidence) = ad_hoc_run_counts(run, agent_id);
+                format!("{messages} msgs · {patches} patches · {evidence} evidence")
+            },
+        ));
+    }
+
+    entries
+}
+
+pub fn artifacts_history_visible_entries(state: &AppState) -> Vec<SavedArtifactsRunEntry> {
+    let entries = artifacts_history_entries(state);
+    let filter = state.agents.artifacts_history_filter;
+    let Some(_) = saved_run_history_filter_window_micros(filter) else {
+        return entries;
+    };
+    let selected_path = state.agents.artifacts_selected_saved_run_path.as_deref();
+    let now_micros = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_micros();
+    entries
+        .into_iter()
+        .filter(|entry| {
+            entry.run_path.as_deref() == selected_path
+                || saved_run_entry_matches_filter(entry, filter, now_micros)
+        })
+        .collect()
+}
+
+pub fn artifacts_history_prunable_entries(state: &AppState) -> Vec<SavedArtifactsRunEntry> {
+    let filter = state.agents.artifacts_history_filter;
+    let now_micros = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_micros();
+    artifacts_history_entries(state)
+        .into_iter()
+        .filter(|entry| matches!(entry.kind, SavedArtifactsRunKind::Archived))
+        .filter(|entry| saved_run_entry_matches_filter(entry, filter, now_micros))
+        .collect()
+}
+
+fn artifacts_history_entry_index_for_path(
+    entries: &[SavedArtifactsRunEntry],
+    selected_path: Option<&str>,
+) -> usize {
+    entries
+        .iter()
+        .position(|entry| entry.run_path.as_deref() == selected_path)
+        .unwrap_or(0)
+        .min(entries.len().saturating_sub(1))
+}
+
+fn selected_archived_run_for_current_context(
+    state: &AppState,
+) -> Option<(SavedArtifactsRunEntry, PersistedArtifactsRun)> {
+    let selected_path = state.agents.artifacts_selected_saved_run_path.as_deref()?;
+    let entry = artifacts_history_entries(state)
+        .into_iter()
+        .find(|entry| entry.run_path.as_deref() == Some(selected_path))?;
+    let run = load_persisted_artifacts_run(PathBuf::from(selected_path))?;
+    Some((entry, run))
+}
+
+pub fn artifacts_selected_history_entry(state: &AppState) -> usize {
+    let entries = artifacts_history_entries(state);
+    artifacts_history_entry_index_for_path(
+        &entries,
+        state.agents.artifacts_selected_saved_run_path.as_deref(),
+    )
+}
+
+pub fn artifacts_selected_visible_history_entry(state: &AppState) -> usize {
+    let entries = artifacts_history_visible_entries(state);
+    artifacts_history_entry_index_for_path(
+        &entries,
+        state.agents.artifacts_selected_saved_run_path.as_deref(),
+    )
+}
+
+pub fn artifacts_history_summary_label(state: &AppState) -> String {
+    if let Some((entry, _)) = selected_archived_run_for_current_context(state) {
+        entry.label
+    } else {
+        "current / latest saved run".into()
+    }
 }
 
 fn persisted_patch_diff_excerpt(patch: &PersistedPatchRecord, path: Option<&str>) -> String {
@@ -2429,6 +2781,10 @@ fn append_swarm_summary_lines(out: &mut Vec<String>, view: &SwarmPersistenceView
 #[cfg(test)]
 fn append_swarm_artifact_lines(out: &mut Vec<String>, view: &SwarmPersistenceView, width: usize) {
     append_swarm_summary_lines(out, view, width);
+    if view.report_output.is_some() {
+        out.push(String::new());
+        append_swarm_report_detail_lines(out, view, width);
+    }
     out.push(String::new());
     append_swarm_verify_detail_lines(out, view, width);
     for task in view.tasks.iter() {
@@ -2439,6 +2795,20 @@ fn append_swarm_artifact_lines(out: &mut Vec<String>, view: &SwarmPersistenceVie
 
 fn build_swarm_cards(view: &SwarmPersistenceView, preview_chars: usize) -> Vec<ArtifactCard> {
     let mut cards = Vec::new();
+    if let Some(report_output) = view.report_output.as_deref() {
+        cards.push(ArtifactCard {
+            kind: "REPORT",
+            at: view.report_status.clone().unwrap_or_else(|| "FINAL".into()),
+            owner: view
+                .report_agent_id
+                .clone()
+                .unwrap_or_else(|| "planner".into()),
+            preview: summarize_text_preview(report_output, preview_chars),
+            reference: ArtifactRef::SwarmReport {
+                mission_id: view.mission_id.clone(),
+            },
+        });
+    }
     if view.gate_bundle.is_some() || view.gate_report.is_some() || view.gate_output.is_some() {
         let status = swarm_verify_status(view);
         let preview = if let Some(report) = view.gate_report.as_ref() {
@@ -2498,6 +2868,51 @@ fn build_swarm_cards(view: &SwarmPersistenceView, preview_chars: usize) -> Vec<A
         });
     }
     cards
+}
+
+fn append_swarm_report_detail_lines(
+    out: &mut Vec<String>,
+    view: &SwarmPersistenceView,
+    width: usize,
+) {
+    out.extend(dag_kv_block_lines(
+        &[
+            (
+                "Agent",
+                view.report_agent_id
+                    .clone()
+                    .unwrap_or_else(|| "planner".into()),
+            ),
+            (
+                "Status",
+                view.report_status.clone().unwrap_or_else(|| "FINAL".into()),
+            ),
+            (
+                "Artifact",
+                format!(".nit/swarm/{}/report/final.md", view.mission_id),
+            ),
+        ],
+        width,
+    ));
+    if let Some(output) = view.report_output.as_deref() {
+        let max_lines = 120usize;
+        let total_lines = output.lines().count();
+        let excerpt = output
+            .lines()
+            .take(max_lines)
+            .collect::<Vec<_>>()
+            .join("\n");
+        out.push(String::new());
+        out.push(" Document (excerpt)".into());
+        for line in wrap_cell_text(excerpt.as_str(), width.saturating_sub(1)) {
+            out.push(format!(" {line}"));
+        }
+        if total_lines > max_lines {
+            out.push(format!(
+                " (report truncated; showing first {max_lines} lines)"
+            ));
+        }
+    }
 }
 
 fn append_swarm_task_detail_lines(
@@ -2804,6 +3219,54 @@ fn append_mission_provenance_lines(
         .iter()
         .filter(|item| item.mission_id.as_deref() == Some(mission_id))
         .collect::<Vec<_>>();
+    let selected_archived =
+        selected_archived_run_for_current_context(state).and_then(|(entry, run)| {
+            let has_mission_data = run
+                .messages
+                .iter()
+                .any(|message| message.mission_id.as_deref() == Some(mission_id))
+                || run
+                    .patches
+                    .iter()
+                    .any(|patch| patch.mission_id.as_deref() == Some(mission_id))
+                || run
+                    .evidence
+                    .iter()
+                    .any(|item| item.mission_id.as_deref() == Some(mission_id));
+            has_mission_data.then_some((entry, run))
+        });
+    let archived_messages = selected_archived
+        .as_ref()
+        .map(|(_, run)| {
+            run.messages
+                .iter()
+                .filter(|message| message.mission_id.as_deref() == Some(mission_id))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let archived_agent_messages = archived_messages
+        .iter()
+        .copied()
+        .filter(|message| message.agent_id.is_some())
+        .collect::<Vec<_>>();
+    let archived_patches = selected_archived
+        .as_ref()
+        .map(|(_, run)| {
+            run.patches
+                .iter()
+                .filter(|patch| patch.mission_id.as_deref() == Some(mission_id))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let archived_evidence = selected_archived
+        .as_ref()
+        .map(|(_, run)| {
+            run.evidence
+                .iter()
+                .filter(|item| item.mission_id.as_deref() == Some(mission_id))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
     let persisted = load_persisted_mission_run(state, mission_id);
     let persisted_messages = persisted
         .as_ref()
@@ -2837,24 +3300,35 @@ fn append_mission_provenance_lines(
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
-    let using_persisted =
-        live_messages.is_empty() && live_patches.is_empty() && live_evidence.is_empty();
-    let messages = if using_persisted {
+    let using_selected_archived = selected_archived.is_some();
+    let using_persisted = !using_selected_archived
+        && live_messages.is_empty()
+        && live_patches.is_empty()
+        && live_evidence.is_empty();
+    let messages = if using_selected_archived {
+        archived_messages.len()
+    } else if using_persisted {
         persisted_messages.len()
     } else {
         live_messages.len()
     };
-    let agent_messages = if using_persisted {
+    let agent_messages = if using_selected_archived {
+        archived_agent_messages.len()
+    } else if using_persisted {
         persisted_agent_messages.len()
     } else {
         live_agent_messages.len()
     };
-    let patches = if using_persisted {
+    let patches = if using_selected_archived {
+        archived_patches.len()
+    } else if using_persisted {
         persisted_patches.len()
     } else {
         live_patches.len()
     };
-    let evidence = if using_persisted {
+    let evidence = if using_selected_archived {
+        archived_evidence.len()
+    } else if using_persisted {
         persisted_evidence.len()
     } else {
         live_evidence.len()
@@ -2878,7 +3352,11 @@ fn append_mission_provenance_lines(
                 .and_then(|threads| threads.values().next().cloned())
         });
     let thread_id = thread_id.or_else(|| {
-        let Some(run) = persisted.as_ref() else {
+        let Some(run) = selected_archived
+            .as_ref()
+            .map(|(_, run)| run)
+            .or(persisted.as_ref())
+        else {
             return None;
         };
         state
@@ -2892,6 +3370,12 @@ fn append_mission_provenance_lines(
             })
             .or_else(|| run.codex_thread_id.clone())
     });
+    let saved_runs = artifacts_history_entries(state).len().saturating_sub(1);
+    let source = if let Some((entry, _)) = selected_archived.as_ref() {
+        entry.label.clone()
+    } else {
+        "current / latest saved run".into()
+    };
 
     out.extend(dag_kv_block_lines(
         &[
@@ -2917,6 +3401,10 @@ fn append_mission_provenance_lines(
             ("Patches", patches.to_string()),
             ("Evidence", evidence.to_string()),
         ],
+        width,
+    ));
+    out.extend(dag_kv_block_lines(
+        &[("SavedRuns", saved_runs.to_string()), ("Source", source)],
         width,
     ));
     push_wrapped_detail(
@@ -2951,7 +3439,9 @@ fn append_mission_provenance_lines(
     push_wrapped_detail(
         out,
         "note",
-        if mission.swarm {
+        if using_selected_archived {
+            "Showing an archived saved run from disk. Press R in ARTIFACTS to switch back to current/latest."
+        } else if mission.swarm {
             "Showing mission provenance fallback because no live swarm artifact view was available."
         } else if using_persisted {
             "Showing saved single-agent mission provenance from disk because the live thread is empty."
@@ -2960,6 +3450,7 @@ fn append_mission_provenance_lines(
         },
         width,
     );
+    push_wrapped_detail(out, "history", "Press R to browse saved runs.", width);
 }
 
 fn append_ad_hoc_agent_lines(
@@ -2994,6 +3485,47 @@ fn append_ad_hoc_agent_lines(
         .iter()
         .filter(|item| item.mission_id.is_none() && item.agent_id.as_deref() == Some(agent_id))
         .collect::<Vec<_>>();
+    let selected_archived =
+        selected_archived_run_for_current_context(state).and_then(|(entry, run)| {
+            let has_agent_data = run.messages.iter().any(|message| {
+                message.mission_id.is_none()
+                    && (message.agent_id.is_none() || message.agent_id.as_deref() == Some(agent_id))
+            }) || run
+                .patches
+                .iter()
+                .any(|patch| patch.mission_id.is_none() && patch.agent_id == agent_id)
+                || run.evidence.iter().any(|item| {
+                    item.mission_id.is_none() && item.agent_id.as_deref() == Some(agent_id)
+                });
+            has_agent_data.then_some((entry, run))
+        });
+    let archived_messages = selected_archived
+        .as_ref()
+        .map(|(_, run)| {
+            run.messages
+                .iter()
+                .filter(|message| {
+                    message.mission_id.is_none()
+                        && (message.agent_id.is_none()
+                            || message.agent_id.as_deref() == Some(agent_id))
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let archived_agent_messages = archived_messages
+        .iter()
+        .copied()
+        .filter(|message| message.agent_id.as_deref() == Some(agent_id))
+        .collect::<Vec<_>>();
+    let archived_patches = selected_archived
+        .as_ref()
+        .map(|(_, run)| {
+            run.patches
+                .iter()
+                .filter(|patch| patch.mission_id.is_none() && patch.agent_id == agent_id)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
     let persisted = load_persisted_ad_hoc_run(state, agent_id);
     let persisted_messages = persisted
         .as_ref()
@@ -3033,28 +3565,47 @@ fn append_ad_hoc_agent_lines(
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
-    let using_persisted =
-        live_messages.is_empty() && live_patches.is_empty() && live_evidence.is_empty();
-    let messages = if using_persisted {
+    let using_selected_archived = selected_archived.is_some();
+    let using_persisted = !using_selected_archived
+        && live_messages.is_empty()
+        && live_patches.is_empty()
+        && live_evidence.is_empty();
+    let messages = if using_selected_archived {
+        archived_messages.len()
+    } else if using_persisted {
         persisted_messages.len()
     } else {
         live_messages.len()
     };
-    let agent_messages = if using_persisted {
+    let agent_messages = if using_selected_archived {
+        archived_agent_messages.len()
+    } else if using_persisted {
         persisted_agent_messages.len()
     } else {
         live_agent_messages.len()
     };
-    let patches = if using_persisted {
+    let patches = if using_selected_archived {
+        archived_patches.len()
+    } else if using_persisted {
         persisted_patches.len()
     } else {
         live_patches.len()
     };
     let thread_present = state.agents.codex_thread_ids.contains_key(agent_id)
+        || selected_archived
+            .as_ref()
+            .and_then(|(_, run)| run.codex_thread_id.as_ref())
+            .is_some()
         || persisted
             .as_ref()
             .and_then(|run| run.codex_thread_id.as_ref())
             .is_some();
+    let saved_runs = artifacts_history_entries(state).len().saturating_sub(1);
+    let source = if let Some((entry, _)) = selected_archived.as_ref() {
+        entry.label.clone()
+    } else {
+        "current / latest saved run".into()
+    };
 
     out.extend(dag_kv_block_lines(
         &[
@@ -3079,6 +3630,10 @@ fn append_ad_hoc_agent_lines(
         ],
         width,
     ));
+    out.extend(dag_kv_block_lines(
+        &[("SavedRuns", saved_runs.to_string()), ("Source", source)],
+        width,
+    ));
     push_wrapped_detail(out, "root", persisted_ad_hoc_root(agent_id).as_str(), width);
     push_wrapped_detail(
         out,
@@ -3095,18 +3650,26 @@ fn append_ad_hoc_agent_lines(
     push_wrapped_detail(
         out,
         "note",
-        if using_persisted {
+        if using_selected_archived {
+            "Showing an archived ad-hoc saved run from disk. Press R in ARTIFACTS to switch back to current/latest."
+        } else if using_persisted {
             "No mission is selected. Showing saved ad-hoc artifacts from disk because the live thread is empty."
         } else {
             "No mission is selected. This view is built from the live ad-hoc thread for the selected agent. Select a mission in MISSIONS to see mission artifacts."
         },
         width,
     );
+    push_wrapped_detail(out, "history", "Press R to browse saved runs.", width);
     if let Some(thread_id) = state
         .agents
         .codex_thread_ids
         .get(agent_id)
         .cloned()
+        .or_else(|| {
+            selected_archived
+                .as_ref()
+                .and_then(|(_, run)| run.codex_thread_id.clone())
+        })
         .or_else(|| persisted.and_then(|run| run.codex_thread_id))
     {
         push_wrapped_detail(out, "codex_thread", thread_id.as_str(), width);
@@ -3118,6 +3681,15 @@ fn artifact_cards_for_context(
     swarm: Option<&SwarmRuntime>,
     preview_chars: usize,
 ) -> Vec<ArtifactCard> {
+    if let Some((_, run)) = selected_archived_run_for_current_context(state) {
+        if let Some(mission_id) = state.agents.selected_context_mission() {
+            return build_persisted_mission_cards(&run, mission_id, preview_chars);
+        }
+        if let Some(agent_id) = state.agents.selected_context_agent() {
+            return build_persisted_ad_hoc_cards(&run, agent_id, preview_chars);
+        }
+    }
+
     if let Some(mission_id) = state.agents.selected_context_mission() {
         if let Some(view) = swarm.and_then(|runtime| runtime.swarm_persistence(mission_id)) {
             return build_swarm_cards(&view, preview_chars);
@@ -3252,6 +3824,7 @@ pub enum ArtifactsPopupRef {
     Patch { idx: usize },
     Evidence { idx: usize },
     SwarmTask { mission_id: String, task_id: String },
+    SwarmReport { mission_id: String },
     SwarmVerify { mission_id: String },
 }
 
@@ -3294,8 +3867,182 @@ pub fn artifacts_popup_ref(
             mission_id: mission_id.clone(),
             task_id: task_id.clone(),
         }),
+        ArtifactRef::SwarmReport { mission_id } => Some(ArtifactsPopupRef::SwarmReport {
+            mission_id: mission_id.clone(),
+        }),
         ArtifactRef::SwarmVerify { mission_id } => Some(ArtifactsPopupRef::SwarmVerify {
             mission_id: mission_id.clone(),
+        }),
+    }
+}
+
+pub fn artifacts_popup_ref_for_message(
+    state: &AppState,
+    swarm: Option<&SwarmRuntime>,
+    width: usize,
+    message_idx: usize,
+) -> Option<ArtifactsPopupRef> {
+    let message = state.agents.messages.get(message_idx)?;
+    if let Some(swarm) = swarm {
+        if let Some((mission_id, agent_id)) = message
+            .mission_id
+            .as_deref()
+            .zip(message.agent_id.as_deref())
+        {
+            if let Some(view) = swarm.swarm_persistence(mission_id) {
+                if view.report_output.as_deref() == Some(message.text.as_str())
+                    && view
+                        .report_agent_id
+                        .as_deref()
+                        .is_none_or(|report_agent_id| report_agent_id == agent_id)
+                {
+                    return Some(ArtifactsPopupRef::SwarmReport {
+                        mission_id: mission_id.to_string(),
+                    });
+                }
+
+                if let Some(task) = view.tasks.iter().rev().find(|task| {
+                    task.agent_id == agent_id
+                        && task.output.as_deref() == Some(message.text.as_str())
+                }) {
+                    return Some(ArtifactsPopupRef::SwarmTask {
+                        mission_id: mission_id.to_string(),
+                        task_id: task.id.clone(),
+                    });
+                }
+
+                if view.gate_output.as_deref() == Some(message.text.as_str()) {
+                    return Some(ArtifactsPopupRef::SwarmVerify {
+                        mission_id: mission_id.to_string(),
+                    });
+                }
+            }
+        }
+    }
+
+    artifacts_card_index_for_message(state, swarm, width, message_idx)
+        .map(|_| ArtifactsPopupRef::Message { idx: message_idx })
+}
+
+pub fn artifacts_card_index_for_swarm_task(
+    state: &AppState,
+    swarm: &SwarmRuntime,
+    width: usize,
+    mission_id: &str,
+    task_id: &str,
+) -> Option<usize> {
+    let width = width.max(32);
+    let widths = artifact_list_widths(width);
+    let preview_chars = widths
+        .get(3)
+        .copied()
+        .unwrap_or(120)
+        .saturating_sub(1)
+        .max(10);
+    let cards = artifact_cards_for_context(state, Some(swarm), preview_chars);
+    cards.iter().position(|card| {
+        matches!(
+            &card.reference,
+            ArtifactRef::SwarmTask {
+                mission_id: card_mission_id,
+                task_id: card_task_id,
+            } if card_mission_id == mission_id && card_task_id == task_id
+        )
+    })
+}
+
+pub fn artifacts_card_index_for_swarm_report(
+    state: &AppState,
+    swarm: &SwarmRuntime,
+    width: usize,
+    mission_id: &str,
+) -> Option<usize> {
+    let width = width.max(32);
+    let widths = artifact_list_widths(width);
+    let preview_chars = widths
+        .get(3)
+        .copied()
+        .unwrap_or(120)
+        .saturating_sub(1)
+        .max(10);
+    let cards = artifact_cards_for_context(state, Some(swarm), preview_chars);
+    cards.iter().position(|card| {
+        matches!(
+            &card.reference,
+            ArtifactRef::SwarmReport {
+                mission_id: card_mission_id,
+            } if card_mission_id == mission_id
+        )
+    })
+}
+
+pub fn artifacts_card_index_for_swarm_verify(
+    state: &AppState,
+    swarm: &SwarmRuntime,
+    width: usize,
+    mission_id: &str,
+) -> Option<usize> {
+    let width = width.max(32);
+    let widths = artifact_list_widths(width);
+    let preview_chars = widths
+        .get(3)
+        .copied()
+        .unwrap_or(120)
+        .saturating_sub(1)
+        .max(10);
+    let cards = artifact_cards_for_context(state, Some(swarm), preview_chars);
+    cards.iter().position(|card| {
+        matches!(
+            &card.reference,
+            ArtifactRef::SwarmVerify {
+                mission_id: card_mission_id,
+            } if card_mission_id == mission_id
+        )
+    })
+}
+
+pub fn artifacts_card_index_for_message(
+    state: &AppState,
+    swarm: Option<&SwarmRuntime>,
+    width: usize,
+    message_idx: usize,
+) -> Option<usize> {
+    let width = width.max(32);
+    let widths = artifact_list_widths(width);
+    let preview_chars = widths
+        .get(3)
+        .copied()
+        .unwrap_or(120)
+        .saturating_sub(1)
+        .max(10);
+    let cards = artifact_cards_for_context(state, swarm, preview_chars);
+    cards.iter().position(
+        |card| matches!(&card.reference, ArtifactRef::Message { idx } if *idx == message_idx),
+    )
+}
+
+pub fn artifacts_card_index_for_popup_ref(
+    state: &AppState,
+    swarm: Option<&SwarmRuntime>,
+    width: usize,
+    popup_ref: &ArtifactsPopupRef,
+) -> Option<usize> {
+    match popup_ref {
+        ArtifactsPopupRef::Message { idx } => {
+            artifacts_card_index_for_message(state, swarm, width, *idx)
+        }
+        ArtifactsPopupRef::Patch { .. } | ArtifactsPopupRef::Evidence { .. } => None,
+        ArtifactsPopupRef::SwarmTask {
+            mission_id,
+            task_id,
+        } => swarm.and_then(|swarm| {
+            artifacts_card_index_for_swarm_task(state, swarm, width, mission_id, task_id)
+        }),
+        ArtifactsPopupRef::SwarmReport { mission_id } => swarm.and_then(|swarm| {
+            artifacts_card_index_for_swarm_report(state, swarm, width, mission_id)
+        }),
+        ArtifactsPopupRef::SwarmVerify { mission_id } => swarm.and_then(|swarm| {
+            artifacts_card_index_for_swarm_verify(state, swarm, width, mission_id)
         }),
     }
 }
@@ -3517,6 +4264,13 @@ pub fn artifacts_popup_strings(
                 return out;
             };
             append_swarm_task_detail_lines(&mut out, &view, task, width);
+        }
+        ArtifactRef::SwarmReport { mission_id } => {
+            let Some(view) = swarm.swarm_persistence(mission_id.as_str()) else {
+                out.push(" Swarm persistence not available.".into());
+                return out;
+            };
+            append_swarm_report_detail_lines(&mut out, &view, width);
         }
         ArtifactRef::SwarmVerify { mission_id } => {
             let Some(view) = swarm.swarm_persistence(mission_id.as_str()) else {
@@ -5669,11 +6423,13 @@ fn split_at_chars(text: &str, count: usize) -> (&str, &str) {
 #[cfg(test)]
 mod tests {
     use super::{
-        append_swarm_artifact_lines, arrow_glyph, current_lines_for_width, cursor_glyph,
-        dag_lines_for_dashboard, diagnostics_lines, roster_column_widths, roster_styled_line,
-        roster_swarm_mission_hit, roster_swarm_mission_line_idx, roster_swarm_template_hit,
-        roster_swarm_template_line_idx, swarm_clone_display_label, table_role_label,
-        tree_closed_glyph, tree_open_glyph,
+        append_swarm_artifact_lines, arrow_glyph, artifacts_history_entries,
+        artifacts_history_visible_entries, current_lines_for_width, cursor_glyph,
+        dag_lines_for_dashboard, diagnostics_lines, format_saved_run_relative_label_from_micros,
+        roster_column_widths, roster_styled_line, roster_swarm_mission_hit,
+        roster_swarm_mission_line_idx, roster_swarm_template_hit, roster_swarm_template_line_idx,
+        saved_run_detail_label, swarm_clone_display_label, table_role_label, tree_closed_glyph,
+        tree_open_glyph,
     };
     use crate::swarm::{
         GateReport, GateReportGate, SwarmDashboardView, SwarmGateDashboardRow,
@@ -5683,6 +6439,7 @@ mod tests {
     use nit_core::{
         AgentAlertSeverity, AgentChannel, AgentMessage, AgentOpsTab, AgentStatus, AppKind,
         AppState, Buffer, MissionPhase, MissionRecord, PatchProposal, PatchStatus,
+        SavedRunHistoryFilter,
     };
     use ratatui::style::Modifier;
     use std::{
@@ -5811,6 +6568,9 @@ mod tests {
                 }],
             }),
             gate_output: Some("fmt failed".into()),
+            report_status: Some("DONE".into()),
+            report_agent_id: Some("planner".into()),
+            report_output: Some("# Final Report\n\nShip it.\n".into()),
             tasks: vec![
                 SwarmTaskPersistenceView {
                     id: "integrate".into(),
@@ -5869,6 +6629,9 @@ mod tests {
         assert!(lines
             .iter()
             .any(|line| line.contains(".nit/swarm/mis-011/gates/verify.md")));
+        assert!(lines
+            .iter()
+            .any(|line| line.contains(".nit/swarm/mis-011/report/final.md")));
         assert!(lines
             .iter()
             .any(|line| line.contains("no parseable swarm_artifacts JSON block")));
@@ -6508,5 +7271,198 @@ mod tests {
         assert_eq!(widths.iter().sum::<usize>() + 4, 79);
         assert_eq!(widths[4], 10);
         assert!(widths[0] > widths[4]);
+    }
+
+    #[test]
+    fn artifacts_history_entries_list_archived_runs_newest_first() {
+        let workspace = unique_test_workspace("artifacts-history-list");
+        let mut state = AppState::new(
+            workspace.clone(),
+            Buffer::empty("x", None),
+            Buffer::empty("n", None),
+        );
+        state.agents.selected_mission = Some("mis-501".into());
+        state.agents.missions.push(MissionRecord {
+            id: "mis-501".into(),
+            title: "Archive history".into(),
+            phase: MissionPhase::Execute,
+            swarm: false,
+            assigned_agents: vec!["codex".into()],
+            status: "DONE".into(),
+            updated_at: "t+9".into(),
+        });
+
+        for (dir_name, updated_at) in [
+            ("00000000000000000002", "t+2"),
+            ("00000000000000000001", "t+1"),
+        ] {
+            let run_dir = workspace
+                .join(".nit/agents/runs/mis-501/history")
+                .join(dir_name);
+            fs::create_dir_all(&run_dir).expect("history dir");
+            fs::write(
+                run_dir.join("run.json"),
+                serde_json::json!({
+                    "id": "mis-501",
+                    "updated_at": updated_at,
+                    "messages": [{"at":"t+1","channel":"Agent","agent_id":"codex","mission_id":"mis-501","text":"saved"}],
+                    "patches": [],
+                    "evidence": []
+                })
+                .to_string(),
+            )
+            .expect("write run json");
+        }
+
+        let entries = artifacts_history_entries(&state);
+        assert_eq!(entries.len(), 3);
+        assert_eq!(entries[1].archive_micros, Some(2));
+        assert_eq!(entries[2].archive_micros, Some(1));
+        assert!(entries[1].label.starts_with("saved "));
+        assert!(entries[2].label.starts_with("saved "));
+    }
+
+    #[test]
+    fn saved_run_relative_label_prefers_human_readable_units() {
+        let now_micros = 10 * 24 * 60 * 60 * 1_000_000u128;
+        assert_eq!(
+            format_saved_run_relative_label_from_micros(Some(now_micros), now_micros),
+            "saved just now"
+        );
+        assert_eq!(
+            format_saved_run_relative_label_from_micros(
+                Some(now_micros.saturating_sub(20 * 60 * 1_000_000)),
+                now_micros
+            ),
+            "saved 20m ago"
+        );
+        assert_eq!(
+            format_saved_run_relative_label_from_micros(
+                Some(now_micros.saturating_sub(3 * 60 * 60 * 1_000_000)),
+                now_micros
+            ),
+            "saved 3h ago"
+        );
+        assert_eq!(
+            format_saved_run_relative_label_from_micros(
+                Some(now_micros.saturating_sub(5 * 24 * 60 * 60 * 1_000_000)),
+                now_micros
+            ),
+            "saved 5d ago"
+        );
+    }
+
+    #[test]
+    fn saved_run_detail_label_includes_absolute_and_run_timestamp() {
+        let detail = saved_run_detail_label(
+            Some(1_741_608_000_000_000),
+            "2026-03-09T18:26:35Z",
+            "3 msgs · 1 patches · 0 evidence",
+        );
+        assert!(detail.contains("UTC"));
+        assert!(detail.contains("run 2026-03-09T18:26:35Z"));
+        assert!(detail.contains("3 msgs · 1 patches · 0 evidence"));
+    }
+
+    #[test]
+    fn artifacts_history_visible_entries_apply_date_filter() {
+        let workspace = unique_test_workspace("artifacts-history-filter");
+        let mut state = AppState::new(
+            workspace.clone(),
+            Buffer::empty("x", None),
+            Buffer::empty("n", None),
+        );
+        state.agents.selected_mission = Some("mis-502".into());
+        state.agents.missions.push(MissionRecord {
+            id: "mis-502".into(),
+            title: "Archive filter".into(),
+            phase: MissionPhase::Execute,
+            swarm: false,
+            assigned_agents: vec!["codex".into()],
+            status: "DONE".into(),
+            updated_at: "t+9".into(),
+        });
+
+        let now_micros = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_micros();
+        let recent = now_micros.saturating_sub(6 * 60 * 60 * 1_000_000);
+        let older = now_micros.saturating_sub(3 * 24 * 60 * 60 * 1_000_000);
+        for archive_micros in [older, recent] {
+            let run_dir = workspace
+                .join(".nit/agents/runs/mis-502/history")
+                .join(format!("{archive_micros:020}"));
+            fs::create_dir_all(&run_dir).expect("history dir");
+            fs::write(
+                run_dir.join("run.json"),
+                serde_json::json!({
+                    "id": "mis-502",
+                    "updated_at": "t+2",
+                    "messages": [{"at":"t+1","channel":"Agent","agent_id":"codex","mission_id":"mis-502","text":"saved"}],
+                    "patches": [],
+                    "evidence": []
+                })
+                .to_string(),
+            )
+            .expect("write run json");
+        }
+
+        state.agents.artifacts_history_filter = SavedRunHistoryFilter::LastDay;
+        let entries = artifacts_history_visible_entries(&state);
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].label, "current / latest saved run");
+        assert_eq!(entries[1].archive_micros, Some(recent));
+        assert!(entries[1].label.starts_with("saved "));
+    }
+
+    #[test]
+    fn artifacts_view_uses_selected_archived_run_over_live_context() {
+        let workspace = unique_test_workspace("artifacts-history-selected");
+        let mut state = AppState::new(
+            workspace.clone(),
+            Buffer::empty("x", None),
+            Buffer::empty("n", None),
+        );
+        state.agents.dock_tab = AgentOpsTab::Evidence;
+        state.agents.selected_mission = Some("mis-601".into());
+        state.agents.missions.push(MissionRecord {
+            id: "mis-601".into(),
+            title: "Selected archive".into(),
+            phase: MissionPhase::Execute,
+            swarm: false,
+            assigned_agents: vec!["codex".into()],
+            status: "DONE".into(),
+            updated_at: "t+9".into(),
+        });
+        state.agents.messages.push(AgentMessage {
+            at: "t+3".into(),
+            channel: AgentChannel::Agent,
+            agent_id: Some("codex".into()),
+            mission_id: Some("mis-601".into()),
+            text: "live reply".into(),
+        });
+
+        let run_dir = workspace.join(".nit/agents/runs/mis-601/history/00000000000000000003");
+        fs::create_dir_all(&run_dir).expect("history dir");
+        let archived_run = serde_json::json!({
+            "id": "mis-601",
+            "updated_at": "t+7",
+            "messages": [
+                {"at":"t+1","channel":"Agent","agent_id":null,"mission_id":"mis-601","text":"prompt"},
+                {"at":"t+2","channel":"Agent","agent_id":"codex","mission_id":"mis-601","text":"archived reply"}
+            ],
+            "patches": [],
+            "evidence": []
+        });
+        let run_path = run_dir.join("run.json");
+        fs::write(&run_path, archived_run.to_string()).expect("write run");
+        state.agents.artifacts_selected_saved_run_path =
+            Some(run_path.to_string_lossy().to_string());
+
+        let lines = current_lines_for_width(&state, 96);
+        assert!(lines.iter().any(|line| line.contains("saved ")));
+        assert!(lines.iter().any(|line| line.contains("archived reply")));
+        assert!(!lines.iter().any(|line| line.contains("live reply")));
     }
 }

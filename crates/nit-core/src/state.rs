@@ -205,6 +205,7 @@ pub enum UiSelectionPane {
     GamesPetriDish,
     HelpPopup,
     ArtifactsPopup,
+    ArtifactsHistoryPopup,
     GamesAnalysisPopup,
     GamesRunBrowserPopup,
     GamesReplayPopup,
@@ -236,6 +237,21 @@ pub enum AgentOpsTab {
     Evidence,
     Diagnostics,
     Scratchpad,
+}
+
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub enum SavedRunHistoryFilter {
+    #[default]
+    All,
+    LastDay,
+    LastWeek,
+    LastMonth,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum SavedRunHistoryPendingAction {
+    DeleteSelected,
+    PruneFiltered,
 }
 
 impl AgentOpsTab {
@@ -539,6 +555,7 @@ pub struct AgentDiagnosticEvent {
 pub enum AgentConsoleRowKind {
     User,
     Agent,
+    ArtifactLink,
     Breather,
     StatusHeader,
     StatusRow,
@@ -676,6 +693,18 @@ pub struct AgentsState {
     pub artifacts_popup_open: bool,
     #[serde(skip)]
     pub artifacts_popup_scroll: usize,
+    #[serde(skip)]
+    pub artifacts_history_popup_open: bool,
+    #[serde(skip)]
+    pub artifacts_history_popup_scroll: usize,
+    #[serde(skip)]
+    pub artifacts_history_selected: usize,
+    #[serde(skip)]
+    pub artifacts_selected_saved_run_path: Option<String>,
+    #[serde(skip, default)]
+    pub artifacts_history_filter: SavedRunHistoryFilter,
+    #[serde(skip)]
+    pub artifacts_history_pending_action: Option<SavedRunHistoryPendingAction>,
     #[serde(skip)]
     pub ops_scroll: usize,
     /// Job output viewport dimensions (Agent Ops body area). Runtime-only.
@@ -923,6 +952,12 @@ impl AgentsState {
             artifacts_selected: 0,
             artifacts_popup_open: false,
             artifacts_popup_scroll: 0,
+            artifacts_history_popup_open: false,
+            artifacts_history_popup_scroll: 0,
+            artifacts_history_selected: 0,
+            artifacts_selected_saved_run_path: None,
+            artifacts_history_filter: SavedRunHistoryFilter::All,
+            artifacts_history_pending_action: None,
             ops_scroll: 0,
             ops_viewport_width: 0,
             ops_viewport_height: 0,
@@ -1020,6 +1055,12 @@ impl Default for AgentsState {
             artifacts_selected: 0,
             artifacts_popup_open: false,
             artifacts_popup_scroll: 0,
+            artifacts_history_popup_open: false,
+            artifacts_history_popup_scroll: 0,
+            artifacts_history_selected: 0,
+            artifacts_selected_saved_run_path: None,
+            artifacts_history_filter: SavedRunHistoryFilter::All,
+            artifacts_history_pending_action: None,
             ops_scroll: 0,
             ops_viewport_width: 0,
             ops_viewport_height: 0,
@@ -1750,6 +1791,20 @@ impl AppState {
         &mut self.buffers[self.notes_buffer_id]
     }
 
+    pub fn has_unsaved_editor_buffers(&self) -> bool {
+        self.buffers
+            .iter()
+            .enumerate()
+            .any(|(id, buf)| id != self.notes_buffer_id && buf.is_dirty())
+    }
+
+    fn find_editor_buffer_by_path(&self, path: &Path) -> Option<usize> {
+        self.buffers.iter().enumerate().find_map(|(id, buf)| {
+            (id != self.notes_buffer_id && buf.path().is_some_and(|buf_path| buf_path == path))
+                .then_some(id)
+        })
+    }
+
     pub fn focused_buffer_mut(&mut self) -> Option<&mut Buffer> {
         match self.focus {
             PaneId::Editor => Some(self.editor_buffer_mut()),
@@ -1811,7 +1866,7 @@ pub fn apply_action(state: &mut AppState, action: Action) -> ActionOutcome {
 
     match action {
         Action::Quit => {
-            if state.editor_buffer().is_dirty() {
+            if state.has_unsaved_editor_buffers() {
                 state.prompt = Some(Prompt::ConfirmQuit);
             } else {
                 should_exit = true;
@@ -2488,8 +2543,11 @@ pub fn apply_action(state: &mut AppState, action: Action) -> ActionOutcome {
             state.fuzzy_search.close();
         }
         Action::OpenFile(path) => {
-            if state.editor_buffer().is_dirty() {
-                state.status = Some("Unsaved changes - save (Ctrl+S) before opening a file".into());
+            if let Some(buffer_id) = state.find_editor_buffer_by_path(&path) {
+                state.active_editor_buffer_id = buffer_id;
+                state.focus = PaneId::Editor;
+                state.mode = Mode::Normal;
+                state.status = Some(format!("Opened {}", path.display()));
             } else {
                 match io::load_to_string(&path) {
                     Ok(content) => {
@@ -2498,7 +2556,12 @@ pub fn apply_action(state: &mut AppState, action: Action) -> ActionOutcome {
                             .map(|n| n.to_string_lossy().into_owned())
                             .unwrap_or_else(|| "untitled".into());
                         let buf = Buffer::from_str(name, &content, Some(path.clone()));
-                        state.buffers[state.active_editor_buffer_id] = buf;
+                        if state.editor_buffer().is_dirty() {
+                            state.buffers.push(buf);
+                            state.active_editor_buffer_id = state.buffers.len() - 1;
+                        } else {
+                            state.buffers[state.active_editor_buffer_id] = buf;
+                        }
                         state.focus = PaneId::Editor;
                         state.mode = Mode::Normal;
                         state.status = Some(format!("Opened {}", path.display()));
@@ -2597,7 +2660,7 @@ fn handle_command_line(state: &mut AppState, input: &str) -> bool {
     }
     match tokens.as_slice() {
         ["q"] | ["quit"] | ["exit"] => {
-            if state.editor_buffer().is_dirty() {
+            if state.has_unsaved_editor_buffers() {
                 state.prompt = Some(Prompt::ConfirmQuit);
                 false
             } else {
@@ -4752,6 +4815,104 @@ mod tests {
         // Mark dirty and ensure :q requests confirmation instead of immediate exit.
         state.editor_buffer_mut().insert_char('x');
         assert!(state.editor_buffer().is_dirty());
+        assert!(!handle_command_line(&mut state, "q"));
+        assert!(matches!(state.prompt, Some(Prompt::ConfirmQuit)));
+    }
+
+    #[test]
+    fn open_file_creates_new_editor_buffer_when_current_buffer_is_dirty() {
+        let root = temp_dir("open-file-dirty");
+        let file_a = root.join("a.txt");
+        let file_b = root.join("b.txt");
+        fs::write(&file_a, "alpha").unwrap();
+        fs::write(&file_b, "beta").unwrap();
+
+        let mut state = AppState::new(
+            root.clone(),
+            Buffer::from_str("a.txt", "alpha", Some(file_a.clone())),
+            Buffer::empty("n", None),
+        );
+        state.editor_buffer_mut().insert_char('!');
+
+        let outcome = apply_action(&mut state, Action::OpenFile(file_b.clone()));
+
+        assert!(!outcome.should_exit);
+        assert_eq!(state.buffers.len(), 3);
+        assert_eq!(state.active_editor_buffer_id, 2);
+        assert_eq!(state.editor_buffer().path(), Some(&file_b));
+        assert_eq!(state.editor_buffer().content_as_string(), "beta");
+
+        let original = state.buffer(0).expect("original editor buffer");
+        assert_eq!(original.path(), Some(&file_a));
+        assert!(original.is_dirty());
+        assert_eq!(original.content_as_string(), "!alpha");
+    }
+
+    #[test]
+    fn open_file_switches_to_existing_dirty_buffer_instead_of_reloading() {
+        let root = temp_dir("open-file-existing");
+        let file_a = root.join("a.txt");
+        let file_b = root.join("b.txt");
+        fs::write(&file_a, "alpha").unwrap();
+        fs::write(&file_b, "beta").unwrap();
+
+        let mut state = AppState::new(
+            root.clone(),
+            Buffer::from_str("a.txt", "alpha", Some(file_a.clone())),
+            Buffer::empty("n", None),
+        );
+        state.editor_buffer_mut().insert_char('!');
+        let _ = apply_action(&mut state, Action::OpenFile(file_b.clone()));
+
+        fs::write(&file_a, "disk copy changed").unwrap();
+        let outcome = apply_action(&mut state, Action::OpenFile(file_a.clone()));
+
+        assert!(!outcome.should_exit);
+        assert_eq!(state.buffers.len(), 3);
+        assert_eq!(state.active_editor_buffer_id, 0);
+        assert_eq!(state.editor_buffer().path(), Some(&file_a));
+        assert!(state.editor_buffer().is_dirty());
+        assert_eq!(state.editor_buffer().content_as_string(), "!alpha");
+    }
+
+    #[test]
+    fn quit_prompts_when_hidden_editor_buffer_is_dirty() {
+        let root = temp_dir("quit-hidden-dirty");
+        let file_a = root.join("a.txt");
+        let file_b = root.join("b.txt");
+        fs::write(&file_a, "alpha").unwrap();
+        fs::write(&file_b, "beta").unwrap();
+
+        let mut state = AppState::new(
+            root.clone(),
+            Buffer::from_str("a.txt", "alpha", Some(file_a.clone())),
+            Buffer::empty("n", None),
+        );
+        state.editor_buffer_mut().insert_char('!');
+        let _ = apply_action(&mut state, Action::OpenFile(file_b));
+
+        let outcome = apply_action(&mut state, Action::Quit);
+
+        assert!(!outcome.should_exit);
+        assert!(matches!(state.prompt, Some(Prompt::ConfirmQuit)));
+    }
+
+    #[test]
+    fn command_q_prompts_when_hidden_editor_buffer_is_dirty() {
+        let root = temp_dir("cmd-q-hidden-dirty");
+        let file_a = root.join("a.txt");
+        let file_b = root.join("b.txt");
+        fs::write(&file_a, "alpha").unwrap();
+        fs::write(&file_b, "beta").unwrap();
+
+        let mut state = AppState::new(
+            root.clone(),
+            Buffer::from_str("a.txt", "alpha", Some(file_a.clone())),
+            Buffer::empty("n", None),
+        );
+        state.editor_buffer_mut().insert_char('!');
+        let _ = apply_action(&mut state, Action::OpenFile(file_b));
+
         assert!(!handle_command_line(&mut state, "q"));
         assert!(matches!(state.prompt, Some(Prompt::ConfirmQuit)));
     }
