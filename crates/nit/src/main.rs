@@ -23,9 +23,9 @@ use nit_games::output::{
 use nit_games::tournament::{KernelRunMode, Parallelism, TournamentKernel};
 use nit_games::{
     accelerator_run_preflight, enumerate_fsms, format_strategy_introspection, introspect_strategy,
-    run_id_from_seed_config, Action, FsmDefinition, GamesConfig, HistoryWriter, InputMode,
-    ScoreAggregation, StrategyIntrospection, StrategyIntrospectionKind,
-    StrategyIntrospectionParameters, StrategySpec, TmTransitionRecord,
+    run_id_from_seed_config, select_halting_turing_machine_strategies, Action, FsmDefinition,
+    GamesConfig, HistoryWriter, InputMode, ScoreAggregation, StrategyIntrospection,
+    StrategyIntrospectionKind, StrategyIntrospectionParameters, StrategySpec, TmTransitionRecord,
 };
 use nit_tui::{run, Theme};
 use nit_utils::hashing::stable_hash_bytes;
@@ -696,7 +696,6 @@ rule_code = 3111
 
 fn execute_tournament(
     kernel: &TournamentKernel,
-    config: &nit_games::NormalizedConfig,
     event_path: Option<PathBuf>,
     history_path: Option<PathBuf>,
 ) -> anyhow::Result<(
@@ -705,6 +704,7 @@ fn execute_tournament(
     Option<String>,
     Option<String>,
 )> {
+    let config = kernel.config();
     let parallelism = Parallelism::from_config(&config.engine.parallelism);
     let event_log_enabled = event_path.is_some();
     let history_log_enabled = history_path.is_some();
@@ -903,6 +903,7 @@ fn run_games_headless(
         .seed
         .unwrap_or_else(|| stable_hash_bytes(format!("{timestamp}\n{config_text}").as_bytes()));
     config.seed = Some(seed);
+    config = select_halting_turing_machine_strategies(config);
     accelerator_run_preflight(
         &config,
         config.save_data && config.event_log.enabled,
@@ -954,9 +955,9 @@ fn run_games_headless(
     let kernel = TournamentKernel::new(config.clone());
     let event_log_enabled = config.save_data && config.event_log.enabled;
     let history_log_enabled = config.save_data && config.history.enabled;
+    let effective_config = kernel.config().clone();
     let (results, runtime, event_log, history_log) = execute_tournament(
         &kernel,
-        &config,
         if event_log_enabled {
             event_path.clone()
         } else {
@@ -1001,7 +1002,7 @@ fn run_games_headless(
         run_id,
         seed,
         config_text: config_text.clone(),
-        config: config.clone(),
+        config: effective_config.clone(),
         paths: RunPaths {
             summary: summary_path.as_ref().map(|path| path.display().to_string()),
             events: event_log.clone(),
@@ -1224,6 +1225,7 @@ fn run_games_sweep(
                                 cell_config.payoff = payoff_from_rsp(*r, *s, *t, *p);
                                 cell_config.seed = Some(cell_seed);
                                 cell_config.engine.mode = EngineMode::Batch;
+                                cell_config = select_halting_turing_machine_strategies(cell_config);
                                 accelerator_run_preflight(
                                     &cell_config,
                                     cell_config.save_data && cell_config.event_log.enabled,
@@ -1305,10 +1307,10 @@ fn run_games_sweep(
                                 }
 
                                 let kernel = TournamentKernel::new(cell_config.clone());
+                                let effective_cell_config = kernel.config().clone();
                                 let (results, runtime, event_log, history_log) =
                                     execute_tournament(
                                         &kernel,
-                                        &cell_config,
                                         cell_config
                                             .event_log
                                             .enabled
@@ -1339,7 +1341,7 @@ fn run_games_sweep(
                                     run_id: run_id.clone(),
                                     seed: cell_seed,
                                     config_text: config_text_cell.clone(),
-                                    config: cell_config.clone(),
+                                    config: effective_cell_config.clone(),
                                     paths: RunPaths {
                                         summary: Some(summary_path.display().to_string()),
                                         events: event_log.clone(),

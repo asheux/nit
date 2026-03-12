@@ -5,7 +5,9 @@ pub struct MatchPair {
 }
 
 pub const CA_MAX_WINDOW: u32 = 1024;
-pub const TM_MAX_WIDTH: u32 = 256;
+// NOTE: This is the default scratch width compiled into the Metal TM batch kernel.
+// The macOS Metal backend may compile specialized pipelines for larger TM widths at runtime.
+pub const TM_MAX_WIDTH: u32 = 1024;
 
 #[derive(Clone, Debug)]
 pub struct ScorePair {

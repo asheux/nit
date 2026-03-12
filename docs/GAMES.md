@@ -117,10 +117,12 @@ One-sided TMs are deterministic, bounded-step programs with notebook-compatible
 history input semantics.
 
 Per-round semantics:
+- empty history returns `C` without running the TM
 - `input = FromDigits[Flatten[history], 2]` (global A,B order; no player swap)
+- the head starts on the least-significant base-`symbols` digit of that input
 - run `OneSidedTuringMachineFunction(tm, input, max_steps_per_round)`
 - if the run produces no output in time: action `D` (`halted=false`)
-- if output symbol is `out`: action is `out mod symbols` (`halted=true`)
+- if output symbol is `0`: action `C`; any non-zero output symbol maps to `D` (`halted=true`)
 - each round starts from the same TM definition; there is no persistent streaming tape
 
 #### Explicit transition table
@@ -185,7 +187,8 @@ Rule decoding order (Wolfram-style one-sided TM):
 
 Notes:
 - Moves are only Left/Right (no Stay) for rule codes.
-- For long histories, runtime uses a bounded suffix window sized by `max_steps_per_round`.
+- When the head moves left of the current tape, the runtime grows a blank cell on the left.
+- For long histories, runtime keeps the notebook-equivalent least-significant input window that can affect a `max_steps_per_round` run.
 
 ### Generated strategies (NDJSON)
 

@@ -558,7 +558,7 @@ pub fn run_one_sided_tm(
 
         if matches!(trans.move_dir, TmMove::Right) && head_before + 1 == tape.len() {
             let output_value = digits_to_u64(&tape, symbols);
-            let output_symbol = output_value.map(|value| (value % symbols as u64) as u8);
+            let output_symbol = tape.last().copied();
             if let Some(trace) = trace.as_mut() {
                 trace.steps.push(TmTraceStep {
                     step: step + 1,
@@ -585,7 +585,12 @@ pub fn run_one_sided_tm(
         let mut head_after = head_before;
         match trans.move_dir {
             TmMove::Left => {
-                head_after = head_after.saturating_sub(1);
+                if head_after == 0 {
+                    tape.insert(0, blank);
+                    head_after = 0;
+                } else {
+                    head_after -= 1;
+                }
             }
             TmMove::Stay => {}
             TmMove::Right => {
@@ -678,18 +683,8 @@ impl OneSidedTmStrategy {
         &self.stats
     }
 
-    fn action_from_symbol(&self, symbol: u8) -> Action {
-        let base = self.symbols.max(1);
-        if symbol.is_multiple_of(base) {
-            Action::Cooperate
-        } else {
-            Action::Defect
-        }
-    }
-
-    fn action_from_output_value(&self, output: u64) -> Action {
-        let symbol = (output % self.symbols.max(1) as u64) as u8;
-        self.action_from_symbol(symbol)
+    fn action_from_output_symbol(&self, symbol: u8) -> Action {
+        tm_action_from_output_symbol(symbol)
     }
 
     fn sync_input(&mut self, history: &History) {
@@ -709,6 +704,33 @@ impl OneSidedTmStrategy {
             self.input_suffix.history_len = len;
         }
     }
+
+    fn record_round(
+        &mut self,
+        steps_taken: u32,
+        halted: bool,
+        output_event: bool,
+        max_steps_hit: bool,
+    ) {
+        self.last_halted = halted;
+        self.stats.rounds = self.stats.rounds.saturating_add(1);
+        self.stats.steps = self.stats.steps.saturating_add(steps_taken as u64);
+        if self.stats.rounds == 1 {
+            self.stats.min_steps = steps_taken;
+            self.stats.max_steps = steps_taken;
+        } else {
+            self.stats.min_steps = self.stats.min_steps.min(steps_taken);
+            self.stats.max_steps = self.stats.max_steps.max(steps_taken);
+        }
+        if output_event {
+            self.stats.output_events = self.stats.output_events.saturating_add(1);
+        } else {
+            self.stats.fallback = self.stats.fallback.saturating_add(1);
+            if max_steps_hit {
+                self.stats.max_steps_hits = self.stats.max_steps_hits.saturating_add(1);
+            }
+        }
+    }
 }
 
 impl Strategy for OneSidedTmStrategy {
@@ -723,6 +745,11 @@ impl Strategy for OneSidedTmStrategy {
     }
 
     fn next_action(&mut self, history: &History, _player_a: bool) -> Action {
+        if history.is_empty() {
+            self.record_round(0, true, true, false);
+            return Action::Cooperate;
+        }
+
         self.sync_input(history);
         let input_digits = self.input_suffix.msd_digits();
         let run = run_one_sided_tm(
@@ -735,27 +762,15 @@ impl Strategy for OneSidedTmStrategy {
             false,
         );
 
-        self.last_halted = run.halted;
-        self.stats.rounds = self.stats.rounds.saturating_add(1);
-        self.stats.steps = self.stats.steps.saturating_add(run.steps_taken as u64);
-        if self.stats.rounds == 1 {
-            self.stats.min_steps = run.steps_taken;
-            self.stats.max_steps = run.steps_taken;
-        } else {
-            self.stats.min_steps = self.stats.min_steps.min(run.steps_taken);
-            self.stats.max_steps = self.stats.max_steps.max(run.steps_taken);
-        }
-        if run.halted {
-            self.stats.output_events = self.stats.output_events.saturating_add(1);
-        } else {
-            self.stats.fallback = self.stats.fallback.saturating_add(1);
-            if matches!(run.stop_reason, TmStopReason::MaxSteps) {
-                self.stats.max_steps_hits = self.stats.max_steps_hits.saturating_add(1);
-            }
-        }
+        self.record_round(
+            run.steps_taken,
+            run.halted,
+            run.halted,
+            matches!(run.stop_reason, TmStopReason::MaxSteps),
+        );
 
-        if let Some(output) = run.output_value {
-            self.action_from_output_value(output)
+        if let Some(symbol) = run.output_symbol {
+            self.action_from_output_symbol(symbol)
         } else {
             Action::Defect
         }
@@ -824,7 +839,7 @@ fn sync_bit_window(window: &mut BitWindow, history: &History, last_history_len: 
 }
 
 #[derive(Clone, Debug)]
-struct InputSuffix {
+pub(crate) struct InputSuffix {
     base: u8,
     width: usize,
     digits_le: Vec<u8>,
@@ -833,7 +848,7 @@ struct InputSuffix {
 }
 
 impl InputSuffix {
-    fn new(base: u8, width: usize) -> Self {
+    pub(crate) fn new(base: u8, width: usize) -> Self {
         Self {
             base: base.max(2),
             width: width.max(1),
@@ -851,7 +866,11 @@ impl InputSuffix {
     }
 
     fn push_round(&mut self, round: RoundRecord) {
-        let pair = ((action_bit(round.a) << 1) | action_bit(round.b)) as u16;
+        self.push_pair_bits(action_bit(round.a), action_bit(round.b));
+    }
+
+    pub(crate) fn push_pair_bits(&mut self, a_bit: u8, b_bit: u8) {
+        let pair = ((a_bit.min(1) << 1) | b_bit.min(1)) as u16;
         self.mul_add(4, pair);
     }
 
@@ -885,7 +904,7 @@ impl InputSuffix {
         }
     }
 
-    fn msd_digits(&self) -> Vec<u8> {
+    pub(crate) fn msd_digits(&self) -> Vec<u8> {
         if self.digits_le.is_empty() {
             return vec![0];
         }
@@ -918,6 +937,14 @@ impl InputSuffix {
             }
             self.digits_le.pop();
         }
+    }
+}
+
+pub(crate) fn tm_action_from_output_symbol(symbol: u8) -> Action {
+    if symbol == 0 {
+        Action::Cooperate
+    } else {
+        Action::Defect
     }
 }
 

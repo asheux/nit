@@ -2,8 +2,12 @@
 
 using namespace metal;
 
+#ifndef CA_MAX_WINDOW
 #define CA_MAX_WINDOW 1024u
-#define TM_MAX_WIDTH 256u
+#endif
+#ifndef TM_MAX_WIDTH
+#define TM_MAX_WIDTH 1024u
+#endif
 
 struct MatchPair {
     uint a_idx;
@@ -145,13 +149,13 @@ inline uint ca_action_for_strategy(
     return row[row_len - 1u] == 0u ? 0u : 1u;
 }
 
-inline void tm_trim_redundant_high_zeros(thread uint* digits, thread uint& len) {
+inline void tm_trim_redundant_high_zeros(thread uchar* digits, thread uint& len) {
     while (len > 1u && digits[len - 1u] == 0u) {
         len -= 1u;
     }
 }
 
-inline void tm_trim_high_zeros_with_prefix(thread uint* digits, thread uint& len, uint width) {
+inline void tm_trim_high_zeros_with_prefix(thread uchar* digits, thread uint& len, uint width) {
     while (len > width) {
         len -= 1u;
     }
@@ -164,7 +168,7 @@ inline void tm_trim_high_zeros_with_prefix(thread uint* digits, thread uint& len
 }
 
 inline void tm_mul_add(
-    thread uint* digits,
+    thread uchar* digits,
     thread uint& len,
     thread uint& prefix_nonzero,
     uint width,
@@ -174,13 +178,13 @@ inline void tm_mul_add(
 ) {
     uint carry = add;
     for (uint idx = 0u; idx < len; idx++) {
-        const uint value = digits[idx] * mul + carry;
-        digits[idx] = value % base;
+        const uint value = uint(digits[idx]) * mul + carry;
+        digits[idx] = (uchar)(value % base);
         carry = value / base;
     }
     while (carry > 0u) {
         if (len < width) {
-            digits[len] = carry % base;
+            digits[len] = (uchar)(carry % base);
             len += 1u;
             carry /= base;
         } else {
@@ -189,7 +193,7 @@ inline void tm_mul_add(
         }
     }
     while (len > width) {
-        const uint popped = digits[len - 1u];
+        const uint popped = uint(digits[len - 1u]);
         len -= 1u;
         if (popped != 0u) {
             prefix_nonzero = 1u;
@@ -203,7 +207,7 @@ inline void tm_mul_add(
 }
 
 inline void tm_push_round(
-    thread uint* digits,
+    thread uchar* digits,
     thread uint& len,
     thread uint& prefix_nonzero,
     uint width,
@@ -214,10 +218,10 @@ inline void tm_push_round(
 }
 
 inline void tm_input_digits(
-    const thread uint* digits_le,
+    const thread uchar* digits_le,
     uint digits_len,
     uint prefix_nonzero,
-    thread uint* input_digits,
+    thread uchar* input_digits,
     thread uint& input_len
 ) {
     input_len = digits_len;
@@ -247,11 +251,11 @@ inline uint tm_action_for_strategy(
     device const uint* start_states,
     constant TmParams& params,
     uint strategy_idx,
-    const thread uint* input_digits,
+    const thread uchar* input_digits,
     uint input_len,
     thread bool& halted
 ) {
-    thread uint tape[TM_MAX_WIDTH];
+    thread uchar tape[TM_MAX_WIDTH];
     for (uint idx = 0u; idx < input_len; idx++) {
         tape[idx] = input_digits[idx];
     }
@@ -268,16 +272,22 @@ inline uint tm_action_for_strategy(
     }
     const uint base = strategy_idx * params.transitions_per_strategy;
     for (uint step = 0u; step < params.max_steps; step++) {
-        const uint read = head < tape_len ? tape[head] : params.blank;
+        const uint read = head < tape_len ? uint(tape[head]) : params.blank;
         const TmTransition trans = transitions[base + (state - 1u) * params.symbols + read];
-        tape[head] = trans.write;
+        tape[head] = (uchar)trans.write;
         if (trans.move_dir == 1u && head + 1u == tape_len) {
             halted = true;
-            return tape[tape_len - 1u] == 0u ? 0u : 1u;
+            return tape[tape_len - 1u] == (uchar)0 ? 0u : 1u;
         }
         if (trans.move_dir == 0u) {
             if (head > 0u) {
                 head -= 1u;
+            } else if (tape_len < TM_MAX_WIDTH) {
+                for (uint idx = tape_len; idx > 0u; idx--) {
+                    tape[idx] = tape[idx - 1u];
+                }
+                tape[0] = (uchar)params.blank;
+                tape_len += 1u;
             }
         } else if (trans.move_dir == 1u) {
             if (head + 1u < tape_len) {
@@ -369,40 +379,44 @@ kernel void tm_batch(
         return;
     }
     const auto pair = pairs[gid];
-    thread uint suffix_digits[TM_MAX_WIDTH];
+    thread uchar suffix_digits[TM_MAX_WIDTH];
     uint suffix_len = 1u;
     uint prefix_nonzero = 0u;
     suffix_digits[0] = 0u;
     long a_total = 0;
     long b_total = 0;
     for (uint round = 0u; round < eval_params.rounds; round++) {
-        thread uint input_digits[TM_MAX_WIDTH];
-        uint input_len = 0u;
-        tm_input_digits(suffix_digits, suffix_len, prefix_nonzero, input_digits, input_len);
-        bool a_halted = false;
-        bool b_halted = false;
-        const uint a_action = tm_action_for_strategy(
-            transitions,
-            start_states,
-            tm_params,
-            pair.a_idx,
-            input_digits,
-            input_len,
-            a_halted
-        );
-        const uint b_action = tm_action_for_strategy(
-            transitions,
-            start_states,
-            tm_params,
-            pair.b_idx,
-            input_digits,
-            input_len,
-            b_halted
-        );
+        bool a_halted = true;
+        bool b_halted = true;
+        uint a_action = 0u;
+        uint b_action = 0u;
+        if (round != 0u) {
+            thread uchar input_digits[TM_MAX_WIDTH];
+            uint input_len = 0u;
+            tm_input_digits(suffix_digits, suffix_len, prefix_nonzero, input_digits, input_len);
+            a_action = tm_action_for_strategy(
+                transitions,
+                start_states,
+                tm_params,
+                pair.a_idx,
+                input_digits,
+                input_len,
+                a_halted
+            );
+            b_action = tm_action_for_strategy(
+                transitions,
+                start_states,
+                tm_params,
+                pair.b_idx,
+                input_digits,
+                input_len,
+                b_halted
+            );
+        }
         const auto payoff = payoff_with_timeouts(a_action, b_action, a_halted, b_halted, eval_params);
         a_total += payoff.x;
         b_total += payoff.y;
-        const uint pair_digit = (a_action << 1u) | b_action;
+        const uint pair_digit = ((a_halted ? a_action : 0u) << 1u) | (b_halted ? b_action : 0u);
         tm_push_round(
             suffix_digits,
             suffix_len,

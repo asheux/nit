@@ -6,16 +6,48 @@ use crate::{
 use metal::{CompileOptions, ComputePipelineState, Device, Library, MTLResourceOptions, MTLSize};
 use nit_utils::{fs::write_atomic, hashing::stable_hash_bytes, paths::cache_dir};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::ffi::c_void;
 use std::fs;
 use std::mem::size_of;
 use std::path::{Path, PathBuf};
 use std::slice;
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
 
 const SHADER_SOURCE: &str = include_str!("batch_eval.metal");
 const POLICY_CACHE_SCHEMA_VERSION: u32 = 1;
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+struct ShaderKey {
+    ca_max_window: u32,
+    tm_max_width: u32,
+}
+
+impl ShaderKey {
+    fn defaults() -> Self {
+        Self {
+            ca_max_window: CA_MAX_WINDOW.max(1),
+            tm_max_width: TM_MAX_WIDTH.max(1),
+        }
+    }
+
+    fn for_tm(max_steps: u32) -> Self {
+        Self {
+            ca_max_window: CA_MAX_WINDOW.max(1),
+            tm_max_width: max_steps.saturating_add(1).max(1),
+        }
+    }
+}
+
+fn shader_source_for_key(key: ShaderKey) -> String {
+    // Metal requires fixed-size arrays. We specialize the kernels by compiling the shader
+    // with the requested scratch sizes, caching pipeline states per key.
+    format!(
+        "#define CA_MAX_WINDOW {}u\n#define TM_MAX_WIDTH {}u\n{}",
+        key.ca_max_window, key.tm_max_width, SHADER_SOURCE
+    )
+}
 
 #[repr(C)]
 #[derive(Copy, Clone)]
@@ -111,6 +143,7 @@ enum PreparedPayload {
 }
 
 pub struct PreparedBatch {
+    shader_key: ShaderKey,
     eval: BatchEvalConfig,
     payload: PreparedPayload,
 }
@@ -487,7 +520,11 @@ pub fn recommended_batch_policy(
     config: &BatchEvalConfig,
     payload: &BatchPayload,
 ) -> Result<Option<RecommendedBatchPolicy>, String> {
-    let ctx = context()?;
+    let key = match payload {
+        BatchPayload::Tm(batch) => ShaderKey::for_tm(batch.max_steps),
+        _ => ShaderKey::defaults(),
+    };
+    let ctx = context_for_key(key)?;
     let working_set = ctx.device.recommended_max_working_set_size();
     let device_name = ctx.device.name().to_string();
     let inflight_batches = preferred_inflight_batches(&device_name);
@@ -737,11 +774,12 @@ mod tests {
 }
 
 impl MetalContext {
-    fn new() -> Result<Self, String> {
+    fn new_for_key(key: ShaderKey) -> Result<Self, String> {
         let device =
             Device::system_default().ok_or_else(|| "Metal device unavailable".to_string())?;
         let options = CompileOptions::new();
-        let library = device.new_library_with_source(SHADER_SOURCE, &options)?;
+        let source = shader_source_for_key(key);
+        let library = device.new_library_with_source(&source, &options)?;
         let fsm_fn = library
             .get_function("fsm_batch", None)
             .map_err(|err| err.to_string())?;
@@ -766,12 +804,20 @@ impl MetalContext {
     }
 }
 
-fn context() -> Result<&'static MetalContext, String> {
-    static CONTEXT: OnceLock<Result<MetalContext, String>> = OnceLock::new();
-    CONTEXT
-        .get_or_init(MetalContext::new)
-        .as_ref()
-        .map_err(|err| err.clone())
+fn context_for_key(key: ShaderKey) -> Result<&'static MetalContext, String> {
+    static CONTEXTS: OnceLock<Mutex<HashMap<ShaderKey, Result<&'static MetalContext, String>>>> =
+        OnceLock::new();
+    let contexts = CONTEXTS.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut contexts = contexts
+        .lock()
+        .map_err(|_| "Metal context cache lock poisoned".to_string())?;
+    if let Some(existing) = contexts.get(&key) {
+        return existing.clone();
+    }
+    let built = MetalContext::new_for_key(key);
+    let stored = built.map(|ctx| Box::leak(Box::new(ctx)) as &'static MetalContext);
+    contexts.insert(key, stored.clone());
+    stored
 }
 
 fn eval_params(config: &BatchEvalConfig, pair_count: usize) -> EvalParams {
@@ -982,7 +1028,23 @@ pub fn try_prepare_batch(
     config: &BatchEvalConfig,
     payload: &BatchPayload,
 ) -> Result<Option<PreparedBatch>, String> {
-    let ctx = context()?;
+    if let BatchPayload::Ca(payload) = payload {
+        if payload
+            .two_r
+            .saturating_mul(payload.steps)
+            .saturating_add(1)
+            > CA_MAX_WINDOW
+        {
+            return Ok(None);
+        }
+    }
+
+    let shader_key = match payload {
+        BatchPayload::Tm(payload) => ShaderKey::for_tm(payload.max_steps),
+        _ => ShaderKey::defaults(),
+    };
+    let ctx = context_for_key(shader_key)?;
+
     let payload = match payload {
         BatchPayload::Fsm(payload) => PreparedPayload::Fsm {
             params: FsmParams {
@@ -993,29 +1055,16 @@ pub fn try_prepare_batch(
             outputs: buffer_from_slice(&ctx.device, &payload.outputs),
             transitions: buffer_from_slice(&ctx.device, &payload.transitions),
         },
-        BatchPayload::Ca(payload) => {
-            if payload
-                .two_r
-                .saturating_mul(payload.steps)
-                .saturating_add(1)
-                > CA_MAX_WINDOW
-            {
-                return Ok(None);
-            }
-            PreparedPayload::Ca {
-                params: CaParams {
-                    symbols: payload.symbols,
-                    two_r: payload.two_r,
-                    steps: payload.steps,
-                    rule_table_len: payload.rule_table_len,
-                },
-                rule_tables: buffer_from_slice(&ctx.device, &payload.rule_tables),
-            }
-        }
+        BatchPayload::Ca(payload) => PreparedPayload::Ca {
+            params: CaParams {
+                symbols: payload.symbols,
+                two_r: payload.two_r,
+                steps: payload.steps,
+                rule_table_len: payload.rule_table_len,
+            },
+            rule_tables: buffer_from_slice(&ctx.device, &payload.rule_tables),
+        },
         BatchPayload::Tm(payload) => {
-            if payload.max_steps.saturating_add(1) > TM_MAX_WIDTH {
-                return Ok(None);
-            }
             let transitions = tm_pods(&payload.transitions);
             PreparedPayload::Tm {
                 params: TmParams {
@@ -1031,6 +1080,7 @@ pub fn try_prepare_batch(
         }
     };
     Ok(Some(PreparedBatch {
+        shader_key,
         eval: config.clone(),
         payload,
     }))
@@ -1056,7 +1106,7 @@ pub fn try_begin_prepared_batch(
     if pairs.is_empty() {
         return Ok(None);
     }
-    let ctx = context()?;
+    let ctx = context_for_key(prepared.shader_key)?;
     submit_prepared_batch_impl(ctx, prepared, pairs).map(Some)
 }
 

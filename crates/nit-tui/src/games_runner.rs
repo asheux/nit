@@ -10,7 +10,10 @@ use nit_games::output::{
 use nit_games::tournament::{
     MatchHistoryPreview, MatchSnapshot, TournamentProgress, TournamentRunner,
 };
-use nit_games::{accelerator_run_preflight, EngineMode, HistoryWriter, NormalizedConfig};
+use nit_games::{
+    accelerator_run_preflight, select_halting_turing_machine_strategies, EngineMode, HistoryWriter,
+    NormalizedConfig,
+};
 
 const RUNNER_CHUNK_TARGET: Duration = Duration::from_millis(120);
 const RUNNER_CHUNK_INITIAL: u32 = 4_096;
@@ -250,15 +253,16 @@ fn runner_loop(cmd_rx: Receiver<RunnerCommand>, event_tx: Sender<RunnerEvent>) {
 }
 
 fn start_run(request: RunRequest, event_tx: &Sender<RunnerEvent>) -> Result<RunState, String> {
-    let match_history_previews = !matches!(request.config.engine.mode, EngineMode::Batch);
+    let config = select_halting_turing_machine_strategies(request.config);
+    let match_history_previews = !matches!(config.engine.mode, EngineMode::Batch);
     accelerator_run_preflight(
-        &request.config,
+        &config,
         request.event_path.is_some(),
         request.history_path.is_some(),
         match_history_previews,
     )?;
 
-    let mut runner = TournamentRunner::new(request.config);
+    let mut runner = TournamentRunner::new(config);
     if matches!(runner.config().engine.mode, EngineMode::Batch) {
         runner = runner.with_match_history_previews(false);
     }

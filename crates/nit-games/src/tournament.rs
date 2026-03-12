@@ -11,7 +11,10 @@ use crate::output::{
     DominanceEdge, PairwiseResult, RunSummary, RuntimeAcceleratorStats, StrategyDefinition,
     StrategyResult, TournamentResults,
 };
-use crate::strategy::{CaStrategy, FsmStrategy, OneSidedTmStrategy, Strategy, TmRunStats};
+use crate::strategy::{
+    run_one_sided_tm, tm_action_from_output_symbol, CaStrategy, FsmStrategy, InputSuffix,
+    OneSidedTmStrategy, Strategy, TmRunStats, TmTransition,
+};
 use nit_metal::{
     BatchEvalConfig, BatchExecutionPolicy, BatchPayload, BatchPolicySource, CaBatch, FsmBatch,
     MatchPair, PreparedBatch, TmBatch,
@@ -708,13 +711,6 @@ fn metal_batch_decline_reason(
                 nit_metal::CA_MAX_WINDOW
             ))
         }
-        BatchPayload::Tm(batch) if batch.max_steps.saturating_add(1) > nit_metal::TM_MAX_WIDTH => {
-            Some(format!(
-                "TM `max_steps_per_round = {}` exceeds Metal limit {}",
-                batch.max_steps,
-                nit_metal::TM_MAX_WIDTH.saturating_sub(1)
-            ))
-        }
         _ => None,
     }
 }
@@ -843,13 +839,6 @@ pub fn accelerator_preflight(config: &NormalizedConfig) -> Result<(), String> {
                 "Metal accelerator supports CA windows up to {} cells; this run needs {}.",
                 nit_metal::CA_MAX_WINDOW,
                 batch.two_r.saturating_mul(batch.steps).saturating_add(1)
-            ));
-        }
-        BatchPayload::Tm(batch) if batch.max_steps.saturating_add(1) > nit_metal::TM_MAX_WIDTH => {
-            return Err(format!(
-                "Metal accelerator supports TM `max_steps_per_round <= {}`; this run uses {}.",
-                nit_metal::TM_MAX_WIDTH.saturating_sub(1),
-                batch.max_steps
             ));
         }
         _ => {}
@@ -1045,8 +1034,327 @@ fn compare_scores(a: f64, b: f64) -> Ordering {
     }
 }
 
+fn strategy_is_one_sided_tm(spec: &StrategySpec) -> bool {
+    matches!(spec.kind, StrategySpecKind::OneSidedTm { .. })
+}
+
+fn roster_is_all_tms(strategies: &[StrategySpec]) -> bool {
+    !strategies.is_empty() && strategies.iter().all(strategy_is_one_sided_tm)
+}
+
+fn tm_stats_always_halt(stats: Option<&TmRunStats>) -> bool {
+    stats
+        .map(|stats| stats.fallback == 0 && stats.output_events == stats.rounds)
+        .unwrap_or(false)
+}
+
+#[derive(Copy, Clone)]
+struct NotebookTmSpec<'a> {
+    symbols: u8,
+    start_state: u16,
+    blank: u8,
+    max_steps_per_round: u32,
+    transitions: &'a [TmTransition],
+}
+
+fn notebook_tm_spec(spec: &StrategySpec) -> Option<NotebookTmSpec<'_>> {
+    match &spec.kind {
+        StrategySpecKind::OneSidedTm {
+            symbols,
+            start_state,
+            blank,
+            max_steps_per_round,
+            transitions,
+            ..
+        } => Some(NotebookTmSpec {
+            symbols: *symbols,
+            start_state: *start_state,
+            blank: *blank,
+            max_steps_per_round: *max_steps_per_round,
+            transitions,
+        }),
+        _ => None,
+    }
+}
+
+fn notebook_tm_action(
+    spec: NotebookTmSpec<'_>,
+    input: &InputSuffix,
+    first_round: bool,
+) -> (Action, bool) {
+    if first_round {
+        return (Action::Cooperate, true);
+    }
+
+    let input_digits = input.msd_digits();
+    let run = run_one_sided_tm(
+        spec.transitions,
+        spec.symbols,
+        spec.start_state,
+        spec.blank,
+        &input_digits,
+        spec.max_steps_per_round,
+        false,
+    );
+    let action = run
+        .output_symbol
+        .map(tm_action_from_output_symbol)
+        .unwrap_or(Action::Defect);
+    (action, run.halted)
+}
+
+fn notebook_tm_history_bit(action: Action, halted: bool) -> u8 {
+    if !halted {
+        return 0;
+    }
+    match action {
+        Action::Cooperate => 0,
+        Action::Defect => 1,
+    }
+}
+
+fn notebook_tm_matchup_halts_all_rounds(
+    a_spec: &StrategySpec,
+    b_spec: &StrategySpec,
+    rounds: u32,
+) -> (bool, bool) {
+    let a_tm = notebook_tm_spec(a_spec).expect("TM roster should only contain TM strategies");
+    let b_tm = notebook_tm_spec(b_spec).expect("TM roster should only contain TM strategies");
+    let mut a_input = InputSuffix::new(a_tm.symbols, a_tm.max_steps_per_round as usize + 1);
+    let mut b_input = InputSuffix::new(b_tm.symbols, b_tm.max_steps_per_round as usize + 1);
+    let mut a_keep = true;
+    let mut b_keep = true;
+
+    for round in 0..rounds {
+        let first_round = round == 0;
+        let (a_action, a_halted) = notebook_tm_action(a_tm, &a_input, first_round);
+        let (b_action, b_halted) = notebook_tm_action(b_tm, &b_input, first_round);
+        a_keep &= a_halted;
+        b_keep &= b_halted;
+
+        let a_bit = notebook_tm_history_bit(a_action, a_halted);
+        let b_bit = notebook_tm_history_bit(b_action, b_halted);
+        a_input.push_pair_bits(a_bit, b_bit);
+        b_input.push_pair_bits(a_bit, b_bit);
+
+        if !a_keep && !b_keep {
+            break;
+        }
+    }
+
+    (a_keep, b_keep)
+}
+
+fn notebook_tm_family_halting_mask(config: &NormalizedConfig) -> Vec<bool> {
+    let strategy_count = config.strategies.len();
+    let mut keep = vec![true; strategy_count];
+    let schedule = SchedulePlan::new(strategy_count, config.repetitions, config.self_play);
+    if schedule.is_empty() {
+        return keep;
+    }
+
+    let total_matches = schedule.len();
+    let scan_parallel = || {
+        (0..total_matches)
+            .into_par_iter()
+            .fold(
+                || vec![true; strategy_count],
+                |mut local_keep, match_id| {
+                    let matchup = schedule
+                        .matchup(match_id)
+                        .expect("matchup should exist for in-range id");
+                    let (a_keep, b_keep) = notebook_tm_matchup_halts_all_rounds(
+                        &config.strategies[matchup.a_idx],
+                        &config.strategies[matchup.b_idx],
+                        config.rounds,
+                    );
+                    if !a_keep {
+                        local_keep[matchup.a_idx] = false;
+                    }
+                    if !b_keep {
+                        local_keep[matchup.b_idx] = false;
+                    }
+                    local_keep
+                },
+            )
+            .reduce(
+                || vec![true; strategy_count],
+                |mut left, right| {
+                    for (slot, keep_right) in left.iter_mut().zip(right.into_iter()) {
+                        *slot &= keep_right;
+                    }
+                    left
+                },
+            )
+    };
+
+    keep = match Parallelism::from_config(&config.engine.parallelism) {
+        Parallelism::Off => {
+            for match_id in 0..total_matches {
+                let matchup = schedule
+                    .matchup(match_id)
+                    .expect("matchup should exist for in-range id");
+                let (a_keep, b_keep) = notebook_tm_matchup_halts_all_rounds(
+                    &config.strategies[matchup.a_idx],
+                    &config.strategies[matchup.b_idx],
+                    config.rounds,
+                );
+                if !a_keep {
+                    keep[matchup.a_idx] = false;
+                }
+                if !b_keep {
+                    keep[matchup.b_idx] = false;
+                }
+            }
+            keep
+        }
+        Parallelism::Threads(threads) if threads > 0 => {
+            let pool = ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .build()
+                .unwrap_or_else(|_| ThreadPoolBuilder::new().build().expect("thread pool"));
+            pool.install(scan_parallel)
+        }
+        _ => scan_parallel(),
+    };
+
+    keep
+}
+
+fn mark_tm_halting_selection(
+    keep: &mut [bool],
+    tm_mask: &[bool],
+    matchup: &Matchup,
+    outcome: &MatchOutcome,
+) {
+    if tm_mask[matchup.a_idx] && !tm_stats_always_halt(outcome.a_tm_stats.as_ref()) {
+        keep[matchup.a_idx] = false;
+    }
+    if tm_mask[matchup.b_idx] && !tm_stats_always_halt(outcome.b_tm_stats.as_ref()) {
+        keep[matchup.b_idx] = false;
+    }
+}
+
+fn halting_turing_machine_mask(config: &NormalizedConfig, seed: u64) -> Vec<bool> {
+    let strategy_count = config.strategies.len();
+    if roster_is_all_tms(&config.strategies) {
+        return notebook_tm_family_halting_mask(config);
+    }
+    let tm_mask = config
+        .strategies
+        .iter()
+        .map(strategy_is_one_sided_tm)
+        .collect::<Vec<_>>();
+    let mut keep = vec![true; strategy_count];
+    if !tm_mask.iter().any(|&is_tm| is_tm) {
+        return keep;
+    }
+
+    let schedule = SchedulePlan::new(strategy_count, config.repetitions, config.self_play);
+    if schedule.is_empty() {
+        return keep;
+    }
+
+    let seed_deriver = SeedDeriver::new(seed);
+    let total_matches = schedule.len();
+    let evaluate_matchup = |matchup: &Matchup| {
+        let mut emit_event = |_event: GameEvent| {};
+        let mut emit_history = |_record: MatchHistory| {};
+        run_match_core(
+            matchup,
+            config,
+            &config.strategies,
+            &seed_deriver,
+            None,
+            false,
+            total_matches,
+            false,
+            false,
+            &mut emit_event,
+            false,
+            &mut emit_history,
+            false,
+        )
+    };
+
+    let scan_parallel = || {
+        (0..total_matches)
+            .into_par_iter()
+            .fold(
+                || vec![true; strategy_count],
+                |mut local_keep, match_id| {
+                    let matchup = schedule
+                        .matchup(match_id)
+                        .expect("matchup should exist for in-range id");
+                    if tm_mask[matchup.a_idx] || tm_mask[matchup.b_idx] {
+                        let outcome = evaluate_matchup(&matchup);
+                        mark_tm_halting_selection(&mut local_keep, &tm_mask, &matchup, &outcome);
+                    }
+                    local_keep
+                },
+            )
+            .reduce(
+                || vec![true; strategy_count],
+                |mut left, right| {
+                    for (slot, keep_right) in left.iter_mut().zip(right.into_iter()) {
+                        *slot &= keep_right;
+                    }
+                    left
+                },
+            )
+    };
+
+    keep = match Parallelism::from_config(&config.engine.parallelism) {
+        Parallelism::Off => {
+            for match_id in 0..total_matches {
+                let matchup = schedule
+                    .matchup(match_id)
+                    .expect("matchup should exist for in-range id");
+                if !(tm_mask[matchup.a_idx] || tm_mask[matchup.b_idx]) {
+                    continue;
+                }
+                let outcome = evaluate_matchup(&matchup);
+                mark_tm_halting_selection(&mut keep, &tm_mask, &matchup, &outcome);
+            }
+            keep
+        }
+        Parallelism::Threads(threads) if threads > 0 => {
+            let pool = ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .build()
+                .unwrap_or_else(|_| ThreadPoolBuilder::new().build().expect("thread pool"));
+            pool.install(scan_parallel)
+        }
+        _ => scan_parallel(),
+    };
+
+    keep
+}
+
+pub fn select_halting_turing_machine_strategies(mut config: NormalizedConfig) -> NormalizedConfig {
+    if config.tm_filter_applied {
+        return config;
+    }
+
+    let seed = config.seed.unwrap_or(0);
+    config.seed = Some(seed);
+
+    let keep = halting_turing_machine_mask(&config, seed);
+    if keep.iter().any(|&entry| !entry) {
+        config.strategies = config
+            .strategies
+            .into_iter()
+            .enumerate()
+            .filter_map(|(idx, spec)| keep[idx].then_some(spec))
+            .collect();
+    }
+    config.tm_filter_applied = true;
+    config
+}
+
 impl TournamentRunner {
-    pub fn new(mut config: NormalizedConfig) -> Self {
+    pub fn new(config: NormalizedConfig) -> Self {
+        let mut config = select_halting_turing_machine_strategies(config);
         let seed = config.seed.unwrap_or(0);
         config.seed = Some(seed);
         let schedule = SchedulePlan::new(
@@ -1975,7 +2283,8 @@ pub struct TournamentKernel {
 }
 
 impl TournamentKernel {
-    pub fn new(mut config: NormalizedConfig) -> Self {
+    pub fn new(config: NormalizedConfig) -> Self {
+        let mut config = select_halting_turing_machine_strategies(config);
         let seed = config.seed.unwrap_or(0);
         config.seed = Some(seed);
         let schedule = SchedulePlan::new(

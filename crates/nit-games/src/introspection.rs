@@ -290,9 +290,11 @@ pub fn format_strategy_introspection(intro: &StrategyIntrospection) -> Vec<Strin
             if let Some(code) = rule_code {
                 lines.push(format!("rule_code: {code}"));
             }
-            lines.push("input_semantics: input = FromDigits[Flatten[history], 2]".to_string());
             lines.push(
-                "output_semantics: halted -> out mod symbols ; timeout -> Defect".to_string(),
+                "input_semantics: input = FromDigits[Flatten[history], 2]; head starts on the least-significant digit".to_string(),
+            );
+            lines.push(
+                "output_semantics: empty history -> C; halted -> output_symbol 0 => C, non-zero => D; timeout -> Defect".to_string(),
             );
             lines.push(String::new());
             lines.push("transitions:".to_string());

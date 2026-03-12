@@ -11,8 +11,9 @@ use crate::strategy::{
 use crate::{
     accelerator_preflight, accelerator_run_preflight, canonical_fsm_indices,
     group_canonical_fsm_indices_by_behavior, group_canonical_fsm_indices_by_behavior_with_mode,
-    unique_fsm_behavior_representatives, unique_fsm_behavior_representatives_with_mode,
-    KernelRunMode, TournamentKernel, TournamentRunner,
+    select_halting_turing_machine_strategies, unique_fsm_behavior_representatives,
+    unique_fsm_behavior_representatives_with_mode, KernelRunMode, TournamentKernel,
+    TournamentRunner,
 };
 
 fn push_round(history: &mut History, a: Action, b: Action) {
@@ -386,7 +387,7 @@ fn tm_always_move_right_write_zero_cooperates_and_halts() {
 }
 
 #[test]
-fn tm_rule_code_zero_times_out_and_defects() {
+fn tm_rule_code_zero_cooperates_on_first_round_then_times_out() {
     let (transitions, _) = decode_tm_rule_code_wolfram(0, 1, 2);
     let mut tm = OneSidedTmStrategy::new(
         "tm_zero",
@@ -399,7 +400,12 @@ fn tm_rule_code_zero_times_out_and_defects() {
         vec![Action::Cooperate, Action::Defect],
         transitions,
     );
-    let history = History::new(0);
+    let mut history = History::new(0);
+    let action = tm.next_action(&history, true);
+    assert_eq!(action, Action::Cooperate);
+    assert!(tm.last_halted());
+
+    push_round(&mut history, Action::Cooperate, Action::Defect);
     let action = tm.next_action(&history, true);
     assert_eq!(action, Action::Defect);
     assert!(!tm.last_halted());
@@ -1664,6 +1670,92 @@ fn run_tournament_from_toml(src: &str) -> crate::output::TournamentResults {
     })
 }
 
+fn halting_tm_tournament_toml(include_bad: bool) -> String {
+    let mut src = String::from(
+        r#"
+schema_version = 1
+game = "ipd"
+rounds = 3
+repetitions = 1
+self_play = true
+
+[[strategy]]
+id = "tm_c"
+type = "tm"
+states = 1
+symbols = 2
+start_state = 1
+blank = 0
+max_steps_per_round = 4
+transitions = [
+  { state=1, read=0, write=0, move="R", next=1 },
+  { state=1, read=1, write=0, move="R", next=1 },
+]
+
+[[strategy]]
+id = "tm_d"
+type = "tm"
+states = 1
+symbols = 2
+start_state = 1
+blank = 0
+max_steps_per_round = 4
+transitions = [
+  { state=1, read=0, write=1, move="R", next=1 },
+  { state=1, read=1, write=1, move="R", next=1 },
+]
+"#,
+    );
+    if include_bad {
+        src.push_str(
+            r#"
+
+[[strategy]]
+id = "tm_bad"
+type = "tm"
+states = 1
+symbols = 2
+start_state = 1
+blank = 0
+max_steps_per_round = 4
+rule_code = 0
+"#,
+        );
+    }
+    src
+}
+
+fn tm_family_1x2_reference_toml(rounds: u32) -> String {
+    let mut src = format!(
+        r#"schema_version = 1
+game = "ipd"
+rounds = {rounds}
+repetitions = 1
+self_play = true
+
+[engine]
+score_aggregation = "mean"
+
+"#
+    );
+    for rule_code in 0..=15 {
+        src.push_str(&format!(
+            r#"[[strategy]]
+id = "tm_{rule_code}"
+type = "tm"
+states = 1
+symbols = 2
+start_state = 1
+blank = 0
+max_steps_per_round = 1000
+rule_code = {rule_code}
+
+"#
+        ));
+    }
+    src
+}
+
 fn ranked_strategy<'a>(
     results: &'a crate::output::TournamentResults,
     id: &str,
@@ -1711,6 +1803,142 @@ k = 2
     assert_eq!(b.matches, 2);
     assert!((b.average_payoff - -1.0).abs() < 1e-9);
     assert!((b.total_payoff_for_scoreboard(ScoreAggregation::Mean, false) - -2.0).abs() < 1e-9);
+}
+
+#[test]
+fn select_halting_turing_machine_strategies_drops_non_halting_tms() {
+    let cfg = GamesConfig::from_toml(&halting_tm_tournament_toml(true)).expect("parse config");
+    let filtered = select_halting_turing_machine_strategies(cfg);
+    let ids = filtered
+        .strategies
+        .iter()
+        .map(|spec| spec.id.as_str())
+        .collect::<Vec<_>>();
+
+    assert_eq!(ids, vec!["tm_c", "tm_d"]);
+}
+
+#[test]
+fn tm_tournament_matches_halting_only_roster() {
+    let with_bad = run_tournament_from_toml(&halting_tm_tournament_toml(true));
+    let expected = run_tournament_from_toml(&halting_tm_tournament_toml(false));
+
+    let actual_ids = with_bad
+        .ranking
+        .iter()
+        .map(|entry| entry.id.as_str())
+        .collect::<Vec<_>>();
+    let expected_ids = expected
+        .ranking
+        .iter()
+        .map(|entry| entry.id.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(actual_ids, expected_ids);
+    assert_eq!(actual_ids, vec!["tm_d", "tm_c"]);
+
+    for expected_entry in &expected.ranking {
+        let actual = ranked_strategy(&with_bad, &expected_entry.id);
+        assert_eq!(actual.total_payoff, expected_entry.total_payoff);
+        assert_eq!(actual.matches, expected_entry.matches);
+        assert_eq!(actual.wins, expected_entry.wins);
+        assert_eq!(actual.losses, expected_entry.losses);
+        assert_eq!(actual.draws, expected_entry.draws);
+        assert!((actual.average_payoff - expected_entry.average_payoff).abs() < 1e-9);
+    }
+
+    assert_eq!(with_bad.pairwise.len(), expected.pairwise.len());
+    let actual_pair = with_bad.pairwise.first().expect("pairwise result");
+    let expected_pair = expected.pairwise.first().expect("pairwise result");
+    assert_eq!(actual_pair.a, expected_pair.a);
+    assert_eq!(actual_pair.b, expected_pair.b);
+    assert_eq!(actual_pair.a_total, expected_pair.a_total);
+    assert_eq!(actual_pair.b_total, expected_pair.b_total);
+    assert_eq!(actual_pair.a_adjusted_total, expected_pair.a_adjusted_total);
+    assert_eq!(actual_pair.b_adjusted_total, expected_pair.b_adjusted_total);
+    assert_eq!(actual_pair.a_wins, expected_pair.a_wins);
+    assert_eq!(actual_pair.b_wins, expected_pair.b_wins);
+    assert_eq!(actual_pair.draws, expected_pair.draws);
+}
+
+#[test]
+fn select_halting_turing_machine_strategies_matches_results_06_good_tms() {
+    let cfg = GamesConfig::from_toml(&tm_family_1x2_reference_toml(200)).expect("parse config");
+    let filtered = select_halting_turing_machine_strategies(cfg);
+    let ids = filtered
+        .strategies
+        .iter()
+        .map(|spec| spec.id.as_str())
+        .collect::<Vec<_>>();
+
+    assert_eq!(ids, vec!["tm_1", "tm_3", "tm_5", "tm_7", "tm_13", "tm_15"]);
+}
+
+#[test]
+fn tm_tournament_matches_results_06_pd_reference_scoreboard() {
+    let results = run_tournament_from_toml(&tm_family_1x2_reference_toml(200));
+    let expected = vec![
+        ("tm_3", 12, 8, 0, 4, -0.9175, -11.01),
+        ("tm_15", 12, 8, 0, 4, -0.9175, -11.01),
+        ("tm_7", 12, 6, 4, 2, -1.37125, -16.455),
+        ("tm_13", 12, 0, 6, 6, -1.70625, -20.475),
+        ("tm_1", 12, 0, 6, 6, -1.9125, -22.95),
+        ("tm_5", 12, 0, 6, 6, -1.9125, -22.95),
+    ];
+
+    let actual_ids = results
+        .ranking
+        .iter()
+        .map(|entry| entry.id.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        actual_ids,
+        expected.iter().map(|(id, ..)| *id).collect::<Vec<_>>()
+    );
+
+    for (id, matches, wins, losses, draws, average_payoff, scoreboard_total) in expected {
+        let entry = ranked_strategy(&results, id);
+        assert_eq!(entry.matches, matches);
+        assert_eq!(entry.wins, wins);
+        assert_eq!(entry.losses, losses);
+        assert_eq!(entry.draws, draws);
+        assert!((entry.average_payoff - average_payoff).abs() < 1e-9);
+        assert!(
+            (entry.total_payoff_for_scoreboard(ScoreAggregation::Mean, false) - scoreboard_total)
+                .abs()
+                < 1e-9
+        );
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn metal_tm_tournament_matches_cpu_results_06_baseline() {
+    let mut metal_cfg =
+        GamesConfig::from_toml(&tm_family_1x2_reference_toml(200)).expect("parse config");
+    metal_cfg.engine.mode = EngineMode::Batch;
+    metal_cfg.engine.fast_eval = true;
+    metal_cfg.engine.accelerator = AcceleratorMode::Metal;
+    metal_cfg = select_halting_turing_machine_strategies(metal_cfg);
+    let pairs = (0..metal_cfg.strategies.len())
+        .flat_map(|a| (0..metal_cfg.strategies.len()).map(move |b| (a, b)))
+        .collect::<Vec<_>>();
+
+    let Some(totals) = metal_totals_or_skip(&metal_cfg, &pairs) else {
+        return;
+    };
+
+    let expected = pairs
+        .iter()
+        .map(|(a, b)| {
+            simulate_match_from_specs(
+                &metal_cfg.strategies[*a],
+                &metal_cfg.strategies[*b],
+                metal_cfg.payoff,
+                metal_cfg.rounds,
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(totals, expected);
 }
 
 #[test]

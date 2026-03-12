@@ -669,8 +669,14 @@ pub fn render(
         theme.selection_bg,
         scroll,
     );
+    // The roster view uses a table-like presentation; give the whole body area the same base
+    // background so the Backends header + roster table feel cohesive.
+    let body_bg = match state.agents.dock_tab {
+        AgentOpsTab::Roster => ops_table_bg(theme),
+        _ => theme.background,
+    };
     frame.render_widget(
-        Paragraph::new(visible).style(Style::default().bg(theme.background)),
+        Paragraph::new(visible).style(Style::default().bg(body_bg)),
         chunks[2],
     );
 
@@ -4569,7 +4575,9 @@ fn ops_styled_line(
             Style::default().fg(theme.title),
         ));
     }
-    if line_idx == 1 {
+    // Most tabs render a title row followed by a divider row. The roster tab uses a backend row on
+    // line 1, so only apply the divider styling when the line is actually a divider.
+    if line_idx == 1 && !line.is_empty() && line.chars().all(|c| c == '─') {
         return Line::from(Span::styled(
             line.to_string(),
             Style::default()
@@ -6427,11 +6435,11 @@ mod tests {
         append_swarm_artifact_lines, arrow_glyph, artifacts_history_entries,
         artifacts_history_visible_entries, current_lines_for_width, cursor_glyph,
         dag_lines_for_dashboard, diagnostics_lines, format_saved_run_relative_label_from_micros,
-        roster_column_widths, roster_inventory_backend_accent, roster_lane_backend_accent,
-        roster_styled_line, roster_swarm_mission_hit, roster_swarm_mission_line_idx,
-        roster_swarm_template_hit, roster_swarm_template_line_idx, saved_run_detail_label,
-        swarm_clone_display_label, table_role_label, tree_closed_glyph, tree_open_glyph,
-        BackendInventoryBackend,
+        ops_styled_line, roster_column_widths, roster_inventory_backend_accent,
+        roster_lane_backend_accent, roster_styled_line, roster_swarm_mission_hit,
+        roster_swarm_mission_line_idx, roster_swarm_template_hit, roster_swarm_template_line_idx,
+        saved_run_detail_label, swarm_clone_display_label, table_role_label, tree_closed_glyph,
+        tree_open_glyph, BackendInventoryBackend,
     };
     use crate::swarm::{
         GateReport, GateReportGate, SwarmDashboardView, SwarmGateDashboardRow,
@@ -7176,6 +7184,27 @@ mod tests {
         assert!(styled.spans[1].style.add_modifier.contains(Modifier::BOLD));
         assert_eq!(styled.spans[5].style.fg, Some(theme.title));
         assert!(styled.spans[5].style.add_modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn roster_header_line_1_is_not_misstyled_as_a_divider_by_ops_styled_line() {
+        let mut state = AppState::new(
+            std::env::temp_dir(),
+            Buffer::empty("x", None),
+            Buffer::empty("n", None),
+        );
+        state.agents.dock_tab = AgentOpsTab::Roster;
+        state.agents.codex_cli_available = true;
+
+        let theme = Theme::default();
+        let lines = current_lines_for_width(&state, 72);
+        let styled = ops_styled_line(&state, 1, &lines[1], 72, &theme);
+
+        // A divider row would be a single span with dim border styling. The roster backend row is
+        // a multi-span line with an accented backend name.
+        assert!(styled.spans.len() > 1);
+        assert_eq!(styled.spans[1].style.fg, Some(theme.title));
+        assert!(styled.spans[1].style.add_modifier.contains(Modifier::BOLD));
     }
 
     #[test]

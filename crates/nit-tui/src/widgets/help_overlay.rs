@@ -176,7 +176,7 @@ pub fn build_lines(theme: &Theme) -> Vec<Line<'static>> {
     ]));
     lines.push(Line::from(vec![
         Span::styled(
-            ":games run [force] <fsm|ca|tm> {…}",
+            ":games run [force] <fsm|ca|tm> {…} [tm_steps]",
             Style::default().fg(theme.accent),
         ),
         Span::raw(" run family tournament; use force to bypass speed caps"),

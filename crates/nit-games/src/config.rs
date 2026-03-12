@@ -111,6 +111,8 @@ pub struct NormalizedConfig {
     pub engine: EngineConfig,
     #[serde(skip)]
     pub max_memory_n: usize,
+    #[serde(skip)]
+    pub tm_filter_applied: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -385,6 +387,7 @@ impl GamesConfig {
             history: self.history.unwrap_or_default(),
             engine,
             max_memory_n: 0,
+            tm_filter_applied: false,
         })
     }
 }

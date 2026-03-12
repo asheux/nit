@@ -70,6 +70,7 @@ fn build_config(
         },
         engine: EngineConfig::default(),
         max_memory_n: 0,
+        tm_filter_applied: false,
     }
 }
 
@@ -192,6 +193,7 @@ fn build_deterministic_config(rounds: u32) -> NormalizedConfig {
         },
         engine: EngineConfig::default(),
         max_memory_n: 1,
+        tm_filter_applied: false,
     }
 }
 
@@ -237,6 +239,7 @@ fn build_fsm_heavy_config(strategies: usize, rounds: u32) -> NormalizedConfig {
         },
         engine: EngineConfig::default(),
         max_memory_n: 1,
+        tm_filter_applied: false,
     }
 }
 
@@ -296,6 +299,7 @@ fn build_tm_config(strategies: usize, rounds: u32) -> NormalizedConfig {
         },
         engine: EngineConfig::default(),
         max_memory_n: 0,
+        tm_filter_applied: false,
     }
 }
 
@@ -355,6 +359,7 @@ fn build_tm_heavy_config(strategies: usize, rounds: u32, max_steps: u32) -> Norm
         },
         engine: EngineConfig::default(),
         max_memory_n: 0,
+        tm_filter_applied: false,
     }
 }
 
@@ -398,6 +403,7 @@ fn build_baseline_deterministic(strategies: usize, rounds: u32) -> NormalizedCon
         },
         engine: EngineConfig::default(),
         max_memory_n: 0,
+        tm_filter_applied: false,
     }
 }
 
