@@ -199,7 +199,7 @@ struct BackendInventoryRow {
 
 fn roster_inventory_backend_accent(backend: BackendInventoryBackend, theme: &Theme) -> Color {
     match backend {
-        BackendInventoryBackend::Codex => theme.title_focused,
+        BackendInventoryBackend::Codex => theme.title,
         BackendInventoryBackend::Claude => theme.border_focused,
         BackendInventoryBackend::Gemini => theme.accent,
         BackendInventoryBackend::Local => theme.border,
@@ -208,7 +208,7 @@ fn roster_inventory_backend_accent(backend: BackendInventoryBackend, theme: &The
 
 fn roster_lane_backend_accent(backend: AgentLaneKind, theme: &Theme) -> Color {
     match backend {
-        AgentLaneKind::Codex => theme.title_focused,
+        AgentLaneKind::Codex => theme.title,
         AgentLaneKind::Claude => theme.border_focused,
         AgentLaneKind::Gemini => theme.accent,
         AgentLaneKind::Mock => theme.border,
@@ -7159,7 +7159,7 @@ mod tests {
     }
 
     #[test]
-    fn roster_header_uses_bold_accent_for_active_codex_backend() {
+    fn roster_header_uses_bold_primary_color_for_active_codex_backend() {
         let mut state = AppState::new(
             std::env::temp_dir(),
             Buffer::empty("x", None),
@@ -7172,9 +7172,9 @@ mod tests {
         let lines = current_lines_for_width(&state, 72);
         let styled = roster_styled_line(&state, 1, &lines[1], 72, &theme);
 
-        assert_eq!(styled.spans[1].style.fg, Some(theme.title_focused));
+        assert_eq!(styled.spans[1].style.fg, Some(theme.title));
         assert!(styled.spans[1].style.add_modifier.contains(Modifier::BOLD));
-        assert_eq!(styled.spans[5].style.fg, Some(theme.title_focused));
+        assert_eq!(styled.spans[5].style.fg, Some(theme.title));
         assert!(styled.spans[5].style.add_modifier.contains(Modifier::BOLD));
     }
 
@@ -7182,6 +7182,14 @@ mod tests {
     fn roster_backend_palette_stays_on_primary_theme_colors() {
         let theme = Theme::default();
 
+        assert_eq!(
+            roster_inventory_backend_accent(BackendInventoryBackend::Codex, &theme),
+            theme.title
+        );
+        assert_eq!(
+            roster_lane_backend_accent(nit_core::AgentLaneKind::Codex, &theme),
+            theme.title
+        );
         assert_eq!(
             roster_inventory_backend_accent(BackendInventoryBackend::Gemini, &theme),
             theme.accent
@@ -7197,6 +7205,10 @@ mod tests {
         assert_eq!(
             roster_lane_backend_accent(nit_core::AgentLaneKind::Mock, &theme),
             theme.border
+        );
+        assert_ne!(
+            roster_inventory_backend_accent(BackendInventoryBackend::Codex, &theme),
+            theme.title_focused
         );
         assert_ne!(
             roster_inventory_backend_accent(BackendInventoryBackend::Gemini, &theme),

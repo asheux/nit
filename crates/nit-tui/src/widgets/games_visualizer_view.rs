@@ -8,6 +8,7 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph, Wrap},
     Frame,
 };
+use unicode_width::UnicodeWidthChar;
 
 use crate::theme::Theme;
 use crate::widgets::text_selection::apply_ui_selection;
@@ -320,8 +321,7 @@ pub fn render(
                 0,
             );
             let right_paragraph = Paragraph::new(side_lines)
-                .style(Style::default().fg(theme.foreground).bg(theme.background))
-                .wrap(Wrap { trim: true });
+                .style(Style::default().fg(theme.foreground).bg(theme.background));
             frame.render_widget(right_paragraph, right_inner);
         }
     }
@@ -553,31 +553,51 @@ fn last_run_lines(
             Span::styled("seed: ", label_style),
             Span::styled(run.seed.to_string(), value_style),
         ]));
-        lines.push(Line::from(vec![
-            Span::styled("run_id: ", label_style),
-            Span::styled(run.run_id.clone(), value_style),
-        ]));
-        lines.push(Line::from(vec![
-            Span::styled("accelerator: ", label_style),
-            Span::styled(format_runtime_accelerator(&run.runtime), value_style),
-        ]));
+        push_wrapped_detail_lines(
+            &mut lines,
+            "run_id: ",
+            &run.run_id,
+            label_style,
+            value_style,
+            width,
+        );
+        push_wrapped_detail_lines(
+            &mut lines,
+            "accelerator: ",
+            &format_runtime_accelerator(&run.runtime),
+            label_style,
+            value_style,
+            width,
+        );
         if let Some(reason) = run.runtime.metal_fallback_reason.as_ref() {
-            lines.push(Line::from(vec![
-                Span::styled("accel_note: ", label_style),
-                Span::styled(reason.clone(), dim_style),
-            ]));
+            push_wrapped_detail_lines(
+                &mut lines,
+                "accel_note: ",
+                reason,
+                label_style,
+                dim_style,
+                width,
+            );
         }
         if let Some(key) = run.runtime.metal_policy_cache_key.as_ref() {
-            lines.push(Line::from(vec![
-                Span::styled("accel_key: ", label_style),
-                Span::styled(key.clone(), dim_style),
-            ]));
+            push_wrapped_detail_lines(
+                &mut lines,
+                "accel_key: ",
+                key,
+                label_style,
+                dim_style,
+                width,
+            );
         }
         if let Some(path) = run.runtime.metal_policy_cache_path.as_ref() {
-            lines.push(Line::from(vec![
-                Span::styled("accel_cache: ", label_style),
-                Span::styled(path.clone(), file_dim_style),
-            ]));
+            push_wrapped_detail_lines(
+                &mut lines,
+                "accel_cache: ",
+                path,
+                label_style,
+                file_dim_style,
+                width,
+            );
         }
         lines.extend(render_last_run_table(
             run,
@@ -603,22 +623,34 @@ fn last_run_lines(
             .as_ref()
             .or(state.games.last_event_path.as_ref());
         if let Some(path) = summary_path {
-            lines.push(Line::from(vec![
-                Span::styled("summary: ", label_style),
-                Span::styled(path.clone(), file_dim_style),
-            ]));
+            push_wrapped_detail_lines(
+                &mut lines,
+                "summary: ",
+                path,
+                label_style,
+                file_dim_style,
+                width,
+            );
         }
         if let Some(path) = history_path.or(run.history_log.as_ref()) {
-            lines.push(Line::from(vec![
-                Span::styled("history: ", label_style),
-                Span::styled(path.clone(), file_dim_style),
-            ]));
+            push_wrapped_detail_lines(
+                &mut lines,
+                "history: ",
+                path,
+                label_style,
+                file_dim_style,
+                width,
+            );
         }
         if let Some(path) = event_path.or(run.event_log.as_ref()) {
-            lines.push(Line::from(vec![
-                Span::styled("events: ", label_style),
-                Span::styled(path.clone(), file_dim_style),
-            ]));
+            push_wrapped_detail_lines(
+                &mut lines,
+                "events: ",
+                path,
+                label_style,
+                file_dim_style,
+                width,
+            );
         }
     } else {
         lines.push(Line::from(Span::styled(
@@ -627,6 +659,121 @@ fn last_run_lines(
         )));
     }
     lines
+}
+
+fn push_wrapped_detail_lines(
+    out: &mut Vec<Line<'static>>,
+    label: &str,
+    value: &str,
+    label_style: Style,
+    value_style: Style,
+    width: usize,
+) {
+    let label_width = display_width(label);
+    let available = width.saturating_sub(label_width).max(1);
+    let indent = " ".repeat(label_width);
+    for (idx, segment) in wrap_visual_line(value, available).into_iter().enumerate() {
+        if idx == 0 {
+            out.push(Line::from(vec![
+                Span::styled(label.to_string(), label_style),
+                Span::styled(segment, value_style),
+            ]));
+        } else {
+            out.push(Line::from(vec![
+                Span::styled(indent.clone(), label_style),
+                Span::styled(segment, value_style),
+            ]));
+        }
+    }
+}
+
+fn wrap_visual_line(text: &str, width: usize) -> Vec<String> {
+    let width = width.max(1);
+    if text.is_empty() {
+        return vec![String::new()];
+    }
+
+    let mut lines = Vec::new();
+    let mut current = String::new();
+    let mut current_width = 0usize;
+    let mut last_break: Option<(usize, usize)> = None;
+
+    let flush_line = |lines: &mut Vec<String>,
+                      current: &mut String,
+                      current_width: &mut usize,
+                      last_break: &mut Option<(usize, usize)>| {
+        lines.push(std::mem::take(current));
+        *current_width = 0;
+        *last_break = None;
+    };
+
+    let push_char = |lines: &mut Vec<String>,
+                     current: &mut String,
+                     current_width: &mut usize,
+                     last_break: &mut Option<(usize, usize)>,
+                     ch: char| {
+        let ch_width = UnicodeWidthChar::width(ch).unwrap_or(1).max(1);
+        if *current_width + ch_width > width && !current.is_empty() {
+            if let Some((break_byte, break_width)) = last_break.take() {
+                let after = current[break_byte..].to_string();
+                let before = current[..break_byte].to_string();
+                lines.push(before);
+                *current = after;
+                *current_width = (*current_width).saturating_sub(break_width);
+            } else {
+                flush_line(lines, current, current_width, last_break);
+            }
+        }
+        current.push(ch);
+        *current_width += ch_width;
+        if ch == ' ' {
+            *last_break = Some((current.len(), *current_width));
+        }
+    };
+
+    for ch in text.chars() {
+        match ch {
+            '\n' | '\r' => {
+                flush_line(
+                    &mut lines,
+                    &mut current,
+                    &mut current_width,
+                    &mut last_break,
+                );
+            }
+            '\t' => {
+                let tab_width = (4 - (current_width % 4)).max(1).min(width);
+                for _ in 0..tab_width {
+                    push_char(
+                        &mut lines,
+                        &mut current,
+                        &mut current_width,
+                        &mut last_break,
+                        ' ',
+                    );
+                }
+            }
+            _ => push_char(
+                &mut lines,
+                &mut current,
+                &mut current_width,
+                &mut last_break,
+                ch,
+            ),
+        }
+    }
+    lines.push(current);
+    if lines.is_empty() {
+        vec![String::new()]
+    } else {
+        lines
+    }
+}
+
+fn display_width(text: &str) -> usize {
+    text.chars()
+        .map(|ch| UnicodeWidthChar::width(ch).unwrap_or(1).max(1))
+        .sum()
 }
 
 fn format_runtime_accelerator(runtime: &nit_games::RuntimeAcceleratorStats) -> String {
@@ -927,6 +1074,7 @@ fn center_pad(width: usize, line_len: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::theme::Theme;
 
     fn line_text(line: &Line<'_>) -> String {
         line.spans
@@ -1301,5 +1449,107 @@ k = 2
         assert!(
             side.width as usize >= LAST_RUN_PANEL_TARGET_WIDTH + 2 + LAST_RUN_PANEL_EXTRA_WIDTH
         );
+    }
+
+    #[test]
+    fn build_side_lines_wrap_long_last_run_fields_without_overflow() {
+        let config = nit_games::GamesConfig::from_toml(
+            r#"
+schema_version = 1
+game = "ipd"
+rounds = 2
+repetitions = 1
+self_play = true
+
+[[strategy]]
+id = "all_c"
+type = "fsm"
+index = 1
+num_states = 1
+k = 2
+"#,
+        )
+        .expect("parse config");
+        let mut state = AppState::new(
+            std::env::temp_dir(),
+            nit_core::Buffer::empty("x", None),
+            nit_core::Buffer::empty("n", None),
+        );
+        let mut runtime = nit_games::RuntimeAcceleratorStats::default();
+        runtime.backend = nit_games::RuntimeAcceleratorBackend::Metal;
+        runtime.metal_matches = 913_936;
+        runtime.metal_matches_per_batch = Some(262_144);
+        runtime.metal_inflight_batches = Some(5);
+        runtime.metal_policy_cache_path = Some(
+            "/Users/nitrika/Library/Caches/dev.openai.nit/games/metal-policy/apple_m4_max_1872106799188804901_v1.json"
+                .into(),
+        );
+        state.games.last_run = Some(nit_games::output::RunSummary {
+            schema_version: nit_games::output::RUN_SUMMARY_SCHEMA_VERSION,
+            timestamp: "2026-03-11T23:19:22.86116Z".into(),
+            run_id: "c3ca2b14966fcff".into(),
+            seed: 42,
+            config_text: String::new(),
+            config,
+            paths: nit_games::output::RunPaths {
+                summary: Some(
+                    "/Users/nitrika/Projects/Configs/nit/runs/games/2026-03-11T23-19-22.86116Z__seed-42/run_summary.json"
+                        .into(),
+                ),
+                events: None,
+                history: None,
+                definitions: None,
+                results: None,
+                config: None,
+                analysis_dir: None,
+            },
+            strategies: Vec::new(),
+            results: nit_games::output::TournamentResults {
+                ranking: vec![nit_games::output::StrategyResult {
+                    id: "fsm_3495".into(),
+                    name: None,
+                    total_payoff: -1690,
+                    average_payoff: -0.884,
+                    adjusted_total_payoff: Some(-1690.0),
+                    adjusted_average_payoff: Some(-0.884),
+                    matches: 1,
+                    wins: 0,
+                    losses: 0,
+                    draws: 1,
+                    crashed: false,
+                    crash_count: 0,
+                    tm_metrics: None,
+                }],
+                pairwise: Vec::new(),
+                dominance: Vec::new(),
+            },
+            event_log: None,
+            history_log: None,
+            runtime,
+            run_dir: None,
+        });
+
+        let width = 40;
+        let rendered: Vec<String> = build_side_lines(&state, &Theme::default(), width)
+            .iter()
+            .map(line_text)
+            .collect();
+
+        let accel_cache_idx = rendered
+            .iter()
+            .position(|line| line.starts_with("accel_cache: "))
+            .expect("accel_cache line");
+        let summary_idx = rendered
+            .iter()
+            .position(|line| line.starts_with("summary: "))
+            .expect("summary line");
+        assert!(rendered[accel_cache_idx + 1].starts_with("             "));
+        assert!(rendered[accel_cache_idx + 1].trim().len() > 0);
+        assert!(rendered[summary_idx + 1].starts_with("         "));
+        assert!(rendered[summary_idx + 1].trim().len() > 0);
+        assert!(display_width(&rendered[accel_cache_idx]) <= width);
+        assert!(display_width(&rendered[accel_cache_idx + 1]) <= width);
+        assert!(display_width(&rendered[summary_idx]) <= width);
+        assert!(display_width(&rendered[summary_idx + 1]) <= width);
     }
 }

@@ -15123,6 +15123,169 @@ mod tests {
     }
 
     #[test]
+    fn wrapped_visualizer_side_selection_tracks_wrapped_rows() {
+        let mut state = state_for_test();
+        state.app_kind = AppKind::Games;
+        let config = nit_games::GamesConfig::from_toml(
+            r#"
+schema_version = 1
+game = "ipd"
+rounds = 2
+repetitions = 1
+self_play = true
+
+[[strategy]]
+id = "all_c"
+type = "fsm"
+index = 1
+num_states = 1
+k = 2
+"#,
+        )
+        .expect("parse config");
+        state.games.config_preview = Some(nit_core::GamesConfigPreview {
+            version: state.editor_buffer().version(),
+            result: Ok(config.clone()),
+        });
+
+        let mut runtime = nit_games::RuntimeAcceleratorStats::default();
+        runtime.backend = nit_games::RuntimeAcceleratorBackend::Metal;
+        runtime.metal_matches = 913_936;
+        runtime.metal_matches_per_batch = Some(262_144);
+        runtime.metal_inflight_batches = Some(5);
+        runtime.metal_policy_cache_path = Some(
+            "/Users/nitrika/Library/Caches/dev.openai.nit/games/metal-policy/apple_m4_max_1872106799188804901_v1.json"
+                .into(),
+        );
+        state.games.last_run = Some(nit_games::output::RunSummary {
+            schema_version: nit_games::output::RUN_SUMMARY_SCHEMA_VERSION,
+            timestamp: "2026-03-11T23:19:22.86116Z".into(),
+            run_id: "c3ca2b14966fcff".into(),
+            seed: 42,
+            config_text: String::new(),
+            config: config.clone(),
+            paths: nit_games::output::RunPaths {
+                summary: Some(
+                    "/Users/nitrika/Projects/Configs/nit/runs/games/2026-03-11T23-19-22.86116Z__seed-42/run_summary.json"
+                        .into(),
+                ),
+                events: None,
+                history: None,
+                definitions: None,
+                results: None,
+                config: None,
+                analysis_dir: None,
+            },
+            strategies: Vec::new(),
+            results: nit_games::output::TournamentResults {
+                ranking: vec![nit_games::output::StrategyResult {
+                    id: "fsm_3495".into(),
+                    name: None,
+                    total_payoff: -1690,
+                    average_payoff: -0.884,
+                    adjusted_total_payoff: Some(-1690.0),
+                    adjusted_average_payoff: Some(-0.884),
+                    matches: 1,
+                    wins: 0,
+                    losses: 0,
+                    draws: 1,
+                    crashed: false,
+                    crash_count: 0,
+                    tm_metrics: None,
+                }],
+                pairwise: Vec::new(),
+                dominance: Vec::new(),
+            },
+            event_log: None,
+            history_log: None,
+            runtime,
+            run_dir: None,
+        });
+
+        let theme = Theme::default();
+        let screen = ratatui::layout::Rect {
+            x: 0,
+            y: 0,
+            width: 240,
+            height: 50,
+        };
+        let layout = layout::split(screen);
+        let inner = Block::default()
+            .borders(Borders::ALL)
+            .inner(layout.visualizer);
+        let layout_info = games_visualizer_view::layout_for_config(inner, &state, Some(&config));
+        let side_area = layout_info.side.expect("side panel");
+        let side_inner = Block::default().borders(Borders::ALL).inner(side_area);
+        let lines =
+            games_visualizer_view::build_side_lines(&state, &theme, side_inner.width as usize)
+                .into_iter()
+                .map(|line| {
+                    line.spans
+                        .iter()
+                        .map(|span| span.content.as_ref())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>();
+        let accel_cache_idx = lines
+            .iter()
+            .position(|line| line.starts_with("accel_cache: "))
+            .expect("accel_cache line");
+        let target_line = (accel_cache_idx + 1..lines.len())
+            .find(|&idx| lines[idx].starts_with("             "))
+            .expect("wrapped continuation line");
+        let line = &lines[target_line];
+        let target_col = line
+            .chars()
+            .position(|ch| ch != ' ')
+            .expect("non-space content on continuation line");
+        let expected = line
+            .chars()
+            .nth(target_col)
+            .expect("selected continuation char")
+            .to_string();
+
+        let mut input_state = InputState::new();
+        let mut clipboard = None;
+        let down = MouseEvent {
+            kind: MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            column: side_inner.x.saturating_add(target_col as u16),
+            row: side_inner.y.saturating_add(target_line as u16),
+            modifiers: KeyModifiers::NONE,
+        };
+        assert!(handle_mouse_down(
+            down,
+            screen,
+            &mut state,
+            &mut input_state,
+            &mut clipboard,
+            &theme
+        ));
+
+        let drag = MouseEvent {
+            kind: MouseEventKind::Drag(crossterm::event::MouseButton::Left),
+            column: side_inner.x.saturating_add(target_col as u16 + 1),
+            row: side_inner.y.saturating_add(target_line as u16),
+            modifiers: KeyModifiers::NONE,
+        };
+        assert!(handle_mouse_drag(
+            drag,
+            screen,
+            &mut state,
+            &mut input_state,
+            &mut clipboard,
+            &theme
+        ));
+
+        let selection = state.ui_selection.expect("selection should exist");
+        assert_eq!(selection.pane, UiSelectionPane::VisualizerSide);
+        assert_eq!(selection.start_line, target_line);
+        assert_eq!(selection.end_line, target_line);
+        assert_eq!(selection.start_col, target_col);
+        assert_eq!(selection.end_col, target_col + 1);
+        assert_eq!(state.yank.as_deref(), Some(expected.as_str()));
+    }
+
+    #[test]
     fn mouse_wheel_in_chat_input_scrolls_input_not_thread() {
         let mut state = state_for_test();
         state.focus = PaneId::Notes;
