@@ -615,6 +615,8 @@ pub struct QueuedCodexTurn {
     pub agent_id: String,
     pub mission_id: Option<String>,
     pub prompt: String,
+    /// Index of the user prompt message that triggered this queued turn.
+    pub prompt_msg_idx: Option<usize>,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]

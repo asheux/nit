@@ -4013,6 +4013,7 @@ mod tests {
             agent_id: "planner".into(),
             mission_id: None,
             prompt: "do the thing".into(),
+            prompt_msg_idx: None,
         });
         state.agents.messages.push(AgentMessage {
             at: "10:00:01".into(),
@@ -4090,6 +4091,7 @@ mod tests {
             agent_id: "a".into(),
             mission_id: None,
             prompt: "do the thing".into(),
+            prompt_msg_idx: None,
         });
         let now = Instant::now();
         state.agents.active_turns.insert(

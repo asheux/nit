@@ -4044,33 +4044,40 @@ fn submit_chat_input_and_dispatch(
                         );
                     } else {
                         // Clone limit reached — fall back to queue on base.
-                        state
-                            .agents
-                            .codex_turn_prompt_idx
-                            .insert(base_model.clone(), prompt_msg_idx);
-                        dispatch_codex_prompt(
+                        enqueue_codex_turn(
                             state,
                             vitals,
-                            codex,
-                            base_model,
+                            Some(base_model),
                             mission_id.clone(),
                             prompt.clone(),
+                            Some(prompt_msg_idx),
                         );
                     }
+                } else if is_agent_busy(state, &base_model) {
+                    // Agent busy — queue with prompt index stored in the turn
+                    // so the active turn's breather mapping stays intact.
+                    enqueue_codex_turn(
+                        state,
+                        vitals,
+                        Some(base_model),
+                        mission_id.clone(),
+                        prompt.clone(),
+                        Some(prompt_msg_idx),
+                    );
                 } else {
-                    // Default (Enter) and @new-when-idle: dispatch to base agent.
-                    // Queues automatically if busy, dispatches immediately if idle.
+                    // Agent idle — dispatch immediately, set breather mapping.
                     state
                         .agents
                         .codex_turn_prompt_idx
                         .insert(base_model.clone(), prompt_msg_idx);
-                    dispatch_codex_prompt(
+                    maybe_dispatch_codex_turn(
                         state,
                         vitals,
                         codex,
-                        base_model,
+                        Some(base_model),
                         mission_id.clone(),
                         prompt.clone(),
+                        true,
                     );
                 }
             }
@@ -5321,7 +5328,7 @@ fn dispatch_codex_prompt(
     prompt: String,
 ) {
     if is_agent_busy(state, &agent_id) {
-        enqueue_codex_turn(state, vitals, Some(agent_id), mission_id, prompt);
+        enqueue_codex_turn(state, vitals, Some(agent_id), mission_id, prompt, None);
     } else {
         maybe_dispatch_codex_turn(
             state,
@@ -5341,6 +5348,7 @@ fn enqueue_codex_turn(
     model: Option<String>,
     mission_id: Option<String>,
     prompt: String,
+    prompt_msg_idx: Option<usize>,
 ) {
     let Some(model) = model else {
         return;
@@ -5363,6 +5371,7 @@ fn enqueue_codex_turn(
             agent_id: model.clone(),
             mission_id: mission_id.clone(),
             prompt,
+            prompt_msg_idx,
         });
 
     if let Some(agent) = state.agents.agents.iter_mut().find(|a| a.id == model) {
@@ -5426,6 +5435,15 @@ fn maybe_dispatch_next_queued_codex_turn(
                 }
             }
             continue;
+        }
+
+        // Restore the prompt → response link from the queued turn so the
+        // breather appears after the correct prompt in the chat view.
+        if let Some(idx) = queued.prompt_msg_idx {
+            state
+                .agents
+                .codex_turn_prompt_idx
+                .insert(model.clone(), idx);
         }
 
         maybe_dispatch_codex_turn(
