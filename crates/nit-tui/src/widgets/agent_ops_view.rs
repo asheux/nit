@@ -3892,7 +3892,38 @@ fn artifact_cards_for_context(
 
     if let Some(mission_id) = state.agents.selected_context_mission() {
         if let Some(view) = swarm.and_then(|runtime| runtime.swarm_persistence(mission_id)) {
-            return build_swarm_cards(&view, preview_chars);
+            let mut cards = build_swarm_cards(&view, preview_chars);
+            // Add the planner's plan response as a clickable card so it can
+            // be viewed in the artifacts popup.
+            if let Some((msg_idx, msg)) = state
+                .agents
+                .messages
+                .iter()
+                .enumerate()
+                .find(|(_, m)| {
+                    m.mission_id.as_deref() == Some(mission_id)
+                        && m.agent_id.is_some()
+                        && !matches!(m.channel, nit_core::AgentChannel::Broadcast)
+                        && m.agent_id.as_deref() != Some("swarm")
+                        // Exclude messages that already have a task/report card.
+                        && !view.tasks.iter().any(|t| {
+                            t.output.as_deref() == Some(m.text.as_str())
+                                && t.agent_id == *m.agent_id.as_deref().unwrap_or("")
+                        })
+                        && view.report_output.as_deref() != Some(m.text.as_str())
+                        && view.gate_output.as_deref() != Some(m.text.as_str())
+                })
+            {
+                let agent_badge = msg.agent_id.as_deref().unwrap_or("planner");
+                cards.push(ArtifactCard {
+                    kind: "PLAN",
+                    at: "DONE".into(),
+                    owner: agent_badge.to_string(),
+                    preview: summarize_text_preview(&msg.text, preview_chars),
+                    reference: ArtifactRef::Message { idx: msg_idx },
+                });
+            }
+            return cards;
         }
         // Prefer live cards (correct tree order from grouping). Fall back to persisted.
         let live = build_mission_cards(state, mission_id, preview_chars);
@@ -4180,6 +4211,13 @@ pub fn artifacts_popup_ref_for_message(
                 }
             }
         }
+    }
+
+    // If the message has an agent_id it is an agent reply and always viewable as an artifact,
+    // even when it doesn't appear in the current artifact card list (e.g. the planner's
+    // initial reply in a swarm, which build_swarm_cards doesn't include).
+    if message.agent_id.is_some() {
+        return Some(ArtifactsPopupRef::Message { idx: message_idx });
     }
 
     artifacts_card_index_for_message(state, swarm, width, message_idx)

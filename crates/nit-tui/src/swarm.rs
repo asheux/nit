@@ -361,7 +361,10 @@ fn ensure_size_clones(
     planner_agent_id: &str,
     agents: &mut Vec<String>,
 ) {
-    if !matches!(template, SwarmTemplate::Parallel | SwarmTemplate::Bulk) {
+    if !matches!(
+        template,
+        SwarmTemplate::Lab | SwarmTemplate::Parallel | SwarmTemplate::Bulk
+    ) {
         return;
     }
     if matches!(size, SwarmSize::All) {
@@ -378,28 +381,8 @@ fn ensure_size_clones(
         return;
     }
 
-    let mut sources: Vec<String> = Vec::new();
-    if !state.agents.swarm_priority_agent_ids.is_empty() {
-        for lane in state.agents.agents.iter() {
-            if !lane.is_codex() {
-                continue;
-            }
-            if lane.id.as_str() == planner_agent_id {
-                continue;
-            }
-            if is_swarm_clone_agent_id(lane.id.as_str())
-                || is_chat_clone_agent_id(lane.id.as_str())
-            {
-                continue;
-            }
-            if state.agents.swarm_priority_agent_ids.contains(&lane.id) {
-                sources.push(lane.id.clone());
-            }
-        }
-    }
-    if sources.is_empty() {
-        sources.push(planner_agent_id.to_string());
-    }
+    // Always clone the planner (main agent) to fill remaining slots.
+    let sources = vec![planner_agent_id.to_string()];
 
     let mut source_lanes = Vec::new();
     for source_id in sources.iter() {
@@ -5730,7 +5713,7 @@ pub fn select_swarm_agents(
     size: SwarmSize,
     template: Option<&str>,
 ) -> Vec<String> {
-    let template_kind = parse_swarm_template(template);
+    let _template_kind = parse_swarm_template(template);
     let mut agents = vec![planner.to_string()];
 
     let roster_index = state
@@ -5802,118 +5785,36 @@ pub fn select_swarm_agents(
         })
         .collect();
 
-    let (mut priority_pool, mut fallback_pool): (Vec<Candidate>, Vec<Candidate>) =
+    let (mut priority_pool, _): (Vec<Candidate>, Vec<Candidate>) =
         pool.drain(..).partition(|candidate| candidate.priority);
 
-    let take_best =
-        |pool: &mut Vec<Candidate>, target_role: &str, critical: bool| -> Option<Candidate> {
-            if pool.is_empty() {
-                return None;
-            }
-            pool.sort_by(|a, b| {
-                let role_match = |candidate: &Candidate| -> u8 {
-                    if candidate.role_hint.eq_ignore_ascii_case(target_role) {
-                        0
-                    } else if candidate.role_hint.eq_ignore_ascii_case("all") {
-                        1
-                    } else {
-                        2
-                    }
-                };
-
-                let priority_score = |candidate: &Candidate| -> u8 {
-                    if candidate.priority {
-                        0
-                    } else if critical {
-                        1
-                    } else {
-                        2
-                    }
-                };
-
-                (
-                    role_match(a),
-                    priority_score(a),
-                    a.busy as u8,
-                    a.roster_idx,
-                    &a.id,
-                )
-                    .cmp(&(
-                        role_match(b),
-                        priority_score(b),
-                        b.busy as u8,
-                        b.roster_idx,
-                        &b.id,
-                    ))
-            });
-            pool.first().cloned().map(|pick| {
-                let pos = pool.iter().position(|cand| cand.id == pick.id).unwrap();
-                pool.remove(pos)
-            })
-        };
-
+    // Only use explicitly-selected priority agents — never pick random
+    // models from the roster.  Any remaining slots will be filled by
+    // ensure_size_clones with clones of the planner.
     let mut selected: Vec<String> = Vec::new();
 
-    if matches!(template_kind, SwarmTemplate::Parallel | SwarmTemplate::Bulk) {
-        let has_priority_selection = !priority_pool.is_empty();
-        if !has_priority_selection && !matches!(size, SwarmSize::All) {
-            return agents;
-        }
-        let integrator = if !priority_pool.is_empty() {
-            take_best(&mut priority_pool, "integrate", true)
-        } else {
-            take_best(&mut fallback_pool, "integrate", true)
-        };
-        if let Some(integrator) = integrator {
-            selected.push(integrator.id);
-        }
-
-        let drain_parallel_pool =
-            |pool: &mut Vec<Candidate>, selected: &mut Vec<String>, take: usize| {
-                if pool.is_empty() {
-                    return;
-                }
-                pool.sort_by(|a, b| {
-                    let role_bucket = |candidate: &Candidate| -> u8 {
-                        if candidate.role_hint.eq_ignore_ascii_case("all") {
-                            1
-                        } else {
-                            0
-                        }
-                    };
-                    (role_bucket(a), a.busy as u8, a.roster_idx, &a.id).cmp(&(
-                        role_bucket(b),
-                        b.busy as u8,
-                        b.roster_idx,
-                        &b.id,
-                    ))
-                });
-                while selected.len() < take {
-                    let Some(candidate) = pool.first().cloned() else {
-                        break;
-                    };
-                    pool.remove(0);
-                    selected.push(candidate.id);
+    if !priority_pool.is_empty() {
+        priority_pool.sort_by(|a, b| {
+            let role_bucket = |candidate: &Candidate| -> u8 {
+                if candidate.role_hint.eq_ignore_ascii_case("all") {
+                    1
+                } else {
+                    0
                 }
             };
-
-        if has_priority_selection {
-            drain_parallel_pool(&mut priority_pool, &mut selected, take);
-        } else {
-            drain_parallel_pool(&mut fallback_pool, &mut selected, take);
-        }
-    } else {
+            (role_bucket(a), a.busy as u8, a.roster_idx, &a.id).cmp(&(
+                role_bucket(b),
+                b.busy as u8,
+                b.roster_idx,
+                &b.id,
+            ))
+        });
         while selected.len() < take {
-            let candidate = if !priority_pool.is_empty() {
-                take_best(&mut priority_pool, "all", false)
-            } else {
-                take_best(&mut fallback_pool, "all", false)
-            };
-            if let Some(candidate) = candidate {
-                selected.push(candidate.id);
-            } else {
+            let Some(candidate) = priority_pool.first().cloned() else {
                 break;
-            }
+            };
+            priority_pool.remove(0);
+            selected.push(candidate.id);
         }
     }
 

@@ -947,6 +947,13 @@ fn run_loop(
                 event,
                 AgentBusEvent::TurnCompleted { .. } | AgentBusEvent::TurnFailed { .. }
             );
+            // Snapshot the currently-viewed artifact so we can re-resolve
+            // the index after the card list changes.
+            let pinned_popup_ref = if state.agents.artifacts_popup_open {
+                agent_ops_view::artifacts_popup_ref(state, &swarm, state.agents.ops_viewport_width)
+            } else {
+                None
+            };
             let clear_invalid_thread_context = match &event {
                 AgentBusEvent::TurnFailed {
                     agent_id,
@@ -989,6 +996,18 @@ fn run_loop(
                 | AgentBusEvent::TurnFailed { agent_id, .. } = &event
                 {
                     crate::swarm::cleanup_idle_chat_clone(state, agent_id);
+                }
+            }
+            // Re-resolve the pinned artifact so the popup stays on the
+            // same card even when new cards shift the indices.
+            if let Some(ref pinned) = pinned_popup_ref {
+                if let Some(idx) = agent_ops_view::artifacts_card_index_for_popup_ref(
+                    state,
+                    Some(&swarm),
+                    state.agents.ops_viewport_width,
+                    pinned,
+                ) {
+                    state.agents.artifacts_selected = idx;
                 }
             }
             needs_redraw = true;
@@ -11770,9 +11789,11 @@ fn maybe_follow_swarm_artifact_in_popup(
     let Some(focus) = focus else {
         return;
     };
-    if !state.agents.artifacts_popup_open
-        || state.agents.artifacts_selected_saved_run_path.is_some()
-    {
+    if state.agents.artifacts_selected_saved_run_path.is_some() {
+        return;
+    }
+    // Don't hijack the popup while the user is already reading an artifact.
+    if state.agents.artifacts_popup_open {
         return;
     }
     let mission_id = match focus {

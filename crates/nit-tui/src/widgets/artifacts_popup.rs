@@ -122,9 +122,6 @@ pub fn preferred_size(screen: Rect) -> (u16, u16) {
     (width, height)
 }
 
-/// Minimum input box height (1 inner line + 2 borders).
-const MIN_INPUT_BOX_HEIGHT: u16 = 3;
-
 /// Returns the content area height after deducting the chat input box from the popup.
 /// Prompts do not have a chat input box, so they use the full height.
 pub fn content_area_height(
@@ -141,7 +138,28 @@ pub fn content_area_height(
     if is_prompt || inner.height < 5 {
         return inner.height;
     }
-    inner.height.saturating_sub(MIN_INPUT_BOX_HEIGHT)
+    // Use the same dynamic input box height as the render function so that
+    // scroll metrics stay in sync with the actual visible content area.
+    let input_wrap_width = inner.width.saturating_sub(2) as usize;
+    let popup_input = &state.agents.artifacts_popup_chat_input;
+    let cursor_char_idx = state
+        .agents
+        .artifacts_popup_chat_cursor
+        .min(popup_input.chars().count());
+    let (input_lines_all, _, _) = agent_console_view::wrap_input_with_cursor(
+        "",
+        popup_input,
+        cursor_char_idx,
+        input_wrap_width,
+    );
+    let half_inner = (inner.height as usize) / 2;
+    let max_inner_by_layout = inner.height.saturating_sub(4).max(1) as usize;
+    let dynamic_max = half_inner
+        .max(POPUP_CHAT_INPUT_MAX_INNER_LINES)
+        .min(max_inner_by_layout);
+    let input_inner_height = input_lines_all.len().max(1).min(dynamic_max);
+    let input_box_height = (input_inner_height + 2) as u16;
+    inner.height.saturating_sub(input_box_height)
 }
 
 pub fn build_lines(

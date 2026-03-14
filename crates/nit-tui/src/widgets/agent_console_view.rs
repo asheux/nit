@@ -1783,6 +1783,14 @@ fn format_message_rows(
     if msg.agent_id.as_deref() == Some("swarm") && msg.text.starts_with("Swarm ") {
         return Vec::new();
     }
+    // Swarm broadcast messages are redundant when individual agent callouts
+    // already cover each clone's completion.
+    if msg.agent_id.as_deref() == Some("swarm")
+        && matches!(msg.channel, nit_core::AgentChannel::Broadcast)
+        && matches!(mode, MessageRenderMode::Transcript)
+    {
+        return Vec::new();
+    }
 
     let src = msg.agent_id.as_deref().unwrap_or("agent");
     let agent_badge = agent_identity_badge(state, src);
@@ -2423,23 +2431,11 @@ fn append_swarm_meta_footer_rows(
 
     let max_inner = inner.max(1);
     let mut entries: Vec<(&str, String)> = Vec::new();
-    if let Some(value) = meta.template {
-        entries.push(("Template", value));
-    }
     if let Some(value) = meta.mission {
         entries.push(("Mission", value));
     }
-    if let Some(value) = meta.integrator {
-        entries.push(("Integrator", value));
-    }
-    if let Some(value) = meta.verifier {
-        entries.push(("Verifier", value));
-    }
     if let Some(value) = meta.gates {
         entries.push(("Gates", value));
-    }
-    if let Some(value) = meta.status {
-        entries.push(("Status", value));
     }
     if !meta.notes.is_empty() {
         entries.push(("Notes", meta.notes.join(" | ")));
@@ -3466,9 +3462,9 @@ mod tests {
             MessageRenderMode::Transcript,
         );
 
-        // Combined callout with badge: "↳ [Planner] done"
-        assert!(rows[0].text.contains("done"));
-        assert!(matches!(rows[0].kind, ThreadRowKind::Agent));
+        // Planner messages now also show the artifact link.
+        assert!(rows[0].text.contains("done (see ARTIFACTS)"));
+        assert!(matches!(rows[0].kind, ThreadRowKind::ArtifactLink));
     }
 
     #[test]
