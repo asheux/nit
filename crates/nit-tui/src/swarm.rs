@@ -237,6 +237,79 @@ fn cleanup_swarm_clones_for_mission(state: &mut AppState, mission_id: &str) {
     }
 }
 
+/// Remove a single idle chat clone from the roster, preserving messages and artifacts.
+pub fn cleanup_idle_chat_clone(state: &mut AppState, clone_id: &str) {
+    if !is_chat_clone_agent_id(clone_id) {
+        return;
+    }
+    // Only remove if actually idle with nothing queued.
+    let dominated = state
+        .agents
+        .agents
+        .iter()
+        .any(|a| a.id == clone_id && a.status == AgentStatus::Idle && a.queue_len == 0);
+    if !dominated {
+        return;
+    }
+
+    // Purge runtime metadata (mirrors cleanup_swarm_clones_for_mission).
+    state.agents.active_turns.remove(clone_id);
+    state.agents.codex_thread_ids.remove(clone_id);
+    state.agents.codex_used_tokens.remove(clone_id);
+    state.agents.codex_context_remaining_pct.remove(clone_id);
+    state
+        .agents
+        .codex_effective_context_window_tokens
+        .remove(clone_id);
+    state.agents.codex_default_reasoning_effort.remove(clone_id);
+    state
+        .agents
+        .codex_supported_reasoning_efforts
+        .remove(clone_id);
+    state
+        .agents
+        .codex_selected_reasoning_effort
+        .remove(clone_id);
+    state.agents.swarm_role_by_agent_id.remove(clone_id);
+    state.agents.swarm_priority_agent_ids.remove(clone_id);
+    state
+        .agents
+        .roster_tree_collapsed_agent_ids
+        .remove(clone_id);
+
+    let selected_clone_removed = state.agents.selected_agent.as_deref() == Some(clone_id);
+    let old_roster_selected = state.agents.roster_selected;
+
+    state.agents.agents.retain(|lane| lane.id != clone_id);
+
+    if state.agents.agents.is_empty() {
+        state.agents.selected_agent = None;
+        state.agents.roster_selected = 0;
+        state.agents.roster_tree_selected = None;
+        return;
+    }
+
+    if selected_clone_removed {
+        state.agents.roster_selected =
+            old_roster_selected.min(state.agents.agents.len().saturating_sub(1));
+        state.agents.selected_agent = state
+            .agents
+            .agents
+            .get(state.agents.roster_selected)
+            .map(|lane| lane.id.clone());
+        state.agents.roster_tree_selected = None;
+    } else if let Some(selected_id) = state.agents.selected_agent.clone() {
+        if let Some(idx) = state
+            .agents
+            .agents
+            .iter()
+            .position(|lane| lane.id == selected_id)
+        {
+            state.agents.roster_selected = idx;
+        }
+    }
+}
+
 pub fn create_chat_clone(state: &mut AppState, base_id: &str) -> Option<String> {
     let effective_base = chat_clone_base_id(base_id).unwrap_or(base_id);
     let base_lane = state

@@ -983,6 +983,12 @@ fn run_loop(
             }
             if finished {
                 maybe_dispatch_next_queued_codex_turn(state, &mut vitals, Some(&codex_runner));
+                // Clean up chat clones that are done.
+                if let AgentBusEvent::TurnCompleted { agent_id, .. }
+                | AgentBusEvent::TurnFailed { agent_id, .. } = &event
+                {
+                    crate::swarm::cleanup_idle_chat_clone(state, agent_id);
+                }
             }
             needs_redraw = true;
         }
