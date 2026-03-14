@@ -49,8 +49,10 @@ pub use strategy::{
 };
 pub use tournament::{
     accelerator_preflight, accelerator_run_preflight, select_halting_turing_machine_strategies,
-    KernelRunMode, MatchHistoryPreview, MatchResult, MatchSnapshot, Parallelism, TournamentKernel,
-    TournamentProgress, TournamentRunner,
+    try_select_halting_turing_machine_strategies,
+    try_select_halting_turing_machine_strategies_with_diagnostics, KernelRunMode,
+    MatchHistoryPreview, MatchResult, MatchSnapshot, Parallelism, TmHaltingFilterBackend,
+    TmHaltingFilterDiagnostics, TournamentKernel, TournamentProgress, TournamentRunner,
 };
 
 #[cfg(test)]

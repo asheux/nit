@@ -37,6 +37,23 @@ pub struct GamesConfig {
     pub engine: Option<EngineConfig>,
 }
 
+#[derive(Clone, Debug)]
+pub struct FamilyRunBaseConfig {
+    pub schema_version: u32,
+    pub game: String,
+    pub rounds: u32,
+    pub repetitions: u32,
+    pub self_play: bool,
+    pub save_data: bool,
+    pub seed: Option<u64>,
+    pub noise: f32,
+    pub payoff: PayoffMatrix,
+    pub event_log: EventLogConfig,
+    pub history: HistoryConfig,
+    pub engine: EngineConfig,
+    pub tm_blank_hint: Option<u8>,
+}
+
 #[derive(Clone, Debug, Deserialize)]
 pub struct PayoffConfig {
     #[serde(rename = "R")]
@@ -84,6 +101,31 @@ pub struct StrategyConfig {
     pub max_steps_per_round: Option<u32>,
     pub output_map: Option<Vec<String>>,
     pub rule_code: Option<u64>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct FamilyRunParseConfig {
+    pub schema_version: Option<u32>,
+    pub game: Option<String>,
+    pub rounds: Option<u32>,
+    pub repetitions: Option<u32>,
+    pub self_play: Option<bool>,
+    pub save_data: Option<bool>,
+    pub seed: Option<u64>,
+    pub noise: Option<f32>,
+    pub payoff: Option<PayoffConfig>,
+    #[serde(default)]
+    pub strategy: Vec<FamilyRunStrategyHint>,
+    pub event_log: Option<EventLogConfig>,
+    pub history: Option<HistoryConfig>,
+    pub engine: Option<EngineConfig>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct FamilyRunStrategyHint {
+    #[serde(rename = "type")]
+    pub kind: Option<String>,
+    pub blank: Option<usize>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
@@ -313,6 +355,16 @@ impl GamesConfig {
         raw.normalize_with_root(base_dir)
     }
 
+    pub fn family_run_base_from_toml_with_root(
+        src: &str,
+        _base_dir: Option<&std::path::Path>,
+    ) -> Result<FamilyRunBaseConfig, ConfigError> {
+        let raw: FamilyRunParseConfig = toml::from_str(src).map_err(|err| ConfigError {
+            errors: vec![err.to_string()],
+        })?;
+        raw.normalize_family_run_base()
+    }
+
     pub fn normalize(self) -> Result<NormalizedConfig, ConfigError> {
         self.normalize_with_root(None)
     }
@@ -390,6 +442,137 @@ impl GamesConfig {
             tm_filter_applied: false,
         })
     }
+}
+
+impl FamilyRunBaseConfig {
+    pub fn from_normalized(config: &NormalizedConfig) -> Self {
+        let tm_blank_hint = config.strategies.iter().find_map(|spec| match &spec.kind {
+            StrategySpecKind::OneSidedTm { blank, .. } => Some(*blank),
+            _ => None,
+        });
+        Self {
+            schema_version: config.schema_version,
+            game: config.game.clone(),
+            rounds: config.rounds,
+            repetitions: config.repetitions,
+            self_play: config.self_play,
+            save_data: config.save_data,
+            seed: config.seed,
+            noise: config.noise,
+            payoff: config.payoff,
+            event_log: config.event_log.clone(),
+            history: config.history.clone(),
+            engine: config.engine.clone(),
+            tm_blank_hint,
+        }
+    }
+
+    pub fn into_normalized(self, strategies: Vec<StrategySpec>) -> NormalizedConfig {
+        NormalizedConfig {
+            schema_version: self.schema_version,
+            game: self.game,
+            rounds: self.rounds,
+            repetitions: self.repetitions,
+            self_play: self.self_play,
+            save_data: self.save_data,
+            seed: self.seed,
+            noise: self.noise,
+            payoff: self.payoff,
+            strategies,
+            event_log: self.event_log,
+            history: self.history,
+            engine: self.engine,
+            max_memory_n: 0,
+            tm_filter_applied: false,
+        }
+    }
+}
+
+impl FamilyRunParseConfig {
+    fn normalize_family_run_base(self) -> Result<FamilyRunBaseConfig, ConfigError> {
+        let mut errors = Vec::new();
+
+        let schema_version = self.schema_version.unwrap_or(1);
+        let game = self.game.unwrap_or_else(|| "ipd".to_string());
+        let game = match game.as_str() {
+            "pd" | "prisoners_dilemma" => "ipd".to_string(),
+            other => other.to_string(),
+        };
+        let rounds = self.rounds.unwrap_or(200);
+        let repetitions = self.repetitions.unwrap_or(1);
+        let self_play = self.self_play.unwrap_or(true);
+        let noise = self.noise.unwrap_or(0.0).clamp(0.0, 1.0);
+
+        if rounds == 0 {
+            errors.push("rounds must be > 0".to_string());
+        }
+        if repetitions == 0 {
+            errors.push("repetitions must be > 0".to_string());
+        }
+        if !matches!(game.as_str(), "ipd") {
+            errors.push(format!("unsupported game '{game}' (expected ipd)"));
+        }
+
+        let payoff = match self.payoff {
+            Some(p) => payoff_from_config(p, &mut errors),
+            None => PayoffMatrix::default_pd(),
+        };
+
+        let engine = self.engine.unwrap_or_default();
+        if let ParallelismConfig::Threads { threads } = engine.parallelism {
+            if threads == 0 {
+                errors.push("engine.parallelism.threads must be > 0".to_string());
+            }
+        }
+
+        if !errors.is_empty() {
+            return Err(ConfigError { errors });
+        }
+
+        Ok(FamilyRunBaseConfig {
+            schema_version,
+            game,
+            rounds,
+            repetitions,
+            self_play,
+            save_data: self.save_data.unwrap_or_else(default_save_data),
+            seed: self.seed,
+            noise,
+            payoff,
+            event_log: self.event_log.unwrap_or_default(),
+            history: self.history.unwrap_or_default(),
+            engine,
+            tm_blank_hint: self.strategy.iter().find_map(family_run_tm_blank_hint),
+        })
+    }
+}
+
+fn family_run_tm_blank_hint(raw: &FamilyRunStrategyHint) -> Option<u8> {
+    let kind_raw = raw
+        .kind
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| value.to_ascii_lowercase());
+    if let Some(kind) = kind_raw.as_deref() {
+        if !matches!(
+            kind,
+            "leftside_tm"
+                | "left-side-tm"
+                | "one_sided_tm"
+                | "one-sided-tm"
+                | "one_sided_tm_strategy"
+                | "tm"
+                | "onesidedtm"
+        ) {
+            return None;
+        }
+    } else if raw.blank.is_none() {
+        return None;
+    }
+    raw.blank
+        .filter(|blank| *blank <= u8::MAX as usize)
+        .map(|blank| blank as u8)
 }
 
 fn normalize_strategy(

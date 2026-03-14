@@ -1,7 +1,7 @@
 use crate::{
     BatchEvalConfig, BatchExecutionPolicy, BatchPayload, BatchPolicyCacheEntryInfo,
     BatchPolicyCacheSnapshot, BatchPolicySource, BatchRequest, MatchPair, RecommendedBatchPolicy,
-    ScorePair, TmTransitionPacked, CA_MAX_WINDOW, TM_MAX_WIDTH,
+    ScorePair, TmHaltingPair, TmTransitionPacked, CA_MAX_WINDOW, FSM_MAX_STATES, TM_MAX_WIDTH,
 };
 use metal::{CompileOptions, ComputePipelineState, Device, Library, MTLResourceOptions, MTLSize};
 use nit_utils::{fs::write_atomic, hashing::stable_hash_bytes, paths::cache_dir};
@@ -22,6 +22,7 @@ const POLICY_CACHE_SCHEMA_VERSION: u32 = 1;
 struct ShaderKey {
     ca_max_window: u32,
     tm_max_width: u32,
+    fsm_max_states: u32,
 }
 
 impl ShaderKey {
@@ -29,13 +30,56 @@ impl ShaderKey {
         Self {
             ca_max_window: CA_MAX_WINDOW.max(1),
             tm_max_width: TM_MAX_WIDTH.max(1),
+            fsm_max_states: FSM_MAX_STATES.max(1),
+        }
+    }
+
+    fn for_fsm(states: u32) -> Self {
+        let required = states.max(1);
+        Self {
+            ca_max_window: CA_MAX_WINDOW.max(1),
+            tm_max_width: TM_MAX_WIDTH.max(1),
+            fsm_max_states: if required <= FSM_MAX_STATES.max(1) {
+                FSM_MAX_STATES.max(1)
+            } else {
+                required
+            },
         }
     }
 
     fn for_tm(max_steps: u32) -> Self {
+        let required_width = max_steps.saturating_add(1).max(1);
         Self {
             ca_max_window: CA_MAX_WINDOW.max(1),
-            tm_max_width: max_steps.saturating_add(1).max(1),
+            tm_max_width: if required_width <= TM_MAX_WIDTH.max(1) {
+                TM_MAX_WIDTH.max(1)
+            } else {
+                required_width
+            },
+            fsm_max_states: FSM_MAX_STATES.max(1),
+        }
+    }
+
+    fn for_ca(window: u32) -> Self {
+        let required = window.max(1);
+        Self {
+            ca_max_window: if required <= CA_MAX_WINDOW.max(1) {
+                CA_MAX_WINDOW.max(1)
+            } else {
+                required
+            },
+            tm_max_width: TM_MAX_WIDTH.max(1),
+            fsm_max_states: FSM_MAX_STATES.max(1),
+        }
+    }
+
+    fn for_payload(payload: &BatchPayload) -> Self {
+        match payload {
+            BatchPayload::Fsm(batch) => Self::for_fsm(batch.states),
+            BatchPayload::Tm(batch) => Self::for_tm(batch.max_steps),
+            BatchPayload::Ca(batch) => {
+                Self::for_ca(batch.two_r.saturating_mul(batch.steps).saturating_add(1))
+            }
         }
     }
 }
@@ -44,8 +88,8 @@ fn shader_source_for_key(key: ShaderKey) -> String {
     // Metal requires fixed-size arrays. We specialize the kernels by compiling the shader
     // with the requested scratch sizes, caching pipeline states per key.
     format!(
-        "#define CA_MAX_WINDOW {}u\n#define TM_MAX_WIDTH {}u\n{}",
-        key.ca_max_window, key.tm_max_width, SHADER_SOURCE
+        "#define CA_MAX_WINDOW {}u\n#define TM_MAX_WIDTH {}u\n#define FSM_MAX_STATES {}u\n{}",
+        key.ca_max_window, key.tm_max_width, key.fsm_max_states, SHADER_SOURCE
     )
 }
 
@@ -108,6 +152,13 @@ struct ScorePairPod {
 
 #[repr(C)]
 #[derive(Copy, Clone)]
+struct TmHaltingPairPod {
+    a_all_halted: u32,
+    b_all_halted: u32,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone)]
 struct TmTransitionPod {
     write: u32,
     move_dir: u32,
@@ -151,6 +202,7 @@ pub struct PreparedBatch {
 pub struct PendingBatch {
     _pair_buffer: metal::Buffer,
     score_buffer: metal::Buffer,
+    tm_halting_buffer: Option<metal::Buffer>,
     command_buffer: metal::CommandBuffer,
     pair_count: usize,
 }
@@ -520,10 +572,7 @@ pub fn recommended_batch_policy(
     config: &BatchEvalConfig,
     payload: &BatchPayload,
 ) -> Result<Option<RecommendedBatchPolicy>, String> {
-    let key = match payload {
-        BatchPayload::Tm(batch) => ShaderKey::for_tm(batch.max_steps),
-        _ => ShaderKey::defaults(),
-    };
+    let key = ShaderKey::for_payload(payload);
     let ctx = context_for_key(key)?;
     let working_set = ctx.device.recommended_max_working_set_size();
     let device_name = ctx.device.name().to_string();
@@ -641,10 +690,10 @@ mod tests {
     use super::{
         clear_policy_cache_entry_in_root, clear_policy_cache_in_root, load_cached_policy_from_dir,
         payload_signature, persist_cached_policy_from_dir, preferred_base_limit,
-        preferred_inflight_batches, snapshot_policy_cache_from_dir, PolicyCacheEntry,
+        preferred_inflight_batches, snapshot_policy_cache_from_dir, PolicyCacheEntry, ShaderKey,
         POLICY_CACHE_SCHEMA_VERSION,
     };
-    use crate::{BatchPayload, CaBatch, FsmBatch, TmBatch};
+    use crate::{BatchPayload, CaBatch, FsmBatch, TmBatch, FSM_MAX_STATES, TM_MAX_WIDTH};
     use std::{
         fs,
         path::{Path, PathBuf},
@@ -701,6 +750,55 @@ mod tests {
         assert_eq!(preferred_base_limit("Apple M4 Pro", &ca_payload), 65_536);
         assert_eq!(preferred_base_limit("Apple M4 Pro", &tm_payload), 32_768);
         assert_eq!(preferred_inflight_batches("Apple M4 Pro"), 3);
+    }
+
+    #[test]
+    fn tm_shader_key_reuses_default_width_until_needed() {
+        assert_eq!(ShaderKey::for_tm(64).tm_max_width, TM_MAX_WIDTH);
+        assert_eq!(
+            ShaderKey::for_tm(TM_MAX_WIDTH - 1).tm_max_width,
+            TM_MAX_WIDTH
+        );
+        assert_eq!(
+            ShaderKey::for_tm(TM_MAX_WIDTH).tm_max_width,
+            TM_MAX_WIDTH + 1
+        );
+    }
+
+    #[test]
+    fn fsm_shader_key_reuses_default_states_until_needed() {
+        assert_eq!(ShaderKey::for_fsm(3).fsm_max_states, FSM_MAX_STATES);
+        assert_eq!(
+            ShaderKey::for_fsm(FSM_MAX_STATES).fsm_max_states,
+            FSM_MAX_STATES
+        );
+        assert_eq!(
+            ShaderKey::for_fsm(FSM_MAX_STATES + 1).fsm_max_states,
+            FSM_MAX_STATES + 1
+        );
+    }
+
+    #[test]
+    fn fsm_payload_sets_shader_key_states() {
+        let payload = BatchPayload::Fsm(FsmBatch {
+            states: 3,
+            alphabet: 2,
+            starts: vec![0],
+            outputs: vec![0; 3],
+            transitions: vec![0; 6],
+        });
+        let key = ShaderKey::for_payload(&payload);
+        assert_eq!(key.fsm_max_states, FSM_MAX_STATES);
+
+        let large = BatchPayload::Fsm(FsmBatch {
+            states: FSM_MAX_STATES + 2,
+            alphabet: 2,
+            starts: vec![0],
+            outputs: vec![0; (FSM_MAX_STATES + 2) as usize],
+            transitions: vec![0; (FSM_MAX_STATES + 2) as usize * 2],
+        });
+        let key = ShaderKey::for_payload(&large);
+        assert_eq!(key.fsm_max_states, FSM_MAX_STATES + 2);
     }
 
     #[test]
@@ -868,6 +966,18 @@ unsafe fn read_scores(buffer: &metal::BufferRef, len: usize) -> Vec<ScorePair> {
         .collect()
 }
 
+unsafe fn read_tm_halting(buffer: &metal::BufferRef, len: usize) -> Vec<TmHaltingPair> {
+    let ptr = buffer.contents() as *const TmHaltingPairPod;
+    let slice = slice::from_raw_parts(ptr, len);
+    slice
+        .iter()
+        .map(|entry| TmHaltingPair {
+            a_all_halted: entry.a_all_halted != 0,
+            b_all_halted: entry.b_all_halted != 0,
+        })
+        .collect()
+}
+
 fn submit_dispatch(
     pipeline: &ComputePipelineState,
     queue: &metal::CommandQueue,
@@ -925,6 +1035,7 @@ fn submit_prepared_batch_impl(
     let pair_pods = pair_pods(pairs);
     let pair_buffer = buffer_from_slice(&ctx.device, &pair_pods);
     let scores = empty_output_buffer::<ScorePairPod>(&ctx.device, pair_pods.len());
+    let mut tm_halting_buffer = None;
     let eval = eval_params(&prepared.eval, pair_pods.len());
     let command_buffer = match &prepared.payload {
         PreparedPayload::Fsm {
@@ -981,31 +1092,38 @@ fn submit_prepared_batch_impl(
             params,
             starts,
             transitions,
-        } => submit_dispatch(
-            &ctx.tm_pipeline,
-            &ctx.queue,
-            |encoder| {
-                encoder.set_buffer(0, Some(&pair_buffer), 0);
-                encoder.set_buffer(1, Some(starts), 0);
-                encoder.set_buffer(2, Some(transitions), 0);
-                encoder.set_buffer(3, Some(&scores), 0);
-                encoder.set_bytes(
-                    4,
-                    size_of::<EvalParams>() as u64,
-                    (&eval as *const EvalParams).cast(),
-                );
-                encoder.set_bytes(
-                    5,
-                    size_of::<TmParams>() as u64,
-                    (params as *const TmParams).cast(),
-                );
-            },
-            pair_pods.len(),
-        ),
+        } => {
+            let halting = empty_output_buffer::<TmHaltingPairPod>(&ctx.device, pair_pods.len());
+            let command_buffer = submit_dispatch(
+                &ctx.tm_pipeline,
+                &ctx.queue,
+                |encoder| {
+                    encoder.set_buffer(0, Some(&pair_buffer), 0);
+                    encoder.set_buffer(1, Some(starts), 0);
+                    encoder.set_buffer(2, Some(transitions), 0);
+                    encoder.set_buffer(3, Some(&scores), 0);
+                    encoder.set_bytes(
+                        4,
+                        size_of::<EvalParams>() as u64,
+                        (&eval as *const EvalParams).cast(),
+                    );
+                    encoder.set_bytes(
+                        5,
+                        size_of::<TmParams>() as u64,
+                        (params as *const TmParams).cast(),
+                    );
+                    encoder.set_buffer(6, Some(&halting), 0);
+                },
+                pair_pods.len(),
+            );
+            tm_halting_buffer = Some(halting);
+            command_buffer
+        }
     };
     Ok(PendingBatch {
         _pair_buffer: pair_buffer,
         score_buffer: scores,
+        tm_halting_buffer,
         command_buffer,
         pair_count: pair_pods.len(),
     })
@@ -1028,21 +1146,7 @@ pub fn try_prepare_batch(
     config: &BatchEvalConfig,
     payload: &BatchPayload,
 ) -> Result<Option<PreparedBatch>, String> {
-    if let BatchPayload::Ca(payload) = payload {
-        if payload
-            .two_r
-            .saturating_mul(payload.steps)
-            .saturating_add(1)
-            > CA_MAX_WINDOW
-        {
-            return Ok(None);
-        }
-    }
-
-    let shader_key = match payload {
-        BatchPayload::Tm(payload) => ShaderKey::for_tm(payload.max_steps),
-        _ => ShaderKey::defaults(),
-    };
+    let shader_key = ShaderKey::for_payload(payload);
     let ctx = context_for_key(shader_key)?;
 
     let payload = match payload {
@@ -1099,6 +1203,19 @@ pub fn try_evaluate_prepared_batch(
     try_finish_prepared_batch(pending).map(Some)
 }
 
+pub fn try_evaluate_prepared_tm_halting_batch(
+    prepared: &PreparedBatch,
+    pairs: &[MatchPair],
+) -> Result<Option<Vec<TmHaltingPair>>, String> {
+    if pairs.is_empty() {
+        return Ok(Some(Vec::new()));
+    }
+    let Some(pending) = try_begin_prepared_batch(prepared, pairs)? else {
+        return Ok(None);
+    };
+    try_finish_prepared_tm_halting_batch(pending).map(Some)
+}
+
 pub fn try_begin_prepared_batch(
     prepared: &PreparedBatch,
     pairs: &[MatchPair],
@@ -1113,4 +1230,19 @@ pub fn try_begin_prepared_batch(
 pub fn try_finish_prepared_batch(pending: PendingBatch) -> Result<Vec<ScorePair>, String> {
     pending.command_buffer.wait_until_completed();
     Ok(unsafe { read_scores(&pending.score_buffer, pending.pair_count) })
+}
+
+pub fn try_finish_prepared_tm_halting_batch(
+    pending: PendingBatch,
+) -> Result<Vec<TmHaltingPair>, String> {
+    pending.command_buffer.wait_until_completed();
+    let Some(buffer) = pending.tm_halting_buffer.as_ref() else {
+        return Err("TM halting results are only available for TM prepared batches".into());
+    };
+    Ok(unsafe { read_tm_halting(buffer, pending.pair_count) })
+}
+
+pub fn prewarm_default_batch_shaders() -> Result<(), String> {
+    let _ = context_for_key(ShaderKey::defaults())?;
+    Ok(())
 }

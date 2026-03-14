@@ -2,13 +2,16 @@ use std::fs::{self, File};
 use std::io::{BufRead, BufReader, BufWriter, Seek, SeekFrom, Write};
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
+#[cfg(target_os = "macos")]
+use std::sync::Once;
 use std::thread;
 use std::time::{Duration, Instant};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use nit_core::{
-    build_family_run_override_for_request, AppState, GamesAnalysisRequest, GamesFamilyRunRequest,
-    GamesRunOverride, GamesStatus, UiSelectionPane,
+    apply_family_run_runtime_overrides, build_family_run_override_for_request_with_timings,
+    build_family_run_override_from_base_config_with_timings, AppState, FamilyRunBuildTimings,
+    GamesAnalysisRequest, GamesFamilyRunRequest, GamesRunOverride, GamesStatus, UiSelectionPane,
 };
 use nit_games::output::StrategyDefinition;
 use nit_games::{
@@ -28,7 +31,9 @@ use ratatui::{
 use tracing::info;
 
 use crate::games_analysis::{AnalysisCommand, AnalysisEvent, AnalysisRequest, GamesAnalysisRunner};
-use crate::games_runner::{GamesRunner, RunRequest, RunnerCommand, RunnerEvent};
+use crate::games_runner::{
+    uses_match_step_units, GamesRunner, RunRequest, RunnerCommand, RunnerEvent,
+};
 use crate::games_runs::{GamesRunsRunner, RunsCommand, RunsEvent};
 use crate::theme::Theme;
 use crate::widgets::games_visualizer_view::strategy_display_name_from_def;
@@ -38,6 +43,10 @@ const MIN_WIDTH: u16 = 120;
 const MIN_HEIGHT: u16 = 40;
 const HISTORY_LOAD_CHUNK: usize = 256;
 const HISTORY_LOAD_PREFETCH: usize = 64;
+const ROUND_STEP_UI_CAP: u32 = 200;
+const MATCH_STEP_UI_CAP: u32 = 250_000;
+#[cfg(target_os = "macos")]
+static METAL_PREWARM_ONCE: Once = Once::new();
 
 pub fn petri_rect(screen: Rect) -> Rect {
     let width = screen.width.clamp(60, MIN_WIDTH);
@@ -106,6 +115,40 @@ impl GameSession {
 struct FamilyBuildOutcome {
     force: bool,
     result: Result<GamesRunOverride, String>,
+    timings: Option<FamilyRunBuildTimings>,
+}
+
+fn family_build_detail(family: &str, raw_input: &str) -> String {
+    let trimmed = raw_input.trim();
+    let detail = trimmed
+        .find('{')
+        .map(|start| trimmed[start..].trim())
+        .filter(|detail| !detail.is_empty())
+        .unwrap_or(trimmed);
+    if detail.is_empty() {
+        family.to_string()
+    } else {
+        format!("{family} {detail}")
+    }
+}
+
+fn tm_family_prep_summary(timings: &FamilyRunBuildTimings) -> Option<String> {
+    let diagnostics = timings.tm_filter.as_ref()?;
+    let summary = match diagnostics.backend {
+        nit_games::TmHaltingFilterBackend::Metal => "prep used Metal".to_string(),
+        nit_games::TmHaltingFilterBackend::NotebookCpuFallback => {
+            if let Some(reason) = diagnostics.metal_decline_reason.as_ref() {
+                format!("prep fell back to CPU: {reason}")
+            } else if let Some(err) = diagnostics.metal_error.as_ref() {
+                format!("prep fell back to CPU after Metal error: {err}")
+            } else {
+                "prep fell back to CPU".to_string()
+            }
+        }
+        nit_games::TmHaltingFilterBackend::NotebookCpu => "prep used CPU".to_string(),
+        other => format!("prep backend {}", other.label()),
+    };
+    Some(summary)
 }
 
 struct HistoryPreviewStore {
@@ -206,8 +249,34 @@ fn escape_wolfram_string(value: &str) -> String {
     out
 }
 
+fn increase_steps_per_tick(current: u32, use_match_units: bool) -> u32 {
+    let base_cap = if use_match_units {
+        MATCH_STEP_UI_CAP
+    } else {
+        ROUND_STEP_UI_CAP
+    };
+    let next = current.saturating_add(1);
+    if current > base_cap {
+        next
+    } else {
+        next.min(base_cap).max(1)
+    }
+}
+
+fn decrease_steps_per_tick(current: u32) -> u32 {
+    current.saturating_sub(1).max(1)
+}
+
 impl GamesPetriDishRuntime {
     pub fn new(_state: &AppState) -> Self {
+        #[cfg(target_os = "macos")]
+        METAL_PREWARM_ONCE.call_once(|| {
+            let _ = thread::Builder::new()
+                .name("nit-metal-prewarm".into())
+                .spawn(|| {
+                    let _ = nit_metal::prewarm_default_batch_shaders();
+                });
+        });
         Self {
             runner: GamesRunner::spawn(),
             analysis_runner: GamesAnalysisRunner::spawn(),
@@ -408,23 +477,78 @@ impl GamesPetriDishRuntime {
         }
         let workspace_root = state.workspace_root.clone();
         let config_text = state.editor_buffer().content_as_string();
+        let config_version = state.editor_buffer().version();
+        let base_config = state
+            .games
+            .config_preview
+            .as_ref()
+            .filter(|preview| preview.version == config_version)
+            .and_then(|preview| preview.result.as_ref().ok())
+            .map(nit_games::config::FamilyRunBaseConfig::from_normalized);
+        let used_preview_base = base_config.is_some();
         let family_label = request.family.clone();
-        let family_input = request.input.trim().to_string();
         let mode = if request.force { "forced, " } else { "" };
         let force = request.force;
         state.games.family_building = true;
-        let detail = if family_input.is_empty() {
-            family_label.clone()
-        } else {
-            format!("{family_label} {family_input}")
-        };
+        let detail = family_build_detail(&family_label, &request.input);
         self.open_loading_popup(state, format!("Preparing family run ({mode}{detail})..."));
         state.status = None;
         let (tx, rx) = mpsc::channel();
         thread::spawn(move || {
-            let result =
-                build_family_run_override_for_request(&workspace_root, &config_text, &request);
-            let _ = tx.send(FamilyBuildOutcome { force, result });
+            let build_started = Instant::now();
+            let built = match base_config {
+                Some(base_config) => build_family_run_override_from_base_config_with_timings(
+                    &workspace_root,
+                    &config_text,
+                    &request,
+                    base_config,
+                ),
+                None => build_family_run_override_for_request_with_timings(
+                    &workspace_root,
+                    &config_text,
+                    &request,
+                ),
+            };
+            let (result, timings) = match built {
+                Ok((override_run, timings)) => {
+                    let tm_prep = tm_family_prep_summary(&timings)
+                        .unwrap_or_else(|| "no TM prep diagnostics".to_string());
+                    info!(
+                        "Games family build ({family_label}) generated {} strategies in {:?} (generation {:?}, estimate {:?}, normalize {:?}, tm-filter {:?}) using {} base config; {}",
+                        timings.generated_strategies,
+                        timings.total_elapsed,
+                        timings.generation_elapsed,
+                        timings.estimate_elapsed,
+                        timings.normalize_elapsed,
+                        timings.tm_filter_elapsed,
+                        if used_preview_base {
+                            "preview"
+                        } else {
+                            "parsed"
+                        },
+                        tm_prep
+                    );
+                    (Ok(override_run), Some(timings))
+                }
+                Err(err) => {
+                    info!(
+                        "Games family build ({family_label}) failed after {:?} using {} base config: {}",
+                        build_started.elapsed(),
+                        if used_preview_base {
+                            "preview"
+                        } else {
+                            "parsed"
+                        },
+                        err
+                    );
+                    (Err(err), None)
+                }
+            };
+            let _ = tx.send(FamilyBuildOutcome {
+                force,
+                result,
+                timings,
+            });
         });
         self.family_run_rx = Some(rx);
     }
@@ -443,6 +567,7 @@ impl GamesPetriDishRuntime {
             Err(TryRecvError::Disconnected) => Some(FamilyBuildOutcome {
                 force: false,
                 result: Err("Family run preparation failed".into()),
+                timings: None,
             }),
         };
         let Some(outcome) = outcome else {
@@ -457,9 +582,25 @@ impl GamesPetriDishRuntime {
                 let mode = if outcome.force { "forced, " } else { "" };
                 state.games.pending_run_override = Some(override_run);
                 state.games.pending_run = true;
-                self.loading_message = Some(format!(
-                    "Queued tournament ({mode}{label}, {machine_count} machines)"
-                ));
+                self.loading_message = Some(match outcome.timings {
+                    Some(timings) => {
+                        let mut message = format!(
+                            "Queued tournament ({mode}{label}, {machine_count} machines; generation {:?}, estimate {:?}, normalize {:?}",
+                            timings.generation_elapsed,
+                            timings.estimate_elapsed,
+                            timings.normalize_elapsed
+                        );
+                        if let Some(tm_filter_elapsed) = timings.tm_filter_elapsed {
+                            message.push_str(&format!(", tm-filter {:?}", tm_filter_elapsed));
+                        }
+                        message.push(')');
+                        if let Some(tm_summary) = tm_family_prep_summary(&timings) {
+                            message.push_str(&format!("; {tm_summary}"));
+                        }
+                        message
+                    }
+                    None => format!("Queued tournament ({mode}{label}, {machine_count} machines)"),
+                });
                 state.status = None;
             }
             Err(err) => {
@@ -598,13 +739,16 @@ impl GamesPetriDishRuntime {
                 true
             }
             KeyCode::Char('+') | KeyCode::Char('=') => {
-                state.games.steps_per_tick = (state.games.steps_per_tick + 1).min(200);
+                state.games.steps_per_tick = increase_steps_per_tick(
+                    state.games.steps_per_tick,
+                    state.games.steps_use_match_units,
+                );
                 self.runner
                     .send(RunnerCommand::UpdateSpeed(state.games.steps_per_tick));
                 true
             }
             KeyCode::Char('-') | KeyCode::Char('_') => {
-                state.games.steps_per_tick = state.games.steps_per_tick.saturating_sub(1).max(1);
+                state.games.steps_per_tick = decrease_steps_per_tick(state.games.steps_per_tick);
                 self.runner
                     .send(RunnerCommand::UpdateSpeed(state.games.steps_per_tick));
                 true
@@ -747,10 +891,16 @@ impl GamesPetriDishRuntime {
         while let Ok(event) = self.runner.events.try_recv() {
             self.mark_activity();
             match event {
+                RunnerEvent::StartupStage(stage) => {
+                    self.loading_open = true;
+                    self.loading_message = Some(stage);
+                }
                 RunnerEvent::Definitions(defs) => {
                     if let Some(session) = self.session.as_mut() {
                         session.definitions = defs;
                     }
+                    self.loading_open = false;
+                    self.loading_message = None;
                 }
                 RunnerEvent::Progress(progress) => {
                     state.games.match_history.total_entries = state
@@ -811,9 +961,12 @@ impl GamesPetriDishRuntime {
                 RunnerEvent::Cancelled => {
                     let elapsed = self.session.as_mut().map(GameSession::freeze_elapsed);
                     self.session = None;
+                    self.loading_open = false;
+                    self.loading_message = None;
                     state.games.last_error = None;
                     state.games.running = false;
                     state.games.paused = false;
+                    state.games.steps_use_match_units = false;
                     state.games.status = GamesStatus::Idle;
                     state.games.petri_hidden = false;
                     state.games.petri_lines.clear();
@@ -828,8 +981,11 @@ impl GamesPetriDishRuntime {
                 RunnerEvent::Error(err) => {
                     let elapsed = self.session.as_mut().map(GameSession::freeze_elapsed);
                     self.session = None;
+                    self.loading_open = false;
+                    self.loading_message = None;
                     state.games.running = false;
                     state.games.paused = false;
+                    state.games.steps_use_match_units = false;
                     state.games.status = GamesStatus::Error;
                     state.games.last_error = Some(err.clone());
                     state.games.petri_lines.clear();
@@ -870,6 +1026,7 @@ impl GamesPetriDishRuntime {
         state.games.status = GamesStatus::Done;
         state.games.running = false;
         state.games.paused = false;
+        state.games.steps_use_match_units = false;
         self.hidden = false;
         state.games.petri_hidden = false;
         state.games.petri_lines.clear();
@@ -1080,6 +1237,7 @@ impl GamesPetriDishRuntime {
             };
             lines.push(session_footer_line(
                 state.games.steps_per_tick,
+                state.games.steps_use_match_units,
                 state.games.paused,
                 elapsed,
                 label_style,
@@ -1226,34 +1384,11 @@ impl GamesPetriDishRuntime {
                 (config, config_text)
             };
 
-        config.engine.mode = if family_mode {
-            nit_games::EngineMode::Batch
+        if family_mode {
+            apply_family_run_runtime_overrides(&mut config);
         } else {
-            nit_games::EngineMode::Interactive
-        };
-        if family_mode {
-            config.event_log.enabled = false;
-            config.history.enabled = false;
-            config.engine.fast_eval = true;
+            config.engine.mode = nit_games::EngineMode::Interactive;
         }
-        let mut request_steps_per_tick = state.games.steps_per_tick.max(1);
-        if family_mode {
-            let strategy_count = config.strategies.len() as u32;
-            let fast_family = config
-                .strategies
-                .iter()
-                .all(|spec| FastStrategyModel::from_spec(spec).is_some());
-            let turbo_matches = strategy_count
-                .saturating_mul(strategy_count)
-                .saturating_div(8)
-                .clamp(256, if fast_family { 250_000 } else { 4_096 });
-            let turbo_steps = turbo_matches.saturating_mul(config.rounds.max(1));
-            if request_steps_per_tick < turbo_steps {
-                request_steps_per_tick = turbo_steps;
-                state.games.steps_per_tick = turbo_steps;
-            }
-        }
-
         let timestamp = EventWriter::timestamp();
         let seed = config
             .seed
@@ -1291,6 +1426,34 @@ impl GamesPetriDishRuntime {
 
         let event_log_enabled = config.save_data && config.event_log.enabled;
         let history_log_enabled = config.save_data && config.history.enabled;
+        let metal_path = config.engine.accelerator.allows_metal();
+        let use_previews =
+            !matches!(config.engine.mode, nit_games::EngineMode::Batch) && !metal_path;
+        let use_event_log = event_log_enabled && !metal_path;
+        let use_history_log = history_log_enabled && !metal_path;
+        let steps_use_match_units =
+            uses_match_step_units(&config, use_event_log, use_history_log, use_previews);
+        let mut request_steps_per_tick = state.games.steps_per_tick.max(1);
+        if family_mode {
+            let strategy_count = config.strategies.len() as u32;
+            let fast_family = config
+                .strategies
+                .iter()
+                .all(|spec| FastStrategyModel::from_spec(spec).is_some());
+            let turbo_matches = strategy_count
+                .saturating_mul(strategy_count)
+                .saturating_div(8)
+                .clamp(256, if fast_family { 250_000 } else { 4_096 });
+            let turbo_target = if steps_use_match_units {
+                turbo_matches
+            } else {
+                turbo_matches.saturating_mul(config.rounds.max(1))
+            };
+            if request_steps_per_tick < turbo_target {
+                request_steps_per_tick = turbo_target;
+                state.games.steps_per_tick = turbo_target;
+            }
+        }
         let summary_path = layout.as_ref().map(|layout| layout.summary_path.clone());
         let event_path = layout.as_ref().map(|layout| layout.events_path.clone());
         let history_path = layout.as_ref().map(|layout| layout.history_path.clone());
@@ -1330,8 +1493,8 @@ impl GamesPetriDishRuntime {
         };
 
         self.runner.send(RunnerCommand::StartRun(Box::new(request)));
-        self.loading_open = false;
-        self.loading_message = None;
+        self.loading_open = true;
+        self.loading_message = Some("Starting tournament runner...".into());
         self.session = Some(GameSession {
             config,
             progress: None,
@@ -1360,12 +1523,20 @@ impl GamesPetriDishRuntime {
         state.games.petri_hidden = false;
         state.games.running = true;
         state.games.paused = false;
+        state.games.steps_use_match_units = steps_use_match_units;
         state.games.status = GamesStatus::Running;
         state.games.last_error = None;
         state.games.runtime = nit_games::RuntimeAcceleratorStats::new(requested_accelerator);
+        let speed_unit = if steps_use_match_units {
+            "matches/tick"
+        } else {
+            "steps/tick"
+        };
         state.status = Some(match run_label {
             Some(label) if family_mode => {
-                format!("Games tournament started ({label}, turbo x{request_steps_per_tick})")
+                format!(
+                    "Games tournament started ({label}, turbo {request_steps_per_tick} {speed_unit})"
+                )
             }
             Some(label) => format!("Games tournament started ({label})"),
             None => "Games tournament started".into(),
@@ -1505,6 +1676,7 @@ impl GamesPetriDishRuntime {
         self.hidden = false;
         state.games.running = false;
         state.games.paused = false;
+        state.games.steps_use_match_units = false;
         state.games.family_building = false;
         state.games.pending_run = false;
         state.games.pending_run_override = None;
@@ -1680,6 +1852,7 @@ fn format_tournament_elapsed(duration: Duration) -> String {
 
 fn session_footer_line(
     steps_per_tick: u32,
+    steps_use_match_units: bool,
     paused: bool,
     elapsed: Duration,
     label_style: Style,
@@ -1687,8 +1860,13 @@ fn session_footer_line(
     paused_style: Style,
     dim_style: Style,
 ) -> Line<'static> {
+    let speed_label = if steps_use_match_units {
+        "matches/tick: "
+    } else {
+        "steps/tick: "
+    };
     Line::from(vec![
-        Span::styled("steps/tick: ", label_style),
+        Span::styled(speed_label, label_style),
         Span::styled(steps_per_tick.to_string(), number_style),
         Span::styled("  ", dim_style),
         Span::styled("paused: ", label_style),
@@ -2889,6 +3067,7 @@ fn truncate_text(value: &str, width: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::{decrease_steps_per_tick, increase_steps_per_tick};
 
     fn sample_snapshot() -> MatchSnapshot {
         MatchSnapshot {
@@ -3185,6 +3364,71 @@ k = 2
     }
 
     #[test]
+    fn tm_family_prep_summary_reports_cpu_fallback_reason() {
+        let timings = FamilyRunBuildTimings {
+            tm_filter: Some(nit_games::TmHaltingFilterDiagnostics {
+                backend: nit_games::TmHaltingFilterBackend::NotebookCpuFallback,
+                metal_decline_reason: Some("non-zero noise disables Metal batch evaluation".into()),
+                ..nit_games::TmHaltingFilterDiagnostics::default()
+            }),
+            ..FamilyRunBuildTimings::default()
+        };
+
+        let summary = tm_family_prep_summary(&timings).expect("expected prep summary");
+        assert_eq!(
+            summary,
+            "prep fell back to CPU: non-zero noise disables Metal batch evaluation"
+        );
+    }
+
+    #[test]
+    fn family_build_result_loading_message_includes_tm_prep_summary() {
+        let mut state = AppState::new(
+            std::env::temp_dir(),
+            nit_core::Buffer::empty("x", None),
+            nit_core::Buffer::empty("n", None),
+        );
+        let mut runtime = GamesPetriDishRuntime::new(&state);
+        state.games.family_building = true;
+
+        let (tx, rx) = mpsc::channel();
+        runtime.family_run_rx = Some(rx);
+        let timings = FamilyRunBuildTimings {
+            generation_elapsed: Duration::from_millis(1),
+            estimate_elapsed: Duration::from_millis(2),
+            normalize_elapsed: Duration::from_millis(3),
+            tm_filter_elapsed: Some(Duration::from_millis(4)),
+            tm_filter: Some(nit_games::TmHaltingFilterDiagnostics {
+                backend: nit_games::TmHaltingFilterBackend::NotebookCpuFallback,
+                metal_decline_reason: Some("non-zero noise disables Metal batch evaluation".into()),
+                ..nit_games::TmHaltingFilterDiagnostics::default()
+            }),
+            ..FamilyRunBuildTimings::default()
+        };
+        let outcome = FamilyBuildOutcome {
+            force: false,
+            result: Ok(GamesRunOverride {
+                config: sample_config(),
+                config_text: "schema_version = 1".into(),
+                label: "tm {1, 2}".into(),
+                family_mode: true,
+            }),
+            timings: Some(timings),
+        };
+        tx.send(outcome).expect("send family build outcome");
+
+        runtime.handle_family_build_result(&mut state);
+        let message = runtime
+            .loading_message
+            .as_deref()
+            .expect("expected loading message");
+        assert!(message.contains("Queued tournament"));
+        assert!(message.contains("tm-filter"));
+        assert!(message.contains("prep fell back to CPU"));
+        assert!(message.contains("non-zero noise"));
+    }
+
+    #[test]
     fn format_tournament_elapsed_uses_readable_units() {
         assert_eq!(
             format_tournament_elapsed(Duration::from_millis(875)),
@@ -3224,6 +3468,7 @@ k = 2
         let line = session_footer_line(
             2_048,
             false,
+            false,
             Duration::from_millis(12_345),
             Style::default(),
             Style::default(),
@@ -3235,6 +3480,49 @@ k = 2
             line_text(&line),
             "steps/tick: 2048  paused: no  elapsed: 12.345s"
         );
+    }
+
+    #[test]
+    fn session_footer_line_can_show_match_units() {
+        let line = session_footer_line(
+            32,
+            true,
+            false,
+            Duration::from_millis(12_345),
+            Style::default(),
+            Style::default(),
+            Style::default(),
+            Style::default(),
+        );
+
+        assert_eq!(
+            line_text(&line),
+            "matches/tick: 32  paused: no  elapsed: 12.345s"
+        );
+    }
+
+    #[test]
+    fn increase_steps_per_tick_clamps_normal_round_mode() {
+        assert_eq!(increase_steps_per_tick(199, false), 200);
+        assert_eq!(increase_steps_per_tick(200, false), 200);
+    }
+
+    #[test]
+    fn increase_steps_per_tick_preserves_large_existing_values() {
+        assert_eq!(increase_steps_per_tick(50_000, false), 50_001);
+        assert_eq!(increase_steps_per_tick(4_096, true), 4_097);
+    }
+
+    #[test]
+    fn increase_steps_per_tick_does_not_overflow() {
+        assert_eq!(increase_steps_per_tick(u32::MAX, false), u32::MAX);
+        assert_eq!(increase_steps_per_tick(u32::MAX, true), u32::MAX);
+    }
+
+    #[test]
+    fn decrease_steps_per_tick_stops_at_one() {
+        assert_eq!(decrease_steps_per_tick(2), 1);
+        assert_eq!(decrease_steps_per_tick(1), 1);
     }
 
     #[test]

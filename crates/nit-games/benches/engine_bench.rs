@@ -1,13 +1,13 @@
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
+use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
 use nit_games::config::{
-    EngineConfig, HistoryConfig, NormalizedConfig, StrategySpec, StrategySpecKind,
+    AcceleratorMode, EngineConfig, HistoryConfig, NormalizedConfig, StrategySpec, StrategySpecKind,
 };
 use nit_games::events::EventWriter;
 use nit_games::game::PayoffMatrix;
 use nit_games::history_log::HistoryWriter;
 use nit_games::output::{RunPaths, RunSummary, RUN_SUMMARY_SCHEMA_VERSION};
 use nit_games::tournament::{KernelRunMode, Parallelism, TournamentKernel};
-use nit_games::{InputMode, Strategy, TmMove, TmTransition};
+use nit_games::{decode_tm_rule_code_wolfram, InputMode, Strategy, TmMove, TmTransition};
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -363,6 +363,58 @@ fn build_tm_heavy_config(strategies: usize, rounds: u32, max_steps: u32) -> Norm
     }
 }
 
+fn build_tm_family_reference_config(rounds: u32, max_steps_per_round: u32) -> NormalizedConfig {
+    let specs = (0u64..=15)
+        .map(|rule_code| {
+            let (transitions, _remaining) = decode_tm_rule_code_wolfram(rule_code, 1, 2);
+            StrategySpec {
+                id: format!("tm_{rule_code}"),
+                name: None,
+                kind: StrategySpecKind::OneSidedTm {
+                    states: 1,
+                    symbols: 2,
+                    start_state: 1,
+                    blank: 0,
+                    fallback_symbol: Some(0),
+                    max_steps_per_round,
+                    input_mode: InputMode::OpponentLastAction,
+                    output_map: vec![
+                        nit_games::game::Action::Cooperate,
+                        nit_games::game::Action::Defect,
+                    ],
+                    transitions,
+                    rule_code: Some(rule_code),
+                },
+            }
+        })
+        .collect();
+    let mut engine = EngineConfig::default();
+    engine.accelerator = AcceleratorMode::Cpu;
+    NormalizedConfig {
+        schema_version: 1,
+        game: "ipd".into(),
+        rounds,
+        repetitions: 1,
+        self_play: true,
+        save_data: true,
+        seed: Some(12345),
+        noise: 0.0,
+        payoff: PayoffMatrix::default_pd(),
+        strategies: specs,
+        event_log: nit_games::events::EventLogConfig {
+            enabled: false,
+            include_rounds: false,
+        },
+        history: HistoryConfig {
+            enabled: false,
+            include_cycle_metadata: false,
+        },
+        engine,
+        max_memory_n: 0,
+        tm_filter_applied: false,
+    }
+}
+
 fn build_baseline_deterministic(strategies: usize, rounds: u32) -> NormalizedConfig {
     let specs = (0..strategies)
         .map(|idx| StrategySpec {
@@ -706,6 +758,24 @@ fn bench_tm_heavy(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_tm_family_halting_filter(c: &mut Criterion) {
+    let mut group = c.benchmark_group("tm_family_halting");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(6));
+    let config = build_tm_family_reference_config(200, 1000);
+    group.bench_function("tm_1x2_rounds200_steps1000", |b| {
+        b.iter(|| {
+            let (_filtered, diagnostics) =
+                nit_games::try_select_halting_turing_machine_strategies_with_diagnostics(
+                    config.clone(),
+                )
+                .expect("TM family halting selection");
+            black_box(diagnostics);
+        });
+    });
+    group.finish();
+}
+
 fn bench_sweep_io(c: &mut Criterion) {
     let config = build_tm_config(6, 60);
     let kernel = TournamentKernel::new(config.clone());
@@ -771,6 +841,7 @@ criterion_group!(
     bench_tm_micro,
     bench_tm_tournament,
     bench_tm_heavy,
+    bench_tm_family_halting_filter,
     bench_sweep_io
 );
 criterion_main!(benches);

@@ -8,6 +8,9 @@ using namespace metal;
 #ifndef TM_MAX_WIDTH
 #define TM_MAX_WIDTH 1024u
 #endif
+#ifndef FSM_MAX_STATES
+#define FSM_MAX_STATES 4u
+#endif
 
 struct MatchPair {
     uint a_idx;
@@ -17,6 +20,11 @@ struct MatchPair {
 struct ScorePair {
     long a_total;
     long b_total;
+};
+
+struct TmHaltingPair {
+    uint a_all_halted;
+    uint b_all_halted;
 };
 
 struct EvalParams {
@@ -320,7 +328,51 @@ kernel void fsm_batch(
     uint b_state = starts[pair.b_idx];
     long a_total = 0;
     long b_total = 0;
+
+    // Cycle detection: FSM combined state space is states*states, so a cycle
+    // must appear within that many rounds.  When detected, skip ahead in O(1).
+    const uint max_combined = FSM_MAX_STATES * FSM_MAX_STATES;
+    thread uint cycle_round[FSM_MAX_STATES * FSM_MAX_STATES];
+    thread long cycle_a[FSM_MAX_STATES * FSM_MAX_STATES];
+    thread long cycle_b[FSM_MAX_STATES * FSM_MAX_STATES];
+    for (uint i = 0u; i < max_combined; i++) {
+        cycle_round[i] = 0xFFFFFFFFu;
+    }
+
     for (uint round = 0u; round < eval_params.rounds; round++) {
+        const uint combined = a_state * fsm_params.states + b_state;
+        if (combined < max_combined) {
+            if (cycle_round[combined] != 0xFFFFFFFFu) {
+                const uint cycle_len = round - cycle_round[combined];
+                if (cycle_len > 0u) {
+                    const long ca = a_total - cycle_a[combined];
+                    const long cb = b_total - cycle_b[combined];
+                    const uint remaining = eval_params.rounds - round;
+                    const uint full_cycles = remaining / cycle_len;
+                    a_total += long(full_cycles) * ca;
+                    b_total += long(full_cycles) * cb;
+                    const uint leftover = remaining - full_cycles * cycle_len;
+                    for (uint r = 0u; r < leftover; r++) {
+                        const uint aa = outputs[pair.a_idx * fsm_params.states + a_state];
+                        const uint ba = outputs[pair.b_idx * fsm_params.states + b_state];
+                        const auto p = payoff_for_actions(aa, ba, eval_params);
+                        a_total += p.x;
+                        b_total += p.y;
+                        a_state = transitions[pair.a_idx * fsm_params.states * fsm_params.alphabet
+                            + a_state * fsm_params.alphabet + ba];
+                        b_state = transitions[pair.b_idx * fsm_params.states * fsm_params.alphabet
+                            + b_state * fsm_params.alphabet + aa];
+                    }
+                    scores[gid].a_total = a_total;
+                    scores[gid].b_total = b_total;
+                    return;
+                }
+            }
+            cycle_round[combined] = round;
+            cycle_a[combined] = a_total;
+            cycle_b[combined] = b_total;
+        }
+
         const uint a_action = outputs[pair.a_idx * fsm_params.states + a_state];
         const uint b_action = outputs[pair.b_idx * fsm_params.states + b_state];
         const auto payoff = payoff_for_actions(a_action, b_action, eval_params);
@@ -373,6 +425,7 @@ kernel void tm_batch(
     device ScorePair* scores [[buffer(3)]],
     constant EvalParams& eval_params [[buffer(4)]],
     constant TmParams& tm_params [[buffer(5)]],
+    device TmHaltingPair* halting [[buffer(6)]],
     uint gid [[thread_position_in_grid]]
 ) {
     if (gid >= eval_params.pair_count) {
@@ -385,6 +438,8 @@ kernel void tm_batch(
     suffix_digits[0] = 0u;
     long a_total = 0;
     long b_total = 0;
+    bool a_all_halted = true;
+    bool b_all_halted = true;
     for (uint round = 0u; round < eval_params.rounds; round++) {
         bool a_halted = true;
         bool b_halted = true;
@@ -413,6 +468,8 @@ kernel void tm_batch(
                 b_halted
             );
         }
+        a_all_halted = a_all_halted && a_halted;
+        b_all_halted = b_all_halted && b_halted;
         const auto payoff = payoff_with_timeouts(a_action, b_action, a_halted, b_halted, eval_params);
         a_total += payoff.x;
         b_total += payoff.y;
@@ -428,4 +485,6 @@ kernel void tm_batch(
     }
     scores[gid].a_total = a_total;
     scores[gid].b_total = b_total;
+    halting[gid].a_all_halted = a_all_halted ? 1u : 0u;
+    halting[gid].b_all_halted = b_all_halted ? 1u : 0u;
 }

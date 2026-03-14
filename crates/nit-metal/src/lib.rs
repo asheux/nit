@@ -8,11 +8,20 @@ pub const CA_MAX_WINDOW: u32 = 1024;
 // NOTE: This is the default scratch width compiled into the Metal TM batch kernel.
 // The macOS Metal backend may compile specialized pipelines for larger TM widths at runtime.
 pub const TM_MAX_WIDTH: u32 = 1024;
+// Default FSM state count for the cycle detection lookup table in the Metal FSM kernel.
+// The macOS Metal backend compiles specialized pipelines with the exact state count.
+pub const FSM_MAX_STATES: u32 = 4;
 
 #[derive(Clone, Debug)]
 pub struct ScorePair {
     pub a_total: i64,
     pub b_total: i64,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct TmHaltingPair {
+    pub a_all_halted: bool,
+    pub b_all_halted: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -124,9 +133,10 @@ mod macos;
 #[cfg(target_os = "macos")]
 pub use macos::{
     batch_policy_cache_snapshot, clear_batch_policy_cache, clear_batch_policy_cache_entry,
-    recommended_batch_policy, try_begin_prepared_batch, try_evaluate_batch,
-    try_evaluate_prepared_batch, try_finish_prepared_batch, try_prepare_batch, PendingBatch,
-    PreparedBatch,
+    prewarm_default_batch_shaders, recommended_batch_policy, try_begin_prepared_batch,
+    try_evaluate_batch, try_evaluate_prepared_batch, try_evaluate_prepared_tm_halting_batch,
+    try_finish_prepared_batch, try_finish_prepared_tm_halting_batch, try_prepare_batch,
+    PendingBatch, PreparedBatch,
 };
 
 #[cfg(not(target_os = "macos"))]
@@ -164,6 +174,11 @@ pub fn clear_batch_policy_cache() -> Result<usize, String> {
 }
 
 #[cfg(not(target_os = "macos"))]
+pub fn prewarm_default_batch_shaders() -> Result<(), String> {
+    Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
 pub fn try_prepare_batch(
     _config: &BatchEvalConfig,
     _payload: &BatchPayload,
@@ -180,6 +195,14 @@ pub fn try_evaluate_prepared_batch(
 }
 
 #[cfg(not(target_os = "macos"))]
+pub fn try_evaluate_prepared_tm_halting_batch(
+    _prepared: &PreparedBatch,
+    _pairs: &[MatchPair],
+) -> Result<Option<Vec<TmHaltingPair>>, String> {
+    Ok(None)
+}
+
+#[cfg(not(target_os = "macos"))]
 pub fn try_begin_prepared_batch(
     _prepared: &PreparedBatch,
     _pairs: &[MatchPair],
@@ -189,5 +212,12 @@ pub fn try_begin_prepared_batch(
 
 #[cfg(not(target_os = "macos"))]
 pub fn try_finish_prepared_batch(_pending: PendingBatch) -> Result<Vec<ScorePair>, String> {
+    Ok(Vec::new())
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn try_finish_prepared_tm_halting_batch(
+    _pending: PendingBatch,
+) -> Result<Vec<TmHaltingPair>, String> {
     Ok(Vec::new())
 }

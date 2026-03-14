@@ -24,9 +24,12 @@ use rayon::prelude::*;
 use rayon::ThreadPoolBuilder;
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering};
 use std::sync::mpsc::Sender;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 #[derive(Clone, Debug)]
 pub struct TournamentProgress {
@@ -172,6 +175,82 @@ impl Parallelism {
     }
 }
 
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum TmHaltingFilterBackend {
+    NotApplied,
+    NotRequired,
+    MixedRosterCpu,
+    NotebookCpu,
+    NotebookCpuFallback,
+    Metal,
+}
+
+impl TmHaltingFilterBackend {
+    pub fn label(self) -> &'static str {
+        match self {
+            TmHaltingFilterBackend::NotApplied => "not-applied",
+            TmHaltingFilterBackend::NotRequired => "not-required",
+            TmHaltingFilterBackend::MixedRosterCpu => "mixed-cpu",
+            TmHaltingFilterBackend::NotebookCpu => "tm-cpu",
+            TmHaltingFilterBackend::NotebookCpuFallback => "tm-cpu-fallback",
+            TmHaltingFilterBackend::Metal => "metal",
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct TmHaltingFilterDiagnostics {
+    pub backend: TmHaltingFilterBackend,
+    pub requested_accelerator: AcceleratorMode,
+    pub strategy_count_before: usize,
+    pub strategy_count_after: usize,
+    pub schedule_matches: usize,
+    pub scanned_matchups: usize,
+    pub backend_probe_elapsed: Duration,
+    pub halting_filter_elapsed: Duration,
+    pub total_elapsed: Duration,
+    pub tm_cache_hits: u64,
+    pub tm_cache_misses: u64,
+    pub tm_evaluations: u64,
+    pub tm_steps: u64,
+    pub metal_batches_submitted: usize,
+    pub metal_decline_reason: Option<String>,
+    pub metal_error: Option<String>,
+    pub metal_policy_source: Option<String>,
+    pub metal_matches_per_batch: Option<usize>,
+    pub metal_inflight_batches: Option<usize>,
+    pub metal_policy_cache_key: Option<String>,
+    pub metal_policy_cache_path: Option<String>,
+}
+
+impl Default for TmHaltingFilterDiagnostics {
+    fn default() -> Self {
+        Self {
+            backend: TmHaltingFilterBackend::NotRequired,
+            requested_accelerator: AcceleratorMode::default(),
+            strategy_count_before: 0,
+            strategy_count_after: 0,
+            schedule_matches: 0,
+            scanned_matchups: 0,
+            backend_probe_elapsed: Duration::ZERO,
+            halting_filter_elapsed: Duration::ZERO,
+            total_elapsed: Duration::ZERO,
+            tm_cache_hits: 0,
+            tm_cache_misses: 0,
+            tm_evaluations: 0,
+            tm_steps: 0,
+            metal_batches_submitted: 0,
+            metal_decline_reason: None,
+            metal_error: None,
+            metal_policy_source: None,
+            metal_matches_per_batch: None,
+            metal_inflight_batches: None,
+            metal_policy_cache_key: None,
+            metal_policy_cache_path: None,
+        }
+    }
+}
+
 pub struct TournamentRunner {
     config: NormalizedConfig,
     seed: u64,
@@ -191,6 +270,7 @@ pub struct TournamentRunner {
     metal_batch: MetalBatchState,
     collect_match_history_previews: bool,
     completed_history_previews: Vec<MatchHistoryPreview>,
+    last_snapshot_sample_at: Option<Instant>,
 }
 
 enum MetalBatchState {
@@ -628,10 +708,14 @@ fn metal_batch_eval_config(config: &NormalizedConfig) -> BatchEvalConfig {
     }
 }
 
-fn try_prepare_metal_batch(
+const SMALL_METAL_WORKLOAD_MATCHUPS: usize = 4_096;
+const AUTO_TM_METAL_PROBE_TIMEOUT: Duration = Duration::from_millis(300);
+static AUTO_TM_METAL_PROBE_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
+
+fn prepare_metal_batch_inputs(
     config: &NormalizedConfig,
     strategies: &[StrategySpec],
-) -> Result<Option<PreparedMetalBatch>, String> {
+) -> Result<Option<(BatchEvalConfig, BatchPayload)>, String> {
     if !config.engine.fast_eval || !config.engine.accelerator.allows_metal() || config.noise != 0.0
     {
         return Ok(None);
@@ -650,7 +734,16 @@ fn try_prepare_metal_batch(
     let Some(payload) = build_metal_batch_payload(strategies) else {
         return Ok(None);
     };
-    let eval = metal_batch_eval_config(config);
+    Ok(Some((metal_batch_eval_config(config), payload)))
+}
+
+fn try_prepare_metal_batch(
+    config: &NormalizedConfig,
+    strategies: &[StrategySpec],
+) -> Result<Option<PreparedMetalBatch>, String> {
+    let Some((eval, payload)) = prepare_metal_batch_inputs(config, strategies)? else {
+        return Ok(None);
+    };
     let Some(policy) = nit_metal::recommended_batch_policy(&eval, &payload)? else {
         return Ok(None);
     };
@@ -664,6 +757,41 @@ fn try_prepare_metal_batch(
         policy_cache_key: policy.cache_key,
         policy_cache_path: policy.cache_path,
     }))
+}
+
+fn try_prepare_metal_batch_for_matchups(
+    config: &NormalizedConfig,
+    strategies: &[StrategySpec],
+    matchup_count: usize,
+) -> Result<Option<PreparedMetalBatch>, String> {
+    let Some((eval, payload)) = prepare_metal_batch_inputs(config, strategies)? else {
+        return Ok(None);
+    };
+    let Some(prepared) = nit_metal::try_prepare_batch(&eval, &payload)? else {
+        return Ok(None);
+    };
+    Ok(Some(PreparedMetalBatch {
+        prepared,
+        policy: BatchExecutionPolicy {
+            matches_per_batch: matchup_count.clamp(1, 4_096),
+            inflight_batches: 1,
+        },
+        policy_source: BatchPolicySource::Heuristic,
+        policy_cache_key: None,
+        policy_cache_path: None,
+    }))
+}
+
+fn try_prepare_metal_batch_for_workload(
+    config: &NormalizedConfig,
+    strategies: &[StrategySpec],
+    matchup_count: usize,
+) -> Result<Option<PreparedMetalBatch>, String> {
+    if matchup_count <= SMALL_METAL_WORKLOAD_MATCHUPS {
+        try_prepare_metal_batch_for_matchups(config, strategies, matchup_count)
+    } else {
+        try_prepare_metal_batch(config, strategies)
+    }
 }
 
 fn metal_batch_decline_reason(
@@ -700,19 +828,10 @@ fn metal_batch_decline_reason(
                 .into(),
         );
     };
-    match payload {
-        BatchPayload::Ca(batch)
-            if batch.two_r.saturating_mul(batch.steps).saturating_add(1)
-                > nit_metal::CA_MAX_WINDOW =>
-        {
-            Some(format!(
-                "CA window {} exceeds Metal limit {}",
-                batch.two_r.saturating_mul(batch.steps).saturating_add(1),
-                nit_metal::CA_MAX_WINDOW
-            ))
-        }
-        _ => None,
-    }
+    // No hard limits on CA window or TM max_steps — the Metal shader compiles
+    // with the exact width needed via ShaderKey.  Let the GPU handle it.
+    let _ = payload;
+    None
 }
 
 #[cfg(test)]
@@ -830,19 +949,8 @@ pub fn accelerator_preflight(config: &NormalizedConfig) -> Result<(), String> {
             .to_string()
     })?;
 
-    match &payload {
-        BatchPayload::Ca(batch)
-            if batch.two_r.saturating_mul(batch.steps).saturating_add(1)
-                > nit_metal::CA_MAX_WINDOW =>
-        {
-            return Err(format!(
-                "Metal accelerator supports CA windows up to {} cells; this run needs {}.",
-                nit_metal::CA_MAX_WINDOW,
-                batch.two_r.saturating_mul(batch.steps).saturating_add(1)
-            ));
-        }
-        _ => {}
-    }
+    // No hard limits on CA window or TM max_steps — ShaderKey dynamically
+    // compiles with the exact width needed.  Let the GPU handle the workload.
 
     let eval = metal_batch_eval_config(config);
     let Some(prepared) = nit_metal::try_prepare_batch(&eval, &payload)? else {
@@ -1077,16 +1185,99 @@ fn notebook_tm_spec(spec: &StrategySpec) -> Option<NotebookTmSpec<'_>> {
     }
 }
 
-fn notebook_tm_action(
+#[derive(Copy, Clone)]
+struct NotebookTmActionResult {
+    action: Action,
+    halted: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct NotebookTmFamilyStats {
+    scanned_matchups: usize,
+    tm_cache_hits: u64,
+    tm_cache_misses: u64,
+    tm_evaluations: u64,
+    tm_steps: u64,
+}
+
+#[derive(Default)]
+struct NotebookTmEvalCounters {
+    cache_hits: AtomicU64,
+    cache_misses: AtomicU64,
+    tm_evaluations: AtomicU64,
+    tm_steps: AtomicU64,
+}
+
+struct NotebookTmEvaluationCache {
+    per_strategy: Vec<Mutex<HashMap<Vec<u8>, NotebookTmActionResult>>>,
+    counters: NotebookTmEvalCounters,
+}
+
+impl NotebookTmEvaluationCache {
+    fn new(strategy_count: usize) -> Self {
+        Self {
+            per_strategy: (0..strategy_count)
+                .map(|_| Mutex::new(HashMap::new()))
+                .collect(),
+            counters: NotebookTmEvalCounters::default(),
+        }
+    }
+
+    fn lookup(&self, strategy_idx: usize, input_digits: &[u8]) -> Option<NotebookTmActionResult> {
+        self.per_strategy
+            .get(strategy_idx)?
+            .lock()
+            .expect("TM cache lock poisoned")
+            .get(input_digits)
+            .copied()
+    }
+
+    fn store(&self, strategy_idx: usize, input_digits: Vec<u8>, result: NotebookTmActionResult) {
+        let Some(bucket) = self.per_strategy.get(strategy_idx) else {
+            return;
+        };
+        bucket
+            .lock()
+            .expect("TM cache lock poisoned")
+            .entry(input_digits)
+            .or_insert(result);
+    }
+
+    fn snapshot(&self) -> NotebookTmFamilyStats {
+        NotebookTmFamilyStats {
+            scanned_matchups: 0,
+            tm_cache_hits: self.counters.cache_hits.load(AtomicOrdering::Relaxed),
+            tm_cache_misses: self.counters.cache_misses.load(AtomicOrdering::Relaxed),
+            tm_evaluations: self.counters.tm_evaluations.load(AtomicOrdering::Relaxed),
+            tm_steps: self.counters.tm_steps.load(AtomicOrdering::Relaxed),
+        }
+    }
+}
+
+fn notebook_tm_action_cached(
+    strategy_idx: usize,
     spec: NotebookTmSpec<'_>,
     input: &InputSuffix,
     first_round: bool,
+    cache: &NotebookTmEvaluationCache,
 ) -> (Action, bool) {
     if first_round {
         return (Action::Cooperate, true);
     }
 
     let input_digits = input.msd_digits();
+    if let Some(cached) = cache.lookup(strategy_idx, &input_digits) {
+        cache
+            .counters
+            .cache_hits
+            .fetch_add(1, AtomicOrdering::Relaxed);
+        return (cached.action, cached.halted);
+    }
+
+    cache
+        .counters
+        .cache_misses
+        .fetch_add(1, AtomicOrdering::Relaxed);
     let run = run_one_sided_tm(
         spec.transitions,
         spec.symbols,
@@ -1096,11 +1287,25 @@ fn notebook_tm_action(
         spec.max_steps_per_round,
         false,
     );
+    cache
+        .counters
+        .tm_evaluations
+        .fetch_add(1, AtomicOrdering::Relaxed);
+    cache
+        .counters
+        .tm_steps
+        .fetch_add(run.steps_taken as u64, AtomicOrdering::Relaxed);
+
     let action = run
         .output_symbol
         .map(tm_action_from_output_symbol)
         .unwrap_or(Action::Defect);
-    (action, run.halted)
+    let result = NotebookTmActionResult {
+        action,
+        halted: run.halted,
+    };
+    cache.store(strategy_idx, input_digits, result);
+    (result.action, result.halted)
 }
 
 fn notebook_tm_history_bit(action: Action, halted: bool) -> u8 {
@@ -1114,12 +1319,14 @@ fn notebook_tm_history_bit(action: Action, halted: bool) -> u8 {
 }
 
 fn notebook_tm_matchup_halts_all_rounds(
-    a_spec: &StrategySpec,
-    b_spec: &StrategySpec,
+    a_idx: usize,
+    b_idx: usize,
+    tm_specs: &[NotebookTmSpec<'_>],
     rounds: u32,
+    cache: &NotebookTmEvaluationCache,
 ) -> (bool, bool) {
-    let a_tm = notebook_tm_spec(a_spec).expect("TM roster should only contain TM strategies");
-    let b_tm = notebook_tm_spec(b_spec).expect("TM roster should only contain TM strategies");
+    let a_tm = tm_specs[a_idx];
+    let b_tm = tm_specs[b_idx];
     let mut a_input = InputSuffix::new(a_tm.symbols, a_tm.max_steps_per_round as usize + 1);
     let mut b_input = InputSuffix::new(b_tm.symbols, b_tm.max_steps_per_round as usize + 1);
     let mut a_keep = true;
@@ -1127,8 +1334,10 @@ fn notebook_tm_matchup_halts_all_rounds(
 
     for round in 0..rounds {
         let first_round = round == 0;
-        let (a_action, a_halted) = notebook_tm_action(a_tm, &a_input, first_round);
-        let (b_action, b_halted) = notebook_tm_action(b_tm, &b_input, first_round);
+        let (a_action, a_halted) =
+            notebook_tm_action_cached(a_idx, a_tm, &a_input, first_round, cache);
+        let (b_action, b_halted) =
+            notebook_tm_action_cached(b_idx, b_tm, &b_input, first_round, cache);
         a_keep &= a_halted;
         b_keep &= b_halted;
 
@@ -1145,17 +1354,31 @@ fn notebook_tm_matchup_halts_all_rounds(
     (a_keep, b_keep)
 }
 
-fn notebook_tm_family_halting_mask(config: &NormalizedConfig) -> Vec<bool> {
+fn notebook_tm_family_halting_mask(
+    config: &NormalizedConfig,
+) -> (Vec<bool>, NotebookTmFamilyStats) {
     let strategy_count = config.strategies.len();
     let mut keep = vec![true; strategy_count];
     let schedule = SchedulePlan::new(strategy_count, config.repetitions, config.self_play);
     if schedule.is_empty() {
-        return keep;
+        return (keep, NotebookTmFamilyStats::default());
     }
+    let tm_specs = config
+        .strategies
+        .iter()
+        .map(|spec| notebook_tm_spec(spec).expect("TM roster should only contain TM strategies"))
+        .collect::<Vec<_>>();
+    // TM-vs-TM halting outcomes are deterministic, so repetitions repeat the same ordered
+    // matchup work. Scan one repetition and reuse the result across all repetitions.
+    let scanned_matchups = matches_per_repetition(strategy_count, config.self_play).unwrap_or(0);
+    if scanned_matchups == 0 {
+        return (keep, NotebookTmFamilyStats::default());
+    }
+    let cache = Arc::new(NotebookTmEvaluationCache::new(strategy_count));
 
-    let total_matches = schedule.len();
     let scan_parallel = || {
-        (0..total_matches)
+        let cache = Arc::clone(&cache);
+        (0..scanned_matchups)
             .into_par_iter()
             .fold(
                 || vec![true; strategy_count],
@@ -1164,9 +1387,11 @@ fn notebook_tm_family_halting_mask(config: &NormalizedConfig) -> Vec<bool> {
                         .matchup(match_id)
                         .expect("matchup should exist for in-range id");
                     let (a_keep, b_keep) = notebook_tm_matchup_halts_all_rounds(
-                        &config.strategies[matchup.a_idx],
-                        &config.strategies[matchup.b_idx],
+                        matchup.a_idx,
+                        matchup.b_idx,
+                        &tm_specs,
                         config.rounds,
+                        &cache,
                     );
                     if !a_keep {
                         local_keep[matchup.a_idx] = false;
@@ -1190,14 +1415,16 @@ fn notebook_tm_family_halting_mask(config: &NormalizedConfig) -> Vec<bool> {
 
     keep = match Parallelism::from_config(&config.engine.parallelism) {
         Parallelism::Off => {
-            for match_id in 0..total_matches {
+            for match_id in 0..scanned_matchups {
                 let matchup = schedule
                     .matchup(match_id)
                     .expect("matchup should exist for in-range id");
                 let (a_keep, b_keep) = notebook_tm_matchup_halts_all_rounds(
-                    &config.strategies[matchup.a_idx],
-                    &config.strategies[matchup.b_idx],
+                    matchup.a_idx,
+                    matchup.b_idx,
+                    &tm_specs,
                     config.rounds,
+                    &cache,
                 );
                 if !a_keep {
                     keep[matchup.a_idx] = false;
@@ -1218,7 +1445,125 @@ fn notebook_tm_family_halting_mask(config: &NormalizedConfig) -> Vec<bool> {
         _ => scan_parallel(),
     };
 
-    keep
+    let mut stats = cache.snapshot();
+    stats.scanned_matchups = scanned_matchups;
+    (keep, stats)
+}
+
+fn apply_tm_family_halting_chunk(
+    keep: &mut [bool],
+    matchups: &[Matchup],
+    halting: &[nit_metal::TmHaltingPair],
+) -> Result<(), String> {
+    if matchups.len() != halting.len() {
+        return Err(format!(
+            "Metal TM halting batch returned {} results for {} matchups",
+            halting.len(),
+            matchups.len()
+        ));
+    }
+    for (matchup, outcome) in matchups.iter().zip(halting.iter()) {
+        if !outcome.a_all_halted {
+            keep[matchup.a_idx] = false;
+        }
+        if !outcome.b_all_halted {
+            keep[matchup.b_idx] = false;
+        }
+    }
+    Ok(())
+}
+
+#[derive(Clone, Debug, Default)]
+struct MetalTmHaltingStats {
+    scanned_matchups: usize,
+    batches_submitted: usize,
+    prepare_elapsed: Duration,
+    execution_elapsed: Duration,
+    policy_source: String,
+    matches_per_batch: usize,
+    inflight_batches: usize,
+    policy_cache_key: Option<String>,
+    policy_cache_path: Option<String>,
+}
+
+fn try_metal_tm_family_halting_mask(
+    config: &NormalizedConfig,
+) -> Result<Option<(Vec<bool>, MetalTmHaltingStats)>, String> {
+    struct PendingChunk {
+        matchups: Vec<Matchup>,
+        pending: nit_metal::PendingBatch,
+    }
+
+    let strategy_count = config.strategies.len();
+    let mut keep = vec![true; strategy_count];
+    let schedule = SchedulePlan::new(strategy_count, config.repetitions, config.self_play);
+    if schedule.is_empty() {
+        return Ok(Some((keep, MetalTmHaltingStats::default())));
+    }
+
+    let prepare_started = Instant::now();
+    let Some(prepared) =
+        try_prepare_metal_batch_for_workload(config, &config.strategies, schedule.len())?
+    else {
+        return Ok(None);
+    };
+    let prepare_elapsed = prepare_started.elapsed();
+
+    let policy_source = format!("{:?}", prepared.policy_source);
+    let policy_cache_key = prepared.policy_cache_key.clone();
+    let policy_cache_path = prepared.policy_cache_path.clone();
+    let matches_per_batch = prepared.policy.matches_per_batch.max(1);
+    let inflight_batches = prepared.policy.inflight_batches.max(1);
+    let mut pending = VecDeque::new();
+    let mut batches_submitted = 0usize;
+    let execution_started = Instant::now();
+
+    for start in (0..schedule.len()).step_by(matches_per_batch) {
+        let matchups = schedule.matchups(start, matches_per_batch);
+        if matchups.is_empty() {
+            continue;
+        }
+        let pairs = matchups
+            .iter()
+            .map(|matchup| MatchPair {
+                a_idx: matchup.a_idx as u32,
+                b_idx: matchup.b_idx as u32,
+            })
+            .collect::<Vec<_>>();
+        let Some(batch) = nit_metal::try_begin_prepared_batch(&prepared.prepared, &pairs)? else {
+            return Ok(None);
+        };
+        pending.push_back(PendingChunk {
+            matchups,
+            pending: batch,
+        });
+        batches_submitted += 1;
+        if pending.len() >= inflight_batches {
+            let ready = pending.pop_front().expect("pending TM halting chunk");
+            let halting = nit_metal::try_finish_prepared_tm_halting_batch(ready.pending)?;
+            apply_tm_family_halting_chunk(&mut keep, &ready.matchups, &halting)?;
+        }
+    }
+
+    while let Some(ready) = pending.pop_front() {
+        let halting = nit_metal::try_finish_prepared_tm_halting_batch(ready.pending)?;
+        apply_tm_family_halting_chunk(&mut keep, &ready.matchups, &halting)?;
+    }
+
+    Ok(Some((
+        keep,
+        MetalTmHaltingStats {
+            scanned_matchups: schedule.len(),
+            batches_submitted,
+            prepare_elapsed,
+            execution_elapsed: execution_started.elapsed(),
+            policy_source,
+            matches_per_batch,
+            inflight_batches,
+            policy_cache_key,
+            policy_cache_path,
+        },
+    )))
 }
 
 fn mark_tm_halting_selection(
@@ -1235,10 +1580,141 @@ fn mark_tm_halting_selection(
     }
 }
 
-fn halting_turing_machine_mask(config: &NormalizedConfig, seed: u64) -> Vec<bool> {
+fn halting_turing_machine_mask(
+    config: &NormalizedConfig,
+    seed: u64,
+    strict_metal: bool,
+    diagnostics: &mut TmHaltingFilterDiagnostics,
+) -> Result<Vec<bool>, String> {
     let strategy_count = config.strategies.len();
+    diagnostics.schedule_matches =
+        total_schedule_matches(strategy_count, config.repetitions, config.self_play).unwrap_or(0);
     if roster_is_all_tms(&config.strategies) {
-        return notebook_tm_family_halting_mask(config);
+        let attempted_metal = config.engine.accelerator.allows_metal();
+        if attempted_metal {
+            let metal_probe_started = Instant::now();
+            let schedule_len =
+                SchedulePlan::new(strategy_count, config.repetitions, config.self_play).len();
+            let immediate_decline =
+                metal_batch_decline_reason(config, &config.strategies, schedule_len);
+            if let Some(reason) = immediate_decline {
+                diagnostics.backend_probe_elapsed = metal_probe_started.elapsed();
+                diagnostics.metal_decline_reason = Some(reason.clone());
+                if strict_metal && config.engine.accelerator.requires_metal() {
+                    return Err(format!("Metal accelerator was requested, but {reason}."));
+                }
+            } else {
+                let maybe_probe_result =
+                    if matches!(config.engine.accelerator, AcceleratorMode::Auto) {
+                        if AUTO_TM_METAL_PROBE_IN_FLIGHT.swap(true, AtomicOrdering::AcqRel) {
+                            diagnostics.backend_probe_elapsed = metal_probe_started.elapsed();
+                            diagnostics.metal_decline_reason = Some(
+                                "Metal probe already in progress; using CPU fallback for this run."
+                                    .into(),
+                            );
+                            None
+                        } else {
+                            let (probe_tx, probe_rx) = std::sync::mpsc::channel();
+                            let probe_config = config.clone();
+                            std::thread::spawn(move || {
+                                let result = catch_unwind(AssertUnwindSafe(|| {
+                                    try_metal_tm_family_halting_mask(&probe_config)
+                                }))
+                                .unwrap_or_else(|_| Err("Metal probe panicked".into()));
+                                AUTO_TM_METAL_PROBE_IN_FLIGHT.store(false, AtomicOrdering::Release);
+                                let _ = probe_tx.send(result);
+                            });
+                            match probe_rx.recv_timeout(AUTO_TM_METAL_PROBE_TIMEOUT) {
+                                Ok(result) => Some(result),
+                                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                                    diagnostics.backend_probe_elapsed =
+                                        metal_probe_started.elapsed();
+                                    diagnostics.metal_decline_reason = Some(format!(
+                                    "Metal probe exceeded {}ms in auto mode; using CPU fallback",
+                                    AUTO_TM_METAL_PROBE_TIMEOUT.as_millis()
+                                ));
+                                    None
+                                }
+                                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                                    diagnostics.backend_probe_elapsed =
+                                        metal_probe_started.elapsed();
+                                    diagnostics.metal_error =
+                                        Some("Metal probe thread terminated unexpectedly".into());
+                                    None
+                                }
+                            }
+                        }
+                    } else {
+                        Some(try_metal_tm_family_halting_mask(config))
+                    };
+
+                if let Some(probe_result) = maybe_probe_result {
+                    match probe_result {
+                        Ok(Some((keep, stats))) => {
+                            diagnostics.backend = TmHaltingFilterBackend::Metal;
+                            diagnostics.scanned_matchups = stats.scanned_matchups;
+                            diagnostics.backend_probe_elapsed = stats.prepare_elapsed;
+                            diagnostics.halting_filter_elapsed = stats.execution_elapsed;
+                            diagnostics.metal_batches_submitted = stats.batches_submitted;
+                            diagnostics.metal_policy_source = Some(stats.policy_source);
+                            diagnostics.metal_matches_per_batch = Some(stats.matches_per_batch);
+                            diagnostics.metal_inflight_batches = Some(stats.inflight_batches);
+                            diagnostics.metal_policy_cache_key = stats.policy_cache_key;
+                            diagnostics.metal_policy_cache_path = stats.policy_cache_path;
+                            return Ok(keep);
+                        }
+                        Ok(None) => {
+                            diagnostics.backend_probe_elapsed = metal_probe_started.elapsed();
+                            diagnostics.metal_decline_reason = metal_batch_decline_reason(
+                                config,
+                                &config.strategies,
+                                schedule_len,
+                            )
+                            .or_else(|| {
+                                Some(
+                                    "Metal batch evaluator declined this TM family preparation workload."
+                                        .into(),
+                                )
+                            });
+                            if strict_metal && config.engine.accelerator.requires_metal() {
+                                if let Some(reason) = diagnostics.metal_decline_reason.as_ref() {
+                                    return Err(format!(
+                                        "Metal accelerator was requested, but {reason}."
+                                    ));
+                                }
+                                return Err(
+                                    "Metal accelerator was requested, but TM family preparation is not supported by the active Metal backend."
+                                        .into(),
+                                );
+                            }
+                        }
+                        Err(err) => {
+                            diagnostics.backend_probe_elapsed = metal_probe_started.elapsed();
+                            diagnostics.metal_error = Some(err.clone());
+                            if strict_metal && config.engine.accelerator.requires_metal() {
+                                return Err(format!(
+                                    "Metal accelerator unavailable during TM family preparation: {err}"
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        let filter_started = Instant::now();
+        let (keep, stats) = notebook_tm_family_halting_mask(config);
+        diagnostics.backend = if attempted_metal {
+            TmHaltingFilterBackend::NotebookCpuFallback
+        } else {
+            TmHaltingFilterBackend::NotebookCpu
+        };
+        diagnostics.halting_filter_elapsed = filter_started.elapsed();
+        diagnostics.scanned_matchups = stats.scanned_matchups;
+        diagnostics.tm_cache_hits = stats.tm_cache_hits;
+        diagnostics.tm_cache_misses = stats.tm_cache_misses;
+        diagnostics.tm_evaluations = stats.tm_evaluations;
+        diagnostics.tm_steps = stats.tm_steps;
+        return Ok(keep);
     }
     let tm_mask = config
         .strategies
@@ -1247,16 +1723,28 @@ fn halting_turing_machine_mask(config: &NormalizedConfig, seed: u64) -> Vec<bool
         .collect::<Vec<_>>();
     let mut keep = vec![true; strategy_count];
     if !tm_mask.iter().any(|&is_tm| is_tm) {
-        return keep;
+        diagnostics.backend = TmHaltingFilterBackend::NotRequired;
+        return Ok(keep);
     }
+    diagnostics.backend = TmHaltingFilterBackend::MixedRosterCpu;
 
     let schedule = SchedulePlan::new(strategy_count, config.repetitions, config.self_play);
     if schedule.is_empty() {
-        return keep;
+        return Ok(keep);
     }
+    let scanned_matchups = (0..schedule.len())
+        .filter(|match_id| {
+            let matchup = schedule
+                .matchup(*match_id)
+                .expect("matchup should exist for in-range id");
+            tm_mask[matchup.a_idx] || tm_mask[matchup.b_idx]
+        })
+        .count();
+    diagnostics.scanned_matchups = scanned_matchups;
 
     let seed_deriver = SeedDeriver::new(seed);
     let total_matches = schedule.len();
+    let filter_started = Instant::now();
     let evaluate_matchup = |matchup: &Matchup| {
         let mut emit_event = |_event: GameEvent| {};
         let mut emit_history = |_record: MatchHistory| {};
@@ -1328,18 +1816,32 @@ fn halting_turing_machine_mask(config: &NormalizedConfig, seed: u64) -> Vec<bool
         _ => scan_parallel(),
     };
 
-    keep
+    diagnostics.halting_filter_elapsed = filter_started.elapsed();
+    Ok(keep)
 }
 
-pub fn select_halting_turing_machine_strategies(mut config: NormalizedConfig) -> NormalizedConfig {
+fn select_halting_turing_machine_strategies_inner(
+    mut config: NormalizedConfig,
+    strict_metal: bool,
+) -> Result<(NormalizedConfig, TmHaltingFilterDiagnostics), String> {
+    let selection_started = Instant::now();
+    let mut diagnostics = TmHaltingFilterDiagnostics {
+        strategy_count_before: config.strategies.len(),
+        strategy_count_after: config.strategies.len(),
+        backend: TmHaltingFilterBackend::NotRequired,
+        requested_accelerator: config.engine.accelerator,
+        ..TmHaltingFilterDiagnostics::default()
+    };
     if config.tm_filter_applied {
-        return config;
+        diagnostics.backend = TmHaltingFilterBackend::NotApplied;
+        diagnostics.total_elapsed = selection_started.elapsed();
+        return Ok((config, diagnostics));
     }
 
     let seed = config.seed.unwrap_or(0);
     config.seed = Some(seed);
 
-    let keep = halting_turing_machine_mask(&config, seed);
+    let keep = halting_turing_machine_mask(&config, seed, strict_metal, &mut diagnostics)?;
     if keep.iter().any(|&entry| !entry) {
         config.strategies = config
             .strategies
@@ -1349,7 +1851,29 @@ pub fn select_halting_turing_machine_strategies(mut config: NormalizedConfig) ->
             .collect();
     }
     config.tm_filter_applied = true;
-    config
+    diagnostics.strategy_count_after = config.strategies.len();
+    diagnostics.total_elapsed = selection_started.elapsed();
+    Ok((config, diagnostics))
+}
+
+pub fn try_select_halting_turing_machine_strategies_with_diagnostics(
+    config: NormalizedConfig,
+) -> Result<(NormalizedConfig, TmHaltingFilterDiagnostics), String> {
+    select_halting_turing_machine_strategies_inner(config, true)
+}
+
+pub fn try_select_halting_turing_machine_strategies(
+    config: NormalizedConfig,
+) -> Result<NormalizedConfig, String> {
+    try_select_halting_turing_machine_strategies_with_diagnostics(config).map(|(config, _)| config)
+}
+
+pub fn select_halting_turing_machine_strategies(config: NormalizedConfig) -> NormalizedConfig {
+    select_halting_turing_machine_strategies_inner(config, false)
+        .map(|(config, _)| config)
+        .expect(
+            "TM halting selection should fall back to the CPU path when strict Metal is not required",
+        )
 }
 
 impl TournamentRunner {
@@ -1395,6 +1919,7 @@ impl TournamentRunner {
             metal_batch: MetalBatchState::Uninitialized,
             collect_match_history_previews: true,
             completed_history_previews: Vec::new(),
+            last_snapshot_sample_at: None,
         }
     }
 
@@ -1807,7 +2332,12 @@ impl TournamentRunner {
 
     fn ensure_metal_batch(&mut self) {
         if matches!(self.metal_batch, MetalBatchState::Uninitialized) {
-            match try_prepare_metal_batch(&self.config, &self.strategies) {
+            let remaining_matches = self.schedule.len().saturating_sub(self.match_index);
+            match try_prepare_metal_batch_for_workload(
+                &self.config,
+                &self.strategies,
+                remaining_matches,
+            ) {
                 Ok(Some(prepared)) => {
                     self.runtime.note_metal_policy(
                         prepared.policy.matches_per_batch,
@@ -1952,13 +2482,30 @@ impl TournamentRunner {
                 (outcomes, false)
             }
         };
-        let snapshot_sample = outcomes
-            .last()
-            .and_then(|outcome| outcome.last_round.as_ref())
-            .is_none()
-            .then(|| fast_forward_matchups.last().cloned())
-            .flatten()
-            .map(|matchup| run_matchup(&matchup, false));
+        // Rate-limit the snapshot sample: running a full match round-by-round
+        // to obtain a last_round preview is O(rounds) on the CPU.  At high
+        // round counts (e.g. 500K) this dominates each tick.  Only recompute
+        // when enough time has passed since the previous sample.
+        let snapshot_interval = Duration::from_millis(100);
+        let need_snapshot = self
+            .last_snapshot_sample_at
+            .map(|t| t.elapsed() >= snapshot_interval)
+            .unwrap_or(true);
+        let snapshot_sample = if need_snapshot {
+            let sample = outcomes
+                .last()
+                .and_then(|outcome| outcome.last_round.as_ref())
+                .is_none()
+                .then(|| fast_forward_matchups.last().cloned())
+                .flatten()
+                .map(|matchup| run_matchup(&matchup, false));
+            if sample.is_some() {
+                self.last_snapshot_sample_at = Some(Instant::now());
+            }
+            sample
+        } else {
+            None
+        };
         if !gpu_used {
             self.runtime.note_cpu_matches(fast_forward_matchups.len());
         }
@@ -2385,7 +2932,11 @@ impl TournamentKernel {
             && !log_history
             && self.schedule.len() > 0
         {
-            match try_prepare_metal_batch(&self.config, &self.config.strategies) {
+            match try_prepare_metal_batch_for_workload(
+                &self.config,
+                &self.config.strategies,
+                self.schedule.len(),
+            ) {
                 Ok(Some(prepared)) => {
                     runtime.note_metal_policy(
                         prepared.policy.matches_per_batch,
@@ -2513,7 +3064,11 @@ impl TournamentKernel {
             && !log_history
             && self.schedule.len() > 0
         {
-            match try_prepare_metal_batch(&self.config, &self.config.strategies) {
+            match try_prepare_metal_batch_for_workload(
+                &self.config,
+                &self.config.strategies,
+                self.schedule.len(),
+            ) {
                 Ok(Some(prepared)) => {
                     runtime.note_metal_policy(
                         prepared.policy.matches_per_batch,

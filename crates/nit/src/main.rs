@@ -23,7 +23,7 @@ use nit_games::output::{
 use nit_games::tournament::{KernelRunMode, Parallelism, TournamentKernel};
 use nit_games::{
     accelerator_run_preflight, enumerate_fsms, format_strategy_introspection, introspect_strategy,
-    run_id_from_seed_config, select_halting_turing_machine_strategies, Action, FsmDefinition,
+    run_id_from_seed_config, try_select_halting_turing_machine_strategies, Action, FsmDefinition,
     GamesConfig, HistoryWriter, InputMode, ScoreAggregation, StrategyIntrospection,
     StrategyIntrospectionKind, StrategyIntrospectionParameters, StrategySpec, TmTransitionRecord,
 };
@@ -903,7 +903,8 @@ fn run_games_headless(
         .seed
         .unwrap_or_else(|| stable_hash_bytes(format!("{timestamp}\n{config_text}").as_bytes()));
     config.seed = Some(seed);
-    config = select_halting_turing_machine_strategies(config);
+    config =
+        try_select_halting_turing_machine_strategies(config).map_err(|err| anyhow::anyhow!(err))?;
     accelerator_run_preflight(
         &config,
         config.save_data && config.event_log.enabled,
@@ -1225,7 +1226,9 @@ fn run_games_sweep(
                                 cell_config.payoff = payoff_from_rsp(*r, *s, *t, *p);
                                 cell_config.seed = Some(cell_seed);
                                 cell_config.engine.mode = EngineMode::Batch;
-                                cell_config = select_halting_turing_machine_strategies(cell_config);
+                                cell_config =
+                                    try_select_halting_turing_machine_strategies(cell_config)
+                                        .map_err(|err| anyhow::anyhow!(err))?;
                                 accelerator_run_preflight(
                                     &cell_config,
                                     cell_config.save_data && cell_config.event_log.enabled,

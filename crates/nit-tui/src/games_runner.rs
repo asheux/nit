@@ -11,12 +11,19 @@ use nit_games::tournament::{
     MatchHistoryPreview, MatchSnapshot, TournamentProgress, TournamentRunner,
 };
 use nit_games::{
-    accelerator_run_preflight, select_halting_turing_machine_strategies, EngineMode, HistoryWriter,
-    NormalizedConfig,
+    accelerator_run_preflight, try_select_halting_turing_machine_strategies_with_diagnostics,
+    EngineMode, HistoryWriter, NormalizedConfig, TmHaltingFilterDiagnostics,
 };
+use tracing::info;
 
 const RUNNER_CHUNK_TARGET: Duration = Duration::from_millis(120);
 const RUNNER_CHUNK_INITIAL: u32 = 4_096;
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum StepUnit {
+    Rounds,
+    Matches,
+}
 
 #[derive(Clone)]
 pub struct RunRequest {
@@ -47,6 +54,7 @@ pub enum RunnerCommand {
 }
 
 pub enum RunnerEvent {
+    StartupStage(String),
     Definitions(Vec<StrategyDefinition>),
     Progress(TournamentProgress),
     MatchPreview(MatchSnapshot),
@@ -107,6 +115,7 @@ struct RunState {
     last_progress_match: Option<usize>,
     last_completed: usize,
     chunk_hint_steps: Option<u32>,
+    step_unit: StepUnit,
 }
 
 fn runner_loop(cmd_rx: Receiver<RunnerCommand>, event_tx: Sender<RunnerEvent>) {
@@ -173,13 +182,21 @@ fn runner_loop(cmd_rx: Receiver<RunnerCommand>, event_tx: Sender<RunnerEvent>) {
         };
 
         let rounds_per_match = run_state.runner.config().rounds.max(1);
+        let mode = run_state.runner.config().engine.mode;
+        let whole_match_chunks =
+            matches!(mode, EngineMode::Batch) || matches!(run_state.step_unit, StepUnit::Matches);
         let steps = if step_once {
             1
         } else {
             steps_for_tick(
-                run_state.steps_per_tick,
+                requested_steps_per_tick(
+                    run_state.steps_per_tick,
+                    rounds_per_match,
+                    run_state.step_unit,
+                ),
                 rounds_per_match,
-                run_state.runner.config().engine.mode,
+                mode,
+                whole_match_chunks,
             )
         };
         let chunk_steps = if step_once {
@@ -189,7 +206,8 @@ fn runner_loop(cmd_rx: Receiver<RunnerCommand>, event_tx: Sender<RunnerEvent>) {
                 steps,
                 run_state.chunk_hint_steps,
                 rounds_per_match,
-                run_state.runner.config().engine.mode,
+                mode,
+                whole_match_chunks,
             )
         };
         let chunk_started_at = Instant::now();
@@ -199,7 +217,8 @@ fn runner_loop(cmd_rx: Receiver<RunnerCommand>, event_tx: Sender<RunnerEvent>) {
                 chunk_steps,
                 chunk_started_at.elapsed(),
                 rounds_per_match,
-                run_state.runner.config().engine.mode,
+                mode,
+                whole_match_chunks,
             ));
         }
         for preview in run_state.runner.drain_match_history_previews() {
@@ -252,36 +271,170 @@ fn runner_loop(cmd_rx: Receiver<RunnerCommand>, event_tx: Sender<RunnerEvent>) {
     }
 }
 
-fn start_run(request: RunRequest, event_tx: &Sender<RunnerEvent>) -> Result<RunState, String> {
-    let config = select_halting_turing_machine_strategies(request.config);
-    let match_history_previews = !matches!(config.engine.mode, EngineMode::Batch);
-    accelerator_run_preflight(
-        &config,
-        request.event_path.is_some(),
-        request.history_path.is_some(),
-        match_history_previews,
-    )?;
+fn startup_schedule_match_count(config: &NormalizedConfig) -> usize {
+    let strategy_count = config.strategies.len();
+    let per_rep = if config.self_play {
+        strategy_count.checked_mul(strategy_count)
+    } else {
+        strategy_count.checked_mul(strategy_count.saturating_sub(1))
+    };
+    per_rep
+        .and_then(|matches| matches.checked_mul(config.repetitions as usize))
+        .unwrap_or(0)
+}
 
+fn tm_filter_stage_message(diag: &TmHaltingFilterDiagnostics) -> String {
+    let mut message = format!(
+        "TM filter [{}] (requested {:?}): kept {}/{}; scanned {} of {} matchups; probe {:?}; filter {:?}",
+        diag.backend.label(),
+        diag.requested_accelerator,
+        diag.strategy_count_after,
+        diag.strategy_count_before,
+        diag.scanned_matchups,
+        diag.schedule_matches,
+        diag.backend_probe_elapsed,
+        diag.halting_filter_elapsed
+    );
+    if diag.tm_evaluations > 0 || diag.tm_cache_hits > 0 {
+        message.push_str(&format!(
+            "; TM evals {} (hits {}, misses {}, steps {})",
+            diag.tm_evaluations, diag.tm_cache_hits, diag.tm_cache_misses, diag.tm_steps
+        ));
+    }
+    if let Some(reason) = diag.metal_decline_reason.as_ref() {
+        message.push_str(&format!("; metal decline: {reason}"));
+    }
+    if let Some(err) = diag.metal_error.as_ref() {
+        message.push_str(&format!("; metal error: {err}"));
+    }
+    if diag.metal_batches_submitted > 0 {
+        message.push_str(&format!("; metal batches {}", diag.metal_batches_submitted));
+    }
+    if let Some(source) = diag.metal_policy_source.as_ref() {
+        message.push_str(&format!("; metal policy {source}"));
+    }
+    if let (Some(matches_per_batch), Some(inflight)) =
+        (diag.metal_matches_per_batch, diag.metal_inflight_batches)
+    {
+        message.push_str(&format!(
+            "; batch {matches_per_batch}x in-flight {inflight}"
+        ));
+    }
+    message
+}
+
+pub(crate) fn uses_match_step_units(
+    config: &NormalizedConfig,
+    event_logging: bool,
+    history_logging: bool,
+    match_history_previews: bool,
+) -> bool {
+    matches!(config.engine.mode, EngineMode::Interactive)
+        && config.engine.fast_eval
+        && config.noise == 0.0
+        && !event_logging
+        && !history_logging
+        && !match_history_previews
+}
+
+fn start_run(request: RunRequest, event_tx: &Sender<RunnerEvent>) -> Result<RunState, String> {
+    let startup_started = Instant::now();
+    let requested_strategies = request.config.strategies.len();
+    let requested_matches = startup_schedule_match_count(&request.config);
+    let _ = event_tx.send(RunnerEvent::StartupStage(format!(
+        "Selecting halting TMs ({requested_strategies} strategies, {requested_matches} scheduled matches)..."
+    )));
+
+    let halting_started = Instant::now();
+    let (config, diagnostics) =
+        try_select_halting_turing_machine_strategies_with_diagnostics(request.config)?;
+    let halting_elapsed = halting_started.elapsed();
+    let stage_summary = tm_filter_stage_message(&diagnostics);
+    let _ = event_tx.send(RunnerEvent::StartupStage(stage_summary.clone()));
+    info!(
+        "Games runner startup TM filter complete: {stage_summary}; total {:?}",
+        diagnostics.total_elapsed
+    );
+
+    // Metal batch dispatch requires fast_forward_allowed() which is blocked by
+    // match history previews, event writers, and history writers.  Metal only
+    // produces final scores — it cannot emit per-round events or history.
+    // When Metal acceleration is available, disable these to let Metal work.
+    let metal_path = config.engine.accelerator.allows_metal();
+    let use_previews = !matches!(config.engine.mode, EngineMode::Batch) && !metal_path;
+    let use_event_log = request.event_path.is_some() && !metal_path;
+    let use_history_log = request.history_path.is_some() && !metal_path;
+    let step_unit = if uses_match_step_units(&config, use_event_log, use_history_log, use_previews)
+    {
+        StepUnit::Matches
+    } else {
+        StepUnit::Rounds
+    };
+    info!(
+        "Games runner Metal path: metal_path={metal_path}, accelerator={:?}, mode={:?}, \
+         fast_eval={}, noise={}, previews={use_previews}, event_log={use_event_log}, \
+         history_log={use_history_log}, step_unit={:?}",
+        config.engine.accelerator,
+        config.engine.mode,
+        config.engine.fast_eval,
+        config.noise,
+        step_unit,
+    );
+
+    let _ = event_tx.send(RunnerEvent::StartupStage(
+        "Preparing backend and preview mode...".into(),
+    ));
+    let preflight_started = Instant::now();
+    accelerator_run_preflight(&config, use_event_log, use_history_log, use_previews)?;
+    let preflight_elapsed = preflight_started.elapsed();
+
+    let _ = event_tx.send(RunnerEvent::StartupStage(
+        "Building tournament runner...".into(),
+    ));
+    let runner_started = Instant::now();
     let mut runner = TournamentRunner::new(config);
-    if matches!(runner.config().engine.mode, EngineMode::Batch) {
+    let runner_elapsed = runner_started.elapsed();
+    if !use_previews {
         runner = runner.with_match_history_previews(false);
     }
-    if let Some(path) = request.event_path {
-        let include_rounds = runner.config().event_log.include_rounds;
-        match EventWriter::new(path, include_rounds) {
-            Ok(writer) => runner = runner.with_event_writer(writer),
-            Err(err) => return Err(format!("Failed to create event log: {err}")),
+    if use_event_log {
+        if let Some(path) = request.event_path {
+            let include_rounds = runner.config().event_log.include_rounds;
+            match EventWriter::new(path, include_rounds) {
+                Ok(writer) => runner = runner.with_event_writer(writer),
+                Err(err) => return Err(format!("Failed to create event log: {err}")),
+            }
         }
     }
-    if let Some(path) = request.history_path {
-        match HistoryWriter::new(path) {
-            Ok(writer) => runner = runner.with_history_writer(writer),
-            Err(err) => return Err(format!("Failed to create history log: {err}")),
+    if use_history_log {
+        if let Some(path) = request.history_path {
+            match HistoryWriter::new(path) {
+                Ok(writer) => runner = runner.with_history_writer(writer),
+                Err(err) => return Err(format!("Failed to create history log: {err}")),
+            }
         }
     }
 
     let definitions = runner.definitions().to_vec();
     let _ = event_tx.send(RunnerEvent::Definitions(definitions));
+    info!(
+        "Games runner startup complete in {:?} (halting {:?}, preflight {:?}, runner {:?})",
+        startup_started.elapsed(),
+        halting_elapsed,
+        preflight_elapsed,
+        runner_elapsed
+    );
+
+    // When using match-unit stepping (Metal fast path), ensure a reasonable
+    // minimum so the adaptive chunk system has room to grow.  With the default
+    // steps_per_tick of 1 and high rounds_per_match, requested_steps saturates
+    // at 1 match per tick and the adaptive system can never grow beyond that,
+    // causing the tournament to crawl.
+    let effective_steps_per_tick = if matches!(step_unit, StepUnit::Matches) {
+        request.steps_per_tick.max(64)
+    } else {
+        request.steps_per_tick.max(1)
+    };
 
     Ok(RunState {
         runner,
@@ -294,12 +447,13 @@ fn start_run(request: RunRequest, event_tx: &Sender<RunnerEvent>) -> Result<RunS
         results_path: request.results_path,
         config_path: request.config_path,
         analysis_dir: request.analysis_dir,
-        steps_per_tick: request.steps_per_tick.max(1),
+        steps_per_tick: effective_steps_per_tick,
         progress_interval: request.progress_interval,
         last_progress: Instant::now(),
         last_progress_match: None,
         last_completed: 0,
         chunk_hint_steps: None,
+        step_unit,
     })
 }
 
@@ -381,11 +535,29 @@ fn dephase_steps_per_tick(steps_per_tick: u32, rounds_per_match: u32) -> u32 {
     }
 }
 
-fn steps_for_tick(steps_per_tick: u32, rounds_per_match: u32, mode: EngineMode) -> u32 {
-    if matches!(mode, EngineMode::Batch) {
-        steps_per_tick.max(1)
+fn requested_steps_per_tick(
+    steps_per_tick: u32,
+    rounds_per_match: u32,
+    step_unit: StepUnit,
+) -> u32 {
+    match step_unit {
+        StepUnit::Rounds => steps_per_tick.max(1),
+        StepUnit::Matches => steps_per_tick
+            .max(1)
+            .saturating_mul(rounds_per_match.max(1)),
+    }
+}
+
+fn steps_for_tick(
+    requested_steps: u32,
+    rounds_per_match: u32,
+    mode: EngineMode,
+    whole_match_chunks: bool,
+) -> u32 {
+    if whole_match_chunks || matches!(mode, EngineMode::Batch) {
+        requested_steps.max(1)
     } else {
-        dephase_steps_per_tick(steps_per_tick, rounds_per_match)
+        dephase_steps_per_tick(requested_steps, rounds_per_match)
     }
 }
 
@@ -394,11 +566,23 @@ fn adaptive_chunk_steps(
     chunk_hint_steps: Option<u32>,
     rounds_per_match: u32,
     mode: EngineMode,
+    whole_match_chunks: bool,
 ) -> u32 {
     let requested_steps = requested_steps.max(1);
-    let base = chunk_hint_steps
-        .unwrap_or_else(|| requested_steps.min(initial_chunk_steps(rounds_per_match, mode)));
-    normalize_chunk_steps(base, requested_steps, rounds_per_match, mode)
+    let base = chunk_hint_steps.unwrap_or_else(|| {
+        requested_steps.min(initial_chunk_steps(
+            rounds_per_match,
+            mode,
+            whole_match_chunks,
+        ))
+    });
+    normalize_chunk_steps(
+        base,
+        requested_steps,
+        rounds_per_match,
+        mode,
+        whole_match_chunks,
+    )
 }
 
 fn next_adaptive_chunk_steps(
@@ -406,8 +590,9 @@ fn next_adaptive_chunk_steps(
     chunk_elapsed: Duration,
     rounds_per_match: u32,
     mode: EngineMode,
+    whole_match_chunks: bool,
 ) -> u32 {
-    let min_steps = minimum_chunk_steps(rounds_per_match, mode);
+    let min_steps = minimum_chunk_steps(rounds_per_match, mode, whole_match_chunks);
     let elapsed_nanos = chunk_elapsed.as_nanos().max(1);
     let target_nanos = RUNNER_CHUNK_TARGET.as_nanos();
     let scaled = ((chunk_steps as u128).saturating_mul(target_nanos) / elapsed_nanos)
@@ -419,27 +604,34 @@ fn next_adaptive_chunk_steps(
         u32::MAX,
         rounds_per_match,
         mode,
+        whole_match_chunks,
     )
 }
 
-fn initial_chunk_steps(rounds_per_match: u32, mode: EngineMode) -> u32 {
+fn initial_chunk_steps(rounds_per_match: u32, mode: EngineMode, whole_match_chunks: bool) -> u32 {
     let rounds_per_match = rounds_per_match.max(1);
-    match mode {
-        EngineMode::Batch => rounds_per_match
-            .saturating_mul(32)
-            .max(rounds_per_match)
-            .min(RUNNER_CHUNK_INITIAL),
-        EngineMode::Interactive => rounds_per_match
+    if whole_match_chunks || matches!(mode, EngineMode::Batch) {
+        // Start with enough steps for a meaningful Metal batch.
+        // With large rounds (e.g. 500K), RUNNER_CHUNK_INITIAL (4096) is less
+        // than one match, so the adaptive chunk gets stuck at minimum.  Start
+        // with at least 256 matches worth of rounds to let Metal batching work
+        // from the first tick.
+        rounds_per_match
+            .saturating_mul(256)
+            .max(RUNNER_CHUNK_INITIAL)
+    } else {
+        rounds_per_match
             .saturating_mul(16)
             .max(256)
-            .min(RUNNER_CHUNK_INITIAL),
+            .min(RUNNER_CHUNK_INITIAL)
     }
 }
 
-fn minimum_chunk_steps(rounds_per_match: u32, mode: EngineMode) -> u32 {
-    match mode {
-        EngineMode::Batch => rounds_per_match.max(1),
-        EngineMode::Interactive => 1,
+fn minimum_chunk_steps(rounds_per_match: u32, mode: EngineMode, whole_match_chunks: bool) -> u32 {
+    if whole_match_chunks || matches!(mode, EngineMode::Batch) {
+        rounds_per_match.max(1)
+    } else {
+        1
     }
 }
 
@@ -448,10 +640,23 @@ fn normalize_chunk_steps(
     requested_steps: u32,
     rounds_per_match: u32,
     mode: EngineMode,
+    whole_match_chunks: bool,
 ) -> u32 {
     let requested_steps = requested_steps.max(1);
-    let min_steps = minimum_chunk_steps(rounds_per_match, mode).min(requested_steps);
+    let min_steps =
+        minimum_chunk_steps(rounds_per_match, mode, whole_match_chunks).min(requested_steps);
     let chunk_steps = candidate_steps.clamp(min_steps, requested_steps);
+    // When using whole-match chunks (Metal batch or match-unit stepping),
+    // round down to exact match boundaries so fast_forward can consume all
+    // steps without leaving a fractional-match remainder that would force
+    // a slow round-by-round fallback.  Without this, high round counts
+    // combined with u32 saturation in the adaptive system leave a remainder
+    // (e.g. u32::MAX % 500_000 = 467_295 rounds) that gets processed
+    // round-by-round on the CPU every tick.
+    if whole_match_chunks && rounds_per_match > 1 {
+        let aligned = (chunk_steps / rounds_per_match).saturating_mul(rounds_per_match);
+        return aligned.max(min_steps);
+    }
     if !matches!(mode, EngineMode::Interactive)
         || rounds_per_match <= 1
         || chunk_steps <= 1
@@ -470,10 +675,10 @@ fn normalize_chunk_steps(
 mod tests {
     use super::{
         adaptive_chunk_steps, dephase_steps_per_tick, finalize_run, next_adaptive_chunk_steps,
-        start_run, steps_for_tick, RunRequest,
+        normalize_chunk_steps, requested_steps_per_tick, start_run, steps_for_tick,
+        uses_match_step_units, RunRequest, StepUnit,
     };
     use nit_games::{EngineMode, GamesConfig};
-    use std::path::PathBuf;
     use std::sync::mpsc;
     use std::time::Duration;
 
@@ -492,62 +697,38 @@ mod tests {
 
     #[test]
     fn batch_steps_skip_dephase() {
-        assert_eq!(steps_for_tick(50_000, 20, EngineMode::Batch), 50_000);
-        assert_eq!(steps_for_tick(20, 20, EngineMode::Interactive), 21);
+        assert_eq!(steps_for_tick(50_000, 20, EngineMode::Batch, false), 50_000);
+        assert_eq!(steps_for_tick(20, 20, EngineMode::Interactive, false), 21);
     }
 
     #[test]
-    fn adaptive_chunk_steps_caps_large_batch_runs_initially() {
-        let chunk = adaptive_chunk_steps(250_000, None, 200, EngineMode::Batch);
-
-        assert_eq!(chunk, 4_096);
+    fn match_step_units_convert_to_whole_matches() {
+        assert_eq!(requested_steps_per_tick(3, 200, StepUnit::Matches), 600);
+        assert_eq!(requested_steps_per_tick(3, 200, StepUnit::Rounds), 3);
     }
 
     #[test]
-    fn adaptive_chunk_steps_preserves_batch_match_floor() {
-        let chunk = adaptive_chunk_steps(400, Some(25), 200, EngineMode::Batch);
-
-        assert_eq!(chunk, 200);
+    fn interactive_match_steps_skip_dephase() {
+        assert_eq!(
+            steps_for_tick(50_000, 20, EngineMode::Interactive, true),
+            50_000
+        );
     }
 
     #[test]
-    fn next_adaptive_chunk_steps_grows_after_fast_chunk() {
-        let next =
-            next_adaptive_chunk_steps(4_096, Duration::from_millis(30), 200, EngineMode::Batch);
-
-        assert_eq!(next, 16_384);
-    }
-
-    #[test]
-    fn next_adaptive_chunk_steps_shrinks_after_slow_chunk() {
-        let next =
-            next_adaptive_chunk_steps(4_096, Duration::from_millis(480), 200, EngineMode::Batch);
-
-        assert_eq!(next, 2_048);
-    }
-
-    #[test]
-    fn next_adaptive_chunk_steps_can_grow_from_batch_match_floor() {
-        let next =
-            next_adaptive_chunk_steps(5_000, Duration::from_millis(30), 5_000, EngineMode::Batch);
-
-        assert_eq!(next, 20_000);
-    }
-
-    #[test]
-    fn start_run_rejects_interactive_metal_requests_that_need_cpu_previews() {
+    fn interactive_match_step_units_require_full_match_fast_forward() {
         let config = GamesConfig::from_toml(
             r#"
 schema_version = 1
 game = "ipd"
-rounds = 4
+rounds = 500000
 repetitions = 1
 self_play = false
 
 [engine]
 mode = "interactive"
 fast_eval = true
-accelerator = "metal"
+accelerator = "auto"
 
 [event_log]
 enabled = false
@@ -572,28 +753,110 @@ k = 2
 "#,
         )
         .expect("parse config");
-        let (event_tx, _event_rx) = mpsc::channel();
-        let request = RunRequest {
-            config,
-            config_text: String::new(),
-            timestamp: "2026-03-11T00:00:00Z".into(),
-            run_id: "run".into(),
-            run_dir: Some(PathBuf::from("/tmp/run")),
-            summary_path: Some(PathBuf::from("/tmp/run/run_summary.json")),
-            definitions_path: Some(PathBuf::from("/tmp/run/definitions.json")),
-            results_path: Some(PathBuf::from("/tmp/run/results.json")),
-            config_path: Some(PathBuf::from("/tmp/run/config.toml")),
-            analysis_dir: Some(PathBuf::from("/tmp/run/analysis")),
-            event_path: None,
-            history_path: None,
-            progress_interval: Duration::from_millis(10),
-            steps_per_tick: 128,
-        };
 
-        let err = start_run(request, &event_tx)
-            .err()
-            .expect("interactive metal should fail fast");
-        assert!(err.contains("interactive match history previews"));
+        assert!(uses_match_step_units(&config, false, false, false));
+        assert!(!uses_match_step_units(&config, false, false, true));
+    }
+
+    #[test]
+    fn adaptive_chunk_steps_batch_starts_at_256_matches() {
+        let chunk = adaptive_chunk_steps(250_000, None, 200, EngineMode::Batch, false);
+        // Batch mode starts at rounds_per_match * 256 = 51200
+        assert_eq!(chunk, 51_200);
+    }
+
+    #[test]
+    fn adaptive_chunk_steps_preserves_batch_match_floor() {
+        let chunk = adaptive_chunk_steps(400, Some(25), 200, EngineMode::Batch, false);
+
+        assert_eq!(chunk, 200);
+    }
+
+    #[test]
+    fn next_adaptive_chunk_steps_grows_after_fast_chunk() {
+        let next = next_adaptive_chunk_steps(
+            4_096,
+            Duration::from_millis(30),
+            200,
+            EngineMode::Batch,
+            false,
+        );
+
+        assert_eq!(next, 16_384);
+    }
+
+    #[test]
+    fn next_adaptive_chunk_steps_shrinks_after_slow_chunk() {
+        let next = next_adaptive_chunk_steps(
+            4_096,
+            Duration::from_millis(480),
+            200,
+            EngineMode::Batch,
+            false,
+        );
+
+        assert_eq!(next, 2_048);
+    }
+
+    #[test]
+    fn next_adaptive_chunk_steps_can_grow_from_batch_match_floor() {
+        let next = next_adaptive_chunk_steps(
+            5_000,
+            Duration::from_millis(30),
+            5_000,
+            EngineMode::Batch,
+            false,
+        );
+
+        assert_eq!(next, 20_000);
+    }
+
+    #[test]
+    fn whole_match_chunks_align_to_rounds_per_match() {
+        // When chunk_steps is not a multiple of rounds_per_match (e.g. u32::MAX
+        // from saturating arithmetic), the remainder would trigger slow
+        // round-by-round CPU processing.  normalize_chunk_steps must round down.
+        let rounds_per_match = 500_000u32;
+        let chunk = normalize_chunk_steps(
+            u32::MAX,
+            u32::MAX,
+            rounds_per_match,
+            EngineMode::Interactive,
+            true,
+        );
+        assert_eq!(
+            chunk % rounds_per_match,
+            0,
+            "chunk_steps should be aligned to rounds_per_match"
+        );
+        assert_eq!(chunk, (u32::MAX / rounds_per_match) * rounds_per_match);
+    }
+
+    #[test]
+    fn whole_match_chunks_preserve_already_aligned_values() {
+        let rounds_per_match = 200u32;
+        let chunk = normalize_chunk_steps(
+            51_200, // 256 * 200, already aligned
+            u32::MAX,
+            rounds_per_match,
+            EngineMode::Interactive,
+            true,
+        );
+        assert_eq!(chunk, 51_200);
+    }
+
+    #[test]
+    fn whole_match_chunks_floor_at_one_match() {
+        // Even with a very small candidate, the result should be at least
+        // one match (= minimum_chunk_steps for whole_match_chunks).
+        let chunk = normalize_chunk_steps(
+            100,      // less than one match
+            u32::MAX,
+            500_000,
+            EngineMode::Interactive,
+            true,
+        );
+        assert_eq!(chunk, 500_000);
     }
 
     #[test]

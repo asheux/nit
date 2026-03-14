@@ -45,17 +45,19 @@ pub use seed::{
     SeedSymmetry,
 };
 pub use state::{
-    apply_action, build_family_run_override_for_request, AgentAlert, AgentAlertSeverity,
+    apply_action, apply_family_run_runtime_overrides, build_family_run_override_for_request,
+    build_family_run_override_for_request_with_timings, build_family_run_override_from_base_config,
+    build_family_run_override_from_base_config_with_timings, AgentAlert, AgentAlertSeverity,
     AgentChannel, AgentConsoleRow, AgentConsoleRowKind, AgentConsoleRowsCache,
     AgentConsoleRowsCacheKey, AgentConsoleTab, AgentDiagnosticEvent, AgentLane, AgentLaneKind,
     AgentMessage, AgentOpsTab, AgentStatus, AgentsState, AppState, DirEntryModel, EvidenceItem,
-    FileTreeKind, FileTreeRow, FileTreeState, GamesAnalysisRequest, GamesAnalysisState,
-    GamesCaSimState, GamesConfigPreview, GamesFamilyRunRequest, GamesReplayRequest,
-    GamesReplayState, GamesRunBrowserState, GamesRunEntry, GamesRunOverride, GamesState,
-    GamesStatus, GamesStrategyInspectState, GolRenderMode, JobState, LogBuffer, McpConnectionState,
-    McpStatus, Metrics, MissionPhase, MissionRecord, PatchProposal, PatchStatus, QueuedCodexTurn,
-    RosterTreeBranch, RosterTreeSelection, SavedRunHistoryFilter, SavedRunHistoryPendingAction,
-    SyntaxDebugInfo, UiSelection, UiSelectionPane, VisualizerMode, VisualizerRuleEntry,
-    VisualizerState, YankKind,
+    FamilyRunBuildTimings, FileTreeKind, FileTreeRow, FileTreeState, GamesAnalysisRequest,
+    GamesAnalysisState, GamesCaSimState, GamesConfigPreview, GamesFamilyRunRequest,
+    GamesReplayRequest, GamesReplayState, GamesRunBrowserState, GamesRunEntry, GamesRunOverride,
+    GamesState, GamesStatus, GamesStrategyInspectState, GolRenderMode, JobState, LogBuffer,
+    McpConnectionState, McpStatus, Metrics, MissionPhase, MissionRecord, PatchProposal,
+    PatchStatus, QueuedCodexTurn, RosterTreeBranch, RosterTreeSelection, SavedRunHistoryFilter,
+    SavedRunHistoryPendingAction, SyntaxDebugInfo, UiSelection, UiSelectionPane, VisualizerMode,
+    VisualizerRuleEntry, VisualizerState, YankKind,
 };
 pub use viewport::Viewport;

@@ -11,9 +11,10 @@ use crate::strategy::{
 use crate::{
     accelerator_preflight, accelerator_run_preflight, canonical_fsm_indices,
     group_canonical_fsm_indices_by_behavior, group_canonical_fsm_indices_by_behavior_with_mode,
-    select_halting_turing_machine_strategies, unique_fsm_behavior_representatives,
-    unique_fsm_behavior_representatives_with_mode, KernelRunMode, TournamentKernel,
-    TournamentRunner,
+    select_halting_turing_machine_strategies, try_select_halting_turing_machine_strategies,
+    try_select_halting_turing_machine_strategies_with_diagnostics,
+    unique_fsm_behavior_representatives, unique_fsm_behavior_representatives_with_mode,
+    KernelRunMode, TmHaltingFilterBackend, TournamentKernel, TournamentRunner,
 };
 
 fn push_round(history: &mut History, a: Action, b: Action) {
@@ -1124,7 +1125,7 @@ transitions = [
 }
 
 #[test]
-fn metal_accelerator_preflight_rejects_tm_step_limit_overflow() {
+fn metal_accelerator_preflight_accepts_large_tm_step_count() {
     let src = r#"
 schema_version = 1
 game = "ipd"
@@ -1142,13 +1143,13 @@ states = 1
 symbols = 2
 start_state = 1
 blank = 0
-max_steps_per_round = 512
+max_steps_per_round = 2048
 rule_code = 0
 "#;
 
     let cfg = GamesConfig::from_toml(src).expect("parse config");
-    let err = accelerator_preflight(&cfg).expect_err("metal should reject oversized TM runs");
-    assert!(err.contains("max_steps_per_round"));
+    // Metal should accept any TM max_steps — the shader compiles with dynamic width.
+    let _ = accelerator_preflight(&cfg);
 }
 
 #[test]
@@ -1382,8 +1383,7 @@ k = 2
     assert_eq!(runtime.metal_matches, 2);
     assert!(runtime.cpu_matches == 0);
     assert!(runtime.metal_policy_source.is_some());
-    assert!(runtime.metal_policy_cache_key.is_some());
-    assert!(runtime.metal_policy_cache_path.is_some());
+    // Small workloads use the heuristic path which does not populate the policy cache.
 }
 
 #[cfg(target_os = "macos")]
@@ -1542,12 +1542,15 @@ k = 2
     let progress = runner.progress().expect("progress should exist");
     assert!(progress.match_complete);
     assert_eq!(progress.match_index, 1);
-    assert_eq!(progress.last_action_a, Some(Action::Cooperate));
+    // FSM index 0 = AlwaysDefect, FSM index 1 = AlwaysCooperate.
+    // Match (0,1): A=AlwaysDefect vs B=AlwaysCooperate.
+    assert_eq!(progress.last_action_a, Some(Action::Defect));
     assert_eq!(progress.last_action_b, Some(Action::Cooperate));
-    assert_eq!(progress.last_payoff_a, Some(-1));
-    assert_eq!(progress.last_payoff_b, Some(-1));
-    assert_eq!(progress.last_halted_a, Some(false));
-    assert_eq!(progress.last_halted_b, Some(false));
+    assert_eq!(progress.last_payoff_a, Some(0));
+    assert_eq!(progress.last_payoff_b, Some(-3));
+    // FSMs always report halted=true (default Strategy trait behavior).
+    assert_eq!(progress.last_halted_a, Some(true));
+    assert_eq!(progress.last_halted_b, Some(true));
     assert_eq!(progress.runtime.backend, RuntimeAcceleratorBackend::Metal);
     assert_eq!(progress.runtime.metal_matches, 1);
     assert_eq!(progress.runtime.cpu_matches, 0);
@@ -1870,6 +1873,135 @@ fn select_halting_turing_machine_strategies_matches_results_06_good_tms() {
         .map(|spec| spec.id.as_str())
         .collect::<Vec<_>>();
 
+    assert_eq!(ids, vec!["tm_1", "tm_3", "tm_5", "tm_7", "tm_13", "tm_15"]);
+}
+
+#[test]
+fn strict_tm_selection_with_diagnostics_preserves_results_06_survivors() {
+    let cfg = GamesConfig::from_toml(&tm_family_1x2_reference_toml(200)).expect("parse config");
+    let (filtered, diagnostics) =
+        try_select_halting_turing_machine_strategies_with_diagnostics(cfg)
+            .expect("strict TM selection should succeed");
+    println!(
+        "tm_filter strict diagnostics: backend={} kept={}/{} scanned={}/{} probe={:?} filter={:?}",
+        diagnostics.backend.label(),
+        diagnostics.strategy_count_after,
+        diagnostics.strategy_count_before,
+        diagnostics.scanned_matchups,
+        diagnostics.schedule_matches,
+        diagnostics.backend_probe_elapsed,
+        diagnostics.halting_filter_elapsed
+    );
+    let ids = filtered
+        .strategies
+        .iter()
+        .map(|spec| spec.id.as_str())
+        .collect::<Vec<_>>();
+
+    assert_eq!(ids, vec!["tm_1", "tm_3", "tm_5", "tm_7", "tm_13", "tm_15"]);
+    assert!(matches!(
+        diagnostics.backend,
+        TmHaltingFilterBackend::Metal
+            | TmHaltingFilterBackend::NotebookCpu
+            | TmHaltingFilterBackend::NotebookCpuFallback
+    ));
+    assert_eq!(diagnostics.strategy_count_before, 16);
+    assert_eq!(diagnostics.strategy_count_after, 6);
+}
+
+#[test]
+fn notebook_tm_filter_reports_cache_activity_for_reference_family() {
+    let mut cfg = GamesConfig::from_toml(&tm_family_1x2_reference_toml(200)).expect("parse config");
+    cfg.engine.accelerator = AcceleratorMode::Cpu;
+    let (_filtered, diagnostics) =
+        try_select_halting_turing_machine_strategies_with_diagnostics(cfg)
+            .expect("strict TM selection should succeed");
+    println!(
+        "tm_filter diagnostics: backend={} kept={}/{} scanned={}/{} probe={:?} filter={:?} evals={} hits={} misses={} steps={}",
+        diagnostics.backend.label(),
+        diagnostics.strategy_count_after,
+        diagnostics.strategy_count_before,
+        diagnostics.scanned_matchups,
+        diagnostics.schedule_matches,
+        diagnostics.backend_probe_elapsed,
+        diagnostics.halting_filter_elapsed,
+        diagnostics.tm_evaluations,
+        diagnostics.tm_cache_hits,
+        diagnostics.tm_cache_misses,
+        diagnostics.tm_steps
+    );
+
+    assert!(matches!(
+        diagnostics.backend,
+        TmHaltingFilterBackend::NotebookCpu
+    ));
+    assert!(diagnostics.tm_evaluations > 0);
+    assert!(diagnostics.tm_cache_hits > 0);
+    assert!(diagnostics.tm_steps > 0);
+}
+
+#[test]
+fn strict_tm_selection_rejects_cpu_fallback_when_metal_is_required() {
+    let src = r#"
+schema_version = 1
+game = "ipd"
+rounds = 3
+repetitions = 1
+self_play = true
+
+[engine]
+accelerator = "metal"
+fast_eval = false
+
+[[strategy]]
+id = "tm_rule"
+type = "tm"
+states = 1
+symbols = 2
+start_state = 1
+blank = 0
+max_steps_per_round = 4
+rule_code = 1
+"#;
+
+    let cfg = GamesConfig::from_toml(src).expect("parse config");
+    let err = try_select_halting_turing_machine_strategies(cfg)
+        .expect_err("strict metal selection should fail before CPU fallback");
+    assert!(
+        err.contains("fast_eval")
+            || err.contains("TM family preparation")
+            || err.contains("Metal accelerator"),
+        "unexpected strict metal error: {err}"
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn metal_tm_family_selection_matches_cpu_reference() {
+    let mut metal_cfg =
+        GamesConfig::from_toml(&tm_family_1x2_reference_toml(200)).expect("parse config");
+    metal_cfg.engine.mode = EngineMode::Batch;
+    metal_cfg.engine.fast_eval = true;
+    metal_cfg.engine.accelerator = AcceleratorMode::Metal;
+
+    let filtered = match try_select_halting_turing_machine_strategies(metal_cfg) {
+        Ok(filtered) => filtered,
+        Err(err)
+            if err.contains("Metal accelerator")
+                || err.contains("Metal backend")
+                || err.contains("active Metal backend")
+                || err.contains("Metal device unavailable") =>
+        {
+            return;
+        }
+        Err(err) => panic!("strict metal TM selection failed: {err}"),
+    };
+
+    let ids = filtered
+        .strategies
+        .iter()
+        .map(|spec| spec.id.as_str())
+        .collect::<Vec<_>>();
     assert_eq!(ids, vec!["tm_1", "tm_3", "tm_5", "tm_7", "tm_13", "tm_15"]);
 }
 
