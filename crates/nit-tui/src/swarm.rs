@@ -5936,6 +5936,33 @@ pub fn is_agent_busy(state: &AppState, agent_id: &str) -> bool {
             .is_some_and(|lane| matches!(lane.status, AgentStatus::Running))
 }
 
+/// Resolve any clone agent ID back to its base (non-clone) agent ID.
+pub fn resolve_base_agent_id(agent_id: &str) -> &str {
+    chat_clone_base_id(agent_id)
+        .or_else(|| swarm_clone_base_id(agent_id))
+        .unwrap_or(agent_id)
+}
+
+/// Returns true if the base agent **or** any of its clones is busy.
+pub fn is_agent_family_busy(state: &AppState, agent_id: &str) -> bool {
+    let base = resolve_base_agent_id(agent_id);
+    for lane in &state.agents.agents {
+        if resolve_base_agent_id(&lane.id) != base {
+            continue;
+        }
+        if state.agents.active_turns.contains_key(&lane.id)
+            || matches!(lane.status, AgentStatus::Running)
+        {
+            return true;
+        }
+    }
+    state
+        .agents
+        .queued_codex_turns
+        .iter()
+        .any(|turn| resolve_base_agent_id(&turn.agent_id) == base)
+}
+
 fn is_priority_agent(state: &AppState, agent_id: &str) -> bool {
     if state.agents.swarm_priority_agent_ids.contains(agent_id) {
         return true;

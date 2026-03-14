@@ -11,7 +11,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::swarm::{
     chat_clone_base_id, create_chat_clone, detect_swarm_mission_kind_from_prompt,
-    explicit_swarm_mission_kind_from_prompt, is_agent_busy, normalize_role_label,
+    explicit_swarm_mission_kind_from_prompt, is_agent_busy, is_agent_family_busy,
+    normalize_role_label,
     parse_swarm_command, parse_swarm_mission_kind, select_swarm_agents, GateReport, GateReportGate,
     SwarmArtifactFocus, SwarmCommand, SwarmMissionKind, SwarmRuntime, SwarmSize,
 };
@@ -3972,11 +3973,19 @@ fn submit_chat_input_and_dispatch(
     }
 
     if !swarm_handled {
-        let force_queue = (raw.starts_with("@queue")
+        // @new: spawn a clone with fresh context when the agent family is busy.
+        let force_new = raw.starts_with("@new")
+            && (raw.len() == 4 || raw[4..].starts_with(char::is_whitespace));
+        // @q / @queue: legacy alias — now the same as the default (queue to base).
+        let legacy_queue = (raw.starts_with("@queue")
             && (raw.len() == 6 || raw[6..].starts_with(char::is_whitespace)))
             || (raw.starts_with("@q")
                 && (raw.len() == 2 || raw[2..].starts_with(char::is_whitespace)));
-        if force_queue {
+
+        if force_new {
+            state.agents.chat_input = raw[4..].trim_start().to_string();
+            state.agents.chat_input_cursor = state.agents.chat_input.chars().count();
+        } else if legacy_queue {
             let stripped = if raw.starts_with("@queue") {
                 &raw[6..]
             } else {
@@ -4005,30 +4014,21 @@ fn submit_chat_input_and_dispatch(
                 selected_agent.clone().into_iter().collect::<Vec<_>>()
             };
             for model in targets {
+                // Always resolve to the base agent so context is preserved.
+                let base_model =
+                    crate::swarm::resolve_base_agent_id(&model).to_string();
                 let is_codex = state
                     .agents
                     .agents
                     .iter()
-                    .find(|lane| lane.id.as_str() == model.as_str())
+                    .find(|lane| lane.id == base_model)
                     .is_some_and(|lane| lane.is_codex());
                 if !is_codex {
                     continue;
                 }
-                if force_queue {
-                    state
-                        .agents
-                        .codex_turn_prompt_idx
-                        .insert(model.clone(), prompt_msg_idx);
-                    dispatch_codex_prompt(
-                        state,
-                        vitals,
-                        codex,
-                        model,
-                        mission_id.clone(),
-                        prompt.clone(),
-                    );
-                } else if is_agent_busy(state, &model) {
-                    if let Some(clone_id) = create_chat_clone(state, &model) {
+                if force_new && is_agent_family_busy(state, &base_model) {
+                    // @new while family busy → fresh clone with new context.
+                    if let Some(clone_id) = create_chat_clone(state, &base_model) {
                         state
                             .agents
                             .codex_turn_prompt_idx
@@ -4043,29 +4043,32 @@ fn submit_chat_input_and_dispatch(
                             true,
                         );
                     } else {
+                        // Clone limit reached — fall back to queue on base.
                         state
                             .agents
                             .codex_turn_prompt_idx
-                            .insert(model.clone(), prompt_msg_idx);
+                            .insert(base_model.clone(), prompt_msg_idx);
                         dispatch_codex_prompt(
                             state,
                             vitals,
                             codex,
-                            model,
+                            base_model,
                             mission_id.clone(),
                             prompt.clone(),
                         );
                     }
                 } else {
+                    // Default (Enter) and @new-when-idle: dispatch to base agent.
+                    // Queues automatically if busy, dispatches immediately if idle.
                     state
                         .agents
                         .codex_turn_prompt_idx
-                        .insert(model.clone(), prompt_msg_idx);
+                        .insert(base_model.clone(), prompt_msg_idx);
                     dispatch_codex_prompt(
                         state,
                         vitals,
                         codex,
-                        model,
+                        base_model,
                         mission_id.clone(),
                         prompt.clone(),
                     );
