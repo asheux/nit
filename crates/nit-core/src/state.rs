@@ -597,6 +597,9 @@ pub struct AgentConsoleRowsCache {
     pub key: Option<AgentConsoleRowsCacheKey>,
     pub rows: Vec<AgentConsoleRow>,
     pub last_message_was_user: bool,
+    /// `(row_index, prompt_msg_idx)` — positions inside `rows` where an inline
+    /// breather should be spliced in when agents are still pending for that prompt.
+    pub breather_slots: Vec<(usize, usize)>,
 }
 
 #[derive(Clone, Debug)]

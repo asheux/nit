@@ -261,9 +261,9 @@ pub fn create_chat_clone(state: &mut AppState, base_id: &str) -> Option<String> 
     let clone_id = format!("{effective_base}#chat-clone-{clone_num:02}");
     let base_role = base_lane.role.trim();
     let display_role = if base_role.is_empty() {
-        format!("(chat {clone_num:02})")
+        format!("(clone {clone_num:02})")
     } else {
-        format!("{base_role} (chat {clone_num:02})")
+        format!("{base_role} (clone {clone_num:02})")
     };
 
     let mut lane = base_lane;
@@ -7703,7 +7703,7 @@ notes
             .iter()
             .find(|l| l.id == clone_id)
             .expect("clone in roster");
-        assert_eq!(clone_lane.role, "coder (chat 01)");
+        assert_eq!(clone_lane.role, "coder (clone 01)");
         assert!(matches!(clone_lane.status, AgentStatus::Idle));
         assert_eq!(clone_lane.queue_len, 0);
 
@@ -7777,7 +7777,7 @@ notes
         state
             .agents
             .agents
-            .push(make_lane("a#chat-clone-01", "worker (chat 01)"));
+            .push(make_lane("a#chat-clone-01", "worker (clone 01)"));
 
         let agents = select_swarm_agents(&state, "planner", SwarmSize::Count(3), Some("parallel"));
         assert!(!agents.iter().any(|id| id.contains("#chat-clone-")));

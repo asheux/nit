@@ -12,7 +12,7 @@ use ratatui::{
 use std::time::{Duration, Instant};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::swarm::SwarmRuntime;
+use crate::swarm::{chat_clone_base_id, SwarmRuntime};
 use crate::theme::Theme;
 use crate::widgets::{agent_ops_view, text_selection::apply_ui_selection};
 
@@ -209,10 +209,88 @@ pub fn render(
 
     let pulse_on = pulse_on(state);
     let thread_width = layout.thread_area.width.max(1) as usize;
-    let (cached_rows_len, _) = refresh_thread_rows_cache(state, Some(swarm), thread_width);
+    let (_cached_rows_len, _) = refresh_thread_rows_cache(state, Some(swarm), thread_width);
     let thread_height = layout.thread_area.height.max(1) as usize;
-    let breather = breather_rows_for_user_prompt(state, Some(swarm), pulse_on, thread_width);
-    let total_rows = cached_rows_len.saturating_add(breather.len());
+
+    // Build pending_by_prompt: prompt_msg_idx → agent_ids still working on it.
+    let mut pending_by_prompt: std::collections::HashMap<usize, Vec<String>> =
+        std::collections::HashMap::new();
+    for (agent_id, &prompt_idx) in state.agents.codex_turn_prompt_idx.iter() {
+        let is_active = state.agents.active_turns.contains_key(agent_id)
+            || state
+                .agents
+                .queued_codex_turns
+                .iter()
+                .any(|t| t.agent_id == *agent_id);
+        if is_active {
+            pending_by_prompt
+                .entry(prompt_idx)
+                .or_default()
+                .push(agent_id.clone());
+        }
+    }
+
+    // Merge cached message rows with per-prompt inline breathers.
+    let mut inline_shown = std::collections::HashSet::<String>::new();
+    let mut combined_rows: Vec<ThreadRow> = Vec::new();
+    {
+        let slots = &state.agents.console_rows_cache.breather_slots;
+        let cached = &state.agents.console_rows_cache.rows;
+        let mut slot_iter = slots.iter().peekable();
+        for (row_idx, row) in cached.iter().enumerate() {
+            combined_rows.push(row.clone());
+            // After each breather slot, inject the inline breather if agents are pending.
+            while slot_iter.peek().is_some_and(|&&(pos, _)| pos == row_idx + 1) {
+                let &(_, prompt_msg_idx) = slot_iter.next().unwrap();
+                if let Some(agent_ids) = pending_by_prompt.get(&prompt_msg_idx) {
+                    combined_rows
+                        .extend(inline_breather_rows(state, agent_ids, pulse_on, thread_width));
+                    for id in agent_ids {
+                        inline_shown.insert(id.clone());
+                    }
+                }
+            }
+        }
+        // Drain any remaining slots past the end of cached rows.
+        for &(_, prompt_msg_idx) in slot_iter {
+            if let Some(agent_ids) = pending_by_prompt.get(&prompt_msg_idx) {
+                combined_rows
+                    .extend(inline_breather_rows(state, agent_ids, pulse_on, thread_width));
+                for id in agent_ids {
+                    inline_shown.insert(id.clone());
+                }
+            }
+        }
+    }
+
+    // Global breather for agents not shown inline (swarm, legacy, etc.).
+    let any_remaining = state.agents.agents.iter().any(|a| {
+        !inline_shown.contains(&a.id)
+            && (state.agents.active_turns.contains_key(&a.id)
+                || state
+                    .agents
+                    .queued_codex_turns
+                    .iter()
+                    .any(|t| t.agent_id == a.id))
+    });
+    let mission_ctx = state.agents.selected_context_mission();
+    let has_swarm_context = mission_ctx.is_some_and(|mid| {
+        state
+            .agents
+            .missions
+            .iter()
+            .any(|m| m.id == mid && m.swarm)
+    });
+    if any_remaining || has_swarm_context {
+        combined_rows.extend(breather_rows_for_user_prompt(
+            state,
+            Some(swarm),
+            pulse_on,
+            thread_width,
+        ));
+    }
+
+    let total_rows = combined_rows.len();
     let max_scroll = total_rows.saturating_sub(thread_height);
     state.agents.console_scroll = if state.agents.console_scroll == usize::MAX {
         max_scroll
@@ -220,12 +298,8 @@ pub fn render(
         state.agents.console_scroll.min(max_scroll)
     };
     let scroll_usize = state.agents.console_scroll;
-    let visible_rows = state
-        .agents
-        .console_rows_cache
-        .rows
+    let visible_rows = combined_rows
         .iter()
-        .chain(breather.iter())
         .skip(scroll_usize)
         .take(thread_height);
     let visible: Vec<Line<'static>> = thread_lines(visible_rows, theme);
@@ -526,12 +600,14 @@ pub fn artifact_message_index_for_line_with_swarm(
             width.max(1),
             MessageRenderMode::Transcript,
         );
-        if rows
-            .last()
-            .is_some_and(|row| matches!(row.kind, ThreadRowKind::ArtifactLink))
-            && row_cursor + rows.len().saturating_sub(1) == line_idx
+        // Find the ArtifactLink row (may not be last if a spacer follows).
+        if let Some(artifact_offset) = rows
+            .iter()
+            .position(|row| matches!(row.kind, ThreadRowKind::ArtifactLink))
         {
-            return Some(msg_idx);
+            if row_cursor + artifact_offset == line_idx {
+                return Some(msg_idx);
+            }
         }
         row_cursor = row_cursor.saturating_add(rows.len());
     }
@@ -570,10 +646,48 @@ fn refresh_thread_rows_cache(
         );
     }
 
+    // Collect visible messages and separate into prompts vs responses.
+    let visible: Vec<(usize, &AgentMessage)> = state
+        .agents
+        .messages
+        .iter()
+        .enumerate()
+        .filter(|(_, msg)| message_matches_context(msg, mission_ref, agent_ref))
+        .collect();
+
+    // Build a map: prompt_msg_idx → list of visible (msg_idx, msg) responses that
+    // should be rendered immediately after their parent prompt instead of in
+    // chronological order.  Only group when the parent prompt is also visible.
+    let visible_prompt_indices: std::collections::HashSet<usize> = visible
+        .iter()
+        .filter(|(_, msg)| msg.agent_id.is_none())
+        .map(|(idx, _)| *idx)
+        .collect();
+
+    let mut responses_by_prompt: std::collections::HashMap<usize, Vec<(usize, &AgentMessage)>> =
+        std::collections::HashMap::new();
+    let mut grouped_indices: std::collections::HashSet<usize> =
+        std::collections::HashSet::new();
+    for &(msg_idx, msg) in &visible {
+        if msg.agent_id.is_some() {
+            if let Some(parent_idx) = msg.prompt_msg_idx {
+                if visible_prompt_indices.contains(&parent_idx) {
+                    responses_by_prompt
+                        .entry(parent_idx)
+                        .or_default()
+                        .push((msg_idx, msg));
+                    grouped_indices.insert(msg_idx);
+                }
+            }
+        }
+    }
+
     let mut rows = Vec::new();
+    let mut breather_slots: Vec<(usize, usize)> = Vec::new();
     let mut last_message_was_user = false;
-    for msg in state.agents.messages.iter() {
-        if !message_matches_context(msg, mission_ref, agent_ref) {
+    for &(msg_idx, msg) in &visible {
+        // Skip responses that will be rendered under their parent prompt.
+        if grouped_indices.contains(&msg_idx) {
             continue;
         }
         last_message_was_user = msg.agent_id.is_none();
@@ -584,6 +698,23 @@ fn refresh_thread_rows_cache(
             width,
             MessageRenderMode::Transcript,
         ));
+        // After a user prompt, splice in its grouped responses.
+        if msg.agent_id.is_none() {
+            if let Some(responses) = responses_by_prompt.get(&msg_idx) {
+                for &(_, resp_msg) in responses {
+                    last_message_was_user = false;
+                    rows.extend(format_message_rows(
+                        state,
+                        swarm,
+                        resp_msg,
+                        width,
+                        MessageRenderMode::Transcript,
+                    ));
+                }
+            }
+            // Record the row position where an inline breather can be inserted.
+            breather_slots.push((rows.len(), msg_idx));
+        }
     }
 
     let key = AgentConsoleRowsCacheKey {
@@ -596,6 +727,7 @@ fn refresh_thread_rows_cache(
     state.agents.console_rows_cache.key = Some(key);
     state.agents.console_rows_cache.rows = rows;
     state.agents.console_rows_cache.last_message_was_user = last_message_was_user;
+    state.agents.console_rows_cache.breather_slots = breather_slots;
     (
         state.agents.console_rows_cache.rows.len(),
         state.agents.console_rows_cache.last_message_was_user,
@@ -1503,52 +1635,124 @@ fn thread_rows(
     let mission = state.agents.selected_context_mission();
     let agent = state.agents.selected_context_agent();
 
-    // Collect visible messages and separate prompts from replies.
-    let mut prompt_indices: Vec<usize> = Vec::new();
-    let mut reply_map: Vec<(usize, usize)> = Vec::new(); // (msg_global_idx, prompt_global_idx)
-    let mut unlinked_replies: Vec<usize> = Vec::new();
+    // Collect visible messages.
+    let visible: Vec<(usize, &AgentMessage)> = state
+        .agents
+        .messages
+        .iter()
+        .enumerate()
+        .filter(|(_, msg)| message_matches_context(msg, mission, agent))
+        .collect();
 
-    for (idx, msg) in state.agents.messages.iter().enumerate() {
-        if !message_matches_context(msg, mission, agent) {
-            continue;
-        }
-        if msg.agent_id.is_none() {
-            prompt_indices.push(idx);
-        } else if let Some(parent_idx) = msg.prompt_msg_idx {
-            reply_map.push((idx, parent_idx));
-        } else {
-            unlinked_replies.push(idx);
+    // Build reverse map: prompt_msg_idx → list of agent_ids still working on it.
+    let mut pending_by_prompt: std::collections::HashMap<usize, Vec<String>> =
+        std::collections::HashMap::new();
+    for (agent_id, &prompt_idx) in state.agents.codex_turn_prompt_idx.iter() {
+        let is_active = state.agents.active_turns.contains_key(agent_id)
+            || state
+                .agents
+                .queued_codex_turns
+                .iter()
+                .any(|t| t.agent_id == *agent_id);
+        if is_active {
+            pending_by_prompt
+                .entry(prompt_idx)
+                .or_default()
+                .push(agent_id.clone());
         }
     }
 
-    // Build output: each prompt followed by its linked replies, then any unlinked ones.
-    let mut rendered: Vec<bool> = vec![false; state.agents.messages.len()];
-    let mut rows = Vec::new();
+    // Group completed responses under their parent prompts.
+    let visible_prompt_indices: std::collections::HashSet<usize> = visible
+        .iter()
+        .filter(|(_, msg)| msg.agent_id.is_none())
+        .map(|(idx, _)| *idx)
+        .collect();
 
-    for &prompt_idx in &prompt_indices {
-        if let Some(msg) = state.agents.messages.get(prompt_idx) {
-            rows.extend(format_message_rows(state, swarm, msg, width, MessageRenderMode::Transcript));
-            rendered[prompt_idx] = true;
-        }
-        // Render replies linked to this prompt.
-        for &(reply_idx, parent_idx) in &reply_map {
-            if parent_idx == prompt_idx {
-                if let Some(msg) = state.agents.messages.get(reply_idx) {
-                    rows.extend(format_message_rows(state, swarm, msg, width, MessageRenderMode::Transcript));
-                    rendered[reply_idx] = true;
+    let mut responses_by_prompt: std::collections::HashMap<usize, Vec<(usize, &AgentMessage)>> =
+        std::collections::HashMap::new();
+    let mut grouped_indices: std::collections::HashSet<usize> =
+        std::collections::HashSet::new();
+    for &(msg_idx, msg) in &visible {
+        if msg.agent_id.is_some() {
+            if let Some(parent_idx) = msg.prompt_msg_idx {
+                if visible_prompt_indices.contains(&parent_idx) {
+                    responses_by_prompt
+                        .entry(parent_idx)
+                        .or_default()
+                        .push((msg_idx, msg));
+                    grouped_indices.insert(msg_idx);
                 }
             }
         }
     }
 
-    // Render any unlinked replies (legacy messages without prompt_msg_idx) in order.
-    for &idx in &unlinked_replies {
-        if let Some(msg) = state.agents.messages.get(idx) {
-            rows.extend(format_message_rows(state, swarm, msg, width, MessageRenderMode::Transcript));
+    let mut inline_shown = std::collections::HashSet::<String>::new();
+    let mut rows = Vec::new();
+
+    for &(msg_idx, msg) in &visible {
+        // Skip responses that will be rendered under their parent prompt.
+        if grouped_indices.contains(&msg_idx) {
+            continue;
+        }
+        rows.extend(format_message_rows(
+            state,
+            swarm,
+            msg,
+            width,
+            MessageRenderMode::Transcript,
+        ));
+
+        // After a user prompt, splice in its grouped responses, then show inline breather.
+        if msg.agent_id.is_none() {
+            if let Some(responses) = responses_by_prompt.get(&msg_idx) {
+                for &(_, resp_msg) in responses {
+                    rows.extend(format_message_rows(
+                        state,
+                        swarm,
+                        resp_msg,
+                        width,
+                        MessageRenderMode::Transcript,
+                    ));
+                }
+            }
+            if let Some(prompt_agents) = pending_by_prompt.get(&msg_idx) {
+                rows.extend(inline_breather_rows(state, prompt_agents, pulse_on, width));
+                for id in prompt_agents {
+                    inline_shown.insert(id.clone());
+                }
+            }
         }
     }
 
-    rows.extend(breather_rows_for_user_prompt(state, swarm, pulse_on, width));
+    // Only show the global breather for active agents NOT already shown inline
+    // (e.g. swarm agents, or agents dispatched before prompt tracking was added).
+    let any_remaining = state.agents.agents.iter().any(|a| {
+        !inline_shown.contains(&a.id)
+            && (state.agents.active_turns.contains_key(&a.id)
+                || state
+                    .agents
+                    .queued_codex_turns
+                    .iter()
+                    .any(|t| t.agent_id == a.id))
+            && if let Some(sel) = agent {
+                a.id == sel || chat_clone_base_id(&a.id) == Some(sel)
+            } else {
+                true
+            }
+    });
+    // Also show global breather for swarm mission status (Done/Waiting/etc.) even
+    // when no agents are active, so the completion state remains visible.
+    let has_swarm_context = mission.is_some_and(|mid| {
+        state
+            .agents
+            .missions
+            .iter()
+            .any(|m| m.id == mid && m.swarm)
+    });
+    if any_remaining || has_swarm_context {
+        rows.extend(breather_rows_for_user_prompt(state, swarm, pulse_on, width));
+    }
     rows
 }
 
@@ -1559,6 +1763,10 @@ fn message_matches_context(msg: &AgentMessage, mission: Option<&str>, agent: Opt
     }
     if let Some(agent_id) = agent {
         return msg.agent_id.as_deref() == Some(agent_id)
+            || msg
+                .agent_id
+                .as_deref()
+                .is_some_and(|id| chat_clone_base_id(id) == Some(agent_id))
             || msg.agent_id.is_none()
             || matches!(msg.channel, nit_core::AgentChannel::Broadcast);
     }
@@ -1580,19 +1788,13 @@ fn format_message_rows(
     };
     if msg.agent_id.is_none() {
         let bubble = format_user_bubble_rows(msg, &text_lines, width);
-        let mut out = bubble
+        return bubble
             .into_iter()
             .map(|text| ThreadRow {
                 text,
                 kind: ThreadRowKind::User,
             })
             .collect::<Vec<_>>();
-        // Spacer between chat turns to make prompts easier to scan.
-        out.push(ThreadRow {
-            text: String::new(),
-            kind: ThreadRowKind::User,
-        });
-        return out;
     }
 
     // Swarm meta is shown in the "Working ..." table footer when in swarm mission context, so
@@ -1617,19 +1819,6 @@ fn format_message_rows(
     let indent_str = " ".repeat(indent);
 
     let mut out = Vec::new();
-    for seg in wrap_visual_line(&header, max_inner) {
-        // `wrap_visual_line` can leave trailing spaces when it wraps at a break point. If we
-        // preserve those, selection logic may mistake agent rows for padded user prompt rows.
-        let seg = seg.trim_end_matches(' ');
-        out.push(ThreadRow {
-            text: if seg.is_empty() {
-                String::new()
-            } else {
-                format!("{indent_str}{seg}")
-            },
-            kind: ThreadRowKind::Agent,
-        });
-    }
     match mode {
         MessageRenderMode::Transcript => {
             let artifact_target = state
@@ -1647,19 +1836,36 @@ fn format_message_rows(
                     )
                 });
             if artifact_target.is_some() {
-                let artifact_row = format!("{indent_str}done (see ARTIFACTS)");
+                let callout = format!("{indent_str}\u{21b3} {header} done (see ARTIFACTS)");
                 out.push(ThreadRow {
-                    text: pad_line_right(&artifact_row, width),
+                    text: pad_line_right(&callout, width),
                     kind: ThreadRowKind::ArtifactLink,
                 });
             } else {
+                let callout = format!("{indent_str}\u{21b3} {header} done");
                 out.push(ThreadRow {
-                    text: format!("{indent_str}done"),
+                    text: callout,
                     kind: ThreadRowKind::Agent,
                 });
             }
+            // Spacer after agent reply to separate chat turns.
+            out.push(ThreadRow {
+                text: String::new(),
+                kind: ThreadRowKind::Agent,
+            });
         }
         MessageRenderMode::Full => {
+            for seg in wrap_visual_line(&header, max_inner) {
+                let seg = seg.trim_end_matches(' ');
+                out.push(ThreadRow {
+                    text: if seg.is_empty() {
+                        String::new()
+                    } else {
+                        format!("{indent_str}{seg}")
+                    },
+                    kind: ThreadRowKind::Agent,
+                });
+            }
             for line in text_lines {
                 for segment in wrap_visual_line(line, max_inner) {
                     let segment = segment.trim_end_matches(' ');
@@ -1682,6 +1888,9 @@ fn agent_identity_badge(state: &AppState, agent_id: &str) -> String {
     let id_full = agent_id.trim();
     if let Some(label) = compact_swarm_clone_label(id_full) {
         return truncate_label(&label, AGENT_BADGE_MAX_CHARS);
+    }
+    if let Some(base_id) = chat_clone_base_id(id_full) {
+        return agent_identity_badge(state, base_id);
     }
     let id = truncate_label(id_full, 10);
     let Some(agent) = state
@@ -1758,6 +1967,12 @@ fn agent_roster_label(agent: &AgentLane) -> String {
     if let Some(label) = swarm_clone_source_label(id_full) {
         return label;
     }
+    if chat_clone_base_id(id_full).is_some() {
+        let role_full = agent.role.trim();
+        if !role_full.is_empty() {
+            return role_full.to_string();
+        }
+    }
     let role_full = agent.role.trim();
     if role_full.is_empty() {
         return id_full.to_string();
@@ -1766,6 +1981,111 @@ fn agent_roster_label(agent: &AgentLane) -> String {
         return role_full.to_string();
     }
     format!("{role_full}/{id_full}")
+}
+
+/// Compact inline working indicator for specific agents, shown right after their user prompt.
+fn inline_breather_rows(
+    state: &AppState,
+    agent_ids: &[String],
+    pulse_on: bool,
+    width: usize,
+) -> Vec<ThreadRow> {
+    let now = Instant::now();
+    let width = width.max(1);
+    let elap_w = 6usize;
+    let hb_w = 4usize;
+    let out_w = 4usize;
+    let times_and_spacing = elap_w + hb_w + out_w + 3;
+    let agent_w = width.saturating_sub(times_and_spacing + 1).max(1);
+
+    let seed_id = agent_ids.first().map(String::as_str);
+    let ecg = ecg_indicator(state.metrics.frame_count, seed_id, pulse_on, true);
+
+    let mut rows = Vec::new();
+    rows.push(ThreadRow {
+        text: format!("{ecg} Working ..."),
+        kind: ThreadRowKind::Breather,
+    });
+    rows.push(ThreadRow {
+        text: pad_to_width(
+            &format!(
+                "{} {} {} {}",
+                fit_left("AGENT", agent_w),
+                fit_right("ELAP", elap_w),
+                fit_right("HB", hb_w),
+                fit_right("OUT", out_w),
+            ),
+            width,
+        ),
+        kind: ThreadRowKind::StatusHeader,
+    });
+    for id in agent_ids {
+        let agent = state
+            .agents
+            .agents
+            .iter()
+            .find(|a| a.id == id.as_str());
+        let badge = agent
+            .map(agent_roster_label)
+            .unwrap_or_else(|| id.to_string());
+        let turn = state.agents.active_turns.get(id.as_str());
+        let stage_raw = if let Some(turn) = turn {
+            turn.stage.as_deref().unwrap_or("starting")
+        } else {
+            "queued"
+        };
+        let stage = agent
+            .map(|a| format_agent_stage_label(state, a, stage_raw))
+            .unwrap_or_else(|| stage_raw.to_string());
+        let suppress = stage_raw == "queued";
+        let (elapsed_s, hb_s, out_s) = if suppress {
+            ("--".into(), "--".into(), "--".into())
+        } else {
+            let elapsed = turn.and_then(|t| now.checked_duration_since(t.started_at));
+            let hb = turn
+                .and_then(|t| now.checked_duration_since(t.last_heartbeat_at))
+                .map(|d| d.as_secs());
+            let out = turn
+                .and_then(|t| now.checked_duration_since(t.last_output_at))
+                .map(|d| d.as_secs());
+            (
+                elapsed
+                    .map(format_duration_compact)
+                    .unwrap_or_else(|| "--".into()),
+                hb.map(|s| format!("{s}s"))
+                    .unwrap_or_else(|| "--".into()),
+                out.map(|s| format!("{s}s"))
+                    .unwrap_or_else(|| "--".into()),
+            )
+        };
+        rows.push(ThreadRow {
+            text: pad_to_width(
+                &format!(
+                    "{} {} {} {}",
+                    fit_left(&badge, agent_w),
+                    fit_right(&elapsed_s, elap_w),
+                    fit_right(&hb_s, hb_w),
+                    fit_right(&out_s, out_w),
+                ),
+                width,
+            ),
+            kind: ThreadRowKind::StatusRow,
+        });
+        rows.push(ThreadRow {
+            text: pad_to_width(
+                &format!(
+                    "{} {} {} {}",
+                    fit_left(&format!("\u{21b3} {stage}"), agent_w),
+                    fit_right("", elap_w),
+                    fit_right("", hb_w),
+                    fit_right("", out_w),
+                ),
+                width,
+            ),
+            kind: ThreadRowKind::StatusSubRow,
+        });
+    }
+    rows
 }
 
 fn breather_rows_for_user_prompt(
@@ -1797,6 +2117,7 @@ fn breather_rows_for_user_prompt(
             agent.current_mission.as_deref() == Some(mission_id) || queued_in_mission
         } else if let Some(selected_agent) = agent_ctx {
             agent.id == selected_agent
+                || chat_clone_base_id(&agent.id) == Some(selected_agent)
         } else {
             true
         };
@@ -2856,7 +3177,7 @@ mod tests {
             prompt_msg_idx: None,
         };
         let rows = format_message_rows(&state, None, &msg, 48, MessageRenderMode::Transcript);
-        assert!(rows.len() >= 6);
+        assert!(rows.len() >= 5);
         assert!(matches!(rows[0].kind, ThreadRowKind::User));
         // Top padding row + label row.
         assert!(rows[0].text.trim().is_empty());
@@ -2865,8 +3186,6 @@ mod tests {
         assert!(rows[3].text.trim_start().starts_with("line two"));
         // Bottom padding row.
         assert!(rows[4].text.trim().is_empty());
-        // Spacer row after the prompt to make turns easier to scan.
-        assert!(rows.last().unwrap().text.is_empty());
     }
 
     #[test]
@@ -2916,17 +3235,15 @@ mod tests {
             80,
             MessageRenderMode::Transcript,
         );
-        // Stable header row (avoid animated separators in the transcript).
-        assert_eq!(first_rows[0].text, "[Coder]");
-        assert_eq!(second_rows[0].text, "[Coder]");
-        assert!(first_rows[1].text.starts_with("done (see ARTIFACTS)"));
-        assert!(second_rows[1].text.starts_with("done (see ARTIFACTS)"));
-        assert_eq!(UnicodeWidthStr::width(first_rows[1].text.as_str()), 80);
-        assert_eq!(UnicodeWidthStr::width(second_rows[1].text.as_str()), 80);
-        assert!(matches!(first_rows[1].kind, ThreadRowKind::ArtifactLink));
-        assert!(matches!(second_rows[1].kind, ThreadRowKind::ArtifactLink));
+        // Combined callout row with badge inline (no separate header).
         assert!(first_rows[0].text.contains("[Coder]"));
         assert!(second_rows[0].text.contains("[Coder]"));
+        assert!(first_rows[0].text.contains("done (see ARTIFACTS)"));
+        assert!(second_rows[0].text.contains("done (see ARTIFACTS)"));
+        assert_eq!(UnicodeWidthStr::width(first_rows[0].text.as_str()), 80);
+        assert_eq!(UnicodeWidthStr::width(second_rows[0].text.as_str()), 80);
+        assert!(matches!(first_rows[0].kind, ThreadRowKind::ArtifactLink));
+        assert!(matches!(second_rows[0].kind, ThreadRowKind::ArtifactLink));
     }
 
     #[test]
@@ -3060,11 +3377,11 @@ mod tests {
             120,
             MessageRenderMode::Transcript,
         );
-        // Header row, then message.
+        // Combined callout with badge and status.
         assert!(rows[0].text.contains("[Coder]"));
-        assert!(rows[1].text.starts_with("done (see ARTIFACTS)"));
-        assert_eq!(UnicodeWidthStr::width(rows[1].text.as_str()), 120);
-        assert!(matches!(rows[1].kind, ThreadRowKind::ArtifactLink));
+        assert!(rows[0].text.contains("done (see ARTIFACTS)"));
+        assert_eq!(UnicodeWidthStr::width(rows[0].text.as_str()), 120);
+        assert!(matches!(rows[0].kind, ThreadRowKind::ArtifactLink));
         assert!(!rows.iter().any(|row| row.text.contains("hello")));
     }
 
@@ -3092,8 +3409,9 @@ mod tests {
             prompt_msg_idx: None,
         });
 
-        assert_eq!(artifact_message_index_for_line(&state, 120, 1), Some(0));
-        assert_eq!(artifact_message_index_for_line(&state, 120, 0), None);
+        // ArtifactLink is now the first row (combined callout).
+        assert_eq!(artifact_message_index_for_line(&state, 120, 0), Some(0));
+        assert_eq!(artifact_message_index_for_line(&state, 120, 1), None);
     }
 
     #[test]
@@ -3167,8 +3485,9 @@ mod tests {
             MessageRenderMode::Transcript,
         );
 
-        assert_eq!(rows[1].text, "done");
-        assert!(matches!(rows[1].kind, ThreadRowKind::Agent));
+        // Combined callout with badge: "↳ [Planner] done"
+        assert!(rows[0].text.contains("done"));
+        assert!(matches!(rows[0].kind, ThreadRowKind::Agent));
     }
 
     #[test]
@@ -3266,9 +3585,10 @@ mod tests {
             MessageRenderMode::Transcript,
         );
 
-        assert!(rows[1].text.starts_with("done (see ARTIFACTS)"));
-        assert_eq!(UnicodeWidthStr::width(rows[1].text.as_str()), 120);
-        assert!(matches!(rows[1].kind, ThreadRowKind::ArtifactLink));
+        // Combined callout: "↳ [Planner] done (see ARTIFACTS)"
+        assert!(rows[0].text.contains("done (see ARTIFACTS)"));
+        assert_eq!(UnicodeWidthStr::width(rows[0].text.as_str()), 120);
+        assert!(matches!(rows[0].kind, ThreadRowKind::ArtifactLink));
     }
 
     #[test]

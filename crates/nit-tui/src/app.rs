@@ -15283,7 +15283,7 @@ mod tests {
         let lines = agent_console_view::thread_lines_for_selection_with_swarm(&state, &swarm, 120);
         let line_idx = lines
             .iter()
-            .position(|line| line == "done")
+            .position(|line| line.contains("done") && !line.contains("ARTIFACTS"))
             .expect("plain done row");
 
         assert!(!maybe_open_artifact_popup_from_console_line(
@@ -16305,8 +16305,8 @@ k = 2
         let down = MouseEvent {
             kind: MouseEventKind::Down(crossterm::event::MouseButton::Left),
             column: text_area.x,
-            // Agent messages are rendered as: badge header, then a "done" placeholder.
-            row: text_area.y.saturating_add(1),
+            // Agent messages are rendered as a combined callout row.
+            row: text_area.y,
             modifiers: KeyModifiers::NONE,
         };
         assert!(handle_mouse_down(
@@ -16320,7 +16320,7 @@ k = 2
         let drag = MouseEvent {
             kind: MouseEventKind::Drag(crossterm::event::MouseButton::Left),
             column: text_area.x.saturating_add(24),
-            row: text_area.y.saturating_add(2),
+            row: text_area.y.saturating_add(1),
             modifiers: KeyModifiers::NONE,
         };
         assert!(handle_mouse_drag(
