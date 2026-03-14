@@ -1680,6 +1680,7 @@ fn codex_exec_endpoint_label(agent_id: &str, resume_thread_id: Option<&str>) -> 
 fn codex_model_slug_for_agent_id(agent_id: &str) -> &str {
     agent_id
         .split_once("#swarm-")
+        .or_else(|| agent_id.split_once("#chat-clone-"))
         .map(|(base, _)| {
             if base.trim().is_empty() {
                 agent_id
@@ -1989,6 +1990,18 @@ mod tests {
             "gpt-5.2"
         );
         assert_eq!(codex_model_slug_for_agent_id("gpt-5.2"), "gpt-5.2");
+    }
+
+    #[test]
+    fn chat_clone_agent_ids_resolve_to_base_model_slug() {
+        assert_eq!(
+            codex_model_slug_for_agent_id("gpt-5.4#chat-clone-01"),
+            "gpt-5.4"
+        );
+        assert_eq!(
+            codex_model_slug_for_agent_id("gpt-5.4#chat-clone-12"),
+            "gpt-5.4"
+        );
     }
 
     #[test]

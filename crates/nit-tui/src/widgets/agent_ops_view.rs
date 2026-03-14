@@ -19,8 +19,8 @@ use std::{
 use time::OffsetDateTime;
 
 use crate::swarm::{
-    normalize_role_label, GateReportGate, SwarmDashboardView, SwarmPersistenceView, SwarmRuntime,
-    SwarmTaskArtifacts,
+    chat_clone_base_id, is_chat_clone_agent_id, normalize_role_label, GateReportGate,
+    SwarmDashboardView, SwarmPersistenceView, SwarmRuntime, SwarmTaskArtifacts,
 };
 use crate::theme::Theme;
 use crate::widgets::text_selection::apply_ui_selection;
@@ -1072,7 +1072,8 @@ fn roster_lines(state: &AppState, swarm: Option<&SwarmRuntime>, width: usize) ->
                 continue;
             };
 
-            let is_clone = is_swarm_clone_agent_id(agent.id.as_str());
+            let is_clone = is_swarm_clone_agent_id(agent.id.as_str())
+                || is_chat_clone_agent_id(agent.id.as_str());
             let agent_selected = selected_row == Some(RosterSelectableRow::Agent { agent_idx });
             let priority_prefix = if agent.supports_swarm_priority() && !is_clone {
                 if state.agents.swarm_priority_agent_ids.contains(&agent.id) {
@@ -1088,7 +1089,7 @@ fn roster_lines(state: &AppState, swarm: Option<&SwarmRuntime>, width: usize) ->
             } else {
                 arrow_glyph()
             };
-            let role_label = if is_clone {
+            let role_label = if is_swarm_clone_agent_id(agent.id.as_str()) {
                 let assigned_role = (|| {
                     let swarm = swarm?;
                     let (mission_id, _suffix) = swarm_clone_label_parts(agent.id.as_str())?;
@@ -1100,6 +1101,9 @@ fn roster_lines(state: &AppState, swarm: Option<&SwarmRuntime>, width: usize) ->
                 })();
                 let label = swarm_clone_display_label(agent.id.as_str(), assigned_role.as_deref())
                     .unwrap_or_else(|| "swarm clone".into());
+                format!("    {} {label}", arrow_glyph())
+            } else if is_chat_clone_agent_id(agent.id.as_str()) {
+                let label = table_role_label(agent.role.as_str());
                 format!("    {} {label}", arrow_glyph())
             } else {
                 format!("{priority_prefix}{}", table_role_label(agent.role.as_str()))
@@ -2363,20 +2367,126 @@ fn artifact_list_widths(width: usize) -> Vec<usize> {
     allocate_columns(cols_total, &[6, 6, 8, 12], &[8, 8, 10, 50], 3)
 }
 
-fn artifact_card_row(card: &ArtifactCard, widths: &[usize], selected: bool) -> String {
+/// Root prompt glyph.
+const PROMPT_GLYPH: char = '→';
+
+fn artifact_card_row(
+    card: &ArtifactCard,
+    widths: &[usize],
+    selected: bool,
+    is_child: bool,
+) -> String {
     let selected_marker = if selected { '>' } else { ' ' };
-    let glyph = if selected {
-        cursor_glyph()
+    if is_child {
+        // Child row: indented with tree connector ↳.
+        let glyph = if selected { cursor_glyph() } else { '↳' };
+        let child_preview_width = widths.get(3).copied().unwrap_or(0);
+        format!(
+            "{selected_marker}  {glyph} {} {} {} {}",
+            fit_left(card.kind, *widths.first().unwrap_or(&0)),
+            fit_left(card.at.as_str(), *widths.get(1).unwrap_or(&0)),
+            fit_left(card.owner.as_str(), *widths.get(2).unwrap_or(&0)),
+            fit_left(
+                card.preview.as_str(),
+                child_preview_width.saturating_sub(2)
+            ),
+        )
     } else {
-        arrow_glyph()
-    };
-    format!(
-        "{selected_marker}{glyph} {} {} {} {}",
-        fit_left(card.kind, *widths.first().unwrap_or(&0)),
-        fit_left(card.at.as_str(), *widths.get(1).unwrap_or(&0)),
-        fit_left(card.owner.as_str(), *widths.get(2).unwrap_or(&0)),
-        fit_left(card.preview.as_str(), *widths.get(3).unwrap_or(&0)),
-    )
+        // Root row (prompt): distinct glyph →.
+        let glyph = if selected { cursor_glyph() } else { PROMPT_GLYPH };
+        format!(
+            "{selected_marker}{glyph} {} {} {} {}",
+            fit_left(card.kind, *widths.first().unwrap_or(&0)),
+            fit_left(card.at.as_str(), *widths.get(1).unwrap_or(&0)),
+            fit_left(card.owner.as_str(), *widths.get(2).unwrap_or(&0)),
+            fit_left(card.preview.as_str(), *widths.get(3).unwrap_or(&0)),
+        )
+    }
+}
+
+/// Group reply indices under their correct prompt index.
+///
+/// For replies that have a `prompt_msg_idx` set (explicit parent tracking), the reply is
+/// placed under that prompt. For replies without it, falls back to the nearest preceding
+/// prompt by index (binary search).
+///
+/// Returns a list of `(Option<prompt_idx>, Vec<reply_indices>)` groups.
+fn group_replies_under_prompts(
+    prompt_indices: &[usize],
+    reply_indices: &[usize],
+) -> Vec<(Option<usize>, Vec<usize>)> {
+    group_replies_under_prompts_with_hints(prompt_indices, reply_indices, &[])
+}
+
+/// Like `group_replies_under_prompts` but accepts explicit parent hints.
+/// `parent_hints` is parallel to `reply_indices`; each entry is `Some(prompt_msg_idx)` if the
+/// reply explicitly knows its parent prompt, or `None` to fall back to positional grouping.
+fn group_replies_under_prompts_with_hints(
+    prompt_indices: &[usize],
+    reply_indices: &[usize],
+    parent_hints: &[Option<usize>],
+) -> Vec<(Option<usize>, Vec<usize>)> {
+    if prompt_indices.is_empty() {
+        if reply_indices.is_empty() {
+            return Vec::new();
+        }
+        return vec![(None, reply_indices.to_vec())];
+    }
+
+    // Build one group per prompt (in order).
+    let mut groups: Vec<(Option<usize>, Vec<usize>)> =
+        prompt_indices.iter().map(|&idx| (Some(idx), Vec::new())).collect();
+
+    // Build a quick lookup: prompt_msg_idx → position in groups vec.
+    let prompt_pos: std::collections::HashMap<usize, usize> = prompt_indices
+        .iter()
+        .enumerate()
+        .map(|(pos, &idx)| (idx, pos))
+        .collect();
+
+    for (i, &reply_idx) in reply_indices.iter().enumerate() {
+        // 1) Try explicit parent hint first.
+        let hint = parent_hints.get(i).copied().flatten();
+        if let Some(parent_idx) = hint {
+            if let Some(&slot) = prompt_pos.get(&parent_idx) {
+                let offset = if groups.first().is_some_and(|g| g.0.is_none()) {
+                    1
+                } else {
+                    0
+                };
+                groups[slot + offset].1.push(reply_idx);
+                continue;
+            }
+        }
+
+        // 2) Fallback: binary search for the rightmost prompt_idx <= reply_idx.
+        let slot = match prompt_indices.binary_search(&reply_idx) {
+            Ok(pos) => pos,
+            Err(pos) => {
+                if pos == 0 {
+                    usize::MAX // sentinel for "orphan"
+                } else {
+                    pos - 1
+                }
+            }
+        };
+        if slot == usize::MAX {
+            if groups.first().is_some_and(|g| g.0.is_none()) {
+                groups[0].1.push(reply_idx);
+            } else {
+                groups.insert(0, (None, vec![reply_idx]));
+            }
+        } else {
+            let offset = if groups.first().is_some_and(|g| g.0.is_none()) {
+                1
+            } else {
+                0
+            };
+            groups[slot + offset].1.push(reply_idx);
+        }
+    }
+
+    groups
 }
 
 fn build_mission_cards(
@@ -2384,18 +2494,26 @@ fn build_mission_cards(
     mission_id: &str,
     preview_chars: usize,
 ) -> Vec<ArtifactCard> {
-    let mut prompt_idx = None;
-    let mut reply_indices = Vec::new();
+    // Two-pass grouping: collect prompts first, then assign each reply to the prompt
+    // whose message index is the highest that is still <= the reply's index.
+    // This correctly handles out-of-order replies (e.g. reply to prompt 1 arriving
+    // after prompt 2 was already answered).
+    let mut prompt_indices: Vec<usize> = Vec::new();
+    let mut reply_indices: Vec<usize> = Vec::new();
+    let mut parent_hints: Vec<Option<usize>> = Vec::new();
     for (idx, message) in state.agents.messages.iter().enumerate() {
         if message.mission_id.as_deref() != Some(mission_id) {
             continue;
         }
         if message.agent_id.is_none() {
-            prompt_idx = Some(idx);
+            prompt_indices.push(idx);
         } else {
             reply_indices.push(idx);
+            parent_hints.push(message.prompt_msg_idx);
         }
     }
+    let groups =
+        group_replies_under_prompts_with_hints(&prompt_indices, &reply_indices, &parent_hints);
 
     let mut patch_indices = state
         .agents
@@ -2412,9 +2530,6 @@ fn build_mission_cards(
         .filter_map(|(idx, item)| (item.mission_id.as_deref() == Some(mission_id)).then_some(idx))
         .collect::<Vec<_>>();
 
-    if reply_indices.len() > ARTIFACT_CARD_LIMIT_REPLIES {
-        reply_indices = reply_indices.split_off(reply_indices.len() - ARTIFACT_CARD_LIMIT_REPLIES);
-    }
     if patch_indices.len() > ARTIFACT_CARD_LIMIT_PATCHES {
         patch_indices = patch_indices.split_off(patch_indices.len() - ARTIFACT_CARD_LIMIT_PATCHES);
     }
@@ -2424,29 +2539,36 @@ fn build_mission_cards(
     }
 
     let mut cards = Vec::new();
-    if let Some(idx) = prompt_idx {
-        if let Some(message) = state.agents.messages.get(idx) {
-            cards.push(ArtifactCard {
-                kind: "PROMPT",
-                at: message.at.clone(),
-                owner: "You".into(),
-                preview: summarize_text_preview(message.text.as_str(), preview_chars),
-                reference: ArtifactRef::Message { idx },
-            });
+    for (prompt_idx, mut reply_indices) in groups {
+        if let Some(idx) = prompt_idx {
+            if let Some(message) = state.agents.messages.get(idx) {
+                cards.push(ArtifactCard {
+                    kind: "PROMPT",
+                    at: message.at.clone(),
+                    owner: "You".into(),
+                    preview: summarize_text_preview(message.text.as_str(), preview_chars),
+                    reference: ArtifactRef::Message { idx },
+                });
+            }
+        }
+        if reply_indices.len() > ARTIFACT_CARD_LIMIT_REPLIES {
+            reply_indices =
+                reply_indices.split_off(reply_indices.len() - ARTIFACT_CARD_LIMIT_REPLIES);
+        }
+        for idx in reply_indices {
+            if let Some(message) = state.agents.messages.get(idx) {
+                let owner = message.agent_id.as_deref().unwrap_or("agent");
+                cards.push(ArtifactCard {
+                    kind: "REPLY",
+                    at: message.at.clone(),
+                    owner: owner.into(),
+                    preview: summarize_text_preview(message.text.as_str(), preview_chars),
+                    reference: ArtifactRef::Message { idx },
+                });
+            }
         }
     }
-    for idx in reply_indices.into_iter().rev() {
-        if let Some(message) = state.agents.messages.get(idx) {
-            let owner = message.agent_id.as_deref().unwrap_or("agent");
-            cards.push(ArtifactCard {
-                kind: "REPLY",
-                at: message.at.clone(),
-                owner: owner.into(),
-                preview: summarize_text_preview(message.text.as_str(), preview_chars),
-                reference: ArtifactRef::Message { idx },
-            });
-        }
-    }
+    // Patches and evidence are appended after the message tree.
     for idx in patch_indices.into_iter().rev() {
         if let Some(patch) = state.agents.patches.get(idx) {
             cards.push(ArtifactCard {
@@ -2474,20 +2596,30 @@ fn build_mission_cards(
 }
 
 fn build_ad_hoc_cards(state: &AppState, agent_id: &str, preview_chars: usize) -> Vec<ArtifactCard> {
-    let mut prompt_idx = None;
-    let mut reply_indices = Vec::new();
+    let is_own_or_clone = |id: Option<&str>| -> bool {
+        id == Some(agent_id) || id.is_some_and(|id| chat_clone_base_id(id) == Some(agent_id))
+    };
+    // Two-pass grouping: assign each reply to the prompt whose message index
+    // is the highest that is still <= the reply's index.
+    let mut prompt_indices: Vec<usize> = Vec::new();
+    let mut reply_indices_vec: Vec<usize> = Vec::new();
+    let mut parent_hints: Vec<Option<usize>> = Vec::new();
     for (idx, message) in state.agents.messages.iter().enumerate() {
         if message.mission_id.is_some() {
             continue;
         }
         if message.agent_id.is_none() {
-            prompt_idx = Some(idx);
-            continue;
-        }
-        if message.agent_id.as_deref() == Some(agent_id) {
-            reply_indices.push(idx);
+            prompt_indices.push(idx);
+        } else if is_own_or_clone(message.agent_id.as_deref()) {
+            reply_indices_vec.push(idx);
+            parent_hints.push(message.prompt_msg_idx);
         }
     }
+    let groups = group_replies_under_prompts_with_hints(
+        &prompt_indices,
+        &reply_indices_vec,
+        &parent_hints,
+    );
 
     let mut patch_indices = state
         .agents
@@ -2495,38 +2627,44 @@ fn build_ad_hoc_cards(state: &AppState, agent_id: &str, preview_chars: usize) ->
         .iter()
         .enumerate()
         .filter_map(|(idx, patch)| {
-            (patch.mission_id.is_none() && patch.agent_id == agent_id).then_some(idx)
+            (patch.mission_id.is_none()
+                && (patch.agent_id == agent_id
+                    || chat_clone_base_id(&patch.agent_id) == Some(agent_id)))
+            .then_some(idx)
         })
         .collect::<Vec<_>>();
 
-    if reply_indices.len() > ARTIFACT_CARD_LIMIT_REPLIES {
-        reply_indices = reply_indices.split_off(reply_indices.len() - ARTIFACT_CARD_LIMIT_REPLIES);
-    }
     if patch_indices.len() > ARTIFACT_CARD_LIMIT_PATCHES {
         patch_indices = patch_indices.split_off(patch_indices.len() - ARTIFACT_CARD_LIMIT_PATCHES);
     }
 
     let mut cards = Vec::new();
-    if let Some(idx) = prompt_idx {
-        if let Some(message) = state.agents.messages.get(idx) {
-            cards.push(ArtifactCard {
-                kind: "PROMPT",
-                at: message.at.clone(),
-                owner: "You".into(),
-                preview: summarize_text_preview(message.text.as_str(), preview_chars),
-                reference: ArtifactRef::Message { idx },
-            });
+    for (prompt_idx, mut reply_indices) in groups {
+        if let Some(idx) = prompt_idx {
+            if let Some(message) = state.agents.messages.get(idx) {
+                cards.push(ArtifactCard {
+                    kind: "PROMPT",
+                    at: message.at.clone(),
+                    owner: "You".into(),
+                    preview: summarize_text_preview(message.text.as_str(), preview_chars),
+                    reference: ArtifactRef::Message { idx },
+                });
+            }
         }
-    }
-    for idx in reply_indices.into_iter().rev() {
-        if let Some(message) = state.agents.messages.get(idx) {
-            cards.push(ArtifactCard {
-                kind: "REPLY",
-                at: message.at.clone(),
-                owner: agent_id.into(),
-                preview: summarize_text_preview(message.text.as_str(), preview_chars),
-                reference: ArtifactRef::Message { idx },
-            });
+        if reply_indices.len() > ARTIFACT_CARD_LIMIT_REPLIES {
+            reply_indices =
+                reply_indices.split_off(reply_indices.len() - ARTIFACT_CARD_LIMIT_REPLIES);
+        }
+        for idx in reply_indices {
+            if let Some(message) = state.agents.messages.get(idx) {
+                cards.push(ArtifactCard {
+                    kind: "REPLY",
+                    at: message.at.clone(),
+                    owner: agent_id.into(),
+                    preview: summarize_text_preview(message.text.as_str(), preview_chars),
+                    reference: ArtifactRef::Message { idx },
+                });
+            }
         }
     }
     for idx in patch_indices.into_iter().rev() {
@@ -2548,18 +2686,23 @@ fn build_persisted_mission_cards(
     mission_id: &str,
     preview_chars: usize,
 ) -> Vec<ArtifactCard> {
-    let mut prompt = None;
-    let mut replies = Vec::new();
-    for message in run.messages.iter() {
-        if message.mission_id.as_deref() != Some(mission_id) {
-            continue;
-        }
-        if message.agent_id.is_none() {
-            prompt = Some(message.clone());
-        } else {
-            replies.push(message.clone());
-        }
-    }
+    // Two-pass grouping: assign each reply to its nearest preceding prompt.
+    let filtered: Vec<&AgentMessage> = run
+        .messages
+        .iter()
+        .filter(|m| m.mission_id.as_deref() == Some(mission_id))
+        .collect();
+    let prompt_positions: Vec<usize> = filtered
+        .iter()
+        .enumerate()
+        .filter_map(|(i, m)| m.agent_id.is_none().then_some(i))
+        .collect();
+    let reply_positions: Vec<usize> = filtered
+        .iter()
+        .enumerate()
+        .filter_map(|(i, m)| m.agent_id.is_some().then_some(i))
+        .collect();
+    let groups = group_replies_under_prompts(&prompt_positions, &reply_positions);
 
     let mut patches = run
         .patches
@@ -2574,9 +2717,6 @@ fn build_persisted_mission_cards(
         .cloned()
         .collect::<Vec<_>>();
 
-    if replies.len() > ARTIFACT_CARD_LIMIT_REPLIES {
-        replies = replies.split_off(replies.len() - ARTIFACT_CARD_LIMIT_REPLIES);
-    }
     if patches.len() > ARTIFACT_CARD_LIMIT_PATCHES {
         patches = patches.split_off(patches.len() - ARTIFACT_CARD_LIMIT_PATCHES);
     }
@@ -2585,24 +2725,38 @@ fn build_persisted_mission_cards(
     }
 
     let mut cards = Vec::new();
-    if let Some(message) = prompt {
-        cards.push(ArtifactCard {
-            kind: "PROMPT",
-            at: message.at.clone(),
-            owner: "You".into(),
-            preview: summarize_text_preview(message.text.as_str(), preview_chars),
-            reference: ArtifactRef::PersistedMessage { message },
-        });
-    }
-    for message in replies.into_iter().rev() {
-        let owner = message.agent_id.as_deref().unwrap_or("agent").to_string();
-        cards.push(ArtifactCard {
-            kind: "REPLY",
-            at: message.at.clone(),
-            owner,
-            preview: summarize_text_preview(message.text.as_str(), preview_chars),
-            reference: ArtifactRef::PersistedMessage { message },
-        });
+    for (prompt_pos, mut child_positions) in groups {
+        if let Some(pos) = prompt_pos {
+            if let Some(message) = filtered.get(pos) {
+                cards.push(ArtifactCard {
+                    kind: "PROMPT",
+                    at: message.at.clone(),
+                    owner: "You".into(),
+                    preview: summarize_text_preview(message.text.as_str(), preview_chars),
+                    reference: ArtifactRef::PersistedMessage {
+                        message: (*message).clone(),
+                    },
+                });
+            }
+        }
+        if child_positions.len() > ARTIFACT_CARD_LIMIT_REPLIES {
+            child_positions =
+                child_positions.split_off(child_positions.len() - ARTIFACT_CARD_LIMIT_REPLIES);
+        }
+        for pos in child_positions {
+            if let Some(message) = filtered.get(pos) {
+                let owner = message.agent_id.as_deref().unwrap_or("agent").to_string();
+                cards.push(ArtifactCard {
+                    kind: "REPLY",
+                    at: message.at.clone(),
+                    owner,
+                    preview: summarize_text_preview(message.text.as_str(), preview_chars),
+                    reference: ArtifactRef::PersistedMessage {
+                        message: (*message).clone(),
+                    },
+                });
+            }
+        }
     }
     for patch in patches.into_iter().rev() {
         cards.push(ArtifactCard {
@@ -2641,18 +2795,27 @@ fn build_persisted_ad_hoc_cards(
     agent_id: &str,
     preview_chars: usize,
 ) -> Vec<ArtifactCard> {
-    let mut prompt = None;
-    let mut replies = Vec::new();
-    for message in run.messages.iter() {
-        if message.mission_id.is_some() {
-            continue;
-        }
-        if message.agent_id.is_none() {
-            prompt = Some(message.clone());
-        } else if message.agent_id.as_deref() == Some(agent_id) {
-            replies.push(message.clone());
-        }
-    }
+    // Group messages by prompt.
+    // Two-pass grouping: assign each reply to its nearest preceding prompt.
+    let filtered: Vec<&AgentMessage> = run
+        .messages
+        .iter()
+        .filter(|m| {
+            m.mission_id.is_none()
+                && (m.agent_id.is_none() || m.agent_id.as_deref() == Some(agent_id))
+        })
+        .collect();
+    let prompt_positions: Vec<usize> = filtered
+        .iter()
+        .enumerate()
+        .filter_map(|(i, m)| m.agent_id.is_none().then_some(i))
+        .collect();
+    let reply_positions: Vec<usize> = filtered
+        .iter()
+        .enumerate()
+        .filter_map(|(i, m)| m.agent_id.is_some().then_some(i))
+        .collect();
+    let groups = group_replies_under_prompts(&prompt_positions, &reply_positions);
 
     let mut patches = run
         .patches
@@ -2667,9 +2830,6 @@ fn build_persisted_ad_hoc_cards(
         .cloned()
         .collect::<Vec<_>>();
 
-    if replies.len() > ARTIFACT_CARD_LIMIT_REPLIES {
-        replies = replies.split_off(replies.len() - ARTIFACT_CARD_LIMIT_REPLIES);
-    }
     if patches.len() > ARTIFACT_CARD_LIMIT_PATCHES {
         patches = patches.split_off(patches.len() - ARTIFACT_CARD_LIMIT_PATCHES);
     }
@@ -2678,23 +2838,37 @@ fn build_persisted_ad_hoc_cards(
     }
 
     let mut cards = Vec::new();
-    if let Some(message) = prompt {
-        cards.push(ArtifactCard {
-            kind: "PROMPT",
-            at: message.at.clone(),
-            owner: "You".into(),
-            preview: summarize_text_preview(message.text.as_str(), preview_chars),
-            reference: ArtifactRef::PersistedMessage { message },
-        });
-    }
-    for message in replies.into_iter().rev() {
-        cards.push(ArtifactCard {
-            kind: "REPLY",
-            at: message.at.clone(),
-            owner: agent_id.into(),
-            preview: summarize_text_preview(message.text.as_str(), preview_chars),
-            reference: ArtifactRef::PersistedMessage { message },
-        });
+    for (prompt_pos, mut child_positions) in groups {
+        if let Some(pos) = prompt_pos {
+            if let Some(message) = filtered.get(pos) {
+                cards.push(ArtifactCard {
+                    kind: "PROMPT",
+                    at: message.at.clone(),
+                    owner: "You".into(),
+                    preview: summarize_text_preview(message.text.as_str(), preview_chars),
+                    reference: ArtifactRef::PersistedMessage {
+                        message: (*message).clone(),
+                    },
+                });
+            }
+        }
+        if child_positions.len() > ARTIFACT_CARD_LIMIT_REPLIES {
+            child_positions =
+                child_positions.split_off(child_positions.len() - ARTIFACT_CARD_LIMIT_REPLIES);
+        }
+        for pos in child_positions {
+            if let Some(message) = filtered.get(pos) {
+                cards.push(ArtifactCard {
+                    kind: "REPLY",
+                    at: message.at.clone(),
+                    owner: agent_id.into(),
+                    preview: summarize_text_preview(message.text.as_str(), preview_chars),
+                    reference: ArtifactRef::PersistedMessage {
+                        message: (*message).clone(),
+                    },
+                });
+            }
+        }
     }
     for patch in patches.into_iter().rev() {
         cards.push(ArtifactCard {
@@ -3706,6 +3880,7 @@ fn artifact_cards_for_context(
     swarm: Option<&SwarmRuntime>,
     preview_chars: usize,
 ) -> Vec<ArtifactCard> {
+    // If the user explicitly selected an archived run in the history browser, show only that.
     if let Some((_, run)) = selected_archived_run_for_current_context(state) {
         if let Some(mission_id) = state.agents.selected_context_mission() {
             return build_persisted_mission_cards(&run, mission_id, preview_chars);
@@ -3719,6 +3894,7 @@ fn artifact_cards_for_context(
         if let Some(view) = swarm.and_then(|runtime| runtime.swarm_persistence(mission_id)) {
             return build_swarm_cards(&view, preview_chars);
         }
+        // Prefer live cards (correct tree order from grouping). Fall back to persisted.
         let live = build_mission_cards(state, mission_id, preview_chars);
         if !live.is_empty() {
             return live;
@@ -3780,18 +3956,30 @@ fn artifacts_lines(state: &AppState, swarm: Option<&SwarmRuntime>, width: usize)
         .agents
         .artifacts_selected
         .min(cards.len().saturating_sub(1));
+
+    // Render in tree style: prompts are roots, everything else is a child.
+    let has_prompt = cards.iter().any(|c| c.kind == "PROMPT");
     for (idx, card) in cards.iter().enumerate() {
+        let is_child = has_prompt && card.kind != "PROMPT";
         out.push(artifact_card_row(
             card,
             widths.as_slice(),
             idx == selected_idx,
+            is_child,
         ));
     }
 
     out
 }
 
+/// Check if a line is an artifact card row.
+/// Root format: `{' '|'>'}{→|➜|>}{' '}...`
+/// Child format: `{' '|'>'}{' '}{' '}{↳|➜}{' '}...`
 fn is_artifacts_card_row(line: &str) -> bool {
+    is_artifacts_root_card_row(line) || is_artifacts_child_card_row(line)
+}
+
+fn is_artifacts_root_card_row(line: &str) -> bool {
     let mut chars = line.chars();
     let Some(first) = chars.next() else {
         return false;
@@ -3799,13 +3987,37 @@ fn is_artifacts_card_row(line: &str) -> bool {
     if first != ' ' && first != '>' {
         return false;
     }
+    let Some(second) = chars.next() else {
+        return false;
+    };
+    if second == PROMPT_GLYPH || second == CURSOR_PRIMARY || second == '>' {
+        return chars.next() == Some(' ');
+    }
+    false
+}
+
+fn is_artifacts_child_card_row(line: &str) -> bool {
+    let mut chars = line.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if first != ' ' && first != '>' {
+        return false;
+    }
+    // Child rows: two spaces then glyph then space.
+    if chars.next() != Some(' ') {
+        return false;
+    }
+    if chars.next() != Some(' ') {
+        return false;
+    }
     let Some(glyph) = chars.next() else {
         return false;
     };
-    if glyph != ARROW_PRIMARY && glyph != CURSOR_PRIMARY && glyph != '>' {
-        return false;
+    if glyph == '↳' || glyph == CURSOR_PRIMARY {
+        return chars.next() == Some(' ');
     }
-    chars.next() == Some(' ')
+    false
 }
 
 pub fn artifacts_card_index_for_line(lines: &[String], line_idx: usize) -> Option<usize> {
@@ -3899,6 +4111,31 @@ pub fn artifacts_popup_ref(
             mission_id: mission_id.clone(),
         }),
     }
+}
+
+/// Returns `true` if the currently selected artifact is a user prompt (not an agent reply).
+pub fn is_selected_artifact_prompt(
+    state: &AppState,
+    swarm: &SwarmRuntime,
+    width: usize,
+) -> bool {
+    let width = width.max(32);
+    let widths = artifact_list_widths(width);
+    let preview_chars = widths
+        .get(3)
+        .copied()
+        .unwrap_or(120)
+        .saturating_sub(1)
+        .max(10);
+    let cards = artifact_cards_for_context(state, Some(swarm), preview_chars);
+    if cards.is_empty() {
+        return false;
+    }
+    let selected_idx = state
+        .agents
+        .artifacts_selected
+        .min(cards.len().saturating_sub(1));
+    cards[selected_idx].kind == "PROMPT"
 }
 
 pub fn artifacts_popup_ref_for_message(
@@ -4631,10 +4868,22 @@ fn artifacts_styled_line(
         ));
     }
     if is_artifacts_card_row(line) {
-        return Line::from(Span::styled(
-            line.to_string(),
-            ops_line_style(line_idx, line, theme),
-        ));
+        let selected = line.starts_with('>');
+        let is_child = is_artifacts_child_card_row(line);
+        let style = if selected {
+            Style::default().fg(theme.foreground).bg(theme.selection_bg)
+        } else if is_child {
+            // Agent artifact rows: subtle background to distinguish from prompt.
+            Style::default()
+                .fg(theme.foreground)
+                .bg(dim_bg_towards(theme.cursor_line_bg, theme.background, 60))
+        } else {
+            // Prompt rows: dimmed cyan + bold.
+            Style::default()
+                .fg(Color::Rgb(100, 190, 200))
+                .add_modifier(Modifier::BOLD)
+        };
+        return Line::from(Span::styled(line.to_string(), style));
     }
 
     let selected = line.starts_with('>');
@@ -5608,7 +5857,8 @@ fn roster_styled_line(
 
             let selected = selected_row == Some(RosterSelectableRow::Agent { agent_idx })
                 && state.agents.roster_tree_selected.is_none();
-            let is_clone = is_swarm_clone_agent_id(agent.id.as_str());
+            let is_clone = is_swarm_clone_agent_id(agent.id.as_str())
+                || is_chat_clone_agent_id(agent.id.as_str());
 
             let marker_style = if selected {
                 selected_row_style(Style::default().fg(theme.accent).bg(table_bg), true, theme)
@@ -6674,6 +6924,7 @@ mod tests {
                 agent_id: None,
                 mission_id: Some("mis-201".into()),
                 text: "Review the repo carefully.".into(),
+                prompt_msg_idx: None,
             },
             AgentMessage {
                 at: "10:01".into(),
@@ -6681,6 +6932,7 @@ mod tests {
                 agent_id: Some("gpt-5.4".into()),
                 mission_id: Some("mis-201".into()),
                 text: "Bulk orchestration looks mostly correct; docs need follow-up.".into(),
+                prompt_msg_idx: None,
             },
         ];
         state.agents.patches = vec![PatchProposal {
@@ -6727,6 +6979,7 @@ mod tests {
                 agent_id: None,
                 mission_id: None,
                 text: "Review the repo and report only.".into(),
+                prompt_msg_idx: None,
             },
             AgentMessage {
                 at: "11:01".into(),
@@ -6734,6 +6987,7 @@ mod tests {
                 agent_id: Some("gpt-5.4".into()),
                 mission_id: None,
                 text: "I checked the repo health; no flickering issue was reproduced.".into(),
+                prompt_msg_idx: None,
             },
         ];
         state
@@ -7514,6 +7768,7 @@ mod tests {
             agent_id: Some("codex".into()),
             mission_id: Some("mis-601".into()),
             text: "live reply".into(),
+            prompt_msg_idx: None,
         });
 
         let run_dir = workspace.join(".nit/agents/runs/mis-601/history/00000000000000000003");

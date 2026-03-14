@@ -321,12 +321,28 @@ impl AgentBusEvent {
                         .or_insert(0);
                     *entry = entry.saturating_add(delta);
                 }
+                // Use the dispatch-time prompt index if available; otherwise fall back to
+                // the most recent user prompt for this context.
+                let parent_prompt_idx =
+                    state.agents.codex_turn_prompt_idx.remove(agent_id).or_else(|| {
+                        state
+                            .agents
+                            .messages
+                            .iter()
+                            .enumerate()
+                            .rev()
+                            .find(|(_, msg)| {
+                                msg.agent_id.is_none() && msg.mission_id == *mission_id
+                            })
+                            .map(|(idx, _)| idx)
+                    });
                 state.agents.messages.push(AgentMessage {
                     at: at.clone(),
                     channel: AgentChannel::Agent,
                     agent_id: Some(agent_id.clone()),
                     mission_id: mission_id.clone(),
                     text: message.clone(),
+                    prompt_msg_idx: parent_prompt_idx,
                 });
                 state.agents.console_scroll = usize::MAX;
 

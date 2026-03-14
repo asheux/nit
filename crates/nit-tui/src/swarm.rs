@@ -21,6 +21,14 @@ fn is_swarm_clone_agent_id(agent_id: &str) -> bool {
     swarm_clone_base_id(agent_id).is_some()
 }
 
+pub fn chat_clone_base_id(agent_id: &str) -> Option<&str> {
+    agent_id.split_once("#chat-clone-").map(|(base, _)| base)
+}
+
+pub fn is_chat_clone_agent_id(agent_id: &str) -> bool {
+    chat_clone_base_id(agent_id).is_some()
+}
+
 fn is_swarm_clone_for_mission(agent_id: &str, mission_id: &str) -> bool {
     let Some((_base_id, rest)) = agent_id.split_once("#swarm-") else {
         return false;
@@ -99,7 +107,9 @@ fn insert_swarm_clone_lane(state: &mut AppState, base_id: &str, clone_lane: nit_
     let mut insert_pos = base_pos.saturating_add(1);
     while insert_pos < state.agents.agents.len() {
         let lane = &state.agents.agents[insert_pos];
-        if swarm_clone_base_id(lane.id.as_str()) == Some(base_id) {
+        if swarm_clone_base_id(lane.id.as_str()) == Some(base_id)
+            || chat_clone_base_id(lane.id.as_str()) == Some(base_id)
+        {
             insert_pos = insert_pos.saturating_add(1);
         } else {
             break;
@@ -227,6 +237,49 @@ fn cleanup_swarm_clones_for_mission(state: &mut AppState, mission_id: &str) {
     }
 }
 
+pub fn create_chat_clone(state: &mut AppState, base_id: &str) -> Option<String> {
+    let effective_base = chat_clone_base_id(base_id).unwrap_or(base_id);
+    let base_lane = state
+        .agents
+        .agents
+        .iter()
+        .find(|lane| lane.id == effective_base)
+        .cloned()?;
+
+    let mut clone_num: usize = 0;
+    loop {
+        clone_num = clone_num.saturating_add(1);
+        let candidate = format!("{effective_base}#chat-clone-{clone_num:02}");
+        if state.agents.agents.iter().all(|lane| lane.id != candidate) {
+            break;
+        }
+        if clone_num >= 99 {
+            return None;
+        }
+    }
+
+    let clone_id = format!("{effective_base}#chat-clone-{clone_num:02}");
+    let base_role = base_lane.role.trim();
+    let display_role = if base_role.is_empty() {
+        format!("(chat {clone_num:02})")
+    } else {
+        format!("{base_role} (chat {clone_num:02})")
+    };
+
+    let mut lane = base_lane;
+    lane.id = clone_id.clone();
+    lane.role = display_role;
+    lane.status = AgentStatus::Idle;
+    lane.queue_len = 0;
+    lane.heartbeat_age_secs = 0;
+    lane.current_mission = None;
+
+    insert_swarm_clone_lane(state, effective_base, lane);
+    copy_codex_runtime_metadata(state, effective_base, &clone_id);
+
+    Some(clone_id)
+}
+
 fn ensure_size_clones(
     state: &mut AppState,
     mission_id: &str,
@@ -261,7 +314,9 @@ fn ensure_size_clones(
             if lane.id.as_str() == planner_agent_id {
                 continue;
             }
-            if is_swarm_clone_agent_id(lane.id.as_str()) {
+            if is_swarm_clone_agent_id(lane.id.as_str())
+                || is_chat_clone_agent_id(lane.id.as_str())
+            {
                 continue;
             }
             if state.agents.swarm_priority_agent_ids.contains(&lane.id) {
@@ -1365,6 +1420,18 @@ impl SwarmRuntime {
         event: &AgentBusEvent,
     ) -> SwarmEventOutcome {
         let mut outcome = SwarmEventOutcome::default();
+
+        // Chat clones are ad-hoc agents; they must never interact with swarm runs.
+        let event_agent_id = match event {
+            AgentBusEvent::TurnStarted { agent_id, .. }
+            | AgentBusEvent::TurnCompleted { agent_id, .. }
+            | AgentBusEvent::TurnFailed { agent_id, .. } => Some(agent_id.as_str()),
+            _ => None,
+        };
+        if event_agent_id.is_some_and(is_chat_clone_agent_id) {
+            return outcome;
+        }
+
         let dispatches = &mut outcome.dispatches;
 
         match event {
@@ -5597,7 +5664,10 @@ pub fn select_swarm_agents(
         .agents
         .agents
         .iter()
-        .filter(|lane| !is_swarm_clone_agent_id(lane.id.as_str()))
+        .filter(|lane| {
+            !is_swarm_clone_agent_id(lane.id.as_str())
+                && !is_chat_clone_agent_id(lane.id.as_str())
+        })
         .enumerate()
         .map(|(idx, lane)| (lane.id.clone(), idx))
         .collect::<HashMap<_, _>>();
@@ -5618,7 +5688,10 @@ pub fn select_swarm_agents(
         .iter()
         .filter(|lane| lane.is_codex())
         .filter(|lane| lane.id.as_str() != planner)
-        .filter(|lane| !is_swarm_clone_agent_id(lane.id.as_str()))
+        .filter(|lane| {
+            !is_swarm_clone_agent_id(lane.id.as_str())
+                && !is_chat_clone_agent_id(lane.id.as_str())
+        })
         .map(|lane| lane.id.clone())
         .collect::<Vec<_>>();
     if codex_pool.is_empty() {
@@ -5807,6 +5880,7 @@ pub fn push_system_message_to_mission(state: &mut AppState, mission_id: &str, te
         agent_id: Some("swarm".into()),
         mission_id: Some(mission_id.to_string()),
         text,
+        prompt_msg_idx: None,
     });
 }
 
@@ -7592,5 +7666,122 @@ notes
         assert_eq!(report.gates[0].command, "cargo fmt");
         assert!(!report.gates[0].ok);
         assert_eq!(report.gates[0].notes.as_deref(), Some("bad"));
+    }
+
+    #[test]
+    fn chat_clone_base_id_parsing() {
+        assert_eq!(chat_clone_base_id("agent-a#chat-clone-01"), Some("agent-a"));
+        assert_eq!(chat_clone_base_id("agent-a#chat-clone-12"), Some("agent-a"));
+        assert_eq!(chat_clone_base_id("agent-a"), None);
+        assert_eq!(chat_clone_base_id("agent-a#swarm-mis-01"), None);
+    }
+
+    #[test]
+    fn is_chat_clone_agent_id_detection() {
+        assert!(is_chat_clone_agent_id("agent-a#chat-clone-01"));
+        assert!(!is_chat_clone_agent_id("agent-a"));
+        assert!(!is_chat_clone_agent_id("agent-a#swarm-mis-01"));
+    }
+
+    #[test]
+    fn create_chat_clone_basic() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let editor = Buffer::empty("editor", None);
+        let notes = Buffer::empty("notes", None);
+        let mut state = AppState::new(root, editor, notes);
+        state.agents.messages.clear();
+        state.agents.agents.clear();
+
+        state.agents.agents.push(make_lane("agent-a", "coder"));
+
+        let clone_id = create_chat_clone(&mut state, "agent-a").expect("clone created");
+        assert_eq!(clone_id, "agent-a#chat-clone-01");
+
+        let clone_lane = state
+            .agents
+            .agents
+            .iter()
+            .find(|l| l.id == clone_id)
+            .expect("clone in roster");
+        assert_eq!(clone_lane.role, "coder (chat 01)");
+        assert!(matches!(clone_lane.status, AgentStatus::Idle));
+        assert_eq!(clone_lane.queue_len, 0);
+
+        // Clone should be right after its base
+        let base_pos = state
+            .agents
+            .agents
+            .iter()
+            .position(|l| l.id == "agent-a")
+            .unwrap();
+        let clone_pos = state
+            .agents
+            .agents
+            .iter()
+            .position(|l| l.id == clone_id)
+            .unwrap();
+        assert_eq!(clone_pos, base_pos + 1);
+    }
+
+    #[test]
+    fn create_chat_clone_sequential_numbering() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let editor = Buffer::empty("editor", None);
+        let notes = Buffer::empty("notes", None);
+        let mut state = AppState::new(root, editor, notes);
+        state.agents.messages.clear();
+        state.agents.agents.clear();
+
+        state.agents.agents.push(make_lane("agent-a", "coder"));
+
+        let first = create_chat_clone(&mut state, "agent-a").expect("first clone");
+        assert_eq!(first, "agent-a#chat-clone-01");
+
+        let second = create_chat_clone(&mut state, "agent-a").expect("second clone");
+        assert_eq!(second, "agent-a#chat-clone-02");
+    }
+
+    #[test]
+    fn create_chat_clone_from_clone_resolves_base() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let editor = Buffer::empty("editor", None);
+        let notes = Buffer::empty("notes", None);
+        let mut state = AppState::new(root, editor, notes);
+        state.agents.messages.clear();
+        state.agents.agents.clear();
+
+        state.agents.agents.push(make_lane("agent-a", "coder"));
+        let first = create_chat_clone(&mut state, "agent-a").expect("first clone");
+
+        // Cloning from the clone should still use the root agent
+        let second = create_chat_clone(&mut state, &first).expect("second clone");
+        assert_eq!(second, "agent-a#chat-clone-02");
+    }
+
+    #[test]
+    fn chat_clones_excluded_from_select_swarm_agents() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let editor = Buffer::empty("editor", None);
+        let notes = Buffer::empty("notes", None);
+        let mut state = AppState::new(root, editor, notes);
+        state.agents.messages.clear();
+        state.agents.agents.clear();
+
+        state.agents.agents.push(make_lane("planner", "planner"));
+        state.agents.agents.push(make_lane("a", "worker"));
+        state.agents.agents.push(make_lane("b", "worker"));
+        state.agents.swarm_priority_agent_ids.insert("a".into());
+        state.agents.swarm_priority_agent_ids.insert("b".into());
+
+        // Add a chat clone — it should be ignored
+        state
+            .agents
+            .agents
+            .push(make_lane("a#chat-clone-01", "worker (chat 01)"));
+
+        let agents = select_swarm_agents(&state, "planner", SwarmSize::Count(3), Some("parallel"));
+        assert!(!agents.iter().any(|id| id.contains("#chat-clone-")));
+        assert!(agents.contains(&"a".to_string()));
+        assert!(agents.contains(&"b".to_string()));
     }
 }

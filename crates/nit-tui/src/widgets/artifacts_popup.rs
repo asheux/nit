@@ -122,6 +122,28 @@ pub fn preferred_size(screen: Rect) -> (u16, u16) {
     (width, height)
 }
 
+/// Minimum input box height (1 inner line + 2 borders).
+const MIN_INPUT_BOX_HEIGHT: u16 = 3;
+
+/// Returns the content area height after deducting the chat input box from the popup.
+/// Prompts do not have a chat input box, so they use the full height.
+pub fn content_area_height(
+    state: &AppState,
+    swarm: &crate::swarm::SwarmRuntime,
+    area: Rect,
+) -> u16 {
+    let inner = Block::default().borders(Borders::ALL).inner(area);
+    let is_prompt = agent_ops_view::is_selected_artifact_prompt(
+        state,
+        swarm,
+        area.width.max(1) as usize,
+    );
+    if is_prompt || inner.height < 5 {
+        return inner.height;
+    }
+    inner.height.saturating_sub(MIN_INPUT_BOX_HEIGHT)
+}
+
 pub fn build_lines(
     state: &AppState,
     swarm: &SwarmRuntime,
@@ -169,32 +191,219 @@ pub fn build_lines(
         .collect()
 }
 
+/// Maximum inner lines for the chat input box inside the artifacts popup.
+const POPUP_CHAT_INPUT_MAX_INNER_LINES: usize = 4;
+
 pub fn render(
     frame: &mut Frame,
     area: Rect,
     state: &AppState,
     swarm: &SwarmRuntime,
     theme: &Theme,
-) {
+) -> Option<(u16, u16)> {
+    let is_prompt = agent_ops_view::is_selected_artifact_prompt(
+        state,
+        swarm,
+        area.width.max(1) as usize,
+    );
+    let popup_title = if is_prompt { "PROMPT" } else { "ARTIFACT" };
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme.border_focused))
         .title(Span::styled(
-            "ARTIFACT",
+            popup_title,
             Style::default()
                 .fg(theme.title_focused)
                 .add_modifier(Modifier::BOLD),
         ))
         .style(Style::default().bg(theme.background).fg(theme.foreground));
 
-    let inner = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Min(1)])
-        .split(block.inner(area))[0];
-    if inner.width == 0 || inner.height == 0 {
-        return;
+    let inner_full = block.inner(area);
+    if inner_full.width < 4 || inner_full.height < 5 {
+        frame.render_widget(Clear, area);
+        frame.render_widget(block, area);
+        return None;
     }
 
+    // For prompt artifacts, render without chat input box.
+    if is_prompt {
+        return render_content_only(frame, area, inner_full, block, state, swarm, theme);
+    }
+
+    // Compute input layout using popup-specific chat state.
+    let input_wrap_width = inner_full.width.saturating_sub(2) as usize;
+    let popup_input = &state.agents.artifacts_popup_chat_input;
+    let popup_cursor = state.agents.artifacts_popup_chat_cursor;
+    let popup_sel_anchor = state.agents.artifacts_popup_chat_selection_anchor;
+    let popup_scroll = state.agents.artifacts_popup_chat_scroll;
+    let cursor_char_idx = popup_cursor.min(popup_input.chars().count());
+    let (input_lines_all, cursor_line_all, cursor_col_all) =
+        agent_console_view::wrap_input_with_cursor(
+            "",
+            popup_input,
+            cursor_char_idx,
+            input_wrap_width,
+        );
+    let max_inner_by_layout = inner_full.height.saturating_sub(4).max(1) as usize;
+    let input_inner_height = input_lines_all
+        .len()
+        .max(1)
+        .min(POPUP_CHAT_INPUT_MAX_INNER_LINES.min(max_inner_by_layout));
+    let input_box_height = (input_inner_height + 2) as u16; // +2 for borders
+
+    // Split: content area (scrollable) + input box (sticky footer).
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(1), Constraint::Length(input_box_height)])
+        .split(inner_full);
+    let content_area = chunks[0];
+    let input_chunk = chunks[1];
+
+    // --- Render content ---
+    let lines = build_lines(state, swarm, theme, content_area.width);
+    let content_height = content_area.height as usize;
+    let max_scroll = lines.len().saturating_sub(content_height);
+    let scroll = state.agents.artifacts_popup_scroll.min(max_scroll);
+    let visible: Vec<Line> = lines.into_iter().skip(scroll).take(content_height).collect();
+    let visible = apply_ui_selection(
+        visible,
+        state.ui_selection.as_ref(),
+        UiSelectionPane::ArtifactsPopup,
+        theme.cursor_line_bg,
+        scroll,
+    );
+
+    let para = Paragraph::new(visible).style(Style::default().bg(theme.background));
+    frame.render_widget(Clear, area);
+    frame.render_widget(block, area);
+    frame.render_widget(para, content_area);
+
+    // --- Render chat input box ---
+    let input_block = Block::default()
+        .borders(Borders::ALL)
+        .title(Line::from(vec![
+            Span::styled(
+                "CHAT BOX",
+                Style::default()
+                    .fg(theme.border_focused)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                "  [ Enter send ]",
+                Style::default()
+                    .fg(theme.border)
+                    .add_modifier(Modifier::DIM),
+            ),
+        ]))
+        .border_style(Style::default().fg(theme.border_focused))
+        .border_type(ratatui::widgets::BorderType::Rounded)
+        .style(Style::default().bg(theme.background));
+    let input_area = input_block.inner(input_chunk);
+    frame.render_widget(input_block, input_chunk);
+
+    let input_window_start = agent_console_view::chat_input_window_start(
+        popup_scroll,
+        input_lines_all.len(),
+        input_inner_height,
+        cursor_line_all,
+    );
+
+    let input_len_chars = popup_input.chars().count();
+    let input_cursor = popup_cursor.min(input_len_chars);
+    let selection_range = popup_sel_anchor
+        .map(|anchor| anchor.min(input_len_chars))
+        .and_then(|anchor| {
+            if anchor == input_cursor {
+                None
+            } else {
+                Some((anchor.min(input_cursor), anchor.max(input_cursor)))
+            }
+        });
+    let (sel_start_line, sel_start_col, sel_end_line, sel_end_col) = selection_range
+        .map(|(start, end)| {
+            let (start_line, start_col) =
+                agent_console_view::chat_input_display_pos_for_char_idx(
+                    popup_input,
+                    input_wrap_width,
+                    start,
+                );
+            let (end_line, end_col) = agent_console_view::chat_input_display_pos_for_char_idx(
+                popup_input,
+                input_wrap_width,
+                end,
+            );
+            (start_line, start_col, end_line, end_col)
+        })
+        .unwrap_or((0, 0, 0, 0));
+
+    let input_visible: Vec<Line<'static>> = input_lines_all
+        .iter()
+        .skip(input_window_start)
+        .take(input_inner_height)
+        .enumerate()
+        .map(|(idx, text)| {
+            if selection_range.is_none() {
+                return Line::from(text.clone());
+            }
+            let line_idx = input_window_start.saturating_add(idx);
+            if line_idx < sel_start_line || line_idx > sel_end_line {
+                return Line::from(text.clone());
+            }
+            let line_len = text.chars().count();
+            let (sel_start, sel_end) = if sel_start_line == sel_end_line {
+                (sel_start_col, sel_end_col)
+            } else if line_idx == sel_start_line {
+                (sel_start_col, line_len)
+            } else if line_idx == sel_end_line {
+                (0, sel_end_col)
+            } else {
+                (0, line_len)
+            };
+            let sel_start = sel_start.min(line_len);
+            let sel_end = sel_end.min(line_len);
+            agent_console_view::highlight_plain_line(text, sel_start, sel_end, theme.selection_bg)
+        })
+        .collect();
+
+    let input_bg = {
+        let mut bg =
+            agent_console_view::dim_bg_towards(theme.cursor_line_bg, theme.background, 75);
+        if bg == theme.selection_bg {
+            bg = theme.cursor_line_bg;
+        }
+        if bg == theme.selection_bg {
+            bg = theme.background;
+        }
+        bg
+    };
+    frame.render_widget(
+        Paragraph::new(input_visible).style(Style::default().fg(theme.foreground).bg(input_bg)),
+        input_area,
+    );
+
+    // Cursor position.
+    let cursor_in_window = cursor_line_all >= input_window_start
+        && cursor_line_all < input_window_start.saturating_add(input_inner_height);
+    if cursor_in_window && input_area.width > 0 && input_area.height > 0 {
+        let cursor_line_visible = cursor_line_all.saturating_sub(input_window_start);
+        let max_col = input_area.width.saturating_sub(1) as usize;
+        let col = cursor_col_all.min(max_col) as u16;
+        let row = cursor_line_visible.min(input_inner_height.saturating_sub(1)) as u16;
+        return Some((input_area.x + col, input_area.y + row));
+    }
+    None
+}
+
+/// Render the popup with content only (no chat input box). Used for prompt artifacts.
+fn render_content_only(
+    frame: &mut Frame,
+    area: Rect,
+    inner: Rect,
+    block: Block<'_>,
+    state: &AppState,
+    swarm: &SwarmRuntime,
+    theme: &Theme,
+) -> Option<(u16, u16)> {
     let lines = build_lines(state, swarm, theme, inner.width);
     let height = inner.height as usize;
     let max_scroll = lines.len().saturating_sub(height);
@@ -212,6 +421,7 @@ pub fn render(
     frame.render_widget(Clear, area);
     frame.render_widget(block, area);
     frame.render_widget(para, inner);
+    None
 }
 
 fn build_message_lines(

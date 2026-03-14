@@ -531,6 +531,10 @@ pub struct AgentMessage {
     pub agent_id: Option<String>,
     pub mission_id: Option<String>,
     pub text: String,
+    /// Index of the user prompt message that this reply is responding to.
+    /// `None` for user prompts themselves, or for replies where the prompt is unknown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_msg_idx: Option<usize>,
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -585,6 +589,7 @@ pub struct AgentConsoleRowsCacheKey {
     pub mission: Option<String>,
     pub agent: Option<String>,
     pub messages_len: usize,
+    pub event_epoch: u64,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -704,6 +709,18 @@ pub struct AgentsState {
     pub artifacts_popup_open: bool,
     #[serde(skip)]
     pub artifacts_popup_scroll: usize,
+    /// Chat input text for the artifacts popup compose box. Runtime-only.
+    #[serde(skip)]
+    pub artifacts_popup_chat_input: String,
+    /// Cursor position (char index) in the artifacts popup compose box. Runtime-only.
+    #[serde(skip)]
+    pub artifacts_popup_chat_cursor: usize,
+    /// Selection anchor in the artifacts popup compose box. Runtime-only.
+    #[serde(skip)]
+    pub artifacts_popup_chat_selection_anchor: Option<usize>,
+    /// Scroll offset for the artifacts popup compose box. Runtime-only.
+    #[serde(skip, default = "chat_input_scroll_default")]
+    pub artifacts_popup_chat_scroll: usize,
     #[serde(skip)]
     pub artifacts_history_popup_open: bool,
     #[serde(skip)]
@@ -773,6 +790,11 @@ pub struct AgentsState {
     /// Runtime-only; updated when Codex reports token counts.
     #[serde(skip)]
     pub codex_mission_used_tokens: HashMap<String, HashMap<String, u32>>,
+    /// Maps agent_id → index of the user prompt message that triggered the current turn.
+    /// Set at dispatch time, consumed by TurnCompleted to link responses to their prompts.
+    /// Runtime-only.
+    #[serde(skip)]
+    pub codex_turn_prompt_idx: HashMap<String, usize>,
     /// Codex session/thread ids keyed by model slug for non-mission chat. Used to resume an
     /// ad-hoc "agent chat" thread across multiple prompts without requiring a mission.
     /// Runtime-only.
@@ -963,6 +985,10 @@ impl AgentsState {
             artifacts_selected: 0,
             artifacts_popup_open: false,
             artifacts_popup_scroll: 0,
+            artifacts_popup_chat_input: String::new(),
+            artifacts_popup_chat_cursor: 0,
+            artifacts_popup_chat_selection_anchor: None,
+            artifacts_popup_chat_scroll: chat_input_scroll_default(),
             artifacts_history_popup_open: false,
             artifacts_history_popup_scroll: 0,
             artifacts_history_selected: 0,
@@ -987,6 +1013,7 @@ impl AgentsState {
             codex_mission_context_remaining_pct: HashMap::new(),
             codex_used_tokens: HashMap::new(),
             codex_mission_used_tokens: HashMap::new(),
+            codex_turn_prompt_idx: HashMap::new(),
             codex_thread_ids: HashMap::new(),
             codex_mission_thread_ids: HashMap::new(),
             active_turns: HashMap::new(),
@@ -1066,6 +1093,10 @@ impl Default for AgentsState {
             artifacts_selected: 0,
             artifacts_popup_open: false,
             artifacts_popup_scroll: 0,
+            artifacts_popup_chat_input: String::new(),
+            artifacts_popup_chat_cursor: 0,
+            artifacts_popup_chat_selection_anchor: None,
+            artifacts_popup_chat_scroll: chat_input_scroll_default(),
             artifacts_history_popup_open: false,
             artifacts_history_popup_scroll: 0,
             artifacts_history_selected: 0,
@@ -1090,6 +1121,7 @@ impl Default for AgentsState {
             codex_mission_context_remaining_pct: HashMap::new(),
             codex_used_tokens: HashMap::new(),
             codex_mission_used_tokens: HashMap::new(),
+            codex_turn_prompt_idx: HashMap::new(),
             codex_thread_ids: HashMap::new(),
             codex_mission_thread_ids: HashMap::new(),
             active_turns: HashMap::new(),

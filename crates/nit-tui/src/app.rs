@@ -10,10 +10,10 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::swarm::{
-    detect_swarm_mission_kind_from_prompt, explicit_swarm_mission_kind_from_prompt, is_agent_busy,
-    normalize_role_label, parse_swarm_command, parse_swarm_mission_kind, select_swarm_agents,
-    GateReport, GateReportGate, SwarmArtifactFocus, SwarmCommand, SwarmMissionKind, SwarmRuntime,
-    SwarmSize,
+    chat_clone_base_id, create_chat_clone, detect_swarm_mission_kind_from_prompt,
+    explicit_swarm_mission_kind_from_prompt, is_agent_busy, normalize_role_label,
+    parse_swarm_command, parse_swarm_mission_kind, select_swarm_agents, GateReport, GateReportGate,
+    SwarmArtifactFocus, SwarmCommand, SwarmMissionKind, SwarmRuntime, SwarmSize,
 };
 use crate::{
     codex_runner::{CodexCommand, CodexRunner, CodexRunnerConfig, CodexRuntimeMode},
@@ -687,7 +687,16 @@ fn run_loop(
                     }
                     if state.agents.artifacts_popup_open {
                         let screen = terminal.size().unwrap_or_default();
-                        if handle_artifacts_popup_key(&key, state, &swarm, screen, theme) {
+                        if handle_artifacts_popup_key(
+                            &key,
+                            state,
+                            &mut swarm,
+                            &mut vitals,
+                            Some(&codex_runner),
+                            &mut clipboard,
+                            screen,
+                            theme,
+                        ) {
                             needs_redraw = true;
                             continue;
                         }
@@ -1589,10 +1598,12 @@ fn draw(
             let area = dynamic_popup_rect(screen, artifacts_history_popup::preferred_size(screen));
             artifacts_history_popup::render(f, area, state, theme);
         }
-        if state.agents.artifacts_popup_open {
+        let artifacts_popup_cursor = if state.agents.artifacts_popup_open {
             let area = dynamic_popup_rect(screen, artifacts_popup::preferred_size(screen));
-            artifacts_popup::render(f, area, state, swarm, theme);
-        }
+            artifacts_popup::render(f, area, state, swarm, theme)
+        } else {
+            None
+        };
         if state.show_help {
             let area = dynamic_popup_rect(screen, help_overlay::preferred_size(screen));
             help_overlay::render(f, area, state, theme);
@@ -1640,6 +1651,8 @@ fn draw(
         let cursor = if let Some((x, y)) = command_cursor {
             Some((x, y))
         } else if let Some((x, y)) = fuzzy_cursor {
+            Some((x, y))
+        } else if let Some((x, y)) = artifacts_popup_cursor {
             Some((x, y))
         } else if petri_visible || (state.file_tree.open && state.focus == PaneId::Editor) {
             None
@@ -3419,17 +3432,26 @@ fn detect_implicit_swarm_command(state: &AppState, raw: &str) -> Option<SwarmCom
     })
 }
 
-fn handle_agent_console_key(
-    key: KeyEvent,
+/// Result from `handle_chat_input_editing_key` indicating what happened.
+struct ChatInputEditResult {
+    handled: bool,
+    changed: bool,
+    follow_cursor: bool,
+}
+
+/// Reusable text-editing key handler for the chat input box.
+/// Handles all text manipulation keys (characters, backspace, delete, cursor movement,
+/// selection, copy/paste, etc.) but NOT Enter-submit, Esc, or Up/Down arrow keys.
+/// Those are left to the caller so each context can provide its own behavior.
+fn handle_chat_input_editing_key(
+    key: &KeyEvent,
     state: &mut AppState,
-    vitals: &mut VitalsState,
-    codex: Option<&CodexRunner>,
-    swarm: &mut SwarmRuntime,
     clipboard: &mut Option<Clipboard>,
-) -> bool {
+) -> ChatInputEditResult {
     let mut changed = false;
     let mut handled = false;
-    let mut follow_chat_cursor = false;
+    let mut follow_cursor = false;
+
     let input_len_chars = state.agents.chat_input.chars().count();
     if state.agents.chat_input_cursor > input_len_chars {
         state.agents.chat_input_cursor = input_len_chars;
@@ -3441,7 +3463,8 @@ fn handle_agent_console_key(
     {
         state.agents.chat_input_selection_anchor = Some(input_len_chars);
     }
-    match key {
+
+    match *key {
         KeyEvent {
             code: KeyCode::Enter,
             modifiers,
@@ -3465,140 +3488,7 @@ fn handle_agent_console_key(
                 .saturating_add(insert.chars().count());
             state.agents.chat_input_selection_anchor = None;
             changed = true;
-            follow_chat_cursor = true;
-        }
-        KeyEvent {
-            code: KeyCode::Enter,
-            ..
-        } => {
-            handled = true;
-            let raw = state.agents.chat_input.clone();
-            let mut swarm_handled = false;
-            let mut cmd = parse_swarm_command(&raw)
-                .map(|mut cmd| {
-                    if cmd.template.is_none() {
-                        cmd.template = Some(state.agents.swarm_default_template.clone());
-                    }
-                    cmd.mission_kind =
-                        effective_swarm_mission_kind(state, cmd.prompt.as_str(), cmd.mission_kind);
-                    cmd
-                })
-                .or_else(|| detect_implicit_swarm_command(state, &raw));
-            if let Some(cmd) = cmd.as_mut() {
-                let auto_switch_ops_dag = cmd
-                    .template
-                    .as_deref()
-                    .is_some_and(|t| matches!(t, "bulk" | "bo"));
-                chat_history_remember(state, &raw);
-                let planner = state
-                    .agents
-                    .selected_context_agent()
-                    .and_then(|id| {
-                        state
-                            .agents
-                            .agents
-                            .iter()
-                            .find(|lane| lane.id == id)
-                            .is_some_and(|lane| lane.is_codex())
-                            .then_some(id.to_string())
-                    })
-                    .or_else(|| {
-                        state
-                            .agents
-                            .agents
-                            .iter()
-                            .find(|lane| lane.is_codex())
-                            .map(|lane| lane.id.clone())
-                    });
-
-                if let Some(planner) = planner {
-                    let agents =
-                        select_swarm_agents(state, &planner, cmd.size, cmd.template.as_deref());
-                    if let Some((_mission_id, dispatches)) = swarm.start(
-                        state,
-                        planner.clone(),
-                        agents,
-                        cmd.size,
-                        cmd.template.clone(),
-                        cmd.mission_kind,
-                        cmd.prompt.clone(),
-                    ) {
-                        if auto_switch_ops_dag {
-                            state.agents.dock_tab = AgentOpsTab::Dag;
-                        }
-                        state.agents.chat_input = cmd.prompt.clone();
-                        state.agents.chat_input_cursor = state.agents.chat_input.chars().count();
-                        let _ = push_chat_message(state);
-                        changed = true;
-                        follow_chat_cursor = true;
-                        for dispatch in dispatches {
-                            dispatch_codex_prompt(
-                                state,
-                                vitals,
-                                codex,
-                                dispatch.agent_id,
-                                Some(dispatch.mission_id),
-                                dispatch.prompt,
-                            );
-                        }
-                        maybe_dispatch_next_queued_codex_turn(state, vitals, codex);
-                        swarm_handled = true;
-                    } else {
-                        state.agents.chat_input = cmd.prompt.clone();
-                        state.agents.chat_input_cursor = state.agents.chat_input.chars().count();
-                    }
-                } else {
-                    state.status = Some("@swarm requires at least one Codex agent".into());
-                    state.agents.chat_input.clear();
-                    state.agents.chat_input_cursor = 0;
-                    changed = true;
-                    follow_chat_cursor = true;
-                    swarm_handled = true;
-                }
-            }
-
-            if !swarm_handled {
-                let mission_id = state
-                    .agents
-                    .selected_context_mission()
-                    .map(ToString::to_string);
-                let selected_agent = state
-                    .agents
-                    .selected_context_agent()
-                    .map(ToString::to_string);
-                let sent = push_chat_message(state);
-                changed = sent.is_some();
-                follow_chat_cursor = changed;
-                if let Some((channel, prompt)) = sent {
-                    chat_history_remember(state, &raw);
-                    let targets = if matches!(channel, AgentChannel::Broadcast) {
-                        broadcast_target_agents(state, mission_id.as_deref())
-                    } else {
-                        selected_agent.clone().into_iter().collect::<Vec<_>>()
-                    };
-                    for model in targets {
-                        let is_codex = state
-                            .agents
-                            .agents
-                            .iter()
-                            .find(|lane| lane.id.as_str() == model.as_str())
-                            .is_some_and(|lane| lane.is_codex());
-                        if !is_codex {
-                            continue;
-                        }
-
-                        dispatch_codex_prompt(
-                            state,
-                            vitals,
-                            codex,
-                            model,
-                            mission_id.clone(),
-                            prompt.clone(),
-                        );
-                    }
-                    maybe_dispatch_next_queued_codex_turn(state, vitals, codex);
-                }
-            }
+            follow_cursor = true;
         }
         KeyEvent {
             code: KeyCode::Char('a'),
@@ -3611,7 +3501,7 @@ fn handle_agent_console_key(
             state.agents.chat_input_cursor = total_chars;
             copy_chat_input_selection(state, clipboard);
             changed = true;
-            follow_chat_cursor = true;
+            follow_cursor = true;
         }
         KeyEvent {
             code: KeyCode::Char('c'),
@@ -3635,7 +3525,7 @@ fn handle_agent_console_key(
             handled = true;
             if copy_chat_input_selection(state, clipboard) && delete_chat_input_selection(state) {
                 changed = true;
-                follow_chat_cursor = true;
+                follow_cursor = true;
             }
         }
         KeyEvent {
@@ -3648,7 +3538,7 @@ fn handle_agent_console_key(
                 if let Ok(text) = cb.get_text() {
                     if insert_chat_input_text(state, &text) {
                         changed = true;
-                        follow_chat_cursor = true;
+                        follow_cursor = true;
                     }
                 }
             }
@@ -3671,7 +3561,7 @@ fn handle_agent_console_key(
                 if let Ok(text) = cb.get_text() {
                     if insert_chat_input_text(state, &text) {
                         changed = true;
-                        follow_chat_cursor = true;
+                        follow_cursor = true;
                     }
                 }
             }
@@ -3688,7 +3578,7 @@ fn handle_agent_console_key(
                 state.agents.chat_input_selection_anchor = None;
                 chat_history_reset_nav(state);
                 changed = true;
-                follow_chat_cursor = true;
+                follow_cursor = true;
             }
         }
         KeyEvent {
@@ -3705,7 +3595,7 @@ fn handle_agent_console_key(
                 state.agents.chat_input_selection_anchor = None;
                 chat_history_reset_nav(state);
                 changed = true;
-                follow_chat_cursor = true;
+                follow_cursor = true;
             }
         }
         KeyEvent {
@@ -3722,27 +3612,7 @@ fn handle_agent_console_key(
                 state.agents.chat_input_selection_anchor = None;
                 chat_history_reset_nav(state);
                 changed = true;
-                follow_chat_cursor = true;
-            }
-        }
-        KeyEvent {
-            code: KeyCode::Esc, ..
-        } => {
-            if matches!(
-                state.ui_selection,
-                Some(nit_core::UiSelection {
-                    pane: UiSelectionPane::AgentConsole,
-                    ..
-                })
-            ) {
-                // In Agent Chat, Esc should clear any active thread selection before touching the
-                // compose box contents.
-                handled = true;
-                state.ui_selection = None;
-            }
-            if state.agents.chat_input_selection_anchor.is_some() {
-                handled = true;
-                state.agents.chat_input_selection_anchor = None;
+                follow_cursor = true;
             }
         }
         KeyEvent {
@@ -3753,7 +3623,7 @@ fn handle_agent_console_key(
             handled = true;
             if delete_chat_input_selection(state) {
                 changed = true;
-                follow_chat_cursor = true;
+                follow_cursor = true;
             } else {
                 let cursor = state.agents.chat_input_cursor;
                 let remove_start = chat_cursor_move_word_left(&state.agents.chat_input, cursor);
@@ -3764,7 +3634,7 @@ fn handle_agent_console_key(
                     state.agents.chat_input_cursor = remove_start;
                     state.agents.chat_input_selection_anchor = None;
                     changed = true;
-                    follow_chat_cursor = true;
+                    follow_cursor = true;
                 }
             }
         }
@@ -3775,7 +3645,7 @@ fn handle_agent_console_key(
             handled = true;
             if delete_chat_input_selection(state) {
                 changed = true;
-                follow_chat_cursor = true;
+                follow_cursor = true;
             } else if state.agents.chat_input_cursor > 0 {
                 let remove_start = chat_input_byte_index(
                     &state.agents.chat_input,
@@ -3790,7 +3660,7 @@ fn handle_agent_console_key(
                 state.agents.chat_input_cursor = state.agents.chat_input_cursor.saturating_sub(1);
                 state.agents.chat_input_selection_anchor = None;
                 changed = true;
-                follow_chat_cursor = true;
+                follow_cursor = true;
             }
         }
         KeyEvent {
@@ -3801,7 +3671,7 @@ fn handle_agent_console_key(
             handled = true;
             if delete_chat_input_selection(state) {
                 changed = true;
-                follow_chat_cursor = true;
+                follow_cursor = true;
             } else {
                 let cursor = state.agents.chat_input_cursor;
                 let remove_end = chat_cursor_move_word_right(&state.agents.chat_input, cursor);
@@ -3811,7 +3681,7 @@ fn handle_agent_console_key(
                     state.agents.chat_input.replace_range(start..end, "");
                     state.agents.chat_input_selection_anchor = None;
                     changed = true;
-                    follow_chat_cursor = true;
+                    follow_cursor = true;
                 }
             }
         }
@@ -3822,7 +3692,7 @@ fn handle_agent_console_key(
             handled = true;
             if delete_chat_input_selection(state) {
                 changed = true;
-                follow_chat_cursor = true;
+                follow_cursor = true;
             } else if state.agents.chat_input_cursor < state.agents.chat_input.chars().count() {
                 let remove_start =
                     chat_input_byte_index(&state.agents.chat_input, state.agents.chat_input_cursor);
@@ -3836,7 +3706,7 @@ fn handle_agent_console_key(
                     .replace_range(remove_start..remove_end, "");
                 state.agents.chat_input_selection_anchor = None;
                 changed = true;
-                follow_chat_cursor = true;
+                follow_cursor = true;
             }
         }
         KeyEvent {
@@ -3863,7 +3733,7 @@ fn handle_agent_console_key(
             if new_cursor != cursor {
                 state.agents.chat_input_cursor = new_cursor;
                 changed = true;
-                follow_chat_cursor = true;
+                follow_cursor = true;
             }
             if selecting {
                 copy_chat_input_selection(state, clipboard);
@@ -3893,7 +3763,7 @@ fn handle_agent_console_key(
             if new_cursor != cursor {
                 state.agents.chat_input_cursor = new_cursor;
                 changed = true;
-                follow_chat_cursor = true;
+                follow_cursor = true;
             }
             if selecting {
                 copy_chat_input_selection(state, clipboard);
@@ -3925,7 +3795,7 @@ fn handle_agent_console_key(
             if new_cursor != cursor {
                 state.agents.chat_input_cursor = new_cursor;
                 changed = true;
-                follow_chat_cursor = true;
+                follow_cursor = true;
             }
             if selecting {
                 copy_chat_input_selection(state, clipboard);
@@ -3957,7 +3827,7 @@ fn handle_agent_console_key(
             if new_cursor != cursor {
                 state.agents.chat_input_cursor = new_cursor;
                 changed = true;
-                follow_chat_cursor = true;
+                follow_cursor = true;
             }
             if selecting {
                 copy_chat_input_selection(state, clipboard);
@@ -3976,7 +3846,7 @@ fn handle_agent_console_key(
             state.agents.chat_input_cursor = state.agents.chat_input_cursor.saturating_add(1);
             state.agents.chat_input_selection_anchor = None;
             changed = true;
-            follow_chat_cursor = true;
+            follow_cursor = true;
         }
         KeyEvent {
             code: KeyCode::Char(c),
@@ -3991,86 +3861,348 @@ fn handle_agent_console_key(
             state.agents.chat_input_cursor += 1;
             state.agents.chat_input_selection_anchor = None;
             changed = true;
-            follow_chat_cursor = true;
-        }
-        KeyEvent {
-            modifiers,
-            code: KeyCode::Up,
-            ..
-        } if modifiers.contains(KeyModifiers::CONTROL) => {
-            handled = true;
-            state.agents.console_scroll = state.agents.console_scroll.saturating_sub(1);
-            changed = true;
-        }
-        KeyEvent {
-            code: KeyCode::Down,
-            modifiers,
-            ..
-        } if modifiers.contains(KeyModifiers::CONTROL) => {
-            handled = true;
-            state.agents.console_scroll = state.agents.console_scroll.saturating_add(1);
-            changed = true;
-        }
-        KeyEvent {
-            code: KeyCode::Up,
-            modifiers,
-            ..
-        } => {
-            handled = true;
-            let selecting = modifiers.contains(KeyModifiers::SHIFT);
-            let cursor = state.agents.chat_input_cursor;
-            let moved = chat_cursor_move_vertical(&state.agents.chat_input, cursor, -1);
-            if moved != cursor {
-                if selecting {
-                    if state.agents.chat_input_selection_anchor.is_none() {
-                        state.agents.chat_input_selection_anchor = Some(cursor);
-                    }
-                } else {
-                    state.agents.chat_input_selection_anchor = None;
-                }
-                state.agents.chat_input_cursor = moved;
-                changed = true;
-                follow_chat_cursor = true;
-                if selecting {
-                    copy_chat_input_selection(state, clipboard);
-                }
-            } else if !selecting && chat_history_prev(state) {
-                state.agents.chat_input_selection_anchor = None;
-                changed = true;
-                follow_chat_cursor = true;
-            }
-        }
-        KeyEvent {
-            code: KeyCode::Down,
-            modifiers,
-            ..
-        } => {
-            handled = true;
-            let selecting = modifiers.contains(KeyModifiers::SHIFT);
-            let cursor = state.agents.chat_input_cursor;
-            let moved = chat_cursor_move_vertical(&state.agents.chat_input, cursor, 1);
-            if moved != cursor {
-                if selecting {
-                    if state.agents.chat_input_selection_anchor.is_none() {
-                        state.agents.chat_input_selection_anchor = Some(cursor);
-                    }
-                } else {
-                    state.agents.chat_input_selection_anchor = None;
-                }
-                state.agents.chat_input_cursor = moved;
-                changed = true;
-                follow_chat_cursor = true;
-                if selecting {
-                    copy_chat_input_selection(state, clipboard);
-                }
-            } else if !selecting && chat_history_next(state) {
-                state.agents.chat_input_selection_anchor = None;
-                changed = true;
-                follow_chat_cursor = true;
-            }
+            follow_cursor = true;
         }
         _ => {}
     }
+
+    ChatInputEditResult {
+        handled,
+        changed,
+        follow_cursor,
+    }
+}
+
+/// Submit the chat input, dispatch to agents, and return whether a prompt was sent.
+/// Shared between the main Agent Chat Enter handler and the Artifacts popup input.
+fn submit_chat_input_and_dispatch(
+    state: &mut AppState,
+    vitals: &mut VitalsState,
+    codex: Option<&CodexRunner>,
+    swarm: &mut SwarmRuntime,
+) -> bool {
+    let raw = state.agents.chat_input.clone();
+    if raw.trim().is_empty() {
+        return false;
+    }
+    let mut swarm_handled = false;
+    let mut cmd = parse_swarm_command(&raw)
+        .map(|mut cmd| {
+            if cmd.template.is_none() {
+                cmd.template = Some(state.agents.swarm_default_template.clone());
+            }
+            cmd.mission_kind =
+                effective_swarm_mission_kind(state, cmd.prompt.as_str(), cmd.mission_kind);
+            cmd
+        })
+        .or_else(|| detect_implicit_swarm_command(state, &raw));
+    if let Some(cmd) = cmd.as_mut() {
+        let auto_switch_ops_dag = cmd
+            .template
+            .as_deref()
+            .is_some_and(|t| matches!(t, "bulk" | "bo"));
+        chat_history_remember(state, &raw);
+        let planner = state
+            .agents
+            .selected_context_agent()
+            .and_then(|id| {
+                state
+                    .agents
+                    .agents
+                    .iter()
+                    .find(|lane| lane.id == id)
+                    .is_some_and(|lane| lane.is_codex())
+                    .then_some(id.to_string())
+            })
+            .or_else(|| {
+                state
+                    .agents
+                    .agents
+                    .iter()
+                    .find(|lane| lane.is_codex())
+                    .map(|lane| lane.id.clone())
+            });
+
+        if let Some(planner) = planner {
+            let agents =
+                select_swarm_agents(state, &planner, cmd.size, cmd.template.as_deref());
+            if let Some((_mission_id, dispatches)) = swarm.start(
+                state,
+                planner.clone(),
+                agents,
+                cmd.size,
+                cmd.template.clone(),
+                cmd.mission_kind,
+                cmd.prompt.clone(),
+            ) {
+                if auto_switch_ops_dag {
+                    state.agents.dock_tab = AgentOpsTab::Dag;
+                }
+                state.agents.chat_input = cmd.prompt.clone();
+                state.agents.chat_input_cursor = state.agents.chat_input.chars().count();
+                let _ = push_chat_message(state);
+                for dispatch in dispatches {
+                    dispatch_codex_prompt(
+                        state,
+                        vitals,
+                        codex,
+                        dispatch.agent_id,
+                        Some(dispatch.mission_id),
+                        dispatch.prompt,
+                    );
+                }
+                maybe_dispatch_next_queued_codex_turn(state, vitals, codex);
+                swarm_handled = true;
+            } else {
+                state.agents.chat_input = cmd.prompt.clone();
+                state.agents.chat_input_cursor = state.agents.chat_input.chars().count();
+            }
+        } else {
+            state.status = Some("@swarm requires at least one Codex agent".into());
+            state.agents.chat_input.clear();
+            state.agents.chat_input_cursor = 0;
+            swarm_handled = true;
+        }
+    }
+
+    if !swarm_handled {
+        let force_queue = (raw.starts_with("@queue")
+            && (raw.len() == 6 || raw[6..].starts_with(char::is_whitespace)))
+            || (raw.starts_with("@q")
+                && (raw.len() == 2 || raw[2..].starts_with(char::is_whitespace)));
+        if force_queue {
+            let stripped = if raw.starts_with("@queue") {
+                &raw[6..]
+            } else {
+                &raw[2..]
+            };
+            state.agents.chat_input = stripped.trim_start().to_string();
+            state.agents.chat_input_cursor = state.agents.chat_input.chars().count();
+        }
+        let mission_id = state
+            .agents
+            .selected_context_mission()
+            .map(ToString::to_string);
+        let selected_agent = state
+            .agents
+            .selected_context_agent()
+            .map(ToString::to_string);
+        let sent = push_chat_message(state);
+        if let Some((channel, prompt)) = sent {
+            // Index of the user prompt message just pushed — used to link agent
+            // responses back to the correct prompt in the chat view.
+            let prompt_msg_idx = state.agents.messages.len().saturating_sub(1);
+            chat_history_remember(state, &raw);
+            let targets = if matches!(channel, AgentChannel::Broadcast) {
+                broadcast_target_agents(state, mission_id.as_deref())
+            } else {
+                selected_agent.clone().into_iter().collect::<Vec<_>>()
+            };
+            for model in targets {
+                let is_codex = state
+                    .agents
+                    .agents
+                    .iter()
+                    .find(|lane| lane.id.as_str() == model.as_str())
+                    .is_some_and(|lane| lane.is_codex());
+                if !is_codex {
+                    continue;
+                }
+                if force_queue {
+                    state
+                        .agents
+                        .codex_turn_prompt_idx
+                        .insert(model.clone(), prompt_msg_idx);
+                    dispatch_codex_prompt(
+                        state,
+                        vitals,
+                        codex,
+                        model,
+                        mission_id.clone(),
+                        prompt.clone(),
+                    );
+                } else if is_agent_busy(state, &model) {
+                    if let Some(clone_id) = create_chat_clone(state, &model) {
+                        state
+                            .agents
+                            .codex_turn_prompt_idx
+                            .insert(clone_id.clone(), prompt_msg_idx);
+                        maybe_dispatch_codex_turn(
+                            state,
+                            vitals,
+                            codex,
+                            Some(clone_id),
+                            mission_id.clone(),
+                            prompt.clone(),
+                            true,
+                        );
+                    } else {
+                        state
+                            .agents
+                            .codex_turn_prompt_idx
+                            .insert(model.clone(), prompt_msg_idx);
+                        dispatch_codex_prompt(
+                            state,
+                            vitals,
+                            codex,
+                            model,
+                            mission_id.clone(),
+                            prompt.clone(),
+                        );
+                    }
+                } else {
+                    state
+                        .agents
+                        .codex_turn_prompt_idx
+                        .insert(model.clone(), prompt_msg_idx);
+                    dispatch_codex_prompt(
+                        state,
+                        vitals,
+                        codex,
+                        model,
+                        mission_id.clone(),
+                        prompt.clone(),
+                    );
+                }
+            }
+            maybe_dispatch_next_queued_codex_turn(state, vitals, codex);
+        } else {
+            return false;
+        }
+    }
+    state.agents.chat_input_scroll = usize::MAX;
+    true
+}
+
+fn handle_agent_console_key(
+    key: KeyEvent,
+    state: &mut AppState,
+    vitals: &mut VitalsState,
+    codex: Option<&CodexRunner>,
+    swarm: &mut SwarmRuntime,
+    clipboard: &mut Option<Clipboard>,
+) -> bool {
+    let mut changed = false;
+    let mut handled = false;
+    let mut follow_chat_cursor = false;
+
+    // Try reusable text-editing handler first.
+    let edit = handle_chat_input_editing_key(&key, state, clipboard);
+    if edit.handled {
+        handled = true;
+        changed = edit.changed;
+        follow_chat_cursor = edit.follow_cursor;
+    }
+
+    // Keys specific to the Agent Console context (not handled by the shared editor).
+    if !handled {
+        match key {
+            KeyEvent {
+                code: KeyCode::Enter,
+                ..
+            } => {
+                handled = true;
+                changed = submit_chat_input_and_dispatch(state, vitals, codex, swarm);
+                follow_chat_cursor = changed;
+            }
+            KeyEvent {
+                code: KeyCode::Esc, ..
+            } => {
+                if matches!(
+                    state.ui_selection,
+                    Some(nit_core::UiSelection {
+                        pane: UiSelectionPane::AgentConsole,
+                        ..
+                    })
+                ) {
+                    handled = true;
+                    state.ui_selection = None;
+                }
+                if state.agents.chat_input_selection_anchor.is_some() {
+                    handled = true;
+                    state.agents.chat_input_selection_anchor = None;
+                }
+            }
+            KeyEvent {
+                modifiers,
+                code: KeyCode::Up,
+                ..
+            } if modifiers.contains(KeyModifiers::CONTROL) => {
+                handled = true;
+                state.agents.console_scroll = state.agents.console_scroll.saturating_sub(1);
+                changed = true;
+            }
+            KeyEvent {
+                code: KeyCode::Down,
+                modifiers,
+                ..
+            } if modifiers.contains(KeyModifiers::CONTROL) => {
+                handled = true;
+                state.agents.console_scroll = state.agents.console_scroll.saturating_add(1);
+                changed = true;
+            }
+            KeyEvent {
+                code: KeyCode::Up,
+                modifiers,
+                ..
+            } => {
+                handled = true;
+                let selecting = modifiers.contains(KeyModifiers::SHIFT);
+                let cursor = state.agents.chat_input_cursor;
+                let moved = chat_cursor_move_vertical(&state.agents.chat_input, cursor, -1);
+                if moved != cursor {
+                    if selecting {
+                        if state.agents.chat_input_selection_anchor.is_none() {
+                            state.agents.chat_input_selection_anchor = Some(cursor);
+                        }
+                    } else {
+                        state.agents.chat_input_selection_anchor = None;
+                    }
+                    state.agents.chat_input_cursor = moved;
+                    changed = true;
+                    follow_chat_cursor = true;
+                    if selecting {
+                        copy_chat_input_selection(state, clipboard);
+                    }
+                } else if !selecting && chat_history_prev(state) {
+                    state.agents.chat_input_selection_anchor = None;
+                    changed = true;
+                    follow_chat_cursor = true;
+                }
+            }
+            KeyEvent {
+                code: KeyCode::Down,
+                modifiers,
+                ..
+            } => {
+                handled = true;
+                let selecting = modifiers.contains(KeyModifiers::SHIFT);
+                let cursor = state.agents.chat_input_cursor;
+                let moved = chat_cursor_move_vertical(&state.agents.chat_input, cursor, 1);
+                if moved != cursor {
+                    if selecting {
+                        if state.agents.chat_input_selection_anchor.is_none() {
+                            state.agents.chat_input_selection_anchor = Some(cursor);
+                        }
+                    } else {
+                        state.agents.chat_input_selection_anchor = None;
+                    }
+                    state.agents.chat_input_cursor = moved;
+                    changed = true;
+                    follow_chat_cursor = true;
+                    if selecting {
+                        copy_chat_input_selection(state, clipboard);
+                    }
+                } else if !selecting && chat_history_next(state) {
+                    state.agents.chat_input_selection_anchor = None;
+                    changed = true;
+                    follow_chat_cursor = true;
+                }
+            }
+            _ => {}
+        }
+    }
+
     if changed {
         if follow_chat_cursor {
             state.agents.chat_input_scroll = usize::MAX;
@@ -4884,6 +5016,7 @@ fn push_chat_message(state: &mut AppState) -> Option<(AgentChannel, String)> {
             .selected_context_mission()
             .map(ToString::to_string),
         text: text.clone(),
+        prompt_msg_idx: None,
     };
     if let Some(mission_id) = message.mission_id.as_deref() {
         mark_mission_provenance_dirty(state, mission_id);
@@ -4952,6 +5085,7 @@ fn spawn_mock_mission(state: &mut AppState) {
         agent_id: None,
         mission_id: Some(mission_id.clone()),
         text: message_text.clone(),
+        prompt_msg_idx: None,
     });
     let delta = estimate_codex_context_tokens(&message_text);
     let entry = state
@@ -6664,10 +6798,15 @@ fn artifacts_popup_scroll_metrics(
 ) -> (usize, usize) {
     let area = dynamic_popup_rect(screen, artifacts_popup::preferred_size(screen));
     let text_area = popup_text_area(area);
+    let content_height = artifacts_popup::content_area_height(
+        state,
+        swarm,
+        area,
+    ) as usize;
     let lines = artifacts_popup::build_lines(state, swarm, theme, text_area.width);
     (
-        popup_max_scroll(lines.len(), text_area),
-        popup_page_step(text_area),
+        lines.len().saturating_sub(content_height),
+        content_height.max(1),
     )
 }
 
@@ -10993,10 +11132,56 @@ fn maybe_open_artifact_popup_from_console_line(
     true
 }
 
+fn close_artifacts_popup(state: &mut AppState) {
+    state.agents.artifacts_popup_open = false;
+    state.agents.artifacts_popup_scroll = 0;
+    state.agents.artifacts_popup_chat_input.clear();
+    state.agents.artifacts_popup_chat_cursor = 0;
+    state.agents.artifacts_popup_chat_selection_anchor = None;
+    state.agents.artifacts_popup_chat_scroll = usize::MAX;
+    if let Some(selection) = state.ui_selection {
+        if matches!(selection.pane, UiSelectionPane::ArtifactsPopup) {
+            state.ui_selection = None;
+        }
+    }
+}
+
+/// Temporarily swap the artifacts popup chat fields into the main `chat_input` fields
+/// so that shared helper functions (`handle_chat_input_editing_key`,
+/// `submit_chat_input_and_dispatch`, etc.) operate on the popup's own state.
+fn swap_in_artifacts_popup_chat(state: &mut AppState) {
+    std::mem::swap(
+        &mut state.agents.chat_input,
+        &mut state.agents.artifacts_popup_chat_input,
+    );
+    std::mem::swap(
+        &mut state.agents.chat_input_cursor,
+        &mut state.agents.artifacts_popup_chat_cursor,
+    );
+    std::mem::swap(
+        &mut state.agents.chat_input_selection_anchor,
+        &mut state.agents.artifacts_popup_chat_selection_anchor,
+    );
+    std::mem::swap(
+        &mut state.agents.chat_input_scroll,
+        &mut state.agents.artifacts_popup_chat_scroll,
+    );
+}
+
+/// Swap the popup chat fields back out of the main `chat_input` fields.
+/// Must be called after every `swap_in_artifacts_popup_chat`.
+fn swap_out_artifacts_popup_chat(state: &mut AppState) {
+    // Same operation — swap is symmetric.
+    swap_in_artifacts_popup_chat(state);
+}
+
 fn handle_artifacts_popup_key(
     key: &KeyEvent,
     state: &mut AppState,
-    swarm: &SwarmRuntime,
+    swarm: &mut SwarmRuntime,
+    vitals: &mut VitalsState,
+    codex: Option<&CodexRunner>,
+    clipboard: &mut Option<Clipboard>,
     screen: ratatui::layout::Rect,
     theme: &Theme,
 ) -> bool {
@@ -11006,54 +11191,87 @@ fn handle_artifacts_popup_key(
     if is_global_quit_key(key) {
         return false;
     }
-    let (max_scroll, page_step) = artifacts_popup_scroll_metrics(state, swarm, screen, theme);
-    let close = matches!(key.code, KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q'));
-    if close {
-        state.agents.artifacts_popup_open = false;
-        state.agents.artifacts_popup_scroll = 0;
-        if let Some(selection) = state.ui_selection {
-            if matches!(selection.pane, UiSelectionPane::ArtifactsPopup) {
-                state.ui_selection = None;
-            }
-        }
+
+    // Esc: close popup.
+    if matches!(key.code, KeyCode::Esc) {
+        close_artifacts_popup(state);
         return true;
     }
 
-    match key.code {
-        KeyCode::Up | KeyCode::Char('k') => {
+    // Content scrolling: Up/Down/PgUp/PgDown.
+    let (max_scroll, page_step) = artifacts_popup_scroll_metrics(state, swarm, screen, theme);
+    match *key {
+        KeyEvent {
+            code: KeyCode::Up,
+            modifiers,
+            ..
+        } if !modifiers.contains(KeyModifiers::SHIFT) => {
             bump_scroll_clamped(&mut state.agents.artifacts_popup_scroll, -1, max_scroll);
-            true
+            return true;
         }
-        KeyCode::Down | KeyCode::Char('j') => {
+        KeyEvent {
+            code: KeyCode::Down,
+            modifiers,
+            ..
+        } if !modifiers.contains(KeyModifiers::SHIFT) => {
             bump_scroll_clamped(&mut state.agents.artifacts_popup_scroll, 1, max_scroll);
-            true
+            return true;
         }
-        KeyCode::PageUp => {
+        KeyEvent {
+            code: KeyCode::PageUp,
+            ..
+        } => {
             bump_scroll_clamped(
                 &mut state.agents.artifacts_popup_scroll,
                 -(page_step as i32),
                 max_scroll,
             );
-            true
+            return true;
         }
-        KeyCode::PageDown => {
+        KeyEvent {
+            code: KeyCode::PageDown,
+            ..
+        } => {
             bump_scroll_clamped(
                 &mut state.agents.artifacts_popup_scroll,
                 page_step as i32,
                 max_scroll,
             );
-            true
+            return true;
         }
-        KeyCode::Home => {
-            state.agents.artifacts_popup_scroll = 0;
-            true
-        }
-        KeyCode::End => {
-            state.agents.artifacts_popup_scroll = max_scroll;
-            true
-        }
-        _ => true, // swallow all input while modal is open
+        _ => {}
     }
+
+    // Swap popup chat state into the main fields so shared helpers work.
+    swap_in_artifacts_popup_chat(state);
+
+    // Enter: submit prompt, then close popup.
+    if matches!(key.code, KeyCode::Enter) && !key.modifiers.contains(KeyModifiers::SHIFT) {
+        if submit_chat_input_and_dispatch(state, vitals, codex, swarm) {
+            swap_out_artifacts_popup_chat(state);
+            close_artifacts_popup(state);
+            state.agents.note_event();
+            vitals.record_agent_event(Instant::now());
+        } else {
+            swap_out_artifacts_popup_chat(state);
+        }
+        return true;
+    }
+
+    // Delegate to shared text-editing handler for all other keys.
+    let edit = handle_chat_input_editing_key(key, state, clipboard);
+
+    // Swap back.
+    swap_out_artifacts_popup_chat(state);
+
+    if edit.changed {
+        if edit.follow_cursor {
+            state.agents.artifacts_popup_chat_scroll = usize::MAX;
+        }
+        state.agents.note_event();
+        vitals.record_agent_event(Instant::now());
+    }
+    true // swallow all input while popup is open
 }
 
 fn load_selected_artifacts_history_entry(state: &mut AppState) {
@@ -11654,13 +11872,16 @@ fn write_ad_hoc_run_provenance(state: &AppState, agent_id: &str) -> io::Result<(
     let patches_dir = run_dir.join("patches");
     fs::create_dir_all(&patches_dir)?;
 
+    let is_own_or_clone = |id: Option<&str>| -> bool {
+        id == Some(agent_id) || id.is_some_and(|id| chat_clone_base_id(id) == Some(agent_id))
+    };
     let messages = state
         .agents
         .messages
         .iter()
         .filter(|message| {
             message.mission_id.is_none()
-                && (message.agent_id.is_none() || message.agent_id.as_deref() == Some(agent_id))
+                && (message.agent_id.is_none() || is_own_or_clone(message.agent_id.as_deref()))
         })
         .cloned()
         .collect::<Vec<_>>();
@@ -11668,14 +11889,20 @@ fn write_ad_hoc_run_provenance(state: &AppState, agent_id: &str) -> io::Result<(
         .agents
         .patches
         .iter()
-        .filter(|patch| patch.mission_id.is_none() && patch.agent_id == agent_id)
+        .filter(|patch| {
+            patch.mission_id.is_none()
+                && (patch.agent_id == agent_id
+                    || chat_clone_base_id(&patch.agent_id) == Some(agent_id))
+        })
         .cloned()
         .collect::<Vec<_>>();
     let evidence = state
         .agents
         .evidence
         .iter()
-        .filter(|item| item.mission_id.is_none() && item.agent_id.as_deref() == Some(agent_id))
+        .filter(|item| {
+            item.mission_id.is_none() && is_own_or_clone(item.agent_id.as_deref())
+        })
         .cloned()
         .collect::<Vec<_>>();
 
@@ -12489,6 +12716,7 @@ mod tests {
             agent_id: None,
             mission_id: Some("mis-001".into()),
             text: "hello".into(),
+            prompt_msg_idx: None,
         });
         state.agents.messages.push(AgentMessage {
             at: "t+2".into(),
@@ -12496,6 +12724,7 @@ mod tests {
             agent_id: Some("gpt-5.1-codex-mini".into()),
             mission_id: Some("mis-001".into()),
             text: "world".into(),
+            prompt_msg_idx: None,
         });
         state.agents.messages.push(AgentMessage {
             at: "t+3".into(),
@@ -12503,6 +12732,7 @@ mod tests {
             agent_id: None,
             mission_id: Some("mis-999".into()),
             text: "other mission".into(),
+            prompt_msg_idx: None,
         });
 
         assert!(reset_roster_context(&mut state, &SwarmRuntime::default()));
@@ -12555,6 +12785,7 @@ mod tests {
             agent_id: None,
             mission_id: Some("mis-401".into()),
             text: "persist me".into(),
+            prompt_msg_idx: None,
         });
 
         assert!(reset_roster_context(&mut state, &SwarmRuntime::default()));
@@ -12590,6 +12821,7 @@ mod tests {
             agent_id: None,
             mission_id: None,
             text: "keep this prompt".into(),
+            prompt_msg_idx: None,
         });
         state.agents.messages.push(AgentMessage {
             at: "t+2".into(),
@@ -12597,6 +12829,7 @@ mod tests {
             agent_id: Some("gpt-5.1-codex-mini".into()),
             mission_id: None,
             text: "keep this reply".into(),
+            prompt_msg_idx: None,
         });
         state
             .agents
@@ -12647,6 +12880,7 @@ mod tests {
             agent_id: None,
             mission_id: Some("mis-777".into()),
             text: "archive me".into(),
+            prompt_msg_idx: None,
         });
 
         assert!(reset_roster_context(&mut state, &SwarmRuntime::default()));
@@ -13845,6 +14079,7 @@ mod tests {
             agent_id: Some("planner".into()),
             mission_id: None,
             text: "hello world".into(),
+            prompt_msg_idx: None,
         });
         let screen = ratatui::layout::Rect {
             x: 0,
@@ -13892,6 +14127,7 @@ mod tests {
             agent_id: Some("planner".into()),
             mission_id: None,
             text: "hello world".into(),
+            prompt_msg_idx: None,
         });
 
         let mut input_state = InputState::new();
@@ -14034,6 +14270,7 @@ mod tests {
             agent_id: Some("planner".into()),
             mission_id: None,
             text: "select me".into(),
+            prompt_msg_idx: None,
         });
         let mut input_state = InputState::new();
         let mut clipboard = None;
@@ -14435,6 +14672,7 @@ mod tests {
             agent_id: None,
             mission_id: None,
             text: (0..80).map(|idx| format!("prompt-line-{idx}\n")).collect(),
+            prompt_msg_idx: None,
         });
 
         let theme = Theme::default();
@@ -14444,14 +14682,19 @@ mod tests {
             width: 120,
             height: 36,
         };
-        let swarm = SwarmRuntime::default();
+        let mut swarm = SwarmRuntime::default();
         let (max_scroll, _) = artifacts_popup_scroll_metrics(&state, &swarm, screen, &theme);
         state.agents.artifacts_popup_scroll = max_scroll.saturating_add(25);
 
+        let mut vitals = VitalsState::default();
+        let mut clipboard = None;
         assert!(handle_artifacts_popup_key(
             &KeyEvent::new(KeyCode::Up, KeyModifiers::NONE),
             &mut state,
-            &swarm,
+            &mut swarm,
+            &mut vitals,
+            None,
+            &mut clipboard,
             screen,
             &theme,
         ));
@@ -15074,6 +15317,7 @@ mod tests {
             agent_id: None,
             mission_id: None,
             text: "selection precision".into(),
+            prompt_msg_idx: None,
         });
         let mut input_state = InputState::new();
         let mut clipboard = None;
@@ -15342,6 +15586,7 @@ k = 2
                 agent_id: Some("planner".into()),
                 mission_id: None,
                 text: format!("message-{i}"),
+                prompt_msg_idx: None,
             });
         }
 
@@ -15408,6 +15653,7 @@ k = 2
                 agent_id: None,
                 mission_id: None,
                 text: format!("payload-{i:03}"),
+                prompt_msg_idx: None,
             });
         }
         let mut fuzzy_runtime =
@@ -15523,6 +15769,7 @@ k = 2
             agent_id: None,
             mission_id: None,
             text: "alpha prompt".into(),
+            prompt_msg_idx: None,
         });
         state.agents.messages.push(AgentMessage {
             at: "10:00:01".into(),
@@ -15530,6 +15777,7 @@ k = 2
             agent_id: None,
             mission_id: None,
             text: "omega prompt".into(),
+            prompt_msg_idx: None,
         });
         let mut input_state = InputState::new();
         let mut clipboard = None;
@@ -15610,6 +15858,7 @@ k = 2
                 agent_id: None,
                 mission_id: None,
                 text: format!("user-prompt-{i:02}"),
+                prompt_msg_idx: None,
             });
         }
         let mut fuzzy_runtime =
@@ -15729,6 +15978,7 @@ k = 2
             agent_id: None,
             mission_id: None,
             text: "first message has a wider bubble".into(),
+            prompt_msg_idx: None,
         });
         state.agents.messages.push(AgentMessage {
             at: "10:00:01".into(),
@@ -15736,6 +15986,7 @@ k = 2
             agent_id: None,
             mission_id: None,
             text: "short".into(),
+            prompt_msg_idx: None,
         });
 
         let mut input_state = InputState::new();
@@ -15824,6 +16075,7 @@ k = 2
             agent_id: None,
             mission_id: None,
             text: "first message has a wider bubble".into(),
+            prompt_msg_idx: None,
         });
         state.agents.messages.push(AgentMessage {
             at: "10:00:01".into(),
@@ -15831,6 +16083,7 @@ k = 2
             agent_id: None,
             mission_id: None,
             text: "short".into(),
+            prompt_msg_idx: None,
         });
 
         let mut input_state = InputState::new();
@@ -15924,6 +16177,7 @@ k = 2
                 agent_id: None,
                 mission_id: None,
                 text: format!("user-prompt-{i:02}"),
+                prompt_msg_idx: None,
             });
         }
 
@@ -16034,6 +16288,7 @@ k = 2
             agent_id: Some("planner".into()),
             mission_id: None,
             text: "selection copy works".into(),
+            prompt_msg_idx: None,
         });
         let mut input_state = InputState::new();
         let mut clipboard = None;
@@ -16149,6 +16404,7 @@ k = 2
             agent_id: None,
             mission_id: None,
             text: "hello".into(),
+            prompt_msg_idx: None,
         });
         let screen = ratatui::layout::Rect {
             x: 0,
@@ -16202,6 +16458,7 @@ k = 2
             agent_id: None,
             mission_id: None,
             text: "intro\n| table row |".into(),
+            prompt_msg_idx: None,
         });
 
         let screen = ratatui::layout::Rect {

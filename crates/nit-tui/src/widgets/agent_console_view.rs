@@ -591,6 +591,7 @@ fn refresh_thread_rows_cache(
         mission: mission_ref.map(str::to_string),
         agent: agent_ref.map(str::to_string),
         messages_len,
+        event_epoch: state.agents.event_epoch,
     };
     state.agents.console_rows_cache.key = Some(key);
     state.agents.console_rows_cache.rows = rows;
@@ -674,7 +675,7 @@ fn input_inner_height_for(inner: Rect, input_boxed: bool, input_lines_len: usize
     }
 }
 
-fn chat_input_window_start(
+pub(crate) fn chat_input_window_start(
     scroll: usize,
     total_lines: usize,
     visible_height: usize,
@@ -743,7 +744,7 @@ fn chat_input_char_index_for_display_pos(
     input.chars().count()
 }
 
-fn chat_input_display_pos_for_char_idx(
+pub(crate) fn chat_input_display_pos_for_char_idx(
     input: &str,
     width: usize,
     target_char_idx: usize,
@@ -791,7 +792,7 @@ fn chat_input_display_pos_for_char_idx(
     (line, char_col)
 }
 
-fn highlight_plain_line(
+pub(crate) fn highlight_plain_line(
     text: &str,
     sel_start: usize,
     sel_end: usize,
@@ -827,7 +828,7 @@ fn split_at_char(input: &str, idx: usize) -> (String, String) {
     (input.to_string(), "".into())
 }
 
-fn wrap_input_with_cursor(
+pub(crate) fn wrap_input_with_cursor(
     prefix: &str,
     input: &str,
     cursor_char_idx: usize,
@@ -1477,7 +1478,7 @@ fn looks_like_ecg(token: &str) -> bool {
     count == 6
 }
 
-fn dim_bg_towards(color: Color, background: Color, background_pct: u8) -> Color {
+pub(crate) fn dim_bg_towards(color: Color, background: Color, background_pct: u8) -> Color {
     let pct = background_pct.min(100) as u16;
     match (color, background) {
         (Color::Rgb(r1, g1, b1), Color::Rgb(r0, g0, b0)) => {
@@ -1501,19 +1502,52 @@ fn thread_rows(
 ) -> Vec<ThreadRow> {
     let mission = state.agents.selected_context_mission();
     let agent = state.agents.selected_context_agent();
-    let mut rows = Vec::new();
-    for msg in state.agents.messages.iter() {
+
+    // Collect visible messages and separate prompts from replies.
+    let mut prompt_indices: Vec<usize> = Vec::new();
+    let mut reply_map: Vec<(usize, usize)> = Vec::new(); // (msg_global_idx, prompt_global_idx)
+    let mut unlinked_replies: Vec<usize> = Vec::new();
+
+    for (idx, msg) in state.agents.messages.iter().enumerate() {
         if !message_matches_context(msg, mission, agent) {
             continue;
         }
-        rows.extend(format_message_rows(
-            state,
-            swarm,
-            msg,
-            width,
-            MessageRenderMode::Transcript,
-        ));
+        if msg.agent_id.is_none() {
+            prompt_indices.push(idx);
+        } else if let Some(parent_idx) = msg.prompt_msg_idx {
+            reply_map.push((idx, parent_idx));
+        } else {
+            unlinked_replies.push(idx);
+        }
     }
+
+    // Build output: each prompt followed by its linked replies, then any unlinked ones.
+    let mut rendered: Vec<bool> = vec![false; state.agents.messages.len()];
+    let mut rows = Vec::new();
+
+    for &prompt_idx in &prompt_indices {
+        if let Some(msg) = state.agents.messages.get(prompt_idx) {
+            rows.extend(format_message_rows(state, swarm, msg, width, MessageRenderMode::Transcript));
+            rendered[prompt_idx] = true;
+        }
+        // Render replies linked to this prompt.
+        for &(reply_idx, parent_idx) in &reply_map {
+            if parent_idx == prompt_idx {
+                if let Some(msg) = state.agents.messages.get(reply_idx) {
+                    rows.extend(format_message_rows(state, swarm, msg, width, MessageRenderMode::Transcript));
+                    rendered[reply_idx] = true;
+                }
+            }
+        }
+    }
+
+    // Render any unlinked replies (legacy messages without prompt_msg_idx) in order.
+    for &idx in &unlinked_replies {
+        if let Some(msg) = state.agents.messages.get(idx) {
+            rows.extend(format_message_rows(state, swarm, msg, width, MessageRenderMode::Transcript));
+        }
+    }
+
     rows.extend(breather_rows_for_user_prompt(state, swarm, pulse_on, width));
     rows
 }
@@ -2819,6 +2853,7 @@ mod tests {
             agent_id: None,
             mission_id: None,
             text: "line one\nline two".into(),
+            prompt_msg_idx: None,
         };
         let rows = format_message_rows(&state, None, &msg, 48, MessageRenderMode::Transcript);
         assert!(rows.len() >= 6);
@@ -2862,6 +2897,7 @@ mod tests {
             agent_id: Some("coder".into()),
             mission_id: None,
             text: "working".into(),
+            prompt_msg_idx: None,
         };
         state.agents.messages.push(msg.clone());
         state.metrics.frame_count = 3;
@@ -2982,6 +3018,7 @@ mod tests {
             agent_id: None,
             mission_id: Some("mis-001".into()),
             text: "do the work".into(),
+            prompt_msg_idx: None,
         });
 
         let rows = thread_rows(&state, None, 120, true);
@@ -3013,6 +3050,7 @@ mod tests {
             agent_id: Some("coder".into()),
             mission_id: None,
             text: "hello".into(),
+            prompt_msg_idx: None,
         };
         state.agents.messages.push(msg.clone());
         let rows = format_message_rows(
@@ -3051,6 +3089,7 @@ mod tests {
             agent_id: Some("coder".into()),
             mission_id: None,
             text: "hello".into(),
+            prompt_msg_idx: None,
         });
 
         assert_eq!(artifact_message_index_for_line(&state, 120, 1), Some(0));
@@ -3253,6 +3292,7 @@ mod tests {
             agent_id: Some("reviewer".into()),
             mission_id: None,
             text: "ok".into(),
+            prompt_msg_idx: None,
         };
         let row = format_message_rows(&state, None, &msg, 120, MessageRenderMode::Transcript)
             .into_iter()
@@ -3416,6 +3456,7 @@ mod tests {
             agent_id: Some("planner".into()),
             mission_id: None,
             text: "older message".into(),
+            prompt_msg_idx: None,
         });
         state.agents.messages.push(AgentMessage {
             at: "10:00:01".into(),
@@ -3423,6 +3464,7 @@ mod tests {
             agent_id: Some("coder".into()),
             mission_id: None,
             text: "newest message".into(),
+            prompt_msg_idx: None,
         });
 
         let rows = thread_rows(&state, None, 100, true);
@@ -3471,6 +3513,7 @@ mod tests {
             agent_id: None,
             mission_id: None,
             text: "please plan".into(),
+            prompt_msg_idx: None,
         });
 
         let rows = thread_rows(&state, None, 100, true);
@@ -3508,6 +3551,7 @@ mod tests {
             agent_id: None,
             mission_id: None,
             text: "please plan".into(),
+            prompt_msg_idx: None,
         });
         state.agents.messages.push(AgentMessage {
             at: "10:00:02".into(),
@@ -3515,6 +3559,7 @@ mod tests {
             agent_id: Some("planner".into()),
             mission_id: None,
             text: "on it".into(),
+            prompt_msg_idx: None,
         });
 
         let rows = thread_rows(&state, None, 100, true);
@@ -3579,6 +3624,7 @@ mod tests {
             agent_id: None,
             mission_id: None,
             text: "do the work".into(),
+            prompt_msg_idx: None,
         });
 
         let rows = thread_rows(&state, None, 120, true);
@@ -3631,6 +3677,7 @@ mod tests {
             agent_id: None,
             mission_id: None,
             text: "do the work".into(),
+            prompt_msg_idx: None,
         });
 
         let rows = thread_rows(&state, None, 120, true);
@@ -3672,6 +3719,7 @@ mod tests {
             agent_id: Some("planner".into()),
             mission_id: None,
             text: "finished previous turn".into(),
+            prompt_msg_idx: None,
         });
 
         let rows = thread_rows(&state, None, 120, true);
@@ -3758,6 +3806,7 @@ mod tests {
             agent_id: Some("a".into()),
             mission_id: None,
             text: "finished previous turn".into(),
+            prompt_msg_idx: None,
         });
 
         let rows = thread_rows(&state, None, 23, true);
@@ -3830,6 +3879,7 @@ mod tests {
             agent_id: None,
             mission_id: Some("mis-001".into()),
             text: "do the work".into(),
+            prompt_msg_idx: None,
         });
         state.agents.messages.push(AgentMessage {
             at: "10:00:03".into(),
@@ -3838,6 +3888,7 @@ mod tests {
             mission_id: Some("mis-001".into()),
             text: "Swarm template: lab | integrator: planner | verifier: coder | gates: rust-ci"
                 .into(),
+            prompt_msg_idx: None,
         });
 
         let rows = thread_rows(&state, None, 120, true);
@@ -3905,6 +3956,7 @@ mod tests {
             agent_id: Some("planner".into()),
             mission_id: Some("mis-001".into()),
             text: "planner output".into(),
+            prompt_msg_idx: None,
         });
         state.agents.messages.push(AgentMessage {
             at: "10:00:02".into(),
@@ -3912,6 +3964,7 @@ mod tests {
             agent_id: Some("coder".into()),
             mission_id: Some("mis-001".into()),
             text: "coder output".into(),
+            prompt_msg_idx: None,
         });
         state.agents.messages.push(AgentMessage {
             at: "10:00:03".into(),
@@ -3920,6 +3973,7 @@ mod tests {
             mission_id: Some("mis-001".into()),
             text: "Swarm template: lab | integrator: planner | verifier: coder | gates: rust-ci"
                 .into(),
+            prompt_msg_idx: None,
         });
 
         let rows = thread_rows(&state, None, 120, true);
