@@ -11103,8 +11103,11 @@ fn maybe_open_artifact_popup_from_console_line(
             state.agents.mission_selected = mission_idx;
         }
     } else if let Some(agent_id) = message.agent_id.as_deref() {
+        // Resolve chat-clone ids to the base agent so the context stays on the
+        // user-selected model and other artifacts remain visible.
+        let resolved = chat_clone_base_id(agent_id).unwrap_or(agent_id);
         state.agents.selected_mission = None;
-        state.agents.selected_agent = Some(agent_id.to_string());
+        state.agents.selected_agent = Some(resolved.to_string());
     }
 
     let selected = agent_ops_view::artifacts_popup_ref_for_message(

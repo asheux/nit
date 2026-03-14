@@ -586,21 +586,36 @@ pub fn artifact_message_index_for_line_with_swarm(
     width: usize,
     line_idx: usize,
 ) -> Option<usize> {
+    let width = width.max(1);
     let mission = state.agents.selected_context_mission();
     let agent = state.agents.selected_context_agent();
-    let mut row_cursor = 0usize;
-    for (msg_idx, msg) in state.agents.messages.iter().enumerate() {
-        if !message_matches_context(msg, mission, agent) {
-            continue;
+
+    // Must iterate messages in the same grouped order as thread_rows() so that
+    // `line_idx` (which comes from the rendered output) lines up with our row count.
+    let ordered = visible_messages_grouped(state, mission, agent);
+
+    // Also account for inline breather rows that thread_rows() inserts after
+    // each user prompt.
+    let mut pending_by_prompt: std::collections::HashMap<usize, Vec<String>> =
+        std::collections::HashMap::new();
+    for (agent_id, &prompt_idx) in state.agents.codex_turn_prompt_idx.iter() {
+        let is_active = state.agents.active_turns.contains_key(agent_id)
+            || state
+                .agents
+                .queued_codex_turns
+                .iter()
+                .any(|t| t.agent_id == *agent_id);
+        if is_active {
+            pending_by_prompt
+                .entry(prompt_idx)
+                .or_default()
+                .push(agent_id.clone());
         }
-        let rows = format_message_rows(
-            state,
-            swarm,
-            msg,
-            width.max(1),
-            MessageRenderMode::Transcript,
-        );
-        // Find the ArtifactLink row (may not be last if a spacer follows).
+    }
+
+    let mut row_cursor = 0usize;
+    for &(msg_idx, msg) in &ordered {
+        let rows = format_message_rows(state, swarm, msg, width, MessageRenderMode::Transcript);
         if let Some(artifact_offset) = rows
             .iter()
             .position(|row| matches!(row.kind, ThreadRowKind::ArtifactLink))
@@ -610,6 +625,15 @@ pub fn artifact_message_index_for_line_with_swarm(
             }
         }
         row_cursor = row_cursor.saturating_add(rows.len());
+
+        // After a user prompt, account for inline breather rows that thread_rows()
+        // would insert (they shift all subsequent line indices).
+        if msg.agent_id.is_none() {
+            if let Some(agent_ids) = pending_by_prompt.get(&msg_idx) {
+                let breather = inline_breather_rows(state, agent_ids, false, width);
+                row_cursor = row_cursor.saturating_add(breather.len());
+            }
+        }
     }
     None
 }
@@ -646,50 +670,12 @@ fn refresh_thread_rows_cache(
         );
     }
 
-    // Collect visible messages and separate into prompts vs responses.
-    let visible: Vec<(usize, &AgentMessage)> = state
-        .agents
-        .messages
-        .iter()
-        .enumerate()
-        .filter(|(_, msg)| message_matches_context(msg, mission_ref, agent_ref))
-        .collect();
-
-    // Build a map: prompt_msg_idx → list of visible (msg_idx, msg) responses that
-    // should be rendered immediately after their parent prompt instead of in
-    // chronological order.  Only group when the parent prompt is also visible.
-    let visible_prompt_indices: std::collections::HashSet<usize> = visible
-        .iter()
-        .filter(|(_, msg)| msg.agent_id.is_none())
-        .map(|(idx, _)| *idx)
-        .collect();
-
-    let mut responses_by_prompt: std::collections::HashMap<usize, Vec<(usize, &AgentMessage)>> =
-        std::collections::HashMap::new();
-    let mut grouped_indices: std::collections::HashSet<usize> =
-        std::collections::HashSet::new();
-    for &(msg_idx, msg) in &visible {
-        if msg.agent_id.is_some() {
-            if let Some(parent_idx) = msg.prompt_msg_idx {
-                if visible_prompt_indices.contains(&parent_idx) {
-                    responses_by_prompt
-                        .entry(parent_idx)
-                        .or_default()
-                        .push((msg_idx, msg));
-                    grouped_indices.insert(msg_idx);
-                }
-            }
-        }
-    }
+    let ordered = visible_messages_grouped(state, mission_ref, agent_ref);
 
     let mut rows = Vec::new();
     let mut breather_slots: Vec<(usize, usize)> = Vec::new();
     let mut last_message_was_user = false;
-    for &(msg_idx, msg) in &visible {
-        // Skip responses that will be rendered under their parent prompt.
-        if grouped_indices.contains(&msg_idx) {
-            continue;
-        }
+    for &(msg_idx, msg) in &ordered {
         last_message_was_user = msg.agent_id.is_none();
         rows.extend(format_message_rows(
             state,
@@ -698,21 +684,8 @@ fn refresh_thread_rows_cache(
             width,
             MessageRenderMode::Transcript,
         ));
-        // After a user prompt, splice in its grouped responses.
+        // Record the row position where an inline breather can be inserted.
         if msg.agent_id.is_none() {
-            if let Some(responses) = responses_by_prompt.get(&msg_idx) {
-                for &(_, resp_msg) in responses {
-                    last_message_was_user = false;
-                    rows.extend(format_message_rows(
-                        state,
-                        swarm,
-                        resp_msg,
-                        width,
-                        MessageRenderMode::Transcript,
-                    ));
-                }
-            }
-            // Record the row position where an inline breather can be inserted.
             breather_slots.push((rows.len(), msg_idx));
         }
     }
@@ -1635,14 +1608,7 @@ fn thread_rows(
     let mission = state.agents.selected_context_mission();
     let agent = state.agents.selected_context_agent();
 
-    // Collect visible messages.
-    let visible: Vec<(usize, &AgentMessage)> = state
-        .agents
-        .messages
-        .iter()
-        .enumerate()
-        .filter(|(_, msg)| message_matches_context(msg, mission, agent))
-        .collect();
+    let ordered = visible_messages_grouped(state, mission, agent);
 
     // Build reverse map: prompt_msg_idx → list of agent_ids still working on it.
     let mut pending_by_prompt: std::collections::HashMap<usize, Vec<String>> =
@@ -1662,39 +1628,10 @@ fn thread_rows(
         }
     }
 
-    // Group completed responses under their parent prompts.
-    let visible_prompt_indices: std::collections::HashSet<usize> = visible
-        .iter()
-        .filter(|(_, msg)| msg.agent_id.is_none())
-        .map(|(idx, _)| *idx)
-        .collect();
-
-    let mut responses_by_prompt: std::collections::HashMap<usize, Vec<(usize, &AgentMessage)>> =
-        std::collections::HashMap::new();
-    let mut grouped_indices: std::collections::HashSet<usize> =
-        std::collections::HashSet::new();
-    for &(msg_idx, msg) in &visible {
-        if msg.agent_id.is_some() {
-            if let Some(parent_idx) = msg.prompt_msg_idx {
-                if visible_prompt_indices.contains(&parent_idx) {
-                    responses_by_prompt
-                        .entry(parent_idx)
-                        .or_default()
-                        .push((msg_idx, msg));
-                    grouped_indices.insert(msg_idx);
-                }
-            }
-        }
-    }
-
     let mut inline_shown = std::collections::HashSet::<String>::new();
     let mut rows = Vec::new();
 
-    for &(msg_idx, msg) in &visible {
-        // Skip responses that will be rendered under their parent prompt.
-        if grouped_indices.contains(&msg_idx) {
-            continue;
-        }
+    for &(msg_idx, msg) in &ordered {
         rows.extend(format_message_rows(
             state,
             swarm,
@@ -1703,19 +1640,8 @@ fn thread_rows(
             MessageRenderMode::Transcript,
         ));
 
-        // After a user prompt, splice in its grouped responses, then show inline breather.
+        // After a user prompt, show inline breather for pending agents.
         if msg.agent_id.is_none() {
-            if let Some(responses) = responses_by_prompt.get(&msg_idx) {
-                for &(_, resp_msg) in responses {
-                    rows.extend(format_message_rows(
-                        state,
-                        swarm,
-                        resp_msg,
-                        width,
-                        MessageRenderMode::Transcript,
-                    ));
-                }
-            }
             if let Some(prompt_agents) = pending_by_prompt.get(&msg_idx) {
                 rows.extend(inline_breather_rows(state, prompt_agents, pulse_on, width));
                 for id in prompt_agents {
@@ -1754,6 +1680,61 @@ fn thread_rows(
         rows.extend(breather_rows_for_user_prompt(state, swarm, pulse_on, width));
     }
     rows
+}
+
+/// Returns visible messages in grouped order: each user prompt is immediately
+/// followed by any agent responses whose `prompt_msg_idx` points to it.
+/// Responses without a matching visible parent appear in their chronological position.
+fn visible_messages_grouped<'a>(
+    state: &'a AppState,
+    mission: Option<&str>,
+    agent: Option<&str>,
+) -> Vec<(usize, &'a AgentMessage)> {
+    let visible: Vec<(usize, &AgentMessage)> = state
+        .agents
+        .messages
+        .iter()
+        .enumerate()
+        .filter(|(_, msg)| message_matches_context(msg, mission, agent))
+        .collect();
+
+    let visible_prompt_indices: std::collections::HashSet<usize> = visible
+        .iter()
+        .filter(|(_, msg)| msg.agent_id.is_none())
+        .map(|(idx, _)| *idx)
+        .collect();
+
+    let mut responses_by_prompt: std::collections::HashMap<usize, Vec<(usize, &AgentMessage)>> =
+        std::collections::HashMap::new();
+    let mut grouped_indices: std::collections::HashSet<usize> =
+        std::collections::HashSet::new();
+    for &(msg_idx, msg) in &visible {
+        if msg.agent_id.is_some() {
+            if let Some(parent_idx) = msg.prompt_msg_idx {
+                if visible_prompt_indices.contains(&parent_idx) {
+                    responses_by_prompt
+                        .entry(parent_idx)
+                        .or_default()
+                        .push((msg_idx, msg));
+                    grouped_indices.insert(msg_idx);
+                }
+            }
+        }
+    }
+
+    let mut result = Vec::with_capacity(visible.len());
+    for &(msg_idx, msg) in &visible {
+        if grouped_indices.contains(&msg_idx) {
+            continue;
+        }
+        result.push((msg_idx, msg));
+        if msg.agent_id.is_none() {
+            if let Some(responses) = responses_by_prompt.get(&msg_idx) {
+                result.extend(responses.iter().copied());
+            }
+        }
+    }
+    result
 }
 
 fn message_matches_context(msg: &AgentMessage, mission: Option<&str>, agent: Option<&str>) -> bool {
