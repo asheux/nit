@@ -1669,7 +1669,7 @@ fn draw(
             f.set_cursor(x, y);
         }
     })?;
-    let cursor_style = if state.focus == PaneId::Notes {
+    let cursor_style = if state.agents.artifacts_popup_open || state.focus == PaneId::Notes {
         SetCursorStyle::SteadyBar
     } else {
         match state.mode {
@@ -4248,6 +4248,15 @@ fn handle_paste_event(
         return true;
     }
 
+    if state.agents.artifacts_popup_open {
+        let changed = insert_popup_chat_text(state, text);
+        if changed {
+            state.agents.note_event();
+            vitals.record_agent_event(Instant::now());
+        }
+        return changed;
+    }
+
     if state.focus == PaneId::Notes {
         let changed = insert_chat_input_text(state, text);
         if changed {
@@ -4362,6 +4371,644 @@ fn copy_chat_input_selection(state: &mut AppState, clipboard: &mut Option<Clipbo
         let _ = cb.set_text(text);
     }
     true
+}
+
+fn copy_popup_chat_input_selection(
+    state: &mut AppState,
+    clipboard: &mut Option<Clipboard>,
+) -> bool {
+    let total = state.agents.artifacts_popup_chat_input.chars().count();
+    let cursor = state.agents.artifacts_popup_chat_cursor.min(total);
+    let anchor = match state.agents.artifacts_popup_chat_selection_anchor {
+        Some(a) => a.min(total),
+        None => return false,
+    };
+    if anchor == cursor {
+        return false;
+    }
+    let (start, end) = (anchor.min(cursor), anchor.max(cursor));
+    let text = slice_by_char(&state.agents.artifacts_popup_chat_input, start, end);
+    if text.is_empty() {
+        return false;
+    }
+    state.yank_kind = if text.contains('\n') {
+        YankKind::Line
+    } else {
+        YankKind::Char
+    };
+    state.yank = Some(text.clone());
+    if let Some(cb) = clipboard.as_mut() {
+        let _ = cb.set_text(text);
+    }
+    true
+}
+
+fn popup_chat_selection_range(state: &AppState) -> Option<(usize, usize)> {
+    let total = state.agents.artifacts_popup_chat_input.chars().count();
+    let cursor = state.agents.artifacts_popup_chat_cursor.min(total);
+    let anchor = state.agents.artifacts_popup_chat_selection_anchor?.min(total);
+    if anchor == cursor {
+        return None;
+    }
+    Some((anchor.min(cursor), anchor.max(cursor)))
+}
+
+fn delete_popup_chat_selection(state: &mut AppState) -> bool {
+    let Some((start, end)) = popup_chat_selection_range(state) else {
+        return false;
+    };
+    let remove_start =
+        chat_input_byte_index(&state.agents.artifacts_popup_chat_input, start);
+    let remove_end =
+        chat_input_byte_index(&state.agents.artifacts_popup_chat_input, end);
+    state
+        .agents
+        .artifacts_popup_chat_input
+        .replace_range(remove_start..remove_end, "");
+    state.agents.artifacts_popup_chat_cursor = start;
+    state.agents.artifacts_popup_chat_selection_anchor = None;
+    true
+}
+
+fn insert_popup_chat_text(state: &mut AppState, text: &str) -> bool {
+    let normalized = normalize_chat_input_text(text);
+    if normalized.is_empty() {
+        return false;
+    }
+    delete_popup_chat_selection(state);
+    let insert_at = chat_input_byte_index(
+        &state.agents.artifacts_popup_chat_input,
+        state.agents.artifacts_popup_chat_cursor,
+    );
+    state
+        .agents
+        .artifacts_popup_chat_input
+        .insert_str(insert_at, &normalized);
+    state.agents.artifacts_popup_chat_cursor += normalized.chars().count();
+    state.agents.artifacts_popup_chat_scroll = usize::MAX;
+    state.agents.artifacts_popup_chat_selection_anchor = None;
+    true
+}
+
+/// Self-contained key handler for the artifacts popup chat input.
+/// Operates directly on `artifacts_popup_chat_*` fields — no swap needed.
+fn handle_artifacts_popup_chat_key(
+    key: &KeyEvent,
+    state: &mut AppState,
+    clipboard: &mut Option<Clipboard>,
+) -> ChatInputEditResult {
+    let mut changed = false;
+    let mut handled = false;
+    let mut follow_cursor = false;
+
+    let input_len_chars = state.agents.artifacts_popup_chat_input.chars().count();
+    if state.agents.artifacts_popup_chat_cursor > input_len_chars {
+        state.agents.artifacts_popup_chat_cursor = input_len_chars;
+    }
+    if state
+        .agents
+        .artifacts_popup_chat_selection_anchor
+        .is_some_and(|anchor| anchor > input_len_chars)
+    {
+        state.agents.artifacts_popup_chat_selection_anchor = Some(input_len_chars);
+    }
+
+    match *key {
+        // Shift+Enter: insert newline
+        KeyEvent {
+            code: KeyCode::Enter,
+            modifiers,
+            ..
+        } if modifiers.contains(KeyModifiers::SHIFT) => {
+            handled = true;
+            delete_popup_chat_selection(state);
+            let indent = chat_current_line_indent(
+                &state.agents.artifacts_popup_chat_input,
+                state.agents.artifacts_popup_chat_cursor,
+            );
+            let insert = if indent.is_empty() {
+                "\n".to_string()
+            } else {
+                format!("\n{indent}")
+            };
+            let insert_at = chat_input_byte_index(
+                &state.agents.artifacts_popup_chat_input,
+                state.agents.artifacts_popup_chat_cursor,
+            );
+            state
+                .agents
+                .artifacts_popup_chat_input
+                .insert_str(insert_at, &insert);
+            state.agents.artifacts_popup_chat_cursor += insert.chars().count();
+            state.agents.artifacts_popup_chat_selection_anchor = None;
+            changed = true;
+            follow_cursor = true;
+        }
+        // Ctrl+A / Cmd+A: select all
+        KeyEvent {
+            code: KeyCode::Char('a'),
+            modifiers,
+            ..
+        } if modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::SUPER) => {
+            handled = true;
+            let total = state.agents.artifacts_popup_chat_input.chars().count();
+            state.agents.artifacts_popup_chat_selection_anchor = Some(0);
+            state.agents.artifacts_popup_chat_cursor = total;
+            copy_popup_chat_input_selection(state, clipboard);
+            changed = true;
+            follow_cursor = true;
+        }
+        // Cmd+C or Ctrl+Shift+C: copy
+        KeyEvent {
+            code: KeyCode::Char('c'),
+            modifiers,
+            ..
+        } if modifiers.contains(KeyModifiers::SUPER)
+            || (modifiers.contains(KeyModifiers::CONTROL)
+                && modifiers.contains(KeyModifiers::SHIFT)) =>
+        {
+            handled = true;
+            copy_popup_chat_input_selection(state, clipboard);
+        }
+        // Cmd+X or Ctrl+Shift+X: cut
+        KeyEvent {
+            code: KeyCode::Char('x'),
+            modifiers,
+            ..
+        } if modifiers.contains(KeyModifiers::SUPER)
+            || (modifiers.contains(KeyModifiers::CONTROL)
+                && modifiers.contains(KeyModifiers::SHIFT)) =>
+        {
+            handled = true;
+            if copy_popup_chat_input_selection(state, clipboard)
+                && delete_popup_chat_selection(state)
+            {
+                changed = true;
+                follow_cursor = true;
+            }
+        }
+        // Ctrl+V / Cmd+V: paste
+        KeyEvent {
+            code: KeyCode::Char('v'),
+            modifiers,
+            ..
+        } if modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::SUPER) => {
+            handled = true;
+            if let Some(cb) = clipboard.as_mut() {
+                if let Ok(text) = cb.get_text() {
+                    if insert_popup_chat_text(state, &text) {
+                        changed = true;
+                        follow_cursor = true;
+                    }
+                }
+            }
+        }
+        // Ctrl+Insert: copy
+        KeyEvent {
+            code: KeyCode::Insert,
+            modifiers,
+            ..
+        } if modifiers.contains(KeyModifiers::CONTROL) => {
+            handled = true;
+            copy_popup_chat_input_selection(state, clipboard);
+        }
+        // Shift+Insert: paste
+        KeyEvent {
+            code: KeyCode::Insert,
+            modifiers,
+            ..
+        } if modifiers.contains(KeyModifiers::SHIFT) => {
+            handled = true;
+            if let Some(cb) = clipboard.as_mut() {
+                if let Ok(text) = cb.get_text() {
+                    if insert_popup_chat_text(state, &text) {
+                        changed = true;
+                        follow_cursor = true;
+                    }
+                }
+            }
+        }
+        // Ctrl+U: clear input
+        KeyEvent {
+            code: KeyCode::Char('u'),
+            modifiers,
+            ..
+        } if modifiers.contains(KeyModifiers::CONTROL) => {
+            handled = true;
+            if !state.agents.artifacts_popup_chat_input.is_empty() {
+                state.agents.artifacts_popup_chat_input.clear();
+                state.agents.artifacts_popup_chat_cursor = 0;
+                state.agents.artifacts_popup_chat_selection_anchor = None;
+                changed = true;
+                follow_cursor = true;
+            }
+        }
+        // Ctrl+C: copy selection or clear input
+        KeyEvent {
+            code: KeyCode::Char('c'),
+            modifiers,
+            ..
+        } if modifiers.contains(KeyModifiers::CONTROL) => {
+            handled = true;
+            if !copy_popup_chat_input_selection(state, clipboard)
+                && !state.agents.artifacts_popup_chat_input.is_empty()
+            {
+                state.agents.artifacts_popup_chat_input.clear();
+                state.agents.artifacts_popup_chat_cursor = 0;
+                state.agents.artifacts_popup_chat_selection_anchor = None;
+                changed = true;
+                follow_cursor = true;
+            }
+        }
+        // ETX literal
+        KeyEvent {
+            code: KeyCode::Char('\u{3}'),
+            modifiers: KeyModifiers::NONE,
+            ..
+        } => {
+            handled = true;
+            if !copy_popup_chat_input_selection(state, clipboard)
+                && !state.agents.artifacts_popup_chat_input.is_empty()
+            {
+                state.agents.artifacts_popup_chat_input.clear();
+                state.agents.artifacts_popup_chat_cursor = 0;
+                state.agents.artifacts_popup_chat_selection_anchor = None;
+                changed = true;
+                follow_cursor = true;
+            }
+        }
+        // Ctrl+Backspace / Alt+Backspace: delete word left
+        KeyEvent {
+            code: KeyCode::Backspace,
+            modifiers,
+            ..
+        } if modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) => {
+            handled = true;
+            if delete_popup_chat_selection(state) {
+                changed = true;
+                follow_cursor = true;
+            } else {
+                let cursor = state.agents.artifacts_popup_chat_cursor;
+                let remove_start = chat_cursor_move_word_left(
+                    &state.agents.artifacts_popup_chat_input,
+                    cursor,
+                );
+                if remove_start < cursor {
+                    let start = chat_input_byte_index(
+                        &state.agents.artifacts_popup_chat_input,
+                        remove_start,
+                    );
+                    let end = chat_input_byte_index(
+                        &state.agents.artifacts_popup_chat_input,
+                        cursor,
+                    );
+                    state
+                        .agents
+                        .artifacts_popup_chat_input
+                        .replace_range(start..end, "");
+                    state.agents.artifacts_popup_chat_cursor = remove_start;
+                    state.agents.artifacts_popup_chat_selection_anchor = None;
+                    changed = true;
+                    follow_cursor = true;
+                }
+            }
+        }
+        // Backspace: delete char left
+        KeyEvent {
+            code: KeyCode::Backspace,
+            ..
+        } => {
+            handled = true;
+            if delete_popup_chat_selection(state) {
+                changed = true;
+                follow_cursor = true;
+            } else if state.agents.artifacts_popup_chat_cursor > 0 {
+                let remove_start = chat_input_byte_index(
+                    &state.agents.artifacts_popup_chat_input,
+                    state.agents.artifacts_popup_chat_cursor - 1,
+                );
+                let remove_end = chat_input_byte_index(
+                    &state.agents.artifacts_popup_chat_input,
+                    state.agents.artifacts_popup_chat_cursor,
+                );
+                state
+                    .agents
+                    .artifacts_popup_chat_input
+                    .replace_range(remove_start..remove_end, "");
+                state.agents.artifacts_popup_chat_cursor -= 1;
+                state.agents.artifacts_popup_chat_selection_anchor = None;
+                changed = true;
+                follow_cursor = true;
+            }
+        }
+        // Ctrl+Delete / Alt+Delete: delete word right
+        KeyEvent {
+            code: KeyCode::Delete,
+            modifiers,
+            ..
+        } if modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) => {
+            handled = true;
+            if delete_popup_chat_selection(state) {
+                changed = true;
+                follow_cursor = true;
+            } else {
+                let cursor = state.agents.artifacts_popup_chat_cursor;
+                let remove_end = chat_cursor_move_word_right(
+                    &state.agents.artifacts_popup_chat_input,
+                    cursor,
+                );
+                if remove_end > cursor {
+                    let start = chat_input_byte_index(
+                        &state.agents.artifacts_popup_chat_input,
+                        cursor,
+                    );
+                    let end = chat_input_byte_index(
+                        &state.agents.artifacts_popup_chat_input,
+                        remove_end,
+                    );
+                    state
+                        .agents
+                        .artifacts_popup_chat_input
+                        .replace_range(start..end, "");
+                    state.agents.artifacts_popup_chat_selection_anchor = None;
+                    changed = true;
+                    follow_cursor = true;
+                }
+            }
+        }
+        // Delete: delete char right
+        KeyEvent {
+            code: KeyCode::Delete,
+            ..
+        } => {
+            handled = true;
+            if delete_popup_chat_selection(state) {
+                changed = true;
+                follow_cursor = true;
+            } else if state.agents.artifacts_popup_chat_cursor
+                < state.agents.artifacts_popup_chat_input.chars().count()
+            {
+                let remove_start = chat_input_byte_index(
+                    &state.agents.artifacts_popup_chat_input,
+                    state.agents.artifacts_popup_chat_cursor,
+                );
+                let remove_end = chat_input_byte_index(
+                    &state.agents.artifacts_popup_chat_input,
+                    state.agents.artifacts_popup_chat_cursor + 1,
+                );
+                state
+                    .agents
+                    .artifacts_popup_chat_input
+                    .replace_range(remove_start..remove_end, "");
+                state.agents.artifacts_popup_chat_selection_anchor = None;
+                changed = true;
+                follow_cursor = true;
+            }
+        }
+        // Left arrow
+        KeyEvent {
+            code: KeyCode::Left,
+            modifiers,
+            ..
+        } => {
+            handled = true;
+            let total_chars = state.agents.artifacts_popup_chat_input.chars().count();
+            let cursor = state.agents.artifacts_popup_chat_cursor.min(total_chars);
+            let selecting = modifiers.contains(KeyModifiers::SHIFT);
+            if selecting {
+                if state.agents.artifacts_popup_chat_selection_anchor.is_none() {
+                    state.agents.artifacts_popup_chat_selection_anchor = Some(cursor);
+                }
+            } else {
+                state.agents.artifacts_popup_chat_selection_anchor = None;
+            }
+            let new_cursor =
+                if modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) {
+                    chat_cursor_move_word_left(
+                        &state.agents.artifacts_popup_chat_input,
+                        cursor,
+                    )
+                } else {
+                    cursor.saturating_sub(1)
+                };
+            if new_cursor != cursor {
+                state.agents.artifacts_popup_chat_cursor = new_cursor;
+                changed = true;
+                follow_cursor = true;
+            }
+            if selecting {
+                copy_popup_chat_input_selection(state, clipboard);
+            }
+        }
+        // Right arrow
+        KeyEvent {
+            code: KeyCode::Right,
+            modifiers,
+            ..
+        } => {
+            handled = true;
+            let max = state.agents.artifacts_popup_chat_input.chars().count();
+            let cursor = state.agents.artifacts_popup_chat_cursor.min(max);
+            let selecting = modifiers.contains(KeyModifiers::SHIFT);
+            if selecting {
+                if state.agents.artifacts_popup_chat_selection_anchor.is_none() {
+                    state.agents.artifacts_popup_chat_selection_anchor = Some(cursor);
+                }
+            } else {
+                state.agents.artifacts_popup_chat_selection_anchor = None;
+            }
+            let new_cursor =
+                if modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) {
+                    chat_cursor_move_word_right(
+                        &state.agents.artifacts_popup_chat_input,
+                        cursor,
+                    )
+                } else {
+                    cursor.saturating_add(1).min(max)
+                };
+            if new_cursor != cursor {
+                state.agents.artifacts_popup_chat_cursor = new_cursor;
+                changed = true;
+                follow_cursor = true;
+            }
+            if selecting {
+                copy_popup_chat_input_selection(state, clipboard);
+            }
+        }
+        // Home
+        KeyEvent {
+            code: KeyCode::Home,
+            modifiers,
+            ..
+        } => {
+            handled = true;
+            let total_chars = state.agents.artifacts_popup_chat_input.chars().count();
+            let cursor = state.agents.artifacts_popup_chat_cursor.min(total_chars);
+            let selecting = modifiers.contains(KeyModifiers::SHIFT);
+            if selecting {
+                if state.agents.artifacts_popup_chat_selection_anchor.is_none() {
+                    state.agents.artifacts_popup_chat_selection_anchor = Some(cursor);
+                }
+            } else {
+                state.agents.artifacts_popup_chat_selection_anchor = None;
+            }
+            let (line_start, _) = chat_current_line_bounds(
+                &state.agents.artifacts_popup_chat_input,
+                cursor,
+            );
+            let new_cursor = if modifiers.contains(KeyModifiers::CONTROL) {
+                0
+            } else {
+                line_start
+            };
+            if new_cursor != cursor {
+                state.agents.artifacts_popup_chat_cursor = new_cursor;
+                changed = true;
+                follow_cursor = true;
+            }
+            if selecting {
+                copy_popup_chat_input_selection(state, clipboard);
+            }
+        }
+        // End
+        KeyEvent {
+            code: KeyCode::End,
+            modifiers,
+            ..
+        } => {
+            handled = true;
+            let max = state.agents.artifacts_popup_chat_input.chars().count();
+            let cursor = state.agents.artifacts_popup_chat_cursor.min(max);
+            let selecting = modifiers.contains(KeyModifiers::SHIFT);
+            if selecting {
+                if state.agents.artifacts_popup_chat_selection_anchor.is_none() {
+                    state.agents.artifacts_popup_chat_selection_anchor = Some(cursor);
+                }
+            } else {
+                state.agents.artifacts_popup_chat_selection_anchor = None;
+            }
+            let (_, line_end) = chat_current_line_bounds(
+                &state.agents.artifacts_popup_chat_input,
+                cursor,
+            );
+            let new_cursor = if modifiers.contains(KeyModifiers::CONTROL) {
+                max
+            } else {
+                line_end
+            };
+            if new_cursor != cursor {
+                state.agents.artifacts_popup_chat_cursor = new_cursor;
+                changed = true;
+                follow_cursor = true;
+            }
+            if selecting {
+                copy_popup_chat_input_selection(state, clipboard);
+            }
+        }
+        // Up arrow
+        KeyEvent {
+            code: KeyCode::Up,
+            modifiers,
+            ..
+        } => {
+            handled = true;
+            let selecting = modifiers.contains(KeyModifiers::SHIFT);
+            let cursor = state.agents.artifacts_popup_chat_cursor;
+            let moved = chat_cursor_move_vertical(
+                &state.agents.artifacts_popup_chat_input,
+                cursor,
+                -1,
+            );
+            if moved != cursor {
+                if selecting {
+                    if state.agents.artifacts_popup_chat_selection_anchor.is_none() {
+                        state.agents.artifacts_popup_chat_selection_anchor = Some(cursor);
+                    }
+                } else {
+                    state.agents.artifacts_popup_chat_selection_anchor = None;
+                }
+                state.agents.artifacts_popup_chat_cursor = moved;
+                changed = true;
+                follow_cursor = true;
+                if selecting {
+                    copy_popup_chat_input_selection(state, clipboard);
+                }
+            }
+        }
+        // Down arrow
+        KeyEvent {
+            code: KeyCode::Down,
+            modifiers,
+            ..
+        } => {
+            handled = true;
+            let selecting = modifiers.contains(KeyModifiers::SHIFT);
+            let cursor = state.agents.artifacts_popup_chat_cursor;
+            let moved = chat_cursor_move_vertical(
+                &state.agents.artifacts_popup_chat_input,
+                cursor,
+                1,
+            );
+            if moved != cursor {
+                if selecting {
+                    if state.agents.artifacts_popup_chat_selection_anchor.is_none() {
+                        state.agents.artifacts_popup_chat_selection_anchor = Some(cursor);
+                    }
+                } else {
+                    state.agents.artifacts_popup_chat_selection_anchor = None;
+                }
+                state.agents.artifacts_popup_chat_cursor = moved;
+                changed = true;
+                follow_cursor = true;
+                if selecting {
+                    copy_popup_chat_input_selection(state, clipboard);
+                }
+            }
+        }
+        // Tab
+        KeyEvent {
+            code: KeyCode::Tab,
+            modifiers,
+            ..
+        } if modifiers.is_empty() => {
+            handled = true;
+            delete_popup_chat_selection(state);
+            let insert_at = chat_input_byte_index(
+                &state.agents.artifacts_popup_chat_input,
+                state.agents.artifacts_popup_chat_cursor,
+            );
+            state.agents.artifacts_popup_chat_input.insert(insert_at, '\t');
+            state.agents.artifacts_popup_chat_cursor += 1;
+            state.agents.artifacts_popup_chat_selection_anchor = None;
+            changed = true;
+            follow_cursor = true;
+        }
+        // Regular character
+        KeyEvent {
+            code: KeyCode::Char(c),
+            modifiers,
+            ..
+        } if modifiers.is_empty() || modifiers == KeyModifiers::SHIFT => {
+            handled = true;
+            delete_popup_chat_selection(state);
+            let insert_at = chat_input_byte_index(
+                &state.agents.artifacts_popup_chat_input,
+                state.agents.artifacts_popup_chat_cursor,
+            );
+            state.agents.artifacts_popup_chat_input.insert(insert_at, c);
+            state.agents.artifacts_popup_chat_cursor += 1;
+            state.agents.artifacts_popup_chat_selection_anchor = None;
+            changed = true;
+            follow_cursor = true;
+        }
+        _ => {}
+    }
+
+    ChatInputEditResult {
+        handled,
+        changed,
+        follow_cursor,
+    }
 }
 
 fn insert_text_into_focused_buffer(
@@ -5895,6 +6542,7 @@ enum MouseSelectTarget {
     Buffer(PaneId),
     Ui(UiSelectionPane),
     ChatInput,
+    PopupChatInput,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -8342,7 +8990,39 @@ fn handle_mouse_down_with_swarm(
         return true;
     }
     if state.agents.artifacts_popup_open {
-        if let Some((line_idx, col, lines)) =
+        // Check if the click is inside the popup's chat input box first.
+        let popup_area = dynamic_popup_rect(screen, artifacts_popup::preferred_size(screen));
+        if let Some(cursor_char_idx) = artifacts_popup::map_chat_input_point_to_cursor(
+            state,
+            swarm,
+            popup_area,
+            mouse.column,
+            mouse.row,
+            false,
+        ) {
+            reset_ui_selection(state, input_state);
+            let total_chars = state.agents.artifacts_popup_chat_input.chars().count();
+            let new_cursor = cursor_char_idx.min(total_chars);
+            if mouse.modifiers.contains(KeyModifiers::SHIFT) {
+                if state.agents.artifacts_popup_chat_selection_anchor.is_none() {
+                    state.agents.artifacts_popup_chat_selection_anchor = Some(
+                        state
+                            .agents
+                            .artifacts_popup_chat_cursor
+                            .min(total_chars),
+                    );
+                }
+            } else {
+                state.agents.artifacts_popup_chat_selection_anchor = Some(new_cursor);
+            }
+            state.agents.artifacts_popup_chat_cursor = new_cursor;
+            input_state.mouse_select_anchor = Some(MouseSelectAnchor {
+                target: MouseSelectTarget::PopupChatInput,
+                line: 0,
+                col: 0,
+            });
+            copy_popup_chat_input_selection(state, clipboard);
+        } else if let Some((line_idx, col, lines)) =
             map_artifacts_popup_mouse_with_swarm(swarm, mouse, screen, state, theme, false)
         {
             reset_ui_selection(state, input_state);
@@ -8366,8 +9046,7 @@ fn handle_mouse_down_with_swarm(
                 input_state,
             );
         } else {
-            let area = dynamic_popup_rect(screen, artifacts_popup::preferred_size(screen));
-            if !point_in_rect(mouse.column, mouse.row, area) {
+            if !point_in_rect(mouse.column, mouse.row, popup_area) {
                 reset_ui_selection(state, input_state);
                 state.agents.artifacts_popup_open = false;
                 state.agents.artifacts_popup_scroll = 0;
@@ -9129,6 +9808,33 @@ fn handle_mouse_drag_with_swarm(
             copy_chat_input_selection(state, clipboard);
             true
         }
+        MouseSelectTarget::PopupChatInput => {
+            let popup_area =
+                dynamic_popup_rect(screen, artifacts_popup::preferred_size(screen));
+            let Some(cursor_char_idx) = artifacts_popup::map_chat_input_point_to_cursor(
+                state,
+                swarm,
+                popup_area,
+                mouse.column,
+                mouse.row,
+                true,
+            ) else {
+                return false;
+            };
+            let total_chars = state.agents.artifacts_popup_chat_input.chars().count();
+            if state.agents.artifacts_popup_chat_selection_anchor.is_none() {
+                state.agents.artifacts_popup_chat_selection_anchor = Some(
+                    state
+                        .agents
+                        .artifacts_popup_chat_cursor
+                        .min(total_chars),
+                );
+            }
+            state.agents.artifacts_popup_chat_cursor = cursor_char_idx.min(total_chars);
+            state.agents.artifacts_popup_chat_scroll = usize::MAX;
+            copy_popup_chat_input_selection(state, clipboard);
+            true
+        }
         MouseSelectTarget::Ui(pane) => {
             let result = match pane {
                 UiSelectionPane::JobOutput => {
@@ -9273,6 +9979,7 @@ fn mouse_drag_allowed(state: &AppState, anchor: MouseSelectAnchor) -> bool {
         return matches!(
             anchor.target,
             MouseSelectTarget::Ui(UiSelectionPane::ArtifactsPopup)
+                | MouseSelectTarget::PopupChatInput
         );
     }
     if state.show_help {
@@ -11201,14 +11908,20 @@ fn handle_artifacts_popup_key(
         return true;
     }
 
-    // Content scrolling: Up/Down/PgUp/PgDown.
+    // Content scrolling:
+    //   Ctrl+Up / Ctrl+Down   — one line at a time
+    //   PgUp / PgDown         — one page at a time
+    //   Ctrl+Home / Ctrl+End  — jump to top / bottom
+    // Plain Up/Down go to the text editor (cursor movement in the input).
     let (max_scroll, page_step) = artifacts_popup_scroll_metrics(state, swarm, screen, theme);
     match *key {
         KeyEvent {
             code: KeyCode::Up,
             modifiers,
             ..
-        } if !modifiers.contains(KeyModifiers::SHIFT) => {
+        } if modifiers.contains(KeyModifiers::CONTROL)
+            && !modifiers.contains(KeyModifiers::SHIFT) =>
+        {
             bump_scroll_clamped(&mut state.agents.artifacts_popup_scroll, -1, max_scroll);
             return true;
         }
@@ -11216,8 +11929,26 @@ fn handle_artifacts_popup_key(
             code: KeyCode::Down,
             modifiers,
             ..
-        } if !modifiers.contains(KeyModifiers::SHIFT) => {
+        } if modifiers.contains(KeyModifiers::CONTROL)
+            && !modifiers.contains(KeyModifiers::SHIFT) =>
+        {
             bump_scroll_clamped(&mut state.agents.artifacts_popup_scroll, 1, max_scroll);
+            return true;
+        }
+        KeyEvent {
+            code: KeyCode::Home,
+            modifiers,
+            ..
+        } if modifiers.contains(KeyModifiers::CONTROL) => {
+            state.agents.artifacts_popup_scroll = 0;
+            return true;
+        }
+        KeyEvent {
+            code: KeyCode::End,
+            modifiers,
+            ..
+        } if modifiers.contains(KeyModifiers::CONTROL) => {
+            state.agents.artifacts_popup_scroll = max_scroll;
             return true;
         }
         KeyEvent {
@@ -11245,11 +11976,10 @@ fn handle_artifacts_popup_key(
         _ => {}
     }
 
-    // Swap popup chat state into the main fields so shared helpers work.
-    swap_in_artifacts_popup_chat(state);
-
-    // Enter: submit prompt, then close popup.
+    // Enter (without Shift): submit prompt, then close popup.
+    // Swap is only needed here because submit_chat_input_and_dispatch reads chat_input.
     if matches!(key.code, KeyCode::Enter) && !key.modifiers.contains(KeyModifiers::SHIFT) {
+        swap_in_artifacts_popup_chat(state);
         if submit_chat_input_and_dispatch(state, vitals, codex, swarm) {
             swap_out_artifacts_popup_chat(state);
             close_artifacts_popup(state);
@@ -11261,11 +11991,8 @@ fn handle_artifacts_popup_key(
         return true;
     }
 
-    // Delegate to shared text-editing handler for all other keys.
-    let edit = handle_chat_input_editing_key(key, state, clipboard);
-
-    // Swap back.
-    swap_out_artifacts_popup_chat(state);
+    // Decoupled text-editing handler — operates directly on popup fields.
+    let edit = handle_artifacts_popup_chat_key(key, state, clipboard);
 
     if edit.changed {
         if edit.follow_cursor {
@@ -14691,8 +15418,9 @@ mod tests {
 
         let mut vitals = VitalsState::default();
         let mut clipboard = None;
+        // Ctrl+Up scrolls the content (plain Up navigates the input cursor).
         assert!(handle_artifacts_popup_key(
-            &KeyEvent::new(KeyCode::Up, KeyModifiers::NONE),
+            &KeyEvent::new(KeyCode::Up, KeyModifiers::CONTROL),
             &mut state,
             &mut swarm,
             &mut vitals,

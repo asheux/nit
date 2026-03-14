@@ -803,7 +803,7 @@ fn point_in_rect(x: u16, y: u16, rect: Rect) -> bool {
         && y < rect.y.saturating_add(rect.height)
 }
 
-fn chat_input_char_index_for_display_pos(
+pub fn chat_input_char_index_for_display_pos(
     input: &str,
     width: usize,
     target_line: usize,

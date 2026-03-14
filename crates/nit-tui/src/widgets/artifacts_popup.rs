@@ -192,7 +192,126 @@ pub fn build_lines(
 }
 
 /// Maximum inner lines for the chat input box inside the artifacts popup.
-const POPUP_CHAT_INPUT_MAX_INNER_LINES: usize = 4;
+/// The box auto-grows as the user types and shrinks back when text is removed,
+/// capped at this limit so the content area stays usable.
+const POPUP_CHAT_INPUT_MAX_INNER_LINES: usize = 6;
+
+/// Returns the absolute screen rect of the chat input's inner area (excluding
+/// its border), or `None` when the popup shows a prompt-only artifact.
+pub fn chat_input_rect(
+    state: &AppState,
+    swarm: &SwarmRuntime,
+    popup_area: Rect,
+) -> Option<Rect> {
+    let is_prompt = agent_ops_view::is_selected_artifact_prompt(
+        state,
+        swarm,
+        popup_area.width.max(1) as usize,
+    );
+    if is_prompt {
+        return None;
+    }
+    let inner_full = Block::default().borders(Borders::ALL).inner(popup_area);
+    if inner_full.width < 4 || inner_full.height < 5 {
+        return None;
+    }
+
+    let input_wrap_width = inner_full.width.saturating_sub(2) as usize;
+    let popup_input = &state.agents.artifacts_popup_chat_input;
+    let cursor_char_idx = state
+        .agents
+        .artifacts_popup_chat_cursor
+        .min(popup_input.chars().count());
+    let (input_lines_all, _, _) = agent_console_view::wrap_input_with_cursor(
+        "",
+        popup_input,
+        cursor_char_idx,
+        input_wrap_width,
+    );
+    let half_inner = (inner_full.height as usize) / 2;
+    let max_inner_by_layout = inner_full.height.saturating_sub(4).max(1) as usize;
+    let dynamic_max = half_inner.max(POPUP_CHAT_INPUT_MAX_INNER_LINES).min(max_inner_by_layout);
+    let input_inner_height = input_lines_all.len().max(1).min(dynamic_max);
+    let input_box_height = (input_inner_height + 2) as u16;
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(1), Constraint::Length(input_box_height)])
+        .split(inner_full);
+    let input_chunk = chunks[1];
+    let input_block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(ratatui::widgets::BorderType::Rounded);
+    Some(input_block.inner(input_chunk))
+}
+
+/// Map a screen position inside the popup's chat input to a character index.
+pub fn map_chat_input_point_to_cursor(
+    state: &AppState,
+    swarm: &SwarmRuntime,
+    popup_area: Rect,
+    column: u16,
+    row: u16,
+    clamp: bool,
+) -> Option<usize> {
+    let input_area = chat_input_rect(state, swarm, popup_area)?;
+    if !clamp
+        && (column < input_area.x
+            || column >= input_area.x.saturating_add(input_area.width)
+            || row < input_area.y
+            || row >= input_area.y.saturating_add(input_area.height))
+    {
+        return None;
+    }
+
+    let input_wrap_width = input_area.width as usize;
+    if input_wrap_width == 0 {
+        return Some(0);
+    }
+
+    let popup_input = &state.agents.artifacts_popup_chat_input;
+    let cursor_char_idx = state
+        .agents
+        .artifacts_popup_chat_cursor
+        .min(popup_input.chars().count());
+    let (input_lines_all, cursor_line_all, _) = agent_console_view::wrap_input_with_cursor(
+        "",
+        popup_input,
+        cursor_char_idx,
+        input_wrap_width,
+    );
+    let input_inner_height = input_area.height as usize;
+    let popup_scroll = state.agents.artifacts_popup_chat_scroll;
+    let input_window_start = agent_console_view::chat_input_window_start(
+        popup_scroll,
+        input_lines_all.len(),
+        input_inner_height,
+        cursor_line_all,
+    );
+
+    let rel_row = if clamp {
+        (row.saturating_sub(input_area.y) as usize).min(input_inner_height.saturating_sub(1))
+    } else {
+        row.saturating_sub(input_area.y) as usize
+    };
+    let rel_col = if clamp {
+        column.saturating_sub(input_area.x) as usize
+    } else {
+        column.saturating_sub(input_area.x) as usize
+    };
+    let line_idx = input_window_start.saturating_add(rel_row);
+    let max_col = input_lines_all
+        .get(line_idx)
+        .map(|l| unicode_width::UnicodeWidthStr::width(l.as_str()))
+        .unwrap_or(0);
+    let visual_col = rel_col.min(max_col);
+    Some(agent_console_view::chat_input_char_index_for_display_pos(
+        popup_input,
+        input_wrap_width,
+        line_idx,
+        visual_col,
+    ))
+}
 
 pub fn render(
     frame: &mut Frame,
@@ -244,11 +363,10 @@ pub fn render(
             cursor_char_idx,
             input_wrap_width,
         );
+    let half_inner = (inner_full.height as usize) / 2;
     let max_inner_by_layout = inner_full.height.saturating_sub(4).max(1) as usize;
-    let input_inner_height = input_lines_all
-        .len()
-        .max(1)
-        .min(POPUP_CHAT_INPUT_MAX_INNER_LINES.min(max_inner_by_layout));
+    let dynamic_max = half_inner.max(POPUP_CHAT_INPUT_MAX_INNER_LINES).min(max_inner_by_layout);
+    let input_inner_height = input_lines_all.len().max(1).min(dynamic_max);
     let input_box_height = (input_inner_height + 2) as u16; // +2 for borders
 
     // Split: content area (scrollable) + input box (sticky footer).
@@ -289,7 +407,7 @@ pub fn render(
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(
-                "  [ Enter send ]",
+                "  [ Enter send | Ctrl+\u{2191}\u{2193} scroll ]",
                 Style::default()
                     .fg(theme.border)
                     .add_modifier(Modifier::DIM),
@@ -300,6 +418,10 @@ pub fn render(
         .style(Style::default().bg(theme.background));
     let input_area = input_block.inner(input_chunk);
     frame.render_widget(input_block, input_chunk);
+
+    // Use the actual render-area width for display position calculations so
+    // wrap boundaries stay in sync with the visual output.
+    let render_wrap_width = input_area.width.max(1) as usize;
 
     let input_window_start = agent_console_view::chat_input_window_start(
         popup_scroll,
@@ -324,12 +446,12 @@ pub fn render(
             let (start_line, start_col) =
                 agent_console_view::chat_input_display_pos_for_char_idx(
                     popup_input,
-                    input_wrap_width,
+                    render_wrap_width,
                     start,
                 );
             let (end_line, end_col) = agent_console_view::chat_input_display_pos_for_char_idx(
                 popup_input,
-                input_wrap_width,
+                render_wrap_width,
                 end,
             );
             (start_line, start_col, end_line, end_col)
