@@ -2505,6 +2505,16 @@ fn build_mission_cards(
         if message.mission_id.as_deref() != Some(mission_id) {
             continue;
         }
+        // Skip swarm meta messages — they're internal bookkeeping,
+        // not real agent replies.
+        if message.agent_id.as_deref() == Some("swarm") {
+            continue;
+        }
+        if matches!(message.channel, nit_core::AgentChannel::Broadcast)
+            && message.agent_id.is_some()
+        {
+            continue;
+        }
         if message.agent_id.is_none() {
             prompt_indices.push(idx);
         } else {
@@ -2992,7 +3002,7 @@ fn append_swarm_artifact_lines(out: &mut Vec<String>, view: &SwarmPersistenceVie
     }
 }
 
-fn build_swarm_cards(view: &SwarmPersistenceView, preview_chars: usize) -> Vec<ArtifactCard> {
+fn _build_swarm_cards(view: &SwarmPersistenceView, preview_chars: usize) -> Vec<ArtifactCard> {
     let mut cards = Vec::new();
     if let Some(report_output) = view.report_output.as_deref() {
         cards.push(ArtifactCard {
@@ -3892,36 +3902,140 @@ fn artifact_cards_for_context(
 
     if let Some(mission_id) = state.agents.selected_context_mission() {
         if let Some(view) = swarm.and_then(|runtime| runtime.swarm_persistence(mission_id)) {
-            let mut cards = build_swarm_cards(&view, preview_chars);
-            // Add the planner's plan response as a clickable card so it can
-            // be viewed in the artifacts popup.
-            if let Some((msg_idx, msg)) = state
-                .agents
-                .messages
-                .iter()
-                .enumerate()
-                .find(|(_, m)| {
-                    m.mission_id.as_deref() == Some(mission_id)
-                        && m.agent_id.is_some()
-                        && !matches!(m.channel, nit_core::AgentChannel::Broadcast)
-                        && m.agent_id.as_deref() != Some("swarm")
-                        // Exclude messages that already have a task/report card.
-                        && !view.tasks.iter().any(|t| {
-                            t.output.as_deref() == Some(m.text.as_str())
-                                && t.agent_id == *m.agent_id.as_deref().unwrap_or("")
-                        })
-                        && view.report_output.as_deref() != Some(m.text.as_str())
-                        && view.gate_output.as_deref() != Some(m.text.as_str())
-                })
+            // Use the same prompt→reply tree as regular missions so the
+            // graph shows root prompts with agent reply branches.
+            let mut cards = build_mission_cards(state, mission_id, preview_chars);
+
+            // Upgrade reply cards: match against swarm task outputs (→ TASK),
+            // label the planner's first response as PLAN, keep the last
+            // non-task reply as REPLY (the synthesis/final response).
             {
-                let agent_badge = msg.agent_id.as_deref().unwrap_or("planner");
-                cards.push(ArtifactCard {
-                    kind: "PLAN",
-                    at: "DONE".into(),
-                    owner: agent_badge.to_string(),
-                    preview: summarize_text_preview(&msg.text, preview_chars),
-                    reference: ArtifactRef::Message { idx: msg_idx },
+                // Pass 1: find indices of non-task reply cards.
+                let mut non_task_reply_positions: Vec<usize> = Vec::new();
+                for (i, card) in cards.iter().enumerate() {
+                    if card.kind != "REPLY" {
+                        continue;
+                    }
+                    if let ArtifactRef::Message { idx } = &card.reference {
+                        if let Some(msg) = state.agents.messages.get(*idx) {
+                            if let Some(agent_id) = msg.agent_id.as_deref() {
+                                let is_task = view.tasks.iter().any(|t| {
+                                    t.agent_id == agent_id
+                                        && t.output.as_deref() == Some(msg.text.as_str())
+                                });
+                                if !is_task {
+                                    non_task_reply_positions.push(i);
+                                }
+                            }
+                        }
+                    }
+                }
+                let last_non_task = non_task_reply_positions.last().copied();
+
+                // Pass 2: apply labels and replace timestamps with roles.
+                let mut plan_found = false;
+                for (i, card) in cards.iter_mut().enumerate() {
+                    if card.kind != "REPLY" {
+                        continue;
+                    }
+                    if let ArtifactRef::Message { idx } = &card.reference {
+                        if let Some(msg) = state.agents.messages.get(*idx) {
+                            if let Some(agent_id) = msg.agent_id.as_deref() {
+                                if let Some(task) = view.tasks.iter().rev().find(|t| {
+                                    t.agent_id == agent_id
+                                        && t.output.as_deref() == Some(msg.text.as_str())
+                                }) {
+                                    card.kind = "TASK";
+                                    card.at = task
+                                        .role
+                                        .as_deref()
+                                        .unwrap_or(&task.state)
+                                        .to_string();
+                                    card.reference = ArtifactRef::SwarmTask {
+                                        mission_id: view.mission_id.clone(),
+                                        task_id: task.id.clone(),
+                                    };
+                                } else if !plan_found {
+                                    card.kind = "PLAN";
+                                    card.at = "planner".into();
+                                    plan_found = true;
+                                } else if Some(i) != last_non_task {
+                                    card.kind = "PLAN";
+                                    card.at = "planner".into();
+                                } else {
+                                    // Last non-task reply stays as "REPLY".
+                                    card.at = "synth".into();
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Insert REPORT and VERIFY as children under the last prompt group
+            // (before any trailing PATCH/EVIDENCE cards).
+            let insert_pos = cards
+                .iter()
+                .rposition(|c| {
+                    matches!(
+                        c.kind,
+                        "PROMPT" | "REPLY" | "TASK" | "PLAN"
+                    )
+                })
+                .map(|i| i + 1)
+                .unwrap_or(cards.len());
+
+            let mut extra = Vec::new();
+            if let Some(report_output) = view.report_output.as_deref() {
+                extra.push(ArtifactCard {
+                    kind: "REPORT",
+                    at: view.report_status.clone().unwrap_or_else(|| "FINAL".into()),
+                    owner: view
+                        .report_agent_id
+                        .clone()
+                        .unwrap_or_else(|| "planner".into()),
+                    preview: summarize_text_preview(report_output, preview_chars),
+                    reference: ArtifactRef::SwarmReport {
+                        mission_id: view.mission_id.clone(),
+                    },
                 });
+            }
+            if view.gate_bundle.is_some()
+                || view.gate_report.is_some()
+                || view.gate_output.is_some()
+            {
+                let status = swarm_verify_status(&view);
+                let preview = if let Some(report) = view.gate_report.as_ref() {
+                    let failures = report
+                        .gates
+                        .iter()
+                        .filter(|gate| {
+                            gate_report_status_label(gate).eq_ignore_ascii_case("FAIL")
+                        })
+                        .count();
+                    if failures > 0 {
+                        format!("{failures} failing gate(s)")
+                    } else {
+                        "all gates passed".into()
+                    }
+                } else if view.gate_bundle.is_some() {
+                    "gate bundle selected; report pending".into()
+                } else {
+                    String::new()
+                };
+                extra.push(ArtifactCard {
+                    kind: "VERIFY",
+                    at: status.into(),
+                    owner: view.gate_bundle.clone().unwrap_or_else(|| "gates".into()),
+                    preview: summarize_text_preview(preview.as_str(), preview_chars),
+                    reference: ArtifactRef::SwarmVerify {
+                        mission_id: view.mission_id.clone(),
+                    },
+                });
+            }
+            // Splice into position so they sit under the prompt, not as roots.
+            for (i, card) in extra.into_iter().enumerate() {
+                cards.insert(insert_pos + i, card);
             }
             return cards;
         }
