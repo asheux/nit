@@ -2172,15 +2172,7 @@ fn breather_rows_for_user_prompt(
                     if swarm_assigned_ids.iter().any(|existing| existing == id) {
                         continue;
                     }
-                    // During planning, only show the planner — clones
-                    // haven't been assigned roles yet.
-                    if swarm_is_planning {
-                        if state.agents.active_turns.contains_key(id.as_str()) {
-                            swarm_assigned_ids.push(id.clone());
-                        }
-                    } else {
-                        swarm_assigned_ids.push(id.clone());
-                    }
+                    swarm_assigned_ids.push(id.clone());
                 }
             }
         }
@@ -2476,11 +2468,23 @@ fn append_swarm_meta_footer_rows(
 
     let max_inner = inner.max(1);
     let mut entries: Vec<(&str, String)> = Vec::new();
+    if let Some(value) = meta.template {
+        entries.push(("Template", value));
+    }
     if let Some(value) = meta.mission {
         entries.push(("Mission", value));
     }
+    if let Some(value) = meta.integrator {
+        entries.push(("Integrator", value));
+    }
+    if let Some(value) = meta.verifier {
+        entries.push(("Verifier", value));
+    }
     if let Some(value) = meta.gates {
         entries.push(("Gates", value));
+    }
+    if let Some(value) = meta.status {
+        entries.push(("Status", value));
     }
     if !meta.notes.is_empty() {
         entries.push(("Notes", meta.notes.join(" | ")));

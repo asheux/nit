@@ -98,7 +98,7 @@ impl LanguageRegistry {
 
     pub fn highlights_query(id: LanguageId) -> Option<&'static str> {
         match id {
-            LanguageId::Rust => Some(tree_sitter_rust::HIGHLIGHT_QUERY),
+            LanguageId::Rust => Some(include_str!("../queries/rust/highlights.scm")),
             LanguageId::Python => Some(tree_sitter_python::HIGHLIGHT_QUERY),
             LanguageId::JavaScript => Some(tree_sitter_javascript::HIGHLIGHT_QUERY),
             LanguageId::TypeScript => Some(tree_sitter_typescript::HIGHLIGHT_QUERY),

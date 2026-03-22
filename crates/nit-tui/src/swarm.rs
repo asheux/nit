@@ -208,8 +208,14 @@ fn cleanup_swarm_clones_for_mission(state: &mut AppState, mission_id: &str) {
             .remove(clone_id);
     }
 
-    // Keep codex_mission_thread_ids so re-created clones can resume their
-    // conversation context on follow-up prompts.
+    let mut remove_mission_thread_ids = false;
+    if let Some(map) = state.agents.codex_mission_thread_ids.get_mut(mission_id) {
+        map.retain(|agent_id, _| !clone_ids.contains(agent_id.as_str()));
+        remove_mission_thread_ids = map.is_empty();
+    }
+    if remove_mission_thread_ids {
+        state.agents.codex_mission_thread_ids.remove(mission_id);
+    }
 
     let mut remove_mission_used_tokens = false;
     if let Some(map) = state.agents.codex_mission_used_tokens.get_mut(mission_id) {
@@ -236,7 +242,55 @@ fn cleanup_swarm_clones_for_mission(state: &mut AppState, mission_id: &str) {
             .remove(mission_id);
     }
 
-    // Keep clones in the roster so they remain visible after the swarm completes.
+    // Remove clones from the roster now that the mission is done.
+    let selected_was_clone = state
+        .agents
+        .selected_agent
+        .as_deref()
+        .is_some_and(|id| clone_ids.contains(id));
+    let base_of_selected = state
+        .agents
+        .selected_agent
+        .as_deref()
+        .and_then(swarm_clone_base_id)
+        .map(str::to_string);
+
+    state
+        .agents
+        .agents
+        .retain(|lane| !clone_ids.contains(&lane.id));
+
+    if selected_was_clone {
+        if let Some(ref base_id) = base_of_selected {
+            state.agents.selected_agent = Some(base_id.clone());
+            state.agents.roster_selected = state
+                .agents
+                .agents
+                .iter()
+                .position(|lane| lane.id == *base_id)
+                .unwrap_or(0);
+        } else {
+            state.agents.roster_selected = state
+                .agents
+                .roster_selected
+                .min(state.agents.agents.len().saturating_sub(1));
+            state.agents.selected_agent = state
+                .agents
+                .agents
+                .get(state.agents.roster_selected)
+                .map(|lane| lane.id.clone());
+        }
+        state.agents.roster_tree_selected = None;
+    } else if let Some(selected_id) = state.agents.selected_agent.clone() {
+        if let Some(idx) = state
+            .agents
+            .agents
+            .iter()
+            .position(|lane| lane.id == selected_id)
+        {
+            state.agents.roster_selected = idx;
+        }
+    }
 }
 
 /// Remove a single idle chat clone from the roster, preserving messages and artifacts.
@@ -384,8 +438,16 @@ fn ensure_size_clones(
         return;
     }
 
-    // Always clone the planner (main agent) to fill remaining slots.
-    let sources = [planner_agent_id.to_string()];
+    // Clone selected non-planner agents to fill remaining slots, falling
+    // back to the planner when no other agents were selected.
+    let mut sources: Vec<String> = agents
+        .iter()
+        .filter(|id| id.as_str() != planner_agent_id)
+        .cloned()
+        .collect();
+    if sources.is_empty() {
+        sources.push(planner_agent_id.to_string());
+    }
 
     let mut source_lanes = Vec::new();
     for source_id in sources.iter() {
@@ -5939,19 +6001,7 @@ pub fn select_swarm_agents(
 
     if !priority_pool.is_empty() {
         priority_pool.sort_by(|a, b| {
-            let role_bucket = |candidate: &Candidate| -> u8 {
-                if candidate.role_hint.eq_ignore_ascii_case("all") {
-                    1
-                } else {
-                    0
-                }
-            };
-            (role_bucket(a), a.busy as u8, a.roster_idx, &a.id).cmp(&(
-                role_bucket(b),
-                b.busy as u8,
-                b.roster_idx,
-                &b.id,
-            ))
+            (a.busy as u8, a.roster_idx, &a.id).cmp(&(b.busy as u8, b.roster_idx, &b.id))
         });
         while selected.len() < take {
             let Some(candidate) = priority_pool.first().cloned() else {

@@ -3981,15 +3981,18 @@ pub fn artifact_cards_for_context(
                 } else {
                     String::new()
                 };
-                cards.push(ArtifactCard {
-                    kind: "VERIFY",
-                    at: status.into(),
-                    owner: view.gate_bundle.clone().unwrap_or_else(|| "gates".into()),
-                    preview: summarize_text_preview(preview.as_str(), preview_chars),
-                    reference: ArtifactRef::SwarmVerify {
-                        mission_id: view.mission_id.clone(),
+                cards.insert(
+                    0,
+                    ArtifactCard {
+                        kind: "VERIFY",
+                        at: status.into(),
+                        owner: view.gate_bundle.clone().unwrap_or_else(|| "gates".into()),
+                        preview: summarize_text_preview(preview.as_str(), preview_chars),
+                        reference: ArtifactRef::SwarmVerify {
+                            mission_id: view.mission_id.clone(),
+                        },
                     },
-                });
+                );
             }
             return cards;
         }

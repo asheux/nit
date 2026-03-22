@@ -12478,10 +12478,6 @@ fn maybe_follow_swarm_artifact_in_popup(
     if state.agents.artifacts_selected_saved_run_path.is_some() {
         return;
     }
-    // Don't hijack the popup while the user is already reading an artifact.
-    if state.agents.artifacts_popup_open {
-        return;
-    }
     let mission_id = match focus {
         SwarmArtifactFocus::Task { mission_id, .. } => mission_id.as_str(),
         SwarmArtifactFocus::Report { mission_id } => mission_id.as_str(),
@@ -12712,36 +12708,118 @@ fn handle_artifacts_popup_key(
         _ => {}
     }
 
-    // Enter (without Shift): submit prompt, then close popup.
-    // Swap is only needed here because submit_chat_input_and_dispatch reads chat_input.
-    // Override selected agent context to the artifact's owning agent so the dispatch
-    // goes to the correct clone/model rather than the roster-selected agent.
+    // Enter (without Shift): submit prompt directly to the artifact's owning agent.
+    // This bypasses the normal submit_chat_input_and_dispatch flow so that:
+    // 1. The prompt goes to the artifact's agent (not the roster-selected agent).
+    // 2. The agent dispatches immediately unless *it specifically* is busy — other
+    //    agents being busy in the chat pane should not block this dispatch.
+    // 3. The correct mission context (and thus thread/session ID) is used.
     if matches!(key.code, KeyCode::Enter) && !key.modifiers.contains(KeyModifiers::SHIFT) {
         let w = state.agents.ops_viewport_width;
         let artifact_agent = agent_ops_view::selected_artifact_agent_id(state, swarm, w);
         let artifact_mission = agent_ops_view::selected_artifact_mission_id(state, swarm, w);
-        // Override both agent and mission context so the dispatch goes to the
-        // correct agent with the correct thread/session ID for context continuity.
-        let prev_agent = state.agents.selected_agent.clone();
-        let prev_mission = state.agents.selected_mission.clone();
-        if let Some(ref agent_id) = artifact_agent {
+
+        // Read the popup chat input.
+        let prompt = state.agents.artifacts_popup_chat_input.trim().to_string();
+        if prompt.is_empty() {
+            return true;
+        }
+
+        if let Some(agent_id) = artifact_agent {
+            // Push the prompt as a user message in the correct context.
+            let prev_agent = state.agents.selected_agent.clone();
+            let prev_mission = state.agents.selected_mission.clone();
             state.agents.selected_agent = Some(agent_id.clone());
-        }
-        if artifact_mission.is_some() {
-            state.agents.selected_mission = artifact_mission;
-        }
-        swap_in_artifacts_popup_chat(state);
-        if submit_chat_input_and_dispatch(state, vitals, codex, claude, swarm) {
+            if artifact_mission.is_some() {
+                state.agents.selected_mission = artifact_mission.clone();
+            }
+            swap_in_artifacts_popup_chat(state);
+            let sent = push_chat_message(state);
             swap_out_artifacts_popup_chat(state);
+            state.agents.selected_agent = prev_agent;
+            state.agents.selected_mission = prev_mission;
+
+            if let Some((_channel, prompt_text)) = sent {
+                let prompt_msg_idx = state.agents.messages.len().saturating_sub(1);
+                let mission_id = artifact_mission;
+
+                // Dispatch directly to the artifact's agent. Only queue if
+                // *this specific agent* is busy — other agents running in
+                // the chat pane should not block this dispatch.
+                let agent_busy = is_agent_busy(state, &agent_id);
+                let is_claude = state
+                    .agents
+                    .agents
+                    .iter()
+                    .find(|lane| lane.id == agent_id)
+                    .is_some_and(|lane| lane.is_claude());
+
+                if agent_busy {
+                    if is_claude {
+                        enqueue_claude_turn(
+                            state,
+                            vitals,
+                            Some(agent_id),
+                            mission_id,
+                            prompt_text,
+                            Some(prompt_msg_idx),
+                        );
+                    } else {
+                        enqueue_codex_turn(
+                            state,
+                            vitals,
+                            Some(agent_id),
+                            mission_id,
+                            prompt_text,
+                            Some(prompt_msg_idx),
+                        );
+                    }
+                } else if is_claude {
+                    state
+                        .agents
+                        .claude_turn_prompt_idx
+                        .insert(agent_id.clone(), prompt_msg_idx);
+                    maybe_dispatch_claude_turn(
+                        state,
+                        vitals,
+                        claude,
+                        Some(agent_id),
+                        mission_id,
+                        prompt_text,
+                        true,
+                    );
+                } else {
+                    state
+                        .agents
+                        .codex_turn_prompt_idx
+                        .insert(agent_id.clone(), prompt_msg_idx);
+                    maybe_dispatch_codex_turn(
+                        state,
+                        vitals,
+                        codex,
+                        Some(agent_id),
+                        mission_id,
+                        prompt_text,
+                        true,
+                    );
+                }
+            }
+
             close_artifacts_popup(state);
             state.agents.note_event();
             vitals.record_agent_event(Instant::now());
         } else {
-            swap_out_artifacts_popup_chat(state);
+            // No artifact agent resolved — fall back to normal submit path.
+            swap_in_artifacts_popup_chat(state);
+            if submit_chat_input_and_dispatch(state, vitals, codex, claude, swarm) {
+                swap_out_artifacts_popup_chat(state);
+                close_artifacts_popup(state);
+                state.agents.note_event();
+                vitals.record_agent_event(Instant::now());
+            } else {
+                swap_out_artifacts_popup_chat(state);
+            }
         }
-        // Restore the roster selection so it doesn't jump.
-        state.agents.selected_agent = prev_agent;
-        state.agents.selected_mission = prev_mission;
         return true;
     }
 
@@ -19015,5 +19093,120 @@ k = 2
         state.agents.selected_mission = prev_mission;
         assert_eq!(state.agents.selected_context_agent(), Some("base-model"));
         assert_eq!(state.agents.selected_context_mission(), Some("mis-001"));
+    }
+
+    #[test]
+    fn artifact_popup_dispatches_idle_agent_even_when_other_agents_busy() {
+        let mut state = state_for_test();
+        let mut vitals = VitalsState::default();
+        let codex = CodexRunner::spawn(CodexRuntimeMode::Exec, CodexRunnerConfig::default());
+
+        // Agent A is busy (running a turn).
+        state.agents.agents.push(nit_core::AgentLane {
+            id: "agent-a".into(),
+            role: "A".into(),
+            lane: "Codex".into(),
+            kind: nit_core::AgentLaneKind::Codex,
+            status: nit_core::AgentStatus::Running,
+            heartbeat_age_secs: 0,
+            queue_len: 1,
+            current_mission: None,
+            last_message: String::new(),
+        });
+        state.agents.active_turns.insert(
+            "agent-a".into(),
+            nit_core::state::AgentTurnState {
+                started_at: Instant::now(),
+                last_heartbeat_at: Instant::now(),
+                last_output_at: Instant::now(),
+                stage: None,
+            },
+        );
+        state.agents.codex_effective_context_window_tokens
+            .insert("agent-a".into(), 128_000);
+
+        // Agent B is idle (the artifact's agent).
+        state.agents.agents.push(nit_core::AgentLane {
+            id: "agent-b".into(),
+            role: "B".into(),
+            lane: "Codex".into(),
+            kind: nit_core::AgentLaneKind::Codex,
+            status: nit_core::AgentStatus::Idle,
+            heartbeat_age_secs: 0,
+            queue_len: 0,
+            current_mission: None,
+            last_message: String::new(),
+        });
+        state.agents.codex_effective_context_window_tokens
+            .insert("agent-b".into(), 128_000);
+
+        // Agent A is busy — verify.
+        assert!(is_agent_busy(&state, "agent-a"));
+        // Agent B is idle — verify.
+        assert!(!is_agent_busy(&state, "agent-b"));
+
+        // Direct dispatch to agent-b (simulating what the artifact popup does).
+        // Even though agent-a is busy, agent-b should dispatch immediately.
+        maybe_dispatch_codex_turn(
+            &mut state,
+            &mut vitals,
+            Some(&codex),
+            Some("agent-b".into()),
+            None,
+            "question about artifact".into(),
+            true,
+        );
+
+        // Agent B should now have an active turn (dispatched, not queued).
+        assert!(
+            state.agents.active_turns.contains_key("agent-b"),
+            "agent-b should be dispatched immediately, not queued"
+        );
+        // Agent A should still be running (unchanged).
+        assert!(state.agents.active_turns.contains_key("agent-a"));
+    }
+
+    #[test]
+    fn artifact_popup_queues_when_artifact_agent_is_busy() {
+        let mut state = state_for_test();
+        let mut vitals = VitalsState::default();
+
+        // Agent B is busy (has an active turn).
+        state.agents.agents.push(nit_core::AgentLane {
+            id: "agent-b".into(),
+            role: "B".into(),
+            lane: "Codex".into(),
+            kind: nit_core::AgentLaneKind::Codex,
+            status: nit_core::AgentStatus::Running,
+            heartbeat_age_secs: 0,
+            queue_len: 1,
+            current_mission: None,
+            last_message: String::new(),
+        });
+        state.agents.active_turns.insert(
+            "agent-b".into(),
+            nit_core::state::AgentTurnState {
+                started_at: Instant::now(),
+                last_heartbeat_at: Instant::now(),
+                last_output_at: Instant::now(),
+                stage: None,
+            },
+        );
+
+        assert!(is_agent_busy(&state, "agent-b"));
+
+        // Enqueue for agent-b since it's busy.
+        enqueue_codex_turn(
+            &mut state,
+            &mut vitals,
+            Some("agent-b".into()),
+            None,
+            "follow-up".into(),
+            Some(0),
+        );
+
+        // Should be queued, not dispatched.
+        assert_eq!(state.agents.queued_codex_turns.len(), 1);
+        assert_eq!(state.agents.queued_codex_turns[0].agent_id, "agent-b");
     }
 }
