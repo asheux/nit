@@ -1,6 +1,6 @@
 use nit_core::{
     AgentConsoleRow as ThreadRow, AgentConsoleRowKind as ThreadRowKind, AgentConsoleRowsCacheKey,
-    AgentLane, AgentLaneKind, AgentMessage, AgentStatus, AppState, MissionPhase, PaneId, UiSelectionPane,
+    AgentLane, AgentLaneKind, AgentMessage, AgentStatus, AppState, PaneId, UiSelectionPane,
 };
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
@@ -2161,13 +2161,10 @@ fn breather_rows_for_user_prompt(
     let now = Instant::now();
     let mut swarm_assigned_ids: Vec<String> = Vec::new();
     let mut swarm_mission_id: Option<&str> = None;
-    let swarm_is_planning;
     if let Some(mission_id) = mission_ctx {
         if let Some(mission) = state.agents.missions.iter().find(|m| m.id == mission_id) {
             if mission.swarm {
                 swarm_mission_id = Some(mission_id);
-                swarm_is_planning =
-                    matches!(mission.phase, MissionPhase::Plan);
                 for id in mission.assigned_agents.iter() {
                     if swarm_assigned_ids.iter().any(|existing| existing == id) {
                         continue;

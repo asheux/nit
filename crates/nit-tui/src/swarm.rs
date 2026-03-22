@@ -4482,33 +4482,69 @@ fn mark_task_finished(
     message: String,
     failed: bool,
 ) -> Option<TaskCompletion> {
-    let pos_running = run.tasks.iter().position(|task| {
-        task.agent_id == agent_id && matches!(task.state, SwarmTaskState::Running)
-    });
-    let pos = pos_running.or_else(|| {
-        run.tasks.iter().position(|task| {
-            task.agent_id == agent_id && matches!(task.state, SwarmTaskState::Dispatched)
+    // Look for an active (Running or Dispatched) task first.
+    let pos_active = run
+        .tasks
+        .iter()
+        .position(|task| {
+            task.agent_id == agent_id && matches!(task.state, SwarmTaskState::Running)
         })
-    });
-    let pos = pos?;
+        .or_else(|| {
+            run.tasks.iter().position(|task| {
+                task.agent_id == agent_id && matches!(task.state, SwarmTaskState::Dispatched)
+            })
+        });
+
+    // Fall back to an already-finished task so late/intermediate responses
+    // can still append artifacts.
+    let pos_finished = || {
+        run.tasks.iter().position(|task| {
+            task.agent_id == agent_id
+                && matches!(task.state, SwarmTaskState::Done | SwarmTaskState::Failed)
+        })
+    };
+    let pos = pos_active.or_else(pos_finished)?;
+    let already_finished = pos_active.is_none();
 
     let parsed_artifacts = parse_task_artifacts(&run.tasks[pos].id, &message);
     let expected_artifacts_missing =
         !run.tasks[pos].artifacts.is_empty() && parsed_artifacts.is_none();
 
     let task = &mut run.tasks[pos];
-    task.output = Some(message);
-    task.parsed_artifacts = parsed_artifacts;
-    task.expected_artifacts_missing = expected_artifacts_missing;
-    task.failed = failed;
-    task.state = if failed {
-        SwarmTaskState::Failed
+
+    if already_finished {
+        // Append output to existing response.
+        if let Some(existing) = task.output.as_mut() {
+            existing.push_str("\n\n---\n\n");
+            existing.push_str(&message);
+        } else {
+            task.output = Some(message);
+        }
     } else {
-        SwarmTaskState::Done
-    };
+        task.output = Some(message);
+        task.failed = failed;
+        task.state = if failed {
+            SwarmTaskState::Failed
+        } else {
+            SwarmTaskState::Done
+        };
+        task.expected_artifacts_missing = expected_artifacts_missing;
+    }
+
+    // Merge artifacts with any previously collected ones instead of overwriting.
+    match (task.parsed_artifacts.as_mut(), parsed_artifacts) {
+        (Some(existing), Some(new)) => merge_task_artifacts(existing, new),
+        (None, new @ Some(_)) => task.parsed_artifacts = new,
+        _ => {}
+    }
+
     Some(TaskCompletion {
         task_id: task.id.clone(),
-        expected_artifacts_missing,
+        expected_artifacts_missing: if already_finished {
+            false
+        } else {
+            expected_artifacts_missing
+        },
     })
 }
 
@@ -5934,16 +5970,6 @@ pub fn select_swarm_agents(
         .map(|(idx, lane)| (lane.id.clone(), idx))
         .collect::<HashMap<_, _>>();
 
-    let role_hint = |state: &AppState, agent_id: &str| -> String {
-        state
-            .agents
-            .swarm_role_by_agent_id
-            .get(agent_id)
-            .map(|s| s.trim().to_ascii_lowercase())
-            .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| "all".into())
-    };
-
     let codex_pool = state
         .agents
         .agents
@@ -5974,7 +6000,6 @@ pub fn select_swarm_agents(
     #[derive(Clone)]
     struct Candidate {
         id: String,
-        role_hint: String,
         priority: bool,
         busy: bool,
         roster_idx: usize,
@@ -5986,7 +6011,6 @@ pub fn select_swarm_agents(
             roster_idx: *roster_index.get(&id).unwrap_or(&usize::MAX),
             busy: is_agent_busy(state, id.as_str()),
             priority: is_priority_agent(state, id.as_str()),
-            role_hint: role_hint(state, id.as_str()),
             id,
         })
         .collect();
