@@ -802,8 +802,8 @@ fn format_runtime_accelerator(runtime: &nit_games::RuntimeAcceleratorStats) -> S
     ) {
         let label = runtime
             .metal_policy_source_label()
-            .map(|source| format!("policy {}x{} {}", batch, inflight, source))
-            .unwrap_or_else(|| format!("policy {}x{}", batch, inflight));
+            .map(|source| format!("policy {batch}x{inflight} {source}"))
+            .unwrap_or_else(|| format!("policy {batch}x{inflight}"));
         parts.push(label);
     }
     parts.join(", ")

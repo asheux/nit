@@ -591,7 +591,7 @@ impl GamesPetriDishRuntime {
                             timings.normalize_elapsed
                         );
                         if let Some(tm_filter_elapsed) = timings.tm_filter_elapsed {
-                            message.push_str(&format!(", tm-filter {:?}", tm_filter_elapsed));
+                            message.push_str(&format!(", tm-filter {tm_filter_elapsed:?}"));
                         }
                         message.push(')');
                         if let Some(tm_summary) = tm_family_prep_summary(&timings) {
@@ -1850,6 +1850,7 @@ fn format_tournament_elapsed(duration: Duration) -> String {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn session_footer_line(
     steps_per_tick: u32,
     steps_use_match_units: bool,
@@ -2149,8 +2150,8 @@ fn accelerator_progress_line(
         spans.push(Span::styled(" ", dim_style));
         let policy_label = runtime
             .metal_policy_source_label()
-            .map(|source| format!("policy {}x{} {}", batch, inflight, source))
-            .unwrap_or_else(|| format!("policy {}x{}", batch, inflight));
+            .map(|source| format!("policy {batch}x{inflight} {source}"))
+            .unwrap_or_else(|| format!("policy {batch}x{inflight}"));
         spans.push(Span::styled(policy_label, dim_style));
     }
     Line::from(spans)
@@ -2189,6 +2190,7 @@ fn accelerator_cache_line(
     ]))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_cache_browser(
     snapshot: &BatchPolicyCacheSnapshot,
     selected: usize,
@@ -2199,8 +2201,7 @@ fn render_cache_browser(
     dim_style: Style,
     key_style: Style,
 ) -> Vec<Line<'static>> {
-    let mut lines = Vec::new();
-    lines.push(Line::from(Span::styled("Metal Cache", header_style)));
+    let mut lines = vec![Line::from(Span::styled("Metal Cache", header_style))];
     lines.push(Line::from(vec![
         Span::styled("root: ", label_style),
         Span::styled(

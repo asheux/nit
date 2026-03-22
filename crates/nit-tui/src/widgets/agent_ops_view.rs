@@ -253,27 +253,28 @@ fn roster_backend_inventory_rows(state: &AppState) -> Vec<BackendInventoryRow> {
         .iter()
         .any(|agent| matches!(agent.kind, AgentLaneKind::Mock));
 
-    let mut out = Vec::with_capacity(4);
-    out.push(BackendInventoryRow {
-        backend: BackendInventoryBackend::Codex,
-        available: codex_available,
-        active: codex_active,
-    });
-    out.push(BackendInventoryRow {
-        backend: BackendInventoryBackend::Claude,
-        available: claude_available,
-        active: claude_active,
-    });
-    out.push(BackendInventoryRow {
-        backend: BackendInventoryBackend::Gemini,
-        available: gemini_available,
-        active: gemini_active,
-    });
-    out.push(BackendInventoryRow {
-        backend: BackendInventoryBackend::Local,
-        available: true,
-        active: local_active,
-    });
+    let out = vec![
+        BackendInventoryRow {
+            backend: BackendInventoryBackend::Codex,
+            available: codex_available,
+            active: codex_active,
+        },
+        BackendInventoryRow {
+            backend: BackendInventoryBackend::Claude,
+            available: claude_available,
+            active: claude_active,
+        },
+        BackendInventoryRow {
+            backend: BackendInventoryBackend::Gemini,
+            available: gemini_available,
+            active: gemini_active,
+        },
+        BackendInventoryRow {
+            backend: BackendInventoryBackend::Local,
+            available: true,
+            active: local_active,
+        },
+    ];
 
     out
 }
@@ -1321,10 +1322,7 @@ fn mission_lines(state: &AppState, width: usize) -> Vec<String> {
 }
 
 fn roster_backend_line(name: &str, primary: &str, secondary: &str) -> String {
-    format!(
-        "  {name:<width$}  {primary}  {secondary}",
-        width = ROSTER_BACKEND_NAME_W
-    )
+    format!("  {name:<ROSTER_BACKEND_NAME_W$}  {primary}  {secondary}")
 }
 
 fn agent_pane_inner_width(col_width: usize) -> usize {
@@ -3565,13 +3563,10 @@ fn append_mission_provenance_lines(
                 .and_then(|threads| threads.values().next().cloned())
         });
     let thread_id = thread_id.or_else(|| {
-        let Some(run) = selected_archived
+        let run = selected_archived
             .as_ref()
             .map(|(_, run)| run)
-            .or(persisted.as_ref())
-        else {
-            return None;
-        };
+            .or(persisted.as_ref())?;
         state
             .agents
             .selected_context_agent()
@@ -5741,7 +5736,7 @@ fn roster_backend_styled_line(
     Line::from(vec![
         Span::styled("  ", Style::default().fg(theme.foreground)),
         Span::styled(
-            format!("{name:<width$}", width = ROSTER_BACKEND_NAME_W),
+            format!("{name:<ROSTER_BACKEND_NAME_W$}"),
             name_style,
         ),
         Span::styled("  ", Style::default().fg(theme.foreground)),

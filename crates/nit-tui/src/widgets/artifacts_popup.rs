@@ -312,11 +312,7 @@ pub fn map_chat_input_point_to_cursor(
     } else {
         row.saturating_sub(input_area.y) as usize
     };
-    let rel_col = if clamp {
-        column.saturating_sub(input_area.x) as usize
-    } else {
-        column.saturating_sub(input_area.x) as usize
-    };
+    let rel_col = column.saturating_sub(input_area.x) as usize;
     let line_idx = input_window_start.saturating_add(rel_row);
     let max_col = input_lines_all
         .get(line_idx)
@@ -1654,7 +1650,7 @@ fn render_numbered_code_line(
     gutter_width: usize,
 ) -> Vec<Line<'static>> {
     let prefix = match line_no {
-        Some(line_no) => format!(" {:>gutter_width$} │ ", line_no),
+        Some(line_no) => format!(" {line_no:>gutter_width$} │ "),
         None => format!(" {:>gutter_width$} │ ", ""),
     };
     let continuation = format!(" {:>gutter_width$} │ ", "");
@@ -2051,8 +2047,7 @@ fn json_string_token(text: &str, start: usize) -> Option<(String, usize)> {
 fn json_token_is_key(text: &str, idx: usize) -> bool {
     text[idx..]
         .chars()
-        .skip_while(|ch| ch.is_whitespace())
-        .next()
+        .find(|ch| !ch.is_whitespace())
         == Some(':')
 }
 

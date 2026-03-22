@@ -622,8 +622,7 @@ fn initial_chunk_steps(rounds_per_match: u32, mode: EngineMode, whole_match_chun
     } else {
         rounds_per_match
             .saturating_mul(16)
-            .max(256)
-            .min(RUNNER_CHUNK_INITIAL)
+            .clamp(256, RUNNER_CHUNK_INITIAL)
     }
 }
 

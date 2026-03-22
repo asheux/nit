@@ -474,6 +474,7 @@ pub fn run(
     result
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_loop(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     state: &mut AppState,
@@ -4136,11 +4137,9 @@ fn submit_chat_input_and_dispatch(
             state.agents.chat_input = raw[4..].trim_start().to_string();
             state.agents.chat_input_cursor = state.agents.chat_input.chars().count();
         } else if legacy_queue {
-            let stripped = if raw.starts_with("@queue") {
-                &raw[6..]
-            } else {
-                &raw[2..]
-            };
+            let stripped = raw
+                .strip_prefix("@queue")
+                .unwrap_or_else(|| raw.strip_prefix("@q").unwrap_or(&raw));
             state.agents.chat_input = stripped.trim_start().to_string();
             state.agents.chat_input_cursor = state.agents.chat_input.chars().count();
         }
@@ -4312,36 +4311,34 @@ fn submit_chat_input_and_dispatch(
                             Some(prompt_msg_idx),
                         );
                     }
+                } else if is_claude {
+                    state
+                        .agents
+                        .claude_turn_prompt_idx
+                        .insert(base_model.clone(), prompt_msg_idx);
+                    maybe_dispatch_claude_turn(
+                        state,
+                        vitals,
+                        claude,
+                        Some(base_model),
+                        mission_id.clone(),
+                        prompt.clone(),
+                        true,
+                    );
                 } else {
-                    if is_claude {
-                        state
-                            .agents
-                            .claude_turn_prompt_idx
-                            .insert(base_model.clone(), prompt_msg_idx);
-                        maybe_dispatch_claude_turn(
-                            state,
-                            vitals,
-                            claude,
-                            Some(base_model),
-                            mission_id.clone(),
-                            prompt.clone(),
-                            true,
-                        );
-                    } else {
-                        state
-                            .agents
-                            .codex_turn_prompt_idx
-                            .insert(base_model.clone(), prompt_msg_idx);
-                        maybe_dispatch_codex_turn(
-                            state,
-                            vitals,
-                            codex,
-                            Some(base_model),
-                            mission_id.clone(),
-                            prompt.clone(),
-                            true,
-                        );
-                    }
+                    state
+                        .agents
+                        .codex_turn_prompt_idx
+                        .insert(base_model.clone(), prompt_msg_idx);
+                    maybe_dispatch_codex_turn(
+                        state,
+                        vitals,
+                        codex,
+                        Some(base_model),
+                        mission_id.clone(),
+                        prompt.clone(),
+                        true,
+                    );
                 }
             }
             maybe_dispatch_next_queued_codex_turn(state, vitals, codex);
@@ -6009,6 +6006,8 @@ fn maybe_dispatch_next_queued_claude_turn(
     claude: Option<&ClaudeRunner>,
 ) {
     let Some(claude) = claude else {
+        // Runner gone — drain orphaned queued turns so queue_len doesn't stick.
+        drain_orphaned_claude_queue(state);
         return;
     };
     if state.agents.queued_claude_turns.is_empty() {
@@ -6061,6 +6060,24 @@ fn maybe_dispatch_next_queued_claude_turn(
             queued.prompt,
             false,
         );
+    }
+}
+
+/// Drain all queued Claude turns when the runner is unavailable, resetting queue_len
+/// so the UI doesn't show permanently "Waiting" agents.
+fn drain_orphaned_claude_queue(state: &mut AppState) {
+    while let Some(queued) = state.agents.queued_claude_turns.pop_front() {
+        if let Some(agent) = state
+            .agents
+            .agents
+            .iter_mut()
+            .find(|a| a.id == queued.agent_id)
+        {
+            agent.queue_len = agent.queue_len.saturating_sub(1);
+            if agent.queue_len == 0 && matches!(agent.status, AgentStatus::Waiting) {
+                agent.status = AgentStatus::Idle;
+            }
+        }
     }
 }
 
@@ -6210,15 +6227,33 @@ fn maybe_dispatch_claude_turn(
         .or_else(|| state.agents.claude_default_effort.get(&model).cloned())
         .unwrap_or_else(|| "high".into());
 
-    claude.send(ClaudeCommand::RunTurn {
-        model,
+    let ok = claude.send(ClaudeCommand::RunTurn {
+        model: model.clone(),
         cwd: state.workspace_root.clone(),
-        mission_id,
+        mission_id: mission_id.clone(),
         resume_session_id,
         persist_session,
         effort: Some(effort),
         prompt,
     });
+    if !ok {
+        // Runner channel is dead — clean up the optimistic state we just set.
+        state.agents.active_turns.remove(&model);
+        if let Some(agent) = state.agents.agents.iter_mut().find(|a| a.id == model) {
+            agent.queue_len = agent.queue_len.saturating_sub(1);
+            agent.status = if agent.queue_len > 0 {
+                AgentStatus::Waiting
+            } else {
+                AgentStatus::Idle
+            };
+        }
+        state.agents.diag_events.push(nit_core::state::AgentDiagnosticEvent {
+            severity: nit_core::state::AgentAlertSeverity::Warn,
+            source: "claude".into(),
+            message: format!("[{model}] Claude runner channel disconnected; turn dropped"),
+            at: format!("t+{}", state.metrics.frame_count),
+        });
+    }
 }
 
 fn estimate_claude_context_tokens_for_mission(state: &mut AppState, mission_id: &str) -> u32 {
@@ -8848,7 +8883,7 @@ fn normalize_http_url(text: &str) -> Option<String> {
     }?;
     let mut url = &text[start..];
     url = url.trim_matches(|ch: char| matches!(ch, '`' | '<' | '>' | '"' | '\''));
-    url = url.trim_end_matches(|ch: char| matches!(ch, '.' | ',' | ';' | ':' | ')' | ']' | '}'));
+    url = url.trim_end_matches(['.', ',', ';', ':', ')', ']', '}']);
     if url.starts_with("http://") || url.starts_with("https://") {
         Some(url.to_string())
     } else {
@@ -9744,12 +9779,10 @@ fn handle_mouse_down_with_swarm(
                 clipboard,
                 input_state,
             );
-        } else {
-            if !point_in_rect(mouse.column, mouse.row, popup_area) {
-                reset_ui_selection(state, input_state);
-                state.agents.artifacts_popup_open = false;
-                state.agents.artifacts_popup_scroll = 0;
-            }
+        } else if !point_in_rect(mouse.column, mouse.row, popup_area) {
+            reset_ui_selection(state, input_state);
+            state.agents.artifacts_popup_open = false;
+            state.agents.artifacts_popup_scroll = 0;
         }
         return true;
     }
@@ -10376,7 +10409,7 @@ fn apply_agent_ops_click_selection(
                             Some(nit_core::RosterTreeSelection { branch, leaf_idx });
                         let _ = select_roster_tree_leaf(state);
                     }
-                    agent_ops_view::RosterBodyNode::Backend { .. } => return,
+                    agent_ops_view::RosterBodyNode::Backend { .. } => (),
                 }
             }
         }
@@ -12586,6 +12619,7 @@ fn swap_out_artifacts_popup_chat(state: &mut AppState) {
     swap_in_artifacts_popup_chat(state);
 }
 
+#[allow(clippy::too_many_arguments)]
 fn handle_artifacts_popup_key(
     key: &KeyEvent,
     state: &mut AppState,
@@ -13648,7 +13682,7 @@ fn render_verify_markdown(
                 .map(str::trim)
                 .filter(|s| !s.is_empty())
             {
-                out.push_str(&format!("  - Notes: {}\n", notes));
+                out.push_str(&format!("  - Notes: {notes}\n"));
             }
         }
         out.push('\n');

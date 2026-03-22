@@ -69,8 +69,10 @@ impl ClaudeRunner {
         }
     }
 
-    pub fn send(&self, command: ClaudeCommand) {
-        let _ = self.cmd_tx.send(command);
+    /// Send a command to the runner. Returns `true` if the command was accepted,
+    /// `false` if the runner's channel is disconnected (runner shut down or crashed).
+    pub fn send(&self, command: ClaudeCommand) -> bool {
+        self.cmd_tx.send(command).is_ok()
     }
 
     pub fn shutdown(&mut self) {
@@ -636,20 +638,14 @@ fn build_claude_args(
     config: &ClaudeRunnerConfig,
 ) -> Vec<String> {
     let model_slug = claude_model_slug_for_agent_id(agent_id);
-    let mut args = Vec::new();
-
-    // Headless (print) mode: read prompt from stdin, output to stdout.
-    args.push("-p".into());
-
-    // Output format: stream-json gives us NDJSON events.
-    // Claude CLI requires --verbose when using stream-json with -p.
-    args.push("--verbose".into());
-    args.push("--output-format".into());
-    args.push("stream-json".into());
-
-    // Model selection.
-    args.push("--model".into());
-    args.push(model_slug.to_string());
+    let mut args = vec![
+        "-p".into(),
+        "--verbose".into(),
+        "--output-format".into(),
+        "stream-json".into(),
+        "--model".into(),
+        model_slug.to_string(),
+    ];
 
     // Effort level.
     if let Some(effort) = effort.map(str::trim).filter(|s| !s.is_empty()) {

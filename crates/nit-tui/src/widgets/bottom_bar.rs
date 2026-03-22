@@ -156,7 +156,7 @@ fn accelerator_spans(
         if !detail.is_empty() {
             detail.push('/');
         }
-        detail.push_str(&format!("{}bx{}", batch, inflight));
+        detail.push_str(&format!("{batch}bx{inflight}"));
         if let Some(source) = runtime.metal_policy_source_label() {
             detail.push('/');
             detail.push_str(source);

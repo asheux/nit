@@ -385,7 +385,7 @@ fn ensure_size_clones(
     }
 
     // Always clone the planner (main agent) to fill remaining slots.
-    let sources = vec![planner_agent_id.to_string()];
+    let sources = [planner_agent_id.to_string()];
 
     let mut source_lanes = Vec::new();
     for source_id in sources.iter() {
@@ -1349,6 +1349,7 @@ impl SwarmRuntime {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn start(
         &mut self,
         state: &mut AppState,
@@ -5244,6 +5245,7 @@ fn sanitize_for_filename(input: &str) -> String {
         .collect()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_planner_prompt(
     root_prompt: &str,
     template: SwarmTemplate,

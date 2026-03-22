@@ -880,7 +880,7 @@ fn match_outcomes_from_scores(
     let cost = &config.engine.complexity_cost;
     matchups
         .iter()
-        .zip(scores.into_iter())
+        .zip(scores)
         .map(|(matchup, score)| {
             let a_spec = &strategies[matchup.a_idx];
             let b_spec = &strategies[matchup.b_idx];
@@ -2930,7 +2930,7 @@ impl TournamentKernel {
             && !matches!(self.config.engine.accelerator, AcceleratorMode::Cpu)
             && !log_events
             && !log_history
-            && self.schedule.len() > 0
+            && !self.schedule.is_empty()
         {
             match try_prepare_metal_batch_for_workload(
                 &self.config,
@@ -3062,7 +3062,7 @@ impl TournamentKernel {
             && !matches!(self.config.engine.accelerator, AcceleratorMode::Cpu)
             && !log_events
             && !log_history
-            && self.schedule.len() > 0
+            && !self.schedule.is_empty()
         {
             match try_prepare_metal_batch_for_workload(
                 &self.config,

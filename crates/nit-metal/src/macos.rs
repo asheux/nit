@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::ffi::c_void;
 use std::fs;
-use std::mem::size_of;
+use std::mem::{size_of, size_of_val};
 use std::path::{Path, PathBuf};
 use std::slice;
 use std::sync::{Mutex, OnceLock};
@@ -245,7 +245,7 @@ fn payload_strategy_count(payload: &BatchPayload) -> usize {
 fn payload_signature(payload: &BatchPayload) -> String {
     let static_mib_bucket = {
         let bytes = payload_static_bytes(payload);
-        let mib = ((bytes + (1024 * 1024) - 1) / (1024 * 1024)).max(1);
+        let mib = bytes.div_ceil(1024 * 1024).max(1);
         mib.next_power_of_two()
     };
     match payload {
@@ -298,7 +298,7 @@ fn policy_cache_root() -> Option<PathBuf> {
 fn policy_cache_key(device_name: &str, payload_signature: &str) -> String {
     let device_slug = sanitize_cache_component(device_name);
     let cache_key = stable_hash_bytes(format!("{device_name}:{payload_signature}").as_bytes());
-    format!("{}_{}", device_slug, cache_key)
+    format!("{device_slug}_{cache_key}")
 }
 
 fn policy_cache_path(root: &Path, device_name: &str, payload_signature: &str) -> PathBuf {
@@ -340,7 +340,7 @@ fn persist_cached_policy_from_dir(root: &Path, entry: &PolicyCacheEntry) {
     let path = policy_cache_path(root, &entry.device_name, &entry.payload_signature);
     let _ = write_atomic(&path, |writer| {
         serde_json::to_writer(writer, entry)
-            .map_err(|err| std::io::Error::new(std::io::ErrorKind::Other, err))
+            .map_err(std::io::Error::other)
     });
 }
 
@@ -939,7 +939,7 @@ fn buffer_from_slice<T>(device: &Device, slice: &[T]) -> metal::Buffer {
     if slice.is_empty() {
         return device.new_buffer(1, MTLResourceOptions::StorageModeShared);
     }
-    let len = (slice.len() * size_of::<T>()) as u64;
+    let len = size_of_val(slice) as u64;
     device.new_buffer_with_data(
         slice.as_ptr() as *const c_void,
         len,
@@ -987,7 +987,7 @@ fn submit_dispatch(
     let command_buffer = queue.new_command_buffer();
     let encoder = command_buffer.new_compute_command_encoder();
     encoder.set_compute_pipeline_state(pipeline);
-    encode(&encoder);
+    encode(encoder);
     let width = pipeline.thread_execution_width().max(1);
     let threads_per_group = MTLSize {
         width,
@@ -995,7 +995,7 @@ fn submit_dispatch(
         depth: 1,
     };
     let group_count = MTLSize {
-        width: ((pair_count as u64) + width - 1) / width,
+        width: (pair_count as u64).div_ceil(width),
         height: 1,
         depth: 1,
     };

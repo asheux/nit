@@ -42,7 +42,7 @@ just run -- path/to/file
 
 - No plugins.
 - No network calls from `nit` itself.
-- No arbitrary command execution; `nit` may invoke `git` and the local `codex` CLI directly (no shell).
+- No arbitrary command execution; `nit` may invoke `git`, the local `codex` CLI, and the `claude` CLI directly (no shell).
 - Atomic file writes.
 - Terminal restored on exit and panic.
 For details see `SECURITY.md`.
@@ -65,6 +65,8 @@ nit includes an Agent Ops / Agent Chat UI.
   - In Agent Chat:
     - `@all <prompt>` broadcasts to multiple Codex agents (fan-out).
     - `@swarm [all|N] [template=lab|parallel|bulk] <prompt>` runs an orchestrated multi-agent workflow (plan → DAG tasks → verify → synthesis). (`lab` is the default.)
+    - `@new <prompt>` spawns a fresh-context clone when the agent is busy (queued turns continue on the original).
+    - Prompt queuing: if an agent is busy, prompts are automatically queued and dispatched when the agent becomes idle.
 
 Examples:
 

@@ -132,13 +132,11 @@ pub fn build_lines(state: &AppState, theme: &Theme, inner_width: u16) -> Vec<Lin
     for (idx, entry) in entries.iter().enumerate() {
         let style = if idx == selected {
             selected_style
-        } else if matches!(entry.kind, SavedArtifactsRunKind::Current)
-            && state.agents.artifacts_selected_saved_run_path.is_none()
-        {
-            active_style
-        } else if matches!(entry.kind, SavedArtifactsRunKind::Archived)
-            && entry.run_path.as_deref()
-                == state.agents.artifacts_selected_saved_run_path.as_deref()
+        } else if (matches!(entry.kind, SavedArtifactsRunKind::Current)
+            && state.agents.artifacts_selected_saved_run_path.is_none())
+            || (matches!(entry.kind, SavedArtifactsRunKind::Archived)
+                && entry.run_path.as_deref()
+                    == state.agents.artifacts_selected_saved_run_path.as_deref())
         {
             active_style
         } else {

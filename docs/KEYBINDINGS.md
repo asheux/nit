@@ -96,6 +96,8 @@
   - Note: agent reply bodies are captured in Agent Ops → ARTIFACTS; the thread shows `done (see ARTIFACTS)` placeholders.
   - `@all <msg>`: broadcast (same prompt) to multiple Codex agents
   - `@swarm [all|N] [template=lab|parallel|bulk] <msg>`: orchestrated multi-agent workflow
+  - `@new <msg>`: spawn a fresh-context clone when the agent is busy
+  - Prompts sent while an agent is busy are automatically queued and dispatched when it becomes idle
 - Left/Right/Home/End: Move input cursor
 - Up/Down: Move input cursor between lines
 - Ctrl+Up/Ctrl+Down: Scroll chat thread
