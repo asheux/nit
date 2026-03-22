@@ -1,3 +1,5 @@
+//! Metal GPU acceleration for compute-intensive operations (macOS only).
+
 #[derive(Clone, Debug)]
 pub struct MatchPair {
     pub a_idx: u32,

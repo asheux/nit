@@ -18,7 +18,7 @@ MSRV: Rust 1.88.0 (pinned in `rust-toolchain.toml`).
 |-------|---------|
 | `nit` | CLI binary entry point |
 | `nit-core` | State (`AppState`), agent bus, config, buffer |
-| `nit-tui` | TUI app loop, widgets, swarm orchestration, Claude/Codex runners |
+| `nit-tui` | TUI app loop, widgets, swarm orchestration, Claude/Codex runners, games UI |
 | `nit-games` | Game theory tournament engine |
 | `nit-gol` | Game of Life simulation |
 | `nit-metal` | Metal GPU acceleration (macOS) |
@@ -42,6 +42,20 @@ MSRV: Rust 1.88.0 (pinned in `rust-toolchain.toml`).
 - Tests: `cargo test --all` — currently 5 tests across the workspace.
 - Agent dispatch: Codex uses MCP or exec runtime; Claude spawns `claude -p` subprocesses.
 - Queue management: `queue_len` on `AgentLane` tracks UI-visible queue depth; increment on enqueue, decrement on `TurnCompleted`/`TurnFailed`.
+
+## Environment variables
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `NIT_LOG_PATH` | `<state_dir>/logs/<hash>.log` | Override the log file path |
+| `NIT_ASCII_FALLBACK` | unset | Use ASCII glyphs instead of Unicode in the agent ops UI |
+| `NIT_SNAPSHOT_QUEUE` | `64` | Snapshot writer channel capacity |
+| `NIT_SNAPSHOT_DEBUG` | unset | Enable verbose snapshot debug logging to stderr |
+| `NIT_SNAPSHOT_CYCLE` | unset | Force a snapshot when an attractor cycle is detected |
+| `NIT_GOL_STACK_MB` | `256` | Stack size (MB) for Game of Life worker threads |
+| `NIT_GOL_IO_STACK_MB` | `256` | Stack size (MB) for snapshot-stress I/O threads (falls back to `NIT_GOL_STACK_MB`) |
+| `NIT_MCP_TURN_TIMEOUT_SECS` | none | Hard timeout for an MCP turn (0 or unset = no limit) |
+| `NIT_MCP_TURN_IDLE_TIMEOUT_SECS` | `600` | Idle timeout for an MCP turn (0 = disable) |
 
 ## Agent commands (in Agent Chat)
 

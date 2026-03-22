@@ -952,7 +952,7 @@ fn agent_chat_accepts_input_and_sends_on_enter() {
     ));
     assert_eq!(state.agents.chat_input, "");
     assert_eq!(state.agents.chat_input_cursor, 0);
-    assert_eq!(state.agents.console_scroll, usize::MAX);
+    assert_eq!(state.agents.console_scroll, CONSOLE_SCROLL_BOTTOM);
     assert_eq!(state.agents.messages.len(), 1);
     assert_eq!(state.agents.messages[0].text, "hi");
 }

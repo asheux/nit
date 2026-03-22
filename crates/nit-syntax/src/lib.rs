@@ -1,3 +1,5 @@
+//! Syntax highlighting engine using tree-sitter grammars.
+
 #![forbid(unsafe_code)]
 
 mod debounce;

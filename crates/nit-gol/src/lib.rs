@@ -1,3 +1,5 @@
+//! Game of Life simulation with rule parsing, seed generation, and grid evolution.
+
 #![forbid(unsafe_code)]
 
 pub mod analyze;

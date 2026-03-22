@@ -2,6 +2,7 @@ use arboard::Clipboard;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use nit_core::{
     AgentAlertSeverity, AgentChannel, AgentDiagnosticEvent, AgentMessage, AppState, MissionPhase,
+    CONSOLE_SCROLL_BOTTOM,
 };
 
 use crate::claude_runner::ClaudeRunner;
@@ -9,8 +10,8 @@ use crate::codex_runner::{CodexRunner, CodexRunnerConfig};
 use crate::swarm::{
     create_chat_clone, detect_swarm_mission_kind_from_prompt,
     explicit_swarm_mission_kind_from_prompt, is_agent_busy, is_agent_family_busy,
-    parse_swarm_command, parse_swarm_mission_kind, select_swarm_agents, SwarmCommand,
-    SwarmMissionKind, SwarmRuntime, SwarmSize,
+    is_chat_clone_agent_id, parse_swarm_command, parse_swarm_mission_kind, select_swarm_agents,
+    SwarmCommand, SwarmMissionKind, SwarmRuntime, SwarmSize,
 };
 use crate::vitals::VitalsState;
 
@@ -854,6 +855,10 @@ pub(super) fn broadcast_target_agents(state: &AppState, mission_id: Option<&str>
                 if targets.iter().any(|id| id == agent_id) {
                     continue;
                 }
+                // Skip @new chat clones — they should not receive @all broadcasts.
+                if is_chat_clone_agent_id(agent_id) {
+                    continue;
+                }
                 let is_codex = state
                     .agents
                     .agents
@@ -874,7 +879,7 @@ pub(super) fn broadcast_target_agents(state: &AppState, mission_id: Option<&str>
         .agents
         .agents
         .iter()
-        .filter(|agent| agent.is_codex())
+        .filter(|agent| agent.is_codex() && !is_chat_clone_agent_id(&agent.id))
         .map(|agent| agent.id.clone())
         .collect()
 }
@@ -936,7 +941,7 @@ pub(super) fn push_chat_message(state: &mut AppState) -> Option<(AgentChannel, S
         message: format!("sent message: {raw}"),
         at: timestamp_label(state),
     });
-    state.agents.console_scroll = usize::MAX;
+    state.agents.console_scroll = CONSOLE_SCROLL_BOTTOM;
     state.agents.chat_input.clear();
     state.agents.chat_input_cursor = 0;
     state.agents.chat_input_scroll = usize::MAX;

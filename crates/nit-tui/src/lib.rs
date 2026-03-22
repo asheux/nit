@@ -1,3 +1,6 @@
+//! TUI application: event loop, widgets, agent runners (Claude/Codex), swarm orchestration,
+//! and game simulation UI.
+
 #![forbid(unsafe_code)]
 
 pub mod app;

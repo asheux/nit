@@ -1,3 +1,5 @@
+//! Core state, agent bus protocol, configuration, and text buffers for the nit workspace.
+
 #![forbid(unsafe_code)]
 
 pub mod actions;
@@ -47,6 +49,7 @@ pub use seed::{
 pub use state::{
     apply_action, apply_family_run_runtime_overrides, build_family_run_override_for_request,
     build_family_run_override_for_request_with_timings, build_family_run_override_from_base_config,
+    CONSOLE_SCROLL_BOTTOM,
     build_family_run_override_from_base_config_with_timings, AgentAlert, AgentAlertSeverity,
     AgentChannel, AgentConsoleRow, AgentConsoleRowKind, AgentConsoleRowsCache,
     AgentConsoleRowsCacheKey, AgentConsoleTab, AgentDiagnosticEvent, AgentLane, AgentLaneKind,

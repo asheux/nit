@@ -4063,8 +4063,9 @@ fn artifacts_lines(state: &AppState, swarm: Option<&SwarmRuntime>, width: usize)
     // REPORT/VERIFY are global (outside the tree). Prompt groups are collapsible.
     let has_prompt = cards.iter().any(|c| c.kind == "PROMPT");
     let is_global = |kind: &str| matches!(kind, "REPORT" | "VERIFY");
-    let mut collapsed = false;
     for (idx, card) in cards.iter().enumerate() {
+        // Collapsed is per-iteration: only the current PROMPT card can set it.
+        let mut collapsed = false;
         if card.kind == "PROMPT" {
             collapsed = state.agents.artifacts_collapsed_prompts.contains(&idx);
             // Count children for the collapse indicator.

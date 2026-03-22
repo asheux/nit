@@ -56,7 +56,7 @@ use nit_core::{
     AgentChannel, AgentDiagnosticEvent, AgentMessage, AgentOpsTab, AgentStatus, AppKind, AppState,
     McpConnectionState, MissionPhase, MissionRecord, Mode, PaneId, PatchProposal, PatchStatus,
     Prompt, SavedRunHistoryFilter, SavedRunHistoryPendingAction, SearchMode, UiSelection,
-    UiSelectionPane, YankKind,
+    UiSelectionPane, YankKind, CONSOLE_SCROLL_BOTTOM,
 };
 use nit_games::config::GamesConfig;
 use ratatui::{
@@ -2330,6 +2330,12 @@ fn handle_agent_ops_key(
                 state.mode = Mode::Insert;
                 return false;
             }
+            KeyEvent {
+                code: KeyCode::Esc, ..
+            } if state.mode == Mode::Insert => {
+                state.mode = Mode::Normal;
+                return true;
+            }
             _ => return false,
         }
     }
@@ -2601,7 +2607,7 @@ fn handle_agent_ops_key(
             } else {
                 state.focus = PaneId::Notes;
                 state.mode = Mode::Normal;
-                state.agents.console_scroll = usize::MAX;
+                state.agents.console_scroll = CONSOLE_SCROLL_BOTTOM;
                 changed = true;
             }
         }
@@ -2657,7 +2663,7 @@ fn handle_agent_ops_key(
         } => {
             state.focus = PaneId::Notes;
             state.mode = Mode::Normal;
-            state.agents.console_scroll = usize::MAX;
+            state.agents.console_scroll = CONSOLE_SCROLL_BOTTOM;
             changed = true;
         }
         KeyEvent {
@@ -3376,7 +3382,8 @@ fn reset_roster_context(state: &mut AppState, swarm: &SwarmRuntime) -> bool {
         }
     }
     let removed = before.saturating_sub(state.agents.messages.len());
-    state.agents.console_scroll = usize::MAX;
+    state.agents.console_scroll = CONSOLE_SCROLL_BOTTOM;
+    state.agents.artifacts_selected = 0;
     state.agents.artifacts_selected_saved_run_path = None;
     state.agents.artifacts_history_selected = 0;
     state.agents.artifacts_history_popup_scroll = 0;
@@ -5634,10 +5641,16 @@ fn bump_scroll_clamped(value: &mut usize, delta: i32, max_scroll: usize) {
 }
 
 fn popup_max_scroll(line_count: usize, text_area: ratatui::layout::Rect) -> usize {
+    if text_area.height == 0 {
+        return 0;
+    }
     line_count.saturating_sub(text_area.height as usize)
 }
 
 fn max_scroll_for_height(line_count: usize, height: usize) -> usize {
+    if height == 0 {
+        return 0;
+    }
     line_count.saturating_sub(height)
 }
 

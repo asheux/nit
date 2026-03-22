@@ -725,9 +725,16 @@ fn extract_session_id_from_jsonl(stdout: &[u8]) -> Option<String> {
 
 /// Extract the final result text from Claude stream-json output.
 /// Claude emits `{"type":"result","result":"..."}` at the end.
+///
+/// When Claude uses tools during a turn, the stream contains multiple
+/// `assistant` events (text before tool use, text after). We collect all
+/// of them so intermediate output (e.g. test results) is not lost. The
+/// final `result` event replaces the last assistant text to avoid
+/// duplication.
 fn extract_result_text_from_jsonl(stdout: &[u8]) -> Option<String> {
     let text = String::from_utf8_lossy(stdout);
-    let mut last_result: Option<String> = None;
+    let mut assistant_texts: Vec<String> = Vec::new();
+    let mut result_text: Option<String> = None;
     for raw in text.lines() {
         let raw = raw.trim();
         if raw.is_empty() {
@@ -741,11 +748,12 @@ fn extract_result_text_from_jsonl(stdout: &[u8]) -> Option<String> {
             if let Some(text) = value.get("result").and_then(|v| v.as_str()) {
                 let trimmed = text.trim();
                 if !trimmed.is_empty() {
-                    last_result = Some(trimmed.to_string());
+                    result_text = Some(trimmed.to_string());
                 }
             }
         }
-        // Also capture assistant text messages as fallback.
+        // Capture assistant text messages — there may be multiple when
+        // Claude interleaves text with tool use.
         if kind == Some("assistant") {
             if let Some(message) = value.get("message").and_then(|v| {
                 // The message may be a content block array or a plain string.
@@ -772,12 +780,26 @@ fn extract_result_text_from_jsonl(stdout: &[u8]) -> Option<String> {
                 }
             }) {
                 if !message.trim().is_empty() {
-                    last_result = Some(message);
+                    assistant_texts.push(message);
                 }
             }
         }
     }
-    last_result
+
+    // The result event typically duplicates the last assistant text.
+    // Replace it so we don't double-up, then join all parts.
+    if let Some(result) = result_text {
+        if assistant_texts.is_empty() {
+            return Some(result);
+        }
+        // Replace last assistant text with the (authoritative) result text.
+        *assistant_texts.last_mut().unwrap() = result;
+        Some(assistant_texts.join("\n\n"))
+    } else if !assistant_texts.is_empty() {
+        Some(assistant_texts.join("\n\n"))
+    } else {
+        None
+    }
 }
 
 /// Extract token count from Claude stream-json output.

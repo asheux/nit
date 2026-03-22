@@ -1,6 +1,7 @@
 use crate::state::{
     AgentAlert, AgentAlertSeverity, AgentChannel, AgentDiagnosticEvent, AgentLane, AgentLaneKind,
     AgentMessage, AgentStatus, AgentTurnState, AppState, McpStatus, MissionRecord,
+    CONSOLE_SCROLL_BOTTOM,
 };
 use std::time::Instant;
 
@@ -26,52 +27,65 @@ pub struct AgentTokenCount {
     pub context_window: u32,
 }
 
-/// Minimal event protocol for driving the Agent Station UI from an external runtime (Codex, Claude,
-/// etc.). Intended to be transported as NDJSON over stdio or a socket.
+/// Event protocol for driving the Agent Station UI from an external runtime (Codex, Claude, etc.).
+///
+/// Transported as NDJSON over stdio or a socket; each variant maps to a single state mutation.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AgentBusEvent {
+    /// Insert or update an agent lane in the roster.
     AgentUpsert {
         agent: AgentLane,
     },
+    /// Insert or update a mission record.
     MissionUpsert {
         mission: MissionRecord,
     },
+    /// Append a chat message to the console log.
     MessageAppend {
         message: AgentMessage,
     },
+    /// Append an operator-visible alert (info, warning, or error).
     AlertAppend {
         alert: AgentAlert,
     },
+    /// Append a diagnostic event for the ops timeline.
     DiagnosticAppend {
         event: AgentDiagnosticEvent,
     },
+    /// Update the MCP connection status.
     McpStatus {
         status: McpStatus,
     },
+    /// Signals that an agent's turn has started processing.
     TurnStarted {
         agent_id: String,
         mission_id: Option<String>,
         resume_thread_id: Option<String>,
     },
+    /// Keep-alive heartbeat from a running agent turn.
     TurnHeartbeat {
         agent_id: String,
         mission_id: Option<String>,
     },
+    /// Update the current processing stage label for an agent turn.
     TurnStage {
         agent_id: String,
         mission_id: Option<String>,
         stage: String,
     },
+    /// Free-form log line emitted during a turn (routed to diagnostics).
     TurnLog {
         agent_id: String,
         message: String,
     },
+    /// Report token usage for context-window tracking.
     TokenCount {
         agent_id: String,
         mission_id: Option<String>,
         token_count: AgentTokenCount,
     },
+    /// Signals that an agent's turn ended with an error.
     TurnFailed {
         agent_id: String,
         mission_id: Option<String>,
@@ -79,6 +93,7 @@ pub enum AgentBusEvent {
         token_count: Option<AgentTokenCount>,
         message: String,
     },
+    /// Signals that an agent's turn completed successfully.
     TurnCompleted {
         agent_id: String,
         mission_id: Option<String>,
@@ -112,7 +127,7 @@ impl AgentBusEvent {
                 }
                 state.agents.messages.push(message.clone());
                 // If the operator was following the tail, keep following it.
-                state.agents.console_scroll = usize::MAX;
+                state.agents.console_scroll = CONSOLE_SCROLL_BOTTOM;
             }
             AgentBusEvent::AlertAppend { alert } => {
                 state.agents.alerts.push(alert.clone());
@@ -282,7 +297,7 @@ impl AgentBusEvent {
                     message: format!("[{agent_id}] {message}"),
                     at: at.clone(),
                 });
-                state.agents.console_scroll = usize::MAX;
+                state.agents.console_scroll = CONSOLE_SCROLL_BOTTOM;
                 state.status = Some(format!("{source_label} failed: {}", summarize_agent_error(message)));
             }
             AgentBusEvent::TurnCompleted {
@@ -373,7 +388,7 @@ impl AgentBusEvent {
                     text: message.clone(),
                     prompt_msg_idx: parent_prompt_idx,
                 });
-                state.agents.console_scroll = usize::MAX;
+                state.agents.console_scroll = CONSOLE_SCROLL_BOTTOM;
 
                 state.agents.diag_events.push(AgentDiagnosticEvent {
                     severity: AgentAlertSeverity::Info,

@@ -646,6 +646,9 @@ pub struct RosterTreeSelection {
     pub leaf_idx: usize,
 }
 
+/// Sentinel value for `AgentsState::console_scroll` meaning "auto-scroll to bottom".
+pub const CONSOLE_SCROLL_BOTTOM: usize = usize::MAX;
+
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct AgentsState {
     pub selected_agent: Option<String>,
@@ -768,6 +771,8 @@ pub struct AgentsState {
     /// Job output viewport dimensions (Agent Ops body area). Runtime-only.
     #[serde(skip)]
     pub ops_viewport_height: usize,
+    /// Scroll offset for the agent console thread view.
+    /// `CONSOLE_SCROLL_BOTTOM` (usize::MAX) means "auto-scroll to bottom".
     #[serde(skip)]
     pub console_scroll: usize,
     #[serde(skip)]
@@ -1087,7 +1092,7 @@ impl AgentsState {
             ops_scroll: 0,
             ops_viewport_width: 0,
             ops_viewport_height: 0,
-            console_scroll: usize::MAX,
+            console_scroll: CONSOLE_SCROLL_BOTTOM,
             console_rows_cache: AgentConsoleRowsCache::default(),
             event_epoch: 0,
             pending_provenance_mission_ids: vec!["mis-001".into()],
@@ -1210,7 +1215,7 @@ impl Default for AgentsState {
             ops_scroll: 0,
             ops_viewport_width: 0,
             ops_viewport_height: 0,
-            console_scroll: usize::MAX,
+            console_scroll: CONSOLE_SCROLL_BOTTOM,
             console_rows_cache: AgentConsoleRowsCache::default(),
             event_epoch: 0,
             pending_provenance_mission_ids: Vec::new(),

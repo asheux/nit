@@ -1,6 +1,7 @@
 [package]
 name = "nit-core"
 version = "0.1.0"
+description = "Core state, agent bus protocol, configuration, and text buffers for the nit workspace"
 edition = "2021"
 license = "MIT"
 rust-version.workspace = true

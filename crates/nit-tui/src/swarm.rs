@@ -165,6 +165,40 @@ fn insert_swarm_clone_lane(state: &mut AppState, base_id: &str, clone_lane: nit_
     state.agents.agents.insert(insert_pos, clone_lane);
 }
 
+/// Drain all queued Codex and Claude turns for a specific agent, decrementing
+/// `queue_len` for each removed turn. Used when a task agent fails during
+/// swarm execution so that orphaned queued turns don't leak.
+fn drain_queued_turns_for_agent(state: &mut AppState, agent_id: &str) {
+    let codex_removed = state
+        .agents
+        .queued_codex_turns
+        .iter()
+        .filter(|t| t.agent_id == agent_id)
+        .count();
+    state
+        .agents
+        .queued_codex_turns
+        .retain(|t| t.agent_id != agent_id);
+
+    let claude_removed = state
+        .agents
+        .queued_claude_turns
+        .iter()
+        .filter(|t| t.agent_id == agent_id)
+        .count();
+    state
+        .agents
+        .queued_claude_turns
+        .retain(|t| t.agent_id != agent_id);
+
+    let total_removed = codex_removed + claude_removed;
+    if total_removed > 0 {
+        if let Some(agent) = state.agents.agents.iter_mut().find(|a| a.id == agent_id) {
+            agent.queue_len = agent.queue_len.saturating_sub(total_removed);
+        }
+    }
+}
+
 fn cleanup_swarm_clones_for_mission(state: &mut AppState, mission_id: &str) {
     let clone_ids = state
         .agents
@@ -177,9 +211,30 @@ fn cleanup_swarm_clones_for_mission(state: &mut AppState, mission_id: &str) {
         return;
     }
 
+    // Decrement queue_len for each Codex turn that will be removed, while agents still exist.
+    for turn in state.agents.queued_codex_turns.iter() {
+        if clone_ids.contains(turn.agent_id.as_str()) {
+            if let Some(agent) = state.agents.agents.iter_mut().find(|a| a.id == turn.agent_id) {
+                agent.queue_len = agent.queue_len.saturating_sub(1);
+            }
+        }
+    }
     state
         .agents
         .queued_codex_turns
+        .retain(|turn| !clone_ids.contains(turn.agent_id.as_str()));
+
+    // Decrement queue_len for each Claude turn that will be removed, while agents still exist.
+    for turn in state.agents.queued_claude_turns.iter() {
+        if clone_ids.contains(turn.agent_id.as_str()) {
+            if let Some(agent) = state.agents.agents.iter_mut().find(|a| a.id == turn.agent_id) {
+                agent.queue_len = agent.queue_len.saturating_sub(1);
+            }
+        }
+    }
+    state
+        .agents
+        .queued_claude_turns
         .retain(|turn| !clone_ids.contains(turn.agent_id.as_str()));
 
     for clone_id in clone_ids.iter() {
@@ -200,6 +255,16 @@ fn cleanup_swarm_clones_for_mission(state: &mut AppState, mission_id: &str) {
             .agents
             .codex_selected_reasoning_effort
             .remove(clone_id);
+        state.agents.claude_session_ids.remove(clone_id);
+        state.agents.claude_used_tokens.remove(clone_id);
+        state.agents.claude_context_remaining_pct.remove(clone_id);
+        state
+            .agents
+            .claude_effective_context_window_tokens
+            .remove(clone_id);
+        state.agents.claude_default_effort.remove(clone_id);
+        state.agents.claude_supported_efforts.remove(clone_id);
+        state.agents.claude_selected_effort.remove(clone_id);
         state.agents.swarm_role_by_agent_id.remove(clone_id);
         state.agents.swarm_priority_agent_ids.remove(clone_id);
         state
@@ -239,6 +304,40 @@ fn cleanup_swarm_clones_for_mission(state: &mut AppState, mission_id: &str) {
         state
             .agents
             .codex_mission_context_remaining_pct
+            .remove(mission_id);
+    }
+
+    let mut remove_claude_mission_session_ids = false;
+    if let Some(map) = state.agents.claude_mission_session_ids.get_mut(mission_id) {
+        map.retain(|agent_id, _| !clone_ids.contains(agent_id.as_str()));
+        remove_claude_mission_session_ids = map.is_empty();
+    }
+    if remove_claude_mission_session_ids {
+        state.agents.claude_mission_session_ids.remove(mission_id);
+    }
+
+    let mut remove_claude_mission_used_tokens = false;
+    if let Some(map) = state.agents.claude_mission_used_tokens.get_mut(mission_id) {
+        map.retain(|agent_id, _| !clone_ids.contains(agent_id.as_str()));
+        remove_claude_mission_used_tokens = map.is_empty();
+    }
+    if remove_claude_mission_used_tokens {
+        state.agents.claude_mission_used_tokens.remove(mission_id);
+    }
+
+    let mut remove_claude_mission_context_remaining = false;
+    if let Some(map) = state
+        .agents
+        .claude_mission_context_remaining_pct
+        .get_mut(mission_id)
+    {
+        map.retain(|agent_id, _| !clone_ids.contains(agent_id.as_str()));
+        remove_claude_mission_context_remaining = map.is_empty();
+    }
+    if remove_claude_mission_context_remaining {
+        state
+            .agents
+            .claude_mission_context_remaining_pct
             .remove(mission_id);
     }
 
@@ -2334,6 +2433,9 @@ impl SwarmRuntime {
                                 );
                             }
                         }
+                        // Drain orphaned queued turns for the failed agent so
+                        // queue_len doesn't leak.
+                        drain_queued_turns_for_agent(state, agent_id);
                         refresh_task_readiness(&mut run);
                         dispatches.extend(dispatch_ready_tasks(&mut run));
                         if let Some(deadlock) = maybe_resolve_deadlock(&mut run) {

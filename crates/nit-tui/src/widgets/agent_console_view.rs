@@ -1,6 +1,7 @@
 use nit_core::{
     AgentConsoleRow as ThreadRow, AgentConsoleRowKind as ThreadRowKind, AgentConsoleRowsCacheKey,
     AgentLane, AgentLaneKind, AgentMessage, AgentStatus, AppState, PaneId, UiSelectionPane,
+    CONSOLE_SCROLL_BOTTOM,
 };
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
@@ -249,11 +250,21 @@ pub fn render(
     // Build pending_by_prompt: prompt_msg_idx → agent_ids still working on it.
     let mut pending_by_prompt: std::collections::HashMap<usize, Vec<String>> =
         std::collections::HashMap::new();
-    for (agent_id, &prompt_idx) in state.agents.codex_turn_prompt_idx.iter() {
+    for (agent_id, &prompt_idx) in state
+        .agents
+        .codex_turn_prompt_idx
+        .iter()
+        .chain(state.agents.claude_turn_prompt_idx.iter())
+    {
         let is_active = state.agents.active_turns.contains_key(agent_id)
             || state
                 .agents
                 .queued_codex_turns
+                .iter()
+                .any(|t| t.agent_id == *agent_id)
+            || state
+                .agents
+                .queued_claude_turns
                 .iter()
                 .any(|t| t.agent_id == *agent_id);
         if is_active {
@@ -305,6 +316,11 @@ pub fn render(
                     .agents
                     .queued_codex_turns
                     .iter()
+                    .any(|t| t.agent_id == a.id)
+                || state
+                    .agents
+                    .queued_claude_turns
+                    .iter()
                     .any(|t| t.agent_id == a.id))
     });
     let mission_ctx = state.agents.selected_context_mission();
@@ -315,8 +331,6 @@ pub fn render(
             .iter()
             .any(|m| m.id == mid && m.swarm)
     });
-    // Only show the global swarm breather when there are active agents NOT
-    // already shown inline — avoids duplicate Working tables.
     if any_remaining || (has_swarm_context && inline_shown.is_empty()) {
         combined_rows.extend(breather_rows_for_user_prompt(
             state,
@@ -328,7 +342,7 @@ pub fn render(
 
     let total_rows = combined_rows.len();
     let max_scroll = total_rows.saturating_sub(thread_height);
-    state.agents.console_scroll = if state.agents.console_scroll == usize::MAX {
+    state.agents.console_scroll = if state.agents.console_scroll == CONSOLE_SCROLL_BOTTOM {
         max_scroll
     } else {
         state.agents.console_scroll.min(max_scroll)
@@ -634,11 +648,21 @@ pub fn artifact_message_index_for_line_with_swarm(
     // each user prompt.
     let mut pending_by_prompt: std::collections::HashMap<usize, Vec<String>> =
         std::collections::HashMap::new();
-    for (agent_id, &prompt_idx) in state.agents.codex_turn_prompt_idx.iter() {
+    for (agent_id, &prompt_idx) in state
+        .agents
+        .codex_turn_prompt_idx
+        .iter()
+        .chain(state.agents.claude_turn_prompt_idx.iter())
+    {
         let is_active = state.agents.active_turns.contains_key(agent_id)
             || state
                 .agents
                 .queued_codex_turns
+                .iter()
+                .any(|t| t.agent_id == *agent_id)
+            || state
+                .agents
+                .queued_claude_turns
                 .iter()
                 .any(|t| t.agent_id == *agent_id);
         if is_active {
@@ -1649,11 +1673,21 @@ fn thread_rows(
     // Build reverse map: prompt_msg_idx → list of agent_ids still working on it.
     let mut pending_by_prompt: std::collections::HashMap<usize, Vec<String>> =
         std::collections::HashMap::new();
-    for (agent_id, &prompt_idx) in state.agents.codex_turn_prompt_idx.iter() {
+    for (agent_id, &prompt_idx) in state
+        .agents
+        .codex_turn_prompt_idx
+        .iter()
+        .chain(state.agents.claude_turn_prompt_idx.iter())
+    {
         let is_active = state.agents.active_turns.contains_key(agent_id)
             || state
                 .agents
                 .queued_codex_turns
+                .iter()
+                .any(|t| t.agent_id == *agent_id)
+            || state
+                .agents
+                .queued_claude_turns
                 .iter()
                 .any(|t| t.agent_id == *agent_id);
         if is_active {
@@ -1695,6 +1729,11 @@ fn thread_rows(
                 || state
                     .agents
                     .queued_codex_turns
+                    .iter()
+                    .any(|t| t.agent_id == a.id)
+                || state
+                    .agents
+                    .queued_claude_turns
                     .iter()
                     .any(|t| t.agent_id == a.id))
             && if let Some(sel) = agent {
@@ -2129,14 +2168,26 @@ fn breather_rows_for_user_prompt(
             .agents
             .queued_codex_turns
             .iter()
-            .any(|turn| turn.agent_id == agent.id);
+            .any(|turn| turn.agent_id == agent.id)
+            || state
+                .agents
+                .queued_claude_turns
+                .iter()
+                .any(|turn| turn.agent_id == agent.id);
         if !has_active && !has_queued {
             continue;
         }
         let queued_in_mission = mission_ctx.is_some_and(|mission_id| {
-            state.agents.queued_codex_turns.iter().any(|turn| {
-                turn.agent_id == agent.id && turn.mission_id.as_deref() == Some(mission_id)
-            })
+            state
+                .agents
+                .queued_codex_turns
+                .iter()
+                .any(|turn| {
+                    turn.agent_id == agent.id && turn.mission_id.as_deref() == Some(mission_id)
+                })
+                || state.agents.queued_claude_turns.iter().any(|turn| {
+                    turn.agent_id == agent.id && turn.mission_id.as_deref() == Some(mission_id)
+                })
         });
         let in_context = if let Some(mission_id) = mission_ctx {
             agent.current_mission.as_deref() == Some(mission_id) || queued_in_mission
@@ -2196,6 +2247,11 @@ fn breather_rows_for_user_prompt(
             .queued_codex_turns
             .iter()
             .any(|turn| turn.agent_id == id.as_str())
+            || state
+                .agents
+                .queued_claude_turns
+                .iter()
+                .any(|turn| turn.agent_id == id.as_str())
     });
     let all_swarm_done = swarm_mission_id.is_some_and(|mid| {
         !swarm_assigned_ids.is_empty()
@@ -2254,13 +2310,20 @@ fn breather_rows_for_user_prompt(
             let queued_for_swarm = swarm_mission_id.is_some_and(|mid| {
                 state.agents.queued_codex_turns.iter().any(|turn| {
                     turn.agent_id == id.as_str() && turn.mission_id.as_deref() == Some(mid)
+                }) || state.agents.queued_claude_turns.iter().any(|turn| {
+                    turn.agent_id == id.as_str() && turn.mission_id.as_deref() == Some(mid)
                 })
             });
             let queued_any = state
                 .agents
                 .queued_codex_turns
                 .iter()
-                .any(|turn| turn.agent_id == id.as_str());
+                .any(|turn| turn.agent_id == id.as_str())
+                || state
+                    .agents
+                    .queued_claude_turns
+                    .iter()
+                    .any(|turn| turn.agent_id == id.as_str());
             let has_message = swarm_mission_id.is_some_and(|mid| {
                 state.agents.messages.iter().any(|msg| {
                     msg.mission_id.as_deref() == Some(mid)
@@ -2358,13 +2421,20 @@ fn breather_rows_for_user_prompt(
             swarm_mission_id.is_some_and(|mid| {
                 state.agents.queued_codex_turns.iter().any(|turn| {
                     turn.agent_id == id.as_str() && turn.mission_id.as_deref() == Some(mid)
+                }) || state.agents.queued_claude_turns.iter().any(|turn| {
+                    turn.agent_id == id.as_str() && turn.mission_id.as_deref() == Some(mid)
                 })
             });
         let queued_any = state
             .agents
             .queued_codex_turns
             .iter()
-            .any(|turn| turn.agent_id == id.as_str());
+            .any(|turn| turn.agent_id == id.as_str())
+            || state
+                .agents
+                .queued_claude_turns
+                .iter()
+                .any(|turn| turn.agent_id == id.as_str());
         let has_message = swarm_mission_id.is_some_and(|mid| {
             state.agents.messages.iter().any(|msg| {
                 msg.mission_id.as_deref() == Some(mid)

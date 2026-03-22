@@ -1,3 +1,5 @@
+//! Game theory tournament engine with configurable strategies, payoff matrices, and analysis.
+
 #![forbid(unsafe_code)]
 
 pub mod analysis;
