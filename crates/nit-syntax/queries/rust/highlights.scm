@@ -14,7 +14,6 @@
 [
   "fn"
   "let"
-  "mut"
   "pub"
   "use"
   "impl"
@@ -38,10 +37,13 @@
   "where"
   "type"
   "mod"
-  "crate"
-  "super"
-  "self"
 ] @keyword
+
+; Named nodes that are keywords in tree-sitter-rust 0.20.x
+(mutable_specifier) @keyword
+(self) @keyword
+(super) @keyword
+(crate) @keyword
 
 (primitive_type) @type.builtin
 (type_identifier) @type

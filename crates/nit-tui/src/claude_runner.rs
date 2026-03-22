@@ -404,6 +404,24 @@ fn run_turn(
                                             .unwrap_or("text");
                                         format!("assistant({subtype})")
                                     }
+                                    "content_block_start" => {
+                                        let block_type = value
+                                            .get("content_block")
+                                            .and_then(|b| b.get("type"))
+                                            .and_then(|v| v.as_str())
+                                            .unwrap_or("unknown");
+                                        match block_type {
+                                            "tool_use" => {
+                                                let name = value
+                                                    .get("content_block")
+                                                    .and_then(|b| b.get("name"))
+                                                    .and_then(|v| v.as_str())
+                                                    .unwrap_or("tool");
+                                                format!("tool_use({name})")
+                                            }
+                                            _ => format!("content({block_type})"),
+                                        }
+                                    }
                                     "tool_use" | "tool_result" => {
                                         let tool_name = value
                                             .get("tool")
@@ -415,8 +433,13 @@ fn run_turn(
                                 };
                                 let is_interesting = matches!(
                                     kind,
-                                    "system" | "assistant" | "tool_use" | "tool_result"
-                                        | "result" | "error"
+                                    "system"
+                                        | "assistant"
+                                        | "content_block_start"
+                                        | "tool_use"
+                                        | "tool_result"
+                                        | "result"
+                                        | "error"
                                 );
                                 if is_interesting
                                     && (last_stage.as_deref() != Some(stage.as_str())

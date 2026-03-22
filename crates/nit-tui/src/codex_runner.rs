@@ -82,8 +82,10 @@ impl CodexRunner {
         }
     }
 
-    pub fn send(&self, command: CodexCommand) {
-        let _ = self.cmd_tx.send(command);
+    /// Send a command to the runner. Returns `true` if the command was accepted,
+    /// `false` if the runner's channel is disconnected (runner shut down or crashed).
+    pub fn send(&self, command: CodexCommand) -> bool {
+        self.cmd_tx.send(command).is_ok()
     }
 
     pub fn shutdown(&mut self) {

@@ -838,6 +838,27 @@ pub(super) fn handle_artifacts_popup_key(
         }
 
         if let Some(agent_id) = artifact_agent {
+            // If the resolved agent was a clone that has been cleaned up,
+            // re-create its lane from the base so the dispatch uses the
+            // clone's preserved session/thread context (Claude session IDs
+            // survive chat-clone cleanup).
+            if !state.agents.agents.iter().any(|a| a.id == agent_id) {
+                let base_id = crate::swarm::resolve_base_agent_id(&agent_id);
+                if base_id != agent_id {
+                    if let Some(base_lane) =
+                        state.agents.agents.iter().find(|a| a.id == base_id).cloned()
+                    {
+                        let mut lane = base_lane;
+                        lane.id = agent_id.clone();
+                        lane.status = nit_core::AgentStatus::Idle;
+                        lane.queue_len = 0;
+                        lane.heartbeat_age_secs = 0;
+                        lane.current_mission = None;
+                        state.agents.agents.push(lane);
+                    }
+                }
+            }
+
             // Push the prompt as a user message in the correct context.
             let prev_agent = state.agents.selected_agent.clone();
             let prev_mission = state.agents.selected_mission.clone();

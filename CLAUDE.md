@@ -39,7 +39,7 @@ MSRV: Rust 1.88.0 (pinned in `rust-toolchain.toml`).
 - No network calls from `nit` itself; external CLIs (`codex`, `claude`, `git`) are spawned directly (no shell).
 - `time` crate is vendored at `vendor/time`.
 - Clippy must pass with zero warnings (`-D warnings`).
-- Tests: `cargo test --all` — currently 5 tests across the workspace.
+- Tests: `cargo test --all` — ~526 tests across the workspace.
 - Agent dispatch: Codex uses MCP or exec runtime; Claude spawns `claude -p` subprocesses.
 - Queue management: `queue_len` on `AgentLane` tracks UI-visible queue depth; increment on enqueue, decrement on `TurnCompleted`/`TurnFailed`.
 

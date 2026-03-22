@@ -221,9 +221,9 @@ fn codex_dispatch_marks_turn_waiting_until_backend_starts() {
     });
 
     let mut vitals = VitalsState::default();
-    let mut codex = CodexRunner::spawn(CodexRuntimeMode::Exec, CodexRunnerConfig::default());
-    // Avoid launching external processes in tests; we only care about the immediate UI state.
-    codex.shutdown();
+    let codex = CodexRunner::spawn(CodexRuntimeMode::Exec, CodexRunnerConfig::default());
+    // Don't shutdown: we only care about the immediate UI state set by the dispatch call.
+    // The runner thread will receive the command but won't affect AppState before assertions run.
 
     maybe_dispatch_codex_turn(
         &mut state,

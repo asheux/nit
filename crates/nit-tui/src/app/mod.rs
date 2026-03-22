@@ -1785,6 +1785,8 @@ fn draw(
             f.set_cursor(x, y);
         }
     })?;
+    // Apply cursor style after draw so ratatui's cursor-show/hide logic has run,
+    // but the two are now in the same flush window (no visible frame gap).
     let cursor_style = if state.agents.artifacts_popup_open || state.focus == PaneId::Notes {
         SetCursorStyle::SteadyBar
     } else {
@@ -9933,24 +9935,9 @@ fn maybe_open_artifact_popup_from_console_line(
         return false;
     };
 
-    if let Some(mission_id) = message.mission_id.as_deref() {
-        state.agents.selected_mission = Some(mission_id.to_string());
-        if let Some(mission_idx) = state
-            .agents
-            .missions
-            .iter()
-            .position(|mission| mission.id == mission_id)
-        {
-            state.agents.mission_selected = mission_idx;
-        }
-    } else if let Some(agent_id) = message.agent_id.as_deref() {
-        // Resolve chat-clone ids to the base agent so the context stays on the
-        // user-selected model and other artifacts remain visible.
-        let resolved = chat_clone_base_id(agent_id).unwrap_or(agent_id);
-        state.agents.selected_mission = None;
-        state.agents.selected_agent = Some(resolved.to_string());
-    }
-
+    // Look up the card BEFORE mutating selected_agent/selected_mission.
+    // Setting the context first would cause the clicked message itself to appear
+    // as an artifact card, creating a self-fulfilling match.
     let selected = agent_ops_view::artifacts_popup_ref_for_message(
         state,
         Some(swarm),
@@ -9968,6 +9955,25 @@ fn maybe_open_artifact_popup_from_console_line(
     let Some(card_idx) = selected else {
         return false;
     };
+
+    // Now that we know we're opening the popup, update the context.
+    if let Some(mission_id) = message.mission_id.as_deref() {
+        state.agents.selected_mission = Some(mission_id.to_string());
+        if let Some(mission_idx) = state
+            .agents
+            .missions
+            .iter()
+            .position(|mission| mission.id == mission_id)
+        {
+            state.agents.mission_selected = mission_idx;
+        }
+    } else if let Some(agent_id) = message.agent_id.as_deref() {
+        // Resolve chat-clone ids to the base agent so the context stays on the
+        // user-selected model and other artifacts remain visible.
+        let resolved = chat_clone_base_id(agent_id).unwrap_or(agent_id);
+        state.agents.selected_mission = None;
+        state.agents.selected_agent = Some(resolved.to_string());
+    }
 
     state.agents.artifacts_selected_saved_run_path = None;
     state.agents.artifacts_selected = card_idx;

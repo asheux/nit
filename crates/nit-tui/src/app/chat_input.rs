@@ -859,13 +859,13 @@ pub(super) fn broadcast_target_agents(state: &AppState, mission_id: Option<&str>
                 if is_chat_clone_agent_id(agent_id) {
                     continue;
                 }
-                let is_codex = state
+                let is_dispatchable = state
                     .agents
                     .agents
                     .iter()
                     .find(|agent| agent.id == *agent_id)
-                    .is_some_and(|agent| agent.is_codex());
-                if is_codex {
+                    .is_some_and(|agent| agent.is_codex() || agent.is_claude());
+                if is_dispatchable {
                     targets.push(agent_id.clone());
                 }
             }
@@ -879,7 +879,9 @@ pub(super) fn broadcast_target_agents(state: &AppState, mission_id: Option<&str>
         .agents
         .agents
         .iter()
-        .filter(|agent| agent.is_codex() && !is_chat_clone_agent_id(&agent.id))
+        .filter(|agent| {
+            (agent.is_codex() || agent.is_claude()) && !is_chat_clone_agent_id(&agent.id)
+        })
         .map(|agent| agent.id.clone())
         .collect()
 }

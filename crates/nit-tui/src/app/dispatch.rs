@@ -157,6 +157,8 @@ pub(super) fn maybe_dispatch_next_queued_codex_turn(
     codex: Option<&CodexRunner>,
 ) {
     let Some(codex) = codex else {
+        // Runner gone -- drain orphaned queued turns so queue_len doesn't stick.
+        drain_orphaned_codex_queue(state);
         return;
     };
     if state.agents.queued_codex_turns.is_empty() {
@@ -376,15 +378,38 @@ pub(super) fn maybe_dispatch_codex_turn(
         })
         .unwrap_or_else(|| "medium".into());
 
-    codex.send(CodexCommand::RunTurn {
-        model,
+    let ok = codex.send(CodexCommand::RunTurn {
+        model: model.clone(),
         cwd: state.workspace_root.clone(),
-        mission_id,
+        mission_id: mission_id.clone(),
         resume_thread_id,
         persist_session,
         reasoning_effort: Some(reasoning_effort),
         prompt,
     });
+    if !ok {
+        // Runner channel is dead -- clean up the optimistic state we just set.
+        state.agents.active_turns.remove(&model);
+        if let Some(agent) = state.agents.agents.iter_mut().find(|a| a.id == model) {
+            agent.queue_len = agent.queue_len.saturating_sub(1);
+            agent.status = if agent.queue_len > 0 {
+                AgentStatus::Waiting
+            } else {
+                AgentStatus::Idle
+            };
+        }
+        state
+            .agents
+            .diag_events
+            .push(nit_core::state::AgentDiagnosticEvent {
+                severity: nit_core::state::AgentAlertSeverity::Warn,
+                source: "codex".into(),
+                message: format!(
+                    "[{model}] Codex runner channel disconnected; turn dropped"
+                ),
+                at: format!("t+{}", state.metrics.frame_count),
+            });
+    }
 }
 
 pub(super) fn estimate_codex_context_tokens(text: &str) -> u32 {
@@ -557,6 +582,24 @@ pub(super) fn maybe_dispatch_next_queued_claude_turn(
             queued.prompt,
             false,
         );
+    }
+}
+
+/// Drain all queued Codex turns when the runner is unavailable, resetting queue_len
+/// so the UI doesn't show permanently "Waiting" agents.
+fn drain_orphaned_codex_queue(state: &mut AppState) {
+    while let Some(queued) = state.agents.queued_codex_turns.pop_front() {
+        if let Some(agent) = state
+            .agents
+            .agents
+            .iter_mut()
+            .find(|a| a.id == queued.agent_id)
+        {
+            agent.queue_len = agent.queue_len.saturating_sub(1);
+            if agent.queue_len == 0 && matches!(agent.status, AgentStatus::Waiting) {
+                agent.status = AgentStatus::Idle;
+            }
+        }
     }
 }
 

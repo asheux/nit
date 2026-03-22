@@ -286,7 +286,9 @@ pub fn render(
             combined_rows.push(row.clone());
             // After each breather slot, inject the inline breather if agents are pending.
             while slot_iter.peek().is_some_and(|&&(pos, _)| pos == row_idx + 1) {
-                let &(_, prompt_msg_idx) = slot_iter.next().unwrap();
+                let Some(&(_, prompt_msg_idx)) = slot_iter.next() else {
+                    break;
+                };
                 if let Some(agent_ids) = pending_by_prompt.get(&prompt_msg_idx) {
                     combined_rows
                         .extend(inline_breather_rows(state, agent_ids, pulse_on, thread_width));
@@ -2797,37 +2799,57 @@ fn format_agent_stage_label(state: &AppState, agent: &AgentLane, stage: &str) ->
         return format_token_count_stage(state, agent);
     }
 
-    if let Some((prefix, inner_raw)) = split_stage_with_parens(stage) {
+    let base = if let Some((prefix, inner_raw)) = split_stage_with_parens(stage) {
         match prefix {
             "item_started" | "item.started" => {
-                return format!("Starting {}", humanize_stage_atom(inner_raw));
+                format!("Starting {}", humanize_stage_atom(inner_raw))
             }
             "item_completed" | "item.completed" => {
-                return format!("Finished {}", humanize_stage_atom(inner_raw));
+                format!("Finished {}", humanize_stage_atom(inner_raw))
             }
-            "tools/call" => {
-                return match inner_raw {
-                    "codex" => "Starting session".into(),
-                    "codex-reply" => "Continuing session".into(),
-                    _ => format!("Calling {}", humanize_stage_atom(inner_raw)),
-                };
+            "tools/call" => match inner_raw {
+                "codex" => "Starting session".into(),
+                "codex-reply" => "Continuing session".into(),
+                _ => format!("Calling {}", humanize_stage_atom(inner_raw)),
+            },
+            "assistant" => {
+                format!("Assistant({})", humanize_stage_atom(inner_raw))
             }
-            _ => {}
+            "tool_use" => {
+                format!("Tool: {}", humanize_stage_atom(inner_raw))
+            }
+            "tool_result" => {
+                format!("Result: {}", humanize_stage_atom(inner_raw))
+            }
+            "content" => {
+                format!("Writing {}", humanize_stage_atom(inner_raw))
+            }
+            _ => sentence_case(&humanize_stage_atom(stage)),
+        }
+    } else {
+        match stage {
+            "starting" => "Starting".into(),
+            "queued" => "Queued".into(),
+            "warning" => "Warning".into(),
+            "error" => "Error".into(),
+            "stream_error" | "stream.error" => "Stream error".into(),
+            _ => sentence_case(&humanize_stage_atom(stage)),
+        }
+    };
+
+    // For Claude agents, append token usage to every stage label so the
+    // user always sees context consumption alongside activity.
+    if agent.is_claude() {
+        if let Some(suffix) = format_token_count_suffix(state, agent) {
+            return format!("{base} \u{2022} {suffix}");
         }
     }
 
-    match stage {
-        "starting" => "Starting".into(),
-        "queued" => "Queued".into(),
-        "warning" => "Warning".into(),
-        "error" => "Error".into(),
-        "stream_error" | "stream.error" => "Stream error".into(),
-        _ => sentence_case(&humanize_stage_atom(stage)),
-    }
+    base
 }
 
 fn format_token_count_stage(state: &AppState, agent: &AgentLane) -> String {
-    if !agent.is_codex() {
+    if !agent.is_codex() && !agent.is_claude() {
         return "Updating token usage".into();
     }
 
@@ -2909,6 +2931,51 @@ fn format_token_count_stage(state: &AppState, agent: &AgentLane) -> String {
         (Some(pct), None, _) => format!("Context: {pct}% left"),
         (None, Some(used), None) => format!("Tokens: {}", format_token_count_short(used)),
         _ => "Updating context usage".into(),
+    }
+}
+
+/// Compact token usage suffix for inline display next to a stage label.
+/// Returns `None` when no token data is available yet.
+fn format_token_count_suffix(state: &AppState, agent: &AgentLane) -> Option<String> {
+    let agent_id = agent.id.as_str();
+    let mission_id = agent
+        .current_mission
+        .as_deref()
+        .or_else(|| state.agents.selected_context_mission());
+
+    let used = if let Some(mid) = mission_id {
+        state
+            .agents
+            .claude_mission_used_tokens
+            .get(mid)
+            .and_then(|m| m.get(agent_id))
+            .copied()
+    } else {
+        state.agents.claude_used_tokens.get(agent_id).copied()
+    };
+    let pct = if let Some(mid) = mission_id {
+        state
+            .agents
+            .claude_mission_context_remaining_pct
+            .get(mid)
+            .and_then(|m| m.get(agent_id))
+            .copied()
+    } else {
+        state
+            .agents
+            .claude_context_remaining_pct
+            .get(agent_id)
+            .copied()
+    };
+
+    match (pct, used) {
+        (Some(pct), Some(used)) => Some(format!(
+            "{} ({pct}%)",
+            format_token_count_short(used)
+        )),
+        (Some(pct), None) => Some(format!("{pct}% left")),
+        (None, Some(used)) => Some(format_token_count_short(used)),
+        _ => None,
     }
 }
 
