@@ -161,14 +161,8 @@ fn cleanup_swarm_clones_for_mission(state: &mut AppState, mission_id: &str) {
             .remove(clone_id);
     }
 
-    let mut remove_mission_thread_ids = false;
-    if let Some(map) = state.agents.codex_mission_thread_ids.get_mut(mission_id) {
-        map.retain(|agent_id, _| !clone_ids.contains(agent_id.as_str()));
-        remove_mission_thread_ids = map.is_empty();
-    }
-    if remove_mission_thread_ids {
-        state.agents.codex_mission_thread_ids.remove(mission_id);
-    }
+    // Keep codex_mission_thread_ids so re-created clones can resume their
+    // conversation context on follow-up prompts.
 
     let mut remove_mission_used_tokens = false;
     if let Some(map) = state.agents.codex_mission_used_tokens.get_mut(mission_id) {
@@ -195,46 +189,7 @@ fn cleanup_swarm_clones_for_mission(state: &mut AppState, mission_id: &str) {
             .remove(mission_id);
     }
 
-    let old_selected_agent = state.agents.selected_agent.clone();
-    let old_roster_selected = state.agents.roster_selected;
-    let selected_clone_removed = old_selected_agent
-        .as_deref()
-        .is_some_and(|agent_id| clone_ids.contains(agent_id));
-
-    state
-        .agents
-        .agents
-        .retain(|lane| !clone_ids.contains(lane.id.as_str()));
-
-    if state.agents.agents.is_empty() {
-        state.agents.selected_agent = None;
-        state.agents.roster_selected = 0;
-        state.agents.roster_tree_selected = None;
-        return;
-    }
-
-    if let Some(selected_id) = old_selected_agent.as_deref() {
-        if let Some(idx) = state
-            .agents
-            .agents
-            .iter()
-            .position(|lane| lane.id == selected_id)
-        {
-            state.agents.selected_agent = Some(selected_id.to_string());
-            state.agents.roster_selected = idx;
-            return;
-        }
-    }
-
-    state.agents.roster_selected = old_roster_selected.min(state.agents.agents.len() - 1);
-    state.agents.selected_agent = state
-        .agents
-        .agents
-        .get(state.agents.roster_selected)
-        .map(|lane| lane.id.clone());
-    if selected_clone_removed {
-        state.agents.roster_tree_selected = None;
-    }
+    // Keep clones in the roster so they remain visible after the swarm completes.
 }
 
 /// Remove a single idle chat clone from the roster, preserving messages and artifacts.
@@ -1104,9 +1059,147 @@ struct SwarmRun {
     report_output: Option<String>,
 }
 
+/// Configuration from a previous swarm run, used to re-launch follow-up prompts
+/// with the same template, size, and planner.
+pub struct SwarmSessionConfig {
+    pub template: String,
+    pub size: usize,
+    pub planner_agent_id: String,
+}
+
+/// Re-create swarm clones for a follow-up dispatch within an existing mission.
+/// Returns the full list of agent IDs (planner + clones) ready for dispatch.
+pub fn ensure_swarm_agents_for_followup(
+    state: &mut AppState,
+    mission_id: &str,
+    config: &SwarmSessionConfig,
+) -> Vec<String> {
+    let template = parse_swarm_template(Some(config.template.as_str()));
+    let size = SwarmSize::Count(config.size);
+    let mut agents = vec![config.planner_agent_id.clone()];
+    ensure_size_clones(
+        state,
+        mission_id,
+        template,
+        size,
+        &config.planner_agent_id,
+        &mut agents,
+    );
+    // Update the mission's assigned_agents so broadcast_target_agents can find them.
+    if let Some(mission) = state
+        .agents
+        .missions
+        .iter_mut()
+        .find(|m| m.id == mission_id)
+    {
+        mission.assigned_agents = agents.clone();
+    }
+    agents
+}
+
 impl SwarmRuntime {
     pub fn is_active_mission(&self, mission_id: &str) -> bool {
         self.runs.contains_key(mission_id)
+    }
+
+    /// Returns the swarm configuration for a mission (active or completed)
+    /// so follow-up prompts can reuse the same template and agent count.
+    pub fn session_config(&self, mission_id: &str) -> Option<SwarmSessionConfig> {
+        let run = self.run_for_mission(mission_id)?;
+        Some(SwarmSessionConfig {
+            template: run.template.label().to_string(),
+            size: run.agent_ids.len(),
+            planner_agent_id: run.planner_agent_id.clone(),
+        })
+    }
+
+    /// Build a planner prompt for a follow-up, wrapping the user's raw text
+    /// with the same planning instructions used for the initial `@swarm`.
+    pub fn build_followup_planner_prompt(
+        &self,
+        state: &AppState,
+        mission_id: &str,
+        user_prompt: &str,
+    ) -> Option<String> {
+        let run = self.run_for_mission(mission_id)?;
+        let mut role_hints: Vec<(String, String)> = Vec::new();
+        if matches!(run.template, SwarmTemplate::Parallel | SwarmTemplate::Bulk) {
+            for id in run
+                .agent_ids
+                .iter()
+                .filter(|id| id.as_str() != run.planner_agent_id.as_str())
+            {
+                role_hints.push((
+                    id.clone(),
+                    planner_role_hint_for_agent(
+                        &state.agents.swarm_role_by_agent_id,
+                        id.as_str(),
+                        run.integrator_agent_id.as_deref(),
+                        run.mission_kind,
+                    ),
+                ));
+            }
+        }
+        let mut priority_agent_ids: Vec<String> = Vec::new();
+        if matches!(run.template, SwarmTemplate::Parallel | SwarmTemplate::Bulk) {
+            for id in run
+                .agent_ids
+                .iter()
+                .filter(|id| id.as_str() != run.planner_agent_id.as_str())
+            {
+                if is_priority_agent(state, id.as_str()) {
+                    priority_agent_ids.push(id.clone());
+                }
+            }
+        }
+        Some(build_planner_prompt(
+            user_prompt,
+            run.template,
+            run.mission_kind,
+            &run.planner_agent_id,
+            &run.agent_ids,
+            run.integrator_agent_id.as_deref(),
+            &role_hints,
+            &priority_agent_ids,
+        ))
+    }
+
+    /// Re-activate a completed swarm run so the planner can generate a new
+    /// plan for a follow-up prompt.  Clears previous tasks/outputs while
+    /// keeping agent assignments and gate config intact.
+    pub fn reactivate_for_followup(
+        &mut self,
+        state: &mut AppState,
+        mission_id: &str,
+    ) -> bool {
+        let Some(mut run) = self.completed_runs.remove(mission_id) else {
+            // Already active or doesn't exist.
+            return self.runs.contains_key(mission_id);
+        };
+
+        // Push the swarm meta message so the footer shows Mission/Gates.
+        push_system_message_to_mission(
+            state,
+            mission_id,
+            format!(
+                "Swarm template: {} | mission: {} | integrator: {} | verifier: {} | gates: {}",
+                run.template.label(),
+                run.mission_kind.label(),
+                run.integrator_agent_id.as_deref().unwrap_or("(none)"),
+                run.verifier_agent_id.as_deref().unwrap_or("(none)"),
+                gate_bundle_label(run.gate_bundle.as_ref(), &run.gate_selection),
+            ),
+        );
+
+        run.stage = SwarmStage::Planning;
+        run.tasks.clear();
+        run.synthesis_prompt = None;
+        run.gate_output = None;
+        run.gate_report = None;
+        run.report_status = None;
+        run.report_output = None;
+        self.runs.insert(mission_id.to_string(), run);
+        true
     }
 
     pub fn swarm_dashboard(&self, mission_id: &str) -> Option<SwarmDashboardView> {

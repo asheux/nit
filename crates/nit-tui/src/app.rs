@@ -2530,8 +2530,33 @@ fn handle_agent_ops_key(
             modifiers: KeyModifiers::NONE,
             ..
         } if state.agents.dock_tab == AgentOpsTab::Evidence => {
-            state.agents.artifacts_popup_open = true;
-            state.agents.artifacts_popup_scroll = 0;
+            // Check if the selected card is a PROMPT — toggle collapse.
+            let selected_card_kind = {
+                let text_width = state.agents.ops_viewport_width.max(32);
+                let widths = agent_ops_view::artifact_list_widths(text_width);
+                let preview_chars = widths
+                    .get(3)
+                    .copied()
+                    .unwrap_or(120)
+                    .saturating_sub(1)
+                    .max(10);
+                let cards =
+                    agent_ops_view::artifact_cards_for_context(state, Some(swarm), preview_chars);
+                let sel = state
+                    .agents
+                    .artifacts_selected
+                    .min(cards.len().saturating_sub(1));
+                cards.get(sel).map(|c| c.kind.to_string())
+            };
+            if selected_card_kind.as_deref() == Some("PROMPT") {
+                let idx = state.agents.artifacts_selected;
+                if !state.agents.artifacts_collapsed_prompts.remove(&idx) {
+                    state.agents.artifacts_collapsed_prompts.insert(idx);
+                }
+            } else {
+                state.agents.artifacts_popup_open = true;
+                state.agents.artifacts_popup_scroll = 0;
+            }
             changed = true;
         }
         KeyEvent {
@@ -4027,13 +4052,60 @@ fn submit_chat_input_and_dispatch(
             // responses back to the correct prompt in the chat view.
             let prompt_msg_idx = state.agents.messages.len().saturating_sub(1);
             chat_history_remember(state, &raw);
-            let targets = if matches!(channel, AgentChannel::Broadcast) {
+            // For swarm missions, re-activate the run and dispatch only to
+            // the planner so the swarm pipeline assigns roles to clones.
+            let swarm_config = mission_id
+                .as_deref()
+                .and_then(|mid| swarm.session_config(mid));
+            let is_swarm_mission = swarm_config.is_some();
+            if is_swarm_mission {
+                let config = swarm_config.as_ref().unwrap();
+                let mid = mission_id.as_deref().unwrap();
+                // Ensure clones exist in the roster.
+                crate::swarm::ensure_swarm_agents_for_followup(state, mid, config);
+                // Re-activate the completed run so handle_event_outcome
+                // processes the planner's response as a new swarm plan.
+                swarm.reactivate_for_followup(state, mid);
+                // Update mission status.
+                if let Some(mission) = state
+                    .agents
+                    .missions
+                    .iter_mut()
+                    .find(|m| m.id == mid)
+                {
+                    mission.status = "PLAN".into();
+                    mission.phase = MissionPhase::Plan;
+                }
+                // Wrap the user's prompt with planning instructions so the
+                // planner generates a proper plan with role assignments.
+                let planner = config.planner_agent_id.clone();
+                let plan_prompt = swarm
+                    .build_followup_planner_prompt(state, mid, &prompt)
+                    .unwrap_or_else(|| prompt.clone());
+                state
+                    .agents
+                    .codex_turn_prompt_idx
+                    .insert(planner.clone(), prompt_msg_idx);
+                dispatch_codex_prompt(
+                    state,
+                    vitals,
+                    codex,
+                    planner,
+                    mission_id.clone(),
+                    plan_prompt,
+                );
+                maybe_dispatch_next_queued_codex_turn(state, vitals, codex);
+            }
+            let targets = if is_swarm_mission {
+                Vec::new() // already dispatched above
+            } else if matches!(channel, AgentChannel::Broadcast) {
                 broadcast_target_agents(state, mission_id.as_deref())
             } else {
                 selected_agent.clone().into_iter().collect::<Vec<_>>()
             };
             for model in targets {
-                // Always resolve to the base agent so context is preserved.
+                // For regular chat, resolve to the base agent to preserve
+                // context continuity.
                 let base_model =
                     crate::swarm::resolve_base_agent_id(&model).to_string();
                 let is_codex = state

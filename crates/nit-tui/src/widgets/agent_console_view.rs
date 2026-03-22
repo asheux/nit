@@ -1,6 +1,6 @@
 use nit_core::{
     AgentConsoleRow as ThreadRow, AgentConsoleRowKind as ThreadRowKind, AgentConsoleRowsCacheKey,
-    AgentLane, AgentMessage, AgentStatus, AppState, PaneId, UiSelectionPane,
+    AgentLane, AgentMessage, AgentStatus, AppState, MissionPhase, PaneId, UiSelectionPane,
 };
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
@@ -281,7 +281,9 @@ pub fn render(
             .iter()
             .any(|m| m.id == mid && m.swarm)
     });
-    if any_remaining || has_swarm_context {
+    // Only show the global swarm breather when there are active agents NOT
+    // already shown inline — avoids duplicate Working tables.
+    if any_remaining || (has_swarm_context && inline_shown.is_empty()) {
         combined_rows.extend(breather_rows_for_user_prompt(
             state,
             Some(swarm),
@@ -2125,17 +2127,26 @@ fn breather_rows_for_user_prompt(
     let now = Instant::now();
     let mut swarm_assigned_ids: Vec<String> = Vec::new();
     let mut swarm_mission_id: Option<&str> = None;
+    let swarm_is_planning;
     if let Some(mission_id) = mission_ctx {
         if let Some(mission) = state.agents.missions.iter().find(|m| m.id == mission_id) {
-            let status = mission.status.to_ascii_uppercase();
-            let is_final = matches!(status.as_str(), "DONE" | "FAILED" | "ERROR");
-            if mission.swarm && !is_final {
+            if mission.swarm {
                 swarm_mission_id = Some(mission_id);
+                swarm_is_planning =
+                    matches!(mission.phase, MissionPhase::Plan);
                 for id in mission.assigned_agents.iter() {
                     if swarm_assigned_ids.iter().any(|existing| existing == id) {
                         continue;
                     }
-                    swarm_assigned_ids.push(id.clone());
+                    // During planning, only show the planner — clones
+                    // haven't been assigned roles yet.
+                    if swarm_is_planning {
+                        if state.agents.active_turns.contains_key(id.as_str()) {
+                            swarm_assigned_ids.push(id.clone());
+                        }
+                    } else {
+                        swarm_assigned_ids.push(id.clone());
+                    }
                 }
             }
         }

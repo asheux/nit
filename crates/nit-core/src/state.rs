@@ -710,6 +710,9 @@ pub struct AgentsState {
     pub patch_selected: usize,
     #[serde(skip)]
     pub artifacts_selected: usize,
+    /// Indices of PROMPT cards whose children are collapsed in the artifact tree.
+    #[serde(skip, default)]
+    pub artifacts_collapsed_prompts: HashSet<usize>,
     #[serde(skip)]
     pub artifacts_popup_open: bool,
     #[serde(skip)]
@@ -988,6 +991,7 @@ impl AgentsState {
             alert_selected: 0,
             patch_selected: 0,
             artifacts_selected: 0,
+            artifacts_collapsed_prompts: HashSet::new(),
             artifacts_popup_open: false,
             artifacts_popup_scroll: 0,
             artifacts_popup_chat_input: String::new(),
@@ -1096,6 +1100,7 @@ impl Default for AgentsState {
             alert_selected: 0,
             patch_selected: 0,
             artifacts_selected: 0,
+            artifacts_collapsed_prompts: HashSet::new(),
             artifacts_popup_open: false,
             artifacts_popup_scroll: 0,
             artifacts_popup_chat_input: String::new(),

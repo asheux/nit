@@ -1924,11 +1924,11 @@ enum ArtifactRef {
 }
 
 #[derive(Clone, Debug)]
-struct ArtifactCard {
-    kind: &'static str,
-    at: String,
-    owner: String,
-    preview: String,
+pub struct ArtifactCard {
+    pub kind: &'static str,
+    pub at: String,
+    pub owner: String,
+    pub preview: String,
     reference: ArtifactRef,
 }
 
@@ -2360,7 +2360,7 @@ fn persisted_patch_diff_excerpt(patch: &PersistedPatchRecord, path: Option<&str>
     fs::read_to_string(path).unwrap_or_default()
 }
 
-fn artifact_list_widths(width: usize) -> Vec<usize> {
+pub fn artifact_list_widths(width: usize) -> Vec<usize> {
     // Two leading glyphs + spacer: `>➜ `
     let cols_total = width.saturating_sub(3);
     // Prefer giving preview text as much space as possible.
@@ -3885,7 +3885,7 @@ fn append_ad_hoc_agent_lines(
     }
 }
 
-fn artifact_cards_for_context(
+pub fn artifact_cards_for_context(
     state: &AppState,
     swarm: Option<&SwarmRuntime>,
     preview_chars: usize,
@@ -3907,34 +3907,11 @@ fn artifact_cards_for_context(
             let mut cards = build_mission_cards(state, mission_id, preview_chars);
 
             // Upgrade reply cards: match against swarm task outputs (→ TASK),
-            // label the planner's first response as PLAN, keep the last
-            // non-task reply as REPLY (the synthesis/final response).
+            // label only the very first non-task reply as PLAN (the actual
+            // swarm plan), all others stay REPLY.
             {
-                // Pass 1: find indices of non-task reply cards.
-                let mut non_task_reply_positions: Vec<usize> = Vec::new();
-                for (i, card) in cards.iter().enumerate() {
-                    if card.kind != "REPLY" {
-                        continue;
-                    }
-                    if let ArtifactRef::Message { idx } = &card.reference {
-                        if let Some(msg) = state.agents.messages.get(*idx) {
-                            if let Some(agent_id) = msg.agent_id.as_deref() {
-                                let is_task = view.tasks.iter().any(|t| {
-                                    t.agent_id == agent_id
-                                        && t.output.as_deref() == Some(msg.text.as_str())
-                                });
-                                if !is_task {
-                                    non_task_reply_positions.push(i);
-                                }
-                            }
-                        }
-                    }
-                }
-                let last_non_task = non_task_reply_positions.last().copied();
-
-                // Pass 2: apply labels and replace timestamps with roles.
                 let mut plan_found = false;
-                for (i, card) in cards.iter_mut().enumerate() {
+                for card in cards.iter_mut() {
                     if card.kind != "REPLY" {
                         continue;
                     }
@@ -3959,35 +3936,17 @@ fn artifact_cards_for_context(
                                     card.kind = "PLAN";
                                     card.at = "planner".into();
                                     plan_found = true;
-                                } else if Some(i) != last_non_task {
-                                    card.kind = "PLAN";
-                                    card.at = "planner".into();
-                                } else {
-                                    // Last non-task reply stays as "REPLY".
-                                    card.at = "synth".into();
                                 }
+                                // All other non-task replies stay as "REPLY".
                             }
                         }
                     }
                 }
             }
 
-            // Insert REPORT and VERIFY as children under the last prompt group
-            // (before any trailing PATCH/EVIDENCE cards).
-            let insert_pos = cards
-                .iter()
-                .rposition(|c| {
-                    matches!(
-                        c.kind,
-                        "PROMPT" | "REPLY" | "TASK" | "PLAN"
-                    )
-                })
-                .map(|i| i + 1)
-                .unwrap_or(cards.len());
-
-            let mut extra = Vec::new();
+            // Append REPORT and VERIFY as global cards (outside the tree).
             if let Some(report_output) = view.report_output.as_deref() {
-                extra.push(ArtifactCard {
+                cards.push(ArtifactCard {
                     kind: "REPORT",
                     at: view.report_status.clone().unwrap_or_else(|| "FINAL".into()),
                     owner: view
@@ -4023,7 +3982,7 @@ fn artifact_cards_for_context(
                 } else {
                     String::new()
                 };
-                extra.push(ArtifactCard {
+                cards.push(ArtifactCard {
                     kind: "VERIFY",
                     at: status.into(),
                     owner: view.gate_bundle.clone().unwrap_or_else(|| "gates".into()),
@@ -4032,10 +3991,6 @@ fn artifact_cards_for_context(
                         mission_id: view.mission_id.clone(),
                     },
                 });
-            }
-            // Splice into position so they sit under the prompt, not as roots.
-            for (i, card) in extra.into_iter().enumerate() {
-                cards.insert(insert_pos + i, card);
             }
             return cards;
         }
@@ -4103,15 +4058,51 @@ fn artifacts_lines(state: &AppState, swarm: Option<&SwarmRuntime>, width: usize)
         .min(cards.len().saturating_sub(1));
 
     // Render in tree style: prompts are roots, everything else is a child.
+    // REPORT/VERIFY are global (outside the tree). Prompt groups are collapsible.
     let has_prompt = cards.iter().any(|c| c.kind == "PROMPT");
+    let is_global = |kind: &str| matches!(kind, "REPORT" | "VERIFY");
+    let mut collapsed = false;
     for (idx, card) in cards.iter().enumerate() {
-        let is_child = has_prompt && card.kind != "PROMPT";
-        out.push(artifact_card_row(
-            card,
-            widths.as_slice(),
-            idx == selected_idx,
-            is_child,
-        ));
+        if card.kind == "PROMPT" {
+            collapsed = state.agents.artifacts_collapsed_prompts.contains(&idx);
+            // Count children for the collapse indicator.
+            let child_count = cards[idx + 1..]
+                .iter()
+                .take_while(|c| c.kind != "PROMPT" && !is_global(c.kind))
+                .count();
+            let suffix = if collapsed {
+                format!(" [{child_count} hidden]")
+            } else {
+                String::new()
+            };
+            let mut row = artifact_card_row(card, widths.as_slice(), idx == selected_idx, false);
+            if !suffix.is_empty() {
+                // Trim trailing spaces and append.
+                row = row.trim_end().to_string();
+                row.push_str(&suffix);
+            }
+            out.push(row);
+        } else if is_global(card.kind) {
+            // Global cards are always visible, not under any prompt.
+            out.push(artifact_card_row(
+                card,
+                widths.as_slice(),
+                idx == selected_idx,
+                false,
+            ));
+        } else {
+            // Child card — skip if parent prompt is collapsed.
+            if collapsed {
+                continue;
+            }
+            let is_child = has_prompt;
+            out.push(artifact_card_row(
+                card,
+                widths.as_slice(),
+                idx == selected_idx,
+                is_child,
+            ));
+        }
     }
 
     out
@@ -5022,7 +5013,50 @@ fn artifacts_styled_line(
     if is_artifacts_card_row(line) {
         let selected = line.starts_with('>');
         let is_child = is_artifacts_child_card_row(line);
-        let style = if selected {
+        let is_root = is_artifacts_root_card_row(line);
+        // Identify global cards (REPORT/VERIFY) by the kind column
+        // (3 chars in: marker + glyph + space).
+        let after_glyph: String = if is_root {
+            line.chars().skip(3).collect()
+        } else {
+            String::new()
+        };
+        let is_report = is_root && after_glyph.starts_with("REPORT");
+        let is_verify = is_root && after_glyph.starts_with("VERIFY");
+
+        let verify_fg = if is_verify {
+            if line.contains("FAIL") {
+                theme.error
+            } else if line.contains("PASS") {
+                theme.title_focused
+            } else {
+                theme.warning
+            }
+        } else {
+            theme.foreground
+        };
+
+        let style = if is_report {
+            let bg = if selected {
+                theme.selection_bg
+            } else {
+                dim_bg_towards(theme.border, theme.background, 85)
+            };
+            Style::default()
+                .fg(theme.accent)
+                .bg(bg)
+                .add_modifier(Modifier::BOLD)
+        } else if is_verify {
+            let bg = if selected {
+                theme.selection_bg
+            } else {
+                dim_bg_towards(theme.border, theme.background, 85)
+            };
+            Style::default()
+                .fg(verify_fg)
+                .bg(bg)
+                .add_modifier(Modifier::BOLD)
+        } else if selected {
             Style::default().fg(theme.foreground).bg(theme.selection_bg)
         } else if is_child {
             // Agent artifact rows: subtle background to distinguish from prompt.
