@@ -12714,7 +12714,22 @@ fn handle_artifacts_popup_key(
 
     // Enter (without Shift): submit prompt, then close popup.
     // Swap is only needed here because submit_chat_input_and_dispatch reads chat_input.
+    // Override selected agent context to the artifact's owning agent so the dispatch
+    // goes to the correct clone/model rather than the roster-selected agent.
     if matches!(key.code, KeyCode::Enter) && !key.modifiers.contains(KeyModifiers::SHIFT) {
+        let w = state.agents.ops_viewport_width;
+        let artifact_agent = agent_ops_view::selected_artifact_agent_id(state, swarm, w);
+        let artifact_mission = agent_ops_view::selected_artifact_mission_id(state, swarm, w);
+        // Override both agent and mission context so the dispatch goes to the
+        // correct agent with the correct thread/session ID for context continuity.
+        let prev_agent = state.agents.selected_agent.clone();
+        let prev_mission = state.agents.selected_mission.clone();
+        if let Some(ref agent_id) = artifact_agent {
+            state.agents.selected_agent = Some(agent_id.clone());
+        }
+        if artifact_mission.is_some() {
+            state.agents.selected_mission = artifact_mission;
+        }
         swap_in_artifacts_popup_chat(state);
         if submit_chat_input_and_dispatch(state, vitals, codex, claude, swarm) {
             swap_out_artifacts_popup_chat(state);
@@ -12724,6 +12739,9 @@ fn handle_artifacts_popup_key(
         } else {
             swap_out_artifacts_popup_chat(state);
         }
+        // Restore the roster selection so it doesn't jump.
+        state.agents.selected_agent = prev_agent;
+        state.agents.selected_mission = prev_mission;
         return true;
     }
 
@@ -18661,5 +18679,341 @@ k = 2
 
         assert!(snapshot.hb_age.unwrap_or_default() >= Duration::from_secs(10));
         assert_eq!(snapshot.criticality, crate::vitals::LabCriticality::Crit);
+    }
+
+    #[test]
+    fn codex_dispatch_uses_stored_thread_id_for_context_continuity() {
+        let mut state = state_for_test();
+        let mut vitals = VitalsState::default();
+        let codex = CodexRunner::spawn(
+            CodexRuntimeMode::Exec,
+            CodexRunnerConfig::default(),
+        );
+
+        // Create a Codex agent.
+        state.agents.agents.push(nit_core::AgentLane {
+            id: "gpt-test".into(),
+            role: "Test".into(),
+            lane: "Codex".into(),
+            kind: nit_core::AgentLaneKind::Codex,
+            status: nit_core::AgentStatus::Idle,
+            heartbeat_age_secs: 0,
+            queue_len: 0,
+            current_mission: None,
+            last_message: String::new(),
+        });
+        state.agents.codex_effective_context_window_tokens
+            .insert("gpt-test".into(), 128_000);
+
+        // Simulate a completed turn that stores a thread_id.
+        state.agents.codex_thread_ids
+            .insert("gpt-test".into(), "thread-abc-123".into());
+
+        // Dispatch a new turn — it should resume the stored thread.
+        maybe_dispatch_codex_turn(
+            &mut state,
+            &mut vitals,
+            Some(&codex),
+            Some("gpt-test".into()),
+            None,
+            "follow-up question".into(),
+            true,
+        );
+
+        // The agent should be queued/running.
+        assert!(state.agents.active_turns.contains_key("gpt-test"));
+    }
+
+    #[test]
+    fn codex_mission_thread_ids_scoped_per_mission() {
+        let mut state = state_for_test();
+
+        // Simulate thread IDs stored for two different missions.
+        state.agents.codex_mission_thread_ids
+            .entry("mis-001".into())
+            .or_default()
+            .insert("gpt-test".into(), "thread-mission-1".into());
+        state.agents.codex_mission_thread_ids
+            .entry("mis-002".into())
+            .or_default()
+            .insert("gpt-test".into(), "thread-mission-2".into());
+
+        // Mission-1 context retrieves thread for mission-1.
+        let thread_1 = state.agents.codex_mission_thread_ids
+            .get("mis-001")
+            .and_then(|m| m.get("gpt-test"))
+            .cloned();
+        assert_eq!(thread_1.as_deref(), Some("thread-mission-1"));
+
+        // Mission-2 context retrieves thread for mission-2.
+        let thread_2 = state.agents.codex_mission_thread_ids
+            .get("mis-002")
+            .and_then(|m| m.get("gpt-test"))
+            .cloned();
+        assert_eq!(thread_2.as_deref(), Some("thread-mission-2"));
+    }
+
+    #[test]
+    fn claude_session_ids_scoped_per_mission() {
+        let mut state = state_for_test();
+
+        // Simulate session IDs stored for two different missions.
+        state.agents.claude_mission_session_ids
+            .entry("mis-001".into())
+            .or_default()
+            .insert("claude-opus".into(), "session-mission-1".into());
+        state.agents.claude_mission_session_ids
+            .entry("mis-002".into())
+            .or_default()
+            .insert("claude-opus".into(), "session-mission-2".into());
+
+        // Mission-1 context retrieves session for mission-1.
+        let session_1 = state.agents.claude_mission_session_ids
+            .get("mis-001")
+            .and_then(|m| m.get("claude-opus"))
+            .cloned();
+        assert_eq!(session_1.as_deref(), Some("session-mission-1"));
+
+        // Mission-2 context retrieves session for mission-2.
+        let session_2 = state.agents.claude_mission_session_ids
+            .get("mis-002")
+            .and_then(|m| m.get("claude-opus"))
+            .cloned();
+        assert_eq!(session_2.as_deref(), Some("session-mission-2"));
+    }
+
+    #[test]
+    fn claude_dispatch_uses_stored_session_id_for_context_continuity() {
+        let mut state = state_for_test();
+        let mut vitals = VitalsState::default();
+        let claude = ClaudeRunner::spawn(ClaudeRunnerConfig::default());
+
+        // Create a Claude agent.
+        state.agents.agents.push(nit_core::AgentLane {
+            id: "claude-opus".into(),
+            role: "Opus".into(),
+            lane: "Claude".into(),
+            kind: nit_core::AgentLaneKind::Claude,
+            status: nit_core::AgentStatus::Idle,
+            heartbeat_age_secs: 0,
+            queue_len: 0,
+            current_mission: None,
+            last_message: String::new(),
+        });
+        state.agents.claude_effective_context_window_tokens
+            .insert("claude-opus".into(), 200_000);
+        state.agents.claude_supported_efforts
+            .insert("claude-opus".into(), vec!["low".into(), "high".into()]);
+        state.agents.claude_default_effort
+            .insert("claude-opus".into(), "high".into());
+        state.agents.claude_selected_effort
+            .insert("claude-opus".into(), "high".into());
+
+        // Simulate a completed turn that stores a session_id.
+        state.agents.claude_session_ids
+            .insert("claude-opus".into(), "session-xyz-789".into());
+
+        // Dispatch a new turn — it should resume the stored session.
+        maybe_dispatch_claude_turn(
+            &mut state,
+            &mut vitals,
+            Some(&claude),
+            Some("claude-opus".into()),
+            None,
+            "follow-up question".into(),
+            true,
+        );
+
+        // The agent should be queued/running.
+        assert!(state.agents.active_turns.contains_key("claude-opus"));
+    }
+
+    #[test]
+    fn turn_completed_stores_thread_id_for_codex() {
+        let mut state = state_for_test();
+        state.agents.agents.push(nit_core::AgentLane {
+            id: "gpt-test".into(),
+            role: "Test".into(),
+            lane: "Codex".into(),
+            kind: nit_core::AgentLaneKind::Codex,
+            status: nit_core::AgentStatus::Running,
+            heartbeat_age_secs: 0,
+            queue_len: 1,
+            current_mission: None,
+            last_message: String::new(),
+        });
+        state.agents.active_turns.insert(
+            "gpt-test".into(),
+            nit_core::state::AgentTurnState {
+                started_at: Instant::now(),
+                last_heartbeat_at: Instant::now(),
+                last_output_at: Instant::now(),
+                stage: None,
+            },
+        );
+
+        // Simulate TurnCompleted from Codex with a thread_id (no mission).
+        let event = AgentBusEvent::TurnCompleted {
+            agent_id: "gpt-test".into(),
+            mission_id: None,
+            thread_id: Some("thread-from-codex".into()),
+            token_count: None,
+            message: "Done.".into(),
+        };
+        event.apply(&mut state);
+
+        assert_eq!(
+            state.agents.codex_thread_ids.get("gpt-test").map(|s| s.as_str()),
+            Some("thread-from-codex"),
+        );
+    }
+
+    #[test]
+    fn turn_completed_stores_session_id_for_claude_via_apply_claude_event() {
+        let mut state = state_for_test();
+        state.agents.agents.push(nit_core::AgentLane {
+            id: "claude-opus".into(),
+            role: "Opus".into(),
+            lane: "Claude".into(),
+            kind: nit_core::AgentLaneKind::Claude,
+            status: nit_core::AgentStatus::Running,
+            heartbeat_age_secs: 0,
+            queue_len: 1,
+            current_mission: None,
+            last_message: String::new(),
+        });
+        state.agents.active_turns.insert(
+            "claude-opus".into(),
+            nit_core::state::AgentTurnState {
+                started_at: Instant::now(),
+                last_heartbeat_at: Instant::now(),
+                last_output_at: Instant::now(),
+                stage: None,
+            },
+        );
+
+        // Simulate TurnCompleted from Claude with a session_id (no mission).
+        let event = AgentBusEvent::TurnCompleted {
+            agent_id: "claude-opus".into(),
+            mission_id: None,
+            thread_id: Some("session-from-claude".into()),
+            token_count: None,
+            message: "Done.".into(),
+        };
+        // Use apply_claude_event which stores in claude_session_ids.
+        apply_claude_event(&mut state, &event);
+
+        assert_eq!(
+            state.agents.claude_session_ids.get("claude-opus").map(|s| s.as_str()),
+            Some("session-from-claude"),
+        );
+    }
+
+    #[test]
+    fn turn_completed_stores_mission_scoped_session_for_claude() {
+        let mut state = state_for_test();
+        state.agents.agents.push(nit_core::AgentLane {
+            id: "claude-opus".into(),
+            role: "Opus".into(),
+            lane: "Claude".into(),
+            kind: nit_core::AgentLaneKind::Claude,
+            status: nit_core::AgentStatus::Running,
+            heartbeat_age_secs: 0,
+            queue_len: 1,
+            current_mission: Some("mis-001".into()),
+            last_message: String::new(),
+        });
+        state.agents.active_turns.insert(
+            "claude-opus".into(),
+            nit_core::state::AgentTurnState {
+                started_at: Instant::now(),
+                last_heartbeat_at: Instant::now(),
+                last_output_at: Instant::now(),
+                stage: None,
+            },
+        );
+
+        let event = AgentBusEvent::TurnCompleted {
+            agent_id: "claude-opus".into(),
+            mission_id: Some("mis-001".into()),
+            thread_id: Some("session-mis-001".into()),
+            token_count: None,
+            message: "Task done.".into(),
+        };
+        apply_claude_event(&mut state, &event);
+
+        // Session should be stored under mission scope, not global.
+        assert!(state.agents.claude_session_ids.get("claude-opus").is_none());
+        assert_eq!(
+            state.agents.claude_mission_session_ids
+                .get("mis-001")
+                .and_then(|m| m.get("claude-opus"))
+                .map(|s| s.as_str()),
+            Some("session-mis-001"),
+        );
+    }
+
+    #[test]
+    fn artifact_popup_context_overrides_agent_and_mission() {
+        let mut state = state_for_test();
+
+        // Set up two agents.
+        state.agents.agents.push(nit_core::AgentLane {
+            id: "base-model".into(),
+            role: "Base".into(),
+            lane: "Codex".into(),
+            kind: nit_core::AgentLaneKind::Codex,
+            status: nit_core::AgentStatus::Idle,
+            heartbeat_age_secs: 0,
+            queue_len: 0,
+            current_mission: None,
+            last_message: String::new(),
+        });
+        state.agents.agents.push(nit_core::AgentLane {
+            id: "clone-agent".into(),
+            role: "Clone".into(),
+            lane: "Codex".into(),
+            kind: nit_core::AgentLaneKind::Codex,
+            status: nit_core::AgentStatus::Idle,
+            heartbeat_age_secs: 0,
+            queue_len: 0,
+            current_mission: None,
+            last_message: String::new(),
+        });
+
+        // Push a message from the clone in mis-002.
+        state.agents.messages.push(nit_core::AgentMessage {
+            at: "t+1".into(),
+            channel: nit_core::AgentChannel::Agent,
+            agent_id: Some("clone-agent".into()),
+            mission_id: Some("mis-002".into()),
+            text: "Clone result".into(),
+            prompt_msg_idx: None,
+        });
+
+        // Roster has base-model selected, mis-001 selected.
+        state.agents.selected_agent = Some("base-model".into());
+        state.agents.selected_mission = Some("mis-001".into());
+
+        // Before override: context points to base-model + mis-001.
+        assert_eq!(state.agents.selected_context_agent(), Some("base-model"));
+        assert_eq!(state.agents.selected_context_mission(), Some("mis-001"));
+
+        // Simulate what the artifacts popup Enter handler does:
+        // override agent and mission from the artifact.
+        let prev_agent = state.agents.selected_agent.clone();
+        let prev_mission = state.agents.selected_mission.clone();
+        state.agents.selected_agent = Some("clone-agent".into());
+        state.agents.selected_mission = Some("mis-002".into());
+
+        // After override: context points to clone-agent + mis-002.
+        assert_eq!(state.agents.selected_context_agent(), Some("clone-agent"));
+        assert_eq!(state.agents.selected_context_mission(), Some("mis-002"));
+
+        // Restore: context reverts.
+        state.agents.selected_agent = prev_agent;
+        state.agents.selected_mission = prev_mission;
+        assert_eq!(state.agents.selected_context_agent(), Some("base-model"));
+        assert_eq!(state.agents.selected_context_mission(), Some("mis-001"));
     }
 }

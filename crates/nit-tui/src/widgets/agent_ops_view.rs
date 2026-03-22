@@ -4248,6 +4248,95 @@ pub fn artifacts_popup_ref(
     }
 }
 
+/// Returns the agent_id that produced the currently selected artifact, if any.
+/// This is used to dispatch from the artifacts popup chat to the correct agent context.
+pub fn selected_artifact_agent_id(
+    state: &AppState,
+    swarm: &SwarmRuntime,
+    width: usize,
+) -> Option<String> {
+    let width = width.max(32);
+    let widths = artifact_list_widths(width);
+    let preview_chars = widths
+        .get(3)
+        .copied()
+        .unwrap_or(120)
+        .saturating_sub(1)
+        .max(10);
+    let cards = artifact_cards_for_context(state, Some(swarm), preview_chars);
+    if cards.is_empty() {
+        return None;
+    }
+    let selected_idx = state
+        .agents
+        .artifacts_selected
+        .min(cards.len().saturating_sub(1));
+    let card = &cards[selected_idx];
+
+    // Try to resolve agent_id from the card reference.
+    match &card.reference {
+        ArtifactRef::Message { idx } => state
+            .agents
+            .messages
+            .get(*idx)
+            .and_then(|msg| msg.agent_id.clone()),
+        ArtifactRef::SwarmTask { mission_id, .. }
+        | ArtifactRef::SwarmReport { mission_id }
+        | ArtifactRef::SwarmVerify { mission_id } => {
+            // For swarm artifacts, check the card owner field which contains the agent id.
+            let owner = card.owner.trim();
+            if !owner.is_empty()
+                && state.agents.agents.iter().any(|a| a.id == owner)
+            {
+                Some(owner.to_string())
+            } else {
+                // Fall back to the planner for this mission.
+                swarm
+                    .session_config(mission_id)
+                    .map(|c| c.planner_agent_id.clone())
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Returns the mission_id associated with the currently selected artifact, if any.
+pub fn selected_artifact_mission_id(
+    state: &AppState,
+    swarm: &SwarmRuntime,
+    width: usize,
+) -> Option<String> {
+    let width = width.max(32);
+    let widths = artifact_list_widths(width);
+    let preview_chars = widths
+        .get(3)
+        .copied()
+        .unwrap_or(120)
+        .saturating_sub(1)
+        .max(10);
+    let cards = artifact_cards_for_context(state, Some(swarm), preview_chars);
+    if cards.is_empty() {
+        return None;
+    }
+    let selected_idx = state
+        .agents
+        .artifacts_selected
+        .min(cards.len().saturating_sub(1));
+    let card = &cards[selected_idx];
+
+    match &card.reference {
+        ArtifactRef::Message { idx } => state
+            .agents
+            .messages
+            .get(*idx)
+            .and_then(|msg| msg.mission_id.clone()),
+        ArtifactRef::SwarmTask { mission_id, .. }
+        | ArtifactRef::SwarmReport { mission_id }
+        | ArtifactRef::SwarmVerify { mission_id } => Some(mission_id.clone()),
+        _ => None,
+    }
+}
+
 /// Returns `true` if the currently selected artifact is a user prompt (not an agent reply).
 pub fn is_selected_artifact_prompt(
     state: &AppState,
