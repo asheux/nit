@@ -56,7 +56,7 @@ pub use state::{
     GamesReplayRequest, GamesReplayState, GamesRunBrowserState, GamesRunEntry, GamesRunOverride,
     GamesState, GamesStatus, GamesStrategyInspectState, GolRenderMode, JobState, LogBuffer,
     McpConnectionState, McpStatus, Metrics, MissionPhase, MissionRecord, PatchProposal,
-    PatchStatus, QueuedCodexTurn, RosterTreeBranch, RosterTreeSelection, SavedRunHistoryFilter,
+    PatchStatus, QueuedClaudeTurn, QueuedCodexTurn, RosterTreeBranch, RosterTreeSelection, SavedRunHistoryFilter,
     SavedRunHistoryPendingAction, SyntaxDebugInfo, UiSelection, UiSelectionPane, VisualizerMode,
     VisualizerRuleEntry, VisualizerState, YankKind,
 };

@@ -503,10 +503,11 @@ fn roster_body_meta(state: &AppState, body_line: usize) -> Option<RosterBodyMeta
                     .agents
                     .codex_supported_reasoning_efforts
                     .get(&agent.id)
+                    .or_else(|| state.agents.claude_supported_efforts.get(&agent.id))
                     .map(|v| v.as_slice())
                     .unwrap_or(&[]);
                 let has_size = !efforts.is_empty();
-                let has_roles = show_roles && agent.is_codex();
+                let has_roles = show_roles && (agent.is_codex() || agent.is_claude());
 
                 for branch in [RosterTreeBranch::Size, RosterTreeBranch::Role] {
                     if matches!(branch, RosterTreeBranch::Size) && !has_size {
@@ -1130,10 +1131,11 @@ fn roster_lines(state: &AppState, swarm: Option<&SwarmRuntime>, width: usize) ->
                     .agents
                     .codex_supported_reasoning_efforts
                     .get(&agent.id)
+                    .or_else(|| state.agents.claude_supported_efforts.get(&agent.id))
                     .map(|v| v.as_slice())
                     .unwrap_or(&[]);
                 let has_size = !efforts.is_empty();
-                let has_roles = show_roles && agent.is_codex();
+                let has_roles = show_roles && (agent.is_codex() || agent.is_claude());
                 if !has_size && !has_roles {
                     continue;
                 }
@@ -1154,6 +1156,8 @@ fn roster_lines(state: &AppState, swarm: Option<&SwarmRuntime>, width: usize) ->
                         .codex_selected_reasoning_effort
                         .get(&agent.id)
                         .or_else(|| state.agents.codex_default_reasoning_effort.get(&agent.id))
+                        .or_else(|| state.agents.claude_selected_effort.get(&agent.id))
+                        .or_else(|| state.agents.claude_default_effort.get(&agent.id))
                         .map(|s| s.as_str());
                     for (effort_idx, effort) in efforts.iter().enumerate() {
                         let marker = if state.agents.roster_tree_selected
@@ -6235,11 +6239,14 @@ fn roster_styled_line(
                         .codex_selected_reasoning_effort
                         .get(&agent.id)
                         .or_else(|| state.agents.codex_default_reasoning_effort.get(&agent.id))
+                        .or_else(|| state.agents.claude_selected_effort.get(&agent.id))
+                        .or_else(|| state.agents.claude_default_effort.get(&agent.id))
                         .map(|s| s.as_str());
                     let effort = state
                         .agents
                         .codex_supported_reasoning_efforts
                         .get(&agent.id)
+                        .or_else(|| state.agents.claude_supported_efforts.get(&agent.id))
                         .and_then(|v| v.get(leaf_idx))
                         .map(|s| s.as_str());
                     effort.is_some_and(|effort| chosen == Some(effort))

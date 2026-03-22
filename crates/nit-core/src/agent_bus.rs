@@ -1,8 +1,24 @@
 use crate::state::{
-    AgentAlert, AgentAlertSeverity, AgentChannel, AgentDiagnosticEvent, AgentLane, AgentMessage,
-    AgentStatus, AgentTurnState, AppState, McpStatus, MissionRecord,
+    AgentAlert, AgentAlertSeverity, AgentChannel, AgentDiagnosticEvent, AgentLane, AgentLaneKind,
+    AgentMessage, AgentStatus, AgentTurnState, AppState, McpStatus, MissionRecord,
 };
 use std::time::Instant;
+
+/// Resolve the backend source label for an agent (used in alerts and diagnostics).
+fn backend_source_for_agent(state: &AppState, agent_id: &str) -> &'static str {
+    state
+        .agents
+        .agents
+        .iter()
+        .find(|a| a.id == agent_id)
+        .map(|a| match a.kind {
+            AgentLaneKind::Claude => "claude",
+            AgentLaneKind::Gemini => "gemini",
+            AgentLaneKind::Mock => "local",
+            AgentLaneKind::Codex | AgentLaneKind::Unknown => "codex",
+        })
+        .unwrap_or("codex")
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct AgentTokenCount {
@@ -174,6 +190,7 @@ impl AgentBusEvent {
                 }
             }
             AgentBusEvent::TurnLog { agent_id, message } => {
+                let source = backend_source_for_agent(state, agent_id);
                 if let Some(turn) = state.agents.active_turns.get_mut(agent_id) {
                     turn.last_output_at = Instant::now();
                 }
@@ -185,7 +202,7 @@ impl AgentBusEvent {
                 };
                 state.agents.diag_events.push(AgentDiagnosticEvent {
                     severity,
-                    source: "codex".into(),
+                    source: source.into(),
                     message: format!("[{agent_id}] {message}"),
                     at: timestamp_label(state),
                 });
@@ -207,6 +224,7 @@ impl AgentBusEvent {
                 token_count,
                 message,
             } => {
+                let source = backend_source_for_agent(state, agent_id);
                 state.agents.active_turns.remove(agent_id);
                 if let Some(token_count) = token_count.as_ref() {
                     apply_codex_token_count(state, agent_id, mission_id.as_deref(), token_count);
@@ -246,20 +264,26 @@ impl AgentBusEvent {
                     }
                 }
 
+                let source_label = match source {
+                    "claude" => "Claude",
+                    "gemini" => "Gemini",
+                    "local" => "Local",
+                    _ => "Codex",
+                };
                 state.agents.alerts.push(AgentAlert {
                     severity: AgentAlertSeverity::Error,
-                    source: "codex".into(),
+                    source: source.into(),
                     message: format!("[{agent_id}] {message}"),
                     at: at.clone(),
                 });
                 state.agents.diag_events.push(AgentDiagnosticEvent {
                     severity: AgentAlertSeverity::Error,
-                    source: "codex".into(),
+                    source: source.into(),
                     message: format!("[{agent_id}] {message}"),
                     at: at.clone(),
                 });
                 state.agents.console_scroll = usize::MAX;
-                state.status = Some(format!("Codex failed: {}", summarize_agent_error(message)));
+                state.status = Some(format!("{source_label} failed: {}", summarize_agent_error(message)));
             }
             AgentBusEvent::TurnCompleted {
                 agent_id,
@@ -268,6 +292,7 @@ impl AgentBusEvent {
                 token_count,
                 message,
             } => {
+                let source = backend_source_for_agent(state, agent_id);
                 state.agents.active_turns.remove(agent_id);
                 if let Some(token_count) = token_count.as_ref() {
                     apply_codex_token_count(state, agent_id, mission_id.as_deref(), token_count);
@@ -321,10 +346,14 @@ impl AgentBusEvent {
                         .or_insert(0);
                     *entry = entry.saturating_add(delta);
                 }
-                // Use the dispatch-time prompt index if available; otherwise fall back to
-                // the most recent user prompt for this context.
-                let parent_prompt_idx =
-                    state.agents.codex_turn_prompt_idx.remove(agent_id).or_else(|| {
+                // Use the dispatch-time prompt index if available; check both
+                // Codex and Claude prompt-index maps.
+                let parent_prompt_idx = state
+                    .agents
+                    .codex_turn_prompt_idx
+                    .remove(agent_id)
+                    .or_else(|| state.agents.claude_turn_prompt_idx.remove(agent_id))
+                    .or_else(|| {
                         state
                             .agents
                             .messages
@@ -348,7 +377,7 @@ impl AgentBusEvent {
 
                 state.agents.diag_events.push(AgentDiagnosticEvent {
                     severity: AgentAlertSeverity::Info,
-                    source: "codex".into(),
+                    source: source.into(),
                     message: format!("[{agent_id}] turn completed"),
                     at,
                 });
@@ -461,6 +490,26 @@ fn apply_codex_token_count(
     mission_id: Option<&str>,
     token_count: &AgentTokenCount,
 ) {
+    let is_claude = state
+        .agents
+        .agents
+        .iter()
+        .find(|a| a.id == agent_id)
+        .is_some_and(|a| a.is_claude());
+
+    if is_claude {
+        apply_token_count_claude(state, agent_id, mission_id, token_count);
+    } else {
+        apply_token_count_codex(state, agent_id, mission_id, token_count);
+    }
+}
+
+fn apply_token_count_codex(
+    state: &mut AppState,
+    agent_id: &str,
+    mission_id: Option<&str>,
+    token_count: &AgentTokenCount,
+) {
     if token_count.context_window > 0 {
         state
             .agents
@@ -515,6 +564,70 @@ fn apply_codex_token_count(
         state
             .agents
             .codex_context_remaining_pct
+            .insert(agent_id.to_string(), pct);
+    }
+}
+
+fn apply_token_count_claude(
+    state: &mut AppState,
+    agent_id: &str,
+    mission_id: Option<&str>,
+    token_count: &AgentTokenCount,
+) {
+    if token_count.context_window > 0 {
+        state
+            .agents
+            .claude_effective_context_window_tokens
+            .insert(agent_id.to_string(), token_count.context_window);
+    }
+    let context_window = if token_count.context_window > 0 {
+        Some(token_count.context_window)
+    } else {
+        state
+            .agents
+            .claude_effective_context_window_tokens
+            .get(agent_id)
+            .copied()
+    };
+
+    let used = context_window
+        .map(|window| token_count.total_tokens.min(window.max(1)))
+        .unwrap_or(token_count.total_tokens);
+    if let Some(mission_id) = mission_id {
+        state
+            .agents
+            .claude_mission_used_tokens
+            .entry(mission_id.to_string())
+            .or_default()
+            .insert(agent_id.to_string(), used);
+    } else {
+        state
+            .agents
+            .claude_used_tokens
+            .insert(agent_id.to_string(), used);
+    }
+    let Some(context_window) = context_window else {
+        return;
+    };
+    if context_window == 0 {
+        return;
+    }
+
+    let remaining = context_window.saturating_sub(used);
+    let denom = context_window as u64;
+    let pct = (((remaining as u64).saturating_mul(100)).saturating_add(denom / 2) / denom) as u8;
+
+    if let Some(mission_id) = mission_id {
+        state
+            .agents
+            .claude_mission_context_remaining_pct
+            .entry(mission_id.to_string())
+            .or_default()
+            .insert(agent_id.to_string(), pct);
+    } else {
+        state
+            .agents
+            .claude_context_remaining_pct
             .insert(agent_id.to_string(), pct);
     }
 }

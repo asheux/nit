@@ -1,0 +1,986 @@
+use std::collections::VecDeque;
+use std::io::{BufRead, BufReader, Read, Write};
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::Arc;
+use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant};
+
+use nit_core::{AgentBusEvent, AgentTokenCount, McpConnectionState, McpStatus};
+
+#[derive(Clone, Debug)]
+pub struct ClaudeRunnerConfig {
+    /// Maximum number of Claude turns to run concurrently.
+    pub max_parallel_turns: usize,
+    /// Permission mode for Claude CLI (e.g. "dangerously-skip-permissions" for headless).
+    pub permission_mode: Option<String>,
+}
+
+impl Default for ClaudeRunnerConfig {
+    fn default() -> Self {
+        Self {
+            max_parallel_turns: 2,
+            permission_mode: None,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub enum ClaudeCommand {
+    RunTurn {
+        model: String,
+        cwd: PathBuf,
+        mission_id: Option<String>,
+        /// Resume an existing Claude session id when present.
+        resume_session_id: Option<String>,
+        /// When false, run the turn with `--no-session-persistence`.
+        /// When true, persist the session so future turns can resume it.
+        persist_session: bool,
+        effort: Option<String>,
+        prompt: String,
+    },
+    Shutdown,
+}
+
+pub struct ClaudeRunner {
+    cmd_tx: Sender<ClaudeCommand>,
+    pub events: Receiver<AgentBusEvent>,
+    shutdown: Arc<AtomicBool>,
+    handle: Option<JoinHandle<()>>,
+}
+
+impl ClaudeRunner {
+    pub fn spawn(config: ClaudeRunnerConfig) -> Self {
+        let (cmd_tx, cmd_rx) = mpsc::channel();
+        let (event_tx, event_rx) = mpsc::channel();
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let shutdown_worker = Arc::clone(&shutdown);
+        let handle = thread::Builder::new()
+            .name("nit-claude".into())
+            .spawn(move || runner_loop(config, shutdown_worker, cmd_rx, event_tx))
+            .expect("spawn claude runner");
+        Self {
+            cmd_tx,
+            events: event_rx,
+            shutdown,
+            handle: Some(handle),
+        }
+    }
+
+    pub fn send(&self, command: ClaudeCommand) {
+        let _ = self.cmd_tx.send(command);
+    }
+
+    pub fn shutdown(&mut self) {
+        self.shutdown.store(true, Ordering::Relaxed);
+        let _ = self.cmd_tx.send(ClaudeCommand::Shutdown);
+        let Some(handle) = self.handle.take() else {
+            return;
+        };
+
+        let (done_tx, done_rx) = mpsc::channel();
+        let _ = thread::Builder::new()
+            .name("nit-claude-join".into())
+            .spawn(move || {
+                let _ = handle.join();
+                let _ = done_tx.send(());
+            });
+        let _ = done_rx.recv_timeout(Duration::from_millis(400));
+    }
+}
+
+impl Drop for ClaudeRunner {
+    fn drop(&mut self) {
+        self.shutdown();
+    }
+}
+
+fn runner_loop(
+    config: ClaudeRunnerConfig,
+    _shutdown: Arc<AtomicBool>,
+    cmd_rx: Receiver<ClaudeCommand>,
+    event_tx: Sender<AgentBusEvent>,
+) {
+    let mut seq = 0u64;
+    let mut queue: VecDeque<ClaudeCommand> = VecDeque::new();
+    let mut active: Vec<ActiveTurn> = Vec::new();
+    let mut shutting_down = false;
+    let mut shutdown_deadline: Option<Instant> = None;
+    let max_parallel = config.max_parallel_turns.max(1);
+
+    loop {
+        let cmd = if active.is_empty() && queue.is_empty() && !shutting_down {
+            cmd_rx.recv().ok()
+        } else {
+            match cmd_rx.recv_timeout(Duration::from_millis(50)) {
+                Ok(cmd) => Some(cmd),
+                Err(mpsc::RecvTimeoutError::Timeout) => None,
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    shutting_down = true;
+                    shutdown_deadline = Some(Instant::now() + Duration::from_millis(400));
+                    None
+                }
+            }
+        };
+
+        if let Some(cmd) = cmd {
+            match cmd {
+                ClaudeCommand::RunTurn { .. } if !shutting_down => queue.push_back(cmd),
+                ClaudeCommand::RunTurn { .. } => {}
+                ClaudeCommand::Shutdown => {
+                    shutting_down = true;
+                    shutdown_deadline = Some(Instant::now() + Duration::from_millis(400));
+                    queue.clear();
+                    for turn in active.iter() {
+                        turn.cancel.store(true, Ordering::Relaxed);
+                    }
+                }
+            }
+        }
+
+        let mut idx = 0usize;
+        while idx < active.len() {
+            let done = match active[idx].done_rx.try_recv() {
+                Ok(()) | Err(mpsc::TryRecvError::Disconnected) => true,
+                Err(mpsc::TryRecvError::Empty) => false,
+            };
+            if done {
+                let turn = active.remove(idx);
+                let _ = turn.handle.join();
+            } else {
+                idx += 1;
+            }
+        }
+
+        if !shutting_down {
+            while active.len() < max_parallel {
+                let idx = queue.iter().position(|cmd| match cmd {
+                    ClaudeCommand::RunTurn { model, .. } => {
+                        !active.iter().any(|turn| turn.agent_id.as_str() == model.as_str())
+                    }
+                    _ => false,
+                });
+                let Some(idx) = idx else {
+                    break;
+                };
+                let Some(cmd) = queue.remove(idx) else {
+                    break;
+                };
+                let ClaudeCommand::RunTurn {
+                    model,
+                    cwd,
+                    mission_id,
+                    resume_session_id,
+                    persist_session,
+                    effort,
+                    prompt,
+                } = cmd
+                else {
+                    continue;
+                };
+                let _ = event_tx.send(AgentBusEvent::McpStatus {
+                    status: McpStatus {
+                        state: McpConnectionState::Connecting,
+                        endpoint: claude_endpoint_label(&model, resume_session_id.as_deref()),
+                        latency_ms: None,
+                        last_error: None,
+                    },
+                });
+                let _ = event_tx.send(AgentBusEvent::TurnStarted {
+                    agent_id: model.clone(),
+                    mission_id: mission_id.clone(),
+                    resume_thread_id: resume_session_id.clone(),
+                });
+                seq = seq.wrapping_add(1);
+                active.push(spawn_turn_worker(
+                    &event_tx,
+                    seq,
+                    model,
+                    cwd,
+                    mission_id,
+                    resume_session_id,
+                    persist_session,
+                    effort,
+                    prompt,
+                    config.clone(),
+                ));
+            }
+        }
+
+        if shutting_down {
+            for turn in active.iter() {
+                turn.cancel.store(true, Ordering::Relaxed);
+            }
+            if active.is_empty() {
+                break;
+            }
+            if let Some(deadline) = shutdown_deadline {
+                if Instant::now() >= deadline {
+                    break;
+                }
+            }
+        }
+    }
+}
+
+struct ActiveTurn {
+    agent_id: String,
+    cancel: Arc<AtomicBool>,
+    done_rx: Receiver<()>,
+    handle: JoinHandle<()>,
+}
+
+struct StdoutCapture {
+    stdout: Vec<u8>,
+    json_errors: Vec<String>,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn spawn_turn_worker(
+    event_tx: &Sender<AgentBusEvent>,
+    seq: u64,
+    model: String,
+    cwd: PathBuf,
+    mission_id: Option<String>,
+    resume_session_id: Option<String>,
+    persist_session: bool,
+    effort: Option<String>,
+    prompt: String,
+    config: ClaudeRunnerConfig,
+) -> ActiveTurn {
+    let agent_id = model.clone();
+    let cancel = Arc::new(AtomicBool::new(false));
+    let (done_tx, done_rx) = mpsc::channel();
+    let event_tx = event_tx.clone();
+    let cancel_worker = Arc::clone(&cancel);
+    let handle = thread::Builder::new()
+        .name(format!("nit-claude-turn-{seq}"))
+        .spawn(move || {
+            run_turn(
+                &event_tx,
+                seq,
+                model,
+                cwd,
+                mission_id,
+                resume_session_id,
+                persist_session,
+                effort,
+                prompt,
+                config,
+                cancel_worker,
+            );
+            let _ = done_tx.send(());
+        })
+        .expect("spawn claude turn worker");
+    ActiveTurn {
+        agent_id,
+        cancel,
+        done_rx,
+        handle,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_turn(
+    event_tx: &Sender<AgentBusEvent>,
+    seq: u64,
+    model: String,
+    cwd: PathBuf,
+    mission_id: Option<String>,
+    resume_session_id: Option<String>,
+    persist_session: bool,
+    effort: Option<String>,
+    prompt: String,
+    config: ClaudeRunnerConfig,
+    cancel: Arc<AtomicBool>,
+) {
+    let started_at = Instant::now();
+    let out_file = std::env::temp_dir().join(format!("nit-claude-last-message-{seq}.txt"));
+
+    let mut cmd = Command::new("claude");
+    cmd.args(build_claude_args(
+        model.as_str(),
+        cwd.as_path(),
+        persist_session,
+        effort.as_deref(),
+        out_file.as_path(),
+        resume_session_id.as_deref(),
+        &config,
+    ))
+    .stdin(Stdio::piped())
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped());
+
+    let mut child = match cmd.spawn() {
+        Ok(child) => child,
+        Err(err) => {
+            let _ = event_tx.send(AgentBusEvent::McpStatus {
+                status: McpStatus {
+                    state: McpConnectionState::Error,
+                    endpoint: claude_endpoint_label(&model, resume_session_id.as_deref()),
+                    latency_ms: None,
+                    last_error: Some(format!("Failed to spawn claude: {err}")),
+                },
+            });
+            let _ = event_tx.send(AgentBusEvent::TurnFailed {
+                agent_id: model,
+                mission_id,
+                thread_id: resume_session_id.clone(),
+                token_count: None,
+                message: format!("Failed to spawn claude: {err}"),
+            });
+            return;
+        }
+    };
+
+    // Mark as connected immediately so the vitals system doesn't flag CRIT
+    // while the turn is in progress.
+    let _ = event_tx.send(AgentBusEvent::McpStatus {
+        status: McpStatus {
+            state: McpConnectionState::Connected,
+            endpoint: claude_endpoint_label(&model, resume_session_id.as_deref()),
+            latency_ms: None,
+            last_error: None,
+        },
+    });
+
+    if let Some(mut stdin) = child.stdin.take() {
+        let _ = stdin.write_all(prompt.as_bytes());
+        let _ = stdin.write_all(b"\n");
+    }
+
+    let stdout_handle = child.stdout.take().map(|stdout| {
+        let event_tx = event_tx.clone();
+        let model = model.clone();
+        let mission_id = mission_id.clone();
+        thread::Builder::new()
+            .name(format!("nit-claude-stdout-{seq}"))
+            .spawn(move || {
+                let mut buf = Vec::new();
+                let mut json_errors = Vec::new();
+                let mut last_stage: Option<String> = None;
+                let mut last_stage_sent_at = Instant::now();
+                let mut reader = BufReader::new(stdout);
+                let mut line = String::new();
+                loop {
+                    line.clear();
+                    match reader.read_line(&mut line) {
+                        Ok(0) => break,
+                        Ok(_) => {
+                            buf.extend_from_slice(line.as_bytes());
+                            let raw = line.trim();
+                            if raw.is_empty() {
+                                continue;
+                            }
+                            let Ok(value) = serde_json::from_str::<serde_json::Value>(raw) else {
+                                let _ = event_tx.send(AgentBusEvent::TurnLog {
+                                    agent_id: model.clone(),
+                                    message: raw.to_string(),
+                                });
+                                continue;
+                            };
+
+                            // Extract token usage from Claude stream-json events.
+                            if let Some(token_count) = claude_token_count_from_value(&value) {
+                                let _ = event_tx.send(AgentBusEvent::TokenCount {
+                                    agent_id: model.clone(),
+                                    mission_id: mission_id.clone(),
+                                    token_count,
+                                });
+                            }
+
+                            // Claude stream-json uses "type" at top level.
+                            let kind = value.get("type").and_then(|v| v.as_str());
+                            if let Some(kind) = kind {
+                                let stage = match kind {
+                                    "assistant" => {
+                                        let subtype = value
+                                            .get("subtype")
+                                            .and_then(|v| v.as_str())
+                                            .unwrap_or("text");
+                                        format!("assistant({subtype})")
+                                    }
+                                    "tool_use" | "tool_result" => {
+                                        let tool_name = value
+                                            .get("tool")
+                                            .and_then(|v| v.as_str())
+                                            .unwrap_or("unknown");
+                                        format!("{kind}({tool_name})")
+                                    }
+                                    _ => kind.to_string(),
+                                };
+                                let is_interesting = matches!(
+                                    kind,
+                                    "system" | "assistant" | "tool_use" | "tool_result"
+                                        | "result" | "error"
+                                );
+                                if is_interesting
+                                    && (last_stage.as_deref() != Some(stage.as_str())
+                                        || last_stage_sent_at.elapsed()
+                                            >= Duration::from_secs(1))
+                                {
+                                    last_stage = Some(stage.clone());
+                                    last_stage_sent_at = Instant::now();
+                                    let _ = event_tx.send(AgentBusEvent::TurnStage {
+                                        agent_id: model.clone(),
+                                        mission_id: mission_id.clone(),
+                                        stage,
+                                    });
+                                }
+                            }
+                            if kind == Some("error") {
+                                let msg = value
+                                    .get("error")
+                                    .and_then(|v| v.as_str())
+                                    .or_else(|| value.get("message").and_then(|v| v.as_str()));
+                                if let Some(msg) = msg {
+                                    json_errors.push(msg.to_string());
+                                    let _ = event_tx.send(AgentBusEvent::TurnLog {
+                                        agent_id: model.clone(),
+                                        message: msg.to_string(),
+                                    });
+                                }
+                            }
+                        }
+                        Err(_) => break,
+                    }
+                }
+                StdoutCapture {
+                    stdout: buf,
+                    json_errors,
+                }
+            })
+            .expect("spawn claude stdout reader")
+    });
+    let stderr_handle = child.stderr.take().map(|mut stderr| {
+        thread::Builder::new()
+            .name(format!("nit-claude-stderr-{seq}"))
+            .spawn(move || {
+                let mut buf = Vec::new();
+                let _ = stderr.read_to_end(&mut buf);
+                buf
+            })
+            .expect("spawn claude stderr reader")
+    });
+
+    let mut killed = false;
+    let mut last_heartbeat_at = Instant::now();
+    let status = loop {
+        if !killed && last_heartbeat_at.elapsed() >= Duration::from_secs(2) {
+            let _ = event_tx.send(AgentBusEvent::TurnHeartbeat {
+                agent_id: model.clone(),
+                mission_id: mission_id.clone(),
+            });
+            last_heartbeat_at = Instant::now();
+        }
+        if cancel.load(Ordering::Relaxed) && !killed {
+            let _ = child.kill();
+            killed = true;
+        }
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => thread::sleep(Duration::from_millis(50)),
+            Err(err) => {
+                let _ = event_tx.send(AgentBusEvent::TurnFailed {
+                    agent_id: model,
+                    mission_id,
+                    thread_id: resume_session_id.clone(),
+                    token_count: None,
+                    message: format!("Claude wait failed: {err}"),
+                });
+                let _ = std::fs::remove_file(&out_file);
+                return;
+            }
+        }
+    };
+
+    let (stdout, json_errors) = match stdout_handle.and_then(|handle| handle.join().ok()) {
+        Some(capture) => (capture.stdout, capture.json_errors),
+        None => (Vec::new(), Vec::new()),
+    };
+    let stderr = stderr_handle
+        .and_then(|handle| handle.join().ok())
+        .unwrap_or_default();
+
+    if killed {
+        let _ = std::fs::remove_file(&out_file);
+        return;
+    }
+
+    let stderr_text = String::from_utf8_lossy(&stderr);
+    for line in stderr_text.lines() {
+        let line = line.trim();
+        if !line.is_empty() {
+            let _ = event_tx.send(AgentBusEvent::TurnLog {
+                agent_id: model.clone(),
+                message: line.to_string(),
+            });
+        }
+    }
+
+    if !status.success() {
+        let message = if !json_errors.is_empty() {
+            json_errors.join(" | ")
+        } else if !stderr_text.trim().is_empty() {
+            stderr_text.trim().to_string()
+        } else {
+            format!("Claude exited with {status}")
+        };
+        let latency_ms = started_at.elapsed().as_millis().min(u64::MAX as u128) as u64;
+        let _ = event_tx.send(AgentBusEvent::McpStatus {
+            status: McpStatus {
+                state: McpConnectionState::Error,
+                endpoint: claude_endpoint_label(&model, resume_session_id.as_deref()),
+                latency_ms: Some(latency_ms),
+                last_error: Some(message.clone()),
+            },
+        });
+        let session_id = extract_session_id_from_jsonl(&stdout);
+        let token_count = extract_token_count_from_jsonl(&stdout);
+        let _ = event_tx.send(AgentBusEvent::TurnFailed {
+            agent_id: model,
+            mission_id,
+            thread_id: session_id,
+            token_count,
+            message,
+        });
+        let _ = std::fs::remove_file(&out_file);
+        return;
+    }
+
+    // Claude -p writes the final result to stdout as part of stream-json. We also attempt to
+    // read the out_file (from the -o flag fallback, if applicable), and fall back to extracting
+    // the result text from the JSONL stream.
+    let message = std::fs::read_to_string(&out_file)
+        .ok()
+        .map(|s| s.trim_end().to_string())
+        .filter(|s| !s.is_empty())
+        .or_else(|| extract_result_text_from_jsonl(&stdout))
+        .unwrap_or_default();
+    let _ = std::fs::remove_file(&out_file);
+
+    if message.is_empty() {
+        let session_id = extract_session_id_from_jsonl(&stdout);
+        let token_count = extract_token_count_from_jsonl(&stdout);
+        let _ = event_tx.send(AgentBusEvent::TurnFailed {
+            agent_id: model,
+            mission_id,
+            thread_id: session_id,
+            token_count,
+            message: "Claude finished but produced an empty last message.".into(),
+        });
+        return;
+    }
+
+    let session_id = extract_session_id_from_jsonl(&stdout);
+    let token_count = extract_token_count_from_jsonl(&stdout);
+    let latency_ms = started_at.elapsed().as_millis().min(u64::MAX as u128) as u64;
+    let endpoint = claude_endpoint_label(&model, resume_session_id.as_deref());
+    let _ = event_tx.send(AgentBusEvent::McpStatus {
+        status: McpStatus {
+            state: McpConnectionState::Connected,
+            endpoint,
+            latency_ms: Some(latency_ms),
+            last_error: None,
+        },
+    });
+    let _ = event_tx.send(AgentBusEvent::TurnCompleted {
+        agent_id: model,
+        mission_id,
+        thread_id: session_id,
+        token_count,
+        message,
+    });
+}
+
+fn claude_endpoint_label(agent_id: &str, resume_session_id: Option<&str>) -> String {
+    let model_slug = claude_model_slug_for_agent_id(agent_id);
+    let suffix = if model_slug == agent_id {
+        String::new()
+    } else {
+        format!(" (agent {agent_id})")
+    };
+    if let Some(session_id) = resume_session_id {
+        format!(
+            "claude -p resume {} --model {model_slug}{suffix}",
+            shorten_id(session_id),
+        )
+    } else {
+        format!("claude -p --model {model_slug}{suffix}")
+    }
+}
+
+pub fn claude_model_slug_for_agent_id(agent_id: &str) -> &str {
+    agent_id
+        .split_once("#swarm-")
+        .or_else(|| agent_id.split_once("#chat-clone-"))
+        .map(|(base, _)| {
+            if base.trim().is_empty() {
+                agent_id
+            } else {
+                base
+            }
+        })
+        .unwrap_or(agent_id)
+}
+
+fn build_claude_args(
+    agent_id: &str,
+    cwd: &Path,
+    persist_session: bool,
+    effort: Option<&str>,
+    _out_file: &Path,
+    resume_session_id: Option<&str>,
+    config: &ClaudeRunnerConfig,
+) -> Vec<String> {
+    let model_slug = claude_model_slug_for_agent_id(agent_id);
+    let mut args = Vec::new();
+
+    // Headless (print) mode: read prompt from stdin, output to stdout.
+    args.push("-p".into());
+
+    // Output format: stream-json gives us NDJSON events.
+    // Claude CLI requires --verbose when using stream-json with -p.
+    args.push("--verbose".into());
+    args.push("--output-format".into());
+    args.push("stream-json".into());
+
+    // Model selection.
+    args.push("--model".into());
+    args.push(model_slug.to_string());
+
+    // Effort level.
+    if let Some(effort) = effort.map(str::trim).filter(|s| !s.is_empty()) {
+        args.push("--effort".into());
+        args.push(effort.to_string());
+    }
+
+    // Working directory. Claude CLI uses --add-dir for additional directories, but the primary
+    // CWD is set via the child process working directory. We pass it explicitly for clarity.
+    args.push("--add-dir".into());
+    args.push(cwd.to_string_lossy().to_string());
+
+    // Session management.
+    if let Some(session_id) = resume_session_id {
+        args.push("--resume".into());
+        args.push(session_id.to_string());
+    }
+    if !persist_session {
+        args.push("--no-session-persistence".into());
+    }
+
+    // Permission handling: auto-allow common tools for headless operation.
+    if let Some(mode) = config
+        .permission_mode
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        args.push("--permission-mode".into());
+        args.push(mode.to_string());
+    } else {
+        // Default: allow standard tools for autonomous operation.
+        args.push("--allowedTools".into());
+        args.push("Read,Edit,Write,Bash,Glob,Grep,WebSearch,WebFetch".into());
+    }
+
+    // Max turns to prevent runaway sessions.
+    args.push("--max-turns".into());
+    args.push("50".into());
+
+    // Read prompt from stdin (trailing `-`).
+    args.push("-".into());
+
+    args
+}
+
+fn shorten_id(id: &str) -> String {
+    let id = id.trim();
+    const MAX_CHARS: usize = 8;
+    let Some((idx, _)) = id.char_indices().nth(MAX_CHARS) else {
+        return id.to_string();
+    };
+    format!("{}…", &id[..idx])
+}
+
+/// Extract the Claude session ID from the stream-json NDJSON output.
+/// Claude emits `{"type":"system","subtype":"init","session_id":"..."}` at the start.
+fn extract_session_id_from_jsonl(stdout: &[u8]) -> Option<String> {
+    let text = String::from_utf8_lossy(stdout);
+    for raw in text.lines() {
+        let raw = raw.trim();
+        if raw.is_empty() {
+            continue;
+        }
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(raw) else {
+            continue;
+        };
+        // Look for session_id in any event (prefer "system" / "init" events).
+        if let Some(session_id) = value.get("session_id").and_then(|v| v.as_str()) {
+            if !session_id.trim().is_empty() {
+                return Some(session_id.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// Extract the final result text from Claude stream-json output.
+/// Claude emits `{"type":"result","result":"..."}` at the end.
+fn extract_result_text_from_jsonl(stdout: &[u8]) -> Option<String> {
+    let text = String::from_utf8_lossy(stdout);
+    let mut last_result: Option<String> = None;
+    for raw in text.lines() {
+        let raw = raw.trim();
+        if raw.is_empty() {
+            continue;
+        }
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(raw) else {
+            continue;
+        };
+        let kind = value.get("type").and_then(|v| v.as_str());
+        if kind == Some("result") {
+            if let Some(text) = value.get("result").and_then(|v| v.as_str()) {
+                let trimmed = text.trim();
+                if !trimmed.is_empty() {
+                    last_result = Some(trimmed.to_string());
+                }
+            }
+        }
+        // Also capture assistant text messages as fallback.
+        if kind == Some("assistant") {
+            if let Some(message) = value.get("message").and_then(|v| {
+                // The message may be a content block array or a plain string.
+                if let Some(s) = v.as_str() {
+                    Some(s.to_string())
+                } else if let Some(content) = v.get("content").and_then(|c| c.as_array()) {
+                    let texts: Vec<&str> = content
+                        .iter()
+                        .filter_map(|block| {
+                            if block.get("type").and_then(|t| t.as_str()) == Some("text") {
+                                block.get("text").and_then(|t| t.as_str())
+                            } else {
+                                None
+                            }
+                        })
+                        .collect();
+                    if texts.is_empty() {
+                        None
+                    } else {
+                        Some(texts.join("\n"))
+                    }
+                } else {
+                    None
+                }
+            }) {
+                if !message.trim().is_empty() {
+                    last_result = Some(message);
+                }
+            }
+        }
+    }
+    last_result
+}
+
+/// Extract token count from Claude stream-json output.
+/// Claude emits usage info in `result` events: `{"type":"result","usage":{"input_tokens":...,"output_tokens":...}}`.
+fn extract_token_count_from_jsonl(stdout: &[u8]) -> Option<AgentTokenCount> {
+    let text = String::from_utf8_lossy(stdout);
+    let mut last: Option<AgentTokenCount> = None;
+    for raw in text.lines() {
+        let raw = raw.trim();
+        if raw.is_empty() {
+            continue;
+        }
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(raw) else {
+            continue;
+        };
+        if let Some(token_count) = claude_token_count_from_value(&value) {
+            last = Some(token_count);
+        }
+    }
+    last
+}
+
+/// Parse token usage from a Claude stream-json event value.
+///
+/// Claude stream-json events:
+/// - `assistant`: usage at `value.message.usage`
+/// - `result`: usage at `value.usage`, context window at `value.modelUsage.<model>.contextWindow`
+fn claude_token_count_from_value(value: &serde_json::Value) -> Option<AgentTokenCount> {
+    let kind = value.get("type").and_then(|v| v.as_str());
+
+    // Try multiple locations for usage data:
+    // - "result" events: top-level "usage"
+    // - "assistant" events: nested under "message.usage"
+    let usage = value
+        .get("usage")
+        .or_else(|| value.get("message").and_then(|m| m.get("usage")))?;
+
+    let input = usage
+        .get("input_tokens")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let output = usage
+        .get("output_tokens")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    // Cache tokens count towards context usage.
+    let cache_creation = usage
+        .get("cache_creation_input_tokens")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let cache_read = usage
+        .get("cache_read_input_tokens")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+
+    let total = input
+        .saturating_add(output)
+        .saturating_add(cache_creation)
+        .saturating_add(cache_read);
+    if total == 0 || total > u32::MAX as u64 {
+        return None;
+    }
+
+    // Extract context window from modelUsage in "result" events:
+    // {"modelUsage":{"claude-opus-4-6":{"contextWindow":200000}}}
+    let mut context_window = 0u64;
+    if kind == Some("result") {
+        if let Some(model_usage) = value.get("modelUsage").and_then(|v| v.as_object()) {
+            for (_model, info) in model_usage {
+                if let Some(cw) = info.get("contextWindow").and_then(|v| v.as_u64()) {
+                    context_window = cw;
+                    break;
+                }
+            }
+        }
+    }
+
+    Some(AgentTokenCount {
+        total_tokens: total as u32,
+        context_window: context_window as u32,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_claude_model_slug_for_agent_id() {
+        assert_eq!(
+            claude_model_slug_for_agent_id("claude-opus-4-6"),
+            "claude-opus-4-6"
+        );
+        assert_eq!(
+            claude_model_slug_for_agent_id("claude-opus-4-6#swarm-mis-001-clone-01"),
+            "claude-opus-4-6"
+        );
+        assert_eq!(
+            claude_model_slug_for_agent_id("claude-sonnet-4-6#chat-clone-02"),
+            "claude-sonnet-4-6"
+        );
+    }
+
+    #[test]
+    fn test_extract_session_id() {
+        let jsonl = br#"{"type":"system","subtype":"init","session_id":"abc-123-def","tools":[],"model":"opus"}
+{"type":"assistant","message":"Hello"}
+"#;
+        assert_eq!(
+            extract_session_id_from_jsonl(jsonl),
+            Some("abc-123-def".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_result_text() {
+        let jsonl = br#"{"type":"system","subtype":"init","session_id":"abc"}
+{"type":"assistant","message":"working on it..."}
+{"type":"result","result":"Here is the answer","usage":{"input_tokens":100,"output_tokens":50}}
+"#;
+        assert_eq!(
+            extract_result_text_from_jsonl(jsonl),
+            Some("Here is the answer".to_string())
+        );
+    }
+
+    #[test]
+    fn test_token_count_from_result_event() {
+        let value: serde_json::Value = serde_json::json!({
+            "type": "result",
+            "result": "done",
+            "usage": {
+                "input_tokens": 100,
+                "output_tokens": 50,
+                "cache_creation_input_tokens": 9000,
+                "cache_read_input_tokens": 6000
+            },
+            "modelUsage": {
+                "claude-opus-4-6": {"contextWindow": 200000, "inputTokens": 100, "outputTokens": 50}
+            }
+        });
+        let count = claude_token_count_from_value(&value).unwrap();
+        assert_eq!(count.total_tokens, 100 + 50 + 9000 + 6000);
+        assert_eq!(count.context_window, 200000);
+    }
+
+    #[test]
+    fn test_token_count_from_assistant_event() {
+        // Assistant events have usage nested under "message"
+        let value: serde_json::Value = serde_json::json!({
+            "type": "assistant",
+            "message": {
+                "usage": {"input_tokens": 500, "output_tokens": 200}
+            }
+        });
+        let count = claude_token_count_from_value(&value).unwrap();
+        assert_eq!(count.total_tokens, 700);
+        assert_eq!(count.context_window, 0);
+    }
+
+    #[test]
+    fn test_build_claude_args_basic() {
+        let config = ClaudeRunnerConfig::default();
+        let args = build_claude_args(
+            "claude-opus-4-6",
+            Path::new("/tmp/project"),
+            true,
+            Some("high"),
+            Path::new("/tmp/out.txt"),
+            None,
+            &config,
+        );
+        assert!(args.contains(&"-p".to_string()));
+        assert!(args.contains(&"stream-json".to_string()));
+        assert!(args.contains(&"claude-opus-4-6".to_string()));
+        assert!(args.contains(&"high".to_string()));
+        assert!(!args.contains(&"--no-session-persistence".to_string()));
+    }
+
+    #[test]
+    fn test_build_claude_args_resume() {
+        let config = ClaudeRunnerConfig::default();
+        let args = build_claude_args(
+            "claude-sonnet-4-6",
+            Path::new("/tmp/project"),
+            false,
+            None,
+            Path::new("/tmp/out.txt"),
+            Some("session-abc-123"),
+            &config,
+        );
+        assert!(args.contains(&"--resume".to_string()));
+        assert!(args.contains(&"session-abc-123".to_string()));
+        assert!(args.contains(&"--no-session-persistence".to_string()));
+    }
+
+    #[test]
+    fn test_shorten_id() {
+        assert_eq!(shorten_id("abcdefghij"), "abcdefgh…");
+        assert_eq!(shorten_id("short"), "short");
+    }
+}

@@ -1,6 +1,6 @@
 use nit_core::{
     AgentConsoleRow as ThreadRow, AgentConsoleRowKind as ThreadRowKind, AgentConsoleRowsCacheKey,
-    AgentLane, AgentMessage, AgentStatus, AppState, MissionPhase, PaneId, UiSelectionPane,
+    AgentLane, AgentLaneKind, AgentMessage, AgentStatus, AppState, MissionPhase, PaneId, UiSelectionPane,
 };
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
@@ -104,50 +104,83 @@ pub fn render(
     let mission = state.agents.selected_context_mission();
     let agent = state.agents.selected_context_agent();
     let codex_ctx_pct = agent.and_then(|agent_id| {
-        let is_codex = state
+        let lane_kind = state
             .agents
             .agents
             .iter()
             .find(|lane| lane.id == agent_id)
-            .is_some_and(|lane| lane.is_codex());
-        if !is_codex {
-            return None;
+            .map(|lane| lane.kind);
+        match lane_kind {
+            Some(AgentLaneKind::Codex) => {
+                let pct = if let Some(mission_id) = mission {
+                    state
+                        .agents
+                        .codex_mission_context_remaining_pct
+                        .get(mission_id)
+                        .and_then(|m| m.get(agent_id))
+                        .copied()
+                } else {
+                    state
+                        .agents
+                        .codex_context_remaining_pct
+                        .get(agent_id)
+                        .copied()
+                };
+                Some(pct.unwrap_or(100))
+            }
+            Some(AgentLaneKind::Claude) => {
+                let pct = if let Some(mission_id) = mission {
+                    state
+                        .agents
+                        .claude_mission_context_remaining_pct
+                        .get(mission_id)
+                        .and_then(|m| m.get(agent_id))
+                        .copied()
+                } else {
+                    state
+                        .agents
+                        .claude_context_remaining_pct
+                        .get(agent_id)
+                        .copied()
+                };
+                Some(pct.unwrap_or(100))
+            }
+            _ => None,
         }
-        let pct = if let Some(mission_id) = mission {
-            state
-                .agents
-                .codex_mission_context_remaining_pct
-                .get(mission_id)
-                .and_then(|m| m.get(agent_id))
-                .copied()
-        } else {
-            state
-                .agents
-                .codex_context_remaining_pct
-                .get(agent_id)
-                .copied()
-        };
-        Some(pct.unwrap_or(100))
     });
     let codex_ctx_used = agent.and_then(|agent_id| {
-        let is_codex = state
+        let lane_kind = state
             .agents
             .agents
             .iter()
             .find(|lane| lane.id == agent_id)
-            .is_some_and(|lane| lane.is_codex());
-        if !is_codex {
-            return None;
-        }
-        if let Some(mission_id) = mission {
-            state
-                .agents
-                .codex_mission_used_tokens
-                .get(mission_id)
-                .and_then(|m| m.get(agent_id))
-                .copied()
-        } else {
-            state.agents.codex_used_tokens.get(agent_id).copied()
+            .map(|lane| lane.kind);
+        match lane_kind {
+            Some(AgentLaneKind::Codex) => {
+                if let Some(mission_id) = mission {
+                    state
+                        .agents
+                        .codex_mission_used_tokens
+                        .get(mission_id)
+                        .and_then(|m| m.get(agent_id))
+                        .copied()
+                } else {
+                    state.agents.codex_used_tokens.get(agent_id).copied()
+                }
+            }
+            Some(AgentLaneKind::Claude) => {
+                if let Some(mission_id) = mission {
+                    state
+                        .agents
+                        .claude_mission_used_tokens
+                        .get(mission_id)
+                        .and_then(|m| m.get(agent_id))
+                        .copied()
+                } else {
+                    state.agents.claude_used_tokens.get(agent_id).copied()
+                }
+            }
+            _ => None,
         }
     });
     let codex_ctx_max = agent.and_then(|agent_id| {
@@ -155,6 +188,7 @@ pub fn render(
             .agents
             .codex_effective_context_window_tokens
             .get(agent_id)
+            .or_else(|| state.agents.claude_effective_context_window_tokens.get(agent_id))
             .copied()
     });
     let label_style = Style::default()
@@ -2732,12 +2766,28 @@ fn format_token_count_stage(state: &AppState, agent: &AgentLane) -> String {
         .as_deref()
         .or_else(|| state.agents.selected_context_mission());
 
+    let is_claude = agent.is_claude();
     let pct = if let Some(mission_id) = mission_id {
+        if is_claude {
+            state
+                .agents
+                .claude_mission_context_remaining_pct
+                .get(mission_id)
+                .and_then(|m| m.get(agent_id))
+                .copied()
+        } else {
+            state
+                .agents
+                .codex_mission_context_remaining_pct
+                .get(mission_id)
+                .and_then(|m| m.get(agent_id))
+                .copied()
+        }
+    } else if is_claude {
         state
             .agents
-            .codex_mission_context_remaining_pct
-            .get(mission_id)
-            .and_then(|m| m.get(agent_id))
+            .claude_context_remaining_pct
+            .get(agent_id)
             .copied()
     } else {
         state
@@ -2747,12 +2797,23 @@ fn format_token_count_stage(state: &AppState, agent: &AgentLane) -> String {
             .copied()
     };
     let used = if let Some(mission_id) = mission_id {
-        state
-            .agents
-            .codex_mission_used_tokens
-            .get(mission_id)
-            .and_then(|m| m.get(agent_id))
-            .copied()
+        if is_claude {
+            state
+                .agents
+                .claude_mission_used_tokens
+                .get(mission_id)
+                .and_then(|m| m.get(agent_id))
+                .copied()
+        } else {
+            state
+                .agents
+                .codex_mission_used_tokens
+                .get(mission_id)
+                .and_then(|m| m.get(agent_id))
+                .copied()
+        }
+    } else if is_claude {
+        state.agents.claude_used_tokens.get(agent_id).copied()
     } else {
         state.agents.codex_used_tokens.get(agent_id).copied()
     };
@@ -2760,6 +2821,7 @@ fn format_token_count_stage(state: &AppState, agent: &AgentLane) -> String {
         .agents
         .codex_effective_context_window_tokens
         .get(agent_id)
+        .or_else(|| state.agents.claude_effective_context_window_tokens.get(agent_id))
         .copied();
 
     match (pct, used, max) {

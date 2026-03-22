@@ -84,6 +84,53 @@ fn copy_codex_runtime_metadata(state: &mut AppState, base_id: &str, clone_id: &s
     }
 }
 
+fn copy_claude_runtime_metadata(state: &mut AppState, base_id: &str, clone_id: &str) {
+    if let Some(tokens) = state
+        .agents
+        .claude_effective_context_window_tokens
+        .get(base_id)
+        .copied()
+    {
+        state
+            .agents
+            .claude_effective_context_window_tokens
+            .insert(clone_id.to_string(), tokens);
+    }
+    if let Some(effort) = state
+        .agents
+        .claude_default_effort
+        .get(base_id)
+        .cloned()
+    {
+        state
+            .agents
+            .claude_default_effort
+            .insert(clone_id.to_string(), effort);
+    }
+    if let Some(efforts) = state
+        .agents
+        .claude_supported_efforts
+        .get(base_id)
+        .cloned()
+    {
+        state
+            .agents
+            .claude_supported_efforts
+            .insert(clone_id.to_string(), efforts);
+    }
+    if let Some(effort) = state
+        .agents
+        .claude_selected_effort
+        .get(base_id)
+        .cloned()
+    {
+        state
+            .agents
+            .claude_selected_effort
+            .insert(clone_id.to_string(), effort);
+    }
+}
+
 fn insert_swarm_clone_lane(state: &mut AppState, base_id: &str, clone_lane: nit_core::AgentLane) {
     if state
         .agents
@@ -304,6 +351,7 @@ pub fn create_chat_clone(state: &mut AppState, base_id: &str) -> Option<String> 
 
     insert_swarm_clone_lane(state, effective_base, lane);
     copy_codex_runtime_metadata(state, effective_base, &clone_id);
+    copy_claude_runtime_metadata(state, effective_base, &clone_id);
 
     Some(clone_id)
 }
@@ -346,7 +394,7 @@ fn ensure_size_clones(
             .agents
             .iter()
             .find(|lane| lane.id == *source_id)
-            .filter(|lane| lane.is_codex())
+            .filter(|lane| lane.is_codex() || lane.is_claude())
             .cloned()
         else {
             continue;
@@ -386,6 +434,7 @@ fn ensure_size_clones(
         }
 
         copy_codex_runtime_metadata(state, source_id.as_str(), clone_id.as_str());
+        copy_claude_runtime_metadata(state, source_id.as_str(), clone_id.as_str());
         agents.push(clone_id);
     }
 }
@@ -1320,7 +1369,7 @@ impl SwarmRuntime {
                 .agents
                 .iter()
                 .find(|lane| lane.id == agent_id)
-                .is_some_and(|lane| lane.is_codex());
+                .is_some_and(|lane| lane.is_codex() || lane.is_claude());
             if is_codex {
                 agents.push(agent_id);
             }
@@ -5835,7 +5884,7 @@ pub fn select_swarm_agents(
         .agents
         .agents
         .iter()
-        .filter(|lane| lane.is_codex())
+        .filter(|lane| lane.is_codex() || lane.is_claude())
         .filter(|lane| lane.id.as_str() != planner)
         .filter(|lane| {
             !is_swarm_clone_agent_id(lane.id.as_str())

@@ -485,6 +485,12 @@ impl AgentLane {
                 && self.lane.eq_ignore_ascii_case("codex"))
     }
 
+    pub fn is_claude(&self) -> bool {
+        matches!(self.kind, AgentLaneKind::Claude)
+            || (matches!(self.kind, AgentLaneKind::Unknown)
+                && self.lane.eq_ignore_ascii_case("claude"))
+    }
+
     pub fn supports_swarm_priority(&self) -> bool {
         let backend_supports_priority = matches!(
             self.kind,
@@ -619,6 +625,15 @@ pub struct QueuedCodexTurn {
     pub prompt_msg_idx: Option<usize>,
 }
 
+#[derive(Clone, Debug)]
+pub struct QueuedClaudeTurn {
+    pub agent_id: String,
+    pub mission_id: Option<String>,
+    pub prompt: String,
+    /// Index of the user prompt message that triggered this queued turn.
+    pub prompt_msg_idx: Option<usize>,
+}
+
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum RosterTreeBranch {
     Size,
@@ -678,6 +693,10 @@ pub struct AgentsState {
     /// Runtime-only; used as a hint for auto-starting swarm sizes.
     #[serde(skip, default = "codex_max_parallel_turns_default")]
     pub codex_max_parallel_turns: usize,
+    /// Maximum number of Claude turns to run concurrently.
+    /// Runtime-only; used as a hint for auto-starting swarm sizes.
+    #[serde(skip, default = "claude_max_parallel_turns_default")]
+    pub claude_max_parallel_turns: usize,
     pub agents: Vec<AgentLane>,
     pub missions: Vec<MissionRecord>,
     pub patches: Vec<PatchProposal>,
@@ -839,6 +858,62 @@ pub struct AgentsState {
     /// Claude model discovery error (if any). Runtime-only.
     #[serde(skip)]
     pub claude_models_error: Option<String>,
+    /// Claude model metadata (effective context window tokens) keyed by model slug.
+    /// Runtime-only; populated when seeding the roster from probed Claude models.
+    #[serde(skip)]
+    pub claude_effective_context_window_tokens: HashMap<String, u32>,
+    /// Best-effort estimated context tokens used per mission session (heuristic; used for UI).
+    /// Runtime-only.
+    #[serde(skip)]
+    pub claude_estimated_tokens_used_by_mission: HashMap<String, u32>,
+    /// Claude model default effort level (e.g. low/medium/high/max) keyed by model slug.
+    /// Runtime-only; populated when seeding the roster from probed Claude models.
+    #[serde(skip)]
+    pub claude_default_effort: HashMap<String, String>,
+    /// Claude model supported effort levels keyed by model slug.
+    /// Runtime-only; populated when seeding the roster from probed Claude models.
+    #[serde(skip)]
+    pub claude_supported_efforts: HashMap<String, Vec<String>>,
+    /// Claude model operator-selected effort level keyed by model slug.
+    /// Runtime-only; defaults to `claude_default_effort` but can be changed in the roster.
+    #[serde(skip)]
+    pub claude_selected_effort: HashMap<String, String>,
+    /// Best-effort context remaining percentage for the currently running Claude turn.
+    /// Runtime-only; updated when dispatching a Claude turn.
+    #[serde(skip)]
+    pub claude_context_remaining_pct: HashMap<String, u8>,
+    /// Last-known Claude context remaining percentage for a mission session, keyed by mission id
+    /// then model slug.
+    /// Runtime-only; updated when Claude reports token counts for a mission-backed session.
+    #[serde(skip)]
+    pub claude_mission_context_remaining_pct: HashMap<String, HashMap<String, u8>>,
+    /// Last-known Claude total token usage (non-mission chat), keyed by model slug.
+    /// Runtime-only; updated when Claude reports token counts.
+    #[serde(skip)]
+    pub claude_used_tokens: HashMap<String, u32>,
+    /// Last-known Claude total token usage for mission sessions, keyed by mission id then model
+    /// slug. Runtime-only; updated when Claude reports token counts.
+    #[serde(skip)]
+    pub claude_mission_used_tokens: HashMap<String, HashMap<String, u32>>,
+    /// Maps agent_id → index of the user prompt message that triggered the current Claude turn.
+    /// Set at dispatch time, consumed by TurnCompleted to link responses to their prompts.
+    /// Runtime-only.
+    #[serde(skip)]
+    pub claude_turn_prompt_idx: HashMap<String, usize>,
+    /// Claude session ids keyed by model slug for non-mission chat. Used to resume an ad-hoc
+    /// "agent chat" session across multiple prompts without requiring a mission.
+    /// Runtime-only.
+    #[serde(skip)]
+    pub claude_session_ids: HashMap<String, String>,
+    /// Claude session ids keyed by mission id then model slug. Used to resume a "live mission"
+    /// session across multiple prompts.
+    /// Runtime-only.
+    #[serde(skip)]
+    pub claude_mission_session_ids: HashMap<String, HashMap<String, String>>,
+    /// Claude turns queued by the operator while another Claude turn is still running.
+    /// Runtime-only.
+    #[serde(skip)]
+    pub queued_claude_turns: VecDeque<QueuedClaudeTurn>,
     /// Gemini models discovered from the backend (CLI/API). Runtime-only.
     #[serde(skip)]
     pub gemini_models: Vec<String>,
@@ -860,6 +935,10 @@ fn swarm_default_mission_default() -> String {
 }
 
 fn codex_max_parallel_turns_default() -> usize {
+    2
+}
+
+fn claude_max_parallel_turns_default() -> usize {
     2
 }
 
@@ -969,6 +1048,7 @@ impl AgentsState {
             swarm_role_by_agent_id: HashMap::new(),
             swarm_priority_agent_ids: HashSet::new(),
             codex_max_parallel_turns: codex_max_parallel_turns_default(),
+            claude_max_parallel_turns: claude_max_parallel_turns_default(),
             agents,
             missions,
             patches,
@@ -1032,6 +1112,19 @@ impl AgentsState {
             gemini_cli_available: false,
             claude_models: Vec::new(),
             claude_models_error: None,
+            claude_effective_context_window_tokens: HashMap::new(),
+            claude_estimated_tokens_used_by_mission: HashMap::new(),
+            claude_default_effort: HashMap::new(),
+            claude_supported_efforts: HashMap::new(),
+            claude_selected_effort: HashMap::new(),
+            claude_context_remaining_pct: HashMap::new(),
+            claude_mission_context_remaining_pct: HashMap::new(),
+            claude_used_tokens: HashMap::new(),
+            claude_mission_used_tokens: HashMap::new(),
+            claude_turn_prompt_idx: HashMap::new(),
+            claude_session_ids: HashMap::new(),
+            claude_mission_session_ids: HashMap::new(),
+            queued_claude_turns: VecDeque::new(),
             gemini_models: Vec::new(),
             gemini_models_error: None,
         }
@@ -1078,6 +1171,7 @@ impl Default for AgentsState {
             swarm_role_by_agent_id: HashMap::new(),
             swarm_priority_agent_ids: HashSet::new(),
             codex_max_parallel_turns: codex_max_parallel_turns_default(),
+            claude_max_parallel_turns: claude_max_parallel_turns_default(),
             agents: Vec::new(),
             missions: Vec::new(),
             patches: Vec::new(),
@@ -1141,6 +1235,19 @@ impl Default for AgentsState {
             gemini_cli_available: false,
             claude_models: Vec::new(),
             claude_models_error: None,
+            claude_effective_context_window_tokens: HashMap::new(),
+            claude_estimated_tokens_used_by_mission: HashMap::new(),
+            claude_default_effort: HashMap::new(),
+            claude_supported_efforts: HashMap::new(),
+            claude_selected_effort: HashMap::new(),
+            claude_context_remaining_pct: HashMap::new(),
+            claude_mission_context_remaining_pct: HashMap::new(),
+            claude_used_tokens: HashMap::new(),
+            claude_mission_used_tokens: HashMap::new(),
+            claude_turn_prompt_idx: HashMap::new(),
+            claude_session_ids: HashMap::new(),
+            claude_mission_session_ids: HashMap::new(),
+            queued_claude_turns: VecDeque::new(),
             gemini_models: Vec::new(),
             gemini_models_error: None,
         }

@@ -17,6 +17,7 @@ use crate::swarm::{
     SwarmArtifactFocus, SwarmCommand, SwarmMissionKind, SwarmRuntime, SwarmSize,
 };
 use crate::{
+    claude_runner::{ClaudeCommand, ClaudeRunner, ClaudeRunnerConfig},
     codex_runner::{CodexCommand, CodexRunner, CodexRunnerConfig, CodexRuntimeMode},
     file_tree,
     file_tree_runner::{FileTreeCommand, FileTreeEvent, FileTreeRunner},
@@ -425,6 +426,7 @@ pub fn run(
     log_rx: Receiver<String>,
     codex_runtime: CodexRuntimeMode,
     codex_config: CodexRunnerConfig,
+    claude_config: ClaudeRunnerConfig,
 ) -> io::Result<()> {
     let (guard, mut stdout) = TerminalGuard::activate()?;
     install_terminal_panic_hook(guard.weak_state());
@@ -462,6 +464,7 @@ pub fn run(
         log_rx,
         codex_runtime,
         codex_config,
+        claude_config,
     );
 
     terminal.show_cursor()?;
@@ -479,6 +482,7 @@ fn run_loop(
     log_rx: Receiver<String>,
     codex_runtime: CodexRuntimeMode,
     codex_config: CodexRunnerConfig,
+    claude_config: ClaudeRunnerConfig,
 ) -> io::Result<()> {
     let mut last_tick = Instant::now();
     let mut last_job = Instant::now();
@@ -499,6 +503,8 @@ fn run_loop(
     };
     state.agents.codex_max_parallel_turns = codex_config.max_parallel_turns;
     let mut codex_runner = CodexRunner::spawn(codex_runtime, codex_config);
+    state.agents.claude_max_parallel_turns = claude_config.max_parallel_turns;
+    let mut claude_runner = ClaudeRunner::spawn(claude_config);
     let mut swarm = SwarmRuntime::default();
     let mut fuzzy_runtime = FuzzySearchRuntime::new(theme, state.settings.highlight.clone());
     let mut seed_runtime = if state.app_kind == AppKind::Gol {
@@ -694,6 +700,7 @@ fn run_loop(
                             &mut swarm,
                             &mut vitals,
                             Some(&codex_runner),
+                            Some(&claude_runner),
                             &mut clipboard,
                             screen,
                             theme,
@@ -807,6 +814,7 @@ fn run_loop(
                         state,
                         &mut vitals,
                         Some(&codex_runner),
+                        Some(&claude_runner),
                         &mut swarm,
                         &mut clipboard,
                     ) {
@@ -980,10 +988,11 @@ fn run_loop(
                 swarm_outcome.artifact_focus.as_ref(),
             );
             for dispatch in swarm_outcome.dispatches {
-                dispatch_codex_prompt(
+                dispatch_agent_prompt(
                     state,
                     &mut vitals,
                     Some(&codex_runner),
+                    Some(&claude_runner),
                     dispatch.agent_id,
                     Some(dispatch.mission_id),
                     dispatch.prompt,
@@ -991,6 +1000,7 @@ fn run_loop(
             }
             if finished {
                 maybe_dispatch_next_queued_codex_turn(state, &mut vitals, Some(&codex_runner));
+                maybe_dispatch_next_queued_claude_turn(state, &mut vitals, Some(&claude_runner));
                 // Clean up chat clones that are done.
                 if let AgentBusEvent::TurnCompleted { agent_id, .. }
                 | AgentBusEvent::TurnFailed { agent_id, .. } = &event
@@ -1000,6 +1010,75 @@ fn run_loop(
             }
             // Re-resolve the pinned artifact so the popup stays on the
             // same card even when new cards shift the indices.
+            if let Some(ref pinned) = pinned_popup_ref {
+                if let Some(idx) = agent_ops_view::artifacts_card_index_for_popup_ref(
+                    state,
+                    Some(&swarm),
+                    state.agents.ops_viewport_width,
+                    pinned,
+                ) {
+                    state.agents.artifacts_selected = idx;
+                }
+            }
+            needs_redraw = true;
+        }
+
+        // claude runner events
+        while let Ok(event) = claude_runner.events.try_recv() {
+            record_agent_bus_vitals(&mut vitals, &event);
+            let finished = matches!(
+                event,
+                AgentBusEvent::TurnCompleted { .. } | AgentBusEvent::TurnFailed { .. }
+            );
+            let pinned_popup_ref = if state.agents.artifacts_popup_open {
+                agent_ops_view::artifacts_popup_ref(state, &swarm, state.agents.ops_viewport_width)
+            } else {
+                None
+            };
+            let clear_invalid_session_context = match &event {
+                AgentBusEvent::TurnFailed {
+                    agent_id,
+                    mission_id,
+                    message,
+                    ..
+                } if claude_session_context_not_found(message) => {
+                    Some((agent_id.clone(), mission_id.clone()))
+                }
+                _ => None,
+            };
+            apply_claude_event(state, &event);
+            if let Some((agent_id, mission_id)) = clear_invalid_session_context {
+                clear_claude_session_context_for_agent(
+                    state,
+                    agent_id.as_str(),
+                    mission_id.as_deref(),
+                );
+            }
+            let swarm_outcome = swarm.handle_event_outcome(state, &event);
+            maybe_follow_swarm_artifact_in_popup(
+                state,
+                &swarm,
+                swarm_outcome.artifact_focus.as_ref(),
+            );
+            for dispatch in swarm_outcome.dispatches {
+                dispatch_agent_prompt(
+                    state,
+                    &mut vitals,
+                    Some(&codex_runner),
+                    Some(&claude_runner),
+                    dispatch.agent_id,
+                    Some(dispatch.mission_id),
+                    dispatch.prompt,
+                );
+            }
+            if finished {
+                maybe_dispatch_next_queued_claude_turn(state, &mut vitals, Some(&claude_runner));
+                if let AgentBusEvent::TurnCompleted { agent_id, .. }
+                | AgentBusEvent::TurnFailed { agent_id, .. } = &event
+                {
+                    crate::swarm::cleanup_idle_chat_clone(state, agent_id);
+                }
+            }
             if let Some(ref pinned) = pinned_popup_ref {
                 if let Some(idx) = agent_ops_view::artifacts_card_index_for_popup_ref(
                     state,
@@ -1200,6 +1279,7 @@ fn run_loop(
     }
     file_tree_runner.shutdown();
     codex_runner.shutdown();
+    claude_runner.shutdown();
     fuzzy_runtime.shutdown();
     if let Some(runtime) = games_config_preview.as_mut() {
         runtime.shutdown();
@@ -2096,10 +2176,11 @@ fn handle_agent_station_key(
     state: &mut AppState,
     vitals: &mut VitalsState,
     codex: Option<&CodexRunner>,
+    claude: Option<&ClaudeRunner>,
     swarm: &mut SwarmRuntime,
 ) -> bool {
     let mut clipboard = None;
-    handle_agent_station_key_with_clipboard(key, state, vitals, codex, swarm, &mut clipboard)
+    handle_agent_station_key_with_clipboard(key, state, vitals, codex, claude, swarm, &mut clipboard)
 }
 
 fn handle_agent_station_key_with_clipboard(
@@ -2107,6 +2188,7 @@ fn handle_agent_station_key_with_clipboard(
     state: &mut AppState,
     vitals: &mut VitalsState,
     codex: Option<&CodexRunner>,
+    claude: Option<&ClaudeRunner>,
     swarm: &mut SwarmRuntime,
     clipboard: &mut Option<Clipboard>,
 ) -> bool {
@@ -2131,8 +2213,8 @@ fn handle_agent_station_key_with_clipboard(
     }
 
     match state.focus {
-        PaneId::JobOutput => handle_agent_ops_key(key, state, vitals, codex, swarm),
-        PaneId::Notes => handle_agent_console_key(key, state, vitals, codex, swarm, clipboard),
+        PaneId::JobOutput => handle_agent_ops_key(key, state, vitals, codex, claude, swarm),
+        PaneId::Notes => handle_agent_console_key(key, state, vitals, codex, claude, swarm, clipboard),
         _ => false,
     }
 }
@@ -2163,6 +2245,7 @@ fn handle_agent_ops_key(
     state: &mut AppState,
     vitals: &mut VitalsState,
     codex: Option<&CodexRunner>,
+    _claude: Option<&ClaudeRunner>,
     swarm: &SwarmRuntime,
 ) -> bool {
     if state.agents.dock_tab == AgentOpsTab::Scratchpad {
@@ -3011,10 +3094,11 @@ fn enter_roster_tree_cursor(state: &mut AppState) -> bool {
         .agents
         .codex_supported_reasoning_efforts
         .get(&agent.id)
+        .or_else(|| state.agents.claude_supported_efforts.get(&agent.id))
         .map(|v| v.as_slice())
         .unwrap_or(&[]);
     let has_size = !efforts.is_empty();
-    let has_roles = show_roles && agent.is_codex();
+    let has_roles = show_roles && (agent.is_codex() || agent.is_claude());
     if !has_size && !has_roles {
         state.agents.roster_tree_selected = None;
         return false;
@@ -3029,6 +3113,8 @@ fn enter_roster_tree_cursor(state: &mut AppState) -> bool {
             .codex_selected_reasoning_effort
             .get(&agent.id)
             .or_else(|| state.agents.codex_default_reasoning_effort.get(&agent.id))
+            .or_else(|| state.agents.claude_selected_effort.get(&agent.id))
+            .or_else(|| state.agents.claude_default_effort.get(&agent.id))
             .map(|s| s.as_str());
         let idx = current
             .and_then(|effort| efforts.iter().position(|e| e == effort))
@@ -3099,11 +3185,12 @@ fn select_roster_tree_leaf(state: &mut AppState) -> bool {
 
     match sel.branch {
         nit_core::RosterTreeBranch::Size => {
-            let Some(efforts) = state
+            let efforts = state
                 .agents
                 .codex_supported_reasoning_efforts
                 .get(&agent.id)
-            else {
+                .or_else(|| state.agents.claude_supported_efforts.get(&agent.id));
+            let Some(efforts) = efforts else {
                 return false;
             };
             let Some(effort) = efforts.get(sel.leaf_idx) else {
@@ -3115,18 +3202,34 @@ fn select_roster_tree_leaf(state: &mut AppState) -> bool {
                 return false;
             }
 
-            let current = state
-                .agents
-                .codex_selected_reasoning_effort
-                .get(&agent.id)
-                .map(|s| s.as_str());
-            if current == Some(effort) {
-                return false;
+            let is_claude = agent.is_claude();
+            if is_claude {
+                let current = state
+                    .agents
+                    .claude_selected_effort
+                    .get(&agent.id)
+                    .map(|s| s.as_str());
+                if current == Some(effort) {
+                    return false;
+                }
+                state
+                    .agents
+                    .claude_selected_effort
+                    .insert(agent.id.clone(), effort.to_string());
+            } else {
+                let current = state
+                    .agents
+                    .codex_selected_reasoning_effort
+                    .get(&agent.id)
+                    .map(|s| s.as_str());
+                if current == Some(effort) {
+                    return false;
+                }
+                state
+                    .agents
+                    .codex_selected_reasoning_effort
+                    .insert(agent.id.clone(), effort.to_string());
             }
-            state
-                .agents
-                .codex_selected_reasoning_effort
-                .insert(agent.id.clone(), effort.to_string());
             true
         }
         nit_core::RosterTreeBranch::Role => {
@@ -3930,6 +4033,7 @@ fn submit_chat_input_and_dispatch(
     state: &mut AppState,
     vitals: &mut VitalsState,
     codex: Option<&CodexRunner>,
+    claude: Option<&ClaudeRunner>,
     swarm: &mut SwarmRuntime,
 ) -> bool {
     let raw = state.agents.chat_input.clone();
@@ -3962,7 +4066,7 @@ fn submit_chat_input_and_dispatch(
                     .agents
                     .iter()
                     .find(|lane| lane.id == id)
-                    .is_some_and(|lane| lane.is_codex())
+                    .is_some_and(|lane| lane.is_codex() || lane.is_claude())
                     .then_some(id.to_string())
             })
             .or_else(|| {
@@ -3970,7 +4074,7 @@ fn submit_chat_input_and_dispatch(
                     .agents
                     .agents
                     .iter()
-                    .find(|lane| lane.is_codex())
+                    .find(|lane| lane.is_codex() || lane.is_claude())
                     .map(|lane| lane.id.clone())
             });
 
@@ -3993,23 +4097,25 @@ fn submit_chat_input_and_dispatch(
                 state.agents.chat_input_cursor = state.agents.chat_input.chars().count();
                 let _ = push_chat_message(state);
                 for dispatch in dispatches {
-                    dispatch_codex_prompt(
+                    dispatch_agent_prompt(
                         state,
                         vitals,
                         codex,
+                        claude,
                         dispatch.agent_id,
                         Some(dispatch.mission_id),
                         dispatch.prompt,
                     );
                 }
                 maybe_dispatch_next_queued_codex_turn(state, vitals, codex);
+                maybe_dispatch_next_queued_claude_turn(state, vitals, claude);
                 swarm_handled = true;
             } else {
                 state.agents.chat_input = cmd.prompt.clone();
                 state.agents.chat_input_cursor = state.agents.chat_input.chars().count();
             }
         } else {
-            state.status = Some("@swarm requires at least one Codex agent".into());
+            state.status = Some("@swarm requires at least one Codex or Claude agent".into());
             state.agents.chat_input.clear();
             state.agents.chat_input_cursor = 0;
             swarm_handled = true;
@@ -4082,19 +4188,35 @@ fn submit_chat_input_and_dispatch(
                 let plan_prompt = swarm
                     .build_followup_planner_prompt(state, mid, &prompt)
                     .unwrap_or_else(|| prompt.clone());
-                state
+                // Store prompt idx in the appropriate backend map.
+                let planner_is_claude = state
                     .agents
-                    .codex_turn_prompt_idx
-                    .insert(planner.clone(), prompt_msg_idx);
-                dispatch_codex_prompt(
+                    .agents
+                    .iter()
+                    .find(|lane| lane.id == planner)
+                    .is_some_and(|lane| lane.is_claude());
+                if planner_is_claude {
+                    state
+                        .agents
+                        .claude_turn_prompt_idx
+                        .insert(planner.clone(), prompt_msg_idx);
+                } else {
+                    state
+                        .agents
+                        .codex_turn_prompt_idx
+                        .insert(planner.clone(), prompt_msg_idx);
+                }
+                dispatch_agent_prompt(
                     state,
                     vitals,
                     codex,
+                    claude,
                     planner,
                     mission_id.clone(),
                     plan_prompt,
                 );
                 maybe_dispatch_next_queued_codex_turn(state, vitals, codex);
+                maybe_dispatch_next_queued_claude_turn(state, vitals, claude);
             }
             let targets = if is_swarm_mission {
                 Vec::new() // already dispatched above
@@ -4104,37 +4226,63 @@ fn submit_chat_input_and_dispatch(
                 selected_agent.clone().into_iter().collect::<Vec<_>>()
             };
             for model in targets {
-                // For regular chat, resolve to the base agent to preserve
-                // context continuity.
                 let base_model =
                     crate::swarm::resolve_base_agent_id(&model).to_string();
-                let is_codex = state
+                let lane_kind = state
                     .agents
                     .agents
                     .iter()
                     .find(|lane| lane.id == base_model)
-                    .is_some_and(|lane| lane.is_codex());
-                if !is_codex {
+                    .map(|lane| lane.kind);
+                let is_dispatchable = matches!(
+                    lane_kind,
+                    Some(nit_core::AgentLaneKind::Codex) | Some(nit_core::AgentLaneKind::Claude)
+                );
+                if !is_dispatchable {
                     continue;
                 }
+                let is_claude = lane_kind == Some(nit_core::AgentLaneKind::Claude);
                 if force_new && is_agent_family_busy(state, &base_model) {
-                    // @new while family busy → fresh clone with new context.
                     if let Some(clone_id) = create_chat_clone(state, &base_model) {
-                        state
-                            .agents
-                            .codex_turn_prompt_idx
-                            .insert(clone_id.clone(), prompt_msg_idx);
-                        maybe_dispatch_codex_turn(
+                        if is_claude {
+                            state
+                                .agents
+                                .claude_turn_prompt_idx
+                                .insert(clone_id.clone(), prompt_msg_idx);
+                            maybe_dispatch_claude_turn(
+                                state,
+                                vitals,
+                                claude,
+                                Some(clone_id),
+                                mission_id.clone(),
+                                prompt.clone(),
+                                true,
+                            );
+                        } else {
+                            state
+                                .agents
+                                .codex_turn_prompt_idx
+                                .insert(clone_id.clone(), prompt_msg_idx);
+                            maybe_dispatch_codex_turn(
+                                state,
+                                vitals,
+                                codex,
+                                Some(clone_id),
+                                mission_id.clone(),
+                                prompt.clone(),
+                                true,
+                            );
+                        }
+                    } else if is_claude {
+                        enqueue_claude_turn(
                             state,
                             vitals,
-                            codex,
-                            Some(clone_id),
+                            Some(base_model),
                             mission_id.clone(),
                             prompt.clone(),
-                            true,
+                            Some(prompt_msg_idx),
                         );
                     } else {
-                        // Clone limit reached — fall back to queue on base.
                         enqueue_codex_turn(
                             state,
                             vitals,
@@ -4145,34 +4293,59 @@ fn submit_chat_input_and_dispatch(
                         );
                     }
                 } else if is_agent_busy(state, &base_model) {
-                    // Agent busy — queue with prompt index stored in the turn
-                    // so the active turn's breather mapping stays intact.
-                    enqueue_codex_turn(
-                        state,
-                        vitals,
-                        Some(base_model),
-                        mission_id.clone(),
-                        prompt.clone(),
-                        Some(prompt_msg_idx),
-                    );
+                    if is_claude {
+                        enqueue_claude_turn(
+                            state,
+                            vitals,
+                            Some(base_model),
+                            mission_id.clone(),
+                            prompt.clone(),
+                            Some(prompt_msg_idx),
+                        );
+                    } else {
+                        enqueue_codex_turn(
+                            state,
+                            vitals,
+                            Some(base_model),
+                            mission_id.clone(),
+                            prompt.clone(),
+                            Some(prompt_msg_idx),
+                        );
+                    }
                 } else {
-                    // Agent idle — dispatch immediately, set breather mapping.
-                    state
-                        .agents
-                        .codex_turn_prompt_idx
-                        .insert(base_model.clone(), prompt_msg_idx);
-                    maybe_dispatch_codex_turn(
-                        state,
-                        vitals,
-                        codex,
-                        Some(base_model),
-                        mission_id.clone(),
-                        prompt.clone(),
-                        true,
-                    );
+                    if is_claude {
+                        state
+                            .agents
+                            .claude_turn_prompt_idx
+                            .insert(base_model.clone(), prompt_msg_idx);
+                        maybe_dispatch_claude_turn(
+                            state,
+                            vitals,
+                            claude,
+                            Some(base_model),
+                            mission_id.clone(),
+                            prompt.clone(),
+                            true,
+                        );
+                    } else {
+                        state
+                            .agents
+                            .codex_turn_prompt_idx
+                            .insert(base_model.clone(), prompt_msg_idx);
+                        maybe_dispatch_codex_turn(
+                            state,
+                            vitals,
+                            codex,
+                            Some(base_model),
+                            mission_id.clone(),
+                            prompt.clone(),
+                            true,
+                        );
+                    }
                 }
             }
             maybe_dispatch_next_queued_codex_turn(state, vitals, codex);
+            maybe_dispatch_next_queued_claude_turn(state, vitals, claude);
         } else {
             return false;
         }
@@ -4186,6 +4359,7 @@ fn handle_agent_console_key(
     state: &mut AppState,
     vitals: &mut VitalsState,
     codex: Option<&CodexRunner>,
+    claude: Option<&ClaudeRunner>,
     swarm: &mut SwarmRuntime,
     clipboard: &mut Option<Clipboard>,
 ) -> bool {
@@ -4209,7 +4383,7 @@ fn handle_agent_console_key(
                 ..
             } => {
                 handled = true;
-                changed = submit_chat_input_and_dispatch(state, vitals, codex, swarm);
+                changed = submit_chat_input_and_dispatch(state, vitals, codex, claude, swarm);
                 follow_chat_cursor = changed;
             }
             KeyEvent {
@@ -5751,6 +5925,413 @@ fn estimate_codex_context_tokens_for_mission(state: &mut AppState, mission_id: &
         .codex_estimated_tokens_used_by_mission
         .insert(mission_id.to_string(), tokens);
     tokens
+}
+
+// ---------------------------------------------------------------------------
+// Claude dispatch functions (mirrors the Codex dispatch pipeline).
+// ---------------------------------------------------------------------------
+
+fn dispatch_claude_prompt(
+    state: &mut AppState,
+    vitals: &mut VitalsState,
+    claude: Option<&ClaudeRunner>,
+    agent_id: String,
+    mission_id: Option<String>,
+    prompt: String,
+) {
+    if is_agent_busy(state, &agent_id) {
+        enqueue_claude_turn(state, vitals, Some(agent_id), mission_id, prompt, None);
+    } else {
+        maybe_dispatch_claude_turn(
+            state,
+            vitals,
+            claude,
+            Some(agent_id),
+            mission_id,
+            prompt,
+            true,
+        );
+    }
+}
+
+fn enqueue_claude_turn(
+    state: &mut AppState,
+    vitals: &mut VitalsState,
+    model: Option<String>,
+    mission_id: Option<String>,
+    prompt: String,
+    prompt_msg_idx: Option<usize>,
+) {
+    let Some(model) = model else {
+        return;
+    };
+    let is_claude = state
+        .agents
+        .agents
+        .iter()
+        .find(|lane| lane.id.as_str() == model.as_str())
+        .is_some_and(|lane| lane.is_claude());
+    if !is_claude {
+        return;
+    }
+
+    state
+        .agents
+        .queued_claude_turns
+        .push_back(nit_core::QueuedClaudeTurn {
+            agent_id: model.clone(),
+            mission_id: mission_id.clone(),
+            prompt,
+            prompt_msg_idx,
+        });
+
+    if let Some(agent) = state.agents.agents.iter_mut().find(|a| a.id == model) {
+        let is_running = matches!(agent.status, AgentStatus::Running);
+        agent.queue_len = agent.queue_len.saturating_add(1);
+        agent.heartbeat_age_secs = 0;
+        agent.last_message = "queued".into();
+        if !is_running {
+            agent.current_mission = mission_id;
+        }
+        if !matches!(agent.status, AgentStatus::Running | AgentStatus::Error) {
+            agent.status = AgentStatus::Waiting;
+        }
+    }
+
+    let now = Instant::now();
+    state.agents.note_event();
+    vitals.record_agent_event(now);
+}
+
+fn maybe_dispatch_next_queued_claude_turn(
+    state: &mut AppState,
+    vitals: &mut VitalsState,
+    claude: Option<&ClaudeRunner>,
+) {
+    let Some(claude) = claude else {
+        return;
+    };
+    if state.agents.queued_claude_turns.is_empty() {
+        return;
+    }
+
+    let mut remaining = state.agents.queued_claude_turns.len();
+    while remaining > 0 {
+        remaining = remaining.saturating_sub(1);
+        let Some(queued) = state.agents.queued_claude_turns.pop_front() else {
+            break;
+        };
+        let model = queued.agent_id.clone();
+        let mission_id = queued.mission_id.clone();
+
+        if state.agents.active_turns.contains_key(&model) {
+            state.agents.queued_claude_turns.push_back(queued);
+            continue;
+        }
+
+        let is_claude = state
+            .agents
+            .agents
+            .iter()
+            .find(|lane| lane.id.as_str() == model.as_str())
+            .is_some_and(|lane| lane.is_claude());
+        if !is_claude {
+            if let Some(agent) = state.agents.agents.iter_mut().find(|a| a.id == model) {
+                agent.queue_len = agent.queue_len.saturating_sub(1);
+                if agent.queue_len == 0 && matches!(agent.status, AgentStatus::Waiting) {
+                    agent.status = AgentStatus::Idle;
+                }
+            }
+            continue;
+        }
+
+        if let Some(idx) = queued.prompt_msg_idx {
+            state
+                .agents
+                .claude_turn_prompt_idx
+                .insert(model.clone(), idx);
+        }
+
+        maybe_dispatch_claude_turn(
+            state,
+            vitals,
+            Some(claude),
+            Some(model),
+            mission_id,
+            queued.prompt,
+            false,
+        );
+    }
+}
+
+fn maybe_dispatch_claude_turn(
+    state: &mut AppState,
+    vitals: &mut VitalsState,
+    claude: Option<&ClaudeRunner>,
+    model: Option<String>,
+    mission_id: Option<String>,
+    prompt: String,
+    count_new_turn: bool,
+) {
+    let Some(claude) = claude else {
+        return;
+    };
+    let Some(model) = model else {
+        return;
+    };
+    let is_claude = state
+        .agents
+        .agents
+        .iter()
+        .find(|lane| lane.id.as_str() == model.as_str())
+        .is_some_and(|lane| lane.is_claude());
+    if !is_claude {
+        return;
+    }
+
+    let resume_session_id = if let Some(mission_id) = mission_id.as_deref() {
+        state
+            .agents
+            .claude_mission_session_ids
+            .get(mission_id)
+            .and_then(|sessions| sessions.get(&model))
+            .cloned()
+    } else {
+        state.agents.claude_session_ids.get(&model).cloned()
+    };
+    let persist_session = true;
+
+    // Best-effort context remaining percentage for the breather row.
+    if let Some(max_tokens) = state
+        .agents
+        .claude_effective_context_window_tokens
+        .get(&model)
+        .copied()
+    {
+        let prompt_tokens_est = estimate_codex_context_tokens(&prompt);
+        let baseline_used = if let Some(mission_id) = mission_id.as_deref() {
+            state
+                .agents
+                .claude_mission_used_tokens
+                .get(mission_id)
+                .and_then(|m| m.get(&model))
+                .copied()
+        } else {
+            state.agents.claude_used_tokens.get(&model).copied()
+        };
+        let used_tokens = if let Some(baseline) = baseline_used {
+            baseline.saturating_add(prompt_tokens_est).min(max_tokens)
+        } else if let Some(mission_id) = mission_id.as_deref() {
+            estimate_claude_context_tokens_for_mission(state, mission_id).min(max_tokens)
+        } else {
+            prompt_tokens_est.min(max_tokens)
+        };
+        if let Some(mission_id) = mission_id.as_deref() {
+            state
+                .agents
+                .claude_mission_used_tokens
+                .entry(mission_id.to_string())
+                .or_default()
+                .insert(model.clone(), used_tokens);
+        } else {
+            state
+                .agents
+                .claude_used_tokens
+                .insert(model.clone(), used_tokens);
+        }
+        let remaining = max_tokens.saturating_sub(used_tokens);
+        let denom = max_tokens.max(1) as u64;
+        let pct =
+            (((remaining as u64).saturating_mul(100)).saturating_add(denom / 2) / denom) as u8;
+        if let Some(mission_id) = mission_id.as_deref() {
+            state
+                .agents
+                .claude_mission_context_remaining_pct
+                .entry(mission_id.to_string())
+                .or_default()
+                .insert(model.clone(), pct);
+        } else {
+            state
+                .agents
+                .claude_context_remaining_pct
+                .insert(model.clone(), pct);
+        }
+    } else if let Some(mission_id) = mission_id.as_deref() {
+        if let Some(map) = state
+            .agents
+            .claude_mission_context_remaining_pct
+            .get_mut(mission_id)
+        {
+            map.remove(&model);
+            if map.is_empty() {
+                state
+                    .agents
+                    .claude_mission_context_remaining_pct
+                    .remove(mission_id);
+            }
+        }
+    } else {
+        state.agents.claude_context_remaining_pct.remove(&model);
+    }
+
+    let Some(agent) = state.agents.agents.iter_mut().find(|a| a.id == model) else {
+        return;
+    };
+    agent.status = AgentStatus::Waiting;
+    if count_new_turn {
+        agent.queue_len = agent.queue_len.saturating_add(1).max(1);
+    } else {
+        agent.queue_len = agent.queue_len.max(1);
+    }
+    agent.heartbeat_age_secs = 0;
+    agent.last_message = "queued".into();
+    agent.current_mission = mission_id.clone();
+
+    let now = Instant::now();
+    state.agents.active_turns.insert(
+        model.clone(),
+        nit_core::state::AgentTurnState {
+            started_at: now,
+            last_heartbeat_at: now,
+            last_output_at: now,
+            stage: Some("queued".into()),
+        },
+    );
+
+    state.agents.mcp.last_error = None;
+    state.agents.note_event();
+    vitals.record_agent_event(now);
+
+    let effort = state
+        .agents
+        .claude_selected_effort
+        .get(&model)
+        .cloned()
+        .or_else(|| state.agents.claude_default_effort.get(&model).cloned())
+        .unwrap_or_else(|| "high".into());
+
+    claude.send(ClaudeCommand::RunTurn {
+        model,
+        cwd: state.workspace_root.clone(),
+        mission_id,
+        resume_session_id,
+        persist_session,
+        effort: Some(effort),
+        prompt,
+    });
+}
+
+fn estimate_claude_context_tokens_for_mission(state: &mut AppState, mission_id: &str) -> u32 {
+    if let Some(tokens) = state
+        .agents
+        .claude_estimated_tokens_used_by_mission
+        .get(mission_id)
+        .copied()
+    {
+        return tokens;
+    }
+    let tokens = state
+        .agents
+        .messages
+        .iter()
+        .filter(|msg| msg.mission_id.as_deref() == Some(mission_id))
+        .fold(0u32, |acc, msg| {
+            acc.saturating_add(estimate_codex_context_tokens(&msg.text))
+        });
+    state
+        .agents
+        .claude_estimated_tokens_used_by_mission
+        .insert(mission_id.to_string(), tokens);
+    tokens
+}
+
+/// Unified dispatch router: routes to Codex or Claude based on agent lane kind.
+fn dispatch_agent_prompt(
+    state: &mut AppState,
+    vitals: &mut VitalsState,
+    codex: Option<&CodexRunner>,
+    claude: Option<&ClaudeRunner>,
+    agent_id: String,
+    mission_id: Option<String>,
+    prompt: String,
+) {
+    let lane_kind = state
+        .agents
+        .agents
+        .iter()
+        .find(|lane| lane.id.as_str() == agent_id.as_str())
+        .map(|lane| lane.kind);
+    match lane_kind {
+        Some(nit_core::AgentLaneKind::Claude) => {
+            dispatch_claude_prompt(state, vitals, claude, agent_id, mission_id, prompt);
+        }
+        Some(nit_core::AgentLaneKind::Codex) => {
+            dispatch_codex_prompt(state, vitals, codex, agent_id, mission_id, prompt);
+        }
+        _ => {
+            // Unknown or unsupported backend — try Codex as fallback.
+            dispatch_codex_prompt(state, vitals, codex, agent_id, mission_id, prompt);
+        }
+    }
+}
+
+/// Apply a Claude bus event to state. Re-uses the generic event.apply() but also stores
+/// Claude-specific session IDs (the equivalent of Codex thread IDs).
+fn apply_claude_event(state: &mut AppState, event: &AgentBusEvent) {
+    // First, apply the generic state mutation (status, messages, tokens, etc.).
+    event.apply(state);
+
+    // Then, store Claude session IDs from TurnCompleted events.
+    if let AgentBusEvent::TurnCompleted {
+        agent_id,
+        mission_id,
+        thread_id: Some(session_id),
+        ..
+    } = event
+    {
+        let is_claude = state
+            .agents
+            .agents
+            .iter()
+            .find(|lane| lane.id.as_str() == agent_id.as_str())
+            .is_some_and(|lane| lane.is_claude());
+        if is_claude {
+            if let Some(mission_id) = mission_id.as_deref() {
+                state
+                    .agents
+                    .claude_mission_session_ids
+                    .entry(mission_id.to_string())
+                    .or_default()
+                    .insert(agent_id.clone(), session_id.clone());
+            } else {
+                state
+                    .agents
+                    .claude_session_ids
+                    .insert(agent_id.clone(), session_id.clone());
+            }
+        }
+    }
+}
+
+fn claude_session_context_not_found(message: &str) -> bool {
+    let lower = message.to_lowercase();
+    lower.contains("session not found")
+        || lower.contains("session_id")
+        || lower.contains("invalid session")
+}
+
+fn clear_claude_session_context_for_agent(
+    state: &mut AppState,
+    agent_id: &str,
+    mission_id: Option<&str>,
+) {
+    if let Some(mission_id) = mission_id {
+        if let Some(map) = state.agents.claude_mission_session_ids.get_mut(mission_id) {
+            map.remove(agent_id);
+        }
+    } else {
+        state.agents.claude_session_ids.remove(agent_id);
+    }
 }
 
 fn parse_chat_input_channel(raw: &str) -> (AgentChannel, String) {
@@ -12011,6 +12592,7 @@ fn handle_artifacts_popup_key(
     swarm: &mut SwarmRuntime,
     vitals: &mut VitalsState,
     codex: Option<&CodexRunner>,
+    claude: Option<&ClaudeRunner>,
     clipboard: &mut Option<Clipboard>,
     screen: ratatui::layout::Rect,
     theme: &Theme,
@@ -12100,7 +12682,7 @@ fn handle_artifacts_popup_key(
     // Swap is only needed here because submit_chat_input_and_dispatch reads chat_input.
     if matches!(key.code, KeyCode::Enter) && !key.modifiers.contains(KeyModifiers::SHIFT) {
         swap_in_artifacts_popup_chat(state);
-        if submit_chat_input_and_dispatch(state, vitals, codex, swarm) {
+        if submit_chat_input_and_dispatch(state, vitals, codex, claude, swarm) {
             swap_out_artifacts_popup_chat(state);
             close_artifacts_popup(state);
             state.agents.note_event();
@@ -14105,12 +14687,14 @@ mod tests {
             &mut state,
             &mut vitals,
             None,
+            None,
             &mut swarm
         ));
         assert!(handle_agent_station_key(
             KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE),
             &mut state,
             &mut vitals,
+            None,
             None,
             &mut swarm
         ));
@@ -14121,6 +14705,7 @@ mod tests {
             KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
             &mut state,
             &mut vitals,
+            None,
             None,
             &mut swarm
         ));
@@ -14168,6 +14753,7 @@ mod tests {
             &mut state,
             &mut vitals,
             None,
+            None,
             &mut swarm
         ));
         assert_eq!(state.agents.dock_tab, AgentOpsTab::Dag);
@@ -14210,6 +14796,7 @@ mod tests {
             KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
             &mut state,
             &mut vitals,
+            None,
             None,
             &mut swarm
         ));
@@ -14259,6 +14846,7 @@ mod tests {
             &mut state,
             &mut vitals,
             None,
+            None,
             &mut swarm
         ));
         assert_eq!(state.agents.dock_tab, AgentOpsTab::Dag);
@@ -14307,6 +14895,7 @@ mod tests {
             &mut state,
             &mut vitals,
             None,
+            None,
             &mut swarm
         ));
         assert_eq!(state.agents.dock_tab, AgentOpsTab::Dag);
@@ -14350,6 +14939,7 @@ mod tests {
             KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
             &mut state,
             &mut vitals,
+            None,
             None,
             &mut swarm
         ));
@@ -14399,6 +14989,7 @@ mod tests {
             &mut state,
             &mut vitals,
             None,
+            None,
             &mut swarm
         ));
         assert!(state
@@ -14445,6 +15036,7 @@ mod tests {
             KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
             &mut state,
             &mut vitals,
+            None,
             None,
             &mut swarm
         ));
@@ -14494,6 +15086,7 @@ mod tests {
             &mut state,
             &mut vitals,
             None,
+            None,
             &mut swarm
         ));
         assert!(state
@@ -14517,6 +15110,7 @@ mod tests {
             &mut state,
             &mut vitals,
             None,
+            None,
             &mut swarm
         ));
         assert_eq!(state.agents.chat_input, "");
@@ -14537,12 +15131,14 @@ mod tests {
             &mut state,
             &mut vitals,
             None,
+            None,
             &mut swarm
         ));
         assert!(handle_agent_station_key(
             KeyEvent::new(KeyCode::Char('l'), KeyModifiers::empty()),
             &mut state,
             &mut vitals,
+            None,
             None,
             &mut swarm
         ));
@@ -14552,6 +15148,7 @@ mod tests {
             KeyEvent::new(KeyCode::Right, KeyModifiers::empty()),
             &mut state,
             &mut vitals,
+            None,
             None,
             &mut swarm
         ));
@@ -14572,6 +15169,7 @@ mod tests {
             &mut state,
             &mut vitals,
             None,
+            None,
             &mut swarm
         ));
         assert_eq!(state.agents.chat_input_cursor, 7);
@@ -14581,6 +15179,7 @@ mod tests {
             &mut state,
             &mut vitals,
             None,
+            None,
             &mut swarm
         ));
         assert_eq!(state.agents.chat_input_cursor, 10);
@@ -14589,6 +15188,7 @@ mod tests {
             KeyEvent::new(KeyCode::Up, KeyModifiers::empty()),
             &mut state,
             &mut vitals,
+            None,
             None,
             &mut swarm
         ));
@@ -14610,6 +15210,7 @@ mod tests {
             &mut state,
             &mut vitals,
             None,
+            None,
             &mut swarm
         ));
         assert_eq!(state.agents.chat_input_cursor, 4);
@@ -14619,6 +15220,7 @@ mod tests {
             KeyEvent::new(KeyCode::Up, KeyModifiers::empty()),
             &mut state,
             &mut vitals,
+            None,
             None,
             &mut swarm
         ));
@@ -14640,6 +15242,7 @@ mod tests {
             &mut state,
             &mut vitals,
             None,
+            None,
             &mut swarm
         ));
 
@@ -14650,6 +15253,7 @@ mod tests {
             &mut state,
             &mut vitals,
             None,
+            None,
             &mut swarm
         ));
 
@@ -14657,6 +15261,7 @@ mod tests {
             KeyEvent::new(KeyCode::Up, KeyModifiers::empty()),
             &mut state,
             &mut vitals,
+            None,
             None,
             &mut swarm
         ));
@@ -14668,6 +15273,7 @@ mod tests {
             &mut state,
             &mut vitals,
             None,
+            None,
             &mut swarm
         ));
         assert_eq!(state.agents.chat_input, "first");
@@ -14678,6 +15284,7 @@ mod tests {
             &mut state,
             &mut vitals,
             None,
+            None,
             &mut swarm
         ));
         assert_eq!(state.agents.chat_input, "second");
@@ -14686,6 +15293,7 @@ mod tests {
             KeyEvent::new(KeyCode::Down, KeyModifiers::empty()),
             &mut state,
             &mut vitals,
+            None,
             None,
             &mut swarm
         ));
@@ -14707,6 +15315,7 @@ mod tests {
             &mut state,
             &mut vitals,
             None,
+            None,
             &mut swarm
         ));
         state.agents.chat_input = "two".into();
@@ -14715,6 +15324,7 @@ mod tests {
             KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()),
             &mut state,
             &mut vitals,
+            None,
             None,
             &mut swarm
         ));
@@ -14726,6 +15336,7 @@ mod tests {
             &mut state,
             &mut vitals,
             None,
+            None,
             &mut swarm
         ));
         assert_eq!(state.agents.chat_input, "two");
@@ -14734,6 +15345,7 @@ mod tests {
             KeyEvent::new(KeyCode::Down, KeyModifiers::empty()),
             &mut state,
             &mut vitals,
+            None,
             None,
             &mut swarm
         ));
@@ -14875,6 +15487,7 @@ mod tests {
             &mut state,
             &mut vitals,
             None,
+            None,
             &mut swarm
         ));
         assert_eq!(state.agents.messages.len(), 1);
@@ -14898,6 +15511,7 @@ mod tests {
             KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
             &mut state,
             &mut vitals,
+            None,
             None,
             &mut swarm
         ));
@@ -15449,6 +16063,7 @@ mod tests {
             &mut state,
             &mut vitals,
             None,
+            None,
             &swarm,
         ));
         assert!(state
@@ -15464,6 +16079,7 @@ mod tests {
             KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
             &mut state,
             &mut vitals,
+            None,
             None,
             &swarm,
         ));
@@ -15544,6 +16160,7 @@ mod tests {
             &mut state,
             &mut swarm,
             &mut vitals,
+            None,
             None,
             &mut clipboard,
             screen,
@@ -17215,6 +17832,7 @@ k = 2
             &mut state,
             &mut vitals,
             None,
+            None,
             &mut swarm
         ));
         assert!(state.ui_selection.is_none());
@@ -17235,6 +17853,7 @@ k = 2
             KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
             &mut state,
             &mut vitals,
+            None,
             None,
             &mut swarm
         ));
@@ -17359,6 +17978,7 @@ k = 2
             KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE),
             &mut state,
             &mut vitals,
+            None,
             None,
             &mut swarm
         ));
@@ -17513,6 +18133,7 @@ k = 2
             &mut state,
             &mut vitals,
             None,
+            None,
             &mut swarm
         ));
         assert_eq!(state.agents.dock_tab, AgentOpsTab::Roster);
@@ -17559,6 +18180,7 @@ k = 2
             &mut state,
             &mut vitals,
             None,
+            None,
             &mut swarm
         ));
         assert_eq!(state.agents.dock_tab, AgentOpsTab::Missions);
@@ -17567,6 +18189,7 @@ k = 2
             KeyEvent::new(KeyCode::Left, KeyModifiers::empty()),
             &mut state,
             &mut vitals,
+            None,
             None,
             &mut swarm
         ));

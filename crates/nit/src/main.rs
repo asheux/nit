@@ -445,6 +445,8 @@ fn main() -> anyhow::Result<()> {
         let (models, error) = probe_claude_models();
         state.agents.claude_models = models;
         state.agents.claude_models_error = error;
+        // Populate Claude model metadata (context windows, effort levels).
+        populate_claude_model_metadata(&mut state.agents);
     } else {
         state.agents.claude_models.clear();
         state.agents.claude_models_error = None;
@@ -519,7 +521,11 @@ fn main() -> anyhow::Result<()> {
         approval_policy: Some(cli.codex_approval_policy.as_str().to_string()),
         max_parallel_turns: cli.codex_max_parallel_turns as usize,
     };
-    run(state, theme, log_rx, codex_runtime, codex_config)?;
+    let claude_config = nit_tui::claude_runner::ClaudeRunnerConfig {
+        max_parallel_turns: cli.codex_max_parallel_turns as usize,
+        permission_mode: None,
+    };
+    run(state, theme, log_rx, codex_runtime, codex_config, claude_config)?;
     Ok(())
 }
 
@@ -2601,6 +2607,51 @@ fn sync_backend_model_lanes(agents: &mut nit_core::AgentsState, agents_arg: Agen
 
     agents.selected_agent = agents.agents.first().map(|lane| lane.id.clone());
     agents.roster_selected = 0;
+}
+
+/// Populate Claude model metadata (context windows, effort levels) for all probed models.
+fn populate_claude_model_metadata(agents: &mut nit_core::AgentsState) {
+    for model in agents.claude_models.iter() {
+        // Determine context window based on model name.
+        // Models with "[1m]" suffix have 1M context; others default to 200k.
+        let context_window: u32 = if model.contains("[1m]") || model.contains("1m") {
+            1_000_000
+        } else {
+            200_000
+        };
+        agents
+            .claude_effective_context_window_tokens
+            .insert(model.clone(), context_window);
+
+        // Determine supported effort levels. "max" is only available on Opus models.
+        let is_opus = model.to_lowercase().contains("opus");
+        let supported = if is_opus {
+            vec![
+                "low".to_string(),
+                "medium".to_string(),
+                "high".to_string(),
+                "max".to_string(),
+            ]
+        } else {
+            vec![
+                "low".to_string(),
+                "medium".to_string(),
+                "high".to_string(),
+            ]
+        };
+        agents
+            .claude_supported_efforts
+            .insert(model.clone(), supported);
+
+        // Default effort: "high" for all Claude models.
+        agents
+            .claude_default_effort
+            .insert(model.clone(), "high".to_string());
+        // Initialize selected effort to default.
+        agents
+            .claude_selected_effort
+            .insert(model.clone(), "high".to_string());
+    }
 }
 
 fn run_command_capture_timeout(
