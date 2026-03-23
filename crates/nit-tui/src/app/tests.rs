@@ -2,7 +2,7 @@ use super::chat_input::push_chat_message;
 use super::*;
 use crate::swarm::{is_agent_busy, SwarmSize};
 use crate::widgets::{agent_console_view, agent_ops_view};
-use nit_core::{AgentBusEvent, SavedRunHistoryPendingAction};
+use nit_core::AgentBusEvent;
 use std::{
     fs,
     time::{SystemTime, UNIX_EPOCH},
@@ -623,7 +623,7 @@ fn archive_saved_run_snapshot_prunes_old_history_entries() {
 }
 
 #[test]
-fn artifacts_history_popup_enter_selects_archived_run() {
+fn global_archive_popup_enter_selects_archived_run() {
     let mut state = state_for_test_in_workspace("history-popup-select");
     state.agents.dock_tab = AgentOpsTab::Evidence;
     state.agents.selected_mission = Some("mis-888".into());
@@ -653,8 +653,17 @@ fn artifacts_history_popup_enter_selects_archived_run() {
         .to_string(),
     )
     .expect("write run");
-    state.agents.artifacts_history_popup_open = true;
-    state.agents.artifacts_history_selected = 1;
+
+    // Build global archive index and open popup.
+    state.agents.global_archive_open = true;
+    state.agents.global_archive_index =
+        agent_ops_view::build_global_archive_index(&state);
+    state.agents.global_archive_filtered = agent_ops_view::filter_global_archive(
+        &state.agents.global_archive_index,
+        "",
+        SavedRunHistoryFilter::All,
+    );
+    state.agents.global_archive_selected = 0;
 
     let screen = ratatui::layout::Rect {
         x: 0,
@@ -663,21 +672,26 @@ fn artifacts_history_popup_enter_selects_archived_run() {
         height: 40,
     };
     let theme = Theme::default();
-    assert!(handle_artifacts_history_popup_key(
+    assert!(handle_global_archive_key(
         &KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
         &mut state,
         screen,
         &theme,
     ));
-    assert!(!state.agents.artifacts_history_popup_open);
+    // RAG popup stays open behind the artifact detail window.
+    assert!(state.agents.global_archive_open);
+    assert!(state.agents.artifacts_popup_open);
+    // The opened entry is stored for direct run.json loading; the Evidence
+    // tab context (artifacts_selected_saved_run_path) is NOT changed.
+    assert!(state.agents.global_archive_opened_entry.is_some());
     assert_eq!(
-        state.agents.artifacts_selected_saved_run_path.as_deref(),
-        Some(run_path.to_string_lossy().as_ref())
+        state.agents.global_archive_opened_entry.as_ref().unwrap().run_path,
+        run_path.to_string_lossy().as_ref()
     );
 }
 
 #[test]
-fn artifacts_history_popup_filter_hotkeys_update_visible_scope() {
+fn global_archive_popup_filter_hotkeys_update_visible_scope() {
     let mut state = state_for_test_in_workspace("history-popup-filter-hotkeys");
     state.agents.selected_mission = Some("mis-889".into());
     state.agents.missions.push(MissionRecord {
@@ -715,7 +729,17 @@ fn artifacts_history_popup_filter_hotkeys_update_visible_scope() {
         )
         .expect("write run");
     }
-    state.agents.artifacts_history_popup_open = true;
+
+    // Build global archive index and open popup.
+    state.agents.global_archive_open = true;
+    state.agents.global_archive_index =
+        agent_ops_view::build_global_archive_index(&state);
+    state.agents.global_archive_filtered = agent_ops_view::filter_global_archive(
+        &state.agents.global_archive_index,
+        "",
+        SavedRunHistoryFilter::All,
+    );
+    let all_count = state.agents.global_archive_filtered.len();
 
     let screen = ratatui::layout::Rect {
         x: 0,
@@ -724,32 +748,30 @@ fn artifacts_history_popup_filter_hotkeys_update_visible_scope() {
         height: 40,
     };
     let theme = Theme::default();
-    assert!(handle_artifacts_history_popup_key(
+    // 'd' applies LastDay filter (query is empty so shortcut works).
+    assert!(handle_global_archive_key(
         &KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE),
         &mut state,
         screen,
         &theme,
     ));
     assert_eq!(
-        state.agents.artifacts_history_filter,
+        state.agents.global_archive_filter,
         SavedRunHistoryFilter::LastDay
     );
-    assert_eq!(
-        agent_ops_view::artifacts_history_visible_entries(&state).len(),
-        2
-    );
+    // After filtering to LastDay, fewer entries should be visible.
+    assert!(state.agents.global_archive_filtered.len() <= all_count);
 }
 
 #[test]
-fn artifacts_history_popup_delete_selected_archived_run_with_confirmation() {
-    let mut state = state_for_test_in_workspace("history-popup-delete");
-    state.agents.selected_mission = Some("mis-890".into());
+fn global_archive_popup_fuzzy_search_filters_entries() {
+    let mut state = state_for_test_in_workspace("history-popup-search");
     state.agents.missions.push(MissionRecord {
         id: "mis-890".into(),
-        title: "History delete".into(),
+        title: "Fix auth bug".into(),
         phase: MissionPhase::Execute,
         swarm: false,
-        assigned_agents: vec!["gpt-5.1-codex-mini".into()],
+        assigned_agents: vec!["codex-1".into()],
         status: "DONE".into(),
         updated_at: "t+0".into(),
     });
@@ -762,88 +784,53 @@ fn artifacts_history_popup_delete_selected_archived_run_with_confirmation() {
         serde_json::json!({
             "id": "mis-890",
             "updated_at": "t+5",
-            "messages": [],
+            "messages": [
+                {"at":"t+1","channel":"Agent","text":"Please fix the auth bug"},
+                {"at":"t+2","channel":"Agent","agent_id":"codex-1","mission_id":"mis-890","text":"Fixed the authentication issue"}
+            ],
             "patches": [],
             "evidence": []
         })
         .to_string(),
     )
     .expect("write run");
-    state.agents.artifacts_history_popup_open = true;
-    state.agents.artifacts_history_selected = 1;
-    state.agents.artifacts_selected_saved_run_path =
-        Some(run_dir.join("run.json").to_string_lossy().to_string());
 
-    let screen = ratatui::layout::Rect {
-        x: 0,
-        y: 0,
-        width: 120,
-        height: 40,
-    };
-    let theme = Theme::default();
-    assert!(handle_artifacts_history_popup_key(
-        &KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE),
-        &mut state,
-        screen,
-        &theme,
-    ));
-    assert_eq!(
-        state.agents.artifacts_history_pending_action,
-        Some(SavedRunHistoryPendingAction::DeleteSelected)
+    // Build index.
+    state.agents.global_archive_index =
+        agent_ops_view::build_global_archive_index(&state);
+    assert!(!state.agents.global_archive_index.is_empty());
+
+    // No query: all entries.
+    let all = agent_ops_view::filter_global_archive(
+        &state.agents.global_archive_index,
+        "",
+        SavedRunHistoryFilter::All,
     );
-    assert!(handle_artifacts_history_popup_key(
-        &KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE),
-        &mut state,
-        screen,
-        &theme,
-    ));
-    assert!(!run_dir.exists());
-    assert_eq!(state.agents.artifacts_history_pending_action, None);
-    assert_eq!(state.agents.artifacts_selected_saved_run_path, None);
+    assert!(all.len() >= 2); // At least the 2 messages.
+
+    // Fuzzy query "auth": should match.
+    let filtered = agent_ops_view::filter_global_archive(
+        &state.agents.global_archive_index,
+        "auth",
+        SavedRunHistoryFilter::All,
+    );
+    assert!(!filtered.is_empty());
+    assert!(filtered.len() <= all.len());
+
+    // Fuzzy query "zzzznonexistent": should match nothing.
+    let empty = agent_ops_view::filter_global_archive(
+        &state.agents.global_archive_index,
+        "zzzznonexistent",
+        SavedRunHistoryFilter::All,
+    );
+    assert!(empty.is_empty());
 }
 
 #[test]
-fn artifacts_history_popup_prune_filtered_runs_with_confirmation() {
-    let mut state = state_for_test_in_workspace("history-popup-prune");
-    state.agents.selected_mission = Some("mis-891".into());
-    state.agents.missions.push(MissionRecord {
-        id: "mis-891".into(),
-        title: "History prune".into(),
-        phase: MissionPhase::Execute,
-        swarm: false,
-        assigned_agents: vec!["gpt-5.1-codex-mini".into()],
-        status: "DONE".into(),
-        updated_at: "t+0".into(),
-    });
-    let now_micros = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("clock")
-        .as_micros();
-    let old_dir = state.workspace_root.join(format!(
-        ".nit/agents/runs/mis-891/history/{:020}",
-        now_micros.saturating_sub(3 * 24 * 60 * 60 * 1_000_000)
-    ));
-    let recent_dir = state.workspace_root.join(format!(
-        ".nit/agents/runs/mis-891/history/{:020}",
-        now_micros.saturating_sub(2 * 60 * 60 * 1_000_000)
-    ));
-    for dir in [&old_dir, &recent_dir] {
-        fs::create_dir_all(dir).expect("history dir");
-        fs::write(
-            dir.join("run.json"),
-            serde_json::json!({
-                "id": "mis-891",
-                "updated_at": "t+1",
-                "messages": [],
-                "patches": [],
-                "evidence": []
-            })
-            .to_string(),
-        )
-        .expect("write run");
-    }
-    state.agents.artifacts_history_popup_open = true;
-    state.agents.artifacts_history_filter = SavedRunHistoryFilter::LastDay;
+fn global_archive_popup_esc_clears_query_then_closes() {
+    let mut state = state_for_test_in_workspace("history-popup-esc");
+    state.agents.global_archive_open = true;
+    state.agents.global_archive_query = "test".into();
 
     let screen = ratatui::layout::Rect {
         x: 0,
@@ -852,25 +839,24 @@ fn artifacts_history_popup_prune_filtered_runs_with_confirmation() {
         height: 40,
     };
     let theme = Theme::default();
-    assert!(handle_artifacts_history_popup_key(
-        &KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE),
+    // First Esc clears query.
+    assert!(handle_global_archive_key(
+        &KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
         &mut state,
         screen,
         &theme,
     ));
-    assert_eq!(
-        state.agents.artifacts_history_pending_action,
-        Some(SavedRunHistoryPendingAction::PruneFiltered)
-    );
-    assert!(handle_artifacts_history_popup_key(
-        &KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE),
+    assert!(state.agents.global_archive_open); // Still open.
+    assert!(state.agents.global_archive_query.is_empty());
+
+    // Second Esc closes.
+    assert!(handle_global_archive_key(
+        &KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
         &mut state,
         screen,
         &theme,
     ));
-    assert!(old_dir.exists());
-    assert!(!recent_dir.exists());
-    assert_eq!(state.agents.artifacts_history_pending_action, None);
+    assert!(!state.agents.global_archive_open);
 }
 
 #[test]

@@ -1,4 +1,4 @@
-use nit_core::{AgentMessage, AppState, UiSelectionPane};
+use nit_core::{AgentMessage, AppState, GlobalArchiveEntry, UiSelectionPane};
 use nit_syntax::{
     map_line_segments_to_chars, HighlightRequest, HighlightSnapshot, LanguageId, LanguageRegistry,
     MappedLineSegment, SyntaxConfig, SyntaxEngine, SyntaxManager,
@@ -162,6 +162,53 @@ pub fn content_area_height(
     inner.height.saturating_sub(input_box_height)
 }
 
+/// Load artifact content directly from a run.json using the archive entry's
+/// `run_path` and `artifact_index`.  This avoids card-index mismatches that
+/// caused the wrong artifact (e.g. a prompt instead of a reply) to be shown.
+fn build_lines_from_archive_entry(
+    state: &AppState,
+    entry: &GlobalArchiveEntry,
+    theme: &Theme,
+    width: usize,
+) -> Option<Vec<Line<'static>>> {
+    let path = std::path::PathBuf::from(&entry.run_path);
+    let text = std::fs::read_to_string(&path).ok()?;
+    let run: serde_json::Value = serde_json::from_str(&text).ok()?;
+    let idx = entry.artifact_index;
+
+    match entry.kind {
+        "PROMPT" | "REPLY" => {
+            let messages = run.get("messages")?.as_array()?;
+            let msg_val = messages.get(idx)?;
+            let msg: AgentMessage = serde_json::from_value(msg_val.clone()).ok()?;
+            Some(build_message_lines(state, &msg, theme, width))
+        }
+        "PATCH" => {
+            let patches = run.get("patches")?.as_array()?;
+            let patch_val = patches.get(idx)?;
+            let patch: agent_ops_view::PersistedPatchRecord =
+                serde_json::from_value(patch_val.clone()).ok()?;
+            let diff_path = path
+                .parent()
+                .map(|p| p.join(&patch.id).to_string_lossy().to_string());
+            Some(build_persisted_patch_lines(
+                &patch,
+                diff_path.as_deref(),
+                theme,
+                width,
+            ))
+        }
+        "EVIDENCE" => {
+            let evidence = run.get("evidence")?.as_array()?;
+            let ev_val = evidence.get(idx)?;
+            let item: nit_core::EvidenceItem =
+                serde_json::from_value(ev_val.clone()).ok()?;
+            Some(build_persisted_evidence_lines(&item, theme, width))
+        }
+        _ => None,
+    }
+}
+
 pub fn build_lines(
     state: &AppState,
     swarm: &SwarmRuntime,
@@ -169,6 +216,17 @@ pub fn build_lines(
     width: u16,
 ) -> Vec<Line<'static>> {
     let width_usize = width.max(1) as usize;
+
+    // If opened from the global archive, load the exact artifact directly from
+    // the run.json using the stored entry, bypassing card-index matching.
+    if let Some(entry) = &state.agents.global_archive_opened_entry {
+        if let Some(lines) =
+            build_lines_from_archive_entry(state, entry, theme, width_usize)
+        {
+            return lines;
+        }
+    }
+
     if let Some(reference) = agent_ops_view::artifacts_popup_ref(state, swarm, width_usize) {
         match reference {
             agent_ops_view::ArtifactsPopupRef::Message { idx } => {
@@ -195,6 +253,15 @@ pub fn build_lines(
                 if let Some(view) = swarm.swarm_persistence(mission_id.as_str()) {
                     return build_swarm_verify_lines(&view, theme, width_usize);
                 }
+            }
+            agent_ops_view::ArtifactsPopupRef::PersistedMessage { message } => {
+                return build_message_lines(state, &message, theme, width_usize);
+            }
+            agent_ops_view::ArtifactsPopupRef::PersistedPatch { patch, path } => {
+                return build_persisted_patch_lines(&patch, path.as_deref(), theme, width_usize);
+            }
+            agent_ops_view::ArtifactsPopupRef::PersistedEvidence { item } => {
+                return build_persisted_evidence_lines(&item, theme, width_usize);
             }
             agent_ops_view::ArtifactsPopupRef::Patch { .. }
             | agent_ops_view::ArtifactsPopupRef::Evidence { .. } => {}
@@ -627,6 +694,118 @@ fn build_message_lines(
     out.extend(agent_console_view::message_lines_for_popup(
         state, message, theme, width,
     ));
+    out
+}
+
+fn build_persisted_patch_lines(
+    patch: &agent_ops_view::PersistedPatchRecord,
+    path: Option<&str>,
+    theme: &Theme,
+    width: usize,
+) -> Vec<Line<'static>> {
+    let label_style = Style::default()
+        .fg(theme.border)
+        .add_modifier(Modifier::DIM);
+    let value_style = Style::default().fg(theme.foreground);
+
+    let mut out = Vec::new();
+    out.push(popup_title_line(
+        &format!(" PATCH  {}  {}", patch.agent_id, patch.status),
+        theme,
+    ));
+    out.push(popup_rule_line(width, theme));
+    out.push(kv_line("id:", &patch.id, label_style, value_style));
+    out.push(kv_line("title:", &patch.title, label_style, value_style));
+    if !patch.summary.is_empty() {
+        out.push(kv_line("summary:", &patch.summary, label_style, value_style));
+    }
+    out.push(kv_line(
+        "mission:",
+        patch.mission_id.as_deref().unwrap_or("ad-hoc"),
+        label_style,
+        value_style,
+    ));
+    out.push(popup_rule_line(width, theme));
+
+    // Diff content.
+    let diff_text = if !patch.diff.trim().is_empty() {
+        patch.diff.clone()
+    } else if let Some(p) = path {
+        std::fs::read_to_string(p).unwrap_or_default()
+    } else {
+        String::new()
+    };
+
+    if diff_text.trim().is_empty() {
+        out.push(Line::from(Span::styled(
+            " (no diff content)",
+            label_style,
+        )));
+    } else {
+        for line in diff_text.lines() {
+            let style = if line.starts_with('+') && !line.starts_with("+++") {
+                Style::default().fg(theme.success)
+            } else if line.starts_with('-') && !line.starts_with("---") {
+                Style::default().fg(theme.error)
+            } else if line.starts_with("@@") {
+                Style::default().fg(theme.title_focused)
+            } else {
+                value_style
+            };
+            out.push(Line::from(Span::styled(
+                format!(" {line}"),
+                style,
+            )));
+        }
+    }
+    out
+}
+
+fn build_persisted_evidence_lines(
+    item: &nit_core::EvidenceItem,
+    theme: &Theme,
+    width: usize,
+) -> Vec<Line<'static>> {
+    let label_style = Style::default()
+        .fg(theme.border)
+        .add_modifier(Modifier::DIM);
+    let value_style = Style::default().fg(theme.foreground);
+
+    let mut out = Vec::new();
+    let owner = item.agent_id.as_deref().unwrap_or("system");
+    out.push(popup_title_line(
+        &format!(" EVIDENCE  {owner}"),
+        theme,
+    ));
+    out.push(popup_rule_line(width, theme));
+    out.push(kv_line("title:", &item.title, label_style, value_style));
+    out.push(kv_line(
+        "mission:",
+        item.mission_id.as_deref().unwrap_or("ad-hoc"),
+        label_style,
+        value_style,
+    ));
+    if let Some(link) = item.link.as_deref() {
+        if !link.is_empty() {
+            out.push(kv_line("link:", link, label_style, value_style));
+        }
+    }
+    out.push(popup_rule_line(width, theme));
+
+    let body = item.detail.trim();
+    if body.is_empty() {
+        out.push(Line::from(Span::styled(
+            " (no content)",
+            label_style,
+        )));
+    } else {
+        for line in body.lines() {
+            out.push(Line::from(Span::styled(
+                format!(" {line}"),
+                value_style,
+            )));
+        }
+    }
     out
 }
 

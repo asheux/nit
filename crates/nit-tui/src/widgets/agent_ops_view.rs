@@ -1,7 +1,7 @@
 use nit_core::{
     AgentAlertSeverity, AgentLaneKind, AgentMessage, AgentOpsTab, AgentStatus, AppKind, AppState,
-    EvidenceItem, McpConnectionState, PaneId, RosterTreeBranch, RosterTreeSelection,
-    SavedRunHistoryFilter, UiSelectionPane,
+    EvidenceItem, GlobalArchiveEntry, GlobalArchiveSourceKind, McpConnectionState, PaneId,
+    RosterTreeBranch, RosterTreeSelection, SavedRunHistoryFilter, UiSelectionPane,
 };
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
@@ -1939,20 +1939,20 @@ const ARTIFACT_CARD_LIMIT_PATCHES: usize = 24;
 const ARTIFACT_CARD_LIMIT_EVIDENCE: usize = 24;
 
 #[derive(Clone, Debug, Default, serde::Deserialize)]
-struct PersistedPatchRecord {
-    id: String,
+pub struct PersistedPatchRecord {
+    pub id: String,
     #[serde(default)]
-    mission_id: Option<String>,
+    pub mission_id: Option<String>,
     #[serde(default)]
-    agent_id: String,
+    pub agent_id: String,
     #[serde(default)]
-    title: String,
+    pub title: String,
     #[serde(default)]
-    summary: String,
+    pub summary: String,
     #[serde(default)]
-    diff: String,
+    pub diff: String,
     #[serde(default)]
-    status: String,
+    pub status: String,
 }
 
 #[derive(Clone, Debug, Default, serde::Deserialize)]
@@ -2202,6 +2202,37 @@ where
     entries
 }
 
+/// When no archived snapshots exist, surface the current `run.json` (written
+/// continuously by the flush loop) so the history popup is never empty while
+/// the user has active data.
+fn current_run_as_history_entry<F>(
+    run_path: &Path,
+    make_detail: F,
+) -> Option<SavedArtifactsRunEntry>
+where
+    F: FnOnce(&PersistedArtifactsRun) -> String,
+{
+    let run = load_persisted_artifacts_run(run_path.to_path_buf())?;
+    let updated = persisted_run_updated_label(&run);
+    let counts = make_detail(&run);
+    let modified_micros = fs::metadata(run_path)
+        .ok()
+        .and_then(|m| m.modified().ok())
+        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+        .map(|d| d.as_micros());
+    let now_micros = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_micros();
+    Some(SavedArtifactsRunEntry {
+        kind: SavedArtifactsRunKind::Archived,
+        label: format_saved_run_relative_label_from_micros(modified_micros, now_micros),
+        detail: saved_run_detail_label(modified_micros, &updated, &counts),
+        run_path: Some(run_path.to_string_lossy().to_string()),
+        archive_micros: modified_micros,
+    })
+}
+
 fn mission_run_counts(run: &PersistedArtifactsRun, mission_id: &str) -> (usize, usize, usize) {
     let messages = run
         .messages
@@ -2253,21 +2284,49 @@ pub fn artifacts_history_entries(state: &AppState) -> Vec<SavedArtifactsRunEntry
     }];
 
     if let Some(mission_id) = state.agents.selected_context_mission() {
-        entries.extend(history_entries_for_root(
+        let archived = history_entries_for_root(
             persisted_mission_history_root(state, mission_id),
             |run| {
                 let (messages, patches, evidence) = mission_run_counts(run, mission_id);
                 format!("{messages} msgs · {patches} patches · {evidence} evidence")
             },
-        ));
+        );
+        if archived.is_empty() {
+            // No archived snapshots yet — surface the current run.json so the
+            // user sees their data before they've ever reset context.
+            let run_path = persisted_mission_run_path(state, mission_id);
+            if let Some(entry) =
+                current_run_as_history_entry(&run_path, |run| {
+                    let (messages, patches, evidence) = mission_run_counts(run, mission_id);
+                    format!("{messages} msgs · {patches} patches · {evidence} evidence")
+                })
+            {
+                entries.push(entry);
+            }
+        } else {
+            entries.extend(archived);
+        }
     } else if let Some(agent_id) = state.agents.selected_context_agent() {
-        entries.extend(history_entries_for_root(
+        let archived = history_entries_for_root(
             persisted_ad_hoc_history_root(state, agent_id),
             |run| {
                 let (messages, patches, evidence) = ad_hoc_run_counts(run, agent_id);
                 format!("{messages} msgs · {patches} patches · {evidence} evidence")
             },
-        ));
+        );
+        if archived.is_empty() {
+            let run_path = persisted_ad_hoc_run_path(state, agent_id);
+            if let Some(entry) =
+                current_run_as_history_entry(&run_path, |run| {
+                    let (messages, patches, evidence) = ad_hoc_run_counts(run, agent_id);
+                    format!("{messages} msgs · {patches} patches · {evidence} evidence")
+                })
+            {
+                entries.push(entry);
+            }
+        } else {
+            entries.extend(archived);
+        }
     }
 
     entries
@@ -2350,6 +2409,507 @@ pub fn artifacts_history_summary_label(state: &AppState) -> String {
     } else {
         "current / latest saved run".into()
     }
+}
+
+// ---------------------------------------------------------------------------
+// Global Artifact Archive
+// ---------------------------------------------------------------------------
+
+const GLOBAL_ARCHIVE_PREVIEW_CHARS: usize = 120;
+/// Full-text chunk size for BM25 indexing (RAG best practice: 200-1000 tokens).
+const GLOBAL_ARCHIVE_FULLTEXT_CHARS: usize = 2000;
+
+struct ArchiveSourceCtx<'a> {
+    source: &'a str,
+    source_id: &'a str,
+    source_kind: GlobalArchiveSourceKind,
+}
+
+/// Tokenize text into lowercased words for BM25 scoring.
+fn tokenize_for_bm25(text: &str) -> Vec<String> {
+    text.split(|ch: char| !ch.is_alphanumeric() && ch != '_' && ch != '-')
+        .filter(|w| w.len() >= 2)
+        .map(|w| w.to_ascii_lowercase())
+        .collect()
+}
+
+/// Build the search haystack from full content (for fuzzy) and extract tokens (for BM25).
+fn build_search_fields(
+    kind: &str,
+    owner: &str,
+    source: &str,
+    full_text: &str,
+) -> (String, Vec<String>) {
+    let hay = format!(
+        "{kind} {owner} {source} {}",
+        summarize_text_preview(full_text, GLOBAL_ARCHIVE_FULLTEXT_CHARS)
+    )
+    .to_ascii_lowercase();
+    let tokens = tokenize_for_bm25(&hay);
+    (hay, tokens)
+}
+
+fn extract_run_entries(
+    run: &PersistedArtifactsRun,
+    run_path: &Path,
+    ctx: &ArchiveSourceCtx<'_>,
+    archive_micros: Option<u128>,
+    now_micros: u128,
+    out: &mut Vec<GlobalArchiveEntry>,
+) {
+    let run_path_str = run_path.to_string_lossy().to_string();
+    let time_label = format_saved_run_relative_label_from_micros(archive_micros, now_micros);
+
+    for (idx, msg) in run.messages.iter().enumerate() {
+        let kind: &'static str = if msg.agent_id.is_none() {
+            "PROMPT"
+        } else {
+            "REPLY"
+        };
+        let owner = msg.agent_id.as_deref().unwrap_or("You").to_string();
+        let preview = summarize_text_preview(&msg.text, GLOBAL_ARCHIVE_PREVIEW_CHARS);
+        let (search_hay, search_tokens) =
+            build_search_fields(kind, &owner, ctx.source, &msg.text);
+        out.push(GlobalArchiveEntry {
+            kind,
+            owner,
+            preview,
+            source: ctx.source.to_string(),
+            source_id: ctx.source_id.to_string(),
+            source_kind: ctx.source_kind.clone(),
+            time_label: time_label.clone(),
+            archive_micros,
+            run_path: run_path_str.clone(),
+            artifact_index: idx,
+            search_hay,
+            search_tokens,
+        });
+    }
+
+    for (idx, patch) in run.patches.iter().enumerate() {
+        let owner = if patch.agent_id.is_empty() {
+            "system".to_string()
+        } else {
+            patch.agent_id.clone()
+        };
+        let preview = if !patch.title.is_empty() {
+            summarize_text_preview(&patch.title, GLOBAL_ARCHIVE_PREVIEW_CHARS)
+        } else {
+            summarize_text_preview(&patch.summary, GLOBAL_ARCHIVE_PREVIEW_CHARS)
+        };
+        let full_text = if !patch.title.is_empty() {
+            &patch.title
+        } else {
+            &patch.summary
+        };
+        let (search_hay, search_tokens) =
+            build_search_fields("PATCH", &owner, ctx.source, full_text);
+        out.push(GlobalArchiveEntry {
+            kind: "PATCH",
+            owner,
+            preview,
+            source: ctx.source.to_string(),
+            source_id: ctx.source_id.to_string(),
+            source_kind: ctx.source_kind.clone(),
+            time_label: time_label.clone(),
+            archive_micros,
+            run_path: run_path_str.clone(),
+            artifact_index: idx,
+            search_hay,
+            search_tokens,
+        });
+    }
+
+    for (idx, item) in run.evidence.iter().enumerate() {
+        let owner = item.agent_id.as_deref().unwrap_or("system").to_string();
+        let preview = summarize_text_preview(&item.title, GLOBAL_ARCHIVE_PREVIEW_CHARS);
+        let (search_hay, search_tokens) =
+            build_search_fields("EVIDENCE", &owner, ctx.source, &item.title);
+        out.push(GlobalArchiveEntry {
+            kind: "EVIDENCE",
+            owner,
+            preview,
+            source: ctx.source.to_string(),
+            source_id: ctx.source_id.to_string(),
+            source_kind: ctx.source_kind.clone(),
+            time_label: time_label.clone(),
+            archive_micros,
+            run_path: run_path_str.clone(),
+            artifact_index: idx,
+            search_hay,
+            search_tokens,
+        });
+    }
+}
+
+/// Return file mtime as microseconds since epoch, or `None` if unavailable.
+fn file_mtime_micros(path: &Path) -> Option<u128> {
+    fs::metadata(path)
+        .ok()
+        .and_then(|m| m.modified().ok())
+        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+        .map(|d| d.as_micros())
+}
+
+/// Collect all run.json paths with their mtimes from the agents directory.
+fn discover_run_files(agents_root: &Path) -> Vec<(PathBuf, Option<u128>)> {
+    let mut files = Vec::new();
+
+    // Mission runs.
+    let runs_root = agents_root.join("runs");
+    if let Ok(read_dir) = fs::read_dir(&runs_root) {
+        for entry in read_dir.filter_map(|e| e.ok()) {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            // Current run.json.
+            let run_path = path.join("run.json");
+            if run_path.exists() {
+                let mtime = file_mtime_micros(&run_path);
+                files.push((run_path, mtime));
+            }
+            // History subdirectories.
+            let history = path.join("history");
+            if let Ok(hist_dir) = fs::read_dir(&history) {
+                for hentry in hist_dir.filter_map(|e| e.ok()) {
+                    let hp = hentry.path();
+                    if hp.is_dir() {
+                        let rp = hp.join("run.json");
+                        if rp.exists() {
+                            let mtime = file_mtime_micros(&rp);
+                            files.push((rp, mtime));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Ad-hoc runs.
+    let adhoc_root = agents_root.join("ad-hoc");
+    if let Ok(read_dir) = fs::read_dir(&adhoc_root) {
+        for entry in read_dir.filter_map(|e| e.ok()) {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            let run_path = path.join("run.json");
+            if run_path.exists() {
+                let mtime = file_mtime_micros(&run_path);
+                files.push((run_path, mtime));
+            }
+            let history = path.join("history");
+            if let Ok(hist_dir) = fs::read_dir(&history) {
+                for hentry in hist_dir.filter_map(|e| e.ok()) {
+                    let hp = hentry.path();
+                    if hp.is_dir() {
+                        let rp = hp.join("run.json");
+                        if rp.exists() {
+                            let mtime = file_mtime_micros(&rp);
+                            files.push((rp, mtime));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    files
+}
+
+/// Build the global archive index with incremental update support.
+///
+/// If `prev_index` is non-empty, entries from unchanged run.json files (same
+/// path and mtime) are carried forward without re-parsing.  Only new or
+/// modified files trigger JSON deserialization.
+pub fn build_global_archive_index(state: &AppState) -> Vec<GlobalArchiveEntry> {
+    let now_micros = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_micros();
+    let agents_root = state.workspace_root.join(".nit").join("agents");
+
+    // Discover all run.json files and their mtimes.
+    let run_files = discover_run_files(&agents_root);
+
+    // Build a lookup of cached entries keyed by (run_path, mtime) from the
+    // previous index so unchanged files can be carried forward.
+    let prev = &state.agents.global_archive_index;
+    let mut cache: std::collections::HashMap<(&str, Option<u128>), Vec<usize>> =
+        std::collections::HashMap::new();
+    for (idx, entry) in prev.iter().enumerate() {
+        cache
+            .entry((entry.run_path.as_str(), entry.archive_micros))
+            .or_default()
+            .push(idx);
+    }
+
+    let mut entries = Vec::new();
+
+    for (run_path, mtime) in &run_files {
+        let run_path_str = run_path.to_string_lossy().to_string();
+
+        // Incremental: if this file was in the previous index with the same
+        // mtime, carry forward cached entries (skip JSON parsing).
+        if let Some(cached_indices) = cache.get(&(run_path_str.as_str(), *mtime)) {
+            if !cached_indices.is_empty() {
+                for &idx in cached_indices {
+                    if let Some(entry) = prev.get(idx) {
+                        // Update the time label to reflect current time, clone the rest.
+                        let mut refreshed = entry.clone();
+                        refreshed.time_label = format_saved_run_relative_label_from_micros(
+                            entry.archive_micros,
+                            now_micros,
+                        );
+                        entries.push(refreshed);
+                    }
+                }
+                continue;
+            }
+        }
+
+        // New or modified file: parse and extract.
+        let Some(run) = load_persisted_artifacts_run(run_path.clone()) else {
+            continue;
+        };
+
+        // Determine source context from the path.
+        let (source, source_id, source_kind) =
+            resolve_run_source(state, run_path, &agents_root);
+        let archive_micros = run_path
+            .parent()
+            .and_then(persisted_history_archive_micros)
+            .or(*mtime);
+        let ctx = ArchiveSourceCtx {
+            source: &source,
+            source_id: &source_id,
+            source_kind,
+        };
+        extract_run_entries(&run, run_path, &ctx, archive_micros, now_micros, &mut entries);
+    }
+
+    entries.sort_by(|a, b| b.archive_micros.cmp(&a.archive_micros));
+    entries
+}
+
+/// Resolve source metadata from a run.json path.
+fn resolve_run_source(
+    state: &AppState,
+    run_path: &Path,
+    agents_root: &Path,
+) -> (String, String, GlobalArchiveSourceKind) {
+    let rel = run_path
+        .strip_prefix(agents_root)
+        .unwrap_or(run_path);
+    let components: Vec<&str> = rel
+        .components()
+        .filter_map(|c| c.as_os_str().to_str())
+        .collect();
+
+    // Pattern: runs/{mission_id}/[history/{ts}/]run.json
+    if components.first() == Some(&"runs") {
+        if let Some(&mission_id) = components.get(1) {
+            let source = state
+                .agents
+                .missions
+                .iter()
+                .find(|m| m.id == mission_id)
+                .map(|m| {
+                    if m.title.is_empty() {
+                        format!("mission: {mission_id}")
+                    } else {
+                        format!("mission: {}", m.title)
+                    }
+                })
+                .unwrap_or_else(|| format!("mission: {mission_id}"));
+            return (source, mission_id.to_string(), GlobalArchiveSourceKind::Mission);
+        }
+    }
+    // Pattern: ad-hoc/{agent_id}/[history/{ts}/]run.json
+    if components.first() == Some(&"ad-hoc") {
+        if let Some(&agent_id) = components.get(1) {
+            let source = format!("ad-hoc: {agent_id}");
+            return (source, agent_id.to_string(), GlobalArchiveSourceKind::AdHoc);
+        }
+    }
+    // Fallback.
+    let name = run_path
+        .parent()
+        .and_then(|p| p.file_name())
+        .and_then(|n| n.to_str())
+        .unwrap_or("unknown");
+    (name.to_string(), name.to_string(), GlobalArchiveSourceKind::AdHoc)
+}
+
+/// Compute BM25 score for a single document against query terms.
+///
+/// BM25 parameters: k1 controls term frequency saturation, b controls
+/// document length normalization. Standard defaults: k1=1.2, b=0.75.
+fn bm25_score(
+    doc_tokens: &[String],
+    query_terms: &[String],
+    _doc_count: usize,
+    avg_doc_len: f64,
+    idf_map: &std::collections::HashMap<String, f64>,
+) -> f64 {
+    const K1: f64 = 1.2;
+    const B: f64 = 0.75;
+    let dl = doc_tokens.len() as f64;
+    let mut score = 0.0;
+
+    for term in query_terms {
+        let idf = idf_map.get(term.as_str()).copied().unwrap_or(0.0);
+        if idf <= 0.0 {
+            continue;
+        }
+        // Term frequency in this document.
+        let tf = doc_tokens.iter().filter(|t| t.as_str() == term.as_str()).count() as f64;
+        if tf == 0.0 {
+            continue;
+        }
+        // BM25 TF component with length normalization.
+        let numerator = tf * (K1 + 1.0);
+        let denominator = tf + K1 * (1.0 - B + B * dl / avg_doc_len.max(1.0));
+        score += idf * numerator / denominator;
+    }
+
+    // BM25+ delta: ensure matching terms always contribute a minimum.
+    if score > 0.0 {
+        let delta = 0.5 * query_terms
+            .iter()
+            .filter(|t| doc_tokens.contains(t))
+            .count() as f64;
+        score += delta;
+    }
+
+    score
+}
+
+/// Build IDF (Inverse Document Frequency) map for query terms across the corpus.
+fn build_idf_map(
+    index: &[GlobalArchiveEntry],
+    query_terms: &[String],
+    time_filtered: &[usize],
+) -> std::collections::HashMap<String, f64> {
+    let n = time_filtered.len().max(1) as f64;
+    let mut idf_map = std::collections::HashMap::new();
+    for term in query_terms {
+        let df = time_filtered
+            .iter()
+            .filter(|&&idx| {
+                index
+                    .get(idx)
+                    .is_some_and(|e| e.search_tokens.contains(term))
+            })
+            .count() as f64;
+        // IDF formula: ln((N - df + 0.5) / (df + 0.5) + 1)
+        let idf = ((n - df + 0.5) / (df + 0.5) + 1.0).ln();
+        idf_map.insert(term.clone(), idf);
+    }
+    idf_map
+}
+
+pub fn filter_global_archive(
+    index: &[GlobalArchiveEntry],
+    query: &str,
+    filter: SavedRunHistoryFilter,
+) -> Vec<(i64, usize)> {
+    let now_micros = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_micros();
+    let window = saved_run_history_filter_window_micros(filter);
+
+    // Step 1: Time-window filter.
+    let time_filtered: Vec<usize> = index
+        .iter()
+        .enumerate()
+        .filter(|(_, entry)| {
+            if let Some(window_micros) = window {
+                if let Some(archive) = entry.archive_micros {
+                    now_micros.saturating_sub(archive) <= window_micros
+                } else {
+                    true
+                }
+            } else {
+                true
+            }
+        })
+        .map(|(idx, _)| idx)
+        .collect();
+
+    // No query: return all time-filtered entries sorted by recency (index order).
+    let needle = query.to_ascii_lowercase();
+    if needle.is_empty() {
+        return time_filtered.into_iter().map(|idx| (0i64, idx)).collect();
+    }
+
+    // Step 2: Tokenize query and build BM25 corpus statistics.
+    let query_terms = tokenize_for_bm25(&needle);
+    let needle_bytes = needle.as_bytes();
+
+    let avg_doc_len = if time_filtered.is_empty() {
+        1.0
+    } else {
+        time_filtered
+            .iter()
+            .filter_map(|&idx| index.get(idx))
+            .map(|e| e.search_tokens.len() as f64)
+            .sum::<f64>()
+            / time_filtered.len() as f64
+    };
+    let idf_map = build_idf_map(index, &query_terms, &time_filtered);
+    let doc_count = time_filtered.len();
+
+    // Step 3: Hybrid scoring — BM25 (relevance) + fuzzy (typo tolerance) + recency.
+    let mut results: Vec<(i64, usize)> = time_filtered
+        .iter()
+        .filter_map(|&idx| {
+            let entry = index.get(idx)?;
+
+            // BM25 score (token-level relevance).
+            let bm25 = bm25_score(
+                &entry.search_tokens,
+                &query_terms,
+                doc_count,
+                avg_doc_len,
+                &idf_map,
+            );
+
+            // Fuzzy score (character-level typo tolerance).
+            let fuzzy = crate::fuzzy_search_runner::fuzzy_score_bytes(
+                entry.search_hay.as_bytes(),
+                needle_bytes,
+            )
+            .map(|(s, _)| s)
+            .unwrap_or(0);
+
+            // Must match on at least one signal.
+            if bm25 <= 0.0 && fuzzy <= 0 {
+                return None;
+            }
+
+            // Recency boost: newer artifacts get a small bonus.
+            let recency_boost = entry
+                .archive_micros
+                .map(|micros| {
+                    let age_hours =
+                        now_micros.saturating_sub(micros) / (3_600 * 1_000_000);
+                    // Decay: 10 points for recent, tapering to 0 over ~30 days.
+                    10.0 / (1.0 + age_hours as f64 / 168.0)
+                })
+                .unwrap_or(0.0);
+
+            // Combined score: BM25 * 100 (dominant) + fuzzy + recency.
+            let combined =
+                (bm25 * 100.0) as i64 + fuzzy + recency_boost as i64;
+            Some((combined, idx))
+        })
+        .collect();
+
+    results.sort_by(|a, b| b.0.cmp(&a.0));
+    results
 }
 
 fn persisted_patch_diff_excerpt(patch: &PersistedPatchRecord, path: Option<&str>) -> String {
@@ -3633,6 +4193,28 @@ fn append_mission_provenance_lines(
         &format!(".nit/agents/runs/{mission_id}/thread.md"),
         width,
     );
+    // Show Claude session ID for the selected agent in this mission.
+    let claude_session = state
+        .agents
+        .selected_context_agent()
+        .and_then(|agent_id| {
+            state
+                .agents
+                .claude_mission_session_ids
+                .get(mission_id)?
+                .get(agent_id)
+                .cloned()
+        })
+        .or_else(|| {
+            state
+                .agents
+                .claude_mission_session_ids
+                .get(mission_id)
+                .and_then(|sessions| sessions.values().next().cloned())
+        });
+    if let Some(session_id) = claude_session.as_deref() {
+        push_wrapped_detail(out, "claude_session", session_id, width);
+    }
     if let Some(thread_id) = thread_id.as_deref() {
         push_wrapped_detail(out, "codex_thread", thread_id, width);
     }
@@ -3800,6 +4382,7 @@ fn append_ad_hoc_agent_lines(
         live_patches.len()
     };
     let thread_present = state.agents.codex_thread_ids.contains_key(agent_id)
+        || state.agents.claude_session_ids.contains_key(agent_id)
         || selected_archived
             .as_ref()
             .and_then(|(_, run)| run.codex_thread_id.as_ref())
@@ -3868,6 +4451,9 @@ fn append_ad_hoc_agent_lines(
         width,
     );
     push_wrapped_detail(out, "history", "Press R to browse saved runs.", width);
+    if let Some(session_id) = state.agents.claude_session_ids.get(agent_id) {
+        push_wrapped_detail(out, "claude_session", session_id.as_str(), width);
+    }
     if let Some(thread_id) = state
         .agents
         .codex_thread_ids
@@ -4199,6 +4785,9 @@ pub enum ArtifactsPopupRef {
     Message { idx: usize },
     Patch { idx: usize },
     Evidence { idx: usize },
+    PersistedMessage { message: AgentMessage },
+    PersistedPatch { patch: PersistedPatchRecord, path: Option<String> },
+    PersistedEvidence { item: EvidenceItem },
     SwarmTask { mission_id: String, task_id: String },
     SwarmReport { mission_id: String },
     SwarmVerify { mission_id: String },
@@ -4233,9 +4822,20 @@ pub fn artifacts_popup_ref(
         ArtifactRef::Message { idx } => Some(ArtifactsPopupRef::Message { idx: *idx }),
         ArtifactRef::Patch { idx } => Some(ArtifactsPopupRef::Patch { idx: *idx }),
         ArtifactRef::Evidence { idx } => Some(ArtifactsPopupRef::Evidence { idx: *idx }),
-        ArtifactRef::PersistedMessage { .. }
-        | ArtifactRef::PersistedPatch { .. }
-        | ArtifactRef::PersistedEvidence { .. } => None,
+        ArtifactRef::PersistedMessage { message } => {
+            Some(ArtifactsPopupRef::PersistedMessage {
+                message: message.clone(),
+            })
+        }
+        ArtifactRef::PersistedPatch { patch, path } => {
+            Some(ArtifactsPopupRef::PersistedPatch {
+                patch: patch.clone(),
+                path: path.clone(),
+            })
+        }
+        ArtifactRef::PersistedEvidence { item } => {
+            Some(ArtifactsPopupRef::PersistedEvidence { item: item.clone() })
+        }
         ArtifactRef::SwarmTask {
             mission_id,
             task_id,
@@ -4528,7 +5128,11 @@ pub fn artifacts_card_index_for_popup_ref(
         ArtifactsPopupRef::Message { idx } => {
             artifacts_card_index_for_message(state, swarm, width, *idx)
         }
-        ArtifactsPopupRef::Patch { .. } | ArtifactsPopupRef::Evidence { .. } => None,
+        ArtifactsPopupRef::Patch { .. }
+        | ArtifactsPopupRef::Evidence { .. }
+        | ArtifactsPopupRef::PersistedMessage { .. }
+        | ArtifactsPopupRef::PersistedPatch { .. }
+        | ArtifactsPopupRef::PersistedEvidence { .. } => None,
         ArtifactsPopupRef::SwarmTask {
             mission_id,
             task_id,
@@ -5238,7 +5842,7 @@ fn artifact_kv_value_style(
         "mission" | "mode" | "phase" | "status" => {
             base.fg(theme.accent).add_modifier(Modifier::BOLD)
         }
-        "codex_thread" | "root" | "run" | "path" | "log" | "link" => {
+        "codex_thread" | "claude_session" | "root" | "run" | "path" | "log" | "link" => {
             base.fg(theme.hl.link).add_modifier(Modifier::UNDERLINED)
         }
         "note" => base.fg(theme.border).add_modifier(Modifier::DIM),

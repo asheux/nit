@@ -54,6 +54,7 @@ pub use state::{
     AgentChannel, AgentConsoleRow, AgentConsoleRowKind, AgentConsoleRowsCache,
     AgentConsoleRowsCacheKey, AgentConsoleTab, AgentDiagnosticEvent, AgentLane, AgentLaneKind,
     AgentMessage, AgentOpsTab, AgentStatus, AgentsState, AppState, DirEntryModel, EvidenceItem,
+    GlobalArchiveEntry, GlobalArchiveSourceKind,
     FamilyRunBuildTimings, FileTreeKind, FileTreeRow, FileTreeState, GamesAnalysisRequest,
     GamesAnalysisState, GamesCaSimState, GamesConfigPreview, GamesFamilyRunRequest,
     GamesReplayRequest, GamesReplayState, GamesRunBrowserState, GamesRunEntry, GamesRunOverride,

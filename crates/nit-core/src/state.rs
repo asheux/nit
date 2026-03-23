@@ -265,6 +265,37 @@ pub enum SavedRunHistoryPendingAction {
     PruneFiltered,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum GlobalArchiveSourceKind {
+    Mission,
+    AdHoc,
+}
+
+#[derive(Clone, Debug)]
+pub struct GlobalArchiveEntry {
+    /// "PROMPT" | "REPLY" | "PATCH" | "EVIDENCE"
+    pub kind: &'static str,
+    pub owner: String,
+    /// Truncated display preview (~120 chars).
+    pub preview: String,
+    /// Mission title or "ad-hoc: {agent_id}".
+    pub source: String,
+    /// The mission_id or agent_id.
+    pub source_id: String,
+    pub source_kind: GlobalArchiveSourceKind,
+    /// Relative label ("saved 2h ago").
+    pub time_label: String,
+    pub archive_micros: Option<u128>,
+    /// Path to the run.json containing this artifact.
+    pub run_path: String,
+    /// Index of this artifact within the run's messages/patches/evidence arrays.
+    pub artifact_index: usize,
+    /// Pre-lowercased haystack for fuzzy matching: kind + owner + source + full_text.
+    pub search_hay: String,
+    /// Lowercased word tokens extracted from the full content (for BM25 scoring).
+    pub search_tokens: Vec<String>,
+}
+
 impl AgentOpsTab {
     pub fn label(self) -> &'static str {
         match self {
@@ -763,6 +794,30 @@ pub struct AgentsState {
     pub artifacts_history_filter: SavedRunHistoryFilter,
     #[serde(skip)]
     pub artifacts_history_pending_action: Option<SavedRunHistoryPendingAction>,
+    // --- Global Archive Browser ---
+    #[serde(skip)]
+    pub global_archive_open: bool,
+    #[serde(skip)]
+    pub global_archive_query: String,
+    #[serde(skip)]
+    pub global_archive_query_cursor: usize,
+    #[serde(skip)]
+    pub global_archive_selected: usize,
+    #[serde(skip)]
+    pub global_archive_scroll: usize,
+    #[serde(skip, default)]
+    pub global_archive_filter: SavedRunHistoryFilter,
+    /// Full index of all archive entries (built when popup opens).
+    #[serde(skip)]
+    pub global_archive_index: Vec<GlobalArchiveEntry>,
+    /// Filtered results: (score, index_into_global_archive_index).
+    #[serde(skip)]
+    pub global_archive_filtered: Vec<(i64, usize)>,
+    /// When an artifact is opened from the archive, this holds the entry so the
+    /// artifact popup can load the correct content directly from the run.json
+    /// instead of relying on card-index matching.
+    #[serde(skip)]
+    pub global_archive_opened_entry: Option<GlobalArchiveEntry>,
     #[serde(skip)]
     pub ops_scroll: usize,
     /// Job output viewport dimensions (Agent Ops body area). Runtime-only.
@@ -1089,6 +1144,15 @@ impl AgentsState {
             artifacts_selected_saved_run_path: None,
             artifacts_history_filter: SavedRunHistoryFilter::All,
             artifacts_history_pending_action: None,
+            global_archive_open: false,
+            global_archive_query: String::new(),
+            global_archive_query_cursor: 0,
+            global_archive_selected: 0,
+            global_archive_scroll: 0,
+            global_archive_filter: SavedRunHistoryFilter::All,
+            global_archive_index: Vec::new(),
+            global_archive_filtered: Vec::new(),
+            global_archive_opened_entry: None,
             ops_scroll: 0,
             ops_viewport_width: 0,
             ops_viewport_height: 0,
@@ -1212,6 +1276,15 @@ impl Default for AgentsState {
             artifacts_selected_saved_run_path: None,
             artifacts_history_filter: SavedRunHistoryFilter::All,
             artifacts_history_pending_action: None,
+            global_archive_open: false,
+            global_archive_query: String::new(),
+            global_archive_query_cursor: 0,
+            global_archive_selected: 0,
+            global_archive_scroll: 0,
+            global_archive_filter: SavedRunHistoryFilter::All,
+            global_archive_index: Vec::new(),
+            global_archive_filtered: Vec::new(),
+            global_archive_opened_entry: None,
             ops_scroll: 0,
             ops_viewport_width: 0,
             ops_viewport_height: 0,

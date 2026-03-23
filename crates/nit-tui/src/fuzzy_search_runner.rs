@@ -590,7 +590,7 @@ fn fuzzy_loop(cmd_rx: Receiver<FuzzyCommand>, event_tx: Sender<FuzzyEvent>) {
     }
 }
 
-fn fuzzy_score_bytes(hay: &[u8], needle: &[u8]) -> Option<(i64, Vec<usize>)> {
+pub(crate) fn fuzzy_score_bytes(hay: &[u8], needle: &[u8]) -> Option<(i64, Vec<usize>)> {
     if needle.is_empty() {
         return Some((0, Vec::new()));
     }

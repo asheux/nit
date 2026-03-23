@@ -55,7 +55,7 @@ use nit_core::{
     actions::Action, apply_action, io as core_io, AgentAlert, AgentAlertSeverity, AgentBusEvent,
     AgentChannel, AgentDiagnosticEvent, AgentMessage, AgentOpsTab, AgentStatus, AppKind, AppState,
     McpConnectionState, MissionPhase, MissionRecord, Mode, PaneId, PatchProposal, PatchStatus,
-    Prompt, SavedRunHistoryFilter, SavedRunHistoryPendingAction, SearchMode, UiSelection,
+    Prompt, SavedRunHistoryFilter, SearchMode, UiSelection,
     UiSelectionPane, YankKind, CONSOLE_SCROLL_BOTTOM,
 };
 use nit_games::config::GamesConfig;
@@ -695,13 +695,6 @@ fn run_loop(
                         needs_redraw = true;
                         continue;
                     }
-                    if state.agents.artifacts_history_popup_open {
-                        let screen = terminal.size().unwrap_or_default();
-                        if handle_artifacts_history_popup_key(&key, state, screen, theme) {
-                            needs_redraw = true;
-                            continue;
-                        }
-                    }
                     if state.agents.artifacts_popup_open {
                         let screen = terminal.size().unwrap_or_default();
                         if handle_artifacts_popup_key(
@@ -715,6 +708,13 @@ fn run_loop(
                             screen,
                             theme,
                         ) {
+                            needs_redraw = true;
+                            continue;
+                        }
+                    }
+                    if state.agents.global_archive_open {
+                        let screen = terminal.size().unwrap_or_default();
+                        if handle_global_archive_key(&key, state, screen, theme) {
                             needs_redraw = true;
                             continue;
                         }
@@ -1710,7 +1710,7 @@ fn draw(
         if state.rule_picker.open {
             rule_picker::render(f, screen, state, theme);
         }
-        if state.agents.artifacts_history_popup_open {
+        if state.agents.global_archive_open {
             let area = dynamic_popup_rect(screen, artifacts_history_popup::preferred_size(screen));
             artifacts_history_popup::render(f, area, state, theme);
         }
@@ -2652,11 +2652,20 @@ fn handle_agent_ops_key(
             modifiers,
             ..
         } if modifiers.is_empty() && state.agents.dock_tab == AgentOpsTab::Evidence => {
-            state.agents.artifacts_history_popup_open = true;
-            state.agents.artifacts_history_selected =
-                agent_ops_view::artifacts_selected_visible_history_entry(state);
-            state.agents.artifacts_history_popup_scroll = 0;
-            state.agents.artifacts_history_pending_action = None;
+            state.agents.global_archive_open = true;
+            state.agents.global_archive_query.clear();
+            state.agents.global_archive_query_cursor = 0;
+            state.agents.global_archive_selected = 0;
+            state.agents.global_archive_scroll = 0;
+            state.agents.global_archive_filter = SavedRunHistoryFilter::All;
+            state.agents.global_archive_index =
+                agent_ops_view::build_global_archive_index(state);
+            state.agents.global_archive_filtered =
+                agent_ops_view::filter_global_archive(
+                    &state.agents.global_archive_index,
+                    "",
+                    SavedRunHistoryFilter::All,
+                );
             changed = true;
         }
         KeyEvent {
@@ -3391,6 +3400,9 @@ fn reset_roster_context(state: &mut AppState, swarm: &SwarmRuntime) -> bool {
     state.agents.artifacts_history_popup_scroll = 0;
     state.agents.artifacts_history_popup_open = false;
     state.agents.artifacts_history_pending_action = None;
+    state.agents.global_archive_open = false;
+    state.agents.global_archive_index.clear();
+    state.agents.global_archive_filtered.clear();
 
     state.agents.diag_events.push(AgentDiagnosticEvent {
         severity: AgentAlertSeverity::Info,
@@ -5357,21 +5369,6 @@ fn handle_mouse_event_with_swarm(
                 return true;
             }
 
-            if state.agents.artifacts_history_popup_open {
-                let area =
-                    dynamic_popup_rect(screen, artifacts_history_popup::preferred_size(screen));
-                if point_in_rect(mouse.column, mouse.row, area) {
-                    let (max_scroll, _) =
-                        artifacts_history_popup_scroll_metrics(state, screen, theme);
-                    bump_scroll_clamped(
-                        &mut state.agents.artifacts_history_popup_scroll,
-                        delta,
-                        max_scroll,
-                    );
-                }
-                return true;
-            }
-
             if state.agents.artifacts_popup_open {
                 let area = dynamic_popup_rect(screen, artifacts_popup::preferred_size(screen));
                 if point_in_rect(mouse.column, mouse.row, area) {
@@ -5379,6 +5376,21 @@ fn handle_mouse_event_with_swarm(
                         artifacts_popup_scroll_metrics(state, swarm, screen, theme);
                     bump_scroll_clamped(
                         &mut state.agents.artifacts_popup_scroll,
+                        delta,
+                        max_scroll,
+                    );
+                }
+                return true;
+            }
+
+            if state.agents.global_archive_open {
+                let area =
+                    dynamic_popup_rect(screen, artifacts_history_popup::preferred_size(screen));
+                if point_in_rect(mouse.column, mouse.row, area) {
+                    let (max_scroll, _) =
+                        global_archive_scroll_metrics(state, screen, theme);
+                    bump_scroll_clamped(
+                        &mut state.agents.global_archive_scroll,
                         delta,
                         max_scroll,
                     );
@@ -5668,7 +5680,7 @@ fn popup_text_metrics(area: ratatui::layout::Rect, line_count: usize) -> (usize,
     )
 }
 
-fn artifacts_history_popup_scroll_metrics(
+fn global_archive_scroll_metrics(
     state: &AppState,
     screen: ratatui::layout::Rect,
     theme: &Theme,
@@ -5831,14 +5843,16 @@ fn clamp_modal_scroll_offsets(state: &mut AppState, screen: ratatui::layout::Rec
         let max_scroll = help_popup_max_scroll(screen, theme);
         state.help_scroll = state.help_scroll.min(max_scroll);
     }
-    if state.agents.artifacts_history_popup_open {
-        let (max_scroll, _) = artifacts_history_popup_scroll_metrics(state, screen, theme);
-        state.agents.artifacts_history_popup_scroll =
-            state.agents.artifacts_history_popup_scroll.min(max_scroll);
-        let max = agent_ops_view::artifacts_history_visible_entries(state)
+    if state.agents.global_archive_open {
+        let (max_scroll, _) = global_archive_scroll_metrics(state, screen, theme);
+        state.agents.global_archive_scroll =
+            state.agents.global_archive_scroll.min(max_scroll);
+        let max = state
+            .agents
+            .global_archive_filtered
             .len()
             .saturating_sub(1);
-        state.agents.artifacts_history_selected = state.agents.artifacts_history_selected.min(max);
+        state.agents.global_archive_selected = state.agents.global_archive_selected.min(max);
     }
     if state.app_kind != AppKind::Games {
         return;
@@ -6045,7 +6059,7 @@ fn map_artifacts_history_popup_mouse(
     theme: &Theme,
     clamp: bool,
 ) -> Option<(usize, usize, Vec<String>)> {
-    if !state.agents.artifacts_history_popup_open {
+    if !state.agents.global_archive_open {
         return None;
     }
     let area = dynamic_popup_rect(screen, artifacts_history_popup::preferred_size(screen));
@@ -6060,7 +6074,7 @@ fn map_artifacts_history_popup_mouse(
     }
     let height = text_area.height as usize;
     let max_scroll = text_lines.len().saturating_sub(height);
-    let scroll = state.agents.artifacts_history_popup_scroll.min(max_scroll);
+    let scroll = state.agents.global_archive_scroll.min(max_scroll);
     let (line_idx, col) = map_mouse_to_line_col(
         mouse,
         text_area,
@@ -7137,38 +7151,6 @@ fn handle_mouse_down_with_swarm(
     if state.rule_picker.open || state.protocol_picker.open {
         return true;
     }
-    if state.agents.artifacts_history_popup_open {
-        if let Some((line_idx, col, lines)) =
-            map_artifacts_history_popup_mouse(mouse, screen, state, theme, false)
-        {
-            if let Some(entry_idx) = artifacts_history_popup::entry_index_for_line(state, line_idx)
-            {
-                clear_artifacts_history_pending_action(state);
-                state.agents.artifacts_history_selected = entry_idx;
-            }
-            reset_ui_selection(state, input_state);
-            state.ui_selection = Some(UiSelection {
-                pane: UiSelectionPane::ArtifactsHistoryPopup,
-                start_line: line_idx,
-                start_col: col,
-                end_line: line_idx,
-                end_col: col,
-            });
-            input_state.mouse_select_anchor = Some(MouseSelectAnchor {
-                target: MouseSelectTarget::Ui(UiSelectionPane::ArtifactsHistoryPopup),
-                line: line_idx,
-                col,
-            });
-            update_ui_selection_text(
-                state,
-                UiSelectionPane::ArtifactsHistoryPopup,
-                &lines,
-                clipboard,
-                input_state,
-            );
-        }
-        return true;
-    }
     if state.agents.artifacts_popup_open {
         // Check if the click is inside the popup's chat input box first.
         let popup_area = dynamic_popup_rect(screen, artifacts_popup::preferred_size(screen));
@@ -7229,7 +7211,45 @@ fn handle_mouse_down_with_swarm(
             reset_ui_selection(state, input_state);
             state.agents.artifacts_popup_open = false;
             state.agents.artifacts_popup_scroll = 0;
+            state.agents.global_archive_opened_entry = None;
         }
+        return true;
+    }
+    if state.agents.global_archive_open {
+        if let Some((line_idx, col, lines)) =
+            map_artifacts_history_popup_mouse(mouse, screen, state, theme, false)
+        {
+            if let Some(entry_idx) = artifacts_history_popup::entry_index_for_line(state, line_idx)
+            {
+                // Click on already-selected entry opens it.
+                if state.agents.global_archive_selected == entry_idx {
+                    load_selected_global_archive_entry(state);
+                    return true;
+                }
+                state.agents.global_archive_selected = entry_idx;
+            }
+            reset_ui_selection(state, input_state);
+            state.ui_selection = Some(UiSelection {
+                pane: UiSelectionPane::ArtifactsHistoryPopup,
+                start_line: line_idx,
+                start_col: col,
+                end_line: line_idx,
+                end_col: col,
+            });
+            input_state.mouse_select_anchor = Some(MouseSelectAnchor {
+                target: MouseSelectTarget::Ui(UiSelectionPane::ArtifactsHistoryPopup),
+                line: line_idx,
+                col,
+            });
+            update_ui_selection_text(
+                state,
+                UiSelectionPane::ArtifactsHistoryPopup,
+                &lines,
+                clipboard,
+                input_state,
+            );
+        }
+        // Swallow clicks outside — don't close the RAG popup.
         return true;
     }
     if state.show_help {
@@ -8107,17 +8127,17 @@ fn mouse_drag_allowed(state: &AppState, anchor: MouseSelectAnchor) -> bool {
     if state.rule_picker.open || state.protocol_picker.open {
         return false;
     }
-    if state.agents.artifacts_history_popup_open {
-        return matches!(
-            anchor.target,
-            MouseSelectTarget::Ui(UiSelectionPane::ArtifactsHistoryPopup)
-        );
-    }
     if state.agents.artifacts_popup_open {
         return matches!(
             anchor.target,
             MouseSelectTarget::Ui(UiSelectionPane::ArtifactsPopup)
                 | MouseSelectTarget::PopupChatInput
+        );
+    }
+    if state.agents.global_archive_open {
+        return matches!(
+            anchor.target,
+            MouseSelectTarget::Ui(UiSelectionPane::ArtifactsHistoryPopup)
         );
     }
     if state.show_help {
@@ -9982,169 +10002,7 @@ fn maybe_open_artifact_popup_from_console_line(
     true
 }
 
-fn load_selected_artifacts_history_entry(state: &mut AppState) {
-    let entries = agent_ops_view::artifacts_history_visible_entries(state);
-    if entries.is_empty() {
-        state.agents.artifacts_selected_saved_run_path = None;
-    } else {
-        let selected = state
-            .agents
-            .artifacts_history_selected
-            .min(entries.len().saturating_sub(1));
-        state.agents.artifacts_selected_saved_run_path = entries
-            .get(selected)
-            .and_then(|entry| entry.run_path.clone());
-    }
-    state.agents.artifacts_selected = 0;
-    state.agents.ops_scroll = 0;
-    state.agents.artifacts_history_pending_action = None;
-}
-
-fn sync_artifacts_history_popup_selection(state: &mut AppState) {
-    let entries = agent_ops_view::artifacts_history_visible_entries(state);
-    if entries.is_empty() {
-        state.agents.artifacts_history_selected = 0;
-        state.agents.artifacts_selected_saved_run_path = None;
-        return;
-    }
-    let selected_path = state.agents.artifacts_selected_saved_run_path.as_deref();
-    let selected = entries
-        .iter()
-        .position(|entry| entry.run_path.as_deref() == selected_path)
-        .unwrap_or_else(|| {
-            state
-                .agents
-                .artifacts_history_selected
-                .min(entries.len().saturating_sub(1))
-        });
-    state.agents.artifacts_history_selected = selected.min(entries.len().saturating_sub(1));
-}
-
-fn clear_artifacts_history_pending_action(state: &mut AppState) {
-    state.agents.artifacts_history_pending_action = None;
-}
-
-fn remove_saved_run_entry(entry: &agent_ops_view::SavedArtifactsRunEntry) -> io::Result<bool> {
-    let Some(run_path) = entry.run_path.as_deref() else {
-        return Ok(false);
-    };
-    let run_path = PathBuf::from(run_path);
-    let target = if run_path.file_name().and_then(|name| name.to_str()) == Some("run.json") {
-        run_path.parent().map(Path::to_path_buf).unwrap_or(run_path)
-    } else {
-        run_path
-    };
-    if !target.exists() {
-        return Ok(false);
-    }
-    fs::remove_dir_all(target)?;
-    Ok(true)
-}
-
-fn delete_selected_artifacts_history_entry(
-    state: &mut AppState,
-    screen: ratatui::layout::Rect,
-    theme: &Theme,
-) -> bool {
-    let entries = agent_ops_view::artifacts_history_visible_entries(state);
-    let Some(entry) = entries.get(
-        state
-            .agents
-            .artifacts_history_selected
-            .min(entries.len().saturating_sub(1)),
-    ) else {
-        state.status = Some("No saved run selected.".into());
-        clear_artifacts_history_pending_action(state);
-        return true;
-    };
-    if !matches!(entry.kind, agent_ops_view::SavedArtifactsRunKind::Archived) {
-        state.status = Some("Current/latest saved run cannot be deleted.".into());
-        clear_artifacts_history_pending_action(state);
-        return true;
-    }
-    if !matches!(
-        state.agents.artifacts_history_pending_action,
-        Some(SavedRunHistoryPendingAction::DeleteSelected)
-    ) {
-        state.agents.artifacts_history_pending_action =
-            Some(SavedRunHistoryPendingAction::DeleteSelected);
-        state.status = Some(format!("Confirm delete for {}.", entry.label));
-        return true;
-    }
-    let deleted = match remove_saved_run_entry(entry) {
-        Ok(deleted) => deleted,
-        Err(err) => {
-            state.status = Some(format!("Failed to delete saved run: {err}"));
-            clear_artifacts_history_pending_action(state);
-            return true;
-        }
-    };
-    if deleted
-        && state.agents.artifacts_selected_saved_run_path.as_deref() == entry.run_path.as_deref()
-    {
-        state.agents.artifacts_selected_saved_run_path = None;
-    }
-    clear_artifacts_history_pending_action(state);
-    sync_artifacts_history_popup_selection(state);
-    adjust_artifacts_history_popup_scroll(state, screen, theme);
-    state.status = Some(if deleted {
-        format!("Deleted {}.", entry.label)
-    } else {
-        format!("Saved run {} was already missing.", entry.label)
-    });
-    true
-}
-
-fn prune_filtered_artifacts_history_entries(
-    state: &mut AppState,
-    screen: ratatui::layout::Rect,
-    theme: &Theme,
-) -> bool {
-    let prunable = agent_ops_view::artifacts_history_prunable_entries(state);
-    if prunable.is_empty() {
-        state.status = Some("No saved runs match the current filter.".into());
-        clear_artifacts_history_pending_action(state);
-        return true;
-    }
-    if !matches!(
-        state.agents.artifacts_history_pending_action,
-        Some(SavedRunHistoryPendingAction::PruneFiltered)
-    ) {
-        state.agents.artifacts_history_pending_action =
-            Some(SavedRunHistoryPendingAction::PruneFiltered);
-        state.status = Some(format!("Confirm prune for {} saved runs.", prunable.len()));
-        return true;
-    }
-    let selected_path = state.agents.artifacts_selected_saved_run_path.clone();
-    let mut removed = 0usize;
-    for entry in &prunable {
-        match remove_saved_run_entry(entry) {
-            Ok(true) => removed = removed.saturating_add(1),
-            Ok(false) => {}
-            Err(err) => {
-                state.status = Some(format!("Failed to prune saved runs: {err}"));
-                clear_artifacts_history_pending_action(state);
-                sync_artifacts_history_popup_selection(state);
-                adjust_artifacts_history_popup_scroll(state, screen, theme);
-                return true;
-            }
-        }
-    }
-    if selected_path.as_deref().is_some_and(|path| {
-        prunable
-            .iter()
-            .any(|entry| entry.run_path.as_deref() == Some(path))
-    }) {
-        state.agents.artifacts_selected_saved_run_path = None;
-    }
-    clear_artifacts_history_pending_action(state);
-    sync_artifacts_history_popup_selection(state);
-    adjust_artifacts_history_popup_scroll(state, screen, theme);
-    state.status = Some(format!("Pruned {removed} saved runs."));
-    true
-}
-
-fn adjust_artifacts_history_popup_scroll(
+fn adjust_global_archive_scroll(
     state: &mut AppState,
     screen: ratatui::layout::Rect,
     theme: &Theme,
@@ -10154,139 +10012,192 @@ fn adjust_artifacts_history_popup_scroll(
     let inner_height = text_area.height.max(1) as usize;
     let total = artifacts_history_popup::build_lines(state, theme, text_area.width).len();
     let max_scroll = total.saturating_sub(inner_height);
-    let selected_line = 6usize.saturating_add(state.agents.artifacts_history_selected);
-    if selected_line < state.agents.artifacts_history_popup_scroll {
-        state.agents.artifacts_history_popup_scroll = selected_line;
+    // HEADER_LINES = 4 (search bar, status, blank, column headers)
+    let selected_line = 4usize.saturating_add(state.agents.global_archive_selected);
+    if selected_line < state.agents.global_archive_scroll {
+        state.agents.global_archive_scroll = selected_line;
     } else if selected_line
         >= state
             .agents
-            .artifacts_history_popup_scroll
+            .global_archive_scroll
             .saturating_add(inner_height)
     {
-        state.agents.artifacts_history_popup_scroll =
+        state.agents.global_archive_scroll =
             selected_line.saturating_sub(inner_height.saturating_sub(1));
     }
-    state.agents.artifacts_history_popup_scroll =
-        state.agents.artifacts_history_popup_scroll.min(max_scroll);
+    state.agents.global_archive_scroll = state.agents.global_archive_scroll.min(max_scroll);
 }
 
-fn handle_artifacts_history_popup_key(
+fn recompute_global_archive_filter(state: &mut AppState) {
+    state.agents.global_archive_filtered = agent_ops_view::filter_global_archive(
+        &state.agents.global_archive_index,
+        &state.agents.global_archive_query,
+        state.agents.global_archive_filter,
+    );
+    state.agents.global_archive_selected = 0;
+    state.agents.global_archive_scroll = 0;
+}
+
+fn close_global_archive(state: &mut AppState) {
+    state.agents.global_archive_open = false;
+    state.agents.global_archive_scroll = 0;
+    state.agents.global_archive_index.clear();
+    state.agents.global_archive_filtered.clear();
+    if let Some(selection) = state.ui_selection {
+        if matches!(selection.pane, UiSelectionPane::ArtifactsHistoryPopup) {
+            state.ui_selection = None;
+        }
+    }
+}
+
+fn load_selected_global_archive_entry(state: &mut AppState) {
+    let selected = state.agents.global_archive_selected;
+    let Some(&(_, entry_idx)) = state.agents.global_archive_filtered.get(selected) else {
+        return;
+    };
+    let Some(entry) = state.agents.global_archive_index.get(entry_idx).cloned() else {
+        return;
+    };
+
+    // Store the entry so the artifact popup loads content directly from the
+    // run.json.  We intentionally do NOT change selected_mission,
+    // selected_agent, artifacts_selected_saved_run_path, or dock_tab — those
+    // control the Evidence tab which should keep showing current-session
+    // artifacts only.
+    state.agents.global_archive_opened_entry = Some(entry.clone());
+
+    // Open the artifact viewer popup on top of the RAG browser.
+    state.agents.artifacts_popup_open = true;
+    state.agents.artifacts_popup_scroll = 0;
+
+    state.status = Some(format!(
+        "Artifact: {} ({})",
+        entry.source, entry.time_label,
+    ));
+}
+
+fn handle_global_archive_key(
     key: &KeyEvent,
     state: &mut AppState,
     screen: ratatui::layout::Rect,
     theme: &Theme,
 ) -> bool {
-    if !state.agents.artifacts_history_popup_open {
+    if !state.agents.global_archive_open {
         return false;
     }
     if is_global_quit_key(key) {
         return false;
     }
-    let entries = agent_ops_view::artifacts_history_visible_entries(state);
-    let max = entries.len().saturating_sub(1);
-    let (_, page_step) = artifacts_history_popup_scroll_metrics(state, screen, theme);
+
+    let query_empty = state.agents.global_archive_query.is_empty();
+    let max = state
+        .agents
+        .global_archive_filtered
+        .len()
+        .saturating_sub(1);
+    let (_, page_step) = global_archive_scroll_metrics(state, screen, theme);
+
     match key.code {
-        KeyCode::Esc | KeyCode::Char('q') => {
-            clear_artifacts_history_pending_action(state);
-            state.agents.artifacts_history_popup_open = false;
-            state.agents.artifacts_history_popup_scroll = 0;
-            if let Some(selection) = state.ui_selection {
-                if matches!(selection.pane, UiSelectionPane::ArtifactsHistoryPopup) {
-                    state.ui_selection = None;
-                }
+        KeyCode::Esc => {
+            if !query_empty {
+                // First Esc clears the query.
+                state.agents.global_archive_query.clear();
+                state.agents.global_archive_query_cursor = 0;
+                recompute_global_archive_filter(state);
+            } else {
+                close_global_archive(state);
             }
             true
         }
+        KeyCode::Char('q') if query_empty => {
+            close_global_archive(state);
+            true
+        }
         KeyCode::Enter => {
-            load_selected_artifacts_history_entry(state);
-            state.agents.artifacts_history_popup_open = false;
-            state.status = Some(format!(
-                "Artifacts source: {}",
-                agent_ops_view::artifacts_history_summary_label(state)
-            ));
+            load_selected_global_archive_entry(state);
             true
         }
-        KeyCode::Char('r') | KeyCode::Char('R') | KeyCode::Char('c') | KeyCode::Char('C') => {
-            state.agents.artifacts_history_selected = 0;
-            load_selected_artifacts_history_entry(state);
-            state.agents.artifacts_history_popup_open = false;
-            state.status = Some("Artifacts source: current / latest saved run".into());
+        // Navigation: always available.
+        KeyCode::Up => {
+            state.agents.global_archive_selected =
+                state.agents.global_archive_selected.saturating_sub(1);
+            adjust_global_archive_scroll(state, screen, theme);
             true
         }
-        KeyCode::Delete | KeyCode::Char('x') | KeyCode::Char('X') => {
-            delete_selected_artifacts_history_entry(state, screen, theme)
-        }
-        KeyCode::Char('p') | KeyCode::Char('P') => {
-            prune_filtered_artifacts_history_entries(state, screen, theme)
-        }
-        KeyCode::Char('a') | KeyCode::Char('A') => {
-            clear_artifacts_history_pending_action(state);
-            state.agents.artifacts_history_filter = SavedRunHistoryFilter::All;
-            sync_artifacts_history_popup_selection(state);
-            adjust_artifacts_history_popup_scroll(state, screen, theme);
-            true
-        }
-        KeyCode::Char('d') | KeyCode::Char('D') => {
-            clear_artifacts_history_pending_action(state);
-            state.agents.artifacts_history_filter = SavedRunHistoryFilter::LastDay;
-            sync_artifacts_history_popup_selection(state);
-            adjust_artifacts_history_popup_scroll(state, screen, theme);
-            true
-        }
-        KeyCode::Char('w') | KeyCode::Char('W') => {
-            clear_artifacts_history_pending_action(state);
-            state.agents.artifacts_history_filter = SavedRunHistoryFilter::LastWeek;
-            sync_artifacts_history_popup_selection(state);
-            adjust_artifacts_history_popup_scroll(state, screen, theme);
-            true
-        }
-        KeyCode::Char('m') | KeyCode::Char('M') => {
-            clear_artifacts_history_pending_action(state);
-            state.agents.artifacts_history_filter = SavedRunHistoryFilter::LastMonth;
-            sync_artifacts_history_popup_selection(state);
-            adjust_artifacts_history_popup_scroll(state, screen, theme);
-            true
-        }
-        KeyCode::Up | KeyCode::Char('k') => {
-            clear_artifacts_history_pending_action(state);
-            state.agents.artifacts_history_selected =
-                state.agents.artifacts_history_selected.saturating_sub(1);
-            adjust_artifacts_history_popup_scroll(state, screen, theme);
-            true
-        }
-        KeyCode::Down | KeyCode::Char('j') => {
-            clear_artifacts_history_pending_action(state);
-            state.agents.artifacts_history_selected =
-                (state.agents.artifacts_history_selected + 1).min(max);
-            adjust_artifacts_history_popup_scroll(state, screen, theme);
+        KeyCode::Down => {
+            state.agents.global_archive_selected =
+                (state.agents.global_archive_selected + 1).min(max);
+            adjust_global_archive_scroll(state, screen, theme);
             true
         }
         KeyCode::PageUp => {
-            clear_artifacts_history_pending_action(state);
-            state.agents.artifacts_history_selected = state
+            state.agents.global_archive_selected = state
                 .agents
-                .artifacts_history_selected
+                .global_archive_selected
                 .saturating_sub(page_step);
-            adjust_artifacts_history_popup_scroll(state, screen, theme);
+            adjust_global_archive_scroll(state, screen, theme);
             true
         }
         KeyCode::PageDown => {
-            clear_artifacts_history_pending_action(state);
-            state.agents.artifacts_history_selected =
-                (state.agents.artifacts_history_selected + page_step).min(max);
-            adjust_artifacts_history_popup_scroll(state, screen, theme);
+            state.agents.global_archive_selected =
+                (state.agents.global_archive_selected + page_step).min(max);
+            adjust_global_archive_scroll(state, screen, theme);
             true
         }
         KeyCode::Home => {
-            clear_artifacts_history_pending_action(state);
-            state.agents.artifacts_history_selected = 0;
-            adjust_artifacts_history_popup_scroll(state, screen, theme);
+            state.agents.global_archive_selected = 0;
+            adjust_global_archive_scroll(state, screen, theme);
             true
         }
         KeyCode::End => {
-            clear_artifacts_history_pending_action(state);
-            state.agents.artifacts_history_selected = max;
-            adjust_artifacts_history_popup_scroll(state, screen, theme);
+            state.agents.global_archive_selected = max;
+            adjust_global_archive_scroll(state, screen, theme);
+            true
+        }
+        // Backspace: remove last char from query.
+        KeyCode::Backspace => {
+            if !query_empty {
+                state.agents.global_archive_query.pop();
+                state.agents.global_archive_query_cursor =
+                    state.agents.global_archive_query.chars().count();
+                recompute_global_archive_filter(state);
+            }
+            true
+        }
+        // Ctrl+U: clear query.
+        KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            state.agents.global_archive_query.clear();
+            state.agents.global_archive_query_cursor = 0;
+            recompute_global_archive_filter(state);
+            true
+        }
+        // Filter shortcuts: only when query is empty.
+        KeyCode::Char('a') | KeyCode::Char('A') if query_empty => {
+            state.agents.global_archive_filter = SavedRunHistoryFilter::All;
+            recompute_global_archive_filter(state);
+            true
+        }
+        KeyCode::Char('d') | KeyCode::Char('D') if query_empty => {
+            state.agents.global_archive_filter = SavedRunHistoryFilter::LastDay;
+            recompute_global_archive_filter(state);
+            true
+        }
+        KeyCode::Char('w') | KeyCode::Char('W') if query_empty => {
+            state.agents.global_archive_filter = SavedRunHistoryFilter::LastWeek;
+            recompute_global_archive_filter(state);
+            true
+        }
+        KeyCode::Char('m') | KeyCode::Char('M') if query_empty => {
+            state.agents.global_archive_filter = SavedRunHistoryFilter::LastMonth;
+            recompute_global_archive_filter(state);
+            true
+        }
+        // All other printable chars: append to search query.
+        KeyCode::Char(ch) => {
+            state.agents.global_archive_query.push(ch);
+            state.agents.global_archive_query_cursor =
+                state.agents.global_archive_query.chars().count();
+            recompute_global_archive_filter(state);
             true
         }
         _ => true,

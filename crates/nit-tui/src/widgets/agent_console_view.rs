@@ -1932,7 +1932,107 @@ fn format_message_rows(
                     kind: ThreadRowKind::Agent,
                 });
             }
-            for line in text_lines {
+            // Detect markdown table blocks and render them as card-style
+            // rows so that long cell content wraps instead of being truncated.
+            let mut line_idx = 0;
+            while line_idx < text_lines.len() {
+                let line = text_lines[line_idx];
+                let trimmed = line.trim_start();
+
+                // Detect a table block: header row, separator, data rows.
+                if trimmed.starts_with('|')
+                    && trimmed.matches('|').count() >= 3
+                    && line_idx + 1 < text_lines.len()
+                {
+                    let sep = text_lines[line_idx + 1].trim();
+                    let is_table_sep = sep.starts_with('|')
+                        && sep.contains("---");
+                    if is_table_sep {
+                        // Parse header columns.
+                        let headers: Vec<&str> = trimmed
+                            .trim_matches('|')
+                            .split('|')
+                            .map(str::trim)
+                            .collect();
+
+                        // Skip header + separator.
+                        line_idx += 2;
+
+                        // Emit a thin rule before the table.
+                        let rule = "─".repeat(max_inner.min(120));
+                        out.push(ThreadRow {
+                            text: format!("{indent_str}{rule}"),
+                            kind: ThreadRowKind::Agent,
+                        });
+
+                        // Process data rows.
+                        let mut row_num = 0usize;
+                        while line_idx < text_lines.len() {
+                            let row_line = text_lines[line_idx].trim();
+                            if !row_line.starts_with('|') {
+                                break;
+                            }
+                            let cells: Vec<&str> = row_line
+                                .trim_matches('|')
+                                .split('|')
+                                .map(str::trim)
+                                .collect();
+
+                            // Blank line between table rows for readability.
+                            if row_num > 0 {
+                                out.push(ThreadRow {
+                                    text: String::new(),
+                                    kind: ThreadRowKind::Agent,
+                                });
+                            }
+
+                            // Render each cell as "  Header: value", wrapping
+                            // the value if it's long.
+                            for (col_idx, cell) in cells.iter().enumerate() {
+                                if cell.is_empty() {
+                                    continue;
+                                }
+                                let label = headers
+                                    .get(col_idx)
+                                    .copied()
+                                    .unwrap_or("#");
+                                let prefix = format!("{indent_str}  {label}: ");
+                                let value_width =
+                                    max_inner.saturating_sub(prefix.len()).max(10);
+                                let segments = wrap_visual_line(cell, value_width);
+                                for (seg_idx, seg) in segments.iter().enumerate() {
+                                    let seg = seg.trim_end();
+                                    if seg_idx == 0 {
+                                        out.push(ThreadRow {
+                                            text: format!("{prefix}{seg}"),
+                                            kind: ThreadRowKind::Agent,
+                                        });
+                                    } else {
+                                        // Continuation lines aligned under
+                                        // the value.
+                                        let pad = " ".repeat(prefix.len());
+                                        out.push(ThreadRow {
+                                            text: format!("{pad}{seg}"),
+                                            kind: ThreadRowKind::Agent,
+                                        });
+                                    }
+                                }
+                            }
+                            row_num += 1;
+                            line_idx += 1;
+                        }
+
+                        // Rule after the table.
+                        let rule = "─".repeat(max_inner.min(120));
+                        out.push(ThreadRow {
+                            text: format!("{indent_str}{rule}"),
+                            kind: ThreadRowKind::Agent,
+                        });
+                        continue;
+                    }
+                }
+
+                // Normal (non-table) line: wrap as before.
                 for segment in wrap_visual_line(line, max_inner) {
                     let segment = segment.trim_end_matches(' ');
                     out.push(ThreadRow {
@@ -1944,6 +2044,7 @@ fn format_message_rows(
                         kind: ThreadRowKind::Agent,
                     });
                 }
+                line_idx += 1;
             }
         }
     }

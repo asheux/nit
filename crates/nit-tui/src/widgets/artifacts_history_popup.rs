@@ -1,22 +1,30 @@
-use nit_core::{AppState, SavedRunHistoryPendingAction, UiSelectionPane};
+use nit_core::{AppState, UiSelectionPane};
 use ratatui::{
     layout::Rect,
-    style::{Modifier, Style},
+    style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Clear, Paragraph, Wrap},
     Frame,
 };
 
 use crate::theme::Theme;
-use crate::widgets::agent_ops_view::{self, SavedArtifactsRunKind};
+use crate::widgets::agent_ops_view;
 use crate::widgets::text_selection::apply_ui_selection;
 
-const MIN_WIDTH: u16 = 72;
-const MIN_HEIGHT: u16 = 16;
+const MIN_WIDTH: u16 = 80;
+const MIN_HEIGHT: u16 = 14;
+
+/// Number of header lines before the scrollable entry list begins.
+const HEADER_LINES: usize = 4;
 
 pub fn preferred_size(screen: Rect) -> (u16, u16) {
-    let width = screen.width.clamp(MIN_WIDTH, 120);
-    let height = screen.height.clamp(MIN_HEIGHT, 28);
+    let width = (screen.width.saturating_mul(80) / 100)
+        .clamp(MIN_WIDTH, 140)
+        .min(screen.width);
+    // Compact height: enough for search bar + header + entries + footer.
+    let height = (screen.height.saturating_mul(65) / 100)
+        .clamp(MIN_HEIGHT, 36)
+        .min(screen.height);
     (width, height)
 }
 
@@ -35,17 +43,24 @@ fn trim_to_width(text: &str, max_width: usize) -> String {
     out
 }
 
-fn entry_start_line() -> usize {
-    6
-}
-
 pub fn entry_index_for_line(state: &AppState, line_idx: usize) -> Option<usize> {
-    let entries = agent_ops_view::artifacts_history_visible_entries(state);
-    if line_idx < entry_start_line() {
+    // Entries start right after HEADER_LINES (search, status, blank, column header).
+    // Each entry is exactly one line with no separators.
+    if line_idx < HEADER_LINES {
         return None;
     }
-    let entry_idx = line_idx - entry_start_line();
-    (entry_idx < entries.len()).then_some(entry_idx)
+    let entry_idx = line_idx - HEADER_LINES;
+    let count = state.agents.global_archive_filtered.len();
+    (entry_idx < count).then_some(entry_idx)
+}
+
+fn kind_color(kind: &str, theme: &Theme) -> Color {
+    match kind {
+        "REPLY" => theme.success,
+        "PATCH" => theme.warning,
+        "EVIDENCE" => theme.title_focused,
+        _ => theme.border, // PROMPT
+    }
 }
 
 pub fn build_lines(state: &AppState, theme: &Theme, inner_width: u16) -> Vec<Line<'static>> {
@@ -54,108 +69,151 @@ pub fn build_lines(state: &AppState, theme: &Theme, inner_width: u16) -> Vec<Lin
     let dim_style = Style::default()
         .fg(theme.border)
         .add_modifier(Modifier::DIM);
-    let warning_style = Style::default()
-        .fg(theme.warning)
-        .add_modifier(Modifier::BOLD);
     let selected_style = Style::default()
         .fg(theme.foreground)
         .bg(theme.selection_bg)
         .add_modifier(Modifier::BOLD);
-    let active_style = Style::default()
-        .fg(theme.title_focused)
-        .add_modifier(Modifier::BOLD);
 
     let max_width = inner_width.max(1) as usize;
-    let entries = agent_ops_view::artifacts_history_visible_entries(state);
-    let archived_visible = entries.len().saturating_sub(1);
-    let archived_total = agent_ops_view::artifacts_history_entries(state)
-        .len()
-        .saturating_sub(1);
+    let index = &state.agents.global_archive_index;
+    let filtered = &state.agents.global_archive_filtered;
+    let total_count = index.len();
+    let matching_count = filtered.len();
+    let query = &state.agents.global_archive_query;
+    let filter_label =
+        agent_ops_view::saved_run_history_filter_label(state.agents.global_archive_filter);
     let selected = state
         .agents
-        .artifacts_history_selected
-        .min(entries.len().saturating_sub(1));
-    let current_source = agent_ops_view::artifacts_history_summary_label(state);
+        .global_archive_selected
+        .min(matching_count.saturating_sub(1));
 
     let mut lines = Vec::new();
-    lines.push(Line::from(vec![
-        Span::styled("source: ", label_style),
-        Span::styled(current_source, active_style),
-    ]));
+
+    // Line 0: search bar with visible block cursor.
+    let cursor_style = Style::default()
+        .fg(theme.background)
+        .bg(theme.foreground);
+    let prompt_style = Style::default()
+        .fg(theme.title_focused)
+        .add_modifier(Modifier::BOLD);
+    if query.is_empty() {
+        lines.push(Line::from(vec![
+            Span::styled(" / ", prompt_style),
+            Span::styled(" ", cursor_style),
+            Span::styled(" type to search...", dim_style),
+        ]));
+    } else {
+        lines.push(Line::from(vec![
+            Span::styled(" / ", prompt_style),
+            Span::styled(query.clone(), value_style),
+            Span::styled(" ", cursor_style),
+        ]));
+    }
+
+    // Line 1: status bar.
     lines.push(Line::from(vec![
         Span::styled("filter: ", label_style),
-        Span::styled(
-            agent_ops_view::saved_run_history_filter_label(state.agents.artifacts_history_filter),
-            value_style,
-        ),
+        Span::styled(filter_label, value_style),
+        Span::styled("  |  ", dim_style),
+        Span::styled(format!("{total_count} artifacts"), value_style),
+        Span::styled("  |  ", dim_style),
+        Span::styled(format!("{matching_count} matching"), value_style),
     ]));
-    lines.push(Line::from(vec![
-        Span::styled("saved runs: ", label_style),
-        Span::styled(
-            format!("{archived_visible}/{archived_total} visible"),
-            value_style,
-        ),
-    ]));
+
+    // Line 2: blank separator.
     lines.push(Line::from(""));
+
+    // Line 3: column header.
+    let time_w = 14;
+    let kind_w = 9;
+    let owner_w = 12;
+    // indent col = 3 chars for "↳ " or "  ", prefix = 2
+    let fixed = 2 + 3 + kind_w + 1 + owner_w + 1 + time_w + 1;
+    let preview_w = max_width.saturating_sub(fixed);
+    let header = format!(
+        "     {:<kind_w$} {:<owner_w$} {:<time_w$} PREVIEW",
+        "KIND", "OWNER", "TIME",
+    );
     lines.push(Line::from(Span::styled(
-        "Select a saved run to load it into the Artifacts tab.",
+        trim_to_width(&header, max_width),
         dim_style,
     )));
-    let pending_line = match state.agents.artifacts_history_pending_action {
-        Some(SavedRunHistoryPendingAction::DeleteSelected) => {
-            let label = entries
-                .get(selected)
-                .map(|entry| entry.label.as_str())
-                .unwrap_or("selected saved run");
-            Line::from(Span::styled(
-                format!("Confirm delete: press X again to remove {label} · Esc cancel"),
-                warning_style,
-            ))
-        }
-        Some(SavedRunHistoryPendingAction::PruneFiltered) => {
-            let count = agent_ops_view::artifacts_history_prunable_entries(state).len();
-            let filter = agent_ops_view::saved_run_history_filter_label(
-                state.agents.artifacts_history_filter,
-            );
-            Line::from(Span::styled(
-                format!("Confirm prune: press P again to remove {count} saved runs in {filter} · Esc cancel"),
-                warning_style,
-            ))
-        }
-        None => Line::from(Span::styled(
-            "X delete selected · P prune current filter",
-            dim_style,
-        )),
-    };
-    lines.push(pending_line);
 
-    for (idx, entry) in entries.iter().enumerate() {
-        let style = if idx == selected {
+    // Entries — prompts are top-level, replies/patches/evidence show with ↳.
+    for (display_idx, &(_score, entry_idx)) in filtered.iter().enumerate() {
+        let Some(entry) = index.get(entry_idx) else {
+            continue;
+        };
+        let is_selected = display_idx == selected;
+        let base_style = if is_selected {
             selected_style
-        } else if (matches!(entry.kind, SavedArtifactsRunKind::Current)
-            && state.agents.artifacts_selected_saved_run_path.is_none())
-            || (matches!(entry.kind, SavedArtifactsRunKind::Archived)
-                && entry.run_path.as_deref()
-                    == state.agents.artifacts_selected_saved_run_path.as_deref())
-        {
-            active_style
         } else {
             value_style
         };
-        let prefix = if idx == selected { "›" } else { " " };
-        let text = format!(
-            "{prefix} {}  {}",
-            trim_to_width(entry.label.as_str(), max_width.saturating_sub(6)),
-            trim_to_width(entry.detail.as_str(), max_width.saturating_sub(12)),
+
+        let is_child = entry.kind != "PROMPT";
+        let prefix = if is_selected { "> " } else { "  " };
+        let indent = if is_child { "↳ " } else { "  " };
+
+        let kind_label = match entry.kind {
+            "PROMPT" => "PROMPT  ",
+            "REPLY" => "REPLY   ",
+            "PATCH" => "PATCH   ",
+            "EVIDENCE" => "EVIDENCE",
+            other => other,
+        };
+        let kind_span = Span::styled(
+            kind_label.to_string(),
+            if is_selected {
+                selected_style
+            } else {
+                Style::default().fg(kind_color(entry.kind, theme))
+            },
         );
-        lines.push(Line::from(Span::styled(text, style)));
+        let owner_span = Span::styled(
+            format!(" {:<owner_w$}", trim_to_width(&entry.owner, owner_w)),
+            base_style,
+        );
+        let time_span = Span::styled(
+            format!(" {:<time_w$}", trim_to_width(&entry.time_label, time_w)),
+            if is_selected { selected_style } else { dim_style },
+        );
+        let preview_span = Span::styled(
+            format!(" {}", trim_to_width(&entry.preview, preview_w)),
+            base_style,
+        );
+
+        lines.push(Line::from(vec![
+            Span::styled(prefix, base_style),
+            Span::styled(
+                indent,
+                if is_selected { selected_style } else { dim_style },
+            ),
+            kind_span,
+            owner_span,
+            time_span,
+            preview_span,
+        ]));
     }
 
+    if filtered.is_empty() {
+        let msg = if query.is_empty() {
+            "No archived artifacts found."
+        } else {
+            "No artifacts match your search."
+        };
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(msg, dim_style)));
+    }
+
+    // Footer.
     lines.push(Line::from(""));
-    lines.push(Line::from(Span::styled(
-        "Enter load · X delete · P prune · A all · D 24h · W 7d · M 30d · R current/latest · Esc close",
-        dim_style,
-    )));
+    let footer = if query.is_empty() {
+        "Enter open | A all | D 24h | W 7d | M 30d | type to search | Esc close"
+    } else {
+        "Enter open | Backspace delete char | Ctrl+U clear | Esc clear/close"
+    };
+    lines.push(Line::from(Span::styled(footer, dim_style)));
 
     lines
 }
@@ -165,7 +223,7 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
     let block = Block::default()
         .borders(Borders::ALL)
         .title(Span::styled(
-            " SAVED RUN HISTORY ",
+            " GLOBAL ARTIFACT ARCHIVE ",
             Style::default()
                 .fg(theme.title_focused)
                 .add_modifier(Modifier::BOLD),
@@ -178,7 +236,7 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
 
     let mut lines = build_lines(state, theme, inner.width);
     let max_scroll = lines.len().saturating_sub(inner.height as usize);
-    let scroll = state.agents.artifacts_history_popup_scroll.min(max_scroll);
+    let scroll = state.agents.global_archive_scroll.min(max_scroll);
     lines = apply_ui_selection(
         lines,
         state.ui_selection.as_ref(),

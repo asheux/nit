@@ -687,6 +687,7 @@ pub(super) fn artifacts_popup_scroll_metrics(
 pub(super) fn close_artifacts_popup(state: &mut AppState) {
     state.agents.artifacts_popup_open = false;
     state.agents.artifacts_popup_scroll = 0;
+    state.agents.global_archive_opened_entry = None;
     state.agents.artifacts_popup_chat_input.clear();
     state.agents.artifacts_popup_chat_cursor = 0;
     state.agents.artifacts_popup_chat_selection_anchor = None;
