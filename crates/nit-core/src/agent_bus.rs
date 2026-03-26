@@ -34,29 +34,17 @@ pub struct AgentTokenCount {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AgentBusEvent {
     /// Insert or update an agent lane in the roster.
-    AgentUpsert {
-        agent: AgentLane,
-    },
+    AgentUpsert { agent: AgentLane },
     /// Insert or update a mission record.
-    MissionUpsert {
-        mission: MissionRecord,
-    },
+    MissionUpsert { mission: MissionRecord },
     /// Append a chat message to the console log.
-    MessageAppend {
-        message: AgentMessage,
-    },
+    MessageAppend { message: AgentMessage },
     /// Append an operator-visible alert (info, warning, or error).
-    AlertAppend {
-        alert: AgentAlert,
-    },
+    AlertAppend { alert: AgentAlert },
     /// Append a diagnostic event for the ops timeline.
-    DiagnosticAppend {
-        event: AgentDiagnosticEvent,
-    },
+    DiagnosticAppend { event: AgentDiagnosticEvent },
     /// Update the MCP connection status.
-    McpStatus {
-        status: McpStatus,
-    },
+    McpStatus { status: McpStatus },
     /// Signals that an agent's turn has started processing.
     TurnStarted {
         agent_id: String,
@@ -75,10 +63,7 @@ pub enum AgentBusEvent {
         stage: String,
     },
     /// Free-form log line emitted during a turn (routed to diagnostics).
-    TurnLog {
-        agent_id: String,
-        message: String,
-    },
+    TurnLog { agent_id: String, message: String },
     /// Report token usage for context-window tracking.
     TokenCount {
         agent_id: String,
@@ -298,7 +283,10 @@ impl AgentBusEvent {
                     at: at.clone(),
                 });
                 state.agents.console_scroll = CONSOLE_SCROLL_BOTTOM;
-                state.status = Some(format!("{source_label} failed: {}", summarize_agent_error(message)));
+                state.status = Some(format!(
+                    "{source_label} failed: {}",
+                    summarize_agent_error(message)
+                ));
             }
             AgentBusEvent::TurnCompleted {
                 agent_id,
@@ -753,7 +741,9 @@ mod tests {
     fn token_count_routes_to_codex_maps_for_codex_agent() {
         let mut state = test_state();
         add_codex_agent(&mut state, "gpt-test");
-        state.agents.codex_effective_context_window_tokens
+        state
+            .agents
+            .codex_effective_context_window_tokens
             .insert("gpt-test".into(), 128_000);
 
         let token_count = AgentTokenCount {
@@ -762,8 +752,14 @@ mod tests {
         };
         apply_codex_token_count(&mut state, "gpt-test", None, &token_count);
 
-        assert_eq!(state.agents.codex_used_tokens.get("gpt-test").copied(), Some(50_000));
-        assert!(state.agents.codex_context_remaining_pct.contains_key("gpt-test"));
+        assert_eq!(
+            state.agents.codex_used_tokens.get("gpt-test").copied(),
+            Some(50_000)
+        );
+        assert!(state
+            .agents
+            .codex_context_remaining_pct
+            .contains_key("gpt-test"));
         // Claude maps should be empty.
         assert!(state.agents.claude_used_tokens.get("gpt-test").is_none());
     }
@@ -772,7 +768,9 @@ mod tests {
     fn token_count_routes_to_claude_maps_for_claude_agent() {
         let mut state = test_state();
         add_claude_agent(&mut state, "claude-opus");
-        state.agents.claude_effective_context_window_tokens
+        state
+            .agents
+            .claude_effective_context_window_tokens
             .insert("claude-opus".into(), 200_000);
 
         let token_count = AgentTokenCount {
@@ -781,8 +779,14 @@ mod tests {
         };
         apply_codex_token_count(&mut state, "claude-opus", None, &token_count);
 
-        assert_eq!(state.agents.claude_used_tokens.get("claude-opus").copied(), Some(15_000));
-        assert!(state.agents.claude_context_remaining_pct.contains_key("claude-opus"));
+        assert_eq!(
+            state.agents.claude_used_tokens.get("claude-opus").copied(),
+            Some(15_000)
+        );
+        assert!(state
+            .agents
+            .claude_context_remaining_pct
+            .contains_key("claude-opus"));
         // Codex maps should be empty.
         assert!(state.agents.codex_used_tokens.get("claude-opus").is_none());
     }
@@ -791,7 +795,9 @@ mod tests {
     fn token_count_mission_scoped_for_claude() {
         let mut state = test_state();
         add_claude_agent(&mut state, "claude-opus");
-        state.agents.claude_effective_context_window_tokens
+        state
+            .agents
+            .claude_effective_context_window_tokens
             .insert("claude-opus".into(), 200_000);
 
         let token_count = AgentTokenCount {
@@ -801,13 +807,17 @@ mod tests {
         apply_codex_token_count(&mut state, "claude-opus", Some("mis-001"), &token_count);
 
         assert_eq!(
-            state.agents.claude_mission_used_tokens
+            state
+                .agents
+                .claude_mission_used_tokens
                 .get("mis-001")
                 .and_then(|m| m.get("claude-opus"))
                 .copied(),
             Some(30_000),
         );
-        assert!(state.agents.claude_mission_context_remaining_pct
+        assert!(state
+            .agents
+            .claude_mission_context_remaining_pct
             .get("mis-001")
             .and_then(|m| m.get("claude-opus"))
             .is_some());
@@ -830,7 +840,11 @@ mod tests {
         event.apply(&mut state);
 
         assert_eq!(
-            state.agents.codex_thread_ids.get("gpt-test").map(|s| s.as_str()),
+            state
+                .agents
+                .codex_thread_ids
+                .get("gpt-test")
+                .map(|s| s.as_str()),
             Some("thread-abc"),
         );
     }
@@ -850,7 +864,9 @@ mod tests {
         event.apply(&mut state);
 
         assert_eq!(
-            state.agents.codex_mission_thread_ids
+            state
+                .agents
+                .codex_mission_thread_ids
                 .get("mis-001")
                 .and_then(|m| m.get("gpt-test"))
                 .map(|s| s.as_str()),
@@ -889,7 +905,10 @@ mod tests {
         add_claude_agent(&mut state, "claude-opus");
 
         // Store prompt index in the Claude map (as dispatch does for Claude agents).
-        state.agents.claude_turn_prompt_idx.insert("claude-opus".into(), 42);
+        state
+            .agents
+            .claude_turn_prompt_idx
+            .insert("claude-opus".into(), 42);
 
         // Push a user prompt message so parent linking can work.
         state.agents.messages.push(AgentMessage {
@@ -914,6 +933,10 @@ mod tests {
         let response = state.agents.messages.last().unwrap();
         assert_eq!(response.prompt_msg_idx, Some(42));
         // The claude_turn_prompt_idx should be consumed (removed).
-        assert!(state.agents.claude_turn_prompt_idx.get("claude-opus").is_none());
+        assert!(state
+            .agents
+            .claude_turn_prompt_idx
+            .get("claude-opus")
+            .is_none());
     }
 }

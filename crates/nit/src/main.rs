@@ -525,7 +525,14 @@ fn main() -> anyhow::Result<()> {
         max_parallel_turns: cli.codex_max_parallel_turns as usize,
         permission_mode: None,
     };
-    run(state, theme, log_rx, codex_runtime, codex_config, claude_config)?;
+    run(
+        state,
+        theme,
+        log_rx,
+        codex_runtime,
+        codex_config,
+        claude_config,
+    )?;
     Ok(())
 }
 
@@ -2633,11 +2640,7 @@ fn populate_claude_model_metadata(agents: &mut nit_core::AgentsState) {
                 "max".to_string(),
             ]
         } else {
-            vec![
-                "low".to_string(),
-                "medium".to_string(),
-                "high".to_string(),
-            ]
+            vec!["low".to_string(), "medium".to_string(), "high".to_string()]
         };
         agents
             .claude_supported_efforts

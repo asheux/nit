@@ -130,11 +130,8 @@ pub fn content_area_height(
     area: Rect,
 ) -> u16 {
     let inner = Block::default().borders(Borders::ALL).inner(area);
-    let is_prompt = agent_ops_view::is_selected_artifact_prompt(
-        state,
-        swarm,
-        area.width.max(1) as usize,
-    );
+    let is_prompt =
+        agent_ops_view::is_selected_artifact_prompt(state, swarm, area.width.max(1) as usize);
     if is_prompt || inner.height < 5 {
         return inner.height;
     }
@@ -201,8 +198,7 @@ fn build_lines_from_archive_entry(
         "EVIDENCE" => {
             let evidence = run.get("evidence")?.as_array()?;
             let ev_val = evidence.get(idx)?;
-            let item: nit_core::EvidenceItem =
-                serde_json::from_value(ev_val.clone()).ok()?;
+            let item: nit_core::EvidenceItem = serde_json::from_value(ev_val.clone()).ok()?;
             Some(build_persisted_evidence_lines(&item, theme, width))
         }
         _ => None,
@@ -220,9 +216,7 @@ pub fn build_lines(
     // If opened from the global archive, load the exact artifact directly from
     // the run.json using the stored entry, bypassing card-index matching.
     if let Some(entry) = &state.agents.global_archive_opened_entry {
-        if let Some(lines) =
-            build_lines_from_archive_entry(state, entry, theme, width_usize)
-        {
+        if let Some(lines) = build_lines_from_archive_entry(state, entry, theme, width_usize) {
             return lines;
         }
     }
@@ -283,16 +277,9 @@ const POPUP_CHAT_INPUT_MAX_INNER_LINES: usize = 6;
 
 /// Returns the absolute screen rect of the chat input's inner area (excluding
 /// its border), or `None` when the popup shows a prompt-only artifact.
-pub fn chat_input_rect(
-    state: &AppState,
-    swarm: &SwarmRuntime,
-    popup_area: Rect,
-) -> Option<Rect> {
-    let is_prompt = agent_ops_view::is_selected_artifact_prompt(
-        state,
-        swarm,
-        popup_area.width.max(1) as usize,
-    );
+pub fn chat_input_rect(state: &AppState, swarm: &SwarmRuntime, popup_area: Rect) -> Option<Rect> {
+    let is_prompt =
+        agent_ops_view::is_selected_artifact_prompt(state, swarm, popup_area.width.max(1) as usize);
     if is_prompt {
         return None;
     }
@@ -315,7 +302,9 @@ pub fn chat_input_rect(
     );
     let half_inner = (inner_full.height as usize) / 2;
     let max_inner_by_layout = inner_full.height.saturating_sub(4).max(1) as usize;
-    let dynamic_max = half_inner.max(POPUP_CHAT_INPUT_MAX_INNER_LINES).min(max_inner_by_layout);
+    let dynamic_max = half_inner
+        .max(POPUP_CHAT_INPUT_MAX_INNER_LINES)
+        .min(max_inner_by_layout);
     let input_inner_height = input_lines_all.len().max(1).min(dynamic_max);
     let input_box_height = (input_inner_height + 2) as u16;
 
@@ -401,11 +390,8 @@ pub fn render(
     swarm: &SwarmRuntime,
     theme: &Theme,
 ) -> Option<(u16, u16)> {
-    let is_prompt = agent_ops_view::is_selected_artifact_prompt(
-        state,
-        swarm,
-        area.width.max(1) as usize,
-    );
+    let is_prompt =
+        agent_ops_view::is_selected_artifact_prompt(state, swarm, area.width.max(1) as usize);
     let popup_title = if is_prompt { "PROMPT" } else { "ARTIFACT" };
     let block = Block::default()
         .borders(Borders::ALL)
@@ -446,7 +432,9 @@ pub fn render(
         );
     let half_inner = (inner_full.height as usize) / 2;
     let max_inner_by_layout = inner_full.height.saturating_sub(4).max(1) as usize;
-    let dynamic_max = half_inner.max(POPUP_CHAT_INPUT_MAX_INNER_LINES).min(max_inner_by_layout);
+    let dynamic_max = half_inner
+        .max(POPUP_CHAT_INPUT_MAX_INNER_LINES)
+        .min(max_inner_by_layout);
     let input_inner_height = input_lines_all.len().max(1).min(dynamic_max);
     let input_box_height = (input_inner_height + 2) as u16; // +2 for borders
 
@@ -463,7 +451,11 @@ pub fn render(
     let content_height = content_area.height as usize;
     let max_scroll = lines.len().saturating_sub(content_height);
     let scroll = state.agents.artifacts_popup_scroll.min(max_scroll);
-    let visible: Vec<Line> = lines.into_iter().skip(scroll).take(content_height).collect();
+    let visible: Vec<Line> = lines
+        .into_iter()
+        .skip(scroll)
+        .take(content_height)
+        .collect();
     let visible = apply_ui_selection(
         visible,
         state.ui_selection.as_ref(),
@@ -524,12 +516,11 @@ pub fn render(
         });
     let (sel_start_line, sel_start_col, sel_end_line, sel_end_col) = selection_range
         .map(|(start, end)| {
-            let (start_line, start_col) =
-                agent_console_view::chat_input_display_pos_for_char_idx(
-                    popup_input,
-                    render_wrap_width,
-                    start,
-                );
+            let (start_line, start_col) = agent_console_view::chat_input_display_pos_for_char_idx(
+                popup_input,
+                render_wrap_width,
+                start,
+            );
             let (end_line, end_col) = agent_console_view::chat_input_display_pos_for_char_idx(
                 popup_input,
                 render_wrap_width,
@@ -569,8 +560,7 @@ pub fn render(
         .collect();
 
     let input_bg = {
-        let mut bg =
-            agent_console_view::dim_bg_towards(theme.cursor_line_bg, theme.background, 75);
+        let mut bg = agent_console_view::dim_bg_towards(theme.cursor_line_bg, theme.background, 75);
         if bg == theme.selection_bg {
             bg = theme.cursor_line_bg;
         }
@@ -717,7 +707,12 @@ fn build_persisted_patch_lines(
     out.push(kv_line("id:", &patch.id, label_style, value_style));
     out.push(kv_line("title:", &patch.title, label_style, value_style));
     if !patch.summary.is_empty() {
-        out.push(kv_line("summary:", &patch.summary, label_style, value_style));
+        out.push(kv_line(
+            "summary:",
+            &patch.summary,
+            label_style,
+            value_style,
+        ));
     }
     out.push(kv_line(
         "mission:",
@@ -737,10 +732,7 @@ fn build_persisted_patch_lines(
     };
 
     if diff_text.trim().is_empty() {
-        out.push(Line::from(Span::styled(
-            " (no diff content)",
-            label_style,
-        )));
+        out.push(Line::from(Span::styled(" (no diff content)", label_style)));
     } else {
         for line in diff_text.lines() {
             let style = if line.starts_with('+') && !line.starts_with("+++") {
@@ -752,10 +744,7 @@ fn build_persisted_patch_lines(
             } else {
                 value_style
             };
-            out.push(Line::from(Span::styled(
-                format!(" {line}"),
-                style,
-            )));
+            out.push(Line::from(Span::styled(format!(" {line}"), style)));
         }
     }
     out
@@ -773,10 +762,7 @@ fn build_persisted_evidence_lines(
 
     let mut out = Vec::new();
     let owner = item.agent_id.as_deref().unwrap_or("system");
-    out.push(popup_title_line(
-        &format!(" EVIDENCE  {owner}"),
-        theme,
-    ));
+    out.push(popup_title_line(&format!(" EVIDENCE  {owner}"), theme));
     out.push(popup_rule_line(width, theme));
     out.push(kv_line("title:", &item.title, label_style, value_style));
     out.push(kv_line(
@@ -794,16 +780,10 @@ fn build_persisted_evidence_lines(
 
     let body = item.detail.trim();
     if body.is_empty() {
-        out.push(Line::from(Span::styled(
-            " (no content)",
-            label_style,
-        )));
+        out.push(Line::from(Span::styled(" (no content)", label_style)));
     } else {
         for line in body.lines() {
-            out.push(Line::from(Span::styled(
-                format!(" {line}"),
-                value_style,
-            )));
+            out.push(Line::from(Span::styled(format!(" {line}"), value_style)));
         }
     }
     out
@@ -2224,10 +2204,7 @@ fn json_string_token(text: &str, start: usize) -> Option<(String, usize)> {
 }
 
 fn json_token_is_key(text: &str, idx: usize) -> bool {
-    text[idx..]
-        .chars()
-        .find(|ch| !ch.is_whitespace())
-        == Some(':')
+    text[idx..].chars().find(|ch| !ch.is_whitespace()) == Some(':')
 }
 
 fn styled_math_spans(text: &str, base: Style, theme: &Theme) -> Vec<Span<'static>> {

@@ -1,8 +1,6 @@
 use std::time::Instant;
 
-use nit_core::{
-    AgentAlertSeverity, AgentBusEvent, AgentDiagnosticEvent, AgentStatus, AppState,
-};
+use nit_core::{AgentAlertSeverity, AgentBusEvent, AgentDiagnosticEvent, AgentStatus, AppState};
 
 use crate::claude_runner::{ClaudeCommand, ClaudeRunner};
 use crate::codex_runner::{CodexCommand, CodexRunner};
@@ -404,9 +402,7 @@ pub(super) fn maybe_dispatch_codex_turn(
             .push(nit_core::state::AgentDiagnosticEvent {
                 severity: nit_core::state::AgentAlertSeverity::Warn,
                 source: "codex".into(),
-                message: format!(
-                    "[{model}] Codex runner channel disconnected; turn dropped"
-                ),
+                message: format!("[{model}] Codex runner channel disconnected; turn dropped"),
                 at: format!("t+{}", state.metrics.frame_count),
             });
     }
@@ -422,7 +418,10 @@ pub(super) fn estimate_codex_context_tokens(text: &str) -> u32 {
     bytes.div_ceil(4)
 }
 
-pub(super) fn estimate_codex_context_tokens_for_mission(state: &mut AppState, mission_id: &str) -> u32 {
+pub(super) fn estimate_codex_context_tokens_for_mission(
+    state: &mut AppState,
+    mission_id: &str,
+) -> u32 {
     if let Some(tokens) = state
         .agents
         .codex_estimated_tokens_used_by_mission
@@ -787,16 +786,22 @@ pub(super) fn maybe_dispatch_claude_turn(
                 AgentStatus::Idle
             };
         }
-        state.agents.diag_events.push(nit_core::state::AgentDiagnosticEvent {
-            severity: nit_core::state::AgentAlertSeverity::Warn,
-            source: "claude".into(),
-            message: format!("[{model}] Claude runner channel disconnected; turn dropped"),
-            at: format!("t+{}", state.metrics.frame_count),
-        });
+        state
+            .agents
+            .diag_events
+            .push(nit_core::state::AgentDiagnosticEvent {
+                severity: nit_core::state::AgentAlertSeverity::Warn,
+                source: "claude".into(),
+                message: format!("[{model}] Claude runner channel disconnected; turn dropped"),
+                at: format!("t+{}", state.metrics.frame_count),
+            });
     }
 }
 
-pub(super) fn estimate_claude_context_tokens_for_mission(state: &mut AppState, mission_id: &str) -> u32 {
+pub(super) fn estimate_claude_context_tokens_for_mission(
+    state: &mut AppState,
+    mission_id: &str,
+) -> u32 {
     if let Some(tokens) = state
         .agents
         .claude_estimated_tokens_used_by_mission

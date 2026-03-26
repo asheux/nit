@@ -2284,44 +2284,36 @@ pub fn artifacts_history_entries(state: &AppState) -> Vec<SavedArtifactsRunEntry
     }];
 
     if let Some(mission_id) = state.agents.selected_context_mission() {
-        let archived = history_entries_for_root(
-            persisted_mission_history_root(state, mission_id),
-            |run| {
+        let archived =
+            history_entries_for_root(persisted_mission_history_root(state, mission_id), |run| {
                 let (messages, patches, evidence) = mission_run_counts(run, mission_id);
                 format!("{messages} msgs · {patches} patches · {evidence} evidence")
-            },
-        );
+            });
         if archived.is_empty() {
             // No archived snapshots yet — surface the current run.json so the
             // user sees their data before they've ever reset context.
             let run_path = persisted_mission_run_path(state, mission_id);
-            if let Some(entry) =
-                current_run_as_history_entry(&run_path, |run| {
-                    let (messages, patches, evidence) = mission_run_counts(run, mission_id);
-                    format!("{messages} msgs · {patches} patches · {evidence} evidence")
-                })
-            {
+            if let Some(entry) = current_run_as_history_entry(&run_path, |run| {
+                let (messages, patches, evidence) = mission_run_counts(run, mission_id);
+                format!("{messages} msgs · {patches} patches · {evidence} evidence")
+            }) {
                 entries.push(entry);
             }
         } else {
             entries.extend(archived);
         }
     } else if let Some(agent_id) = state.agents.selected_context_agent() {
-        let archived = history_entries_for_root(
-            persisted_ad_hoc_history_root(state, agent_id),
-            |run| {
+        let archived =
+            history_entries_for_root(persisted_ad_hoc_history_root(state, agent_id), |run| {
                 let (messages, patches, evidence) = ad_hoc_run_counts(run, agent_id);
                 format!("{messages} msgs · {patches} patches · {evidence} evidence")
-            },
-        );
+            });
         if archived.is_empty() {
             let run_path = persisted_ad_hoc_run_path(state, agent_id);
-            if let Some(entry) =
-                current_run_as_history_entry(&run_path, |run| {
-                    let (messages, patches, evidence) = ad_hoc_run_counts(run, agent_id);
-                    format!("{messages} msgs · {patches} patches · {evidence} evidence")
-                })
-            {
+            if let Some(entry) = current_run_as_history_entry(&run_path, |run| {
+                let (messages, patches, evidence) = ad_hoc_run_counts(run, agent_id);
+                format!("{messages} msgs · {patches} patches · {evidence} evidence")
+            }) {
                 entries.push(entry);
             }
         } else {
@@ -2468,8 +2460,7 @@ fn extract_run_entries(
         };
         let owner = msg.agent_id.as_deref().unwrap_or("You").to_string();
         let preview = summarize_text_preview(&msg.text, GLOBAL_ARCHIVE_PREVIEW_CHARS);
-        let (search_hay, search_tokens) =
-            build_search_fields(kind, &owner, ctx.source, &msg.text);
+        let (search_hay, search_tokens) = build_search_fields(kind, &owner, ctx.source, &msg.text);
         out.push(GlobalArchiveEntry {
             kind,
             owner,
@@ -2675,8 +2666,7 @@ pub fn build_global_archive_index(state: &AppState) -> Vec<GlobalArchiveEntry> {
         };
 
         // Determine source context from the path.
-        let (source, source_id, source_kind) =
-            resolve_run_source(state, run_path, &agents_root);
+        let (source, source_id, source_kind) = resolve_run_source(state, run_path, &agents_root);
         let archive_micros = run_path
             .parent()
             .and_then(persisted_history_archive_micros)
@@ -2686,7 +2676,14 @@ pub fn build_global_archive_index(state: &AppState) -> Vec<GlobalArchiveEntry> {
             source_id: &source_id,
             source_kind,
         };
-        extract_run_entries(&run, run_path, &ctx, archive_micros, now_micros, &mut entries);
+        extract_run_entries(
+            &run,
+            run_path,
+            &ctx,
+            archive_micros,
+            now_micros,
+            &mut entries,
+        );
     }
 
     entries.sort_by(|a, b| b.archive_micros.cmp(&a.archive_micros));
@@ -2699,9 +2696,7 @@ fn resolve_run_source(
     run_path: &Path,
     agents_root: &Path,
 ) -> (String, String, GlobalArchiveSourceKind) {
-    let rel = run_path
-        .strip_prefix(agents_root)
-        .unwrap_or(run_path);
+    let rel = run_path.strip_prefix(agents_root).unwrap_or(run_path);
     let components: Vec<&str> = rel
         .components()
         .filter_map(|c| c.as_os_str().to_str())
@@ -2723,7 +2718,11 @@ fn resolve_run_source(
                     }
                 })
                 .unwrap_or_else(|| format!("mission: {mission_id}"));
-            return (source, mission_id.to_string(), GlobalArchiveSourceKind::Mission);
+            return (
+                source,
+                mission_id.to_string(),
+                GlobalArchiveSourceKind::Mission,
+            );
         }
     }
     // Pattern: ad-hoc/{agent_id}/[history/{ts}/]run.json
@@ -2739,7 +2738,11 @@ fn resolve_run_source(
         .and_then(|p| p.file_name())
         .and_then(|n| n.to_str())
         .unwrap_or("unknown");
-    (name.to_string(), name.to_string(), GlobalArchiveSourceKind::AdHoc)
+    (
+        name.to_string(),
+        name.to_string(),
+        GlobalArchiveSourceKind::AdHoc,
+    )
 }
 
 /// Compute BM25 score for a single document against query terms.
@@ -2764,7 +2767,10 @@ fn bm25_score(
             continue;
         }
         // Term frequency in this document.
-        let tf = doc_tokens.iter().filter(|t| t.as_str() == term.as_str()).count() as f64;
+        let tf = doc_tokens
+            .iter()
+            .filter(|t| t.as_str() == term.as_str())
+            .count() as f64;
         if tf == 0.0 {
             continue;
         }
@@ -2776,10 +2782,11 @@ fn bm25_score(
 
     // BM25+ delta: ensure matching terms always contribute a minimum.
     if score > 0.0 {
-        let delta = 0.5 * query_terms
-            .iter()
-            .filter(|t| doc_tokens.contains(t))
-            .count() as f64;
+        let delta = 0.5
+            * query_terms
+                .iter()
+                .filter(|t| doc_tokens.contains(t))
+                .count() as f64;
         score += delta;
     }
 
@@ -2894,16 +2901,14 @@ pub fn filter_global_archive(
             let recency_boost = entry
                 .archive_micros
                 .map(|micros| {
-                    let age_hours =
-                        now_micros.saturating_sub(micros) / (3_600 * 1_000_000);
+                    let age_hours = now_micros.saturating_sub(micros) / (3_600 * 1_000_000);
                     // Decay: 10 points for recent, tapering to 0 over ~30 days.
                     10.0 / (1.0 + age_hours as f64 / 168.0)
                 })
                 .unwrap_or(0.0);
 
             // Combined score: BM25 * 100 (dominant) + fuzzy + recency.
-            let combined =
-                (bm25 * 100.0) as i64 + fuzzy + recency_boost as i64;
+            let combined = (bm25 * 100.0) as i64 + fuzzy + recency_boost as i64;
             Some((combined, idx))
         })
         .collect();
@@ -2948,14 +2953,15 @@ fn artifact_card_row(
             fit_left(card.kind, *widths.first().unwrap_or(&0)),
             fit_left(card.at.as_str(), *widths.get(1).unwrap_or(&0)),
             fit_left(card.owner.as_str(), *widths.get(2).unwrap_or(&0)),
-            fit_left(
-                card.preview.as_str(),
-                child_preview_width.saturating_sub(2)
-            ),
+            fit_left(card.preview.as_str(), child_preview_width.saturating_sub(2)),
         )
     } else {
         // Root row (prompt): distinct glyph →.
-        let glyph = if selected { cursor_glyph() } else { PROMPT_GLYPH };
+        let glyph = if selected {
+            cursor_glyph()
+        } else {
+            PROMPT_GLYPH
+        };
         format!(
             "{selected_marker}{glyph} {} {} {} {}",
             fit_left(card.kind, *widths.first().unwrap_or(&0)),
@@ -2996,8 +3002,10 @@ fn group_replies_under_prompts_with_hints(
     }
 
     // Build one group per prompt (in order).
-    let mut groups: Vec<(Option<usize>, Vec<usize>)> =
-        prompt_indices.iter().map(|&idx| (Some(idx), Vec::new())).collect();
+    let mut groups: Vec<(Option<usize>, Vec<usize>)> = prompt_indices
+        .iter()
+        .map(|&idx| (Some(idx), Vec::new()))
+        .collect();
 
     // Build a quick lookup: prompt_msg_idx → position in groups vec.
     let prompt_pos: std::collections::HashMap<usize, usize> = prompt_indices
@@ -3187,11 +3195,8 @@ fn build_ad_hoc_cards(state: &AppState, agent_id: &str, preview_chars: usize) ->
             parent_hints.push(message.prompt_msg_idx);
         }
     }
-    let groups = group_replies_under_prompts_with_hints(
-        &prompt_indices,
-        &reply_indices_vec,
-        &parent_hints,
-    );
+    let groups =
+        group_replies_under_prompts_with_hints(&prompt_indices, &reply_indices_vec, &parent_hints);
 
     let mut patch_indices = state
         .agents
@@ -4508,11 +4513,8 @@ pub fn artifact_cards_for_context(
                                         && t.output.as_deref() == Some(msg.text.as_str())
                                 }) {
                                     card.kind = "TASK";
-                                    card.at = task
-                                        .role
-                                        .as_deref()
-                                        .unwrap_or(&task.state)
-                                        .to_string();
+                                    card.at =
+                                        task.role.as_deref().unwrap_or(&task.state).to_string();
                                     card.reference = ArtifactRef::SwarmTask {
                                         mission_id: view.mission_id.clone(),
                                         task_id: task.id.clone(),
@@ -4553,9 +4555,7 @@ pub fn artifact_cards_for_context(
                     let failures = report
                         .gates
                         .iter()
-                        .filter(|gate| {
-                            gate_report_status_label(gate).eq_ignore_ascii_case("FAIL")
-                        })
+                        .filter(|gate| gate_report_status_label(gate).eq_ignore_ascii_case("FAIL"))
                         .count();
                     if failures > 0 {
                         format!("{failures} failing gate(s)")
@@ -4782,15 +4782,35 @@ pub fn artifacts_card_count(lines: &[String]) -> usize {
 
 #[derive(Clone, Debug)]
 pub enum ArtifactsPopupRef {
-    Message { idx: usize },
-    Patch { idx: usize },
-    Evidence { idx: usize },
-    PersistedMessage { message: AgentMessage },
-    PersistedPatch { patch: PersistedPatchRecord, path: Option<String> },
-    PersistedEvidence { item: EvidenceItem },
-    SwarmTask { mission_id: String, task_id: String },
-    SwarmReport { mission_id: String },
-    SwarmVerify { mission_id: String },
+    Message {
+        idx: usize,
+    },
+    Patch {
+        idx: usize,
+    },
+    Evidence {
+        idx: usize,
+    },
+    PersistedMessage {
+        message: AgentMessage,
+    },
+    PersistedPatch {
+        patch: PersistedPatchRecord,
+        path: Option<String>,
+    },
+    PersistedEvidence {
+        item: EvidenceItem,
+    },
+    SwarmTask {
+        mission_id: String,
+        task_id: String,
+    },
+    SwarmReport {
+        mission_id: String,
+    },
+    SwarmVerify {
+        mission_id: String,
+    },
 }
 
 pub fn artifacts_popup_ref(
@@ -4822,17 +4842,13 @@ pub fn artifacts_popup_ref(
         ArtifactRef::Message { idx } => Some(ArtifactsPopupRef::Message { idx: *idx }),
         ArtifactRef::Patch { idx } => Some(ArtifactsPopupRef::Patch { idx: *idx }),
         ArtifactRef::Evidence { idx } => Some(ArtifactsPopupRef::Evidence { idx: *idx }),
-        ArtifactRef::PersistedMessage { message } => {
-            Some(ArtifactsPopupRef::PersistedMessage {
-                message: message.clone(),
-            })
-        }
-        ArtifactRef::PersistedPatch { patch, path } => {
-            Some(ArtifactsPopupRef::PersistedPatch {
-                patch: patch.clone(),
-                path: path.clone(),
-            })
-        }
+        ArtifactRef::PersistedMessage { message } => Some(ArtifactsPopupRef::PersistedMessage {
+            message: message.clone(),
+        }),
+        ArtifactRef::PersistedPatch { patch, path } => Some(ArtifactsPopupRef::PersistedPatch {
+            patch: patch.clone(),
+            path: path.clone(),
+        }),
         ArtifactRef::PersistedEvidence { item } => {
             Some(ArtifactsPopupRef::PersistedEvidence { item: item.clone() })
         }
@@ -4889,9 +4905,7 @@ pub fn selected_artifact_agent_id(
         | ArtifactRef::SwarmVerify { mission_id } => {
             // For swarm artifacts, check the card owner field which contains the agent id.
             let owner = card.owner.trim();
-            if !owner.is_empty()
-                && state.agents.agents.iter().any(|a| a.id == owner)
-            {
+            if !owner.is_empty() && state.agents.agents.iter().any(|a| a.id == owner) {
                 Some(owner.to_string())
             } else {
                 // Fall back to the planner for this mission.
@@ -4942,11 +4956,7 @@ pub fn selected_artifact_mission_id(
 }
 
 /// Returns `true` if the currently selected artifact is a user prompt (not an agent reply).
-pub fn is_selected_artifact_prompt(
-    state: &AppState,
-    swarm: &SwarmRuntime,
-    width: usize,
-) -> bool {
+pub fn is_selected_artifact_prompt(state: &AppState, swarm: &SwarmRuntime, width: usize) -> bool {
     let width = width.max(32);
     let widths = artifact_list_widths(width);
     let preview_chars = widths
@@ -5756,9 +5766,11 @@ fn artifacts_styled_line(
             Style::default().fg(theme.foreground).bg(theme.selection_bg)
         } else if is_child {
             // Agent artifact rows: subtle background to distinguish from prompt.
-            Style::default()
-                .fg(theme.foreground)
-                .bg(dim_bg_towards(theme.cursor_line_bg, theme.background, 60))
+            Style::default().fg(theme.foreground).bg(dim_bg_towards(
+                theme.cursor_line_bg,
+                theme.background,
+                60,
+            ))
         } else {
             // Prompt rows: dimmed cyan + bold.
             Style::default()
@@ -6432,10 +6444,7 @@ fn roster_backend_styled_line(
 
     Line::from(vec![
         Span::styled("  ", Style::default().fg(theme.foreground)),
-        Span::styled(
-            format!("{name:<ROSTER_BACKEND_NAME_W$}"),
-            name_style,
-        ),
+        Span::styled(format!("{name:<ROSTER_BACKEND_NAME_W$}"), name_style),
         Span::styled("  ", Style::default().fg(theme.foreground)),
         Span::styled(primary.to_string(), primary_style),
         Span::styled("  ", Style::default().fg(theme.foreground)),

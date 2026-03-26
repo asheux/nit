@@ -159,9 +159,9 @@ fn runner_loop(
         if !shutting_down {
             while active.len() < max_parallel {
                 let idx = queue.iter().position(|cmd| match cmd {
-                    ClaudeCommand::RunTurn { model, .. } => {
-                        !active.iter().any(|turn| turn.agent_id.as_str() == model.as_str())
-                    }
+                    ClaudeCommand::RunTurn { model, .. } => !active
+                        .iter()
+                        .any(|turn| turn.agent_id.as_str() == model.as_str()),
                     _ => false,
                 });
                 let Some(idx) = idx else {
@@ -443,8 +443,7 @@ fn run_turn(
                                 );
                                 if is_interesting
                                     && (last_stage.as_deref() != Some(stage.as_str())
-                                        || last_stage_sent_at.elapsed()
-                                            >= Duration::from_secs(1))
+                                        || last_stage_sent_at.elapsed() >= Duration::from_secs(1))
                                 {
                                     last_stage = Some(stage.clone());
                                     last_stage_sent_at = Instant::now();

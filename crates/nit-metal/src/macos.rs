@@ -339,8 +339,7 @@ fn persist_cached_policy_from_dir(root: &Path, entry: &PolicyCacheEntry) {
     }
     let path = policy_cache_path(root, &entry.device_name, &entry.payload_signature);
     let _ = write_atomic(&path, |writer| {
-        serde_json::to_writer(writer, entry)
-            .map_err(std::io::Error::other)
+        serde_json::to_writer(writer, entry).map_err(std::io::Error::other)
     });
 }
 

@@ -19,7 +19,15 @@ fn handle_agent_station_key(
     swarm: &mut SwarmRuntime,
 ) -> bool {
     let mut clipboard = None;
-    handle_agent_station_key_with_clipboard(key, state, vitals, codex, claude, swarm, &mut clipboard)
+    handle_agent_station_key_with_clipboard(
+        key,
+        state,
+        vitals,
+        codex,
+        claude,
+        swarm,
+        &mut clipboard,
+    )
 }
 
 fn handle_mouse_event(
@@ -656,8 +664,7 @@ fn global_archive_popup_enter_selects_archived_run() {
 
     // Build global archive index and open popup.
     state.agents.global_archive_open = true;
-    state.agents.global_archive_index =
-        agent_ops_view::build_global_archive_index(&state);
+    state.agents.global_archive_index = agent_ops_view::build_global_archive_index(&state);
     state.agents.global_archive_filtered = agent_ops_view::filter_global_archive(
         &state.agents.global_archive_index,
         "",
@@ -685,7 +692,12 @@ fn global_archive_popup_enter_selects_archived_run() {
     // tab context (artifacts_selected_saved_run_path) is NOT changed.
     assert!(state.agents.global_archive_opened_entry.is_some());
     assert_eq!(
-        state.agents.global_archive_opened_entry.as_ref().unwrap().run_path,
+        state
+            .agents
+            .global_archive_opened_entry
+            .as_ref()
+            .unwrap()
+            .run_path,
         run_path.to_string_lossy().as_ref()
     );
 }
@@ -732,8 +744,7 @@ fn global_archive_popup_filter_hotkeys_update_visible_scope() {
 
     // Build global archive index and open popup.
     state.agents.global_archive_open = true;
-    state.agents.global_archive_index =
-        agent_ops_view::build_global_archive_index(&state);
+    state.agents.global_archive_index = agent_ops_view::build_global_archive_index(&state);
     state.agents.global_archive_filtered = agent_ops_view::filter_global_archive(
         &state.agents.global_archive_index,
         "",
@@ -796,8 +807,7 @@ fn global_archive_popup_fuzzy_search_filters_entries() {
     .expect("write run");
 
     // Build index.
-    state.agents.global_archive_index =
-        agent_ops_view::build_global_archive_index(&state);
+    state.agents.global_archive_index = agent_ops_view::build_global_archive_index(&state);
     assert!(!state.agents.global_archive_index.is_empty());
 
     // No query: all entries.
@@ -1302,8 +1312,7 @@ fn explicit_prompt_mission_overrides_roster_default_mission() {
         current_mission: None,
         last_message: String::new(),
     });
-    state.agents.chat_input =
-        "@swarm 2 Mission: research\nread papers and compare ideas".into();
+    state.agents.chat_input = "@swarm 2 Mission: research\nread papers and compare ideas".into();
     state.agents.chat_input_cursor = state.agents.chat_input.chars().count();
     let mut vitals = VitalsState::default();
     let mut swarm = SwarmRuntime::default();
@@ -1833,8 +1842,7 @@ fn clicking_agent_console_artifact_row_opens_matching_artifact_popup() {
     let layout = layout::split(screen);
     let text_area = agent_console_view::thread_text_area(layout.notes, &state)
         .expect("thread area should be available");
-    let lines =
-        agent_console_view::thread_lines_for_selection(&state, text_area.width as usize);
+    let lines = agent_console_view::thread_lines_for_selection(&state, text_area.width as usize);
     let line_idx = lines
         .iter()
         .position(|line| line.contains("ARTIFACTS"))
@@ -2535,11 +2543,7 @@ fn swarm_artifacts_popup_follows_completed_clone_task() {
     };
     clone_event.apply(&mut state);
     let clone_outcome = swarm.handle_event_outcome(&mut state, &clone_event);
-    maybe_follow_swarm_artifact_in_popup(
-        &mut state,
-        &swarm,
-        clone_outcome.artifact_focus.as_ref(),
-    );
+    maybe_follow_swarm_artifact_in_popup(&mut state, &swarm, clone_outcome.artifact_focus.as_ref());
 
     assert!(matches!(
         agent_ops_view::artifacts_popup_ref(&state, &swarm, 120),
@@ -2624,11 +2628,7 @@ fn swarm_artifacts_popup_follows_final_report() {
     };
     clone_event.apply(&mut state);
     let clone_outcome = swarm.handle_event_outcome(&mut state, &clone_event);
-    maybe_follow_swarm_artifact_in_popup(
-        &mut state,
-        &swarm,
-        clone_outcome.artifact_focus.as_ref(),
-    );
+    maybe_follow_swarm_artifact_in_popup(&mut state, &swarm, clone_outcome.artifact_focus.as_ref());
 
     assert!(matches!(
         agent_ops_view::artifacts_popup_ref(&state, &swarm, 120),
@@ -2872,8 +2872,7 @@ fn clicking_swarm_clone_artifact_row_opens_matching_task_card() {
     let text_area = agent_console_view::thread_text_area(layout.notes, &state)
         .expect("thread area should be available");
     let width = text_area.width as usize;
-    let lines =
-        agent_console_view::thread_lines_for_selection_with_swarm(&state, &swarm, width);
+    let lines = agent_console_view::thread_lines_for_selection_with_swarm(&state, &swarm, width);
     let line_idx = lines
         .iter()
         .enumerate()
@@ -3026,8 +3025,7 @@ fn chat_thread_selection_starts_at_clicked_column() {
     let layout = layout::split(screen);
     let text_area = agent_console_view::thread_text_area(layout.notes, &state)
         .expect("thread area should be available");
-    let lines =
-        agent_console_view::thread_lines_for_selection(&state, text_area.width as usize);
+    let lines = agent_console_view::thread_lines_for_selection(&state, text_area.width as usize);
     let line_idx = lines
         .iter()
         .position(|line| line.contains("precision"))
@@ -3155,16 +3153,15 @@ k = 2
     let layout_info = games_visualizer_view::layout_for_config(inner, &state, Some(&config));
     let side_area = layout_info.side.expect("side panel");
     let side_inner = Block::default().borders(Borders::ALL).inner(side_area);
-    let lines =
-        games_visualizer_view::build_side_lines(&state, &theme, side_inner.width as usize)
-            .into_iter()
-            .map(|line| {
-                line.spans
-                    .iter()
-                    .map(|span| span.content.as_ref())
-                    .collect::<String>()
-            })
-            .collect::<Vec<_>>();
+    let lines = games_visualizer_view::build_side_lines(&state, &theme, side_inner.width as usize)
+        .into_iter()
+        .map(|line| {
+            line.spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>();
     let accel_cache_idx = lines
         .iter()
         .position(|line| line.starts_with("accel_cache: "))
@@ -3299,8 +3296,7 @@ fn mouse_wheel_in_chat_thread_clamps_at_bottom_without_wrap() {
     let layout = layout::split(screen);
     let thread_area = agent_console_view::thread_text_area(layout.notes, &state)
         .expect("chat thread area should be available");
-    let lines =
-        agent_console_view::thread_lines_for_selection(&state, thread_area.width as usize);
+    let lines = agent_console_view::thread_lines_for_selection(&state, thread_area.width as usize);
     let max_scroll = lines.len().saturating_sub(thread_area.height as usize);
     let wheel_down = MouseEvent {
         kind: MouseEventKind::ScrollDown,
@@ -3384,8 +3380,7 @@ fn scrolled_chat_selection_maps_to_visible_line_not_top() {
     }
     assert!(state.agents.console_scroll > 0);
 
-    let lines =
-        agent_console_view::thread_lines_for_selection(&state, thread_area.width as usize);
+    let lines = agent_console_view::thread_lines_for_selection(&state, thread_area.width as usize);
     let visible_height = thread_area.height as usize;
     let visible_start = state.agents.console_scroll;
     let maybe_target = (0..visible_height)
@@ -3486,8 +3481,7 @@ fn user_bubble_selection_can_span_multiple_messages() {
     let layout = layout::split(screen);
     let thread_area = agent_console_view::thread_text_area(layout.notes, &state)
         .expect("chat thread area should be available");
-    let lines =
-        agent_console_view::thread_lines_for_selection(&state, thread_area.width as usize);
+    let lines = agent_console_view::thread_lines_for_selection(&state, thread_area.width as usize);
     let (start_row, start_col) = lines
         .iter()
         .enumerate()
@@ -3587,8 +3581,7 @@ fn scrolled_user_bubble_selection_can_span_multiple_messages() {
             &theme
         ));
     }
-    let lines =
-        agent_console_view::thread_lines_for_selection(&state, thread_area.width as usize);
+    let lines = agent_console_view::thread_lines_for_selection(&state, thread_area.width as usize);
     let visible_start = state.agents.console_scroll;
     let visible_end = visible_start.saturating_add(thread_area.height as usize);
     let visible = lines
@@ -3696,8 +3689,7 @@ fn vertical_drag_across_user_bubbles_includes_end_message_text() {
     let layout = layout::split(screen);
     let thread_area = agent_console_view::thread_text_area(layout.notes, &state)
         .expect("chat thread area should be available");
-    let lines =
-        agent_console_view::thread_lines_for_selection(&state, thread_area.width as usize);
+    let lines = agent_console_view::thread_lines_for_selection(&state, thread_area.width as usize);
 
     let (start_row, start_col) = lines
         .iter()
@@ -3793,8 +3785,7 @@ fn reverse_vertical_drag_across_user_bubbles_keeps_both_messages() {
     let layout = layout::split(screen);
     let thread_area = agent_console_view::thread_text_area(layout.notes, &state)
         .expect("chat thread area should be available");
-    let lines =
-        agent_console_view::thread_lines_for_selection(&state, thread_area.width as usize);
+    let lines = agent_console_view::thread_lines_for_selection(&state, thread_area.width as usize);
 
     let (start_row, start_col) = lines
         .iter()
@@ -3908,8 +3899,7 @@ fn scrolled_reverse_drag_across_user_bubbles_keeps_visible_messages() {
         ));
     }
 
-    let lines =
-        agent_console_view::thread_lines_for_selection(&state, thread_area.width as usize);
+    let lines = agent_console_view::thread_lines_for_selection(&state, thread_area.width as usize);
     let visible_start = state.agents.console_scroll;
     let visible_end = visible_start.saturating_add(thread_area.height as usize);
     let visible_prompt_rows = lines
@@ -3923,8 +3913,7 @@ fn scrolled_reverse_drag_across_user_bubbles_keeps_visible_messages() {
         visible_prompt_rows.len() >= 2,
         "need at least two visible prompt rows after scroll"
     );
-    let (start_abs_row, start_line) =
-        *visible_prompt_rows.last().expect("last visible prompt row");
+    let (start_abs_row, start_line) = *visible_prompt_rows.last().expect("last visible prompt row");
     let (end_abs_row, end_line) = *visible_prompt_rows
         .first()
         .expect("first visible prompt row");
@@ -4112,8 +4101,7 @@ fn agent_console_selection_strips_user_bubble_edges_from_clipboard() {
     let layout = layout::split(screen);
     let thread_area =
         agent_console_view::thread_text_area(layout.notes, &state).expect("thread area");
-    let lines =
-        agent_console_view::thread_lines_for_selection(&state, thread_area.width as usize);
+    let lines = agent_console_view::thread_lines_for_selection(&state, thread_area.width as usize);
     let (line_idx, line) = lines
         .iter()
         .enumerate()
@@ -4167,8 +4155,7 @@ fn agent_console_selection_does_not_strip_markdown_table_pipes_in_user_prompt() 
     let layout = layout::split(screen);
     let thread_area =
         agent_console_view::thread_text_area(layout.notes, &state).expect("thread area");
-    let lines =
-        agent_console_view::thread_lines_for_selection(&state, thread_area.width as usize);
+    let lines = agent_console_view::thread_lines_for_selection(&state, thread_area.width as usize);
     let (line_idx, line) = lines
         .iter()
         .enumerate()
@@ -4860,10 +4847,7 @@ fn vitals_smoke_games_run_then_stall_hits_crit_boundary() {
 fn codex_dispatch_uses_stored_thread_id_for_context_continuity() {
     let mut state = state_for_test();
     let mut vitals = VitalsState::default();
-    let codex = CodexRunner::spawn(
-        CodexRuntimeMode::Exec,
-        CodexRunnerConfig::default(),
-    );
+    let codex = CodexRunner::spawn(CodexRuntimeMode::Exec, CodexRunnerConfig::default());
 
     // Create a Codex agent.
     state.agents.agents.push(nit_core::AgentLane {
@@ -4877,11 +4861,15 @@ fn codex_dispatch_uses_stored_thread_id_for_context_continuity() {
         current_mission: None,
         last_message: String::new(),
     });
-    state.agents.codex_effective_context_window_tokens
+    state
+        .agents
+        .codex_effective_context_window_tokens
         .insert("gpt-test".into(), 128_000);
 
     // Simulate a completed turn that stores a thread_id.
-    state.agents.codex_thread_ids
+    state
+        .agents
+        .codex_thread_ids
         .insert("gpt-test".into(), "thread-abc-123".into());
 
     // Dispatch a new turn — it should resume the stored thread.
@@ -4904,24 +4892,32 @@ fn codex_mission_thread_ids_scoped_per_mission() {
     let mut state = state_for_test();
 
     // Simulate thread IDs stored for two different missions.
-    state.agents.codex_mission_thread_ids
+    state
+        .agents
+        .codex_mission_thread_ids
         .entry("mis-001".into())
         .or_default()
         .insert("gpt-test".into(), "thread-mission-1".into());
-    state.agents.codex_mission_thread_ids
+    state
+        .agents
+        .codex_mission_thread_ids
         .entry("mis-002".into())
         .or_default()
         .insert("gpt-test".into(), "thread-mission-2".into());
 
     // Mission-1 context retrieves thread for mission-1.
-    let thread_1 = state.agents.codex_mission_thread_ids
+    let thread_1 = state
+        .agents
+        .codex_mission_thread_ids
         .get("mis-001")
         .and_then(|m| m.get("gpt-test"))
         .cloned();
     assert_eq!(thread_1.as_deref(), Some("thread-mission-1"));
 
     // Mission-2 context retrieves thread for mission-2.
-    let thread_2 = state.agents.codex_mission_thread_ids
+    let thread_2 = state
+        .agents
+        .codex_mission_thread_ids
         .get("mis-002")
         .and_then(|m| m.get("gpt-test"))
         .cloned();
@@ -4933,24 +4929,32 @@ fn claude_session_ids_scoped_per_mission() {
     let mut state = state_for_test();
 
     // Simulate session IDs stored for two different missions.
-    state.agents.claude_mission_session_ids
+    state
+        .agents
+        .claude_mission_session_ids
         .entry("mis-001".into())
         .or_default()
         .insert("claude-opus".into(), "session-mission-1".into());
-    state.agents.claude_mission_session_ids
+    state
+        .agents
+        .claude_mission_session_ids
         .entry("mis-002".into())
         .or_default()
         .insert("claude-opus".into(), "session-mission-2".into());
 
     // Mission-1 context retrieves session for mission-1.
-    let session_1 = state.agents.claude_mission_session_ids
+    let session_1 = state
+        .agents
+        .claude_mission_session_ids
         .get("mis-001")
         .and_then(|m| m.get("claude-opus"))
         .cloned();
     assert_eq!(session_1.as_deref(), Some("session-mission-1"));
 
     // Mission-2 context retrieves session for mission-2.
-    let session_2 = state.agents.claude_mission_session_ids
+    let session_2 = state
+        .agents
+        .claude_mission_session_ids
         .get("mis-002")
         .and_then(|m| m.get("claude-opus"))
         .cloned();
@@ -4975,17 +4979,27 @@ fn claude_dispatch_uses_stored_session_id_for_context_continuity() {
         current_mission: None,
         last_message: String::new(),
     });
-    state.agents.claude_effective_context_window_tokens
+    state
+        .agents
+        .claude_effective_context_window_tokens
         .insert("claude-opus".into(), 200_000);
-    state.agents.claude_supported_efforts
+    state
+        .agents
+        .claude_supported_efforts
         .insert("claude-opus".into(), vec!["low".into(), "high".into()]);
-    state.agents.claude_default_effort
+    state
+        .agents
+        .claude_default_effort
         .insert("claude-opus".into(), "high".into());
-    state.agents.claude_selected_effort
+    state
+        .agents
+        .claude_selected_effort
         .insert("claude-opus".into(), "high".into());
 
     // Simulate a completed turn that stores a session_id.
-    state.agents.claude_session_ids
+    state
+        .agents
+        .claude_session_ids
         .insert("claude-opus".into(), "session-xyz-789".into());
 
     // Dispatch a new turn — it should resume the stored session.
@@ -5038,7 +5052,11 @@ fn turn_completed_stores_thread_id_for_codex() {
     event.apply(&mut state);
 
     assert_eq!(
-        state.agents.codex_thread_ids.get("gpt-test").map(|s| s.as_str()),
+        state
+            .agents
+            .codex_thread_ids
+            .get("gpt-test")
+            .map(|s| s.as_str()),
         Some("thread-from-codex"),
     );
 }
@@ -5079,7 +5097,11 @@ fn turn_completed_stores_session_id_for_claude_via_apply_claude_event() {
     apply_claude_event(&mut state, &event);
 
     assert_eq!(
-        state.agents.claude_session_ids.get("claude-opus").map(|s| s.as_str()),
+        state
+            .agents
+            .claude_session_ids
+            .get("claude-opus")
+            .map(|s| s.as_str()),
         Some("session-from-claude"),
     );
 }
@@ -5120,7 +5142,9 @@ fn turn_completed_stores_mission_scoped_session_for_claude() {
     // Session should be stored under mission scope, not global.
     assert!(state.agents.claude_session_ids.get("claude-opus").is_none());
     assert_eq!(
-        state.agents.claude_mission_session_ids
+        state
+            .agents
+            .claude_mission_session_ids
             .get("mis-001")
             .and_then(|m| m.get("claude-opus"))
             .map(|s| s.as_str()),
@@ -5219,7 +5243,9 @@ fn artifact_popup_dispatches_idle_agent_even_when_other_agents_busy() {
             stage: None,
         },
     );
-    state.agents.codex_effective_context_window_tokens
+    state
+        .agents
+        .codex_effective_context_window_tokens
         .insert("agent-a".into(), 128_000);
 
     // Agent B is idle (the artifact's agent).
@@ -5234,7 +5260,9 @@ fn artifact_popup_dispatches_idle_agent_even_when_other_agents_busy() {
         current_mission: None,
         last_message: String::new(),
     });
-    state.agents.codex_effective_context_window_tokens
+    state
+        .agents
+        .codex_effective_context_window_tokens
         .insert("agent-b".into(), 128_000);
 
     // Agent A is busy — verify.

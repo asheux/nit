@@ -849,7 +849,7 @@ k = 2
         // Even with a very small candidate, the result should be at least
         // one match (= minimum_chunk_steps for whole_match_chunks).
         let chunk = normalize_chunk_steps(
-            100,      // less than one match
+            100, // less than one match
             u32::MAX,
             500_000,
             EngineMode::Interactive,

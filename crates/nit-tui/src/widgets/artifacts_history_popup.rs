@@ -90,9 +90,7 @@ pub fn build_lines(state: &AppState, theme: &Theme, inner_width: u16) -> Vec<Lin
     let mut lines = Vec::new();
 
     // Line 0: search bar with visible block cursor.
-    let cursor_style = Style::default()
-        .fg(theme.background)
-        .bg(theme.foreground);
+    let cursor_style = Style::default().fg(theme.background).bg(theme.foreground);
     let prompt_style = Style::default()
         .fg(theme.title_focused)
         .add_modifier(Modifier::BOLD);
@@ -176,7 +174,11 @@ pub fn build_lines(state: &AppState, theme: &Theme, inner_width: u16) -> Vec<Lin
         );
         let time_span = Span::styled(
             format!(" {:<time_w$}", trim_to_width(&entry.time_label, time_w)),
-            if is_selected { selected_style } else { dim_style },
+            if is_selected {
+                selected_style
+            } else {
+                dim_style
+            },
         );
         let preview_span = Span::styled(
             format!(" {}", trim_to_width(&entry.preview, preview_w)),
@@ -187,7 +189,11 @@ pub fn build_lines(state: &AppState, theme: &Theme, inner_width: u16) -> Vec<Lin
             Span::styled(prefix, base_style),
             Span::styled(
                 indent,
-                if is_selected { selected_style } else { dim_style },
+                if is_selected {
+                    selected_style
+                } else {
+                    dim_style
+                },
             ),
             kind_span,
             owner_span,

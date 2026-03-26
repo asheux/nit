@@ -96,34 +96,19 @@ fn copy_claude_runtime_metadata(state: &mut AppState, base_id: &str, clone_id: &
             .claude_effective_context_window_tokens
             .insert(clone_id.to_string(), tokens);
     }
-    if let Some(effort) = state
-        .agents
-        .claude_default_effort
-        .get(base_id)
-        .cloned()
-    {
+    if let Some(effort) = state.agents.claude_default_effort.get(base_id).cloned() {
         state
             .agents
             .claude_default_effort
             .insert(clone_id.to_string(), effort);
     }
-    if let Some(efforts) = state
-        .agents
-        .claude_supported_efforts
-        .get(base_id)
-        .cloned()
-    {
+    if let Some(efforts) = state.agents.claude_supported_efforts.get(base_id).cloned() {
         state
             .agents
             .claude_supported_efforts
             .insert(clone_id.to_string(), efforts);
     }
-    if let Some(effort) = state
-        .agents
-        .claude_selected_effort
-        .get(base_id)
-        .cloned()
-    {
+    if let Some(effort) = state.agents.claude_selected_effort.get(base_id).cloned() {
         state
             .agents
             .claude_selected_effort
@@ -214,7 +199,12 @@ fn cleanup_swarm_clones_for_mission(state: &mut AppState, mission_id: &str) {
     // Decrement queue_len for each Codex turn that will be removed, while agents still exist.
     for turn in state.agents.queued_codex_turns.iter() {
         if clone_ids.contains(turn.agent_id.as_str()) {
-            if let Some(agent) = state.agents.agents.iter_mut().find(|a| a.id == turn.agent_id) {
+            if let Some(agent) = state
+                .agents
+                .agents
+                .iter_mut()
+                .find(|a| a.id == turn.agent_id)
+            {
                 agent.queue_len = agent.queue_len.saturating_sub(1);
             }
         }
@@ -227,7 +217,12 @@ fn cleanup_swarm_clones_for_mission(state: &mut AppState, mission_id: &str) {
     // Decrement queue_len for each Claude turn that will be removed, while agents still exist.
     for turn in state.agents.queued_claude_turns.iter() {
         if clone_ids.contains(turn.agent_id.as_str()) {
-            if let Some(agent) = state.agents.agents.iter_mut().find(|a| a.id == turn.agent_id) {
+            if let Some(agent) = state
+                .agents
+                .agents
+                .iter_mut()
+                .find(|a| a.id == turn.agent_id)
+            {
                 agent.queue_len = agent.queue_len.saturating_sub(1);
             }
         }
@@ -1377,11 +1372,7 @@ impl SwarmRuntime {
     /// Re-activate a completed swarm run so the planner can generate a new
     /// plan for a follow-up prompt.  Clears previous tasks/outputs while
     /// keeping agent assignments and gate config intact.
-    pub fn reactivate_for_followup(
-        &mut self,
-        state: &mut AppState,
-        mission_id: &str,
-    ) -> bool {
+    pub fn reactivate_for_followup(&mut self, state: &mut AppState, mission_id: &str) -> bool {
         let Some(mut run) = self.completed_runs.remove(mission_id) else {
             // Already active or doesn't exist.
             return self.runs.contains_key(mission_id);
@@ -4588,9 +4579,7 @@ fn mark_task_finished(
     let pos_active = run
         .tasks
         .iter()
-        .position(|task| {
-            task.agent_id == agent_id && matches!(task.state, SwarmTaskState::Running)
-        })
+        .position(|task| task.agent_id == agent_id && matches!(task.state, SwarmTaskState::Running))
         .or_else(|| {
             run.tasks.iter().position(|task| {
                 task.agent_id == agent_id && matches!(task.state, SwarmTaskState::Dispatched)
@@ -6065,8 +6054,7 @@ pub fn select_swarm_agents(
         .agents
         .iter()
         .filter(|lane| {
-            !is_swarm_clone_agent_id(lane.id.as_str())
-                && !is_chat_clone_agent_id(lane.id.as_str())
+            !is_swarm_clone_agent_id(lane.id.as_str()) && !is_chat_clone_agent_id(lane.id.as_str())
         })
         .enumerate()
         .map(|(idx, lane)| (lane.id.clone(), idx))
@@ -6079,8 +6067,7 @@ pub fn select_swarm_agents(
         .filter(|lane| lane.is_codex() || lane.is_claude())
         .filter(|lane| lane.id.as_str() != planner)
         .filter(|lane| {
-            !is_swarm_clone_agent_id(lane.id.as_str())
-                && !is_chat_clone_agent_id(lane.id.as_str())
+            !is_swarm_clone_agent_id(lane.id.as_str()) && !is_chat_clone_agent_id(lane.id.as_str())
         })
         .map(|lane| lane.id.clone())
         .collect::<Vec<_>>();

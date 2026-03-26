@@ -189,7 +189,12 @@ pub fn render(
             .agents
             .codex_effective_context_window_tokens
             .get(agent_id)
-            .or_else(|| state.agents.claude_effective_context_window_tokens.get(agent_id))
+            .or_else(|| {
+                state
+                    .agents
+                    .claude_effective_context_window_tokens
+                    .get(agent_id)
+            })
             .copied()
     });
     let label_style = Style::default()
@@ -285,13 +290,20 @@ pub fn render(
         for (row_idx, row) in cached.iter().enumerate() {
             combined_rows.push(row.clone());
             // After each breather slot, inject the inline breather if agents are pending.
-            while slot_iter.peek().is_some_and(|&&(pos, _)| pos == row_idx + 1) {
+            while slot_iter
+                .peek()
+                .is_some_and(|&&(pos, _)| pos == row_idx + 1)
+            {
                 let Some(&(_, prompt_msg_idx)) = slot_iter.next() else {
                     break;
                 };
                 if let Some(agent_ids) = pending_by_prompt.get(&prompt_msg_idx) {
-                    combined_rows
-                        .extend(inline_breather_rows(state, agent_ids, pulse_on, thread_width));
+                    combined_rows.extend(inline_breather_rows(
+                        state,
+                        agent_ids,
+                        pulse_on,
+                        thread_width,
+                    ));
                     for id in agent_ids {
                         inline_shown.insert(id.clone());
                     }
@@ -301,8 +313,12 @@ pub fn render(
         // Drain any remaining slots past the end of cached rows.
         for &(_, prompt_msg_idx) in slot_iter {
             if let Some(agent_ids) = pending_by_prompt.get(&prompt_msg_idx) {
-                combined_rows
-                    .extend(inline_breather_rows(state, agent_ids, pulse_on, thread_width));
+                combined_rows.extend(inline_breather_rows(
+                    state,
+                    agent_ids,
+                    pulse_on,
+                    thread_width,
+                ));
                 for id in agent_ids {
                     inline_shown.insert(id.clone());
                 }
@@ -326,13 +342,8 @@ pub fn render(
                     .any(|t| t.agent_id == a.id))
     });
     let mission_ctx = state.agents.selected_context_mission();
-    let has_swarm_context = mission_ctx.is_some_and(|mid| {
-        state
-            .agents
-            .missions
-            .iter()
-            .any(|m| m.id == mid && m.swarm)
-    });
+    let has_swarm_context =
+        mission_ctx.is_some_and(|mid| state.agents.missions.iter().any(|m| m.id == mid && m.swarm));
     if any_remaining || (has_swarm_context && inline_shown.is_empty()) {
         combined_rows.extend(breather_rows_for_user_prompt(
             state,
@@ -350,10 +361,7 @@ pub fn render(
         state.agents.console_scroll.min(max_scroll)
     };
     let scroll_usize = state.agents.console_scroll;
-    let visible_rows = combined_rows
-        .iter()
-        .skip(scroll_usize)
-        .take(thread_height);
+    let visible_rows = combined_rows.iter().skip(scroll_usize).take(thread_height);
     let visible: Vec<Line<'static>> = thread_lines(visible_rows, theme);
     let visible = apply_ui_selection(
         visible,
@@ -1746,13 +1754,8 @@ fn thread_rows(
     });
     // Also show global breather for swarm mission status (Done/Waiting/etc.) even
     // when no agents are active, so the completion state remains visible.
-    let has_swarm_context = mission.is_some_and(|mid| {
-        state
-            .agents
-            .missions
-            .iter()
-            .any(|m| m.id == mid && m.swarm)
-    });
+    let has_swarm_context =
+        mission.is_some_and(|mid| state.agents.missions.iter().any(|m| m.id == mid && m.swarm));
     if any_remaining || has_swarm_context {
         rows.extend(breather_rows_for_user_prompt(state, swarm, pulse_on, width));
     }
@@ -1783,8 +1786,7 @@ fn visible_messages_grouped<'a>(
 
     let mut responses_by_prompt: std::collections::HashMap<usize, Vec<(usize, &AgentMessage)>> =
         std::collections::HashMap::new();
-    let mut grouped_indices: std::collections::HashSet<usize> =
-        std::collections::HashSet::new();
+    let mut grouped_indices: std::collections::HashSet<usize> = std::collections::HashSet::new();
     for &(msg_idx, msg) in &visible {
         if msg.agent_id.is_some() {
             if let Some(parent_idx) = msg.prompt_msg_idx {
@@ -1945,8 +1947,7 @@ fn format_message_rows(
                     && line_idx + 1 < text_lines.len()
                 {
                     let sep = text_lines[line_idx + 1].trim();
-                    let is_table_sep = sep.starts_with('|')
-                        && sep.contains("---");
+                    let is_table_sep = sep.starts_with('|') && sep.contains("---");
                     if is_table_sep {
                         // Parse header columns.
                         let headers: Vec<&str> = trimmed
@@ -1992,13 +1993,9 @@ fn format_message_rows(
                                 if cell.is_empty() {
                                     continue;
                                 }
-                                let label = headers
-                                    .get(col_idx)
-                                    .copied()
-                                    .unwrap_or("#");
+                                let label = headers.get(col_idx).copied().unwrap_or("#");
                                 let prefix = format!("{indent_str}  {label}: ");
-                                let value_width =
-                                    max_inner.saturating_sub(prefix.len()).max(10);
+                                let value_width = max_inner.saturating_sub(prefix.len()).max(10);
                                 let segments = wrap_visual_line(cell, value_width);
                                 for (seg_idx, seg) in segments.iter().enumerate() {
                                     let seg = seg.trim_end();
@@ -2187,11 +2184,7 @@ fn inline_breather_rows(
         kind: ThreadRowKind::StatusHeader,
     });
     for id in agent_ids {
-        let agent = state
-            .agents
-            .agents
-            .iter()
-            .find(|a| a.id == id.as_str());
+        let agent = state.agents.agents.iter().find(|a| a.id == id.as_str());
         let badge = agent
             .map(agent_roster_label)
             .unwrap_or_else(|| id.to_string());
@@ -2219,10 +2212,8 @@ fn inline_breather_rows(
                 elapsed
                     .map(format_duration_compact)
                     .unwrap_or_else(|| "--".into()),
-                hb.map(|s| format!("{s}s"))
-                    .unwrap_or_else(|| "--".into()),
-                out.map(|s| format!("{s}s"))
-                    .unwrap_or_else(|| "--".into()),
+                hb.map(|s| format!("{s}s")).unwrap_or_else(|| "--".into()),
+                out.map(|s| format!("{s}s")).unwrap_or_else(|| "--".into()),
             )
         };
         rows.push(ThreadRow {
@@ -2281,22 +2272,16 @@ fn breather_rows_for_user_prompt(
             continue;
         }
         let queued_in_mission = mission_ctx.is_some_and(|mission_id| {
-            state
-                .agents
-                .queued_codex_turns
-                .iter()
-                .any(|turn| {
-                    turn.agent_id == agent.id && turn.mission_id.as_deref() == Some(mission_id)
-                })
-                || state.agents.queued_claude_turns.iter().any(|turn| {
-                    turn.agent_id == agent.id && turn.mission_id.as_deref() == Some(mission_id)
-                })
+            state.agents.queued_codex_turns.iter().any(|turn| {
+                turn.agent_id == agent.id && turn.mission_id.as_deref() == Some(mission_id)
+            }) || state.agents.queued_claude_turns.iter().any(|turn| {
+                turn.agent_id == agent.id && turn.mission_id.as_deref() == Some(mission_id)
+            })
         });
         let in_context = if let Some(mission_id) = mission_ctx {
             agent.current_mission.as_deref() == Some(mission_id) || queued_in_mission
         } else if let Some(selected_agent) = agent_ctx {
-            agent.id == selected_agent
-                || chat_clone_base_id(&agent.id) == Some(selected_agent)
+            agent.id == selected_agent || chat_clone_base_id(&agent.id) == Some(selected_agent)
         } else {
             true
         };
@@ -3015,7 +3000,12 @@ fn format_token_count_stage(state: &AppState, agent: &AgentLane) -> String {
         .agents
         .codex_effective_context_window_tokens
         .get(agent_id)
-        .or_else(|| state.agents.claude_effective_context_window_tokens.get(agent_id))
+        .or_else(|| {
+            state
+                .agents
+                .claude_effective_context_window_tokens
+                .get(agent_id)
+        })
         .copied();
 
     match (pct, used, max) {
@@ -3070,10 +3060,7 @@ fn format_token_count_suffix(state: &AppState, agent: &AgentLane) -> Option<Stri
     };
 
     match (pct, used) {
-        (Some(pct), Some(used)) => Some(format!(
-            "{} ({pct}%)",
-            format_token_count_short(used)
-        )),
+        (Some(pct), Some(used)) => Some(format!("{} ({pct}%)", format_token_count_short(used))),
         (Some(pct), None) => Some(format!("{pct}% left")),
         (None, Some(used)) => Some(format_token_count_short(used)),
         _ => None,

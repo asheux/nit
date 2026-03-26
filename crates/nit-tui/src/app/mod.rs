@@ -55,8 +55,8 @@ use nit_core::{
     actions::Action, apply_action, io as core_io, AgentAlert, AgentAlertSeverity, AgentBusEvent,
     AgentChannel, AgentDiagnosticEvent, AgentMessage, AgentOpsTab, AgentStatus, AppKind, AppState,
     McpConnectionState, MissionPhase, MissionRecord, Mode, PaneId, PatchProposal, PatchStatus,
-    Prompt, SavedRunHistoryFilter, SearchMode, UiSelection,
-    UiSelectionPane, YankKind, CONSOLE_SCROLL_BOTTOM,
+    Prompt, SavedRunHistoryFilter, SearchMode, UiSelection, UiSelectionPane, YankKind,
+    CONSOLE_SCROLL_BOTTOM,
 };
 use nit_games::config::GamesConfig;
 use ratatui::{
@@ -2213,7 +2213,9 @@ fn handle_agent_station_key_with_clipboard(
 
     match state.focus {
         PaneId::JobOutput => handle_agent_ops_key(key, state, vitals, codex, claude, swarm),
-        PaneId::Notes => handle_agent_console_key(key, state, vitals, codex, claude, swarm, clipboard),
+        PaneId::Notes => {
+            handle_agent_console_key(key, state, vitals, codex, claude, swarm, clipboard)
+        }
         _ => false,
     }
 }
@@ -2658,14 +2660,12 @@ fn handle_agent_ops_key(
             state.agents.global_archive_selected = 0;
             state.agents.global_archive_scroll = 0;
             state.agents.global_archive_filter = SavedRunHistoryFilter::All;
-            state.agents.global_archive_index =
-                agent_ops_view::build_global_archive_index(state);
-            state.agents.global_archive_filtered =
-                agent_ops_view::filter_global_archive(
-                    &state.agents.global_archive_index,
-                    "",
-                    SavedRunHistoryFilter::All,
-                );
+            state.agents.global_archive_index = agent_ops_view::build_global_archive_index(state);
+            state.agents.global_archive_filtered = agent_ops_view::filter_global_archive(
+                &state.agents.global_archive_index,
+                "",
+                SavedRunHistoryFilter::All,
+            );
             changed = true;
         }
         KeyEvent {
@@ -3716,7 +3716,10 @@ pub(super) fn delete_chat_input_selection(state: &mut AppState) -> bool {
     true
 }
 
-pub(super) fn copy_chat_input_selection(state: &mut AppState, clipboard: &mut Option<Clipboard>) -> bool {
+pub(super) fn copy_chat_input_selection(
+    state: &mut AppState,
+    clipboard: &mut Option<Clipboard>,
+) -> bool {
     let Some((start, end)) = chat_input_selection_range(state) else {
         return false;
     };
@@ -5387,13 +5390,8 @@ fn handle_mouse_event_with_swarm(
                 let area =
                     dynamic_popup_rect(screen, artifacts_history_popup::preferred_size(screen));
                 if point_in_rect(mouse.column, mouse.row, area) {
-                    let (max_scroll, _) =
-                        global_archive_scroll_metrics(state, screen, theme);
-                    bump_scroll_clamped(
-                        &mut state.agents.global_archive_scroll,
-                        delta,
-                        max_scroll,
-                    );
+                    let (max_scroll, _) = global_archive_scroll_metrics(state, screen, theme);
+                    bump_scroll_clamped(&mut state.agents.global_archive_scroll, delta, max_scroll);
                 }
                 return true;
             }
@@ -5845,13 +5843,8 @@ fn clamp_modal_scroll_offsets(state: &mut AppState, screen: ratatui::layout::Rec
     }
     if state.agents.global_archive_open {
         let (max_scroll, _) = global_archive_scroll_metrics(state, screen, theme);
-        state.agents.global_archive_scroll =
-            state.agents.global_archive_scroll.min(max_scroll);
-        let max = state
-            .agents
-            .global_archive_filtered
-            .len()
-            .saturating_sub(1);
+        state.agents.global_archive_scroll = state.agents.global_archive_scroll.min(max_scroll);
+        let max = state.agents.global_archive_filtered.len().saturating_sub(1);
         state.agents.global_archive_selected = state.agents.global_archive_selected.min(max);
     }
     if state.app_kind != AppKind::Games {
@@ -7167,12 +7160,8 @@ fn handle_mouse_down_with_swarm(
             let new_cursor = cursor_char_idx.min(total_chars);
             if mouse.modifiers.contains(KeyModifiers::SHIFT) {
                 if state.agents.artifacts_popup_chat_selection_anchor.is_none() {
-                    state.agents.artifacts_popup_chat_selection_anchor = Some(
-                        state
-                            .agents
-                            .artifacts_popup_chat_cursor
-                            .min(total_chars),
-                    );
+                    state.agents.artifacts_popup_chat_selection_anchor =
+                        Some(state.agents.artifacts_popup_chat_cursor.min(total_chars));
                 }
             } else {
                 state.agents.artifacts_popup_chat_selection_anchor = Some(new_cursor);
@@ -7987,8 +7976,7 @@ fn handle_mouse_drag_with_swarm(
             true
         }
         MouseSelectTarget::PopupChatInput => {
-            let popup_area =
-                dynamic_popup_rect(screen, artifacts_popup::preferred_size(screen));
+            let popup_area = dynamic_popup_rect(screen, artifacts_popup::preferred_size(screen));
             let Some(cursor_char_idx) = artifacts_popup::map_chat_input_point_to_cursor(
                 state,
                 swarm,
@@ -8001,12 +7989,8 @@ fn handle_mouse_drag_with_swarm(
             };
             let total_chars = state.agents.artifacts_popup_chat_input.chars().count();
             if state.agents.artifacts_popup_chat_selection_anchor.is_none() {
-                state.agents.artifacts_popup_chat_selection_anchor = Some(
-                    state
-                        .agents
-                        .artifacts_popup_chat_cursor
-                        .min(total_chars),
-                );
+                state.agents.artifacts_popup_chat_selection_anchor =
+                    Some(state.agents.artifacts_popup_chat_cursor.min(total_chars));
             }
             state.agents.artifacts_popup_chat_cursor = cursor_char_idx.min(total_chars);
             state.agents.artifacts_popup_chat_scroll = usize::MAX;
@@ -10070,10 +10054,7 @@ fn load_selected_global_archive_entry(state: &mut AppState) {
     state.agents.artifacts_popup_open = true;
     state.agents.artifacts_popup_scroll = 0;
 
-    state.status = Some(format!(
-        "Artifact: {} ({})",
-        entry.source, entry.time_label,
-    ));
+    state.status = Some(format!("Artifact: {} ({})", entry.source, entry.time_label,));
 }
 
 fn handle_global_archive_key(
@@ -10090,11 +10071,7 @@ fn handle_global_archive_key(
     }
 
     let query_empty = state.agents.global_archive_query.is_empty();
-    let max = state
-        .agents
-        .global_archive_filtered
-        .len()
-        .saturating_sub(1);
+    let max = state.agents.global_archive_filtered.len().saturating_sub(1);
     let (_, page_step) = global_archive_scroll_metrics(state, screen, theme);
 
     match key.code {
@@ -10519,9 +10496,7 @@ fn write_ad_hoc_run_provenance(state: &AppState, agent_id: &str) -> io::Result<(
         .agents
         .evidence
         .iter()
-        .filter(|item| {
-            item.mission_id.is_none() && is_own_or_clone(item.agent_id.as_deref())
-        })
+        .filter(|item| item.mission_id.is_none() && is_own_or_clone(item.agent_id.as_deref()))
         .cloned()
         .collect::<Vec<_>>();
 

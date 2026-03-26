@@ -533,8 +533,7 @@ pub(super) fn submit_chat_input_and_dispatch(
             });
 
         if let Some(planner) = planner {
-            let agents =
-                select_swarm_agents(state, &planner, cmd.size, cmd.template.as_deref());
+            let agents = select_swarm_agents(state, &planner, cmd.size, cmd.template.as_deref());
             if let Some((_mission_id, dispatches)) = swarm.start(
                 state,
                 planner.clone(),
@@ -625,12 +624,7 @@ pub(super) fn submit_chat_input_and_dispatch(
                 // processes the planner's response as a new swarm plan.
                 swarm.reactivate_for_followup(state, mid);
                 // Update mission status.
-                if let Some(mission) = state
-                    .agents
-                    .missions
-                    .iter_mut()
-                    .find(|m| m.id == mid)
-                {
+                if let Some(mission) = state.agents.missions.iter_mut().find(|m| m.id == mid) {
                     mission.status = "PLAN".into();
                     mission.phase = MissionPhase::Plan;
                 }
@@ -678,8 +672,7 @@ pub(super) fn submit_chat_input_and_dispatch(
                 selected_agent.clone().into_iter().collect::<Vec<_>>()
             };
             for model in targets {
-                let base_model =
-                    crate::swarm::resolve_base_agent_id(&model).to_string();
+                let base_model = crate::swarm::resolve_base_agent_id(&model).to_string();
                 let lane_kind = state
                     .agents
                     .agents
@@ -981,7 +974,10 @@ pub(super) fn slice_by_char(input: &str, start: usize, end: usize) -> String {
 
 fn detect_swarm_template_from_prompt(raw: &str) -> Option<String> {
     for line in raw.lines() {
-        let trimmed = line.trim().trim_start_matches(['-', '*', '\u{2022}']).trim_start();
+        let trimmed = line
+            .trim()
+            .trim_start_matches(['-', '*', '\u{2022}'])
+            .trim_start();
         if trimmed.is_empty() {
             continue;
         }
