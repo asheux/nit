@@ -4,7 +4,7 @@ use nit_core::{AgentAlertSeverity, AgentBusEvent, AgentDiagnosticEvent, AgentSta
 
 use crate::claude_runner::{ClaudeCommand, ClaudeRunner};
 use crate::codex_runner::{CodexCommand, CodexRunner};
-use crate::swarm::is_agent_busy;
+use crate::swarm::{is_agent_busy, SwarmDispatch};
 use crate::vitals::VitalsState;
 
 // ---------------------------------------------------------------------------
@@ -823,6 +823,38 @@ pub(super) fn estimate_claude_context_tokens_for_mission(
         .claude_estimated_tokens_used_by_mission
         .insert(mission_id.to_string(), tokens);
     tokens
+}
+
+/// Apply the swarm task role to the agent lane so the UI shows the correct role
+/// during execution. For Codex agents, the MCP runtime already sends AgentUpsert
+/// events that update the role, so this is primarily needed for Claude agents.
+pub(super) fn apply_swarm_task_role(state: &mut AppState, dispatch: &SwarmDispatch) {
+    let Some(role) = dispatch.task_role.as_deref() else {
+        return;
+    };
+    let Some(agent) = state
+        .agents
+        .agents
+        .iter_mut()
+        .find(|a| a.id == dispatch.agent_id)
+    else {
+        return;
+    };
+    // Capitalise the role for display (e.g. "review" → "Review").
+    let display = titlecase_role(role);
+    agent.role = display;
+}
+
+fn titlecase_role(role: &str) -> String {
+    let mut chars = role.chars();
+    match chars.next() {
+        Some(first) => {
+            let mut out = first.to_uppercase().to_string();
+            out.extend(chars);
+            out
+        }
+        None => String::new(),
+    }
 }
 
 /// Unified dispatch router: routes to Codex or Claude based on agent lane kind.

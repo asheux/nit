@@ -16,9 +16,9 @@ use crate::swarm::{
 use crate::vitals::VitalsState;
 
 use super::dispatch::{
-    dispatch_agent_prompt, enqueue_claude_turn, enqueue_codex_turn, estimate_codex_context_tokens,
-    maybe_dispatch_claude_turn, maybe_dispatch_codex_turn, maybe_dispatch_next_queued_claude_turn,
-    maybe_dispatch_next_queued_codex_turn,
+    apply_swarm_task_role, dispatch_agent_prompt, enqueue_claude_turn, enqueue_codex_turn,
+    estimate_codex_context_tokens, maybe_dispatch_claude_turn, maybe_dispatch_codex_turn,
+    maybe_dispatch_next_queued_claude_turn, maybe_dispatch_next_queued_codex_turn,
 };
 use super::{
     chat_current_line_indent, chat_cursor_move_word_left, chat_cursor_move_word_right,
@@ -550,6 +550,7 @@ pub(super) fn submit_chat_input_and_dispatch(
                 state.agents.chat_input_cursor = state.agents.chat_input.chars().count();
                 let _ = push_chat_message(state);
                 for dispatch in dispatches {
+                    apply_swarm_task_role(state, &dispatch);
                     dispatch_agent_prompt(
                         state,
                         vitals,

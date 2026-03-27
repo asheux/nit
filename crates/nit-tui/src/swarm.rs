@@ -815,6 +815,8 @@ pub struct SwarmDispatch {
     pub agent_id: String,
     pub mission_id: String,
     pub prompt: String,
+    /// Task role (e.g. "review", "code") to apply to the agent lane on dispatch.
+    pub task_role: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1307,6 +1309,12 @@ impl SwarmRuntime {
         self.runs.contains_key(mission_id)
     }
 
+    /// Returns the current swarm stage label (e.g. "VERIFY", "SYNTH") for a mission.
+    pub fn swarm_stage_label(&self, mission_id: &str) -> Option<&'static str> {
+        self.run_for_mission(mission_id)
+            .map(|run| stage_label(run.stage))
+    }
+
     /// Returns the swarm configuration for a mission (active or completed)
     /// so follow-up prompts can reuse the same template and agent count.
     pub fn session_config(&self, mission_id: &str) -> Option<SwarmSessionConfig> {
@@ -1344,6 +1352,10 @@ impl SwarmRuntime {
                     ),
                 ));
             }
+            deduplicate_inherited_role_hints(
+                &mut role_hints,
+                &state.agents.swarm_role_by_agent_id,
+            );
         }
         let mut priority_agent_ids: Vec<String> = Vec::new();
         if matches!(run.template, SwarmTemplate::Parallel | SwarmTemplate::Bulk) {
@@ -1655,6 +1667,10 @@ impl SwarmRuntime {
                     ),
                 ));
             }
+            deduplicate_inherited_role_hints(
+                &mut role_hints,
+                &state.agents.swarm_role_by_agent_id,
+            );
         }
         let mut priority_agent_ids: Vec<String> = Vec::new();
         if matches!(template_kind, SwarmTemplate::Parallel | SwarmTemplate::Bulk) {
@@ -1753,6 +1769,7 @@ impl SwarmRuntime {
                 agent_id: planner_agent_id,
                 mission_id,
                 prompt: plan_prompt,
+                task_role: None,
             }],
         ))
     }
@@ -2012,6 +2029,7 @@ impl SwarmRuntime {
                                     agent_id: verifier,
                                     mission_id: run.mission_id.clone(),
                                     prompt,
+                                    task_role: None,
                                 });
                             } else {
                                 run.stage = SwarmStage::Synthesizing;
@@ -2022,6 +2040,7 @@ impl SwarmRuntime {
                                     agent_id: run.planner_agent_id.clone(),
                                     mission_id: run.mission_id.clone(),
                                     prompt,
+                                    task_role: None,
                                 });
                             }
                         }
@@ -2077,6 +2096,7 @@ impl SwarmRuntime {
                                     agent_id: verifier,
                                     mission_id: run.mission_id.clone(),
                                     prompt,
+                                    task_role: None,
                                 });
                             } else {
                                 run.stage = SwarmStage::Synthesizing;
@@ -2087,6 +2107,7 @@ impl SwarmRuntime {
                                     agent_id: run.planner_agent_id.clone(),
                                     mission_id: run.mission_id.clone(),
                                     prompt,
+                                    task_role: None,
                                 });
                             }
                         }
@@ -2135,6 +2156,7 @@ impl SwarmRuntime {
                             agent_id: run.planner_agent_id.clone(),
                             mission_id: run.mission_id.clone(),
                             prompt,
+                            task_role: None,
                         });
                         self.runs.insert(mid.clone(), run);
                     }
@@ -2390,6 +2412,7 @@ impl SwarmRuntime {
                                     agent_id: verifier,
                                     mission_id: run.mission_id.clone(),
                                     prompt,
+                                    task_role: None,
                                 });
                             } else {
                                 run.stage = SwarmStage::Synthesizing;
@@ -2400,6 +2423,7 @@ impl SwarmRuntime {
                                     agent_id: run.planner_agent_id.clone(),
                                     mission_id: run.mission_id.clone(),
                                     prompt,
+                                    task_role: None,
                                 });
                             }
                         }
@@ -2458,6 +2482,7 @@ impl SwarmRuntime {
                                     agent_id: verifier,
                                     mission_id: run.mission_id.clone(),
                                     prompt,
+                                    task_role: None,
                                 });
                             } else {
                                 run.stage = SwarmStage::Synthesizing;
@@ -2468,6 +2493,7 @@ impl SwarmRuntime {
                                     agent_id: run.planner_agent_id.clone(),
                                     mission_id: run.mission_id.clone(),
                                     prompt,
+                                    task_role: None,
                                 });
                             }
                         }
@@ -2494,6 +2520,7 @@ impl SwarmRuntime {
                             agent_id: run.planner_agent_id.clone(),
                             mission_id: run.mission_id.clone(),
                             prompt,
+                            task_role: None,
                         });
                         self.runs.insert(mid.clone(), run);
                     }
@@ -3028,6 +3055,53 @@ fn planner_role_hint_for_agent(
         mission_kind,
     )
     .unwrap_or_else(|| "all".into())
+}
+
+/// Deduplicate inherited role hints so that clones of the same base agent don't
+/// all receive the same hint. Only the first clone keeps the inherited hint; the
+/// rest get "all" so the planner is free to diversify roles.
+fn deduplicate_inherited_role_hints(
+    role_hints: &mut [(String, String)],
+    role_hints_by_agent_id: &HashMap<String, String>,
+) {
+    let mut seen_inherited: HashMap<&str, usize> = HashMap::new();
+    for (idx, (agent_id, hint)) in role_hints.iter().enumerate() {
+        if hint == "all" {
+            continue;
+        }
+        // Check if this hint was inherited (agent has no direct hint but its base does).
+        let has_direct = direct_role_hint_for_agent(role_hints_by_agent_id, agent_id).is_some();
+        if has_direct {
+            continue;
+        }
+        let Some(base_id) = swarm_clone_base_id(agent_id)
+            .or_else(|| chat_clone_base_id(agent_id))
+        else {
+            continue;
+        };
+        seen_inherited.entry(base_id).or_insert(idx);
+    }
+    // Second pass: reset duplicates to "all".
+    let mut count_by_base: HashMap<&str, usize> = HashMap::new();
+    for (agent_id, hint) in role_hints.iter_mut() {
+        if hint == "all" {
+            continue;
+        }
+        let has_direct = direct_role_hint_for_agent(role_hints_by_agent_id, agent_id).is_some();
+        if has_direct {
+            continue;
+        }
+        let Some(base_id) = swarm_clone_base_id(agent_id)
+            .or_else(|| chat_clone_base_id(agent_id))
+        else {
+            continue;
+        };
+        let count = count_by_base.entry(base_id).or_insert(0);
+        if *count > 0 {
+            *hint = "all".into();
+        }
+        *count += 1;
+    }
 }
 
 fn infer_role_from_task_id(task_id: &str) -> Option<&'static str> {
@@ -4765,11 +4839,13 @@ fn dispatch_ready_tasks(run: &mut SwarmRun) -> Vec<SwarmDispatch> {
             )
         };
         let agent_id = task.agent_id.clone();
+        let task_role = task.role.clone();
         run.tasks[idx].state = SwarmTaskState::Dispatched;
         dispatches.push(SwarmDispatch {
             agent_id,
             mission_id: run.mission_id.clone(),
             prompt,
+            task_role,
         });
     }
     dispatches

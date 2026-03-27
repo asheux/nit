@@ -998,6 +998,7 @@ fn run_loop(
                 swarm_outcome.artifact_focus.as_ref(),
             );
             for dispatch in swarm_outcome.dispatches {
+                apply_swarm_task_role(state, &dispatch);
                 dispatch_agent_prompt(
                     state,
                     &mut vitals,
@@ -1071,6 +1072,7 @@ fn run_loop(
                 swarm_outcome.artifact_focus.as_ref(),
             );
             for dispatch in swarm_outcome.dispatches {
+                apply_swarm_task_role(state, &dispatch);
                 dispatch_agent_prompt(
                     state,
                     &mut vitals,

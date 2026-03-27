@@ -2248,7 +2248,7 @@ fn inline_breather_rows(
 
 fn breather_rows_for_user_prompt(
     state: &AppState,
-    _swarm: Option<&SwarmRuntime>,
+    swarm: Option<&SwarmRuntime>,
     pulse_on: bool,
     width: usize,
 ) -> Vec<ThreadRow> {
@@ -2351,10 +2351,15 @@ fn breather_rows_for_user_prompt(
             })
     });
     let working = any_active || any_queued;
-    let label = if any_active {
-        "Working ..."
-    } else if any_queued {
-        "Queued ..."
+    let swarm_phase = swarm_mission_id
+        .and_then(|mid| swarm.and_then(|s| s.swarm_stage_label(mid)));
+    let label = if any_active || any_queued {
+        match swarm_phase {
+            Some("VERIFY") => "Verifying ...",
+            Some("SYNTH") => "Synthesizing ...",
+            _ if any_active => "Working ...",
+            _ => "Queued ...",
+        }
     } else if swarm_mission_id.is_some() && all_swarm_done {
         "Done"
     } else if swarm_mission_id.is_some() {

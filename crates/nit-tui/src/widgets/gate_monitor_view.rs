@@ -1541,7 +1541,7 @@ fn format_rows(rows: Vec<GateLine>, label_width: usize, max_width: usize) -> Vec
             if value_width == 0 {
                 Line::from(Span::styled(label, row.label_style))
             } else {
-                let value = trim_to_width(&row.value, value_width);
+                let value = right_align(&row.value, value_width);
                 Line::from(vec![
                     Span::styled(label, row.label_style),
                     Span::raw(" "),
@@ -1552,11 +1552,17 @@ fn format_rows(rows: Vec<GateLine>, label_width: usize, max_width: usize) -> Vec
         .collect()
 }
 
-fn trim_to_width(text: &str, max_width: usize) -> String {
-    if max_width == 0 {
+fn right_align(text: &str, width: usize) -> String {
+    if width == 0 {
         return String::new();
     }
-    text.chars().take(max_width).collect()
+    let trimmed: String = text.chars().take(width).collect();
+    let count = trimmed.chars().count();
+    if count < width {
+        format!("{}{}", " ".repeat(width - count), trimmed)
+    } else {
+        trimmed
+    }
 }
 
 fn pad_to_width(text: &str, width: usize) -> String {
