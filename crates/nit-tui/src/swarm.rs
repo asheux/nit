@@ -29,6 +29,10 @@ pub fn is_chat_clone_agent_id(agent_id: &str) -> bool {
     chat_clone_base_id(agent_id).is_some()
 }
 
+pub fn is_any_clone_agent_id(agent_id: &str) -> bool {
+    is_swarm_clone_agent_id(agent_id) || is_chat_clone_agent_id(agent_id)
+}
+
 fn is_swarm_clone_for_mission(agent_id: &str, mission_id: &str) -> bool {
     let Some((_base_id, rest)) = agent_id.split_once("#swarm-") else {
         return false;

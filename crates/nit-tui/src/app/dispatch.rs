@@ -826,12 +826,16 @@ pub(super) fn estimate_claude_context_tokens_for_mission(
 }
 
 /// Apply the swarm task role to the agent lane so the UI shows the correct role
-/// during execution. For Codex agents, the MCP runtime already sends AgentUpsert
-/// events that update the role, so this is primarily needed for Claude agents.
+/// during execution.  Only swarm clone agents get their role overwritten — the
+/// original roster agents keep their display name intact.
 pub(super) fn apply_swarm_task_role(state: &mut AppState, dispatch: &SwarmDispatch) {
     let Some(role) = dispatch.task_role.as_deref() else {
         return;
     };
+    // Never overwrite the role of an original roster agent.
+    if !crate::swarm::is_any_clone_agent_id(&dispatch.agent_id) {
+        return;
+    }
     let Some(agent) = state
         .agents
         .agents
