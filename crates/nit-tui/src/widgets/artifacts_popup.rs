@@ -174,7 +174,7 @@ fn build_lines_from_archive_entry(
     let idx = entry.artifact_index;
 
     match entry.kind {
-        "PROMPT" | "REPLY" => {
+        "PROMPT" | "REPLY" | "PLAN" | "SYNTH" => {
             let messages = run.get("messages")?.as_array()?;
             let msg_val = messages.get(idx)?;
             let msg: AgentMessage = serde_json::from_value(msg_val.clone()).ok()?;
@@ -644,6 +644,8 @@ fn build_message_lines(
         "PROMPT"
     } else if message.kind.as_deref() == Some("synth") {
         "SYNTH"
+    } else if message.kind.as_deref() == Some("plan") {
+        "PLAN"
     } else {
         "REPLY"
     };

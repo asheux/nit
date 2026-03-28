@@ -58,6 +58,7 @@ fn kind_color(kind: &str, theme: &Theme) -> Color {
     match kind {
         "REPLY" => theme.success,
         "SYNTH" => theme.accent,
+        "PLAN" => theme.title,
         "PATCH" => theme.warning,
         "EVIDENCE" => theme.title_focused,
         _ => theme.border, // PROMPT
@@ -125,7 +126,7 @@ pub fn build_lines(state: &AppState, theme: &Theme, inner_width: u16) -> Vec<Lin
     // Line 3: column header.
     let time_w = 14;
     let kind_w = 9;
-    let owner_w = 12;
+    let owner_w = 30;
     // indent col = 3 chars for "↳ " or "  ", prefix = 2
     let fixed = 2 + 3 + kind_w + 1 + owner_w + 1 + time_w + 1;
     let preview_w = max_width.saturating_sub(fixed);
@@ -158,6 +159,7 @@ pub fn build_lines(state: &AppState, theme: &Theme, inner_width: u16) -> Vec<Lin
             "PROMPT" => "PROMPT  ",
             "REPLY" => "REPLY   ",
             "SYNTH" => "SYNTH   ",
+            "PLAN" => "PLAN    ",
             "PATCH" => "PATCH   ",
             "EVIDENCE" => "EVIDENCE",
             other => other,

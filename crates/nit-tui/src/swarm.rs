@@ -33,6 +33,17 @@ pub fn is_any_clone_agent_id(agent_id: &str) -> bool {
     is_swarm_clone_agent_id(agent_id) || is_chat_clone_agent_id(agent_id)
 }
 
+/// Display-only: compact `base#swarm-mis-XXX-clone-NN` to `base#clone-NN`.
+pub fn compact_agent_display_id(agent_id: &str) -> String {
+    if let Some((base, rest)) = agent_id.split_once("#swarm-") {
+        // rest is e.g. "mis-002-clone-01"; extract "clone-NN" suffix.
+        if let Some(clone_pos) = rest.find("clone-") {
+            return format!("{base}#{}", &rest[clone_pos..]);
+        }
+    }
+    agent_id.to_string()
+}
+
 fn is_swarm_clone_for_mission(agent_id: &str, mission_id: &str) -> bool {
     let Some((_base_id, rest)) = agent_id.split_once("#swarm-") else {
         return false;
@@ -1807,6 +1818,7 @@ impl SwarmRuntime {
                 };
                 match run.stage {
                     SwarmStage::Planning if agent_id == &run.planner_agent_id => {
+                        tag_last_agent_message_kind(state, agent_id, &run.mission_id, "plan");
                         let available = run
                             .agent_ids
                             .iter()
@@ -2193,6 +2205,7 @@ impl SwarmRuntime {
 
                 match run.stage {
                     SwarmStage::Planning if agent_id == &run.planner_agent_id => {
+                        tag_last_agent_message_kind(state, agent_id, &run.mission_id, "plan");
                         let available = run
                             .agent_ids
                             .iter()

@@ -1969,6 +1969,10 @@ struct PersistedArtifactsRun {
     codex_thread_id: Option<String>,
     #[serde(default)]
     codex_thread_ids: Option<BTreeMap<String, String>>,
+    #[serde(default)]
+    swarm: bool,
+    #[serde(default)]
+    assigned_agents: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -2452,18 +2456,54 @@ fn extract_run_entries(
     let run_path_str = run_path.to_string_lossy().to_string();
     let time_label = format_saved_run_relative_label_from_micros(archive_micros, now_micros);
 
+    // For swarm missions without explicit kind tags, infer special messages:
+    // - first reply from the planner (assigned_agents[0]) is the plan
+    // - last reply from the planner is the synthesis report
+    let (plan_msg_idx, synth_msg_idx) = if run.swarm {
+        let planner = run.assigned_agents.first().map(String::as_str);
+        let plan = planner.and_then(|pid| {
+            run.messages
+                .iter()
+                .enumerate()
+                .find(|(_, m)| m.agent_id.as_deref() == Some(pid))
+                .map(|(i, _)| i)
+        });
+        let synth = planner.and_then(|pid| {
+            run.messages
+                .iter()
+                .enumerate()
+                .rev()
+                .find(|(_, m)| m.agent_id.as_deref() == Some(pid))
+                .map(|(i, _)| i)
+        });
+        // If plan and synth point to the same message, it's just a synth (single planner reply).
+        if plan == synth {
+            (None, synth)
+        } else {
+            (plan, synth)
+        }
+    } else {
+        (None, None)
+    };
+
     for (idx, msg) in run.messages.iter().enumerate() {
         if msg.agent_id.as_deref() == Some("swarm") {
             continue;
         }
         let kind: &'static str = if msg.agent_id.is_none() {
             "PROMPT"
-        } else if msg.kind.as_deref() == Some("synth") {
+        } else if msg.kind.as_deref() == Some("synth") || synth_msg_idx == Some(idx) {
             "SYNTH"
+        } else if msg.kind.as_deref() == Some("plan") || plan_msg_idx == Some(idx) {
+            "PLAN"
         } else {
             "REPLY"
         };
-        let owner = msg.agent_id.as_deref().unwrap_or("You").to_string();
+        let owner = msg
+            .agent_id
+            .as_deref()
+            .map(crate::swarm::compact_agent_display_id)
+            .unwrap_or_else(|| "You".into());
         let preview = summarize_text_preview(&msg.text, GLOBAL_ARCHIVE_PREVIEW_CHARS);
         let (search_hay, search_tokens) = build_search_fields(kind, &owner, ctx.source, &msg.text);
         out.push(GlobalArchiveEntry {
@@ -2486,7 +2526,7 @@ fn extract_run_entries(
         let owner = if patch.agent_id.is_empty() {
             "system".to_string()
         } else {
-            patch.agent_id.clone()
+            crate::swarm::compact_agent_display_id(&patch.agent_id)
         };
         let preview = if !patch.title.is_empty() {
             summarize_text_preview(&patch.title, GLOBAL_ARCHIVE_PREVIEW_CHARS)
@@ -2517,7 +2557,11 @@ fn extract_run_entries(
     }
 
     for (idx, item) in run.evidence.iter().enumerate() {
-        let owner = item.agent_id.as_deref().unwrap_or("system").to_string();
+        let owner = item
+            .agent_id
+            .as_deref()
+            .map(crate::swarm::compact_agent_display_id)
+            .unwrap_or_else(|| "system".into());
         let preview = summarize_text_preview(&item.title, GLOBAL_ARCHIVE_PREVIEW_CHARS);
         let (search_hay, search_tokens) =
             build_search_fields("EVIDENCE", &owner, ctx.source, &item.title);
@@ -3143,8 +3187,13 @@ fn build_mission_cards(
         for idx in reply_indices {
             if let Some(message) = state.agents.messages.get(idx) {
                 let owner = message.agent_id.as_deref().unwrap_or("agent");
+                let kind = if message.kind.as_deref() == Some("synth") {
+                    "SYNTH"
+                } else {
+                    "REPLY"
+                };
                 cards.push(ArtifactCard {
-                    kind: "REPLY",
+                    kind,
                     at: message.at.clone(),
                     owner: owner.into(),
                     preview: summarize_text_preview(message.text.as_str(), preview_chars),
@@ -3239,8 +3288,13 @@ fn build_ad_hoc_cards(state: &AppState, agent_id: &str, preview_chars: usize) ->
         }
         for idx in reply_indices {
             if let Some(message) = state.agents.messages.get(idx) {
+                let kind = if message.kind.as_deref() == Some("synth") {
+                    "SYNTH"
+                } else {
+                    "REPLY"
+                };
                 cards.push(ArtifactCard {
-                    kind: "REPLY",
+                    kind,
                     at: message.at.clone(),
                     owner: agent_id.into(),
                     preview: summarize_text_preview(message.text.as_str(), preview_chars),
@@ -3306,6 +3360,29 @@ fn build_persisted_mission_cards(
         evidence = evidence.split_off(evidence.len() - ARTIFACT_CARD_LIMIT_EVIDENCE);
     }
 
+    // Infer plan/synthesis: first and last reply from the planner in a swarm mission.
+    let (plan_pos, synth_pos) = if run.swarm {
+        let planner = run.assigned_agents.first().map(String::as_str);
+        let plan = planner.and_then(|pid| {
+            filtered
+                .iter()
+                .enumerate()
+                .find(|(_, m)| m.agent_id.as_deref() == Some(pid))
+                .map(|(i, _)| i)
+        });
+        let synth = planner.and_then(|pid| {
+            filtered
+                .iter()
+                .enumerate()
+                .rev()
+                .find(|(_, m)| m.agent_id.as_deref() == Some(pid))
+                .map(|(i, _)| i)
+        });
+        if plan == synth { (None, synth) } else { (plan, synth) }
+    } else {
+        (None, None)
+    };
+
     let mut cards = Vec::new();
     for (prompt_pos, mut child_positions) in groups {
         if let Some(pos) = prompt_pos {
@@ -3328,8 +3405,19 @@ fn build_persisted_mission_cards(
         for pos in child_positions {
             if let Some(message) = filtered.get(pos) {
                 let owner = message.agent_id.as_deref().unwrap_or("agent").to_string();
+                let kind = if message.kind.as_deref() == Some("synth")
+                    || synth_pos == Some(pos)
+                {
+                    "SYNTH"
+                } else if message.kind.as_deref() == Some("plan")
+                    || plan_pos == Some(pos)
+                {
+                    "PLAN"
+                } else {
+                    "REPLY"
+                };
                 cards.push(ArtifactCard {
-                    kind: "REPLY",
+                    kind,
                     at: message.at.clone(),
                     owner,
                     preview: summarize_text_preview(message.text.as_str(), preview_chars),
@@ -3440,8 +3528,13 @@ fn build_persisted_ad_hoc_cards(
         }
         for pos in child_positions {
             if let Some(message) = filtered.get(pos) {
+                let kind = if message.kind.as_deref() == Some("synth") {
+                    "SYNTH"
+                } else {
+                    "REPLY"
+                };
                 cards.push(ArtifactCard {
-                    kind: "REPLY",
+                    kind,
                     at: message.at.clone(),
                     owner: agent_id.into(),
                     preview: summarize_text_preview(message.text.as_str(), preview_chars),
