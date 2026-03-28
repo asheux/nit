@@ -80,6 +80,7 @@ pub enum Action {
     VisualizerCycleSeedView,
     VisualizerCycleEncoder,
     VisualizerCycleSeedOverlays,
+    VisualizerCycleSymmetry,
     VisualizerToggleSeedView,
     VisualizerInspectLeft,
     VisualizerInspectRight,

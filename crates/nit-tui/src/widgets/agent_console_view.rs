@@ -1853,12 +1853,7 @@ fn format_message_rows(
         .enumerate()
         .find_map(|(idx, candidate)| std::ptr::eq(candidate, msg).then_some(idx))
         .and_then(|message_idx| {
-            agent_ops_view::artifacts_popup_ref_for_message(
-                state,
-                swarm,
-                width,
-                message_idx,
-            )
+            agent_ops_view::artifacts_popup_ref_for_message(state, swarm, width, message_idx)
         });
     if artifact_target.is_some() {
         let callout = format!("{indent_str}\u{21b3} {header} done (see ARTIFACTS)");

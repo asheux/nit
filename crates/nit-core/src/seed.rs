@@ -3,7 +3,7 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 
 use nit_gol::Grid;
-use nit_utils::hashing::{stable_hash_bytes, XorShift64};
+use nit_utils::hashing::{stable_hash_bytes, SplitMix64};
 
 use crate::config::GolSeedSource;
 
@@ -112,6 +112,15 @@ pub enum SeedSymmetry {
 }
 
 impl SeedSymmetry {
+    pub fn next(self) -> Self {
+        match self {
+            SeedSymmetry::None => SeedSymmetry::MirrorX,
+            SeedSymmetry::MirrorX => SeedSymmetry::MirrorY,
+            SeedSymmetry::MirrorY => SeedSymmetry::Rotate180,
+            SeedSymmetry::Rotate180 => SeedSymmetry::None,
+        }
+    }
+
     pub fn label(self) -> &'static str {
         match self {
             SeedSymmetry::None => "none",
@@ -137,7 +146,7 @@ impl SeedPlacement {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SeedParams {
     pub symmetry: SeedSymmetry,
     pub target_density: f32,
@@ -175,11 +184,15 @@ impl SeedParams {
         bytes.push(self.symmetry as u8);
         bytes.push(self.placement as u8);
         bytes.extend_from_slice(
-            &(self.target_density.clamp(0.0, 1.0) * 1000.0)
+            &(self.target_density.clamp(0.0, 1.0) * 1_000_000.0)
                 .round()
                 .to_le_bytes(),
         );
-        bytes.extend_from_slice(&(self.jitter.clamp(0.0, 1.0) * 1000.0).round().to_le_bytes());
+        bytes.extend_from_slice(
+            &(self.jitter.clamp(0.0, 1.0) * 1_000_000.0)
+                .round()
+                .to_le_bytes(),
+        );
         bytes.push(self.padding);
         stable_hash_bytes(&bytes)
     }
@@ -377,14 +390,15 @@ fn density_threshold(target_density: f32) -> u8 {
 }
 
 fn hash_seed(encoder: SeedEncoderId, params: &SeedParams, variant: u8, bits: &SeedBits) -> u64 {
-    let mut bytes = Vec::with_capacity(bits.cells.len().saturating_add(64));
-    bytes.extend_from_slice(encoder.as_str().as_bytes());
-    bytes.extend_from_slice(&params.fingerprint().to_le_bytes());
-    bytes.push(variant);
-    bytes.extend_from_slice(&bits.width.to_le_bytes());
-    bytes.extend_from_slice(&bits.height.to_le_bytes());
-    bytes.extend_from_slice(bits.cells());
-    stable_hash_bytes(&bytes)
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(encoder.as_str().as_bytes());
+    hasher.update(&params.fingerprint().to_le_bytes());
+    hasher.update(&[variant]);
+    hasher.update(&bits.width().to_le_bytes());
+    hasher.update(&bits.height().to_le_bytes());
+    hasher.update(bits.cells());
+    let hash = hasher.finalize();
+    u64::from_le_bytes(hash.as_bytes()[..8].try_into().unwrap())
 }
 
 fn apply_jitter(values: &mut [u8], jitter: f32, seed: u64) {
@@ -396,10 +410,10 @@ fn apply_jitter(values: &mut [u8], jitter: f32, seed: u64) {
     if amp <= 0 {
         return;
     }
-    let mut rng = XorShift64::new(seed);
+    let mut rng = SplitMix64::new(seed);
     let span = (amp * 2 + 1) as u64;
     for value in values.iter_mut() {
-        let delta = (rng.next_u64() % span) as i16 - amp;
+        let delta = ((rng.next_u64() >> 48) % span) as i16 - amp;
         let next = (*value as i16 + delta).clamp(0, 255) as u8;
         *value = next;
     }
@@ -413,34 +427,31 @@ fn apply_symmetry(bits: &mut SeedBits, symmetry: SeedSymmetry) {
         SeedSymmetry::MirrorX => {
             for y in 0..h {
                 for x in 0..w / 2 {
-                    let alive = bits.get(x, y);
                     let rx = w - 1 - x;
-                    if alive {
-                        bits.set(rx, y, true);
-                    }
+                    let alive = bits.get(x, y) || bits.get(rx, y);
+                    bits.set(x, y, alive);
+                    bits.set(rx, y, alive);
                 }
             }
         }
         SeedSymmetry::MirrorY => {
             for y in 0..h / 2 {
                 for x in 0..w {
-                    let alive = bits.get(x, y);
                     let ry = h - 1 - y;
-                    if alive {
-                        bits.set(x, ry, true);
-                    }
+                    let alive = bits.get(x, y) || bits.get(x, ry);
+                    bits.set(x, y, alive);
+                    bits.set(x, ry, alive);
                 }
             }
         }
         SeedSymmetry::Rotate180 => {
             for y in 0..h {
                 for x in 0..w {
-                    let alive = bits.get(x, y);
-                    if alive {
-                        let rx = w - 1 - x;
-                        let ry = h - 1 - y;
-                        bits.set(rx, ry, true);
-                    }
+                    let rx = w - 1 - x;
+                    let ry = h - 1 - y;
+                    let alive = bits.get(x, y) || bits.get(rx, ry);
+                    bits.set(x, y, alive);
+                    bits.set(rx, ry, alive);
                 }
             }
         }
@@ -481,6 +492,8 @@ fn map_bits_to_grid(bits: &SeedBits, width: usize, height: usize, params: &SeedP
     grid
 }
 
+/// Counts connected components using 8-connectivity (Moore neighborhood).
+/// Diagonally adjacent alive cells are considered part of the same component.
 fn count_components(grid: &Grid) -> usize {
     let w = grid.width();
     let h = grid.height();
@@ -526,7 +539,7 @@ impl SeedEncoder for AsciiBytesEncoder {
         let size = 32usize;
         let mut grid = SeedValueGrid::new(size, size);
         let bytes = input.text.as_bytes();
-        let mut rng = XorShift64::new(seed_nonce ^ stable_hash_bytes(bytes) ^ (variant as u64));
+        let mut rng = SplitMix64::new(seed_nonce ^ stable_hash_bytes(bytes) ^ (variant as u64));
         let len = bytes.len();
         for idx in 0..size * size {
             let base = if len == 0 { 0 } else { bytes[idx % len] };
@@ -552,7 +565,7 @@ impl SeedEncoder for Lifehash16Encoder {
         let mut grid = SeedValueGrid::new(size, size);
         let bytes = input.text.as_bytes();
         let mut rng =
-            XorShift64::new(seed_nonce ^ stable_hash_bytes(bytes) ^ (variant as u64) ^ 0x16_u64);
+            SplitMix64::new(seed_nonce ^ stable_hash_bytes(bytes) ^ (variant as u64) ^ 0x16_u64);
         for idx in 0..size * size {
             let value = (rng.next_u64() & 0xff) as u8;
             let x = idx % size;
@@ -577,7 +590,7 @@ impl SeedEncoder for HilbertBitsEncoder {
         let bytes = input.text.as_bytes();
         let len = bytes.len();
         let mut rng =
-            XorShift64::new(seed_nonce ^ stable_hash_bytes(bytes) ^ (variant as u64) ^ 0x5eed_u64);
+            SplitMix64::new(seed_nonce ^ stable_hash_bytes(bytes) ^ (variant as u64) ^ 0x5eed_u64);
         for idx in 0..size * size {
             let (x, y) = hilbert_index_to_xy(order, idx as u32);
             let base = if len == 0 { 0 } else { bytes[idx % len] };

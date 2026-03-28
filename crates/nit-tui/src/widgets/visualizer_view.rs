@@ -1,9 +1,9 @@
 use nit_core::seed::SeedViewMode;
-use nit_core::{AppState, PaneId, SeedEncoderId};
+use nit_core::{Action, AppState, PaneId, SeedEncoderId};
 use ratatui::{
     buffer::Buffer,
     style::{Modifier, Style},
-    text::Span,
+    text::{Line, Span},
     widgets::{Block, BorderType, Borders, Gauge},
     Frame,
 };
@@ -13,6 +13,34 @@ use crate::{
     seed_runtime::SeedRuntime,
     theme::Theme,
 };
+
+// Title layout: "VISUALIZER " + " " + " APPLY " + " " + " SEED " + " " + " SNAP " + " " + " SEARCH "
+// The block title starts 1 cell in from the border.
+const BTN_APPLY_START: u16 = 12; // len("VISUALIZER ") + len(" ")
+const BTN_APPLY_END: u16 = 19; // + len(" APPLY ")
+const BTN_SEED_START: u16 = 20; // + len(" ")
+const BTN_SEED_END: u16 = 26; // + len(" SEED ")
+const BTN_SNAP_START: u16 = 27; // + len(" ")
+const BTN_SNAP_END: u16 = 33; // + len(" SNAP ")
+const BTN_SEARCH_START: u16 = 34; // + len(" ")
+const BTN_SEARCH_END: u16 = 42; // + len(" SEARCH ")
+
+/// Returns an action if the click column (relative to the visualizer rect) hits a title button.
+pub fn title_button_hit(col_in_rect: u16) -> Option<Action> {
+    // Title text starts 1 cell from the left border.
+    let col = col_in_rect.saturating_sub(1);
+    if (BTN_APPLY_START..BTN_APPLY_END).contains(&col) {
+        Some(Action::VisualizerApply)
+    } else if (BTN_SEED_START..BTN_SEED_END).contains(&col) {
+        Some(Action::VisualizerCycleSymmetry)
+    } else if (BTN_SNAP_START..BTN_SNAP_END).contains(&col) {
+        Some(Action::VisualizerSnapshot)
+    } else if (BTN_SEARCH_START..BTN_SEARCH_END).contains(&col) {
+        Some(Action::VisualizerToggleSearch)
+    } else {
+        None
+    }
+}
 
 pub fn render(
     frame: &mut Frame,
@@ -40,17 +68,33 @@ pub fn render(
 
     let palette = SeedPalette::from_theme(theme);
 
+    let title_style = Style::default()
+        .fg(title_color)
+        .add_modifier(Modifier::BOLD);
+    let btn_style = Style::default()
+        .fg(theme.background)
+        .bg(title_color)
+        .add_modifier(Modifier::BOLD);
+    let sep_style = Style::default().fg(title_color);
+
+    let title = Line::from(vec![
+        Span::styled("VISUALIZER ", title_style),
+        Span::styled(" ", sep_style),
+        Span::styled(" APPLY ", btn_style),
+        Span::styled(" ", sep_style),
+        Span::styled(" SEED ", btn_style),
+        Span::styled(" ", sep_style),
+        Span::styled(" SNAP ", btn_style),
+        Span::styled(" ", sep_style),
+        Span::styled(" SEARCH ", btn_style),
+    ]);
+
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(border_style)
         .border_type(border_type)
         .style(Style::default().bg(palette.bg))
-        .title(Span::styled(
-            "VISUALIZER  [ APPLY ] [ SEED ] [ SNAP ] [ SEARCH ]",
-            Style::default()
-                .fg(title_color)
-                .add_modifier(Modifier::BOLD),
-        ));
+        .title(title);
 
     let inner = block.inner(area);
     frame.render_widget(block, area);

@@ -2481,12 +2481,8 @@ pub fn apply_action(state: &mut AppState, action: Action) -> ActionOutcome {
             state.visualizer.wrap = !state.visualizer.wrap;
         }
         Action::VisualizerToggleSeedSource => {
-            state.visualizer.seed_source = match state.visualizer.seed_source {
-                GolSeedSource::Editor => GolSeedSource::Notes,
-                GolSeedSource::Notes => GolSeedSource::Editor,
-            };
-            state.visualizer.pending_reseed = true;
-            state.status = Some(format!("Seed source: {:?}", state.visualizer.seed_source));
+            state.visualizer.seed_source = GolSeedSource::Editor;
+            state.status = Some("Seed source: Editor (only)".into());
         }
         Action::VisualizerSnapshot => {
             state.visualizer.pending_snapshot = true;
@@ -2659,6 +2655,14 @@ pub fn apply_action(state: &mut AppState, action: Action) -> ActionOutcome {
                 state.visualizer.seed_encoder.label()
             ));
         }
+        Action::VisualizerCycleSymmetry => {
+            state.visualizer.seed_params.symmetry = state.visualizer.seed_params.symmetry.next();
+            state.visualizer.pending_reseed = true;
+            state.status = Some(format!(
+                "Symmetry: {}",
+                state.visualizer.seed_params.symmetry.label()
+            ));
+        }
         Action::SetGolRuleById(id) => {
             if let Some(named) = state.rule_catalog.find_by_id(&id) {
                 apply_rule_selection(state, SelectedRule::from_named(named), true);
@@ -2791,6 +2795,7 @@ pub fn apply_action(state: &mut AppState, action: Action) -> ActionOutcome {
                 state.active_editor_buffer_id = buffer_id;
                 state.focus = PaneId::Editor;
                 state.mode = Mode::Normal;
+                state.visualizer.pending_reseed = true;
                 state.status = Some(format!("Opened {}", path.display()));
             } else {
                 match io::load_to_string(&path) {
@@ -2808,6 +2813,7 @@ pub fn apply_action(state: &mut AppState, action: Action) -> ActionOutcome {
                         }
                         state.focus = PaneId::Editor;
                         state.mode = Mode::Normal;
+                        state.visualizer.pending_reseed = true;
                         state.status = Some(format!("Opened {}", path.display()));
                     }
                     Err(err) => {

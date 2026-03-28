@@ -18,7 +18,7 @@ use nit_gol::snapshot_manager::{
 use nit_gol::step::step;
 use nit_gol::AttractorExtra;
 use nit_gol::{EdgeMode, Grid, Rule};
-use nit_utils::hashing::XorShift64;
+use nit_utils::hashing::SplitMix64;
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Modifier, Style},
@@ -1481,7 +1481,7 @@ fn search_worker_loop(cmd_rx: Receiver<SearchCommand>, event_tx: Sender<WorkerEv
         candidate_pool_size: 8,
     };
     let mut seed = Grid::new(0, 0);
-    let mut rng = XorShift64::new(0x5eed1234);
+    let mut rng = SplitMix64::new(0x5eed1234);
     let mut leaderboard: Vec<RuleScore> = Vec::new();
     let mut best_score = f32::MIN;
     let mut base_rule = Rule::conway();
@@ -1613,7 +1613,7 @@ fn handle_search_command(
     false
 }
 
-fn sample_rule(rng: &mut XorShift64, _base_rule: Rule) -> Rule {
+fn sample_rule(rng: &mut SplitMix64, _base_rule: Rule) -> Rule {
     let births = rng.next_u64() as u32;
     let survives = (rng.next_u64() >> 32) as u32;
     Rule::new((births & 0x1ff) as u16, (survives & 0x1ff) as u16)

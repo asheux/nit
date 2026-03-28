@@ -19,7 +19,7 @@ use nit_gol::{
     step::step,
     EdgeMode, Grid, Rule, AttractorExtra,
 };
-use nit_utils::hashing::{stable_hash_bytes, XorShift64};
+use nit_utils::hashing::{stable_hash_bytes, SplitMix64};
 use tracing::{info, warn};
 
 use crate::gol_render::GolRenderState;
@@ -834,7 +834,7 @@ fn build_seed_grid_text(
         }
     }
     let seed_hash = stable_hash_bytes(seed_text.as_bytes());
-    let mut rng = XorShift64::new(seed_hash ^ seed);
+    let mut rng = SplitMix64::new(seed_hash ^ seed);
     let live_chars = build_live_chars(&state.settings.gol.seed_live_chars);
     let other_live_percent = state.settings.gol.seed_other_live_percent.min(100);
     let mut grid = Grid::new(width, height);
@@ -945,7 +945,7 @@ fn attractor_snapshots_enabled(settings: &GolSnapshotsConfig, event: &AttractorE
 
 fn map_char(
     ch: char,
-    rng: &mut XorShift64,
+    rng: &mut SplitMix64,
     live_chars: &HashSet<char>,
     other_live_percent: u8,
 ) -> bool {
@@ -1068,7 +1068,7 @@ fn search_worker_loop(cmd_rx: Receiver<SearchCommand>, event_tx: Sender<WorkerEv
         candidate_pool_size: 8,
     };
     let mut seed = Grid::new(0, 0);
-    let mut rng = XorShift64::new(0x5eed1234);
+    let mut rng = SplitMix64::new(0x5eed1234);
     let mut leaderboard: Vec<RuleScore> = Vec::new();
     let mut best_score = f32::MIN;
     let mut base_rule = Rule::conway();
@@ -1201,7 +1201,7 @@ fn handle_search_command(
     false
 }
 
-fn sample_rule(rng: &mut XorShift64, base_rule: Rule) -> Rule {
+fn sample_rule(rng: &mut SplitMix64, base_rule: Rule) -> Rule {
     let mut births = base_rule.births_mask();
     let mut survives = base_rule.survives_mask();
     if rng.next_u64() % 5 == 0 {

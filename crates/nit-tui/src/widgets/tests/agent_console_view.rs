@@ -1,8 +1,7 @@
 use super::{
     artifact_message_index_for_line, chat_input_scroll_metrics, chat_input_text_area,
     ecg_indicator, format_message_rows, map_chat_input_point_to_cursor, thread_lines, thread_rows,
-    user_prompt_bg, wrap_input_with_cursor, wrap_visual_line, ThreadRow,
-    ThreadRowKind,
+    user_prompt_bg, wrap_input_with_cursor, wrap_visual_line, ThreadRow, ThreadRowKind,
 };
 use crate::swarm::{SwarmRuntime, SwarmSize};
 use crate::theme::Theme;
@@ -56,7 +55,6 @@ fn user_message_renders_right_aligned_bubble() {
         text: "line one\nline two".into(),
         prompt_msg_idx: None,
         kind: None,
-
     };
     let rows = format_message_rows(&state, None, &msg, 48);
     assert!(rows.len() >= 5);
@@ -100,7 +98,6 @@ fn agent_messages_use_stable_badge_header() {
         text: "working".into(),
         prompt_msg_idx: None,
         kind: None,
-
     };
     state.agents.messages.push(msg.clone());
     state.metrics.frame_count = 3;
@@ -219,7 +216,6 @@ fn breather_rows_show_clone_source_model_name() {
         text: "do the work".into(),
         prompt_msg_idx: None,
         kind: None,
-
     });
 
     let rows = thread_rows(&state, None, 120, true);
@@ -253,7 +249,6 @@ fn agent_badge_shown_when_single_agent_context_selected() {
         text: "hello".into(),
         prompt_msg_idx: None,
         kind: None,
-
     };
     state.agents.messages.push(msg.clone());
     let rows = format_message_rows(
@@ -293,7 +288,6 @@ fn artifact_message_index_for_line_maps_transcript_artifact_row() {
         text: "hello".into(),
         prompt_msg_idx: None,
         kind: None,
-
     });
 
     // ArtifactLink is now the first row (combined callout).
@@ -364,12 +358,7 @@ fn swarm_planning_message_stays_plain_done_when_no_artifact_exists() {
         .iter()
         .find(|message| message.agent_id.as_deref() == Some("planner"))
         .expect("planner message");
-    let rows = format_message_rows(
-        &state,
-        Some(&swarm),
-        planner_message,
-        120,
-    );
+    let rows = format_message_rows(&state, Some(&swarm), planner_message, 120);
 
     // Planner messages now also show the artifact link.
     assert!(rows[0].text.contains("done (see ARTIFACTS)"));
@@ -499,7 +488,6 @@ fn agent_header_includes_truncated_role_badge() {
         text: "ok".into(),
         prompt_msg_idx: None,
         kind: None,
-
     };
     let row = format_message_rows(&state, None, &msg, 120)
         .into_iter()
@@ -674,7 +662,6 @@ fn thread_rows_keep_chronological_order() {
         text: "newest message".into(),
         prompt_msg_idx: None,
         kind: None,
-
     });
 
     let rows = thread_rows(&state, None, 100, true);
@@ -725,7 +712,6 @@ fn breather_row_renders_below_user_prompt_when_agent_running() {
         text: "please plan".into(),
         prompt_msg_idx: None,
         kind: None,
-
     });
 
     let rows = thread_rows(&state, None, 100, true);
@@ -774,7 +760,6 @@ fn breather_row_hidden_when_latest_message_is_agent() {
         text: "on it".into(),
         prompt_msg_idx: None,
         kind: None,
-
     });
 
     let rows = thread_rows(&state, None, 100, true);
@@ -841,7 +826,6 @@ fn breather_rows_include_multiple_running_agents() {
         text: "do the work".into(),
         prompt_msg_idx: None,
         kind: None,
-
     });
 
     let rows = thread_rows(&state, None, 120, true);
@@ -896,7 +880,6 @@ fn breather_rows_hide_stage_column_and_show_stage_subrow() {
         text: "do the work".into(),
         prompt_msg_idx: None,
         kind: None,
-
     });
 
     let rows = thread_rows(&state, None, 120, true);
@@ -941,7 +924,6 @@ fn breather_rows_show_when_prompt_queued_but_not_yet_started() {
         text: "finished previous turn".into(),
         prompt_msg_idx: None,
         kind: None,
-
     });
 
     let rows = thread_rows(&state, None, 120, true);
@@ -1031,7 +1013,6 @@ fn breather_rows_suppress_turn_metrics_when_queued_in_narrow_layout() {
         text: "finished previous turn".into(),
         prompt_msg_idx: None,
         kind: None,
-
     });
 
     let rows = thread_rows(&state, None, 23, true);
@@ -1115,7 +1096,6 @@ fn breather_rows_include_swarm_assigned_agents_even_when_idle() {
         text: "Swarm template: lab | integrator: planner | verifier: coder | gates: rust-ci".into(),
         prompt_msg_idx: None,
         kind: None,
-
     });
 
     let rows = thread_rows(&state, None, 120, true);
@@ -1202,7 +1182,6 @@ fn breather_rows_show_done_when_swarm_idle_and_all_assigned_reported() {
         text: "Swarm template: lab | integrator: planner | verifier: coder | gates: rust-ci".into(),
         prompt_msg_idx: None,
         kind: None,
-
     });
 
     let rows = thread_rows(&state, None, 120, true);

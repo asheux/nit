@@ -6267,22 +6267,10 @@ pub fn push_system_message_to_mission(state: &mut AppState, mission_id: &str, te
 }
 
 /// Tag the most recent message from `agent_id` for `mission_id` with the given kind.
-fn tag_last_agent_message_kind(
-    state: &mut AppState,
-    agent_id: &str,
-    mission_id: &str,
-    kind: &str,
-) {
-    if let Some(msg) = state
-        .agents
-        .messages
-        .iter_mut()
-        .rev()
-        .find(|msg| {
-            msg.agent_id.as_deref() == Some(agent_id)
-                && msg.mission_id.as_deref() == Some(mission_id)
-        })
-    {
+fn tag_last_agent_message_kind(state: &mut AppState, agent_id: &str, mission_id: &str, kind: &str) {
+    if let Some(msg) = state.agents.messages.iter_mut().rev().find(|msg| {
+        msg.agent_id.as_deref() == Some(agent_id) && msg.mission_id.as_deref() == Some(mission_id)
+    }) {
         msg.kind = Some(kind.to_string());
     }
 }

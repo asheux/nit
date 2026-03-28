@@ -730,12 +730,6 @@ fn footer_line(state: &AppState, theme: &Theme) -> Line<'static> {
             spans.push(Span::styled("h/l", key_style));
             spans.push(Span::styled(" size", label_style));
             spans.push(Span::styled("  ", sep_style));
-            spans.push(Span::styled("1/2/3", key_style));
-            spans.push(Span::styled(" template", label_style));
-            spans.push(Span::styled("  ", sep_style));
-            spans.push(Span::styled("4/5/6/7", key_style));
-            spans.push(Span::styled(" mission", label_style));
-            spans.push(Span::styled("  ", sep_style));
             spans.push(Span::styled("Space", key_style));
             spans.push(Span::styled(" set", label_style));
             spans.push(Span::styled("  ", sep_style));
@@ -3378,7 +3372,11 @@ fn build_persisted_mission_cards(
                 .find(|(_, m)| m.agent_id.as_deref() == Some(pid))
                 .map(|(i, _)| i)
         });
-        if plan == synth { (None, synth) } else { (plan, synth) }
+        if plan == synth {
+            (None, synth)
+        } else {
+            (plan, synth)
+        }
     } else {
         (None, None)
     };
@@ -3405,13 +3403,9 @@ fn build_persisted_mission_cards(
         for pos in child_positions {
             if let Some(message) = filtered.get(pos) {
                 let owner = message.agent_id.as_deref().unwrap_or("agent").to_string();
-                let kind = if message.kind.as_deref() == Some("synth")
-                    || synth_pos == Some(pos)
-                {
+                let kind = if message.kind.as_deref() == Some("synth") || synth_pos == Some(pos) {
                     "SYNTH"
-                } else if message.kind.as_deref() == Some("plan")
-                    || plan_pos == Some(pos)
-                {
+                } else if message.kind.as_deref() == Some("plan") || plan_pos == Some(pos) {
                     "PLAN"
                 } else {
                     "REPLY"

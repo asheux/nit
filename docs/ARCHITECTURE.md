@@ -504,3 +504,96 @@ and snapshot I/O) runs in a background worker thread.
 **Snapshots**
 - Stored under `gol-snapshots/` in the workspace root as RLE + JSON metadata.
 - Deduped by grid hash and pruned by max file count.
+
+### Seed Encoding System
+
+The seed encoding system converts editor text into a Game of Life genome (initial grid
+pattern). The pipeline lives in `nit-core/src/seed.rs` (encoding logic) and
+`nit-tui/src/seed_runtime.rs` (runtime orchestration).
+
+**Encoding Pipeline**
+
+```
+text input → encoder → value grid → jitter → density threshold → bit grid → symmetry → target grid
+```
+
+1. **Encoder** produces a base value grid (each cell 0-255) from the input text.
+2. **Jitter** adds random perturbation (SplitMix64 PRNG, upper bits via `>> 48`) to break
+   uniformity. Amplitude is `jitter * 32` intensity units.
+3. **Density threshold** converts values to alive/dead: `cell >= (1 - target_density) * 255`.
+4. **Symmetry** enforces spatial constraints using union semantics — if either mirrored cell
+   is alive, both become alive.
+5. **Target grid** scales the bit grid into the final GoL grid dimensions with placement
+   and padding.
+
+**Encoders**
+
+| Encoder | Grid Size | Method |
+|---------|-----------|--------|
+| `ascii_bytes` | 32x32 | Maps text bytes with index mixing and PRNG |
+| `lifehash16` | 16x16 | Pure PRNG derived from text hash |
+| `hilbert_bits` | 32x32 | Hilbert space-filling curve mapping |
+
+**Seed Parameters**
+
+| Parameter | Default | Range | Description |
+|-----------|---------|-------|-------------|
+| `symmetry` | mirror-x | none, mirror-x, mirror-y, rotate-180 | Spatial symmetry (union: either side alive → both alive) |
+| `target_density` | 0.31 | 0.08 - 0.7 | Target proportion of alive cells |
+| `padding` | 1 | 0+ | Border padding in cells |
+| `placement` | center | center, top-left | Seed position within the grid |
+| `jitter` | 0.04 | 0.0 - 0.25 | Random perturbation amplitude |
+
+**Change Detection**
+
+The seed runtime (`seed_runtime.rs`) detects parameter changes by direct `PartialEq`
+comparison on `SeedParams` (not fingerprint hashing), so arbitrarily small changes to
+density or jitter trigger recomputation. A debounce timer (120ms) prevents thrashing
+during rapid edits.
+
+**Seed Hashing**
+
+`hash_seed()` produces a 64-bit identity hash using BLAKE3 incremental hashing (no
+intermediate allocation). Inputs: encoder id, params fingerprint, variant, grid dimensions,
+and cell data. The fingerprint quantizes density and jitter to 1e-6 precision.
+
+**PRNG**
+
+All randomness (jitter, encoders, seed search mutations) uses `SplitMix64`
+(`nit-utils/src/hashing.rs`), a full-period 2^64 PRNG with excellent bit distribution.
+Jitter additionally extracts upper bits (`>> 48`) before the modulo to avoid low-bit
+correlation.
+
+**Seed Search**
+
+Toggled via `Ctrl+G` or the **SEARCH** title button. A background worker mutates seed
+parameters (symmetry, density, jitter, padding, placement) and scores candidates by:
+
+```
+score = component_count - 40 * |actual_density - target_density|
+```
+
+Best proposals are surfaced to the UI and applied with `Ctrl+A` or the **APPLY** title button.
+
+**Title Bar Buttons**
+
+The visualizer pane header has four clickable buttons:
+
+| Button | Action | Keyboard |
+|--------|--------|----------|
+| **APPLY** | Apply the best seed search proposal (swaps in candidate params) | `Ctrl+A` |
+| **SEED** | Cycle symmetry: none → mirror-x → mirror-y → rotate-180 | `Ctrl+S` |
+| **SNAP** | Snapshot current seed to `gol-snapshots/` as RLE + JSON metadata | `Ctrl+N` |
+| **SEARCH** | Toggle seed search background worker on/off | `Ctrl+G` |
+
+Buttons are rendered as inverted-color spans and use column-based hit detection
+(`visualizer_view::title_button_hit`).
+
+**Key Source Files**
+
+| File | Contents |
+|------|----------|
+| `nit-core/src/seed.rs` | Encoders, symmetry, jitter, thresholding, hashing, component counting |
+| `nit-tui/src/seed_runtime.rs` | Runtime loop, change detection, compute worker, search worker, snapshot dispatch |
+| `nit-tui/src/widgets/visualizer_view.rs` | Visualizer rendering, title bar buttons, click hit detection |
+| `nit-utils/src/hashing.rs` | SplitMix64 PRNG, BLAKE3 stable hashing |

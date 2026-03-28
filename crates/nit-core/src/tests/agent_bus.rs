@@ -234,7 +234,7 @@ fn turn_completed_prompt_idx_checks_both_codex_and_claude_maps() {
         mission_id: None,
         text: "user prompt".into(),
         prompt_msg_idx: None,
-            kind: None,
+        kind: None,
     });
 
     let event = AgentBusEvent::TurnCompleted {

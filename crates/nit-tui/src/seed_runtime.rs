@@ -8,7 +8,7 @@ use nit_core::seed::SeedViewMode;
 use nit_core::{
     encode_seed, AppState, EncodedSeed, GolSeedSource, PaneId, SeedEncoderId, SeedParams,
 };
-use nit_utils::hashing::XorShift64;
+use nit_utils::hashing::SplitMix64;
 
 use crate::gol_render::GolRenderState;
 use crate::seed_render::SeedRenderCache;
@@ -26,13 +26,16 @@ pub struct SeedRuntime {
     encoded: Option<EncodedSeed>,
     input: SeedInputOwned,
     last_seed_source: GolSeedSource,
+    last_buffer_id: usize,
     last_encoder: SeedEncoderId,
-    last_params_fp: u64,
+    last_params: SeedParams,
     last_variant: u8,
     last_seed_nonce: u64,
     pending_recompute: bool,
     last_edit: Instant,
     debounce: Duration,
+    compute: SeedComputeWorker,
+    compute_inflight: bool,
     search: SeedSearchWorker,
     search_best: Option<SeedSearchProposal>,
     search_active: bool,
@@ -53,20 +56,22 @@ impl SeedRuntime {
             state.settings.gol.snapshots.min_interval_ms,
         );
         let input = SeedInputOwned::from_state(state);
-        let params_fp = state.visualizer.seed_params.fingerprint();
         Self {
             size: (0, 0),
             render_state: GolRenderState::new(),
             encoded: None,
             input,
             last_seed_source: state.visualizer.seed_source,
+            last_buffer_id: state.active_editor_buffer_id,
             last_encoder: state.visualizer.seed_encoder,
-            last_params_fp: params_fp,
+            last_params: state.visualizer.seed_params.clone(),
             last_variant: state.visualizer.variant,
             last_seed_nonce: state.visualizer.seed,
             pending_recompute: true,
             last_edit: Instant::now(),
             debounce: Duration::from_millis(DEFAULT_DEBOUNCE_MS),
+            compute: SeedComputeWorker::spawn(),
+            compute_inflight: false,
             search: SeedSearchWorker::spawn(),
             search_best: None,
             search_active: false,
@@ -91,6 +96,7 @@ impl SeedRuntime {
     }
 
     pub fn tick(&mut self, state: &mut AppState) {
+        self.handle_compute_results(state);
         self.handle_search_events(state);
         self.apply_state_changes(state);
         self.recompute_if_due(state);
@@ -147,10 +153,11 @@ impl SeedRuntime {
             self.last_edit = Instant::now();
         }
 
-        let params_fp = state.visualizer.seed_params.fingerprint();
-        if state.visualizer.seed_encoder != self.last_encoder || params_fp != self.last_params_fp {
+        if state.visualizer.seed_encoder != self.last_encoder
+            || state.visualizer.seed_params != self.last_params
+        {
             self.last_encoder = state.visualizer.seed_encoder;
-            self.last_params_fp = params_fp;
+            self.last_params = state.visualizer.seed_params.clone();
             self.pending_recompute = true;
             self.last_edit = Instant::now();
         }
@@ -166,6 +173,15 @@ impl SeedRuntime {
 
         if state.visualizer.pending_reseed {
             state.visualizer.pending_reseed = false;
+            self.input = SeedInputOwned::from_state(state);
+            self.last_buffer_id = state.active_editor_buffer_id;
+            self.pending_recompute = true;
+            self.last_edit = Instant::now();
+        }
+
+        if state.active_editor_buffer_id != self.last_buffer_id {
+            self.last_buffer_id = state.active_editor_buffer_id;
+            self.input = SeedInputOwned::from_state(state);
             self.pending_recompute = true;
             self.last_edit = Instant::now();
         }
@@ -181,7 +197,7 @@ impl SeedRuntime {
             state.visualizer.pending_apply = false;
             if let Some(best) = self.search_best.take() {
                 state.visualizer.seed_params = best.params.clone();
-                self.last_params_fp = state.visualizer.seed_params.fingerprint();
+                self.last_params = state.visualizer.seed_params.clone();
                 self.pending_recompute = true;
                 self.last_edit = Instant::now();
                 state.status = Some(format!("Applied seed params (score {:.2})", best.score));
@@ -212,6 +228,21 @@ impl SeedRuntime {
         }
     }
 
+    fn handle_compute_results(&mut self, state: &mut AppState) {
+        let mut latest = None;
+        while let Ok(seed) = self.compute.results.try_recv() {
+            latest = Some(seed);
+        }
+        if let Some(seed) = latest {
+            self.compute_inflight = false;
+            self.encoded = Some(seed);
+            self.update_state_from_seed(state);
+            if self.search_active {
+                self.update_search_seed(state);
+            }
+        }
+    }
+
     fn recompute_if_due(&mut self, state: &mut AppState) {
         if !self.pending_recompute {
             return;
@@ -220,15 +251,21 @@ impl SeedRuntime {
             return;
         }
         self.refresh_input(state);
-        let Some(seed) = self.compute_seed(state, self.size.0, self.size.1) else {
+        let (w, h) = (self.size.0, self.size.1);
+        if w == 0 || h == 0 {
             return;
-        };
-        self.encoded = Some(seed);
-        self.pending_recompute = false;
-        self.update_state_from_seed(state);
-        if self.search_active {
-            self.update_search_seed(state);
         }
+        self.pending_recompute = false;
+        self.compute_inflight = true;
+        self.compute.send(SeedComputeRequest::Compute {
+            input: self.input.clone(),
+            encoder: state.visualizer.seed_encoder,
+            params: state.visualizer.seed_params.clone(),
+            seed_nonce: state.visualizer.seed,
+            variant: state.visualizer.variant,
+            width: w,
+            height: h,
+        });
     }
 
     fn refresh_input(&mut self, state: &AppState) {
@@ -395,6 +432,8 @@ impl SeedRuntime {
 
 impl Drop for SeedRuntime {
     fn drop(&mut self) {
+        self.compute.send(SeedComputeRequest::Shutdown);
+        self.compute.join();
         self.search.send(SeedSearchCommand::Shutdown);
         self.search.join();
         self.snapshot.shutdown();
@@ -429,6 +468,76 @@ impl SeedInputOwned {
             source: self.source,
             file_path: self.file_path.as_deref(),
             version: self.version,
+        }
+    }
+}
+
+enum SeedComputeRequest {
+    Compute {
+        input: SeedInputOwned,
+        encoder: SeedEncoderId,
+        params: SeedParams,
+        seed_nonce: u64,
+        variant: u8,
+        width: usize,
+        height: usize,
+    },
+    Shutdown,
+}
+
+struct SeedComputeWorker {
+    tx: Sender<SeedComputeRequest>,
+    results: Receiver<EncodedSeed>,
+    handle: Option<JoinHandle<()>>,
+}
+
+impl SeedComputeWorker {
+    fn spawn() -> Self {
+        let (tx, rx) = mpsc::channel::<SeedComputeRequest>();
+        let (result_tx, results) = mpsc::channel();
+        let handle = thread::Builder::new()
+            .name("nit-seed-compute".into())
+            .spawn(move || {
+                while let Ok(mut req) = rx.recv() {
+                    // Drain stale requests, keep only the latest.
+                    while let Ok(newer) = rx.try_recv() {
+                        req = newer;
+                    }
+                    match req {
+                        SeedComputeRequest::Compute {
+                            input,
+                            encoder,
+                            params,
+                            seed_nonce,
+                            variant,
+                            width,
+                            height,
+                        } => {
+                            let si = input.as_seed_input();
+                            let seed = encode_seed(
+                                &si, encoder, &params, seed_nonce, variant, width, height,
+                            );
+                            let _ = result_tx.send(seed);
+                        }
+                        SeedComputeRequest::Shutdown => break,
+                    }
+                }
+            })
+            .expect("spawn seed compute worker");
+        Self {
+            tx,
+            results,
+            handle: Some(handle),
+        }
+    }
+
+    fn send(&self, req: SeedComputeRequest) {
+        let _ = self.tx.send(req);
+    }
+
+    fn join(&mut self) {
+        if let Some(h) = self.handle.take() {
+            let _ = h.join();
         }
     }
 }
@@ -537,7 +646,7 @@ fn seed_search_loop(cmd_rx: Receiver<SeedSearchCommand>, event_tx: Sender<SeedSe
     let mut seed_nonce = 0u64;
     let mut variant = 0u8;
     let mut target_size = (0usize, 0usize);
-    let mut rng = XorShift64::new(0x5eedcafe);
+    let mut rng = SplitMix64::new(0x5eedcafe);
     let mut best_score = f32::MIN;
 
     loop {
@@ -687,7 +796,7 @@ fn handle_seed_search_cmd(
     false
 }
 
-fn mutate_params(base: &SeedParams, rng: &mut XorShift64) -> SeedParams {
+fn mutate_params(base: &SeedParams, rng: &mut SplitMix64) -> SeedParams {
     let mut params = base.clone();
     if rng.next_u64() % 100 < 45 {
         params.symmetry = match rng.next_u64() % 4 {

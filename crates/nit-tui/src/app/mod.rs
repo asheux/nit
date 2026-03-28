@@ -4960,6 +4960,7 @@ fn visualizer_ctrl_action(key: &KeyEvent, state: &AppState) -> Option<Action> {
         KeyCode::Char('b') | KeyCode::Char('B') => Some(Action::VisualizerToggleBBox),
         KeyCode::Char('h') | KeyCode::Char('H') => Some(Action::VisualizerToggleHeat),
         KeyCode::Char('l') | KeyCode::Char('L') => Some(Action::VisualizerToggleScanlines),
+        KeyCode::Char('s') | KeyCode::Char('S') => Some(Action::VisualizerCycleSymmetry),
         _ => None,
     }
 }
@@ -7622,6 +7623,17 @@ fn handle_mouse_down_with_swarm(
         state.mode = Mode::Insert;
         input_state.mouse_select_anchor = None;
         return true;
+    }
+    {
+        let layout = layout::split(screen);
+        if mouse.row == layout.visualizer.y {
+            let col_in_rect = mouse.column.saturating_sub(layout.visualizer.x);
+            if let Some(action) = visualizer_view::title_button_hit(col_in_rect) {
+                state.focus = PaneId::Visualizer;
+                apply_action(state, action);
+                return true;
+            }
+        }
     }
     if let Some((line_idx, col, lines)) =
         map_visualizer_side_mouse(mouse, screen, state, theme, false)

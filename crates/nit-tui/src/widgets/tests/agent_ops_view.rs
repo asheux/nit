@@ -1088,7 +1088,7 @@ fn artifacts_view_uses_selected_archived_run_over_live_context() {
         mission_id: Some("mis-601".into()),
         text: "live reply".into(),
         prompt_msg_idx: None,
-            kind: None,
+        kind: None,
     });
 
     let run_dir = workspace.join(".nit/agents/runs/mis-601/history/00000000000000000003");

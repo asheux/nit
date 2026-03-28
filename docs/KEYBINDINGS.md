@@ -104,14 +104,23 @@
 - Ctrl+Up/Ctrl+Down: Scroll chat thread
 
 ## Visualizer (GoL)
-- Ctrl+E: Cycle seed encoder
+
+### Title Bar Buttons (clickable)
+- **APPLY**: Apply the best seed search proposal (swaps in the candidate's params)
+- **SEED**: Cycle symmetry (none → mirror-x → mirror-y → rotate-180)
+- **SNAP**: Snapshot current seed to `gol-snapshots/` (RLE + JSON metadata, deduped by grid hash)
+- **SEARCH**: Toggle seed search (background worker mutates params and scores by component count vs density error)
+
+### Keyboard Shortcuts
+- Ctrl+E: Cycle seed encoder (ascii_bytes → hilbert_bits → lifehash16)
+- Ctrl+S: Cycle symmetry (same as SEED button)
 - Ctrl+V: Toggle view (GENOME ↔ PLATE)
 - Ctrl+R: Cycle seed view (genome/plate/map/stats)
 - Ctrl+M: Cycle plate render (solid/half/braille/tissue/heat)
-- Ctrl+Y: Toggle seed source (Editor/Notes)
-- Ctrl+A: Apply seed search proposal
-- Ctrl+G: Toggle seed search
-- Ctrl+N: Snapshot seed (SNAP)
+- Ctrl+Y: Seed source (Editor only)
+- Ctrl+A: Apply seed search proposal (same as APPLY button)
+- Ctrl+G: Toggle seed search (same as SEARCH button)
+- Ctrl+N: Snapshot seed (same as SNAP button)
 - Ctrl+Shift+V: Cycle seed overlays
 - Arrows / HJKL: Move genome inspector (Visualizer focus)
 - Home / End: Inspector jump to edges

@@ -19,7 +19,7 @@ use nit_metal::{
     BatchEvalConfig, BatchExecutionPolicy, BatchPayload, BatchPolicySource, CaBatch, FsmBatch,
     MatchPair, PreparedBatch, TmBatch,
 };
-use nit_utils::hashing::{stable_hash_bytes, XorShift64};
+use nit_utils::hashing::{stable_hash_bytes, SplitMix64};
 use rayon::prelude::*;
 use rayon::ThreadPoolBuilder;
 use serde::{Deserialize, Serialize};
@@ -365,7 +365,7 @@ struct MatchSession {
     history: History,
     a_strategy: Box<dyn Strategy>,
     b_strategy: Box<dyn Strategy>,
-    noise_rng: XorShift64,
+    noise_rng: SplitMix64,
     history_actions_a: String,
     history_actions_b: String,
     history_halted_a: String,
@@ -2706,7 +2706,7 @@ fn play_round_core(session: &mut MatchSession, config: &NormalizedConfig) -> Rou
     }
 }
 
-fn apply_noise(noise: f32, action: Action, rng: &mut XorShift64) -> Action {
+fn apply_noise(noise: f32, action: Action, rng: &mut SplitMix64) -> Action {
     if noise <= 0.0 {
         return action;
     }
@@ -2753,7 +2753,7 @@ impl MatchSession {
             history: History::new(max_memory),
             a_strategy,
             b_strategy,
-            noise_rng: XorShift64::new(noise_seed),
+            noise_rng: SplitMix64::new(noise_seed),
             history_actions_a: if record_history {
                 String::with_capacity(rounds_total as usize)
             } else {
