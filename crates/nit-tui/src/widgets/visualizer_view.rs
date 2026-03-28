@@ -151,6 +151,12 @@ pub fn render(
     }
 
     fill_bg(frame.buffer_mut(), render_area, palette.bg);
+
+    if state.editor_buffer().path().is_none() {
+        draw_genome_placeholder(frame.buffer_mut(), render_area, &palette);
+        return;
+    }
+
     let Some(seed) = seed_runtime.encoded() else {
         draw_loading_bar(frame, render_area, &palette);
         return;
@@ -293,6 +299,44 @@ fn draw_loading_bar(frame: &mut Frame, area: ratatui::layout::Rect, palette: &Se
     frame.render_widget(gauge, bar_area);
 }
 
+fn draw_genome_placeholder(buf: &mut Buffer, area: ratatui::layout::Rect, palette: &SeedPalette) {
+    if area.width < 4 || area.height < 3 {
+        return;
+    }
+    let msg = " Open file in editor to view code genome ";
+    let msg_len = msg.len() as u16;
+    let bar_w = msg_len;
+    let bar_h = 3u16;
+    let bar_x = area.x + area.width.saturating_sub(bar_w) / 2;
+    let bar_y = area.y + area.height.saturating_sub(bar_h) / 2;
+
+    let cyan = ratatui::style::Color::Rgb(0, 215, 215);
+    let bar_style = Style::default().bg(cyan);
+    let text_style = Style::default()
+        .fg(palette.bg)
+        .bg(cyan)
+        .add_modifier(Modifier::BOLD);
+
+    // Fill the 3-row bar with background color.
+    for row in 0..bar_h {
+        for dx in 0..bar_w {
+            let cell = buf.get_mut(bar_x + dx, bar_y + row);
+            cell.set_char(' ');
+            cell.set_style(bar_style);
+        }
+    }
+    // Draw centered text on the middle row.
+    let text_y = bar_y + 1;
+    for (i, ch) in msg.chars().enumerate() {
+        let cx = bar_x + i as u16;
+        if cx < bar_x + bar_w {
+            let cell = buf.get_mut(cx, text_y);
+            cell.set_char(ch);
+            cell.set_style(text_style);
+        }
+    }
+}
+
 fn loading_ratio() -> f64 {
     use std::time::{SystemTime, UNIX_EPOCH};
     let now = SystemTime::now()
@@ -346,6 +390,30 @@ fn draw_legend_line(
                     }
                 }
             }
+        }
+        SeedEncoderId::Structural => {
+            writer.write_str("structural 32×32 | Hilbert-curve layout | block boundaries");
+            if let Some(stream) = seed_runtime.render_cache().hilbert_stream.as_ref() {
+                let cols = render_area.width as usize;
+                if cols > 0 {
+                    let total = stream.len().max(1);
+                    let stride = total.div_ceil(cols);
+                    if stride > 1 {
+                        writer.write_sep();
+                        writer.write_str("stride=");
+                        writer.write_u32(stride as u32);
+                    }
+                }
+            }
+        }
+        SeedEncoderId::TokenSpectrum => {
+            writer.write_str("token_spectrum 32×32 | AST token categories | Hilbert layout");
+        }
+        SeedEncoderId::AstStructure => {
+            writer.write_str("ast_structure 32×32 | AST node properties | Hilbert layout");
+        }
+        SeedEncoderId::ComplexityField => {
+            writer.write_str("complexity_field 32×32 | per-line metrics heatmap");
         }
     }
     writer.finish();
@@ -419,7 +487,7 @@ fn draw_inspector_line(
             writer.write_str("BIT:");
             writer.write_char(if bit { '1' } else { '0' });
         }
-        SeedEncoderId::HilbertBits => {
+        SeedEncoderId::HilbertBits | SeedEncoderId::Structural => {
             let bit = seed.base_bits.get(x, y);
             writer.write_str("IDX:");
             if let Some(map) = seed_runtime.render_cache().hilbert_index_by_xy.as_ref() {
@@ -436,6 +504,21 @@ fn draw_inspector_line(
             writer.write_sep();
             writer.write_str("BIT:");
             writer.write_char(if bit { '1' } else { '0' });
+        }
+        SeedEncoderId::TokenSpectrum
+        | SeedEncoderId::AstStructure
+        | SeedEncoderId::ComplexityField => {
+            let value = seed.base_values.get(x, y);
+            writer.write_str("IDX:");
+            writer.write_u32(idx as u32);
+            writer.write_sep();
+            writer.write_str("XY:");
+            writer.write_u32(x as u32);
+            writer.write_char(',');
+            writer.write_u32(y as u32);
+            writer.write_sep();
+            writer.write_str("VAL:");
+            writer.write_u32(value as u32);
         }
     }
     writer.finish();
@@ -481,7 +564,7 @@ fn draw_genome_crosshair(
                 cell.set_fg(palette.accent);
             }
         }
-        SeedEncoderId::HilbertBits => {
+        SeedEncoderId::HilbertBits | SeedEncoderId::Structural => {
             let w = seed.base_bits.width().max(1);
             let idx = if let Some(map) = seed_runtime.render_cache().hilbert_index_by_xy.as_ref() {
                 map[y.saturating_mul(w) + x] as usize
@@ -506,6 +589,27 @@ fn draw_genome_crosshair(
                         }
                     }
                 }
+            }
+        }
+        SeedEncoderId::TokenSpectrum
+        | SeedEncoderId::AstStructure
+        | SeedEncoderId::ComplexityField => {
+            // Same crosshair as AsciiBytes — highlight the cell.
+            let w = seed.base_values.width().max(1);
+            let h = seed.base_values.height().max(1);
+            let (digits, gap, cols) = ascii_layout(area.width as usize, w);
+            if cols == 0 || digits == 0 {
+                return;
+            }
+            let rows = area.height as usize;
+            let cx = x.saturating_mul(cols) / w;
+            let cy = y.saturating_mul(rows.max(1)) / h;
+            let stride = digits + gap;
+            let start_x = area.x + (cx * stride) as u16;
+            let row_y = area.y + cy as u16;
+            for dx in 0..digits {
+                let cell = buf.get_mut(start_x + dx as u16, row_y);
+                cell.set_bg(palette.accent);
             }
         }
     }
@@ -540,7 +644,10 @@ fn draw_hilbert_inset_highlight(
 
 fn inspector_pos(state: &AppState) -> (usize, usize) {
     match state.visualizer.seed_encoder {
-        SeedEncoderId::AsciiBytes => (
+        SeedEncoderId::AsciiBytes
+        | SeedEncoderId::TokenSpectrum
+        | SeedEncoderId::AstStructure
+        | SeedEncoderId::ComplexityField => (
             state.visualizer.inspect_ascii_x,
             state.visualizer.inspect_ascii_y,
         ),
@@ -548,7 +655,7 @@ fn inspector_pos(state: &AppState) -> (usize, usize) {
             state.visualizer.inspect_lifehash_x,
             state.visualizer.inspect_lifehash_y,
         ),
-        SeedEncoderId::HilbertBits => (
+        SeedEncoderId::HilbertBits | SeedEncoderId::Structural => (
             state.visualizer.inspect_hilbert_x,
             state.visualizer.inspect_hilbert_y,
         ),

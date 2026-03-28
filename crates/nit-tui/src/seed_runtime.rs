@@ -884,7 +884,11 @@ fn seed_genome_preview(seed: &EncodedSeed) -> Option<SeedGenomePreview> {
                 hilbert_bits_prefix: Some(bits),
             })
         }
-        SeedEncoderId::AsciiBytes => None,
+        SeedEncoderId::AsciiBytes
+        | SeedEncoderId::Structural
+        | SeedEncoderId::TokenSpectrum
+        | SeedEncoderId::AstStructure
+        | SeedEncoderId::ComplexityField => None,
     }
 }
 
@@ -896,7 +900,10 @@ fn reset_inspector_if_seed_changed(state: &mut AppState, seed: &EncodedSeed) {
     let cx = w / 2;
     let cy = h / 2;
     match seed.encoder_id {
-        SeedEncoderId::AsciiBytes => {
+        SeedEncoderId::AsciiBytes
+        | SeedEncoderId::TokenSpectrum
+        | SeedEncoderId::AstStructure
+        | SeedEncoderId::ComplexityField => {
             if state.visualizer.inspect_ascii_hash != seed.seed_hash {
                 state.visualizer.inspect_ascii_hash = seed.seed_hash;
                 state.visualizer.inspect_ascii_x = cx;
@@ -910,7 +917,7 @@ fn reset_inspector_if_seed_changed(state: &mut AppState, seed: &EncodedSeed) {
                 state.visualizer.inspect_lifehash_y = cy;
             }
         }
-        SeedEncoderId::HilbertBits => {
+        SeedEncoderId::HilbertBits | SeedEncoderId::Structural => {
             if state.visualizer.inspect_hilbert_hash != seed.seed_hash {
                 state.visualizer.inspect_hilbert_hash = seed.seed_hash;
                 state.visualizer.inspect_hilbert_x = cx;

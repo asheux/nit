@@ -1838,7 +1838,7 @@ impl AppState {
                 seed: 1,
                 variant: 0,
                 mode: VisualizerMode::SimOnly,
-                seed_encoder: SeedEncoderId::AsciiBytes,
+                seed_encoder: SeedEncoderId::TokenSpectrum,
                 seed_view: SeedViewMode::Genome,
                 seed_plate_mode: SeedPreviewMode::Solid,
                 seed_params: SeedParams::default(),
@@ -3948,6 +3948,16 @@ fn handle_command_line(state: &mut AppState, input: &str) -> bool {
             ));
             false
         }
+        ["gol", "encoder", name] => {
+            if let Some(id) = SeedEncoderId::from_str_name(name) {
+                state.visualizer.seed_encoder = id;
+                state.visualizer.pending_reseed = true;
+                state.status = Some(format!("Encoder: {}", id.label()));
+            } else {
+                state.status = Some(format!("Unknown encoder: {name}"));
+            }
+            false
+        }
         ["seed", "encoder"] if state.app_kind == AppKind::Gol => {
             state.visualizer.seed_encoder = state.visualizer.seed_encoder.next();
             state.visualizer.pending_reseed = true;
@@ -3955,6 +3965,16 @@ fn handle_command_line(state: &mut AppState, input: &str) -> bool {
                 "Encoder: {}",
                 state.visualizer.seed_encoder.label()
             ));
+            false
+        }
+        ["seed", "encoder", name] if state.app_kind == AppKind::Gol => {
+            if let Some(id) = SeedEncoderId::from_str_name(name) {
+                state.visualizer.seed_encoder = id;
+                state.visualizer.pending_reseed = true;
+                state.status = Some(format!("Encoder: {}", id.label()));
+            } else {
+                state.status = Some(format!("Unknown encoder: {name}"));
+            }
             false
         }
         _ if tokens.first() == Some(&"gol") && tokens.get(1) == Some(&"rule") => {
@@ -4996,7 +5016,10 @@ fn move_inspector(state: &mut AppState, dx: isize, dy: isize) {
         return;
     }
     let (x, y) = match state.visualizer.seed_encoder {
-        SeedEncoderId::AsciiBytes => (
+        SeedEncoderId::AsciiBytes
+        | SeedEncoderId::TokenSpectrum
+        | SeedEncoderId::AstStructure
+        | SeedEncoderId::ComplexityField => (
             &mut state.visualizer.inspect_ascii_x,
             &mut state.visualizer.inspect_ascii_y,
         ),
@@ -5004,7 +5027,7 @@ fn move_inspector(state: &mut AppState, dx: isize, dy: isize) {
             &mut state.visualizer.inspect_lifehash_x,
             &mut state.visualizer.inspect_lifehash_y,
         ),
-        SeedEncoderId::HilbertBits => (
+        SeedEncoderId::HilbertBits | SeedEncoderId::Structural => (
             &mut state.visualizer.inspect_hilbert_x,
             &mut state.visualizer.inspect_hilbert_y,
         ),
@@ -5024,7 +5047,10 @@ fn inspector_dims(state: &AppState) -> (usize, usize) {
 
 fn set_inspector_pos(state: &mut AppState, x: usize, y: usize) {
     match state.visualizer.seed_encoder {
-        SeedEncoderId::AsciiBytes => {
+        SeedEncoderId::AsciiBytes
+        | SeedEncoderId::TokenSpectrum
+        | SeedEncoderId::AstStructure
+        | SeedEncoderId::ComplexityField => {
             state.visualizer.inspect_ascii_x = x;
             state.visualizer.inspect_ascii_y = y;
         }
@@ -5032,7 +5058,7 @@ fn set_inspector_pos(state: &mut AppState, x: usize, y: usize) {
             state.visualizer.inspect_lifehash_x = x;
             state.visualizer.inspect_lifehash_y = y;
         }
-        SeedEncoderId::HilbertBits => {
+        SeedEncoderId::HilbertBits | SeedEncoderId::Structural => {
             state.visualizer.inspect_hilbert_x = x;
             state.visualizer.inspect_hilbert_y = y;
         }
@@ -5044,7 +5070,7 @@ fn jump_inspector_to_index(state: &mut AppState, idx: u64) {
     let total = w.saturating_mul(h).max(1) as u64;
     let clamped = idx.min(total.saturating_sub(1));
     match state.visualizer.seed_encoder {
-        SeedEncoderId::HilbertBits => {
+        SeedEncoderId::HilbertBits | SeedEncoderId::Structural => {
             let order = hilbert_order_for(w);
             let (x, y) = hilbert_index_to_xy(order, clamped as u32);
             set_inspector_pos(state, x as usize, y as usize);

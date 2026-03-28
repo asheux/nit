@@ -20,8 +20,13 @@ pub fn render_genome(
     }
     match seed.encoder_id {
         SeedEncoderId::Lifehash16 => render_lifehash16(area, buf, seed, palette),
-        SeedEncoderId::HilbertBits => render_hilbert_bits(area, buf, seed, cache, palette),
+        SeedEncoderId::HilbertBits | SeedEncoderId::Structural => {
+            render_hilbert_bits(area, buf, seed, cache, palette)
+        }
         SeedEncoderId::AsciiBytes => render_ascii_bytes(area, buf, seed, palette),
+        SeedEncoderId::TokenSpectrum
+        | SeedEncoderId::AstStructure
+        | SeedEncoderId::ComplexityField => render_ascii_bytes(area, buf, seed, palette),
     }
 }
 
