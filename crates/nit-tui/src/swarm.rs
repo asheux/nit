@@ -532,39 +532,24 @@ fn ensure_size_clones(
         return;
     }
 
-    // Clone selected non-planner agents to fill remaining slots, falling
-    // back to the planner when no other agents were selected.
-    let mut sources: Vec<String> = agents
+    // Additional clones always come from the planner (the original
+    // roster-selected agent), regardless of how many priority agents
+    // were already picked.
+    let Some(base_lane) = state
+        .agents
+        .agents
         .iter()
-        .filter(|id| id.as_str() != planner_agent_id)
+        .find(|lane| lane.id == planner_agent_id)
+        .filter(|lane| lane.is_codex() || lane.is_claude())
         .cloned()
-        .collect();
-    if sources.is_empty() {
-        sources.push(planner_agent_id.to_string());
-    }
-
-    let mut source_lanes = Vec::new();
-    for source_id in sources.iter() {
-        let Some(base_lane) = state
-            .agents
-            .agents
-            .iter()
-            .find(|lane| lane.id == *source_id)
-            .filter(|lane| lane.is_codex() || lane.is_claude())
-            .cloned()
-        else {
-            continue;
-        };
-        source_lanes.push((source_id.clone(), base_lane));
-    }
-    if source_lanes.is_empty() {
+    else {
         return;
-    }
+    };
 
     let mut clone_num: usize = 0;
     while agents.len() < target {
         clone_num = clone_num.saturating_add(1);
-        let (source_id, base_lane) = &source_lanes[(clone_num - 1) % source_lanes.len()];
+        let source_id = planner_agent_id;
         let clone_id = format!("{source_id}#swarm-{mission_id}-clone-{clone_num:02}");
 
         if agents.iter().any(|id| id == &clone_id) {
@@ -586,11 +571,11 @@ fn ensure_size_clones(
             lane.queue_len = 0;
             lane.current_mission = None;
             lane.last_message = String::new();
-            insert_swarm_clone_lane(state, source_id.as_str(), lane);
+            insert_swarm_clone_lane(state, source_id, lane);
         }
 
-        copy_codex_runtime_metadata(state, source_id.as_str(), clone_id.as_str());
-        copy_claude_runtime_metadata(state, source_id.as_str(), clone_id.as_str());
+        copy_codex_runtime_metadata(state, source_id, clone_id.as_str());
+        copy_claude_runtime_metadata(state, source_id, clone_id.as_str());
         agents.push(clone_id);
     }
 }
@@ -6657,7 +6642,7 @@ mod tests {
     }
 
     #[test]
-    fn parallel_priority_selection_clones_from_selected_models() {
+    fn parallel_priority_selection_clones_from_planner() {
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         let editor = Buffer::empty("editor", None);
         let notes = Buffer::empty("notes", None);
@@ -6696,7 +6681,7 @@ mod tests {
             .expect("mission");
         assert_eq!(
             mission.assigned_agents,
-            vec!["planner", "b", "d", "b#swarm-mis-001-clone-01",]
+            vec!["planner", "b", "d", "planner#swarm-mis-001-clone-01",]
         );
     }
 

@@ -47,7 +47,7 @@ just run -- path/to/file
 - Atomic file writes.
 - Terminal restored on exit and panic.
 
-For details see `SECURITY.md`.
+For details see `docs/SECURITY.md`.
 
 ## Agent Station
 
@@ -101,6 +101,7 @@ cargo run -p nit -- --agents codex
 - `docs/GAMES.md` — games engine details (strategies, config, headless CLI, analysis).
 - `docs/PERF.md` — benchmarks and flamegraphs.
 - `docs/RULES.md` — Game of Life rule catalog and contribution guide.
+- `docs/SECURITY.md` — security policy, protections, and hardening backlog.
 
 ## Command prompt (`:`)
 
