@@ -1084,6 +1084,7 @@ fn run_loop(
                 );
             }
             if finished {
+                maybe_dispatch_next_queued_codex_turn(state, &mut vitals, Some(&codex_runner));
                 maybe_dispatch_next_queued_claude_turn(state, &mut vitals, Some(&claude_runner));
                 if let AgentBusEvent::TurnCompleted { agent_id, .. }
                 | AgentBusEvent::TurnFailed { agent_id, .. } = &event

@@ -493,28 +493,30 @@ pub(super) fn enqueue_claude_turn(
         return;
     }
 
-    state
-        .agents
-        .queued_claude_turns
-        .push_back(nit_core::QueuedClaudeTurn {
-            agent_id: model.clone(),
-            mission_id: mission_id.clone(),
-            prompt,
-            prompt_msg_idx,
-        });
-
+    // Increment queue_len only after all validation checks pass, right before
+    // the turn is pushed so the two stay in sync.
     if let Some(agent) = state.agents.agents.iter_mut().find(|a| a.id == model) {
         let is_running = matches!(agent.status, AgentStatus::Running);
         agent.queue_len = agent.queue_len.saturating_add(1);
         agent.heartbeat_age_secs = 0;
         agent.last_message = "queued".into();
         if !is_running {
-            agent.current_mission = mission_id;
+            agent.current_mission = mission_id.clone();
         }
         if !matches!(agent.status, AgentStatus::Running | AgentStatus::Error) {
             agent.status = AgentStatus::Waiting;
         }
     }
+
+    state
+        .agents
+        .queued_claude_turns
+        .push_back(nit_core::QueuedClaudeTurn {
+            agent_id: model,
+            mission_id,
+            prompt,
+            prompt_msg_idx,
+        });
 
     let now = Instant::now();
     state.agents.note_event();
