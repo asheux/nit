@@ -398,6 +398,7 @@ fn reset_context_in_mission_forgets_codex_thread_id_and_clears_mission_thread() 
         mission_id: Some("mis-001".into()),
         text: "hello".into(),
         prompt_msg_idx: None,
+            kind: None,
     });
     state.agents.messages.push(AgentMessage {
         at: "t+2".into(),
@@ -406,6 +407,7 @@ fn reset_context_in_mission_forgets_codex_thread_id_and_clears_mission_thread() 
         mission_id: Some("mis-001".into()),
         text: "world".into(),
         prompt_msg_idx: None,
+            kind: None,
     });
     state.agents.messages.push(AgentMessage {
         at: "t+3".into(),
@@ -414,6 +416,7 @@ fn reset_context_in_mission_forgets_codex_thread_id_and_clears_mission_thread() 
         mission_id: Some("mis-999".into()),
         text: "other mission".into(),
         prompt_msg_idx: None,
+            kind: None,
     });
 
     assert!(reset_roster_context(&mut state, &SwarmRuntime::default()));
@@ -467,6 +470,7 @@ fn reset_context_persists_mission_artifacts_before_clearing_live_thread() {
         mission_id: Some("mis-401".into()),
         text: "persist me".into(),
         prompt_msg_idx: None,
+            kind: None,
     });
 
     assert!(reset_roster_context(&mut state, &SwarmRuntime::default()));
@@ -503,6 +507,7 @@ fn reset_context_persists_ad_hoc_artifacts_before_clearing_live_thread() {
         mission_id: None,
         text: "keep this prompt".into(),
         prompt_msg_idx: None,
+            kind: None,
     });
     state.agents.messages.push(AgentMessage {
         at: "t+2".into(),
@@ -511,6 +516,7 @@ fn reset_context_persists_ad_hoc_artifacts_before_clearing_live_thread() {
         mission_id: None,
         text: "keep this reply".into(),
         prompt_msg_idx: None,
+            kind: None,
     });
     state
         .agents
@@ -562,6 +568,7 @@ fn reset_context_archives_saved_run_history_snapshot() {
         mission_id: Some("mis-777".into()),
         text: "archive me".into(),
         prompt_msg_idx: None,
+            kind: None,
     });
 
     assert!(reset_roster_context(&mut state, &SwarmRuntime::default()));
@@ -1780,6 +1787,7 @@ fn map_agent_console_mouse_maps_chat_thread_lines() {
         mission_id: None,
         text: "hello world".into(),
         prompt_msg_idx: None,
+            kind: None,
     });
     let screen = ratatui::layout::Rect {
         x: 0,
@@ -1828,6 +1836,7 @@ fn clicking_agent_console_artifact_row_opens_matching_artifact_popup() {
         mission_id: None,
         text: "hello world".into(),
         prompt_msg_idx: None,
+            kind: None,
     });
 
     let mut input_state = InputState::new();
@@ -1970,6 +1979,7 @@ fn click_in_chat_header_does_not_start_thread_selection() {
         mission_id: None,
         text: "select me".into(),
         prompt_msg_idx: None,
+            kind: None,
     });
     let mut input_state = InputState::new();
     let mut clipboard = None;
@@ -2374,6 +2384,7 @@ fn artifacts_popup_scroll_clamps_before_moving_back_up() {
         mission_id: None,
         text: (0..80).map(|idx| format!("prompt-line-{idx}\n")).collect(),
         prompt_msg_idx: None,
+            kind: None,
     });
 
     let theme = Theme::default();
@@ -3012,6 +3023,7 @@ fn chat_thread_selection_starts_at_clicked_column() {
         mission_id: None,
         text: "selection precision".into(),
         prompt_msg_idx: None,
+            kind: None,
     });
     let mut input_state = InputState::new();
     let mut clipboard = None;
@@ -3279,6 +3291,7 @@ fn mouse_wheel_in_chat_thread_clamps_at_bottom_without_wrap() {
             mission_id: None,
             text: format!("message-{i}"),
             prompt_msg_idx: None,
+            kind: None,
         });
     }
 
@@ -3345,6 +3358,7 @@ fn scrolled_chat_selection_maps_to_visible_line_not_top() {
             mission_id: None,
             text: format!("payload-{i:03}"),
             prompt_msg_idx: None,
+            kind: None,
         });
     }
     let mut fuzzy_runtime =
@@ -3460,6 +3474,7 @@ fn user_bubble_selection_can_span_multiple_messages() {
         mission_id: None,
         text: "alpha prompt".into(),
         prompt_msg_idx: None,
+            kind: None,
     });
     state.agents.messages.push(AgentMessage {
         at: "10:00:01".into(),
@@ -3468,6 +3483,7 @@ fn user_bubble_selection_can_span_multiple_messages() {
         mission_id: None,
         text: "omega prompt".into(),
         prompt_msg_idx: None,
+            kind: None,
     });
     let mut input_state = InputState::new();
     let mut clipboard = None;
@@ -3548,6 +3564,7 @@ fn scrolled_user_bubble_selection_can_span_multiple_messages() {
             mission_id: None,
             text: format!("user-prompt-{i:02}"),
             prompt_msg_idx: None,
+            kind: None,
         });
     }
     let mut fuzzy_runtime =
@@ -3667,6 +3684,7 @@ fn vertical_drag_across_user_bubbles_includes_end_message_text() {
         mission_id: None,
         text: "first message has a wider bubble".into(),
         prompt_msg_idx: None,
+            kind: None,
     });
     state.agents.messages.push(AgentMessage {
         at: "10:00:01".into(),
@@ -3675,6 +3693,7 @@ fn vertical_drag_across_user_bubbles_includes_end_message_text() {
         mission_id: None,
         text: "short".into(),
         prompt_msg_idx: None,
+            kind: None,
     });
 
     let mut input_state = InputState::new();
@@ -3763,6 +3782,7 @@ fn reverse_vertical_drag_across_user_bubbles_keeps_both_messages() {
         mission_id: None,
         text: "first message has a wider bubble".into(),
         prompt_msg_idx: None,
+            kind: None,
     });
     state.agents.messages.push(AgentMessage {
         at: "10:00:01".into(),
@@ -3771,6 +3791,7 @@ fn reverse_vertical_drag_across_user_bubbles_keeps_both_messages() {
         mission_id: None,
         text: "short".into(),
         prompt_msg_idx: None,
+            kind: None,
     });
 
     let mut input_state = InputState::new();
@@ -3864,6 +3885,7 @@ fn scrolled_reverse_drag_across_user_bubbles_keeps_visible_messages() {
             mission_id: None,
             text: format!("user-prompt-{i:02}"),
             prompt_msg_idx: None,
+            kind: None,
         });
     }
 
@@ -3973,6 +3995,7 @@ fn agent_console_mouse_drag_copies_selected_chat_text() {
         mission_id: None,
         text: "selection copy works".into(),
         prompt_msg_idx: None,
+            kind: None,
     });
     let mut input_state = InputState::new();
     let mut clipboard = None;
@@ -4091,6 +4114,7 @@ fn agent_console_selection_strips_user_bubble_edges_from_clipboard() {
         mission_id: None,
         text: "hello".into(),
         prompt_msg_idx: None,
+            kind: None,
     });
     let screen = ratatui::layout::Rect {
         x: 0,
@@ -4144,6 +4168,7 @@ fn agent_console_selection_does_not_strip_markdown_table_pipes_in_user_prompt() 
         mission_id: None,
         text: "intro\n| table row |".into(),
         prompt_msg_idx: None,
+            kind: None,
     });
 
     let screen = ratatui::layout::Rect {
@@ -5188,6 +5213,7 @@ fn artifact_popup_context_overrides_agent_and_mission() {
         mission_id: Some("mis-002".into()),
         text: "Clone result".into(),
         prompt_msg_idx: None,
+            kind: None,
     });
 
     // Roster has base-model selected, mis-001 selected.

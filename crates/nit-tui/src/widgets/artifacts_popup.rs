@@ -257,8 +257,25 @@ pub fn build_lines(
             agent_ops_view::ArtifactsPopupRef::PersistedEvidence { item } => {
                 return build_persisted_evidence_lines(&item, theme, width_usize);
             }
-            agent_ops_view::ArtifactsPopupRef::Patch { .. }
-            | agent_ops_view::ArtifactsPopupRef::Evidence { .. } => {}
+            agent_ops_view::ArtifactsPopupRef::Patch { idx } => {
+                if let Some(patch) = state.agents.patches.get(idx) {
+                    let persisted = agent_ops_view::PersistedPatchRecord {
+                        id: patch.id.clone(),
+                        mission_id: patch.mission_id.clone(),
+                        agent_id: patch.agent_id.clone(),
+                        title: patch.title.clone(),
+                        summary: patch.summary.clone(),
+                        diff: patch.diff.clone(),
+                        status: patch.status.label().to_string(),
+                    };
+                    return build_persisted_patch_lines(&persisted, None, theme, width_usize);
+                }
+            }
+            agent_ops_view::ArtifactsPopupRef::Evidence { idx } => {
+                if let Some(item) = state.agents.evidence.get(idx) {
+                    return build_persisted_evidence_lines(item, theme, width_usize);
+                }
+            }
         }
     }
 
@@ -618,15 +635,17 @@ fn render_content_only(
 }
 
 fn build_message_lines(
-    state: &AppState,
+    _state: &AppState,
     message: &AgentMessage,
     theme: &Theme,
     width: usize,
 ) -> Vec<Line<'static>> {
-    let kind = if message.agent_id.is_some() {
-        "REPLY"
-    } else {
+    let kind = if message.agent_id.is_none() {
         "PROMPT"
+    } else if message.kind.as_deref() == Some("synth") {
+        "SYNTH"
+    } else {
+        "REPLY"
     };
     let owner = message.agent_id.as_deref().unwrap_or("You");
     let at = if message.at.trim().is_empty() {
@@ -674,16 +693,15 @@ fn build_message_lines(
             .fg(theme.border)
             .add_modifier(Modifier::DIM),
     )));
-    out.push(Line::from(Span::styled(
-        " Content",
-        Style::default()
-            .fg(theme.title_focused)
-            .add_modifier(Modifier::BOLD),
-    )));
-
-    out.extend(agent_console_view::message_lines_for_popup(
-        state, message, theme, width,
-    ));
+    let body = message.text.trim();
+    if body.is_empty() {
+        let label_style = Style::default()
+            .fg(theme.border)
+            .add_modifier(Modifier::DIM);
+        out.push(Line::from(Span::styled(" (no content)", label_style)));
+    } else {
+        out.extend(render_markdown_document(body, theme, width));
+    }
     out
 }
 

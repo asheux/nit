@@ -1,7 +1,7 @@
 use super::{
     artifact_message_index_for_line, chat_input_scroll_metrics, chat_input_text_area,
     ecg_indicator, format_message_rows, map_chat_input_point_to_cursor, thread_lines, thread_rows,
-    user_prompt_bg, wrap_input_with_cursor, wrap_visual_line, MessageRenderMode, ThreadRow,
+    user_prompt_bg, wrap_input_with_cursor, wrap_visual_line, ThreadRow,
     ThreadRowKind,
 };
 use crate::swarm::{SwarmRuntime, SwarmSize};
@@ -55,8 +55,10 @@ fn user_message_renders_right_aligned_bubble() {
         mission_id: None,
         text: "line one\nline two".into(),
         prompt_msg_idx: None,
+        kind: None,
+
     };
-    let rows = format_message_rows(&state, None, &msg, 48, MessageRenderMode::Transcript);
+    let rows = format_message_rows(&state, None, &msg, 48);
     assert!(rows.len() >= 5);
     assert!(matches!(rows[0].kind, ThreadRowKind::User));
     // Top padding row + label row.
@@ -97,6 +99,8 @@ fn agent_messages_use_stable_badge_header() {
         mission_id: None,
         text: "working".into(),
         prompt_msg_idx: None,
+        kind: None,
+
     };
     state.agents.messages.push(msg.clone());
     state.metrics.frame_count = 3;
@@ -105,7 +109,6 @@ fn agent_messages_use_stable_badge_header() {
         None,
         state.agents.messages.last().expect("reply"),
         80,
-        MessageRenderMode::Transcript,
     );
     state.metrics.frame_count = 30;
     let second_rows = format_message_rows(
@@ -113,7 +116,6 @@ fn agent_messages_use_stable_badge_header() {
         None,
         state.agents.messages.last().expect("reply"),
         80,
-        MessageRenderMode::Transcript,
     );
     // Combined callout row with badge inline (no separate header).
     assert!(first_rows[0].text.contains("[Coder]"));
@@ -216,6 +218,8 @@ fn breather_rows_show_clone_source_model_name() {
         mission_id: Some("mis-001".into()),
         text: "do the work".into(),
         prompt_msg_idx: None,
+        kind: None,
+
     });
 
     let rows = thread_rows(&state, None, 120, true);
@@ -248,6 +252,8 @@ fn agent_badge_shown_when_single_agent_context_selected() {
         mission_id: None,
         text: "hello".into(),
         prompt_msg_idx: None,
+        kind: None,
+
     };
     state.agents.messages.push(msg.clone());
     let rows = format_message_rows(
@@ -255,7 +261,6 @@ fn agent_badge_shown_when_single_agent_context_selected() {
         None,
         state.agents.messages.last().expect("reply"),
         120,
-        MessageRenderMode::Transcript,
     );
     // Combined callout with badge and status.
     assert!(rows[0].text.contains("[Coder]"));
@@ -287,6 +292,8 @@ fn artifact_message_index_for_line_maps_transcript_artifact_row() {
         mission_id: None,
         text: "hello".into(),
         prompt_msg_idx: None,
+        kind: None,
+
     });
 
     // ArtifactLink is now the first row (combined callout).
@@ -362,7 +369,6 @@ fn swarm_planning_message_stays_plain_done_when_no_artifact_exists() {
         Some(&swarm),
         planner_message,
         120,
-        MessageRenderMode::Transcript,
     );
 
     // Planner messages now also show the artifact link.
@@ -462,7 +468,6 @@ fn swarm_report_message_renders_artifact_link() {
         Some(&swarm),
         state.agents.messages.last().expect("report message"),
         120,
-        MessageRenderMode::Transcript,
     );
 
     // Combined callout: "↳ [Planner] done (see ARTIFACTS)"
@@ -493,8 +498,10 @@ fn agent_header_includes_truncated_role_badge() {
         mission_id: None,
         text: "ok".into(),
         prompt_msg_idx: None,
+        kind: None,
+
     };
-    let row = format_message_rows(&state, None, &msg, 120, MessageRenderMode::Transcript)
+    let row = format_message_rows(&state, None, &msg, 120)
         .into_iter()
         .find(|row| !row.text.trim().is_empty())
         .expect("row");
@@ -657,6 +664,7 @@ fn thread_rows_keep_chronological_order() {
         mission_id: None,
         text: "older message".into(),
         prompt_msg_idx: None,
+        kind: None,
     });
     state.agents.messages.push(AgentMessage {
         at: "10:00:01".into(),
@@ -665,6 +673,8 @@ fn thread_rows_keep_chronological_order() {
         mission_id: None,
         text: "newest message".into(),
         prompt_msg_idx: None,
+        kind: None,
+
     });
 
     let rows = thread_rows(&state, None, 100, true);
@@ -714,6 +724,8 @@ fn breather_row_renders_below_user_prompt_when_agent_running() {
         mission_id: None,
         text: "please plan".into(),
         prompt_msg_idx: None,
+        kind: None,
+
     });
 
     let rows = thread_rows(&state, None, 100, true);
@@ -752,6 +764,7 @@ fn breather_row_hidden_when_latest_message_is_agent() {
         mission_id: None,
         text: "please plan".into(),
         prompt_msg_idx: None,
+        kind: None,
     });
     state.agents.messages.push(AgentMessage {
         at: "10:00:02".into(),
@@ -760,6 +773,8 @@ fn breather_row_hidden_when_latest_message_is_agent() {
         mission_id: None,
         text: "on it".into(),
         prompt_msg_idx: None,
+        kind: None,
+
     });
 
     let rows = thread_rows(&state, None, 100, true);
@@ -825,6 +840,8 @@ fn breather_rows_include_multiple_running_agents() {
         mission_id: None,
         text: "do the work".into(),
         prompt_msg_idx: None,
+        kind: None,
+
     });
 
     let rows = thread_rows(&state, None, 120, true);
@@ -878,6 +895,8 @@ fn breather_rows_hide_stage_column_and_show_stage_subrow() {
         mission_id: None,
         text: "do the work".into(),
         prompt_msg_idx: None,
+        kind: None,
+
     });
 
     let rows = thread_rows(&state, None, 120, true);
@@ -921,6 +940,8 @@ fn breather_rows_show_when_prompt_queued_but_not_yet_started() {
         mission_id: None,
         text: "finished previous turn".into(),
         prompt_msg_idx: None,
+        kind: None,
+
     });
 
     let rows = thread_rows(&state, None, 120, true);
@@ -1009,6 +1030,8 @@ fn breather_rows_suppress_turn_metrics_when_queued_in_narrow_layout() {
         mission_id: None,
         text: "finished previous turn".into(),
         prompt_msg_idx: None,
+        kind: None,
+
     });
 
     let rows = thread_rows(&state, None, 23, true);
@@ -1082,6 +1105,7 @@ fn breather_rows_include_swarm_assigned_agents_even_when_idle() {
         mission_id: Some("mis-001".into()),
         text: "do the work".into(),
         prompt_msg_idx: None,
+        kind: None,
     });
     state.agents.messages.push(AgentMessage {
         at: "10:00:03".into(),
@@ -1090,6 +1114,8 @@ fn breather_rows_include_swarm_assigned_agents_even_when_idle() {
         mission_id: Some("mis-001".into()),
         text: "Swarm template: lab | integrator: planner | verifier: coder | gates: rust-ci".into(),
         prompt_msg_idx: None,
+        kind: None,
+
     });
 
     let rows = thread_rows(&state, None, 120, true);
@@ -1157,6 +1183,7 @@ fn breather_rows_show_done_when_swarm_idle_and_all_assigned_reported() {
         mission_id: Some("mis-001".into()),
         text: "planner output".into(),
         prompt_msg_idx: None,
+        kind: None,
     });
     state.agents.messages.push(AgentMessage {
         at: "10:00:02".into(),
@@ -1165,6 +1192,7 @@ fn breather_rows_show_done_when_swarm_idle_and_all_assigned_reported() {
         mission_id: Some("mis-001".into()),
         text: "coder output".into(),
         prompt_msg_idx: None,
+        kind: None,
     });
     state.agents.messages.push(AgentMessage {
         at: "10:00:03".into(),
@@ -1173,6 +1201,8 @@ fn breather_rows_show_done_when_swarm_idle_and_all_assigned_reported() {
         mission_id: Some("mis-001".into()),
         text: "Swarm template: lab | integrator: planner | verifier: coder | gates: rust-ci".into(),
         prompt_msg_idx: None,
+        kind: None,
+
     });
 
     let rows = thread_rows(&state, None, 120, true);

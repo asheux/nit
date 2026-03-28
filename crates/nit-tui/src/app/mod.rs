@@ -4011,6 +4011,7 @@ fn spawn_mock_mission(state: &mut AppState) {
         mission_id: Some(mission_id.clone()),
         text: message_text.clone(),
         prompt_msg_idx: None,
+        kind: None,
     });
     let delta = estimate_codex_context_tokens(&message_text);
     let entry = state

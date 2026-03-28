@@ -240,6 +240,7 @@ fn artifacts_tab_shows_non_swarm_mission_provenance() {
             mission_id: Some("mis-201".into()),
             text: "Review the repo carefully.".into(),
             prompt_msg_idx: None,
+            kind: None,
         },
         AgentMessage {
             at: "10:01".into(),
@@ -248,6 +249,7 @@ fn artifacts_tab_shows_non_swarm_mission_provenance() {
             mission_id: Some("mis-201".into()),
             text: "Bulk orchestration looks mostly correct; docs need follow-up.".into(),
             prompt_msg_idx: None,
+            kind: None,
         },
     ];
     state.agents.patches = vec![PatchProposal {
@@ -295,6 +297,7 @@ fn artifacts_tab_shows_ad_hoc_selected_agent_output_without_mission() {
             mission_id: None,
             text: "Review the repo and report only.".into(),
             prompt_msg_idx: None,
+            kind: None,
         },
         AgentMessage {
             at: "11:01".into(),
@@ -303,6 +306,7 @@ fn artifacts_tab_shows_ad_hoc_selected_agent_output_without_mission() {
             mission_id: None,
             text: "I checked the repo health; no flickering issue was reproduced.".into(),
             prompt_msg_idx: None,
+            kind: None,
         },
     ];
     state
@@ -1084,6 +1088,7 @@ fn artifacts_view_uses_selected_archived_run_over_live_context() {
         mission_id: Some("mis-601".into()),
         text: "live reply".into(),
         prompt_msg_idx: None,
+            kind: None,
     });
 
     let run_dir = workspace.join(".nit/agents/runs/mis-601/history/00000000000000000003");

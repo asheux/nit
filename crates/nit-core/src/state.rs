@@ -572,6 +572,9 @@ pub struct AgentMessage {
     /// `None` for user prompts themselves, or for replies where the prompt is unknown.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt_msg_idx: Option<usize>,
+    /// Optional kind tag for special message types (e.g. "synth" for synthesis reports).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]

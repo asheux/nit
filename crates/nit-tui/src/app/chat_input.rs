@@ -917,6 +917,7 @@ pub(super) fn push_chat_message(state: &mut AppState) -> Option<(AgentChannel, S
             .map(ToString::to_string),
         text: text.clone(),
         prompt_msg_idx: None,
+        kind: None,
     };
     if let Some(mission_id) = message.mission_id.as_deref() {
         mark_mission_provenance_dirty(state, mission_id);

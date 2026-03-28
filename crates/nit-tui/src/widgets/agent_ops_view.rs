@@ -2453,8 +2453,13 @@ fn extract_run_entries(
     let time_label = format_saved_run_relative_label_from_micros(archive_micros, now_micros);
 
     for (idx, msg) in run.messages.iter().enumerate() {
+        if msg.agent_id.as_deref() == Some("swarm") {
+            continue;
+        }
         let kind: &'static str = if msg.agent_id.is_none() {
             "PROMPT"
+        } else if msg.kind.as_deref() == Some("synth") {
+            "SYNTH"
         } else {
             "REPLY"
         };

@@ -30,12 +30,6 @@ pub struct ChatInputScrollMetrics {
     pub total_lines: usize,
 }
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-enum MessageRenderMode {
-    Transcript,
-    Full,
-}
-
 const TAB_STOP: usize = 4;
 const CHAT_INPUT_MAX_INNER_LINES: usize = 12;
 const CHAT_INPUT_MAX_INNER_LINES_COMPACT: usize = 8;
@@ -685,7 +679,7 @@ pub fn artifact_message_index_for_line_with_swarm(
 
     let mut row_cursor = 0usize;
     for &(msg_idx, msg) in &ordered {
-        let rows = format_message_rows(state, swarm, msg, width, MessageRenderMode::Transcript);
+        let rows = format_message_rows(state, swarm, msg, width);
         if let Some(artifact_offset) = rows
             .iter()
             .position(|row| matches!(row.kind, ThreadRowKind::ArtifactLink))
@@ -747,13 +741,7 @@ fn refresh_thread_rows_cache(
     let mut last_message_was_user = false;
     for &(msg_idx, msg) in &ordered {
         last_message_was_user = msg.agent_id.is_none();
-        rows.extend(format_message_rows(
-            state,
-            swarm,
-            msg,
-            width,
-            MessageRenderMode::Transcript,
-        ));
+        rows.extend(format_message_rows(state, swarm, msg, width));
         // Record the row position where an inline breather can be inserted.
         if msg.agent_id.is_none() {
             breather_slots.push((rows.len(), msg_idx));
@@ -1083,21 +1071,6 @@ fn thread_lines<'a>(
             ThreadRowKind::StatusSubRow => status_sub_row_line(&row.text, theme),
         })
         .collect()
-}
-
-pub(crate) fn message_lines_for_popup(
-    state: &AppState,
-    msg: &AgentMessage,
-    theme: &Theme,
-    width: usize,
-) -> Vec<Line<'static>> {
-    let width = width.max(1);
-    let mut rows = format_message_rows(state, None, msg, width, MessageRenderMode::Full);
-    // `format_message_rows` may add spacing rows meant for the full transcript.
-    while rows.last().is_some_and(|row| row.text.trim().is_empty()) {
-        rows.pop();
-    }
-    thread_lines(rows.iter(), theme)
 }
 
 fn breather_line(text: &str, theme: &Theme) -> Line<'static> {
@@ -1712,13 +1685,7 @@ fn thread_rows(
     let mut rows = Vec::new();
 
     for &(msg_idx, msg) in &ordered {
-        rows.extend(format_message_rows(
-            state,
-            swarm,
-            msg,
-            width,
-            MessageRenderMode::Transcript,
-        ));
+        rows.extend(format_message_rows(state, swarm, msg, width));
 
         // After a user prompt, show inline breather for pending agents.
         if msg.agent_id.is_none() {
@@ -1838,7 +1805,6 @@ fn format_message_rows(
     swarm: Option<&SwarmRuntime>,
     msg: &AgentMessage,
     width: usize,
-    mode: MessageRenderMode,
 ) -> Vec<ThreadRow> {
     let width = width.max(1);
     let text_lines: Vec<&str> = if msg.text.is_empty() {
@@ -1866,7 +1832,6 @@ fn format_message_rows(
     // already cover each clone's completion.
     if msg.agent_id.as_deref() == Some("swarm")
         && matches!(msg.channel, nit_core::AgentChannel::Broadcast)
-        && matches!(mode, MessageRenderMode::Transcript)
     {
         return Vec::new();
     }
@@ -1878,173 +1843,41 @@ fn format_message_rows(
         header.push_str(" @all");
     }
 
-    let indent = match mode {
-        MessageRenderMode::Transcript => 0,
-        MessageRenderMode::Full => 2usize.min(width.saturating_sub(1)),
-    };
-    // Keep at least one trailing column free so transcript text doesn't hug the right edge.
-    let max_inner = width.saturating_sub(indent + 1).max(1);
-    let indent_str = " ".repeat(indent);
+    let indent_str = "";
 
     let mut out = Vec::new();
-    match mode {
-        MessageRenderMode::Transcript => {
-            let artifact_target = state
-                .agents
-                .messages
-                .iter()
-                .enumerate()
-                .find_map(|(idx, candidate)| std::ptr::eq(candidate, msg).then_some(idx))
-                .and_then(|message_idx| {
-                    agent_ops_view::artifacts_popup_ref_for_message(
-                        state,
-                        swarm,
-                        width,
-                        message_idx,
-                    )
-                });
-            if artifact_target.is_some() {
-                let callout = format!("{indent_str}\u{21b3} {header} done (see ARTIFACTS)");
-                out.push(ThreadRow {
-                    text: pad_line_right(&callout, width),
-                    kind: ThreadRowKind::ArtifactLink,
-                });
-            } else {
-                let callout = format!("{indent_str}\u{21b3} {header} done");
-                out.push(ThreadRow {
-                    text: callout,
-                    kind: ThreadRowKind::Agent,
-                });
-            }
-            // Spacer after agent reply to separate chat turns.
-            out.push(ThreadRow {
-                text: String::new(),
-                kind: ThreadRowKind::Agent,
-            });
-        }
-        MessageRenderMode::Full => {
-            for seg in wrap_visual_line(&header, max_inner) {
-                let seg = seg.trim_end_matches(' ');
-                out.push(ThreadRow {
-                    text: if seg.is_empty() {
-                        String::new()
-                    } else {
-                        format!("{indent_str}{seg}")
-                    },
-                    kind: ThreadRowKind::Agent,
-                });
-            }
-            // Detect markdown table blocks and render them as card-style
-            // rows so that long cell content wraps instead of being truncated.
-            let mut line_idx = 0;
-            while line_idx < text_lines.len() {
-                let line = text_lines[line_idx];
-                let trimmed = line.trim_start();
-
-                // Detect a table block: header row, separator, data rows.
-                if trimmed.starts_with('|')
-                    && trimmed.matches('|').count() >= 3
-                    && line_idx + 1 < text_lines.len()
-                {
-                    let sep = text_lines[line_idx + 1].trim();
-                    let is_table_sep = sep.starts_with('|') && sep.contains("---");
-                    if is_table_sep {
-                        // Parse header columns.
-                        let headers: Vec<&str> = trimmed
-                            .trim_matches('|')
-                            .split('|')
-                            .map(str::trim)
-                            .collect();
-
-                        // Skip header + separator.
-                        line_idx += 2;
-
-                        // Emit a thin rule before the table.
-                        let rule = "─".repeat(max_inner.min(120));
-                        out.push(ThreadRow {
-                            text: format!("{indent_str}{rule}"),
-                            kind: ThreadRowKind::Agent,
-                        });
-
-                        // Process data rows.
-                        let mut row_num = 0usize;
-                        while line_idx < text_lines.len() {
-                            let row_line = text_lines[line_idx].trim();
-                            if !row_line.starts_with('|') {
-                                break;
-                            }
-                            let cells: Vec<&str> = row_line
-                                .trim_matches('|')
-                                .split('|')
-                                .map(str::trim)
-                                .collect();
-
-                            // Blank line between table rows for readability.
-                            if row_num > 0 {
-                                out.push(ThreadRow {
-                                    text: String::new(),
-                                    kind: ThreadRowKind::Agent,
-                                });
-                            }
-
-                            // Render each cell as "  Header: value", wrapping
-                            // the value if it's long.
-                            for (col_idx, cell) in cells.iter().enumerate() {
-                                if cell.is_empty() {
-                                    continue;
-                                }
-                                let label = headers.get(col_idx).copied().unwrap_or("#");
-                                let prefix = format!("{indent_str}  {label}: ");
-                                let value_width = max_inner.saturating_sub(prefix.len()).max(10);
-                                let segments = wrap_visual_line(cell, value_width);
-                                for (seg_idx, seg) in segments.iter().enumerate() {
-                                    let seg = seg.trim_end();
-                                    if seg_idx == 0 {
-                                        out.push(ThreadRow {
-                                            text: format!("{prefix}{seg}"),
-                                            kind: ThreadRowKind::Agent,
-                                        });
-                                    } else {
-                                        // Continuation lines aligned under
-                                        // the value.
-                                        let pad = " ".repeat(prefix.len());
-                                        out.push(ThreadRow {
-                                            text: format!("{pad}{seg}"),
-                                            kind: ThreadRowKind::Agent,
-                                        });
-                                    }
-                                }
-                            }
-                            row_num += 1;
-                            line_idx += 1;
-                        }
-
-                        // Rule after the table.
-                        let rule = "─".repeat(max_inner.min(120));
-                        out.push(ThreadRow {
-                            text: format!("{indent_str}{rule}"),
-                            kind: ThreadRowKind::Agent,
-                        });
-                        continue;
-                    }
-                }
-
-                // Normal (non-table) line: wrap as before.
-                for segment in wrap_visual_line(line, max_inner) {
-                    let segment = segment.trim_end_matches(' ');
-                    out.push(ThreadRow {
-                        text: if segment.is_empty() {
-                            String::new()
-                        } else {
-                            format!("{indent_str}{segment}")
-                        },
-                        kind: ThreadRowKind::Agent,
-                    });
-                }
-                line_idx += 1;
-            }
-        }
+    let artifact_target = state
+        .agents
+        .messages
+        .iter()
+        .enumerate()
+        .find_map(|(idx, candidate)| std::ptr::eq(candidate, msg).then_some(idx))
+        .and_then(|message_idx| {
+            agent_ops_view::artifacts_popup_ref_for_message(
+                state,
+                swarm,
+                width,
+                message_idx,
+            )
+        });
+    if artifact_target.is_some() {
+        let callout = format!("{indent_str}\u{21b3} {header} done (see ARTIFACTS)");
+        out.push(ThreadRow {
+            text: pad_line_right(&callout, width),
+            kind: ThreadRowKind::ArtifactLink,
+        });
+    } else {
+        let callout = format!("{indent_str}\u{21b3} {header} done");
+        out.push(ThreadRow {
+            text: callout,
+            kind: ThreadRowKind::Agent,
+        });
     }
+    // Spacer after agent reply to separate chat turns.
+    out.push(ThreadRow {
+        text: String::new(),
+        kind: ThreadRowKind::Agent,
+    });
     out
 }
 

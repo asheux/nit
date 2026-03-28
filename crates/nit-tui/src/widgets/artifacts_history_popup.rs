@@ -57,6 +57,7 @@ pub fn entry_index_for_line(state: &AppState, line_idx: usize) -> Option<usize> 
 fn kind_color(kind: &str, theme: &Theme) -> Color {
     match kind {
         "REPLY" => theme.success,
+        "SYNTH" => theme.accent,
         "PATCH" => theme.warning,
         "EVIDENCE" => theme.title_focused,
         _ => theme.border, // PROMPT
@@ -156,6 +157,7 @@ pub fn build_lines(state: &AppState, theme: &Theme, inner_width: u16) -> Vec<Lin
         let kind_label = match entry.kind {
             "PROMPT" => "PROMPT  ",
             "REPLY" => "REPLY   ",
+            "SYNTH" => "SYNTH   ",
             "PATCH" => "PATCH   ",
             "EVIDENCE" => "EVIDENCE",
             other => other,

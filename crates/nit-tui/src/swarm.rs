@@ -2146,6 +2146,8 @@ impl SwarmRuntime {
                     SwarmStage::Synthesizing if agent_id == &run.planner_agent_id => {
                         run.report_status = Some("DONE".into());
                         run.report_output = Some(message.clone());
+                        // Tag the message as a synthesis report.
+                        tag_last_agent_message_kind(state, agent_id, &run.mission_id, "synth");
                         outcome.artifact_focus = Some(SwarmArtifactFocus::Report {
                             mission_id: run.mission_id.clone(),
                         });
@@ -2510,6 +2512,7 @@ impl SwarmRuntime {
                     SwarmStage::Synthesizing if agent_id == &run.planner_agent_id => {
                         run.report_status = Some("ERROR".into());
                         run.report_output = Some(message.clone());
+                        tag_last_agent_message_kind(state, agent_id, &run.mission_id, "synth");
                         outcome.artifact_focus = Some(SwarmArtifactFocus::Report {
                             mission_id: run.mission_id.clone(),
                         });
@@ -6246,7 +6249,29 @@ pub fn push_system_message_to_mission(state: &mut AppState, mission_id: &str, te
         mission_id: Some(mission_id.to_string()),
         text,
         prompt_msg_idx: None,
+        kind: None,
     });
+}
+
+/// Tag the most recent message from `agent_id` for `mission_id` with the given kind.
+fn tag_last_agent_message_kind(
+    state: &mut AppState,
+    agent_id: &str,
+    mission_id: &str,
+    kind: &str,
+) {
+    if let Some(msg) = state
+        .agents
+        .messages
+        .iter_mut()
+        .rev()
+        .find(|msg| {
+            msg.agent_id.as_deref() == Some(agent_id)
+                && msg.mission_id.as_deref() == Some(mission_id)
+        })
+    {
+        msg.kind = Some(kind.to_string());
+    }
 }
 
 #[cfg(test)]

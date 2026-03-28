@@ -375,6 +375,7 @@ impl AgentBusEvent {
                     mission_id: mission_id.clone(),
                     text: message.clone(),
                     prompt_msg_idx: parent_prompt_idx,
+                    kind: None,
                 });
                 state.agents.console_scroll = CONSOLE_SCROLL_BOTTOM;
 
