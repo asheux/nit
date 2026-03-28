@@ -1,0 +1,117 @@
+use super::*;
+
+#[test]
+fn test_claude_model_slug_for_agent_id() {
+    assert_eq!(
+        claude_model_slug_for_agent_id("claude-opus-4-6"),
+        "claude-opus-4-6"
+    );
+    assert_eq!(
+        claude_model_slug_for_agent_id("claude-opus-4-6#swarm-mis-001-clone-01"),
+        "claude-opus-4-6"
+    );
+    assert_eq!(
+        claude_model_slug_for_agent_id("claude-sonnet-4-6#chat-clone-02"),
+        "claude-sonnet-4-6"
+    );
+}
+
+#[test]
+fn test_extract_session_id() {
+    let jsonl =
+        br#"{"type":"system","subtype":"init","session_id":"abc-123-def","tools":[],"model":"opus"}
+{"type":"assistant","message":"Hello"}
+"#;
+    assert_eq!(
+        extract_session_id_from_jsonl(jsonl),
+        Some("abc-123-def".to_string())
+    );
+}
+
+#[test]
+fn test_extract_result_text() {
+    let jsonl = br#"{"type":"system","subtype":"init","session_id":"abc"}
+{"type":"assistant","message":"working on it..."}
+{"type":"result","result":"Here is the answer","usage":{"input_tokens":100,"output_tokens":50}}
+"#;
+    assert_eq!(
+        extract_result_text_from_jsonl(jsonl),
+        Some("Here is the answer".to_string())
+    );
+}
+
+#[test]
+fn test_token_count_from_result_event() {
+    let value: serde_json::Value = serde_json::json!({
+        "type": "result",
+        "result": "done",
+        "usage": {
+            "input_tokens": 100,
+            "output_tokens": 50,
+            "cache_creation_input_tokens": 9000,
+            "cache_read_input_tokens": 6000
+        },
+        "modelUsage": {
+            "claude-opus-4-6": {"contextWindow": 200000, "inputTokens": 100, "outputTokens": 50}
+        }
+    });
+    let count = claude_token_count_from_value(&value).unwrap();
+    assert_eq!(count.total_tokens, 100 + 50 + 9000 + 6000);
+    assert_eq!(count.context_window, 200000);
+}
+
+#[test]
+fn test_token_count_from_assistant_event() {
+    // Assistant events have usage nested under "message"
+    let value: serde_json::Value = serde_json::json!({
+        "type": "assistant",
+        "message": {
+            "usage": {"input_tokens": 500, "output_tokens": 200}
+        }
+    });
+    let count = claude_token_count_from_value(&value).unwrap();
+    assert_eq!(count.total_tokens, 700);
+    assert_eq!(count.context_window, 0);
+}
+
+#[test]
+fn test_build_claude_args_basic() {
+    let config = ClaudeRunnerConfig::default();
+    let args = build_claude_args(
+        "claude-opus-4-6",
+        Path::new("/tmp/project"),
+        true,
+        Some("high"),
+        Path::new("/tmp/out.txt"),
+        None,
+        &config,
+    );
+    assert!(args.contains(&"-p".to_string()));
+    assert!(args.contains(&"stream-json".to_string()));
+    assert!(args.contains(&"claude-opus-4-6".to_string()));
+    assert!(args.contains(&"high".to_string()));
+    assert!(!args.contains(&"--no-session-persistence".to_string()));
+}
+
+#[test]
+fn test_build_claude_args_resume() {
+    let config = ClaudeRunnerConfig::default();
+    let args = build_claude_args(
+        "claude-sonnet-4-6",
+        Path::new("/tmp/project"),
+        false,
+        None,
+        Path::new("/tmp/out.txt"),
+        Some("session-abc-123"),
+        &config,
+    );
+    assert!(args.contains(&"--resume".to_string()));
+    assert!(args.contains(&"session-abc-123".to_string()));
+    assert!(args.contains(&"--no-session-persistence".to_string()));
+}
+
+#[test]
+fn test_shorten_id() {
+    assert_eq!(shorten_id("abcdefghij"), "abcdefgh…");
+    assert_eq!(shorten_id("short"), "short");
+}
