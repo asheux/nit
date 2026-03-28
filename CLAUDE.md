@@ -27,12 +27,15 @@ MSRV: Rust 1.88.0 (pinned in `rust-toolchain.toml`).
 
 ## Key source files
 
-- `crates/nit-tui/src/app.rs` — main event loop, input handling, agent dispatch
+- `crates/nit-tui/src/app/mod.rs` — main event loop, input handling, keybinding dispatch
+- `crates/nit-tui/src/app/dispatch.rs` — agent prompt dispatch (Codex and Claude routing, queue management)
+- `crates/nit-tui/src/app/chat_input.rs` — chat input command parsing (`@all`, `@swarm`, `@new`, `@queue`)
 - `crates/nit-core/src/agent_bus.rs` — `AgentBusEvent` enum and state application
-- `crates/nit-core/src/state.rs` — `AppState`, `AgentState`, queue types
-- `crates/nit-tui/src/swarm.rs` — swarm orchestrator (DAG planning/execution)
-- `crates/nit-tui/src/claude_runner.rs` — Claude CLI subprocess integration
-- `crates/nit-tui/src/widgets/` — all TUI widgets (agent_console_view, agent_ops_view, artifacts_popup, etc.)
+- `crates/nit-core/src/state.rs` — `AppState`, `AgentsState`, `AgentLane`, `MissionRecord`, queue types
+- `crates/nit-tui/src/swarm.rs` — swarm orchestrator (DAG planning/execution, gate bundles)
+- `crates/nit-tui/src/codex_runner.rs` — Codex CLI integration (MCP server + exec runtime)
+- `crates/nit-tui/src/claude_runner.rs` — Claude CLI subprocess integration (`claude -p`)
+- `crates/nit-tui/src/widgets/` — all TUI widgets (agent_console_view, agent_ops_view, artifacts_popup, gate_monitor_view, etc.)
 
 ## Conventions
 
@@ -55,11 +58,11 @@ MSRV: Rust 1.88.0 (pinned in `rust-toolchain.toml`).
 | `NIT_GOL_STACK_MB` | `256` | Stack size (MB) for Game of Life worker threads |
 | `NIT_GOL_IO_STACK_MB` | `256` | Stack size (MB) for snapshot-stress I/O threads (falls back to `NIT_GOL_STACK_MB`) |
 | `NIT_MCP_TURN_TIMEOUT_SECS` | none | Hard timeout for an MCP turn (0 or unset = no limit) |
-| `NIT_MCP_TURN_IDLE_TIMEOUT_SECS` | `600` | Idle timeout for an MCP turn (0 = disable) |
+| `NIT_MCP_TURN_IDLE_TIMEOUT_SECS` | disabled | Idle timeout for an MCP turn (set to enable, e.g. `600`; 0 or unset = disabled) |
 
 ## Agent commands (in Agent Chat)
 
-- `@all <prompt>` — fan-out to multiple agents
-- `@swarm [all|N] [template=lab|parallel|bulk] <prompt>` — orchestrated multi-agent workflow
+- `@all <prompt>` — fan-out to multiple agents (Codex and Claude)
+- `@swarm [all|N] [template=lab|parallel|bulk] [mission=general|research|computational-research] <prompt>` — orchestrated multi-agent workflow
 - `@new <prompt>` — spawn fresh-context clone when agent is busy
-- `@queue` / `@q` — legacy alias for queued prompt
+- `@queue` / `@q` — legacy alias for queued prompt (now same as default queueing)

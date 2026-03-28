@@ -2,13 +2,15 @@
 
 ## Overview
 
-nit is a terminal-first editor composed of six crates:
+nit is a terminal-first editor composed of eight crates:
 
-- `nit-core`: state, actions, text buffers, and IO (no terminal dependencies).
-- `nit-games`: games-between-programs engine and tournament logic.
+- `nit-core`: state, actions, text buffers, config, agent bus, and IO (no terminal dependencies).
+- `nit-games`: game theory tournament engine and strategy implementations (FSM, CA, one-sided TM).
 - `nit-gol`: Conway’s Game of Life engine, rule evaluation, and snapshot encoding.
+- `nit-metal`: Metal GPU acceleration for macOS (optional compute offload for games engine).
 - `nit-syntax`: syntax highlighting engine and language registry (tree-sitter + fallback).
-- `nit-tui`: rendering, layout, event loop, and key mapping using ratatui + crossterm.
+- `nit-tui`: rendering, layout, event loop, key mapping, agent runners (Codex + Claude), swarm orchestration, using ratatui + crossterm.
+- `nit-utils`: shared filesystem, hashing, and path utilities.
 - `nit`: binary entrypoint wiring CLI args, tracing, and running the TUI.
 
 ## Data Flow
@@ -26,8 +28,8 @@ The app redraws only when state changes or the terminal resizes.
 
 - Workspace root (PathBuf)
 - Buffers (main editor + scratchpad) stored in rope-backed `Buffer`
-- Mode (Insert/Normal)
-- Focused pane
+- Mode (Insert/Normal/Visual)
+- Focused pane (Editor, Notes, JobOutput, Visualizer, GateMonitor, AgentOps, AgentConsole, FileTree, SearchPopup)
 - Logs ring buffer and job progress/paused flag
 - Visualizer state (seed, rule, mode, pause, wrap, generation, period, leaderboard)
 - App kind (GoL or Games) plus app-specific runtime state
@@ -52,18 +54,29 @@ rendering and text‑measurement consistent, and avoids lossy conversions.
 - Main grid: left (Agent Chat + Agent Ops), center (Editor), right (Visualizer + Gate Monitor).
 - Bottom bar with key hints; overlay for help and prompts.
 
-## Agent Station (Codex)
+## Agent Station (Codex + Claude)
 
-nit includes an Agent Station UI (Agent Ops + Agent Chat) that can be backed by either a mock
-planner/coder/reviewer demo or the local `codex` CLI.
+nit includes an Agent Station UI (Agent Ops + Agent Chat) with support for multiple backends:
+Codex (MCP or exec runtime), Claude (subprocess per turn), and a local mock lane.
+
+### Agent Ops tabs
+
+Agent Ops provides nine tabs: **Roster**, **Missions**, **DAG**, **MCP**, **Alerts**, **Patch**, **Evidence**, **Diagnostics**, **Scratchpad**.
 
 ### Roster seeding
 
 - `nit --agents codex` loads model metadata from `~/.codex/models_cache.json` (used to populate the
   roster and reasoning-effort picker).
-- `nit --agents claude` seeds a Claude lane when `claude` is available on `PATH`.
+- `nit --agents claude` seeds Claude lanes when `claude` is available on `PATH`. At startup, nit
+  probes `claude models --json` (with fallbacks) to discover available models.
 - `nit --agents local` (alias `mock`) seeds a built-in local lane.
-- `nit --agents all` (or default `nit`) includes all available lanes.
+- `nit --agents all` (or default `nit`) includes all available lanes (Codex, Claude, and Gemini
+  models are probed at startup via their respective CLIs).
+
+### Agent lane kinds
+
+`AgentLaneKind` in `nit-core` distinguishes backends: `Unknown`, `Mock`, `Codex`, `Claude`, `Gemini`.
+Each `AgentLane` has an `id`, `kind`, `role`, `status`, `queue_len`, and optional `current_mission`.
 
 ### Runtime modes (Exec vs MCP)
 
@@ -89,17 +102,38 @@ The Codex backend is implemented in `nit-tui` as a background `CodexRunner` thre
     multiplexing JSON-RPC request ids (and routing `codex/event` updates via `_meta.requestId`).
     Controlled by `--codex-max-parallel-turns` (default `2`).
 
+### Claude runtime
+
+The Claude backend is implemented in `nit-tui` as a background `ClaudeRunner` thread that emits
+`AgentBusEvent` updates into the main TUI loop.
+
+- Spawns `claude -p --verbose --output-format stream-json` per turn.
+- Additional flags: `--model <slug>`, `--effort <level>`, `--add-dir <cwd>`, `--max-turns 50`.
+- Session resumption: `--resume <session_id>` reuses a prior session.
+- Default allowed tools: `Read,Edit,Write,Bash,Glob,Grep,WebSearch,WebFetch`.
+- Optional `--permission-mode` pass-through.
+- Parses NDJSON stream on stdout for stage updates, token counts, and results.
+- Session ids are tracked per agent (ad-hoc) and per mission+agent (swarm), mirroring the Codex
+  thread-id pattern via `claude_session_ids` / `claude_mission_session_ids`.
+
+### Gemini (detection only)
+
+nit probes for `gemini` CLI availability at startup and lists discovered models in the roster,
+but there is no `GeminiRunner` — Gemini lanes are currently display-only.
+
 ### Parallel turns (multi-agent workflows)
 
 nit treats each roster entry (`AgentLane.id`) as an **agent**. For Codex lanes, that id is the
-Codex model slug (e.g. `gpt-5.2`, `gpt-5.3-codex`, etc.).
+Codex model slug (e.g. `gpt-5.2`, `gpt-5.3-codex`); for Claude lanes, it is the Claude model
+slug (e.g. `claude-sonnet-4-6`).
 
 Parallelism exists at two layers:
 
-- **UI queueing (per agent)**: `AppState.agents.queued_codex_turns` stores prompts the operator
-  submits while that same agent already has an active turn.
-- **Runner parallelism (across agents)**: `CodexRunner` executes up to
-  `--codex-max-parallel-turns` turns concurrently **across different agent ids**.
+- **UI queueing (per agent)**: `AppState.agents.queued_codex_turns` and
+  `AppState.agents.queued_claude_turns` store prompts the operator submits while that same agent
+  already has an active turn.
+- **Runner parallelism (across agents)**: `CodexRunner` and `ClaudeRunner` each execute up to
+  their configured `max_parallel_turns` (default `2`) concurrently **across different agent ids**.
 
 Key rules:
 
@@ -154,9 +188,9 @@ Cancellation/timeouts in MCP mode:
   heartbeat age, output age). When viewing a Swarm mission, the table also includes assigned
   agents that are pending/queued (for clearer multi-agent visibility).
 - To inspect a specific agent’s transcript, select it in Agent Ops → Roster and press `Enter`.
-- `@all <prompt>` broadcasts to multiple Codex agents:
-  - in mission context: targets the mission’s assigned Codex agents,
-  - otherwise: targets all available Codex lanes.
+- `@all <prompt>` broadcasts to multiple agents (Codex and Claude):
+  - in mission context: targets the mission’s assigned agents,
+  - otherwise: targets all available lanes.
 
 #### Swarm orchestration (`@swarm`)
 
@@ -165,7 +199,7 @@ Operator guide: `docs/SWARM.md`.
 nit supports two “multi-agent” modes:
 
 - `@all <prompt>`: **fan-out** (every targeted agent gets the same prompt).
-- `@swarm [all|N] [template=lab|parallel|bulk] <prompt>`: **orchestrated workflows** (agents get different prompts and/or coordinated roles).
+- `@swarm [all|N] [template=lab|parallel|bulk] [mission=general|research|computational-research] <prompt>`: **orchestrated workflows** (agents get different prompts and/or coordinated roles).
 
 `@swarm` is implemented in `nit-tui` as a small orchestrator state machine (`SwarmRuntime`) that
 creates a mission, asks a planner agent for a machine-readable plan, dispatches distinct tasks to
@@ -174,19 +208,19 @@ final report.
 
 Agent selection rules:
 
-- The currently selected Codex model becomes the **planner/synthesizer**.
+- The currently selected Codex or Claude model becomes the **planner/synthesizer**.
 - Swarm size:
   - `@swarm <prompt>` defaults to 4 agents total (planner + 3), capped at 16.
   - `@swarm N <prompt>` uses `N` agents total (1–16).
   - `@swarm all <prompt>` uses all available Codex agents (still capped at 16).
 - Agent selection:
-  - `lab`: selects additional Codex agents from the roster (priority agents are preferred).
+  - `lab`: selects additional Codex/Claude agents from the roster (priority agents are preferred).
   - `parallel`/`bulk`: if any roster models are marked **priority**, Swarm restricts worker lanes
     to that selected pool; if you request more agents than selected, nit spawns mission-scoped
     clones of the selected models to reach the swarm size.
   - `parallel`/`bulk` fallback: if *no* priority models are selected, nit clones the planner model
-    for worker lanes (so Swarm can still run even with a single Codex model configured).
-- If Swarm ends up with fewer than 2 Codex agents (e.g. `@swarm 1 ...`), it falls back to a normal
+    for worker lanes (so Swarm can still run even with a single model configured).
+- If Swarm ends up with fewer than 2 agents (e.g. `@swarm 1 ...`), it falls back to a normal
   single-agent send.
 
 Templates:
@@ -254,7 +288,7 @@ Plan schema (v2):
 
 Execution rules:
 
-- Tasks are dispatched as Codex turns in the new mission when they become runnable:
+- Tasks are dispatched as agent turns (Codex or Claude) in the new mission when they become runnable:
   - tasks with `deps=[]` start immediately,
   - a task becomes runnable when all its deps have reached a terminal state.
 - If tasks have recognizable roles (from the plan or roster hints), nit may add missing deps based on
@@ -273,14 +307,20 @@ Execution rules:
   - nit then dispatches a final **synthesis** turn to the planner containing the original prompt,
     each agent’s full output, and the verification report.
 
-Gate bundles (v1):
+Gate bundles:
 
 - `rust-ci` (auto-detected when a `Cargo.toml` exists in the workspace root or ancestors):
   - `cargo fmt --all -- --check`
   - `cargo clippy --all-targets --all-features -- -D warnings`
   - `cargo test --workspace --all-features`
-- Gates run inside a Codex turn (nit does not execute arbitrary shell commands itself), so outcomes
-  respect Codex sandbox + approval policy settings.
+- `node-ci`, `python-ci`, `go-ci` — additional gate bundles available via config override.
+- Gate bundle can be overridden in `.nit/config.toml`:
+  ```toml
+  [swarm.gates]
+  default = "auto"  # or "none", "rust-ci", "node-ci", "python-ci", "go-ci"
+  ```
+- Gates run inside an agent turn (nit does not execute arbitrary shell commands itself), so outcomes
+  respect the agent's sandbox + approval policy settings.
 
 Fallback behavior:
 
@@ -311,11 +351,15 @@ The wiring for Codex runtime configuration is intentionally explicit:
 
 ### Thread + mission context
 
-- For ad-hoc chat (no mission), the last known Codex `threadId` is tracked per model so future
-  prompts can resume the session.
-- For missions, thread ids are tracked per mission *and* per model so each agent can continue its
-  own mission thread independently.
-- `AgentBusEvent::TurnCompleted` / `TurnFailed` store the returned `threadId` back into the
+- For ad-hoc chat (no mission), the last known session id is tracked per model so future
+  prompts can resume the session:
+  - Codex: `codex_thread_ids` (maps agent_id → threadId)
+  - Claude: `claude_session_ids` (maps agent_id → session_id)
+- For missions, session ids are tracked per mission *and* per model so each agent can continue its
+  own mission thread independently:
+  - Codex: `codex_mission_thread_ids` (mission_id → agent_id → threadId)
+  - Claude: `claude_mission_session_ids` (mission_id → agent_id → session_id)
+- `AgentBusEvent::TurnCompleted` / `TurnFailed` store the returned session id back into the
   appropriate map.
 
 ## MCP status + notes
@@ -379,7 +423,7 @@ and parallel logging behavior.
 ## Program Strategies (Phase 3E)
 
 - Strategy implementations live in `crates/nit-games/src/strategy.rs`:
-  builtins, random, FSM (Moore), memory‑n, and one‑sided TM.
+  FSM (Moore machine), CA (cellular automaton), and one‑sided TM (Turing machine).
 - Deterministic FSM/memory strategies have fast‑eval models in
   `crates/nit-games/src/fast_eval.rs` (cycle detection on combined state).
 - One‑sided TMs are deterministic but currently run through the simulator
@@ -409,7 +453,7 @@ Atomic save in `io.rs`:
 
 ## Error Handling
 
-- All crates forbid unsafe code.
+- All crates forbid unsafe code (`#![forbid(unsafe_code)]`) except `nit-metal` (Metal GPU interop).
 - Terminal restoration uses guard structs and panic hooks to exit raw/alt screen cleanly.
 
 ## Syntax Highlighting

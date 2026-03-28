@@ -2482,7 +2482,9 @@ fn breather_rows_for_user_prompt(
             });
         }
         if let Some(mission_id) = swarm_mission_id {
-            append_swarm_meta_footer_rows(&mut rows, state, mission_id, &indent_str, width, inner);
+            append_swarm_meta_footer_rows(
+                &mut rows, state, mission_id, &indent_str, width, inner, working,
+            );
         }
         return rows;
     }
@@ -2608,7 +2610,9 @@ fn breather_rows_for_user_prompt(
     }
 
     if let Some(mission_id) = swarm_mission_id {
-        append_swarm_meta_footer_rows(&mut rows, state, mission_id, &indent_str, width, inner);
+        append_swarm_meta_footer_rows(
+            &mut rows, state, mission_id, &indent_str, width, inner, working,
+        );
     }
 
     rows
@@ -2621,6 +2625,7 @@ fn append_swarm_meta_footer_rows(
     indent_str: &str,
     width: usize,
     inner: usize,
+    working: bool,
 ) {
     let Some(meta) = collect_swarm_footer_meta(state, mission_id) else {
         return;
@@ -2628,23 +2633,30 @@ fn append_swarm_meta_footer_rows(
 
     let max_inner = inner.max(1);
     let mut entries: Vec<(&str, String)> = Vec::new();
-    if let Some(value) = meta.template {
-        entries.push(("Template", value));
+    // When agents are actively working, show only the essential fields.
+    if !working {
+        if let Some(value) = meta.template {
+            entries.push(("Template", value));
+        }
     }
     if let Some(value) = meta.mission {
         entries.push(("Mission", value));
     }
-    if let Some(value) = meta.integrator {
-        entries.push(("Integrator", value));
-    }
-    if let Some(value) = meta.verifier {
-        entries.push(("Verifier", value));
+    if !working {
+        if let Some(value) = meta.integrator {
+            entries.push(("Integrator", value));
+        }
+        if let Some(value) = meta.verifier {
+            entries.push(("Verifier", value));
+        }
     }
     if let Some(value) = meta.gates {
         entries.push(("Gates", value));
     }
-    if let Some(value) = meta.status {
-        entries.push(("Status", value));
+    if !working {
+        if let Some(value) = meta.status {
+            entries.push(("Status", value));
+        }
     }
     if !meta.notes.is_empty() {
         entries.push(("Notes", meta.notes.join(" | ")));
@@ -4500,12 +4512,11 @@ mod tests {
         assert!(flattened.iter().any(|line| line.contains("Planner")));
         assert!(flattened.iter().any(|line| line.contains("Coder")));
         assert!(flattened.iter().any(|line| line.contains("Swarm pending")));
-        assert!(rows.iter().any(|row| {
-            matches!(row.kind, ThreadRowKind::StatusSubRow) && row.text.contains("Template: lab")
-        }));
-        assert!(!rows.iter().any(|row| {
-            matches!(row.kind, ThreadRowKind::Agent) && row.text.contains("Template: lab")
-        }));
+        // While agents are working, the footer shows only mission, gates, and notes.
+        assert!(!rows.iter().any(|row| row.text.contains("Template:")));
+        assert!(!rows.iter().any(|row| row.text.contains("Integrator:")));
+        assert!(!rows.iter().any(|row| row.text.contains("Verifier:")));
+        assert!(rows.iter().any(|row| row.text.contains("Gates:")));
     }
 
     #[test]

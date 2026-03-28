@@ -4,12 +4,12 @@ This project uses Life-like (outer-totalistic, Moore-neighborhood, 2-state) rule
 A rulestring like "B3/S23" means a dead cell is born with 3 neighbors, and a live cell survives
 with 2 or 3 neighbors.
 
-There are 2^18 possible Life-like rules, so we keep a small, tagged catalog of curated defaults and
-let users layer their own rules on top.
+There are 2^18 possible Life-like rules, so we keep a small, tagged catalog of 28 curated defaults
+and let users layer their own rules on top.
 
 ## Where the built-ins live
 
-- Built-in catalog: `crates/nit-gol/assets/rules.toml`
+- Built-in catalog: `crates/nit-gol/assets/rules.toml` (28 rules: classics, maze, no-death, texture, and literature rules)
 - User overlay (optional): `~/.config/nit/rules.toml`
   - Can add new rules or override description/tags/aliases of existing rules.
   - Can mark rules as `favorite = true` or `hidden = true`.

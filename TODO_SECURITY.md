@@ -23,11 +23,11 @@ items with longer-term defense-in-depth work.
   - [ ] Display clear UI warning when editing a symlinked path.
 
 - [ ] **External process boundary hardening**
-  - [x] Treat `git` and `codex` as untrusted boundaries; document that `nit` spawns both.
+  - [x] Treat `git`, `codex`, and `claude` as untrusted boundaries; document that `nit` spawns all three (plus `open`/`xdg-open` for links and `gemini` for model probing).
   - [ ] Reduce PATH hijack risk:
-    - resolve and display the full resolved path to `git`/`codex` at startup
+    - resolve and display the full resolved path to `git`/`codex`/`claude` at startup
     - optionally allow pinning absolute paths in config
-  - [ ] Add “safe mode” flag that disables all external processes (`git`, `codex`, etc.).
+  - [ ] Add “safe mode” flag that disables all external processes (`git`, `codex`, `claude`, etc.).
 
 - [ ] **Provenance/logging privacy**
   - [ ] `.nit/` data: add `.nit/` to `.gitignore` by default or store under an OS-specific app dir.
@@ -43,11 +43,12 @@ items with longer-term defense-in-depth work.
 
 ## Medium priority (defense in depth)
 
-- [ ] **Agent/Codex safety UX**
+- [ ] **Agent safety UX (Codex + Claude)**
   - [ ] Safer defaults for Codex integration (sandbox + approval), with explicit prompts to relax.
   - [ ] Show a prominent indicator when running in “danger-full-access” / low-approval modes.
-  - [ ] Add a per-workspace allowlist/denylist for which agent backends can execute.
+  - [ ] Add a per-workspace allowlist/denylist for which agent backends (Codex, Claude, Gemini) can execute.
   - [ ] Add a “network use” indicator based on the selected backend/runtime configuration.
+  - [ ] Surface Claude permission mode prominently in Agent Ops.
 
 - [ ] **Clipboard controls**
   - [ ] Allow disabling clipboard integration entirely.
@@ -75,7 +76,7 @@ items with longer-term defense-in-depth work.
   - [ ] Regression corpus for terminal escape payloads and weird Unicode edge cases.
 
 - [ ] **Security documentation & process**
-  - [x] Update `SECURITY.md` to match reality (spawns `git` as well as `codex`).
+  - [x] Update `SECURITY.md` to match reality (spawns `git`, `codex`, `claude`, and `open`/`xdg-open`).
   - [ ] Maintain a “security checklist” for releases (deny/audit, escape sanitization, safe defaults).
   - [ ] Document recommended settings for working on untrusted repos.
 

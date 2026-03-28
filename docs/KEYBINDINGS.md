@@ -7,8 +7,9 @@
 - Ctrl+P: Fuzzy file search popup
 - Ctrl+F: Content search popup
 - Tab / Shift+Tab: Cycle pane focus
-- Ctrl+1/2/3: Focus Editor / Agent Ops / Agent Chat
+- Ctrl+1/2/3: Focus Editor / Job Output / Notes
 - Ctrl+H/J/K/L: Focus panes (vim/tmux style: left/down/up/right)
+- Ctrl+B: Toggle debug mode
 - F1 / ?: Toggle help overlay
 - Ctrl+Enter: Run Petri Dish simulation popup (active app)
 - Ctrl+^: Show hidden Petri Dish
@@ -72,7 +73,7 @@
 - Esc: Switch to Normal mode
 
 ## Agent Ops
-- Tab / Shift+Tab / Left/Right: Cycle Ops tabs (Roster/Missions/DAG/ARTIFACTS/MCP/Alerts/DIAG/Scratchpad)
+- Tab / Shift+Tab / Left/Right: Cycle Ops tabs (Roster/Missions/DAG/MCP/Alerts/Patch/Evidence/Diagnostics/Scratchpad)
 - j/k or Up/Down: Move selection
 - Enter: Focus Agent Chat with selected context (except ARTIFACTS tab; see below)
 - n: New mission (mock runner in MVP)
@@ -83,7 +84,7 @@
   - h: Exit the roster tree cursor (then collapse on next h)
   - Mouse: Click the model name (left column) to expand; click again to collapse
   - Space/Enter (in the tree): Select the highlighted Size/Role option
-- ARTIFACTS:
+- Patch/Evidence:
   - Enter or mouse click: Open selected artifact detail popup
   - Esc or q: Close artifact popup
   - j/k or Up/Down: Scroll popup content (when open)
@@ -94,8 +95,8 @@
 ## Agent Chat
 - Type message, Enter to send, Esc or Ctrl+C to clear input
   - Note: agent reply bodies are captured in Agent Ops → ARTIFACTS; the thread shows `done (see ARTIFACTS)` placeholders.
-  - `@all <msg>`: broadcast (same prompt) to multiple Codex agents
-  - `@swarm [all|N] [template=lab|parallel|bulk] <msg>`: orchestrated multi-agent workflow
+  - `@all <msg>`: broadcast (same prompt) to multiple agents (Codex and Claude)
+  - `@swarm [all|N] [template=lab|parallel|bulk] [mission=general|research|computational-research] <msg>`: orchestrated multi-agent workflow
   - `@new <msg>`: spawn a fresh-context clone when the agent is busy
   - Prompts sent while an agent is busy are automatically queued and dispatched when it becomes idle
 - Left/Right/Home/End: Move input cursor
@@ -128,6 +129,7 @@
 - Ctrl+R: Reseed from current code
 - H: Hide popup (sim keeps running)
 - F2 / Ctrl+P: Rule picker
+- P: Protocol picker
 - T: Toggle wrap mode
 - O: Cycle auto-stop policy (Off → Fixed → Repeat)
 - G: Toggle rule search
@@ -161,4 +163,13 @@
 - :games export: Re-emit last run summary (if present)
 - :games runs: Open run browser
 - :games replay: Open match replay selector (uses loaded run summary)
+- :games history / :games hist / :games plot: Open match history viewer
+- :games strategy [run|all|config]: Open strategy inspector
 - :games inspect <strategy_id>: Show introspection for a strategy (pretty text)
+- :games inspect <strategy_id> {rule,states,symbols}: Inspect a TM rule tuple override
+- :games inspect {rule,states,symbols}: Inspect a TM rule tuple (no config/run)
+- :games tm [run|config] <input> [steps] [strategy_id]: TM simulator
+- :games tm {rule,states,symbols} <input> [steps]: TM rule simulator
+- :games ca [run|config] <input> [steps] [strategy_id]: CA simulator
+- :games ca {n,k,r} <input> [steps]: CA rule tuple simulator
+- :games analyze [path] [tail=N] [samples=N]: Analyze history log

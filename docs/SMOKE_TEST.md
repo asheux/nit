@@ -70,11 +70,12 @@ It's meant for quick confidence after changes to UI, commands, or engine wiring.
   - `Ctrl+B`
   - Expect: debug information appears (and toggles back off).
 
-## Agent Station (Codex/MCP)
+## Agent Station (Codex/Claude/MCP)
 
 - Preconditions:
-  - `codex` installed and accessible on `$PATH`
-  - `~/.codex/models_cache.json` present (for `--agents codex`)
+  - `codex` installed and accessible on `$PATH` (for `--agents codex`)
+  - `~/.codex/models_cache.json` present (for Codex roster seeding)
+  - `claude` installed and accessible on `$PATH` (for `--agents claude`)
 - Launch with Codex lanes:
   - `cargo run -- --agents codex`
   - Expect: Agent Ops roster populated with Codex models.
@@ -95,7 +96,7 @@ It's meant for quick confidence after changes to UI, commands, or engine wiring.
   - Expect: each agent finishes independently (thread shows `done (see ARTIFACTS)` per agent); full outputs are in Agent Ops → ARTIFACTS.
   - Optional: create a mission (`n` in Agent Ops), then in Agent Chat send `@all <prompt>` to broadcast to the mission’s assigned Codex agents.
 - Verify `@swarm` orchestration (task splitting + synthesis):
-  - In Agent Chat (any Codex model selected): send `@swarm 4 template=lab <prompt>` (or omit `template=...` since `lab` is the default).
+  - In Agent Chat (any Codex or Claude model selected): send `@swarm 4 template=lab <prompt>` (or omit `template=...` since `lab` is the default).
   - Expect: a new mission is created (Missions tab shows `SWM yes`) and the planner runs first (phase `PLAN`).
   - Expect: during planning, Agent Ops → DAG shows `Planning: waiting for planner output`.
   - Expect: after the planner returns a JSON plan, Agent Ops → DAG shows task cards (multi-line, wraps instead of `...`) with accurate `Pending` vs `Queued` vs `Skipped` states.
@@ -132,13 +133,30 @@ It's meant for quick confidence after changes to UI, commands, or engine wiring.
     - Have a task emit a `swarm_artifacts` JSON block (files/diffs/commands/risks/notes).
     - Expect the selected mission to show task artifacts in `Agent Ops → Artifacts`.
     - Expect persistence under `.nit/swarm/<mission>/` (`run.json`, `tasks/<task-id>/artifacts.json`, `tasks/<task-id>/output.md`, optional `gates/report.json`, `gates/output.txt`, `gates/verify.md`).
+  - Mission focus sanity:
+    - Send `@swarm template=lab mission=research <prompt>`.
+    - Expect: mission classified as `research`; research roles allowed in the plan.
+    - Send `@swarm template=lab mission=computational-research <prompt>`.
+    - Expect: mission classified as `computational-research`; both research and computational-research roles allowed.
   - Gate bundle override sanity:
     - Add `.nit/config.toml` with:
       - `[swarm.gates]`
       - `default = "none"` (or `rust-ci`/`node-ci`/`python-ci`/`go-ci`).
     - Expect swarm metadata and VERIFY behavior to follow the override.
+- Verify Claude agent:
+  - Launch with `cargo run -- --agents claude`.
+  - Expect: Agent Ops roster populated with Claude models (probed via `claude models --json`).
+  - Focus Agent Chat, send a short prompt.
+  - Expect: stage updates while running; the thread shows `done (see ARTIFACTS)` when finished.
+  - Expect: session resumption works across multiple prompts (Claude uses `--resume <session_id>`).
+- Verify mixed agents:
+  - Launch with `cargo run -- --agents all` (default).
+  - Expect: roster shows Codex, Claude, and (if detected) Gemini models.
+  - Expect: Gemini models appear in roster but are not actionable (no runtime runner).
+  - Send prompts to both Codex and Claude agents; expect both to work independently.
 - Failure mode sanity:
   - If Codex is offline/misconfigured, expect MCP state ERROR and details in Agent diagnostics/logs.
+  - If Claude CLI is not on PATH, expect Claude lanes to be absent from roster (no crash).
 
 ## Editor + Notes
 

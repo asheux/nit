@@ -42,19 +42,21 @@ just run -- path/to/file
 
 - No plugins.
 - No network calls from `nit` itself.
-- No arbitrary command execution; `nit` may invoke `git`, the local `codex` CLI, and the `claude` CLI directly (no shell).
+- No arbitrary command execution; `nit` may invoke `git`, `codex`, `claude`, and the platform URL launcher (`open`/`xdg-open`) directly (no shell). At startup, `gemini` is probed for model detection.
+- `#![forbid(unsafe_code)]` across all crates except `nit-metal` (Metal GPU interop).
 - Atomic file writes.
 - Terminal restored on exit and panic.
+
 For details see `SECURITY.md`.
 
 ## Agent Station
 
-nit includes an Agent Ops / Agent Chat UI.
+nit includes an Agent Station UI (Agent Ops + Agent Chat) with multiple backends: Codex (MCP or exec), Claude (subprocess per turn), and a local mock lane. Gemini models are detected at startup but have no runtime runner yet.
 
-- Default: seeds all available lanes (`local`, Codex cache models, and `claude` when detected).
+- Default: seeds all available lanes (Codex, Claude, and Gemini models when detected on `PATH`).
 - `nit --agents local` (alias: `mock`) — force local lane only.
 - `nit --agents codex` — force Codex only (loads a model roster from `~/.codex/models_cache.json`).
-- `nit --agents claude` — force Claude lane only.
+- `nit --agents claude` — force Claude only (probes `claude models --json` for available models).
 - `nit --agents all` — include all available lanes.
   - Default runtime: `--codex-runtime mcp` (runs a persistent `codex mcp-server`).
   - Exec runtime: `--codex-runtime exec` (spawns `codex exec` per turn).
@@ -63,8 +65,8 @@ nit includes an Agent Ops / Agent Chat UI.
     - `--codex-sandbox <read-only|workspace-write|danger-full-access>` (default: Codex config)
     - `--codex-approval-policy <untrusted|on-failure|on-request|never>` (default: `never`)
   - In Agent Chat:
-    - `@all <prompt>` broadcasts to multiple Codex agents (fan-out).
-    - `@swarm [all|N] [template=lab|parallel|bulk] <prompt>` runs an orchestrated multi-agent workflow (plan → DAG tasks → verify → synthesis). (`lab` is the default.)
+    - `@all <prompt>` broadcasts to multiple agents — Codex and Claude (fan-out).
+    - `@swarm [all|N] [template=lab|parallel|bulk] [mission=general|research|computational-research] <prompt>` runs an orchestrated multi-agent workflow (plan → DAG tasks → verify → synthesis). (`lab` is the default.)
     - `@new <prompt>` spawns a fresh-context clone when the agent is busy (queued turns continue on the original).
     - Prompt queuing: if an agent is busy, prompts are automatically queued and dispatched when the agent becomes idle.
 
@@ -92,9 +94,13 @@ cargo run -p nit -- --agents codex
 
 ## Documentation
 
-- `docs/ARCHITECTURE.md` — state model, rendering pipeline.
+- `docs/ARCHITECTURE.md` — state model, rendering pipeline, agent system, swarm orchestration.
 - `docs/KEYBINDINGS.md` — full keymap.
 - `docs/SMOKE_TEST.md` — feature tour + quick manual test checklist.
+- `docs/SWARM.md` — swarm orchestration operator guide (templates, roles, DAG, gates).
+- `docs/GAMES.md` — games engine details (strategies, config, headless CLI, analysis).
+- `docs/PERF.md` — benchmarks and flamegraphs.
+- `docs/RULES.md` — Game of Life rule catalog and contribution guide.
 
 ## Command prompt (`:`)
 
@@ -169,8 +175,8 @@ Games:
 - Run tournament: `Ctrl+Enter` or `:games run`.
 - Hide/show: `H` in popup to hide, `Ctrl+^` (or `Ctrl+6`) to show.
 - Inspector: `Tab` toggles tournament vs match inspector; `←/→` changes the window size.
-- Outputs: summaries, event logs, and optional history logs land in `games-runs/` under the workspace root.
-  Summary JSON includes `run_id`, `config_text`, and `paths` for summary/events/history.
+- Outputs: summaries, event logs, and optional history logs land in `runs/games/` under the workspace root.
+  Summary JSON (schema v2) includes `run_id`, `config_text`, `paths`, and runtime accelerator info.
 
 ### Games config (payoff)
 
