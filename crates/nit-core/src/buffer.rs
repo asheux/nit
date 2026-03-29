@@ -429,12 +429,35 @@ impl Buffer {
             .min(self.rope.len_lines().saturating_sub(1));
         let indent = self.line_indent(line);
         let idx = self.char_index();
+
+        // Smart indent after selection replacement
+        let char_before = self.last_non_ws_before_cursor();
+        let should_increase = char_before.is_some_and(is_indent_opener);
+        let char_after = self.first_non_ws_after_cursor();
+        let bracket_pair = should_increase
+            && char_before
+                .and_then(matching_closer)
+                .zip(char_after)
+                .is_some_and(|(expected, actual)| expected == actual);
+
+        let extra_indent = if should_increase {
+            self.indent_unit()
+        } else {
+            String::new()
+        };
+
         let mut text = String::from("\n");
         text.push_str(&indent);
+        text.push_str(&extra_indent);
+        if bracket_pair {
+            text.push('\n');
+            text.push_str(&indent);
+        }
+
         self.record_insert(idx, &text);
         self.rope.insert(idx, &text);
         self.cursor.line += 1;
-        self.cursor.col = indent.chars().count();
+        self.cursor.col = indent.chars().count() + extra_indent.chars().count();
         self.dirty = true;
         self.finish_insert_group();
     }
@@ -475,13 +498,23 @@ impl Buffer {
             .line
             .min(self.rope.len_lines().saturating_sub(1));
         let indent = self.line_indent(line);
+
+        // Smart indent: if line ends with an opener, increase indent
+        let last_char = self.last_non_ws_char_on_line(line);
+        let extra_indent = if last_char.is_some_and(|c| is_indent_opener(c) || c == ':') {
+            self.indent_unit()
+        } else {
+            String::new()
+        };
+
         let insert_at = self.rope.line_to_char(line) + self.line_char_len(line);
         let mut text = String::from("\n");
         text.push_str(&indent);
+        text.push_str(&extra_indent);
         self.record_insert(insert_at, &text);
         self.rope.insert(insert_at, &text);
         self.cursor.line = line + 1;
-        self.cursor.col = indent.chars().count();
+        self.cursor.col = indent.chars().count() + extra_indent.chars().count();
         self.dirty = true;
     }
 
@@ -568,6 +601,106 @@ impl Buffer {
             }
         }
         indent
+    }
+
+    /// Detect the indent unit used in this buffer (e.g. "\t", "  ", "    ").
+    fn indent_unit(&self) -> String {
+        let max = self.rope.len_lines().min(200);
+        let mut use_tabs = false;
+        let mut widths = Vec::new();
+        for i in 0..max {
+            let line = self.rope.line(i);
+            let mut spaces = 0usize;
+            for ch in line.chars() {
+                if ch == '\t' {
+                    use_tabs = true;
+                    break;
+                } else if ch == ' ' {
+                    spaces += 1;
+                } else {
+                    break;
+                }
+            }
+            if use_tabs {
+                break;
+            }
+            let has_content = line
+                .chars()
+                .nth(spaces)
+                .is_some_and(|c| c != '\n' && c != '\r');
+            if spaces > 0 && has_content {
+                widths.push(spaces);
+            }
+        }
+        if use_tabs {
+            return "\t".to_string();
+        }
+        if widths.is_empty() {
+            return "    ".to_string();
+        }
+        let mut g = widths[0];
+        for &w in &widths[1..] {
+            g = gcd(g, w);
+        }
+        " ".repeat(g.clamp(1, 8))
+    }
+
+    /// Last non-whitespace character on a line, ignoring trailing spaces/tabs/newlines.
+    fn last_non_ws_char_on_line(&self, line: usize) -> Option<char> {
+        if line >= self.rope.len_lines() {
+            return None;
+        }
+        let mut result = None;
+        for ch in self.rope.line(line).chars() {
+            if ch == '\n' || ch == '\r' {
+                break;
+            }
+            if ch != ' ' && ch != '\t' {
+                result = Some(ch);
+            }
+        }
+        result
+    }
+
+    /// Last non-whitespace character before the cursor on the current line.
+    fn last_non_ws_before_cursor(&self) -> Option<char> {
+        let line = self
+            .cursor
+            .line
+            .min(self.rope.len_lines().saturating_sub(1));
+        let line_start = self.rope.line_to_char(line);
+        let idx = self.char_index();
+        let mut i = idx;
+        while i > line_start {
+            let ch = self.rope.char(i - 1);
+            if ch != ' ' && ch != '\t' {
+                return Some(ch);
+            }
+            i -= 1;
+        }
+        None
+    }
+
+    /// First non-whitespace character after the cursor on the current line.
+    fn first_non_ws_after_cursor(&self) -> Option<char> {
+        let idx = self.char_index();
+        let line = self
+            .cursor
+            .line
+            .min(self.rope.len_lines().saturating_sub(1));
+        let line_end_char = self.rope.line_to_char(line) + self.line_char_len(line);
+        let mut i = idx;
+        while i < line_end_char {
+            let ch = self.rope.char(i);
+            if ch == '\n' || ch == '\r' {
+                return None;
+            }
+            if ch != ' ' && ch != '\t' {
+                return Some(ch);
+            }
+            i += 1;
+        }
+        None
     }
 
     pub fn exit_insert_mode(&mut self) {
@@ -684,13 +817,39 @@ impl Buffer {
             .min(self.rope.len_lines().saturating_sub(1));
         let indent = self.line_indent(line);
         let idx = self.char_index();
+
+        // Smart indent: check if we should increase indent
+        let char_before = self.last_non_ws_before_cursor();
+        let should_increase = char_before.is_some_and(is_indent_opener);
+
+        // Bracket pair expansion: cursor between matching brackets like {|}
+        let char_after = self.first_non_ws_after_cursor();
+        let bracket_pair = should_increase
+            && char_before
+                .and_then(matching_closer)
+                .zip(char_after)
+                .is_some_and(|(expected, actual)| expected == actual);
+
+        let extra_indent = if should_increase {
+            self.indent_unit()
+        } else {
+            String::new()
+        };
+
         let mut text = String::from("\n");
         text.push_str(&indent);
+        text.push_str(&extra_indent);
+        if bracket_pair {
+            // Add closing bracket line: \n + base_indent
+            text.push('\n');
+            text.push_str(&indent);
+        }
+
         self.record_insert(idx, &text);
         self.begin_insert_group(idx);
         self.rope.insert(idx, &text);
         self.cursor.line += 1;
-        self.cursor.col = indent.chars().count();
+        self.cursor.col = indent.chars().count() + extra_indent.chars().count();
         self.dirty = true;
         self.finish_insert_group();
     }
@@ -1041,6 +1200,27 @@ fn advance_point(start_byte: usize, start_point: BufferPoint, text: &str) -> (us
         }
     }
     (byte, BufferPoint { row, column })
+}
+
+fn gcd(a: usize, b: usize) -> usize {
+    if b == 0 {
+        a
+    } else {
+        gcd(b, a % b)
+    }
+}
+
+fn is_indent_opener(ch: char) -> bool {
+    matches!(ch, '{' | '(' | '[')
+}
+
+fn matching_closer(opener: char) -> Option<char> {
+    match opener {
+        '{' => Some('}'),
+        '(' => Some(')'),
+        '[' => Some(']'),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
