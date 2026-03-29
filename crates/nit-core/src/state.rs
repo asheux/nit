@@ -1799,6 +1799,10 @@ pub struct AppState {
     /// Last genome diff text for inclusion in agent prompts.
     #[serde(skip)]
     pub last_genome_diff: Option<String>,
+    /// Quality change direction from the last genome recomputation.
+    /// +1 = improved, -1 = degraded, 0 = unchanged.
+    #[serde(skip)]
+    pub genome_quality_delta: i32,
     /// True when genome computation has been requested but not yet executed.
     #[serde(skip)]
     pub genome_computing: bool,
@@ -1993,6 +1997,7 @@ impl AppState {
             genome_reports: HashMap::new(),
             last_genome_diff: None,
             genome_computing: false,
+            genome_quality_delta: 0,
             gate_monitor_scroll: 0,
         }
     }
@@ -2147,6 +2152,56 @@ pub fn apply_action(state: &mut AppState, action: Action) -> ActionOutcome {
             } else {
                 buf.mark_clean();
                 state.status = Some("Saved".into());
+                // Recompute genome report for the saved file.
+                if let Some(file_path) = state.editor_buffer().path().cloned() {
+                    let text = state.editor_buffer().content_as_string();
+                    let report = crate::genome_report::compute_genome_report(&text, &file_path);
+                    let (msg, delta) = if let Some(prev) = state.genome_reports.get(&file_path) {
+                        let gen_before: i32 = prev
+                            .encoder_scores
+                            .iter()
+                            .map(|s| s.generations_survived as i32)
+                            .sum();
+                        let gen_after: i32 = report
+                            .encoder_scores
+                            .iter()
+                            .map(|s| s.generations_survived as i32)
+                            .sum();
+                        let d = gen_after - gen_before;
+                        let diff = crate::genome_report::compute_genome_diff(prev, &report);
+                        if diff.tier_after > diff.tier_before {
+                            (
+                                format!(
+                                    "Saved \u{2014} quality upgraded: {} \u{2192} {}",
+                                    diff.tier_before, diff.tier_after,
+                                ),
+                                1,
+                            )
+                        } else if diff.tier_after < diff.tier_before {
+                            (
+                                format!(
+                                    "Saved \u{2014} quality degraded: {} \u{2192} {}",
+                                    diff.tier_before, diff.tier_after,
+                                ),
+                                -1,
+                            )
+                        } else if d > 0 {
+                            (format!("Saved \u{2014} quality improved (+{d} gen)"), 1)
+                        } else if d < 0 {
+                            (format!("Saved \u{2014} quality declined ({d} gen)"), -1)
+                        } else {
+                            (
+                                format!("Saved \u{2014} quality unchanged ({})", report.tier),
+                                0,
+                            )
+                        }
+                    } else {
+                        (format!("Saved \u{2014} genome: {}", report.tier), 0)
+                    };
+                    state.genome_quality_delta = delta;
+                    state.genome_reports.insert(file_path, report);
+                    state.status = Some(msg);
+                }
             }
             if matches!(action, Action::SaveAndNormal) {
                 state.mode = Mode::Normal;

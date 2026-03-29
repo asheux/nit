@@ -505,6 +505,7 @@ fn run_loop(
     let mut last_job = Instant::now();
     let mut last_vitals_sample = Instant::now();
     let mut last_busy_pulse = Instant::now();
+    let mut last_file_poll = Instant::now();
     let app_start = Instant::now();
     let mut last_resize_event: Option<(Duration, u16, u16)> = None;
     let mut needs_redraw = true;
@@ -1279,6 +1280,21 @@ fn run_loop(
                 is_lab_job_running(state),
                 current_agent_state(state),
             );
+            // Poll the editor file for external changes (e.g. agent writes).
+            if last_file_poll.elapsed() >= Duration::from_millis(500) {
+                last_file_poll = Instant::now();
+                if state.editor_buffer_mut().reload_from_disk() {
+                    // File changed on disk — recompute genome and trigger syntax re-highlight.
+                    if let Some(file_path) = state.editor_buffer().path().cloned() {
+                        let text = state.editor_buffer().content_as_string();
+                        let report = nit_core::compute_genome_report(&text, &file_path);
+                        state.genome_reports.insert(file_path, report);
+                    }
+                    let buf_id = state.active_editor_buffer_id;
+                    syntax.note_buffer_change(buf_id, state.editor_buffer_mut());
+                }
+            }
+
             // Auto-compute genome report for the active editor buffer if missing.
             maybe_compute_genome_report(state);
 

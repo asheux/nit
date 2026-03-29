@@ -273,11 +273,13 @@ fn draw_loading_bar(frame: &mut Frame, area: ratatui::layout::Rect, palette: &Se
     if area.width == 0 || area.height == 0 {
         return;
     }
+    let bar_w = area.width / 3;
+    let x = area.x + (area.width.saturating_sub(bar_w)) / 2;
     let y = area.y.saturating_add(area.height / 2);
     let bar_area = ratatui::layout::Rect {
-        x: area.x,
+        x,
         y,
-        width: area.width,
+        width: bar_w,
         height: 1,
     };
     let ratio = loading_ratio();

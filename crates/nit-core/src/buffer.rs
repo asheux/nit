@@ -1093,6 +1093,31 @@ impl Buffer {
         self.diff_version = u64::MAX; // force recomputation
     }
 
+    /// Reload the buffer content from disk if the file has changed.
+    /// Returns `true` if the buffer was updated.
+    pub fn reload_from_disk(&mut self) -> bool {
+        let Some(path) = self.path.as_ref() else {
+            return false;
+        };
+        let Ok(content) = std::fs::read_to_string(path) else {
+            return false;
+        };
+        let new_rope = Rope::from_str(&content);
+        if self.rope == new_rope {
+            return false;
+        }
+        self.rope = new_rope;
+        self.version = self.version.wrapping_add(1);
+        self.full_reparse = true;
+        self.pending_edits.clear();
+        self.undo.clear();
+        self.redo.clear();
+        self.dirty = false;
+        self.base_line_hashes = rope_line_hashes(&self.rope);
+        self.diff_version = u64::MAX;
+        true
+    }
+
     pub fn undo(&mut self) -> bool {
         if let Some(snapshot) = self.undo.pop() {
             self.end_edit_group();

@@ -100,7 +100,7 @@ pub fn build_lines(state: &AppState, theme: &Theme, width: usize) -> Vec<Line<'s
 // ---------------------------------------------------------------------------
 
 fn build_lines_genome(
-    _state: &AppState,
+    state: &AppState,
     report: Option<&GenomeReport>,
     theme: &Theme,
     width: usize,
@@ -121,14 +121,30 @@ fn build_lines_genome(
 
     let mut lines: Vec<Line<'static>> = Vec::new();
 
-    // ── Tier display ──
+    // ── Tier display with quality change indicator ──
     let tier_text = format!("TIER {}  {}", report.tier.numeral(), report.tier.name());
-    lines.push(Line::from(Span::styled(
+    let mut tier_spans = vec![Span::styled(
         tier_text,
         Style::default()
             .fg(theme.accent)
             .add_modifier(Modifier::BOLD),
-    )));
+    )];
+    match state.genome_quality_delta {
+        d if d > 0 => {
+            tier_spans.push(Span::styled(
+                " \u{2014} Quality Improved",
+                Style::default().fg(theme.title_focused),
+            ));
+        }
+        d if d < 0 => {
+            tier_spans.push(Span::styled(
+                " \u{2014} Quality Degraded",
+                Style::default().fg(theme.foreground),
+            ));
+        }
+        _ => {}
+    }
+    lines.push(Line::from(tier_spans));
     lines.push(build_tier_bar(report.tier, width, theme));
     lines.push(Line::from(""));
 

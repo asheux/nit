@@ -386,6 +386,9 @@ impl AgentBusEvent {
                     at,
                 });
 
+                // Reload editor buffer if the agent changed the file on disk.
+                state.editor_buffer_mut().reload_from_disk();
+
                 // Genome evaluation on the active editor buffer.
                 if state.settings.genome.genome_context_enabled {
                     if let Some(file_path) = state.editor_buffer().path().cloned() {
