@@ -8,6 +8,7 @@ pub mod claude_runner;
 pub mod codex_runner;
 pub mod file_tree;
 pub mod file_tree_runner;
+pub mod file_watcher;
 pub mod fuzzy_preview_runner;
 pub mod fuzzy_search_runner;
 pub mod games_analysis;

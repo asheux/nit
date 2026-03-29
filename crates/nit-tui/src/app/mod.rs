@@ -18,6 +18,7 @@ use crate::{
     codex_runner::{CodexCommand, CodexRunner, CodexRunnerConfig, CodexRuntimeMode},
     file_tree,
     file_tree_runner::{FileTreeCommand, FileTreeEvent, FileTreeRunner},
+    file_watcher::FileWatcher,
     fuzzy_preview_runner::{PreviewEvent, PreviewModel, PreviewRunner},
     fuzzy_search_runner::{
         ContentEvent, ContentSearchRunner, FileIndexRunner, FuzzyCommand, FuzzyEvent,
@@ -505,7 +506,6 @@ fn run_loop(
     let mut last_job = Instant::now();
     let mut last_vitals_sample = Instant::now();
     let mut last_busy_pulse = Instant::now();
-    let mut last_file_poll = Instant::now();
     let app_start = Instant::now();
     let mut last_resize_event: Option<(Duration, u16, u16)> = None;
     let mut needs_redraw = true;
@@ -513,6 +513,11 @@ fn run_loop(
     let mut system_stats = SystemStats::new();
     let mut clipboard = Clipboard::new().ok();
     let mut file_tree_runner = FileTreeRunner::spawn();
+    let mut file_watcher = FileWatcher::spawn();
+    let mut last_watched_path = state.editor_buffer().path().cloned();
+    if let Some(ref path) = last_watched_path {
+        file_watcher.watch(path.clone());
+    }
     let has_codex = state.agents.agents.iter().any(|lane| lane.is_codex());
     let codex_runtime = if has_codex {
         codex_runtime
@@ -1280,20 +1285,20 @@ fn run_loop(
                 is_lab_job_running(state),
                 current_agent_state(state),
             );
-            // Poll the editor file for external changes (e.g. agent writes).
-            if last_file_poll.elapsed() >= Duration::from_millis(500) {
-                last_file_poll = Instant::now();
-                if state.editor_buffer_mut().reload_from_disk() {
-                    // File changed on disk — recompute genome and trigger syntax re-highlight.
-                    if let Some(file_path) = state.editor_buffer().path().cloned() {
-                        let text = state.editor_buffer().content_as_string();
-                        let report = nit_core::compute_genome_report(&text, &file_path);
-                        state.genome_reports.insert(file_path, report);
-                    }
-                    let buf_id = state.active_editor_buffer_id;
-                    syntax.note_buffer_change(buf_id, state.editor_buffer_mut());
+            // Update file watcher when the active editor file changes.
+            let current_path = state.editor_buffer().path().cloned();
+            if current_path != last_watched_path {
+                if let Some(ref old) = last_watched_path {
+                    file_watcher.send(crate::file_watcher::FileWatchCommand::Unwatch(old.clone()));
                 }
+                if let Some(ref new) = current_path {
+                    file_watcher.watch(new.clone());
+                }
+                last_watched_path = current_path;
             }
+
+            // Drain file watcher notifications — reload any open buffers that changed on disk.
+            drain_file_watcher(state, syntax, &file_watcher);
 
             // Auto-compute genome report for the active editor buffer if missing.
             maybe_compute_genome_report(state);
@@ -1317,6 +1322,7 @@ fn run_loop(
         }
     }
     file_tree_runner.shutdown();
+    file_watcher.shutdown();
     codex_runner.shutdown();
     claude_runner.shutdown();
     fuzzy_runtime.shutdown();
@@ -1449,6 +1455,31 @@ fn maybe_compute_genome_report(state: &mut AppState) {
         // First encounter: set flag so the loading bar renders this frame,
         // and the computation happens next frame.
         state.genome_computing = true;
+    }
+}
+
+/// Drain file-watcher events: reload buffers whose files changed on disk.
+fn drain_file_watcher(state: &mut AppState, syntax: &mut SyntaxRuntime, watcher: &FileWatcher) {
+    while let Ok(changed_path) = watcher.events.try_recv() {
+        // Check every open editor buffer for a path match.
+        for buf_idx in 0..state.buffers.len() {
+            let matches = state.buffers[buf_idx]
+                .path()
+                .map(|p| *p == changed_path)
+                .unwrap_or(false);
+            if !matches {
+                continue;
+            }
+            if state.buffers[buf_idx].reload_from_disk() {
+                syntax.note_buffer_change(buf_idx, &mut state.buffers[buf_idx]);
+                // Recompute genome for the active editor buffer.
+                if buf_idx == state.active_editor_buffer_id {
+                    let text = state.buffers[buf_idx].content_as_string();
+                    let report = nit_core::compute_genome_report(&text, &changed_path);
+                    state.genome_reports.insert(changed_path.clone(), report);
+                }
+            }
+        }
     }
 }
 
