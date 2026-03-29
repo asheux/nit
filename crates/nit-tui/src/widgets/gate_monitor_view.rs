@@ -223,7 +223,7 @@ fn build_lines_genome(
             summary_spans.push(Span::styled(
                 format!("{critical} critical"),
                 Style::default()
-                    .fg(theme.error)
+                    .fg(theme.foreground)
                     .add_modifier(Modifier::BOLD),
             ));
             if warning > 0 || info > 0 {
@@ -233,7 +233,7 @@ fn build_lines_genome(
         if warning > 0 {
             summary_spans.push(Span::styled(
                 format!("{warning} warn"),
-                Style::default().fg(theme.warning),
+                Style::default().fg(theme.title_focused),
             ));
             if info > 0 {
                 summary_spans.push(Span::styled("  ", dim_style));
@@ -267,8 +267,13 @@ fn build_lines_genome(
                 width.saturating_sub(4),
             );
             lines.push(Line::from(vec![
-                Span::styled("  ", Style::default().fg(theme.error)),
-                Span::styled(msg, Style::default().fg(theme.error)),
+                Span::styled("  ", Style::default().fg(theme.foreground)),
+                Span::styled(
+                    msg,
+                    Style::default()
+                        .fg(theme.foreground)
+                        .add_modifier(Modifier::BOLD),
+                ),
             ]));
         }
 
@@ -286,7 +291,7 @@ fn build_lines_genome(
             let msg = shorten_text(&format!("{label}{loc}"), width.saturating_sub(4));
             lines.push(Line::from(Span::styled(
                 format!("  {msg}"),
-                Style::default().fg(theme.warning),
+                Style::default().fg(theme.title_focused),
             )));
         }
 
@@ -306,7 +311,7 @@ fn build_lines_genome(
         }
     } else {
         lines.push(Line::from(vec![
-            Span::styled("No structural issues ", Style::default().fg(theme.success)),
+            Span::styled("No structural issues ", Style::default().fg(theme.accent)),
             Span::styled("─".repeat(width.saturating_sub(22)), dim_style),
         ]));
     }
@@ -347,11 +352,11 @@ fn build_gauge_line(label: &str, value: f32, width: usize, theme: &Theme) -> Lin
     let empty = bar_w.saturating_sub(filled);
 
     let bar_color = if clamped >= 0.6 {
-        theme.success
+        theme.accent
     } else if clamped >= 0.3 {
-        theme.warning
+        theme.title_focused
     } else {
-        theme.error
+        theme.title
     };
 
     Line::from(vec![
@@ -381,7 +386,10 @@ fn build_encoder_line(
     let name_w = 12;
     let gen = score.generations_survived;
     let gen_str = format!("{gen}");
-    let stats_str = format!(" density={:.2} components={}", score.density, score.components);
+    let stats_str = format!(
+        " density={:.2} components={}",
+        score.density, score.components
+    );
     let fixed_w = name_w + gen_str.len() + stats_str.len() + 2;
     let bar_w = width.saturating_sub(fixed_w);
 
@@ -431,9 +439,9 @@ fn build_density_line(
 
     let over_threshold = score.density > 0.45;
     let bar_color = if over_threshold {
-        theme.error
+        theme.foreground
     } else if score.density > 0.35 {
-        theme.warning
+        theme.title
     } else {
         theme.title_focused
     };
@@ -453,9 +461,9 @@ fn build_density_line(
         Span::styled(
             format!(" {val_str}"),
             Style::default().fg(if over_threshold {
-                theme.error
-            } else {
                 theme.foreground
+            } else {
+                theme.title
             }),
         ),
     ];
@@ -463,7 +471,7 @@ fn build_density_line(
         spans.push(Span::styled(
             " !",
             Style::default()
-                .fg(theme.error)
+                .fg(theme.foreground)
                 .add_modifier(Modifier::BOLD),
         ));
     }
@@ -528,10 +536,10 @@ fn tier_glyph(tier: nit_core::GenomeTier) -> &'static str {
 
 fn tier_color(tier: nit_core::GenomeTier, theme: &Theme) -> ratatui::style::Color {
     match tier {
-        nit_core::GenomeTier::StillLife => theme.error,
-        nit_core::GenomeTier::Oscillator => theme.warning,
+        nit_core::GenomeTier::StillLife => theme.border,
+        nit_core::GenomeTier::Oscillator => theme.title,
         nit_core::GenomeTier::Spaceship => theme.title_focused,
-        nit_core::GenomeTier::Methuselah => theme.success,
+        nit_core::GenomeTier::Methuselah => theme.accent,
         nit_core::GenomeTier::Replicator => theme.accent,
     }
 }
@@ -546,11 +554,13 @@ fn draw_loading_bar(frame: &mut Frame, area: ratatui::layout::Rect, theme: &Them
     if area.width == 0 || area.height == 0 {
         return;
     }
+    let bar_w = area.width / 3;
+    let x = area.x + (area.width.saturating_sub(bar_w)) / 2;
     let y = area.y.saturating_add(area.height / 2);
     let bar_area = ratatui::layout::Rect {
-        x: area.x,
+        x,
         y,
-        width: area.width,
+        width: bar_w,
         height: 1,
     };
     let ratio = loading_ratio();
@@ -591,10 +601,10 @@ fn loading_ratio() -> f64 {
 
 fn gen_color(gen: u32, theme: &Theme) -> ratatui::style::Color {
     match gen {
-        0..=50 => theme.error,
-        51..=200 => theme.warning,
+        0..=50 => theme.border,
+        51..=200 => theme.title,
         201..=500 => theme.title_focused,
-        501..=2000 => theme.success,
+        501..=2000 => theme.accent,
         _ => theme.accent,
     }
 }
