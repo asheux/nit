@@ -39,6 +39,21 @@ impl TreeSitterEngine {
         }
     }
 
+    /// Pre-warm the worker for a language so grammar + parser are ready before content arrives.
+    pub fn prewarm_language(&self, language: LanguageId) {
+        let request = HighlightRequest {
+            buffer_id: usize::MAX,
+            version: 0,
+            language,
+            text: String::new(),
+            edits: Vec::new(),
+            full_reparse: true,
+            max_spans_per_line: 0,
+            viewport: None,
+        };
+        let _ = self.sender.send(request);
+    }
+
     fn drain_results(&mut self) {
         while let Ok(result) = self.receiver.try_recv() {
             self.cache.insert(result.buffer_id, result.snapshot);
@@ -74,6 +89,20 @@ struct BufferState {
     parser: Parser,
     tree: Option<Tree>,
     snapshot: Option<HighlightSnapshot>,
+    cursor: QueryCursor,
+}
+
+struct ProgressiveFillState {
+    buffer_id: usize,
+    version: u64,
+    language: LanguageId,
+    text: String,
+    line_start_bytes: Vec<usize>,
+    next_below: Option<usize>,
+    next_above: Option<usize>,
+    chunk_size: usize,
+    total_lines: usize,
+    max_spans_per_line: usize,
 }
 
 fn worker_loop(rx: Receiver<HighlightRequest>, out_tx: Sender<HighlightResult>) {
@@ -81,46 +110,135 @@ fn worker_loop(rx: Receiver<HighlightRequest>, out_tx: Sender<HighlightResult>) 
     let mut configs = build_configs();
     let mut query_configs = build_query_configs();
     let mut highlighter = Highlighter::new();
+    let mut progressive_fills: HashMap<usize, ProgressiveFillState> = HashMap::new();
 
-    while let Ok(first) = rx.recv() {
-        let mut pending: HashMap<usize, HighlightRequest> = HashMap::new();
-        pending.insert(first.buffer_id, first);
-        while let Ok(job) = rx.try_recv() {
-            pending.insert(job.buffer_id, job);
+    loop {
+        // Use recv_timeout when progressive fills are pending, blocking recv otherwise
+        let first = if progressive_fills.is_empty() {
+            match rx.recv() {
+                Ok(req) => Some(req),
+                Err(_) => break,
+            }
+        } else {
+            match rx.recv_timeout(Duration::from_millis(10)) {
+                Ok(req) => Some(req),
+                Err(mpsc::RecvTimeoutError::Timeout) => None,
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+        };
+
+        if let Some(first) = first {
+            // Batch drain
+            let mut pending: HashMap<usize, HighlightRequest> = HashMap::new();
+            pending.insert(first.buffer_id, first);
+            while let Ok(job) = rx.try_recv() {
+                pending.insert(job.buffer_id, job);
+            }
+
+            // Prioritize full_reparse requests (instant syntax on file open)
+            let mut jobs: Vec<HighlightRequest> = pending.into_values().collect();
+            jobs.sort_by_key(|j| u8::from(!j.full_reparse));
+
+            for job in jobs {
+                // Cancel progressive fill for this buffer
+                progressive_fills.remove(&job.buffer_id);
+
+                let start = Instant::now();
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    highlight_job(
+                        &mut buffers,
+                        &mut configs,
+                        &mut query_configs,
+                        &mut highlighter,
+                        &job,
+                    )
+                }));
+
+                let snapshot = match result {
+                    Ok(Ok(mut snap)) => {
+                        snap.duration_ms = start.elapsed().as_millis();
+                        log_highlight_complete(job.buffer_id, job.version, &snap);
+                        snap
+                    }
+                    Ok(Err(err)) => {
+                        log_highlight_error(job.buffer_id, job.version, &err);
+                        let mut snap = HighlightSnapshot::plain(
+                            job.buffer_id,
+                            job.version,
+                            job.language,
+                            EngineKind::TreeSitter,
+                            SyntaxStatus::Error(err.to_string()),
+                            &job.text,
+                        );
+                        snap.duration_ms = start.elapsed().as_millis();
+                        snap
+                    }
+                    Err(panic_info) => {
+                        let msg = panic_message(&panic_info);
+                        error!(
+                            buffer_id = job.buffer_id,
+                            version = job.version,
+                            "syntax worker panic: {msg}"
+                        );
+                        // Clear buffer state to avoid cascading failures
+                        buffers.remove(&job.buffer_id);
+                        let mut snap = HighlightSnapshot::plain(
+                            job.buffer_id,
+                            job.version,
+                            job.language,
+                            EngineKind::TreeSitter,
+                            SyntaxStatus::Error(format!("worker panic: {msg}")),
+                            &job.text,
+                        );
+                        snap.duration_ms = start.elapsed().as_millis();
+                        snap
+                    }
+                };
+
+                // Set up progressive fill for viewport-scoped results
+                if let Some((hl_start, hl_end)) = snapshot.highlighted_range {
+                    let total = snapshot.per_line.len();
+                    if hl_end + 1 < total || hl_start > 0 {
+                        progressive_fills.insert(
+                            job.buffer_id,
+                            ProgressiveFillState {
+                                buffer_id: job.buffer_id,
+                                version: job.version,
+                                language: job.language,
+                                text: job.text.clone(),
+                                line_start_bytes: snapshot.line_start_bytes.clone(),
+                                next_below: if hl_end + 1 < total {
+                                    Some(hl_end + 1)
+                                } else {
+                                    None
+                                },
+                                next_above: if hl_start > 0 { Some(hl_start) } else { None },
+                                chunk_size: 500,
+                                total_lines: total,
+                                max_spans_per_line: job.max_spans_per_line,
+                            },
+                        );
+                    }
+                }
+
+                let _ = out_tx.send(HighlightResult {
+                    buffer_id: job.buffer_id,
+                    snapshot,
+                });
+            }
         }
 
-        for (_, job) in pending.drain() {
-            let start = Instant::now();
-            let snapshot = match highlight_job(
-                &mut buffers,
-                &mut configs,
-                &mut query_configs,
-                &mut highlighter,
-                &job,
-            ) {
-                Ok(mut snap) => {
-                    snap.duration_ms = start.elapsed().as_millis();
-                    log_highlight_complete(job.buffer_id, job.version, &snap);
-                    snap
-                }
-                Err(err) => {
-                    log_highlight_error(job.buffer_id, job.version, &err);
-                    let mut snap = HighlightSnapshot::plain(
-                        job.buffer_id,
-                        job.version,
-                        job.language,
-                        EngineKind::TreeSitter,
-                        SyntaxStatus::Error(err.to_string()),
-                        &job.text,
-                    );
-                    snap.duration_ms = start.elapsed().as_millis();
-                    snap
-                }
-            };
-            let _ = out_tx.send(HighlightResult {
-                buffer_id: job.buffer_id,
-                snapshot,
-            });
+        // Process one progressive fill chunk per idle cycle
+        let pf_ids: Vec<usize> = progressive_fills.keys().copied().collect();
+        let mut done_ids = Vec::new();
+        for id in pf_ids {
+            let pf = progressive_fills.get_mut(&id).unwrap();
+            if process_progressive_chunk(pf, &mut buffers, &query_configs, &out_tx) {
+                done_ids.push(id);
+            }
+        }
+        for id in done_ids {
+            progressive_fills.remove(&id);
         }
     }
 }
@@ -153,8 +271,10 @@ fn highlight_job(
         parser: Parser::new(),
         tree: None,
         snapshot: None,
+        cursor: QueryCursor::new(),
     });
 
+    // Bug 4 fix: invalidate cache on language change
     if buffer_state.language != language {
         buffer_state.language = language;
         buffer_state.tree = None;
@@ -166,8 +286,11 @@ fn highlight_job(
     }
 
     let mut edited_old_tree = None;
-    let mut tree = if job.full_reparse || buffer_state.tree.is_none() {
+    let tree = if job.full_reparse || buffer_state.tree.is_none() {
         buffer_state.parser.parse(job.text.as_bytes(), None)
+    } else if job.edits.is_empty() {
+        // Scroll-only: reuse existing tree without reparsing
+        buffer_state.tree.take()
     } else {
         let mut existing = buffer_state.tree.take().unwrap();
         for edit in &job.edits {
@@ -180,7 +303,7 @@ fn highlight_job(
             .or(Some(existing))
     };
 
-    let Some(tree) = tree.take() else {
+    let Some(tree) = tree else {
         return Ok(HighlightSnapshot::plain(
             job.buffer_id,
             job.version,
@@ -190,6 +313,7 @@ fn highlight_job(
             &job.text,
         ));
     };
+
     let snapshot = if should_incremental_update(buffer_state, job) {
         if let Some(old_snapshot) = buffer_state.snapshot.as_ref() {
             let line_start_bytes = compute_line_starts(&job.text);
@@ -237,8 +361,6 @@ fn highlight_job(
             }
 
             if dirty.iter().any(|v| *v) {
-                // Clear (and later recompute) only the dirty lines. This avoids rebuilding an
-                // entire HighlightSnapshot for the whole file on every small edit.
                 for (idx, is_dirty) in dirty.iter().enumerate() {
                     if *is_dirty {
                         per_line[idx].clear();
@@ -254,6 +376,7 @@ fn highlight_job(
                         job.text.as_bytes(),
                         &dirty_ranges,
                         &mut spans,
+                        &mut buffer_state.cursor,
                     );
                     apply_spans_to_dirty_lines(
                         &mut spans,
@@ -264,7 +387,6 @@ fn highlight_job(
                     );
                 }
 
-                // Hash dirty lines only (non-dirty hashes were copied from the prior snapshot).
                 let bytes = job.text.as_bytes();
                 for (idx, is_dirty) in dirty.iter().enumerate() {
                     if !*is_dirty {
@@ -289,10 +411,14 @@ fn highlight_job(
                 line_start_bytes,
                 line_hashes,
                 per_line,
+                highlighted_range: None,
             }
         } else {
             full_highlight(configs, config, highlighter, job)?
         }
+    } else if job.viewport.is_some() {
+        // Viewport-scoped highlighting for large files
+        viewport_highlight(query_configs, &tree, job, &mut buffer_state.cursor)?
     } else {
         full_highlight(configs, config, highlighter, job)?
     };
@@ -300,6 +426,262 @@ fn highlight_job(
     buffer_state.tree = Some(tree);
     buffer_state.snapshot = Some(snapshot.clone());
     Ok(snapshot)
+}
+
+fn viewport_highlight(
+    query_configs: &HashMap<LanguageId, QueryConfig>,
+    tree: &Tree,
+    job: &HighlightRequest,
+    cursor: &mut QueryCursor,
+) -> anyhow::Result<HighlightSnapshot> {
+    let vp = job.viewport.as_ref().unwrap();
+    let line_start_bytes = compute_line_starts(&job.text);
+    let total_lines = line_start_bytes.len().saturating_sub(1);
+
+    let buffer_zone = 100;
+    let start_line = vp.first_line.saturating_sub(buffer_zone);
+    let end_line = (vp.last_line + buffer_zone).min(total_lines.saturating_sub(1));
+
+    let start_byte = line_start_bytes[start_line];
+    let end_byte = line_start_bytes
+        .get(end_line + 1)
+        .copied()
+        .unwrap_or(job.text.len());
+
+    let query_cfg = match query_configs.get(&job.language) {
+        Some(cfg) => cfg,
+        None => {
+            return Ok(HighlightSnapshot::plain(
+                job.buffer_id,
+                job.version,
+                job.language,
+                EngineKind::TreeSitter,
+                SyntaxStatus::Error("no query config".into()),
+                &job.text,
+            ));
+        }
+    };
+
+    let mut spans = Vec::new();
+    collect_spans(
+        query_cfg,
+        tree,
+        job.text.as_bytes(),
+        &[(start_byte, end_byte)],
+        &mut spans,
+        cursor,
+    );
+
+    // Sort spans - skip sort if already ordered (optimization)
+    let needs_sort = spans.windows(2).any(|pair| {
+        let a = &pair[0];
+        let b = &pair[1];
+        match a.start_byte.cmp(&b.start_byte) {
+            cmp::Ordering::Greater => true,
+            cmp::Ordering::Equal => a.priority < b.priority,
+            cmp::Ordering::Less => false,
+        }
+    });
+    if needs_sort {
+        spans.sort_by(|a, b| match a.start_byte.cmp(&b.start_byte) {
+            cmp::Ordering::Equal => b.priority.cmp(&a.priority),
+            other => other,
+        });
+    }
+
+    // Build per_line only for highlighted range; other lines get empty Vec
+    let mut per_line = vec![Vec::new(); total_lines];
+    for span in &spans {
+        if span.end_byte <= span.start_byte {
+            continue;
+        }
+        let sl = find_line(&line_start_bytes, span.start_byte);
+        let el = find_line(&line_start_bytes, span.end_byte);
+        for line in sl..=el {
+            if line + 1 >= line_start_bytes.len() {
+                continue;
+            }
+            if job.max_spans_per_line > 0 && per_line[line].len() >= job.max_spans_per_line {
+                continue;
+            }
+            let line_start = line_start_bytes[line];
+            let line_end = line_start_bytes[line + 1];
+            let seg_start = span.start_byte.max(line_start) - line_start;
+            let seg_end = span.end_byte.min(line_end) - line_start;
+            if seg_start < seg_end {
+                per_line[line].push(LineSegment {
+                    start: seg_start,
+                    end: seg_end,
+                    group: span.group,
+                });
+            }
+        }
+    }
+
+    // Compute line hashes only for highlighted range (sentinel 0 for others)
+    let bytes = job.text.as_bytes();
+    let mut line_hashes = vec![0u64; total_lines];
+    for idx in start_line..=end_line.min(total_lines.saturating_sub(1)) {
+        if idx + 1 < line_start_bytes.len() {
+            let s = line_start_bytes[idx];
+            let e = line_start_bytes[idx + 1];
+            line_hashes[idx] = crate::highlight::hash_line_bytes(&bytes[s..e]);
+        }
+    }
+
+    Ok(HighlightSnapshot {
+        buffer_id: job.buffer_id,
+        version: job.version,
+        language: job.language,
+        engine: EngineKind::TreeSitter,
+        status: SyntaxStatus::Ok(EngineKind::TreeSitter),
+        duration_ms: 0,
+        line_start_bytes,
+        line_hashes,
+        per_line,
+        highlighted_range: Some((start_line, end_line)),
+    })
+}
+
+fn process_progressive_chunk(
+    pf: &mut ProgressiveFillState,
+    buffers: &mut HashMap<usize, BufferState>,
+    query_configs: &HashMap<LanguageId, QueryConfig>,
+    out_tx: &Sender<HighlightResult>,
+) -> bool {
+    // Determine chunk range: fill below first, then above
+    let (start_line, end_line) = if let Some(next) = pf.next_below {
+        let end = (next + pf.chunk_size).min(pf.total_lines);
+        let end_line = end.saturating_sub(1);
+        pf.next_below = if end < pf.total_lines {
+            Some(end)
+        } else {
+            None
+        };
+        (next, end_line)
+    } else if let Some(above_end) = pf.next_above {
+        let start = above_end.saturating_sub(pf.chunk_size);
+        let end_line = above_end.saturating_sub(1);
+        pf.next_above = if start > 0 { Some(start) } else { None };
+        (start, end_line)
+    } else {
+        return true; // done
+    };
+
+    let query_cfg = match query_configs.get(&pf.language) {
+        Some(cfg) => cfg,
+        None => return true,
+    };
+
+    let buffer_state = match buffers.get_mut(&pf.buffer_id) {
+        Some(bs) => bs,
+        None => return true,
+    };
+
+    let tree = match buffer_state.tree.as_ref() {
+        Some(t) => t,
+        None => return true,
+    };
+
+    let snapshot = match buffer_state.snapshot.as_mut() {
+        Some(s) => s,
+        None => return true,
+    };
+
+    if snapshot.version != pf.version {
+        return true; // version mismatch, cancel
+    }
+
+    let start_byte = pf.line_start_bytes[start_line];
+    let end_byte = pf
+        .line_start_bytes
+        .get(end_line + 1)
+        .copied()
+        .unwrap_or(pf.text.len());
+
+    let mut spans = Vec::new();
+    collect_spans(
+        query_cfg,
+        tree,
+        pf.text.as_bytes(),
+        &[(start_byte, end_byte)],
+        &mut spans,
+        &mut buffer_state.cursor,
+    );
+
+    spans.sort_by(|a, b| match a.start_byte.cmp(&b.start_byte) {
+        cmp::Ordering::Equal => b.priority.cmp(&a.priority),
+        other => other,
+    });
+
+    for span in &spans {
+        if span.end_byte <= span.start_byte {
+            continue;
+        }
+        let sl = find_line(&pf.line_start_bytes, span.start_byte);
+        let el = find_line(&pf.line_start_bytes, span.end_byte);
+        for line in sl..=el {
+            if line < start_line || line > end_line {
+                continue;
+            }
+            if line + 1 >= pf.line_start_bytes.len() || line >= snapshot.per_line.len() {
+                continue;
+            }
+            if pf.max_spans_per_line > 0 && snapshot.per_line[line].len() >= pf.max_spans_per_line {
+                continue;
+            }
+            let line_start = pf.line_start_bytes[line];
+            let line_end = pf.line_start_bytes[line + 1];
+            let seg_start = span.start_byte.max(line_start) - line_start;
+            let seg_end = span.end_byte.min(line_end) - line_start;
+            if seg_start < seg_end {
+                snapshot.per_line[line].push(LineSegment {
+                    start: seg_start,
+                    end: seg_end,
+                    group: span.group,
+                });
+            }
+        }
+    }
+
+    // Update line hashes for chunk
+    let bytes = pf.text.as_bytes();
+    for idx in start_line..=end_line {
+        if idx + 1 < pf.line_start_bytes.len() && idx < snapshot.line_hashes.len() {
+            let s = pf.line_start_bytes[idx];
+            let e = pf.line_start_bytes[idx + 1];
+            snapshot.line_hashes[idx] = crate::highlight::hash_line_bytes(&bytes[s..e]);
+        }
+    }
+
+    // Expand highlighted_range
+    let (old_start, old_end) = snapshot
+        .highlighted_range
+        .unwrap_or((0, pf.total_lines.saturating_sub(1)));
+    let new_start = old_start.min(start_line);
+    let new_end = old_end.max(end_line);
+    if new_start == 0 && new_end >= pf.total_lines.saturating_sub(1) {
+        snapshot.highlighted_range = None; // fully covered
+    } else {
+        snapshot.highlighted_range = Some((new_start, new_end));
+    }
+
+    let _ = out_tx.send(HighlightResult {
+        buffer_id: pf.buffer_id,
+        snapshot: snapshot.clone(),
+    });
+
+    pf.next_below.is_none() && pf.next_above.is_none()
+}
+
+fn panic_message(info: &Box<dyn std::any::Any + Send>) -> String {
+    if let Some(s) = info.downcast_ref::<&str>() {
+        s.to_string()
+    } else if let Some(s) = info.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "unknown panic".to_string()
+    }
 }
 
 fn apply_spans_to_dirty_lines(
@@ -357,12 +739,13 @@ fn to_point(point: BufferPoint) -> Point {
     Point::new(point.row, point.column)
 }
 
+// Bug 1 fix: allow incremental updates for injection languages.
+// For injection languages, the outer language spans are re-queried correctly via
+// collect_spans on dirty ranges. Injection-specific highlighting in dirty regions
+// may be temporarily absent until the next full reparse, but this is a significant
+// perf improvement over full re-highlighting every keystroke.
 fn should_incremental_update(state: &BufferState, job: &HighlightRequest) -> bool {
-    !job.full_reparse
-        && !job.edits.is_empty()
-        && state.snapshot.is_some()
-        && state.tree.is_some()
-        && LanguageRegistry::injections_query(job.language).is_empty()
+    !job.full_reparse && !job.edits.is_empty() && state.snapshot.is_some() && state.tree.is_some()
 }
 
 struct QueryConfig {
@@ -376,8 +759,8 @@ fn collect_spans(
     source: &[u8],
     ranges: &[(usize, usize)],
     spans: &mut Vec<HighlightSpan>,
+    cursor: &mut QueryCursor,
 ) {
-    let mut cursor = QueryCursor::new();
     let root = tree.root_node();
     for &(start, end) in ranges {
         if start >= end {

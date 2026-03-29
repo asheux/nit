@@ -58,6 +58,7 @@ impl DocumentSyntaxHighlighter {
             edits: Vec::new(),
             full_reparse: true,
             max_spans_per_line: self.manager.config().max_spans_per_line,
+            viewport: None,
         });
         wait_for_document_snapshot(
             &mut self.manager,

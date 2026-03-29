@@ -47,7 +47,6 @@ pub enum EngineKind {
 pub enum SyntaxStatus {
     Ok(EngineKind),
     Disabled,
-    LargeFile,
     Error(String),
 }
 
@@ -57,7 +56,6 @@ impl SyntaxStatus {
             SyntaxStatus::Ok(EngineKind::TreeSitter) => "TS(ok)".to_string(),
             SyntaxStatus::Ok(EngineKind::Plain) => "Plain(ok)".to_string(),
             SyntaxStatus::Disabled => "Off".to_string(),
-            SyntaxStatus::LargeFile => "Plain(large)".to_string(),
             SyntaxStatus::Error(_) => "TS(error)".to_string(),
         }
     }
@@ -104,6 +102,9 @@ pub struct HighlightSnapshot {
     pub line_start_bytes: Vec<usize>,
     pub line_hashes: Vec<u64>,
     pub per_line: Vec<Vec<LineSegment>>,
+    /// For viewport-scoped highlights: `Some((start_line, end_line))` indicates
+    /// only that range has spans. `None` means the full file is highlighted (eager mode).
+    pub highlighted_range: Option<(usize, usize)>,
 }
 
 impl HighlightSnapshot {
@@ -128,6 +129,7 @@ impl HighlightSnapshot {
             line_start_bytes,
             line_hashes,
             per_line,
+            highlighted_range: None,
         }
     }
 
@@ -209,6 +211,7 @@ impl HighlightSnapshot {
             line_start_bytes,
             line_hashes,
             per_line,
+            highlighted_range: None,
         }
     }
 }

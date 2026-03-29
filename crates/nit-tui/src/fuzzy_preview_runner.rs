@@ -263,6 +263,7 @@ fn build_preview(
             edits: Vec::new(),
             full_reparse: true,
             max_spans_per_line: manager.config().max_spans_per_line,
+            viewport: None,
         };
         manager.schedule_rehighlight(request);
         wait_for_snapshot(manager, 0, *version, HIGHLIGHT_WAIT)

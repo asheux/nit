@@ -1,10 +1,12 @@
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use nit_core::{Buffer, BufferEdit, HighlightConfig, HighlightEngine};
 use nit_syntax::{
     Debouncer, HighlightRequest, HighlightSnapshot, LanguageId, SyntaxEngine, SyntaxManager,
+    ViewportRange,
 };
 
 #[derive(Debug, Clone)]
@@ -37,6 +39,17 @@ struct RenderCache {
     line_map: Option<Vec<Option<usize>>>,
 }
 
+/// Per-buffer state for viewport-scoped highlighting.
+#[derive(Default)]
+struct BufferSyntaxState {
+    /// Last viewport sent in a scroll-triggered rehighlight request.
+    last_sent_viewport: Option<ViewportRange>,
+    /// Last viewport checked (for debounce tracking).
+    last_checked_viewport: Option<ViewportRange>,
+    /// Timestamp of last scroll-triggered rehighlight send.
+    last_scroll_send: Option<Instant>,
+}
+
 pub struct SyntaxRuntime {
     manager: SyntaxManager,
     debouncers: HashMap<usize, Debouncer>,
@@ -47,9 +60,12 @@ pub struct SyntaxRuntime {
     full_reparse_pending: HashMap<usize, bool>,
     line_hash_cache: HashMap<usize, CachedLineHashes>,
     render_cache: HashMap<usize, RenderCache>,
+    scroll_debouncers: HashMap<usize, Debouncer>,
+    buffer_syntax_states: HashMap<usize, BufferSyntaxState>,
 }
 
 const INITIAL_HIGHLIGHT_WAIT_MS: u64 = 1000;
+const SCROLL_DEBOUNCE_MS: u64 = 20;
 
 impl SyntaxRuntime {
     pub fn new(config: HighlightConfig) -> Self {
@@ -64,6 +80,8 @@ impl SyntaxRuntime {
             full_reparse_pending: HashMap::new(),
             line_hash_cache: HashMap::new(),
             render_cache: HashMap::new(),
+            scroll_debouncers: HashMap::new(),
+            buffer_syntax_states: HashMap::new(),
         }
     }
 
@@ -81,9 +99,22 @@ impl SyntaxRuntime {
             self.full_reparse_pending.clear();
             self.line_hash_cache.clear();
             self.render_cache.clear();
+            self.scroll_debouncers.clear();
+            self.buffer_syntax_states.clear();
         } else {
             self.line_hash_cache.clear();
             self.render_cache.clear();
+        }
+    }
+
+    /// Pre-warm the syntax engine for a file path before content is loaded.
+    pub fn prewarm_for_path(&self, path: &Path) {
+        if !self.manager.config().enabled {
+            return;
+        }
+        let language = self.manager.detect_language(Some(path), None, None);
+        if language != LanguageId::PlainText {
+            self.manager.prewarm_language(language);
         }
     }
 
@@ -101,6 +132,15 @@ impl SyntaxRuntime {
             first_line.as_deref(),
             None,
         );
+
+        // For large files, include viewport for scoped highlighting
+        let viewport = if buffer.bytes_len() > self.manager.config().max_file_bytes {
+            Some(viewport_from_buffer(buffer))
+        } else {
+            None
+        };
+
+        // Send request immediately - skip debounce for initial file load (instant syntax)
         let request = HighlightRequest {
             buffer_id,
             version: buffer.version(),
@@ -109,6 +149,7 @@ impl SyntaxRuntime {
             edits: Vec::new(),
             full_reparse: true,
             max_spans_per_line,
+            viewport,
         };
         self.last_sent.insert(buffer_id, request.version);
         self.manager.schedule_rehighlight(request);
@@ -118,6 +159,20 @@ impl SyntaxRuntime {
         self.pending.remove(&buffer_id);
         self.render_cache.remove(&buffer_id);
         self.line_hash_cache.remove(&buffer_id);
+
+        // Initialize viewport tracking for large files
+        if buffer.bytes_len() > self.manager.config().max_file_bytes {
+            let vp = viewport_from_buffer(buffer);
+            self.buffer_syntax_states.insert(
+                buffer_id,
+                BufferSyntaxState {
+                    last_sent_viewport: Some(vp.clone()),
+                    last_checked_viewport: Some(vp),
+                    last_scroll_send: Some(Instant::now()),
+                },
+            );
+        }
+
         if warmup {
             let deadline = Instant::now() + Duration::from_millis(INITIAL_HIGHLIGHT_WAIT_MS);
             loop {
@@ -202,8 +257,15 @@ impl SyntaxRuntime {
             self.last_sent.remove(&buffer_id);
             self.edits_since_snapshot.remove(&buffer_id);
             self.full_reparse_pending.remove(&buffer_id);
+            self.scroll_debouncers.remove(&buffer_id);
+            self.buffer_syntax_states.remove(&buffer_id);
             return;
         }
+        self.tick_edits(buffer_id, buffer);
+        self.tick_scroll(buffer_id, buffer);
+    }
+
+    fn tick_edits(&mut self, buffer_id: usize, buffer: &Buffer) {
         let Some(debouncer) = self.debouncers.get_mut(&buffer_id) else {
             return;
         };
@@ -219,6 +281,14 @@ impl SyntaxRuntime {
             self.manager.config().max_spans_per_line,
             buffer.bytes_len(),
         );
+
+        // Include viewport for large files
+        let viewport = if buffer.bytes_len() > self.manager.config().max_file_bytes {
+            Some(viewport_from_buffer(buffer))
+        } else {
+            None
+        };
+
         let request = HighlightRequest {
             buffer_id,
             version: pending.version,
@@ -227,6 +297,7 @@ impl SyntaxRuntime {
             edits: pending.edits,
             full_reparse: pending.full_reparse,
             max_spans_per_line,
+            viewport,
         };
         self.last_sent.insert(buffer_id, request.version);
         log_rate_limited(&HIGHLIGHT_SCHEDULE_LOG, Duration::from_secs(1), || {
@@ -239,6 +310,72 @@ impl SyntaxRuntime {
             );
         });
         self.manager.schedule_rehighlight(request);
+        debouncer.clear();
+    }
+
+    fn tick_scroll(&mut self, buffer_id: usize, buffer: &Buffer) {
+        if buffer.bytes_len() <= self.manager.config().max_file_bytes {
+            return;
+        }
+
+        let current_vp = viewport_from_buffer(buffer);
+        let state = self.buffer_syntax_states.entry(buffer_id).or_default();
+
+        // Check if viewport changed since last check
+        let viewport_changed = state.last_checked_viewport.as_ref() != Some(&current_vp);
+        if viewport_changed {
+            state.last_checked_viewport = Some(current_vp.clone());
+        }
+
+        // Check if rehighlight is needed
+        let highlighted_range = self
+            .snapshots
+            .get(&buffer_id)
+            .and_then(|s| s.highlighted_range);
+        let needs = viewport_needs_rehighlight(&current_vp, highlighted_range);
+
+        if !needs {
+            return;
+        }
+
+        // Debounce scroll events
+        let debouncer = self
+            .scroll_debouncers
+            .entry(buffer_id)
+            .or_insert_with(|| Debouncer::new(SCROLL_DEBOUNCE_MS));
+
+        if viewport_changed {
+            debouncer.mark();
+        }
+
+        if !debouncer.ready() {
+            return;
+        }
+
+        // Send scroll-triggered rehighlight
+        let language = self.manager.detect_language(
+            buffer.path().map(|p| p.as_path()),
+            buffer.first_line().as_deref(),
+            None,
+        );
+        let max_spans = adaptive_max_spans_per_line(
+            self.manager.config().max_spans_per_line,
+            buffer.bytes_len(),
+        );
+        let request = HighlightRequest {
+            buffer_id,
+            version: buffer.version(),
+            language,
+            text: buffer.content_as_string(),
+            edits: Vec::new(),
+            full_reparse: false,
+            max_spans_per_line: max_spans,
+            viewport: Some(current_vp.clone()),
+        };
+        self.last_sent.insert(buffer_id, request.version);
+        self.manager.schedule_rehighlight(request);
+        state.last_sent_viewport = Some(current_vp);
+        state.last_scroll_send = Some(Instant::now());
         debouncer.clear();
     }
 
@@ -299,8 +436,6 @@ impl SyntaxRuntime {
         }
 
         // For large buffers, keep rendering the latest snapshot without computing a full line-map.
-        // The map computation can be O(lines) and cause UI stutter on very large files; the editor
-        // renderer still validates spans by line hash before applying them.
         const LARGE_MAP_BYTES: usize = 600_000;
         const LARGE_MAP_LINES: usize = 15_000;
         let large = buffer.bytes_len() >= LARGE_MAP_BYTES || current_lines >= LARGE_MAP_LINES;
@@ -420,7 +555,6 @@ impl SyntaxRuntime {
             nit_syntax::SyntaxStatus::Ok(_) => "ok".to_string(),
             nit_syntax::SyntaxStatus::Error(_) => "error".to_string(),
             nit_syntax::SyntaxStatus::Disabled => "off".to_string(),
-            nit_syntax::SyntaxStatus::LargeFile => "plain".to_string(),
         }
     }
 
@@ -457,6 +591,28 @@ impl SyntaxRuntime {
             .get(&buffer_id)
             .map(|cache| Arc::clone(&cache.hashes))
             .unwrap_or_else(|| Arc::from(Vec::new()))
+    }
+}
+
+fn viewport_from_buffer(buffer: &Buffer) -> ViewportRange {
+    ViewportRange {
+        first_line: buffer.viewport.offset_line,
+        last_line: buffer.viewport.offset_line + buffer.viewport.height.saturating_sub(1),
+        total_lines: buffer.lines_len(),
+    }
+}
+
+fn viewport_needs_rehighlight(
+    current: &ViewportRange,
+    highlighted_range: Option<(usize, usize)>,
+) -> bool {
+    match highlighted_range {
+        Some((hl_start, hl_end)) => {
+            // Rehighlight if viewport has scrolled within 20 lines of the highlighted range boundary
+            current.first_line < hl_start.saturating_add(20)
+                || current.last_line > hl_end.saturating_sub(20)
+        }
+        None => false, // Full file is highlighted (eager mode or progressive fill complete)
     }
 }
 
@@ -591,13 +747,14 @@ fn adaptive_debounce_ms(base_ms: u64, bytes: usize) -> u64 {
     }
 }
 
+// Bug 2 fix: increase adaptive caps to avoid visible truncation in dense syntax.
 fn adaptive_max_spans_per_line(base: usize, bytes: usize) -> usize {
     if bytes >= 1_500_000 {
-        base.min(64)
-    } else if bytes >= 800_000 {
         base.min(96)
-    } else if bytes >= 300_000 {
+    } else if bytes >= 800_000 {
         base.min(128)
+    } else if bytes >= 300_000 {
+        base.min(192)
     } else {
         base
     }

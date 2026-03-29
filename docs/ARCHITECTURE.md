@@ -528,11 +528,17 @@ text input → encoder → value grid → jitter → density threshold → bit g
 
 **Encoders**
 
-| Encoder | Grid Size | Method |
-|---------|-----------|--------|
-| `ascii_bytes` | 32x32 | Maps text bytes with index mixing and PRNG |
-| `lifehash16` | 16x16 | Pure PRNG derived from text hash |
-| `hilbert_bits` | 32x32 | Hilbert space-filling curve mapping |
+| Encoder | Grid Size | Category | Method |
+|---------|-----------|----------|--------|
+| `token_spectrum` | 32x32 | AST-driven (default) | Tree-sitter semantic token classification into 9 value ranges |
+| `ast_structure` | 32x32 | AST-driven | DFS tree walk encoding depth, child count, byte span, node kind |
+| `complexity_field` | 32x32 | AST-driven | Per-line cyclomatic complexity, token entropy, nesting, identifier uniqueness |
+| `structural` | 32x32 | Hybrid | Per-byte Shannon entropy, bracket depth, token signal, n-gram uniqueness |
+| `ascii_bytes` | 32x32 | Byte-level | Maps text bytes with index mixing and PRNG |
+| `hilbert_bits` | 32x32 | Byte-level | Hilbert space-filling curve mapping |
+| `lifehash16` | 16x16 | Byte-level | Pure PRNG derived from text hash |
+
+See `docs/SEEDS.md` for detailed encoder documentation, anti-gaming properties, and fallback behavior.
 
 **Seed Parameters**
 

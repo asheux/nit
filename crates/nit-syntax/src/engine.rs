@@ -28,6 +28,13 @@ impl Default for SyntaxConfig {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ViewportRange {
+    pub first_line: usize,
+    pub last_line: usize,
+    pub total_lines: usize,
+}
+
 #[derive(Clone, Debug)]
 pub struct HighlightRequest {
     pub buffer_id: usize,
@@ -37,6 +44,9 @@ pub struct HighlightRequest {
     pub edits: Vec<BufferEdit>,
     pub full_reparse: bool,
     pub max_spans_per_line: usize,
+    /// Viewport range for scoped highlighting. When `Some`, large files highlight
+    /// only the visible range plus a buffer zone instead of the full file.
+    pub viewport: Option<ViewportRange>,
 }
 
 pub trait SyntaxEngine {
@@ -125,6 +135,11 @@ impl SyntaxManager {
         self.config = config;
     }
 
+    /// Pre-warm the worker for a language so grammar + parser are ready before content arrives.
+    pub fn prewarm_language(&self, language: LanguageId) {
+        self.tree.prewarm_language(language);
+    }
+
     pub fn status_for(&self, buffer_id: usize) -> SyntaxStatus {
         if !self.config.enabled {
             return SyntaxStatus::Disabled;
@@ -171,15 +186,6 @@ impl SyntaxEngine for SyntaxManager {
             return;
         }
 
-        if request.text.len() > self.config.max_file_bytes {
-            self.status
-                .insert(request.buffer_id, SyntaxStatus::LargeFile);
-            self.engine_for_buffer
-                .insert(request.buffer_id, EngineKind::Plain);
-            self.plain.schedule_rehighlight(request);
-            return;
-        }
-
         self.status
             .insert(request.buffer_id, SyntaxStatus::Ok(EngineKind::TreeSitter));
         self.engine_for_buffer
@@ -198,10 +204,7 @@ impl SyntaxEngine for SyntaxManager {
             EngineKind::Plain => self.plain.try_get_highlights(buffer_id, version),
         };
         if let Some(ref snap) = snapshot {
-            let keep_large = matches!(self.status.get(&buffer_id), Some(SyntaxStatus::LargeFile));
-            if !keep_large {
-                self.status.insert(buffer_id, snap.status.clone());
-            }
+            self.status.insert(buffer_id, snap.status.clone());
         }
         snapshot
     }
