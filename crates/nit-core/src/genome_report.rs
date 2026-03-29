@@ -87,6 +87,39 @@ impl fmt::Display for GenomeTier {
     }
 }
 
+impl GenomeReport {
+    /// Classify overall quality from tier and consistency.
+    pub fn quality_level(&self) -> &'static str {
+        match (self.tier, self.cross_encoder_consistency) {
+            (GenomeTier::Replicator, c) if c >= 0.85 => "Exceptional",
+            (GenomeTier::Methuselah, c) if c >= 0.70 => "Excellent",
+            (GenomeTier::Spaceship, c) if c >= 0.50 => "Standard",
+            (GenomeTier::Oscillator, c) if c >= 0.30 => "Minimum",
+            _ => "Failing",
+        }
+    }
+}
+
+pub const GENOME_AGENT_INSTRUCTIONS: &str = "\
+You are writing code in nit, which measures structural quality by encoding your \
+source file as a Game of Life genome. Your code is evaluated across seven \
+encoders that analyze token distribution, AST structure, cyclomatic complexity, \
+nesting depth, token entropy, and identifier uniqueness.\n\
+\n\
+Your targets:\n\
+- Keep cyclomatic complexity <= 8 per function. Split complex functions.\n\
+- Keep nesting depth <= 3 on average. Use early returns and guard clauses.\n\
+- Use descriptive, unique identifiers. Aim for >= 65% uniqueness per scope.\n\
+- Include comments on public interfaces. Whitespace between logical sections.\n\
+- Keep functions small and focused. Each should produce a distinct grid component.\n\
+- Aim for tier III (Spaceship) or higher on all AST-driven encoders.\n\
+- Aim for density between 0.20 and 0.35 on AST encoders.\n\
+- Aim for >= 5 components on AST Structure encoder.\n\
+- Aim for cross-encoder consistency >= 0.60.\n\
+\n\
+After writing code, use the evaluate_genome tool to check your structural score. \
+If tier drops below III, refactor before submitting.";
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct GenomeRecommendation {
     pub metric: String,
@@ -321,6 +354,12 @@ pub fn compute_genome_diff(before: &GenomeReport, after: &GenomeReport) -> Genom
 pub fn format_genome_report(report: &GenomeReport) -> String {
     let mut out = String::new();
     out.push_str(&format!("[genome report] {}\n", report.file_path.display()));
+    out.push_str(&format!(
+        "Quality: {} (tier {}, consistency {:.2})\n",
+        report.quality_level(),
+        report.tier.numeral(),
+        report.cross_encoder_consistency
+    ));
     out.push_str(&format!(
         "Tier: {} ({})\n",
         report.tier.numeral(),

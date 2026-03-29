@@ -913,6 +913,9 @@ fn build_genome_context(state: &AppState) -> Option<String> {
     }
 
     ctx.push_str(crate::codex_runner::EVALUATE_GENOME_TOOL_DESCRIPTION);
+    ctx.push('\n');
+    ctx.push_str(nit_core::GENOME_AGENT_INSTRUCTIONS);
+    ctx.push('\n');
     ctx.push_str("[/genome context]\n\n");
     Some(ctx)
 }

@@ -5,6 +5,7 @@ target/
 .DS_Store
 .idea/
 .vscode/
+__pycache__/
 gol-snapshots/
 games-runs/
 output/

@@ -6168,11 +6168,16 @@ fn evaluate_genome_gate(state: &AppState) -> String {
             }
         }
 
+        let quality = report.quality_level();
         out.push_str(&nit_core::format_genome_report(&report));
         if failures.is_empty() {
-            out.push_str("\nGenome gate: PASS\n");
+            out.push_str(&format!(
+                "\nGenome gate: PASS (quality: {quality}, requires Standard or above)\n"
+            ));
         } else {
-            out.push_str("\nGenome gate: FAIL\n");
+            out.push_str(&format!(
+                "\nGenome gate: FAIL (quality: {quality}, requires Standard or above)\n"
+            ));
             for f in &failures {
                 out.push_str(f);
                 out.push('\n');

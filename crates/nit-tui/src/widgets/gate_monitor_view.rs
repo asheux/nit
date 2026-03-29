@@ -133,13 +133,19 @@ fn build_lines_genome(
         d if d > 0 => {
             tier_spans.push(Span::styled(
                 " \u{2014} Quality Improved",
-                Style::default().fg(theme.title_focused),
+                Style::default().fg(theme.success),
             ));
         }
         d if d < 0 => {
             tier_spans.push(Span::styled(
                 " \u{2014} Quality Degraded",
-                Style::default().fg(theme.foreground),
+                Style::default().fg(theme.error),
+            ));
+        }
+        0 => {
+            tier_spans.push(Span::styled(
+                " \u{2014} Quality Unchanged",
+                Style::default().fg(theme.warning),
             ));
         }
         _ => {}

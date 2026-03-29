@@ -1472,10 +1472,31 @@ fn drain_file_watcher(state: &mut AppState, syntax: &mut SyntaxRuntime, watcher:
             }
             if state.buffers[buf_idx].reload_from_disk() {
                 syntax.note_buffer_change(buf_idx, &mut state.buffers[buf_idx]);
-                // Recompute genome for the active editor buffer.
+                // Recompute genome and quality delta for the active editor buffer.
                 if buf_idx == state.active_editor_buffer_id {
                     let text = state.buffers[buf_idx].content_as_string();
                     let report = nit_core::compute_genome_report(&text, &changed_path);
+                    if let Some(prev) = state.genome_reports.get(&changed_path) {
+                        let gen_before: i32 = prev
+                            .encoder_scores
+                            .iter()
+                            .map(|s| s.generations_survived as i32)
+                            .sum();
+                        let gen_after: i32 = report
+                            .encoder_scores
+                            .iter()
+                            .map(|s| s.generations_survived as i32)
+                            .sum();
+                        let diff = nit_core::compute_genome_diff(prev, &report);
+                        state.genome_quality_delta =
+                            if diff.tier_after > diff.tier_before || gen_after > gen_before {
+                                1
+                            } else if diff.tier_after < diff.tier_before || gen_after < gen_before {
+                                -1
+                            } else {
+                                0
+                            };
+                    }
                     state.genome_reports.insert(changed_path.clone(), report);
                 }
             }
