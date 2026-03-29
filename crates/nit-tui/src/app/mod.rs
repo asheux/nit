@@ -465,6 +465,13 @@ pub fn run(
     syntax.prime_buffer(editor_id, state.editor_buffer(), warmup_editor);
     syntax.prime_buffer(notes_id, state.notes_buffer(), false);
 
+    // Load git HEAD base for diff gutter on initial editor buffer.
+    if let Some(path) = state.editor_buffer().path().cloned() {
+        if let Some(base) = git_head_content(&path) {
+            state.editor_buffer_mut().set_git_base(&base);
+        }
+    }
+
     let result = run_loop(
         &mut terminal,
         &mut state,
@@ -1534,6 +1541,7 @@ fn draw(
             file_tree_view::render(f, layout.editor, state, theme);
             None
         } else {
+            state.editor_buffer_mut().compute_diff_if_needed();
             let editor_render = syntax.render_snapshot_for(editor_id, state.editor_buffer());
             editor_view::render_editor(
                 f,
@@ -4475,6 +4483,12 @@ fn apply_action_with_syntax(
     if matches!(action, Action::OpenFile(_)) {
         // Avoid blocking highlight warmup when hopping files from NITTree.
         syntax.prime_buffer(after_editor_id, state.editor_buffer(), false);
+        // Load git HEAD base for diff gutter indicators.
+        if let Some(path) = state.editor_buffer().path() {
+            if let Some(base) = git_head_content(path) {
+                state.editor_buffer_mut().set_git_base(&base);
+            }
+        }
     }
 
     outcome
@@ -11015,6 +11029,37 @@ fn install_terminal_panic_hook(state: Weak<Mutex<TerminalState>>) {
         }
         previous(info);
     }));
+}
+
+/// Get the git HEAD version of a file for diff base.
+fn git_head_content(path: &Path) -> Option<String> {
+    use std::process::Command;
+    let dir = path.parent()?;
+    let root_out = Command::new("git")
+        .args(["rev-parse", "--show-toplevel"])
+        .current_dir(dir)
+        .output()
+        .ok()?;
+    if !root_out.status.success() {
+        return None;
+    }
+    let root = PathBuf::from(String::from_utf8(root_out.stdout).ok()?.trim());
+    let rel = path
+        .canonicalize()
+        .ok()?
+        .strip_prefix(&root)
+        .ok()?
+        .to_path_buf();
+    let output = Command::new("git")
+        .args(["show", &format!("HEAD:{}", rel.display())])
+        .current_dir(&root)
+        .output()
+        .ok()?;
+    if output.status.success() {
+        String::from_utf8(output.stdout).ok()
+    } else {
+        None
+    }
 }
 
 #[cfg(test)]

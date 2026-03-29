@@ -568,6 +568,34 @@ where
     out
 }
 
+/// Try to get the git HEAD version of a file for diff base.
+fn git_head_content(path: &Path) -> Option<String> {
+    use std::process::Command;
+    let dir = path.parent()?;
+    // Get the repo-relative path
+    let rel = Command::new("git")
+        .args(["ls-files", "--full-name", "--error-unmatch"])
+        .arg(path)
+        .current_dir(dir)
+        .output()
+        .ok()?;
+    if !rel.status.success() {
+        return None; // not tracked by git
+    }
+    let rel_path = String::from_utf8(rel.stdout).ok()?;
+    let rel_path = rel_path.trim();
+    let output = Command::new("git")
+        .args(["show", &format!("HEAD:{rel_path}")])
+        .current_dir(dir)
+        .output()
+        .ok()?;
+    if output.status.success() {
+        String::from_utf8(output.stdout).ok()
+    } else {
+        None
+    }
+}
+
 fn open_target_gol(path: Option<&Path>) -> anyhow::Result<(PathBuf, Buffer)> {
     match path {
         Some(p) if p.is_file() => {
@@ -577,7 +605,10 @@ fn open_target_gol(path: Option<&Path>) -> anyhow::Result<(PathBuf, Buffer)> {
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_else(|| "untitled".into());
-            let buffer = Buffer::from_str(name, &content, Some(p.to_path_buf()));
+            let mut buffer = Buffer::from_str(name, &content, Some(p.to_path_buf()));
+            if let Some(git_base) = git_head_content(p) {
+                buffer.set_git_base(&git_base);
+            }
             let root = p
                 .parent()
                 .map(|p| p.to_path_buf())
@@ -607,7 +638,10 @@ fn open_target_games(path: Option<&Path>) -> anyhow::Result<(PathBuf, Buffer)> {
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_else(|| "games.toml".into());
-            let buffer = Buffer::from_str(name, &content, Some(p.to_path_buf()));
+            let mut buffer = Buffer::from_str(name, &content, Some(p.to_path_buf()));
+            if let Some(git_base) = git_head_content(p) {
+                buffer.set_git_base(&git_base);
+            }
             let root = p
                 .parent()
                 .map(|p| p.to_path_buf())
@@ -629,7 +663,10 @@ fn open_games_workspace(root: &Path) -> anyhow::Result<(PathBuf, Buffer)> {
     if config_path.exists() {
         let content = core_io::load_to_string(&config_path)
             .with_context(|| format!("failed to read {}", config_path.display()))?;
-        let buffer = Buffer::from_str("games.toml", &content, Some(config_path));
+        let mut buffer = Buffer::from_str("games.toml", &content, Some(config_path.clone()));
+        if let Some(git_base) = git_head_content(&config_path) {
+            buffer.set_git_base(&git_base);
+        }
         return Ok((root, buffer));
     }
     let buffer = Buffer::from_str("games.toml", games_template(), Some(config_path));

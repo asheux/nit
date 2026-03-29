@@ -23,7 +23,7 @@ pub mod viewport;
 pub use actions::Action;
 pub use agent_bus::{AgentBusEvent, AgentTokenCount};
 pub use buffer::Buffer;
-pub use buffer::{BufferEdit, BufferPoint};
+pub use buffer::{BufferEdit, BufferPoint, LineDiffStatus};
 pub use config::{
     EditorConfig, GolConfig, GolRuleConfig, GolRulesConfig, GolSearchConfig, GolSearchIntensity,
     GolSeedSource, GolSnapshotsConfig, GolUserRule, HighlightConfig, HighlightEngine, Settings,

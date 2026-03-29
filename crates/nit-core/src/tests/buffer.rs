@@ -217,6 +217,87 @@ fn indent_unit_defaults_to_four_spaces() {
 }
 
 #[test]
+fn diff_detects_added_lines() {
+    let mut buf = Buffer::from_str("test", "a\nb\nc\n", None);
+    // No changes yet - all unchanged
+    buf.compute_diff_if_needed();
+    assert_eq!(buf.line_diff_status(0), LineDiffStatus::Unchanged);
+    assert_eq!(buf.line_diff_status(1), LineDiffStatus::Unchanged);
+
+    // Insert a new line
+    buf.cursor.line = 1;
+    buf.cursor.col = 0;
+    buf.open_line_above();
+    buf.insert_str("new");
+    buf.compute_diff_if_needed();
+    // The new line should be marked as Added
+    assert_eq!(buf.line_diff_status(1), LineDiffStatus::Added);
+}
+
+#[test]
+fn diff_detects_modified_lines() {
+    let mut buf = Buffer::from_str("test", "hello\nworld\n", None);
+    buf.cursor.line = 0;
+    buf.cursor.col = 5;
+    buf.insert_str(" there");
+    buf.compute_diff_if_needed();
+    assert_eq!(buf.line_diff_status(0), LineDiffStatus::Modified);
+    assert_eq!(buf.line_diff_status(1), LineDiffStatus::Unchanged);
+}
+
+#[test]
+fn diff_all_unchanged_on_open() {
+    let buf = Buffer::from_str("test", "a\nb\nc\n", None);
+    assert_eq!(buf.diff_statuses().len(), 0); // not computed yet
+}
+
+#[test]
+fn diff_resets_on_mark_clean() {
+    let mut buf = Buffer::from_str("test", "a\nb\n", None);
+    buf.cursor.line = 0;
+    buf.cursor.col = 1;
+    buf.insert_str("x");
+    buf.compute_diff_if_needed();
+    assert_eq!(buf.line_diff_status(0), LineDiffStatus::Modified);
+
+    // Simulate save
+    buf.mark_clean();
+    buf.compute_diff_if_needed();
+    assert_eq!(buf.line_diff_status(0), LineDiffStatus::Unchanged);
+}
+
+#[test]
+fn diff_modified_line_in_context() {
+    // Simulate: one line changed in the middle of unchanged code (like lib.rs case)
+    let base = "use foo;\nuse bar;\nuse baz;\nuse qux;\n";
+    let mut buf = Buffer::from_str("test", base, None);
+    // Change "use bar;" → "use bar_v2;"
+    buf.cursor.line = 1;
+    buf.cursor.col = 7;
+    buf.insert_str("_v2");
+    buf.compute_diff_if_needed();
+    assert_eq!(buf.line_diff_status(0), LineDiffStatus::Unchanged);
+    assert_eq!(buf.line_diff_status(1), LineDiffStatus::Modified);
+    assert_eq!(buf.line_diff_status(2), LineDiffStatus::Unchanged);
+    assert_eq!(buf.line_diff_status(3), LineDiffStatus::Unchanged);
+}
+
+#[test]
+fn diff_added_block_between_unchanged() {
+    // Simulate: new block inserted between existing code
+    let base = "fn a() {}\nfn b() {}\n";
+    let mut buf = Buffer::from_str("test", base, None);
+    buf.cursor.line = 0;
+    buf.cursor.col = 9;
+    buf.insert_newline();
+    buf.insert_str("fn new_func() {}");
+    buf.compute_diff_if_needed();
+    assert_eq!(buf.line_diff_status(0), LineDiffStatus::Unchanged);
+    assert_eq!(buf.line_diff_status(1), LineDiffStatus::Added);
+    assert_eq!(buf.line_diff_status(2), LineDiffStatus::Unchanged);
+}
+
+#[test]
 fn newline_after_brace_with_trailing_spaces() {
     let mut buf = Buffer::from_str("test", "fn main() {   ", None);
     buf.cursor.line = 0;

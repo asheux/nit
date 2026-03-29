@@ -1,5 +1,5 @@
 use crate::theme::Theme;
-use nit_core::{Buffer, Mode, PaneId};
+use nit_core::{Buffer, LineDiffStatus, Mode, PaneId};
 use nit_syntax::{hash_line_bytes, map_line_segments_to_chars, HighlightSnapshot, SegmentMapError};
 use ratatui::{
     layout::Rect,
@@ -107,11 +107,13 @@ pub fn render_buffer(
         base_style: Style,
         is_cursor_line: bool,
         mapped_segments: Option<Vec<nit_syntax::MappedLineSegment>>,
+        diff_status: LineDiffStatus,
     }
 
     let mut line_data: Vec<LineData> = Vec::with_capacity(height);
     let highlight_enabled = snapshot.is_some();
     let mut highlight_error: Option<SegmentMapError> = None;
+    let diff_statuses = buffer.diff_statuses();
     for row in 0..height {
         let line_idx = start + row;
         let mut content = if line_idx < total_lines {
@@ -130,6 +132,10 @@ pub fn render_buffer(
                 .add_modifier(Modifier::UNDERLINED);
         }
         let chars: Vec<char> = content.chars().collect();
+        let diff_status = diff_statuses
+            .get(line_idx)
+            .copied()
+            .unwrap_or(LineDiffStatus::Unchanged);
 
         let mapped_segments = if highlight_enabled {
             if let Some(snapshot) = snapshot {
@@ -159,6 +165,7 @@ pub fn render_buffer(
                                 base_style,
                                 is_cursor_line,
                                 mapped_segments: None,
+                                diff_status,
                             });
                             continue;
                         }
@@ -190,6 +197,7 @@ pub fn render_buffer(
             base_style,
             is_cursor_line,
             mapped_segments,
+            diff_status,
         });
     }
     if let Some(err) = highlight_error {
@@ -281,9 +289,21 @@ pub fn render_buffer(
             (format!(" {ln_blank} "), ln_style, sep_style)
         };
 
+        // Color the gutter separator based on diff status
+        let diff_sep_style = match data.diff_status {
+            LineDiffStatus::Added => sep_style.fg(theme.diff_added),
+            LineDiffStatus::Modified => sep_style.fg(theme.diff_modified),
+            LineDiffStatus::DeletedAbove => sep_style.fg(theme.diff_deleted),
+            LineDiffStatus::Unchanged => sep_style,
+        };
+        let diff_indicator = match data.diff_status {
+            LineDiffStatus::DeletedAbove => "▔",
+            _ => "│",
+        };
+
         let mut spans = vec![
             Span::styled(ln_text, ln_style),
-            Span::styled("│ ", sep_style),
+            Span::styled(format!("{diff_indicator} "), diff_sep_style),
         ];
 
         let offset_display =

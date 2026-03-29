@@ -107,6 +107,9 @@ pub struct Theme {
     pub hl: HighlightTheme,
     pub gol: GolTheme,
     pub seed: SeedTheme,
+    pub diff_added: Color,
+    pub diff_modified: Color,
+    pub diff_deleted: Color,
 }
 
 #[derive(Clone, Debug)]
@@ -203,6 +206,9 @@ impl Theme {
                         hl: HighlightTheme::from_file(cfg.hl, Color::Rgb(215, 229, 255)),
                         gol: GolTheme::from_file(cfg.gol),
                         seed: SeedTheme::from_file(cfg.seed),
+                        diff_added: Color::Rgb(154, 216, 143),
+                        diff_modified: Color::Rgb(242, 165, 65),
+                        diff_deleted: Color::Rgb(242, 95, 92),
                     };
                 }
             }
@@ -306,6 +312,9 @@ impl Default for Theme {
             hl: HighlightTheme::default(),
             gol: GolTheme::default(),
             seed: SeedTheme::default(),
+            diff_added: Color::Rgb(154, 216, 143),
+            diff_modified: Color::Rgb(242, 165, 65),
+            diff_deleted: Color::Rgb(242, 95, 92),
         }
     }
 }
