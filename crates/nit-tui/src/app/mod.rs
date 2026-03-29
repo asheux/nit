@@ -1031,6 +1031,27 @@ fn run_loop(
                 {
                     crate::swarm::cleanup_idle_chat_clone(state, agent_id);
                 }
+                // Auto-retry on genome quality degradation.
+                if let AgentBusEvent::TurnCompleted {
+                    agent_id,
+                    mission_id,
+                    ..
+                } = &event
+                {
+                    if let Some(prompt) = build_genome_retry_prompt(state) {
+                        let attempt = state.genome_retry_count;
+                        push_genome_retry_message(state, agent_id, attempt);
+                        dispatch_agent_prompt(
+                            state,
+                            &mut vitals,
+                            Some(&codex_runner),
+                            Some(&claude_runner),
+                            agent_id.clone(),
+                            mission_id.clone(),
+                            prompt,
+                        );
+                    }
+                }
             }
             // Re-resolve the pinned artifact so the popup stays on the
             // same card even when new cards shift the indices.
@@ -1103,6 +1124,27 @@ fn run_loop(
                 | AgentBusEvent::TurnFailed { agent_id, .. } = &event
                 {
                     crate::swarm::cleanup_idle_chat_clone(state, agent_id);
+                }
+                // Auto-retry on genome quality degradation.
+                if let AgentBusEvent::TurnCompleted {
+                    agent_id,
+                    mission_id,
+                    ..
+                } = &event
+                {
+                    if let Some(prompt) = build_genome_retry_prompt(state) {
+                        let attempt = state.genome_retry_count;
+                        push_genome_retry_message(state, agent_id, attempt);
+                        dispatch_agent_prompt(
+                            state,
+                            &mut vitals,
+                            Some(&codex_runner),
+                            Some(&claude_runner),
+                            agent_id.clone(),
+                            mission_id.clone(),
+                            prompt,
+                        );
+                    }
                 }
             }
             if let Some(ref pinned) = pinned_popup_ref {
@@ -1435,6 +1477,125 @@ fn record_agent_bus_vitals(vitals: &mut VitalsState, event: &AgentBusEvent) {
 
 /// Compute the genome report for the active editor buffer if one doesn't exist yet.
 /// This runs synchronously (~50-100ms) and only triggers once per file path.
+/// Maximum number of automatic genome-improvement retries per agent turn.
+const GENOME_RETRY_LIMIT: u8 = 3;
+
+/// Push a visible message to the agent console and diagnostics when a genome retry fires.
+fn push_genome_retry_message(state: &mut AppState, agent_id: &str, attempt: u8) {
+    let quality = state
+        .editor_buffer()
+        .path()
+        .and_then(|p| state.genome_reports.get(p))
+        .map(|r| format!("{} (tier {})", r.quality_level(), r.tier.numeral()))
+        .unwrap_or_else(|| "unknown".into());
+
+    let msg = format!(
+        "[genome] Quality degraded \u{2014} auto-retrying ({attempt}/{GENOME_RETRY_LIMIT}). Current: {quality}",
+    );
+
+    let at = timestamp_label(state);
+    state.agents.messages.push(nit_core::AgentMessage {
+        at: at.clone(),
+        channel: nit_core::AgentChannel::Broadcast,
+        agent_id: Some(agent_id.to_string()),
+        mission_id: None,
+        text: msg.clone(),
+        prompt_msg_idx: None,
+        kind: None,
+    });
+    state.agents.console_scroll = nit_core::CONSOLE_SCROLL_BOTTOM;
+
+    state
+        .agents
+        .diag_events
+        .push(nit_core::AgentDiagnosticEvent {
+            severity: nit_core::AgentAlertSeverity::Warn,
+            source: "genome".into(),
+            message: format!(
+                "[{agent_id}] genome quality degraded, retry {attempt}/{GENOME_RETRY_LIMIT}"
+            ),
+            at,
+        });
+    state.agents.note_event();
+}
+
+/// Build a follow-up prompt if the agent's last turn degraded genome quality.
+/// Returns `None` if quality did not degrade or retry limit is reached.
+fn build_genome_retry_prompt(state: &mut AppState) -> Option<String> {
+    if !state.settings.genome.genome_context_enabled {
+        return None;
+    }
+    // Only retry on degradation relative to baseline.
+    if state.genome_quality_delta >= 0 {
+        state.genome_retry_count = 0;
+        state.genome_baseline = None;
+        return None;
+    }
+    if state.genome_retry_count >= GENOME_RETRY_LIMIT {
+        state.genome_baseline = None;
+        return None;
+    }
+    state.genome_retry_count += 1;
+    let attempt = state.genome_retry_count;
+
+    let file_path = state.editor_buffer().path()?.clone();
+    let report = state.genome_reports.get(&file_path)?;
+
+    let mut prompt = String::new();
+
+    // Full genome report.
+    prompt.push_str(&nit_core::format_genome_report(report));
+    prompt.push('\n');
+
+    // Diff from previous version.
+    if let Some(diff) = &state.last_genome_diff {
+        prompt.push_str(diff);
+        prompt.push('\n');
+    }
+
+    // Quality goals.
+    prompt.push_str(nit_core::GENOME_AGENT_INSTRUCTIONS);
+    prompt.push_str("\n\n");
+
+    // Baseline context.
+    let baseline_info = if let Some(base) = &state.genome_baseline {
+        format!(
+            "Baseline before your changes: {} (tier {}, consistency {:.2})\n",
+            base.quality_level(),
+            base.tier.numeral(),
+            base.cross_encoder_consistency,
+        )
+    } else {
+        String::new()
+    };
+
+    // Retry instructions.
+    prompt.push_str(&format!(
+        "[GENOME QUALITY DEGRADED \u{2014} automatic retry {attempt}/{GENOME_RETRY_LIMIT}]\n\n\
+         Your changes degraded the structural quality of {} below the baseline.\n\
+         {baseline_info}\
+         Current quality: {} (tier {}, consistency {:.2})\n\n\
+         Your goal is to IMPROVE the structural quality. If improvement is not possible \
+         given the functional requirements, you MUST NOT degrade it below the baseline. \
+         At minimum, restore the quality to the baseline level.\n\n\
+         Specific actions to take:\n\
+         - Review the recommendations above and address as many as possible\n\
+         - Split functions with high cyclomatic complexity (> 8)\n\
+         - Reduce nesting depth with early returns and guard clauses\n\
+         - Use descriptive, unique identifiers (aim for >= 65% uniqueness)\n\
+         - Add whitespace between logical sections and comments on public interfaces\n\
+         - Aim for tier III (Spaceship) or higher on all AST-driven encoders\n\
+         - Aim for density between 0.20 and 0.35 on AST encoders\n\n\
+         Refactor now to improve the genome score, then submit your changes.\n",
+        file_path.display(),
+        report.quality_level(),
+        report.tier.numeral(),
+        report.cross_encoder_consistency,
+    ));
+
+    Some(prompt)
+}
+
 fn maybe_compute_genome_report(state: &mut AppState) {
     let file_path = match state.editor_buffer().path().cloned() {
         Some(p) => p,

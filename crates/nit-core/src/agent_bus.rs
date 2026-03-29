@@ -161,6 +161,16 @@ impl AgentBusEvent {
                         mission.updated_at = at;
                     }
                 }
+
+                // Capture genome baseline before the agent modifies anything.
+                // Only set once per agent session — retries keep the same baseline.
+                if state.genome_baseline.is_none() {
+                    if let Some(file_path) = state.editor_buffer().path() {
+                        if let Some(report) = state.genome_reports.get(file_path) {
+                            state.genome_baseline = Some(report.clone());
+                        }
+                    }
+                }
             }
             AgentBusEvent::TurnHeartbeat {
                 agent_id,
@@ -386,16 +396,46 @@ impl AgentBusEvent {
                     at,
                 });
 
+                // Reload editor buffer from disk (agent may have written to the file).
+                state.editor_buffer_mut().reload_from_disk();
+
                 // Genome evaluation on the active editor buffer.
                 if state.settings.genome.genome_context_enabled {
                     if let Some(file_path) = state.editor_buffer().path().cloned() {
                         let text = state.editor_buffer().content_as_string();
                         let report = crate::genome_report::compute_genome_report(&text, &file_path);
 
+                        // Diff for display: compare against previous report.
                         if let Some(prev) = state.genome_reports.get(&file_path) {
                             let diff = crate::genome_report::compute_genome_diff(prev, &report);
                             let diff_text = crate::genome_report::format_genome_diff(&diff);
                             state.last_genome_diff = Some(diff_text);
+                        }
+
+                        // Quality delta for retry logic: compare against BASELINE.
+                        let baseline = state
+                            .genome_baseline
+                            .as_ref()
+                            .or_else(|| state.genome_reports.get(&file_path));
+                        if let Some(base) = baseline {
+                            let gen_base: i32 = base
+                                .encoder_scores
+                                .iter()
+                                .map(|s| s.generations_survived as i32)
+                                .sum();
+                            let gen_now: i32 = report
+                                .encoder_scores
+                                .iter()
+                                .map(|s| s.generations_survived as i32)
+                                .sum();
+                            state.genome_quality_delta =
+                                if report.tier > base.tier || gen_now > gen_base {
+                                    1
+                                } else if report.tier < base.tier || gen_now < gen_base {
+                                    -1
+                                } else {
+                                    0
+                                };
                         }
 
                         persist_genome_report(&state.workspace_root, &report);

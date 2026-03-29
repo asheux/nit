@@ -1803,9 +1803,17 @@ pub struct AppState {
     /// +1 = improved, -1 = degraded, 0 = unchanged.
     #[serde(skip)]
     pub genome_quality_delta: i32,
+    /// Baseline genome report captured before the agent's first turn on this file.
+    /// Retries compare against this baseline, not the previous iteration.
+    #[serde(skip)]
+    pub genome_baseline: Option<crate::genome_report::GenomeReport>,
     /// True when genome computation has been requested but not yet executed.
     #[serde(skip)]
     pub genome_computing: bool,
+    /// Consecutive genome retry attempts for the current agent turn.
+    /// Reset to 0 when quality improves or stays the same.
+    #[serde(skip)]
+    pub genome_retry_count: u8,
     /// Scroll offset for the gate monitor / structural quality pane.
     #[serde(skip)]
     pub gate_monitor_scroll: usize,
@@ -1998,6 +2006,8 @@ impl AppState {
             last_genome_diff: None,
             genome_computing: false,
             genome_quality_delta: 0,
+            genome_baseline: None,
+            genome_retry_count: 0,
             gate_monitor_scroll: 0,
         }
     }
