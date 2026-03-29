@@ -1428,6 +1428,7 @@ fn maybe_compute_genome_report(state: &mut AppState) {
         let report = nit_core::compute_genome_report(&text, &file_path);
         state.genome_reports.insert(file_path, report);
         state.genome_computing = false;
+        state.gate_monitor_scroll = 0;
     } else {
         // First encounter: set flag so the loading bar renders this frame,
         // and the computation happens next frame.
@@ -5565,6 +5566,13 @@ fn handle_mouse_event_with_swarm(
                     bump_scroll(&mut scroll, delta);
                     state.agents.console_scroll = scroll;
                 }
+                return true;
+            }
+            if point_in_rect(mouse.column, mouse.row, layout.gate) {
+                let inner = Block::default().borders(Borders::ALL).inner(layout.gate);
+                let lines = gate_monitor_view::build_lines(state, theme, inner.width as usize);
+                let max_scroll = lines.len().saturating_sub(inner.height as usize);
+                bump_scroll_clamped(&mut state.gate_monitor_scroll, delta, max_scroll);
                 return true;
             }
             if point_in_rect(mouse.column, mouse.row, layout.job) {

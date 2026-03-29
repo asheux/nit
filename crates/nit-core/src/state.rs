@@ -1802,6 +1802,9 @@ pub struct AppState {
     /// True when genome computation has been requested but not yet executed.
     #[serde(skip)]
     pub genome_computing: bool,
+    /// Scroll offset for the gate monitor / structural quality pane.
+    #[serde(skip)]
+    pub gate_monitor_scroll: usize,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Default)]
@@ -1990,6 +1993,7 @@ impl AppState {
             genome_reports: HashMap::new(),
             last_genome_diff: None,
             genome_computing: false,
+            gate_monitor_scroll: 0,
         }
     }
 

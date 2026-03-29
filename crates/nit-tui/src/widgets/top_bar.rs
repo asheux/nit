@@ -61,7 +61,7 @@ pub fn render(
     } else {
         let star_width = "*".width();
         let name_max = file_max.saturating_sub(star_width);
-        format!("{}*", truncate_start(&file_text, name_max))
+        truncate_start(&file_text, name_max)
     };
 
     let mut spans = vec![
@@ -86,12 +86,22 @@ pub fn render(
                     Modifier::BOLD
                 }),
         ),
+    ];
+    if !dirty.is_empty() {
+        spans.push(Span::styled(
+            "*",
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
+    spans.extend([
         Span::styled(" | ", Style::default().fg(theme.border)),
         Span::styled(mode, Style::default().fg(theme.title)),
         Span::styled(" | ", Style::default().fg(theme.border)),
         Span::styled(app_label, Style::default().fg(theme.title)),
         Span::styled(" | UTF-8 ", Style::default().fg(theme.border)),
-    ];
+    ]);
 
     let left_width: usize = spans.iter().map(|s| s.content.as_ref().width()).sum();
     let max_right = inner_width.saturating_sub(left_width).saturating_sub(1);

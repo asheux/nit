@@ -75,8 +75,11 @@ pub fn render(frame: &mut Frame, area: ratatui::layout::Rect, state: &AppState, 
         theme.selection_bg,
         0,
     );
-    let para =
-        Paragraph::new(lines).style(Style::default().bg(theme.background).fg(theme.foreground));
+    let max_scroll = lines.len().saturating_sub(inner.height as usize);
+    let scroll = state.gate_monitor_scroll.min(max_scroll);
+    let para = Paragraph::new(lines)
+        .style(Style::default().bg(theme.background).fg(theme.foreground))
+        .scroll((scroll as u16, 0));
     frame.render_widget(para, inner);
 }
 
@@ -103,7 +106,6 @@ fn build_lines_genome(
     width: usize,
 ) -> Vec<Line<'static>> {
     let label_style = Style::default().fg(theme.title).add_modifier(Modifier::DIM);
-    let value_style = Style::default().fg(theme.foreground);
     let dim_style = Style::default()
         .fg(theme.border)
         .add_modifier(Modifier::DIM);
@@ -119,17 +121,13 @@ fn build_lines_genome(
 
     let mut lines: Vec<Line<'static>> = Vec::new();
 
-    // ── File name ──
-    let file_name = shorten_path(&report.file_path, width.saturating_sub(2));
-    lines.push(Line::from(Span::styled(file_name, value_style)));
-    lines.push(Line::from(""));
-
     // ── Tier display ──
-    let tier_style = tier_style(report.tier, theme);
     let tier_text = format!("TIER {}  {}", report.tier.numeral(), report.tier.name());
     lines.push(Line::from(Span::styled(
         tier_text,
-        tier_style.add_modifier(Modifier::BOLD),
+        Style::default()
+            .fg(theme.accent)
+            .add_modifier(Modifier::BOLD),
     )));
     lines.push(build_tier_bar(report.tier, width, theme));
     lines.push(Line::from(""));
@@ -544,10 +542,6 @@ fn tier_color(tier: nit_core::GenomeTier, theme: &Theme) -> ratatui::style::Colo
     }
 }
 
-fn tier_style(tier: nit_core::GenomeTier, theme: &Theme) -> Style {
-    Style::default().fg(tier_color(tier, theme))
-}
-
 /// Animated loading bar centered vertically in the given area.
 /// Identical to the visualizer pane's loading bar.
 fn draw_loading_bar(frame: &mut Frame, area: ratatui::layout::Rect, theme: &Theme) {
@@ -631,17 +625,6 @@ fn metric_display_name(metric: &str) -> &str {
         "components" => "low modularity",
         other => other,
     }
-}
-
-fn shorten_path(path: &std::path::Path, max_len: usize) -> String {
-    let s = path.to_string_lossy();
-    if s.len() <= max_len {
-        return s.to_string();
-    }
-    if max_len < 4 {
-        return s.chars().take(max_len).collect();
-    }
-    format!("...{}", &s[s.len().saturating_sub(max_len - 3)..])
 }
 
 fn shorten_text(text: &str, max_len: usize) -> String {
