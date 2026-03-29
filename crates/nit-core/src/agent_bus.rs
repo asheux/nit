@@ -385,6 +385,23 @@ impl AgentBusEvent {
                     message: format!("[{agent_id}] turn completed"),
                     at,
                 });
+
+                // Genome evaluation on the active editor buffer.
+                if state.settings.genome.genome_context_enabled {
+                    if let Some(file_path) = state.editor_buffer().path().cloned() {
+                        let text = state.editor_buffer().content_as_string();
+                        let report = crate::genome_report::compute_genome_report(&text, &file_path);
+
+                        if let Some(prev) = state.genome_reports.get(&file_path) {
+                            let diff = crate::genome_report::compute_genome_diff(prev, &report);
+                            let diff_text = crate::genome_report::format_genome_diff(&diff);
+                            state.last_genome_diff = Some(diff_text);
+                        }
+
+                        persist_genome_report(&state.workspace_root, &report);
+                        state.genome_reports.insert(file_path, report);
+                    }
+                }
             }
         }
 
@@ -679,6 +696,60 @@ fn extract_error_message(value: &serde_json::Value) -> Option<&str> {
         .and_then(|err| err.get("message"))
         .and_then(|v| v.as_str())
         .or_else(|| value.get("message").and_then(|v| v.as_str()))
+}
+
+// ---------------------------------------------------------------------------
+// Genome report persistence
+// ---------------------------------------------------------------------------
+
+fn genome_dir(workspace_root: &std::path::Path) -> std::path::PathBuf {
+    workspace_root.join(".nit").join("genome")
+}
+
+fn genome_report_filename(file_path: &std::path::Path) -> String {
+    let s = file_path.to_string_lossy();
+    format!("{}.json", s.replace('/', "__"))
+}
+
+fn persist_genome_report(
+    workspace_root: &std::path::Path,
+    report: &crate::genome_report::GenomeReport,
+) {
+    let dir = genome_dir(workspace_root);
+    let _ = std::fs::create_dir_all(&dir);
+    let filename = genome_report_filename(&report.file_path);
+    let path = dir.join(filename);
+    if let Ok(json) = serde_json::to_string(report) {
+        let _ = std::fs::write(path, json);
+    }
+}
+
+/// Load previously persisted genome reports from `.nit/genome/`.
+pub fn load_genome_reports(
+    workspace_root: &std::path::Path,
+) -> std::collections::HashMap<std::path::PathBuf, crate::genome_report::GenomeReport> {
+    let mut map = std::collections::HashMap::new();
+    let dir = genome_dir(workspace_root);
+    let entries = match std::fs::read_dir(&dir) {
+        Ok(e) => e,
+        Err(_) => return map,
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("json") {
+            continue;
+        }
+        let data = match std::fs::read_to_string(&path) {
+            Ok(d) => d,
+            Err(_) => continue,
+        };
+        let report: crate::genome_report::GenomeReport = match serde_json::from_str(&data) {
+            Ok(r) => r,
+            Err(_) => continue,
+        };
+        map.insert(report.file_path.clone(), report);
+    }
+    map
 }
 
 #[cfg(test)]

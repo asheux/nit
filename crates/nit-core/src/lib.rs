@@ -7,6 +7,7 @@ pub mod agent_bus;
 pub mod buffer;
 pub mod config;
 pub mod cursor;
+pub mod genome_report;
 pub mod gol_rules;
 pub mod io;
 pub mod lab;
@@ -25,11 +26,16 @@ pub use agent_bus::{AgentBusEvent, AgentTokenCount};
 pub use buffer::Buffer;
 pub use buffer::{BufferEdit, BufferPoint, LineDiffStatus};
 pub use config::{
-    EditorConfig, GolConfig, GolRuleConfig, GolRulesConfig, GolSearchConfig, GolSearchIntensity,
-    GolSeedSource, GolSnapshotsConfig, GolUserRule, HighlightConfig, HighlightEngine, Settings,
-    SnapshotPrunePolicy,
+    AgentGenomeConfig, EditorConfig, GenomeGateConfig, GolConfig, GolRuleConfig, GolRulesConfig,
+    GolSearchConfig, GolSearchIntensity, GolSeedSource, GolSnapshotsConfig, GolUserRule,
+    HighlightConfig, HighlightEngine, Settings, SnapshotPrunePolicy,
 };
 pub use cursor::Cursor;
+pub use genome_report::{
+    compute_genome_diff, compute_genome_report, format_genome_diff, format_genome_report,
+    EncoderDiff, EncoderScore, GenomeDiff, GenomeRecommendation, GenomeReport, GenomeTier,
+    RecommendationSeverity,
+};
 pub use gol_rules::{load_rule_catalog, NamedRule, RuleCatalog, RuleSelectError, SelectedRule};
 pub use io::{load_to_string, save_buffer};
 pub use lab::{AppKind, LabId, LabSpec};

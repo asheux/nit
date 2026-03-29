@@ -1160,6 +1160,7 @@ fn dag_scheduler_dispatches_after_deps() {
         synthesis_prompt: None,
         gate_output: None,
         gate_report: None,
+        genome_gate_results: None,
         report_status: None,
         report_output: None,
     };
@@ -1255,6 +1256,7 @@ fn single_writer_limits_concurrent_write_tasks() {
         synthesis_prompt: None,
         gate_output: None,
         gate_report: None,
+        genome_gate_results: None,
         report_status: None,
         report_output: None,
     };
@@ -1403,6 +1405,7 @@ fn deadlock_detection_skips_pending_tasks() {
         synthesis_prompt: None,
         gate_output: None,
         gate_report: None,
+        genome_gate_results: None,
         report_status: None,
         report_output: None,
     };
@@ -1732,6 +1735,7 @@ fn dashboard_distinguishes_pending_queued_and_skipped() {
                 notes: Some("formatting".into()),
             }],
         }),
+        genome_gate_results: None,
         report_status: None,
         report_output: None,
     };

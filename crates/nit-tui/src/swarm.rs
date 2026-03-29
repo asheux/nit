@@ -851,6 +851,7 @@ enum GateBundle {
     Node,
     Python,
     Go,
+    Genome,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -873,6 +874,9 @@ impl GateBundle {
         }
         if value.eq_ignore_ascii_case("go-ci") {
             return Some(Self::Go);
+        }
+        if value.eq_ignore_ascii_case("genome") || value.eq_ignore_ascii_case("genome-quality") {
+            return Some(Self::Genome);
         }
         None
     }
@@ -954,6 +958,7 @@ impl GateBundle {
             GateBundle::Node => "node-ci",
             GateBundle::Python => "python-ci",
             GateBundle::Go => "go-ci",
+            GateBundle::Genome => "genome",
         }
     }
 
@@ -1015,6 +1020,10 @@ impl GateBundle {
                     command: "go test ./...",
                 },
             ],
+            GateBundle::Genome => vec![Gate {
+                name: "genome-quality",
+                command: "(evaluated locally by nit)",
+            }],
         }
     }
 }
@@ -1262,6 +1271,7 @@ struct SwarmRun {
     synthesis_prompt: Option<String>,
     gate_output: Option<String>,
     gate_report: Option<GateReport>,
+    genome_gate_results: Option<String>,
     report_status: Option<String>,
     report_output: Option<String>,
 }
@@ -1752,6 +1762,7 @@ impl SwarmRuntime {
                 synthesis_prompt: None,
                 gate_output: None,
                 gate_report: None,
+                genome_gate_results: None,
                 report_status: None,
                 report_output: None,
             },
@@ -2011,6 +2022,9 @@ impl SwarmRuntime {
                                 run.stage = SwarmStage::Verifying;
                                 update_mission_phase(state, &run.mission_id, MissionPhase::Verify);
                                 update_mission_status(state, &run, Some(done));
+                                if state.settings.genome.genome_gate_enabled {
+                                    run.genome_gate_results = Some(evaluate_genome_gate(state));
+                                }
                                 push_system_message_to_mission(
                                     state,
                                     &run.mission_id,
@@ -2078,6 +2092,9 @@ impl SwarmRuntime {
                                 run.stage = SwarmStage::Verifying;
                                 update_mission_phase(state, &run.mission_id, MissionPhase::Verify);
                                 update_mission_status(state, &run, Some(done));
+                                if state.settings.genome.genome_gate_enabled {
+                                    run.genome_gate_results = Some(evaluate_genome_gate(state));
+                                }
                                 push_system_message_to_mission(
                                     state,
                                     &run.mission_id,
@@ -2141,6 +2158,26 @@ impl SwarmRuntime {
                                 &run.mission_id,
                                 "VERIFY result: ERROR (no parseable JSON report)".into(),
                             );
+                        }
+
+                        // Dispatch genome reviewer if enabled.
+                        if state.settings.genome.genome_gate_enabled {
+                            if let Some(reviewer_id) = run.verifier_agent_id.clone() {
+                                let review_prompt = build_genome_review_prompt(state);
+                                if !review_prompt.is_empty() {
+                                    push_system_message_to_mission(
+                                        state,
+                                        &run.mission_id,
+                                        format!("Dispatching genome review to {reviewer_id}"),
+                                    );
+                                    dispatches.push(SwarmDispatch {
+                                        agent_id: reviewer_id,
+                                        mission_id: run.mission_id.clone(),
+                                        prompt: review_prompt,
+                                        task_role: Some("genome-reviewer".into()),
+                                    });
+                                }
+                            }
                         }
 
                         run.stage = SwarmStage::Synthesizing;
@@ -2397,6 +2434,9 @@ impl SwarmRuntime {
                                 run.stage = SwarmStage::Verifying;
                                 update_mission_phase(state, &run.mission_id, MissionPhase::Verify);
                                 update_mission_status(state, &run, Some(done));
+                                if state.settings.genome.genome_gate_enabled {
+                                    run.genome_gate_results = Some(evaluate_genome_gate(state));
+                                }
                                 push_system_message_to_mission(
                                     state,
                                     &run.mission_id,
@@ -2467,6 +2507,9 @@ impl SwarmRuntime {
                                 run.stage = SwarmStage::Verifying;
                                 update_mission_phase(state, &run.mission_id, MissionPhase::Verify);
                                 update_mission_status(state, &run, Some(done));
+                                if state.settings.genome.genome_gate_enabled {
+                                    run.genome_gate_results = Some(evaluate_genome_gate(state));
+                                }
                                 push_system_message_to_mission(
                                     state,
                                     &run.mission_id,
@@ -2509,6 +2552,26 @@ impl SwarmRuntime {
                             &run.mission_id,
                             format!("VERIFY result: ERROR ({message})"),
                         );
+
+                        // Dispatch genome reviewer if enabled.
+                        if state.settings.genome.genome_gate_enabled {
+                            if let Some(reviewer_id) = run.verifier_agent_id.clone() {
+                                let review_prompt = build_genome_review_prompt(state);
+                                if !review_prompt.is_empty() {
+                                    push_system_message_to_mission(
+                                        state,
+                                        &run.mission_id,
+                                        format!("Dispatching genome review to {reviewer_id}"),
+                                    );
+                                    dispatches.push(SwarmDispatch {
+                                        agent_id: reviewer_id,
+                                        mission_id: run.mission_id.clone(),
+                                        prompt: review_prompt,
+                                        task_role: Some("genome-reviewer".into()),
+                                    });
+                                }
+                            }
+                        }
 
                         run.stage = SwarmStage::Synthesizing;
                         update_mission_phase(state, &run.mission_id, MissionPhase::Report);
@@ -5725,6 +5788,13 @@ fn role_contract_lines(role: &str) -> &'static [&'static str] {
             "Differentiate confirmed results from unrun suggestions.",
             "Do not redesign the solution unless a test failure makes it necessary.",
         ],
+        "genome-reviewer" => &[
+            "Evaluate the structural quality of code changes using the genome reports provided.",
+            "For each modified file, compare before/after genome metrics and identify regressions.",
+            "Produce a structured review: which files improved, which regressed, critical issues, and specific refactoring recommendations.",
+            "Overall verdict: PASS (all files tier II+) or FAIL (any file tier I).",
+            "Do not edit the workspace; report findings as text only.",
+        ],
         _ => &[
             "Stay within the assigned task scope.",
             "Do not silently switch into a different swarm role.",
@@ -5910,6 +5980,11 @@ fn build_synthesis_prompt(run: &SwarmRun) -> String {
             out.push('\n');
         }
     }
+    if let Some(genome_results) = run.genome_gate_results.as_deref() {
+        out.push_str("\n\nGenome quality review:\n");
+        out.push_str(genome_results);
+        out.push('\n');
+    }
     if let Some(extra) = run.synthesis_prompt.as_deref() {
         out.push_str("\n\nSynthesis notes:\n");
         out.push_str(extra.trim());
@@ -5962,6 +6037,151 @@ fn extract_json_code_blocks(text: &str) -> Vec<String> {
     blocks
 }
 
+/// Build the genome review prompt for the genome-reviewer role.
+fn build_genome_review_prompt(state: &AppState) -> String {
+    let mut prompt = String::from(
+        "You are the genome reviewer. Evaluate the structural quality of the code changes \
+         made by this swarm mission. For each modified file, a genome report shows \
+         before/after metrics across seven encoders.\n\n",
+    );
+
+    // Evaluate the active buffer as the modified file.
+    let mut has_content = false;
+    if let Some(file_path) = state.editor_buffer().path().cloned() {
+        let text = state.editor_buffer().content_as_string();
+        let report = nit_core::compute_genome_report(&text, &file_path);
+        prompt.push_str(&nit_core::format_genome_report(&report));
+        prompt.push('\n');
+
+        if let Some(prev) = state.genome_reports.get(&file_path) {
+            let diff = nit_core::compute_genome_diff(prev, &report);
+            prompt.push_str(&nit_core::format_genome_diff(&diff));
+            prompt.push('\n');
+        }
+        has_content = true;
+    }
+
+    if !has_content {
+        return String::new();
+    }
+
+    prompt.push_str(
+        "\nProduce a structured review:\n\
+         1. Which files improved in structural quality and which regressed\n\
+         2. The most critical structural issues remaining\n\
+         3. Specific refactoring recommendations for the worst-scoring files\n\
+         4. Overall verdict: PASS (all files tier II+) or FAIL (any file tier I)\n",
+    );
+
+    prompt
+}
+
+/// Evaluate genome quality on modified files and produce a gate result string.
+fn evaluate_genome_gate(state: &AppState) -> String {
+    let genome_config = &state.settings.genome.genome_gate;
+    let min_tier = nit_core::GenomeTier::from_generations(match genome_config.min_tier {
+        0 => 0,
+        1 => 51,
+        2 => 201,
+        3 => 501,
+        _ => 2001,
+    });
+
+    // Evaluate the active buffer as the modified file.
+    let mut out = String::new();
+    if let Some(file_path) = state.editor_buffer().path().cloned() {
+        let text = state.editor_buffer().content_as_string();
+        let report = nit_core::compute_genome_report(&text, &file_path);
+        let mut failures = Vec::new();
+
+        if report.tier < min_tier {
+            failures.push(format!(
+                "Genome FAIL: {} tier {} ({}) below minimum {} ({})",
+                file_path.display(),
+                report.tier.numeral(),
+                report.tier.name(),
+                min_tier.numeral(),
+                min_tier.name(),
+            ));
+        }
+
+        for score in &report.encoder_scores {
+            if matches!(
+                score.encoder,
+                nit_core::SeedEncoderId::TokenSpectrum
+                    | nit_core::SeedEncoderId::AstStructure
+                    | nit_core::SeedEncoderId::ComplexityField
+            ) && score.density > genome_config.max_density
+            {
+                failures.push(format!(
+                    "Genome FAIL: {} density {:.2} on {} exceeds {:.2}",
+                    file_path.display(),
+                    score.density,
+                    score.encoder.label(),
+                    genome_config.max_density,
+                ));
+            }
+        }
+
+        if let Some(s) = report
+            .encoder_scores
+            .iter()
+            .find(|s| s.encoder == nit_core::SeedEncoderId::AstStructure)
+        {
+            if s.components < genome_config.min_components {
+                failures.push(format!(
+                    "Genome FAIL: {} has {} components (min: {})",
+                    file_path.display(),
+                    s.components,
+                    genome_config.min_components,
+                ));
+            }
+        }
+
+        if report.cross_encoder_consistency < genome_config.min_consistency {
+            failures.push(format!(
+                "Genome FAIL: {} consistency {:.2} below {:.2}",
+                file_path.display(),
+                report.cross_encoder_consistency,
+                genome_config.min_consistency,
+            ));
+        }
+
+        if genome_config.require_no_regression {
+            if let Some(prev) = state.genome_reports.get(&file_path) {
+                if report.tier < prev.tier {
+                    failures.push(format!(
+                        "Genome FAIL: {} regressed from {} ({}) to {} ({})",
+                        file_path.display(),
+                        prev.tier.numeral(),
+                        prev.tier.name(),
+                        report.tier.numeral(),
+                        report.tier.name(),
+                    ));
+                }
+            }
+        }
+
+        for rec in &report.recommendations {
+            if matches!(rec.severity, nit_core::RecommendationSeverity::Critical) {
+                failures.push(format!("  Recommendation: {}", rec.message));
+            }
+        }
+
+        out.push_str(&nit_core::format_genome_report(&report));
+        if failures.is_empty() {
+            out.push_str("\nGenome gate: PASS\n");
+        } else {
+            out.push_str("\nGenome gate: FAIL\n");
+            for f in &failures {
+                out.push_str(f);
+                out.push('\n');
+            }
+        }
+    }
+    out
+}
+
 fn build_verify_prompt(run: &SwarmRun, bundle: &GateBundle) -> String {
     let mut out = String::new();
     out.push_str(
@@ -5980,6 +6200,12 @@ fn build_verify_prompt(run: &SwarmRun, bundle: &GateBundle) -> String {
     out.push_str(&format!("Bundle: {}\n", bundle.label()));
     for gate in bundle.gates() {
         out.push_str(&format!("- {}: `{}`\n", gate.name, gate.command));
+    }
+
+    if let Some(genome_results) = run.genome_gate_results.as_deref() {
+        out.push_str("\nGenome gate (pre-evaluated by nit):\n");
+        out.push_str(genome_results);
+        out.push_str("\nInclude a gate entry for \"genome-quality\" with ok=true/false based on the results above.\n");
     }
 
     out.push_str("\nReport schema:\n");

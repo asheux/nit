@@ -1948,6 +1948,48 @@ fn extract_total_tokens(info: &serde_json::Value) -> Option<u64> {
         .or_else(|| info.get("used_tokens").and_then(|v| v.as_u64()))
 }
 
+// ---------------------------------------------------------------------------
+// Genome evaluation tool (Phase 5: MCP tool exposure)
+// ---------------------------------------------------------------------------
+
+/// The evaluate_genome tool definition for inclusion in agent prompts.
+pub const EVALUATE_GENOME_TOOL_DESCRIPTION: &str = r#"
+[nit tool: evaluate_genome]
+Evaluate the structural quality of a source file using nit's code genome system.
+Runs seven encoders (three AST-driven, one hybrid, three byte-level), simulates
+Conway's Game of Life on each, and returns density, component count, generations
+survived, tier, cross-encoder consistency, and targeted refactoring recommendations.
+Use this after writing or modifying code to check whether structural quality
+improved or degraded.
+
+To request evaluation, include in your response:
+  [evaluate_genome: <file_path>]
+
+The results will be included in your next prompt.
+[/nit tool]
+"#;
+
+/// Handle an evaluate_genome request from an agent's output.
+/// Returns a formatted genome report if a request pattern is found.
+pub fn handle_evaluate_genome_request(workspace_root: &Path, message: &str) -> Option<String> {
+    let marker = "[evaluate_genome:";
+    let start = message.find(marker)?;
+    let rest = &message[start + marker.len()..];
+    let end = rest.find(']')?;
+    let raw_path = rest[..end].trim();
+    if raw_path.is_empty() {
+        return None;
+    }
+    let file_path = if std::path::Path::new(raw_path).is_absolute() {
+        std::path::PathBuf::from(raw_path)
+    } else {
+        workspace_root.join(raw_path)
+    };
+    let text = std::fs::read_to_string(&file_path).ok()?;
+    let report = nit_core::compute_genome_report(&text, &file_path);
+    Some(nit_core::format_genome_report(&report))
+}
+
 #[cfg(test)]
 #[path = "tests/codex_runner.rs"]
 mod tests;

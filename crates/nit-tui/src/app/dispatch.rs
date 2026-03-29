@@ -863,6 +863,60 @@ fn titlecase_role(role: &str) -> String {
     }
 }
 
+/// Build the genome context string to prepend to agent prompts.
+fn build_genome_context(state: &AppState) -> Option<String> {
+    if !state.settings.genome.genome_context_enabled {
+        return None;
+    }
+    let file_path = state.editor_buffer().path()?;
+    let report = state.genome_reports.get(file_path)?;
+
+    let mut ctx = String::from("\n[genome context]\n");
+    ctx.push_str(&format!("File: {}\n", file_path.display()));
+    ctx.push_str(&format!(
+        "Current tier: {} ({})\n",
+        report.tier.numeral(),
+        report.tier.name()
+    ));
+
+    for score in &report.encoder_scores {
+        if matches!(
+            score.encoder,
+            nit_core::SeedEncoderId::TokenSpectrum
+                | nit_core::SeedEncoderId::AstStructure
+                | nit_core::SeedEncoderId::ComplexityField
+        ) {
+            ctx.push_str(&format!(
+                "{}: density={:.2}, components={}, generations={}\n",
+                score.encoder.label(),
+                score.density,
+                score.components,
+                score.generations_survived
+            ));
+        }
+    }
+
+    ctx.push_str(&format!(
+        "Cross-encoder consistency: {:.2}\n",
+        report.cross_encoder_consistency
+    ));
+
+    if !report.recommendations.is_empty() {
+        ctx.push_str("\nStructural recommendations:\n");
+        for rec in &report.recommendations {
+            ctx.push_str(&format!("- {}\n", rec.message));
+        }
+    }
+
+    if let Some(diff) = &state.last_genome_diff {
+        ctx.push_str(&format!("\n{diff}\n"));
+    }
+
+    ctx.push_str(crate::codex_runner::EVALUATE_GENOME_TOOL_DESCRIPTION);
+    ctx.push_str("[/genome context]\n\n");
+    Some(ctx)
+}
+
 /// Unified dispatch router: routes to Codex or Claude based on agent lane kind.
 pub(super) fn dispatch_agent_prompt(
     state: &mut AppState,
@@ -873,6 +927,12 @@ pub(super) fn dispatch_agent_prompt(
     mission_id: Option<String>,
     prompt: String,
 ) {
+    // Prepend genome context to the prompt if available.
+    let prompt = match build_genome_context(state) {
+        Some(ctx) => format!("{ctx}{prompt}"),
+        None => prompt,
+    };
+
     let lane_kind = state
         .agents
         .agents

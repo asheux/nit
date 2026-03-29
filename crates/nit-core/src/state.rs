@@ -1793,6 +1793,12 @@ pub struct AppState {
     pub protocol_picker: ProtocolPickerState,
     #[serde(skip)]
     pub rule_persistence: crate::rule_config::RulePersistence,
+    /// Cached genome reports per file path (runtime-only, loaded from .nit/genome/).
+    #[serde(skip)]
+    pub genome_reports: HashMap<PathBuf, crate::genome_report::GenomeReport>,
+    /// Last genome diff text for inclusion in agent prompts.
+    #[serde(skip)]
+    pub last_genome_diff: Option<String>,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Default)]
@@ -1978,6 +1984,8 @@ impl AppState {
             rule_picker: RulePickerState::default(),
             protocol_picker: ProtocolPickerState::default(),
             rule_persistence: crate::rule_config::RulePersistence::default(),
+            genome_reports: HashMap::new(),
+            last_genome_diff: None,
         }
     }
 
