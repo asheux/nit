@@ -1279,6 +1279,9 @@ fn run_loop(
                 is_lab_job_running(state),
                 current_agent_state(state),
             );
+            // Auto-compute genome report for the active editor buffer if missing.
+            maybe_compute_genome_report(state);
+
             draw(
                 terminal,
                 state,
@@ -1405,6 +1408,30 @@ fn record_agent_bus_vitals(vitals: &mut VitalsState, event: &AgentBusEvent) {
             AgentAlertSeverity::Info => {}
         },
         _ => {}
+    }
+}
+
+/// Compute the genome report for the active editor buffer if one doesn't exist yet.
+/// This runs synchronously (~50-100ms) and only triggers once per file path.
+fn maybe_compute_genome_report(state: &mut AppState) {
+    let file_path = match state.editor_buffer().path().cloned() {
+        Some(p) => p,
+        None => return,
+    };
+    if state.genome_reports.contains_key(&file_path) {
+        return;
+    }
+    // Mark as computing so the UI can show a loading bar for one frame.
+    if state.genome_computing {
+        // Already flagged — compute now.
+        let text = state.editor_buffer().content_as_string();
+        let report = nit_core::compute_genome_report(&text, &file_path);
+        state.genome_reports.insert(file_path, report);
+        state.genome_computing = false;
+    } else {
+        // First encounter: set flag so the loading bar renders this frame,
+        // and the computation happens next frame.
+        state.genome_computing = true;
     }
 }
 

@@ -1799,6 +1799,9 @@ pub struct AppState {
     /// Last genome diff text for inclusion in agent prompts.
     #[serde(skip)]
     pub last_genome_diff: Option<String>,
+    /// True when genome computation has been requested but not yet executed.
+    #[serde(skip)]
+    pub genome_computing: bool,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Default)]
@@ -1986,6 +1989,7 @@ impl AppState {
             rule_persistence: crate::rule_config::RulePersistence::default(),
             genome_reports: HashMap::new(),
             last_genome_diff: None,
+            genome_computing: false,
         }
     }
 
