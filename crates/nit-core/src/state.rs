@@ -1803,10 +1803,16 @@ pub struct AppState {
     /// +1 = improved, -1 = degraded, 0 = unchanged.
     #[serde(skip)]
     pub genome_quality_delta: i32,
-    /// Baseline genome report captured before the agent's first turn on this file.
-    /// Retries compare against this baseline, not the previous iteration.
+    /// Baseline genome reports captured before the agent's first turn.
+    /// Retries compare against these baselines, not the previous iteration.
     #[serde(skip)]
-    pub genome_baseline: Option<crate::genome_report::GenomeReport>,
+    pub genome_baselines: HashMap<PathBuf, crate::genome_report::GenomeReport>,
+    /// All files modified during the current agent turn (for multi-file genome tracking).
+    #[serde(skip)]
+    pub genome_turn_modified: HashSet<PathBuf>,
+    /// Whether an agent turn is currently active (between TurnStarted and TurnCompleted).
+    #[serde(skip)]
+    pub genome_turn_active: bool,
     /// True when genome computation has been requested but not yet executed.
     #[serde(skip)]
     pub genome_computing: bool,
@@ -2006,7 +2012,9 @@ impl AppState {
             last_genome_diff: None,
             genome_computing: false,
             genome_quality_delta: 0,
-            genome_baseline: None,
+            genome_baselines: HashMap::new(),
+            genome_turn_modified: HashSet::new(),
+            genome_turn_active: false,
             genome_retry_count: 0,
             gate_monitor_scroll: 0,
         }

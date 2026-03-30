@@ -1,7 +1,8 @@
-use super::{
+use crate::agents::{
     parse_claude_models_from_binary, parse_gemini_models_from_source, select_current_claude_models,
-    select_current_gemini_models, sync_backend_model_lanes, AgentsArg,
+    select_current_gemini_models, sync_backend_model_lanes,
 };
+use crate::cli::AgentsArg;
 
 #[test]
 fn parses_gemini_models_from_backend_source() {

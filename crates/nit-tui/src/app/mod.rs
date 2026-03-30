@@ -514,6 +514,8 @@ fn run_loop(
     let mut clipboard = Clipboard::new().ok();
     let mut file_tree_runner = FileTreeRunner::spawn();
     let mut file_watcher = FileWatcher::spawn();
+    // Watch the entire workspace for agent-created/modified files.
+    file_watcher.watch_workspace(state.workspace_root.clone());
     let mut last_watched_path = state.editor_buffer().path().cloned();
     if let Some(ref path) = last_watched_path {
         file_watcher.watch(path.clone());
@@ -1525,55 +1527,34 @@ fn build_genome_retry_prompt(state: &mut AppState) -> Option<String> {
     if !state.settings.genome.genome_context_enabled {
         return None;
     }
-    // Only retry on degradation relative to baseline.
+    // Only retry on degradation relative to baselines.
     if state.genome_quality_delta >= 0 {
         state.genome_retry_count = 0;
-        state.genome_baseline = None;
+        state.genome_baselines.clear();
         return None;
     }
     if state.genome_retry_count >= GENOME_RETRY_LIMIT {
-        state.genome_baseline = None;
+        state.genome_baselines.clear();
         return None;
     }
     state.genome_retry_count += 1;
     let attempt = state.genome_retry_count;
 
-    let file_path = state.editor_buffer().path()?.clone();
-    let report = state.genome_reports.get(&file_path)?;
-
-    let mut prompt = String::new();
-
-    // Clearly label this as the ACTUAL measured result, not what the agent claimed.
-    prompt.push_str(
-        "IMPORTANT: The scores below are the ACTUAL measured results from nit's genome \
-         system after your changes were applied to disk. These are authoritative \u{2014} \
-         disregard any scores you computed or estimated yourself.\n\n",
-    );
-
-    // Full genome report (actual, post-change).
-    prompt.push_str("[ACTUAL genome report after your changes]\n");
-    prompt.push_str(&nit_core::format_genome_report(report));
-    prompt.push_str("[/ACTUAL genome report]\n\n");
-
-    // Baseline report (the original before agent touched the file).
-    if let Some(base) = &state.genome_baseline {
-        prompt.push_str("[BASELINE genome report before your changes]\n");
-        prompt.push_str(&nit_core::format_genome_report(base));
-        prompt.push_str("[/BASELINE genome report]\n\n");
-    }
-
-    // Diff from previous version.
-    if let Some(diff) = &state.last_genome_diff {
-        prompt.push_str(diff);
-        prompt.push('\n');
-    }
-
-    // Quality goals.
-    prompt.push_str(nit_core::GENOME_AGENT_INSTRUCTIONS);
-    prompt.push_str("\n\n");
-
-    // Baseline comparison.
-    let baseline_info = if let Some(base) = &state.genome_baseline {
+    // Collect only files that degraded relative to their baseline.
+    let mut degraded_files: Vec<std::path::PathBuf> = Vec::new();
+    for file_path in &state
+        .genome_turn_modified
+        .iter()
+        .cloned()
+        .collect::<Vec<_>>()
+    {
+        let report = match state.genome_reports.get(file_path) {
+            Some(r) => r,
+            None => continue,
+        };
+        let Some(base) = state.genome_baselines.get(file_path) else {
+            continue; // new file, no baseline — skip
+        };
         let gen_base: i32 = base
             .encoder_scores
             .iter()
@@ -1584,29 +1565,72 @@ fn build_genome_retry_prompt(state: &mut AppState) -> Option<String> {
             .iter()
             .map(|s| s.generations_survived as i32)
             .sum();
-        format!(
-            "Baseline: {} (tier {}, consistency {:.2}, total generations {})\n\
-             Current:  {} (tier {}, consistency {:.2}, total generations {})\n\
-             Delta:    {} generations\n",
-            base.quality_level(),
-            base.tier.numeral(),
-            base.cross_encoder_consistency,
-            gen_base,
-            report.quality_level(),
-            report.tier.numeral(),
-            report.cross_encoder_consistency,
-            gen_now,
-            gen_now - gen_base,
-        )
-    } else {
-        String::new()
-    };
+        if report.tier < base.tier || gen_now < gen_base {
+            degraded_files.push(file_path.clone());
+        }
+    }
+    if degraded_files.is_empty() {
+        state.genome_retry_count = 0;
+        state.genome_baselines.clear();
+        return None;
+    }
+
+    let mut prompt = String::new();
+
+    prompt.push_str(
+        "IMPORTANT: The scores below are the ACTUAL measured results from nit's genome \
+         system after your changes were applied to disk. These are authoritative \u{2014} \
+         disregard any scores you computed or estimated yourself.\n\n",
+    );
+
+    // Only include files that degraded.
+    prompt.push_str(&format!(
+        "Files with degraded quality ({} of {} modified):\n\n",
+        degraded_files.len(),
+        state.genome_turn_modified.len(),
+    ));
+    for file_path in &degraded_files {
+        let report = match state.genome_reports.get(file_path) {
+            Some(r) => r,
+            None => continue,
+        };
+        prompt.push_str(&format!("--- {} ---\n", file_path.display()));
+        prompt.push_str("[ACTUAL]\n");
+        prompt.push_str(&nit_core::format_genome_report(report));
+
+        if let Some(base) = state.genome_baselines.get(file_path) {
+            let gen_base: i32 = base
+                .encoder_scores
+                .iter()
+                .map(|s| s.generations_survived as i32)
+                .sum();
+            let gen_now: i32 = report
+                .encoder_scores
+                .iter()
+                .map(|s| s.generations_survived as i32)
+                .sum();
+            prompt.push_str(&format!(
+                "[BASELINE] {} (tier {}, consistency {:.2}, total gen {})\n\
+                 [DELTA]    DEGRADED ({:+} generations)\n",
+                base.quality_level(),
+                base.tier.numeral(),
+                base.cross_encoder_consistency,
+                gen_base,
+                gen_now - gen_base,
+            ));
+        }
+        prompt.push('\n');
+    }
+
+    // Quality goals.
+    prompt.push_str(nit_core::GENOME_AGENT_INSTRUCTIONS);
+    prompt.push_str("\n\n");
 
     // Retry instructions.
     prompt.push_str(&format!(
         "[GENOME QUALITY DEGRADED \u{2014} automatic retry {attempt}/{GENOME_RETRY_LIMIT}]\n\n\
-         Your changes degraded the structural quality of {} below the baseline.\n\n\
-         {baseline_info}\n\
+         Your changes degraded the structural quality of the files listed above. \
+         Only fix those files \u{2014} do not touch files that maintained or improved quality.\n\n\
          The [evaluate_genome] output you may have seen in your previous response was \
          NOT a real evaluation \u{2014} nit evaluates externally after your changes are \
          written to disk. The ACTUAL results above show your code scored WORSE than \
@@ -1617,9 +1641,9 @@ fn build_genome_retry_prompt(state: &mut AppState) -> Option<String> {
          by improving the quality of YOUR code only. Leave all other code exactly as it was.\n\n\
          Exception: if the operator's original prompt explicitly asked you to refactor the \
          entire file, you may do so. Otherwise, constrain your fixes to your own changes.\n\n\
-         Your goal is to IMPROVE the structural quality above the baseline. If improvement \
-         is not possible given the functional requirements, you MUST NOT degrade it below \
-         the baseline. At minimum, restore the quality to the baseline level.\n\n\
+         Your goal is to IMPROVE the structural quality above the baselines. If improvement \
+         is not possible given the functional requirements, you MUST NOT degrade below \
+         baseline. At minimum, restore quality to the baseline level for every file.\n\n\
          Specific actions to take on YOUR code:\n\
          - Split functions you wrote that have high cyclomatic complexity (> 8)\n\
          - Reduce nesting depth in your code with early returns and guard clauses\n\
@@ -1627,8 +1651,7 @@ fn build_genome_retry_prompt(state: &mut AppState) -> Option<String> {
          - Add whitespace between logical sections and comments on public interfaces you created\n\
          - Aim for tier III (Spaceship) or higher on all AST-driven encoders\n\
          - Aim for density between 0.20 and 0.35 on AST encoders\n\n\
-         Fix your changes to improve the genome score, then submit.\n",
-        file_path.display(),
+         Fix your changes to improve the genome scores, then submit.\n",
     ));
 
     Some(prompt)
@@ -1660,46 +1683,76 @@ fn maybe_compute_genome_report(state: &mut AppState) {
 /// Drain file-watcher events: reload buffers whose files changed on disk.
 fn drain_file_watcher(state: &mut AppState, syntax: &mut SyntaxRuntime, watcher: &FileWatcher) {
     while let Ok(changed_path) = watcher.events.try_recv() {
-        // Check every open editor buffer for a path match.
+        // Track this file as modified during the current agent turn.
+        if state.genome_turn_active {
+            state.genome_turn_modified.insert(changed_path.clone());
+        }
+
+        // Reload any open editor buffer that matches.
         for buf_idx in 0..state.buffers.len() {
             let matches = state.buffers[buf_idx]
                 .path()
                 .map(|p| *p == changed_path)
                 .unwrap_or(false);
-            if !matches {
-                continue;
-            }
-            if state.buffers[buf_idx].reload_from_disk() {
+            if matches && state.buffers[buf_idx].reload_from_disk() {
                 syntax.note_buffer_change(buf_idx, &mut state.buffers[buf_idx]);
-                // Recompute genome and quality delta for the active editor buffer.
-                if buf_idx == state.active_editor_buffer_id {
-                    let text = state.buffers[buf_idx].content_as_string();
-                    let report = nit_core::compute_genome_report(&text, &changed_path);
-                    if let Some(prev) = state.genome_reports.get(&changed_path) {
-                        let gen_before: i32 = prev
-                            .encoder_scores
-                            .iter()
-                            .map(|s| s.generations_survived as i32)
-                            .sum();
-                        let gen_after: i32 = report
-                            .encoder_scores
-                            .iter()
-                            .map(|s| s.generations_survived as i32)
-                            .sum();
-                        let diff = nit_core::compute_genome_diff(prev, &report);
-                        state.genome_quality_delta =
-                            if diff.tier_after > diff.tier_before || gen_after > gen_before {
-                                1
-                            } else if diff.tier_after < diff.tier_before || gen_after < gen_before {
-                                -1
-                            } else {
-                                0
-                            };
-                    }
-                    state.genome_reports.insert(changed_path.clone(), report);
-                }
             }
         }
+
+        // Evaluate genome on the changed file (shadow evaluator).
+        let text = match std::fs::read_to_string(&changed_path) {
+            Ok(t) => t,
+            Err(_) => continue,
+        };
+        let report = nit_core::compute_genome_report(&text, &changed_path);
+
+        // Compare against baseline for display label only.
+        // The authoritative genome_quality_delta is computed at TurnCompleted,
+        // not here — avoid overwriting it per-file.
+        let delta_label = if let Some(base) = state.genome_baselines.get(&changed_path) {
+            let gen_base: i32 = base
+                .encoder_scores
+                .iter()
+                .map(|s| s.generations_survived as i32)
+                .sum();
+            let gen_now: i32 = report
+                .encoder_scores
+                .iter()
+                .map(|s| s.generations_survived as i32)
+                .sum();
+            if report.tier > base.tier || gen_now > gen_base {
+                "improved"
+            } else if report.tier < base.tier || gen_now < gen_base {
+                "degraded"
+            } else {
+                "unchanged"
+            }
+        } else {
+            "new"
+        };
+
+        // Update the running agent's stage label with genome info (shows as ↳ under agent name).
+        if state.genome_turn_active {
+            let file_name = changed_path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("?");
+            let genome_stage = format!(
+                "genome: {} {} {} (tier {}, c={:.2})",
+                file_name,
+                report.quality_level(),
+                delta_label,
+                report.tier.numeral(),
+                report.cross_encoder_consistency,
+            );
+            // Set stage on whichever agent is currently running.
+            for turn in state.agents.active_turns.values_mut() {
+                turn.stage = Some(genome_stage.clone());
+                turn.last_output_at = Instant::now();
+            }
+        }
+
+        state.genome_reports.insert(changed_path, report);
     }
 }
 

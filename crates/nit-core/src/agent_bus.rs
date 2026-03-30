@@ -3,6 +3,7 @@ use crate::state::{
     AgentMessage, AgentStatus, AgentTurnState, AppState, McpStatus, MissionRecord,
     CONSOLE_SCROLL_BOTTOM,
 };
+use std::path::PathBuf;
 use std::time::Instant;
 
 /// Resolve the backend source label for an agent (used in alerts and diagnostics).
@@ -162,15 +163,14 @@ impl AgentBusEvent {
                     }
                 }
 
-                // Capture genome baseline before the agent modifies anything.
-                // Only set once per agent session — retries keep the same baseline.
-                if state.genome_baseline.is_none() {
-                    if let Some(file_path) = state.editor_buffer().path() {
-                        if let Some(report) = state.genome_reports.get(file_path) {
-                            state.genome_baseline = Some(report.clone());
-                        }
-                    }
+                // Capture genome baselines and activate turn tracking.
+                // On a fresh turn (not a retry), reset baselines to current state.
+                // During retries (retry_count > 0), keep the original baselines.
+                if state.genome_retry_count == 0 {
+                    state.genome_baselines = state.genome_reports.clone();
                 }
+                state.genome_turn_modified.clear();
+                state.genome_turn_active = true;
             }
             AgentBusEvent::TurnHeartbeat {
                 agent_id,
@@ -399,25 +399,22 @@ impl AgentBusEvent {
                 // Reload editor buffer from disk (agent may have written to the file).
                 state.editor_buffer_mut().reload_from_disk();
 
-                // Genome evaluation on the active editor buffer.
+                // Evaluate genome on ALL files modified during this turn.
+                state.genome_turn_active = false;
                 if state.settings.genome.genome_context_enabled {
-                    if let Some(file_path) = state.editor_buffer().path().cloned() {
-                        let text = state.editor_buffer().content_as_string();
-                        let report = crate::genome_report::compute_genome_report(&text, &file_path);
+                    let modified: Vec<PathBuf> =
+                        state.genome_turn_modified.iter().cloned().collect();
+                    let mut worst_delta: i32 = 0;
 
-                        // Diff for display: compare against previous report.
-                        if let Some(prev) = state.genome_reports.get(&file_path) {
-                            let diff = crate::genome_report::compute_genome_diff(prev, &report);
-                            let diff_text = crate::genome_report::format_genome_diff(&diff);
-                            state.last_genome_diff = Some(diff_text);
-                        }
+                    for file_path in &modified {
+                        let text = match std::fs::read_to_string(file_path) {
+                            Ok(t) => t,
+                            Err(_) => continue,
+                        };
+                        let report = crate::genome_report::compute_genome_report(&text, file_path);
 
-                        // Quality delta for retry logic: compare against BASELINE.
-                        let baseline = state
-                            .genome_baseline
-                            .as_ref()
-                            .or_else(|| state.genome_reports.get(&file_path));
-                        if let Some(base) = baseline {
+                        // Compute delta against baseline for this file.
+                        if let Some(base) = state.genome_baselines.get(file_path) {
                             let gen_base: i32 = base
                                 .encoder_scores
                                 .iter()
@@ -428,18 +425,69 @@ impl AgentBusEvent {
                                 .iter()
                                 .map(|s| s.generations_survived as i32)
                                 .sum();
-                            state.genome_quality_delta =
-                                if report.tier > base.tier || gen_now > gen_base {
+                            let delta = if report.tier > base.tier || gen_now > gen_base {
+                                1
+                            } else if report.tier < base.tier || gen_now < gen_base {
+                                -1
+                            } else {
+                                0
+                            };
+                            if delta < worst_delta {
+                                worst_delta = delta;
+                            }
+                        } else {
+                            // New file — no baseline, treat as neutral.
+                        }
+
+                        persist_genome_report(&state.workspace_root, &report);
+                        state.genome_reports.insert(file_path.clone(), report);
+                    }
+
+                    // Also evaluate the active editor buffer if not already covered.
+                    if let Some(editor_path) = state.editor_buffer().path().cloned() {
+                        if !modified.contains(&editor_path) {
+                            let text = state.editor_buffer().content_as_string();
+                            let report =
+                                crate::genome_report::compute_genome_report(&text, &editor_path);
+                            if let Some(base) = state.genome_baselines.get(&editor_path) {
+                                let gen_base: i32 = base
+                                    .encoder_scores
+                                    .iter()
+                                    .map(|s| s.generations_survived as i32)
+                                    .sum();
+                                let gen_now: i32 = report
+                                    .encoder_scores
+                                    .iter()
+                                    .map(|s| s.generations_survived as i32)
+                                    .sum();
+                                let delta = if report.tier > base.tier || gen_now > gen_base {
                                     1
                                 } else if report.tier < base.tier || gen_now < gen_base {
                                     -1
                                 } else {
                                     0
                                 };
+                                if delta < worst_delta {
+                                    worst_delta = delta;
+                                }
+                            }
+                            persist_genome_report(&state.workspace_root, &report);
+                            state.genome_reports.insert(editor_path, report);
                         }
+                    }
 
-                        persist_genome_report(&state.workspace_root, &report);
-                        state.genome_reports.insert(file_path, report);
+                    state.genome_quality_delta = worst_delta;
+
+                    // Build diff text for the active buffer.
+                    if let Some(file_path) = state.editor_buffer().path() {
+                        if let (Some(report), Some(base)) = (
+                            state.genome_reports.get(file_path),
+                            state.genome_baselines.get(file_path),
+                        ) {
+                            let diff = crate::genome_report::compute_genome_diff(base, report);
+                            state.last_genome_diff =
+                                Some(crate::genome_report::format_genome_diff(&diff));
+                        }
                     }
                 }
             }
