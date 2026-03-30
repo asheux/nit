@@ -1611,18 +1611,23 @@ fn build_genome_retry_prompt(state: &mut AppState) -> Option<String> {
          NOT a real evaluation \u{2014} nit evaluates externally after your changes are \
          written to disk. The ACTUAL results above show your code scored WORSE than \
          the baseline.\n\n\
+         SCOPE CONSTRAINT: You may ONLY modify code that YOU added or changed during \
+         this session. Do NOT refactor, rename, restructure, or rewrite pre-existing code \
+         that you did not touch. The degradation was caused by YOUR changes \u{2014} fix it \
+         by improving the quality of YOUR code only. Leave all other code exactly as it was.\n\n\
+         Exception: if the operator's original prompt explicitly asked you to refactor the \
+         entire file, you may do so. Otherwise, constrain your fixes to your own changes.\n\n\
          Your goal is to IMPROVE the structural quality above the baseline. If improvement \
          is not possible given the functional requirements, you MUST NOT degrade it below \
          the baseline. At minimum, restore the quality to the baseline level.\n\n\
-         Specific actions to take:\n\
-         - Review the recommendations in the ACTUAL genome report above\n\
-         - Split functions with high cyclomatic complexity (> 8)\n\
-         - Reduce nesting depth with early returns and guard clauses\n\
-         - Use descriptive, unique identifiers (aim for >= 65% uniqueness)\n\
-         - Add whitespace between logical sections and comments on public interfaces\n\
+         Specific actions to take on YOUR code:\n\
+         - Split functions you wrote that have high cyclomatic complexity (> 8)\n\
+         - Reduce nesting depth in your code with early returns and guard clauses\n\
+         - Use descriptive, unique identifiers in code you added\n\
+         - Add whitespace between logical sections and comments on public interfaces you created\n\
          - Aim for tier III (Spaceship) or higher on all AST-driven encoders\n\
          - Aim for density between 0.20 and 0.35 on AST encoders\n\n\
-         Refactor now to improve the genome score, then submit your changes.\n",
+         Fix your changes to improve the genome score, then submit.\n",
         file_path.display(),
     ));
 
