@@ -1543,9 +1543,24 @@ fn build_genome_retry_prompt(state: &mut AppState) -> Option<String> {
 
     let mut prompt = String::new();
 
-    // Full genome report.
+    // Clearly label this as the ACTUAL measured result, not what the agent claimed.
+    prompt.push_str(
+        "IMPORTANT: The scores below are the ACTUAL measured results from nit's genome \
+         system after your changes were applied to disk. These are authoritative \u{2014} \
+         disregard any scores you computed or estimated yourself.\n\n",
+    );
+
+    // Full genome report (actual, post-change).
+    prompt.push_str("[ACTUAL genome report after your changes]\n");
     prompt.push_str(&nit_core::format_genome_report(report));
-    prompt.push('\n');
+    prompt.push_str("[/ACTUAL genome report]\n\n");
+
+    // Baseline report (the original before agent touched the file).
+    if let Some(base) = &state.genome_baseline {
+        prompt.push_str("[BASELINE genome report before your changes]\n");
+        prompt.push_str(&nit_core::format_genome_report(base));
+        prompt.push_str("[/BASELINE genome report]\n\n");
+    }
 
     // Diff from previous version.
     if let Some(diff) = &state.last_genome_diff {
@@ -1557,13 +1572,31 @@ fn build_genome_retry_prompt(state: &mut AppState) -> Option<String> {
     prompt.push_str(nit_core::GENOME_AGENT_INSTRUCTIONS);
     prompt.push_str("\n\n");
 
-    // Baseline context.
+    // Baseline comparison.
     let baseline_info = if let Some(base) = &state.genome_baseline {
+        let gen_base: i32 = base
+            .encoder_scores
+            .iter()
+            .map(|s| s.generations_survived as i32)
+            .sum();
+        let gen_now: i32 = report
+            .encoder_scores
+            .iter()
+            .map(|s| s.generations_survived as i32)
+            .sum();
         format!(
-            "Baseline before your changes: {} (tier {}, consistency {:.2})\n",
+            "Baseline: {} (tier {}, consistency {:.2}, total generations {})\n\
+             Current:  {} (tier {}, consistency {:.2}, total generations {})\n\
+             Delta:    {} generations\n",
             base.quality_level(),
             base.tier.numeral(),
             base.cross_encoder_consistency,
+            gen_base,
+            report.quality_level(),
+            report.tier.numeral(),
+            report.cross_encoder_consistency,
+            gen_now,
+            gen_now - gen_base,
         )
     } else {
         String::new()
@@ -1572,14 +1605,17 @@ fn build_genome_retry_prompt(state: &mut AppState) -> Option<String> {
     // Retry instructions.
     prompt.push_str(&format!(
         "[GENOME QUALITY DEGRADED \u{2014} automatic retry {attempt}/{GENOME_RETRY_LIMIT}]\n\n\
-         Your changes degraded the structural quality of {} below the baseline.\n\
-         {baseline_info}\
-         Current quality: {} (tier {}, consistency {:.2})\n\n\
-         Your goal is to IMPROVE the structural quality. If improvement is not possible \
-         given the functional requirements, you MUST NOT degrade it below the baseline. \
-         At minimum, restore the quality to the baseline level.\n\n\
+         Your changes degraded the structural quality of {} below the baseline.\n\n\
+         {baseline_info}\n\
+         The [evaluate_genome] output you may have seen in your previous response was \
+         NOT a real evaluation \u{2014} nit evaluates externally after your changes are \
+         written to disk. The ACTUAL results above show your code scored WORSE than \
+         the baseline.\n\n\
+         Your goal is to IMPROVE the structural quality above the baseline. If improvement \
+         is not possible given the functional requirements, you MUST NOT degrade it below \
+         the baseline. At minimum, restore the quality to the baseline level.\n\n\
          Specific actions to take:\n\
-         - Review the recommendations above and address as many as possible\n\
+         - Review the recommendations in the ACTUAL genome report above\n\
          - Split functions with high cyclomatic complexity (> 8)\n\
          - Reduce nesting depth with early returns and guard clauses\n\
          - Use descriptive, unique identifiers (aim for >= 65% uniqueness)\n\
@@ -1588,9 +1624,6 @@ fn build_genome_retry_prompt(state: &mut AppState) -> Option<String> {
          - Aim for density between 0.20 and 0.35 on AST encoders\n\n\
          Refactor now to improve the genome score, then submit your changes.\n",
         file_path.display(),
-        report.quality_level(),
-        report.tier.numeral(),
-        report.cross_encoder_consistency,
     ));
 
     Some(prompt)
