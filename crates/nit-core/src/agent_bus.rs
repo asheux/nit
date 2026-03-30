@@ -170,6 +170,7 @@ impl AgentBusEvent {
                     state.genome_baselines = state.genome_reports.clone();
                 }
                 state.genome_turn_modified.clear();
+                state.genome_shadow_evals.clear();
                 state.genome_turn_active = true;
             }
             AgentBusEvent::TurnHeartbeat {
@@ -436,7 +437,17 @@ impl AgentBusEvent {
                                 worst_delta = delta;
                             }
                         } else {
-                            // New file — no baseline, treat as neutral.
+                            // New file — evaluate against minimum quality threshold.
+                            // New code created by agents should meet at least Tier III.
+                            if report.tier < crate::genome_report::GenomeTier::Spaceship {
+                                if -1 < worst_delta {
+                                    worst_delta = -1;
+                                }
+                            } else if report.tier > crate::genome_report::GenomeTier::Spaceship
+                                && 1 > worst_delta
+                            {
+                                // New file above threshold — count as improvement.
+                            }
                         }
 
                         persist_genome_report(&state.workspace_root, &report);
@@ -478,17 +489,48 @@ impl AgentBusEvent {
 
                     state.genome_quality_delta = worst_delta;
 
-                    // Build diff text for the active buffer.
-                    if let Some(file_path) = state.editor_buffer().path() {
+                    // Build diff text for ALL modified files (not just editor buffer).
+                    let mut all_diffs = String::new();
+                    for file_path in &modified {
                         if let (Some(report), Some(base)) = (
                             state.genome_reports.get(file_path),
                             state.genome_baselines.get(file_path),
                         ) {
                             let diff = crate::genome_report::compute_genome_diff(base, report);
-                            state.last_genome_diff =
-                                Some(crate::genome_report::format_genome_diff(&diff));
+                            all_diffs.push_str(&crate::genome_report::format_genome_diff(&diff));
+                            all_diffs.push('\n');
+                        } else if let Some(report) = state.genome_reports.get(file_path) {
+                            // New file — show its report as context (no baseline to diff).
+                            all_diffs.push_str(&format!(
+                                "[new file] {} — {} (tier {}, c={:.2})\n",
+                                file_path.display(),
+                                report.quality_level(),
+                                report.tier.numeral(),
+                                report.cross_encoder_consistency,
+                            ));
                         }
                     }
+                    // Also include editor buffer if it wasn't in the modified set.
+                    if let Some(editor_path) = state.editor_buffer().path() {
+                        if !modified.contains(editor_path) {
+                            if let (Some(report), Some(base)) = (
+                                state.genome_reports.get(editor_path),
+                                state.genome_baselines.get(editor_path),
+                            ) {
+                                let diff =
+                                    crate::genome_report::compute_genome_diff(base, report);
+                                all_diffs.push_str(
+                                    &crate::genome_report::format_genome_diff(&diff),
+                                );
+                                all_diffs.push('\n');
+                            }
+                        }
+                    }
+                    state.last_genome_diff = if all_diffs.is_empty() {
+                        None
+                    } else {
+                        Some(all_diffs)
+                    };
                 }
             }
         }

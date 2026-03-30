@@ -62,7 +62,7 @@ pub use state::{
     FamilyRunBuildTimings, FileTreeKind, FileTreeRow, FileTreeState, GamesAnalysisRequest,
     GamesAnalysisState, GamesCaSimState, GamesConfigPreview, GamesFamilyRunRequest,
     GamesReplayRequest, GamesReplayState, GamesRunBrowserState, GamesRunEntry, GamesRunOverride,
-    GamesState, GamesStatus, GamesStrategyInspectState, GlobalArchiveEntry,
+    GamesState, GamesStatus, GamesStrategyInspectState, GenomeShadowEval, GlobalArchiveEntry,
     GlobalArchiveSourceKind, GolRenderMode, JobState, LogBuffer, McpConnectionState, McpStatus,
     Metrics, MissionPhase, MissionRecord, PatchProposal, PatchStatus, QueuedClaudeTurn,
     QueuedCodexTurn, RosterTreeBranch, RosterTreeSelection, SavedRunHistoryFilter,

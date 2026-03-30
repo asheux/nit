@@ -1540,7 +1540,7 @@ fn build_genome_retry_prompt(state: &mut AppState) -> Option<String> {
     state.genome_retry_count += 1;
     let attempt = state.genome_retry_count;
 
-    // Collect only files that degraded relative to their baseline.
+    // Collect files that degraded relative to their baseline OR new files below threshold.
     let mut degraded_files: Vec<std::path::PathBuf> = Vec::new();
     for file_path in &state
         .genome_turn_modified
@@ -1552,21 +1552,25 @@ fn build_genome_retry_prompt(state: &mut AppState) -> Option<String> {
             Some(r) => r,
             None => continue,
         };
-        let Some(base) = state.genome_baselines.get(file_path) else {
-            continue; // new file, no baseline — skip
-        };
-        let gen_base: i32 = base
-            .encoder_scores
-            .iter()
-            .map(|s| s.generations_survived as i32)
-            .sum();
-        let gen_now: i32 = report
-            .encoder_scores
-            .iter()
-            .map(|s| s.generations_survived as i32)
-            .sum();
-        if report.tier < base.tier || gen_now < gen_base {
-            degraded_files.push(file_path.clone());
+        if let Some(base) = state.genome_baselines.get(file_path) {
+            let gen_base: i32 = base
+                .encoder_scores
+                .iter()
+                .map(|s| s.generations_survived as i32)
+                .sum();
+            let gen_now: i32 = report
+                .encoder_scores
+                .iter()
+                .map(|s| s.generations_survived as i32)
+                .sum();
+            if report.tier < base.tier || gen_now < gen_base {
+                degraded_files.push(file_path.clone());
+            }
+        } else {
+            // New file — include if below minimum quality threshold (Tier III).
+            if report.tier < nit_core::GenomeTier::Spaceship {
+                degraded_files.push(file_path.clone());
+            }
         }
     }
     if degraded_files.is_empty() {
@@ -1583,12 +1587,23 @@ fn build_genome_retry_prompt(state: &mut AppState) -> Option<String> {
          disregard any scores you computed or estimated yourself.\n\n",
     );
 
-    // Only include files that degraded.
+    // Include files that degraded or new files below threshold.
+    let new_below_threshold = degraded_files
+        .iter()
+        .filter(|p| !state.genome_baselines.contains_key(*p))
+        .count();
+    let existing_degraded = degraded_files.len() - new_below_threshold;
     prompt.push_str(&format!(
-        "Files with degraded quality ({} of {} modified):\n\n",
+        "Files requiring attention ({} of {} modified",
         degraded_files.len(),
         state.genome_turn_modified.len(),
     ));
+    if new_below_threshold > 0 {
+        prompt.push_str(&format!(
+            "; {existing_degraded} degraded, {new_below_threshold} new below threshold",
+        ));
+    }
+    prompt.push_str("):\n\n");
     for file_path in &degraded_files {
         let report = match state.genome_reports.get(file_path) {
             Some(r) => r,
@@ -1617,6 +1632,16 @@ fn build_genome_retry_prompt(state: &mut AppState) -> Option<String> {
                 base.cross_encoder_consistency,
                 gen_base,
                 gen_now - gen_base,
+            ));
+        } else {
+            // New file — no baseline, show threshold requirement.
+            prompt.push_str(&format!(
+                "[NEW FILE] Below minimum quality threshold (Tier III Spaceship).\n\
+                 [ACTUAL]   {} (tier {}, consistency {:.2})\n\
+                 [TARGET]   Tier III (Spaceship) or higher required for new files.\n",
+                report.quality_level(),
+                report.tier.numeral(),
+                report.cross_encoder_consistency,
             ));
         }
         prompt.push('\n');
@@ -1699,57 +1724,108 @@ fn drain_file_watcher(state: &mut AppState, syntax: &mut SyntaxRuntime, watcher:
             }
         }
 
-        // Evaluate genome on the changed file (shadow evaluator).
+        // Shadow evaluator: evaluate genome on the changed file in real time.
         let text = match std::fs::read_to_string(&changed_path) {
             Ok(t) => t,
             Err(_) => continue,
         };
         let report = nit_core::compute_genome_report(&text, &changed_path);
 
-        // Compare against baseline for display label only.
+        // Compare against baseline for display label.
         // The authoritative genome_quality_delta is computed at TurnCompleted,
         // not here — avoid overwriting it per-file.
-        let delta_label = if let Some(base) = state.genome_baselines.get(&changed_path) {
-            let gen_base: i32 = base
-                .encoder_scores
-                .iter()
-                .map(|s| s.generations_survived as i32)
-                .sum();
-            let gen_now: i32 = report
-                .encoder_scores
-                .iter()
-                .map(|s| s.generations_survived as i32)
-                .sum();
-            if report.tier > base.tier || gen_now > gen_base {
-                "improved"
-            } else if report.tier < base.tier || gen_now < gen_base {
-                "degraded"
+        let is_new_file = !state.genome_baselines.contains_key(&changed_path);
+        let delta_label: &'static str =
+            if let Some(base) = state.genome_baselines.get(&changed_path) {
+                let gen_base: i32 = base
+                    .encoder_scores
+                    .iter()
+                    .map(|s| s.generations_survived as i32)
+                    .sum();
+                let gen_now: i32 = report
+                    .encoder_scores
+                    .iter()
+                    .map(|s| s.generations_survived as i32)
+                    .sum();
+                if report.tier > base.tier || gen_now > gen_base {
+                    "improved"
+                } else if report.tier < base.tier || gen_now < gen_base {
+                    "degraded"
+                } else {
+                    "unchanged"
+                }
             } else {
-                "unchanged"
-            }
-        } else {
-            "new"
-        };
+                "new"
+            };
+
+        let file_name = changed_path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("?");
+        let quality = report.quality_level();
+        let tier_str = report.tier.numeral();
+        let consistency = report.cross_encoder_consistency;
 
         // Update the running agent's stage label with genome info (shows as ↳ under agent name).
         if state.genome_turn_active {
-            let file_name = changed_path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("?");
             let genome_stage = format!(
-                "genome: {} {} {} (tier {}, c={:.2})",
-                file_name,
-                report.quality_level(),
-                delta_label,
-                report.tier.numeral(),
-                report.cross_encoder_consistency,
+                "genome: {file_name} {quality} {delta_label} (tier {tier_str}, c={consistency:.2})",
             );
-            // Set stage on whichever agent is currently running.
             for turn in state.agents.active_turns.values_mut() {
                 turn.stage = Some(genome_stage.clone());
                 turn.last_output_at = Instant::now();
             }
+
+            // Record shadow eval for gate monitor and genome context.
+            state.genome_shadow_evals.insert(
+                changed_path.clone(),
+                nit_core::GenomeShadowEval {
+                    tier: report.tier,
+                    quality,
+                    consistency,
+                    delta_label,
+                    is_new_file,
+                    at: Instant::now(),
+                },
+            );
+
+            // Push real-time update to operator console (like other breather updates).
+            let at = timestamp_label(state);
+            let new_tag = if is_new_file { " [NEW]" } else { "" };
+            let msg = format!(
+                "[genome shadow] {file_name}{new_tag} \u{2014} {quality} {delta_label} (tier {tier_str}, c={consistency:.2})",
+            );
+            state.agents.messages.push(nit_core::AgentMessage {
+                at: at.clone(),
+                channel: nit_core::AgentChannel::Broadcast,
+                agent_id: None,
+                mission_id: None,
+                text: msg,
+                prompt_msg_idx: None,
+                kind: None,
+            });
+            state.agents.console_scroll = nit_core::CONSOLE_SCROLL_BOTTOM;
+
+            // Diagnostic event for the diagnostics pane.
+            let severity = match delta_label {
+                "degraded" => nit_core::AgentAlertSeverity::Warn,
+                "new" if report.tier < nit_core::GenomeTier::Spaceship => {
+                    nit_core::AgentAlertSeverity::Warn
+                }
+                _ => nit_core::AgentAlertSeverity::Info,
+            };
+            state
+                .agents
+                .diag_events
+                .push(nit_core::AgentDiagnosticEvent {
+                    severity,
+                    source: "genome-shadow".into(),
+                    message: format!(
+                        "{file_name}{new_tag}: {quality} {delta_label} (tier {tier_str}, c={consistency:.2})",
+                    ),
+                    at,
+                });
+            state.agents.note_event();
         }
 
         state.genome_reports.insert(changed_path, report);

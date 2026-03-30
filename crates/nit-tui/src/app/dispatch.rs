@@ -863,22 +863,16 @@ fn titlecase_role(role: &str) -> String {
     }
 }
 
-/// Build the genome context string to prepend to agent prompts.
-fn build_genome_context(state: &AppState) -> Option<String> {
-    if !state.settings.genome.genome_context_enabled {
-        return None;
-    }
-    let file_path = state.editor_buffer().path()?;
-    let report = state.genome_reports.get(file_path)?;
-
-    let mut ctx = String::from("\n[genome context]\n");
-    ctx.push_str(&format!("File: {}\n", file_path.display()));
+/// Append genome metrics for a single file to the context string.
+fn append_file_genome_context(ctx: &mut String, file_path: &std::path::Path, report: &nit_core::GenomeReport) {
+    ctx.push_str(&format!("\n--- {} ---\n", file_path.display()));
     ctx.push_str(&format!(
-        "Current tier: {} ({})\n",
+        "Tier: {} ({}), quality: {}, consistency: {:.2}\n",
         report.tier.numeral(),
-        report.tier.name()
+        report.tier.name(),
+        report.quality_level(),
+        report.cross_encoder_consistency,
     ));
-
     for score in &report.encoder_scores {
         if matches!(
             score.encoder,
@@ -887,7 +881,7 @@ fn build_genome_context(state: &AppState) -> Option<String> {
                 | nit_core::SeedEncoderId::ComplexityField
         ) {
             ctx.push_str(&format!(
-                "{}: density={:.2}, components={}, generations={}\n",
+                "  {}: density={:.2}, components={}, generations={}\n",
                 score.encoder.label(),
                 score.density,
                 score.components,
@@ -895,16 +889,95 @@ fn build_genome_context(state: &AppState) -> Option<String> {
             ));
         }
     }
-
-    ctx.push_str(&format!(
-        "Cross-encoder consistency: {:.2}\n",
-        report.cross_encoder_consistency
-    ));
-
     if !report.recommendations.is_empty() {
-        ctx.push_str("\nStructural recommendations:\n");
+        ctx.push_str("  Recommendations:\n");
         for rec in &report.recommendations {
-            ctx.push_str(&format!("- {}\n", rec.message));
+            ctx.push_str(&format!("  - {}\n", rec.message));
+        }
+    }
+}
+
+/// Build the genome context string to prepend to agent prompts.
+/// Includes reports for ALL files modified during the current turn, not just the editor buffer.
+fn build_genome_context(state: &AppState) -> Option<String> {
+    if !state.settings.genome.genome_context_enabled {
+        return None;
+    }
+
+    let mut ctx = String::from("\n[genome context]\n");
+    let mut has_content = false;
+
+    // Include ALL files modified during the current/last turn.
+    if !state.genome_turn_modified.is_empty() {
+        ctx.push_str(&format!(
+            "Files modified this turn: {}\n",
+            state.genome_turn_modified.len()
+        ));
+        let mut sorted_paths: Vec<_> = state.genome_turn_modified.iter().collect();
+        sorted_paths.sort();
+        for file_path in &sorted_paths {
+            if let Some(report) = state.genome_reports.get(*file_path) {
+                let is_new = !state.genome_baselines.contains_key(*file_path);
+                if is_new {
+                    ctx.push_str("[NEW FILE] ");
+                }
+                append_file_genome_context(&mut ctx, file_path, report);
+                // Show delta against baseline if available.
+                if let Some(base) = state.genome_baselines.get(*file_path) {
+                    let gen_base: i32 = base
+                        .encoder_scores
+                        .iter()
+                        .map(|s| s.generations_survived as i32)
+                        .sum();
+                    let gen_now: i32 = report
+                        .encoder_scores
+                        .iter()
+                        .map(|s| s.generations_survived as i32)
+                        .sum();
+                    let label = if report.tier > base.tier || gen_now > gen_base {
+                        "IMPROVED"
+                    } else if report.tier < base.tier || gen_now < gen_base {
+                        "DEGRADED"
+                    } else {
+                        "UNCHANGED"
+                    };
+                    ctx.push_str(&format!(
+                        "  Delta: {label} ({:+} generations vs baseline)\n",
+                        gen_now - gen_base
+                    ));
+                }
+                has_content = true;
+            }
+        }
+    }
+
+    // Always include the editor buffer (primary file context).
+    if let Some(file_path) = state.editor_buffer().path() {
+        if !state.genome_turn_modified.contains(file_path) {
+            if let Some(report) = state.genome_reports.get(file_path) {
+                ctx.push_str("\n[active buffer]\n");
+                append_file_genome_context(&mut ctx, file_path, report);
+                has_content = true;
+            }
+        }
+    }
+
+    if !has_content {
+        return None;
+    }
+
+    // Include real-time shadow evaluation summary if available.
+    if !state.genome_shadow_evals.is_empty() {
+        ctx.push_str("\n[shadow evaluator — real-time quality]\n");
+        let mut sorted: Vec<_> = state.genome_shadow_evals.iter().collect();
+        sorted.sort_by_key(|(p, _)| (*p).clone());
+        for (path, eval) in &sorted {
+            let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("?");
+            let new_tag = if eval.is_new_file { " [NEW]" } else { "" };
+            ctx.push_str(&format!(
+                "  {file_name}{new_tag}: {} {} (tier {}, c={:.2})\n",
+                eval.quality, eval.delta_label, eval.tier.numeral(), eval.consistency,
+            ));
         }
     }
 

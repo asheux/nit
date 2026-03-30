@@ -336,6 +336,56 @@ fn build_lines_genome(
         ]));
     }
 
+    // Shadow evaluator section: real-time per-file quality during agent turns.
+    if state.genome_turn_active && !state.genome_shadow_evals.is_empty() {
+        lines.push(Line::from(""));
+        lines.push(Line::from(vec![
+            Span::styled(
+                "SHADOW EVALUATOR ",
+                Style::default()
+                    .fg(theme.title)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                "─".repeat(width.saturating_sub(18)),
+                dim_style,
+            ),
+        ]));
+        let mut sorted: Vec<_> = state.genome_shadow_evals.iter().collect();
+        sorted.sort_by_key(|(p, _)| (*p).clone());
+        for (path, eval) in &sorted {
+            let file_name = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("?");
+            let delta_color = match eval.delta_label {
+                "improved" => theme.accent,
+                "degraded" => theme.error,
+                "new" => theme.title,
+                _ => theme.border,
+            };
+            let new_tag = if eval.is_new_file { " [NEW]" } else { "" };
+            lines.push(Line::from(vec![
+                Span::styled(
+                    format!("  {file_name}{new_tag} "),
+                    Style::default().fg(theme.foreground),
+                ),
+                Span::styled(
+                    format!("{} ", eval.delta_label),
+                    Style::default().fg(delta_color),
+                ),
+                Span::styled(
+                    format!(
+                        "tier {} c={:.2}",
+                        eval.tier.numeral(),
+                        eval.consistency,
+                    ),
+                    dim_style,
+                ),
+            ]));
+        }
+    }
+
     lines
 }
 

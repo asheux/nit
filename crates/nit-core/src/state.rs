@@ -650,6 +650,18 @@ pub struct AgentTurnState {
     pub stage: Option<String>,
 }
 
+/// Real-time shadow evaluation result for a single file during an agent turn.
+#[derive(Clone, Debug)]
+pub struct GenomeShadowEval {
+    pub tier: crate::genome_report::GenomeTier,
+    pub quality: &'static str,
+    pub consistency: f32,
+    /// "improved", "degraded", "unchanged", or "new".
+    pub delta_label: &'static str,
+    pub is_new_file: bool,
+    pub at: Instant,
+}
+
 #[derive(Clone, Debug)]
 pub struct QueuedCodexTurn {
     pub agent_id: String,
@@ -1820,6 +1832,10 @@ pub struct AppState {
     /// Reset to 0 when quality improves or stays the same.
     #[serde(skip)]
     pub genome_retry_count: u8,
+    /// Real-time per-file shadow evaluation results during an active agent turn.
+    /// Populated by the file watcher as files change; cleared on TurnStarted.
+    #[serde(skip)]
+    pub genome_shadow_evals: HashMap<PathBuf, GenomeShadowEval>,
     /// Scroll offset for the gate monitor / structural quality pane.
     #[serde(skip)]
     pub gate_monitor_scroll: usize,
@@ -2016,6 +2032,7 @@ impl AppState {
             genome_turn_modified: HashSet::new(),
             genome_turn_active: false,
             genome_retry_count: 0,
+            genome_shadow_evals: HashMap::new(),
             gate_monitor_scroll: 0,
         }
     }
