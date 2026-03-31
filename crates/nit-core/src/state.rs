@@ -1861,6 +1861,17 @@ pub struct AppState {
     /// Scroll offset for the gate monitor / structural quality pane.
     #[serde(skip)]
     pub gate_monitor_scroll: usize,
+    /// Active sub-view for the structural quality pane: Stats or FileScores.
+    #[serde(skip)]
+    pub gate_monitor_sub_view: GateMonitorSubView,
+}
+
+/// Sub-view toggle for the CODE STRUCTURAL QUALITY pane.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub enum GateMonitorSubView {
+    #[default]
+    Stats,
+    FileScores,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Default)]
@@ -2062,6 +2073,7 @@ impl AppState {
             genome_eval_agent_id: None,
             genome_eval_mission_id: None,
             gate_monitor_scroll: 0,
+            gate_monitor_sub_view: GateMonitorSubView::default(),
         }
     }
 
@@ -2724,6 +2736,13 @@ pub fn apply_action(state: &mut AppState, action: Action) -> ActionOutcome {
                     "OFF"
                 }
             ));
+        }
+        Action::GateMonitorToggleSubView => {
+            state.gate_monitor_sub_view = match state.gate_monitor_sub_view {
+                GateMonitorSubView::Stats => GateMonitorSubView::FileScores,
+                GateMonitorSubView::FileScores => GateMonitorSubView::Stats,
+            };
+            state.gate_monitor_scroll = 0;
         }
         Action::VisualizerCycleSeedView => {
             state.visualizer.seed_view = state.visualizer.seed_view.next();

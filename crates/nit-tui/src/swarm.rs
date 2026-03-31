@@ -5757,6 +5757,7 @@ fn role_contract_lines(role: &str) -> &'static [&'static str] {
             "Advance one concrete solution candidate from your assigned lens.",
             "Do not judge between candidates or claim final implementation ownership.",
             "Be specific about files, commands, and risks.",
+            "GENOME: nit measures the integrator's code across four encoders: token_spectrum (token role balance), ast_structure (tree shape variety, >= 5 components), complexity_field (cyclomatic complexity <= 8, identifier uniqueness >= 65%), structural (token-role diversity, AST depth variation, role n-gram uniqueness). See the full ENCODER GUIDE and TARGETS in the genome instructions attached to this prompt. Help the integrator score well — suggest function decomposition, varied patterns, and low-complexity approaches that target these encoders.",
         ],
         "research" => &[
             "Explore the topic through papers, docs, web resources, and related references when available.",
@@ -5772,16 +5773,19 @@ fn role_contract_lines(role: &str) -> &'static [&'static str] {
             "Compare the dependency outputs and choose the best path forward.",
             "Produce a decisive recommendation, acceptance criteria, and verification steps.",
             "Do not edit the workspace or perform the final implementation.",
+            "GENOME: nit measures code across four encoders: token_spectrum, ast_structure, complexity_field, structural. See the full ENCODER GUIDE and TARGETS in the genome instructions attached to this prompt. Prefer proposals that enable varied AST node types, low per-function complexity (<= 8), diverse token-role sequences, and >= 5 structural components. Flag proposals that would force monolithic functions or repetitive patterns.",
         ],
         "integrate" => &[
             "Implement the chosen plan and convert it into concrete edits.",
             "Do not restart broad ideation; focus on carrying the selected approach through.",
             "Report exact files changed and validation results.",
+            "GENOME QUALITY OBLIGATION: You are the sole writer. Your code is measured by nit's genome system across four encoders. See the full ENCODER GUIDE and TARGETS in the genome instructions attached to this prompt. Maintain or improve genome scores on every file you touch. Aim for Tier III+ (Spaceship) minimum, aspire to Tier V (Replicator). Use the evaluate_genome tool to verify quality before finishing.",
         ],
         "review" => &[
             "Critique the current output or diff for correctness, UX, and maintainability.",
             "Call out risks, regressions, and missing tests.",
             "Do not edit the workspace; suggest follow-ups as text only.",
+            "GENOME: nit measures code across four encoders. See the full ENCODER GUIDE and TARGETS in the genome instructions attached to this prompt. Name the affected encoder when flagging issues — e.g., 'complexity 12 in parse_config (complexity_field: target <= 8)', 'only 2 node types (ast_structure: need >= 5 components)', 'repeated role sequence across match arms (structural: role n-gram uniqueness)', 'comment-to-code ratio too low (token_spectrum)'. Suggest concrete refactoring the integrator can apply.",
         ],
         "test" => &[
             "Focus on validation commands, expected results, and edge cases.",
@@ -5904,6 +5908,13 @@ fn wrap_task_prompt(
     }
 
     out.push_str("\nRespond with:\n- Findings / recommendations\n- Concrete file paths / commands where relevant\n");
+
+    // Embed genome quality instructions so every role is aware of the measurement system,
+    // regardless of whether genome context is also injected at dispatch time.
+    out.push('\n');
+    out.push_str(nit_core::GENOME_AGENT_INSTRUCTIONS);
+    out.push('\n');
+
     out
 }
 
@@ -6047,15 +6058,28 @@ fn build_genome_review_prompt(state: &AppState) -> String {
          modified file, a genome report shows before/after metrics across four encoders.\n\n",
     );
 
-    // Evaluate the active buffer as the modified file.
+    // Evaluate ALL modified files, not just the editor buffer.
+    let mut files_to_eval: Vec<std::path::PathBuf> =
+        state.genome_turn_modified.iter().cloned().collect();
+    if let Some(editor_path) = state.editor_buffer().path().cloned() {
+        if !files_to_eval.contains(&editor_path) {
+            files_to_eval.push(editor_path);
+        }
+    }
+    files_to_eval.sort();
+
     let mut has_content = false;
-    if let Some(file_path) = state.editor_buffer().path().cloned() {
-        let text = state.editor_buffer().content_as_string();
-        let report = nit_core::compute_genome_report(&text, &file_path);
+    for file_path in &files_to_eval {
+        let text = match std::fs::read_to_string(file_path) {
+            Ok(t) => t,
+            Err(_) => continue,
+        };
+        let report = nit_core::compute_genome_report(&text, file_path);
+        prompt.push_str(&format!("--- {} ---\n", file_path.display()));
         prompt.push_str(&nit_core::format_genome_report(&report));
         prompt.push('\n');
 
-        if let Some(prev) = state.genome_reports.get(&file_path) {
+        if let Some(prev) = state.genome_reports.get(file_path) {
             let diff = nit_core::compute_genome_diff(prev, &report);
             prompt.push_str(&nit_core::format_genome_diff(&diff));
             prompt.push('\n');
@@ -6079,7 +6103,7 @@ fn build_genome_review_prompt(state: &AppState) -> String {
     prompt
 }
 
-/// Evaluate genome quality on modified files and produce a gate result string.
+/// Evaluate genome quality on ALL modified files and produce a gate result string.
 fn evaluate_genome_gate(state: &AppState) -> String {
     let genome_config = &state.settings.genome.genome_gate;
     let min_tier = nit_core::GenomeTier::from_generations(match genome_config.min_tier {
@@ -6090,12 +6114,29 @@ fn evaluate_genome_gate(state: &AppState) -> String {
         _ => 2001,
     });
 
-    // Evaluate the active buffer as the modified file.
+    // Collect all files to evaluate: modified files + editor buffer.
+    let mut files_to_eval: Vec<std::path::PathBuf> =
+        state.genome_turn_modified.iter().cloned().collect();
+    if let Some(editor_path) = state.editor_buffer().path().cloned() {
+        if !files_to_eval.contains(&editor_path) {
+            files_to_eval.push(editor_path);
+        }
+    }
+    files_to_eval.sort();
+
     let mut out = String::new();
-    if let Some(file_path) = state.editor_buffer().path().cloned() {
-        let text = state.editor_buffer().content_as_string();
-        let report = nit_core::compute_genome_report(&text, &file_path);
+    let mut all_failures: Vec<String> = Vec::new();
+    let mut file_count = 0u32;
+    let mut pass_count = 0u32;
+
+    for file_path in &files_to_eval {
+        let text = match std::fs::read_to_string(file_path) {
+            Ok(t) => t,
+            Err(_) => continue,
+        };
+        let report = nit_core::compute_genome_report(&text, file_path);
         let mut failures = Vec::new();
+        file_count += 1;
 
         if report.tier < min_tier {
             failures.push(format!(
@@ -6151,7 +6192,7 @@ fn evaluate_genome_gate(state: &AppState) -> String {
         }
 
         if genome_config.require_no_regression {
-            if let Some(prev) = state.genome_reports.get(&file_path) {
+            if let Some(prev) = state.genome_reports.get(file_path) {
                 if report.tier < prev.tier {
                     failures.push(format!(
                         "Genome FAIL: {} regressed from {} ({}) to {} ({})",
@@ -6171,21 +6212,39 @@ fn evaluate_genome_gate(state: &AppState) -> String {
             }
         }
 
-        let quality = report.quality_level();
+        out.push_str(&format!("--- {} ---\n", file_path.display()));
         out.push_str(&nit_core::format_genome_report(&report));
         if failures.is_empty() {
             out.push_str(&format!(
-                "\nGenome gate: PASS (quality: {quality}, requires Standard or above)\n"
+                "  Result: PASS ({})\n\n",
+                report.quality_level()
             ));
+            pass_count += 1;
         } else {
             out.push_str(&format!(
-                "\nGenome gate: FAIL (quality: {quality}, requires Standard or above)\n"
+                "  Result: FAIL ({})\n",
+                report.quality_level()
             ));
             for f in &failures {
-                out.push_str(f);
-                out.push('\n');
+                out.push_str(&format!("  {f}\n"));
             }
+            out.push('\n');
+            all_failures.extend(failures);
         }
+    }
+
+    // Summary.
+    if file_count == 0 {
+        out.push_str("Genome gate: SKIP (no files to evaluate)\n");
+    } else if all_failures.is_empty() {
+        out.push_str(&format!(
+            "Genome gate: PASS ({pass_count}/{file_count} files passed)\n"
+        ));
+    } else {
+        out.push_str(&format!(
+            "Genome gate: FAIL ({pass_count}/{file_count} files passed, {} failures)\n",
+            all_failures.len(),
+        ));
     }
     out
 }

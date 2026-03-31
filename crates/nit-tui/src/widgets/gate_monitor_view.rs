@@ -1,6 +1,6 @@
 use nit_core::genome_report::GenomeReport;
 use nit_core::seed::SeedEncoderId;
-use nit_core::{AppKind, AppState, GamesStatus, PaneId, UiSelectionPane};
+use nit_core::{Action, AppKind, AppState, GamesStatus, GateMonitorSubView, PaneId, UiSelectionPane};
 use ratatui::{
     style::{Modifier, Style},
     text::{Line, Span},
@@ -10,6 +10,25 @@ use ratatui::{
 
 use crate::theme::Theme;
 use crate::widgets::text_selection::apply_ui_selection;
+
+// Title button column ranges (relative to rect start + 1 for border).
+// " CODE STRUCTURAL QUALITY [NxN] " then " STATS " then " FILESCORES "
+const BTN_STATS_LABEL: &str = " STATS ";
+const BTN_FILESCORES_LABEL: &str = " FILESCORES ";
+
+/// Returns an action if the click column hits a title button.
+pub fn title_button_hit(col_in_rect: u16, title_prefix_len: u16) -> Option<Action> {
+    let col = col_in_rect.saturating_sub(1); // border offset
+    let stats_start = title_prefix_len + 1; // space separator
+    let stats_end = stats_start + BTN_STATS_LABEL.len() as u16;
+    let fs_start = stats_end + 1;
+    let fs_end = fs_start + BTN_FILESCORES_LABEL.len() as u16;
+    if (stats_start..stats_end).contains(&col) || (fs_start..fs_end).contains(&col) {
+        Some(Action::GateMonitorToggleSubView)
+    } else {
+        None
+    }
+}
 
 pub fn render(frame: &mut Frame, area: ratatui::layout::Rect, state: &AppState, theme: &Theme) {
     if state.app_kind == AppKind::Games {
@@ -38,28 +57,45 @@ pub fn render(frame: &mut Frame, area: ratatui::layout::Rect, state: &AppState, 
         .path()
         .and_then(|p| state.genome_reports.get(p));
 
-    let title_text = match genome_report {
+    let title_prefix = match genome_report {
         Some(report) => format!(
-            " CODE STRUCTURAL QUALITY \u{2014} {} {} [{}x{}] ",
-            report.tier.name(),
-            tier_glyph(report.tier),
+            " CODE STRUCTURAL QUALITY [{}x{}] ",
             report.grid_size,
             report.grid_size,
         ),
         None => " CODE STRUCTURAL QUALITY ".to_string(),
     };
 
+    let title_style = Style::default()
+        .fg(title_color)
+        .add_modifier(Modifier::BOLD);
+    let btn_active = Style::default()
+        .fg(theme.background)
+        .bg(title_color)
+        .add_modifier(Modifier::BOLD);
+    let btn_inactive = Style::default()
+        .fg(title_color)
+        .add_modifier(Modifier::DIM);
+    let sep_style = Style::default().fg(title_color);
+
+    let is_stats = state.gate_monitor_sub_view == GateMonitorSubView::Stats;
+    let stats_style = if is_stats { btn_active } else { btn_inactive };
+    let fs_style = if is_stats { btn_inactive } else { btn_active };
+
+    let title = Line::from(vec![
+        Span::styled(title_prefix, title_style),
+        Span::styled(" ", sep_style),
+        Span::styled(BTN_STATS_LABEL, stats_style),
+        Span::styled(" ", sep_style),
+        Span::styled(BTN_FILESCORES_LABEL, fs_style),
+    ]);
+
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(border_style)
         .border_type(border_type)
         .style(Style::default().bg(theme.background))
-        .title(Span::styled(
-            title_text,
-            Style::default()
-                .fg(title_color)
-                .add_modifier(Modifier::BOLD),
-        ));
+        .title(title);
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -69,7 +105,20 @@ pub fn render(frame: &mut Frame, area: ratatui::layout::Rect, state: &AppState, 
         return;
     }
 
-    let lines = build_lines_genome(state, genome_report, theme, inner.width as usize);
+    // Show centered placeholder when no file is open (Stats view only).
+    if genome_report.is_none() && state.gate_monitor_sub_view == GateMonitorSubView::Stats {
+        draw_no_file_placeholder(frame, inner, theme);
+        return;
+    }
+
+    let lines = match state.gate_monitor_sub_view {
+        GateMonitorSubView::Stats => {
+            build_lines_genome(state, genome_report, theme, inner.width as usize)
+        }
+        GateMonitorSubView::FileScores => {
+            build_lines_filescores(state, theme, inner.width as usize)
+        }
+    };
     let lines = apply_ui_selection(
         lines,
         state.ui_selection.as_ref(),
@@ -89,11 +138,16 @@ pub fn build_lines(state: &AppState, theme: &Theme, width: usize) -> Vec<Line<'s
     if state.app_kind == AppKind::Games {
         build_lines_games(state, theme, width)
     } else {
-        let report = state
-            .editor_buffer()
-            .path()
-            .and_then(|p| state.genome_reports.get(p));
-        build_lines_genome(state, report, theme, width)
+        match state.gate_monitor_sub_view {
+            GateMonitorSubView::Stats => {
+                let report = state
+                    .editor_buffer()
+                    .path()
+                    .and_then(|p| state.genome_reports.get(p));
+                build_lines_genome(state, report, theme, width)
+            }
+            GateMonitorSubView::FileScores => build_lines_filescores(state, theme, width),
+        }
     }
 }
 
@@ -613,16 +667,6 @@ fn build_sim_detail_line(
 // Helpers
 // ---------------------------------------------------------------------------
 
-fn tier_glyph(tier: nit_core::GenomeTier) -> &'static str {
-    match tier {
-        nit_core::GenomeTier::StillLife => ".",
-        nit_core::GenomeTier::Oscillator => "~",
-        nit_core::GenomeTier::Spaceship => ">",
-        nit_core::GenomeTier::Methuselah => "*",
-        nit_core::GenomeTier::Replicator => "!",
-    }
-}
-
 fn tier_color(tier: nit_core::GenomeTier, theme: &Theme) -> ratatui::style::Color {
     match tier {
         nit_core::GenomeTier::StillLife => theme.border,
@@ -634,6 +678,44 @@ fn tier_color(tier: nit_core::GenomeTier, theme: &Theme) -> ratatui::style::Colo
 }
 
 /// Animated indeterminate loading bar centered vertically in the given area.
+/// Centered placeholder bar matching the visualizer's "Open file" style.
+fn draw_no_file_placeholder(frame: &mut Frame, area: ratatui::layout::Rect, theme: &Theme) {
+    if area.width < 4 || area.height < 3 {
+        return;
+    }
+    let msg = " Open file in editor to view code genome ";
+    let msg_len = msg.len() as u16;
+    let bar_w = msg_len;
+    let bar_h = 3u16;
+    let bar_x = area.x + area.width.saturating_sub(bar_w) / 2;
+    let bar_y = area.y + area.height.saturating_sub(bar_h) / 2;
+
+    let cyan = ratatui::style::Color::Rgb(0, 215, 215);
+    let bar_style = Style::default().bg(cyan);
+    let text_style = Style::default()
+        .fg(theme.background)
+        .bg(cyan)
+        .add_modifier(Modifier::BOLD);
+
+    let buf = frame.buffer_mut();
+    for row in 0..bar_h {
+        for dx in 0..bar_w {
+            let cell = buf.get_mut(bar_x + dx, bar_y + row);
+            cell.set_char(' ');
+            cell.set_style(bar_style);
+        }
+    }
+    let text_y = bar_y + 1;
+    for (i, ch) in msg.chars().enumerate() {
+        let cx = bar_x + i as u16;
+        if cx < bar_x + bar_w {
+            let cell = buf.get_mut(cx, text_y);
+            cell.set_char(ch);
+            cell.set_style(text_style);
+        }
+    }
+}
+
 fn draw_loading_bar(frame: &mut Frame, area: ratatui::layout::Rect, theme: &Theme) {
     if area.width < 6 || area.height < 2 {
         return;
@@ -1021,5 +1103,218 @@ fn syntax_style(status: &str, theme: &Theme, dim_style: Style) -> Style {
         Style::default().fg(theme.title_focused)
     } else {
         Style::default().fg(theme.foreground)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// FILESCORES sub-view: real-time file quality table
+// ---------------------------------------------------------------------------
+
+fn build_lines_filescores(
+    state: &AppState,
+    theme: &Theme,
+    width: usize,
+) -> Vec<Line<'static>> {
+    let label_style = Style::default().fg(theme.title).add_modifier(Modifier::DIM);
+    let dim_style = Style::default()
+        .fg(theme.border)
+        .add_modifier(Modifier::DIM);
+    let header_style = Style::default()
+        .fg(theme.title)
+        .add_modifier(Modifier::BOLD);
+
+    let mut lines: Vec<Line<'static>> = Vec::new();
+
+    // Collect all files with scores: shadow evals (real-time) + genome reports.
+    let mut file_rows: Vec<FileScoreRow> = Vec::new();
+
+    // Shadow evals are the most up-to-date (real-time during agent turns).
+    for (path, eval) in &state.genome_shadow_evals {
+        let name = relative_file_path(path, &state.workspace_root);
+        file_rows.push(FileScoreRow {
+            name,
+            tier: eval.tier.numeral().to_string(),
+            quality: eval.quality.to_string(),
+            consistency: format!("{:.2}", eval.consistency),
+            delta: eval.delta_label.to_string(),
+            is_shadow: true,
+        });
+    }
+
+    // Add files from genome_turn_modified that aren't already in shadow evals.
+    for path in &state.genome_turn_modified {
+        if state.genome_shadow_evals.contains_key(path) {
+            continue;
+        }
+        if let Some(report) = state.genome_reports.get(path) {
+            let name = relative_file_path(path, &state.workspace_root);
+            let delta = if let Some(base) = state.genome_baselines.get(path) {
+                if report.tier > base.tier {
+                    "improved"
+                } else if report.tier < base.tier {
+                    "degraded"
+                } else {
+                    "unchanged"
+                }
+            } else {
+                "new"
+            };
+            file_rows.push(FileScoreRow {
+                name,
+                tier: report.tier.numeral().to_string(),
+                quality: report.quality_level().to_string(),
+                consistency: format!("{:.2}", report.cross_encoder_consistency),
+                delta: delta.to_string(),
+                is_shadow: false,
+            });
+        }
+    }
+
+    // Sort by file name.
+    file_rows.sort_by(|a, b| a.name.cmp(&b.name));
+
+    if file_rows.is_empty() {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "No file changes detected",
+            Style::default().fg(theme.border),
+        )));
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "Files will appear here in real time as agents modify code.",
+            dim_style,
+        )));
+        return lines;
+    }
+
+    // Section header.
+    let file_count = file_rows.len();
+    let header_text = format!("File Scores ({file_count} files) ");
+    lines.push(Line::from(vec![
+        Span::styled(header_text.clone(), label_style),
+        Span::styled(
+            "\u{2500}".repeat(width.saturating_sub(header_text.len())),
+            dim_style,
+        ),
+    ]));
+
+    // Fixed right-side columns — file name gets the remainder to show full paths.
+    let tier_w = 4;
+    let quality_w = 11;
+    let cons_w = 4;
+    let delta_w = 9;
+    let data_w = tier_w + quality_w + cons_w + delta_w + 4; // columns + gaps
+    let name_w = width.saturating_sub(data_w).max(8);
+
+    // Table header.
+    lines.push(Line::from(vec![
+        Span::styled(format!(" {:<width$}", "FILE", width = name_w - 1), header_style),
+        Span::styled(format!("{:>tier_w$} ", "TIER"), header_style),
+        Span::styled(format!("{:<quality_w$}", "QUALITY"), header_style),
+        Span::styled(format!("{:>cons_w$} ", "CONS"), header_style),
+        Span::styled(format!("{:<delta_w$}", "DELTA"), header_style),
+    ]));
+
+    // Separator.
+    lines.push(Line::from(Span::styled(
+        "\u{2500}".repeat(width),
+        dim_style,
+    )));
+
+    // Rows.
+    for row in &file_rows {
+        let delta_color = match row.delta.as_str() {
+            "improved" => theme.success,
+            "degraded" => theme.error,
+            "new" => theme.title_focused,
+            _ => theme.warning,
+        };
+        let quality_color = match row.quality.as_str() {
+            "Exceptional" => theme.success,
+            "Excellent" => theme.title_focused,
+            "Standard" => theme.foreground,
+            "Minimum" => theme.warning,
+            _ => theme.error,
+        };
+        let live_marker = if row.is_shadow { "\u{25cf}" } else { " " };
+        let display_name = truncate_str(&row.name, name_w.saturating_sub(1));
+
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!("{live_marker}{display_name:<width$}", width = name_w - 1),
+                Style::default().fg(theme.foreground),
+            ),
+            Span::styled(
+                format!("{:>tier_w$} ", row.tier),
+                Style::default()
+                    .fg(theme.accent)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!("{:<quality_w$}", row.quality),
+                Style::default().fg(quality_color),
+            ),
+            Span::styled(
+                format!("{:>cons_w$} ", row.consistency),
+                Style::default().fg(theme.foreground),
+            ),
+            Span::styled(
+                format!("{:<delta_w$}", row.delta),
+                Style::default().fg(delta_color),
+            ),
+        ]));
+    }
+
+    lines
+}
+
+struct FileScoreRow {
+    name: String,
+    tier: String,
+    quality: String,
+    consistency: String,
+    delta: String,
+    is_shadow: bool,
+}
+
+/// Get a display-friendly relative path from workspace root.
+/// Tries multiple approaches to handle canonicalization mismatches on macOS.
+fn relative_file_path(path: &std::path::Path, workspace: &std::path::Path) -> String {
+    // 1. Direct strip_prefix.
+    if let Ok(rel) = path.strip_prefix(workspace) {
+        let s = rel.to_string_lossy();
+        if !s.is_empty() {
+            return s.to_string();
+        }
+    }
+    // 2. Canonicalize both to resolve symlinks (e.g., /var vs /private/var on macOS).
+    if let (Ok(canon_path), Ok(canon_ws)) = (path.canonicalize(), workspace.canonicalize()) {
+        if let Ok(rel) = canon_path.strip_prefix(&canon_ws) {
+            let s = rel.to_string_lossy();
+            if !s.is_empty() {
+                return s.to_string();
+            }
+        }
+    }
+    // 3. String-based stripping as last structured attempt.
+    let path_s = path.to_string_lossy();
+    let ws_s = workspace.to_string_lossy();
+    if let Some(rest) = path_s.strip_prefix(ws_s.as_ref()) {
+        let rest = rest.strip_prefix('/').unwrap_or(rest);
+        if !rest.is_empty() {
+            return rest.to_string();
+        }
+    }
+    // 4. Full path.
+    path_s.to_string()
+}
+
+fn truncate_str(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        s.to_string()
+    } else if max > 2 {
+        format!("{}\u{2026}", &s[..max - 1])
+    } else {
+        s[..max].to_string()
     }
 }

@@ -1711,10 +1711,9 @@ fn build_genome_retry_prompt(state: &mut AppState) -> Option<String> {
         "[GENOME QUALITY DEGRADED \u{2014} automatic retry {attempt}/{GENOME_RETRY_LIMIT}]\n\n\
          Your changes degraded the structural quality of the files listed above. \
          Only fix those files \u{2014} do not touch files that maintained or improved quality.\n\n\
-         The [evaluate_genome] output you may have seen in your previous response was \
-         NOT a real evaluation \u{2014} nit evaluates externally after your changes are \
-         written to disk. The ACTUAL results above show your code scored WORSE than \
-         the baseline.\n\n\
+         The ACTUAL results above were measured by nit AFTER your changes were \
+         written to disk. These are authoritative \u{2014} your code scored WORSE than \
+         the baseline. Do NOT call [evaluate_genome]; nit measures automatically.\n\n\
          SCOPE CONSTRAINT: You may ONLY modify code that YOU added or changed during \
          this session. Do NOT refactor, rename, restructure, or rewrite pre-existing code \
          that you did not touch. The degradation was caused by YOUR changes \u{2014} fix it \
@@ -8325,6 +8324,29 @@ fn handle_mouse_down_with_swarm(
             let col_in_rect = mouse.column.saturating_sub(layout.visualizer.x);
             if let Some(action) = visualizer_view::title_button_hit(col_in_rect) {
                 state.focus = PaneId::Visualizer;
+                apply_action(state, action);
+                return true;
+            }
+        }
+        // Gate monitor title buttons (STATS / FILESCORES).
+        if mouse.row == layout.gate.y {
+            let col_in_rect = mouse.column.saturating_sub(layout.gate.x);
+            // Compute the title prefix length to find button positions.
+            let prefix_len = if let Some(report) = state
+                .editor_buffer()
+                .path()
+                .and_then(|p| state.genome_reports.get(p))
+            {
+                format!(
+                    " CODE STRUCTURAL QUALITY [{}x{}] ",
+                    report.grid_size, report.grid_size
+                )
+                .len() as u16
+            } else {
+                " CODE STRUCTURAL QUALITY ".len() as u16
+            };
+            if let Some(action) = gate_monitor_view::title_button_hit(col_in_rect, prefix_len) {
+                state.focus = PaneId::GateMonitor;
                 apply_action(state, action);
                 return true;
             }

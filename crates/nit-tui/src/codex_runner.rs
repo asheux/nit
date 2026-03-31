@@ -1955,17 +1955,13 @@ fn extract_total_tokens(info: &serde_json::Value) -> Option<u64> {
 /// The evaluate_genome tool definition for inclusion in agent prompts.
 pub const EVALUATE_GENOME_TOOL_DESCRIPTION: &str = r#"
 [nit tool: evaluate_genome]
-Evaluate the structural quality of a source file using nit's code genome system.
-Runs seven encoders (three AST-driven, one hybrid, three byte-level), simulates
-Conway's Game of Life on each, and returns density, component count, generations
-survived, tier, cross-encoder consistency, and targeted refactoring recommendations.
-Use this after writing or modifying code to check whether structural quality
-improved or degraded.
+nit evaluates genome quality automatically in real time as you write files.
+You do NOT need to call [evaluate_genome] — nit measures quality externally
+after your changes are written to disk. If quality degrades, nit will retry
+your turn automatically with specific per-encoder feedback.
 
-To request evaluation, include in your response:
-  [evaluate_genome: <file_path>]
-
-The results will be included in your next prompt.
+Focus on writing good code using the encoder guide and recommendations above.
+nit handles the measurement.
 [/nit tool]
 "#;
 

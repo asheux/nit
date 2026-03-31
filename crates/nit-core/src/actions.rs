@@ -91,6 +91,7 @@ pub enum Action {
     VisualizerInspectCenter,
     VisualizerInspectToggle,
     VisualizerInspectJump(u64),
+    GateMonitorToggleSubView,
     SetGolRuleById(String),
     SetGolRuleByString(String),
     OpenRulePicker,

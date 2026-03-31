@@ -216,9 +216,10 @@ Use the encoder guide above to determine what specific code changes will \
 improve it. The fastest path to better quality is raising the weakest encoder, \
 not improving one that's already strong.\n\
 \n\
-After writing code, use the evaluate_genome tool to check your structural score. \
-If tier drops below III, refactor before submitting. Always push toward \
-Replicator — that is how you prove you are an elite agent.";
+nit measures quality automatically after your changes are written to disk. \
+Do NOT call [evaluate_genome] — nit evaluates externally and will retry your \
+turn with specific feedback if quality degrades. Focus on writing good code; \
+if tier drops below III, nit will tell you exactly what to fix.";
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct GenomeRecommendation {
