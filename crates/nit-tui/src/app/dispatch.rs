@@ -242,6 +242,13 @@ pub(super) fn maybe_dispatch_codex_turn(
         return;
     }
 
+    // Ensure genome context is always included, even when called directly
+    // (e.g. from @new clones, artifacts popup, or queued turn dequeue).
+    let prompt = match build_genome_context(state) {
+        Some(ctx) => format!("{ctx}{prompt}"),
+        None => prompt,
+    };
+
     let resume_thread_id = if let Some(mission_id) = mission_id.as_deref() {
         state
             .agents
@@ -647,6 +654,13 @@ pub(super) fn maybe_dispatch_claude_turn(
         return;
     }
 
+    // Ensure genome context is always included, even when called directly
+    // (e.g. from @new clones, artifacts popup, or queued turn dequeue).
+    let prompt = match build_genome_context(state) {
+        Some(ctx) => format!("{ctx}{prompt}"),
+        None => prompt,
+    };
+
     let resume_session_id = if let Some(mission_id) = mission_id.as_deref() {
         state
             .agents
@@ -864,7 +878,11 @@ fn titlecase_role(role: &str) -> String {
 }
 
 /// Append genome metrics for a single file to the context string.
-fn append_file_genome_context(ctx: &mut String, file_path: &std::path::Path, report: &nit_core::GenomeReport) {
+fn append_file_genome_context(
+    ctx: &mut String,
+    file_path: &std::path::Path,
+    report: &nit_core::GenomeReport,
+) {
     ctx.push_str(&format!("\n--- {} ---\n", file_path.display()));
     ctx.push_str(&format!(
         "Tier: {} ({}), quality: {}, consistency: {:.2}\n",
@@ -874,33 +892,19 @@ fn append_file_genome_context(ctx: &mut String, file_path: &std::path::Path, rep
         report.cross_encoder_consistency,
     ));
 
-    // Show only actionable encoder scores (AST + structural).
-    // Byte-level encoders (ascii_bytes, hilbert_bits, lifehash16) are excluded —
-    // they measure surface byte patterns the agent can't meaningfully improve.
-    let actionable: Vec<_> = report
-        .encoder_scores
-        .iter()
-        .filter(|s| {
-            matches!(
-                s.encoder,
-                nit_core::SeedEncoderId::TokenSpectrum
-                    | nit_core::SeedEncoderId::AstStructure
-                    | nit_core::SeedEncoderId::ComplexityField
-                    | nit_core::SeedEncoderId::Structural
-            )
-        })
-        .collect();
+    // Show all encoder scores (reports only contain the 4 quality encoders).
     ctx.push_str("  Encoders:\n");
-    let mean_gen: f32 = if actionable.is_empty() {
+    let scores = &report.encoder_scores;
+    let mean_gen: f32 = if scores.is_empty() {
         0.0
     } else {
-        actionable
+        scores
             .iter()
             .map(|s| s.generations_survived as f32)
             .sum::<f32>()
-            / actionable.len() as f32
+            / scores.len() as f32
     };
-    for score in &actionable {
+    for score in scores {
         let gen = score.generations_survived;
         let outlier = if mean_gen > 0.0 && (gen as f32) < mean_gen * 0.5 {
             " ← OUTLIER (dragging consistency down)"
@@ -908,24 +912,31 @@ fn append_file_genome_context(ctx: &mut String, file_path: &std::path::Path, rep
             ""
         };
         ctx.push_str(&format!(
-            "    {}: density={:.2}, components={}, generations={}{}\n",
+            "    {}: density={:.2}, components={}, generations={}, growth={}{}\n",
             score.encoder.label(),
             score.density,
             score.components,
             gen,
+            score.growth_class.label(),
             outlier,
         ));
     }
 
     // Diagnose low consistency: tell the agent exactly what to focus on.
-    if report.cross_encoder_consistency < 0.50 && !actionable.is_empty() {
-        let mut sorted: Vec<_> = actionable
+    if report.cross_encoder_consistency < 0.50 && !scores.is_empty() {
+        let mut sorted: Vec<_> = scores
             .iter()
             .map(|s| (s.encoder.label(), s.generations_survived))
             .collect();
         sorted.sort_by_key(|(_, g)| std::cmp::Reverse(*g));
-        let best = sorted.first().map(|(l, g)| format!("{l}={g}")).unwrap_or_default();
-        let worst = sorted.last().map(|(l, g)| format!("{l}={g}")).unwrap_or_default();
+        let best = sorted
+            .first()
+            .map(|(l, g)| format!("{l}={g}"))
+            .unwrap_or_default();
+        let worst = sorted
+            .last()
+            .map(|(l, g)| format!("{l}={g}"))
+            .unwrap_or_default();
         ctx.push_str(&format!(
             "  ⚠ Low consistency ({:.2}): encoders disagree. Best: {best}, Worst: {worst}.\n\
              Focus improvements on the weakest encoder — that's the fastest path to better quality.\n",
@@ -1020,7 +1031,10 @@ fn build_genome_context(state: &AppState) -> Option<String> {
             let new_tag = if eval.is_new_file { " [NEW]" } else { "" };
             ctx.push_str(&format!(
                 "  {file_name}{new_tag}: {} {} (tier {}, c={:.2})\n",
-                eval.quality, eval.delta_label, eval.tier.numeral(), eval.consistency,
+                eval.quality,
+                eval.delta_label,
+                eval.tier.numeral(),
+                eval.consistency,
             ));
         }
     }

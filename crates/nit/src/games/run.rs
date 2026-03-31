@@ -169,9 +169,9 @@ fn prepare_batch_config(
 
     // Resolve the effective seed: use the explicit value or derive one deterministically.
     let creation_stamp = EventWriter::timestamp();
-    let resolved_seed = parsed_cfg.seed.unwrap_or_else(|| {
-        stable_hash_bytes(format!("{creation_stamp}\n{raw_toml}").as_bytes())
-    });
+    let resolved_seed = parsed_cfg
+        .seed
+        .unwrap_or_else(|| stable_hash_bytes(format!("{creation_stamp}\n{raw_toml}").as_bytes()));
     parsed_cfg.seed = Some(resolved_seed);
 
     // Select halting Turing machine strategies where applicable.
@@ -186,8 +186,7 @@ fn prepare_batch_config(
     )
     .map_err(|validation_error| anyhow::anyhow!(validation_error))?;
 
-    let content_hash_id =
-        nit_games::run_id_from_seed_config(resolved_seed, &raw_toml);
+    let content_hash_id = nit_games::run_id_from_seed_config(resolved_seed, &raw_toml);
 
     Ok(PreparedBatchConfig {
         resolved_path: canonical_path,
@@ -201,7 +200,11 @@ fn prepare_batch_config(
 
 /// Log the resolved configuration path and artifact summary destination before execution.
 fn log_run_preamble(toml_location: &Path, storage_layout: &Option<RunLayout>) {
-    eprintln!("[{}] Games config: {}", RunPhase::ConfigPrep, toml_location.display());
+    eprintln!(
+        "[{}] Games config: {}",
+        RunPhase::ConfigPrep,
+        toml_location.display()
+    );
     match storage_layout.as_ref() {
         Some(available_layout) => {
             eprintln!(

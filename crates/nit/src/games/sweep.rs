@@ -13,8 +13,8 @@ use nit_games::events::EventWriter;
 use nit_games::output::{RunPaths, RunSummary, RUN_SUMMARY_SCHEMA_VERSION};
 use nit_games::tournament::TournamentKernel;
 use nit_games::{
-    accelerator_run_preflight, run_id_from_seed_config, try_select_halting_turing_machine_strategies,
-    PayoffMatrix, ScoreAggregation,
+    accelerator_run_preflight, run_id_from_seed_config,
+    try_select_halting_turing_machine_strategies, PayoffMatrix, ScoreAggregation,
 };
 use nit_utils::hashing::stable_hash_bytes;
 use serde::Serialize;
@@ -247,20 +247,29 @@ fn collect_sweep_results(
         .take(PODIUM_SIZE)
         .map(|ranked_item| SweepTopEntry {
             id: ranked_item.id.clone(),
-            score: ranked_item.score(sweep_context.score_aggregation, sweep_context.adjusted_scores),
+            score: ranked_item.score(
+                sweep_context.score_aggregation,
+                sweep_context.adjusted_scores,
+            ),
         })
         .collect();
     let winner_id = podium_entries
         .first()
         .map(|ranked_item| ranked_item.id.clone())
         .unwrap_or_else(|| "none".into());
-    *running_totals.top_counts.entry(winner_id.clone()).or_insert(0) += 1;
+    *running_totals
+        .top_counts
+        .entry(winner_id.clone())
+        .or_insert(0) += 1;
     for contestant in &tournament_outcome.ranking {
         running_totals
             .scores_by_strategy
             .entry(contestant.id.clone())
             .or_default()
-            .push(contestant.score(sweep_context.score_aggregation, sweep_context.adjusted_scores));
+            .push(contestant.score(
+                sweep_context.score_aggregation,
+                sweep_context.adjusted_scores,
+            ));
     }
     (winner_id, podium_entries)
 }
@@ -430,7 +439,9 @@ fn try_reuse_existing_cell(
     if sweep_context.verbose {
         eprintln!(
             "Skipping existing cell {} ({}): {}",
-            ordinal, stored_summary.run_id, summary_path.display()
+            ordinal,
+            stored_summary.run_id,
+            summary_path.display()
         );
     }
 
@@ -439,10 +450,13 @@ fn try_reuse_existing_cell(
         grid_point,
         stored_summary.seed,
         stored_summary.run_id.clone(),
-        stored_summary
-            .run_dir
-            .clone()
-            .unwrap_or_else(|| summary_path.parent().unwrap_or(Path::new(".")).display().to_string()),
+        stored_summary.run_dir.clone().unwrap_or_else(|| {
+            summary_path
+                .parent()
+                .unwrap_or(Path::new("."))
+                .display()
+                .to_string()
+        }),
         stored_summary
             .paths
             .summary

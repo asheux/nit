@@ -34,8 +34,7 @@ pub(crate) fn init_agents(backend_selection: AgentsArg) -> AgentsState {
     let gemini_detected = discover::gemini_cli_available();
 
     // Phase 2: build the skeleton roster from the user's backend selection.
-    let mut assembled_roster =
-        load_roster_for(backend_selection, codex_detected, claude_detected);
+    let mut assembled_roster = load_roster_for(backend_selection, codex_detected, claude_detected);
     assembled_roster.codex_cli_available = codex_detected;
     assembled_roster.claude_cli_available = claude_detected;
     assembled_roster.gemini_cli_available = gemini_detected;
@@ -56,8 +55,8 @@ pub(crate) fn init_agents(backend_selection: AgentsArg) -> AgentsState {
 /// is removed and replaced with one lane per discovered model identifier.
 pub(crate) fn sync_backend_model_lanes(roster: &mut AgentsState, selection: AgentsArg) {
     // Determine which backend catalogs have discovered models to expand.
-    let expanding_claude_catalog = matches!(selection, AgentsArg::All | AgentsArg::Claude)
-        && !roster.claude_models.is_empty();
+    let expanding_claude_catalog =
+        matches!(selection, AgentsArg::All | AgentsArg::Claude) && !roster.claude_models.is_empty();
 
     let expanding_gemini_catalog =
         matches!(selection, AgentsArg::All) && !roster.gemini_models.is_empty();
@@ -205,7 +204,10 @@ fn restore_selection_after_expansion(
         return;
     }
 
-    roster.selected_agent = roster.agents.first().map(|first_lane| first_lane.id.clone());
+    roster.selected_agent = roster
+        .agents
+        .first()
+        .map(|first_lane| first_lane.id.clone());
     roster.roster_selected = 0;
 }
 
@@ -245,7 +247,10 @@ fn assemble_combined_roster(codex_available: bool, claude_available: bool) -> Ag
         incorporate_codex_cache(&mut merged_roster);
     }
 
-    merged_roster.selected_agent = merged_roster.agents.first().map(|first_lane| first_lane.id.clone());
+    merged_roster.selected_agent = merged_roster
+        .agents
+        .first()
+        .map(|first_lane| first_lane.id.clone());
     merged_roster.roster_selected = 0;
     merged_roster
 }

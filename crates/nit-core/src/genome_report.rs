@@ -1,8 +1,9 @@
 //! Genome report engine: structural quality feedback for agent code changes.
 //!
-//! Runs all seven seed encoders on a source file, simulates Conway's Game of Life
-//! on each resulting grid, and produces a [`GenomeReport`] with per-encoder metrics,
-//! a composite tier, cross-encoder consistency, and targeted recommendations.
+//! Runs four quality encoders (three AST-driven + one hybrid) on a source file,
+//! simulates Conway's Game of Life on each resulting grid, and produces a
+//! [`GenomeReport`] with per-encoder metrics, a composite tier, cross-encoder
+//! consistency, and targeted recommendations.
 
 use std::collections::{HashMap, HashSet};
 use std::fmt;
@@ -28,6 +29,8 @@ pub struct GenomeReport {
     pub tier: GenomeTier,
     pub recommendations: Vec<GenomeRecommendation>,
     pub timestamp_ms: u64,
+    /// Grid dimension used for this report (adaptive: 32, 48, or 64).
+    pub grid_size: usize,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -38,6 +41,32 @@ pub struct EncoderScore {
     pub generations_survived: u32,
     pub peak_population: u32,
     pub cycle_period: Option<u32>,
+    /// Population trajectory classification based on growth curve analysis.
+    pub growth_class: GrowthClass,
+}
+
+/// Classification of population trajectory during GoL simulation.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum GrowthClass {
+    /// Population expanded over time (early < late) — structurally resilient code.
+    Expanding,
+    /// Population remained stable — well-balanced code.
+    Stable,
+    /// Population declined over time (early > late) — structurally fragile code.
+    Collapsing,
+    /// Population died out completely.
+    Extinct,
+}
+
+impl GrowthClass {
+    pub fn label(self) -> &'static str {
+        match self {
+            GrowthClass::Expanding => "expanding",
+            GrowthClass::Stable => "stable",
+            GrowthClass::Collapsing => "collapsing",
+            GrowthClass::Extinct => "extinct",
+        }
+    }
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -187,22 +216,26 @@ pub struct EncoderDiff {
 // ---------------------------------------------------------------------------
 
 const MAX_GENERATIONS: u32 = 3000;
-const GRID_SIZE: usize = 32;
+
+/// Minimum grid dimension (small files).
+const GRID_MIN: usize = 32;
+/// Maximum grid dimension (cap for very large files — diminishing returns beyond this).
+const GRID_MAX: usize = 64;
+
+/// Compute adaptive grid size based on file byte length.
+/// Scales from 32x32 for small files up to 64x64 for large files,
+/// preserving structural fidelity without blowing up simulation cost.
+fn adaptive_grid_size(file_bytes: usize) -> usize {
+    match file_bytes {
+        0..=2048 => GRID_MIN, // <= 2KB: 32x32 (1,024 cells)
+        2049..=10240 => 48,   // 2-10KB: 48x48 (2,304 cells)
+        _ => GRID_MAX,        // > 10KB: 64x64 (4,096 cells)
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Core computation
 // ---------------------------------------------------------------------------
-
-/// All seven encoder IDs in canonical order.
-const ALL_ENCODERS: [SeedEncoderId; 7] = [
-    SeedEncoderId::AsciiBytes,
-    SeedEncoderId::Lifehash16,
-    SeedEncoderId::HilbertBits,
-    SeedEncoderId::Structural,
-    SeedEncoderId::TokenSpectrum,
-    SeedEncoderId::AstStructure,
-    SeedEncoderId::ComplexityField,
-];
 
 /// AST-driven encoder IDs used for tier determination.
 const AST_ENCODERS: [SeedEncoderId; 3] = [
@@ -211,11 +244,12 @@ const AST_ENCODERS: [SeedEncoderId; 3] = [
     SeedEncoderId::ComplexityField,
 ];
 
-/// Actionable encoders: AST-driven + hybrid. These are the encoders whose scores
-/// the agent can meaningfully improve through structural code changes.
-/// Byte-level encoders (ascii_bytes, hilbert_bits, lifehash16) are excluded because
-/// they measure surface-level byte patterns that add noise to quality signals.
-const ACTIONABLE_ENCODERS: [SeedEncoderId; 4] = [
+/// The four encoders used for code quality measurement.
+/// Three AST-driven (determine tier) + one hybrid (structural).
+/// Byte-level encoders (ascii_bytes, hilbert_bits, lifehash16) are excluded
+/// entirely — they measure surface byte patterns that add noise to quality
+/// signals and cannot be meaningfully improved through code changes.
+const QUALITY_ENCODERS: [SeedEncoderId; 4] = [
     SeedEncoderId::TokenSpectrum,
     SeedEncoderId::AstStructure,
     SeedEncoderId::ComplexityField,
@@ -232,11 +266,14 @@ pub fn compute_genome_report(text: &str, file_path: &Path) -> GenomeReport {
     };
     let params = SeedParams::default();
     let conway = Rule::conway();
+    let grid_size = adaptive_grid_size(text.len());
 
-    // Step 1-4: encode each encoder via encode_seed(), then simulate GoL.
-    let mut encoder_scores = Vec::with_capacity(7);
-    for &encoder_id in &ALL_ENCODERS {
-        let encoded = encode_seed(&input, encoder_id, &params, 0, 0, GRID_SIZE, GRID_SIZE);
+    // Encode and simulate only the 4 quality encoders (3 AST + 1 hybrid).
+    // Byte-level encoders (ascii_bytes, hilbert_bits, lifehash16) are not
+    // computed — they add noise to quality measurement.
+    let mut encoder_scores = Vec::with_capacity(QUALITY_ENCODERS.len());
+    for &encoder_id in &QUALITY_ENCODERS {
+        let encoded = encode_seed(&input, encoder_id, &params, 0, 0, grid_size, grid_size);
         let score = simulate_gol(
             encoder_id,
             &encoded.grid,
@@ -274,6 +311,7 @@ pub fn compute_genome_report(text: &str, file_path: &Path) -> GenomeReport {
         tier,
         recommendations,
         timestamp_ms,
+        grid_size,
     }
 }
 
@@ -294,6 +332,10 @@ fn simulate_gol(
 
     let mut generations_survived: u32 = 0;
     let mut cycle_period: Option<u32> = None;
+    // Track population at early and late stages for growth classification.
+    let mut early_pop: u32 = 0;
+    let mut late_pop: u32 = 0;
+    let mut died = false;
 
     for gen in 1..=MAX_GENERATIONS {
         grid = nit_gol::step::step(&grid, rule, EdgeMode::Dead);
@@ -301,15 +343,25 @@ fn simulate_gol(
         if alive > peak_population {
             peak_population = alive;
         }
+        // Sample early population (around 10% of sim).
+        if gen == MAX_GENERATIONS / 10 {
+            early_pop = alive;
+        }
+        // Sample late population (around 80% of sim).
+        if gen == MAX_GENERATIONS * 4 / 5 {
+            late_pop = alive;
+        }
         // All cells dead — no further evolution possible.
         if alive == 0 {
             generations_survived = gen;
+            died = true;
             break;
         }
         let h = grid.hash();
         if let Some(&first_seen) = seen.get(&h) {
             generations_survived = gen;
             cycle_period = Some(gen - first_seen);
+            late_pop = alive;
             break;
         }
         seen.insert(h, gen);
@@ -318,6 +370,22 @@ fn simulate_gol(
         generations_survived = MAX_GENERATIONS;
     }
 
+    let growth_class = if died {
+        GrowthClass::Extinct
+    } else if early_pop == 0 || late_pop == 0 {
+        // Not enough data — treat as stable.
+        GrowthClass::Stable
+    } else {
+        let ratio = late_pop as f32 / early_pop as f32;
+        if ratio > 1.15 {
+            GrowthClass::Expanding
+        } else if ratio < 0.85 {
+            GrowthClass::Collapsing
+        } else {
+            GrowthClass::Stable
+        }
+    };
+
     EncoderScore {
         encoder,
         density,
@@ -325,6 +393,7 @@ fn simulate_gol(
         generations_survived,
         peak_population,
         cycle_period,
+        growth_class,
     }
 }
 
@@ -334,7 +403,7 @@ fn simulate_gol(
 fn compute_consistency(scores: &[EncoderScore]) -> f32 {
     let gens: Vec<f64> = scores
         .iter()
-        .filter(|s| ACTIONABLE_ENCODERS.contains(&s.encoder))
+        .filter(|s| QUALITY_ENCODERS.contains(&s.encoder))
         .map(|s| s.generations_survived as f64)
         .collect();
     if gens.is_empty() {
@@ -404,9 +473,11 @@ pub fn format_genome_report(report: &GenomeReport) -> String {
         report.cross_encoder_consistency
     ));
     out.push_str(&format!(
-        "Tier: {} ({})\n",
+        "Tier: {} ({}) [grid {}x{}]\n",
         report.tier.numeral(),
-        report.tier.name()
+        report.tier.name(),
+        report.grid_size,
+        report.grid_size,
     ));
     out.push_str(&format!(
         "Cross-encoder consistency: {:.2}\n\n",
@@ -416,12 +487,13 @@ pub fn format_genome_report(report: &GenomeReport) -> String {
     out.push_str("Encoder scores:\n");
     for score in &report.encoder_scores {
         out.push_str(&format!(
-            "  {}: density={:.2}, components={}, generations={}, peak_pop={}{}\n",
+            "  {}: density={:.2}, components={}, generations={}, peak_pop={}, growth={}{}\n",
             score.encoder.label(),
             score.density,
             score.components,
             score.generations_survived,
             score.peak_population,
+            score.growth_class.label(),
             match score.cycle_period {
                 Some(p) => format!(", cycle={p}"),
                 None => String::new(),

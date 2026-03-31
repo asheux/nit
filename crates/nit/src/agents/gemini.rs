@@ -92,8 +92,8 @@ fn discover_models_from_package() -> Option<Vec<String>> {
     let canonical_path = fs::canonicalize(gemini_bin).ok()?;
     let package_dir = canonical_path.parent()?.parent()?;
 
-    let models_js_path = package_dir
-        .join("node_modules/@google/gemini-cli-core/dist/src/config/models.js");
+    let models_js_path =
+        package_dir.join("node_modules/@google/gemini-cli-core/dist/src/config/models.js");
     let js_content = fs::read_to_string(models_js_path).ok()?;
 
     let parsed = parse_gemini_models_from_source(&js_content);
@@ -235,7 +235,8 @@ fn beats_incumbent(
     let version_advantage = challenger.version_components > current_best.version_components;
     let version_tied = challenger.version_components == current_best.version_components;
     version_advantage
-        || (version_tied && super::prefer_shorter_model_name(challenger_name, &current_best.full_identifier))
+        || (version_tied
+            && super::prefer_shorter_model_name(challenger_name, &current_best.full_identifier))
 }
 
 // ── Version Parsing ──
@@ -254,7 +255,9 @@ fn parse_version_segment(digit_str: &str) -> Option<u32> {
         return None;
     }
 
-    let all_numeric = digit_str.chars().all(|character| character.is_ascii_digit());
+    let all_numeric = digit_str
+        .chars()
+        .all(|character| character.is_ascii_digit());
     if !all_numeric {
         return None;
     }

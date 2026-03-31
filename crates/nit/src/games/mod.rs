@@ -198,7 +198,8 @@ fn load_games_config(
     toml_source: Option<PathBuf>,
     sidecar_source: Option<PathBuf>,
 ) -> anyhow::Result<LoadedConfig> {
-    let canonical_config_path = toml_source.unwrap_or_else(|| PathBuf::from(DEFAULT_CONFIG_FILENAME));
+    let canonical_config_path =
+        toml_source.unwrap_or_else(|| PathBuf::from(DEFAULT_CONFIG_FILENAME));
 
     let raw_toml_content = core_io::load_to_string(&canonical_config_path)
         .with_context(|| format!("failed to read {}", canonical_config_path.display()))?;
@@ -208,7 +209,8 @@ fn load_games_config(
             .map_err(|config_parse_failure| anyhow::anyhow!(config_parse_failure))?;
 
     if let Some(ndjson_sidecar) = sidecar_source {
-        let absolute_sidecar_path = resolve_relative_path(&ndjson_sidecar, canonical_config_path.parent());
+        let absolute_sidecar_path =
+            resolve_relative_path(&ndjson_sidecar, canonical_config_path.parent());
         append_strategies_from_ndjson(&mut parsed_config, &absolute_sidecar_path)?;
     }
 
@@ -268,7 +270,8 @@ fn append_strategies_from_ndjson(
 
     let line_reader = std::io::BufReader::new(opened_handle);
     for (line_number, raw_line_result) in line_reader.lines().enumerate() {
-        let Some(parsed_strategy) = parse_ndjson_line(sidecar_file, line_number, raw_line_result?)? else {
+        let Some(parsed_strategy) = parse_ndjson_line(sidecar_file, line_number, raw_line_result?)?
+        else {
             continue;
         };
         target_config.strategies.push(parsed_strategy);
@@ -319,13 +322,17 @@ fn write_run_artifacts(
     });
 
     // Serialize compiled strategy definitions to structured JSON.
-    persist_artifact(definitions_output_path, "strategy definitions", |target_path| {
-        nit_utils::fs::write_atomic(target_path, |json_writer| {
-            serde_json::to_writer_pretty(json_writer, compiled_strategy_list)
-                .map_err(std::io::Error::other)
-        })?;
-        Ok(())
-    });
+    persist_artifact(
+        definitions_output_path,
+        "strategy definitions",
+        |target_path| {
+            nit_utils::fs::write_atomic(target_path, |json_writer| {
+                serde_json::to_writer_pretty(json_writer, compiled_strategy_list)
+                    .map_err(std::io::Error::other)
+            })?;
+            Ok(())
+        },
+    );
 
     // Write tournament results with final rankings and per-strategy scores.
     persist_artifact(results_output_path, "tournament results", |target_path| {
@@ -373,9 +380,20 @@ fn execute_tournament(
     let parallelism_mode = Parallelism::from_config(&engine_settings.engine.parallelism);
 
     if matches!(parallelism_mode, Parallelism::Off) {
-        run_sequential(tournament_engine, engine_settings, event_output_file, history_output_file)
+        run_sequential(
+            tournament_engine,
+            engine_settings,
+            event_output_file,
+            history_output_file,
+        )
     } else {
-        run_parallel(tournament_engine, engine_settings, parallelism_mode, event_output_file, history_output_file)
+        run_parallel(
+            tournament_engine,
+            engine_settings,
+            parallelism_mode,
+            event_output_file,
+            history_output_file,
+        )
     }
 }
 
@@ -394,10 +412,11 @@ fn run_sequential(
     let mut history_recorder = history_file.map(HistoryWriter::new).transpose()?;
 
     // Run the tournament kernel in sequential mode with direct writer references.
-    let (tournament_outcomes, acceleration_metrics) = tournament_engine.run_with_runtime(KernelRunMode::Sequential {
-        event_writer: event_recorder.as_mut(),
-        history_writer: history_recorder.as_mut(),
-    });
+    let (tournament_outcomes, acceleration_metrics) =
+        tournament_engine.run_with_runtime(KernelRunMode::Sequential {
+            event_writer: event_recorder.as_mut(),
+            history_writer: history_recorder.as_mut(),
+        });
 
     let finalized_event_path = finalize_writer(event_recorder, "event log")?;
     let finalized_history_path = finalize_writer(history_recorder, "history log")?;
@@ -425,12 +444,13 @@ fn run_parallel(
     let (history_sender, history_thread) = spawn_history_writer(history_file)?;
 
     // Run the tournament kernel in parallel mode with channel-based senders.
-    let (tournament_outcomes, acceleration_metrics) = tournament_engine.run_with_runtime(KernelRunMode::Parallel {
-        parallelism: thread_strategy,
-        event_sender: event_sender.clone(),
-        include_rounds: engine_settings.event_log.include_rounds,
-        history_sender: history_sender.clone(),
-    });
+    let (tournament_outcomes, acceleration_metrics) =
+        tournament_engine.run_with_runtime(KernelRunMode::Parallel {
+            parallelism: thread_strategy,
+            event_sender: event_sender.clone(),
+            include_rounds: engine_settings.event_log.include_rounds,
+            history_sender: history_sender.clone(),
+        });
 
     // Close channels so background threads drain their queues and exit cleanly.
     drop(event_sender);

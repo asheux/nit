@@ -40,9 +40,11 @@ pub fn render(frame: &mut Frame, area: ratatui::layout::Rect, state: &AppState, 
 
     let title_text = match genome_report {
         Some(report) => format!(
-            " CODE STRUCTURAL QUALITY \u{2014} {} {} ",
+            " CODE STRUCTURAL QUALITY \u{2014} {} {} [{}x{}] ",
             report.tier.name(),
-            tier_glyph(report.tier)
+            tier_glyph(report.tier),
+            report.grid_size,
+            report.grid_size,
         ),
         None => " CODE STRUCTURAL QUALITY ".to_string(),
     };
@@ -163,37 +165,27 @@ fn build_lines_genome(
     ));
     lines.push(Line::from(""));
 
-    // ── AST Encoders (determine tier) ──
+    // ── Quality Encoders (3 AST + 1 hybrid) ──
     lines.push(Line::from(vec![
-        Span::styled("AST Encoders ", label_style),
-        Span::styled("─".repeat(width.saturating_sub(14)), dim_style),
+        Span::styled("Encoders ", label_style),
+        Span::styled("─".repeat(width.saturating_sub(10)), dim_style),
     ]));
-    let ast_encoders = [
+    let quality_encoders = [
         SeedEncoderId::TokenSpectrum,
         SeedEncoderId::AstStructure,
         SeedEncoderId::ComplexityField,
-    ];
-    for &enc_id in &ast_encoders {
-        if let Some(score) = report.encoder_scores.iter().find(|s| s.encoder == enc_id) {
-            lines.push(build_encoder_line(score, width, theme, true));
-        }
-    }
-    lines.push(Line::from(""));
-
-    // ── Byte Encoders ──
-    lines.push(Line::from(vec![
-        Span::styled("Byte Encoders ", label_style),
-        Span::styled("─".repeat(width.saturating_sub(15)), dim_style),
-    ]));
-    let byte_encoders = [
-        SeedEncoderId::AsciiBytes,
-        SeedEncoderId::Lifehash16,
-        SeedEncoderId::HilbertBits,
         SeedEncoderId::Structural,
     ];
-    for &enc_id in &byte_encoders {
+    for &enc_id in &quality_encoders {
+        // AST encoders determine tier; Structural is hybrid.
+        let is_ast = matches!(
+            enc_id,
+            SeedEncoderId::TokenSpectrum
+                | SeedEncoderId::AstStructure
+                | SeedEncoderId::ComplexityField
+        );
         if let Some(score) = report.encoder_scores.iter().find(|s| s.encoder == enc_id) {
-            lines.push(build_encoder_line(score, width, theme, false));
+            lines.push(build_encoder_line(score, width, theme, is_ast));
         }
     }
     lines.push(Line::from(""));
@@ -203,7 +195,7 @@ fn build_lines_genome(
         Span::styled("Density ", label_style),
         Span::styled("─".repeat(width.saturating_sub(9)), dim_style),
     ]));
-    for &enc_id in &ast_encoders {
+    for &enc_id in &quality_encoders {
         if let Some(score) = report.encoder_scores.iter().find(|s| s.encoder == enc_id) {
             lines.push(build_density_line(score, width, theme));
         }
@@ -346,18 +338,12 @@ fn build_lines_genome(
                     .fg(theme.title)
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::styled(
-                "─".repeat(width.saturating_sub(18)),
-                dim_style,
-            ),
+            Span::styled("─".repeat(width.saturating_sub(18)), dim_style),
         ]));
         let mut sorted: Vec<_> = state.genome_shadow_evals.iter().collect();
         sorted.sort_by_key(|(p, _)| (*p).clone());
         for (path, eval) in &sorted {
-            let file_name = path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("?");
+            let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("?");
             let delta_color = match eval.delta_label {
                 "improved" => theme.accent,
                 "degraded" => theme.error,
@@ -375,11 +361,7 @@ fn build_lines_genome(
                     Style::default().fg(delta_color),
                 ),
                 Span::styled(
-                    format!(
-                        "tier {} c={:.2}",
-                        eval.tier.numeral(),
-                        eval.consistency,
-                    ),
+                    format!("tier {} c={:.2}", eval.tier.numeral(), eval.consistency,),
                     dim_style,
                 ),
             ]));
@@ -565,9 +547,10 @@ fn build_sim_detail_line(
         Some(p) => format!("period={p}"),
         None => "none".into(),
     };
+    let growth_str = score.growth_class.label();
     let detail = format!(
-        "generations={:<5} peak={:<5} cycle={}",
-        score.generations_survived, score.peak_population, cycle_str
+        "generations={:<5} peak={:<5} growth={:<10} cycle={}",
+        score.generations_survived, score.peak_population, growth_str, cycle_str
     );
     let used = name_w + detail.len();
     let pad = width.saturating_sub(used);
@@ -584,6 +567,15 @@ fn build_sim_detail_line(
         Span::styled(
             format!(" peak={:<5}", score.peak_population),
             Style::default().fg(theme.foreground),
+        ),
+        Span::styled(
+            format!(" {growth_str}"),
+            Style::default().fg(match score.growth_class {
+                nit_core::GrowthClass::Expanding => theme.accent,
+                nit_core::GrowthClass::Stable => theme.foreground,
+                nit_core::GrowthClass::Collapsing => theme.error,
+                nit_core::GrowthClass::Extinct => theme.error,
+            }),
         ),
         Span::styled(format!(" cycle={cycle_str}"), dim),
         Span::styled(" ".repeat(pad.saturating_sub(2)), dim),

@@ -1567,8 +1567,14 @@ fn build_genome_retry_prompt(state: &mut AppState) -> Option<String> {
                 degraded_files.push(file_path.clone());
             }
         } else {
-            // New file — include if below minimum quality threshold (Tier III).
-            if report.tier < nit_core::GenomeTier::Spaceship {
+            // New file — include if below adaptive quality threshold.
+            let min_tier = state
+                .genome_agent_min_tier
+                .values()
+                .max()
+                .copied()
+                .unwrap_or(nit_core::GenomeTier::Spaceship);
+            if report.tier < min_tier {
                 degraded_files.push(file_path.clone());
             }
         }
@@ -1633,6 +1639,23 @@ fn build_genome_retry_prompt(state: &mut AppState) -> Option<String> {
                 gen_base,
                 gen_now - gen_base,
             ));
+
+            // Pinpoint: identify which encoder(s) degraded most.
+            for (now_score, base_score) in
+                report.encoder_scores.iter().zip(base.encoder_scores.iter())
+            {
+                let drop =
+                    base_score.generations_survived as i64 - now_score.generations_survived as i64;
+                if drop > 0 {
+                    prompt.push_str(&format!(
+                        "  ↓ {} dropped {} generations (was {}, now {})\n",
+                        now_score.encoder.label(),
+                        drop,
+                        base_score.generations_survived,
+                        now_score.generations_survived,
+                    ));
+                }
+            }
         } else {
             // New file — no baseline, show threshold requirement.
             prompt.push_str(&format!(
@@ -1643,6 +1666,30 @@ fn build_genome_retry_prompt(state: &mut AppState) -> Option<String> {
                 report.tier.numeral(),
                 report.cross_encoder_consistency,
             ));
+        }
+
+        // Pinpoint: include specific function-level recommendations.
+        let critical_recs: Vec<_> = report
+            .recommendations
+            .iter()
+            .filter(|r| {
+                matches!(
+                    r.severity,
+                    nit_core::RecommendationSeverity::Critical
+                        | nit_core::RecommendationSeverity::Warning
+                )
+            })
+            .collect();
+        if !critical_recs.is_empty() {
+            prompt.push_str("[FIX THESE SPECIFIC ISSUES]\n");
+            for rec in &critical_recs {
+                let loc = rec
+                    .location
+                    .as_deref()
+                    .map(|l| format!(" at {l}"))
+                    .unwrap_or_default();
+                prompt.push_str(&format!("  • {}{loc}\n", rec.message));
+            }
         }
         prompt.push('\n');
     }

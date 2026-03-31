@@ -97,12 +97,11 @@ pub(super) fn populate_claude_model_metadata(roster: &mut nit_core::AgentsState)
 
 /// Determine and record the effective context window for a Claude model identifier.
 fn insert_claude_context_window(roster: &mut nit_core::AgentsState, model_id: &str) {
-    let effective_window_size: u32 =
-        if model_id.contains("[1m]") || model_id.contains("1m") {
-            EXTENDED_CONTEXT_WINDOW
-        } else {
-            STANDARD_CONTEXT_WINDOW
-        };
+    let effective_window_size: u32 = if model_id.contains("[1m]") || model_id.contains("1m") {
+        EXTENDED_CONTEXT_WINDOW
+    } else {
+        STANDARD_CONTEXT_WINDOW
+    };
     roster
         .claude_effective_context_window_tokens
         .insert(model_id.to_owned(), effective_window_size);
@@ -159,8 +158,7 @@ pub(crate) fn select_current_claude_models(models: Vec<String>) -> Vec<String> {
     // Accumulate the best (latest version) candidate per family.
     let mut latest_per_family: HashMap<&'static str, (Vec<u32>, String)> = HashMap::new();
     for candidate_model in deduplicated_input.iter() {
-        let Some((family_tag, parsed_version)) =
-            parse_claude_family_and_version(candidate_model)
+        let Some((family_tag, parsed_version)) = parse_claude_family_and_version(candidate_model)
         else {
             continue;
         };
@@ -198,11 +196,7 @@ fn update_latest_per_family(
             slot.insert((parsed_version, candidate_model.to_owned()));
         }
         std::collections::hash_map::Entry::Occupied(mut slot) => {
-            let dominated = is_version_dominated(
-                &parsed_version,
-                candidate_model,
-                slot.get(),
-            );
+            let dominated = is_version_dominated(&parsed_version, candidate_model, slot.get());
             if dominated {
                 slot.insert((parsed_version, candidate_model.to_owned()));
             }
@@ -313,7 +307,9 @@ const RECOGNIZED_FAMILIES: &[&str] = &["-haiku", "-sonnet", "-opus"];
 
 /// Check that the identifier contains a recognized model family name.
 fn contains_model_family_marker(normalized_id: &str) -> bool {
-    RECOGNIZED_FAMILIES.iter().any(|tag| normalized_id.contains(tag))
+    RECOGNIZED_FAMILIES
+        .iter()
+        .any(|tag| normalized_id.contains(tag))
 }
 
 /// Keywords that indicate an internal tool, plugin, or non-model artifact.
@@ -387,9 +383,7 @@ fn parse_version_segments(version_tokens: &[&str]) -> Option<Vec<u32>> {
     }
     let mut parsed_digits = Vec::with_capacity(version_tokens.len());
     for segment in version_tokens {
-        if segment.is_empty()
-            || segment.len() > 2
-            || !segment.chars().all(|ch| ch.is_ascii_digit())
+        if segment.is_empty() || segment.len() > 2 || !segment.chars().all(|ch| ch.is_ascii_digit())
         {
             return None;
         }

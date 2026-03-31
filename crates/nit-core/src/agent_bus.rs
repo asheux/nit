@@ -437,16 +437,14 @@ impl AgentBusEvent {
                                 worst_delta = delta;
                             }
                         } else {
-                            // New file — evaluate against minimum quality threshold.
-                            // New code created by agents should meet at least Tier III.
-                            if report.tier < crate::genome_report::GenomeTier::Spaceship {
-                                if -1 < worst_delta {
-                                    worst_delta = -1;
-                                }
-                            } else if report.tier > crate::genome_report::GenomeTier::Spaceship
-                                && 1 > worst_delta
-                            {
-                                // New file above threshold — count as improvement.
+                            // New file — evaluate against adaptive quality threshold.
+                            let min_tier = state
+                                .genome_agent_min_tier
+                                .get(agent_id)
+                                .copied()
+                                .unwrap_or(crate::genome_report::GenomeTier::Spaceship);
+                            if report.tier < min_tier && -1 < worst_delta {
+                                worst_delta = -1;
                             }
                         }
 
@@ -489,6 +487,51 @@ impl AgentBusEvent {
 
                     state.genome_quality_delta = worst_delta;
 
+                    // Adaptive quality thresholds: track per-agent streak.
+                    // When an agent consistently hits the current min tier for 5+ turns,
+                    // raise their threshold.
+                    let current_min = state
+                        .genome_agent_min_tier
+                        .get(agent_id)
+                        .copied()
+                        .unwrap_or(crate::genome_report::GenomeTier::Spaceship);
+                    // Compute the worst tier across all modified files this turn.
+                    let worst_tier = modified
+                        .iter()
+                        .filter_map(|p| state.genome_reports.get(p))
+                        .map(|r| r.tier)
+                        .min()
+                        .unwrap_or(crate::genome_report::GenomeTier::StillLife);
+                    if worst_tier >= current_min {
+                        let streak = state
+                            .genome_agent_streak
+                            .entry(agent_id.clone())
+                            .or_insert(0);
+                        *streak = streak.saturating_add(1);
+                        if *streak >= 5 {
+                            // Promote threshold to next tier (cap at Methuselah).
+                            let next_tier = match current_min {
+                                crate::genome_report::GenomeTier::StillLife
+                                | crate::genome_report::GenomeTier::Oscillator => {
+                                    crate::genome_report::GenomeTier::Spaceship
+                                }
+                                crate::genome_report::GenomeTier::Spaceship => {
+                                    crate::genome_report::GenomeTier::Methuselah
+                                }
+                                _ => current_min, // Don't push beyond Methuselah.
+                            };
+                            if next_tier > current_min {
+                                state
+                                    .genome_agent_min_tier
+                                    .insert(agent_id.clone(), next_tier);
+                                *streak = 0;
+                            }
+                        }
+                    } else {
+                        // Reset streak on degradation.
+                        state.genome_agent_streak.insert(agent_id.clone(), 0);
+                    }
+
                     // Build diff text for ALL modified files (not just editor buffer).
                     let mut all_diffs = String::new();
                     for file_path in &modified {
@@ -517,11 +560,9 @@ impl AgentBusEvent {
                                 state.genome_reports.get(editor_path),
                                 state.genome_baselines.get(editor_path),
                             ) {
-                                let diff =
-                                    crate::genome_report::compute_genome_diff(base, report);
-                                all_diffs.push_str(
-                                    &crate::genome_report::format_genome_diff(&diff),
-                                );
+                                let diff = crate::genome_report::compute_genome_diff(base, report);
+                                all_diffs
+                                    .push_str(&crate::genome_report::format_genome_diff(&diff));
                                 all_diffs.push('\n');
                             }
                         }

@@ -117,7 +117,7 @@ impl Default for GenomeGateConfig {
 pub struct AgentGenomeConfig {
     #[serde(default = "default_true")]
     pub genome_context_enabled: bool,
-    #[serde(default)]
+    #[serde(default = "default_true")]
     pub genome_gate_enabled: bool,
     #[serde(default)]
     pub genome_gate: GenomeGateConfig,
@@ -127,7 +127,7 @@ impl Default for AgentGenomeConfig {
     fn default() -> Self {
         Self {
             genome_context_enabled: true,
-            genome_gate_enabled: false,
+            genome_gate_enabled: true,
             genome_gate: GenomeGateConfig::default(),
         }
     }

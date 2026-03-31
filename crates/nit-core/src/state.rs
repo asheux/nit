@@ -1832,6 +1832,14 @@ pub struct AppState {
     /// Reset to 0 when quality improves or stays the same.
     #[serde(skip)]
     pub genome_retry_count: u8,
+    /// Rolling count of consecutive turns where quality met or exceeded Tier III,
+    /// per agent. Used for adaptive quality thresholds — agents that consistently
+    /// hit Tier III get pushed toward Tier IV.
+    #[serde(skip)]
+    pub genome_agent_streak: HashMap<String, u8>,
+    /// Effective minimum tier per agent, elevated by adaptive thresholds.
+    #[serde(skip)]
+    pub genome_agent_min_tier: HashMap<String, crate::genome_report::GenomeTier>,
     /// Real-time per-file shadow evaluation results during an active agent turn.
     /// Populated by the file watcher as files change; cleared on TurnStarted.
     #[serde(skip)]
@@ -2032,6 +2040,8 @@ impl AppState {
             genome_turn_modified: HashSet::new(),
             genome_turn_active: false,
             genome_retry_count: 0,
+            genome_agent_streak: HashMap::new(),
+            genome_agent_min_tier: HashMap::new(),
             genome_shadow_evals: HashMap::new(),
             gate_monitor_scroll: 0,
         }
