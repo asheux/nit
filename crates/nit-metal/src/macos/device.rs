@@ -29,7 +29,7 @@ impl MetalBackendInfo {
         })
     }
 
-        /// Returns `true` when the device belongs to a high-core-count Apple
+    /// Returns `true` when the device belongs to a high-core-count Apple
     /// Silicon tier (Pro, Max, or Ultra) that benefits from deeper dispatch
     /// queues and larger batch sizes.
     pub fn is_high_performance(&self) -> bool {

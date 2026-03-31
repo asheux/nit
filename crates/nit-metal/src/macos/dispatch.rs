@@ -4,7 +4,8 @@
 //! of prepared and pending batches across FSM, CA, and TM payloads.
 
 use crate::{
-    BatchEvalConfig, BatchPayload, MatchPair, ScorePair, TmHaltingPair, TmTransitionPacked,
+    BatchEvalConfig, BatchPayload, CaBatch, FsmBatch, MatchPair, ScorePair, TmBatch,
+    TmHaltingPair, TmTransitionPacked,
 };
 use metal::{MTLResourceOptions, MTLSize};
 use std::ffi::c_void;
@@ -119,6 +120,64 @@ enum PreparedPayload {
         starts: metal::Buffer,
         transitions: metal::Buffer,
     },
+}
+
+impl PreparedPayload {
+    /// Uploads FSM strategy tables (starts, outputs, transitions) to GPU memory.
+    fn upload_fsm(device: &metal::Device, fsm: &FsmBatch) -> Self {
+        Self::Fsm {
+            params: FsmParams {
+                states: fsm.states,
+                alphabet: fsm.alphabet,
+            },
+            starts: buffer_from_slice(device, &fsm.starts),
+            outputs: buffer_from_slice(device, &fsm.outputs),
+            transitions: buffer_from_slice(device, &fsm.transitions),
+        }
+    }
+
+    /// Uploads cellular automaton rule tables to GPU memory.
+    fn upload_ca(device: &metal::Device, ca: &CaBatch) -> Self {
+        Self::Ca {
+            params: CaParams {
+                symbols: ca.symbols,
+                two_r: ca.two_r,
+                steps: ca.steps,
+                rule_table_len: ca.rule_table_len,
+            },
+            rule_tables: buffer_from_slice(device, &ca.rule_tables),
+        }
+    }
+
+    /// Uploads Turing machine state tables and transitions to GPU memory.
+    ///
+    /// Transitions are converted to the padded GPU-side representation
+    /// to satisfy Metal's alignment requirements.
+    fn upload_tm(device: &metal::Device, tm: &TmBatch) -> Self {
+        let gpu_transitions = tm_transition_pods(&tm.transitions);
+        Self::Tm {
+            params: TmParams {
+                states: tm.states,
+                symbols: tm.symbols,
+                blank: tm.blank,
+                max_steps: tm.max_steps,
+                transitions_per_strategy: tm.states.saturating_mul(tm.symbols),
+            },
+            starts: buffer_from_slice(device, &tm.start_states),
+            transitions: buffer_from_slice(device, &gpu_transitions),
+        }
+    }
+
+    /// Uploads a batch payload to GPU memory, dispatching to the
+    /// variant-specific upload method.
+    fn upload(device: &metal::Device, payload: &BatchPayload) -> Self {
+        match payload {
+            BatchPayload::Fsm(fsm) => Self::upload_fsm(device, fsm),
+            BatchPayload::Ca(ca) => Self::upload_ca(device, ca),
+            BatchPayload::Tm(tm) => Self::upload_tm(device, tm),
+        }
+    }
+
 }
 
 /// A fully prepared batch: shader selected, payload uploaded to GPU.
@@ -426,47 +485,10 @@ pub fn try_prepare_batch(
     let shader_key = ShaderKey::for_payload(payload);
     let ctx = context_for_key(shader_key)?;
 
-    let prepared_payload = match payload {
-        BatchPayload::Fsm(fsm) => PreparedPayload::Fsm {
-            params: FsmParams {
-                states: fsm.states,
-                alphabet: fsm.alphabet,
-            },
-            starts: buffer_from_slice(&ctx.device, &fsm.starts),
-            outputs: buffer_from_slice(&ctx.device, &fsm.outputs),
-            transitions: buffer_from_slice(&ctx.device, &fsm.transitions),
-        },
-
-        BatchPayload::Ca(ca) => PreparedPayload::Ca {
-            params: CaParams {
-                symbols: ca.symbols,
-                two_r: ca.two_r,
-                steps: ca.steps,
-                rule_table_len: ca.rule_table_len,
-            },
-            rule_tables: buffer_from_slice(&ctx.device, &ca.rule_tables),
-        },
-
-        BatchPayload::Tm(tm) => {
-            let gpu_transitions = tm_transition_pods(&tm.transitions);
-            PreparedPayload::Tm {
-                params: TmParams {
-                    states: tm.states,
-                    symbols: tm.symbols,
-                    blank: tm.blank,
-                    max_steps: tm.max_steps,
-                    transitions_per_strategy: tm.states.saturating_mul(tm.symbols),
-                },
-                starts: buffer_from_slice(&ctx.device, &tm.start_states),
-                transitions: buffer_from_slice(&ctx.device, &gpu_transitions),
-            }
-        }
-    };
-
     Ok(Some(PreparedBatch {
         shader_key,
         eval_config: config.clone(),
-        payload: prepared_payload,
+        payload: PreparedPayload::upload(&ctx.device, payload),
     }))
 }
 
