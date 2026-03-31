@@ -1,0 +1,263 @@
+use std::collections::HashMap;
+use std::fs;
+
+use super::discover::{find_executable_in_path, probe_models_from_cli};
+
+/// Probe the Gemini CLI for available models, falling back to the installed package.
+pub(super) fn probe_gemini_models() -> (Vec<String>, Option<String>) {
+    let cli_attempts: &[&[&str]] = &[
+        &["models", "--json"],
+        &["models"],
+        &["list-models"],
+        &["--list-models"],
+        &["--models"],
+    ];
+
+    let (raw_models, probe_error) = probe_models_from_cli("gemini", cli_attempts);
+    let filtered = select_current_gemini_models(raw_models);
+    if !filtered.is_empty() {
+        return (filtered, None);
+    }
+
+    if let Some(installed_models) = discover_models_from_package() {
+        let filtered_installed = select_current_gemini_models(installed_models);
+        return (filtered_installed, None);
+    }
+
+    (filtered, probe_error)
+}
+
+/// Extract model identifiers from the Gemini CLI-core JavaScript source.
+pub(crate) fn parse_gemini_models_from_source(js_source: &str) -> Vec<String> {
+    let const_bindings = collect_js_const_bindings(js_source);
+    let set_member_tokens = extract_valid_models_set_members(js_source);
+
+    let mut resolved: Vec<String> = set_member_tokens
+        .into_iter()
+        .filter_map(|token| resolve_set_member(token, &const_bindings))
+        .collect();
+    resolved.sort();
+    resolved.dedup();
+    resolved
+}
+
+/// Keep only the latest non-preview model per family (pro, flash, flash-lite).
+pub(crate) fn select_current_gemini_models(raw_models: Vec<String>) -> Vec<String> {
+    let mut deduplicated = raw_models;
+    deduplicated.sort();
+    deduplicated.dedup();
+
+    let mut best_per_family: HashMap<&'static str, ModelCandidate> = HashMap::new();
+
+    for model_id in &deduplicated {
+        let Some(classified) = classify_gemini_model(model_id) else {
+            continue;
+        };
+        record_if_better(&mut best_per_family, classified, model_id);
+    }
+
+    if best_per_family.is_empty() {
+        return deduplicated;
+    }
+
+    let mut selected: Vec<String> = best_per_family
+        .into_values()
+        .map(|winner| winner.full_identifier)
+        .collect();
+    selected.sort();
+    selected
+}
+
+// ── Classification Types ──
+
+/// A classified Gemini model with its family, stability status, and parsed version.
+struct ClassifiedModel {
+    family_tag: &'static str,
+    preview_variant: bool,
+    version_components: Vec<u32>,
+}
+
+/// Tracks the best model discovered so far within a given family.
+struct ModelCandidate {
+    preview_variant: bool,
+    version_components: Vec<u32>,
+    full_identifier: String,
+}
+
+// ── Package Discovery ──
+
+/// Locate models by reading the gemini-cli-core package source on disk.
+fn discover_models_from_package() -> Option<Vec<String>> {
+    let gemini_bin = find_executable_in_path("gemini")?;
+    let canonical_path = fs::canonicalize(gemini_bin).ok()?;
+    let package_dir = canonical_path.parent()?.parent()?;
+
+    let models_js_path = package_dir
+        .join("node_modules/@google/gemini-cli-core/dist/src/config/models.js");
+    let js_content = fs::read_to_string(models_js_path).ok()?;
+
+    let parsed = parse_gemini_models_from_source(&js_content);
+    if parsed.is_empty() {
+        None
+    } else {
+        Some(parsed)
+    }
+}
+
+// ── JavaScript Parsing Helpers ──
+
+/// Resolve a single set member token to a model ID string.
+fn resolve_set_member(token: &str, bindings: &HashMap<String, String>) -> Option<String> {
+    if let Some(quoted_value) = strip_single_quotes(token) {
+        return Some(quoted_value.to_string());
+    }
+
+    bindings.get(token).cloned()
+}
+
+/// Parse `export const NAME = 'value';` lines into a name-to-value map.
+fn collect_js_const_bindings(js_source: &str) -> HashMap<String, String> {
+    js_source.lines().filter_map(parse_js_const_line).collect()
+}
+
+/// Try to parse a single JS const declaration into (name, value).
+fn parse_js_const_line(line: &str) -> Option<(String, String)> {
+    let after_export = line.trim().strip_prefix("export const ")?;
+    let (binding_name, rhs) = after_export.split_once('=')?;
+    let cleaned_rhs = rhs.trim().trim_end_matches(';').trim();
+    let unquoted = strip_single_quotes(cleaned_rhs)?;
+    Some((binding_name.trim().to_string(), unquoted.to_string()))
+}
+
+/// Find the `VALID_GEMINI_MODELS = new Set([...])` block and return member tokens.
+fn extract_valid_models_set_members(js_source: &str) -> Vec<&str> {
+    let set_constructor_prefix = "export const VALID_GEMINI_MODELS = new Set([";
+
+    let Some(prefix_offset) = js_source.find(set_constructor_prefix) else {
+        return Vec::new();
+    };
+
+    let inner_content = &js_source[prefix_offset + set_constructor_prefix.len()..];
+
+    let Some(terminator_offset) = inner_content.find("]);") else {
+        return Vec::new();
+    };
+
+    inner_content[..terminator_offset]
+        .split(',')
+        .map(|element| element.trim())
+        .filter(|element| !element.is_empty())
+        .collect()
+}
+
+/// Strip surrounding single quotes from a JS string literal.
+fn strip_single_quotes(text: &str) -> Option<&str> {
+    let trimmed = text.trim();
+    let inner = trimmed.strip_prefix('\'')?.strip_suffix('\'')?;
+    if inner.is_empty() {
+        None
+    } else {
+        Some(inner)
+    }
+}
+
+// ── Model Classification and Selection ──
+
+/// Classify a model ID into its family, stability status, and version.
+fn classify_gemini_model(raw_identifier: &str) -> Option<ClassifiedModel> {
+    let normalized_name = raw_identifier.trim().to_ascii_lowercase();
+    let remainder = normalized_name.strip_prefix("gemini-")?;
+    let (numeric_portion, descriptor) = remainder.split_once('-')?;
+    let parsed_version = parse_dotted_version(numeric_portion)?;
+
+    // Exclude special-purpose model variants from family comparison.
+    if descriptor.contains("customtools") || descriptor.contains("embedding") {
+        return None;
+    }
+
+    let family_tag = match () {
+        _ if descriptor.contains("flash-lite") => "flash-lite",
+        _ if descriptor.contains("flash") => "flash",
+        _ if descriptor.contains("pro") => "pro",
+        _ => return None,
+    };
+
+    Some(ClassifiedModel {
+        family_tag,
+        preview_variant: descriptor.contains("preview"),
+        version_components: parsed_version,
+    })
+}
+
+/// Record a classified model as the best for its family if it improves on the current pick.
+fn record_if_better(
+    family_winners: &mut HashMap<&'static str, ModelCandidate>,
+    classification: ClassifiedModel,
+    full_id: &str,
+) {
+    let dominated_by_existing = family_winners
+        .get(classification.family_tag)
+        .is_some_and(|current_best| !beats_incumbent(current_best, &classification, full_id));
+
+    if dominated_by_existing {
+        return;
+    }
+
+    family_winners.insert(
+        classification.family_tag,
+        ModelCandidate {
+            preview_variant: classification.preview_variant,
+            version_components: classification.version_components,
+            full_identifier: full_id.to_string(),
+        },
+    );
+}
+
+/// Check whether a challenger classification should replace the current best candidate.
+///
+/// Preference order: stable release over preview, higher version, shorter name.
+fn beats_incumbent(
+    current_best: &ModelCandidate,
+    challenger: &ClassifiedModel,
+    challenger_name: &str,
+) -> bool {
+    // Stable release always takes priority over a preview variant.
+    if current_best.preview_variant && !challenger.preview_variant {
+        return true;
+    }
+
+    // A preview variant cannot displace a stable release.
+    if current_best.preview_variant != challenger.preview_variant {
+        return false;
+    }
+
+    // Same stability tier: compare by version magnitude, then by name brevity.
+    let version_advantage = challenger.version_components > current_best.version_components;
+    let version_tied = challenger.version_components == current_best.version_components;
+    version_advantage
+        || (version_tied && super::prefer_shorter_model_name(challenger_name, &current_best.full_identifier))
+}
+
+// ── Version Parsing ──
+
+/// Parse a dotted version string like "2.5" into a component vector [2, 5].
+fn parse_dotted_version(raw: &str) -> Option<Vec<u32>> {
+    if raw.is_empty() {
+        return None;
+    }
+    raw.split('.').map(parse_version_segment).collect()
+}
+
+/// Parse a single numeric segment from a version string.
+fn parse_version_segment(digit_str: &str) -> Option<u32> {
+    if digit_str.is_empty() {
+        return None;
+    }
+
+    let all_numeric = digit_str.chars().all(|character| character.is_ascii_digit());
+    if !all_numeric {
+        return None;
+    }
+
+    digit_str.parse::<u32>().ok()
+}

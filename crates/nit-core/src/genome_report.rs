@@ -102,20 +102,49 @@ impl GenomeReport {
 
 pub const GENOME_AGENT_INSTRUCTIONS: &str = "\
 You are writing code in nit, which measures structural quality by encoding your \
-source file as a Game of Life genome. Your code is evaluated across seven \
-encoders that analyze token distribution, AST structure, cyclomatic complexity, \
-nesting depth, token entropy, and identifier uniqueness.\n\
+source file as a Game of Life genome. Your code is evaluated across four \
+actionable encoders. Each captures a different dimension of code quality. \
+Cross-encoder consistency measures how much they agree — low consistency means \
+some dimensions are strong but others are weak. Focus on the weakest encoder.\n\
 \n\
-Your targets:\n\
-- Keep cyclomatic complexity <= 8 per function. Split complex functions.\n\
-- Keep nesting depth <= 3 on average. Use early returns and guard clauses.\n\
-- Use descriptive, unique identifiers. Aim for >= 65% uniqueness per scope.\n\
-- Include comments on public interfaces. Whitespace between logical sections.\n\
-- Keep functions small and focused. Each should produce a distinct grid component.\n\
-- Aim for tier III (Spaceship) or higher on all AST-driven encoders.\n\
-- Aim for density between 0.20 and 0.35 on AST encoders.\n\
-- Aim for >= 5 components on AST Structure encoder.\n\
-- Aim for cross-encoder consistency >= 0.60.\n\
+ENCODER GUIDE (what each measures → how to improve it):\n\
+\n\
+AST-driven encoders (determine the overall tier):\n\
+  token_spectrum — token semantic role distribution (keywords, operators, \
+identifiers, literals, comments).\n\
+    → Balance code vs comments vs whitespace. Add doc comments on public \
+items. Avoid long chains of similar tokens.\n\
+  ast_structure — syntactic tree shape (nesting depth, branching factor, span \
+size, node type variety).\n\
+    → Split monolithic functions into smaller ones (>= 5 distinct \
+functions/structs). Reduce nesting with early returns. Vary node types \
+(mix structs, enums, impls, fns).\n\
+  complexity_field — spatial heatmap of cyclomatic complexity, nesting depth, \
+token entropy, and identifier uniqueness.\n\
+    → Keep cyclomatic complexity <= 8 per function. Use unique, descriptive \
+names (>= 65% identifier uniqueness per scope). Distribute complexity \
+evenly across functions.\n\
+\n\
+Hybrid encoder:\n\
+  structural — Shannon entropy, bracket depth balance, token signal density, \
+n-gram uniqueness.\n\
+    → Balance bracket depth (avoid deeply nested blocks). Vary syntax \
+patterns (avoid repetitive match arms, if-else chains, or boilerplate). \
+Use diverse token patterns across the file.\n\
+\n\
+TARGETS:\n\
+- Tier III (Spaceship, 201+ generations) or higher on all AST encoders.\n\
+- Density between 0.20 and 0.35 on AST encoders.\n\
+- >= 5 components on ast_structure.\n\
+- Cyclomatic complexity <= 8 per function.\n\
+- Nesting depth <= 3 on average.\n\
+- Identifier uniqueness >= 65% per scope.\n\
+- Cross-encoder consistency >= 0.60.\n\
+\n\
+When you see an OUTLIER encoder in the scores, that encoder is the bottleneck. \
+Use the encoder guide above to determine what specific code changes will \
+improve it. The fastest path to better quality is raising the weakest encoder, \
+not improving one that's already strong.\n\
 \n\
 After writing code, use the evaluate_genome tool to check your structural score. \
 If tier drops below III, refactor before submitting.";
@@ -180,6 +209,17 @@ const AST_ENCODERS: [SeedEncoderId; 3] = [
     SeedEncoderId::TokenSpectrum,
     SeedEncoderId::AstStructure,
     SeedEncoderId::ComplexityField,
+];
+
+/// Actionable encoders: AST-driven + hybrid. These are the encoders whose scores
+/// the agent can meaningfully improve through structural code changes.
+/// Byte-level encoders (ascii_bytes, hilbert_bits, lifehash16) are excluded because
+/// they measure surface-level byte patterns that add noise to quality signals.
+const ACTIONABLE_ENCODERS: [SeedEncoderId; 4] = [
+    SeedEncoderId::TokenSpectrum,
+    SeedEncoderId::AstStructure,
+    SeedEncoderId::ComplexityField,
+    SeedEncoderId::Structural,
 ];
 
 /// Compute a full genome report for the given source text and file path.
@@ -288,15 +328,18 @@ fn simulate_gol(
     }
 }
 
-/// Compute cross-encoder consistency: 1.0 - (std_dev / mean), clamped to [0, 1].
+/// Compute cross-encoder consistency from actionable encoders only (AST + structural).
+/// Byte-level encoders are excluded — they add noise that doesn't reflect
+/// code quality the agent can act on.
 fn compute_consistency(scores: &[EncoderScore]) -> f32 {
-    if scores.is_empty() {
-        return 0.0;
-    }
     let gens: Vec<f64> = scores
         .iter()
+        .filter(|s| ACTIONABLE_ENCODERS.contains(&s.encoder))
         .map(|s| s.generations_survived as f64)
         .collect();
+    if gens.is_empty() {
+        return 0.0;
+    }
     let mean = gens.iter().sum::<f64>() / gens.len() as f64;
     if mean == 0.0 {
         return 0.0;
@@ -876,3 +919,7 @@ fn shannon_entropy(counts: &HashMap<&str, usize>, total: usize) -> f32 {
 #[cfg(test)]
 #[path = "tests/genome_report.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "tests/genome_check.rs"]
+mod genome_check;

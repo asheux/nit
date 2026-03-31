@@ -1480,7 +1480,7 @@ fn record_agent_bus_vitals(vitals: &mut VitalsState, event: &AgentBusEvent) {
 /// Compute the genome report for the active editor buffer if one doesn't exist yet.
 /// This runs synchronously (~50-100ms) and only triggers once per file path.
 /// Maximum number of automatic genome-improvement retries per agent turn.
-const GENOME_RETRY_LIMIT: u8 = 3;
+const GENOME_RETRY_LIMIT: u8 = 10;
 
 /// Push a visible message to the agent console and diagnostics when a genome retry fires.
 fn push_genome_retry_message(state: &mut AppState, agent_id: &str, attempt: u8) {
@@ -1788,44 +1788,6 @@ fn drain_file_watcher(state: &mut AppState, syntax: &mut SyntaxRuntime, watcher:
                     at: Instant::now(),
                 },
             );
-
-            // Push real-time update to operator console (like other breather updates).
-            let at = timestamp_label(state);
-            let new_tag = if is_new_file { " [NEW]" } else { "" };
-            let msg = format!(
-                "[genome shadow] {file_name}{new_tag} \u{2014} {quality} {delta_label} (tier {tier_str}, c={consistency:.2})",
-            );
-            state.agents.messages.push(nit_core::AgentMessage {
-                at: at.clone(),
-                channel: nit_core::AgentChannel::Broadcast,
-                agent_id: None,
-                mission_id: None,
-                text: msg,
-                prompt_msg_idx: None,
-                kind: None,
-            });
-            state.agents.console_scroll = nit_core::CONSOLE_SCROLL_BOTTOM;
-
-            // Diagnostic event for the diagnostics pane.
-            let severity = match delta_label {
-                "degraded" => nit_core::AgentAlertSeverity::Warn,
-                "new" if report.tier < nit_core::GenomeTier::Spaceship => {
-                    nit_core::AgentAlertSeverity::Warn
-                }
-                _ => nit_core::AgentAlertSeverity::Info,
-            };
-            state
-                .agents
-                .diag_events
-                .push(nit_core::AgentDiagnosticEvent {
-                    severity,
-                    source: "genome-shadow".into(),
-                    message: format!(
-                        "{file_name}{new_tag}: {quality} {delta_label} (tier {tier_str}, c={consistency:.2})",
-                    ),
-                    at,
-                });
-            state.agents.note_event();
         }
 
         state.genome_reports.insert(changed_path, report);

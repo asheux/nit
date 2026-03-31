@@ -873,22 +873,66 @@ fn append_file_genome_context(ctx: &mut String, file_path: &std::path::Path, rep
         report.quality_level(),
         report.cross_encoder_consistency,
     ));
-    for score in &report.encoder_scores {
-        if matches!(
-            score.encoder,
-            nit_core::SeedEncoderId::TokenSpectrum
-                | nit_core::SeedEncoderId::AstStructure
-                | nit_core::SeedEncoderId::ComplexityField
-        ) {
-            ctx.push_str(&format!(
-                "  {}: density={:.2}, components={}, generations={}\n",
-                score.encoder.label(),
-                score.density,
-                score.components,
-                score.generations_survived
-            ));
-        }
+
+    // Show only actionable encoder scores (AST + structural).
+    // Byte-level encoders (ascii_bytes, hilbert_bits, lifehash16) are excluded —
+    // they measure surface byte patterns the agent can't meaningfully improve.
+    let actionable: Vec<_> = report
+        .encoder_scores
+        .iter()
+        .filter(|s| {
+            matches!(
+                s.encoder,
+                nit_core::SeedEncoderId::TokenSpectrum
+                    | nit_core::SeedEncoderId::AstStructure
+                    | nit_core::SeedEncoderId::ComplexityField
+                    | nit_core::SeedEncoderId::Structural
+            )
+        })
+        .collect();
+    ctx.push_str("  Encoders:\n");
+    let mean_gen: f32 = if actionable.is_empty() {
+        0.0
+    } else {
+        actionable
+            .iter()
+            .map(|s| s.generations_survived as f32)
+            .sum::<f32>()
+            / actionable.len() as f32
+    };
+    for score in &actionable {
+        let gen = score.generations_survived;
+        let outlier = if mean_gen > 0.0 && (gen as f32) < mean_gen * 0.5 {
+            " ← OUTLIER (dragging consistency down)"
+        } else {
+            ""
+        };
+        ctx.push_str(&format!(
+            "    {}: density={:.2}, components={}, generations={}{}\n",
+            score.encoder.label(),
+            score.density,
+            score.components,
+            gen,
+            outlier,
+        ));
     }
+
+    // Diagnose low consistency: tell the agent exactly what to focus on.
+    if report.cross_encoder_consistency < 0.50 && !actionable.is_empty() {
+        let mut sorted: Vec<_> = actionable
+            .iter()
+            .map(|s| (s.encoder.label(), s.generations_survived))
+            .collect();
+        sorted.sort_by_key(|(_, g)| std::cmp::Reverse(*g));
+        let best = sorted.first().map(|(l, g)| format!("{l}={g}")).unwrap_or_default();
+        let worst = sorted.last().map(|(l, g)| format!("{l}={g}")).unwrap_or_default();
+        ctx.push_str(&format!(
+            "  ⚠ Low consistency ({:.2}): encoders disagree. Best: {best}, Worst: {worst}.\n\
+             Focus improvements on the weakest encoder — that's the fastest path to better quality.\n",
+            report.cross_encoder_consistency,
+        ));
+    }
+
     if !report.recommendations.is_empty() {
         ctx.push_str("  Recommendations:\n");
         for rec in &report.recommendations {
