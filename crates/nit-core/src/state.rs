@@ -1844,6 +1844,19 @@ pub struct AppState {
     /// Populated by the file watcher as files change; cleared on TurnStarted.
     #[serde(skip)]
     pub genome_shadow_evals: HashMap<PathBuf, GenomeShadowEval>,
+    /// Number of authoritative genome evaluations still in flight (background threads).
+    /// When this reaches 0 after a TurnCompleted, the retry decision is made.
+    #[serde(skip)]
+    pub genome_eval_pending: usize,
+    /// Running worst delta across in-flight turn evaluations.
+    #[serde(skip)]
+    pub genome_eval_worst_delta: i32,
+    /// Agent ID for the in-flight turn evaluation batch (for retry dispatch).
+    #[serde(skip)]
+    pub genome_eval_agent_id: Option<String>,
+    /// Mission ID for the in-flight turn evaluation batch.
+    #[serde(skip)]
+    pub genome_eval_mission_id: Option<String>,
     /// Scroll offset for the gate monitor / structural quality pane.
     #[serde(skip)]
     pub gate_monitor_scroll: usize,
@@ -2043,6 +2056,10 @@ impl AppState {
             genome_agent_streak: HashMap::new(),
             genome_agent_min_tier: HashMap::new(),
             genome_shadow_evals: HashMap::new(),
+            genome_eval_pending: 0,
+            genome_eval_worst_delta: 0,
+            genome_eval_agent_id: None,
+            genome_eval_mission_id: None,
             gate_monitor_scroll: 0,
         }
     }

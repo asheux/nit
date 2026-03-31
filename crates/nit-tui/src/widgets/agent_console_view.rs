@@ -1593,10 +1593,10 @@ fn status_row_line(text: &str, theme: &Theme) -> Line<'static> {
 
 fn status_sub_row_line(text: &str, theme: &Theme) -> Line<'static> {
     let trimmed = text.trim_start();
+    let bg = dim_bg_towards(theme.border, theme.background, 85);
     let is_swarm_meta =
         trimmed.starts_with("Swarm") || trimmed.starts_with("Verify") || trimmed.starts_with("• ");
     if is_swarm_meta {
-        let bg = dim_bg_towards(theme.border, theme.background, 85);
         return Line::from(Span::styled(
             text.to_string(),
             Style::default()
@@ -1605,7 +1605,47 @@ fn status_sub_row_line(text: &str, theme: &Theme) -> Line<'static> {
                 .add_modifier(Modifier::DIM),
         ));
     }
-    let bg = dim_bg_towards(theme.border, theme.background, 85);
+    // Genome shadow stage: "↳ file.rs Quality delta (tier N, c=X.XX)"
+    // Color-code the file name based on quality delta.
+    if let Some(genome_rest) = trimmed.strip_prefix("↳ ") {
+        if genome_rest.contains("(tier ") {
+            let leading = text.len() - text.trim_start().len();
+            let indent: String = text.chars().take(leading).collect();
+            if let Some(space_idx) = genome_rest.find(' ') {
+                let file_name = &genome_rest[..space_idx];
+                let rest = &genome_rest[space_idx..];
+                let file_color = if rest.contains("improved") {
+                    theme.accent
+                } else if rest.contains("degraded") {
+                    theme.error
+                } else if rest.contains("new") {
+                    theme.title
+                } else {
+                    theme.foreground
+                };
+                return Line::from(vec![
+                    Span::styled(
+                        format!("{indent}↳ "),
+                        Style::default()
+                            .fg(theme.title)
+                            .bg(bg)
+                            .add_modifier(Modifier::DIM),
+                    ),
+                    Span::styled(
+                        file_name.to_string(),
+                        Style::default().fg(file_color).bg(bg),
+                    ),
+                    Span::styled(
+                        rest.to_string(),
+                        Style::default()
+                            .fg(theme.title)
+                            .bg(bg)
+                            .add_modifier(Modifier::DIM),
+                    ),
+                ]);
+            }
+        }
+    }
     Line::from(Span::styled(
         text.to_string(),
         Style::default()

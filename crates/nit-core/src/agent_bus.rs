@@ -3,7 +3,6 @@ use crate::state::{
     AgentMessage, AgentStatus, AgentTurnState, AppState, McpStatus, MissionRecord,
     CONSOLE_SCROLL_BOTTOM,
 };
-use std::path::PathBuf;
 use std::time::Instant;
 
 /// Resolve the backend source label for an agent (used in alerts and diagnostics).
@@ -400,179 +399,10 @@ impl AgentBusEvent {
                 // Reload editor buffer from disk (agent may have written to the file).
                 state.editor_buffer_mut().reload_from_disk();
 
-                // Evaluate genome on ALL files modified during this turn.
+                // Mark genome turn as inactive. Actual evaluation is dispatched
+                // to background threads by the TUI event loop (genome_worker)
+                // to avoid blocking the main thread.
                 state.genome_turn_active = false;
-                if state.settings.genome.genome_context_enabled {
-                    let modified: Vec<PathBuf> =
-                        state.genome_turn_modified.iter().cloned().collect();
-                    let mut worst_delta: i32 = 0;
-
-                    for file_path in &modified {
-                        let text = match std::fs::read_to_string(file_path) {
-                            Ok(t) => t,
-                            Err(_) => continue,
-                        };
-                        let report = crate::genome_report::compute_genome_report(&text, file_path);
-
-                        // Compute delta against baseline for this file.
-                        if let Some(base) = state.genome_baselines.get(file_path) {
-                            let gen_base: i32 = base
-                                .encoder_scores
-                                .iter()
-                                .map(|s| s.generations_survived as i32)
-                                .sum();
-                            let gen_now: i32 = report
-                                .encoder_scores
-                                .iter()
-                                .map(|s| s.generations_survived as i32)
-                                .sum();
-                            let delta = if report.tier > base.tier || gen_now > gen_base {
-                                1
-                            } else if report.tier < base.tier || gen_now < gen_base {
-                                -1
-                            } else {
-                                0
-                            };
-                            if delta < worst_delta {
-                                worst_delta = delta;
-                            }
-                        } else {
-                            // New file — evaluate against adaptive quality threshold.
-                            let min_tier = state
-                                .genome_agent_min_tier
-                                .get(agent_id)
-                                .copied()
-                                .unwrap_or(crate::genome_report::GenomeTier::Spaceship);
-                            if report.tier < min_tier && -1 < worst_delta {
-                                worst_delta = -1;
-                            }
-                        }
-
-                        persist_genome_report(&state.workspace_root, &report);
-                        state.genome_reports.insert(file_path.clone(), report);
-                    }
-
-                    // Also evaluate the active editor buffer if not already covered.
-                    if let Some(editor_path) = state.editor_buffer().path().cloned() {
-                        if !modified.contains(&editor_path) {
-                            let text = state.editor_buffer().content_as_string();
-                            let report =
-                                crate::genome_report::compute_genome_report(&text, &editor_path);
-                            if let Some(base) = state.genome_baselines.get(&editor_path) {
-                                let gen_base: i32 = base
-                                    .encoder_scores
-                                    .iter()
-                                    .map(|s| s.generations_survived as i32)
-                                    .sum();
-                                let gen_now: i32 = report
-                                    .encoder_scores
-                                    .iter()
-                                    .map(|s| s.generations_survived as i32)
-                                    .sum();
-                                let delta = if report.tier > base.tier || gen_now > gen_base {
-                                    1
-                                } else if report.tier < base.tier || gen_now < gen_base {
-                                    -1
-                                } else {
-                                    0
-                                };
-                                if delta < worst_delta {
-                                    worst_delta = delta;
-                                }
-                            }
-                            persist_genome_report(&state.workspace_root, &report);
-                            state.genome_reports.insert(editor_path, report);
-                        }
-                    }
-
-                    state.genome_quality_delta = worst_delta;
-
-                    // Adaptive quality thresholds: track per-agent streak.
-                    // When an agent consistently hits the current min tier for 5+ turns,
-                    // raise their threshold.
-                    let current_min = state
-                        .genome_agent_min_tier
-                        .get(agent_id)
-                        .copied()
-                        .unwrap_or(crate::genome_report::GenomeTier::Spaceship);
-                    // Compute the worst tier across all modified files this turn.
-                    let worst_tier = modified
-                        .iter()
-                        .filter_map(|p| state.genome_reports.get(p))
-                        .map(|r| r.tier)
-                        .min()
-                        .unwrap_or(crate::genome_report::GenomeTier::StillLife);
-                    if worst_tier >= current_min {
-                        let streak = state
-                            .genome_agent_streak
-                            .entry(agent_id.clone())
-                            .or_insert(0);
-                        *streak = streak.saturating_add(1);
-                        if *streak >= 5 {
-                            // Promote threshold to next tier (cap at Methuselah).
-                            let next_tier = match current_min {
-                                crate::genome_report::GenomeTier::StillLife
-                                | crate::genome_report::GenomeTier::Oscillator => {
-                                    crate::genome_report::GenomeTier::Spaceship
-                                }
-                                crate::genome_report::GenomeTier::Spaceship => {
-                                    crate::genome_report::GenomeTier::Methuselah
-                                }
-                                _ => current_min, // Don't push beyond Methuselah.
-                            };
-                            if next_tier > current_min {
-                                state
-                                    .genome_agent_min_tier
-                                    .insert(agent_id.clone(), next_tier);
-                                *streak = 0;
-                            }
-                        }
-                    } else {
-                        // Reset streak on degradation.
-                        state.genome_agent_streak.insert(agent_id.clone(), 0);
-                    }
-
-                    // Build diff text for ALL modified files (not just editor buffer).
-                    let mut all_diffs = String::new();
-                    for file_path in &modified {
-                        if let (Some(report), Some(base)) = (
-                            state.genome_reports.get(file_path),
-                            state.genome_baselines.get(file_path),
-                        ) {
-                            let diff = crate::genome_report::compute_genome_diff(base, report);
-                            all_diffs.push_str(&crate::genome_report::format_genome_diff(&diff));
-                            all_diffs.push('\n');
-                        } else if let Some(report) = state.genome_reports.get(file_path) {
-                            // New file — show its report as context (no baseline to diff).
-                            all_diffs.push_str(&format!(
-                                "[new file] {} — {} (tier {}, c={:.2})\n",
-                                file_path.display(),
-                                report.quality_level(),
-                                report.tier.numeral(),
-                                report.cross_encoder_consistency,
-                            ));
-                        }
-                    }
-                    // Also include editor buffer if it wasn't in the modified set.
-                    if let Some(editor_path) = state.editor_buffer().path() {
-                        if !modified.contains(editor_path) {
-                            if let (Some(report), Some(base)) = (
-                                state.genome_reports.get(editor_path),
-                                state.genome_baselines.get(editor_path),
-                            ) {
-                                let diff = crate::genome_report::compute_genome_diff(base, report);
-                                all_diffs
-                                    .push_str(&crate::genome_report::format_genome_diff(&diff));
-                                all_diffs.push('\n');
-                            }
-                        }
-                    }
-                    state.last_genome_diff = if all_diffs.is_empty() {
-                        None
-                    } else {
-                        Some(all_diffs)
-                    };
-                }
             }
         }
 
@@ -882,7 +712,7 @@ fn genome_report_filename(file_path: &std::path::Path) -> String {
     format!("{}.json", s.replace('/', "__"))
 }
 
-fn persist_genome_report(
+pub fn persist_genome_report(
     workspace_root: &std::path::Path,
     report: &crate::genome_report::GenomeReport,
 ) {

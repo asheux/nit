@@ -514,6 +514,7 @@ fn run_loop(
     let mut clipboard = Clipboard::new().ok();
     let mut file_tree_runner = FileTreeRunner::spawn();
     let mut file_watcher = FileWatcher::spawn();
+    let genome_worker = crate::genome_worker::GenomeWorker::new();
     // Watch the entire workspace for agent-created/modified files.
     file_watcher.watch_workspace(state.workspace_root.clone());
     let mut last_watched_path = state.editor_buffer().path().cloned();
@@ -1033,26 +1034,14 @@ fn run_loop(
                 {
                     crate::swarm::cleanup_idle_chat_clone(state, agent_id);
                 }
-                // Auto-retry on genome quality degradation.
+                // Dispatch genome evaluations to background threads.
                 if let AgentBusEvent::TurnCompleted {
                     agent_id,
                     mission_id,
                     ..
                 } = &event
                 {
-                    if let Some(prompt) = build_genome_retry_prompt(state) {
-                        let attempt = state.genome_retry_count;
-                        push_genome_retry_message(state, agent_id, attempt);
-                        dispatch_agent_prompt(
-                            state,
-                            &mut vitals,
-                            Some(&codex_runner),
-                            Some(&claude_runner),
-                            agent_id.clone(),
-                            mission_id.clone(),
-                            prompt,
-                        );
-                    }
+                    dispatch_turn_genome_evals(state, &genome_worker, agent_id, mission_id);
                 }
             }
             // Re-resolve the pinned artifact so the popup stays on the
@@ -1127,26 +1116,14 @@ fn run_loop(
                 {
                     crate::swarm::cleanup_idle_chat_clone(state, agent_id);
                 }
-                // Auto-retry on genome quality degradation.
+                // Dispatch genome evaluations to background threads.
                 if let AgentBusEvent::TurnCompleted {
                     agent_id,
                     mission_id,
                     ..
                 } = &event
                 {
-                    if let Some(prompt) = build_genome_retry_prompt(state) {
-                        let attempt = state.genome_retry_count;
-                        push_genome_retry_message(state, agent_id, attempt);
-                        dispatch_agent_prompt(
-                            state,
-                            &mut vitals,
-                            Some(&codex_runner),
-                            Some(&claude_runner),
-                            agent_id.clone(),
-                            mission_id.clone(),
-                            prompt,
-                        );
-                    }
+                    dispatch_turn_genome_evals(state, &genome_worker, agent_id, mission_id);
                 }
             }
             if let Some(ref pinned) = pinned_popup_ref {
@@ -1342,7 +1319,8 @@ fn run_loop(
             }
 
             // Drain file watcher notifications — reload any open buffers that changed on disk.
-            drain_file_watcher(state, syntax, &file_watcher);
+            drain_file_watcher(state, syntax, &file_watcher, &genome_worker);
+            drain_genome_results(state, &genome_worker, &mut vitals, &codex_runner, &claude_runner);
 
             // Auto-compute genome report for the active editor buffer if missing.
             maybe_compute_genome_report(state);
@@ -1752,8 +1730,64 @@ fn maybe_compute_genome_report(state: &mut AppState) {
     }
 }
 
+/// Dispatch authoritative genome evaluations to background threads after a turn completes.
+/// Each modified file is sent to the genome worker; results stream back to `drain_genome_results`.
+fn dispatch_turn_genome_evals(
+    state: &mut AppState,
+    genome: &crate::genome_worker::GenomeWorker,
+    agent_id: &str,
+    mission_id: &Option<String>,
+) {
+    if !state.settings.genome.genome_context_enabled {
+        return;
+    }
+    let modified: Vec<std::path::PathBuf> = state.genome_turn_modified.iter().cloned().collect();
+
+    // Also include editor buffer if not already in the modified set.
+    let editor_path = state.editor_buffer().path().cloned();
+    let mut extra_editor = false;
+    if let Some(ref ep) = editor_path {
+        if !modified.contains(ep) {
+            extra_editor = true;
+        }
+    }
+
+    let total = modified.len() + if extra_editor { 1 } else { 0 };
+    if total == 0 {
+        return;
+    }
+
+    state.genome_eval_pending = total;
+    state.genome_eval_worst_delta = 0;
+    state.genome_eval_agent_id = Some(agent_id.to_string());
+    state.genome_eval_mission_id = mission_id.clone();
+
+    for file_path in modified {
+        if let Ok(text) = std::fs::read_to_string(&file_path) {
+            genome.evaluate(file_path, text, false);
+        } else {
+            state.genome_eval_pending = state.genome_eval_pending.saturating_sub(1);
+        }
+    }
+
+    if extra_editor {
+        if let Some(ep) = editor_path {
+            let text = state.editor_buffer().content_as_string();
+            genome.evaluate(ep, text, false);
+        } else {
+            state.genome_eval_pending = state.genome_eval_pending.saturating_sub(1);
+        }
+    }
+}
+
 /// Drain file-watcher events: reload buffers whose files changed on disk.
-fn drain_file_watcher(state: &mut AppState, syntax: &mut SyntaxRuntime, watcher: &FileWatcher) {
+/// Genome evaluation is dispatched to the background worker — never blocks.
+fn drain_file_watcher(
+    state: &mut AppState,
+    syntax: &mut SyntaxRuntime,
+    watcher: &FileWatcher,
+    genome: &crate::genome_worker::GenomeWorker,
+) {
     while let Ok(changed_path) = watcher.events.try_recv() {
         // Track this file as modified during the current agent turn.
         if state.genome_turn_active {
@@ -1771,19 +1805,88 @@ fn drain_file_watcher(state: &mut AppState, syntax: &mut SyntaxRuntime, watcher:
             }
         }
 
-        // Shadow evaluator: evaluate genome on the changed file in real time.
-        let text = match std::fs::read_to_string(&changed_path) {
-            Ok(t) => t,
-            Err(_) => continue,
-        };
-        let report = nit_core::compute_genome_report(&text, &changed_path);
+        // Dispatch shadow genome evaluation to background thread.
+        if state.genome_turn_active && state.settings.genome.genome_context_enabled {
+            if let Ok(text) = std::fs::read_to_string(&changed_path) {
+                genome.evaluate(changed_path, text, true);
+            }
+        }
+    }
+}
 
-        // Compare against baseline for display label.
-        // The authoritative genome_quality_delta is computed at TurnCompleted,
-        // not here — avoid overwriting it per-file.
-        let is_new_file = !state.genome_baselines.contains_key(&changed_path);
-        let delta_label: &'static str =
-            if let Some(base) = state.genome_baselines.get(&changed_path) {
+/// Drain genome worker results: update shadow evals, reports, and stage labels.
+/// Also finalizes turn evaluations when all pending results arrive.
+fn drain_genome_results(
+    state: &mut AppState,
+    genome: &crate::genome_worker::GenomeWorker,
+    vitals: &mut crate::vitals::VitalsState,
+    codex_runner: &crate::codex_runner::CodexRunner,
+    claude_runner: &crate::claude_runner::ClaudeRunner,
+) {
+    while let Ok(result) = genome.rx.try_recv() {
+        let path = result.path;
+        let report = result.report;
+
+        if result.shadow {
+            // Shadow evaluation — update UI only.
+            let is_new_file = !state.genome_baselines.contains_key(&path);
+            let delta_label: &'static str =
+                if let Some(base) = state.genome_baselines.get(&path) {
+                    let gen_base: i32 = base
+                        .encoder_scores
+                        .iter()
+                        .map(|s| s.generations_survived as i32)
+                        .sum();
+                    let gen_now: i32 = report
+                        .encoder_scores
+                        .iter()
+                        .map(|s| s.generations_survived as i32)
+                        .sum();
+                    if report.tier > base.tier || gen_now > gen_base {
+                        "improved"
+                    } else if report.tier < base.tier || gen_now < gen_base {
+                        "degraded"
+                    } else {
+                        "unchanged"
+                    }
+                } else {
+                    "new"
+                };
+
+            let file_name = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("?");
+            let quality = report.quality_level();
+            let tier_str = report.tier.numeral();
+            let consistency = report.cross_encoder_consistency;
+
+            let genome_stage = format!(
+                "{file_name} {quality} {delta_label} (tier {tier_str}, c={consistency:.2})",
+            );
+            for turn in state.agents.active_turns.values_mut() {
+                turn.stage = Some(genome_stage.clone());
+                turn.last_output_at = Instant::now();
+            }
+
+            state.genome_shadow_evals.insert(
+                path.clone(),
+                nit_core::GenomeShadowEval {
+                    tier: report.tier,
+                    quality,
+                    consistency,
+                    delta_label,
+                    is_new_file,
+                    at: Instant::now(),
+                },
+            );
+
+            state.genome_reports.insert(path, report);
+        } else {
+            // Authoritative turn evaluation — update reports, compute delta, persist.
+            let agent_id = state.genome_eval_agent_id.clone().unwrap_or_default();
+
+            let delta: i32 = if let Some(base) = state.genome_baselines.get(&path) {
                 let gen_base: i32 = base
                     .encoder_scores
                     .iter()
@@ -1795,49 +1898,120 @@ fn drain_file_watcher(state: &mut AppState, syntax: &mut SyntaxRuntime, watcher:
                     .map(|s| s.generations_survived as i32)
                     .sum();
                 if report.tier > base.tier || gen_now > gen_base {
-                    "improved"
+                    1
                 } else if report.tier < base.tier || gen_now < gen_base {
-                    "degraded"
+                    -1
                 } else {
-                    "unchanged"
+                    0
                 }
             } else {
-                "new"
+                // New file — evaluate against adaptive quality threshold.
+                let min_tier = state
+                    .genome_agent_min_tier
+                    .get(&agent_id)
+                    .copied()
+                    .unwrap_or(nit_core::GenomeTier::Spaceship);
+                if report.tier < min_tier {
+                    -1
+                } else {
+                    0
+                }
             };
 
-        let file_name = changed_path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("?");
-        let quality = report.quality_level();
-        let tier_str = report.tier.numeral();
-        let consistency = report.cross_encoder_consistency;
-
-        // Update the running agent's stage label with genome info (shows as ↳ under agent name).
-        if state.genome_turn_active {
-            let genome_stage = format!(
-                "genome: {file_name} {quality} {delta_label} (tier {tier_str}, c={consistency:.2})",
-            );
-            for turn in state.agents.active_turns.values_mut() {
-                turn.stage = Some(genome_stage.clone());
-                turn.last_output_at = Instant::now();
+            if delta < state.genome_eval_worst_delta {
+                state.genome_eval_worst_delta = delta;
             }
 
-            // Record shadow eval for gate monitor and genome context.
-            state.genome_shadow_evals.insert(
-                changed_path.clone(),
-                nit_core::GenomeShadowEval {
-                    tier: report.tier,
-                    quality,
-                    consistency,
-                    delta_label,
-                    is_new_file,
-                    at: Instant::now(),
-                },
-            );
-        }
+            nit_core::agent_bus::persist_genome_report(&state.workspace_root, &report);
+            state.genome_reports.insert(path, report);
 
-        state.genome_reports.insert(changed_path, report);
+            state.genome_eval_pending = state.genome_eval_pending.saturating_sub(1);
+
+            // All turn evaluations complete — finalize.
+            if state.genome_eval_pending == 0 {
+                let worst_delta = state.genome_eval_worst_delta;
+                state.genome_quality_delta = worst_delta;
+
+                // Adaptive quality thresholds: streak tracking.
+                let current_min = state
+                    .genome_agent_min_tier
+                    .get(&agent_id)
+                    .copied()
+                    .unwrap_or(nit_core::GenomeTier::Spaceship);
+                let modified: Vec<_> = state.genome_turn_modified.iter().cloned().collect();
+                let worst_tier = modified
+                    .iter()
+                    .filter_map(|p| state.genome_reports.get(p))
+                    .map(|r| r.tier)
+                    .min()
+                    .unwrap_or(nit_core::GenomeTier::StillLife);
+                if worst_tier >= current_min {
+                    let streak = state
+                        .genome_agent_streak
+                        .entry(agent_id.clone())
+                        .or_insert(0);
+                    *streak = streak.saturating_add(1);
+                    if *streak >= 5 {
+                        let next_tier = match current_min {
+                            nit_core::GenomeTier::StillLife
+                            | nit_core::GenomeTier::Oscillator => nit_core::GenomeTier::Spaceship,
+                            nit_core::GenomeTier::Spaceship => nit_core::GenomeTier::Methuselah,
+                            _ => current_min,
+                        };
+                        if next_tier > current_min {
+                            state
+                                .genome_agent_min_tier
+                                .insert(agent_id.clone(), next_tier);
+                            *streak = 0;
+                        }
+                    }
+                } else {
+                    state.genome_agent_streak.insert(agent_id.clone(), 0);
+                }
+
+                // Build diff text for all modified files.
+                let mut all_diffs = String::new();
+                for file_path in &modified {
+                    if let (Some(rpt), Some(base)) = (
+                        state.genome_reports.get(file_path),
+                        state.genome_baselines.get(file_path),
+                    ) {
+                        let diff = nit_core::compute_genome_diff(base, rpt);
+                        all_diffs.push_str(&nit_core::format_genome_diff(&diff));
+                        all_diffs.push('\n');
+                    } else if let Some(rpt) = state.genome_reports.get(file_path) {
+                        all_diffs.push_str(&format!(
+                            "[new file] {} — {} (tier {}, c={:.2})\n",
+                            file_path.display(),
+                            rpt.quality_level(),
+                            rpt.tier.numeral(),
+                            rpt.cross_encoder_consistency,
+                        ));
+                    }
+                }
+                state.last_genome_diff = if all_diffs.is_empty() {
+                    None
+                } else {
+                    Some(all_diffs)
+                };
+
+                // Auto-retry on genome quality degradation.
+                if let Some(prompt) = build_genome_retry_prompt(state) {
+                    let attempt = state.genome_retry_count;
+                    let mission_id = state.genome_eval_mission_id.clone();
+                    push_genome_retry_message(state, &agent_id, attempt);
+                    dispatch_agent_prompt(
+                        state,
+                        vitals,
+                        Some(codex_runner),
+                        Some(claude_runner),
+                        agent_id,
+                        mission_id,
+                        prompt,
+                    );
+                }
+            }
+        }
     }
 }
 
