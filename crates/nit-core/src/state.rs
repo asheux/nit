@@ -1832,9 +1832,10 @@ pub struct AppState {
     /// Reset to 0 when quality improves or stays the same.
     #[serde(skip)]
     pub genome_retry_count: u8,
-    /// Rolling count of consecutive turns where quality met or exceeded Tier III,
-    /// per agent. Used for adaptive quality thresholds — agents that consistently
-    /// hit Tier III get pushed toward Tier IV.
+    /// Rolling count of consecutive turns where quality met or exceeded the
+    /// agent's adaptive min tier. Used for adaptive quality thresholds — agents
+    /// that consistently hit their tier get pushed toward the next one, up to
+    /// Tier V (Replicator).
     #[serde(skip)]
     pub genome_agent_streak: HashMap<String, u8>,
     /// Effective minimum tier per agent, elevated by adaptive thresholds.

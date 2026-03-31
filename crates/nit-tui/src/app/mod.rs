@@ -1550,11 +1550,12 @@ fn build_genome_retry_prompt(state: &mut AppState) -> Option<String> {
                 }
             }
         } else {
-            // New file — include if below adaptive quality threshold.
+            // New file — include if below the *specific* agent's adaptive
+            // quality threshold (not the global max across all agents).
+            let agent_id = state.genome_eval_agent_id.clone().unwrap_or_default();
             let min_tier = state
                 .genome_agent_min_tier
-                .values()
-                .max()
+                .get(&agent_id)
                 .copied()
                 .unwrap_or(nit_core::GenomeTier::Spaceship);
             if report.tier < min_tier {
@@ -1640,14 +1641,25 @@ fn build_genome_retry_prompt(state: &mut AppState) -> Option<String> {
                 }
             }
         } else {
-            // New file — no baseline, show threshold requirement.
+            // New file — no baseline, show threshold requirement using the
+            // agent's adaptive min tier (not hardcoded).
+            let eid = state.genome_eval_agent_id.clone().unwrap_or_default();
+            let min_t = state
+                .genome_agent_min_tier
+                .get(&eid)
+                .copied()
+                .unwrap_or(nit_core::GenomeTier::Spaceship);
             prompt.push_str(&format!(
-                "[NEW FILE] Below minimum quality threshold (Tier III Spaceship).\n\
+                "[NEW FILE] Below minimum quality threshold ({} {}).\n\
                  [ACTUAL]   {} (tier {}, consistency {:.2})\n\
-                 [TARGET]   Tier III (Spaceship) or higher required for new files.\n",
+                 [TARGET]   {} ({}) or higher required for new files.\n",
+                min_t.numeral(),
+                min_t.name(),
                 report.quality_level(),
                 report.tier.numeral(),
                 report.cross_encoder_consistency,
+                min_t.numeral(),
+                min_t.name(),
             ));
         }
 
@@ -1681,7 +1693,20 @@ fn build_genome_retry_prompt(state: &mut AppState) -> Option<String> {
     prompt.push_str(nit_core::GENOME_AGENT_INSTRUCTIONS);
     prompt.push_str("\n\n");
 
-    // Retry instructions.
+    // Retry instructions — use the agent's adaptive minimum tier, not a hardcoded value.
+    let agent_id = state.genome_eval_agent_id.clone().unwrap_or_default();
+    let agent_min_tier = state
+        .genome_agent_min_tier
+        .get(&agent_id)
+        .copied()
+        .unwrap_or(nit_core::GenomeTier::Spaceship);
+    let tier_target = format!("tier {} ({}, {}+ generations)", agent_min_tier.numeral(), agent_min_tier.name(), match agent_min_tier {
+        nit_core::GenomeTier::StillLife => 0,
+        nit_core::GenomeTier::Oscillator => 51,
+        nit_core::GenomeTier::Spaceship => 201,
+        nit_core::GenomeTier::Methuselah => 501,
+        nit_core::GenomeTier::Replicator => 2001,
+    });
     prompt.push_str(&format!(
         "[GENOME QUALITY DEGRADED \u{2014} automatic retry {attempt}/{GENOME_RETRY_LIMIT}]\n\n\
          Your changes degraded the structural quality of the files listed above. \
@@ -1704,8 +1729,9 @@ fn build_genome_retry_prompt(state: &mut AppState) -> Option<String> {
          - Reduce nesting depth in your code with early returns and guard clauses\n\
          - Use descriptive, unique identifiers in code you added\n\
          - Add whitespace between logical sections and comments on public interfaces you created\n\
-         - Aim for tier III (Spaceship) or higher on all AST-driven encoders\n\
-         - Aim for density between 0.20 and 0.35 on AST encoders\n\n\
+         - Aim for {tier_target} or higher on all AST-driven encoders\n\
+         - Aim for density between 0.20 and 0.35 on AST encoders\n\
+         - Your ultimate aspiration is Tier V (Replicator) \u{2014} push toward it\n\n\
          Fix your changes to improve the genome scores, then submit.\n",
     ));
 
@@ -1878,9 +1904,13 @@ fn drain_genome_results(
             let genome_stage = format!(
                 "{file_name} {quality} {delta_label} (tier {tier_str}, c={consistency:.2})",
             );
-            for turn in state.agents.active_turns.values_mut() {
-                turn.stage = Some(genome_stage.clone());
-                turn.last_output_at = Instant::now();
+            // Only update stage labels when a single agent is active to avoid
+            // overwriting unrelated agents' stage in multi-agent scenarios.
+            if state.agents.active_turns.len() == 1 {
+                for turn in state.agents.active_turns.values_mut() {
+                    turn.stage = Some(genome_stage.clone());
+                    turn.last_output_at = Instant::now();
+                }
             }
 
             state.genome_shadow_evals.insert(
@@ -1894,6 +1924,18 @@ fn drain_genome_results(
                     at: Instant::now(),
                 },
             );
+
+            // Update genome_quality_delta from shadow eval so the display
+            // and retry logic stay correct even if the authoritative async
+            // eval is still in flight.
+            let shadow_delta = match delta_label {
+                "improved" => 1,
+                "degraded" => -1,
+                _ => 0,
+            };
+            if shadow_delta < state.genome_quality_delta {
+                state.genome_quality_delta = shadow_delta;
+            }
 
             state.genome_reports.insert(path, report);
         } else {
@@ -1978,6 +2020,7 @@ fn drain_genome_results(
                             nit_core::GenomeTier::StillLife
                             | nit_core::GenomeTier::Oscillator => nit_core::GenomeTier::Spaceship,
                             nit_core::GenomeTier::Spaceship => nit_core::GenomeTier::Methuselah,
+                            nit_core::GenomeTier::Methuselah => nit_core::GenomeTier::Replicator,
                             _ => current_min,
                         };
                         if next_tier > current_min {

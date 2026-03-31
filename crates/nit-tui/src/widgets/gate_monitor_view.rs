@@ -131,7 +131,34 @@ fn build_lines_genome(
             .fg(theme.accent)
             .add_modifier(Modifier::BOLD),
     )];
-    match state.genome_quality_delta {
+    // Derive quality delta directly from current report vs baseline.
+    // This is always correct regardless of async eval timing.
+    let display_delta = if let Some(file_path) = state.editor_buffer().path() {
+        if let Some(base) = state.genome_baselines.get(file_path) {
+            if report.tier > base.tier {
+                1
+            } else if report.tier < base.tier {
+                -1
+            } else {
+                let gen_base: i32 = base
+                    .encoder_scores
+                    .iter()
+                    .map(|s| s.generations_survived as i32)
+                    .sum();
+                let gen_now: i32 = report
+                    .encoder_scores
+                    .iter()
+                    .map(|s| s.generations_survived as i32)
+                    .sum();
+                gen_now.cmp(&gen_base) as i32
+            }
+        } else {
+            state.genome_quality_delta
+        }
+    } else {
+        state.genome_quality_delta
+    };
+    match display_delta {
         d if d > 0 => {
             tier_spans.push(Span::styled(
                 " \u{2014} Quality Improved",

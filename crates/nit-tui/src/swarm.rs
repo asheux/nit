@@ -5792,7 +5792,7 @@ fn role_contract_lines(role: &str) -> &'static [&'static str] {
             "Evaluate the structural quality of code changes using the genome reports provided.",
             "For each modified file, compare before/after genome metrics and identify regressions.",
             "Produce a structured review: which files improved, which regressed, critical issues, and specific refactoring recommendations.",
-            "Overall verdict: PASS (all files tier II+) or FAIL (any file tier I).",
+            "Overall verdict: PASS (all files tier III+ Spaceship) or FAIL (any file below tier III). Aspiration is tier V (Replicator).",
             "Do not edit the workspace; report findings as text only.",
         ],
         _ => &[
@@ -6040,9 +6040,11 @@ fn extract_json_code_blocks(text: &str) -> Vec<String> {
 /// Build the genome review prompt for the genome-reviewer role.
 fn build_genome_review_prompt(state: &AppState) -> String {
     let mut prompt = String::from(
-        "You are the genome reviewer. Evaluate the structural quality of the code changes \
-         made by this swarm mission. For each modified file, a genome report shows \
-         before/after metrics across seven encoders.\n\n",
+        "You are the genome reviewer in nit's coding lab. nit measures structural code \
+         quality by encoding source files as Game of Life genomes. The lab's goal is to \
+         produce elite Replicator-tier (Tier V, 2001+ generations) code. Evaluate the \
+         structural quality of the code changes made by this swarm mission. For each \
+         modified file, a genome report shows before/after metrics across four encoders.\n\n",
     );
 
     // Evaluate the active buffer as the modified file.
@@ -6070,7 +6072,8 @@ fn build_genome_review_prompt(state: &AppState) -> String {
          1. Which files improved in structural quality and which regressed\n\
          2. The most critical structural issues remaining\n\
          3. Specific refactoring recommendations for the worst-scoring files\n\
-         4. Overall verdict: PASS (all files tier II+) or FAIL (any file tier I)\n",
+         4. Overall verdict: PASS (all files tier III+ Spaceship) or FAIL (any file below tier III)\n\
+         5. Distance from Replicator (Tier V) — what would it take to reach elite status\n",
     );
 
     prompt

@@ -1061,11 +1061,10 @@ pub(super) fn dispatch_agent_prompt(
     mission_id: Option<String>,
     prompt: String,
 ) {
-    // Prepend genome context to the prompt if available.
-    let prompt = match build_genome_context(state) {
-        Some(ctx) => format!("{ctx}{prompt}"),
-        None => prompt,
-    };
+    // NOTE: genome context is prepended inside maybe_dispatch_codex_turn /
+    // maybe_dispatch_claude_turn (and their queue-dequeue paths) so that every
+    // code path that actually sends a prompt gets it exactly once.  Do NOT add
+    // it here — that would duplicate the context.
 
     let lane_kind = state
         .agents
