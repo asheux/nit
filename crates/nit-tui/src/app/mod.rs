@@ -1531,18 +1531,23 @@ fn build_genome_retry_prompt(state: &mut AppState) -> Option<String> {
             None => continue,
         };
         if let Some(base) = state.genome_baselines.get(file_path) {
-            let gen_base: i32 = base
-                .encoder_scores
-                .iter()
-                .map(|s| s.generations_survived as i32)
-                .sum();
-            let gen_now: i32 = report
-                .encoder_scores
-                .iter()
-                .map(|s| s.generations_survived as i32)
-                .sum();
-            if report.tier < base.tier || gen_now < gen_base {
+            // Tier takes priority — a tier drop is always degradation.
+            if report.tier < base.tier {
                 degraded_files.push(file_path.clone());
+            } else if report.tier == base.tier {
+                let gen_base: i32 = base
+                    .encoder_scores
+                    .iter()
+                    .map(|s| s.generations_survived as i32)
+                    .sum();
+                let gen_now: i32 = report
+                    .encoder_scores
+                    .iter()
+                    .map(|s| s.generations_survived as i32)
+                    .sum();
+                if gen_now < gen_base {
+                    degraded_files.push(file_path.clone());
+                }
             }
         } else {
             // New file — include if below adaptive quality threshold.
@@ -1832,22 +1837,31 @@ fn drain_genome_results(
             let is_new_file = !state.genome_baselines.contains_key(&path);
             let delta_label: &'static str =
                 if let Some(base) = state.genome_baselines.get(&path) {
-                    let gen_base: i32 = base
-                        .encoder_scores
-                        .iter()
-                        .map(|s| s.generations_survived as i32)
-                        .sum();
-                    let gen_now: i32 = report
-                        .encoder_scores
-                        .iter()
-                        .map(|s| s.generations_survived as i32)
-                        .sum();
-                    if report.tier > base.tier || gen_now > gen_base {
+                    // Tier comparison takes priority — tier reflects the weakest
+                    // encoder (bottleneck). Gen sum is only a tiebreaker when
+                    // tiers are equal.
+                    if report.tier > base.tier {
                         "improved"
-                    } else if report.tier < base.tier || gen_now < gen_base {
+                    } else if report.tier < base.tier {
                         "degraded"
                     } else {
-                        "unchanged"
+                        let gen_base: i32 = base
+                            .encoder_scores
+                            .iter()
+                            .map(|s| s.generations_survived as i32)
+                            .sum();
+                        let gen_now: i32 = report
+                            .encoder_scores
+                            .iter()
+                            .map(|s| s.generations_survived as i32)
+                            .sum();
+                        if gen_now > gen_base {
+                            "improved"
+                        } else if gen_now < gen_base {
+                            "degraded"
+                        } else {
+                            "unchanged"
+                        }
                     }
                 } else {
                     "new"
@@ -1887,22 +1901,30 @@ fn drain_genome_results(
             let agent_id = state.genome_eval_agent_id.clone().unwrap_or_default();
 
             let delta: i32 = if let Some(base) = state.genome_baselines.get(&path) {
-                let gen_base: i32 = base
-                    .encoder_scores
-                    .iter()
-                    .map(|s| s.generations_survived as i32)
-                    .sum();
-                let gen_now: i32 = report
-                    .encoder_scores
-                    .iter()
-                    .map(|s| s.generations_survived as i32)
-                    .sum();
-                if report.tier > base.tier || gen_now > gen_base {
+                // Tier comparison takes priority — tier reflects the weakest
+                // encoder. Gen sum is only a tiebreaker when tiers are equal.
+                if report.tier > base.tier {
                     1
-                } else if report.tier < base.tier || gen_now < gen_base {
+                } else if report.tier < base.tier {
                     -1
                 } else {
-                    0
+                    let gen_base: i32 = base
+                        .encoder_scores
+                        .iter()
+                        .map(|s| s.generations_survived as i32)
+                        .sum();
+                    let gen_now: i32 = report
+                        .encoder_scores
+                        .iter()
+                        .map(|s| s.generations_survived as i32)
+                        .sum();
+                    if gen_now > gen_base {
+                        1
+                    } else if gen_now < gen_base {
+                        -1
+                    } else {
+                        0
+                    }
                 }
             } else {
                 // New file — evaluate against adaptive quality threshold.

@@ -5,28 +5,16 @@
 //! source files. The watcher runs on a dedicated thread and communicates
 //! via channels — no filesystem notification APIs required.
 
-use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime};
 
-/// Recognised source file extensions for workspace scanning.
-///
-/// When the watcher performs a workspace scan it only indexes files whose
-/// extension appears in this list, keeping the watch-set focused on editable
-/// source artifacts.
-const SOURCE_EXTENSIONS: &[&str] = &[
-    "rs", "py", "js", "jsx", "ts", "tsx", "go", "java", "c", "cpp", "h", "hpp", "cs", "rb",
-    "swift", "kt", "scala", "sh", "bash", "zsh", "toml", "yaml", "yml", "json", "html", "css",
-    "sql", "md", "txt",
-];
-
 /// Directory names unconditionally skipped during workspace scanning.
 const IGNORED_DIRS: &[&str] = &["target", "node_modules", "__pycache__", "vendor", ".git"];
 
-/// Alias for the per-file mtime tracking map used throughout the watcher.
+/// Per-file modification-time tracking map.
 type MtimeMap = HashMap<PathBuf, Option<SystemTime>>;
 
 /// Polling cadence for checking file changes.
@@ -102,10 +90,6 @@ impl FileWatcher {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Background state machine
-// ---------------------------------------------------------------------------
-
 /// Internal state of the background polling loop.
 ///
 /// The watcher alternates between draining queued commands, re-scanning
@@ -132,18 +116,17 @@ impl WatcherState {
 
     /// Run the poll loop until shutdown or channel disconnect.
     fn run(&mut self) {
-        loop {
-            if self.drain_pending_commands() {
-                return;
-            }
+        while self.poll_cycle() {}
+    }
 
-            self.rescan_workspace_if_due();
-            self.emit_changed_files();
-
-            if self.wait_for_next_command() {
-                return;
-            }
+    /// Execute one polling cycle. Returns `true` to continue, `false` to stop.
+    fn poll_cycle(&mut self) -> bool {
+        if self.drain_pending_commands() {
+            return false;
         }
+        self.rescan_workspace_if_due();
+        self.emit_changed_files();
+        !self.wait_for_next_command()
     }
 
     /// Dispatch a single command. Returns `true` when the watcher should stop.
@@ -228,18 +211,13 @@ impl WatcherState {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Filesystem helpers
-// ---------------------------------------------------------------------------
-
-/// Walk `root` recursively, inserting any newly discovered source file
-/// paths into the mtime tracking map. Existing entries are left untouched.
+/// Walk `root` recursively, inserting newly discovered source-file
+/// paths into the mtime tracking map. Existing entries are preserved.
 fn discover_source_files(root: &Path, tracked_mtimes: &mut MtimeMap) {
-    for discovered_path in SourceFileWalker::from_root(root) {
-        if let Entry::Vacant(slot) = tracked_mtimes.entry(discovered_path) {
-            let mtime = file_mtime(slot.key());
-            slot.insert(mtime);
-        }
+    for path in SourceFileWalker::from_root(root) {
+        tracked_mtimes
+            .entry(path)
+            .or_insert_with_key(|p| file_mtime(p));
     }
 }
 
@@ -248,11 +226,30 @@ fn file_mtime(path: &Path) -> Option<SystemTime> {
     std::fs::metadata(path).ok()?.modified().ok()
 }
 
+/// Check whether `ext` belongs to a recognised source language or config format.
+fn is_source_extension(ext: &str) -> bool {
+    matches!(
+        ext,
+        // Systems languages
+        "rs" | "c" | "cpp" | "h" | "hpp" | "go" | "swift"
+        // JVM and .NET
+        | "java" | "kt" | "scala" | "cs"
+        // Scripting and dynamic
+        | "py" | "rb" | "sh" | "bash" | "zsh"
+        // Web frontend
+        | "js" | "jsx" | "ts" | "tsx" | "html" | "css"
+        // Data and config
+        | "toml" | "yaml" | "yml" | "json" | "sql"
+        // Documentation
+        | "md" | "txt"
+    )
+}
+
 /// Check whether `path` has a recognised source-file extension.
 fn is_source_file(path: &Path) -> bool {
     path.extension()
         .and_then(|os_ext| os_ext.to_str())
-        .is_some_and(|extension| SOURCE_EXTENSIONS.contains(&extension))
+        .is_some_and(is_source_extension)
 }
 
 /// Returns `true` for hidden directories (leading `.`) and well-known
@@ -261,9 +258,26 @@ fn is_ignored_directory(directory_name: &str) -> bool {
     directory_name.starts_with('.') || IGNORED_DIRS.contains(&directory_name)
 }
 
-// ---------------------------------------------------------------------------
-// Recursive directory walker (iterator)
-// ---------------------------------------------------------------------------
+/// Classification of a filesystem entry encountered during directory walking.
+enum EntryKind {
+    /// A directory that should be expanded into its children.
+    Directory,
+    /// A file with a recognised source extension.
+    SourceFile,
+    /// A file or symlink that does not match any watched extension.
+    Ignored,
+}
+
+/// Classify a filesystem path as a directory, source file, or ignored entry.
+fn classify_entry(path: &Path) -> EntryKind {
+    if path.is_dir() {
+        EntryKind::Directory
+    } else if is_source_file(path) {
+        EntryKind::SourceFile
+    } else {
+        EntryKind::Ignored
+    }
+}
 
 /// Stack-based depth-first iterator yielding source-file paths.
 ///
@@ -281,8 +295,7 @@ impl SourceFileWalker {
         }
     }
 
-    /// Push child entries of `dir_path` onto the stack, unless the
-    /// directory is in the ignored set.
+    /// Push child entries of `dir_path` onto the stack, skipping ignored directories.
     fn expand_directory(&mut self, dir_path: &Path) {
         let dir_name = dir_path
             .file_name()
@@ -310,14 +323,10 @@ impl Iterator for SourceFileWalker {
     fn next(&mut self) -> Option<PathBuf> {
         loop {
             let candidate = self.pending_entries.pop()?;
-
-            if candidate.is_dir() {
-                self.expand_directory(&candidate);
-                continue;
-            }
-
-            if is_source_file(&candidate) {
-                return Some(candidate);
+            match classify_entry(&candidate) {
+                EntryKind::Directory => self.expand_directory(&candidate),
+                EntryKind::SourceFile => return Some(candidate),
+                EntryKind::Ignored => {}
             }
         }
     }
