@@ -1157,8 +1157,8 @@ fn build_lines_filescores(
             name,
             tier_ord: eval.tier as u8,
             tier: eval.tier.numeral().to_string(),
-            quality: eval.quality.to_string(),
-            consistency: format!("{:.2}", eval.consistency),
+            quality: shadow_quality_with_reason(eval.quality, eval.tier, eval.consistency),
+            consistency: cons_with_target(eval.tier, eval.consistency),
             delta: compute_delta(path, eval.tier).to_string(),
             is_shadow: true,
         });
@@ -1176,8 +1176,8 @@ fn build_lines_filescores(
                     name,
                     tier_ord: report.tier as u8,
                     tier: report.tier.numeral().to_string(),
-                    quality: report.quality_level().to_string(),
-                    consistency: format!("{:.2}", report.cross_encoder_consistency),
+                    quality: quality_with_reason(report),
+                    consistency: cons_with_target(report.tier, report.cross_encoder_consistency),
                     delta: compute_delta(path, report.tier).to_string(),
                     is_shadow: false,
                 });
@@ -1195,7 +1195,7 @@ fn build_lines_filescores(
             name,
             tier_ord: report.tier as u8,
             tier: report.tier.numeral().to_string(),
-            quality: report.quality_level().to_string(),
+            quality: quality_with_reason(report),
             consistency: format!("{:.2}", report.cross_encoder_consistency),
             delta: compute_delta(path, report.tier).to_string(),
             is_shadow: false,
@@ -1232,8 +1232,8 @@ fn build_lines_filescores(
 
     // Fixed right-side columns — file name gets the remainder to show full paths.
     let tier_w = 4;
-    let quality_w = 11;
-    let cons_w = 4;
+    let quality_w = 19; // "Failing (low c)" = 15, with padding
+    let cons_w = 9; // "0.24/0.70"
     let delta_w = 9;
     let data_w = tier_w + quality_w + cons_w + delta_w + 4; // columns + gaps
     let name_w = width.saturating_sub(data_w).max(8);
@@ -1243,7 +1243,7 @@ fn build_lines_filescores(
         Span::styled(format!(" {:<width$}", "FILE", width = name_w - 1), header_style),
         Span::styled(format!("{:>tier_w$} ", "TIER"), header_style),
         Span::styled(format!("{:<quality_w$}", "QUALITY"), header_style),
-        Span::styled(format!("{:>cons_w$} ", "CONS"), header_style),
+        Span::styled(format!("{:>cons_w$} ", "CONS/TARG"), header_style),
         Span::styled(format!("{:<delta_w$}", "DELTA"), header_style),
     ]));
 
@@ -1284,7 +1284,13 @@ fn build_lines_filescores(
             ),
             Span::styled(
                 format!("{:<quality_w$}", row.quality),
-                Style::default().fg(quality_color),
+                Style::default()
+                    .fg(quality_color)
+                    .add_modifier(if row.quality.contains('(') {
+                        Modifier::DIM
+                    } else {
+                        Modifier::empty()
+                    }),
             ),
             Span::styled(
                 format!("{:>cons_w$} ", row.consistency),
@@ -1308,6 +1314,49 @@ struct FileScoreRow {
     consistency: String,
     delta: String,
     is_shadow: bool,
+}
+
+/// Format quality level with reason when it doesn't match what the tier suggests.
+/// e.g. Tier IV + low consistency → "Failing (c)"
+fn quality_with_reason(report: &GenomeReport) -> String {
+    let level = report.quality_level();
+    match report.quality_reason() {
+        Some(reason) => format!("{level} ({reason})"),
+        None => level.to_string(),
+    }
+}
+
+/// Format consistency as "actual/target" so the operator sees the gap at a glance.
+fn cons_with_target(tier: nit_core::GenomeTier, consistency: f32) -> String {
+    let target = match tier {
+        nit_core::GenomeTier::Replicator => 0.85,
+        nit_core::GenomeTier::Methuselah => 0.70,
+        nit_core::GenomeTier::Spaceship => 0.50,
+        nit_core::GenomeTier::Oscillator => 0.30,
+        nit_core::GenomeTier::StillLife => 0.30, // show minimum target
+    };
+    format!("{consistency:.2}/{target:.2}")
+}
+
+/// Same as quality_with_reason but for shadow evals (which only have tier + consistency).
+fn shadow_quality_with_reason(
+    quality: &str,
+    tier: nit_core::GenomeTier,
+    consistency: f32,
+) -> String {
+    // Check if tier is high enough but consistency drags it to Failing.
+    let reason = match tier {
+        nit_core::GenomeTier::Replicator if consistency < 0.85 => Some("low cons"),
+        nit_core::GenomeTier::Methuselah if consistency < 0.70 => Some("low cons"),
+        nit_core::GenomeTier::Spaceship if consistency < 0.50 => Some("low cons"),
+        nit_core::GenomeTier::Oscillator if consistency < 0.30 => Some("low cons"),
+        nit_core::GenomeTier::StillLife => Some("low tier"),
+        _ => None,
+    };
+    match reason {
+        Some(r) if quality == "Failing" || quality == "Minimum" => format!("{quality} ({r})"),
+        _ => quality.to_string(),
+    }
 }
 
 /// Get a display-friendly relative path from workspace root.

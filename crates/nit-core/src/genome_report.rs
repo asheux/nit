@@ -127,6 +127,23 @@ impl GenomeReport {
             _ => "Failing",
         }
     }
+
+    /// Short reason why quality is at its current level.
+    /// Returns `None` if quality meets the tier's consistency threshold.
+    pub fn quality_reason(&self) -> Option<&'static str> {
+        let (needed_tier, needed_c) = match self.tier {
+            GenomeTier::Replicator => (GenomeTier::Replicator, 0.85),
+            GenomeTier::Methuselah => (GenomeTier::Methuselah, 0.70),
+            GenomeTier::Spaceship => (GenomeTier::Spaceship, 0.50),
+            GenomeTier::Oscillator => (GenomeTier::Oscillator, 0.30),
+            GenomeTier::StillLife => return Some("low tier"),
+        };
+        if self.tier >= needed_tier && self.cross_encoder_consistency < needed_c {
+            Some("low cons")
+        } else {
+            None
+        }
+    }
 }
 
 pub const GENOME_AGENT_INSTRUCTIONS: &str = "\

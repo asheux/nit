@@ -84,7 +84,8 @@ pub(crate) fn payload_signature(payload: &BatchPayload) -> String {
             static_mib_bucket
         ),
         BatchPayload::Ca(automaton) => {
-            let strategy_total = payload_strategy_count(&BatchPayload::Ca(automaton.clone()));
+            let entries_per_strategy = automaton.rule_table_len.max(1) as usize;
+            let strategy_total = automaton.rule_tables.len() / entries_per_strategy;
             format!(
                 "ca_sym{}_twor{}_steps{}_table{}_n{}_static{}mib",
                 automaton.symbols,
