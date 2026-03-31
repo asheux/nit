@@ -633,26 +633,115 @@ impl SeedEncoder for HilbertBitsEncoder {
 }
 
 // ---------------------------------------------------------------------------
-// Structural encoder — maps code features to GoL genomes.
+// Structural encoder — maps semantic token-role features to GoL genomes.
 //
-// Four per-byte feature channels are extracted and combined:
-//   1. Local entropy    (35%) — Shannon entropy over a sliding window.
-//   2. Bracket depth    (25%) — nesting depth from (){}[] delimiters.
-//   3. Token class      (20%) — structural weight by byte category.
-//   4. N-gram uniqueness(20%) — distance to nearest repeated 4-gram.
+// Operates on a **filtered token-role sequence** from tree-sitter, stripping
+// whitespace entirely. Four channels are computed on the semantic tokens:
+//   1. Role diversity  (35%) — count of distinct token roles per chunk.
+//   2. AST depth       (25%) — nesting depth from tree-sitter, not brackets.
+//   3. Role entropy    (20%) — Shannon entropy of role distribution per window.
+//   4. Role n-gram     (20%) — uniqueness of role 4-grams.
 //
-// Bytes are mapped to the 32×32 grid via a Hilbert curve so that nearby
-// code maps to nearby cells, preserving spatial locality.
-//
-// The result: well-structured code with varying complexity, clear nesting,
-// and unique logic produces density gradients and clustered patterns that
-// evolve into interesting GoL structures. Uniform gibberish produces flat
-// high-entropy grids that collapse into featureless static.
+// Tokens are mapped to a 32×32 grid via Hilbert curve. The result: code with
+// varied structure, mixed role types, and unique patterns produces rich GoL
+// genomes. Uniform/repetitive code produces flat grids that die quickly.
 // ---------------------------------------------------------------------------
 
-const STRUCTURAL_ENTROPY_WINDOW: usize = 64;
-const STRUCTURAL_NGRAM_SIZE: usize = 4;
-const STRUCTURAL_NGRAM_SEARCH: usize = 512;
+/// Compact role ID for semantic tokens (whitespace excluded).
+const ROLE_COMMENT: u8 = 0;
+const ROLE_PUNCTUATION: u8 = 1;
+const ROLE_OPERATOR: u8 = 2;
+const ROLE_KEYWORD: u8 = 3;
+const ROLE_VARIABLE: u8 = 4;
+const ROLE_TYPE: u8 = 5;
+const ROLE_STRING: u8 = 6;
+const ROLE_FUNCTION: u8 = 7;
+const ROLE_MACRO: u8 = 8;
+const ROLE_COUNT: usize = 9;
+
+/// N-gram size and search distance for role-based uniqueness analysis.
+const STRUCTURAL_ROLE_NGRAM: usize = 4;
+const STRUCTURAL_ROLE_NGRAM_SEARCH: usize = 256;
+
+/// Map a SeedHighlight to a compact role ID.
+fn highlight_to_role(h: SeedHighlight) -> u8 {
+    match h {
+        SeedHighlight::Comment => ROLE_COMMENT,
+        SeedHighlight::Punctuation => ROLE_PUNCTUATION,
+        SeedHighlight::Operator => ROLE_OPERATOR,
+        SeedHighlight::Keyword => ROLE_KEYWORD,
+        SeedHighlight::Variable => ROLE_VARIABLE,
+        SeedHighlight::Type => ROLE_TYPE,
+        SeedHighlight::StringLiteral => ROLE_STRING,
+        SeedHighlight::Function => ROLE_FUNCTION,
+        SeedHighlight::Macro => ROLE_MACRO,
+    }
+}
+
+/// A semantic token: role + AST depth at that position.
+struct SemanticToken {
+    role: u8,
+    depth: u8, // 0-255, normalized
+}
+
+/// Extract a whitespace-free sequence of semantic tokens with AST depth.
+fn extract_semantic_tokens(
+    text: &str,
+    tree: &Tree,
+    lang: SeedLanguage,
+) -> Vec<SemanticToken> {
+    let groups = seed_highlight_bytes(text, lang, tree);
+
+    // Compute per-byte AST depth.
+    let byte_depths = ast_depth_per_byte(tree, text.len());
+
+    // Build token sequence: one entry per non-whitespace "token run".
+    // A token run is a contiguous sequence of bytes with the same highlight group.
+    let mut tokens = Vec::with_capacity(text.len() / 4);
+    let mut i = 0;
+    while i < groups.len() {
+        let group = match groups[i] {
+            Some(g) => g,
+            None => {
+                i += 1;
+                continue; // skip whitespace
+            }
+        };
+        // Find end of this token run (same highlight group).
+        let start = i;
+        while i < groups.len() && groups[i] == Some(group) {
+            i += 1;
+        }
+        // Use max depth within this token's span.
+        let max_d = byte_depths[start..i].iter().copied().max().unwrap_or(0);
+        tokens.push(SemanticToken {
+            role: highlight_to_role(group),
+            depth: max_d,
+        });
+    }
+    tokens
+}
+
+/// Compute per-byte AST depth (0-255 normalized).
+fn ast_depth_per_byte(tree: &Tree, byte_count: usize) -> Vec<u8> {
+    let mut depths = vec![0u32; byte_count];
+    let mut max_depth = 0u32;
+    let mut stack = vec![(tree.root_node(), 0u32)];
+    while let Some((node, depth)) = stack.pop() {
+        let start = node.start_byte().min(byte_count);
+        let end = node.end_byte().min(byte_count);
+        for d in depths[start..end].iter_mut() {
+            *d = (*d).max(depth);
+        }
+        max_depth = max_depth.max(depth);
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            stack.push((child, depth + 1));
+        }
+    }
+    let scale = if max_depth > 0 { 255.0 / max_depth as f32 } else { 0.0 };
+    depths.iter().map(|&d| (d as f32 * scale).round().min(255.0) as u8).collect()
+}
 
 struct StructuralEncoder;
 
@@ -672,28 +761,36 @@ impl SeedEncoder for StructuralEncoder {
             return grid;
         }
 
-        // ---- Feature extraction (per-byte) ----
-        let entropy = structural_local_entropy(bytes, STRUCTURAL_ENTROPY_WINDOW);
-        let depth = structural_depth_profile(bytes);
-        let token = structural_token_signal(bytes);
-        let unique = structural_uniqueness(bytes, STRUCTURAL_NGRAM_SIZE, STRUCTURAL_NGRAM_SEARCH);
+        // Try AST-aware path; fall back to filtered-byte path.
+        let tokens = match seed_parse(input.text, input.file_path) {
+            Some((tree, lang)) => extract_semantic_tokens(input.text, &tree, lang),
+            None => extract_byte_tokens(bytes),
+        };
 
-        // ---- Map text → grid via Hilbert curve ----
-        let chunk = bytes.len().div_ceil(total).max(1);
+        if tokens.is_empty() {
+            return grid;
+        }
+
+        // ---- Channel 1: Role diversity (35%) ----
+        let diversity = role_diversity(&tokens, total);
+
+        // ---- Channel 2: AST depth gradient (25%) ----
+        let depth = token_depth_gradient(&tokens, total);
+
+        // ---- Channel 3: Role entropy (20%) ----
+        let entropy = role_entropy(&tokens, total);
+
+        // ---- Channel 4: Role n-gram uniqueness (20%) ----
+        let uniqueness = role_ngram_uniqueness(&tokens, total);
+
+        // ---- Map to grid via Hilbert curve ----
         for cell in 0..total {
-            let start = cell * chunk;
-            if start >= bytes.len() {
-                break;
-            }
-            let end = (start + chunk).min(bytes.len());
-            let n = (end - start) as f32;
+            let d = diversity.get(cell).copied().unwrap_or(0.0);
+            let dp = depth.get(cell).copied().unwrap_or(0.0);
+            let e = entropy.get(cell).copied().unwrap_or(0.0);
+            let u = uniqueness.get(cell).copied().unwrap_or(0.0);
 
-            let e: f32 = entropy[start..end].iter().sum::<f32>() / n;
-            let d: f32 = depth[start..end].iter().sum::<f32>() / n;
-            let t: f32 = token[start..end].iter().sum::<f32>() / n;
-            let u: f32 = unique[start..end].iter().sum::<f32>() / n;
-
-            let value = (e * 0.35 + d * 0.25 + t * 0.20 + u * 0.20)
+            let value = (d * 0.35 + dp * 0.25 + e * 0.20 + u * 0.20)
                 .round()
                 .clamp(0.0, 255.0) as u8;
 
@@ -701,138 +798,155 @@ impl SeedEncoder for StructuralEncoder {
             grid.set(x as usize, y as usize, value);
         }
 
-        // Light deterministic noise (±12 of 256) to break ties across variants
-        // without destroying the structural signal.
-        let mut rng =
-            SplitMix64::new(seed_nonce ^ stable_hash_bytes(bytes) ^ (variant as u64) ^ 0x57ac_u64);
-        for idx in 0..total {
-            let x = idx % size;
-            let y = idx / size;
-            let base = grid.get(x, y) as i16;
-            let noise = ((rng.next_u64() >> 56) as i16).wrapping_sub(128) / 10;
-            grid.set(x, y, (base + noise).clamp(0, 255) as u8);
-        }
-
+        normalize_grid(&mut grid);
+        apply_structural_noise(&mut grid, size, seed_nonce, bytes, variant);
         grid
     }
 }
 
-/// Sliding-window Shannon entropy, normalized to [0, 255].
-fn structural_local_entropy(bytes: &[u8], window: usize) -> Vec<f32> {
-    let n = bytes.len();
-    let mut out = vec![0.0f32; n];
-    if n == 0 {
-        return out;
+/// Fallback: extract tokens from raw bytes, filtering whitespace.
+fn extract_byte_tokens(bytes: &[u8]) -> Vec<SemanticToken> {
+    let mut tokens = Vec::with_capacity(bytes.len() / 2);
+    let mut depth: u8 = 0;
+    let mut max_depth: u8 = 0;
+    for &b in bytes {
+        match b {
+            b'\n' | b'\r' | b'\t' | b' ' => continue, // skip whitespace
+            b'(' | b'{' | b'[' => {
+                depth = depth.saturating_add(1);
+                max_depth = max_depth.max(depth);
+            }
+            b')' | b'}' | b']' => {
+                depth = depth.saturating_sub(1);
+            }
+            _ => {}
+        }
+        let role = match b {
+            b'a'..=b'z' | b'_' => ROLE_VARIABLE,
+            b'A'..=b'Z' => ROLE_TYPE,
+            b'0'..=b'9' => ROLE_STRING,
+            b'(' | b')' | b'{' | b'}' | b'[' | b']' | b';' | b':' | b',' | b'.' => {
+                ROLE_PUNCTUATION
+            }
+            b'+' | b'-' | b'*' | b'/' | b'=' | b'<' | b'>' | b'!' | b'&' | b'|' => {
+                ROLE_OPERATOR
+            }
+            b'"' | b'\'' | b'`' => ROLE_STRING,
+            _ => ROLE_PUNCTUATION,
+        };
+        tokens.push(SemanticToken { role, depth });
     }
-    let half = window / 2;
-
-    // Sliding frequency table for O(n) amortized entropy.
-    let mut freq = [0u32; 256];
-    let mut win_start = 0usize;
-    let mut win_end = 0usize;
-    let mut win_len = 0u32;
-
-    for (i, out_val) in out.iter_mut().enumerate().take(n) {
-        let want_start = i.saturating_sub(half);
-        let want_end = (i + half + 1).min(n);
-
-        // Expand right edge.
-        while win_end < want_end {
-            freq[bytes[win_end] as usize] += 1;
-            win_len += 1;
-            win_end += 1;
+    // Normalize depth to 0-255 after the fact.
+    if max_depth > 0 {
+        let scale = 255.0 / max_depth as f32;
+        for t in &mut tokens {
+            t.depth = (t.depth as f32 * scale).round().min(255.0) as u8;
         }
-        // Shrink left edge.
-        while win_start < want_start {
-            freq[bytes[win_start] as usize] -= 1;
-            win_len -= 1;
-            win_start += 1;
-        }
+    }
+    tokens
+}
 
-        let len_f = win_len as f32;
+/// Chunk tokens into `grid_cells` buckets and apply `f` to each chunk.
+fn chunked_token_map(
+    tokens: &[SemanticToken],
+    grid_cells: usize,
+    f: impl Fn(&[SemanticToken]) -> f32,
+) -> Vec<f32> {
+    let chunk = tokens.len().div_ceil(grid_cells).max(1);
+    let mut out = vec![0.0f32; grid_cells];
+    for (cell, val) in out.iter_mut().enumerate() {
+        let start = cell * chunk;
+        if start >= tokens.len() {
+            break;
+        }
+        let end = (start + chunk).min(tokens.len());
+        *val = f(&tokens[start..end]);
+    }
+    out
+}
+
+/// Channel 1: Count of distinct roles per chunk, normalized to 0-255.
+fn role_diversity(tokens: &[SemanticToken], grid_cells: usize) -> Vec<f32> {
+    chunked_token_map(tokens, grid_cells, |chunk| {
+        let mut seen = [false; ROLE_COUNT];
+        for t in chunk {
+            if (t.role as usize) < ROLE_COUNT {
+                seen[t.role as usize] = true;
+            }
+        }
+        let distinct = seen.iter().filter(|&&s| s).count();
+        (distinct as f32 / ROLE_COUNT as f32 * 255.0).min(255.0)
+    })
+}
+
+/// Channel 2: Average AST depth per chunk, directly from token depth values.
+fn token_depth_gradient(tokens: &[SemanticToken], grid_cells: usize) -> Vec<f32> {
+    chunked_token_map(tokens, grid_cells, |chunk| {
+        let n = chunk.len() as f32;
+        let sum: f32 = chunk.iter().map(|t| t.depth as f32).sum();
+        (sum / n).min(255.0)
+    })
+}
+
+/// Channel 3: Shannon entropy of role distribution per chunk, normalized to 0-255.
+fn role_entropy(tokens: &[SemanticToken], grid_cells: usize) -> Vec<f32> {
+    let max_entropy = (ROLE_COUNT as f32).log2(); // ~3.17 bits
+    chunked_token_map(tokens, grid_cells, |chunk| {
+        let n = chunk.len() as f32;
+        let mut freq = [0u32; ROLE_COUNT];
+        for t in chunk {
+            if (t.role as usize) < ROLE_COUNT {
+                freq[t.role as usize] += 1;
+            }
+        }
         let mut h = 0.0f32;
         for &f in &freq {
             if f > 0 {
-                let p = f as f32 / len_f;
+                let p = f as f32 / n;
                 h -= p * p.log2();
             }
         }
-        // Max Shannon entropy for byte alphabet = 8 bits.
-        *out_val = (h / 8.0 * 255.0).clamp(0.0, 255.0);
-    }
-
-    out
+        (h / max_entropy * 255.0).clamp(0.0, 255.0)
+    })
 }
 
-/// Bracket-nesting depth, normalized to [0, 255].
-fn structural_depth_profile(bytes: &[u8]) -> Vec<f32> {
-    let n = bytes.len();
-    let mut out = vec![0.0f32; n];
-    let mut depth: i32 = 0;
-    let mut max_depth: i32 = 0;
-
-    for (i, &b) in bytes.iter().enumerate() {
-        match b {
-            b'(' | b'{' | b'[' => depth += 1,
-            b')' | b'}' | b']' => depth = (depth - 1).max(0),
-            _ => {}
-        }
-        out[i] = depth as f32;
-        max_depth = max_depth.max(depth);
-    }
-
-    if max_depth > 0 {
-        let scale = 255.0 / max_depth as f32;
-        for v in &mut out {
-            *v *= scale;
-        }
-    }
-
-    out
-}
-
-/// Byte-category structural weight in [0, 255].
-fn structural_token_signal(bytes: &[u8]) -> Vec<f32> {
-    bytes
-        .iter()
-        .map(|&b| match b {
-            b'a'..=b'z' | b'A'..=b'Z' | b'_' => 200.0,
-            b'(' | b')' | b'{' | b'}' | b'[' | b']' => 180.0,
-            b'0'..=b'9' => 160.0,
-            b'+' | b'-' | b'*' | b'/' | b'=' | b'<' | b'>' | b'!' | b'&' | b'|' => 140.0,
-            b';' | b':' | b',' | b'.' => 120.0,
-            b'"' | b'\'' | b'`' => 100.0,
-            b' ' => 40.0,
-            b'\n' | b'\r' | b'\t' => 20.0,
-            _ => 80.0,
-        })
-        .collect()
-}
-
-/// N-gram uniqueness: distance to the nearest prior matching N-gram,
-/// normalized to [0, 255]. Unique code → high values. Repeated code → low values.
-fn structural_uniqueness(bytes: &[u8], ngram: usize, search_limit: usize) -> Vec<f32> {
-    let n = bytes.len();
-    let mut out = vec![255.0f32; n];
-    if n < ngram {
-        return out;
-    }
-
-    for i in ngram..n {
-        let gram = &bytes[i + 1 - ngram..=i];
-        let lookback = search_limit.min(i + 1 - ngram);
-        let base = i + 1 - ngram;
-        let mut dist = lookback;
-        for j in 1..=lookback {
-            let pos = base - j;
-            if bytes[pos..pos + ngram] == *gram {
-                dist = j;
-                break;
+/// Channel 4: Role n-gram uniqueness per chunk, normalized to 0-255.
+fn role_ngram_uniqueness(tokens: &[SemanticToken], grid_cells: usize) -> Vec<f32> {
+    let ngram = STRUCTURAL_ROLE_NGRAM;
+    let search = STRUCTURAL_ROLE_NGRAM_SEARCH;
+    // Pre-compute per-token uniqueness.
+    let mut per_token = vec![255.0f32; tokens.len()];
+    if tokens.len() >= ngram {
+        for i in ngram..tokens.len() {
+            let gram: Vec<u8> = tokens[i + 1 - ngram..=i].iter().map(|t| t.role).collect();
+            let lookback = search.min(i + 1 - ngram);
+            for j in (i.saturating_sub(lookback + ngram)..i.saturating_sub(ngram)).rev() {
+                if j + ngram <= tokens.len() {
+                    let candidate: Vec<u8> =
+                        tokens[j..j + ngram].iter().map(|t| t.role).collect();
+                    if candidate == gram {
+                        let dist = i - j;
+                        per_token[i] = (dist as f32 / search as f32 * 255.0).min(255.0);
+                        break;
+                    }
+                }
             }
         }
-        out[i] = (dist as f32 / search_limit as f32 * 255.0).clamp(0.0, 255.0);
     }
 
+    // Average per chunk.
+    let chunk = tokens.len().div_ceil(grid_cells).max(1);
+    let mut out = vec![0.0f32; grid_cells];
+    for (cell, val) in out.iter_mut().enumerate() {
+        let start = cell * chunk;
+        if start >= tokens.len() {
+            break;
+        }
+        let end = (start + chunk).min(tokens.len());
+        let n = (end - start) as f32;
+        let sum: f32 = per_token[start..end].iter().sum();
+        *val = (sum / n).min(255.0);
+    }
     out
 }
 
@@ -1010,6 +1124,68 @@ fn map_seed_capture_groups(query: &Query) -> Vec<Option<SeedHighlight>> {
         .collect()
 }
 
+/// Classify an AST node kind into a semantic class (0-255).
+/// Deterministic and meaningful, unlike a hash of the kind_id.
+fn ast_node_class(kind: &str) -> u8 {
+    // Declarations: highest weight — they define code structure.
+    if kind.contains("declaration")
+        || kind.contains("definition")
+        || kind.contains("function_item")
+        || kind.contains("struct_item")
+        || kind.contains("enum_item")
+        || kind.contains("trait_item")
+        || kind.contains("impl_item")
+        || kind.contains("class_")
+        || kind.contains("interface_")
+        || kind == "module"
+    {
+        return 255;
+    }
+    // Control flow: creates branching structure.
+    if kind.contains("if_")
+        || kind.contains("match_")
+        || kind.contains("switch_")
+        || kind.contains("while_")
+        || kind.contains("for_")
+        || kind.contains("loop_")
+        || kind.contains("try_")
+        || kind.contains("catch_")
+    {
+        return 210;
+    }
+    // Expressions: moderate structural weight.
+    if kind.contains("expression")
+        || kind.contains("call_")
+        || kind.contains("binary_")
+        || kind.contains("unary_")
+        || kind.contains("assignment")
+    {
+        return 170;
+    }
+    // Statements / blocks.
+    if kind.contains("statement")
+        || kind.contains("block")
+        || kind == "source_file"
+        || kind == "program"
+    {
+        return 130;
+    }
+    // Type annotations / parameters.
+    if kind.contains("type") || kind.contains("parameter") || kind.contains("argument") {
+        return 90;
+    }
+    // Literals and identifiers.
+    if kind.contains("literal")
+        || kind.contains("string")
+        || kind.contains("number")
+        || kind == "identifier"
+    {
+        return 50;
+    }
+    // Everything else.
+    100
+}
+
 // ---------------------------------------------------------------------------
 // TokenSpectrum encoder — AST-driven token classification via tree-sitter.
 // ---------------------------------------------------------------------------
@@ -1032,30 +1208,40 @@ impl SeedEncoder for TokenSpectrumEncoder {
             return grid;
         }
 
-        // Per-byte values from tree-sitter highlight groups (or fallback).
-        let per_byte = match seed_parse(input.text, input.file_path) {
+        // Per-byte values from tree-sitter highlight groups (or fallback),
+        // filtering whitespace so only meaningful tokens fill the grid.
+        let values: Vec<u8> = match seed_parse(input.text, input.file_path) {
             Some((tree, lang)) => {
                 let groups = seed_highlight_bytes(input.text, lang, &tree);
                 groups
                     .iter()
+                    .filter(|g| g.is_some()) // skip whitespace (None)
                     .map(|g| seed_highlight_to_value(*g))
-                    .collect::<Vec<u8>>()
+                    .collect()
             }
             None => {
-                // Fallback: byte-category classification with refined ranges.
-                bytes.iter().map(|&b| byte_category_value(b)).collect()
+                // Fallback: byte-category classification, skipping whitespace.
+                bytes
+                    .iter()
+                    .filter(|&&b| !matches!(b, b'\n' | b'\r' | b'\t' | b' '))
+                    .map(|&b| byte_category_value(b))
+                    .collect()
             }
         };
 
+        if values.is_empty() {
+            return grid;
+        }
+
         // Map to 32x32 grid via Hilbert curve, averaging per cell.
-        let chunk = per_byte.len().div_ceil(total).max(1);
+        let chunk = values.len().div_ceil(total).max(1);
         for cell in 0..total {
             let start = cell * chunk;
-            if start >= per_byte.len() {
+            if start >= values.len() {
                 break;
             }
-            let end = (start + chunk).min(per_byte.len());
-            let sum: u32 = per_byte[start..end].iter().map(|&v| v as u32).sum();
+            let end = (start + chunk).min(values.len());
+            let sum: u32 = values[start..end].iter().map(|&v| v as u32).sum();
             let avg = (sum / (end - start) as u32).min(255) as u8;
             let (x, y) = hilbert_index_to_xy(order, cell as u32);
             grid.set(x as usize, y as usize, avg);
@@ -1137,17 +1323,17 @@ impl SeedEncoder for AstStructureEncoder {
                     if node.is_named() {
                         let child_count = node.named_child_count() as u32;
                         let byte_span = (node.end_byte().saturating_sub(node.start_byte())) as u32;
-                        let kind_id = node.kind_id();
 
                         let depth_score = (depth.min(15) as f32 / 15.0 * 255.0) as u64;
                         let branch_score = (child_count.min(20) as f32 / 20.0 * 255.0) as u64;
                         let span_score = (byte_span.min(2000) as f32 / 2000.0 * 255.0) as u64;
-                        let kind_hash = stable_hash_bytes(&kind_id.to_le_bytes()) & 0xFF;
+                        // Semantic node class instead of pseudo-random kind_id hash.
+                        let kind_class = ast_node_class(node.kind()) as u64;
 
                         let value = ((depth_score * 30
                             + branch_score * 25
                             + span_score * 25
-                            + kind_hash * 20)
+                            + kind_class * 20)
                             / 100)
                             .clamp(0, 255) as u8;
 
@@ -1197,22 +1383,12 @@ impl SeedEncoder for AstStructureEncoder {
                 let _ = file_size; // used implicitly via total_span
             }
             None => {
-                // Fallback: use existing structural signals.
-                let token = structural_token_signal(bytes);
-                let depth = structural_depth_profile(bytes);
-                let chunk = bytes.len().div_ceil(total).max(1);
+                // Fallback: neutral mid-range grid. Without tree-sitter we
+                // cannot extract meaningful AST structure, so we produce a
+                // deterministic but moderate signal rather than byte-level noise.
                 for cell in 0..total {
-                    let start = cell * chunk;
-                    if start >= bytes.len() {
-                        break;
-                    }
-                    let end = (start + chunk).min(bytes.len());
-                    let n = (end - start) as f32;
-                    let t: f32 = token[start..end].iter().sum::<f32>() / n;
-                    let d: f32 = depth[start..end].iter().sum::<f32>() / n;
-                    let value = (t * 0.50 + d * 0.50).round().clamp(0.0, 255.0) as u8;
                     let (x, y) = hilbert_index_to_xy(order, cell as u32);
-                    grid.set(x as usize, y as usize, value);
+                    grid.set(x as usize, y as usize, 128);
                 }
             }
         }
@@ -1256,11 +1432,11 @@ impl SeedEncoder for ComplexityFieldEncoder {
                 (n, c, e, u)
             }
             None => {
-                // Fallback: byte-level approximations.
-                let n = fallback_nesting_depth(bytes, line_count);
-                let e = fallback_entropy(bytes, line_count);
-                let neutral = vec![128.0f32; line_count]; // neutral for missing layers
-                (n, neutral.clone(), e, neutral)
+                // Fallback: neutral mid-range values for all layers.
+                // Without tree-sitter we cannot compute meaningful metrics,
+                // so we produce a moderate signal rather than byte-level noise.
+                let neutral = vec![128.0f32; line_count];
+                (neutral.clone(), neutral.clone(), neutral.clone(), neutral)
             }
         };
 
@@ -1297,11 +1473,15 @@ impl SeedEncoder for ComplexityFieldEncoder {
                     let col = gx * line_len / size;
                     let byte_idx = start + col.min(line_len.saturating_sub(1));
                     if byte_idx < groups.len() {
-                        let col_value = seed_highlight_to_value(groups[byte_idx]);
-                        let base = grid.get(gx, gy) as u16;
-                        // Blend: 80% metrics, 20% column token.
-                        let blended = ((base * 80 + col_value as u16 * 20) / 100).min(255) as u8;
-                        grid.set(gx, gy, blended);
+                        // Skip whitespace bytes — only blend meaningful tokens.
+                        if let Some(group) = groups[byte_idx] {
+                            let col_value = seed_highlight_to_value(Some(group));
+                            let base = grid.get(gx, gy) as u16;
+                            // Blend: 80% metrics, 20% column token.
+                            let blended =
+                                ((base * 80 + col_value as u16 * 20) / 100).min(255) as u8;
+                            grid.set(gx, gy, blended);
+                        }
                     }
                 }
             }
@@ -1574,46 +1754,6 @@ fn complexity_identifier_uniqueness(
     per_line
 }
 
-/// Fallback nesting depth using bracket counting, normalized to 0.0-255.0.
-fn fallback_nesting_depth(bytes: &[u8], line_count: usize) -> Vec<f32> {
-    let depth_profile = structural_depth_profile(bytes);
-    let line_starts = compute_line_starts_bytes(bytes);
-    let mut per_line = vec![0.0f32; line_count];
-
-    for (line, per_line_val) in per_line.iter_mut().enumerate() {
-        let start = line_starts.get(line).copied().unwrap_or(0);
-        let end = line_starts.get(line + 1).copied().unwrap_or(bytes.len());
-        if start < end && start < depth_profile.len() {
-            let max_d = depth_profile[start..end.min(depth_profile.len())]
-                .iter()
-                .cloned()
-                .fold(0.0f32, f32::max);
-            *per_line_val = max_d;
-        }
-    }
-
-    per_line
-}
-
-/// Fallback entropy using byte-level sliding window, averaged per line.
-fn fallback_entropy(bytes: &[u8], line_count: usize) -> Vec<f32> {
-    let entropy = structural_local_entropy(bytes, STRUCTURAL_ENTROPY_WINDOW);
-    let line_starts = compute_line_starts_bytes(bytes);
-    let mut per_line = vec![0.0f32; line_count];
-
-    for (line, per_line_val) in per_line.iter_mut().enumerate() {
-        let start = line_starts.get(line).copied().unwrap_or(0);
-        let end = line_starts.get(line + 1).copied().unwrap_or(bytes.len());
-        if start < end && start < entropy.len() {
-            let sum: f32 = entropy[start..end.min(entropy.len())].iter().sum();
-            let n = (end.min(entropy.len()) - start) as f32;
-            *per_line_val = (sum / n).clamp(0.0, 255.0);
-        }
-    }
-
-    per_line
-}
-
 /// Compute line start byte offsets from a string.
 fn compute_line_starts(text: &str) -> Vec<usize> {
     let mut starts = vec![0usize];
@@ -1625,16 +1765,6 @@ fn compute_line_starts(text: &str) -> Vec<usize> {
     starts
 }
 
-/// Compute line start byte offsets from raw bytes.
-fn compute_line_starts_bytes(bytes: &[u8]) -> Vec<usize> {
-    let mut starts = vec![0usize];
-    for (idx, &b) in bytes.iter().enumerate() {
-        if b == b'\n' {
-            starts.push(idx + 1);
-        }
-    }
-    starts
-}
 
 /// Normalize grid values to span the full 0-255 range so that the density
 /// threshold works correctly regardless of the encoder's raw value distribution.

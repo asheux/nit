@@ -175,12 +175,32 @@ token entropy, and identifier uniqueness.\n\
 names (>= 65% identifier uniqueness per scope). Distribute complexity \
 evenly across functions.\n\
 \n\
-Hybrid encoder:\n\
-  structural — Shannon entropy, bracket depth balance, token signal density, \
-n-gram uniqueness.\n\
-    → Balance bracket depth (avoid deeply nested blocks). Vary syntax \
-patterns (avoid repetitive match arms, if-else chains, or boilerplate). \
-Use diverse token patterns across the file.\n\
+Hybrid encoder (AST-aware, whitespace-filtered):\n\
+  structural — operates on semantic token roles from tree-sitter, with \
+whitespace stripped entirely. Four channels are computed on the filtered \
+token-role sequence and mapped to a 32x32 grid via Hilbert curve:\n\
+    1. Role diversity (35%) — count of distinct token roles (keyword, \
+variable, operator, type, function, etc.) per region. More diverse \
+regions = higher score.\n\
+    2. AST depth gradient (25%) — nesting depth from the actual AST, not \
+bracket counting. Varied depth levels across the file create gradients \
+that sustain GoL life.\n\
+    3. Role entropy (20%) — Shannon entropy of the token-role distribution \
+per region. Varied mixes of roles = high entropy.\n\
+    4. Role n-gram uniqueness (20%) — uniqueness of 4-token role sequences. \
+Repeated structural patterns (e.g., many functions with identical \
+keyword-variable-operator-punctuation sequences) score low.\n\
+  Tactics to boost this encoder:\n\
+    → Mix token role types within each region: intersperse keywords, \
+operators, identifiers, types, and literals.\n\
+    → Vary function shapes: different return types, parameter counts, \
+generic bounds, and error handling styles.\n\
+    → Use varied nesting depths: mix flat top-level declarations with \
+moderately nested blocks (closures, match arms with guards).\n\
+    → Avoid copy-paste structural patterns: even if identifiers differ, \
+repeated function shapes produce repeated role n-grams.\n\
+    → Add doc comments and section markers between functions — comments are \
+a distinct role that diversifies the token stream.\n\
 \n\
 TARGETS (minimum → aspirational):\n\
 - Tier III+ (Spaceship) on all AST encoders. Aim for Tier V (Replicator).\n\
@@ -650,6 +670,11 @@ pub fn generate_recommendations(
         }
     }
 
+    // Structural encoder recommendations — this encoder is the most common bottleneck.
+    // It operates at the raw byte level; detect when it's an outlier and provide
+    // specific guidance based on the four byte-level channels.
+    analyze_structural_outlier(text, scores, &mut recs);
+
     // Tree-sitter based recommendations.
     let tree = match ts_parse(text, file_path) {
         Some(t) => t,
@@ -1008,6 +1033,99 @@ fn shannon_entropy(counts: &HashMap<&str, usize>, total: usize) -> f32 {
         entropy -= p * p.log2();
     }
     entropy as f32
+}
+
+// ---------------------------------------------------------------------------
+// Structural encoder outlier analysis
+// ---------------------------------------------------------------------------
+
+/// Detect when the structural encoder is a significant outlier and generate
+/// targeted recommendations based on the four token-role channels:
+/// role diversity (35%), AST depth (25%), role entropy (20%), role n-gram (20%).
+fn analyze_structural_outlier(
+    _text: &str,
+    scores: &[EncoderScore],
+    recs: &mut Vec<GenomeRecommendation>,
+) {
+    let structural = match scores.iter().find(|s| s.encoder == SeedEncoderId::Structural) {
+        Some(s) => s,
+        None => return,
+    };
+
+    // Check if structural is an outlier relative to the other encoders.
+    let ast_gens: Vec<u32> = scores
+        .iter()
+        .filter(|s| s.encoder != SeedEncoderId::Structural)
+        .map(|s| s.generations_survived)
+        .collect();
+    if ast_gens.is_empty() {
+        return;
+    }
+    let ast_mean = ast_gens.iter().sum::<u32>() as f32 / ast_gens.len() as f32;
+
+    // Only diagnose if structural is significantly below the AST encoders.
+    let is_outlier = ast_mean > 50.0
+        && (structural.generations_survived as f32) < ast_mean * 0.3;
+    if !is_outlier {
+        return;
+    }
+
+    // The structural encoder operates on semantic token roles from tree-sitter.
+    // Low scores indicate: too few distinct roles per region, flat AST depth,
+    // low role entropy, or repeated role n-gram patterns.
+    let mut specific = false;
+
+    // Low density suggests few distinct roles or very flat depth.
+    if structural.density < 0.10 {
+        recs.push(GenomeRecommendation {
+            metric: "structural_diversity".into(),
+            severity: RecommendationSeverity::Warning,
+            message: format!(
+                "Structural encoder bottleneck: density {:.2} is very low. The token-role \
+                 distribution lacks variety. Mix different token types within each code region: \
+                 keywords, operators, identifiers, types, literals, and comments. Vary function \
+                 shapes and add doc comments between functions to diversify the role stream.",
+                structural.density,
+            ),
+            location: None,
+        });
+        specific = true;
+    }
+
+    // Low components suggests the GoL seed is too uniform — role patterns repeat.
+    if structural.components < 5 {
+        recs.push(GenomeRecommendation {
+            metric: "structural_ngram".into(),
+            severity: RecommendationSeverity::Warning,
+            message: format!(
+                "Structural encoder bottleneck: only {} connected regions in the GoL grid. \
+                 The code has too many repeated structural patterns. Functions likely share \
+                 the same role sequence (e.g., keyword-variable-operator-punctuation). Vary \
+                 function signatures, error handling styles, and intersperse different node \
+                 types (closures, trait impls, enums, const items).",
+                structural.components,
+            ),
+            location: None,
+        });
+        specific = true;
+    }
+
+    if !specific {
+        recs.push(GenomeRecommendation {
+            metric: "structural_general".into(),
+            severity: RecommendationSeverity::Warning,
+            message: format!(
+                "Structural encoder is a severe outlier ({} generations vs {:.0} AST mean). \
+                 This encoder measures token-role diversity, AST depth variation, role entropy, \
+                 and role-pattern uniqueness. To boost it: vary function shapes and signatures, \
+                 mix token role types per region, use varied nesting depths, add doc comments \
+                 between functions, and avoid copy-paste structural patterns.",
+                structural.generations_survived,
+                ast_mean,
+            ),
+            location: None,
+        });
+    }
 }
 
 #[cfg(test)]
