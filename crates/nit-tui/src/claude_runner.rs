@@ -467,6 +467,29 @@ fn run_turn(
                                     });
                                 }
                             }
+                            // Detect file writes for per-agent genome attribution.
+                            if matches!(kind, Some("tool_use") | Some("tool_result")) {
+                                for key in ["file_path", "path", "file"] {
+                                    if let Some(p) = value
+                                        .get("input")
+                                        .and_then(|v| v.get(key))
+                                        .and_then(|v| v.as_str())
+                                    {
+                                        let path = if std::path::Path::new(p).is_absolute() {
+                                            std::path::PathBuf::from(p)
+                                        } else {
+                                            cwd.join(p)
+                                        };
+                                        if path.exists() {
+                                            let _ = event_tx.send(AgentBusEvent::FileWrite {
+                                                agent_id: model.clone(),
+                                                path,
+                                            });
+                                        }
+                                        break;
+                                    }
+                                }
+                            }
                         }
                         Err(_) => break,
                     }

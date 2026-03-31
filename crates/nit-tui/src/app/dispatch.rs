@@ -244,7 +244,7 @@ pub(super) fn maybe_dispatch_codex_turn(
 
     // Ensure genome context is always included, even when called directly
     // (e.g. from @new clones, artifacts popup, or queued turn dequeue).
-    let prompt = match build_genome_context(state) {
+    let prompt = match build_genome_context(state, &model) {
         Some(ctx) => format!("{ctx}{prompt}"),
         None => prompt,
     };
@@ -656,7 +656,7 @@ pub(super) fn maybe_dispatch_claude_turn(
 
     // Ensure genome context is always included, even when called directly
     // (e.g. from @new clones, artifacts popup, or queued turn dequeue).
-    let prompt = match build_genome_context(state) {
+    let prompt = match build_genome_context(state, &model) {
         Some(ctx) => format!("{ctx}{prompt}"),
         None => prompt,
     };
@@ -953,8 +953,8 @@ fn append_file_genome_context(
 }
 
 /// Build the genome context string to prepend to agent prompts.
-/// Includes reports for ALL files modified during the current turn, not just the editor buffer.
-fn build_genome_context(state: &AppState) -> Option<String> {
+/// Only includes files modified by the SPECIFIC agent, not other agents' files.
+fn build_genome_context(state: &AppState, agent_id: &str) -> Option<String> {
     if !state.settings.genome.genome_context_enabled {
         return None;
     }
@@ -962,13 +962,16 @@ fn build_genome_context(state: &AppState) -> Option<String> {
     let mut ctx = String::from("\n[genome context]\n");
     let mut has_content = false;
 
-    // Include ALL files modified during the current/last turn.
-    if !state.genome_turn_modified.is_empty() {
-        ctx.push_str(&format!(
-            "Files modified this turn: {}\n",
-            state.genome_turn_modified.len()
-        ));
-        let mut sorted_paths: Vec<_> = state.genome_turn_modified.iter().collect();
+    // Include only files modified by THIS agent during its turn.
+    let agent_modified = state.genome_turn_modified.get(agent_id);
+    if let Some(modified) = agent_modified {
+        if !modified.is_empty() {
+            ctx.push_str(&format!(
+                "Files modified this turn: {}\n",
+                modified.len()
+            ));
+        }
+        let mut sorted_paths: Vec<_> = modified.iter().collect();
         sorted_paths.sort();
         for file_path in &sorted_paths {
             if let Some(report) = state.genome_reports.get(*file_path) {
@@ -1006,9 +1009,10 @@ fn build_genome_context(state: &AppState) -> Option<String> {
         }
     }
 
-    // Always include the editor buffer (primary file context).
+    // Always include the editor buffer if this agent hasn't modified it.
+    let agent_modified_set = agent_modified.cloned().unwrap_or_default();
     if let Some(file_path) = state.editor_buffer().path() {
-        if !state.genome_turn_modified.contains(file_path) {
+        if !agent_modified_set.contains(file_path) {
             if let Some(report) = state.genome_reports.get(file_path) {
                 ctx.push_str("\n[active buffer]\n");
                 append_file_genome_context(&mut ctx, file_path, report);

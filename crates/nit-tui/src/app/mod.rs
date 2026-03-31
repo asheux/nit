@@ -1501,7 +1501,7 @@ fn push_genome_retry_message(state: &mut AppState, agent_id: &str, attempt: u8) 
 
 /// Build a follow-up prompt if the agent's last turn degraded genome quality.
 /// Returns `None` if quality did not degrade or retry limit is reached.
-fn build_genome_retry_prompt(state: &mut AppState) -> Option<String> {
+fn build_genome_retry_prompt(state: &mut AppState, agent_id: &str) -> Option<String> {
     if !state.settings.genome.genome_context_enabled {
         return None;
     }
@@ -1520,12 +1520,12 @@ fn build_genome_retry_prompt(state: &mut AppState) -> Option<String> {
 
     // Collect files that degraded relative to their baseline OR new files below threshold.
     let mut degraded_files: Vec<std::path::PathBuf> = Vec::new();
-    for file_path in &state
+    let agent_files: Vec<_> = state
         .genome_turn_modified
-        .iter()
-        .cloned()
-        .collect::<Vec<_>>()
-    {
+        .get(agent_id)
+        .map(|s| s.iter().cloned().collect())
+        .unwrap_or_default();
+    for file_path in &agent_files {
         let report = match state.genome_reports.get(file_path) {
             Some(r) => r,
             None => continue,
@@ -1586,7 +1586,7 @@ fn build_genome_retry_prompt(state: &mut AppState) -> Option<String> {
     prompt.push_str(&format!(
         "Files requiring attention ({} of {} modified",
         degraded_files.len(),
-        state.genome_turn_modified.len(),
+        agent_files.len(),
     ));
     if new_below_threshold > 0 {
         prompt.push_str(&format!(
@@ -1767,23 +1767,23 @@ fn dispatch_turn_genome_evals(
     if !state.settings.genome.genome_context_enabled {
         return;
     }
-    let modified: Vec<std::path::PathBuf> = state.genome_turn_modified.iter().cloned().collect();
 
-    // Also include editor buffer if not already in the modified set.
-    let editor_path = state.editor_buffer().path().cloned();
-    let mut extra_editor = false;
-    if let Some(ref ep) = editor_path {
-        if !modified.contains(ep) {
-            extra_editor = true;
-        }
-    }
+    // Use runner-attributed files: the runners emit FileWrite events when
+    // they detect tool_use(edit/write) targeting a file. These are already
+    // collected in genome_turn_modified[agent_id] by the FileWrite event handler.
+    // This is authoritative — no filesystem-level guessing, no cross-agent
+    // contamination even for parallel agents with overlapping turns.
+    let modified: Vec<std::path::PathBuf> = state
+        .genome_turn_modified
+        .get(agent_id)
+        .map(|s| s.iter().cloned().collect())
+        .unwrap_or_default();
 
-    let total = modified.len() + if extra_editor { 1 } else { 0 };
-    if total == 0 {
+    if modified.is_empty() {
         return;
     }
 
-    state.genome_eval_pending = total;
+    state.genome_eval_pending = modified.len();
     state.genome_eval_worst_delta = 0;
     state.genome_eval_agent_id = Some(agent_id.to_string());
     state.genome_eval_mission_id = mission_id.clone();
@@ -1791,15 +1791,6 @@ fn dispatch_turn_genome_evals(
     for file_path in modified {
         if let Ok(text) = std::fs::read_to_string(&file_path) {
             genome.evaluate(file_path, text, false);
-        } else {
-            state.genome_eval_pending = state.genome_eval_pending.saturating_sub(1);
-        }
-    }
-
-    if extra_editor {
-        if let Some(ep) = editor_path {
-            let text = state.editor_buffer().content_as_string();
-            genome.evaluate(ep, text, false);
         } else {
             state.genome_eval_pending = state.genome_eval_pending.saturating_sub(1);
         }
@@ -1815,10 +1806,10 @@ fn drain_file_watcher(
     genome: &crate::genome_worker::GenomeWorker,
 ) {
     while let Ok(changed_path) = watcher.events.try_recv() {
-        // Track this file as modified during the current agent turn.
-        if state.genome_turn_active {
-            state.genome_turn_modified.insert(changed_path.clone());
-        }
+        // NOTE: we do NOT attribute file changes to agents here.
+        // The file watcher can't distinguish agent writes from external editor
+        // writes. Agent file attribution is done at TurnCompleted using mtime
+        // watermarks (see dispatch_turn_genome_evals).
 
         // Reload any open editor buffer that matches.
         for buf_idx in 0..state.buffers.len() {
@@ -1832,7 +1823,7 @@ fn drain_file_watcher(
         }
 
         // Dispatch shadow genome evaluation to background thread.
-        if state.genome_turn_active && state.settings.genome.genome_context_enabled {
+        if !state.genome_turn_active.is_empty() && state.settings.genome.genome_context_enabled {
             if let Ok(text) = std::fs::read_to_string(&changed_path) {
                 genome.evaluate(changed_path, text, true);
             }
@@ -1905,10 +1896,14 @@ fn drain_genome_results(
             let genome_stage = format!(
                 "{file_name} {quality} {delta_label} (tier {tier_str}, c={consistency:.2})",
             );
-            // Only update stage labels when a single agent is active to avoid
-            // overwriting unrelated agents' stage in multi-agent scenarios.
-            if state.agents.active_turns.len() == 1 {
-                for turn in state.agents.active_turns.values_mut() {
+            // Only update stage labels for agents that own this file.
+            for (agent_id, turn) in state.agents.active_turns.iter_mut() {
+                let owns_file = state
+                    .genome_turn_modified
+                    .get(agent_id)
+                    .map(|files| files.contains(&path))
+                    .unwrap_or(false);
+                if owns_file {
                     turn.stage = Some(genome_stage.clone());
                     turn.last_output_at = Instant::now();
                 }
@@ -2003,7 +1998,11 @@ fn drain_genome_results(
                     .get(&agent_id)
                     .copied()
                     .unwrap_or(nit_core::GenomeTier::Spaceship);
-                let modified: Vec<_> = state.genome_turn_modified.iter().cloned().collect();
+                let modified: Vec<_> = state
+                    .genome_turn_modified
+                    .get(&agent_id)
+                    .map(|s| s.iter().cloned().collect())
+                    .unwrap_or_default();
                 let worst_tier = modified
                     .iter()
                     .filter_map(|p| state.genome_reports.get(p))
@@ -2062,7 +2061,7 @@ fn drain_genome_results(
                 };
 
                 // Auto-retry on genome quality degradation.
-                if let Some(prompt) = build_genome_retry_prompt(state) {
+                if let Some(prompt) = build_genome_retry_prompt(state, &agent_id) {
                     let attempt = state.genome_retry_count;
                     let mission_id = state.genome_eval_mission_id.clone();
                     push_genome_retry_message(state, &agent_id, attempt);
@@ -3678,11 +3677,12 @@ fn move_agent_ops_selection(state: &mut AppState, swarm: &SwarmRuntime, delta: i
         | AgentOpsTab::Diagnostics
         | AgentOpsTab::Dag
         | AgentOpsTab::Scratchpad => {
-            if delta.is_negative() {
-                state.agents.ops_scroll = state.agents.ops_scroll.saturating_sub(1);
-            } else if delta > 0 {
-                state.agents.ops_scroll = state.agents.ops_scroll.saturating_add(1);
-            }
+            let text_width = state.agents.ops_viewport_width.max(1);
+            let lines =
+                agent_ops_view::current_lines_for_width_with_swarm(state, Some(swarm), text_width);
+            let height = state.agents.ops_viewport_height.max(1);
+            let max_scroll = lines.len().saturating_sub(height);
+            bump_scroll_clamped(&mut state.agents.ops_scroll, delta, max_scroll);
             true
         }
         AgentOpsTab::Mcp => false,
@@ -4176,7 +4176,11 @@ fn handle_agent_console_key(
                 ..
             } if modifiers.contains(KeyModifiers::CONTROL) => {
                 handled = true;
-                state.agents.console_scroll = state.agents.console_scroll.saturating_sub(1);
+                bump_scroll_clamped(
+                    &mut state.agents.console_scroll,
+                    -1,
+                    state.agents.console_max_scroll,
+                );
                 changed = true;
             }
             KeyEvent {
@@ -4185,7 +4189,11 @@ fn handle_agent_console_key(
                 ..
             } if modifiers.contains(KeyModifiers::CONTROL) => {
                 handled = true;
-                state.agents.console_scroll = state.agents.console_scroll.saturating_add(1);
+                bump_scroll_clamped(
+                    &mut state.agents.console_scroll,
+                    1,
+                    state.agents.console_max_scroll,
+                );
                 changed = true;
             }
             KeyEvent {
@@ -6207,9 +6215,11 @@ fn handle_mouse_event_with_swarm(
                     bump_scroll(&mut scroll, delta);
                     state.agents.console_scroll = scroll.min(max_scroll);
                 } else {
-                    let mut scroll = state.agents.console_scroll;
-                    bump_scroll(&mut scroll, delta);
-                    state.agents.console_scroll = scroll;
+                    bump_scroll_clamped(
+                        &mut state.agents.console_scroll,
+                        delta,
+                        state.agents.console_max_scroll,
+                    );
                 }
                 return true;
             }

@@ -845,6 +845,9 @@ pub struct AgentsState {
     /// `CONSOLE_SCROLL_BOTTOM` (usize::MAX) means "auto-scroll to bottom".
     #[serde(skip)]
     pub console_scroll: usize,
+    /// Cached max scroll from last render (used by input handlers to clamp).
+    #[serde(skip)]
+    pub console_max_scroll: usize,
     #[serde(skip)]
     pub console_rows_cache: AgentConsoleRowsCache,
     #[serde(skip)]
@@ -1172,6 +1175,7 @@ impl AgentsState {
             ops_viewport_width: 0,
             ops_viewport_height: 0,
             console_scroll: CONSOLE_SCROLL_BOTTOM,
+            console_max_scroll: 0,
             console_rows_cache: AgentConsoleRowsCache::default(),
             event_epoch: 0,
             pending_provenance_mission_ids: vec!["mis-001".into()],
@@ -1304,6 +1308,7 @@ impl Default for AgentsState {
             ops_viewport_width: 0,
             ops_viewport_height: 0,
             console_scroll: CONSOLE_SCROLL_BOTTOM,
+            console_max_scroll: 0,
             console_rows_cache: AgentConsoleRowsCache::default(),
             event_epoch: 0,
             pending_provenance_mission_ids: Vec::new(),
@@ -1819,12 +1824,14 @@ pub struct AppState {
     /// Retries compare against these baselines, not the previous iteration.
     #[serde(skip)]
     pub genome_baselines: HashMap<PathBuf, crate::genome_report::GenomeReport>,
-    /// All files modified during the current agent turn (for multi-file genome tracking).
+    /// Files modified during each agent's turn (per-agent tracking).
+    /// Key: agent_id, Value: set of file paths modified during that agent's turn.
     #[serde(skip)]
-    pub genome_turn_modified: HashSet<PathBuf>,
-    /// Whether an agent turn is currently active (between TurnStarted and TurnCompleted).
+    pub genome_turn_modified: HashMap<String, HashSet<PathBuf>>,
+    /// Which agents currently have active turns. File attribution is done
+    /// by the runners via `FileWrite` events — not by filesystem tracking.
     #[serde(skip)]
-    pub genome_turn_active: bool,
+    pub genome_turn_active: HashSet<String>,
     /// True when genome computation has been requested but not yet executed.
     #[serde(skip)]
     pub genome_computing: bool,
@@ -2062,8 +2069,8 @@ impl AppState {
             genome_computing: false,
             genome_quality_delta: 0,
             genome_baselines: HashMap::new(),
-            genome_turn_modified: HashSet::new(),
-            genome_turn_active: false,
+            genome_turn_modified: HashMap::new(),
+            genome_turn_active: HashSet::new(),
             genome_retry_count: 0,
             genome_agent_streak: HashMap::new(),
             genome_agent_min_tier: HashMap::new(),
@@ -2557,7 +2564,8 @@ pub fn apply_action(state: &mut AppState, action: Action) -> ActionOutcome {
         }
         Action::ScrollDown => {
             if let Some(buf) = state.focused_buffer_mut() {
-                buf.viewport.offset_line = buf.viewport.offset_line.saturating_add(1);
+                let max_offset = buf.lines_len().saturating_sub(buf.viewport.height.max(1));
+                buf.viewport.offset_line = buf.viewport.offset_line.saturating_add(1).min(max_offset);
             }
         }
         Action::ClearLogs => {

@@ -1,133 +1,10 @@
 //! Metal GPU acceleration for compute-intensive operations (macOS only).
+//!
+//! On non-macOS platforms every public function returns a no-op stub so that
+//! the rest of the workspace compiles unconditionally.
 
-#[derive(Clone, Debug)]
-pub struct MatchPair {
-    pub a_idx: u32,
-    pub b_idx: u32,
-}
-
-pub const CA_MAX_WINDOW: u32 = 1024;
-// NOTE: This is the default scratch width compiled into the Metal TM batch kernel.
-// The macOS Metal backend may compile specialized pipelines for larger TM widths at runtime.
-pub const TM_MAX_WIDTH: u32 = 1024;
-// Default FSM state count for the cycle detection lookup table in the Metal FSM kernel.
-// The macOS Metal backend compiles specialized pipelines with the exact state count.
-pub const FSM_MAX_STATES: u32 = 4;
-
-#[derive(Clone, Debug)]
-pub struct ScorePair {
-    pub a_total: i64,
-    pub b_total: i64,
-}
-
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub struct TmHaltingPair {
-    pub a_all_halted: bool,
-    pub b_all_halted: bool,
-}
-
-#[derive(Clone, Debug)]
-pub struct EvalCommon {
-    pub rounds: u32,
-    pub payoff: [[[i32; 2]; 2]; 2],
-    pub timeout_lose: i32,
-    pub timeout_win: i32,
-    pub pairs: Vec<MatchPair>,
-}
-
-#[derive(Clone, Debug)]
-pub struct BatchEvalConfig {
-    pub rounds: u32,
-    pub payoff: [[[i32; 2]; 2]; 2],
-    pub timeout_lose: i32,
-    pub timeout_win: i32,
-}
-
-#[derive(Clone, Debug)]
-pub struct FsmBatch {
-    pub states: u32,
-    pub alphabet: u32,
-    pub starts: Vec<u32>,
-    pub outputs: Vec<u32>,
-    pub transitions: Vec<u32>,
-}
-
-#[derive(Clone, Debug)]
-pub struct CaBatch {
-    pub symbols: u32,
-    pub two_r: u32,
-    pub steps: u32,
-    pub rule_table_len: u32,
-    pub rule_tables: Vec<u32>,
-}
-
-#[derive(Clone, Debug)]
-pub struct TmTransitionPacked {
-    pub write: u32,
-    pub move_dir: u32,
-    pub next: u32,
-}
-
-#[derive(Clone, Debug)]
-pub struct TmBatch {
-    pub states: u32,
-    pub symbols: u32,
-    pub blank: u32,
-    pub max_steps: u32,
-    pub start_states: Vec<u32>,
-    pub transitions: Vec<TmTransitionPacked>,
-}
-
-#[derive(Clone, Debug)]
-pub enum BatchPayload {
-    Fsm(FsmBatch),
-    Ca(CaBatch),
-    Tm(TmBatch),
-}
-
-#[derive(Clone, Debug)]
-pub struct BatchRequest {
-    pub common: EvalCommon,
-    pub payload: BatchPayload,
-}
-
-#[derive(Copy, Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum BatchPolicySource {
-    Heuristic,
-    Cached,
-    Benchmarked,
-}
-
-#[derive(Clone, Copy, Debug)]
-pub struct BatchExecutionPolicy {
-    pub matches_per_batch: usize,
-    pub inflight_batches: usize,
-}
-
-#[derive(Clone, Debug)]
-pub struct RecommendedBatchPolicy {
-    pub policy: BatchExecutionPolicy,
-    pub source: BatchPolicySource,
-    pub cache_key: Option<String>,
-    pub cache_path: Option<String>,
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct BatchPolicyCacheEntryInfo {
-    pub key: String,
-    pub path: String,
-    pub device_name: String,
-    pub payload_signature: String,
-    pub matches_per_batch: usize,
-    pub inflight_batches: usize,
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct BatchPolicyCacheSnapshot {
-    pub root: Option<String>,
-    pub entries: Vec<BatchPolicyCacheEntryInfo>,
-}
+mod types;
+pub use types::*;
 
 #[cfg(target_os = "macos")]
 mod macos;
@@ -135,23 +12,166 @@ mod macos;
 #[cfg(target_os = "macos")]
 pub use macos::{
     batch_policy_cache_snapshot, clear_batch_policy_cache, clear_batch_policy_cache_entry,
-    prewarm_default_batch_shaders, recommended_batch_policy, try_begin_prepared_batch,
-    try_evaluate_batch, try_evaluate_prepared_batch, try_evaluate_prepared_tm_halting_batch,
-    try_finish_prepared_batch, try_finish_prepared_tm_halting_batch, try_prepare_batch,
-    PendingBatch, PreparedBatch,
+    gpu_device_name, prewarm_default_batch_shaders, recommended_batch_policy,
+    try_begin_prepared_batch, try_evaluate_batch, try_evaluate_prepared_batch,
+    try_evaluate_prepared_tm_halting_batch, try_finish_prepared_batch,
+    try_finish_prepared_tm_halting_batch, try_prepare_batch, MetalBackendInfo, PendingBatch,
+    PreparedBatch,
 };
 
+// ---------------------------------------------------------------------------
+// Cross-platform payload introspection
+// ---------------------------------------------------------------------------
+
+impl BatchPayload {
+    /// Returns the kernel variant name used in logging and cache key prefixes.
+    pub fn variant_name(&self) -> &'static str {
+        match self {
+            BatchPayload::Fsm(_) => "fsm",
+            BatchPayload::Ca(_) => "ca",
+            BatchPayload::Tm(_) => "tm",
+        }
+    }
+
+    /// Number of individual agents (automata) encoded in this batch.
+    ///
+    /// For FSM payloads this equals the number of start states; for CA
+    /// payloads it is derived from the rule table length divided by entries
+    /// per rule; for TM payloads it equals the number of start states.
+    pub fn population_count(&self) -> usize {
+        match self {
+            BatchPayload::Fsm(fsm) => fsm.starts.len(),
+            BatchPayload::Ca(ca) => {
+                let entries_per_rule = ca.rule_table_len as usize;
+                if entries_per_rule == 0 {
+                    0
+                } else {
+                    ca.rule_tables.len() / entries_per_rule
+                }
+            }
+            BatchPayload::Tm(tm) => tm.start_states.len(),
+        }
+    }
+
+    /// State-space dimension of the encoded automata.
+    ///
+    /// Returns the number of states for FSM and TM payloads, or the
+    /// number of distinct symbols for CA payloads.
+    pub fn state_dimension(&self) -> u32 {
+        match self {
+            BatchPayload::Fsm(fsm) => fsm.states,
+            BatchPayload::Ca(ca) => ca.symbols,
+            BatchPayload::Tm(tm) => tm.states,
+        }
+    }
+}
+
+impl BatchRequest {
+    /// Number of match pairs that will be evaluated in this request.
+    pub fn pair_count(&self) -> usize {
+        self.common.pairs.len()
+    }
+
+    /// Kernel variant name derived from the inner payload.
+    pub fn kernel_variant(&self) -> &'static str {
+        self.payload.variant_name()
+    }
+}
+
+impl BatchExecutionPolicy {
+    /// Total matches that may be in-flight across all concurrent batches.
+    pub fn total_inflight_matches(&self) -> usize {
+        self.matches_per_batch.saturating_mul(self.inflight_batches)
+    }
+}
+
+impl BatchPolicyCacheSnapshot {
+    /// Returns `true` when the cache contains no entries.
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    /// Number of cached policy entries.
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Non-macOS stubs
+// ---------------------------------------------------------------------------
+//
+// Each stub mirrors the macOS public API with a minimal no-op body so that
+// dependent crates compile on Linux, Windows, and CI containers without
+// conditional compilation at every call-site.
+
+/// Runtime capabilities of the Metal GPU backend.
+///
+/// On non-macOS this is a placeholder struct; [`MetalBackendInfo::probe`]
+/// always returns `None`.
+#[cfg(not(target_os = "macos"))]
+#[derive(Debug, Clone)]
+pub struct MetalBackendInfo {
+    /// GPU device name (unavailable on non-macOS).
+    pub device_name: String,
+
+    /// Recommended working set in bytes (zero on non-macOS).
+    pub working_set_bytes: u64,
+}
+
+#[cfg(not(target_os = "macos"))]
+impl MetalBackendInfo {
+    /// Always returns `None` — no Metal device on this platform.
+    pub fn probe() -> Option<Self> {
+        None
+    }
+
+    /// Always `false` — no GPU tier detection without Metal.
+    pub fn is_high_performance(&self) -> bool {
+        false
+    }
+
+    /// Returns `0` — no working set budget on non-macOS.
+    pub fn working_set_mib(&self) -> u64 {
+        0
+    }
+
+    /// Returns a static placeholder label.
+    pub fn diagnostic_label(&self) -> String {
+        String::from("metal-unavailable")
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+impl std::fmt::Display for MetalBackendInfo {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Metal backend unavailable")
+    }
+}
+
+/// Device name stub — always `None` on non-macOS.
+#[cfg(not(target_os = "macos"))]
+pub fn gpu_device_name() -> Option<String> {
+    None
+}
+
+// --- Batch evaluation stubs ------------------------------------------------
+
+/// Opaque handle for a prepared (but not yet dispatched) GPU batch.
+#[cfg(not(target_os = "macos"))]
+pub struct PreparedBatch;
+
+/// Opaque handle for an in-flight GPU batch awaiting completion.
+#[cfg(not(target_os = "macos"))]
+pub struct PendingBatch;
+
+/// Full evaluate-and-collect: no-op without Metal.
 #[cfg(not(target_os = "macos"))]
 pub fn try_evaluate_batch(_request: &BatchRequest) -> Result<Option<Vec<ScorePair>>, String> {
     Ok(None)
 }
 
-#[cfg(not(target_os = "macos"))]
-pub struct PreparedBatch;
-
-#[cfg(not(target_os = "macos"))]
-pub struct PendingBatch;
-
+/// Policy recommendation: no-op without Metal.
 #[cfg(not(target_os = "macos"))]
 pub fn recommended_batch_policy(
     _config: &BatchEvalConfig,
@@ -160,26 +180,33 @@ pub fn recommended_batch_policy(
     Ok(None)
 }
 
+/// Cache snapshot: returns an empty snapshot without Metal.
 #[cfg(not(target_os = "macos"))]
 pub fn batch_policy_cache_snapshot() -> Result<BatchPolicyCacheSnapshot, String> {
     Ok(BatchPolicyCacheSnapshot::default())
 }
 
+/// Clear a single cache entry: no-op without Metal.
 #[cfg(not(target_os = "macos"))]
 pub fn clear_batch_policy_cache_entry(_path: &str) -> Result<bool, String> {
     Ok(false)
 }
 
+/// Purge the full cache: no-op without Metal.
 #[cfg(not(target_os = "macos"))]
 pub fn clear_batch_policy_cache() -> Result<usize, String> {
     Ok(0)
 }
 
+/// Shader pre-warming: no-op without Metal.
 #[cfg(not(target_os = "macos"))]
 pub fn prewarm_default_batch_shaders() -> Result<(), String> {
     Ok(())
 }
 
+// --- Prepared batch lifecycle stubs ----------------------------------------
+
+/// Prepare a batch context: no-op without Metal.
 #[cfg(not(target_os = "macos"))]
 pub fn try_prepare_batch(
     _config: &BatchEvalConfig,
@@ -188,6 +215,7 @@ pub fn try_prepare_batch(
     Ok(None)
 }
 
+/// Evaluate using a pre-prepared batch: no-op without Metal.
 #[cfg(not(target_os = "macos"))]
 pub fn try_evaluate_prepared_batch(
     _prepared: &PreparedBatch,
@@ -196,6 +224,7 @@ pub fn try_evaluate_prepared_batch(
     Ok(None)
 }
 
+/// Evaluate TM halting via prepared batch: no-op without Metal.
 #[cfg(not(target_os = "macos"))]
 pub fn try_evaluate_prepared_tm_halting_batch(
     _prepared: &PreparedBatch,
@@ -204,6 +233,7 @@ pub fn try_evaluate_prepared_tm_halting_batch(
     Ok(None)
 }
 
+/// Begin async dispatch: no-op without Metal.
 #[cfg(not(target_os = "macos"))]
 pub fn try_begin_prepared_batch(
     _prepared: &PreparedBatch,
@@ -212,11 +242,13 @@ pub fn try_begin_prepared_batch(
     Ok(None)
 }
 
+/// Collect results from a pending batch: no-op without Metal.
 #[cfg(not(target_os = "macos"))]
 pub fn try_finish_prepared_batch(_pending: PendingBatch) -> Result<Vec<ScorePair>, String> {
     Ok(Vec::new())
 }
 
+/// Collect TM halting results: no-op without Metal.
 #[cfg(not(target_os = "macos"))]
 pub fn try_finish_prepared_tm_halting_batch(
     _pending: PendingBatch,

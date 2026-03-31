@@ -410,7 +410,7 @@ fn build_lines_genome(
     }
 
     // Shadow evaluator section: real-time per-file quality during agent turns.
-    if state.genome_turn_active && !state.genome_shadow_evals.is_empty() {
+    if !state.genome_turn_active.is_empty() && !state.genome_shadow_evals.is_empty() {
         lines.push(Line::from(""));
         lines.push(Line::from(vec![
             Span::styled(
@@ -1125,53 +1125,85 @@ fn build_lines_filescores(
 
     let mut lines: Vec<Line<'static>> = Vec::new();
 
-    // Collect all files with scores: shadow evals (real-time) + genome reports.
+    // Collect all files with scores from three sources, deduplicating by path.
+    // Priority: shadow evals (most current) > turn-modified reports > all genome reports.
+    let mut seen = std::collections::HashSet::new();
     let mut file_rows: Vec<FileScoreRow> = Vec::new();
 
-    // Shadow evals are the most up-to-date (real-time during agent turns).
-    for (path, eval) in &state.genome_shadow_evals {
-        let name = relative_file_path(path, &state.workspace_root);
-        file_rows.push(FileScoreRow {
-            name,
-            tier: eval.tier.numeral().to_string(),
-            quality: eval.quality.to_string(),
-            consistency: format!("{:.2}", eval.consistency),
-            delta: eval.delta_label.to_string(),
-            is_shadow: true,
-        });
-    }
-
-    // Add files from genome_turn_modified that aren't already in shadow evals.
-    for path in &state.genome_turn_modified {
-        if state.genome_shadow_evals.contains_key(path) {
-            continue;
-        }
-        if let Some(report) = state.genome_reports.get(path) {
-            let name = relative_file_path(path, &state.workspace_root);
-            let delta = if let Some(base) = state.genome_baselines.get(path) {
-                if report.tier > base.tier {
+    // Helper: compute delta from baselines. Returns "—" when no baseline exists
+    // (file was never evaluated before this session).
+    let compute_delta = |path: &std::path::Path, tier: nit_core::GenomeTier| -> &'static str {
+        match state.genome_baselines.get(path) {
+            Some(base) => {
+                if tier > base.tier {
                     "improved"
-                } else if report.tier < base.tier {
+                } else if tier < base.tier {
                     "degraded"
                 } else {
                     "unchanged"
                 }
-            } else {
-                "new"
-            };
-            file_rows.push(FileScoreRow {
-                name,
-                tier: report.tier.numeral().to_string(),
-                quality: report.quality_level().to_string(),
-                consistency: format!("{:.2}", report.cross_encoder_consistency),
-                delta: delta.to_string(),
-                is_shadow: false,
-            });
+            }
+            None => "\u{2014}",
+        }
+    };
+
+    // 1. Shadow evals — live during agent turns.
+    for (path, eval) in &state.genome_shadow_evals {
+        let name = relative_file_path(path, &state.workspace_root);
+        if !seen.insert(name.clone()) {
+            continue;
+        }
+        file_rows.push(FileScoreRow {
+            name,
+            tier_ord: eval.tier as u8,
+            tier: eval.tier.numeral().to_string(),
+            quality: eval.quality.to_string(),
+            consistency: format!("{:.2}", eval.consistency),
+            delta: compute_delta(path, eval.tier).to_string(),
+            is_shadow: true,
+        });
+    }
+
+    // 2. Turn-modified files with genome reports (flattened across all agents).
+    for paths in state.genome_turn_modified.values() {
+        for path in paths {
+            let name = relative_file_path(path, &state.workspace_root);
+            if !seen.insert(name.clone()) {
+                continue;
+            }
+            if let Some(report) = state.genome_reports.get(path) {
+                file_rows.push(FileScoreRow {
+                    name,
+                    tier_ord: report.tier as u8,
+                    tier: report.tier.numeral().to_string(),
+                    quality: report.quality_level().to_string(),
+                    consistency: format!("{:.2}", report.cross_encoder_consistency),
+                    delta: compute_delta(path, report.tier).to_string(),
+                    is_shadow: false,
+                });
+            }
         }
     }
 
-    // Sort by file name.
-    file_rows.sort_by(|a, b| a.name.cmp(&b.name));
+    // 3. All persisted genome reports — these persist across turns.
+    for (path, report) in &state.genome_reports {
+        let name = relative_file_path(path, &state.workspace_root);
+        if !seen.insert(name.clone()) {
+            continue;
+        }
+        file_rows.push(FileScoreRow {
+            name,
+            tier_ord: report.tier as u8,
+            tier: report.tier.numeral().to_string(),
+            quality: report.quality_level().to_string(),
+            consistency: format!("{:.2}", report.cross_encoder_consistency),
+            delta: compute_delta(path, report.tier).to_string(),
+            is_shadow: false,
+        });
+    }
+
+    // Sort descending by tier (highest first), then by name for ties.
+    file_rows.sort_by(|a, b| b.tier_ord.cmp(&a.tier_ord).then(a.name.cmp(&b.name)));
 
     if file_rows.is_empty() {
         lines.push(Line::from(""));
@@ -1226,8 +1258,8 @@ fn build_lines_filescores(
         let delta_color = match row.delta.as_str() {
             "improved" => theme.success,
             "degraded" => theme.error,
-            "new" => theme.title_focused,
-            _ => theme.warning,
+            "unchanged" => theme.warning,
+            _ => theme.border, // "—" (no baseline)
         };
         let quality_color = match row.quality.as_str() {
             "Exceptional" => theme.success,
@@ -1270,6 +1302,7 @@ fn build_lines_filescores(
 
 struct FileScoreRow {
     name: String,
+    tier_ord: u8,
     tier: String,
     quality: String,
     consistency: String,

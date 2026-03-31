@@ -231,7 +231,10 @@ impl PollLoop {
                 false
             }
             FileWatchCommand::WatchWorkspace(root) => {
-                discover_source_files(&root, &mut self.tracked_files);
+                let new_files = discover_source_files(&root, &mut self.tracked_files);
+                for path in new_files {
+                    let _ = self.change_emitter.send(path);
+                }
                 self.workspace_root = Some(root);
                 self.last_scan_timestamp = Instant::now();
                 false
@@ -268,7 +271,12 @@ impl PollLoop {
             return;
         }
 
-        discover_source_files(&workspace, &mut self.tracked_files);
+        let new_files = discover_source_files(&workspace, &mut self.tracked_files);
+        // Emit change events for newly created files so the genome system
+        // picks them up immediately rather than waiting for a future mtime change.
+        for path in new_files {
+            let _ = self.change_emitter.send(path);
+        }
         self.last_scan_timestamp = Instant::now();
     }
 
@@ -310,12 +318,20 @@ impl PollLoop {
 /// Walk `root` recursively and insert newly discovered source files
 /// into `destination`. Paths already present are left unchanged so
 /// their baseline mtime records are preserved.
-fn discover_source_files(root: &Path, destination: &mut MtimeMap) {
+/// Returns the list of newly discovered paths (not previously tracked).
+fn discover_source_files(root: &Path, destination: &mut MtimeMap) -> Vec<PathBuf> {
+    let mut new_paths = Vec::new();
     SourceTreeWalker::rooted_at(root).for_each(|discovered_path| {
-        destination
-            .entry(discovered_path)
-            .or_insert_with_key(|p| RecordedMtime::probe(p));
+        use std::collections::hash_map::Entry;
+        match destination.entry(discovered_path.clone()) {
+            Entry::Vacant(e) => {
+                e.insert(RecordedMtime::probe(&discovered_path));
+                new_paths.push(discovered_path);
+            }
+            Entry::Occupied(_) => {} // already tracked
+        }
     });
+    new_paths
 }
 
 // ── Extension classification ──────────────────────────────────────

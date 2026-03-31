@@ -64,6 +64,14 @@ pub enum AgentBusEvent {
     },
     /// Free-form log line emitted during a turn (routed to diagnostics).
     TurnLog { agent_id: String, message: String },
+    /// An agent wrote to a file during its turn. Emitted by the runner when
+    /// it detects tool_use(edit/write/bash) targeting a file path.
+    /// This is the authoritative source for per-agent file attribution —
+    /// used by the genome system instead of filesystem-level tracking.
+    FileWrite {
+        agent_id: String,
+        path: std::path::PathBuf,
+    },
     /// Report token usage for context-window tracking.
     TokenCount {
         agent_id: String,
@@ -168,9 +176,15 @@ impl AgentBusEvent {
                 if state.genome_retry_count == 0 {
                     state.genome_baselines = state.genome_reports.clone();
                 }
-                state.genome_turn_modified.clear();
+                // Per-agent turn tracking: init this agent's modified set and
+                // snapshot git dirty files so TurnCompleted can attribute changes.
+                state
+                    .genome_turn_modified
+                    .entry(agent_id.clone())
+                    .or_default()
+                    .clear();
                 state.genome_shadow_evals.clear();
-                state.genome_turn_active = true;
+                state.genome_turn_active.insert(agent_id.clone());
             }
             AgentBusEvent::TurnHeartbeat {
                 agent_id,
@@ -198,6 +212,14 @@ impl AgentBusEvent {
                     // Mission context is authoritative (including clearing it).
                     agent.current_mission = mission_id.clone();
                 }
+            }
+            AgentBusEvent::FileWrite { agent_id, path } => {
+                // Authoritative per-agent file attribution from the runner.
+                state
+                    .genome_turn_modified
+                    .entry(agent_id.clone())
+                    .or_default()
+                    .insert(path.clone());
             }
             AgentBusEvent::TurnLog { agent_id, message } => {
                 let source = backend_source_for_agent(state, agent_id);
@@ -402,7 +424,7 @@ impl AgentBusEvent {
                 // Mark genome turn as inactive. Actual evaluation is dispatched
                 // to background threads by the TUI event loop (genome_worker)
                 // to avoid blocking the main thread.
-                state.genome_turn_active = false;
+                state.genome_turn_active.remove(agent_id);
             }
         }
 

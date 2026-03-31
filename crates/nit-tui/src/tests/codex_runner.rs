@@ -244,11 +244,13 @@ fn mcp_token_count_notifications_emit_agent_bus_token_count() {
     let mut last_stage = None;
     let mut last_stage_sent_at = Instant::now();
     let mut last_token_count = None;
+    let cwd = std::path::PathBuf::from("/tmp");
     assert!(handle_codex_mcp_notification(
         &tx,
         "gpt-test",
         None,
         42,
+        &cwd,
         &value,
         &mut last_stage,
         &mut last_stage_sent_at,

@@ -6059,8 +6059,13 @@ fn build_genome_review_prompt(state: &AppState) -> String {
     );
 
     // Evaluate ALL modified files, not just the editor buffer.
-    let mut files_to_eval: Vec<std::path::PathBuf> =
-        state.genome_turn_modified.iter().cloned().collect();
+    let mut files_to_eval: Vec<std::path::PathBuf> = state
+        .genome_turn_modified
+        .values()
+        .flat_map(|s| s.iter().cloned())
+        .collect::<std::collections::HashSet<_>>()
+        .into_iter()
+        .collect();
     if let Some(editor_path) = state.editor_buffer().path().cloned() {
         if !files_to_eval.contains(&editor_path) {
             files_to_eval.push(editor_path);
@@ -6115,8 +6120,13 @@ fn evaluate_genome_gate(state: &AppState) -> String {
     });
 
     // Collect all files to evaluate: modified files + editor buffer.
-    let mut files_to_eval: Vec<std::path::PathBuf> =
-        state.genome_turn_modified.iter().cloned().collect();
+    let mut files_to_eval: Vec<std::path::PathBuf> = state
+        .genome_turn_modified
+        .values()
+        .flat_map(|s| s.iter().cloned())
+        .collect::<std::collections::HashSet<_>>()
+        .into_iter()
+        .collect();
     if let Some(editor_path) = state.editor_buffer().path().cloned() {
         if !files_to_eval.contains(&editor_path) {
             files_to_eval.push(editor_path);

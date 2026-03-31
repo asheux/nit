@@ -513,6 +513,7 @@ struct InFlightMcpTurn {
     agent_id: String,
     mission_id: Option<String>,
     resume_thread_id: Option<String>,
+    cwd: PathBuf,
     started_at: Instant,
     last_activity_at: Instant,
     last_heartbeat_sent_at: Instant,
@@ -927,6 +928,7 @@ fn runner_loop_mcp(
                                     &turn.agent_id,
                                     turn.mission_id.as_deref(),
                                     request_id,
+                                    &turn.cwd,
                                     &value,
                                     &mut turn.last_stage,
                                     &mut turn.last_stage_sent_at,
@@ -941,6 +943,7 @@ fn runner_loop_mcp(
                                     &turn.agent_id,
                                     turn.mission_id.as_deref(),
                                     only_id,
+                                    &turn.cwd,
                                     &value,
                                     &mut turn.last_stage,
                                     &mut turn.last_stage_sent_at,
@@ -1101,6 +1104,7 @@ fn runner_loop_mcp(
                         agent_id: model.clone(),
                         mission_id,
                         resume_thread_id,
+                        cwd: cwd.clone(),
                         started_at: now,
                         last_activity_at: now,
                         last_heartbeat_sent_at: now,
@@ -1165,6 +1169,7 @@ fn handle_codex_mcp_notification(
     agent_id: &str,
     mission_id: Option<&str>,
     request_id: u64,
+    cwd: &std::path::Path,
     value: &serde_json::Value,
     last_stage: &mut Option<String>,
     last_stage_sent_at: &mut Instant,
@@ -1240,7 +1245,70 @@ fn handle_codex_mcp_notification(
         }
     }
 
+    // Detect file writes from tool_use events for per-agent genome attribution.
+    // Agents write files via tools (edit, write, str_replace_editor, bash).
+    // Extract file paths from item events so the genome system knows which
+    // agent modified which file — no filesystem-level guessing.
+    if kind == "item_completed" || kind == "item.completed" {
+        if let Some(item) = msg.get("item").or_else(|| msg.get("info")) {
+            extract_file_write_paths(item, cwd).into_iter().for_each(|path| {
+                let _ = event_tx.send(AgentBusEvent::FileWrite {
+                    agent_id: agent_id.to_string(),
+                    path,
+                });
+            });
+        }
+    }
+
     true
+}
+
+/// Extract file paths from a tool_use/item event that indicate file writes.
+fn extract_file_write_paths(
+    item: &serde_json::Value,
+    cwd: &std::path::Path,
+) -> Vec<std::path::PathBuf> {
+    let mut paths = Vec::new();
+
+    // Check for direct "file_path" or "path" fields in item or its input.
+    for key in &["file_path", "path", "file", "filename"] {
+        for source in &[item, &item["input"], &item["arguments"]] {
+            if let Some(p) = source.get(key).and_then(|v| v.as_str()) {
+                let path = if std::path::Path::new(p).is_absolute() {
+                    std::path::PathBuf::from(p)
+                } else {
+                    cwd.join(p)
+                };
+                if path.exists() {
+                    paths.push(path);
+                }
+            }
+        }
+    }
+
+    // Check nested content array (Claude-style tool_use results).
+    if let Some(content) = item.get("content").and_then(|v| v.as_array()) {
+        for block in content {
+            if block.get("type").and_then(|v| v.as_str()) == Some("tool_use") {
+                if let Some(input) = block.get("input") {
+                    for key in &["file_path", "path", "file", "filename"] {
+                        if let Some(p) = input.get(key).and_then(|v| v.as_str()) {
+                            let path = if std::path::Path::new(p).is_absolute() {
+                                std::path::PathBuf::from(p)
+                            } else {
+                                cwd.join(p)
+                            };
+                            if path.exists() {
+                                paths.push(path);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    paths
 }
 
 fn token_count_from_mcp_msg(msg: &serde_json::Value) -> Option<AgentTokenCount> {

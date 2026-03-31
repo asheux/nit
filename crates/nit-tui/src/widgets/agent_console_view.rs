@@ -349,6 +349,7 @@ pub fn render(
 
     let total_rows = combined_rows.len();
     let max_scroll = total_rows.saturating_sub(thread_height);
+    state.agents.console_max_scroll = max_scroll;
     state.agents.console_scroll = if state.agents.console_scroll == CONSOLE_SCROLL_BOTTOM {
         max_scroll
     } else {
