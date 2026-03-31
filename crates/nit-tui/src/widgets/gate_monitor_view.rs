@@ -4,7 +4,7 @@ use nit_core::{AppKind, AppState, GamesStatus, PaneId, UiSelectionPane};
 use ratatui::{
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, BorderType, Borders, Gauge, Paragraph},
+    widgets::{Block, BorderType, Borders, Paragraph},
     Frame,
 };
 
@@ -633,38 +633,51 @@ fn tier_color(tier: nit_core::GenomeTier, theme: &Theme) -> ratatui::style::Colo
     }
 }
 
-/// Animated loading bar centered vertically in the given area.
-/// Identical to the visualizer pane's loading bar.
+/// Animated indeterminate loading bar centered vertically in the given area.
 fn draw_loading_bar(frame: &mut Frame, area: ratatui::layout::Rect, theme: &Theme) {
-    if area.width == 0 || area.height == 0 {
+    if area.width < 6 || area.height < 2 {
         return;
     }
     let bar_w = area.width / 3;
     let x = area.x + (area.width.saturating_sub(bar_w)) / 2;
     let y = area.y.saturating_add(area.height / 2);
-    let bar_area = ratatui::layout::Rect {
-        x,
-        y,
-        width: bar_w,
-        height: 1,
-    };
+
+    let label = "Genome loading";
+    let label_y = y.saturating_sub(1);
+    if label_y >= area.y {
+        let label_x = x + bar_w.saturating_sub(label.len() as u16) / 2;
+        let label_style = Style::default()
+            .fg(theme.title_focused)
+            .add_modifier(Modifier::DIM);
+        let buf = frame.buffer_mut();
+        for (i, ch) in label.chars().enumerate() {
+            let cx = label_x + i as u16;
+            if cx < x + bar_w {
+                buf.get_mut(cx, label_y).set_char(ch).set_style(label_style);
+            }
+        }
+    }
+
     let ratio = loading_ratio();
-    let gauge = Gauge::default()
-        .block(Block::default().style(Style::default().bg(theme.background)))
-        .gauge_style(
-            Style::default()
-                .fg(theme.title_focused)
-                .bg(theme.background)
-                .add_modifier(Modifier::BOLD),
-        )
-        .ratio(ratio)
-        .label(Span::styled(
-            "Genome loading",
-            Style::default()
-                .fg(theme.title_focused)
-                .add_modifier(Modifier::DIM),
-        ));
-    frame.render_widget(gauge, bar_area);
+    let seg_w = (bar_w / 5).max(2);
+    let travel = bar_w.saturating_sub(seg_w);
+    let seg_x = x + (travel as f64 * ratio) as u16;
+
+    let track_style = Style::default()
+        .fg(theme.title_focused)
+        .add_modifier(Modifier::DIM);
+    let seg_style = Style::default()
+        .fg(theme.title_focused)
+        .add_modifier(Modifier::BOLD);
+    let buf = frame.buffer_mut();
+    for dx in 0..bar_w {
+        let cx = x + dx;
+        if cx >= seg_x && cx < seg_x + seg_w {
+            buf.get_mut(cx, y).set_char('━').set_style(seg_style);
+        } else {
+            buf.get_mut(cx, y).set_char('─').set_style(track_style);
+        }
+    }
 }
 
 /// Triangular wave oscillating 0..1..0 over 1600ms, driven by system clock.

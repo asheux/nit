@@ -1323,7 +1323,7 @@ fn run_loop(
             drain_genome_results(state, &genome_worker, &mut vitals, &codex_runner, &claude_runner);
 
             // Auto-compute genome report for the active editor buffer if missing.
-            maybe_compute_genome_report(state);
+            maybe_compute_genome_report(state, &genome_worker);
 
             draw(
                 terminal,
@@ -1738,7 +1738,10 @@ fn build_genome_retry_prompt(state: &mut AppState) -> Option<String> {
     Some(prompt)
 }
 
-fn maybe_compute_genome_report(state: &mut AppState) {
+fn maybe_compute_genome_report(
+    state: &mut AppState,
+    genome: &crate::genome_worker::GenomeWorker,
+) {
     let file_path = match state.editor_buffer().path().cloned() {
         Some(p) => p,
         None => return,
@@ -1746,19 +1749,12 @@ fn maybe_compute_genome_report(state: &mut AppState) {
     if state.genome_reports.contains_key(&file_path) {
         return;
     }
-    // Mark as computing so the UI can show a loading bar for one frame.
     if state.genome_computing {
-        // Already flagged — compute now.
-        let text = state.editor_buffer().content_as_string();
-        let report = nit_core::compute_genome_report(&text, &file_path);
-        state.genome_reports.insert(file_path, report);
-        state.genome_computing = false;
-        state.gate_monitor_scroll = 0;
-    } else {
-        // First encounter: set flag so the loading bar renders this frame,
-        // and the computation happens next frame.
-        state.genome_computing = true;
+        return; // Already dispatched, waiting for result.
     }
+    state.genome_computing = true;
+    let text = state.editor_buffer().content_as_string();
+    genome.evaluate(file_path, text, true);
 }
 
 /// Dispatch authoritative genome evaluations to background threads after a turn completes.
@@ -1857,6 +1853,12 @@ fn drain_genome_results(
     while let Ok(result) = genome.rx.try_recv() {
         let path = result.path;
         let report = result.report;
+
+        // Clear genome_computing flag when result arrives for the current editor buffer.
+        if state.genome_computing && state.editor_buffer().path() == Some(&path) {
+            state.genome_computing = false;
+            state.gate_monitor_scroll = 0;
+        }
 
         if result.shadow {
             // Shadow evaluation — update UI only.

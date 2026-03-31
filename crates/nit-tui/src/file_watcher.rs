@@ -6,6 +6,7 @@
 //! filesystem notification APIs required.
 
 use std::collections::HashMap;
+use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::thread::{self, JoinHandle};
@@ -19,22 +20,19 @@ const POLL_INTERVAL: Duration = Duration::from_millis(200);
 /// Interval between workspace re-scans to discover newly created files.
 const RESCAN_INTERVAL: Duration = Duration::from_secs(2);
 
+/// Capacity hint for the initial mtime tracking map allocation.
+const INITIAL_TRACKING_CAPACITY: usize = 256;
+
 /// Directory names unconditionally excluded during recursive walks.
 const IGNORED_DIRS: &[&str] = &["target", "node_modules", "__pycache__", "vendor", ".git"];
 
 /// File extensions recognized as trackable source or config files.
 const SOURCE_EXTENSIONS: &[&str] = &[
-    // Systems
     "rs", "c", "cpp", "h", "hpp", "go", "swift",
-    // JVM / .NET
     "java", "kt", "scala", "cs",
-    // Scripting
     "py", "rb", "sh", "bash", "zsh",
-    // Web
     "js", "jsx", "ts", "tsx", "html", "css",
-    // Data / config
     "toml", "yaml", "yml", "json", "sql",
-    // Prose
     "md", "txt",
 ];
 
@@ -53,6 +51,31 @@ impl RecordedMtime {
     /// on any I/O or metadata error.
     fn probe(path: &Path) -> Self {
         Self(std::fs::metadata(path).ok().and_then(|m| m.modified().ok()))
+    }
+
+    /// Whether this timestamp is present and valid.
+    const fn is_known(&self) -> bool {
+        self.0.is_some()
+    }
+
+    /// Returns `true` when the on-disk mtime has diverged from our record.
+    fn has_changed_from(&self, baseline: &Self) -> bool {
+        self.is_known() && *self != *baseline
+    }
+}
+
+/// Format a recorded mtime as a human-readable diagnostic string.
+impl fmt::Display for RecordedMtime {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match &self.0 {
+            Some(timestamp) => {
+                let elapsed = timestamp
+                    .duration_since(SystemTime::UNIX_EPOCH)
+                    .unwrap_or_default();
+                write!(f, "mtime({}s)", elapsed.as_secs())
+            }
+            None => f.write_str("mtime(unknown)"),
+        }
     }
 }
 
@@ -76,6 +99,18 @@ pub enum FileWatchCommand {
     Shutdown,
 }
 
+/// Render commands for diagnostic logging in the watcher subsystem.
+impl fmt::Display for FileWatchCommand {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Watch(target) => write!(f, "Watch({})", target.display()),
+            Self::Unwatch(target) => write!(f, "Unwatch({})", target.display()),
+            Self::WatchWorkspace(root) => write!(f, "WatchWorkspace({})", root.display()),
+            Self::Shutdown => f.write_str("Shutdown"),
+        }
+    }
+}
+
 // ── Public handle ──────────────────────────────────────────────────
 
 /// Main-thread handle for the background file-watcher.
@@ -84,7 +119,7 @@ pub enum FileWatchCommand {
 /// [`FileWatcher::shutdown`] leaves the thread running until the
 /// channel disconnects naturally.
 pub struct FileWatcher {
-    command_sender: Sender<FileWatchCommand>,
+    command_channel: Sender<FileWatchCommand>,
 
     /// Receiver for paths whose mtimes changed since the last drain.
     pub events: Receiver<PathBuf>,
@@ -95,26 +130,26 @@ pub struct FileWatcher {
 impl FileWatcher {
     /// Spawn the background polling thread and return a communication handle.
     pub fn spawn() -> Self {
-        let (command_sender, command_receiver) = mpsc::channel();
-        let (event_sender, event_receiver) = mpsc::channel();
+        let (cmd_tx, cmd_rx) = mpsc::channel();
+        let (evt_tx, evt_rx) = mpsc::channel();
 
-        let watcher_thread = thread::Builder::new()
+        let thread_handle = thread::Builder::new()
             .name("nit-file-watcher".into())
             .spawn(move || {
-                PollLoop::initialize(command_receiver, event_sender).run_until_shutdown();
+                PollLoop::initialize(cmd_rx, evt_tx).run_until_shutdown();
             })
             .expect("failed to spawn file-watcher thread");
 
         Self {
-            command_sender,
-            events: event_receiver,
-            watcher_thread: Some(watcher_thread),
+            command_channel: cmd_tx,
+            events: evt_rx,
+            watcher_thread: Some(thread_handle),
         }
     }
 
     /// Send a command to the watcher thread (best-effort, ignores closed channel).
     pub fn send(&self, command: FileWatchCommand) {
-        let _ = self.command_sender.send(command);
+        let _ = self.command_channel.send(command);
     }
 
     /// Convenience: begin watching a single file.
@@ -129,9 +164,9 @@ impl FileWatcher {
 
     /// Signal shutdown and block until the watcher thread exits.
     pub fn shutdown(&mut self) {
-        let _ = self.command_sender.send(FileWatchCommand::Shutdown);
-        if let Some(thread_handle) = self.watcher_thread.take() {
-            let _ = thread_handle.join();
+        let _ = self.command_channel.send(FileWatchCommand::Shutdown);
+        if let Some(joinable) = self.watcher_thread.take() {
+            let _ = joinable.join();
         }
     }
 }
@@ -145,7 +180,7 @@ impl FileWatcher {
 struct PollLoop {
     tracked_files: MtimeMap,
     workspace_root: Option<PathBuf>,
-    last_workspace_scan: Instant,
+    last_scan_timestamp: Instant,
     command_receiver: Receiver<FileWatchCommand>,
     change_emitter: Sender<PathBuf>,
 }
@@ -153,38 +188,38 @@ struct PollLoop {
 impl PollLoop {
     /// Create a fresh poll-loop state from the given channel endpoints.
     fn initialize(
-        command_receiver: Receiver<FileWatchCommand>,
-        change_emitter: Sender<PathBuf>,
+        command_rx: Receiver<FileWatchCommand>,
+        event_tx: Sender<PathBuf>,
     ) -> Self {
         Self {
-            tracked_files: HashMap::with_capacity(256),
+            tracked_files: HashMap::with_capacity(INITIAL_TRACKING_CAPACITY),
             workspace_root: None,
-            last_workspace_scan: Instant::now(),
-            command_receiver,
-            change_emitter,
+            last_scan_timestamp: Instant::now(),
+            command_receiver: command_rx,
+            change_emitter: event_tx,
         }
     }
 
     /// Execute polling ticks until a shutdown signal or channel disconnect.
     fn run_until_shutdown(&mut self) {
         loop {
-            if self.drain_queued_commands() {
-                break;
+            if self.drain_pending_commands() {
+                return;
             }
 
             self.rescan_workspace_if_due();
-            self.emit_mtime_changes();
+            self.emit_detected_changes();
 
-            if self.block_until_next_tick() {
-                break;
+            if self.sleep_or_handle_command() {
+                return;
             }
         }
     }
 
-    // ── Command handling ───────────────────────────────────────────
+    // ── Command dispatch ──────────────────────────────────────────
 
-    /// Apply a single command. Returns `true` when the loop should exit.
-    fn execute_command(&mut self, command: FileWatchCommand) -> bool {
+    /// Apply a single command, returning `true` when the loop should exit.
+    fn execute(&mut self, command: FileWatchCommand) -> bool {
         match command {
             FileWatchCommand::Watch(filepath) => {
                 let baseline = RecordedMtime::probe(&filepath);
@@ -195,10 +230,10 @@ impl PollLoop {
                 self.tracked_files.remove(&filepath);
                 false
             }
-            FileWatchCommand::WatchWorkspace(root_directory) => {
-                populate_source_entries(&root_directory, &mut self.tracked_files);
-                self.workspace_root = Some(root_directory);
-                self.last_workspace_scan = Instant::now();
+            FileWatchCommand::WatchWorkspace(root) => {
+                discover_source_files(&root, &mut self.tracked_files);
+                self.workspace_root = Some(root);
+                self.last_scan_timestamp = Instant::now();
                 false
             }
             FileWatchCommand::Shutdown => true,
@@ -206,11 +241,11 @@ impl PollLoop {
     }
 
     /// Non-blocking drain of every pending command. Returns `true` on shutdown.
-    fn drain_queued_commands(&mut self) -> bool {
+    fn drain_pending_commands(&mut self) -> bool {
         loop {
             match self.command_receiver.try_recv() {
-                Ok(pending_command) => {
-                    if self.execute_command(pending_command) {
+                Ok(cmd) => {
+                    if self.execute(cmd) {
                         return true;
                     }
                 }
@@ -220,54 +255,50 @@ impl PollLoop {
         }
     }
 
-    // ── Workspace scanning ─────────────────────────────────────────
+    // ── Workspace scanning ────────────────────────────────────────
 
     /// Re-discover workspace source files when the rescan interval elapses.
     fn rescan_workspace_if_due(&mut self) {
         let workspace = match self.workspace_root {
-            Some(ref active_root) => active_root.clone(),
+            Some(ref root) => root.clone(),
             None => return,
         };
 
-        if self.last_workspace_scan.elapsed() < RESCAN_INTERVAL {
+        if self.last_scan_timestamp.elapsed() < RESCAN_INTERVAL {
             return;
         }
 
-        populate_source_entries(&workspace, &mut self.tracked_files);
-        self.last_workspace_scan = Instant::now();
+        discover_source_files(&workspace, &mut self.tracked_files);
+        self.last_scan_timestamp = Instant::now();
     }
 
-    // ── Change detection ───────────────────────────────────────────
+    // ── Change detection ──────────────────────────────────────────
 
     /// Compare on-disk mtimes against recorded values and emit change events.
-    fn emit_mtime_changes(&mut self) {
+    fn emit_detected_changes(&mut self) {
         let modified_paths: Vec<PathBuf> = self
             .tracked_files
             .iter_mut()
-            .filter_map(|(filepath, recorded_mtime)| {
-                let current_mtime = RecordedMtime::probe(filepath);
-
-                let unchanged =
-                    current_mtime.0.is_none() || current_mtime == *recorded_mtime;
-                if unchanged {
+            .filter_map(|(filepath, recorded)| {
+                let current = RecordedMtime::probe(filepath);
+                if !current.has_changed_from(recorded) {
                     return None;
                 }
-
-                *recorded_mtime = current_mtime;
+                *recorded = current;
                 Some(filepath.clone())
             })
             .collect();
 
-        for modified_file in modified_paths {
-            let _ = self.change_emitter.send(modified_file);
+        for changed_file in modified_paths {
+            let _ = self.change_emitter.send(changed_file);
         }
     }
 
-    /// Block up to [`POLL_INTERVAL`] waiting for a command.
-    /// Returns `true` when the loop should exit.
-    fn block_until_next_tick(&mut self) -> bool {
+    /// Block up to [`POLL_INTERVAL`] waiting for a command, handling it
+    /// inline. Returns `true` when the loop should exit.
+    fn sleep_or_handle_command(&mut self) -> bool {
         match self.command_receiver.recv_timeout(POLL_INTERVAL) {
-            Ok(incoming_command) => self.execute_command(incoming_command),
+            Ok(incoming) => self.execute(incoming),
             Err(mpsc::RecvTimeoutError::Timeout) => false,
             Err(mpsc::RecvTimeoutError::Disconnected) => true,
         }
@@ -279,115 +310,129 @@ impl PollLoop {
 /// Walk `root` recursively and insert newly discovered source files
 /// into `destination`. Paths already present are left unchanged so
 /// their baseline mtime records are preserved.
-fn populate_source_entries(root: &Path, destination: &mut MtimeMap) {
-    for discovered_path in DirectoryWalker::rooted_at(root) {
+fn discover_source_files(root: &Path, destination: &mut MtimeMap) {
+    SourceTreeWalker::rooted_at(root).for_each(|discovered_path| {
         destination
             .entry(discovered_path)
             .or_insert_with_key(|p| RecordedMtime::probe(p));
-    }
+    });
 }
 
-// ── Extension classification ───────────────────────────────────────
+// ── Extension classification ──────────────────────────────────────
 
 /// Returns `true` when the extension belongs to a recognized source
 /// or configuration format listed in [`SOURCE_EXTENSIONS`].
-fn matches_source_extension(candidate_ext: &str) -> bool {
-    SOURCE_EXTENSIONS.contains(&candidate_ext)
+fn matches_known_extension(candidate: &str) -> bool {
+    SOURCE_EXTENSIONS.contains(&candidate)
 }
 
 /// Check whether `filepath` carries a recognized source extension.
-fn has_source_extension(filepath: &Path) -> bool {
+fn is_trackable_source(filepath: &Path) -> bool {
     filepath
         .extension()
-        .and_then(|raw_ext| raw_ext.to_str())
-        .is_some_and(matches_source_extension)
+        .and_then(|raw| raw.to_str())
+        .is_some_and(matches_known_extension)
 }
 
-// ── Directory filtering ────────────────────────────────────────────
+// ── Directory filtering ───────────────────────────────────────────
 
 /// Returns `true` for hidden directories (leading `.`) and well-known
 /// build output directories listed in [`IGNORED_DIRS`].
-fn should_skip_directory(dir_label: &str) -> bool {
-    dir_label.starts_with('.') || IGNORED_DIRS.contains(&dir_label)
+fn is_excluded_directory(dir_component: &str) -> bool {
+    dir_component.starts_with('.') || IGNORED_DIRS.contains(&dir_component)
 }
 
-// ── Filesystem entry classification ────────────────────────────────
+// ── Filesystem entry classification ───────────────────────────────
 
 /// Classification of a filesystem entry encountered during a walk.
-enum WalkerEntry {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EntryKind {
     /// A traversable directory whose children should be expanded.
-    Subdirectory,
+    Descendable,
 
     /// A file matching a recognized source extension.
-    TrackableFile,
+    Trackable,
 
     /// An entry that does not match any watched criteria.
-    Skippable,
+    Irrelevant,
 }
 
-/// Classify a path for the directory walker.
-fn categorize_path(entry_path: &Path) -> WalkerEntry {
-    if entry_path.is_dir() {
-        return WalkerEntry::Subdirectory;
+impl EntryKind {
+    /// Classify a path for the directory walker, inspecting the filesystem
+    /// to distinguish directories from files.
+    fn classify(entry_path: &Path) -> Self {
+        if entry_path.is_dir() {
+            return Self::Descendable;
+        }
+        if is_trackable_source(entry_path) {
+            return Self::Trackable;
+        }
+        Self::Irrelevant
     }
-
-    if has_source_extension(entry_path) {
-        return WalkerEntry::TrackableFile;
-    }
-
-    WalkerEntry::Skippable
 }
 
-// ── Directory walker ───────────────────────────────────────────────
+/// Render the entry classification as a short label for diagnostics.
+impl fmt::Display for EntryKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let label = match self {
+            Self::Descendable => "directory",
+            Self::Trackable => "source",
+            Self::Irrelevant => "skip",
+        };
+        f.write_str(label)
+    }
+}
+
+// ── Directory walker ──────────────────────────────────────────────
 
 /// Stack-based depth-first iterator yielding source-file paths.
 ///
 /// Automatically skips hidden directories, common build artifacts, and
 /// non-source files while recursively walking the workspace tree.
-struct DirectoryWalker {
-    exploration_stack: Vec<PathBuf>,
+struct SourceTreeWalker {
+    pending_paths: Vec<PathBuf>,
 }
 
-impl DirectoryWalker {
+impl SourceTreeWalker {
     /// Begin a walk rooted at the given directory.
     fn rooted_at(start: &Path) -> Self {
         Self {
-            exploration_stack: vec![start.to_path_buf()],
+            pending_paths: vec![start.to_path_buf()],
         }
     }
 
     /// Push walkable children of `parent` onto the exploration stack,
-    /// skipping directories that match the ignore list.
-    fn enqueue_children(&mut self, parent_directory: &Path) {
-        let dir_label = parent_directory
+    /// respecting the directory exclusion list.
+    fn expand_directory(&mut self, parent: &Path) {
+        let dir_name = parent
             .file_name()
             .and_then(|segment| segment.to_str())
             .unwrap_or("");
 
-        if should_skip_directory(dir_label) {
+        if is_excluded_directory(dir_name) {
             return;
         }
 
-        let children = match std::fs::read_dir(parent_directory) {
-            Ok(listing) => listing,
-            Err(_) => return,
+        let Ok(listing) = std::fs::read_dir(parent) else {
+            return;
         };
 
-        for child_entry in children.flatten() {
-            self.exploration_stack.push(child_entry.path());
+        for child in listing.flatten() {
+            self.pending_paths.push(child.path());
         }
     }
 }
 
-impl Iterator for DirectoryWalker {
+/// Depth-first traversal yielding only paths with recognized source extensions.
+impl Iterator for SourceTreeWalker {
     type Item = PathBuf;
 
-    fn next(&mut self) -> Option<PathBuf> {
-        while let Some(candidate_path) = self.exploration_stack.pop() {
-            match categorize_path(&candidate_path) {
-                WalkerEntry::Subdirectory => self.enqueue_children(&candidate_path),
-                WalkerEntry::TrackableFile => return Some(candidate_path),
-                WalkerEntry::Skippable => continue,
+    fn next(&mut self) -> Option<Self::Item> {
+        while let Some(candidate) = self.pending_paths.pop() {
+            match EntryKind::classify(&candidate) {
+                EntryKind::Descendable => self.expand_directory(&candidate),
+                EntryKind::Trackable => return Some(candidate),
+                EntryKind::Irrelevant => {}
             }
         }
         None
