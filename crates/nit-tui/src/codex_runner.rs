@@ -1264,50 +1264,62 @@ fn handle_codex_mcp_notification(
 }
 
 /// Extract file paths from a tool_use/item event that indicate file writes.
+/// Searches multiple levels of JSON nesting and common field names used by
+/// Codex, Claude, and other agent tool formats.
 fn extract_file_write_paths(
     item: &serde_json::Value,
     cwd: &std::path::Path,
 ) -> Vec<std::path::PathBuf> {
     let mut paths = Vec::new();
+    let mut seen = std::collections::HashSet::new();
 
-    // Check for direct "file_path" or "path" fields in item or its input.
-    for key in &["file_path", "path", "file", "filename"] {
-        for source in &[item, &item["input"], &item["arguments"]] {
-            if let Some(p) = source.get(key).and_then(|v| v.as_str()) {
-                let path = if std::path::Path::new(p).is_absolute() {
-                    std::path::PathBuf::from(p)
-                } else {
-                    cwd.join(p)
-                };
-                if path.exists() {
-                    paths.push(path);
-                }
-            }
+    let path_keys = [
+        "file_path", "path", "file", "filename", "file_name",
+        "target_file", "old_str_file", "new_file_path",
+    ];
+
+    // Recursively search for path-like string values in the JSON tree.
+    fn extract_paths_recursive(
+        value: &serde_json::Value,
+        keys: &[&str],
+        cwd: &std::path::Path,
+        paths: &mut Vec<std::path::PathBuf>,
+        seen: &mut std::collections::HashSet<std::path::PathBuf>,
+        depth: usize,
+    ) {
+        if depth > 5 {
+            return; // Avoid unbounded recursion.
         }
-    }
-
-    // Check nested content array (Claude-style tool_use results).
-    if let Some(content) = item.get("content").and_then(|v| v.as_array()) {
-        for block in content {
-            if block.get("type").and_then(|v| v.as_str()) == Some("tool_use") {
-                if let Some(input) = block.get("input") {
-                    for key in &["file_path", "path", "file", "filename"] {
-                        if let Some(p) = input.get(key).and_then(|v| v.as_str()) {
-                            let path = if std::path::Path::new(p).is_absolute() {
-                                std::path::PathBuf::from(p)
-                            } else {
-                                cwd.join(p)
-                            };
-                            if path.exists() {
-                                paths.push(path);
+        match value {
+            serde_json::Value::Object(map) => {
+                for (k, v) in map {
+                    if keys.contains(&k.as_str()) {
+                        if let Some(p) = v.as_str() {
+                            if !p.is_empty() && !p.contains('\n') {
+                                let path = if std::path::Path::new(p).is_absolute() {
+                                    std::path::PathBuf::from(p)
+                                } else {
+                                    cwd.join(p)
+                                };
+                                if path.exists() && seen.insert(path.clone()) {
+                                    paths.push(path);
+                                }
                             }
                         }
                     }
+                    extract_paths_recursive(v, keys, cwd, paths, seen, depth + 1);
                 }
             }
+            serde_json::Value::Array(arr) => {
+                for v in arr {
+                    extract_paths_recursive(v, keys, cwd, paths, seen, depth + 1);
+                }
+            }
+            _ => {}
         }
     }
 
+    extract_paths_recursive(item, &path_keys, cwd, &mut paths, &mut seen, 0);
     paths
 }
 

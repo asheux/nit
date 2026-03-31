@@ -1771,13 +1771,24 @@ fn dispatch_turn_genome_evals(
     // Use runner-attributed files: the runners emit FileWrite events when
     // they detect tool_use(edit/write) targeting a file. These are already
     // collected in genome_turn_modified[agent_id] by the FileWrite event handler.
-    // This is authoritative — no filesystem-level guessing, no cross-agent
-    // contamination even for parallel agents with overlapping turns.
-    let modified: Vec<std::path::PathBuf> = state
+    // Primary: runner-attributed files from FileWrite events.
+    let mut modified: Vec<std::path::PathBuf> = state
         .genome_turn_modified
         .get(agent_id)
         .map(|s| s.iter().cloned().collect())
         .unwrap_or_default();
+
+    // Fallback: if runner attribution found nothing (tool format mismatch),
+    // use shadow-eval-detected files. The file watcher saw changes during
+    // the turn — shadow evals prove files were modified. This is less precise
+    // for parallel agents but ensures retries fire when quality degrades.
+    if modified.is_empty() && !state.genome_shadow_evals.is_empty() {
+        modified = state.genome_shadow_evals.keys().cloned().collect();
+        // Store for genome context and retry prompts.
+        state
+            .genome_turn_modified
+            .insert(agent_id.to_string(), modified.iter().cloned().collect());
+    }
 
     if modified.is_empty() {
         return;

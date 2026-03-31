@@ -1,7 +1,12 @@
-//! Metal GPU acceleration for compute-intensive operations (macOS only).
+//! Metal GPU acceleration for compute-intensive game-theory tournaments.
+//!
+//! This crate provides a platform-adaptive backend for evaluating large
+//! populations of finite state machines, cellular automata, and Turing
+//! machines in batch on Apple Silicon GPUs via Metal.
 //!
 //! On non-macOS platforms every public function returns a no-op stub so that
-//! the rest of the workspace compiles unconditionally.
+//! the rest of the workspace compiles unconditionally without `#[cfg]`
+//! guards at every call site.
 
 mod types;
 pub use types::*;
@@ -31,46 +36,52 @@ pub use stubs::*;
 
 impl BatchPayload {
     /// Returns the kernel variant name used in logging and cache key prefixes.
+    ///
+    /// Each variant maps to a distinct Metal compute kernel; the returned
+    /// string is stable and safe to embed in filesystem paths.
     pub fn variant_name(&self) -> &'static str {
         match self {
-            BatchPayload::Fsm(_) => "fsm",
-            BatchPayload::Ca(_) => "ca",
-            BatchPayload::Tm(_) => "tm",
+            Self::Fsm(_) => "fsm",
+            Self::Ca(_) => "ca",
+            Self::Tm(_) => "tm",
         }
     }
 
-    /// Number of individual agents (automata) encoded in this batch.
+    /// Number of individual strategies (automata) encoded in this payload.
     ///
     /// For FSM payloads this equals the number of start states; for CA
     /// payloads it is derived from the rule table length divided by entries
-    /// per rule; for TM payloads it equals the number of start states.
+    /// per strategy; for TM payloads it equals the number of start states.
     pub fn population_count(&self) -> usize {
         match self {
-            BatchPayload::Fsm(fsm) => fsm.starts.len(),
-            BatchPayload::Ca(ca) => {
-                let entries_per_rule = ca.rule_table_len as usize;
-                if entries_per_rule == 0 {
-                    0
-                } else {
-                    ca.rule_tables.len() / entries_per_rule
+            Self::Fsm(fsm) => fsm.starts.len(),
+            Self::Ca(ca) => {
+                let stride = ca.rule_table_len as usize;
+                if stride == 0 {
+                    return 0;
                 }
+                ca.rule_tables.len() / stride
             }
-            BatchPayload::Tm(tm) => tm.start_states.len(),
+            Self::Tm(tm) => tm.start_states.len(),
         }
     }
 
     /// State-space dimension of the encoded automata.
     ///
-    /// Returns the number of states for FSM and TM payloads, or the
-    /// number of distinct symbols for CA payloads.
+    /// Returns the number of internal states for FSM and TM payloads,
+    /// or the number of distinct cell symbols for CA payloads.
     pub fn state_dimension(&self) -> u32 {
         match self {
-            BatchPayload::Fsm(fsm) => fsm.states,
-            BatchPayload::Ca(ca) => ca.symbols,
-            BatchPayload::Tm(tm) => tm.states,
+            Self::Fsm(fsm) => fsm.states,
+            Self::Ca(ca) => ca.symbols,
+            Self::Tm(tm) => tm.states,
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// Request-level convenience accessors
+// ---------------------------------------------------------------------------
 
 impl BatchRequest {
     /// Number of match pairs that will be evaluated in this request.
@@ -84,12 +95,23 @@ impl BatchRequest {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Policy arithmetic
+// ---------------------------------------------------------------------------
+
 impl BatchExecutionPolicy {
     /// Total matches that may be in-flight across all concurrent batches.
+    ///
+    /// Saturates rather than wrapping on overflow, which is defensive
+    /// against absurdly large configurations reaching the UI layer.
     pub fn total_inflight_matches(&self) -> usize {
         self.matches_per_batch.saturating_mul(self.inflight_batches)
     }
 }
+
+// ---------------------------------------------------------------------------
+// Cache snapshot queries
+// ---------------------------------------------------------------------------
 
 impl BatchPolicyCacheSnapshot {
     /// Returns `true` when the cache contains no entries.

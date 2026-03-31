@@ -16,6 +16,9 @@ pub(crate) const POLICY_CACHE_SCHEMA_VERSION: u32 = 1;
 // ---------------------------------------------------------------------------
 
 /// On-disk representation of a benchmarked batch policy result.
+///
+/// Persisted as JSON with a schema version guard so that future format
+/// changes can be detected and stale entries discarded automatically.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub(crate) struct PolicyCacheEntry {
     pub(crate) schema_version: u32,
@@ -23,6 +26,18 @@ pub(crate) struct PolicyCacheEntry {
     pub(crate) payload_signature: String,
     pub(crate) matches_per_batch_cap: usize,
     pub(crate) inflight_batches: usize,
+}
+
+impl PolicyCacheEntry {
+    /// Validates that this entry matches the expected device, signature,
+    /// schema version, and contains non-zero policy values.
+    fn is_valid_for(&self, device_name: &str, sig: &str) -> bool {
+        self.schema_version == POLICY_CACHE_SCHEMA_VERSION
+            && self.device_name == device_name
+            && self.payload_signature == sig
+            && self.matches_per_batch_cap > 0
+            && self.inflight_batches > 0
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -75,25 +90,17 @@ pub(super) fn policy_cache_path(root: &Path, device_name: &str, sig: &str) -> Pa
 // ---------------------------------------------------------------------------
 
 /// Loads a cached policy entry if it passes validation checks.
+///
+/// Returns `None` on I/O errors, parse failures, schema mismatches,
+/// or when the stored device/signature do not match the request.
 pub(crate) fn load_cached_policy_from_dir(
     root: &Path,
     device_name: &str,
     sig: &str,
 ) -> Option<PolicyCacheEntry> {
-    let cache_file = policy_cache_path(root, device_name, sig);
-    let raw_json = fs::read(cache_file).ok()?;
+    let raw_json = fs::read(policy_cache_path(root, device_name, sig)).ok()?;
     let entry: PolicyCacheEntry = serde_json::from_slice(&raw_json).ok()?;
-
-    let version_matches = entry.schema_version == POLICY_CACHE_SCHEMA_VERSION;
-    let device_matches = entry.device_name == device_name;
-    let signature_matches = entry.payload_signature == sig;
-    let values_valid = entry.matches_per_batch_cap > 0 && entry.inflight_batches > 0;
-
-    if version_matches && device_matches && signature_matches && values_valid {
-        Some(entry)
-    } else {
-        None
-    }
+    entry.is_valid_for(device_name, sig).then_some(entry)
 }
 
 /// Loads a cached policy using the default cache root.
@@ -121,18 +128,45 @@ pub(super) fn persist_cached_policy(entry: &PolicyCacheEntry) {
     persist_cached_policy_from_dir(&root, entry);
 }
 
+/// Tries to parse a single directory entry into a cache info record.
+///
+/// Returns `None` for non-files, unreadable entries, parse errors,
+/// or schema version mismatches — callers simply skip these.
+fn try_parse_cache_file(dir_entry: &fs::DirEntry) -> Option<BatchPolicyCacheEntryInfo> {
+    if !dir_entry.file_type().ok()?.is_file() {
+        return None;
+    }
+    let path = dir_entry.path();
+    let raw = fs::read(&path).ok()?;
+    let parsed: PolicyCacheEntry = serde_json::from_slice(&raw).ok()?;
+    if parsed.schema_version != POLICY_CACHE_SCHEMA_VERSION {
+        return None;
+    }
+    Some(BatchPolicyCacheEntryInfo {
+        key: policy_cache_key(&parsed.device_name, &parsed.payload_signature),
+        path: path.to_string_lossy().into_owned(),
+        device_name: parsed.device_name,
+        payload_signature: parsed.payload_signature,
+        matches_per_batch: parsed.matches_per_batch_cap,
+        inflight_batches: parsed.inflight_batches,
+    })
+}
+
 /// Reads all valid cache entries from a directory into a snapshot.
+///
+/// Entries with wrong schema versions or unparseable JSON are silently
+/// skipped. The returned list is sorted by key for deterministic output.
 pub(crate) fn snapshot_policy_cache_from_dir(
     root: &Path,
 ) -> Result<BatchPolicyCacheSnapshot, String> {
-    let mut snapshot = BatchPolicyCacheSnapshot {
-        root: Some(root.to_string_lossy().into_owned()),
-        entries: Vec::new(),
-    };
-
     let dir_listing = match fs::read_dir(root) {
         Ok(listing) => listing,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(snapshot),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(BatchPolicyCacheSnapshot {
+                root: Some(root.to_string_lossy().into_owned()),
+                entries: Vec::new(),
+            });
+        }
         Err(err) => {
             return Err(format!(
                 "failed to read Metal policy cache {}: {err}",
@@ -141,51 +175,30 @@ pub(crate) fn snapshot_policy_cache_from_dir(
         }
     };
 
-    for dir_result in dir_listing {
-        let dir_entry = dir_result.map_err(|err| {
+    let mut entries = Vec::new();
+    for result in dir_listing {
+        let dir_entry = result.map_err(|err| {
             format!(
                 "failed to enumerate Metal policy cache {}: {err}",
                 root.display()
             )
         })?;
-
-        let is_regular_file = dir_entry
-            .file_type()
-            .map(|ft| ft.is_file())
-            .unwrap_or(false);
-        if !is_regular_file {
-            continue;
+        if let Some(info) = try_parse_cache_file(&dir_entry) {
+            entries.push(info);
         }
-
-        let entry_path = dir_entry.path();
-        let Ok(raw_json) = fs::read(&entry_path) else {
-            continue;
-        };
-        let Ok(parsed): Result<PolicyCacheEntry, _> = serde_json::from_slice(&raw_json) else {
-            continue;
-        };
-        if parsed.schema_version != POLICY_CACHE_SCHEMA_VERSION {
-            continue;
-        }
-
-        snapshot.entries.push(BatchPolicyCacheEntryInfo {
-            key: policy_cache_key(&parsed.device_name, &parsed.payload_signature),
-            path: entry_path.to_string_lossy().into_owned(),
-            device_name: parsed.device_name,
-            payload_signature: parsed.payload_signature,
-            matches_per_batch: parsed.matches_per_batch_cap,
-            inflight_batches: parsed.inflight_batches,
-        });
     }
 
-    snapshot.entries.sort_by(|lhs, rhs| {
-        lhs.key
-            .cmp(&rhs.key)
-            .then(lhs.payload_signature.cmp(&rhs.payload_signature))
-            .then(lhs.path.cmp(&rhs.path))
+    entries.sort_by(|a, b| {
+        a.key
+            .cmp(&b.key)
+            .then_with(|| a.payload_signature.cmp(&b.payload_signature))
+            .then_with(|| a.path.cmp(&b.path))
     });
 
-    Ok(snapshot)
+    Ok(BatchPolicyCacheSnapshot {
+        root: Some(root.to_string_lossy().into_owned()),
+        entries,
+    })
 }
 
 /// Deletes a single cache entry, validating it lives under the root.

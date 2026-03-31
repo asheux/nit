@@ -294,7 +294,25 @@ fn tm_transition_pods(transitions: &[TmTransitionPacked]) -> Vec<TmTransitionPod
 // Core dispatch: submits a prepared batch to the GPU
 // ---------------------------------------------------------------------------
 
+/// Binds the pair input buffer and eval params that are common to every kernel.
+///
+/// Writes buffer slot 0 (pair input) and a trailing bytes slot for `EvalParams`.
+/// Returns the byte-encoded eval params for the caller to bind at the correct
+/// index via `set_bytes`.
+fn bind_common_inputs(
+    enc: &metal::ComputeCommandEncoderRef,
+    pair_buf: &metal::Buffer,
+    eval: &EvalParams,
+    eval_slot: u64,
+) {
+    enc.set_buffer(0, Some(pair_buf), 0);
+    enc.set_bytes(eval_slot, size_of::<EvalParams>() as u64, as_void_ptr(eval));
+}
+
 /// Encodes and dispatches a prepared batch with the given match pairs.
+///
+/// Allocates per-dispatch input/output buffers, selects the pipeline for
+/// the payload variant, binds all GPU resources, and commits the command.
 fn dispatch_prepared(
     ctx: &MetalContext,
     prepared: &PreparedBatch,
@@ -304,68 +322,69 @@ fn dispatch_prepared(
     let pair_buf = buffer_from_slice(&ctx.device, &pods);
     let score_buf = allocate_output_buffer::<ScorePairPod>(&ctx.device, pods.len());
     let eval = build_eval_params(&prepared.eval_config, pods.len());
+    let thread_count = pods.len();
 
-    let mut halting_buf = None;
-
-    let cmd = match &prepared.payload {
+    let (cmd, halting_buf) = match &prepared.payload {
         PreparedPayload::Fsm {
             params,
             starts,
             outputs,
             transitions,
-        } => encode_and_commit(
-            &ctx.fsm_pipeline,
-            &ctx.queue,
-            |enc| {
-                enc.set_buffer(0, Some(&pair_buf), 0);
-                enc.set_buffer(1, Some(starts), 0);
-                enc.set_buffer(2, Some(outputs), 0);
-                enc.set_buffer(3, Some(transitions), 0);
-                enc.set_buffer(4, Some(&score_buf), 0);
-                enc.set_bytes(5, size_of::<EvalParams>() as u64, as_void_ptr(&eval));
-                enc.set_bytes(6, size_of::<FsmParams>() as u64, as_void_ptr(params));
-            },
-            pods.len(),
-        ),
+        } => {
+            let committed = encode_and_commit(
+                &ctx.fsm_pipeline,
+                &ctx.queue,
+                |enc| {
+                    bind_common_inputs(enc, &pair_buf, &eval, 5);
+                    enc.set_buffer(1, Some(starts), 0);
+                    enc.set_buffer(2, Some(outputs), 0);
+                    enc.set_buffer(3, Some(transitions), 0);
+                    enc.set_buffer(4, Some(&score_buf), 0);
+                    enc.set_bytes(6, size_of::<FsmParams>() as u64, as_void_ptr(params));
+                },
+                thread_count,
+            );
+            (committed, None)
+        }
 
         PreparedPayload::Ca {
             params,
             rule_tables,
-        } => encode_and_commit(
-            &ctx.ca_pipeline,
-            &ctx.queue,
-            |enc| {
-                enc.set_buffer(0, Some(&pair_buf), 0);
-                enc.set_buffer(1, Some(rule_tables), 0);
-                enc.set_buffer(2, Some(&score_buf), 0);
-                enc.set_bytes(3, size_of::<EvalParams>() as u64, as_void_ptr(&eval));
-                enc.set_bytes(4, size_of::<CaParams>() as u64, as_void_ptr(params));
-            },
-            pods.len(),
-        ),
+        } => {
+            let committed = encode_and_commit(
+                &ctx.ca_pipeline,
+                &ctx.queue,
+                |enc| {
+                    bind_common_inputs(enc, &pair_buf, &eval, 3);
+                    enc.set_buffer(1, Some(rule_tables), 0);
+                    enc.set_buffer(2, Some(&score_buf), 0);
+                    enc.set_bytes(4, size_of::<CaParams>() as u64, as_void_ptr(params));
+                },
+                thread_count,
+            );
+            (committed, None)
+        }
 
         PreparedPayload::Tm {
             params,
             starts,
             transitions,
         } => {
-            let halting = allocate_output_buffer::<TmHaltingPairPod>(&ctx.device, pods.len());
-            let submitted = encode_and_commit(
+            let halting = allocate_output_buffer::<TmHaltingPairPod>(&ctx.device, thread_count);
+            let committed = encode_and_commit(
                 &ctx.tm_pipeline,
                 &ctx.queue,
                 |enc| {
-                    enc.set_buffer(0, Some(&pair_buf), 0);
+                    bind_common_inputs(enc, &pair_buf, &eval, 4);
                     enc.set_buffer(1, Some(starts), 0);
                     enc.set_buffer(2, Some(transitions), 0);
                     enc.set_buffer(3, Some(&score_buf), 0);
-                    enc.set_bytes(4, size_of::<EvalParams>() as u64, as_void_ptr(&eval));
                     enc.set_bytes(5, size_of::<TmParams>() as u64, as_void_ptr(params));
                     enc.set_buffer(6, Some(&halting), 0);
                 },
-                pods.len(),
+                thread_count,
             );
-            halting_buf = Some(halting);
-            submitted
+            (committed, Some(halting))
         }
     };
 
@@ -374,7 +393,7 @@ fn dispatch_prepared(
         score_output: score_buf,
         tm_halting_output: halting_buf,
         command_buffer: cmd,
-        dispatched_pair_count: pods.len(),
+        dispatched_pair_count: thread_count,
     })
 }
 

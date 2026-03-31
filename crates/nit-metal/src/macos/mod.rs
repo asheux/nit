@@ -1,11 +1,17 @@
 //! macOS Metal GPU backend for game-theory tournament batch evaluation.
 //!
-//! Sub-modules:
-//! - [`cache`] — on-disk cache for benchmark results
-//! - [`device`] — GPU device introspection and capabilities
-//! - [`dispatch`] — GPU buffer allocation and batch lifecycle
-//! - [`policy`] — heuristic and benchmark-driven policy selection
-//! - [`shader`] — Metal shader compilation and pipeline management
+//! Architecture layers (bottom-up):
+//!
+//! 1. **[`shader`]** — compiles Metal shader source into per-variant pipeline states,
+//!    cached behind a `OnceLock` singleton keyed by [`shader::ShaderKey`].
+//! 2. **[`device`]** — probes the system default Metal device and captures its
+//!    name, memory budget, and performance tier into [`MetalBackendInfo`].
+//! 3. **[`dispatch`]** — allocates GPU buffers, encodes compute commands, and
+//!    manages the prepared → pending → completed batch lifecycle.
+//! 4. **[`policy`]** — selects optimal batch sizes via device-tier heuristics
+//!    or live GPU benchmarking, persisting winners through the cache layer.
+//! 5. **[`cache`]** — JSON-based on-disk storage keyed by device name and
+//!    payload signature, with schema-versioned validation.
 
 mod cache;
 mod device;
@@ -20,10 +26,9 @@ mod shader;
 pub use device::{gpu_device_name, MetalBackendInfo};
 
 // ---------------------------------------------------------------------------
-// GPU dispatch and lifecycle
+// Batch dispatch and lifecycle
 // ---------------------------------------------------------------------------
 
-/// Batch dispatch: buffer allocation, kernel submission, and result collection.
 pub use dispatch::{
     try_begin_prepared_batch, try_evaluate_batch, try_evaluate_prepared_batch,
     try_evaluate_prepared_tm_halting_batch, try_finish_prepared_batch,
@@ -31,18 +36,13 @@ pub use dispatch::{
 };
 
 // ---------------------------------------------------------------------------
-// Policy and cache operations
+// Policy selection and cache management
 // ---------------------------------------------------------------------------
 
-/// Cache CRUD: snapshot, clear individual entries, or purge the entire cache.
 pub use cache::{
     batch_policy_cache_snapshot, clear_batch_policy_cache, clear_batch_policy_cache_entry,
 };
-
-/// Benchmark-driven or heuristic policy recommendation for a given payload.
 pub use policy::recommended_batch_policy;
-
-/// Pre-compile default shader variants to reduce first-dispatch latency.
 pub use shader::prewarm_default_batch_shaders;
 
 // ---------------------------------------------------------------------------

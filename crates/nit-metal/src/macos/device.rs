@@ -29,13 +29,14 @@ impl MetalBackendInfo {
         })
     }
 
-    /// Returns `true` when the device belongs to a high-core-count Apple
+        /// Returns `true` when the device belongs to a high-core-count Apple
     /// Silicon tier (Pro, Max, or Ultra) that benefits from deeper dispatch
     /// queues and larger batch sizes.
     pub fn is_high_performance(&self) -> bool {
-        self.device_name.contains("Pro")
-            || self.device_name.contains("Max")
-            || self.device_name.contains("Ultra")
+        const HIGH_PERF_TIERS: &[&str] = &["Pro", "Max", "Ultra"];
+        HIGH_PERF_TIERS
+            .iter()
+            .any(|tier| self.device_name.contains(tier))
     }
 
     /// Working set converted to mebibytes, rounded down.
@@ -44,6 +45,8 @@ impl MetalBackendInfo {
     }
 
     /// Short diagnostic label suitable for log lines and cache key prefixes.
+    ///
+    /// Format: `metal-macos/<device_name>/<working_set>MiB`
     pub fn diagnostic_label(&self) -> String {
         format!(
             "metal-macos/{}/{}MiB",

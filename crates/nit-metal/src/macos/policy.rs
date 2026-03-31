@@ -7,6 +7,7 @@ use crate::{
     BatchEvalConfig, BatchExecutionPolicy, BatchPayload, BatchPolicySource, MatchPair,
     RecommendedBatchPolicy, TmTransitionPacked,
 };
+use std::collections::VecDeque;
 use std::mem::size_of;
 use std::time::Instant;
 
@@ -35,18 +36,16 @@ const DEFAULT_MEMORY_BUDGET: usize = 64 * 1024 * 1024;
 /// Accounts for strategy tables, transition tables, and rule tables
 /// that are uploaded once regardless of how many match pairs are dispatched.
 fn payload_static_bytes(payload: &BatchPayload) -> usize {
+    let u32_stride = size_of::<u32>();
     match payload {
         BatchPayload::Fsm(fsm) => {
-            let start_table_bytes = fsm.starts.len() * size_of::<u32>();
-            let output_table_bytes = fsm.outputs.len() * size_of::<u32>();
-            let transition_table_bytes = fsm.transitions.len() * size_of::<u32>();
-            start_table_bytes + output_table_bytes + transition_table_bytes
+            (fsm.starts.len() + fsm.outputs.len() + fsm.transitions.len()) * u32_stride
         }
-        BatchPayload::Ca(automaton) => automaton.rule_tables.len() * size_of::<u32>(),
+        BatchPayload::Ca(automaton) => automaton.rule_tables.len() * u32_stride,
         BatchPayload::Tm(machine) => {
-            let start_table_bytes = machine.start_states.len() * size_of::<u32>();
-            let transition_bytes = machine.transitions.len() * size_of::<TmTransitionPacked>();
-            start_table_bytes + transition_bytes
+            let packed_stride = size_of::<TmTransitionPacked>();
+            machine.start_states.len() * u32_stride
+                + machine.transitions.len() * packed_stride
         }
     }
 }
@@ -189,45 +188,44 @@ impl PayloadBatchLimits {
 // Benchmark candidate generation
 // ---------------------------------------------------------------------------
 
-/// Generates candidate policies by varying batch size and inflight count.
+/// Generates candidate policies by varying batch size and inflight depth.
 ///
-/// Produces a combinatorial grid of batch sizes (fractions and multiples
-/// of the base limit) crossed with inflight depths near the device default.
+/// Produces a combinatorial grid: several fractions and multiples of the
+/// device base limit, crossed with one or two inflight depths near the
+/// device default. Duplicate sizes are collapsed.
 fn candidate_policies(
     payload: &BatchPayload,
-    gpu_device_name: &str,
-    memory_cap: usize,
+    device_name: &str,
+    mem_cap: usize,
 ) -> Vec<BatchExecutionPolicy> {
-    let default_inflight_depth = preferred_inflight_batches(gpu_device_name);
-    let base_batch_count = preferred_base_limit(gpu_device_name, payload);
+    let base_depth = preferred_inflight_batches(device_name);
+    let base_size = preferred_base_limit(device_name, payload);
     let limits = PayloadBatchLimits::for_payload(payload);
-    let max_viable_batch = limits.candidate_ceiling.min(memory_cap).max(MIN_BATCH_SIZE);
-    let clamped_base = base_batch_count.min(max_viable_batch).max(MIN_BATCH_SIZE);
+    let viable_ceil = limits.candidate_ceiling.min(mem_cap).max(MIN_BATCH_SIZE);
+    let anchor = base_size.min(viable_ceil).max(MIN_BATCH_SIZE);
 
-    let mut batch_size_candidates = vec![
-        (clamped_base / 2).max(MIN_BATCH_SIZE),
-        ((clamped_base.saturating_mul(3)) / 4).max(MIN_BATCH_SIZE),
-        clamped_base,
-        (clamped_base.saturating_mul(2))
-            .min(max_viable_batch)
-            .max(MIN_BATCH_SIZE),
+    let clamp = |v: usize| v.clamp(MIN_BATCH_SIZE, viable_ceil);
+    let mut sizes = vec![
+        clamp(anchor / 2),
+        clamp(anchor.saturating_mul(3) / 4),
+        anchor,
+        clamp(anchor.saturating_mul(2)),
     ];
-    batch_size_candidates.sort_unstable();
-    batch_size_candidates.dedup();
+    sizes.sort_unstable();
+    sizes.dedup();
 
-    let mut inflight_depth_options = vec![default_inflight_depth];
-    if default_inflight_depth < 5 {
-        inflight_depth_options.push(default_inflight_depth + 1);
-    }
+    let depths: &[usize] = if base_depth < 5 {
+        &[base_depth, base_depth + 1]
+    } else {
+        &[base_depth]
+    };
 
-    inflight_depth_options
+    depths
         .iter()
         .flat_map(|&depth| {
-            batch_size_candidates.iter().map(move |&batch_count| {
-                BatchExecutionPolicy {
-                    matches_per_batch: batch_count,
-                    inflight_batches: depth,
-                }
+            sizes.iter().map(move |&size| BatchExecutionPolicy {
+                matches_per_batch: size,
+                inflight_batches: depth,
             })
         })
         .collect()
@@ -241,34 +239,33 @@ fn generate_benchmark_pairs(
     payload: &BatchPayload,
     candidates: &[BatchExecutionPolicy],
 ) -> Vec<MatchPair> {
-    let total_strategies = payload_strategy_count(payload).max(1);
+    let strategy_count = payload_strategy_count(payload).max(1);
     let limits = PayloadBatchLimits::for_payload(payload);
 
-    let largest_candidate_batch = candidates
+    let max_batch = candidates
         .iter()
-        .map(|policy| policy.matches_per_batch)
+        .map(|p| p.matches_per_batch)
         .max()
         .unwrap_or(MIN_BATCH_SIZE);
 
-    let deepest_inflight_level = candidates
+    let max_depth = candidates
         .iter()
-        .map(|policy| policy.inflight_batches)
+        .map(|p| p.inflight_batches)
         .max()
         .unwrap_or(1);
 
-    let required_pair_count = largest_candidate_batch
-        .saturating_mul(deepest_inflight_level)
+    let pair_count = max_batch
+        .saturating_mul(max_depth)
         .saturating_mul(2)
         .clamp(limits.benchmark_floor, limits.benchmark_ceiling);
 
-    (0..required_pair_count)
-        .map(|pair_index| {
-            let forward_strategy = (pair_index % total_strategies) as u32;
-            let reverse_strategy =
-                ((total_strategies - 1) - (pair_index % total_strategies)) as u32;
+    (0..pair_count)
+        .map(|i| {
+            let fwd = (i % strategy_count) as u32;
+            let rev = (strategy_count - 1 - i % strategy_count) as u32;
             MatchPair {
-                a_idx: forward_strategy,
-                b_idx: reverse_strategy,
+                a_idx: fwd,
+                b_idx: rev,
             }
         })
         .collect()
@@ -278,12 +275,13 @@ fn generate_benchmark_pairs(
 // Benchmark execution
 // ---------------------------------------------------------------------------
 
-/// Waits for all remaining pending GPU batches to complete.
+/// Drains all remaining in-flight GPU batches, discarding their results.
 ///
-/// Called after the main dispatch loop to flush the in-flight queue.
-fn drain_pending_batches(pending: Vec<PendingBatch>) -> Result<(), String> {
-    for completed_batch in pending {
-        let _ = try_finish_prepared_batch(completed_batch)?;
+/// Called after the main dispatch loop to flush the pipeline before
+/// recording the elapsed wall-clock time.
+fn drain_inflight(queue: VecDeque<PendingBatch>) -> Result<(), String> {
+    for batch in queue {
+        let _ = try_finish_prepared_batch(batch)?;
     }
     Ok(())
 }
@@ -291,55 +289,59 @@ fn drain_pending_batches(pending: Vec<PendingBatch>) -> Result<(), String> {
 /// Runs a single benchmark trial for a candidate policy, returning elapsed seconds.
 ///
 /// Simulates the real dispatch pattern: submitting batches in chunks and
-/// draining the oldest completed batch when the inflight limit is reached.
+/// retiring the oldest completed batch when the inflight depth is saturated.
+/// Uses a `VecDeque` so that retiring the front is O(1).
 fn time_benchmark_trial(
     prepared: &PreparedBatch,
-    candidate: BatchExecutionPolicy,
-    all_pairs: &[MatchPair],
+    policy: BatchExecutionPolicy,
+    pairs: &[MatchPair],
 ) -> Result<f64, String> {
-    let chunk_size = candidate.matches_per_batch.max(1);
-    let inflight_limit = candidate.inflight_batches.max(1);
+    let chunk_size = policy.matches_per_batch.max(1);
+    let depth_cap = policy.inflight_batches.max(1);
     let timer = Instant::now();
 
-    let mut pending_queue: Vec<PendingBatch> = Vec::new();
+    let mut inflight: VecDeque<PendingBatch> = VecDeque::with_capacity(depth_cap + 1);
 
-    for pair_chunk in all_pairs.chunks(chunk_size) {
-        let submitted_batch = try_begin_prepared_batch(prepared, pair_chunk)?
-            .ok_or_else(|| "Metal batch benchmark failed to begin dispatch".to_string())?;
-        pending_queue.push(submitted_batch);
+    for chunk in pairs.chunks(chunk_size) {
+        let submitted = try_begin_prepared_batch(prepared, chunk)?
+            .ok_or("Metal batch benchmark: dispatch failed to begin")?;
+        inflight.push_back(submitted);
 
-        if pending_queue.len() >= inflight_limit {
-            let oldest_batch = pending_queue.remove(0);
-            let _ = try_finish_prepared_batch(oldest_batch)?;
+        if inflight.len() > depth_cap {
+            let retired = inflight.pop_front().expect("inflight is non-empty");
+            let _ = try_finish_prepared_batch(retired)?;
         }
     }
 
-    drain_pending_batches(pending_queue)?;
+    drain_inflight(inflight)?;
     Ok(timer.elapsed().as_secs_f64())
 }
 
-/// Runs benchmark trials across all candidates and returns the fastest policy.
-///
-/// Each candidate is timed over the same set of synthetic pairs. The policy
-/// that finishes in the shortest wall-clock time wins.
+/// Benchmarks every candidate policy and returns the one with the lowest
+/// wall-clock time, falling back to `fallback` if the candidate set is empty.
 fn select_fastest_policy(
     prepared: &PreparedBatch,
     candidates: Vec<BatchExecutionPolicy>,
-    benchmark_pairs: &[MatchPair],
-    fallback_policy: BatchExecutionPolicy,
+    pairs: &[MatchPair],
+    fallback: BatchExecutionPolicy,
 ) -> Result<BatchExecutionPolicy, String> {
-    let mut best_policy = fallback_policy;
-    let mut shortest_elapsed = f64::INFINITY;
+    let timed: Vec<(BatchExecutionPolicy, f64)> = candidates
+        .into_iter()
+        .map(|policy| {
+            let elapsed = time_benchmark_trial(prepared, policy, pairs)?;
+            Ok((policy, elapsed))
+        })
+        .collect::<Result<_, String>>()?;
 
-    for candidate_policy in candidates {
-        let trial_elapsed = time_benchmark_trial(prepared, candidate_policy, benchmark_pairs)?;
-        if trial_elapsed < shortest_elapsed {
-            shortest_elapsed = trial_elapsed;
-            best_policy = candidate_policy;
-        }
-    }
+    let winner = timed
+        .into_iter()
+        .min_by(|(_, elapsed_a), (_, elapsed_b)| {
+            elapsed_a.partial_cmp(elapsed_b).unwrap_or(std::cmp::Ordering::Equal)
+        })
+        .map(|(policy, _)| policy)
+        .unwrap_or(fallback);
 
-    Ok(best_policy)
+    Ok(winner)
 }
 
 // ---------------------------------------------------------------------------
@@ -390,105 +392,113 @@ fn resolve_cache_location(
 }
 
 // ---------------------------------------------------------------------------
+// Recommendation builders
+// ---------------------------------------------------------------------------
+
+/// Constructs a heuristic-only recommendation (no cache involvement).
+fn heuristic_recommendation(policy: BatchExecutionPolicy) -> RecommendedBatchPolicy {
+    RecommendedBatchPolicy {
+        policy,
+        source: BatchPolicySource::Heuristic,
+        cache_key: None,
+        cache_path: None,
+    }
+}
+
+/// Constructs a recommendation backed by a cached or benchmarked result.
+fn sourced_recommendation(
+    policy: BatchExecutionPolicy,
+    source: BatchPolicySource,
+    key: String,
+    path: Option<String>,
+) -> RecommendedBatchPolicy {
+    RecommendedBatchPolicy {
+        policy,
+        source,
+        cache_key: Some(key),
+        cache_path: path,
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
 
 /// Determines the best batch execution policy for a payload.
 ///
-/// Checks the on-disk cache first, then falls back to GPU benchmarking
-/// if no cached result exists. Returns a heuristic default if benchmarking
-/// cannot be performed.
+/// Resolution order:
+/// 1. On-disk cache hit → return the stored policy (clamped to current memory budget).
+/// 2. GPU benchmark sweep → time candidate policies and persist the winner.
+/// 3. Heuristic fallback → device-tier defaults when benchmarking cannot run.
 pub fn recommended_batch_policy(
     config: &BatchEvalConfig,
     payload: &BatchPayload,
 ) -> Result<Option<RecommendedBatchPolicy>, String> {
     let shader_key = ShaderKey::for_payload(payload);
     let metal_ctx = context_for_key(shader_key)?;
-    let gpu_device_name = metal_ctx.device.name().to_string();
+    let device_name = metal_ctx.device.name().to_string();
 
-    let inflight_depth = preferred_inflight_batches(&gpu_device_name);
-    let base_batch_limit = preferred_base_limit(&gpu_device_name, payload);
+    let inflight_depth = preferred_inflight_batches(&device_name);
+    let base_limit = preferred_base_limit(&device_name, payload);
     let static_bytes = payload_static_bytes(payload);
-    let memory_cap = compute_memory_cap(
+    let mem_cap = compute_memory_cap(
         metal_ctx.device.recommended_max_working_set_size(),
         static_bytes,
         inflight_depth,
     );
 
-    let heuristic_policy = BatchExecutionPolicy {
-        matches_per_batch: base_batch_limit.min(memory_cap).max(MIN_BATCH_SIZE),
+    let heuristic = BatchExecutionPolicy {
+        matches_per_batch: base_limit.min(mem_cap).max(MIN_BATCH_SIZE),
         inflight_batches: inflight_depth,
     };
 
-    let payload_sig = payload_signature(payload);
-    let (cache_key, cache_file_path) = resolve_cache_location(&gpu_device_name, &payload_sig);
+    let sig = payload_signature(payload);
+    let (cache_key, cache_path) = resolve_cache_location(&device_name, &sig);
 
-    // Fast path: use a previously benchmarked result from disk.
-    if let Some(cached_entry) = load_cached_policy(&gpu_device_name, &payload_sig) {
-        return Ok(Some(RecommendedBatchPolicy {
-            policy: BatchExecutionPolicy {
-                matches_per_batch: cached_entry
-                    .matches_per_batch_cap
-                    .min(memory_cap)
-                    .max(MIN_BATCH_SIZE),
-                inflight_batches: cached_entry.inflight_batches.max(1),
-            },
-            source: BatchPolicySource::Cached,
-            cache_key: Some(cache_key),
-            cache_path: cache_file_path,
-        }));
+    // Fast path: reuse a previously benchmarked result from disk.
+    if let Some(hit) = load_cached_policy(&device_name, &sig) {
+        let restored = BatchExecutionPolicy {
+            matches_per_batch: hit.matches_per_batch_cap.min(mem_cap).max(MIN_BATCH_SIZE),
+            inflight_batches: hit.inflight_batches.max(1),
+        };
+        return Ok(Some(sourced_recommendation(
+            restored,
+            BatchPolicySource::Cached,
+            cache_key,
+            cache_path,
+        )));
     }
 
-    // Prepare a batch for GPU benchmarking.
-    let Some(prepared_batch) = try_prepare_batch(config, payload)? else {
-        return Ok(Some(RecommendedBatchPolicy {
-            policy: heuristic_policy,
-            source: BatchPolicySource::Heuristic,
-            cache_key: None,
-            cache_path: None,
-        }));
+    // Prepare payload buffers for a GPU benchmark sweep.
+    let Some(prepared) = try_prepare_batch(config, payload)? else {
+        return Ok(Some(heuristic_recommendation(heuristic)));
     };
 
-    let benchmark_candidates = candidate_policies(payload, &gpu_device_name, memory_cap);
-    if benchmark_candidates.len() <= 1 {
-        return Ok(Some(RecommendedBatchPolicy {
-            policy: heuristic_policy,
-            source: BatchPolicySource::Heuristic,
-            cache_key: None,
-            cache_path: None,
-        }));
+    let candidates = candidate_policies(payload, &device_name, mem_cap);
+    if candidates.len() <= 1 {
+        return Ok(Some(heuristic_recommendation(heuristic)));
     }
 
-    let synthetic_pairs = generate_benchmark_pairs(payload, &benchmark_candidates);
+    let synthetic_pairs = generate_benchmark_pairs(payload, &candidates);
     if synthetic_pairs.is_empty() {
-        return Ok(Some(RecommendedBatchPolicy {
-            policy: heuristic_policy,
-            source: BatchPolicySource::Heuristic,
-            cache_key: None,
-            cache_path: None,
-        }));
+        return Ok(Some(heuristic_recommendation(heuristic)));
     }
 
-    // Run the benchmark sweep and persist the winner.
-    let fastest_policy = select_fastest_policy(
-        &prepared_batch,
-        benchmark_candidates,
-        &synthetic_pairs,
-        heuristic_policy,
-    )?;
+    // Benchmark all candidates and persist the winner.
+    let winner = select_fastest_policy(&prepared, candidates, &synthetic_pairs, heuristic)?;
 
     persist_cached_policy(&PolicyCacheEntry {
         schema_version: POLICY_CACHE_SCHEMA_VERSION,
-        device_name: gpu_device_name,
-        payload_signature: payload_sig,
-        matches_per_batch_cap: fastest_policy.matches_per_batch,
-        inflight_batches: fastest_policy.inflight_batches,
+        device_name,
+        payload_signature: sig,
+        matches_per_batch_cap: winner.matches_per_batch,
+        inflight_batches: winner.inflight_batches,
     });
 
-    Ok(Some(RecommendedBatchPolicy {
-        policy: fastest_policy,
-        source: BatchPolicySource::Benchmarked,
-        cache_key: Some(cache_key),
-        cache_path: cache_file_path,
-    }))
+    Ok(Some(sourced_recommendation(
+        winner,
+        BatchPolicySource::Benchmarked,
+        cache_key,
+        cache_path,
+    )))
 }
