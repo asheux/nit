@@ -1606,6 +1606,67 @@ fn status_sub_row_line(text: &str, theme: &Theme) -> Line<'static> {
                 .add_modifier(Modifier::DIM),
         ));
     }
+    // Genome retry header: "↳ genome retry 1/10"
+    if let Some(genome_rest) = trimmed.strip_prefix("\u{21b3} ") {
+        if genome_rest.starts_with("genome retry") {
+            let leading = text.len() - text.trim_start().len();
+            let indent: String = text.chars().take(leading).collect();
+            return Line::from(vec![
+                Span::styled(
+                    format!("{indent}\u{21b3} "),
+                    Style::default().fg(theme.warning).bg(bg),
+                ),
+                Span::styled(
+                    genome_rest.to_string(),
+                    Style::default()
+                        .fg(theme.warning)
+                        .bg(bg)
+                        .add_modifier(Modifier::BOLD),
+                ),
+            ]);
+        }
+    }
+    // Genome retry file row: "  ↓ mod.rs III Failing c=0.33"
+    if trimmed.starts_with("\u{2193} ")
+        || trimmed.starts_with("\u{2191} ")
+        || trimmed.starts_with("\u{2014} ")
+        || trimmed.starts_with("+ ")
+    {
+        let leading = text.len() - text.trim_start().len();
+        let indent: String = text.chars().take(leading).collect();
+        let arrow = &trimmed[..trimmed.char_indices().nth(1).map(|(i, _)| i).unwrap_or(1)];
+        let rest = trimmed[arrow.len()..].trim_start();
+        let arrow_color = match arrow {
+            "\u{2191}" => theme.success,   // ↑ improved
+            "\u{2193}" => theme.error,     // ↓ degraded
+            "+" => theme.title_focused,    // + new
+            _ => theme.border,             // — unchanged
+        };
+        // Color the quality label if present.
+        let quality_color = if rest.contains("Failing") {
+            theme.error
+        } else if rest.contains("Minimum") {
+            theme.warning
+        } else if rest.contains("Standard") {
+            theme.foreground
+        } else if rest.contains("Excellent") {
+            theme.title_focused
+        } else if rest.contains("Exceptional") {
+            theme.success
+        } else {
+            theme.foreground
+        };
+        return Line::from(vec![
+            Span::styled(
+                format!("{indent}{arrow} "),
+                Style::default().fg(arrow_color).bg(bg),
+            ),
+            Span::styled(
+                rest.to_string(),
+                Style::default().fg(quality_color).bg(bg),
+            ),
+        ]);
+    }
     // Genome shadow stage: "↳ file.rs Quality delta (tier N, c=X.XX)"
     // Color-code the file name based on quality delta.
     if let Some(genome_rest) = trimmed.strip_prefix("↳ ") {
@@ -1875,6 +1936,18 @@ fn format_message_rows(
         && matches!(msg.channel, nit_core::AgentChannel::Broadcast)
     {
         return Vec::new();
+    }
+
+    // Genome retry messages render as a compact multi-line table.
+    if msg.kind.as_deref() == Some("genome-retry") {
+        return msg
+            .text
+            .lines()
+            .map(|line| ThreadRow {
+                text: pad_line_right(line, width),
+                kind: ThreadRowKind::StatusSubRow,
+            })
+            .collect();
     }
 
     let src = msg.agent_id.as_deref().unwrap_or("agent");

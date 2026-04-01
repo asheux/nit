@@ -1462,16 +1462,47 @@ const GENOME_RETRY_LIMIT: u8 = 10;
 
 /// Push a visible message to the agent console and diagnostics when a genome retry fires.
 fn push_genome_retry_message(state: &mut AppState, agent_id: &str, attempt: u8) {
-    let quality = state
-        .editor_buffer()
-        .path()
-        .and_then(|p| state.genome_reports.get(p))
-        .map(|r| format!("{} (tier {})", r.quality_level(), r.tier.numeral()))
-        .unwrap_or_else(|| "unknown".into());
+    // Build a compact per-file table for the retry message.
+    let modified: Vec<std::path::PathBuf> = state
+        .genome_turn_modified
+        .values()
+        .flat_map(|s| s.iter().cloned())
+        .collect();
 
-    let msg = format!(
-        "[genome] Quality degraded \u{2014} auto-retrying ({attempt}/{GENOME_RETRY_LIMIT}). Current: {quality}",
-    );
+    let mut lines = Vec::new();
+    lines.push(format!(
+        "\u{21b3} genome retry {attempt}/{GENOME_RETRY_LIMIT}"
+    ));
+
+    for path in &modified {
+        let report = match state.genome_reports.get(path) {
+            Some(r) => r,
+            None => continue,
+        };
+        let file_name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("?");
+        let delta = if let Some(base) = state.genome_baselines.get(path) {
+            if report.tier > base.tier {
+                "\u{2191}" // ↑
+            } else if report.tier < base.tier {
+                "\u{2193}" // ↓
+            } else {
+                "\u{2014}" // —
+            }
+        } else {
+            "+"
+        };
+        lines.push(format!(
+            "  {delta} {file_name} {} {} c={:.2}",
+            report.tier.numeral(),
+            report.quality_level(),
+            report.cross_encoder_consistency,
+        ));
+    }
+
+    let msg = lines.join("\n");
 
     let at = timestamp_label(state);
     state.agents.messages.push(nit_core::AgentMessage {
@@ -1479,9 +1510,9 @@ fn push_genome_retry_message(state: &mut AppState, agent_id: &str, attempt: u8) 
         channel: nit_core::AgentChannel::Broadcast,
         agent_id: Some(agent_id.to_string()),
         mission_id: None,
-        text: msg.clone(),
+        text: msg,
         prompt_msg_idx: None,
-        kind: None,
+        kind: Some("genome-retry".into()),
     });
     state.agents.console_scroll = nit_core::CONSOLE_SCROLL_BOTTOM;
 
