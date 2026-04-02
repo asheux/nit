@@ -515,6 +515,8 @@ fn run_loop(
     let mut file_tree_runner = FileTreeRunner::spawn();
     let mut file_watcher = FileWatcher::spawn();
     let genome_worker = crate::genome_worker::GenomeWorker::new();
+    // Parse .gitignore for directory exclusions (shared with file watcher and FILESCORES view).
+    state.gitignored_dirs = crate::file_watcher::parse_gitignore_dirs(&state.workspace_root);
     // Watch the entire workspace for agent-created/modified files.
     file_watcher.watch_workspace(state.workspace_root.clone());
     let mut last_watched_path = state.editor_buffer().path().cloned();
@@ -1320,7 +1322,13 @@ fn run_loop(
 
             // Drain file watcher notifications — reload any open buffers that changed on disk.
             drain_file_watcher(state, syntax, &file_watcher, &genome_worker);
-            drain_genome_results(state, &genome_worker, &mut vitals, &codex_runner, &claude_runner);
+            drain_genome_results(
+                state,
+                &genome_worker,
+                &mut vitals,
+                &codex_runner,
+                &claude_runner,
+            );
 
             // Auto-compute genome report for the active editor buffer if missing.
             maybe_compute_genome_report(state, &genome_worker);
@@ -1462,11 +1470,18 @@ const GENOME_RETRY_LIMIT: u8 = 10;
 
 /// Push a visible message to the agent console and diagnostics when a genome retry fires.
 fn push_genome_retry_message(state: &mut AppState, agent_id: &str, attempt: u8) {
-    // Build a compact per-file table for the retry message.
+    // Build a compact per-file table for the retry message (excluding gitignored paths).
+    let gitignored = &state.gitignored_dirs;
     let modified: Vec<std::path::PathBuf> = state
         .genome_turn_modified
         .values()
         .flat_map(|s| s.iter().cloned())
+        .filter(|p| {
+            !p.components().any(|c| {
+                matches!(c, std::path::Component::Normal(s) if
+                    gitignored.iter().any(|g| g == s.to_string_lossy().as_ref()))
+            })
+        })
         .collect();
 
     let mut lines = Vec::new();
@@ -1479,10 +1494,7 @@ fn push_genome_retry_message(state: &mut AppState, agent_id: &str, attempt: u8) 
             Some(r) => r,
             None => continue,
         };
-        let file_name = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("?");
+        let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("?");
         let delta = if let Some(base) = state.genome_baselines.get(path) {
             if report.tier > base.tier {
                 "\u{2191}" // ↑
@@ -1731,13 +1743,18 @@ fn build_genome_retry_prompt(state: &mut AppState, agent_id: &str) -> Option<Str
         .get(&agent_id)
         .copied()
         .unwrap_or(nit_core::GenomeTier::Spaceship);
-    let tier_target = format!("tier {} ({}, {}+ generations)", agent_min_tier.numeral(), agent_min_tier.name(), match agent_min_tier {
-        nit_core::GenomeTier::StillLife => 0,
-        nit_core::GenomeTier::Oscillator => 51,
-        nit_core::GenomeTier::Spaceship => 201,
-        nit_core::GenomeTier::Methuselah => 501,
-        nit_core::GenomeTier::Replicator => 2001,
-    });
+    let tier_target = format!(
+        "tier {} ({}, {}+ generations)",
+        agent_min_tier.numeral(),
+        agent_min_tier.name(),
+        match agent_min_tier {
+            nit_core::GenomeTier::StillLife => 0,
+            nit_core::GenomeTier::Oscillator => 51,
+            nit_core::GenomeTier::Spaceship => 201,
+            nit_core::GenomeTier::Methuselah => 501,
+            nit_core::GenomeTier::Replicator => 2001,
+        }
+    );
     prompt.push_str(&format!(
         "[GENOME QUALITY DEGRADED \u{2014} automatic retry {attempt}/{GENOME_RETRY_LIMIT}]\n\n\
          Your changes degraded the structural quality of the files listed above. \
@@ -1768,10 +1785,7 @@ fn build_genome_retry_prompt(state: &mut AppState, agent_id: &str) -> Option<Str
     Some(prompt)
 }
 
-fn maybe_compute_genome_report(
-    state: &mut AppState,
-    genome: &crate::genome_worker::GenomeWorker,
-) {
+fn maybe_compute_genome_report(state: &mut AppState, genome: &crate::genome_worker::GenomeWorker) {
     let file_path = match state.editor_buffer().path().cloned() {
         Some(p) => p,
         None => return,
@@ -1895,42 +1909,38 @@ fn drain_genome_results(
         if result.shadow {
             // Shadow evaluation — update UI only.
             let is_new_file = !state.genome_baselines.contains_key(&path);
-            let delta_label: &'static str =
-                if let Some(base) = state.genome_baselines.get(&path) {
-                    // Tier comparison takes priority — tier reflects the weakest
-                    // encoder (bottleneck). Gen sum is only a tiebreaker when
-                    // tiers are equal.
-                    if report.tier > base.tier {
+            let delta_label: &'static str = if let Some(base) = state.genome_baselines.get(&path) {
+                // Tier comparison takes priority — tier reflects the weakest
+                // encoder (bottleneck). Gen sum is only a tiebreaker when
+                // tiers are equal.
+                if report.tier > base.tier {
+                    "improved"
+                } else if report.tier < base.tier {
+                    "degraded"
+                } else {
+                    let gen_base: i32 = base
+                        .encoder_scores
+                        .iter()
+                        .map(|s| s.generations_survived as i32)
+                        .sum();
+                    let gen_now: i32 = report
+                        .encoder_scores
+                        .iter()
+                        .map(|s| s.generations_survived as i32)
+                        .sum();
+                    if gen_now > gen_base {
                         "improved"
-                    } else if report.tier < base.tier {
+                    } else if gen_now < gen_base {
                         "degraded"
                     } else {
-                        let gen_base: i32 = base
-                            .encoder_scores
-                            .iter()
-                            .map(|s| s.generations_survived as i32)
-                            .sum();
-                        let gen_now: i32 = report
-                            .encoder_scores
-                            .iter()
-                            .map(|s| s.generations_survived as i32)
-                            .sum();
-                        if gen_now > gen_base {
-                            "improved"
-                        } else if gen_now < gen_base {
-                            "degraded"
-                        } else {
-                            "unchanged"
-                        }
+                        "unchanged"
                     }
-                } else {
-                    "new"
-                };
+                }
+            } else {
+                "new"
+            };
 
-            let file_name = path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("?");
+            let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("?");
             let quality = report.quality_level();
             let tier_str = report.tier.numeral();
             let consistency = report.cross_encoder_consistency;
@@ -2059,8 +2069,9 @@ fn drain_genome_results(
                     *streak = streak.saturating_add(1);
                     if *streak >= 5 {
                         let next_tier = match current_min {
-                            nit_core::GenomeTier::StillLife
-                            | nit_core::GenomeTier::Oscillator => nit_core::GenomeTier::Spaceship,
+                            nit_core::GenomeTier::StillLife | nit_core::GenomeTier::Oscillator => {
+                                nit_core::GenomeTier::Spaceship
+                            }
                             nit_core::GenomeTier::Spaceship => nit_core::GenomeTier::Methuselah,
                             nit_core::GenomeTier::Methuselah => nit_core::GenomeTier::Replicator,
                             _ => current_min,

@@ -966,10 +966,7 @@ fn build_genome_context(state: &AppState, agent_id: &str) -> Option<String> {
     let agent_modified = state.genome_turn_modified.get(agent_id);
     if let Some(modified) = agent_modified {
         if !modified.is_empty() {
-            ctx.push_str(&format!(
-                "Files modified this turn: {}\n",
-                modified.len()
-            ));
+            ctx.push_str(&format!("Files modified this turn: {}\n", modified.len()));
         }
         let mut sorted_paths: Vec<_> = modified.iter().collect();
         sorted_paths.sort();

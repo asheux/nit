@@ -194,8 +194,8 @@ pub(super) fn context_for_key(key: ShaderKey) -> Result<&'static MetalContext, S
         return existing.clone();
     }
 
-    let result = MetalContext::compile(key)
-        .map(|ctx| Box::leak(Box::new(ctx)) as &'static MetalContext);
+    let result =
+        MetalContext::compile(key).map(|ctx| Box::leak(Box::new(ctx)) as &'static MetalContext);
     guard.insert(key, result.clone());
     result
 }

@@ -1,3 +1,5 @@
+//! Syntax engine configuration, trait definitions, and implementations.
+
 use std::collections::HashMap;
 use std::path::Path;
 
@@ -7,12 +9,22 @@ use crate::highlight::{EngineKind, HighlightSnapshot, SyntaxStatus};
 use crate::registry::{LanguageId, LanguageRegistry};
 use crate::tree_sitter_engine::TreeSitterEngine;
 
+// ---------------------------------------------------------------------------
+// Configuration
+// ---------------------------------------------------------------------------
+
+/// Tuning knobs for the syntax highlighting subsystem.
 #[derive(Clone, Debug)]
 pub struct SyntaxConfig {
+    /// Master switch — when `false`, all buffers fall back to plain text.
     pub enabled: bool,
+    /// Which backend to use globally.
     pub engine: EngineKind,
+    /// Minimum milliseconds between successive rehighlight requests.
     pub debounce_ms: u64,
+    /// Files larger than this (in bytes) skip tree-sitter parsing.
     pub max_file_bytes: usize,
+    /// Per-line cap on highlight segments to avoid render stalls.
     pub max_spans_per_line: usize,
 }
 
@@ -28,6 +40,12 @@ impl Default for SyntaxConfig {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Viewport
+// ---------------------------------------------------------------------------
+
+/// Visible line range sent with each highlight request so large files can
+/// prioritise the on-screen region.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ViewportRange {
     pub first_line: usize,
@@ -35,6 +53,11 @@ pub struct ViewportRange {
     pub total_lines: usize,
 }
 
+// ---------------------------------------------------------------------------
+// Highlight request
+// ---------------------------------------------------------------------------
+
+/// A request to (re)highlight a single buffer.
 #[derive(Clone, Debug)]
 pub struct HighlightRequest {
     pub buffer_id: usize,
@@ -44,22 +67,39 @@ pub struct HighlightRequest {
     pub edits: Vec<BufferEdit>,
     pub full_reparse: bool,
     pub max_spans_per_line: usize,
-    /// Viewport range for scoped highlighting. When `Some`, large files highlight
-    /// only the visible range plus a buffer zone instead of the full file.
     pub viewport: Option<ViewportRange>,
 }
 
+// ---------------------------------------------------------------------------
+// Engine trait
+// ---------------------------------------------------------------------------
+
+/// Common interface implemented by every highlighting backend.
 pub trait SyntaxEngine {
+    /// Determine the language for a buffer from its path, shebang line,
+    /// or an explicit override.
     fn detect_language(
         &self,
         path: Option<&Path>,
         first_line: Option<&str>,
         override_lang: Option<LanguageId>,
-    ) -> LanguageId;
+    ) -> LanguageId {
+        LanguageRegistry::detect(path, first_line, override_lang)
+    }
+
+    /// Submit a highlight request.
     fn schedule_rehighlight(&mut self, request: HighlightRequest);
+
+    /// Poll for a completed snapshot. Returns `None` if not ready.
     fn try_get_highlights(&mut self, buffer_id: usize, version: u64) -> Option<HighlightSnapshot>;
 }
 
+// ---------------------------------------------------------------------------
+// Plain-text fallback engine
+// ---------------------------------------------------------------------------
+
+/// Trivial engine that produces empty highlight spans.
+#[derive(Default)]
 pub struct PlainTextEngine {
     snapshots: HashMap<usize, HighlightSnapshot>,
 }
@@ -72,32 +112,17 @@ impl PlainTextEngine {
     }
 }
 
-impl Default for PlainTextEngine {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl SyntaxEngine for PlainTextEngine {
-    fn detect_language(
-        &self,
-        path: Option<&Path>,
-        first_line: Option<&str>,
-        override_lang: Option<LanguageId>,
-    ) -> LanguageId {
-        LanguageRegistry::detect(path, first_line, override_lang)
-    }
-
-    fn schedule_rehighlight(&mut self, request: HighlightRequest) {
-        let snapshot = HighlightSnapshot::plain(
-            request.buffer_id,
-            request.version,
-            request.language,
+    fn schedule_rehighlight(&mut self, req: HighlightRequest) {
+        let snap = HighlightSnapshot::plain(
+            req.buffer_id,
+            req.version,
+            req.language,
             EngineKind::Plain,
             SyntaxStatus::Ok(EngineKind::Plain),
-            &request.text,
+            &req.text,
         );
-        self.snapshots.insert(request.buffer_id, snapshot);
+        self.snapshots.insert(req.buffer_id, snap);
     }
 
     fn try_get_highlights(&mut self, buffer_id: usize, version: u64) -> Option<HighlightSnapshot> {
@@ -108,22 +133,27 @@ impl SyntaxEngine for PlainTextEngine {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Manager (multiplexer)
+// ---------------------------------------------------------------------------
+
+/// Routes highlight requests to the appropriate backend based on config.
 pub struct SyntaxManager {
     config: SyntaxConfig,
-    tree: TreeSitterEngine,
-    plain: PlainTextEngine,
-    engine_for_buffer: HashMap<usize, EngineKind>,
-    status: HashMap<usize, SyntaxStatus>,
+    tree_engine: TreeSitterEngine,
+    plain_engine: PlainTextEngine,
+    buffer_engines: HashMap<usize, EngineKind>,
+    statuses: HashMap<usize, SyntaxStatus>,
 }
 
 impl SyntaxManager {
     pub fn new(config: SyntaxConfig) -> Self {
         Self {
             config,
-            tree: TreeSitterEngine::new(),
-            plain: PlainTextEngine::new(),
-            engine_for_buffer: HashMap::new(),
-            status: HashMap::new(),
+            tree_engine: TreeSitterEngine::new(),
+            plain_engine: PlainTextEngine::new(),
+            buffer_engines: HashMap::new(),
+            statuses: HashMap::new(),
         }
     }
 
@@ -135,77 +165,59 @@ impl SyntaxManager {
         self.config = config;
     }
 
-    /// Pre-warm the worker for a language so grammar + parser are ready before content arrives.
-    pub fn prewarm_language(&self, language: LanguageId) {
-        self.tree.prewarm_language(language);
+    /// Pre-warm the tree-sitter worker so grammar and parser are ready.
+    pub fn prewarm_language(&self, lang: LanguageId) {
+        self.tree_engine.prewarm_language(lang);
     }
 
+    /// Return the most recent highlighting status for a buffer.
     pub fn status_for(&self, buffer_id: usize) -> SyntaxStatus {
         if !self.config.enabled {
             return SyntaxStatus::Disabled;
         }
-        if self.config.engine == EngineKind::Plain {
-            return self
-                .status
-                .get(&buffer_id)
-                .cloned()
-                .unwrap_or(SyntaxStatus::Ok(EngineKind::Plain));
-        }
-        self.status
+        self.statuses
             .get(&buffer_id)
             .cloned()
-            .unwrap_or(SyntaxStatus::Ok(EngineKind::TreeSitter))
+            .unwrap_or(SyntaxStatus::Ok(self.config.engine))
+    }
+
+    fn set_buffer_engine(&mut self, buffer_id: usize, kind: EngineKind, status: SyntaxStatus) {
+        self.statuses.insert(buffer_id, status);
+        self.buffer_engines.insert(buffer_id, kind);
+    }
+
+    fn engine_for(&self, buffer_id: usize) -> EngineKind {
+        self.buffer_engines
+            .get(&buffer_id)
+            .copied()
+            .unwrap_or(EngineKind::Plain)
     }
 }
 
 impl SyntaxEngine for SyntaxManager {
-    fn detect_language(
-        &self,
-        path: Option<&Path>,
-        first_line: Option<&str>,
-        override_lang: Option<LanguageId>,
-    ) -> LanguageId {
-        LanguageRegistry::detect(path, first_line, override_lang)
-    }
-
     fn schedule_rehighlight(&mut self, request: HighlightRequest) {
         if !self.config.enabled {
-            self.status
-                .insert(request.buffer_id, SyntaxStatus::Disabled);
-            self.engine_for_buffer
-                .insert(request.buffer_id, EngineKind::Plain);
+            self.set_buffer_engine(request.buffer_id, EngineKind::Plain, SyntaxStatus::Disabled);
             return;
         }
 
-        if self.config.engine == EngineKind::Plain {
-            self.status
-                .insert(request.buffer_id, SyntaxStatus::Ok(EngineKind::Plain));
-            self.engine_for_buffer
-                .insert(request.buffer_id, EngineKind::Plain);
-            self.plain.schedule_rehighlight(request);
-            return;
-        }
+        let engine = self.config.engine;
+        self.set_buffer_engine(request.buffer_id, engine, SyntaxStatus::Ok(engine));
 
-        self.status
-            .insert(request.buffer_id, SyntaxStatus::Ok(EngineKind::TreeSitter));
-        self.engine_for_buffer
-            .insert(request.buffer_id, EngineKind::TreeSitter);
-        self.tree.schedule_rehighlight(request);
+        match engine {
+            EngineKind::Plain => self.plain_engine.schedule_rehighlight(request),
+            EngineKind::TreeSitter => self.tree_engine.schedule_rehighlight(request),
+        }
     }
 
     fn try_get_highlights(&mut self, buffer_id: usize, version: u64) -> Option<HighlightSnapshot> {
-        let engine = self
-            .engine_for_buffer
-            .get(&buffer_id)
-            .copied()
-            .unwrap_or(EngineKind::Plain);
-        let snapshot = match engine {
-            EngineKind::TreeSitter => self.tree.try_get_highlights(buffer_id, version),
-            EngineKind::Plain => self.plain.try_get_highlights(buffer_id, version),
+        let snap = match self.engine_for(buffer_id) {
+            EngineKind::TreeSitter => self.tree_engine.try_get_highlights(buffer_id, version),
+            EngineKind::Plain => self.plain_engine.try_get_highlights(buffer_id, version),
         };
-        if let Some(ref snap) = snapshot {
-            self.status.insert(buffer_id, snap.status.clone());
+        if let Some(ref s) = snap {
+            self.statuses.insert(buffer_id, s.status.clone());
         }
-        snapshot
+        snap
     }
 }

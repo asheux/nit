@@ -1,86 +1,120 @@
+//! Language identification and grammar registry.
+//!
+//! [`LanguageRegistry`] provides static methods that resolve a buffer's
+//! language from its file path, shebang line, or an explicit override, and
+//! then return the matching tree-sitter grammar and highlight queries.
+
+use std::fmt;
 use std::path::Path;
 
+// ── Language identifier ────────────────────────────────────────────────────
+
+/// Enum of supported languages, used as a key into the grammar and query
+/// tables. [`PlainText`](Self::PlainText) is the fallback when no grammar
+/// matches the buffer's content.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub enum LanguageId {
+    /// Rust (`*.rs`)
     Rust,
+    /// Python (`*.py`)
     Python,
+    /// JavaScript (`*.js`, `*.mjs`, `*.cjs`, `*.jsx`)
     JavaScript,
+    /// TypeScript (`*.ts`, `*.tsx`)
     TypeScript,
+    /// Markdown (`*.md`, `*.markdown`)
     Markdown,
+    /// HTML (`*.html`, `*.htm`)
     Html,
+    /// CSS / SCSS / Sass (`*.css`, `*.scss`, `*.sass`)
     Css,
+    /// JSON / JSONC (`*.json`, `*.jsonc`)
     Json,
+    /// TOML (`*.toml`, `Cargo.toml`)
     Toml,
+    /// YAML (`*.yml`, `*.yaml`)
     Yaml,
+    /// Shell scripts (`*.sh`, `*.bash`, `*.zsh`, `*.fish`)
     Bash,
+    /// Unrecognised — no grammar available.
     PlainText,
 }
 
+/// All languages that have a tree-sitter grammar bound to the crate.
 impl LanguageId {
     pub const ALL: [LanguageId; 11] = [
-        LanguageId::Rust,
-        LanguageId::Python,
-        LanguageId::JavaScript,
-        LanguageId::TypeScript,
-        LanguageId::Markdown,
-        LanguageId::Html,
-        LanguageId::Css,
-        LanguageId::Json,
-        LanguageId::Toml,
-        LanguageId::Yaml,
-        LanguageId::Bash,
+        Self::Rust,
+        Self::Python,
+        Self::JavaScript,
+        Self::TypeScript,
+        Self::Markdown,
+        Self::Html,
+        Self::Css,
+        Self::Json,
+        Self::Toml,
+        Self::Yaml,
+        Self::Bash,
     ];
 }
 
+/// Human-readable label for status-bar display and logging.
+impl fmt::Display for LanguageId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let label = match self {
+            Self::Rust => "Rust",
+            Self::Python => "Python",
+            Self::JavaScript => "JavaScript",
+            Self::TypeScript => "TypeScript",
+            Self::Markdown => "Markdown",
+            Self::Html => "HTML",
+            Self::Css => "CSS",
+            Self::Json => "JSON",
+            Self::Toml => "TOML",
+            Self::Yaml => "YAML",
+            Self::Bash => "Bash",
+            Self::PlainText => "Plain Text",
+        };
+        formatter.write_str(label)
+    }
+}
+
+// ── Registry ───────────────────────────────────────────────────────────────
+
+/// Static methods for language detection and tree-sitter resource lookup.
+///
+/// There is no runtime state — all data is compiled into the binary via
+/// `include_str!` and the `tree-sitter-*` crate constants.
 pub struct LanguageRegistry;
 
-impl LanguageRegistry {
-    pub fn detect(
-        path: Option<&Path>,
-        first_line: Option<&str>,
-        override_lang: Option<LanguageId>,
-    ) -> LanguageId {
-        if let Some(lang) = override_lang {
-            return lang;
-        }
-        if let Some(line) = first_line {
-            if let Some(lang) = detect_shebang(line) {
-                return lang;
-            }
-        }
-        if let Some(path) = path {
-            if let Some(name) = path.file_name().and_then(|s| s.to_str()) {
-                let lower = name.to_lowercase();
-                if lower == "cargo.toml" {
-                    return LanguageId::Toml;
-                }
-                if lower == "makefile" {
-                    return LanguageId::Bash;
-                }
-            }
-            if let Some(ext) = path.extension().and_then(|s| s.to_str()) {
-                let ext = ext.to_lowercase();
-                return match ext.as_str() {
-                    "rs" => LanguageId::Rust,
-                    "py" => LanguageId::Python,
-                    "js" | "mjs" | "cjs" | "jsx" => LanguageId::JavaScript,
-                    "ts" | "tsx" => LanguageId::TypeScript,
-                    "md" | "markdown" => LanguageId::Markdown,
-                    "html" | "htm" => LanguageId::Html,
-                    "css" | "scss" | "sass" => LanguageId::Css,
-                    "json" | "jsonc" => LanguageId::Json,
-                    "toml" => LanguageId::Toml,
-                    "yml" | "yaml" => LanguageId::Yaml,
-                    "sh" | "bash" | "zsh" | "fish" => LanguageId::Bash,
-                    _ => LanguageId::PlainText,
-                };
-            }
-        }
-        LanguageId::PlainText
-    }
+// ── Detection ──────────────────────────────────────────────────────────────
 
-    pub fn tree_sitter_language(id: LanguageId) -> Option<tree_sitter::Language> {
-        match id {
+impl LanguageRegistry {
+    /// Detect the buffer language from path, shebang, or an explicit
+    /// override.  Priority: override > shebang > path > `PlainText`.
+    pub fn detect(
+        file_path: Option<&Path>,
+        first_line: Option<&str>,
+        explicit_override: Option<LanguageId>,
+    ) -> LanguageId {
+        if let Some(language) = explicit_override {
+            return language;
+        }
+        if let Some(language) = first_line.and_then(detect_shebang) {
+            return language;
+        }
+        file_path
+            .map(detect_from_path)
+            .unwrap_or(LanguageId::PlainText)
+    }
+}
+
+// ── Grammar and query lookup ───────────────────────────────────────────────
+
+impl LanguageRegistry {
+    /// Return the tree-sitter [`Language`](tree_sitter::Language) for a
+    /// known language, or `None` for `PlainText`.
+    pub fn tree_sitter_language(language_id: LanguageId) -> Option<tree_sitter::Language> {
+        match language_id {
             LanguageId::Rust => Some(tree_sitter_rust::language()),
             LanguageId::Python => Some(tree_sitter_python::language()),
             LanguageId::JavaScript => Some(tree_sitter_javascript::language()),
@@ -96,8 +130,9 @@ impl LanguageRegistry {
         }
     }
 
-    pub fn highlights_query(id: LanguageId) -> Option<&'static str> {
-        match id {
+    /// Return the SCM highlights query source for a known language.
+    pub fn highlights_query(language_id: LanguageId) -> Option<&'static str> {
+        match language_id {
             LanguageId::Rust => Some(include_str!("../queries/rust/highlights.scm")),
             LanguageId::Python => Some(tree_sitter_python::HIGHLIGHT_QUERY),
             LanguageId::JavaScript => Some(tree_sitter_javascript::HIGHLIGHT_QUERY),
@@ -113,21 +148,24 @@ impl LanguageRegistry {
         }
     }
 
-    pub fn injections_query(id: LanguageId) -> &'static str {
-        match id {
+    /// Return the SCM injections query (for embedded language blocks).
+    pub fn injections_query(language_id: LanguageId) -> &'static str {
+        match language_id {
             LanguageId::Markdown => include_str!("../queries/markdown/injections.scm"),
             LanguageId::Html => include_str!("../queries/html/injections.scm"),
             _ => "",
         }
     }
 
-    pub fn from_injection_name(name: &str) -> Option<LanguageId> {
-        let lower = name
-            .split(|c: char| !c.is_alphanumeric() && c != '-' && c != '_')
+    /// Resolve an injection language name (from a tree-sitter grammar)
+    /// back to a [`LanguageId`].
+    pub fn from_injection_name(injection_name: &str) -> Option<LanguageId> {
+        let token = injection_name
+            .split(|ch: char| !ch.is_alphanumeric() && ch != '-' && ch != '_')
             .next()
-            .unwrap_or(name)
-            .to_lowercase();
-        match lower.as_str() {
+            .unwrap_or(injection_name);
+
+        match token.to_lowercase().as_str() {
             "rust" => Some(LanguageId::Rust),
             "python" => Some(LanguageId::Python),
             "javascript" | "js" => Some(LanguageId::JavaScript),
@@ -144,20 +182,59 @@ impl LanguageRegistry {
     }
 }
 
-fn detect_shebang(line: &str) -> Option<LanguageId> {
-    let line = line.trim();
-    if !line.starts_with("#!") {
+// ── Path-based detection ───────────────────────────────────────────────────
+
+/// Match a file path against known filenames and extensions.
+fn detect_from_path(file_path: &Path) -> LanguageId {
+    // Check well-known filenames first (e.g. `Cargo.toml`, `Makefile`).
+    if let Some(filename) = file_path.file_name().and_then(|os| os.to_str()) {
+        match filename.to_lowercase().as_str() {
+            "cargo.toml" => return LanguageId::Toml,
+            "makefile" => return LanguageId::Bash,
+            _ => {}
+        }
+    }
+
+    // Fall back to extension matching.
+    let extension = match file_path.extension().and_then(|os| os.to_str()) {
+        Some(ext) => ext.to_lowercase(),
+        None => return LanguageId::PlainText,
+    };
+
+    match extension.as_str() {
+        "rs" => LanguageId::Rust,
+        "py" => LanguageId::Python,
+        "js" | "mjs" | "cjs" | "jsx" => LanguageId::JavaScript,
+        "ts" | "tsx" => LanguageId::TypeScript,
+        "md" | "markdown" => LanguageId::Markdown,
+        "html" | "htm" => LanguageId::Html,
+        "css" | "scss" | "sass" => LanguageId::Css,
+        "json" | "jsonc" => LanguageId::Json,
+        "toml" => LanguageId::Toml,
+        "yml" | "yaml" => LanguageId::Yaml,
+        "sh" | "bash" | "zsh" | "fish" => LanguageId::Bash,
+        _ => LanguageId::PlainText,
+    }
+}
+
+// ── Shebang detection ──────────────────────────────────────────────────────
+
+/// Inspect the first line of a file for a `#!` shebang and map the
+/// interpreter name to a [`LanguageId`].
+fn detect_shebang(first_line: &str) -> Option<LanguageId> {
+    let shebang_line = first_line.trim();
+    if !shebang_line.starts_with("#!") {
         return None;
     }
-    let lower = line.to_lowercase();
-    if lower.contains("python") {
-        return Some(LanguageId::Python);
+    let normalised = shebang_line.to_lowercase();
+    if normalised.contains("python") {
+        Some(LanguageId::Python)
+    } else if normalised.contains("node") || normalised.contains("deno") {
+        Some(LanguageId::JavaScript)
+    } else if normalised.contains("bash") || normalised.contains("sh") || normalised.contains("zsh")
+    {
+        Some(LanguageId::Bash)
+    } else {
+        None
     }
-    if lower.contains("node") || lower.contains("deno") {
-        return Some(LanguageId::JavaScript);
-    }
-    if lower.contains("bash") || lower.contains("sh") || lower.contains("zsh") {
-        return Some(LanguageId::Bash);
-    }
-    None
 }

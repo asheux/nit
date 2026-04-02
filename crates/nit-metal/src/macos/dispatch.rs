@@ -4,8 +4,8 @@
 //! of prepared and pending batches across FSM, CA, and TM payloads.
 
 use crate::{
-    BatchEvalConfig, BatchPayload, CaBatch, FsmBatch, MatchPair, ScorePair, TmBatch,
-    TmHaltingPair, TmTransitionPacked,
+    BatchEvalConfig, BatchPayload, CaBatch, FsmBatch, MatchPair, ScorePair, TmBatch, TmHaltingPair,
+    TmTransitionPacked,
 };
 use metal::{MTLResourceOptions, MTLSize};
 use std::ffi::c_void;
@@ -177,7 +177,6 @@ impl PreparedPayload {
             BatchPayload::Tm(tm) => Self::upload_tm(device, tm),
         }
     }
-
 }
 
 /// A fully prepared batch: shader selected, payload uploaded to GPU.
@@ -462,9 +461,7 @@ fn dispatch_prepared(
 
 /// Evaluates a full batch request synchronously, returning scores or `None`
 /// if Metal is unavailable.
-pub fn try_evaluate_batch(
-    request: &crate::BatchRequest,
-) -> Result<Option<Vec<ScorePair>>, String> {
+pub fn try_evaluate_batch(request: &crate::BatchRequest) -> Result<Option<Vec<ScorePair>>, String> {
     let eval_config = BatchEvalConfig {
         rounds: request.common.rounds,
         payoff: request.common.payoff,

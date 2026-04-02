@@ -1,7 +1,19 @@
+//! Highlight output types and span-to-line distribution.
+//!
+//! Data flow: tree-sitter produces [`HighlightSpan`]s covering byte ranges
+//! → [`sort_spans`] orders them → [`distribute_spans_to_lines`] splits them
+//! into per-line [`LineSegment`]s → [`map_line_segments_to_chars`] converts
+//! byte offsets to character indices for the renderer.
+
 use std::cmp::Ordering;
 
 use crate::registry::LanguageId;
 
+// ── Highlight groups ────────────────────────────────────────────────────────
+
+/// Semantic highlight category mapped to theme colours by the renderer.
+///
+/// Variant order is stable — new entries are appended at the end.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub enum HighlightGroup {
     Normal,
@@ -37,12 +49,16 @@ pub enum HighlightGroup {
     DiffRemove,
 }
 
+// ── Engine identification ───────────────────────────────────────────────────
+
+/// Identifies which highlighting backend produced the result.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum EngineKind {
     TreeSitter,
     Plain,
 }
 
+/// Current operational state of highlighting for a buffer.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SyntaxStatus {
     Ok(EngineKind),
@@ -51,16 +67,20 @@ pub enum SyntaxStatus {
 }
 
 impl SyntaxStatus {
+    /// Human-readable status-bar label.
     pub fn label(&self) -> String {
         match self {
-            SyntaxStatus::Ok(EngineKind::TreeSitter) => "TS(ok)".to_string(),
-            SyntaxStatus::Ok(EngineKind::Plain) => "Plain(ok)".to_string(),
-            SyntaxStatus::Disabled => "Off".to_string(),
-            SyntaxStatus::Error(_) => "TS(error)".to_string(),
+            Self::Ok(EngineKind::TreeSitter) => "TS(ok)".to_string(),
+            Self::Ok(EngineKind::Plain) => "Plain(ok)".to_string(),
+            Self::Disabled => "Off".to_string(),
+            Self::Error(_) => "TS(error)".to_string(),
         }
     }
 }
 
+// ── Span and segment types ──────────────────────────────────────────────────
+
+/// Byte-range highlight span before per-line splitting.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HighlightSpan {
     pub start_byte: usize,
@@ -70,6 +90,7 @@ pub struct HighlightSpan {
     pub modifiers: u8,
 }
 
+/// Byte-range segment relative to a single source line.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct LineSegment {
     pub start: usize,
@@ -77,6 +98,7 @@ pub struct LineSegment {
     pub group: HighlightGroup,
 }
 
+/// Character-index segment produced by [`map_line_segments_to_chars`].
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct MappedLineSegment {
     pub start: usize,
@@ -84,6 +106,7 @@ pub struct MappedLineSegment {
     pub group: HighlightGroup,
 }
 
+/// Error when a segment boundary falls inside a multi-byte character.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SegmentMapError {
     pub start: usize,
@@ -91,6 +114,9 @@ pub struct SegmentMapError {
     pub line_len: usize,
 }
 
+// ── Snapshot ────────────────────────────────────────────────────────────────
+
+/// Immutable, versioned output of a highlight pass for one buffer.
 #[derive(Clone, Debug)]
 pub struct HighlightSnapshot {
     pub buffer_id: usize,
@@ -102,12 +128,12 @@ pub struct HighlightSnapshot {
     pub line_start_bytes: Vec<usize>,
     pub line_hashes: Vec<u64>,
     pub per_line: Vec<Vec<LineSegment>>,
-    /// For viewport-scoped highlights: `Some((start_line, end_line))` indicates
-    /// only that range has spans. `None` means the full file is highlighted (eager mode).
+    /// `Some((start, end))` for viewport-scoped; `None` for full-file.
     pub highlighted_range: Option<(usize, usize)>,
 }
 
 impl HighlightSnapshot {
+    /// Construct a snapshot with zero highlight spans (plain-text fallback).
     pub fn plain(
         buffer_id: usize,
         version: u64,
@@ -116,23 +142,26 @@ impl HighlightSnapshot {
         status: SyntaxStatus,
         text: &str,
     ) -> Self {
-        let line_start_bytes = compute_line_starts(text);
-        let line_hashes = compute_line_hashes(text, &line_start_bytes);
-        let per_line = vec![Vec::new(); line_start_bytes.len().saturating_sub(1)];
-        HighlightSnapshot {
+        let offsets = compute_line_starts(text);
+        let hashes = compute_line_hashes(text, &offsets);
+        let line_count = offsets.len().saturating_sub(1);
+
+        Self {
             buffer_id,
             version,
             language,
             engine,
             status,
             duration_ms: 0,
-            line_start_bytes,
-            line_hashes,
-            per_line,
+            line_start_bytes: offsets,
+            line_hashes: hashes,
+            per_line: vec![Vec::new(); line_count],
             highlighted_range: None,
         }
     }
 
+    /// Build a snapshot by sorting raw spans and distributing them across
+    /// line boundaries into per-line segment lists.
     #[allow(clippy::too_many_arguments)]
     pub fn from_spans(
         buffer_id: usize,
@@ -142,109 +171,112 @@ impl HighlightSnapshot {
         status: SyntaxStatus,
         text: &str,
         mut spans: Vec<HighlightSpan>,
-        max_spans_per_line: usize,
+        max_per_line: usize,
     ) -> Self {
-        // Most engines already emit spans in source order; avoid an O(n log n) sort when possible.
-        // Required order: start_byte ASC, priority DESC for ties.
-        let mut needs_sort = false;
-        for pair in spans.windows(2) {
-            let a = &pair[0];
-            let b = &pair[1];
-            match a.start_byte.cmp(&b.start_byte) {
-                Ordering::Less => {}
-                Ordering::Equal => {
-                    if a.priority < b.priority {
-                        needs_sort = true;
-                        break;
-                    }
-                }
-                Ordering::Greater => {
-                    needs_sort = true;
-                    break;
-                }
-            }
-        }
-        if needs_sort {
-            spans.sort_by(|a, b| match a.start_byte.cmp(&b.start_byte) {
-                Ordering::Equal => b.priority.cmp(&a.priority),
-                other => other,
-            });
-        }
-        let line_start_bytes = compute_line_starts(text);
-        let mut per_line = vec![Vec::new(); line_start_bytes.len().saturating_sub(1)];
+        sort_spans(&mut spans);
 
-        for span in spans {
-            if span.end_byte <= span.start_byte {
-                continue;
-            }
-            let start_line = find_line(&line_start_bytes, span.start_byte);
-            let end_line = find_line(&line_start_bytes, span.end_byte);
-            for line in start_line..=end_line {
-                if line + 1 >= line_start_bytes.len() {
-                    continue;
-                }
-                if max_spans_per_line > 0 && per_line[line].len() >= max_spans_per_line {
-                    continue;
-                }
-                let line_start = line_start_bytes[line];
-                let line_end = line_start_bytes[line + 1];
-                let seg_start = span.start_byte.max(line_start) - line_start;
-                let seg_end = span.end_byte.min(line_end) - line_start;
-                if seg_start < seg_end {
-                    per_line[line].push(LineSegment {
-                        start: seg_start,
-                        end: seg_end,
-                        group: span.group,
-                    });
-                }
-            }
-        }
+        let offsets = compute_line_starts(text);
+        let line_count = offsets.len().saturating_sub(1);
+        let mut lines = vec![Vec::new(); line_count];
 
-        let line_hashes = compute_line_hashes(text, &line_start_bytes);
-        HighlightSnapshot {
+        distribute_spans_to_lines(&spans, &offsets, &mut lines, max_per_line, |_| true);
+
+        let hashes = compute_line_hashes(text, &offsets);
+
+        Self {
             buffer_id,
             version,
             language,
             engine,
             status,
             duration_ms: 0,
-            line_start_bytes,
-            line_hashes,
-            per_line,
+            line_start_bytes: offsets,
+            line_hashes: hashes,
+            per_line: lines,
             highlighted_range: None,
         }
     }
 }
 
-pub fn hash_line_bytes(bytes: &[u8]) -> u64 {
-    const OFFSET: u64 = 14695981039346656037;
+// ── FNV-1a line hashing ─────────────────────────────────────────────────────
+
+/// Compute an FNV-1a hash of a source line, stripping trailing `\n` and
+/// ignoring `\r` so that hashes are line-ending-agnostic.
+pub fn hash_line_bytes(raw: &[u8]) -> u64 {
+    const BASIS: u64 = 14695981039346656037;
     const PRIME: u64 = 1099511628211;
-    let mut end = bytes.len();
-    if end > 0 && bytes[end - 1] == b'\n' {
-        end = end.saturating_sub(1);
-    }
-    let mut hash = OFFSET;
-    for &b in &bytes[..end] {
-        if b == b'\r' {
-            continue;
+
+    let end = if raw.last() == Some(&b'\n') {
+        raw.len() - 1
+    } else {
+        raw.len()
+    };
+
+    raw[..end]
+        .iter()
+        .filter(|&&b| b != b'\r')
+        .fold(BASIS, |hash, &b| (hash ^ b as u64).wrapping_mul(PRIME))
+}
+
+/// Recompute [`hash_line_bytes`] for a set of lines, writing results
+/// directly into `hashes`. Safely skips out-of-range indices.
+pub(crate) fn rehash_lines(
+    text: &[u8],
+    line_starts: &[usize],
+    hashes: &mut [u64],
+    lines: impl Iterator<Item = usize>,
+) {
+    for i in lines {
+        if i + 1 < line_starts.len() && i < hashes.len() {
+            hashes[i] = hash_line_bytes(&text[line_starts[i]..line_starts[i + 1]]);
         }
-        hash ^= b as u64;
-        hash = hash.wrapping_mul(PRIME);
     }
-    hash
 }
 
-fn compute_line_hashes(text: &str, line_starts: &[usize]) -> Vec<u64> {
+/// Hash every line in the buffer using [`hash_line_bytes`].
+fn compute_line_hashes(text: &str, offsets: &[usize]) -> Vec<u64> {
     let bytes = text.as_bytes();
-    let mut hashes = Vec::with_capacity(line_starts.len().saturating_sub(1));
-    for idx in 0..line_starts.len().saturating_sub(1) {
-        let start = line_starts[idx];
-        let end = line_starts[idx + 1];
-        hashes.push(hash_line_bytes(&bytes[start..end]));
-    }
-    hashes
+    let line_count = offsets.len().saturating_sub(1);
+
+    (0..line_count)
+        .map(|i| hash_line_bytes(&bytes[offsets[i]..offsets[i + 1]]))
+        .collect()
 }
 
+// ── Byte→char segment mapping ───────────────────────────────────────────────
+
+/// Map a single byte-offset segment to character indices via binary search.
+fn resolve_segment_chars(
+    seg: &LineSegment,
+    byte_len: usize,
+    boundaries: &[usize],
+) -> Result<Option<MappedLineSegment>, SegmentMapError> {
+    let start = seg.start;
+    let end = seg.end.min(byte_len);
+
+    if start >= byte_len || start >= end {
+        return Ok(None);
+    }
+
+    let err = || SegmentMapError {
+        start,
+        end,
+        line_len: byte_len,
+    };
+
+    let char_start = boundaries.binary_search(&start).map_err(|_| err())?;
+    let char_end = boundaries.binary_search(&end).map_err(|_| err())?;
+
+    Ok((char_start < char_end).then_some(MappedLineSegment {
+        start: char_start,
+        end: char_end,
+        group: seg.group,
+    }))
+}
+
+/// Convert byte-offset [`LineSegment`]s to character-index
+/// [`MappedLineSegment`]s. Fails if any boundary falls inside a multi-byte
+/// character.
 pub fn map_line_segments_to_chars(
     line: &str,
     segments: &[LineSegment],
@@ -252,66 +284,125 @@ pub fn map_line_segments_to_chars(
     if segments.is_empty() || line.is_empty() {
         return Ok(Vec::new());
     }
-    let line_len = line.len();
-    let mut boundaries = Vec::with_capacity(line.chars().count().saturating_add(1));
-    for (idx, _) in line.char_indices() {
-        boundaries.push(idx);
-    }
-    boundaries.push(line_len);
 
-    let mut mapped = Vec::with_capacity(segments.len());
+    let byte_len = line.len();
+    let mut boundaries: Vec<usize> = line.char_indices().map(|(pos, _)| pos).collect();
+    boundaries.push(byte_len);
+
+    let mut result = Vec::with_capacity(segments.len());
     for seg in segments {
-        let start = seg.start;
-        let mut end = seg.end;
-        if start >= line_len {
-            continue;
+        if let Some(mapped) = resolve_segment_chars(seg, byte_len, &boundaries)? {
+            result.push(mapped);
         }
-        if end > line_len {
-            end = line_len;
+    }
+    Ok(result)
+}
+
+// ── Span sorting ────────────────────────────────────────────────────────────
+
+/// Sort highlight spans in source order: `start_byte` ascending, `priority`
+/// descending for ties. Skips the sort when already ordered.
+pub(crate) fn sort_spans(spans: &mut [HighlightSpan]) {
+    let needs_sort = spans.windows(2).any(|pair| {
+        let (a, b) = (&pair[0], &pair[1]);
+        match a.start_byte.cmp(&b.start_byte) {
+            Ordering::Greater => true,
+            Ordering::Equal => a.priority < b.priority,
+            Ordering::Less => false,
         }
-        if start >= end {
-            continue;
-        }
-        let start_idx = boundaries
-            .binary_search(&start)
-            .map_err(|_| SegmentMapError {
-                start,
-                end,
-                line_len,
-            })?;
-        let end_idx = boundaries
-            .binary_search(&end)
-            .map_err(|_| SegmentMapError {
-                start,
-                end,
-                line_len,
-            })?;
-        if start_idx >= end_idx {
-            continue;
-        }
-        mapped.push(MappedLineSegment {
-            start: start_idx,
-            end: end_idx,
-            group: seg.group,
+    });
+
+    if needs_sort {
+        spans.sort_by(|a, b| match a.start_byte.cmp(&b.start_byte) {
+            Ordering::Equal => b.priority.cmp(&a.priority),
+            ord => ord,
         });
     }
-    Ok(mapped)
 }
 
-fn compute_line_starts(text: &str) -> Vec<usize> {
-    let mut starts = vec![0];
-    for (idx, b) in text.bytes().enumerate() {
-        if b == b'\n' {
-            starts.push(idx + 1);
+// ── Span→line distribution ──────────────────────────────────────────────────
+
+/// Distribute pre-sorted [`HighlightSpan`]s into per-line segment lists.
+///
+/// Only lines where `predicate(line_index)` returns `true` receive segments.
+pub(crate) fn distribute_spans_to_lines(
+    spans: &[HighlightSpan],
+    offsets: &[usize],
+    segments: &mut [Vec<LineSegment>],
+    max_per_line: usize,
+    predicate: impl Fn(usize) -> bool,
+) {
+    for span in spans {
+        if span.end_byte <= span.start_byte {
+            continue;
+        }
+        assign_span_to_lines(span, offsets, segments, max_per_line, &predicate);
+    }
+}
+
+/// Clamp a single highlight span to each intersecting line and append the
+/// resulting line-relative segment.
+fn assign_span_to_lines(
+    span: &HighlightSpan,
+    offsets: &[usize],
+    segments: &mut [Vec<LineSegment>],
+    max_per_line: usize,
+    predicate: &impl Fn(usize) -> bool,
+) {
+    let first = find_line(offsets, span.start_byte);
+    let last = find_line(offsets, span.end_byte);
+
+    for line in first..=last {
+        if line + 1 >= offsets.len() || line >= segments.len() {
+            break;
+        }
+        if !predicate(line) {
+            continue;
+        }
+        if max_per_line > 0 && segments[line].len() >= max_per_line {
+            continue;
+        }
+
+        let line_start = offsets[line];
+        let line_end = offsets[line + 1];
+        let seg_start = span.start_byte.max(line_start) - line_start;
+        let seg_end = span.end_byte.min(line_end) - line_start;
+
+        if seg_start < seg_end {
+            segments[line].push(LineSegment {
+                start: seg_start,
+                end: seg_end,
+                group: span.group,
+            });
         }
     }
-    if *starts.last().unwrap_or(&0) != text.len() {
-        starts.push(text.len());
-    }
-    starts
 }
 
-fn find_line(starts: &[usize], byte: usize) -> usize {
-    let idx = starts.partition_point(|&s| s <= byte);
-    idx.saturating_sub(1)
+// ── Line offset index ───────────────────────────────────────────────────────
+
+/// Build a sorted table of byte offsets where each source line begins.
+/// The final entry equals `text.len()`.
+pub(crate) fn compute_line_starts(text: &str) -> Vec<usize> {
+    let mut offsets = vec![0usize];
+
+    offsets.extend(
+        text.bytes()
+            .enumerate()
+            .filter_map(|(i, b)| (b == b'\n').then_some(i + 1)),
+    );
+
+    let last = *offsets.last().unwrap_or(&0);
+    if last != text.len() {
+        offsets.push(text.len());
+    }
+
+    offsets
+}
+
+/// Binary-search the line offset table to find which line contains
+/// `target_byte`. Returns the zero-based line index.
+pub(crate) fn find_line(offsets: &[usize], target_byte: usize) -> usize {
+    offsets
+        .partition_point(|&boundary| boundary <= target_byte)
+        .saturating_sub(1)
 }

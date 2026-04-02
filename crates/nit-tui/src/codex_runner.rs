@@ -1251,12 +1251,14 @@ fn handle_codex_mcp_notification(
     // agent modified which file — no filesystem-level guessing.
     if kind == "item_completed" || kind == "item.completed" {
         if let Some(item) = msg.get("item").or_else(|| msg.get("info")) {
-            extract_file_write_paths(item, cwd).into_iter().for_each(|path| {
-                let _ = event_tx.send(AgentBusEvent::FileWrite {
-                    agent_id: agent_id.to_string(),
-                    path,
+            extract_file_write_paths(item, cwd)
+                .into_iter()
+                .for_each(|path| {
+                    let _ = event_tx.send(AgentBusEvent::FileWrite {
+                        agent_id: agent_id.to_string(),
+                        path,
+                    });
                 });
-            });
         }
     }
 
@@ -1274,8 +1276,14 @@ fn extract_file_write_paths(
     let mut seen = std::collections::HashSet::new();
 
     let path_keys = [
-        "file_path", "path", "file", "filename", "file_name",
-        "target_file", "old_str_file", "new_file_path",
+        "file_path",
+        "path",
+        "file",
+        "filename",
+        "file_name",
+        "target_file",
+        "old_str_file",
+        "new_file_path",
     ];
 
     // Recursively search for path-like string values in the JSON tree.

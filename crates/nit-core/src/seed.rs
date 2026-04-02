@@ -685,11 +685,7 @@ struct SemanticToken {
 }
 
 /// Extract a whitespace-free sequence of semantic tokens with AST depth.
-fn extract_semantic_tokens(
-    text: &str,
-    tree: &Tree,
-    lang: SeedLanguage,
-) -> Vec<SemanticToken> {
+fn extract_semantic_tokens(text: &str, tree: &Tree, lang: SeedLanguage) -> Vec<SemanticToken> {
     let groups = seed_highlight_bytes(text, lang, tree);
 
     // Compute per-byte AST depth.
@@ -739,8 +735,15 @@ fn ast_depth_per_byte(tree: &Tree, byte_count: usize) -> Vec<u8> {
             stack.push((child, depth + 1));
         }
     }
-    let scale = if max_depth > 0 { 255.0 / max_depth as f32 } else { 0.0 };
-    depths.iter().map(|&d| (d as f32 * scale).round().min(255.0) as u8).collect()
+    let scale = if max_depth > 0 {
+        255.0 / max_depth as f32
+    } else {
+        0.0
+    };
+    depths
+        .iter()
+        .map(|&d| (d as f32 * scale).round().min(255.0) as u8)
+        .collect()
 }
 
 struct StructuralEncoder;
@@ -825,12 +828,8 @@ fn extract_byte_tokens(bytes: &[u8]) -> Vec<SemanticToken> {
             b'a'..=b'z' | b'_' => ROLE_VARIABLE,
             b'A'..=b'Z' => ROLE_TYPE,
             b'0'..=b'9' => ROLE_STRING,
-            b'(' | b')' | b'{' | b'}' | b'[' | b']' | b';' | b':' | b',' | b'.' => {
-                ROLE_PUNCTUATION
-            }
-            b'+' | b'-' | b'*' | b'/' | b'=' | b'<' | b'>' | b'!' | b'&' | b'|' => {
-                ROLE_OPERATOR
-            }
+            b'(' | b')' | b'{' | b'}' | b'[' | b']' | b';' | b':' | b',' | b'.' => ROLE_PUNCTUATION,
+            b'+' | b'-' | b'*' | b'/' | b'=' | b'<' | b'>' | b'!' | b'&' | b'|' => ROLE_OPERATOR,
             b'"' | b'\'' | b'`' => ROLE_STRING,
             _ => ROLE_PUNCTUATION,
         };
@@ -922,8 +921,7 @@ fn role_ngram_uniqueness(tokens: &[SemanticToken], grid_cells: usize) -> Vec<f32
             let lookback = search.min(i + 1 - ngram);
             for j in (i.saturating_sub(lookback + ngram)..i.saturating_sub(ngram)).rev() {
                 if j + ngram <= tokens.len() {
-                    let candidate: Vec<u8> =
-                        tokens[j..j + ngram].iter().map(|t| t.role).collect();
+                    let candidate: Vec<u8> = tokens[j..j + ngram].iter().map(|t| t.role).collect();
                     if candidate == gram {
                         let dist = i - j;
                         per_token[i] = (dist as f32 / search as f32 * 255.0).min(255.0);
@@ -1764,7 +1762,6 @@ fn compute_line_starts(text: &str) -> Vec<usize> {
     }
     starts
 }
-
 
 /// Normalize grid values to span the full 0-255 range so that the density
 /// threshold works correctly regardless of the encoder's raw value distribution.

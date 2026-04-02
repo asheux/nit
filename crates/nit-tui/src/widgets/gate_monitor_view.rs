@@ -1,6 +1,8 @@
 use nit_core::genome_report::GenomeReport;
 use nit_core::seed::SeedEncoderId;
-use nit_core::{Action, AppKind, AppState, GamesStatus, GateMonitorSubView, PaneId, UiSelectionPane};
+use nit_core::{
+    Action, AppKind, AppState, GamesStatus, GateMonitorSubView, PaneId, UiSelectionPane,
+};
 use ratatui::{
     style::{Modifier, Style},
     text::{Line, Span},
@@ -60,8 +62,7 @@ pub fn render(frame: &mut Frame, area: ratatui::layout::Rect, state: &AppState, 
     let title_prefix = match genome_report {
         Some(report) => format!(
             " CODE STRUCTURAL QUALITY [{}x{}] ",
-            report.grid_size,
-            report.grid_size,
+            report.grid_size, report.grid_size,
         ),
         None => " CODE STRUCTURAL QUALITY ".to_string(),
     };
@@ -73,9 +74,7 @@ pub fn render(frame: &mut Frame, area: ratatui::layout::Rect, state: &AppState, 
         .fg(theme.background)
         .bg(title_color)
         .add_modifier(Modifier::BOLD);
-    let btn_inactive = Style::default()
-        .fg(title_color)
-        .add_modifier(Modifier::DIM);
+    let btn_inactive = Style::default().fg(title_color).add_modifier(Modifier::DIM);
     let sep_style = Style::default().fg(title_color);
 
     let is_stats = state.gate_monitor_sub_view == GateMonitorSubView::Stats;
@@ -1110,11 +1109,7 @@ fn syntax_style(status: &str, theme: &Theme, dim_style: Style) -> Style {
 // FILESCORES sub-view: real-time file quality table
 // ---------------------------------------------------------------------------
 
-fn build_lines_filescores(
-    state: &AppState,
-    theme: &Theme,
-    width: usize,
-) -> Vec<Line<'static>> {
+fn build_lines_filescores(state: &AppState, theme: &Theme, width: usize) -> Vec<Line<'static>> {
     let label_style = Style::default().fg(theme.title).add_modifier(Modifier::DIM);
     let dim_style = Style::default()
         .fg(theme.border)
@@ -1124,6 +1119,18 @@ fn build_lines_filescores(
         .add_modifier(Modifier::BOLD);
 
     let mut lines: Vec<Line<'static>> = Vec::new();
+
+    // Helper: check if a path contains a gitignored directory component.
+    let is_gitignored = |path: &std::path::Path| -> bool {
+        path.components().any(|c| {
+            if let std::path::Component::Normal(s) = c {
+                let s = s.to_string_lossy();
+                state.gitignored_dirs.iter().any(|g| g == s.as_ref())
+            } else {
+                false
+            }
+        })
+    };
 
     // Collect all files with scores from three sources, deduplicating by path.
     // Priority: shadow evals (most current) > turn-modified reports > all genome reports.
@@ -1149,6 +1156,9 @@ fn build_lines_filescores(
 
     // 1. Shadow evals — live during agent turns.
     for (path, eval) in &state.genome_shadow_evals {
+        if is_gitignored(path) {
+            continue;
+        }
         let name = relative_file_path(path, &state.workspace_root);
         if !seen.insert(name.clone()) {
             continue;
@@ -1167,6 +1177,9 @@ fn build_lines_filescores(
     // 2. Turn-modified files with genome reports (flattened across all agents).
     for paths in state.genome_turn_modified.values() {
         for path in paths {
+            if is_gitignored(path) {
+                continue;
+            }
             let name = relative_file_path(path, &state.workspace_root);
             if !seen.insert(name.clone()) {
                 continue;
@@ -1187,6 +1200,9 @@ fn build_lines_filescores(
 
     // 3. All persisted genome reports — these persist across turns.
     for (path, report) in &state.genome_reports {
+        if is_gitignored(path) {
+            continue;
+        }
         let name = relative_file_path(path, &state.workspace_root);
         if !seen.insert(name.clone()) {
             continue;
@@ -1196,7 +1212,7 @@ fn build_lines_filescores(
             tier_ord: report.tier as u8,
             tier: report.tier.numeral().to_string(),
             quality: quality_with_reason(report),
-            consistency: format!("{:.2}", report.cross_encoder_consistency),
+            consistency: cons_with_target(report.tier, report.cross_encoder_consistency),
             delta: compute_delta(path, report.tier).to_string(),
             is_shadow: false,
         });
@@ -1240,7 +1256,10 @@ fn build_lines_filescores(
 
     // Table header.
     lines.push(Line::from(vec![
-        Span::styled(format!(" {:<width$}", "FILE", width = name_w - 1), header_style),
+        Span::styled(
+            format!(" {:<width$}", "FILE", width = name_w - 1),
+            header_style,
+        ),
         Span::styled(format!("{:>tier_w$} ", "TIER"), header_style),
         Span::styled(format!("{:<quality_w$}", "QUALITY"), header_style),
         Span::styled(format!("{:>cons_w$} ", "CONS/TARG"), header_style),
@@ -1329,11 +1348,11 @@ fn quality_with_reason(report: &GenomeReport) -> String {
 /// Format consistency as "actual/target" so the operator sees the gap at a glance.
 fn cons_with_target(tier: nit_core::GenomeTier, consistency: f32) -> String {
     let target = match tier {
-        nit_core::GenomeTier::Replicator => 0.85,
-        nit_core::GenomeTier::Methuselah => 0.70,
-        nit_core::GenomeTier::Spaceship => 0.50,
-        nit_core::GenomeTier::Oscillator => 0.30,
-        nit_core::GenomeTier::StillLife => 0.30, // show minimum target
+        nit_core::GenomeTier::Replicator => 0.80,
+        nit_core::GenomeTier::Methuselah => 0.60,
+        nit_core::GenomeTier::Spaceship => 0.40,
+        nit_core::GenomeTier::Oscillator => 0.20,
+        nit_core::GenomeTier::StillLife => 0.20,
     };
     format!("{consistency:.2}/{target:.2}")
 }
@@ -1346,10 +1365,10 @@ fn shadow_quality_with_reason(
 ) -> String {
     // Check if tier is high enough but consistency drags it to Failing.
     let reason = match tier {
-        nit_core::GenomeTier::Replicator if consistency < 0.85 => Some("low cons"),
-        nit_core::GenomeTier::Methuselah if consistency < 0.70 => Some("low cons"),
-        nit_core::GenomeTier::Spaceship if consistency < 0.50 => Some("low cons"),
-        nit_core::GenomeTier::Oscillator if consistency < 0.30 => Some("low cons"),
+        nit_core::GenomeTier::Replicator if consistency < 0.80 => Some("low cons"),
+        nit_core::GenomeTier::Methuselah if consistency < 0.60 => Some("low cons"),
+        nit_core::GenomeTier::Spaceship if consistency < 0.40 => Some("low cons"),
+        nit_core::GenomeTier::Oscillator if consistency < 0.20 => Some("low cons"),
         nit_core::GenomeTier::StillLife => Some("low tier"),
         _ => None,
     };

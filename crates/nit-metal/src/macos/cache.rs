@@ -202,10 +202,7 @@ pub(crate) fn snapshot_policy_cache_from_dir(
 }
 
 /// Deletes a single cache entry, validating it lives under the root.
-pub(crate) fn clear_policy_cache_entry_in_root(
-    root: &Path,
-    target: &Path,
-) -> Result<bool, String> {
+pub(crate) fn clear_policy_cache_entry_in_root(root: &Path, target: &Path) -> Result<bool, String> {
     if !target.starts_with(root) {
         return Err(format!(
             "refusing to delete Metal cache entry outside {}",

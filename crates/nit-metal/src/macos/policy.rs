@@ -44,8 +44,7 @@ fn payload_static_bytes(payload: &BatchPayload) -> usize {
         BatchPayload::Ca(automaton) => automaton.rule_tables.len() * u32_stride,
         BatchPayload::Tm(machine) => {
             let packed_stride = size_of::<TmTransitionPacked>();
-            machine.start_states.len() * u32_stride
-                + machine.transitions.len() * packed_stride
+            machine.start_states.len() * u32_stride + machine.transitions.len() * packed_stride
         }
     }
 }
@@ -336,7 +335,9 @@ fn select_fastest_policy(
     let winner = timed
         .into_iter()
         .min_by(|(_, elapsed_a), (_, elapsed_b)| {
-            elapsed_a.partial_cmp(elapsed_b).unwrap_or(std::cmp::Ordering::Equal)
+            elapsed_a
+                .partial_cmp(elapsed_b)
+                .unwrap_or(std::cmp::Ordering::Equal)
         })
         .map(|(policy, _)| policy)
         .unwrap_or(fallback);
@@ -376,10 +377,7 @@ fn compute_memory_cap(
 ///
 /// Returns a tuple of `(cache_key, optional_file_path)` used for both
 /// cache lookups and result metadata in [`RecommendedBatchPolicy`].
-fn resolve_cache_location(
-    gpu_device_name: &str,
-    payload_sig: &str,
-) -> (String, Option<String>) {
+fn resolve_cache_location(gpu_device_name: &str, payload_sig: &str) -> (String, Option<String>) {
     let derived_key = policy_cache_key(gpu_device_name, payload_sig);
 
     let resolved_path = policy_cache_root().map(|root_dir| {

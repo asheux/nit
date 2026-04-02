@@ -6225,16 +6225,10 @@ fn evaluate_genome_gate(state: &AppState) -> String {
         out.push_str(&format!("--- {} ---\n", file_path.display()));
         out.push_str(&nit_core::format_genome_report(&report));
         if failures.is_empty() {
-            out.push_str(&format!(
-                "  Result: PASS ({})\n\n",
-                report.quality_level()
-            ));
+            out.push_str(&format!("  Result: PASS ({})\n\n", report.quality_level()));
             pass_count += 1;
         } else {
-            out.push_str(&format!(
-                "  Result: FAIL ({})\n",
-                report.quality_level()
-            ));
+            out.push_str(&format!("  Result: FAIL ({})\n", report.quality_level()));
             for f in &failures {
                 out.push_str(&format!("  {f}\n"));
             }

@@ -1767,6 +1767,9 @@ impl Default for FileTreeState {
 pub struct AppState {
     pub app_kind: AppKind,
     pub workspace_root: PathBuf,
+    /// Directory names from `.gitignore` that should be excluded from file tracking and display.
+    #[serde(skip)]
+    pub gitignored_dirs: Vec<String>,
     pub buffers: Vec<Buffer>,
     pub active_editor_buffer_id: usize,
     pub notes_buffer_id: usize,
@@ -1908,6 +1911,7 @@ impl AppState {
         };
         Self {
             app_kind: AppKind::Gol,
+            gitignored_dirs: Vec::new(),
             workspace_root,
             buffers: vec![editor, notes],
             active_editor_buffer_id: 0,
@@ -2565,7 +2569,8 @@ pub fn apply_action(state: &mut AppState, action: Action) -> ActionOutcome {
         Action::ScrollDown => {
             if let Some(buf) = state.focused_buffer_mut() {
                 let max_offset = buf.lines_len().saturating_sub(buf.viewport.height.max(1));
-                buf.viewport.offset_line = buf.viewport.offset_line.saturating_add(1).min(max_offset);
+                buf.viewport.offset_line =
+                    buf.viewport.offset_line.saturating_add(1).min(max_offset);
             }
         }
         Action::ClearLogs => {

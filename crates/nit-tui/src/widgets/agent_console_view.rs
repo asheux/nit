@@ -1637,10 +1637,10 @@ fn status_sub_row_line(text: &str, theme: &Theme) -> Line<'static> {
         let arrow = &trimmed[..trimmed.char_indices().nth(1).map(|(i, _)| i).unwrap_or(1)];
         let rest = trimmed[arrow.len()..].trim_start();
         let arrow_color = match arrow {
-            "\u{2191}" => theme.success,   // ↑ improved
-            "\u{2193}" => theme.error,     // ↓ degraded
-            "+" => theme.title_focused,    // + new
-            _ => theme.border,             // — unchanged
+            "\u{2191}" => theme.success, // ↑ improved
+            "\u{2193}" => theme.error,   // ↓ degraded
+            "+" => theme.title_focused,  // + new
+            _ => theme.border,           // — unchanged
         };
         // Color the quality label if present.
         let quality_color = if rest.contains("Failing") {
@@ -1661,10 +1661,7 @@ fn status_sub_row_line(text: &str, theme: &Theme) -> Line<'static> {
                 format!("{indent}{arrow} "),
                 Style::default().fg(arrow_color).bg(bg),
             ),
-            Span::styled(
-                rest.to_string(),
-                Style::default().fg(quality_color).bg(bg),
-            ),
+            Span::styled(rest.to_string(), Style::default().fg(quality_color).bg(bg)),
         ]);
     }
     // Genome shadow stage: "↳ file.rs Quality delta (tier N, c=X.XX)"
@@ -1828,7 +1825,51 @@ fn thread_rows(
     if any_remaining || has_swarm_context {
         rows.extend(breather_rows_for_user_prompt(state, swarm, pulse_on, width));
     }
+
+    // Ensure artifact/done callouts never appear after the last breather.
+    // This can happen when a turn completes and a queued prompt dequeues
+    // simultaneously — the "done" reply gets pushed after the new prompt.
+    hoist_stale_callouts_above_breather(&mut rows);
+
     rows
+}
+
+/// Move any ArtifactLink / StatusSubRow / Agent-done rows that appear after
+/// the last breather block to just before the breather.
+fn hoist_stale_callouts_above_breather(rows: &mut Vec<ThreadRow>) {
+    // Find the start of the last breather block (StatusHeader row).
+    let breather_start = rows
+        .iter()
+        .rposition(|r| matches!(r.kind, ThreadRowKind::StatusHeader));
+    let Some(breather_idx) = breather_start else {
+        return;
+    };
+    // Collect indices of callout rows that appear after the breather.
+    let stale: Vec<usize> = (breather_idx + 1..rows.len())
+        .filter(|&i| {
+            matches!(
+                rows[i].kind,
+                ThreadRowKind::ArtifactLink | ThreadRowKind::Agent
+            )
+        })
+        .collect();
+    if stale.is_empty() {
+        return;
+    }
+    // Extract stale rows (reverse order to preserve indices).
+    let mut hoisted: Vec<ThreadRow> = Vec::with_capacity(stale.len());
+    for &idx in stale.iter().rev() {
+        hoisted.push(rows.remove(idx));
+    }
+    hoisted.reverse();
+    // Insert before the breather.
+    let insert_at = rows
+        .iter()
+        .rposition(|r| matches!(r.kind, ThreadRowKind::StatusHeader))
+        .unwrap_or(rows.len());
+    for (offset, row) in hoisted.into_iter().enumerate() {
+        rows.insert(insert_at + offset, row);
+    }
 }
 
 /// Returns visible messages in grouped order: each user prompt is immediately

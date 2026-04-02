@@ -28,11 +28,8 @@ const IGNORED_DIRS: &[&str] = &["target", "node_modules", "__pycache__", "vendor
 
 /// File extensions recognized as trackable source or config files.
 const SOURCE_EXTENSIONS: &[&str] = &[
-    "rs", "c", "cpp", "h", "hpp", "go", "swift",
-    "java", "kt", "scala", "cs",
-    "py", "rb", "sh", "bash", "zsh",
-    "js", "jsx", "ts", "tsx", "html", "css",
-    "toml", "yaml", "yml", "json", "sql",
+    "rs", "c", "cpp", "h", "hpp", "go", "swift", "java", "kt", "scala", "cs", "py", "rb", "sh",
+    "bash", "zsh", "js", "jsx", "ts", "tsx", "html", "css", "toml", "yaml", "yml", "json", "sql",
     "md", "txt",
 ];
 
@@ -180,6 +177,7 @@ impl FileWatcher {
 struct PollLoop {
     tracked_files: MtimeMap,
     workspace_root: Option<PathBuf>,
+    gitignored_dirs: Vec<String>,
     last_scan_timestamp: Instant,
     command_receiver: Receiver<FileWatchCommand>,
     change_emitter: Sender<PathBuf>,
@@ -187,13 +185,11 @@ struct PollLoop {
 
 impl PollLoop {
     /// Create a fresh poll-loop state from the given channel endpoints.
-    fn initialize(
-        command_rx: Receiver<FileWatchCommand>,
-        event_tx: Sender<PathBuf>,
-    ) -> Self {
+    fn initialize(command_rx: Receiver<FileWatchCommand>, event_tx: Sender<PathBuf>) -> Self {
         Self {
             tracked_files: HashMap::with_capacity(INITIAL_TRACKING_CAPACITY),
             workspace_root: None,
+            gitignored_dirs: Vec::new(),
             last_scan_timestamp: Instant::now(),
             command_receiver: command_rx,
             change_emitter: event_tx,
@@ -231,7 +227,9 @@ impl PollLoop {
                 false
             }
             FileWatchCommand::WatchWorkspace(root) => {
-                let new_files = discover_source_files(&root, &mut self.tracked_files);
+                self.gitignored_dirs = parse_gitignore_dirs(&root);
+                let new_files =
+                    discover_source_files(&root, &mut self.tracked_files, &self.gitignored_dirs);
                 for path in new_files {
                     let _ = self.change_emitter.send(path);
                 }
@@ -271,7 +269,8 @@ impl PollLoop {
             return;
         }
 
-        let new_files = discover_source_files(&workspace, &mut self.tracked_files);
+        let new_files =
+            discover_source_files(&workspace, &mut self.tracked_files, &self.gitignored_dirs);
         // Emit change events for newly created files so the genome system
         // picks them up immediately rather than waiting for a future mtime change.
         for path in new_files {
@@ -319,9 +318,13 @@ impl PollLoop {
 /// into `destination`. Paths already present are left unchanged so
 /// their baseline mtime records are preserved.
 /// Returns the list of newly discovered paths (not previously tracked).
-fn discover_source_files(root: &Path, destination: &mut MtimeMap) -> Vec<PathBuf> {
+fn discover_source_files(
+    root: &Path,
+    destination: &mut MtimeMap,
+    gitignored: &[String],
+) -> Vec<PathBuf> {
     let mut new_paths = Vec::new();
-    SourceTreeWalker::rooted_at(root).for_each(|discovered_path| {
+    SourceTreeWalker::rooted_at(root, gitignored.to_vec()).for_each(|discovered_path| {
         use std::collections::hash_map::Entry;
         match destination.entry(discovered_path.clone()) {
             Entry::Vacant(e) => {
@@ -354,8 +357,49 @@ fn is_trackable_source(filepath: &Path) -> bool {
 
 /// Returns `true` for hidden directories (leading `.`) and well-known
 /// build output directories listed in [`IGNORED_DIRS`].
-fn is_excluded_directory(dir_component: &str) -> bool {
-    dir_component.starts_with('.') || IGNORED_DIRS.contains(&dir_component)
+fn is_excluded_directory(dir_component: &str, gitignored: &[String]) -> bool {
+    dir_component.starts_with('.')
+        || IGNORED_DIRS.contains(&dir_component)
+        || gitignored.iter().any(|g| g == dir_component)
+}
+
+/// Parse `.gitignore` at the workspace root and collect directory names to skip.
+/// Public so it can be called at startup to populate `AppState.gitignored_dirs`.
+/// Only extracts simple directory patterns (e.g., `build/`, `dist`, `/out`).
+/// Does not support globs, negations, or nested `.gitignore` files.
+pub fn parse_gitignore_dirs(workspace_root: &Path) -> Vec<String> {
+    let gitignore_path = workspace_root.join(".gitignore");
+    let content = match std::fs::read_to_string(&gitignore_path) {
+        Ok(c) => c,
+        Err(_) => return Vec::new(),
+    };
+    content
+        .lines()
+        .filter_map(|line| {
+            let line = line.trim();
+            // Skip comments and empty lines.
+            if line.is_empty() || line.starts_with('#') {
+                return None;
+            }
+            // Skip negations.
+            if line.starts_with('!') {
+                return None;
+            }
+            // Skip glob patterns (contain * or ?).
+            if line.contains('*') || line.contains('?') {
+                return None;
+            }
+            // Strip leading `/` (root-anchored).
+            let line = line.strip_prefix('/').unwrap_or(line);
+            // Strip trailing `/` (directory marker).
+            let line = line.strip_suffix('/').unwrap_or(line);
+            // Only take simple names (no path separators inside).
+            if line.contains('/') || line.is_empty() {
+                return None;
+            }
+            Some(line.to_string())
+        })
+        .collect()
 }
 
 // ── Filesystem entry classification ───────────────────────────────
@@ -407,25 +451,27 @@ impl fmt::Display for EntryKind {
 /// non-source files while recursively walking the workspace tree.
 struct SourceTreeWalker {
     pending_paths: Vec<PathBuf>,
+    gitignored: Vec<String>,
 }
 
 impl SourceTreeWalker {
     /// Begin a walk rooted at the given directory.
-    fn rooted_at(start: &Path) -> Self {
+    fn rooted_at(start: &Path, gitignored: Vec<String>) -> Self {
         Self {
             pending_paths: vec![start.to_path_buf()],
+            gitignored,
         }
     }
 
     /// Push walkable children of `parent` onto the exploration stack,
-    /// respecting the directory exclusion list.
+    /// respecting the directory exclusion list and .gitignore.
     fn expand_directory(&mut self, parent: &Path) {
         let dir_name = parent
             .file_name()
             .and_then(|segment| segment.to_str())
             .unwrap_or("");
 
-        if is_excluded_directory(dir_name) {
+        if is_excluded_directory(dir_name, &self.gitignored) {
             return;
         }
 
