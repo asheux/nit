@@ -10,6 +10,7 @@ const DEFAULT_SWARM_SIZE: usize = 4;
 const MAX_SWARM_SIZE: usize = 16;
 const SWARM_VERIFY_MAX_CHARS: usize = 12_000;
 const SWARM_DEP_OUTPUT_MAX_CHARS: usize = 8_000;
+const SWARM_DEP_OUTPUT_MAX_CHARS_JUDGE: usize = 24_000;
 const COMPUTATIONAL_RESEARCH_ROLE: &str = "computational-research";
 const COMPUTATIONAL_RESEARCH_ROLE_LEGACY: &str = "computational research";
 
@@ -1620,7 +1621,10 @@ impl SwarmRuntime {
                 })
                 .cloned();
         }
-        if matches!(template_kind, SwarmTemplate::Lab | SwarmTemplate::Bulk) {
+        if matches!(template_kind, SwarmTemplate::Lab | SwarmTemplate::Bulk)
+            || (matches!(template_kind, SwarmTemplate::Parallel)
+                && integrator_agent_id.is_none())
+        {
             let eligible = agents
                 .iter()
                 .filter(|id| id.as_str() != planner_agent_id.as_str())
@@ -1851,6 +1855,13 @@ impl SwarmRuntime {
                             run.mission_kind,
                             run.integrator_agent_id.as_deref(),
                             parsed.tasks.as_mut_slice(),
+                        ));
+                        parsed.warnings.extend(ensure_integrate_task(
+                            &mut parsed.tasks,
+                            run.mission_kind,
+                            run.integrator_agent_id
+                                .as_deref()
+                                .or(parsed.integrator_agent_id.as_deref()),
                         ));
 
                         let dag_mode = match read_workspace_dag_validation_mode(
@@ -2263,6 +2274,13 @@ impl SwarmRuntime {
                             run.mission_kind,
                             run.integrator_agent_id.as_deref(),
                             parsed.tasks.as_mut_slice(),
+                        ));
+                        parsed.warnings.extend(ensure_integrate_task(
+                            &mut parsed.tasks,
+                            run.mission_kind,
+                            run.integrator_agent_id
+                                .as_deref()
+                                .or(parsed.integrator_agent_id.as_deref()),
                         ));
 
                         let dag_mode = match read_workspace_dag_validation_mode(
@@ -2743,6 +2761,70 @@ fn normalize_bulk_plan(tasks: &mut [SwarmTask], integrator_agent_id: Option<&str
         }
     }
 
+    warnings
+}
+
+/// Safety net: if the planner omitted an integrate task for a General mission,
+/// inject one so the swarm can actually write to the workspace.
+fn ensure_integrate_task(
+    tasks: &mut Vec<SwarmTask>,
+    mission_kind: SwarmMissionKind,
+    integrator_agent_id: Option<&str>,
+) -> Vec<String> {
+    let mut warnings = Vec::new();
+    if !matches!(mission_kind, SwarmMissionKind::General) {
+        return warnings;
+    }
+    let Some(integrator) = integrator_agent_id else {
+        return warnings;
+    };
+
+    let has_integrate = tasks.iter().any(|t| {
+        t.role
+            .as_deref()
+            .and_then(normalize_role_label)
+            .as_deref()
+            == Some("integrate")
+    });
+    if has_integrate {
+        return warnings;
+    }
+
+    // Check if any task on the integrator agent can be promoted.
+    let promote_idx = tasks
+        .iter()
+        .position(|t| t.agent_id == integrator && t.role.is_none());
+    if let Some(idx) = promote_idx {
+        tasks[idx].role = Some("integrate".into());
+        tasks[idx].writes = true;
+        warnings.push(format!(
+            "Plan safety net: promoted task '{}' to role=integrate (writes=true) because no integrate task was found.",
+            tasks[idx].id
+        ));
+        return warnings;
+    }
+
+    // No promotable task — inject a new integrate task that depends on all others.
+    let all_deps: Vec<String> = tasks.iter().map(|t| t.id.clone()).collect();
+    tasks.push(SwarmTask {
+        id: "integrate".into(),
+        agent_id: integrator.to_string(),
+        role: Some("integrate".into()),
+        title: "Integrate + implement".into(),
+        task_prompt: "Implement the changes using the dependency outputs. You are the only agent allowed to make workspace edits. Prefer small, safe diffs and keep tests green.".into(),
+        deps: all_deps,
+        writes: true,
+        artifacts: vec!["files".into(), "diffs".into(), "commands".into()],
+        done_when: Some("Changes are implemented cleanly with validations to run.".into()),
+        state: SwarmTaskState::Pending,
+        output: None,
+        parsed_artifacts: None,
+        expected_artifacts_missing: false,
+        failed: false,
+    });
+    warnings.push(
+        "Plan safety net: injected integrate task because the planner omitted one.".into(),
+    );
     warnings
 }
 
@@ -4936,6 +5018,17 @@ fn select_dispatchable_ready_task_indices(run: &SwarmRun) -> Vec<usize> {
 }
 
 fn collect_dependency_payload(run: &SwarmRun, task: &SwarmTask) -> Vec<(String, String)> {
+    let is_judge = task
+        .role
+        .as_deref()
+        .and_then(normalize_role_label)
+        .as_deref()
+        == Some("judge");
+    let max_chars = if is_judge {
+        SWARM_DEP_OUTPUT_MAX_CHARS_JUDGE
+    } else {
+        SWARM_DEP_OUTPUT_MAX_CHARS
+    };
     let mut out = Vec::new();
     for dep_id in task.deps.iter() {
         let Some(dep) = run.tasks.iter().find(|t| t.id == *dep_id) else {
@@ -4948,8 +5041,14 @@ fn collect_dependency_payload(run: &SwarmRun, task: &SwarmTask) -> Vec<(String, 
             _ => "PENDING",
         };
         let label = format!("{} [{}] (agent {})", dep.id, status, dep.agent_id);
-        let text = dependency_payload_text(run, dep);
-        out.push((label, truncate_chars(&text, SWARM_DEP_OUTPUT_MAX_CHARS)));
+        // Judge needs full raw output to compare proposals properly;
+        // other roles get the compact artifact summary when available.
+        let text = if is_judge {
+            dependency_payload_text_full(dep)
+        } else {
+            dependency_payload_text(run, dep)
+        };
+        out.push((label, truncate_chars(&text, max_chars)));
     }
     out
 }
@@ -4958,6 +5057,13 @@ fn dependency_payload_text(run: &SwarmRun, task: &SwarmTask) -> String {
     if let Some(summary) = task_artifacts_summary_for_prompt(task, &run.mission_id) {
         return summary;
     }
+    task.output
+        .as_deref()
+        .map(ToString::to_string)
+        .unwrap_or_else(|| "(no output)".into())
+}
+
+fn dependency_payload_text_full(task: &SwarmTask) -> String {
     task.output
         .as_deref()
         .map(ToString::to_string)
@@ -5662,6 +5768,11 @@ fn build_planner_prompt(
         out.push_str(&format!(
             "- If code changes are needed, assign `writes=true` and `role=integrate` only to `{integrator_agent_id}`.\n"
         ));
+        if matches!(mission_kind, SwarmMissionKind::General) {
+            out.push_str(&format!(
+                "- REQUIRED: for code-change, refactoring, or implementation requests you MUST include exactly one task with `role=integrate` and `writes=true` assigned to `{integrator_agent_id}`. Without an integrate task, no workspace edits will be made and the swarm will produce no changes.\n"
+            ));
+        }
     }
     if matches!(template, SwarmTemplate::Parallel | SwarmTemplate::Bulk)
         && !priority_agent_ids.is_empty()
@@ -5719,6 +5830,12 @@ fn build_planner_prompt(
             out.push_str("- Only the integrator agent may have `writes=true` tasks.\n");
         }
     }
+    out.push_str(
+        "- When the operator request involves refactoring or modifying a module/directory, the plan MUST cover ALL files in that scope. Assign a recon or propose task to survey the full directory tree first, and ensure the integrate task prompt lists every affected file.\n",
+    );
+    out.push_str(
+        "- Each task prompt should be specific about which files or areas to focus on, not generic. The more concrete the prompt, the better the agent output.\n",
+    );
     out.push_str("\nOutput format:\n");
     out.push_str("1) 3-6 bullets summarizing the plan.\n");
     out.push_str("2) A JSON plan in a ```json code block with this schema (v2):\n");
@@ -5890,7 +6007,20 @@ fn wrap_task_prompt(
 
     if let Some(deps) = deps {
         if !deps.is_empty() {
-            out.push_str("\nDependency outputs:\n");
+            let is_judge = task
+                .role
+                .as_deref()
+                .and_then(normalize_role_label)
+                .as_deref()
+                == Some("judge");
+            if is_judge {
+                out.push_str(&format!(
+                    "\nDependency outputs ({} proposals to evaluate — read ALL of them carefully before choosing):\n",
+                    deps.len()
+                ));
+            } else {
+                out.push_str("\nDependency outputs:\n");
+            }
             for (label, output) in deps.iter() {
                 out.push_str(&format!("\n---\nDEP: {label}\n"));
                 out.push_str(output.trim());
@@ -5900,11 +6030,24 @@ fn wrap_task_prompt(
     }
 
     if !task.artifacts.is_empty() {
-        out.push_str("\nStructured artifacts:\n");
-        out.push_str("Include a ```json block with:\n");
-        out.push_str("{\"type\":\"swarm_artifacts\",\"version\":1,\"task_id\":\"");
-        out.push_str(task.id.as_str());
-        out.push_str("\",\"summary\":\"...\",\"artifacts\":{\"files\":[],\"diffs\":[],\"commands\":[],\"risks\":[],\"notes\":[]}}\n");
+        out.push_str("\n## STRUCTURED ARTIFACTS (REQUIRED)\n");
+        out.push_str("You MUST include a ```json code block at the END of your response with this exact structure:\n");
+        out.push_str("```\n");
+        out.push_str("{\n");
+        out.push_str("  \"type\": \"swarm_artifacts\",\n");
+        out.push_str("  \"version\": 1,\n");
+        out.push_str(&format!("  \"task_id\": \"{}\",\n", task.id));
+        out.push_str("  \"summary\": \"one-line summary of what you did or found\",\n");
+        out.push_str("  \"artifacts\": {\n");
+        out.push_str("    \"files\": [\"path/to/file.rs\"],\n");
+        out.push_str("    \"diffs\": [{\"path\": \"file.rs\", \"summary\": \"what changed\"}],\n");
+        out.push_str("    \"commands\": [\"cargo test\"],\n");
+        out.push_str("    \"risks\": [\"potential issue\"],\n");
+        out.push_str("    \"notes\": [\"additional context\"]\n");
+        out.push_str("  }\n");
+        out.push_str("}\n");
+        out.push_str("```\n");
+        out.push_str("Only include artifact keys relevant to your task. This JSON block is machine-parsed by the swarm orchestrator — omitting it means your output cannot be tracked.\n");
     }
 
     out.push_str("\nRespond with:\n- Findings / recommendations\n- Concrete file paths / commands where relevant\n");
