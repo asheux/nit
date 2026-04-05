@@ -26,7 +26,7 @@ use crate::widgets::agent_console_view;
 use crate::widgets::agent_ops_view;
 use crate::widgets::text_selection::apply_ui_selection;
 
-const DOCUMENT_HIGHLIGHT_WAIT: Duration = Duration::from_millis(100);
+const DOCUMENT_HIGHLIGHT_WAIT: Duration = Duration::from_millis(250);
 const DOCUMENT_HIGHLIGHT_CACHE_LIMIT: usize = 96;
 
 struct DocumentSyntaxHighlighter {

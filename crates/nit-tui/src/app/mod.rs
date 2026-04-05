@@ -510,6 +510,7 @@ fn run_loop(
     let mut last_resize_event: Option<(Duration, u16, u16)> = None;
     let mut needs_redraw = true;
     let mut input_state = InputState::new();
+    let mut stashed_event: Option<Event> = None;
     let mut system_stats = SystemStats::new();
     let mut clipboard = Clipboard::new().ok();
     let mut file_tree_runner = FileTreeRunner::spawn();
@@ -603,11 +604,21 @@ fn run_loop(
             continue;
         }
 
-        // Poll input with tick fallback
+        // Poll input with tick fallback (check stashed events from scroll coalescing first)
         let timeout = TICK_RATE;
         let mut handled_input = false;
-        if event::poll(timeout)? {
-            match event::read()? {
+        let next_event = match stashed_event.take() {
+            Some(e) => Some(e),
+            None => {
+                if event::poll(timeout)? {
+                    Some(event::read()?)
+                } else {
+                    None
+                }
+            }
+        };
+        if let Some(next_event) = next_event {
+            match next_event {
                 Event::Key(key) => {
                     if key.kind == KeyEventKind::Release {
                         continue;
@@ -877,7 +888,11 @@ fn run_loop(
                 Event::Mouse(mouse) => {
                     handled_input = true;
                     let screen = terminal.size().unwrap_or_default();
-                    if handle_mouse_event_with_swarm(
+                    let is_scroll = matches!(
+                        mouse.kind,
+                        MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
+                    );
+                    let mut mouse_changed = handle_mouse_event_with_swarm(
                         &swarm,
                         mouse,
                         screen,
@@ -886,7 +901,39 @@ fn run_loop(
                         &mut input_state,
                         &mut clipboard,
                         theme,
-                    ) {
+                    );
+                    // Coalesce pending scroll events to prevent phantom-offset
+                    // lag from trackpad momentum scrolling. Without this, each
+                    // queued scroll event triggers a full render cycle, so
+                    // reversing direction feels delayed.
+                    if is_scroll {
+                        while event::poll(Duration::ZERO)? {
+                            match event::read()? {
+                                Event::Mouse(m)
+                                    if matches!(
+                                        m.kind,
+                                        MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
+                                    ) =>
+                                {
+                                    mouse_changed |= handle_mouse_event_with_swarm(
+                                        &swarm,
+                                        m,
+                                        screen,
+                                        state,
+                                        &mut fuzzy_runtime,
+                                        &mut input_state,
+                                        &mut clipboard,
+                                        theme,
+                                    );
+                                }
+                                other => {
+                                    stashed_event = Some(other);
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    if mouse_changed {
                         clamp_modal_scroll_offsets(state, screen, theme);
                         needs_redraw = true;
                     }
@@ -6338,8 +6385,8 @@ fn handle_mouse_event_with_swarm(
     }
 }
 
-const SCROLL_LINES: usize = 1;
-const SCROLL_LINES_FAST: usize = 5;
+const SCROLL_LINES: usize = 3;
+const SCROLL_LINES_FAST: usize = 10;
 
 fn handle_fuzzy_search_mouse_down(
     mouse: MouseEvent,

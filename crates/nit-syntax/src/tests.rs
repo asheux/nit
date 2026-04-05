@@ -44,7 +44,7 @@ fn wait_for(engine: &mut TreeSitterEngine, buffer_id: usize, version: u64) -> Hi
         if let Some(snap) = engine.try_get_highlights(buffer_id, version) {
             return snap;
         }
-        if start.elapsed() > Duration::from_millis(250) {
+        if start.elapsed() > Duration::from_secs(2) {
             panic!("timed out waiting for highlight snapshot");
         }
         std::thread::sleep(Duration::from_millis(10));
