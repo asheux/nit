@@ -1622,8 +1622,7 @@ impl SwarmRuntime {
                 .cloned();
         }
         if matches!(template_kind, SwarmTemplate::Lab | SwarmTemplate::Bulk)
-            || (matches!(template_kind, SwarmTemplate::Parallel)
-                && integrator_agent_id.is_none())
+            || (matches!(template_kind, SwarmTemplate::Parallel) && integrator_agent_id.is_none())
         {
             let eligible = agents
                 .iter()
@@ -2779,13 +2778,9 @@ fn ensure_integrate_task(
         return warnings;
     };
 
-    let has_integrate = tasks.iter().any(|t| {
-        t.role
-            .as_deref()
-            .and_then(normalize_role_label)
-            .as_deref()
-            == Some("integrate")
-    });
+    let has_integrate = tasks
+        .iter()
+        .any(|t| t.role.as_deref().and_then(normalize_role_label).as_deref() == Some("integrate"));
     if has_integrate {
         return warnings;
     }
@@ -2822,9 +2817,8 @@ fn ensure_integrate_task(
         expected_artifacts_missing: false,
         failed: false,
     });
-    warnings.push(
-        "Plan safety net: injected integrate task because the planner omitted one.".into(),
-    );
+    warnings
+        .push("Plan safety net: injected integrate task because the planner omitted one.".into());
     warnings
 }
 

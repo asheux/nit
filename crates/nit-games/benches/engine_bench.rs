@@ -40,10 +40,7 @@ fn build_config(
                     nit_games::game::Action::Defect,
                 ],
                 input_mode: Some(InputMode::OpponentLastAction),
-                transitions: vec![
-                    vec![(idx % 2) as usize, ((idx / 2) % 2) as usize],
-                    vec![((idx / 2) % 2) as usize, (idx % 2) as usize],
-                ],
+                transitions: vec![vec![idx % 2, (idx / 2) % 2], vec![(idx / 2) % 2, idx % 2]],
                 index: None,
             },
         })
@@ -200,8 +197,8 @@ fn build_deterministic_config(rounds: u32) -> NormalizedConfig {
 fn build_fsm_heavy_config(strategies: usize, rounds: u32) -> NormalizedConfig {
     let mut specs = Vec::new();
     for idx in 0..strategies {
-        let a = (idx % 2) as usize;
-        let b = ((idx / 2) % 2) as usize;
+        let a = idx % 2;
+        let b = (idx / 2) % 2;
         specs.push(StrategySpec {
             id: format!("fsm{idx}"),
             name: None,
@@ -388,8 +385,10 @@ fn build_tm_family_reference_config(rounds: u32, max_steps_per_round: u32) -> No
             }
         })
         .collect();
-    let mut engine = EngineConfig::default();
-    engine.accelerator = AcceleratorMode::Cpu;
+    let engine = EngineConfig {
+        accelerator: AcceleratorMode::Cpu,
+        ..EngineConfig::default()
+    };
     NormalizedConfig {
         schema_version: 1,
         game: "ipd".into(),
@@ -815,15 +814,13 @@ fn bench_sweep_io(c: &mut Criterion) {
         b.iter(|| {
             let _ = nit_utils::fs::write_atomic(&definitions_path, |writer| {
                 serde_json::to_writer_pretty(writer, kernel.definitions())
-                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
+                    .map_err(std::io::Error::other)
             });
             let _ = nit_utils::fs::write_atomic(&results_path, |writer| {
-                serde_json::to_writer_pretty(writer, &results)
-                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
+                serde_json::to_writer_pretty(writer, &results).map_err(std::io::Error::other)
             });
             let _ = nit_utils::fs::write_atomic(&summary_path, |writer| {
-                serde_json::to_writer_pretty(writer, &summary)
-                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
+                serde_json::to_writer_pretty(writer, &summary).map_err(std::io::Error::other)
             });
         });
     });

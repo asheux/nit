@@ -170,6 +170,7 @@ fn notebook_rules_from_outputs_and_transitions(
     rules
 }
 
+#[allow(clippy::type_complexity)]
 fn notebook_buggy_fsm_to_index_from_rules(
     rules: &[((usize, usize), (usize, usize))],
     states: usize,
@@ -1658,10 +1659,7 @@ transitions = [[0, 0]]
         }
     }
     if let Some((matches_per_batch, inflight_batches, average_elapsed)) = fastest {
-        println!(
-            "metal_policy best batch={} inflight={} avg={:.3}s",
-            matches_per_batch, inflight_batches, average_elapsed
-        );
+        println!("metal_policy best batch={matches_per_batch} inflight={inflight_batches} avg={average_elapsed:.3}s");
     }
 }
 
