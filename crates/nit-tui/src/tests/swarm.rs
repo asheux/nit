@@ -1322,7 +1322,13 @@ fn computational_research_role_contract_mentions_modeling_and_simulation() {
         Some(COMPUTATIONAL_RESEARCH_ROLE),
         Vec::new(),
     );
-    let prompt = wrap_task_prompt("root", SwarmMissionKind::ComputationalResearch, &task, None, &[]);
+    let prompt = wrap_task_prompt(
+        "root",
+        SwarmMissionKind::ComputationalResearch,
+        &task,
+        None,
+        &[],
+    );
 
     assert!(prompt.contains("simulations, modeling, numerical methods, optimization"));
     assert!(prompt.contains("reproducible research workflows"));

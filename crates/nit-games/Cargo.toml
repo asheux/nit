@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "Game theory tournament engine with configurable strategies, payoff matrices, and analysis"
 edition = "2021"
 license = "MIT"
+publish = false
 rust-version.workspace = true
 
 [dependencies]

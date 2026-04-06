@@ -58,8 +58,11 @@ pub trait Strategy: Send {
 /// Discriminant identifying the strategy family.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum StrategyKind {
+    /// Finite state machine strategy.
     Fsm,
+    /// Cellular automaton strategy.
     Ca,
+    /// One-sided Turing machine strategy.
     OneSidedTm,
 }
 
@@ -79,8 +82,8 @@ impl InputMode {
     /// Number of distinct input symbols for this mode.
     pub fn alphabet_size(self) -> usize {
         match self {
-            InputMode::OpponentLastAction | InputMode::SelfLastAction => 2,
-            InputMode::JointLastAction => 4,
+            Self::OpponentLastAction | Self::SelfLastAction => 2,
+            Self::JointLastAction => 4,
         }
     }
 }
@@ -90,10 +93,13 @@ impl InputMode {
 /// Direction the TM head moves after a transition.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TmMove {
+    /// Move the head one cell to the left.
     #[serde(rename = "L")]
     Left,
+    /// Move the head one cell to the right.
     #[serde(rename = "R")]
     Right,
+    /// Keep the head at the current cell.
     #[serde(rename = "S")]
     Stay,
 }
@@ -101,9 +107,12 @@ pub enum TmMove {
 /// A single TM transition rule: write symbol, move head, go to next state.
 #[derive(Copy, Clone, Debug, Serialize, Deserialize)]
 pub struct TmTransition {
+    /// Symbol to write on the tape at the current head position.
     pub write: u8,
+    /// Direction to move the head after writing.
     #[serde(rename = "move")]
     pub move_dir: TmMove,
+    /// 1-indexed state to transition to (0 is the halt pseudo-state).
     pub next: u16,
 }
 
@@ -118,46 +127,60 @@ pub fn decode_tm_rule_code_wolfram(
     states: usize,
     symbols: usize,
 ) -> (Vec<TmTransition>, u64) {
-    let total = states.saturating_mul(symbols);
+    let entry_count = states.saturating_mul(symbols);
     let mut transitions = vec![
         TmTransition {
             write: 0,
             move_dir: TmMove::Left,
             next: 1,
         };
-        total
+        entry_count
     ];
     if states == 0 || symbols == 0 {
         return (transitions, rule_code);
     }
-    let base = (symbols as u64) * (states as u64) * 2;
-    if base == 0 {
+    let mixed_radix_base = (symbols as u64) * (states as u64) * 2;
+    if mixed_radix_base == 0 {
         return (transitions, rule_code);
     }
-    let mut code = rule_code;
-    for state in (1..=states).rev() {
-        for read in 0..symbols {
-            let digit = code % base;
-            code /= base;
-            let move_idx = (digit % 2) as u8;
-            let write = ((digit / 2) % symbols as u64) as u8;
-            let next = (digit / (2 * symbols as u64)) as u16 + 1;
-            let move_dir = if move_idx == 0 {
-                TmMove::Left
-            } else {
-                TmMove::Right
-            };
-            let idx = (state - 1) * symbols + read;
-            if let Some(slot) = transitions.get_mut(idx) {
-                *slot = TmTransition {
-                    write,
-                    move_dir,
-                    next,
-                };
+    let mut remaining_code = rule_code;
+    for current_state in (1..=states).rev() {
+        for tape_symbol in 0..symbols {
+            let transition = decode_single_wolfram_digit(remaining_code, mixed_radix_base, symbols);
+            remaining_code /= mixed_radix_base;
+
+            let transition_index = (current_state - 1) * symbols + tape_symbol;
+            if let Some(slot) = transitions.get_mut(transition_index) {
+                *slot = transition;
             }
         }
     }
-    (transitions, code)
+    (transitions, remaining_code)
+}
+
+/// Extract a single TM transition from the lowest digit of the rule code.
+///
+/// The digit is decomposed as `(move_flag, write_symbol, next_state)` in
+/// mixed-radix form with base `2 * symbols * states`.
+fn decode_single_wolfram_digit(
+    remaining_code: u64,
+    mixed_radix_base: u64,
+    symbol_count: usize,
+) -> TmTransition {
+    let digit_value = remaining_code % mixed_radix_base;
+    let move_flag = (digit_value % 2) as u8;
+    let write_symbol = ((digit_value / 2) % symbol_count as u64) as u8;
+    let next_state = (digit_value / (2 * symbol_count as u64)) as u16 + 1;
+    let head_direction = if move_flag == 0 {
+        TmMove::Left
+    } else {
+        TmMove::Right
+    };
+    TmTransition {
+        write: write_symbol,
+        move_dir: head_direction,
+        next: next_state,
+    }
 }
 
 /// Maximum valid Wolfram rule index for the given state/symbol counts.

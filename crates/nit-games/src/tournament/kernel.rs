@@ -22,6 +22,10 @@ use rayon::prelude::*;
 use std::sync::mpsc::Sender;
 
 /// Selects between sequential and parallel execution for the kernel.
+///
+/// `Sequential` passes mutable writers directly, producing ordered output.
+/// `Parallel` uses channels so match results arrive in nondeterministic order;
+/// callers should use `match_id` / `match_index` fields to reconstruct ordering.
 pub enum KernelRunMode<'a> {
     Sequential {
         event_writer: Option<&'a mut EventWriter>,
@@ -48,6 +52,10 @@ pub struct TournamentKernel {
 }
 
 impl TournamentKernel {
+    /// Build a kernel from a normalised configuration.
+    ///
+    /// Applies the TM halting filter, derives seeds, pre-computes fast-eval
+    /// models, and builds the full match schedule.
     pub fn new(config: NormalizedConfig) -> Self {
         let mut config = select_halting_turing_machine_strategies(config);
         let seed = config.seed.unwrap_or(0);
@@ -74,10 +82,14 @@ impl TournamentKernel {
         }
     }
 
+    /// Run the full tournament and return the final results (discarding runtime stats).
     pub fn run(&self, mode: KernelRunMode<'_>) -> TournamentResults {
         self.run_with_runtime(mode).0
     }
 
+    /// Run the full tournament, returning both results and runtime accelerator stats.
+    ///
+    /// Dispatches to `run_sequential` or `run_parallel` based on the [`KernelRunMode`].
     pub fn run_with_runtime(
         &self,
         mode: KernelRunMode<'_>,
@@ -96,18 +108,22 @@ impl TournamentKernel {
         }
     }
 
+    /// The serializable strategy definitions for this tournament.
     pub fn definitions(&self) -> &[StrategyDefinition] {
         &self.definitions
     }
 
+    /// The deterministic seed used for this tournament run.
     pub fn seed(&self) -> u64 {
         self.seed
     }
 
+    /// The normalised configuration (after TM halting filter) used for this run.
     pub fn config(&self) -> &NormalizedConfig {
         &self.config
     }
 
+    /// Total number of matches in the tournament schedule.
     pub fn total_matches(&self) -> usize {
         self.schedule.len()
     }

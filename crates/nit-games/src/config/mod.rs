@@ -41,10 +41,18 @@ pub(crate) type ConfigResult<T> = Result<T, ConfigError>;
 
 // ── Game name helpers ───────────────────────────────────────────────────────
 
-/// Maps a user-facing game name (which may be any recognised alias) to the
-/// canonical identifier used internally, or returns `None` for unknown games.
+/// Maps a user-facing game name to the canonical identifier used internally.
 ///
-/// The canonical name for the Iterated Prisoner's Dilemma is `"ipd"`.
+/// Accepts any recognised alias for a supported game and returns the canonical
+/// form (e.g. `"pd"`, `"prisoners-dilemma"` -> `"ipd"`).  Returns `None` when
+/// `name` does not match any known game.
+///
+/// # Examples
+///
+/// ```ignore
+/// assert_eq!(canonical_game_name("pd"), Some("ipd"));
+/// assert_eq!(canonical_game_name("unknown"), None);
+/// ```
 pub(crate) fn canonical_game_name(name: &str) -> Option<&'static str> {
     match name {
         "ipd"

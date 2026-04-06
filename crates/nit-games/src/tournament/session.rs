@@ -20,7 +20,8 @@ use crate::strategy::{CaStrategy, FsmStrategy, OneSidedTmStrategy, Strategy, TmR
 use nit_utils::hashing::SplitMix64;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 
-/// Convert TM runtime stats into the serializable metrics format.
+/// Convert [`TmRunStats`] into the serializable [`TmDerivedMetrics`](crate::output::TmDerivedMetrics)
+/// format for inclusion in tournament results and history logs.
 pub(super) fn tm_metrics_from_stats(stats: &TmRunStats) -> crate::output::TmDerivedMetrics {
     let rounds = stats.rounds.max(1);
     let avg_steps = stats.steps as f64 / rounds as f64;
@@ -37,6 +38,11 @@ pub(super) fn tm_metrics_from_stats(stats: &TmRunStats) -> crate::output::TmDeri
     }
 }
 
+/// Execute a single round of play for both strategies in `session`.
+///
+/// Queries each strategy for its next action (catching panics), applies noise,
+/// computes payoffs, updates the session's cumulative scores and history buffers,
+/// and returns a [`RoundOutcome`] with the snapshot and crash flags.
 pub(super) fn play_round_core(
     session: &mut MatchSession,
     config: &NormalizedConfig,
@@ -89,7 +95,7 @@ pub(super) fn play_round_core(
     session.b_total += b_payoff as i64;
     session.history.push(a_action, b_action);
     if session.record_history || session.record_trace {
-        session.history_scores.push(outcome_char(outcome));
+        session.history_scores.push(outcome_digit_char(outcome));
     }
     if session.record_trace {
         session.history_payoffs.push([a_payoff, b_payoff]);
@@ -210,6 +216,11 @@ impl MatchSession {
     }
 }
 
+/// Run a complete match between two strategies, returning the final [`MatchOutcome`].
+///
+/// Attempts the fast-eval (FSM product-graph) path first when eligible, falling
+/// back to round-by-round simulation via [`play_round_core`]. Emits event and
+/// history records through the provided callback closures.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn run_match_core<E, H>(
     matchup: &Matchup,
@@ -448,7 +459,10 @@ where
     }
 }
 
-fn outcome_char(outcome: Outcome) -> char {
+/// Map an [`Outcome`] to a single digit character for the history score string.
+///
+/// CC -> `'0'`, CD -> `'1'`, DC -> `'2'`, DD -> `'3'`.
+fn outcome_digit_char(outcome: Outcome) -> char {
     match outcome {
         Outcome::CC => '0',
         Outcome::CD => '1',
@@ -457,6 +471,9 @@ fn outcome_char(outcome: Outcome) -> char {
     }
 }
 
+/// Build the serializable [`StrategyDefinition`] list from the roster specs.
+///
+/// Used by both the kernel and runner to populate the run summary output.
 pub(super) fn build_strategy_definitions(
     strategies: &[StrategySpec],
     _seed_deriver: &SeedDeriver,
@@ -473,6 +490,8 @@ pub(super) fn build_strategy_definitions(
         .collect()
 }
 
+/// Derive a short display identifier for a strategy, preferring the compact
+/// numeric form (FSM index, CA rule number, or TM rule code) when available.
 pub(super) fn strategy_log_id(spec: &StrategySpec) -> String {
     match &spec.kind {
         StrategySpecKind::Fsm {
@@ -487,6 +506,10 @@ pub(super) fn strategy_log_id(spec: &StrategySpec) -> String {
     }
 }
 
+/// Construct a boxed [`Strategy`] trait object from a [`StrategySpec`].
+///
+/// Dispatches on the spec kind to build the correct concrete strategy type
+/// (FSM, CA, or one-sided TM).
 fn build_strategy(spec: &StrategySpec, seed: u64) -> Box<dyn Strategy> {
     let _ = seed;
     match &spec.kind {

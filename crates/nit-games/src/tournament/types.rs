@@ -17,24 +17,44 @@ use std::time::Duration;
 // ── Tournament progress ─────────────────────────────────────
 
 /// Snapshot of tournament execution state, used to drive the TUI progress display.
+///
+/// Built by [`TournamentRunner`](super::runner::TournamentRunner) after each round
+/// or match completion to give the TUI enough context to render the live scoreboard.
 #[derive(Clone, Debug)]
 pub struct TournamentProgress {
+    /// One-based index of the current or just-completed match.
     pub match_index: usize,
+    /// Total number of matches in the schedule.
     pub total_matches: usize,
+    /// Current round number within the active match.
     pub round: u32,
+    /// Total rounds configured for each match.
     pub rounds: u32,
+    /// `true` when the match has finished all its rounds.
     pub match_complete: bool,
+    /// Display identifier for strategy A.
     pub a: String,
+    /// Display identifier for strategy B.
     pub b: String,
+    /// Cumulative payoff for strategy A across rounds played so far.
     pub total_payoff_a: i64,
+    /// Cumulative payoff for strategy B across rounds played so far.
     pub total_payoff_b: i64,
+    /// Last-round action chosen by strategy A, if any round has been played.
     pub last_action_a: Option<Action>,
+    /// Last-round action chosen by strategy B, if any round has been played.
     pub last_action_b: Option<Action>,
+    /// Last-round payoff awarded to strategy A.
     pub last_payoff_a: Option<i32>,
+    /// Last-round payoff awarded to strategy B.
     pub last_payoff_b: Option<i32>,
+    /// Whether strategy A halted on the last round (TM strategies only).
     pub last_halted_a: Option<bool>,
+    /// Whether strategy B halted on the last round (TM strategies only).
     pub last_halted_b: Option<bool>,
+    /// Derived outcome (CC/CD/DC/DD) of the last round.
     pub last_outcome: Option<Outcome>,
+    /// Runtime accelerator statistics accumulated so far.
     pub runtime: RuntimeAcceleratorStats,
 }
 
@@ -74,8 +94,7 @@ impl TournamentProgress {
             last_payoff_b: last_round.map(|r| r.b_payoff),
             last_halted_a: last_round.map(|r| r.a_halted),
             last_halted_b: last_round.map(|r| r.b_halted),
-            last_outcome: last_round
-                .map(|r| Outcome::from_actions(r.a_action, r.b_action)),
+            last_outcome: last_round.map(|r| Outcome::from_actions(r.a_action, r.b_action)),
             runtime,
         }
     }
@@ -84,19 +103,34 @@ impl TournamentProgress {
 // ── Match snapshot ──────────────────────────────────────────
 
 /// Full snapshot of a match in progress, including the outcome history buffer.
+///
+/// Captures the complete trace of a match for the TUI detail view, including
+/// per-round outcome characters, payoff pairs, and halting flags.
 #[derive(Clone, Debug)]
 pub struct MatchSnapshot {
+    /// One-based index of this match within the tournament.
     pub match_index: usize,
+    /// Total matches in the tournament schedule.
     pub total_matches: usize,
+    /// Current round number (zero-based count of rounds played so far).
     pub round: u32,
+    /// Total rounds configured for this match.
     pub rounds: u32,
+    /// Display identifier for strategy A.
     pub a: String,
+    /// Display identifier for strategy B.
     pub b: String,
+    /// Cumulative payoff for strategy A.
     pub a_score: i64,
+    /// Cumulative payoff for strategy B.
     pub b_score: i64,
+    /// Encoded outcome history: one digit char (`'0'`..`'3'`) per round.
     pub outcomes: String,
+    /// Per-round payoff pairs `[a_payoff, b_payoff]`.
     pub payoffs: Vec<[i32; 2]>,
+    /// Per-round halting flags for strategy A (`'0'` or `'1'` per round).
     pub a_halted: String,
+    /// Per-round halting flags for strategy B (`'0'` or `'1'` per round).
     pub b_halted: String,
 }
 
@@ -125,17 +159,29 @@ impl MatchHistoryPreview {
     }
 }
 
-/// Outcome of a single match: strategy indices, scores, and adjusted totals.
+/// Outcome of a single completed match: strategy indices, raw and adjusted scores.
+///
+/// The `adjusted_total` fields incorporate complexity-cost penalties when enabled;
+/// otherwise they equal the raw totals cast to `f64`.
 #[derive(Clone, Debug)]
 pub struct MatchResult {
+    /// Index of strategy A in the roster.
     pub a_idx: usize,
+    /// Index of strategy B in the roster.
     pub b_idx: usize,
+    /// Number of rounds played.
     pub rounds: u32,
+    /// Raw cumulative payoff for strategy A.
     pub a_total: i64,
+    /// Raw cumulative payoff for strategy B.
     pub b_total: i64,
+    /// Payoff for A after complexity-cost adjustment.
     pub a_adjusted_total: f64,
+    /// Payoff for B after complexity-cost adjustment.
     pub b_adjusted_total: f64,
+    /// Zero-based repetition index for this matchup.
     pub repetition: u32,
+    /// Global match identifier within the schedule.
     pub match_id: usize,
 }
 
@@ -151,8 +197,8 @@ pub(super) enum MatchRole {
 impl MatchRole {
     pub(super) fn label(self) -> &'static str {
         match self {
-            MatchRole::A => "A",
-            MatchRole::B => "B",
+            Self::A => "A",
+            Self::B => "B",
         }
     }
 }
@@ -215,10 +261,10 @@ impl Parallelism {
     pub fn from_config(config: &ParallelismConfig) -> Self {
         match config {
             ParallelismConfig::Mode(mode) => match mode {
-                ParallelismMode::Auto => Parallelism::Auto,
-                ParallelismMode::Off => Parallelism::Off,
+                ParallelismMode::Auto => Self::Auto,
+                ParallelismMode::Off => Self::Off,
             },
-            ParallelismConfig::Threads { threads } => Parallelism::Threads(*threads),
+            ParallelismConfig::Threads { threads } => Self::Threads(*threads),
         }
     }
 }
@@ -247,32 +293,46 @@ pub(super) fn run_with_parallelism<T: Send>(
 // ── TM halting filter ───────────────────────────────────────
 
 /// Identifies which backend was used for TM halting analysis.
+///
+/// Reported in [`TmHaltingFilterDiagnostics`] so the caller can see which code
+/// path actually ran (Metal GPU, notebook CPU, mixed-roster CPU, or skipped).
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum TmHaltingFilterBackend {
+    /// The filter was skipped because it had already been applied.
     NotApplied,
+    /// No TM strategies were present, so no filtering was needed.
     NotRequired,
+    /// Mixed roster (TMs + non-TMs): full match simulation on the CPU.
     MixedRosterCpu,
+    /// All-TM roster evaluated pairwise on the CPU.
     NotebookCpu,
+    /// All-TM roster: Metal probe failed or timed out, fell back to CPU.
     NotebookCpuFallback,
+    /// All-TM roster evaluated on the Metal GPU.
     Metal,
 }
 
 impl TmHaltingFilterBackend {
+    /// Returns a short dash-separated label suitable for logging and telemetry.
     pub fn label(self) -> &'static str {
         match self {
-            TmHaltingFilterBackend::NotApplied => "not-applied",
-            TmHaltingFilterBackend::NotRequired => "not-required",
-            TmHaltingFilterBackend::MixedRosterCpu => "mixed-cpu",
-            TmHaltingFilterBackend::NotebookCpu => "tm-cpu",
-            TmHaltingFilterBackend::NotebookCpuFallback => "tm-cpu-fallback",
-            TmHaltingFilterBackend::Metal => "metal",
+            Self::NotApplied => "not-applied",
+            Self::NotRequired => "not-required",
+            Self::MixedRosterCpu => "mixed-cpu",
+            Self::NotebookCpu => "tm-cpu",
+            Self::NotebookCpuFallback => "tm-cpu-fallback",
+            Self::Metal => "metal",
         }
     }
 }
 
 /// Diagnostic telemetry from the TM halting filter pass.
+///
+/// Captures timing, backend selection, cache statistics, and Metal-specific
+/// metadata so the TUI and CLI can display a detailed filter summary.
 #[derive(Clone, Debug)]
 pub struct TmHaltingFilterDiagnostics {
+    /// Which backend actually executed the halting analysis.
     pub backend: TmHaltingFilterBackend,
     pub requested_accelerator: AcceleratorMode,
     pub strategy_count_before: usize,
@@ -344,16 +404,27 @@ pub(super) struct PreparedMetalBatch {
 
 // ── Match types ─────────────────────────────────────────────
 
-/// A scheduled matchup: two strategy indices, a repetition, and a global id.
+/// A scheduled matchup: two strategy indices, a repetition, and a global match id.
+///
+/// Produced by [`SchedulePlan::matchup`](super::schedule::SchedulePlan::matchup)
+/// and consumed by `run_match_core` and the Metal batch path.
 #[derive(Clone, Debug)]
 pub(super) struct Matchup {
+    /// Globally unique match identifier within the schedule.
     pub(super) match_id: usize,
+    /// Index of strategy A in the roster.
     pub(super) a_idx: usize,
+    /// Index of strategy B in the roster.
     pub(super) b_idx: usize,
+    /// Zero-based repetition index.
     pub(super) repetition: u32,
 }
 
-/// Mutable state for a match in progress: strategies, history, and scores.
+/// Mutable state for a single match in progress.
+///
+/// Holds the two strategy instances, shared history buffer, noise RNG,
+/// per-round trace buffers, and cumulative scores. Created at the start
+/// of each match and consumed when the match finishes.
 pub(super) struct MatchSession {
     pub(super) matchup: Matchup,
     pub(super) history: History,

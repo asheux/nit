@@ -1,7 +1,14 @@
 //! Strategy specification parsing from TOML configuration.
 //!
-//! Handles FSM, cellular automata, and Turing machine strategy definitions,
-//! including notebook-index decoding and transition-table validation.
+//! Each public function in this module converts a raw [`StrategyConfig`] (one
+//! `[[strategy]]` table from TOML) into a validated [`StrategySpecKind`] for a
+//! single strategy family:
+//!
+//! - [`normalize_fsm_kind`]  -- finite state machines (notebook-index or
+//!   explicit transitions)
+//! - [`normalize_ca_kind`]   -- elementary / totalistic cellular automata
+//! - [`normalize_tm_kind`]   -- one-sided Turing machines
+//! - [`load_generated_strategies`] -- bulk import from a JSONL file
 
 use super::types::{StrategyConfig, StrategySpec, StrategySpecKind};
 use crate::game::Action;
@@ -12,6 +19,12 @@ use crate::strategy::{
 use serde::Deserialize;
 use std::path::Path;
 
+/// Normalizes a raw strategy config into an FSM [`StrategySpecKind`].
+///
+/// Supports two encoding modes: a compact notebook index (when `raw.index` is
+/// set) or explicit `outputs` + `transitions` tables.  Validation errors are
+/// appended to `errors` rather than returned early so that as many problems as
+/// possible are reported in a single pass.
 pub(super) fn normalize_fsm_kind(
     raw: &StrategyConfig,
     errors: &mut Vec<String>,
@@ -129,6 +142,11 @@ pub(super) fn normalize_fsm_kind(
     }
 }
 
+/// Normalizes a raw strategy config into a cellular automaton [`StrategySpecKind`].
+///
+/// Validates the neighbourhood radius `r` (must be non-negative with `2r`
+/// integral), alphabet size `k`, and that the resulting rule table is not
+/// unreasonably large.
 pub(super) fn normalize_ca_kind(
     raw: &StrategyConfig,
     errors: &mut Vec<String>,
@@ -180,6 +198,12 @@ pub(super) fn normalize_ca_kind(
     }
 }
 
+/// Normalizes a raw strategy config into a one-sided Turing machine
+/// [`StrategySpecKind`].
+///
+/// Accepts either explicit transition rules (array-of-objects or table form)
+/// or a Wolfram-style `rule_code`.  The output map is forced to notebook
+/// semantics (symbol 0 -> Cooperate, all others -> Defect).
 pub(super) fn normalize_tm_kind(
     raw: &StrategyConfig,
     errors: &mut Vec<String>,
@@ -739,19 +763,18 @@ pub(super) fn load_generated_strategies(
     }
 }
 
+/// Converts a CA neighbourhood radius `r` to `2r` as an integer.
+///
+/// Returns `None` when `r` is non-finite, negative, or `2r` is not
+/// (approximately) an integer.
 fn parse_two_r(r: f32) -> Option<u32> {
     if !r.is_finite() || r < 0.0 {
         return None;
     }
     let doubled = r * 2.0;
     let rounded = doubled.round();
-    if (doubled - rounded).abs() > 1e-6 {
+    if (doubled - rounded).abs() > 1e-6 || rounded < 0.0 {
         return None;
     }
-    if rounded < 0.0 {
-        None
-    } else {
-        Some(rounded as u32)
-    }
+    Some(rounded as u32)
 }
-

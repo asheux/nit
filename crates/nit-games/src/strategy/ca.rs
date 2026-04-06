@@ -78,6 +78,10 @@ pub fn run_shrinking_ca(
     }
 }
 
+/// Look up the next cell symbol from the rule table for a given neighborhood window.
+///
+/// Interprets `window` as a mixed-radix index into `rule_table`, where each
+/// cell is a digit in base `symbols`. Returns 0 if the index is out of range.
 fn ca_transition_symbol(rule_table: &[u8], symbols: u8, window: &[u8]) -> u8 {
     let base = symbols.max(2) as usize;
     let mut idx = 0usize;
@@ -105,6 +109,9 @@ pub struct CaStrategy {
 
 impl CaStrategy {
     /// Construct from rule parameters.
+    ///
+    /// Pre-decodes the rule table and allocates the sliding bit window
+    /// sized to the maximum input the CA can consume.
     pub fn new(id: impl Into<String>, rule_code: u64, symbols: u8, two_r: u32, steps: u32) -> Self {
         let rule_table = decode_ca_rule_table(rule_code, symbols, two_r);
         let suffix_len = two_r.saturating_mul(steps).saturating_add(1).max(1) as usize;
@@ -162,6 +169,11 @@ impl super::Strategy for CaStrategy {
 
 // ── Sliding bit window ───────────────────────────────────────
 
+/// Fixed-capacity sliding window of binary symbols.
+///
+/// Maintains at most `max_len` bits in FIFO order. Older bits are
+/// discarded when the window is full. Used by [`CaStrategy`] to
+/// build the CA input row incrementally from game history.
 #[derive(Clone, Debug)]
 struct BitWindow {
     max_len: usize,
@@ -169,6 +181,7 @@ struct BitWindow {
 }
 
 impl BitWindow {
+    /// Create a new empty window with the given maximum length.
     fn new(max_len: usize) -> Self {
         Self {
             max_len: max_len.max(1),
@@ -176,15 +189,18 @@ impl BitWindow {
         }
     }
 
+    /// Remove all bits from the window.
     fn clear(&mut self) {
         self.bits.clear();
     }
 
+    /// Append both player bits from a single round record.
     fn push_round(&mut self, record: RoundRecord) {
         self.push_bit(super::action_bit(record.a));
         self.push_bit(super::action_bit(record.b));
     }
 
+    /// Append a single bit, evicting the oldest if at capacity.
     fn push_bit(&mut self, bit: u8) {
         self.bits.push_back(bit.min(1));
         while self.bits.len() > self.max_len {
@@ -192,6 +208,7 @@ impl BitWindow {
         }
     }
 
+    /// Snapshot the current window contents as a contiguous vector.
     fn to_vec(&self) -> Vec<u8> {
         self.bits.iter().copied().collect()
     }

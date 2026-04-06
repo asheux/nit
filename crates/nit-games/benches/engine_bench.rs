@@ -4,6 +4,19 @@
 //! Turing-machine halting filters, event/history logging overhead, and sweep I/O
 //! throughput across FSM, cellular automaton, and Turing machine strategy families.
 //!
+//! ## Benchmark groups
+//!
+//! | Group | Focus |
+//! |-------|-------|
+//! | Single match / tournament sizes | Baseline latency scaling from 2 to 128 strategies |
+//! | Logging overhead | I/O cost of NDJSON event and history writers |
+//! | Parallel execution | Rayon-parallel throughput at 64 and 256 strategies |
+//! | Fast-eval cycle detection | Cycle-detecting vs brute-force execution |
+//! | FSM fast-eval stress | Pure-FSM cycle detection at scale |
+//! | TM micro / tournament / heavy | Raw tape-simulation cost and tournament overhead |
+//! | TM halting filter | Pre-tournament halting analysis throughput |
+//! | Sweep I/O serialisation | JSON write throughput for tournament artefacts |
+//!
 //! ## Running
 //!
 //! ```text
@@ -11,7 +24,11 @@
 //! cargo bench -p nit-games -- --test  # compile-check only
 //! ```
 
+use std::path::PathBuf;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
+
 use nit_games::config::{
     AcceleratorMode, EngineConfig, HistoryConfig, NormalizedConfig, StrategySpec, StrategySpecKind,
 };
@@ -21,8 +38,6 @@ use nit_games::history_log::HistoryWriter;
 use nit_games::output::{RunPaths, RunSummary, RUN_SUMMARY_SCHEMA_VERSION};
 use nit_games::tournament::{KernelRunMode, Parallelism, TournamentKernel};
 use nit_games::{decode_tm_rule_code_wolfram, InputMode, Strategy, TmMove, TmTransition};
-use std::path::PathBuf;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 // ── Temporary file paths ────────────────────────────────────
 
@@ -44,6 +59,7 @@ fn temp_bench_path(label: &str, extension: &str) -> PathBuf {
 // ── Strategy spec constructors ──────────────────────────────
 
 /// The standard cooperate/defect output pair used by most benchmark strategies.
+#[inline]
 fn cooperate_defect_outputs() -> Vec<Action> {
     vec![Action::Cooperate, Action::Defect]
 }
@@ -104,13 +120,26 @@ fn tm_spec(
 fn binary_tm_transitions(movement: HeadMovement) -> Vec<TmTransition> {
     let move_dir = movement.to_tm_move();
     vec![
-        TmTransition { write: 0, move_dir, next: 1 },
-        TmTransition { write: 1, move_dir, next: 1 },
+        TmTransition {
+            write: 0,
+            move_dir,
+            next: 1,
+        },
+        TmTransition {
+            write: 1,
+            move_dir,
+            next: 1,
+        },
     ]
 }
 
 /// Build a cellular automaton strategy spec from rule parameters.
-fn ca_spec(label: impl Into<String>, rule_number: u64, radius: f32, threshold: u32) -> StrategySpec {
+fn ca_spec(
+    label: impl Into<String>,
+    rule_number: u64,
+    radius: f32,
+    threshold: u32,
+) -> StrategySpec {
     StrategySpec {
         id: label.into(),
         name: None,
@@ -129,6 +158,7 @@ fn ca_spec(label: impl Into<String>, rule_number: u64, radius: f32, threshold: u
 /// together, providing `run_sequential` as a convenience for benchmarks.
 struct BenchTournament {
     kernel: TournamentKernel,
+    #[allow(dead_code)]
     config: NormalizedConfig,
 }
 
@@ -145,11 +175,6 @@ impl BenchTournament {
             event_writer: None,
             history_writer: None,
         })
-    }
-
-    /// Borrow the kernel's strategy definitions (for serialisation benchmarks).
-    fn definitions(&self) -> &[nit_games::output::StrategyDefinition] {
-        self.kernel.definitions()
     }
 }
 
@@ -176,6 +201,19 @@ impl HeadMovement {
         }
     }
 }
+
+impl std::fmt::Display for HeadMovement {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Advancing => f.write_str("right"),
+            Self::Stationary => f.write_str("stay"),
+        }
+    }
+}
+
+/// Standard round count used for baseline benchmarks where latency scaling
+/// (rather than absolute throughput) is the metric of interest.
+const BASELINE_ROUNDS: u32 = 200;
 
 // ── Config scaffold ─────────────────────────────────────────
 
@@ -250,12 +288,14 @@ fn build_deterministic_strategy_suite(rounds: u32) -> NormalizedConfig {
     let alld = fsm_spec("fsm_alld", 1, vec![Action::Defect], vec![vec![0, 0]]);
 
     let tft = fsm_spec(
-        "fsm_tft", 2,
+        "fsm_tft",
+        2,
         cooperate_defect_outputs(),
         vec![vec![0, 1], vec![0, 1]],
     );
     let anti_tft = fsm_spec(
-        "fsm_anti_tft", 2,
+        "fsm_anti_tft",
+        2,
         cooperate_defect_outputs(),
         vec![vec![1, 0], vec![1, 0]],
     );
@@ -265,7 +305,9 @@ fn build_deterministic_strategy_suite(rounds: u32) -> NormalizedConfig {
 
     let mut cfg = config_scaffold(
         vec![allc, alld, tft, anti_tft, ca_rule30, tm_basic],
-        rounds, 1, false,
+        rounds,
+        1,
+        false,
     );
     // Deterministic suite needs memory_n=1 for TFT lookback.
     cfg.max_memory_n = 1;
@@ -313,7 +355,13 @@ fn build_tm_heavy_tournament(
 ) -> NormalizedConfig {
     let stay_transitions = binary_tm_transitions(HeadMovement::Stationary);
     let specs: Vec<StrategySpec> = (0..strategy_count)
-        .map(|idx| tm_spec(format!("tm_heavy{idx}"), stay_transitions.clone(), step_budget))
+        .map(|idx| {
+            tm_spec(
+                format!("tm_heavy{idx}"),
+                stay_transitions.clone(),
+                step_budget,
+            )
+        })
         .collect();
 
     config_scaffold(specs, rounds, 1, false)
@@ -326,8 +374,7 @@ fn build_tm_heavy_tournament(
 fn build_tm_family_reference(rounds: u32, step_budget: u32) -> NormalizedConfig {
     let specs: Vec<StrategySpec> = (0u64..=15)
         .map(|rule_code| {
-            let (decoded_transitions, _remainder) =
-                decode_tm_rule_code_wolfram(rule_code, 1, 2);
+            let (decoded_transitions, _remainder) = decode_tm_rule_code_wolfram(rule_code, 1, 2);
             StrategySpec {
                 id: format!("tm_{rule_code}"),
                 name: None,
@@ -359,7 +406,11 @@ fn build_tm_family_reference(rounds: u32, step_budget: u32) -> NormalizedConfig 
 fn build_alternating_baseline(strategy_count: usize, rounds: u32) -> NormalizedConfig {
     let specs: Vec<StrategySpec> = (0..strategy_count)
         .map(|idx| {
-            let action = if idx % 2 == 0 { Action::Cooperate } else { Action::Defect };
+            let action = if idx % 2 == 0 {
+                Action::Cooperate
+            } else {
+                Action::Defect
+            };
             fsm_spec(format!("base{idx}"), 1, vec![action], vec![vec![0, 0]])
         })
         .collect();
@@ -384,9 +435,8 @@ fn run_sequential(kernel: &TournamentKernel) -> nit_games::output::TournamentRes
 
 /// Baseline latency for a single 200-round match between two FSM strategies.
 fn bench_single_match(c: &mut Criterion) {
-    let pair_match = BenchTournament::from_config(
-        build_generic_fsm_tournament(2, 200, 1, false),
-    );
+    let pair_match =
+        BenchTournament::from_config(build_generic_fsm_tournament(2, BASELINE_ROUNDS, 1, false));
     c.bench_function("single_match_200_rounds", |b| {
         b.iter(|| pair_match.run_sequential());
     });
@@ -394,9 +444,8 @@ fn bench_single_match(c: &mut Criterion) {
 
 /// Small tournament: 16 strategies, 200 rounds, sequential execution.
 fn bench_tournament_small(c: &mut Criterion) {
-    let small_field = BenchTournament::from_config(
-        build_generic_fsm_tournament(16, 200, 1, false),
-    );
+    let small_field =
+        BenchTournament::from_config(build_generic_fsm_tournament(16, BASELINE_ROUNDS, 1, false));
     c.bench_function("tournament_small", |b| {
         b.iter(|| small_field.run_sequential());
     });
@@ -405,9 +454,8 @@ fn bench_tournament_small(c: &mut Criterion) {
 /// Medium tournament: 128 strategies, 50 rounds, sequential execution.
 /// The larger field produces O(n^2) matchups, stressing the scheduler.
 fn bench_tournament_medium(c: &mut Criterion) {
-    let medium_field = BenchTournament::from_config(
-        build_generic_fsm_tournament(128, 50, 1, false),
-    );
+    let medium_field =
+        BenchTournament::from_config(build_generic_fsm_tournament(128, 50, 1, false));
     c.bench_function("tournament_medium", |b| {
         b.iter(|| medium_field.run_sequential());
     });
@@ -609,11 +657,11 @@ fn bench_tm_micro(c: &mut Criterion) {
 
     let mut tm_strategy = nit_games::OneSidedTmStrategy::new(
         "tm",
-        2,     // symbols
-        1,     // states
-        0,     // blank symbol
-        0,     // fallback symbol
-        256,   // max steps per round
+        2,   // symbols
+        1,   // states
+        0,   // blank symbol
+        0,   // fallback symbol
+        256, // max steps per round
         InputMode::OpponentLastAction,
         cooperate_defect_outputs(),
         stay_transitions,
@@ -746,16 +794,13 @@ fn bench_sweep_io(c: &mut Criterion) {
             // Definitions, results, and summary are written atomically to
             // avoid partial reads from concurrent processes.
             let _ = nit_utils::fs::write_atomic(&definitions_dest, |w| {
-                serde_json::to_writer_pretty(w, kernel.definitions())
-                    .map_err(std::io::Error::other)
+                serde_json::to_writer_pretty(w, kernel.definitions()).map_err(std::io::Error::other)
             });
             let _ = nit_utils::fs::write_atomic(&results_dest, |w| {
-                serde_json::to_writer_pretty(w, &tournament_results)
-                    .map_err(std::io::Error::other)
+                serde_json::to_writer_pretty(w, &tournament_results).map_err(std::io::Error::other)
             });
             let _ = nit_utils::fs::write_atomic(&summary_dest, |w| {
-                serde_json::to_writer_pretty(w, &run_summary)
-                    .map_err(std::io::Error::other)
+                serde_json::to_writer_pretty(w, &run_summary).map_err(std::io::Error::other)
             });
         });
     });

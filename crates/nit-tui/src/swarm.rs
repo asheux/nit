@@ -5747,7 +5747,10 @@ fn collect_source_files(dir: &Path, workspace_root: &Path, out: &mut Vec<String>
             collect_source_files(&path, workspace_root, out);
         } else if path.is_file() {
             if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
-                if matches!(ext, "rs" | "toml" | "ts" | "js" | "py" | "go" | "c" | "h" | "cpp" | "hpp") {
+                if matches!(
+                    ext,
+                    "rs" | "toml" | "ts" | "js" | "py" | "go" | "c" | "h" | "cpp" | "hpp"
+                ) {
                     if let Ok(rel) = path.strip_prefix(workspace_root) {
                         out.push(rel.display().to_string());
                     }
@@ -6141,9 +6144,13 @@ fn wrap_task_prompt(
             == Some("propose");
         if is_integrate {
             out.push_str("\n## FILE CHECKLIST (non-negotiable)\n");
-            out.push_str("\"Refactor module\" = refactor EVERY file below. No exceptions, no skipping.\n");
+            out.push_str(
+                "\"Refactor module\" = refactor EVERY file below. No exceptions, no skipping.\n",
+            );
             out.push_str("Process this checklist in order. Open each file, read it, refactor it, then move to the next.\n");
-            out.push_str("Even if a file looks clean, improve naming, docs, structure, or consistency.\n");
+            out.push_str(
+                "Even if a file looks clean, improve naming, docs, structure, or consistency.\n",
+            );
             out.push_str("Your task is NOT complete until every file has been modified.\n\n");
             for (i, path) in scope_files.iter().enumerate() {
                 out.push_str(&format!("{}. {path}\n", i + 1));

@@ -1416,6 +1416,11 @@ fn render_markdown_table(lines: &[String], theme: &Theme, width: usize) -> Vec<L
     for cell_width in widths.iter_mut() {
         *cell_width = (*cell_width).min(max_col.max(6));
     }
+    // Give remaining space to the last column so it fills the full width.
+    let used: usize = widths.iter().sum();
+    if used < available && cols > 0 {
+        widths[cols - 1] += available - used;
+    }
 
     let border = format_table_border(widths.as_slice());
     let mut out = Vec::new();

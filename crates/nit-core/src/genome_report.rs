@@ -221,7 +221,7 @@ a distinct role that diversifies the token stream.\n\
 \n\
 TARGETS (minimum → aspirational):\n\
 - Tier III+ (Spaceship) on all AST encoders. Aim for Tier V (Replicator).\n\
-- Density between 0.20 and 0.35 on AST encoders.\n\
+- Density >= 0.20 on AST encoders (higher density means richer structure).\n\
 - >= 5 components on ast_structure.\n\
 - Cyclomatic complexity <= 8 per function.\n\
 - Nesting depth <= 3 on average.\n\
@@ -647,21 +647,23 @@ pub fn generate_recommendations(
 ) -> Vec<GenomeRecommendation> {
     let mut recs = Vec::new();
 
-    // Density and component recommendations (no tree-sitter needed).
+    // Density recommendations (no tree-sitter needed).
+    // Low density means poor structural variety; high density is good.
     for score in scores {
         if matches!(
             score.encoder,
             SeedEncoderId::TokenSpectrum
                 | SeedEncoderId::AstStructure
                 | SeedEncoderId::ComplexityField
-        ) && score.density > 0.45
+        ) && score.density < 0.15
         {
             recs.push(GenomeRecommendation {
                 metric: "density".into(),
                 severity: RecommendationSeverity::Warning,
                 message: format!(
-                    "{} density is {:.2}. The file has insufficient whitespace and comments. \
-                     Add documentation comments to public functions and blank lines between logical sections.",
+                    "{} density is {:.2}. The token-role distribution lacks variety. \
+                     Mix different token types: keywords, operators, identifiers, types, and literals. \
+                     Break up uniform code blocks with varied function shapes.",
                     score.encoder.label(),
                     score.density,
                 ),

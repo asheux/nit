@@ -1,5 +1,13 @@
+//! Deterministic match scheduling for round-robin tournaments.
+//!
+//! Converts `(strategy_count, repetitions, self_play)` into a flat,
+//! deterministic sequence of [`Matchup`] values that both the kernel and
+//! runner iterate over.
+
 use super::types::Matchup;
 
+/// Pre-computed tournament schedule: total match count and the parameters
+/// needed to derive any individual [`Matchup`] by its flat index.
 #[derive(Clone, Debug)]
 pub(super) struct SchedulePlan {
     pub(super) strategy_count: usize,
@@ -9,6 +17,9 @@ pub(super) struct SchedulePlan {
 }
 
 impl SchedulePlan {
+    /// Build a schedule from the roster size, repetition count, and self-play flag.
+    ///
+    /// Panics if the resulting match count overflows `usize`.
     pub(super) fn new(strategy_count: usize, repetitions: u32, self_play: bool) -> Self {
         let total_matches = total_schedule_matches(strategy_count, repetitions, self_play)
             .expect("tournament schedule size overflow");
@@ -20,22 +31,25 @@ impl SchedulePlan {
         }
     }
 
+    /// Total number of matches in the schedule.
     pub(super) fn len(&self) -> usize {
         self.total_matches
     }
 
+    /// Returns `true` when the schedule contains zero matches.
     pub(super) fn is_empty(&self) -> bool {
         self.total_matches == 0
     }
 
+    /// Derive the [`Matchup`] for a given flat match id, or `None` if out of range.
     pub(super) fn matchup(&self, match_id: usize) -> Option<Matchup> {
         if match_id >= self.total_matches || self.strategy_count == 0 || self.repetitions == 0 {
             return None;
         }
-        let matches_per_repetition =
+        let per_rep =
             matches_per_repetition(self.strategy_count, self.self_play).expect("schedule size");
-        let repetition = match_id / matches_per_repetition;
-        let offset = match_id % matches_per_repetition;
+        let repetition = match_id / per_rep;
+        let offset = match_id % per_rep;
         let (a_idx, b_idx) = if self.self_play {
             (offset / self.strategy_count, offset % self.strategy_count)
         } else {
@@ -57,6 +71,7 @@ impl SchedulePlan {
         })
     }
 
+    /// Derive a contiguous slice of matchups starting at `start`, up to `count` entries.
     pub(super) fn matchups(&self, start: usize, count: usize) -> Vec<Matchup> {
         let end = start.saturating_add(count).min(self.total_matches);
         (start..end)
@@ -65,6 +80,8 @@ impl SchedulePlan {
     }
 }
 
+/// Number of distinct matchups in a single repetition (N*N with self-play,
+/// N*(N-1) without). Returns `None` on overflow.
 pub(super) fn matches_per_repetition(strategy_count: usize, self_play: bool) -> Option<usize> {
     if strategy_count == 0 {
         return Some(0);
@@ -76,6 +93,7 @@ pub(super) fn matches_per_repetition(strategy_count: usize, self_play: bool) -> 
     }
 }
 
+/// Total matches across all repetitions. Returns `None` on overflow.
 pub(super) fn total_schedule_matches(
     strategy_count: usize,
     repetitions: u32,

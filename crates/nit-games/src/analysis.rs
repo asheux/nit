@@ -1,17 +1,30 @@
-use crate::events::EventWriter;
-use nit_utils::fs::write_atomic;
-use serde::{Deserialize, Serialize};
+//! Post-tournament history analysis.
+//!
+//! Given an NDJSON history log produced by a tournament run, this module
+//! computes per-match summaries (outcome counts, cooperation rates),
+//! per-strategy aggregates, and trajectory samples for randomness-tagged
+//! matches. Results are written as CSV, NDJSON, and a JSON summary file
+//! under a configurable output directory.
+
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::Path;
 
+use serde::{Deserialize, Serialize};
+
+use crate::events::EventWriter;
+use nit_utils::fs::write_atomic;
+
 const ANALYSIS_SCHEMA_VERSION: u32 = 1;
 const DEFAULT_TAIL_ROUNDS: usize = 10_000;
 const DEFAULT_TRAJECTORY_SAMPLES: usize = 50;
 const DEFAULT_PREVIEW_LIMIT: usize = 3;
 
+/// Configuration controlling the history analysis pass: how many tail rounds
+/// to consider, how many trajectory sample buckets to produce, and which
+/// strategy-ID substrings identify "random" matches.
 #[derive(Clone, Debug)]
 pub struct AnalysisConfig {
     pub tail_rounds: usize,
@@ -48,6 +61,8 @@ pub struct OutcomeCounts {
     pub dd: u32,
 }
 
+/// Per-match analysis record: outcome counts, cooperation rates, and
+/// tail-window statistics for a single match between two strategies.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct MatchSummary {
     pub match_id: usize,
@@ -70,6 +85,8 @@ pub struct MatchSummary {
     pub b_initial: Option<char>,
 }
 
+/// Aggregate analysis for a single strategy across all its matches:
+/// total rounds, cooperation rate, tail cooperation rate, and average score.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct StrategySummary {
     pub id: String,
@@ -168,6 +185,11 @@ struct StrategyAgg {
     total_score: i64,
 }
 
+/// Run the full analysis pipeline over the given NDJSON history log, writing
+/// CSV and JSON artefacts into `out_dir`.
+///
+/// Returns a [`HistoryAnalysis`] containing both the serialised summary and a
+/// small preview suitable for TUI display.
 pub fn analyze_history(
     history_path: &Path,
     out_dir: &Path,
@@ -475,32 +497,34 @@ fn update_strategy(
     entry.total_score = entry.total_score.saturating_add(score);
 }
 
-fn agg_to_summary(id: String, agg: StrategyAgg) -> StrategySummary {
-    let coop_rate = if agg.rounds == 0 {
+/// Convert a [`StrategyAgg`] accumulator into the public [`StrategySummary`],
+/// computing derived rates.
+fn agg_to_summary(id: String, aggregate: StrategyAgg) -> StrategySummary {
+    let coop_rate = if aggregate.rounds == 0 {
         0.0
     } else {
-        agg.coop_rounds as f64 / agg.rounds as f64
+        aggregate.coop_rounds as f64 / aggregate.rounds as f64
     };
-    let tail_coop_rate = if agg.tail_rounds == 0 {
+    let tail_coop_rate = if aggregate.tail_rounds == 0 {
         0.0
     } else {
-        agg.tail_coop_rounds as f64 / agg.tail_rounds as f64
+        aggregate.tail_coop_rounds as f64 / aggregate.tail_rounds as f64
     };
-    let avg_score_per_round = if agg.rounds == 0 {
+    let avg_score_per_round = if aggregate.rounds == 0 {
         0.0
     } else {
-        agg.total_score as f64 / agg.rounds as f64
+        aggregate.total_score as f64 / aggregate.rounds as f64
     };
     StrategySummary {
         id,
-        matches: agg.matches,
-        rounds: agg.rounds,
-        coop_rounds: agg.coop_rounds,
+        matches: aggregate.matches,
+        rounds: aggregate.rounds,
+        coop_rounds: aggregate.coop_rounds,
         coop_rate,
-        tail_rounds: agg.tail_rounds,
-        tail_coop_rounds: agg.tail_coop_rounds,
+        tail_rounds: aggregate.tail_rounds,
+        tail_coop_rounds: aggregate.tail_coop_rounds,
         tail_coop_rate,
-        total_score: agg.total_score,
+        total_score: aggregate.total_score,
         avg_score_per_round,
     }
 }

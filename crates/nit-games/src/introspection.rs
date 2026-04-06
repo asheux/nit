@@ -1,9 +1,18 @@
+//! Strategy introspection and human-readable formatting.
+//!
+//! Given a [`StrategySpec`], this module produces a structured
+//! [`StrategyIntrospection`] record that exposes the strategy's internal
+//! parameters (FSM graph, CA rule, or Turing machine transitions) in a
+//! serialisable form, and can render them as plain-text tables for display
+//! in the TUI or CLI output.
+
 use serde::{Deserialize, Serialize};
 
 use crate::config::{StrategySpec, StrategySpecKind};
 use crate::game::Action;
 use crate::strategy::TmMove;
 
+/// Discriminant identifying which family of strategy a spec belongs to.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum StrategyIntrospectionKind {
@@ -12,6 +21,8 @@ pub enum StrategyIntrospectionKind {
     OneSidedTm,
 }
 
+/// A structured, serialisable view of a strategy's internal parameters,
+/// suitable for JSON export or human-readable rendering.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct StrategyIntrospection {
     pub id: String,
@@ -58,6 +69,9 @@ pub struct TmTransitionRecord {
     pub next: u16,
 }
 
+/// Build a [`StrategyIntrospection`] from the given [`StrategySpec`],
+/// normalising fields where necessary (e.g. Turing machine transition tables
+/// are expanded into per-`(state, read)` records).
 pub fn introspect_strategy(spec: &StrategySpec) -> StrategyIntrospection {
     match &spec.kind {
         StrategySpecKind::Fsm {
@@ -214,6 +228,8 @@ fn build_tm_rules_table(transitions: &[TmTransitionRecord]) -> Vec<String> {
     build_table(&headers, &rows)
 }
 
+/// Render a [`StrategyIntrospection`] as a sequence of plain-text lines,
+/// including ASCII tables for FSM transition graphs and Turing machine rules.
 pub fn format_strategy_introspection(intro: &StrategyIntrospection) -> Vec<String> {
     let mut lines = Vec::new();
     lines.push(format!("id: {}", intro.id));

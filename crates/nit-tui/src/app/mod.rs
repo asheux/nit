@@ -1516,27 +1516,18 @@ fn record_agent_bus_vitals(vitals: &mut VitalsState, event: &AgentBusEvent) {
 const GENOME_RETRY_LIMIT: u8 = 10;
 
 /// Push a visible message to the agent console and diagnostics when a genome retry fires.
-fn push_genome_retry_message(state: &mut AppState, agent_id: &str, attempt: u8) {
-    // Build a compact per-file table for the retry message (excluding gitignored paths).
-    let gitignored = &state.gitignored_dirs;
-    let modified: Vec<std::path::PathBuf> = state
-        .genome_turn_modified
-        .values()
-        .flat_map(|s| s.iter().cloned())
-        .filter(|p| {
-            !p.components().any(|c| {
-                matches!(c, std::path::Component::Normal(s) if
-                    gitignored.iter().any(|g| g == s.to_string_lossy().as_ref()))
-            })
-        })
-        .collect();
-
+fn push_genome_retry_message(
+    state: &mut AppState,
+    agent_id: &str,
+    attempt: u8,
+    degraded_files: &[std::path::PathBuf],
+) {
     let mut lines = Vec::new();
     lines.push(format!(
         "\u{21b3} genome retry {attempt}/{GENOME_RETRY_LIMIT}"
     ));
 
-    for path in &modified {
+    for path in degraded_files {
         let report = match state.genome_reports.get(path) {
             Some(r) => r,
             None => continue,
@@ -1591,7 +1582,10 @@ fn push_genome_retry_message(state: &mut AppState, agent_id: &str, attempt: u8) 
 
 /// Build a follow-up prompt if the agent's last turn degraded genome quality.
 /// Returns `None` if quality did not degrade or retry limit is reached.
-fn build_genome_retry_prompt(state: &mut AppState, agent_id: &str) -> Option<String> {
+fn build_genome_retry_prompt(
+    state: &mut AppState,
+    agent_id: &str,
+) -> Option<(String, Vec<std::path::PathBuf>)> {
     if !state.settings.genome.genome_context_enabled {
         return None;
     }
@@ -1824,12 +1818,11 @@ fn build_genome_retry_prompt(state: &mut AppState, agent_id: &str) -> Option<Str
          - Use descriptive, unique identifiers in code you added\n\
          - Add whitespace between logical sections and comments on public interfaces you created\n\
          - Aim for {tier_target} or higher on all AST-driven encoders\n\
-         - Aim for density between 0.20 and 0.35 on AST encoders\n\
          - Your ultimate aspiration is Tier V (Replicator) \u{2014} push toward it\n\n\
          Fix your changes to improve the genome scores, then submit.\n",
     ));
 
-    Some(prompt)
+    Some((prompt, degraded_files))
 }
 
 fn maybe_compute_genome_report(state: &mut AppState, genome: &crate::genome_worker::GenomeWorker) {
@@ -2161,10 +2154,11 @@ fn drain_genome_results(
                 };
 
                 // Auto-retry on genome quality degradation.
-                if let Some(prompt) = build_genome_retry_prompt(state, &agent_id) {
+                if let Some((prompt, degraded_files)) = build_genome_retry_prompt(state, &agent_id)
+                {
                     let attempt = state.genome_retry_count;
                     let mission_id = state.genome_eval_mission_id.clone();
-                    push_genome_retry_message(state, &agent_id, attempt);
+                    push_genome_retry_message(state, &agent_id, attempt, &degraded_files);
                     dispatch_agent_prompt(
                         state,
                         vitals,

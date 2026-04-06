@@ -1,12 +1,24 @@
+//! Tournament result accumulation and final ranking computation.
+//!
+//! [`TournamentAccumulator`] collects individual [`MatchResult`] values as
+//! they arrive (from either CPU or GPU evaluation), maintains per-strategy
+//! running totals and optional pairwise head-to-head tables, and produces
+//! the final [`TournamentResults`] ranking at the end.
+
+use std::cmp::Ordering;
+
 use super::halting::compare_scores;
 use super::session::tm_metrics_from_stats;
 use super::types::{MatchResult, PairStats, StrategyStats, TournamentAccumulator};
 use crate::config::{ScoreAggregation, StrategySpec};
 use crate::output::{DominanceEdge, PairwiseResult, StrategyResult, TournamentResults};
 use crate::strategy::TmRunStats;
-use std::cmp::Ordering;
 
 impl TournamentAccumulator {
+    /// Create a new accumulator for `n` strategies.
+    ///
+    /// When `store_pairwise` is `true` an N x N pairwise grid is allocated
+    /// for head-to-head statistics (used by the TUI and non-batch modes).
     pub(super) fn new(
         n: usize,
         use_adjusted: bool,
@@ -35,6 +47,10 @@ impl TournamentAccumulator {
         }
     }
 
+    /// Fold a single match result into the running per-strategy and pairwise totals.
+    ///
+    /// Handles self-play (same strategy on both sides) as a special case, crediting
+    /// both roles to the same strategy entry.
     pub(super) fn apply_match(
         &mut self,
         result: MatchResult,
@@ -166,6 +182,10 @@ impl TournamentAccumulator {
         }
     }
 
+    /// Compute the sorted strategy ranking from accumulated statistics.
+    ///
+    /// Strategies are sorted by descending score (adjusted or raw depending on
+    /// the accumulator configuration).
     fn build_ranking(&self, specs: &[StrategySpec]) -> Vec<StrategyResult> {
         let mut ranking = Vec::new();
         for (idx, stats) in self.strategies.iter().enumerate() {
@@ -203,6 +223,9 @@ impl TournamentAccumulator {
         ranking
     }
 
+    /// Produce a lightweight leaderboard (ranking only, no pairwise or dominance data).
+    ///
+    /// Used by the TUI for the live leaderboard display during tournament execution.
     pub(super) fn leaderboard(&self, specs: &[StrategySpec]) -> TournamentResults {
         TournamentResults {
             ranking: self.build_ranking(specs),
@@ -211,6 +234,10 @@ impl TournamentAccumulator {
         }
     }
 
+    /// Produce the final [`TournamentResults`] with ranking, pairwise table, and
+    /// dominance edges.
+    ///
+    /// Called once after all matches have been accumulated.
     pub(super) fn finalize(&self, specs: &[StrategySpec]) -> TournamentResults {
         let ranking = self.build_ranking(specs);
 

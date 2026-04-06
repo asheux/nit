@@ -114,7 +114,10 @@ fn move_dir_code(direction: crate::strategy::TmMove) -> u32 {
 // representation for one strategy family.  All strategies in the slice must
 // belong to the same family and share structural parameters.
 
-/// Selects the correct family-specific builder based on the first strategy.
+/// Selects the correct family-specific builder based on the first strategy's kind.
+///
+/// Returns `None` when the roster is empty, heterogeneous, or contains parameters
+/// that the Metal shader cannot encode (e.g. non-binary FSM alphabet).
 fn build_metal_batch_payload(strategies: &[StrategySpec]) -> Option<BatchPayload> {
     let first = strategies.first()?;
     match &first.kind {
@@ -126,7 +129,11 @@ fn build_metal_batch_payload(strategies: &[StrategySpec]) -> Option<BatchPayload
     }
 }
 
-/// Validated FSM parameters extracted from a `StrategySpec`.
+/// Validated FSM parameters extracted from a [`StrategySpec`], ready for Metal
+/// payload packing.
+///
+/// All structural checks (binary alphabet, consistent dimensions, valid start
+/// state) have already passed by the time this struct is constructed.
 struct ValidatedFsm<'a> {
     state_count: usize,
     alphabet_size: usize,
@@ -560,7 +567,10 @@ fn match_outcomes_from_scores(
 // ── Preflight checks ────────────────────────────────────────────────────────
 
 /// Validates that the Metal accelerator can handle the given configuration.
+///
 /// Called before a tournament begins when `accelerator = "metal"` is set.
+/// Checks fast-eval, noise, roster homogeneity, and runs a single-pair probe
+/// batch to confirm the GPU pipeline is functional.
 pub fn accelerator_preflight(config: &NormalizedConfig) -> Result<(), String> {
     if !config.engine.accelerator.requires_metal() {
         return Ok(());
@@ -619,8 +629,11 @@ pub fn accelerator_preflight(config: &NormalizedConfig) -> Result<(), String> {
     }
 }
 
-/// Extended preflight that also checks for features incompatible with the
-/// Metal fast-path (event logging, history logging, match previews).
+/// Extended preflight that additionally checks for features incompatible with
+/// the Metal fast-path (event logging, history logging, match previews).
+///
+/// Should be called at the start of a TUI or CLI run to give the user an
+/// early error rather than a silent fallback to CPU.
 pub fn accelerator_run_preflight(
     config: &NormalizedConfig,
     event_logging: bool,

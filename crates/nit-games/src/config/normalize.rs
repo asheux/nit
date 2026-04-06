@@ -11,24 +11,98 @@ use super::{canonical_game_name, ConfigResult, CONFIG_SCHEMA_VERSION};
 use crate::game::{Action, PayoffMatrix};
 use crate::strategy::InputMode;
 
+/// Raw optional fields shared by both [`GamesConfig`] and
+/// [`FamilyRunParseConfig`], bundled for [`validate_base`].
+struct RawBaseFields {
+    schema_version: Option<u32>,
+    game: Option<String>,
+    rounds: Option<u32>,
+    repetitions: Option<u32>,
+    self_play: Option<bool>,
+    noise: Option<f32>,
+    payoff: Option<super::types::PayoffConfig>,
+}
+
+/// Validated scalars and payoff matrix produced by [`validate_base`].
+struct ValidatedBase {
+    schema_version: u32,
+    game: String,
+    rounds: u32,
+    repetitions: u32,
+    self_play: bool,
+    noise: f32,
+    payoff: PayoffMatrix,
+}
+
+/// Shared validation for fields common to both full tournament configs and
+/// family-run base configs.  Returns the validated scalars and payoff matrix,
+/// appending any problems to `errors`.
+fn validate_base(raw: RawBaseFields, errors: &mut Vec<String>) -> ValidatedBase {
+    let schema_version = raw.schema_version.unwrap_or(CONFIG_SCHEMA_VERSION);
+    let game = resolve_game_name(raw.game, errors);
+    let rounds = raw.rounds.unwrap_or(200);
+    let repetitions = raw.repetitions.unwrap_or(1);
+    let self_play = raw.self_play.unwrap_or(true);
+    let noise = raw.noise.unwrap_or(0.0).clamp(0.0, 1.0);
+
+    if rounds == 0 {
+        errors.push("rounds must be > 0".to_string());
+    }
+    if repetitions == 0 {
+        errors.push("repetitions must be > 0".to_string());
+    }
+
+    let payoff = match raw.payoff {
+        Some(p) => payoff_from_config(p, errors),
+        None => PayoffMatrix::default_pd(),
+    };
+
+    ValidatedBase {
+        schema_version,
+        game,
+        rounds,
+        repetitions,
+        self_play,
+        noise,
+        payoff,
+    }
+}
+
+/// Validates that an [`EngineConfig`]'s parallelism settings are sane,
+/// appending any problems to `errors`.
+fn validate_engine(engine: &super::types::EngineConfig, errors: &mut Vec<String>) {
+    if let ParallelismConfig::Threads { threads } = engine.parallelism {
+        if threads == 0 {
+            errors.push("engine.parallelism.threads must be > 0".to_string());
+        }
+    }
+}
+
 impl GamesConfig {
+    /// Parses a TOML string into a fully validated [`NormalizedConfig`].
+    ///
+    /// Equivalent to calling [`Self::from_toml_with_root`] with `base_dir = None`.
     pub fn from_toml(src: &str) -> ConfigResult<NormalizedConfig> {
-        let raw: GamesConfig = toml::from_str(src).map_err(|err| ConfigError {
+        let raw: Self = toml::from_str(src).map_err(|err| ConfigError {
             errors: vec![err.to_string()],
         })?;
         raw.normalize_with_root(None)
     }
 
+    /// Parses a TOML string into a fully validated [`NormalizedConfig`],
+    /// resolving relative strategy source paths against `base_dir`.
     pub fn from_toml_with_root(
         src: &str,
         base_dir: Option<&std::path::Path>,
     ) -> ConfigResult<NormalizedConfig> {
-        let raw: GamesConfig = toml::from_str(src).map_err(|err| ConfigError {
+        let raw: Self = toml::from_str(src).map_err(|err| ConfigError {
             errors: vec![err.to_string()],
         })?;
         raw.normalize_with_root(base_dir)
     }
 
+    /// Parses a TOML string into a [`FamilyRunBaseConfig`] (shared tournament
+    /// parameters without individual strategy definitions).
     pub fn family_run_base_from_toml_with_root(
         src: &str,
         _base_dir: Option<&std::path::Path>,
@@ -39,34 +113,32 @@ impl GamesConfig {
         raw.normalize_family_run_base()
     }
 
+    /// Validates and normalizes this config using the current working directory
+    /// for any relative paths.
     pub fn normalize(self) -> ConfigResult<NormalizedConfig> {
         self.normalize_with_root(None)
     }
 
+    /// Validates and normalizes this config, resolving relative strategy source
+    /// paths against the optional `base_dir`.
     pub fn normalize_with_root(
         self,
         base_dir: Option<&std::path::Path>,
     ) -> ConfigResult<NormalizedConfig> {
         let mut errors = Vec::new();
 
-        let schema_version = self.schema_version.unwrap_or(CONFIG_SCHEMA_VERSION);
-        let game = resolve_game_name(self.game, &mut errors);
-        let rounds = self.rounds.unwrap_or(200);
-        let repetitions = self.repetitions.unwrap_or(1);
-        let self_play = self.self_play.unwrap_or(true);
-        let noise = self.noise.unwrap_or(0.0).clamp(0.0, 1.0);
-
-        if rounds == 0 {
-            errors.push("rounds must be > 0".to_string());
-        }
-        if repetitions == 0 {
-            errors.push("repetitions must be > 0".to_string());
-        }
-
-        let payoff = match self.payoff {
-            Some(p) => payoff_from_config(p, &mut errors),
-            None => PayoffMatrix::default_pd(),
-        };
+        let base = validate_base(
+            RawBaseFields {
+                schema_version: self.schema_version,
+                game: self.game,
+                rounds: self.rounds,
+                repetitions: self.repetitions,
+                self_play: self.self_play,
+                noise: self.noise,
+                payoff: self.payoff,
+            },
+            &mut errors,
+        );
 
         let mut strategies = Vec::new();
         if self.strategy.is_empty() {
@@ -81,26 +153,22 @@ impl GamesConfig {
         }
 
         let engine = self.engine.unwrap_or_default();
-        if let ParallelismConfig::Threads { threads } = engine.parallelism {
-            if threads == 0 {
-                errors.push("engine.parallelism.threads must be > 0".to_string());
-            }
-        }
+        validate_engine(&engine, &mut errors);
 
         if !errors.is_empty() {
             return Err(ConfigError { errors });
         }
 
         Ok(NormalizedConfig {
-            schema_version,
-            game,
-            rounds,
-            repetitions,
-            self_play,
+            schema_version: base.schema_version,
+            game: base.game,
+            rounds: base.rounds,
+            repetitions: base.repetitions,
+            self_play: base.self_play,
             save_data: self.save_data.unwrap_or_else(default_save_data),
             seed: self.seed,
-            noise,
-            payoff,
+            noise: base.noise,
+            payoff: base.payoff,
             strategies,
             event_log: self.event_log.unwrap_or_default(),
             history: self.history.unwrap_or_default(),
@@ -112,6 +180,8 @@ impl GamesConfig {
 }
 
 impl FamilyRunBaseConfig {
+    /// Extracts the shared tournament parameters from a fully normalized config,
+    /// including a TM blank-symbol hint when any strategy is a Turing machine.
     pub fn from_normalized(config: &NormalizedConfig) -> Self {
         let tm_blank_hint = config.strategies.iter().find_map(|spec| match &spec.kind {
             StrategySpecKind::OneSidedTm { blank, .. } => Some(*blank),
@@ -134,6 +204,8 @@ impl FamilyRunBaseConfig {
         }
     }
 
+    /// Combines this base config with a set of strategy specs to produce a
+    /// complete [`NormalizedConfig`] ready for tournament execution.
     pub fn into_normalized(self, strategies: Vec<StrategySpec>) -> NormalizedConfig {
         NormalizedConfig {
             schema_version: self.schema_version,
@@ -156,49 +228,41 @@ impl FamilyRunBaseConfig {
 }
 
 impl FamilyRunParseConfig {
+    /// Validates the raw parsed family-run TOML into a [`FamilyRunBaseConfig`],
+    /// applying the same scalar and engine checks as full config normalization.
     fn normalize_family_run_base(self) -> ConfigResult<FamilyRunBaseConfig> {
         let mut errors = Vec::new();
 
-        let schema_version = self.schema_version.unwrap_or(CONFIG_SCHEMA_VERSION);
-        let game = resolve_game_name(self.game, &mut errors);
-        let rounds = self.rounds.unwrap_or(200);
-        let repetitions = self.repetitions.unwrap_or(1);
-        let self_play = self.self_play.unwrap_or(true);
-        let noise = self.noise.unwrap_or(0.0).clamp(0.0, 1.0);
-
-        if rounds == 0 {
-            errors.push("rounds must be > 0".to_string());
-        }
-        if repetitions == 0 {
-            errors.push("repetitions must be > 0".to_string());
-        }
-
-        let payoff = match self.payoff {
-            Some(p) => payoff_from_config(p, &mut errors),
-            None => PayoffMatrix::default_pd(),
-        };
+        let base = validate_base(
+            RawBaseFields {
+                schema_version: self.schema_version,
+                game: self.game,
+                rounds: self.rounds,
+                repetitions: self.repetitions,
+                self_play: self.self_play,
+                noise: self.noise,
+                payoff: self.payoff,
+            },
+            &mut errors,
+        );
 
         let engine = self.engine.unwrap_or_default();
-        if let ParallelismConfig::Threads { threads } = engine.parallelism {
-            if threads == 0 {
-                errors.push("engine.parallelism.threads must be > 0".to_string());
-            }
-        }
+        validate_engine(&engine, &mut errors);
 
         if !errors.is_empty() {
             return Err(ConfigError { errors });
         }
 
         Ok(FamilyRunBaseConfig {
-            schema_version,
-            game,
-            rounds,
-            repetitions,
-            self_play,
+            schema_version: base.schema_version,
+            game: base.game,
+            rounds: base.rounds,
+            repetitions: base.repetitions,
+            self_play: base.self_play,
             save_data: self.save_data.unwrap_or_else(default_save_data),
             seed: self.seed,
-            noise,
-            payoff,
+            noise: base.noise,
+            payoff: base.payoff,
             event_log: self.event_log.unwrap_or_default(),
             history: self.history.unwrap_or_default(),
             engine,

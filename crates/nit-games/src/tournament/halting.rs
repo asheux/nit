@@ -8,8 +8,8 @@ use super::metal::{metal_batch_decline_reason, try_prepare_metal_batch_for_workl
 use super::schedule::{matches_per_repetition, total_schedule_matches, SchedulePlan};
 use super::session::run_match_core;
 use super::types::{
-    run_with_parallelism, MatchOutcome, Matchup, Parallelism, SeedDeriver,
-    TmHaltingFilterBackend, TmHaltingFilterDiagnostics,
+    run_with_parallelism, MatchOutcome, Matchup, Parallelism, SeedDeriver, TmHaltingFilterBackend,
+    TmHaltingFilterDiagnostics,
 };
 use crate::config::{AcceleratorMode, NormalizedConfig, StrategySpec, StrategySpecKind};
 use crate::events::GameEvent;
@@ -31,6 +31,10 @@ use std::time::{Duration, Instant};
 const AUTO_TM_METAL_PROBE_TIMEOUT: Duration = Duration::from_millis(300);
 static AUTO_TM_METAL_PROBE_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
 
+/// Compare two floating-point scores with a small epsilon tolerance.
+///
+/// Scores within `1e-9` of each other are considered equal, avoiding
+/// spurious win/loss distinctions from floating-point rounding.
 pub(super) fn compare_scores(a: f64, b: f64) -> Ordering {
     let diff = (a - b).abs();
     if diff < 1e-9 {
@@ -42,14 +46,18 @@ pub(super) fn compare_scores(a: f64, b: f64) -> Ordering {
     }
 }
 
+/// Returns `true` if the strategy spec describes a one-sided Turing machine.
 fn strategy_is_one_sided_tm(spec: &StrategySpec) -> bool {
     matches!(spec.kind, StrategySpecKind::OneSidedTm { .. })
 }
 
+/// Returns `true` when the roster is non-empty and every strategy is a one-sided TM.
 fn roster_is_all_tms(strategies: &[StrategySpec]) -> bool {
     !strategies.is_empty() && strategies.iter().all(strategy_is_one_sided_tm)
 }
 
+/// Returns `true` when the TM run stats indicate the machine halted on every round
+/// (zero fallbacks and output events equal to rounds played).
 fn tm_stats_always_halt(stats: Option<&TmRunStats>) -> bool {
     stats
         .map(|stats| stats.fallback == 0 && stats.output_events == stats.rounds)
@@ -254,6 +262,11 @@ fn notebook_tm_matchup_halts_all_rounds(
     (a_keep, b_keep)
 }
 
+/// Compute the halting mask for an all-TM roster using pairwise CPU simulation.
+///
+/// Scans one repetition of the schedule (TM-vs-TM outcomes are deterministic
+/// across repetitions) and marks any strategy that fails to halt in at least
+/// one matchup. Returns the per-strategy keep mask and cache/evaluation stats.
 fn notebook_tm_family_halting_mask(
     config: &NormalizedConfig,
 ) -> (Vec<bool>, NotebookTmFamilyStats) {
@@ -494,9 +507,8 @@ fn dispatch_metal_tm_probe(
     // Guard against concurrent auto-mode probes.
     if AUTO_TM_METAL_PROBE_IN_FLIGHT.swap(true, AtomicOrdering::AcqRel) {
         diagnostics.backend_probe_elapsed = probe_started.elapsed();
-        diagnostics.metal_decline_reason = Some(
-            "Metal probe already in progress; using CPU fallback for this run.".into(),
-        );
+        diagnostics.metal_decline_reason =
+            Some("Metal probe already in progress; using CPU fallback for this run.".into());
         return None;
     }
 
@@ -523,8 +535,7 @@ fn dispatch_metal_tm_probe(
         }
         Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
             diagnostics.backend_probe_elapsed = probe_started.elapsed();
-            diagnostics.metal_error =
-                Some("Metal probe thread terminated unexpectedly".into());
+            diagnostics.metal_error = Some("Metal probe thread terminated unexpectedly".into());
             None
         }
     }
@@ -566,16 +577,15 @@ fn apply_metal_probe_result(
                 schedule_len,
             )
             .or_else(|| {
-                Some(
-                    "Metal batch evaluator declined this TM family preparation workload.".into(),
-                )
+                Some("Metal batch evaluator declined this TM family preparation workload.".into())
             });
             if strict_metal && config.engine.accelerator.requires_metal() {
-                let decline_msg = diagnostics
-                    .metal_decline_reason
-                    .as_deref()
-                    .unwrap_or("TM family preparation is not supported by the active Metal backend");
-                return Err(format!("Metal accelerator was requested, but {decline_msg}."));
+                let decline_msg = diagnostics.metal_decline_reason.as_deref().unwrap_or(
+                    "TM family preparation is not supported by the active Metal backend",
+                );
+                return Err(format!(
+                    "Metal accelerator was requested, but {decline_msg}."
+                ));
             }
             Ok(None)
         }
@@ -624,11 +634,14 @@ fn all_tm_halting_mask(
         } else {
             let maybe_probe = dispatch_metal_tm_probe(config, diagnostics, probe_started);
             if let Some(probe_result) = maybe_probe {
-                let applied =
-                    apply_metal_probe_result(
-                        probe_result, config, schedule_len,
-                        strict_metal, diagnostics, probe_started,
-                    )?;
+                let applied = apply_metal_probe_result(
+                    probe_result,
+                    config,
+                    schedule_len,
+                    strict_metal,
+                    diagnostics,
+                    probe_started,
+                )?;
                 if let Some(halting_keep) = applied {
                     return Ok(halting_keep);
                 }

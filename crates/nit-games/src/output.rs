@@ -1,10 +1,22 @@
-use crate::config::{AcceleratorMode, NormalizedConfig, ScoreAggregation, StrategySpecKind};
-use nit_utils::fs::write_atomic;
-use nit_utils::hashing::stable_hash_bytes;
-use serde::{Deserialize, Serialize};
+//! Tournament output types, run layout, and summary serialisation.
+//!
+//! This module defines the data structures written to disk after a tournament
+//! run: per-strategy results, pairwise match results, dominance edges, and the
+//! top-level [`RunSummary`] that ties everything together. It also handles
+//! unique run directory creation and the [`RuntimeAcceleratorStats`] that
+//! records which compute backend was used.
+
 use std::io;
 use std::path::{Path, PathBuf};
 
+use serde::{Deserialize, Serialize};
+
+use crate::config::{AcceleratorMode, NormalizedConfig, ScoreAggregation, StrategySpecKind};
+use nit_utils::fs::write_atomic;
+use nit_utils::hashing::stable_hash_bytes;
+
+/// Static definition of a strategy as recorded in the run output, including
+/// the specification kind and optional per-player RNG seeds.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct StrategyDefinition {
     pub id: String,
@@ -15,6 +27,8 @@ pub struct StrategyDefinition {
     pub rng_seed_b: Option<u64>,
 }
 
+/// Aggregated tournament result for a single strategy: total/average payoff,
+/// win/loss/draw record, and optional Turing-machine-specific metrics.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct StrategyResult {
     pub id: String,
@@ -131,6 +145,8 @@ pub struct DominanceEdge {
     pub loser: String,
 }
 
+/// The complete results of a tournament: a ranked list of strategies, all
+/// pairwise match outcomes, and the strict dominance graph.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TournamentResults {
     pub ranking: Vec<StrategyResult>,
@@ -139,6 +155,8 @@ pub struct TournamentResults {
 }
 
 impl TournamentResults {
+    /// Return an empty result set with no rankings, pairwise data, or dominance
+    /// edges.
     pub fn empty() -> Self {
         Self {
             ranking: Vec::new(),
@@ -157,6 +175,8 @@ pub enum RuntimeAcceleratorBackend {
     Metal,
 }
 
+/// Runtime statistics for the compute accelerator backend (CPU or Metal GPU)
+/// used during tournament evaluation.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RuntimeAcceleratorStats {
     #[serde(default)]
@@ -272,6 +292,10 @@ impl Default for RuntimeAcceleratorStats {
     }
 }
 
+/// File paths emitted by a tournament run (summary, events, history, etc.).
+/// Each path is stored as an `Option<String>` so older schema versions that
+/// lack a given file can still deserialise.
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RunPaths {
     pub summary: Option<String>,
@@ -292,6 +316,9 @@ pub fn run_id_from_seed_config(seed: u64, config_text: &str) -> String {
     format!("{hash:016x}")
 }
 
+/// Top-level summary of a single tournament run, combining configuration,
+/// strategy definitions, results, and output paths into a single
+/// JSON-serialisable record.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RunSummary {
     pub schema_version: u32,
@@ -319,6 +346,8 @@ pub fn write_summary(path: &Path, summary: &RunSummary) -> io::Result<()> {
     })
 }
 
+/// Filesystem layout for a single tournament run, mapping each output
+/// artefact to a concrete path under the run directory.
 #[derive(Clone, Debug)]
 pub struct RunLayout {
     pub run_dir: PathBuf,
@@ -357,23 +386,29 @@ impl RunLayout {
     }
 }
 
+/// Find a unique directory name under `root` for this run.
+///
+/// Tries, in order: `<base>`, `<base>__run-<suffix>`, then
+/// `<base>__run-<suffix>-1` through `-9`, and finally falls back to
+/// `<base>__run-<suffix>-overflow`.
 fn unique_run_dir(root: &Path, base: &str, run_id: &str) -> PathBuf {
-    let mut candidate = root.join(base);
+    let candidate = root.join(base);
     if !candidate.exists() {
         return candidate;
     }
+
     let suffix = run_id.get(0..8).unwrap_or(run_id);
-    let mut with_suffix = format!("{base}__run-{suffix}");
-    candidate = root.join(&with_suffix);
-    if !candidate.exists() {
-        return candidate;
-    }
-    for attempt in 1..=9 {
-        with_suffix = format!("{base}__run-{suffix}-{attempt}");
-        candidate = root.join(&with_suffix);
+
+    // Try the plain suffixed name, then numbered variants 1..=9.
+    let names = std::iter::once(format!("{base}__run-{suffix}"))
+        .chain((1..=9).map(|n| format!("{base}__run-{suffix}-{n}")));
+
+    for name in names {
+        let candidate = root.join(&name);
         if !candidate.exists() {
             return candidate;
         }
     }
+
     root.join(format!("{base}__run-{suffix}-overflow"))
 }

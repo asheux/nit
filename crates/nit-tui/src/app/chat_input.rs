@@ -610,10 +610,8 @@ pub(super) fn submit_chat_input_and_dispatch(
             // prompt references a module/directory so the agent covers every
             // file during refactors.
             let prompt = {
-                let scope = crate::swarm::enumerate_scope_files(
-                    state.workspace_root.as_path(),
-                    &prompt,
-                );
+                let scope =
+                    crate::swarm::enumerate_scope_files(state.workspace_root.as_path(), &prompt);
                 if scope.is_empty() {
                     prompt
                 } else {
@@ -622,11 +620,15 @@ pub(super) fn submit_chat_input_and_dispatch(
                     augmented.push_str("\"Refactor module\" = refactor EVERY file below. No exceptions, no skipping.\n");
                     augmented.push_str("Process this checklist in order. Open each file, read it, refactor it, then move to the next.\n");
                     augmented.push_str("Even if a file looks clean, improve naming, docs, structure, or consistency.\n");
-                    augmented.push_str("Your task is NOT complete until every file has been modified.\n\n");
+                    augmented.push_str(
+                        "Your task is NOT complete until every file has been modified.\n\n",
+                    );
                     for (i, path) in scope.iter().enumerate() {
                         augmented.push_str(&format!("{}. {path}\n", i + 1));
                     }
-                    augmented.push_str("\nAfter finishing, list every file and what you changed in each.\n");
+                    augmented.push_str(
+                        "\nAfter finishing, list every file and what you changed in each.\n",
+                    );
                     augmented
                 }
             };

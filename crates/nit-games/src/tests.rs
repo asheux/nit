@@ -1,3 +1,9 @@
+//! Unit and integration tests for the `nit-games` crate.
+//!
+//! Covers FSM/CA/TM strategy correctness, notebook index encoding/decoding,
+//! tournament kernel execution, fast-eval cycle detection, halting filters,
+//! Metal GPU acceleration (macOS), and configuration validation.
+
 use crate::config::{
     AcceleratorMode, EngineMode, FsmGroupingMode, GamesConfig, ScoreAggregation, StrategySpecKind,
 };
@@ -17,10 +23,21 @@ use crate::{
     KernelRunMode, TmHaltingFilterBackend, TournamentKernel, TournamentRunner,
 };
 
-fn push_round(history: &mut History, a: Action, b: Action) {
+// ── Shared test helpers ────────────────────────────────────
+
+/// Record a single round of actions into a match history.
+///
+/// Convenience wrapper around [`History::push`] that makes test
+/// setup more readable when building multi-round histories.
+fn record_round(history: &mut History, a: Action, b: Action) {
     history.push(a, b);
 }
 
+/// Construct a boxed [`Strategy`] from a [`StrategySpec`].
+///
+/// Dispatches on the spec kind (FSM, CA, or one-sided TM) and returns
+/// the corresponding strategy implementation. Used by tests that need
+/// to run matches outside the tournament kernel.
 fn strategy_from_spec(spec: &crate::config::StrategySpec) -> Box<dyn Strategy> {
     match &spec.kind {
         StrategySpecKind::Fsm {
@@ -67,6 +84,12 @@ fn strategy_from_spec(spec: &crate::config::StrategySpec) -> Box<dyn Strategy> {
     }
 }
 
+/// Simulate a full match between two strategies given their specs.
+///
+/// Instantiates both strategies, plays `rounds` rounds with the given
+/// payoff matrix (including halting-timeout penalties), and returns the
+/// cumulative `(a_total, b_total)` scores. Used to verify tournament
+/// kernel results against a reference implementation.
 fn simulate_match_from_specs(
     a_spec: &crate::config::StrategySpec,
     b_spec: &crate::config::StrategySpec,
@@ -89,6 +112,8 @@ fn simulate_match_from_specs(
     }
     (a_total, b_total)
 }
+
+// ── macOS Metal GPU helpers ─────────────────────────────────
 
 #[cfg(target_os = "macos")]
 fn metal_totals_or_skip(
@@ -123,6 +148,8 @@ fn simple_four_state_fsm_spec(id: String) -> crate::config::StrategySpec {
         },
     }
 }
+
+// ── Notebook FSM index helpers ──────────────────────────────
 
 fn notebook_buggy_state_outputs(
     outputs: &[Action],
@@ -228,7 +255,7 @@ fn fsm_notebook_index_s1_k2_all_d_and_all_c() {
     assert_eq!(all_d.next_action(&history, true), Action::Defect);
     assert_eq!(all_c.next_action(&history, true), Action::Cooperate);
 
-    push_round(&mut history, Action::Cooperate, Action::Defect);
+    record_round(&mut history, Action::Cooperate, Action::Defect);
     assert_eq!(all_d.next_action(&history, true), Action::Defect);
     assert_eq!(all_c.next_action(&history, true), Action::Cooperate);
 }
@@ -309,11 +336,11 @@ fn fsm_uses_opponent_last_action_like_tft() {
     assert_eq!(a_fsm.next_action(&history, true), Action::Cooperate);
     assert_eq!(b_fsm.next_action(&history, false), Action::Cooperate);
 
-    push_round(&mut history, Action::Cooperate, Action::Defect);
+    record_round(&mut history, Action::Cooperate, Action::Defect);
     assert_eq!(a_fsm.next_action(&history, true), Action::Defect);
     assert_eq!(b_fsm.next_action(&history, false), Action::Cooperate);
 
-    push_round(&mut history, Action::Defect, Action::Cooperate);
+    record_round(&mut history, Action::Defect, Action::Cooperate);
     assert_eq!(a_fsm.next_action(&history, true), Action::Cooperate);
     assert_eq!(b_fsm.next_action(&history, false), Action::Defect);
 }
@@ -321,8 +348,8 @@ fn fsm_uses_opponent_last_action_like_tft() {
 #[test]
 fn ca_rule_zero_and_255_match_notebook_behavior() {
     let mut history = History::new(0);
-    push_round(&mut history, Action::Defect, Action::Cooperate);
-    push_round(&mut history, Action::Defect, Action::Defect);
+    record_round(&mut history, Action::Defect, Action::Cooperate);
+    record_round(&mut history, Action::Defect, Action::Defect);
 
     let mut ca_zero = CaStrategy::new("ca0", 0, 2, 2, 1);
     let mut ca_255 = CaStrategy::new("ca255", 255, 2, 2, 1);
@@ -345,8 +372,8 @@ fn ca_nontrivial_rule_matches_hand_computation() {
     // r=1 => neighborhood width 3. Rule n=85 maps each neighborhood to its rightmost bit.
     let mut history = History::new(0);
     // bits = [1,0,1,1]
-    push_round(&mut history, Action::Defect, Action::Cooperate);
-    push_round(&mut history, Action::Defect, Action::Defect);
+    record_round(&mut history, Action::Defect, Action::Cooperate);
+    record_round(&mut history, Action::Defect, Action::Defect);
 
     let mut ca = CaStrategy::new("ca85", 85, 2, 2, 1);
     // windows: [1,0,1] -> 1, [0,1,1] -> 1, final row [1,1], last cell 1 => Defect
@@ -384,7 +411,7 @@ fn tm_always_move_right_write_zero_cooperates_and_halts() {
         let action = tm.next_action(&history, true);
         assert_eq!(action, Action::Cooperate);
         assert!(tm.last_halted());
-        push_round(&mut history, action, Action::Defect);
+        record_round(&mut history, action, Action::Defect);
     }
 }
 
@@ -407,7 +434,7 @@ fn tm_rule_code_zero_cooperates_on_first_round_then_times_out() {
     assert_eq!(action, Action::Cooperate);
     assert!(tm.last_halted());
 
-    push_round(&mut history, Action::Cooperate, Action::Defect);
+    record_round(&mut history, Action::Cooperate, Action::Defect);
     let action = tm.next_action(&history, true);
     assert_eq!(action, Action::Defect);
     assert!(!tm.last_halted());
@@ -416,7 +443,7 @@ fn tm_rule_code_zero_cooperates_on_first_round_then_times_out() {
 #[test]
 fn history_to_input_uses_flattened_pairs_binary_order() {
     let mut history = History::new(0);
-    push_round(&mut history, Action::Cooperate, Action::Defect); // bits [0,1]
+    record_round(&mut history, Action::Cooperate, Action::Defect); // bits [0,1]
     assert_eq!(history_to_input_u64(&history), Some(1));
 }
 

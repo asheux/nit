@@ -6,7 +6,10 @@
 
 /// Floor division with non-negative remainder for signed 128-bit integers.
 ///
-/// Returns `(q, r)` such that `numer == q * denom + r` and `0 <= r < denom`.
+/// Unlike Rust's built-in truncating division, this always rounds the
+/// quotient toward negative infinity, ensuring the remainder is
+/// non-negative. Returns `(q, r)` such that `numer == q * denom + r`
+/// and `0 <= r < denom`.
 pub(crate) fn floor_div_rem_i128(numer: i128, denom: i128) -> (i128, i128) {
     let mut q = numer / denom;
     let mut r = numer % denom;
@@ -49,17 +52,19 @@ pub(crate) fn checked_pow_u128(base: u128, exp: u32) -> Option<u128> {
     Some(value)
 }
 
-/// Checked exponentiation for `usize`: returns `base.pow(exp)` or `None` on overflow.
-pub(crate) fn checked_pow_usize(base: usize, exp: usize) -> Option<usize> {
+/// Checked exponentiation for `usize`: returns `base.pow(exponent)` or `None` on overflow.
+pub(crate) fn checked_pow_usize(base: usize, exponent: usize) -> Option<usize> {
     let mut value = 1usize;
-    for _ in 0..exp {
+    for _ in 0..exponent {
         value = value.checked_mul(base)?;
     }
     Some(value)
 }
 
-/// Convert a `u64` to its digit representation in base `base`,
-/// most-significant digit first. Returns `[0]` for zero input.
+/// Convert a `u64` to its digit representation in the given base,
+/// most-significant digit first.
+///
+/// The base is clamped to a minimum of 2. Returns `[0]` for zero input.
 pub(crate) fn digits_in_base(input: u64, base: u8) -> Vec<u8> {
     let base = base.max(2) as u64;
     if input == 0 {
@@ -75,8 +80,11 @@ pub(crate) fn digits_in_base(input: u64, base: u8) -> Vec<u8> {
     digits
 }
 
-/// Reconstruct a `u64` from a sequence of base-`base` digits,
-/// most-significant digit first. Returns `None` on overflow.
+/// Reconstruct a `u64` from a sequence of digits in the given base,
+/// most-significant digit first.
+///
+/// The base is clamped to a minimum of 2. Returns `None` if the
+/// accumulated value would overflow `u64`.
 pub(crate) fn digits_to_u64(digits: &[u8], base: u8) -> Option<u64> {
     let base_u64 = base.max(2) as u64;
     let mut value = 0u64;

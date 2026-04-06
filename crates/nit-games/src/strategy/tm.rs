@@ -23,21 +23,21 @@ pub struct TmRunStats {
 
 impl TmRunStats {
     /// Merge another set of stats into this one (additive, min/max preserved).
-    pub fn merge(&mut self, other: &TmRunStats) {
-        if other.rounds > 0 {
+    pub fn merge(&mut self, incoming: &Self) {
+        if incoming.rounds > 0 {
             if self.rounds == 0 {
-                self.min_steps = other.min_steps;
-                self.max_steps = other.max_steps;
+                self.min_steps = incoming.min_steps;
+                self.max_steps = incoming.max_steps;
             } else {
-                self.min_steps = self.min_steps.min(other.min_steps);
-                self.max_steps = self.max_steps.max(other.max_steps);
+                self.min_steps = self.min_steps.min(incoming.min_steps);
+                self.max_steps = self.max_steps.max(incoming.max_steps);
             }
         }
-        self.rounds = self.rounds.saturating_add(other.rounds);
-        self.steps = self.steps.saturating_add(other.steps);
-        self.output_events = self.output_events.saturating_add(other.output_events);
-        self.fallback = self.fallback.saturating_add(other.fallback);
-        self.max_steps_hits = self.max_steps_hits.saturating_add(other.max_steps_hits);
+        self.rounds = self.rounds.saturating_add(incoming.rounds);
+        self.steps = self.steps.saturating_add(incoming.steps);
+        self.output_events = self.output_events.saturating_add(incoming.output_events);
+        self.fallback = self.fallback.saturating_add(incoming.fallback);
+        self.max_steps_hits = self.max_steps_hits.saturating_add(incoming.max_steps_hits);
     }
 }
 
@@ -69,9 +69,13 @@ pub struct TmTrace {
 /// Reason a TM run terminated.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum TmStopReason {
+    /// Head moved right past the last tape cell, producing an output.
     Output,
+    /// Step limit reached without halting.
     MaxSteps,
+    /// No transition entry for the current (state, symbol) pair.
     MissingTransition,
+    /// State index was zero (the halt pseudo-state) before completion.
     InvalidState,
 }
 
@@ -89,8 +93,9 @@ pub struct TmRunResult {
 impl TmRunResult {
     /// Construct a non-output termination result (max-steps, invalid-state, etc.).
     ///
-    /// Most TM exits produce no output value — only the "Output" stop reason does.
-    /// This constructor captures the common pattern for all other exit paths.
+    /// Most TM exits produce no output value -- only the `Output` stop reason
+    /// does. This constructor captures the common pattern for all other exit
+    /// paths.
     fn terminated(steps_taken: u32, stop_reason: TmStopReason, trace: Option<TmTrace>) -> Self {
         Self {
             output_value: None,
@@ -104,6 +109,74 @@ impl TmRunResult {
 }
 
 // ── TM evaluation engine ─────────────────────────────────────
+
+/// Compute the flat transition-table index for a given (state, symbol) pair.
+///
+/// States are 1-indexed externally; subtracting 1 converts to the 0-based row.
+fn transition_index(current_state: u16, read_symbol: u8, symbol_count: u8) -> usize {
+    (current_state.saturating_sub(1) as usize)
+        .saturating_mul(symbol_count as usize)
+        .saturating_add(read_symbol as usize)
+}
+
+/// Move the head according to the transition direction, expanding the tape
+/// leftward (with a blank cell) when the head would underflow position 0.
+///
+/// Returns the new head position after the move.
+fn apply_head_movement(
+    direction: super::TmMove,
+    head_pos: usize,
+    tape: &mut Vec<u8>,
+    blank_symbol: u8,
+) -> usize {
+    match direction {
+        super::TmMove::Left => {
+            if head_pos == 0 {
+                tape.insert(0, blank_symbol);
+                0
+            } else {
+                head_pos - 1
+            }
+        }
+        super::TmMove::Stay => head_pos,
+        super::TmMove::Right => {
+            if head_pos + 1 < tape.len() {
+                head_pos + 1
+            } else {
+                head_pos
+            }
+        }
+    }
+}
+
+/// Snapshot of a single TM step, used to build trace records without
+/// passing many individual arguments.
+struct StepSnapshot {
+    step_number: usize,
+    current_state: u16,
+    head_before: usize,
+    read_symbol: u8,
+    transition: super::TmTransition,
+    head_after: usize,
+}
+
+/// Append one step record to the trace (if tracing is enabled).
+fn record_trace_step(trace: &mut Option<TmTrace>, snap: &StepSnapshot, tape: &[u8]) {
+    let Some(active_trace) = trace.as_mut() else {
+        return;
+    };
+    active_trace.steps.push(TmTraceStep {
+        step: snap.step_number,
+        state: snap.current_state,
+        head_before: snap.head_before,
+        read: snap.read_symbol,
+        next: snap.transition.next,
+        write: snap.transition.write,
+        move_dir: snap.transition.move_dir,
+        head_after: snap.head_after,
+        tape: tape.to_vec(),
+    });
+}
 
 /// Run a one-sided TM with integer input converted to digit form.
 pub fn run_one_sided_tm_from_integer(
@@ -129,32 +202,35 @@ pub fn run_one_sided_tm_from_integer(
 
 /// Run a one-sided Turing machine on explicit input digits.
 ///
-/// The TM halts (with output) when the head moves right past the last tape cell.
-/// Returns [`TmRunResult`] with execution outcome and optional trace.
+/// The tape is initialized from `input_digits` (MSD first) with the head
+/// positioned at the rightmost cell. The TM halts with output when the head
+/// moves right past the last tape cell. Execution also terminates on step
+/// limit, missing transition, or entering the halt pseudo-state (0).
+/// Returns [`TmRunResult`] with the execution outcome and optional trace.
 pub fn run_one_sided_tm(
     transitions: &[super::TmTransition],
-    symbols: u8,
+    symbol_count: u8,
     start_state: u16,
-    blank: u8,
+    blank_symbol: u8,
     input_digits: &[u8],
     max_steps: u32,
     with_trace: bool,
 ) -> TmRunResult {
-    let symbols = symbols.max(1);
-    let digits = if input_digits.is_empty() {
+    let symbol_count = symbol_count.max(1);
+    let initial_digits = if input_digits.is_empty() {
         vec![0]
     } else {
         input_digits.to_vec()
     };
-    let mut tape = digits.clone();
-    let mut head = tape.len().saturating_sub(1);
-    let mut state = start_state;
+    let mut tape = initial_digits.clone();
+    let mut head_pos = tape.len().saturating_sub(1);
+    let mut current_state = start_state;
 
     let mut trace = if with_trace {
         Some(TmTrace {
-            input_digits: digits.clone(),
+            input_digits: initial_digits.clone(),
             initial_tape: tape.clone(),
-            initial_head: head,
+            initial_head: head_pos,
             steps: Vec::with_capacity(max_steps.min(10_000) as usize),
         })
     } else {
@@ -164,94 +240,66 @@ pub fn run_one_sided_tm(
     if max_steps == 0 {
         return TmRunResult::terminated(0, TmStopReason::MaxSteps, trace);
     }
-    if state == 0 {
+    if current_state == 0 {
         return TmRunResult::terminated(0, TmStopReason::InvalidState, trace);
     }
 
-    for step in 0..(max_steps as usize) {
-        let head_before = head;
-        let read = tape.get(head_before).copied().unwrap_or(blank);
-        let idx = (state.saturating_sub(1) as usize)
-            .saturating_mul(symbols as usize)
-            .saturating_add(read as usize);
-        let Some(trans) = transitions.get(idx).copied() else {
+    for step_idx in 0..(max_steps as usize) {
+        let step_number = step_idx + 1;
+        let head_before = head_pos;
+        let read_symbol = tape.get(head_before).copied().unwrap_or(blank_symbol);
+
+        let table_index = transition_index(current_state, read_symbol, symbol_count);
+        let Some(transition) = transitions.get(table_index).copied() else {
             return TmRunResult::terminated(
-                (step + 1) as u32,
+                step_number as u32,
                 TmStopReason::MissingTransition,
                 trace,
             );
         };
 
         if let Some(cell) = tape.get_mut(head_before) {
-            *cell = trans.write;
+            *cell = transition.write;
         }
 
-        if matches!(trans.move_dir, super::TmMove::Right) && head_before + 1 == tape.len() {
-            let output_value = digits_to_u64(&tape, symbols);
-            let output_symbol = tape.last().copied();
-            if let Some(trace) = trace.as_mut() {
-                trace.steps.push(TmTraceStep {
-                    step: step + 1,
-                    state,
-                    head_before,
-                    read,
-                    next: trans.next,
-                    write: trans.write,
-                    move_dir: trans.move_dir,
-                    head_after: head_before + 1,
-                    tape: tape.clone(),
-                });
-            }
+        // Output halt: head moves right past the last tape cell.
+        if matches!(transition.move_dir, super::TmMove::Right) && head_before + 1 == tape.len() {
+            let snap = StepSnapshot {
+                step_number,
+                current_state,
+                head_before,
+                read_symbol,
+                transition,
+                head_after: head_before + 1,
+            };
+            record_trace_step(&mut trace, &snap, &tape);
             return TmRunResult {
-                output_value,
-                output_symbol,
+                output_value: digits_to_u64(&tape, symbol_count),
+                output_symbol: tape.last().copied(),
                 halted: true,
-                steps_taken: (step + 1) as u32,
+                steps_taken: step_number as u32,
                 stop_reason: TmStopReason::Output,
                 trace,
             };
         }
 
-        let mut head_after = head_before;
-        match trans.move_dir {
-            super::TmMove::Left => {
-                if head_after == 0 {
-                    tape.insert(0, blank);
-                    head_after = 0;
-                } else {
-                    head_after -= 1;
-                }
-            }
-            super::TmMove::Stay => {}
-            super::TmMove::Right => {
-                if head_after + 1 < tape.len() {
-                    head_after += 1;
-                }
-            }
-        }
+        let head_after =
+            apply_head_movement(transition.move_dir, head_before, &mut tape, blank_symbol);
 
-        if let Some(trace) = trace.as_mut() {
-            trace.steps.push(TmTraceStep {
-                step: step + 1,
-                state,
-                head_before,
-                read,
-                next: trans.next,
-                write: trans.write,
-                move_dir: trans.move_dir,
-                head_after,
-                tape: tape.clone(),
-            });
-        }
+        let snap = StepSnapshot {
+            step_number,
+            current_state,
+            head_before,
+            read_symbol,
+            transition,
+            head_after,
+        };
+        record_trace_step(&mut trace, &snap, &tape);
 
-        head = head_after;
-        state = trans.next;
-        if state == 0 {
-            return TmRunResult::terminated(
-                (step + 1) as u32,
-                TmStopReason::InvalidState,
-                trace,
-            );
+        head_pos = head_after;
+        current_state = transition.next;
+        if current_state == 0 {
+            return TmRunResult::terminated(step_number as u32, TmStopReason::InvalidState, trace);
         }
     }
 
@@ -324,22 +372,29 @@ impl OneSidedTmStrategy {
         tm_action_from_output_symbol(symbol)
     }
 
+    /// Bring the input suffix up to date with the current history.
+    ///
+    /// When exactly one round was appended since the last sync, only that
+    /// round is pushed incrementally. Otherwise the suffix is rebuilt from
+    /// scratch (handles resets or skipped rounds).
     fn sync_input(&mut self, history: &History) {
         let len = history.len();
-        if len < self.input_suffix.history_len || len > self.input_suffix.history_len + 1 {
+        let prev = self.input_suffix.history_len;
+
+        if len == prev + 1 {
+            // Fast path: exactly one new round appended.
+            if let Some(last) = history.last() {
+                self.input_suffix.push_round(last);
+            }
+        } else if len != prev {
+            // Full rebuild: history was reset or jumped by more than one round.
             self.input_suffix.reset();
             for round in history.iter() {
                 self.input_suffix.push_round(round);
             }
-            self.input_suffix.history_len = len;
-            return;
         }
-        if len == self.input_suffix.history_len + 1 {
-            if let Some(last) = history.last() {
-                self.input_suffix.push_round(last);
-            }
-            self.input_suffix.history_len = len;
-        }
+
+        self.input_suffix.history_len = len;
     }
 
     fn record_round(
@@ -439,6 +494,7 @@ pub(crate) struct InputSuffix {
 }
 
 impl InputSuffix {
+    /// Create a new suffix tracker with the given numeric base and digit width.
     pub(crate) fn new(base: u8, width: usize) -> Self {
         Self {
             base: base.max(2),
@@ -449,6 +505,7 @@ impl InputSuffix {
         }
     }
 
+    /// Reset the suffix to its initial zero state.
     fn reset(&mut self) {
         self.digits_le.clear();
         self.digits_le.push(0);
@@ -456,38 +513,28 @@ impl InputSuffix {
         self.history_len = 0;
     }
 
+    /// Encode a single round (two action bits) into the suffix.
     fn push_round(&mut self, round: RoundRecord) {
         self.push_pair_bits(super::action_bit(round.a), super::action_bit(round.b));
     }
 
     pub(crate) fn push_pair_bits(&mut self, a_bit: u8, b_bit: u8) {
-        let pair = ((a_bit.min(1) << 1) | b_bit.min(1)) as u16;
-        self.mul_add(4, pair);
+        let action_pair = ((a_bit.min(1) << 1) | b_bit.min(1)) as u16;
+        self.mul_add(4, action_pair);
     }
 
-    fn mul_add(&mut self, mul: u16, add: u16) {
-        let base = self.base as u16;
-        let mut carry = add;
-        for digit in &mut self.digits_le {
-            let value = (*digit as u16).saturating_mul(mul).saturating_add(carry);
-            *digit = (value % base) as u8;
-            carry = value / base;
+    fn mul_add(&mut self, multiplier: u16, addend: u16) {
+        let radix = self.base as u16;
+        let mut overflow = addend;
+        for slot in &mut self.digits_le {
+            let product = (*slot as u16)
+                .saturating_mul(multiplier)
+                .saturating_add(overflow);
+            *slot = (product % radix) as u8;
+            overflow = product / radix;
         }
-        while carry > 0 {
-            if self.digits_le.len() < self.width {
-                self.digits_le.push((carry % base) as u8);
-                carry /= base;
-            } else {
-                self.prefix_nonzero = true;
-                break;
-            }
-        }
-        while self.digits_le.len() > self.width {
-            let popped = self.digits_le.pop();
-            if popped.unwrap_or(0) != 0 {
-                self.prefix_nonzero = true;
-            }
-        }
+        self.propagate_carry(overflow, radix);
+        self.truncate_to_width();
         if self.prefix_nonzero {
             self.trim_most_significant_zeros_with_prefix();
         } else {
@@ -495,20 +542,49 @@ impl InputSuffix {
         }
     }
 
+    /// Extend `digits_le` with carry digits until the carry is exhausted or
+    /// the width limit is reached (setting the prefix-overflow flag).
+    fn propagate_carry(&mut self, mut remaining: u16, radix: u16) {
+        while remaining > 0 {
+            if self.digits_le.len() < self.width {
+                self.digits_le.push((remaining % radix) as u8);
+                remaining /= radix;
+            } else {
+                self.prefix_nonzero = true;
+                return;
+            }
+        }
+    }
+
+    /// Drop digits beyond `self.width`, flagging prefix overflow if any
+    /// non-zero digit is discarded.
+    fn truncate_to_width(&mut self) {
+        while self.digits_le.len() > self.width {
+            let discarded = self.digits_le.pop();
+            if discarded.unwrap_or(0) != 0 {
+                self.prefix_nonzero = true;
+            }
+        }
+    }
+
+    /// Return the current digits in most-significant-digit-first order.
+    ///
+    /// Strips leading zeros unless the prefix overflow flag is set, in
+    /// which case the full width is preserved to maintain alignment.
     pub(crate) fn msd_digits(&self) -> Vec<u8> {
         if self.digits_le.is_empty() {
             return vec![0];
         }
-        let mut out = self.digits_le.iter().rev().copied().collect::<Vec<_>>();
+        let mut reversed = self.digits_le.iter().rev().copied().collect::<Vec<_>>();
         if !self.prefix_nonzero {
-            while out.len() > 1 && out.first() == Some(&0) {
-                out.remove(0);
+            while reversed.len() > 1 && reversed.first() == Some(&0) {
+                reversed.remove(0);
             }
         }
-        if out.is_empty() {
+        if reversed.is_empty() {
             vec![0]
         } else {
-            out
+            reversed
         }
     }
 

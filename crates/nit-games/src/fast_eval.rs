@@ -1,8 +1,20 @@
+//! Fast match evaluation for FSM strategies.
+//!
+//! This module provides [`FastStrategyModel`], a flattened representation of an
+//! FSM strategy optimised for cache-friendly match simulation, and
+//! [`evaluate_match`], which runs a full match between two FSM strategies with
+//! optional cycle detection and outcome recording.
+
 use std::collections::HashMap;
 
 use crate::config::{StrategySpec, StrategySpecKind};
 use crate::game::{Action, Outcome, PayoffMatrix};
 
+/// A flattened, evaluation-optimised representation of an FSM strategy.
+///
+/// Transition rows are stored in a contiguous `Vec<u32>` indexed by
+/// `state * alphabet + symbol`, which avoids per-row `Vec` overhead and
+/// improves cache locality during match simulation.
 #[derive(Clone, Debug)]
 pub struct FastStrategyModel {
     pub id: String,
@@ -12,27 +24,51 @@ pub struct FastStrategyModel {
     alphabet: u32,
 }
 
+/// The result of evaluating a single match between two FSM strategies.
 #[derive(Clone, Debug)]
 pub struct FastEvalResult {
+    /// Cumulative payoff for strategy A over all rounds.
     pub a_total: i64,
+    /// Cumulative payoff for strategy B over all rounds.
     pub b_total: i64,
+    /// Cycle metadata, populated when cycle detection is requested and a cycle
+    /// was found.
     pub cycle: Option<CycleMetadata>,
+    /// Encoded outcome string (`'0'`=CC, `'1'`=CD, `'2'`=DC, `'3'`=DD), present
+    /// only when outcome recording is requested.
     pub outcomes: Option<String>,
 }
 
+/// Metadata describing the periodic cycle discovered during match evaluation.
+///
+/// A match between two deterministic FSM strategies always eventually enters a
+/// cycle. This struct captures where the cycle starts, how long it is, and the
+/// outcome distribution within the cycle.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct CycleMetadata {
+    /// Number of rounds before the cycle begins (the transient prefix).
     pub transient_rounds: u32,
+    /// Length of the repeating cycle in rounds.
     pub cycle_rounds: u32,
+    /// Count of CC (mutual cooperation) outcomes within one cycle.
     pub cycle_cc: u64,
+    /// Count of CD (A cooperates, B defects) outcomes within one cycle.
     pub cycle_cd: u64,
+    /// Count of DC (A defects, B cooperates) outcomes within one cycle.
     pub cycle_dc: u64,
+    /// Count of DD (mutual defection) outcomes within one cycle.
     pub cycle_dd: u64,
+    /// Fraction of cycle rounds where strategy A cooperates.
     pub a_cycle_coop_rate: f64,
+    /// Fraction of cycle rounds where strategy B cooperates.
     pub b_cycle_coop_rate: f64,
 }
 
 impl FastStrategyModel {
+    /// Try to build a [`FastStrategyModel`] from a [`StrategySpec`].
+    ///
+    /// Returns `None` for non-FSM strategies or if the FSM data is malformed
+    /// (empty outputs, empty transitions, or inconsistent row widths).
     pub fn from_spec(spec: &StrategySpec) -> Option<Self> {
         match &spec.kind {
             StrategySpecKind::Fsm {
@@ -69,6 +105,7 @@ impl FastStrategyModel {
         }
     }
 
+    /// Return the action (output) for the given FSM state.
     fn action(&self, state: u32) -> Action {
         self.outputs
             .get(state as usize)
@@ -76,6 +113,8 @@ impl FastStrategyModel {
             .unwrap_or(Action::Cooperate)
     }
 
+    /// Compute the next FSM state given the current state and the opponent's
+    /// last action.
     fn next_state(&self, state: u32, opponent_action: Action) -> u32 {
         let symbol = match opponent_action {
             Action::Cooperate => 0,
@@ -86,12 +125,16 @@ impl FastStrategyModel {
     }
 }
 
+/// The joint state of two FSM strategies at a given point during a match.
+/// Field `a` is the current FSM state of player A; `b` is player B's.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 struct CombinedState {
     a: u32,
     b: u32,
 }
 
+/// A snapshot of the match at the first visit to a particular [`CombinedState`],
+/// used for cycle detection.
 #[derive(Copy, Clone, Debug)]
 struct SeenState {
     round: u32,
@@ -100,6 +143,12 @@ struct SeenState {
     counts: [u64; 4],
 }
 
+/// Evaluate a single match between two FSM strategies over a fixed number of
+/// rounds, optionally recording cycle metadata and per-round outcomes.
+///
+/// Uses cycle detection: when the combined state revisits a previously-seen
+/// pair, the remaining rounds are fast-forwarded using the per-cycle payoff
+/// totals.
 pub fn evaluate_match(
     a: &FastStrategyModel,
     b: &FastStrategyModel,
@@ -206,6 +255,8 @@ pub fn evaluate_match(
     }
 }
 
+/// Build a [`CycleMetadata`] from the transient prefix length, cycle length,
+/// and the four outcome counts within a single cycle period.
 fn build_cycle_metadata(
     transient_rounds: u32,
     cycle_rounds: u32,

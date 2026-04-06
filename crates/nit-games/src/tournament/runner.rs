@@ -28,6 +28,14 @@ use crate::output::{RunSummary, RuntimeAcceleratorStats, StrategyDefinition, Tou
 use rayon::prelude::*;
 use std::time::{Duration, Instant};
 
+/// How often (in wall-clock time) the TUI samples a round-level preview
+/// snapshot during batch fast-forward execution.
+const SNAPSHOT_REFRESH_MS: u64 = 100;
+
+/// Sentinel value used when a schedule contains zero matches but a progress
+/// snapshot is still requested (e.g. during empty-roster dry runs).
+const EMPTY_SCHEDULE_SENTINEL: usize = 0;
+
 /// Incremental tournament executor with match-level and round-level stepping.
 pub struct TournamentRunner {
     config: NormalizedConfig,
@@ -52,40 +60,45 @@ pub struct TournamentRunner {
 }
 
 impl TournamentRunner {
+    /// Build a new runner from a normalised game-theory configuration.
+    ///
+    /// Selects halting TM strategies, derives seeds, compiles fast-eval
+    /// models, and lays out the full round-robin schedule.
     pub fn new(config: NormalizedConfig) -> Self {
         let mut config = select_halting_turing_machine_strategies(config);
-        let seed = config.seed.unwrap_or(0);
-        config.seed = Some(seed);
-        let schedule = SchedulePlan::new(
+        let tournament_seed = config.seed.unwrap_or(0);
+        config.seed = Some(tournament_seed);
+        let round_robin_schedule = SchedulePlan::new(
             config.strategies.len(),
             config.repetitions,
             config.self_play,
         );
-        let seed_deriver = SeedDeriver::new(seed);
-        let definitions = build_strategy_definitions(&config.strategies, &seed_deriver);
-        let fast_models = config
+        let match_seed_deriver = SeedDeriver::new(tournament_seed);
+        let strategy_definitions =
+            build_strategy_definitions(&config.strategies, &match_seed_deriver);
+        let precompiled_fast_models = config
             .strategies
             .iter()
             .map(FastStrategyModel::from_spec)
             .collect();
-        let use_adjusted = config.engine.complexity_cost.enabled;
-        let results = TournamentAccumulator::new(
+        let adjusted_scoring_enabled = config.engine.complexity_cost.enabled;
+        let score_accumulator = TournamentAccumulator::new(
             config.strategies.len(),
-            use_adjusted,
+            adjusted_scoring_enabled,
             config.engine.score_aggregation,
             !matches!(config.engine.mode, crate::config::EngineMode::Batch),
         );
         Self {
             config: config.clone(),
-            seed,
-            schedule,
+            seed: tournament_seed,
+            schedule: round_robin_schedule,
             match_index: 0,
             current: None,
-            results,
+            results: score_accumulator,
             strategies: config.strategies.clone(),
-            definitions,
-            seed_deriver,
-            fast_models,
+            definitions: strategy_definitions,
+            seed_deriver: match_seed_deriver,
+            fast_models: precompiled_fast_models,
             event_writer: None,
             history_writer: None,
             last_round: None,
@@ -98,16 +111,22 @@ impl TournamentRunner {
         }
     }
 
+    /// Attach an event log writer. Events (match start/end, rounds, errors) will
+    /// be serialised to this writer during tournament execution.
     pub fn with_event_writer(mut self, writer: EventWriter) -> Self {
         self.event_writer = Some(writer);
         self
     }
 
+    /// Attach a match history writer. Per-match history records will be serialised
+    /// to this writer as each match completes.
     pub fn with_history_writer(mut self, writer: HistoryWriter) -> Self {
         self.history_writer = Some(writer);
         self
     }
 
+    /// Enable or disable collection of per-match history previews for the
+    /// TUI match replay panel.
     pub fn with_match_history_previews(mut self, enabled: bool) -> Self {
         self.collect_match_history_previews = enabled;
         if !enabled {
@@ -116,81 +135,131 @@ impl TournamentRunner {
         self
     }
 
+    /// Drain all accumulated match history previews, returning them and
+    /// leaving the internal buffer empty for the next collection cycle.
     pub fn drain_match_history_previews(&mut self) -> Vec<MatchHistoryPreview> {
         std::mem::take(&mut self.completed_history_previews)
     }
 
+    /// Returns `true` when every match in the schedule has been completed.
     pub fn is_done(&self) -> bool {
         self.match_index >= self.schedule.len() && self.current.is_none()
     }
 
     /// Current progress snapshot for the TUI status display.
+    ///
+    /// Prioritises the active session, then batch-mode cached progress,
+    /// then the next scheduled matchup, falling back to the last saved progress.
     pub fn progress(&self) -> Option<TournamentProgress> {
         if self.schedule.is_empty() {
             return Some(TournamentProgress::build(
-                0, 0, 0, self.config.rounds, false,
-                "-".into(), "-".into(), 0, 0,
-                None, self.runtime.clone(),
+                EMPTY_SCHEDULE_SENTINEL,
+                EMPTY_SCHEDULE_SENTINEL,
+                0,
+                self.config.rounds,
+                false,
+                "-".into(),
+                "-".into(),
+                0,
+                0,
+                None,
+                self.runtime.clone(),
             ));
         }
-        if let Some(current) = self.current.as_ref() {
-            let matchup = &current.matchup;
-            let a = strategy_log_id(self.strategies.get(matchup.a_idx)?);
-            let b = strategy_log_id(self.strategies.get(matchup.b_idx)?);
-            let last_round = if current.round > 0 {
-                self.last_round.as_ref()
-            } else {
-                None
-            };
+        if let Some(active_session) = self.current.as_ref() {
+            return self.progress_from_active_session(active_session);
+        }
+        if let Some(cached_batch_progress) = self.progress_from_batch_cache() {
+            return Some(cached_batch_progress);
+        }
+        if let Some(upcoming_matchup) = self.schedule.matchup(self.match_index) {
+            let first_label = strategy_log_id(self.strategies.get(upcoming_matchup.a_idx)?);
+            let second_label = strategy_log_id(self.strategies.get(upcoming_matchup.b_idx)?);
             return Some(TournamentProgress::build(
                 self.match_index.saturating_add(1),
                 self.schedule.len().max(1),
-                current.round, current.rounds_total, false,
-                a, b, current.a_total, current.b_total,
-                last_round, self.runtime.clone(),
-            ));
-        }
-        if matches!(self.config.engine.mode, crate::config::EngineMode::Batch) {
-            if let Some(mut progress) = self.last_progress.clone() {
-                progress.runtime = self.runtime.clone();
-                return Some(progress);
-            }
-        }
-        if let Some(next_match) = self.schedule.matchup(self.match_index) {
-            let a = strategy_log_id(self.strategies.get(next_match.a_idx)?);
-            let b = strategy_log_id(self.strategies.get(next_match.b_idx)?);
-            return Some(TournamentProgress::build(
-                self.match_index.saturating_add(1),
-                self.schedule.len().max(1),
-                0, self.config.rounds, false,
-                a, b, 0, 0,
-                None, self.runtime.clone(),
+                0,
+                self.config.rounds,
+                false,
+                first_label,
+                second_label,
+                0,
+                0,
+                None,
+                self.runtime.clone(),
             ));
         }
         self.last_progress.clone()
     }
 
+    /// Build a progress snapshot from the currently active match session.
+    fn progress_from_active_session(
+        &self,
+        active_session: &MatchSession,
+    ) -> Option<TournamentProgress> {
+        let active_matchup = &active_session.matchup;
+        let first_label = strategy_log_id(self.strategies.get(active_matchup.a_idx)?);
+        let second_label = strategy_log_id(self.strategies.get(active_matchup.b_idx)?);
+        let previous_round_snapshot = if active_session.round > 0 {
+            self.last_round.as_ref()
+        } else {
+            None
+        };
+        Some(TournamentProgress::build(
+            self.match_index.saturating_add(1),
+            self.schedule.len().max(1),
+            active_session.round,
+            active_session.rounds_total,
+            false,
+            first_label,
+            second_label,
+            active_session.a_total,
+            active_session.b_total,
+            previous_round_snapshot,
+            self.runtime.clone(),
+        ))
+    }
+
+    /// In batch mode, return a copy of the last cached progress with fresh
+    /// runtime stats, or `None` when not applicable.
+    fn progress_from_batch_cache(&self) -> Option<TournamentProgress> {
+        if !matches!(self.config.engine.mode, crate::config::EngineMode::Batch) {
+            return None;
+        }
+        let mut cached_snapshot = self.last_progress.clone()?;
+        cached_snapshot.runtime = self.runtime.clone();
+        Some(cached_snapshot)
+    }
+
+    /// Snapshot the in-progress match for the TUI match detail panel.
+    ///
+    /// Returns `None` when no match is currently active.
     pub fn match_snapshot(&self) -> Option<MatchSnapshot> {
-        let current = self.current.as_ref()?;
-        let matchup = &current.matchup;
-        let a = strategy_log_id(self.strategies.get(matchup.a_idx)?);
-        let b = strategy_log_id(self.strategies.get(matchup.b_idx)?);
+        let active_session = self.current.as_ref()?;
+        let active_matchup = &active_session.matchup;
+        let first_label = strategy_log_id(self.strategies.get(active_matchup.a_idx)?);
+        let second_label = strategy_log_id(self.strategies.get(active_matchup.b_idx)?);
         Some(MatchSnapshot {
             match_index: self.match_index.saturating_add(1),
             total_matches: self.schedule.len().max(1),
-            round: current.round,
-            rounds: current.rounds_total,
-            a,
-            b,
-            a_score: current.a_total,
-            b_score: current.b_total,
-            outcomes: current.history_scores.clone(),
-            payoffs: current.history_payoffs.clone(),
-            a_halted: current.history_halted_a.clone(),
-            b_halted: current.history_halted_b.clone(),
+            round: active_session.round,
+            rounds: active_session.rounds_total,
+            a: first_label,
+            b: second_label,
+            a_score: active_session.a_total,
+            b_score: active_session.b_total,
+            outcomes: active_session.history_scores.clone(),
+            payoffs: active_session.history_payoffs.clone(),
+            a_halted: active_session.history_halted_a.clone(),
+            b_halted: active_session.history_halted_b.clone(),
         })
     }
 
+    /// Advance the tournament by up to `steps` rounds.
+    ///
+    /// Opens new matches as needed, plays rounds, records results, and attempts
+    /// to fast-forward remaining budget through batch evaluation when eligible.
+    /// The TUI calls this once per tick to drive incremental progress.
     pub fn step_rounds(&mut self, steps: u32) {
         if self.schedule.is_empty() {
             return;
@@ -202,173 +271,208 @@ impl TournamentRunner {
                 rounds: self.config.rounds,
             });
         }
-        let mut remaining_steps = steps;
-        self.try_fast_forward_matches(&mut remaining_steps);
-        while remaining_steps > 0 {
+        let mut remaining_step_budget = steps;
+        self.try_fast_forward_matches(&mut remaining_step_budget);
+        while remaining_step_budget > 0 {
             if self.is_done() {
                 break;
             }
             if self.current.is_none() {
-                if let Some(matchup) = self.schedule.matchup(self.match_index) {
-                    let session = MatchSession::new(
-                        matchup,
-                        &self.config,
-                        &self.strategies,
-                        &self.seed_deriver,
-                        true,
-                        true,
-                    );
-                    self.emit(GameEvent::MatchStart {
-                        timestamp: EventWriter::timestamp(),
-                        match_id: session.matchup.match_id,
-                        match_index: self.match_index + 1,
-                        total_matches: self.schedule.len(),
-                        a: self.strategies[session.matchup.a_idx].id.clone(),
-                        b: self.strategies[session.matchup.b_idx].id.clone(),
-                        repetition: session.matchup.repetition + 1,
-                    });
-                    self.last_progress = Some(TournamentProgress::build(
-                        self.match_index.saturating_add(1),
-                        self.schedule.len().max(1),
-                        0, session.rounds_total, false,
-                        self.strategies[session.matchup.a_idx].id.clone(),
-                        self.strategies[session.matchup.b_idx].id.clone(),
-                        0, 0, None, self.runtime.clone(),
-                    ));
-                    self.current = Some(session);
-                } else {
+                let Some(next_matchup) = self.schedule.matchup(self.match_index) else {
                     break;
-                }
+                };
+                self.open_new_match(next_matchup);
             }
 
-            if let Some(mut session) = self.current.take() {
-                let snapshot = self.play_round(&mut session);
-                self.last_round = Some(snapshot.clone());
-                self.last_progress = Some(TournamentProgress::build(
-                    self.match_index.saturating_add(1),
-                    self.schedule.len().max(1),
-                    session.round, session.rounds_total, false,
-                    strategy_log_id(&self.strategies[session.matchup.a_idx]),
-                    strategy_log_id(&self.strategies[session.matchup.b_idx]),
-                    session.a_total, session.b_total,
-                    Some(&snapshot), self.runtime.clone(),
-                ));
-                if session.round >= session.rounds_total {
-                    if self.collect_match_history_previews {
-                        self.completed_history_previews.push(MatchHistoryPreview {
-                            match_index: self.match_index.saturating_add(1),
-                            total_matches: self.schedule.len().max(1),
-                            a: strategy_log_id(&self.strategies[session.matchup.a_idx]),
-                            b: strategy_log_id(&self.strategies[session.matchup.b_idx]),
-                            rounds_total: session.rounds_total,
-                            outcomes: session.history_scores.clone(),
-                        });
-                    }
-                    let a_spec = &self.strategies[session.matchup.a_idx];
-                    let b_spec = &self.strategies[session.matchup.b_idx];
-                    let cost = &self.config.engine.complexity_cost;
-                    let a_tm_stats = session.a_strategy.tm_stats();
-                    let b_tm_stats = session.b_strategy.tm_stats();
-                    let a_adjusted_total = adjusted_total_for_match(
-                        session.a_total,
-                        a_spec,
-                        session.rounds_total,
-                        a_tm_stats,
-                        cost,
-                    );
-                    let b_adjusted_total = adjusted_total_for_match(
-                        session.b_total,
-                        b_spec,
-                        session.rounds_total,
-                        b_tm_stats,
-                        cost,
-                    );
-                    let result = MatchResult {
-                        a_idx: session.matchup.a_idx,
-                        b_idx: session.matchup.b_idx,
-                        rounds: session.rounds_total,
-                        a_total: session.a_total,
-                        b_total: session.b_total,
-                        a_adjusted_total,
-                        b_adjusted_total,
-                        repetition: session.matchup.repetition,
-                        match_id: session.matchup.match_id,
-                    };
-                    self.emit(GameEvent::MatchEnd {
-                        timestamp: EventWriter::timestamp(),
-                        match_id: session.matchup.match_id,
-                        match_index: self.match_index + 1,
-                        a_total: session.a_total,
-                        b_total: session.b_total,
-                    });
-                    self.emit_history(&session);
-                    self.runtime.note_cpu_matches(1);
-                    self.record_completed_outcome(MatchOutcome {
-                        result,
-                        a_crashed: session.a_crashed,
-                        b_crashed: session.b_crashed,
-                        a_tm_stats: a_tm_stats.cloned(),
-                        b_tm_stats: b_tm_stats.cloned(),
-                        last_round: self.last_round.clone(),
-                    });
-                    if self.is_done() {
-                        self.emit(GameEvent::TournamentEnd {
-                            timestamp: EventWriter::timestamp(),
-                        });
-                    }
-                } else {
-                    self.current = Some(session);
-                }
+            let Some(mut active_session) = self.current.take() else {
+                break;
+            };
+            let round_snapshot = self.play_round(&mut active_session);
+            self.last_round = Some(round_snapshot.clone());
+            self.last_progress = Some(TournamentProgress::build(
+                self.match_index.saturating_add(1),
+                self.schedule.len().max(1),
+                active_session.round,
+                active_session.rounds_total,
+                false,
+                strategy_log_id(&self.strategies[active_session.matchup.a_idx]),
+                strategy_log_id(&self.strategies[active_session.matchup.b_idx]),
+                active_session.a_total,
+                active_session.b_total,
+                Some(&round_snapshot),
+                self.runtime.clone(),
+            ));
+            if active_session.round >= active_session.rounds_total {
+                self.finalize_completed_session(active_session);
+            } else {
+                self.current = Some(active_session);
             }
-            remaining_steps = remaining_steps.saturating_sub(1);
-            self.try_fast_forward_matches(&mut remaining_steps);
+            remaining_step_budget = remaining_step_budget.saturating_sub(1);
+            self.try_fast_forward_matches(&mut remaining_step_budget);
         }
     }
 
+    /// Initialise a new [`MatchSession`] from a schedule matchup and emit
+    /// the corresponding start event and initial progress snapshot.
+    fn open_new_match(&mut self, next_matchup: Matchup) {
+        let new_session = MatchSession::new(
+            next_matchup,
+            &self.config,
+            &self.strategies,
+            &self.seed_deriver,
+            true,
+            true,
+        );
+        let player_a_id = self.strategies[new_session.matchup.a_idx].id.clone();
+        let player_b_id = self.strategies[new_session.matchup.b_idx].id.clone();
+        self.emit(GameEvent::MatchStart {
+            timestamp: EventWriter::timestamp(),
+            match_id: new_session.matchup.match_id,
+            match_index: self.match_index + 1,
+            total_matches: self.schedule.len(),
+            a: player_a_id.clone(),
+            b: player_b_id.clone(),
+            repetition: new_session.matchup.repetition + 1,
+        });
+        self.last_progress = Some(TournamentProgress::build(
+            self.match_index.saturating_add(1),
+            self.schedule.len().max(1),
+            0,
+            new_session.rounds_total,
+            false,
+            player_a_id,
+            player_b_id,
+            0,
+            0,
+            None,
+            self.runtime.clone(),
+        ));
+        self.current = Some(new_session);
+    }
+
+    /// Record the final results from a completed match session, including
+    /// complexity-adjusted scores, history previews, and TM statistics.
+    fn finalize_completed_session(&mut self, completed_session: MatchSession) {
+        if self.collect_match_history_previews {
+            self.completed_history_previews.push(MatchHistoryPreview {
+                match_index: self.match_index.saturating_add(1),
+                total_matches: self.schedule.len().max(1),
+                a: strategy_log_id(&self.strategies[completed_session.matchup.a_idx]),
+                b: strategy_log_id(&self.strategies[completed_session.matchup.b_idx]),
+                rounds_total: completed_session.rounds_total,
+                outcomes: completed_session.history_scores.clone(),
+            });
+        }
+        let first_strategy_spec = &self.strategies[completed_session.matchup.a_idx];
+        let second_strategy_spec = &self.strategies[completed_session.matchup.b_idx];
+        let complexity_cost_config = &self.config.engine.complexity_cost;
+        let first_tm_stats = completed_session.a_strategy.tm_stats();
+        let second_tm_stats = completed_session.b_strategy.tm_stats();
+        let first_adjusted_total = adjusted_total_for_match(
+            completed_session.a_total,
+            first_strategy_spec,
+            completed_session.rounds_total,
+            first_tm_stats,
+            complexity_cost_config,
+        );
+        let second_adjusted_total = adjusted_total_for_match(
+            completed_session.b_total,
+            second_strategy_spec,
+            completed_session.rounds_total,
+            second_tm_stats,
+            complexity_cost_config,
+        );
+        let match_result = MatchResult {
+            a_idx: completed_session.matchup.a_idx,
+            b_idx: completed_session.matchup.b_idx,
+            rounds: completed_session.rounds_total,
+            a_total: completed_session.a_total,
+            b_total: completed_session.b_total,
+            a_adjusted_total: first_adjusted_total,
+            b_adjusted_total: second_adjusted_total,
+            repetition: completed_session.matchup.repetition,
+            match_id: completed_session.matchup.match_id,
+        };
+        self.emit(GameEvent::MatchEnd {
+            timestamp: EventWriter::timestamp(),
+            match_id: completed_session.matchup.match_id,
+            match_index: self.match_index + 1,
+            a_total: completed_session.a_total,
+            b_total: completed_session.b_total,
+        });
+        self.emit_history(&completed_session);
+        self.runtime.note_cpu_matches(1);
+        self.record_completed_outcome(MatchOutcome {
+            result: match_result,
+            a_crashed: completed_session.a_crashed,
+            b_crashed: completed_session.b_crashed,
+            a_tm_stats: first_tm_stats.cloned(),
+            b_tm_stats: second_tm_stats.cloned(),
+            last_round: self.last_round.clone(),
+        });
+        if self.is_done() {
+            self.emit(GameEvent::TournamentEnd {
+                timestamp: EventWriter::timestamp(),
+            });
+        }
+    }
+
+    /// Produce the final tournament results (ranking, pairwise, dominance).
     pub fn results(&self) -> TournamentResults {
         self.results.finalize(&self.strategies)
     }
 
+    /// Lightweight leaderboard snapshot (ranking only, no pairwise matrix).
     pub fn leaderboard(&self) -> TournamentResults {
         self.results.leaderboard(&self.strategies)
     }
 
+    /// Strategy definition metadata used for result display headers.
     pub fn definitions(&self) -> &[StrategyDefinition] {
         &self.definitions
     }
 
+    /// The tournament-level random seed.
     pub fn seed(&self) -> u64 {
         self.seed
     }
 
+    /// Borrow the normalised configuration driving this tournament.
     pub fn config(&self) -> &NormalizedConfig {
         &self.config
     }
 
+    /// Current runtime accelerator statistics (CPU/GPU match counts).
     pub fn runtime(&self) -> &RuntimeAcceleratorStats {
         &self.runtime
     }
 
+    /// Number of matches that have been fully scored so far.
     pub fn completed_matches(&self) -> usize {
         self.match_index
     }
 
+    /// Total number of matches in the tournament schedule.
     pub fn total_matches(&self) -> usize {
         self.schedule.len()
     }
 
+    /// Consume the runner, flush writers, and produce the final [`RunSummary`].
+    ///
+    /// Closes event and history log files, builds the result ranking, and
+    /// assembles all metadata into a single summary struct for serialisation.
     pub fn finish(mut self, timestamp: String, run_id: String, config_text: String) -> RunSummary {
-        let event_log = self
+        let event_log_path = self
             .event_writer
             .take()
-            .and_then(|writer| writer.finish().ok())
-            .map(|p| p.to_string_lossy().to_string());
-        let history_log = self
+            .and_then(|pending_writer| pending_writer.finish().ok())
+            .map(|resolved_path| resolved_path.to_string_lossy().to_string());
+        let history_log_path = self
             .history_writer
             .take()
-            .and_then(|writer| writer.finish().ok())
-            .map(|p| p.to_string_lossy().to_string());
-        let results = self.results();
+            .and_then(|pending_writer| pending_writer.finish().ok())
+            .map(|resolved_path| resolved_path.to_string_lossy().to_string());
+        let final_results = self.results();
         RunSummary {
             schema_version: crate::output::RUN_SUMMARY_SCHEMA_VERSION,
             timestamp,
@@ -378,66 +482,85 @@ impl TournamentRunner {
             config: self.config.clone(),
             paths: crate::output::RunPaths {
                 summary: None,
-                events: event_log.clone(),
-                history: history_log.clone(),
+                events: event_log_path.clone(),
+                history: history_log_path.clone(),
                 definitions: None,
                 results: None,
                 config: None,
                 analysis_dir: None,
             },
             strategies: self.definitions.clone(),
-            results,
-            event_log,
-            history_log,
+            results: final_results,
+            event_log: event_log_path,
+            history_log: history_log_path,
             runtime: self.runtime.clone(),
             run_dir: None,
         }
     }
 
+    /// Write a game event to the attached event log, if present.
+    ///
+    /// Round-level events are suppressed when the writer is configured to
+    /// exclude per-round granularity.
     fn emit(&mut self, event: GameEvent) {
-        if let Some(writer) = self.event_writer.as_mut() {
-            if matches!(event, GameEvent::Round { .. }) && !writer.include_rounds() {
-                return;
-            }
-            let _ = writer.write(&event);
-        }
-    }
-
-    fn emit_history(&mut self, session: &MatchSession) {
-        let Some(writer) = self.history_writer.as_mut() else {
+        let Some(event_log_writer) = self.event_writer.as_mut() else {
             return;
         };
-        let a = strategy_log_id(&self.strategies[session.matchup.a_idx]);
-        let b = strategy_log_id(&self.strategies[session.matchup.b_idx]);
-        let include_tm_metrics = self.config.history.include_cycle_metadata;
-        let a_tm_metrics = if include_tm_metrics {
-            session.a_strategy.tm_stats().map(tm_metrics_from_stats)
-        } else {
-            None
-        };
-        let b_tm_metrics = if include_tm_metrics {
-            session.b_strategy.tm_stats().map(tm_metrics_from_stats)
-        } else {
-            None
-        };
-        let record = MatchHistory {
-            match_id: session.matchup.match_id,
-            match_index: self.match_index + 1,
-            total_matches: self.schedule.len(),
-            a,
-            b,
-            repetition: session.matchup.repetition + 1,
-            rounds: session.rounds_total,
-            score_idx: session.history_scores.clone(),
-            a_score: session.a_total,
-            b_score: session.b_total,
-            cycle: None,
-            a_tm_metrics,
-            b_tm_metrics,
-        };
-        let _ = writer.write(&record);
+        if matches!(event, GameEvent::Round { .. }) && !event_log_writer.include_rounds() {
+            return;
+        }
+        let _ = event_log_writer.write(&event);
     }
 
+    /// Serialise a completed match session into the history log.
+    ///
+    /// Optionally includes Turing-machine cycle metadata when enabled in
+    /// the history configuration.
+    fn emit_history(&mut self, finished_session: &MatchSession) {
+        let Some(history_log_writer) = self.history_writer.as_mut() else {
+            return;
+        };
+        let first_label = strategy_log_id(&self.strategies[finished_session.matchup.a_idx]);
+        let second_label = strategy_log_id(&self.strategies[finished_session.matchup.b_idx]);
+        let should_include_tm_metrics = self.config.history.include_cycle_metadata;
+        let first_tm_metrics = if should_include_tm_metrics {
+            finished_session
+                .a_strategy
+                .tm_stats()
+                .map(tm_metrics_from_stats)
+        } else {
+            None
+        };
+        let second_tm_metrics = if should_include_tm_metrics {
+            finished_session
+                .b_strategy
+                .tm_stats()
+                .map(tm_metrics_from_stats)
+        } else {
+            None
+        };
+        let history_record = MatchHistory {
+            match_id: finished_session.matchup.match_id,
+            match_index: self.match_index + 1,
+            total_matches: self.schedule.len(),
+            a: first_label,
+            b: second_label,
+            repetition: finished_session.matchup.repetition + 1,
+            rounds: finished_session.rounds_total,
+            score_idx: finished_session.history_scores.clone(),
+            a_score: finished_session.a_total,
+            b_score: finished_session.b_total,
+            cycle: None,
+            a_tm_metrics: first_tm_metrics,
+            b_tm_metrics: second_tm_metrics,
+        };
+        let _ = history_log_writer.write(&history_record);
+    }
+
+    /// Check whether the batch fast-forward path is eligible.
+    ///
+    /// Fast-forwarding requires no active session, fast-eval enabled, zero
+    /// noise, and no attached event/history writers or preview collection.
     fn fast_forward_allowed(&self) -> bool {
         self.current.is_none()
             && self.config.engine.fast_eval
@@ -447,183 +570,209 @@ impl TournamentRunner {
             && !self.collect_match_history_previews
     }
 
+    /// Lazily initialise the Metal batch pipeline when the GPU accelerator
+    /// has not yet been probed for this tournament.
+    ///
+    /// After this call, `self.metal_batch` is guaranteed to be either
+    /// `Prepared` or `Unavailable` (never `Uninitialized`).
     fn ensure_metal_batch(&mut self) {
-        if matches!(self.metal_batch, MetalBatchState::Uninitialized) {
-            let remaining_matches = self.schedule.len().saturating_sub(self.match_index);
-            match try_prepare_metal_batch_for_workload(
-                &self.config,
-                &self.strategies,
-                remaining_matches,
-            ) {
-                Ok(Some(prepared)) => {
-                    self.runtime.note_metal_policy(
-                        prepared.policy.matches_per_batch,
-                        prepared.policy.inflight_batches,
-                        prepared.policy_source,
-                        prepared.policy_cache_key.clone(),
-                        prepared.policy_cache_path.clone(),
-                    );
-                    self.metal_batch = MetalBatchState::Prepared(prepared);
+        if !matches!(self.metal_batch, MetalBatchState::Uninitialized) {
+            return;
+        }
+        let remaining_match_count = self.schedule.len().saturating_sub(self.match_index);
+        let preparation_result = try_prepare_metal_batch_for_workload(
+            &self.config,
+            &self.strategies,
+            remaining_match_count,
+        );
+        match preparation_result {
+            Ok(Some(prepared_pipeline)) => {
+                self.runtime.note_metal_policy(
+                    prepared_pipeline.policy.matches_per_batch,
+                    prepared_pipeline.policy.inflight_batches,
+                    prepared_pipeline.policy_source,
+                    prepared_pipeline.policy_cache_key.clone(),
+                    prepared_pipeline.policy_cache_path.clone(),
+                );
+                self.metal_batch = MetalBatchState::Prepared(prepared_pipeline);
+            }
+            Ok(None) => {
+                self.note_metal_decline_reason();
+                self.metal_batch = MetalBatchState::Unavailable;
+            }
+            Err(preparation_error) => {
+                if self.config.engine.accelerator.allows_metal() {
+                    self.runtime.note_metal_fallback_reason(format!(
+                        "Metal backend error: {preparation_error}"
+                    ));
                 }
-                Ok(None) => {
-                    if self.config.engine.accelerator.allows_metal() {
-                        self.runtime.note_metal_fallback_reason(
-                            metal_batch_decline_reason(&self.config, &self.strategies, 1)
-                                .unwrap_or_else(|| {
-                                    "Metal batch evaluator declined this workload".into()
-                                }),
-                        );
-                    }
-                    self.metal_batch = MetalBatchState::Unavailable;
-                }
-                Err(err) => {
-                    if self.config.engine.accelerator.allows_metal() {
-                        self.runtime
-                            .note_metal_fallback_reason(format!("Metal backend error: {err}"));
-                    }
-                    self.metal_batch = MetalBatchState::Unavailable;
-                }
+                self.metal_batch = MetalBatchState::Unavailable;
             }
         }
     }
 
-    fn try_fast_forward_matches(&mut self, remaining_steps: &mut u32) {
+    /// Record the reason the Metal batch evaluator declined this workload,
+    /// but only when the accelerator configuration permits Metal.
+    fn note_metal_decline_reason(&mut self) {
+        if !self.config.engine.accelerator.allows_metal() {
+            return;
+        }
+        let decline_reason = metal_batch_decline_reason(&self.config, &self.strategies, 1)
+            .unwrap_or_else(|| "Metal batch evaluator declined this workload".into());
+        self.runtime.note_metal_fallback_reason(decline_reason);
+    }
+
+    /// Attempt to skip ahead by evaluating multiple complete matches in a
+    /// single batch, using the Metal GPU pipeline when available or falling
+    /// back to parallel CPU evaluation.
+    ///
+    /// This is the primary fast-path for batch mode: instead of stepping one
+    /// round at a time, entire matches are evaluated in bulk.
+    fn try_fast_forward_matches(&mut self, remaining_step_budget: &mut u32) {
         if !self.fast_forward_allowed() {
             return;
         }
         let rounds_per_match = self.config.rounds.max(1);
-        let match_budget = (*remaining_steps / rounds_per_match) as usize;
-        if match_budget == 0 {
+        let affordable_match_count = (*remaining_step_budget / rounds_per_match) as usize;
+        if affordable_match_count == 0 {
             return;
         }
-        let available = self.schedule.len().saturating_sub(self.match_index);
-        let matches_to_run = match_budget.min(available);
-        if matches_to_run == 0 {
+        let schedulable_match_count = self.schedule.len().saturating_sub(self.match_index);
+        let batch_match_count = affordable_match_count.min(schedulable_match_count);
+        if batch_match_count == 0 {
             return;
         }
 
-        let total_matches = self.schedule.len();
-        let matchups = self.schedule.matchups(self.match_index, matches_to_run);
-        if matchups.is_empty() {
+        let scheduled_total = self.schedule.len();
+        let batch_matchups = self.schedule.matchups(self.match_index, batch_match_count);
+        if batch_matchups.is_empty() {
             return;
         }
         self.ensure_metal_batch();
-        let config = &self.config;
-        let strategies = &self.strategies;
-        let seed_deriver = &self.seed_deriver;
-        let fast_models = &self.fast_models;
-        let run_matchup = |matchup: &Matchup, fast_eval_allowed: bool| {
-            let mut emit_event = |_event: GameEvent| {};
-            let mut emit_history = |_record: MatchHistory| {};
+        let tournament_config = &self.config;
+        let strategy_roster = &self.strategies;
+        let match_seed_deriver = &self.seed_deriver;
+        let precompiled_fast_models = &self.fast_models;
+        let evaluate_single_matchup = |target_matchup: &Matchup, fast_eval_enabled: bool| {
+            let mut discard_event = |_event: GameEvent| {};
+            let mut discard_history = |_record: MatchHistory| {};
             run_match_core(
-                matchup,
-                config,
-                strategies,
-                seed_deriver,
-                Some(fast_models),
-                fast_eval_allowed,
-                total_matches,
+                target_matchup,
+                tournament_config,
+                strategy_roster,
+                match_seed_deriver,
+                Some(precompiled_fast_models),
+                fast_eval_enabled,
+                scheduled_total,
                 false,
                 false,
-                &mut emit_event,
+                &mut discard_event,
                 false,
-                &mut emit_history,
+                &mut discard_history,
                 false,
             )
         };
-        let fast_forward_matchups = matchups.as_slice();
-        let run_parallel = || {
-            fast_forward_matchups
+        let pending_matchup_slice = batch_matchups.as_slice();
+        let evaluate_parallel = || {
+            pending_matchup_slice
                 .par_iter()
-                .map(|matchup| run_matchup(matchup, true))
+                .map(|queued_matchup| evaluate_single_matchup(queued_matchup, true))
                 .collect::<Vec<_>>()
         };
-        let metal_result = match &self.metal_batch {
-            MetalBatchState::Prepared(prepared) => try_metal_batch_outcomes_chunked_prepared(
-                config,
-                strategies,
-                prepared,
-                fast_forward_matchups,
-            ),
+        let gpu_evaluation_result = match &self.metal_batch {
+            MetalBatchState::Prepared(prepared_pipeline) => {
+                try_metal_batch_outcomes_chunked_prepared(
+                    tournament_config,
+                    strategy_roster,
+                    prepared_pipeline,
+                    pending_matchup_slice,
+                )
+            }
             MetalBatchState::Uninitialized | MetalBatchState::Unavailable => Ok(None),
         };
-        let (outcomes, gpu_used) = match metal_result {
-            Ok(Some((gpu_outcomes, metal_batches))) => {
+        let (batch_outcomes, executed_on_gpu) = match gpu_evaluation_result {
+            Ok(Some((gpu_outcomes, metal_batch_count))) => {
                 self.runtime
-                    .note_metal_batches(metal_batches, fast_forward_matchups.len());
+                    .note_metal_batches(metal_batch_count, pending_matchup_slice.len());
                 (gpu_outcomes, true)
             }
             Ok(None) => {
-                let par = Parallelism::from_config(&self.config.engine.parallelism);
-                let outcomes = if matches!(par, Parallelism::Off) {
-                    fast_forward_matchups
+                let parallelism_mode = Parallelism::from_config(&self.config.engine.parallelism);
+                let cpu_outcomes = if matches!(parallelism_mode, Parallelism::Off) {
+                    pending_matchup_slice
                         .iter()
-                        .map(|matchup| run_matchup(matchup, true))
+                        .map(|queued_matchup| evaluate_single_matchup(queued_matchup, true))
                         .collect()
                 } else {
-                    run_with_parallelism(par, run_parallel)
+                    run_with_parallelism(parallelism_mode, evaluate_parallel)
                 };
-                (outcomes, false)
+                (cpu_outcomes, false)
             }
-            Err(err) => {
-                if !fast_forward_matchups.is_empty()
+            Err(gpu_error) => {
+                if !pending_matchup_slice.is_empty()
                     && self.config.engine.accelerator.allows_metal()
                 {
                     self.runtime
-                        .note_metal_fallback_reason(format!("Metal backend error: {err}"));
+                        .note_metal_fallback_reason(format!("Metal backend error: {gpu_error}"));
                     self.metal_batch = MetalBatchState::Unavailable;
                 }
-                let par = Parallelism::from_config(&self.config.engine.parallelism);
-                let outcomes = if matches!(par, Parallelism::Off) {
-                    fast_forward_matchups
+                let parallelism_mode = Parallelism::from_config(&self.config.engine.parallelism);
+                let cpu_outcomes = if matches!(parallelism_mode, Parallelism::Off) {
+                    pending_matchup_slice
                         .iter()
-                        .map(|matchup| run_matchup(matchup, true))
+                        .map(|queued_matchup| evaluate_single_matchup(queued_matchup, true))
                         .collect()
                 } else {
-                    run_with_parallelism(par, run_parallel)
+                    run_with_parallelism(parallelism_mode, evaluate_parallel)
                 };
-                (outcomes, false)
+                (cpu_outcomes, false)
             }
         };
         // Rate-limit the snapshot sample: running a full match round-by-round
         // to obtain a last_round preview is O(rounds) on the CPU.  At high
         // round counts (e.g. 500K) this dominates each tick.  Only recompute
-        // when enough time has passed since the previous sample.
-        let snapshot_interval = Duration::from_millis(100);
-        let need_snapshot = self
+        // when enough wall-clock time has elapsed since the previous sample.
+        let snapshot_refresh_interval = Duration::from_millis(SNAPSHOT_REFRESH_MS);
+        let snapshot_is_stale = self
             .last_snapshot_sample_at
-            .map(|t| t.elapsed() >= snapshot_interval)
+            .map(|last_sample_time| last_sample_time.elapsed() >= snapshot_refresh_interval)
             .unwrap_or(true);
-        let snapshot_sample = if need_snapshot {
-            let sample = outcomes
+        let round_preview_sample = if snapshot_is_stale {
+            let last_outcome_has_round = batch_outcomes
                 .last()
-                .and_then(|outcome| outcome.last_round.as_ref())
-                .is_none()
-                .then(|| fast_forward_matchups.last().cloned())
-                .flatten()
-                .map(|matchup| run_matchup(&matchup, false));
-            if sample.is_some() {
-                self.last_snapshot_sample_at = Some(Instant::now());
+                .and_then(|final_outcome| final_outcome.last_round.as_ref())
+                .is_some();
+            if last_outcome_has_round {
+                None
+            } else {
+                pending_matchup_slice
+                    .last()
+                    .cloned()
+                    .map(|trailing_matchup| {
+                        let preview = evaluate_single_matchup(&trailing_matchup, false);
+                        self.last_snapshot_sample_at = Some(Instant::now());
+                        preview
+                    })
             }
-            sample
         } else {
             None
         };
-        if !gpu_used {
-            self.runtime.note_cpu_matches(fast_forward_matchups.len());
+        if !executed_on_gpu {
+            self.runtime.note_cpu_matches(pending_matchup_slice.len());
         }
 
         self.last_round = None;
-        for (idx, mut outcome) in outcomes.into_iter().enumerate() {
-            if idx + 1 == fast_forward_matchups.len() {
-                if let Some(sample) = snapshot_sample.as_ref() {
-                    outcome.last_round = sample.last_round.clone();
+        let final_matchup_index = pending_matchup_slice.len();
+        for (ordinal, mut completed_outcome) in batch_outcomes.into_iter().enumerate() {
+            if ordinal + 1 == final_matchup_index {
+                if let Some(sampled_preview) = round_preview_sample.as_ref() {
+                    completed_outcome.last_round = sampled_preview.last_round.clone();
                 }
             }
-            self.record_completed_outcome(outcome);
+            self.record_completed_outcome(completed_outcome);
         }
-        *remaining_steps = remaining_steps
-            .saturating_sub((matches_to_run as u32).saturating_mul(rounds_per_match));
+        *remaining_step_budget = remaining_step_budget
+            .saturating_sub((batch_match_count as u32).saturating_mul(rounds_per_match));
         if self.is_done() {
             self.emit(GameEvent::TournamentEnd {
                 timestamp: EventWriter::timestamp(),
@@ -631,88 +780,107 @@ impl TournamentRunner {
         }
     }
 
-    fn record_completed_outcome(&mut self, outcome: MatchOutcome) {
+    /// Integrate a completed match outcome into the accumulator and advance
+    /// the match index.
+    ///
+    /// Updates the leaderboard progress, marks any crash flags on the
+    /// per-strategy stats, and delegates scoring to `TournamentAccumulator`.
+    fn record_completed_outcome(&mut self, finished_outcome: MatchOutcome) {
         let MatchOutcome {
-            result,
-            a_crashed,
-            b_crashed,
-            a_tm_stats,
-            b_tm_stats,
-            last_round,
-        } = outcome;
-        let completed_match = self.match_index.saturating_add(1);
-        self.last_round = last_round.clone();
-        if self
+            result: scoring_result,
+            a_crashed: first_player_crashed,
+            b_crashed: second_player_crashed,
+            a_tm_stats: first_tm_statistics,
+            b_tm_stats: second_tm_statistics,
+            last_round: final_round_snapshot,
+        } = finished_outcome;
+        let completed_ordinal = self.match_index.saturating_add(1);
+        self.last_round = final_round_snapshot.clone();
+        let progress_needs_update = self
             .last_progress
             .as_ref()
-            .map(|progress| (progress.match_index, progress.round))
-            != Some((completed_match, result.rounds))
-        {
+            .map(|tracked| (tracked.match_index, tracked.round))
+            != Some((completed_ordinal, scoring_result.rounds));
+        if progress_needs_update {
             self.last_progress = Some(TournamentProgress::build(
-                completed_match,
+                completed_ordinal,
                 self.schedule.len().max(1),
-                result.rounds, result.rounds, true,
-                strategy_log_id(&self.strategies[result.a_idx]),
-                strategy_log_id(&self.strategies[result.b_idx]),
-                result.a_total, result.b_total,
-                last_round.as_ref(), self.runtime.clone(),
+                scoring_result.rounds,
+                scoring_result.rounds,
+                true,
+                strategy_log_id(&self.strategies[scoring_result.a_idx]),
+                strategy_log_id(&self.strategies[scoring_result.b_idx]),
+                scoring_result.a_total,
+                scoring_result.b_total,
+                final_round_snapshot.as_ref(),
+                self.runtime.clone(),
             ));
         }
-        if a_crashed {
-            self.results.strategies[result.a_idx].crash_count += 1;
-            self.results.strategies[result.a_idx].crashed = true;
+        if first_player_crashed {
+            self.results.strategies[scoring_result.a_idx].crash_count += 1;
+            self.results.strategies[scoring_result.a_idx].crashed = true;
         }
-        if b_crashed {
-            self.results.strategies[result.b_idx].crash_count += 1;
-            self.results.strategies[result.b_idx].crashed = true;
+        if second_player_crashed {
+            self.results.strategies[scoring_result.b_idx].crash_count += 1;
+            self.results.strategies[scoring_result.b_idx].crashed = true;
         }
-        self.results
-            .apply_match(result, a_crashed, b_crashed, a_tm_stats, b_tm_stats);
+        self.results.apply_match(
+            scoring_result,
+            first_player_crashed,
+            second_player_crashed,
+            first_tm_statistics,
+            second_tm_statistics,
+        );
         self.match_index += 1;
     }
 
-    fn play_round(&mut self, session: &mut MatchSession) -> RoundSnapshot {
+    /// Execute a single round of the active match session, recording any
+    /// strategy crashes and emitting the round-level game event.
+    ///
+    /// Returns the round snapshot for use in progress updates and
+    /// last-round caching.
+    fn play_round(&mut self, active_session: &mut MatchSession) -> RoundSnapshot {
         self.runtime.note_cpu_activity();
-        let a_idx = session.matchup.a_idx;
-        let b_idx = session.matchup.b_idx;
-        let a_id = self.strategies[a_idx].id.clone();
-        let b_id = self.strategies[b_idx].id.clone();
+        let first_player_idx = active_session.matchup.a_idx;
+        let second_player_idx = active_session.matchup.b_idx;
+        let first_strategy_id = self.strategies[first_player_idx].id.clone();
+        let second_strategy_id = self.strategies[second_player_idx].id.clone();
 
-        let outcome = play_round_core(session, &self.config);
+        let round_outcome = play_round_core(active_session, &self.config);
 
-        if outcome.a_crash_now {
-            session.a_crashed = true;
-            self.results.strategies[a_idx].crash_count += 1;
-            self.results.strategies[a_idx].crashed = true;
+        if round_outcome.a_crash_now {
+            active_session.a_crashed = true;
+            self.results.strategies[first_player_idx].crash_count += 1;
+            self.results.strategies[first_player_idx].crashed = true;
             self.emit(GameEvent::StrategyError {
                 timestamp: EventWriter::timestamp(),
-                strategy_id: a_id,
+                strategy_id: first_strategy_id,
                 error: "panic in strategy".into(),
             });
         }
-        if outcome.b_crash_now {
-            session.b_crashed = true;
-            self.results.strategies[b_idx].crash_count += 1;
-            self.results.strategies[b_idx].crashed = true;
+        if round_outcome.b_crash_now {
+            active_session.b_crashed = true;
+            self.results.strategies[second_player_idx].crash_count += 1;
+            self.results.strategies[second_player_idx].crashed = true;
             self.emit(GameEvent::StrategyError {
                 timestamp: EventWriter::timestamp(),
-                strategy_id: b_id,
+                strategy_id: second_strategy_id,
                 error: "panic in strategy".into(),
             });
         }
 
         self.emit(GameEvent::Round {
             timestamp: EventWriter::timestamp(),
-            match_id: session.matchup.match_id,
+            match_id: active_session.matchup.match_id,
             match_index: self.match_index + 1,
-            round: session.round,
-            a_action: outcome.snapshot.a_action.as_char(),
-            b_action: outcome.snapshot.b_action.as_char(),
-            a_halted: outcome.snapshot.a_halted,
-            b_halted: outcome.snapshot.b_halted,
-            a_payoff: outcome.snapshot.a_payoff,
-            b_payoff: outcome.snapshot.b_payoff,
+            round: active_session.round,
+            a_action: round_outcome.snapshot.a_action.as_char(),
+            b_action: round_outcome.snapshot.b_action.as_char(),
+            a_halted: round_outcome.snapshot.a_halted,
+            b_halted: round_outcome.snapshot.b_halted,
+            a_payoff: round_outcome.snapshot.a_payoff,
+            b_payoff: round_outcome.snapshot.b_payoff,
         });
-        outcome.snapshot
+        round_outcome.snapshot
     }
 }
