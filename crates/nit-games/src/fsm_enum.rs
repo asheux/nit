@@ -1,5 +1,6 @@
 use crate::config::{FsmGroupingMode, StrategySpec, StrategySpecKind};
 use crate::game::Action;
+use crate::strategy::math::{checked_pow_u128, floor_div_rem_i128, integer_digits_unsigned};
 use crate::strategy::InputMode;
 use nit_utils::hashing::stable_hash_bytes;
 use rayon::prelude::*;
@@ -674,35 +675,4 @@ fn behavior_trace_signature(raw: &RawFsm, steps: usize) -> Result<Vec<u16>, Stri
     }
 
     Ok(signature)
-}
-
-fn floor_div_rem_i128(numer: i128, denom: i128) -> (i128, i128) {
-    let mut q = numer / denom;
-    let mut r = numer % denom;
-    if r < 0 {
-        q -= 1;
-        r += denom;
-    }
-    (q, r)
-}
-
-fn integer_digits_unsigned(mut value: u128, base: usize, len: usize) -> Vec<usize> {
-    if len == 0 {
-        return Vec::new();
-    }
-    let base_u128 = base.max(2) as u128;
-    let mut digits = vec![0usize; len];
-    for idx in (0..len).rev() {
-        digits[idx] = (value % base_u128) as usize;
-        value /= base_u128;
-    }
-    digits
-}
-
-fn checked_pow_u128(base: u128, exp: u32) -> Option<u128> {
-    let mut value = 1u128;
-    for _ in 0..exp {
-        value = value.checked_mul(base)?;
-    }
-    Some(value)
 }
