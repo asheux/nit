@@ -1386,6 +1386,7 @@ impl SwarmRuntime {
             run.integrator_agent_id.as_deref(),
             &role_hints,
             &priority_agent_ids,
+            state.workspace_root.as_path(),
         ))
     }
 
@@ -1700,6 +1701,7 @@ impl SwarmRuntime {
             integrator_agent_id.as_deref(),
             &role_hints,
             &priority_agent_ids,
+            state.workspace_root.as_path(),
         );
 
         let gate_selection = GateBundle::detect(state);
@@ -5670,6 +5672,66 @@ fn sanitize_for_filename(input: &str) -> String {
         .collect()
 }
 
+/// Extract directory/module paths from the operator prompt and enumerate their
+/// source files.  Returns relative paths sorted alphabetically, capped at 100
+/// entries to keep the planner prompt sane.
+fn enumerate_scope_files(workspace_root: &Path, prompt: &str) -> Vec<String> {
+    // Look for path-like tokens that point to directories inside the workspace.
+    let mut dirs: Vec<std::path::PathBuf> = Vec::new();
+    for token in prompt.split_whitespace() {
+        let token = token.trim_matches(|c: char| c == ',' || c == '.' || c == '"' || c == '\'');
+        if token.is_empty() {
+            continue;
+        }
+        // Must look like a path (contains / or starts with "crates/", "src/", etc.)
+        if !token.contains('/') {
+            continue;
+        }
+        let candidate = workspace_root.join(token);
+        if candidate.is_dir() {
+            dirs.push(candidate);
+        }
+    }
+    if dirs.is_empty() {
+        return Vec::new();
+    }
+
+    let mut files = Vec::new();
+    for dir in dirs.iter() {
+        collect_source_files(dir, workspace_root, &mut files);
+    }
+    files.sort();
+    files.dedup();
+    files.truncate(100);
+    files
+}
+
+fn collect_source_files(dir: &Path, workspace_root: &Path, out: &mut Vec<String>) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            // Skip hidden dirs and target/
+            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                if name.starts_with('.') || name == "target" {
+                    continue;
+                }
+            }
+            collect_source_files(&path, workspace_root, out);
+        } else if path.is_file() {
+            if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+                if matches!(ext, "rs" | "toml" | "ts" | "js" | "py" | "go" | "c" | "h" | "cpp" | "hpp") {
+                    if let Ok(rel) = path.strip_prefix(workspace_root) {
+                        out.push(rel.display().to_string());
+                    }
+                }
+            }
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn build_planner_prompt(
     root_prompt: &str,
@@ -5680,6 +5742,7 @@ fn build_planner_prompt(
     integrator_agent_id: Option<&str>,
     role_hints: &[(String, String)],
     priority_agent_ids: &[String],
+    workspace_root: &Path,
 ) -> String {
     let available = agent_ids
         .iter()
@@ -5856,6 +5919,18 @@ fn build_planner_prompt(
         "  \"synthesis_prompt\": \"(optional extra guidance for the final synthesis step)\"\n",
     );
     out.push_str("}\n");
+
+    // If the operator request references a directory/module path, enumerate its
+    // files so the planner can distribute work across ALL of them.
+    let scope_files = enumerate_scope_files(workspace_root, root_prompt);
+    if !scope_files.is_empty() {
+        out.push_str("\nScope — files in the referenced module/directory:\n");
+        for path in scope_files.iter() {
+            out.push_str(&format!("  - {path}\n"));
+        }
+        out.push_str("The plan MUST cover ALL of these files. Ensure the integrate task prompt explicitly lists every file that needs changes.\n");
+    }
+
     out.push_str("\nOperator request:\n");
     out.push_str(root_prompt.trim());
     out.push('\n');
@@ -5890,7 +5965,7 @@ fn role_contract_lines(role: &str) -> &'static [&'static str] {
             "Implement the chosen plan and convert it into concrete edits.",
             "Do not restart broad ideation; focus on carrying the selected approach through.",
             "Report exact files changed and validation results.",
-            "GENOME QUALITY OBLIGATION: You are the sole writer. Your code is measured by nit's genome system across four encoders. See the full ENCODER GUIDE and TARGETS in the genome instructions attached to this prompt. Maintain or improve genome scores on every file you touch. Aim for Tier III+ (Spaceship) minimum, aspire to Tier V (Replicator). Use the evaluate_genome tool to verify quality before finishing.",
+            "GENOME QUALITY OBLIGATION: You are the sole writer. Your code is measured by nit's genome system across four encoders. See the full ENCODER GUIDE and TARGETS in the genome instructions attached to this prompt. Maintain or improve genome scores on every file you touch. Aim for Tier III+ (Spaceship) minimum, aspire to Tier V (Replicator). Do NOT call [evaluate_genome] — nit evaluates automatically after your changes are written to disk.",
         ],
         "review" => &[
             "Critique the current output or diff for correctness, UX, and maintainability.",

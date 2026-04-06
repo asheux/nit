@@ -120,10 +120,10 @@ impl GenomeReport {
     /// Classify overall quality from tier and consistency.
     pub fn quality_level(&self) -> &'static str {
         match (self.tier, self.cross_encoder_consistency) {
-            (GenomeTier::Replicator, c) if c >= 0.80 => "Exceptional",
-            (GenomeTier::Methuselah, c) if c >= 0.60 => "Excellent",
-            (GenomeTier::Spaceship, c) if c >= 0.40 => "Standard",
-            (GenomeTier::Oscillator, c) if c >= 0.20 => "Minimum",
+            (GenomeTier::Replicator, c) if c >= 0.85 => "Exceptional",
+            (GenomeTier::Methuselah, c) if c >= 0.70 => "Excellent",
+            (GenomeTier::Spaceship, c) if c >= 0.50 => "Standard",
+            (GenomeTier::Oscillator, c) if c >= 0.25 => "Minimum",
             _ => "Failing",
         }
     }
@@ -132,10 +132,10 @@ impl GenomeReport {
     /// Returns `None` if quality meets the tier's consistency threshold.
     pub fn quality_reason(&self) -> Option<&'static str> {
         let (needed_tier, needed_c) = match self.tier {
-            GenomeTier::Replicator => (GenomeTier::Replicator, 0.80),
-            GenomeTier::Methuselah => (GenomeTier::Methuselah, 0.60),
-            GenomeTier::Spaceship => (GenomeTier::Spaceship, 0.40),
-            GenomeTier::Oscillator => (GenomeTier::Oscillator, 0.20),
+            GenomeTier::Replicator => (GenomeTier::Replicator, 0.85),
+            GenomeTier::Methuselah => (GenomeTier::Methuselah, 0.70),
+            GenomeTier::Spaceship => (GenomeTier::Spaceship, 0.50),
+            GenomeTier::Oscillator => (GenomeTier::Oscillator, 0.25),
             GenomeTier::StillLife => return Some("low tier"),
         };
         if self.tier >= needed_tier && self.cross_encoder_consistency < needed_c {
@@ -226,7 +226,7 @@ TARGETS (minimum → aspirational):\n\
 - Cyclomatic complexity <= 8 per function.\n\
 - Nesting depth <= 3 on average.\n\
 - Identifier uniqueness >= 65% per scope.\n\
-- Cross-encoder consistency >= 0.40 (elite: >= 0.80).\n\
+- Cross-encoder consistency >= 0.50 (elite: >= 0.85).\n\
 \n\
 When you see an OUTLIER encoder in the scores, that encoder is the bottleneck. \
 Use the encoder guide above to determine what specific code changes will \

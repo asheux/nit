@@ -1348,11 +1348,11 @@ fn quality_with_reason(report: &GenomeReport) -> String {
 /// Format consistency as "actual/target" so the operator sees the gap at a glance.
 fn cons_with_target(tier: nit_core::GenomeTier, consistency: f32) -> String {
     let target = match tier {
-        nit_core::GenomeTier::Replicator => 0.80,
-        nit_core::GenomeTier::Methuselah => 0.60,
-        nit_core::GenomeTier::Spaceship => 0.40,
-        nit_core::GenomeTier::Oscillator => 0.20,
-        nit_core::GenomeTier::StillLife => 0.20,
+        nit_core::GenomeTier::Replicator => 0.85,
+        nit_core::GenomeTier::Methuselah => 0.70,
+        nit_core::GenomeTier::Spaceship => 0.50,
+        nit_core::GenomeTier::Oscillator => 0.25,
+        nit_core::GenomeTier::StillLife => 0.25,
     };
     format!("{consistency:.2}/{target:.2}")
 }
@@ -1365,10 +1365,10 @@ fn shadow_quality_with_reason(
 ) -> String {
     // Check if tier is high enough but consistency drags it to Failing.
     let reason = match tier {
-        nit_core::GenomeTier::Replicator if consistency < 0.80 => Some("low cons"),
-        nit_core::GenomeTier::Methuselah if consistency < 0.60 => Some("low cons"),
-        nit_core::GenomeTier::Spaceship if consistency < 0.40 => Some("low cons"),
-        nit_core::GenomeTier::Oscillator if consistency < 0.20 => Some("low cons"),
+        nit_core::GenomeTier::Replicator if consistency < 0.85 => Some("low cons"),
+        nit_core::GenomeTier::Methuselah if consistency < 0.70 => Some("low cons"),
+        nit_core::GenomeTier::Spaceship if consistency < 0.50 => Some("low cons"),
+        nit_core::GenomeTier::Oscillator if consistency < 0.25 => Some("low cons"),
         nit_core::GenomeTier::StillLife => Some("low tier"),
         _ => None,
     };
