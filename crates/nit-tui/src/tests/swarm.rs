@@ -679,6 +679,7 @@ Plan:
         &available,
         Some("a1"),
         false,
+        false,
     );
     assert_eq!(parsed.integrator_agent_id.as_deref(), Some("a1"));
     assert!(parsed
@@ -706,6 +707,7 @@ fn role_ordering_adds_research_before_judge() {
         SwarmMissionKind::Research,
         None,
         &mut tasks,
+        false,
     );
 
     let judge = tasks.iter().find(|t| t.id == "judge-1").expect("judge");
@@ -731,6 +733,7 @@ fn role_ordering_uses_roster_hints_when_task_roles_missing() {
         SwarmMissionKind::Research,
         None,
         &mut tasks,
+        false,
     );
 
     let t1 = tasks.iter().find(|t| t.id == "t1").expect("t1");
@@ -754,6 +757,7 @@ fn role_ordering_does_not_introduce_cycles() {
         SwarmMissionKind::Research,
         None,
         &mut tasks,
+        false,
     );
 
     let judge = tasks.iter().find(|t| t.id == "j").expect("judge");
@@ -778,6 +782,7 @@ fn role_ordering_does_not_inherit_singleton_role_hints_to_clones() {
         SwarmMissionKind::General,
         Some("a1"),
         &mut tasks,
+        false,
     );
 
     let base = tasks.iter().find(|t| t.id == "base").expect("base");
@@ -800,6 +805,7 @@ fn role_ordering_clears_integrate_role_for_non_integrator() {
         SwarmMissionKind::General,
         Some("a1"),
         &mut tasks,
+        false,
     );
 
     let good = tasks.iter().find(|t| t.id == "good").expect("good");
@@ -827,6 +833,7 @@ fn role_ordering_clears_research_role_for_non_research_prompts() {
         SwarmMissionKind::General,
         None,
         &mut tasks,
+        false,
     );
 
     let task = tasks.first().expect("task");
@@ -969,6 +976,7 @@ Plan:
         &available,
         Some("a1"),
         false,
+        false,
     );
 
     assert!(parsed
@@ -1007,6 +1015,7 @@ Plan:
         "root",
         &available,
         Some("a1"),
+        false,
         false,
     );
 
@@ -1053,6 +1062,7 @@ Plan:
         "root",
         &available,
         Some("a1"),
+        false,
         false,
     );
 
@@ -1163,6 +1173,7 @@ fn dag_scheduler_dispatches_after_deps() {
         genome_gate_results: None,
         report_status: None,
         report_output: None,
+        scope_files: Vec::new(),
     };
 
     initialize_task_graph(&mut run);
@@ -1259,6 +1270,7 @@ fn single_writer_limits_concurrent_write_tasks() {
         genome_gate_results: None,
         report_status: None,
         report_output: None,
+        scope_files: Vec::new(),
     };
 
     initialize_task_graph(&mut run);
@@ -1281,7 +1293,7 @@ fn single_writer_limits_concurrent_write_tasks() {
 #[test]
 fn task_prompt_includes_role_contract_guidance() {
     let task = make_task("judge", "a1", Some("judge"), vec!["propose-01"]);
-    let prompt = wrap_task_prompt("root", SwarmMissionKind::General, &task, None);
+    let prompt = wrap_task_prompt("root", SwarmMissionKind::General, &task, None, &[]);
 
     assert!(prompt.contains("ROLE CONTRACT:"));
     assert!(prompt.contains("Act strictly as the assigned role"));
@@ -1291,7 +1303,7 @@ fn task_prompt_includes_role_contract_guidance() {
 #[test]
 fn research_role_contract_mentions_external_sources() {
     let task = make_task("research", "a1", Some("research"), Vec::new());
-    let prompt = wrap_task_prompt("root", SwarmMissionKind::Research, &task, None);
+    let prompt = wrap_task_prompt("root", SwarmMissionKind::Research, &task, None, &[]);
 
     assert!(prompt.contains("papers, docs, web resources"));
     assert!(prompt.contains("best strategy candidates"));
@@ -1310,7 +1322,7 @@ fn computational_research_role_contract_mentions_modeling_and_simulation() {
         Some(COMPUTATIONAL_RESEARCH_ROLE),
         Vec::new(),
     );
-    let prompt = wrap_task_prompt("root", SwarmMissionKind::ComputationalResearch, &task, None);
+    let prompt = wrap_task_prompt("root", SwarmMissionKind::ComputationalResearch, &task, None, &[]);
 
     assert!(prompt.contains("simulations, modeling, numerical methods, optimization"));
     assert!(prompt.contains("reproducible research workflows"));
@@ -1410,6 +1422,7 @@ fn deadlock_detection_skips_pending_tasks() {
         genome_gate_results: None,
         report_status: None,
         report_output: None,
+        scope_files: Vec::new(),
     };
     initialize_task_graph(&mut run);
     refresh_task_readiness(&mut run);
@@ -1740,6 +1753,7 @@ fn dashboard_distinguishes_pending_queued_and_skipped() {
         genome_gate_results: None,
         report_status: None,
         report_output: None,
+        scope_files: Vec::new(),
     };
     let mut runtime = SwarmRuntime::default();
     runtime.runs.insert("mis-001".into(), run);

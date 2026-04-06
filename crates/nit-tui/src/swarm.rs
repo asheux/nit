@@ -1275,6 +1275,10 @@ struct SwarmRun {
     genome_gate_results: Option<String>,
     report_status: Option<String>,
     report_output: Option<String>,
+    /// Source files in the scope referenced by the operator prompt (e.g.
+    /// `crates/nit-games`).  Populated at run creation; injected into
+    /// integrate task prompts so agents cannot skip files.
+    scope_files: Vec<String>,
 }
 
 /// Configuration from a previous swarm run, used to re-launch follow-up prompts
@@ -1704,6 +1708,8 @@ impl SwarmRuntime {
             state.workspace_root.as_path(),
         );
 
+        let scope_files = enumerate_scope_files(state.workspace_root.as_path(), &root_prompt);
+
         let gate_selection = GateBundle::detect(state);
         let gate_bundle = gate_selection.bundle.clone();
         let verifier_agent_id = gate_bundle.as_ref().and_then(|_| {
@@ -1770,6 +1776,7 @@ impl SwarmRuntime {
                 genome_gate_results: None,
                 report_status: None,
                 report_output: None,
+                scope_files,
             },
         );
 
@@ -1841,6 +1848,7 @@ impl SwarmRuntime {
                             .filter(|id| *id != &run.planner_agent_id)
                             .cloned()
                             .collect::<Vec<_>>();
+                        let multi_integrator = run.scope_files.len() > 15;
                         let mut parsed = parse_plan_from_planner(
                             message,
                             run.template,
@@ -1849,6 +1857,7 @@ impl SwarmRuntime {
                             &available,
                             run.integrator_agent_id.as_deref(),
                             run.integrator_locked,
+                            multi_integrator,
                         );
                         parsed.warnings.extend(apply_role_dependency_ordering(
                             state.workspace_root.as_path(),
@@ -1856,6 +1865,7 @@ impl SwarmRuntime {
                             run.mission_kind,
                             run.integrator_agent_id.as_deref(),
                             parsed.tasks.as_mut_slice(),
+                            multi_integrator,
                         ));
                         parsed.warnings.extend(ensure_integrate_task(
                             &mut parsed.tasks,
@@ -2275,6 +2285,7 @@ impl SwarmRuntime {
                             run.mission_kind,
                             run.integrator_agent_id.as_deref(),
                             parsed.tasks.as_mut_slice(),
+                            run.scope_files.len() > 15,
                         ));
                         parsed.warnings.extend(ensure_integrate_task(
                             &mut parsed.tasks,
@@ -3524,6 +3535,7 @@ fn apply_role_dependency_ordering(
     mission_kind: SwarmMissionKind,
     integrator_agent_id: Option<&str>,
     tasks: &mut [SwarmTask],
+    multi_integrator: bool,
 ) -> Vec<String> {
     if tasks.is_empty() {
         return Vec::new();
@@ -3550,6 +3562,7 @@ fn apply_role_dependency_ordering(
             continue;
         }
         if role == "integrate"
+            && !multi_integrator
             && integrator_agent_id.is_some_and(|integrator| task.agent_id != integrator)
         {
             warnings.push(format!(
@@ -3574,6 +3587,7 @@ fn apply_role_dependency_ordering(
         }
         if let Some(inferred) = infer_role_from_task_id(task.id.as_str()) {
             if inferred == "integrate"
+                && !multi_integrator
                 && integrator_agent_id.is_some_and(|integrator| task.agent_id != integrator)
             {
                 warnings.push(format!(
@@ -3628,6 +3642,7 @@ fn apply_role_dependency_ordering(
     warnings
 }
 
+#[allow(clippy::too_many_arguments)]
 fn parse_plan_from_planner(
     planner_message: &str,
     template: SwarmTemplate,
@@ -3636,6 +3651,7 @@ fn parse_plan_from_planner(
     available_agents: &[String],
     integrator_hint: Option<&str>,
     integrator_locked: bool,
+    multi_integrator: bool,
 ) -> ParsedSwarmPlan {
     let Some(json) = extract_json_code_block(planner_message) else {
         return fallback_tasks(
@@ -3655,6 +3671,7 @@ fn parse_plan_from_planner(
             available_agents,
             integrator_hint,
             integrator_locked,
+            multi_integrator,
         ) {
             if matches!(template, SwarmTemplate::Bulk) {
                 let integrator = parsed
@@ -3775,6 +3792,7 @@ fn parse_v2_plan(
     available_agents: &[String],
     integrator_hint: Option<&str>,
     integrator_locked: bool,
+    multi_integrator: bool,
 ) -> Option<ParsedSwarmPlan> {
     if plan.tasks.is_empty() {
         return None;
@@ -3876,7 +3894,7 @@ fn parse_v2_plan(
         }
 
         let mut writes = task.writes;
-        if writes {
+        if writes && !multi_integrator {
             let allowed = integrator
                 .as_deref()
                 .is_some_and(|integrator| integrator == agent_id.as_str());
@@ -4967,13 +4985,20 @@ fn dispatch_ready_tasks(run: &mut SwarmRun) -> Vec<SwarmDispatch> {
         let task = &run.tasks[idx];
         let deps_payload = collect_dependency_payload(run, task);
         let prompt = if deps_payload.is_empty() {
-            wrap_task_prompt(&run.root_prompt, run.mission_kind, task, None)
+            wrap_task_prompt(
+                &run.root_prompt,
+                run.mission_kind,
+                task,
+                None,
+                &run.scope_files,
+            )
         } else {
             wrap_task_prompt(
                 &run.root_prompt,
                 run.mission_kind,
                 task,
                 Some(deps_payload.as_slice()),
+                &run.scope_files,
             )
         };
         let agent_id = task.agent_id.clone();
@@ -5749,6 +5774,8 @@ fn build_planner_prompt(
         .filter(|id| id.as_str() != planner_agent_id)
         .cloned()
         .collect::<Vec<_>>();
+    let scope_files = enumerate_scope_files(workspace_root, root_prompt);
+    let large_scope = scope_files.len() > 15;
     let mut out = String::new();
     out.push_str(
         "You are the SWARM PLANNER inside nit. Create an execution plan for a multi-agent workflow.\n\n",
@@ -5817,18 +5844,37 @@ fn build_planner_prompt(
         }
     }
     if matches!(template, SwarmTemplate::Parallel | SwarmTemplate::Bulk) {
-        out.push_str(
-            "- Treat `judge` and `integrate` as singleton roles: assign at most one task for each role unless the operator explicitly asks for duplicates.\n",
-        );
+        if large_scope {
+            out.push_str(
+                "- Treat `judge` as a singleton role. The `integrate` role may be split across MULTIPLE tasks when the scope is large — assign disjoint file subsets to each integrate task so every file is covered.\n",
+            );
+        } else {
+            out.push_str(
+                "- Treat `judge` and `integrate` as singleton roles: assign at most one task for each role unless the operator explicitly asks for duplicates.\n",
+            );
+        }
     }
     if let Some(integrator_agent_id) = integrator_agent_id {
-        out.push_str(&format!(
-            "- If code changes are needed, assign `writes=true` and `role=integrate` only to `{integrator_agent_id}`.\n"
-        ));
-        if matches!(mission_kind, SwarmMissionKind::General) {
+        if large_scope {
             out.push_str(&format!(
-                "- REQUIRED: for code-change, refactoring, or implementation requests you MUST include exactly one task with `role=integrate` and `writes=true` assigned to `{integrator_agent_id}`. Without an integrate task, no workspace edits will be made and the swarm will produce no changes.\n"
+                "- Code changes: assign `writes=true` and `role=integrate` to tasks. The scope has {} files — split integrate work across multiple agents with disjoint file subsets. Each integrate task prompt MUST list the exact files it is responsible for. Any agent may receive `role=integrate` and `writes=true` when the scope is large.\n",
+                scope_files.len()
             ));
+        } else {
+            out.push_str(&format!(
+                "- If code changes are needed, assign `writes=true` and `role=integrate` only to `{integrator_agent_id}`.\n"
+            ));
+        }
+        if matches!(mission_kind, SwarmMissionKind::General) {
+            if large_scope {
+                out.push_str(
+                    "- REQUIRED: for code-change, refactoring, or implementation requests you MUST include at least one task with `role=integrate` and `writes=true`. Split across multiple integrate tasks so every file in the scope is covered. Without integrate tasks, no workspace edits will be made.\n"
+                );
+            } else {
+                out.push_str(&format!(
+                    "- REQUIRED: for code-change, refactoring, or implementation requests you MUST include exactly one task with `role=integrate` and `writes=true` assigned to `{integrator_agent_id}`. Without an integrate task, no workspace edits will be made and the swarm will produce no changes.\n"
+                ));
+            }
         }
     }
     if matches!(template, SwarmTemplate::Parallel | SwarmTemplate::Bulk)
@@ -5920,9 +5966,6 @@ fn build_planner_prompt(
     );
     out.push_str("}\n");
 
-    // If the operator request references a directory/module path, enumerate its
-    // files so the planner can distribute work across ALL of them.
-    let scope_files = enumerate_scope_files(workspace_root, root_prompt);
     if !scope_files.is_empty() {
         out.push_str("\nScope — files in the referenced module/directory:\n");
         for path in scope_files.iter() {
@@ -6009,6 +6052,7 @@ fn wrap_task_prompt(
     mission_kind: SwarmMissionKind,
     task: &SwarmTask,
     deps: Option<&[(String, String)]>,
+    scope_files: &[String],
 ) -> String {
     let mut out = String::new();
     out.push_str(&format!(
@@ -6073,6 +6117,37 @@ fn wrap_task_prompt(
     out.push_str("\n\nYour task:\n");
     out.push_str(task.task_prompt.trim());
     out.push('\n');
+
+    // Inject the mandatory scope file list for integrate and propose roles so
+    // agents cannot silently skip files that fall within the operator's scope.
+    if !scope_files.is_empty() {
+        let is_integrate = task
+            .role
+            .as_deref()
+            .and_then(normalize_role_label)
+            .as_deref()
+            == Some("integrate");
+        let is_propose = task
+            .role
+            .as_deref()
+            .and_then(normalize_role_label)
+            .as_deref()
+            == Some("propose");
+        if is_integrate {
+            out.push_str("\n## MANDATORY SCOPE — files you MUST refactor/modify\n");
+            out.push_str("The operator's request covers ALL of the following files. You MUST apply changes to EVERY file listed below — do not skip any. If a file needs no functional changes, still review it for style, naming, documentation, and structural consistency with the rest of the module.\n");
+            for path in scope_files.iter() {
+                out.push_str(&format!("  - {path}\n"));
+            }
+            out.push_str("Confirm in your response that you touched each file.\n");
+        } else if is_propose {
+            out.push_str("\n## SCOPE — files in the target module\n");
+            out.push_str("Your proposal must consider ALL of these files:\n");
+            for path in scope_files.iter() {
+                out.push_str(&format!("  - {path}\n"));
+            }
+        }
+    }
 
     if let Some(deps) = deps {
         if !deps.is_empty() {
