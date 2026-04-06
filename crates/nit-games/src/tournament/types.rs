@@ -1,3 +1,8 @@
+//! Internal types shared across tournament submodules.
+//!
+//! Contains match scheduling types, parallelism helpers, progress tracking,
+//! and the accumulator that aggregates results across matches.
+
 use crate::config::{AcceleratorMode, ParallelismConfig, ParallelismMode, ScoreAggregation};
 use crate::game::{Action, Outcome};
 use crate::history::History;
@@ -5,9 +10,13 @@ use crate::output::RuntimeAcceleratorStats;
 use crate::strategy::{Strategy, TmRunStats};
 use nit_metal::{BatchExecutionPolicy, BatchPolicySource, PreparedBatch};
 use nit_utils::hashing::{stable_hash_bytes, SplitMix64};
+use rayon::ThreadPoolBuilder;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
+// ── Tournament progress ─────────────────────────────────────
+
+/// Snapshot of tournament execution state, used to drive the TUI progress display.
 #[derive(Clone, Debug)]
 pub struct TournamentProgress {
     pub match_index: usize,
@@ -29,6 +38,52 @@ pub struct TournamentProgress {
     pub runtime: RuntimeAcceleratorStats,
 }
 
+impl TournamentProgress {
+    /// Construct a progress snapshot from scheduling context, strategy IDs,
+    /// cumulative scores, an optional round snapshot, and runtime stats.
+    ///
+    /// Centralises the construction pattern that was previously repeated at
+    /// every call site in the tournament runner.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn build(
+        match_index: usize,
+        total_matches: usize,
+        current_round: u32,
+        total_rounds: u32,
+        match_complete: bool,
+        strategy_a: String,
+        strategy_b: String,
+        cumulative_payoff_a: i64,
+        cumulative_payoff_b: i64,
+        last_round: Option<&RoundSnapshot>,
+        runtime: RuntimeAcceleratorStats,
+    ) -> Self {
+        Self {
+            match_index,
+            total_matches,
+            round: current_round,
+            rounds: total_rounds,
+            match_complete,
+            a: strategy_a,
+            b: strategy_b,
+            total_payoff_a: cumulative_payoff_a,
+            total_payoff_b: cumulative_payoff_b,
+            last_action_a: last_round.map(|r| r.a_action),
+            last_action_b: last_round.map(|r| r.b_action),
+            last_payoff_a: last_round.map(|r| r.a_payoff),
+            last_payoff_b: last_round.map(|r| r.b_payoff),
+            last_halted_a: last_round.map(|r| r.a_halted),
+            last_halted_b: last_round.map(|r| r.b_halted),
+            last_outcome: last_round
+                .map(|r| Outcome::from_actions(r.a_action, r.b_action)),
+            runtime,
+        }
+    }
+}
+
+// ── Match snapshot ──────────────────────────────────────────
+
+/// Full snapshot of a match in progress, including the outcome history buffer.
 #[derive(Clone, Debug)]
 pub struct MatchSnapshot {
     pub match_index: usize,
@@ -57,6 +112,7 @@ pub struct MatchHistoryPreview {
 }
 
 impl MatchHistoryPreview {
+    /// Maximum rounds shown in the TUI preview widget.
     pub const DISPLAY_ROUND_CAP: usize = 500;
 
     pub fn preview_rounds(&self) -> usize {
@@ -69,6 +125,7 @@ impl MatchHistoryPreview {
     }
 }
 
+/// Outcome of a single match: strategy indices, scores, and adjusted totals.
 #[derive(Clone, Debug)]
 pub struct MatchResult {
     pub a_idx: usize,
@@ -82,6 +139,9 @@ pub struct MatchResult {
     pub match_id: usize,
 }
 
+// ── Seed derivation ─────────────────────────────────────────
+
+/// Which side of a match a strategy occupies (first-mover vs second-mover).
 #[derive(Copy, Clone, Debug)]
 pub(super) enum MatchRole {
     A,
@@ -97,6 +157,10 @@ impl MatchRole {
     }
 }
 
+/// Deterministic seed derivation from a tournament-level seed.
+///
+/// Each match gets unique per-strategy and per-noise seeds, derived
+/// from the run seed, strategy id, match id, and repetition index.
 #[derive(Clone, Debug)]
 pub(super) struct SeedDeriver {
     pub(super) run_seed: u64,
@@ -133,14 +197,21 @@ impl SeedDeriver {
     }
 }
 
+// ── Parallelism ─────────────────────────────────────────────
+
+/// Controls how matches are distributed across threads during tournament execution.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum Parallelism {
+    /// Use the global Rayon thread pool.
     Auto,
+    /// Run everything on the calling thread.
     Off,
+    /// Spawn a dedicated pool with the given thread count.
     Threads(usize),
 }
 
 impl Parallelism {
+    /// Derive parallelism settings from the user-facing config enum.
     pub fn from_config(config: &ParallelismConfig) -> Self {
         match config {
             ParallelismConfig::Mode(mode) => match mode {
@@ -152,6 +223,30 @@ impl Parallelism {
     }
 }
 
+/// Execute a closure on a Rayon pool governed by the [`Parallelism`] setting.
+///
+/// When `Parallelism::Threads(n)` is set, a dedicated pool is built with `n`
+/// threads. All other variants (`Auto`, `Off`) run the closure directly — `Auto`
+/// relies on the global Rayon pool, while `Off` executes sequentially.
+pub(super) fn run_with_parallelism<T: Send>(
+    parallelism: Parallelism,
+    f: impl FnOnce() -> T + Send,
+) -> T {
+    match parallelism {
+        Parallelism::Threads(threads) if threads > 0 => {
+            let pool = ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .build()
+                .unwrap_or_else(|_| ThreadPoolBuilder::new().build().expect("thread pool"));
+            pool.install(f)
+        }
+        _ => f(),
+    }
+}
+
+// ── TM halting filter ───────────────────────────────────────
+
+/// Identifies which backend was used for TM halting analysis.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum TmHaltingFilterBackend {
     NotApplied,
@@ -175,6 +270,7 @@ impl TmHaltingFilterBackend {
     }
 }
 
+/// Diagnostic telemetry from the TM halting filter pass.
 #[derive(Clone, Debug)]
 pub struct TmHaltingFilterDiagnostics {
     pub backend: TmHaltingFilterBackend,
@@ -228,12 +324,16 @@ impl Default for TmHaltingFilterDiagnostics {
     }
 }
 
+// ── Metal GPU state ─────────────────────────────────────────
+
+/// Tracks whether the Metal GPU batch evaluator has been probed and prepared.
 pub(super) enum MetalBatchState {
     Uninitialized,
     Prepared(PreparedMetalBatch),
     Unavailable,
 }
 
+/// A validated Metal batch ready for dispatch, with execution policy metadata.
 pub(super) struct PreparedMetalBatch {
     pub(super) prepared: PreparedBatch,
     pub(super) policy: BatchExecutionPolicy,
@@ -242,6 +342,9 @@ pub(super) struct PreparedMetalBatch {
     pub(super) policy_cache_path: Option<String>,
 }
 
+// ── Match types ─────────────────────────────────────────────
+
+/// A scheduled matchup: two strategy indices, a repetition, and a global id.
 #[derive(Clone, Debug)]
 pub(super) struct Matchup {
     pub(super) match_id: usize,
@@ -250,6 +353,7 @@ pub(super) struct Matchup {
     pub(super) repetition: u32,
 }
 
+/// Mutable state for a match in progress: strategies, history, and scores.
 pub(super) struct MatchSession {
     pub(super) matchup: Matchup,
     pub(super) history: History,
@@ -272,6 +376,9 @@ pub(super) struct MatchSession {
     pub(super) record_trace: bool,
 }
 
+// ── Round and outcome types ─────────────────────────────────
+
+/// Actions and payoffs from a single round of play.
 #[derive(Clone, Debug)]
 pub(super) struct RoundSnapshot {
     pub(super) a_action: Action,
@@ -282,12 +389,16 @@ pub(super) struct RoundSnapshot {
     pub(super) b_payoff: i32,
 }
 
+/// Round snapshot plus crash flags, returned from `play_round_core`.
 pub(super) struct RoundOutcome {
     pub(super) snapshot: RoundSnapshot,
     pub(super) a_crash_now: bool,
     pub(super) b_crash_now: bool,
 }
 
+// ── Accumulator types ───────────────────────────────────────
+
+/// Per-strategy running totals used by [`TournamentAccumulator`].
 #[derive(Clone, Debug)]
 pub(super) struct StrategyStats {
     pub(super) total: i64,
@@ -302,6 +413,7 @@ pub(super) struct StrategyStats {
     pub(super) tm_stats: Option<TmRunStats>,
 }
 
+/// Pairwise head-to-head statistics between two strategies.
 #[derive(Clone, Debug, Default)]
 pub(super) struct PairStats {
     pub(super) a_total: i64,
@@ -313,6 +425,7 @@ pub(super) struct PairStats {
     pub(super) draws: u32,
 }
 
+/// Aggregates match results into per-strategy and pairwise statistics.
 pub(super) struct TournamentAccumulator {
     pub(super) strategies: Vec<StrategyStats>,
     pub(super) pairwise: Option<Vec<Vec<PairStats>>>,
@@ -320,6 +433,7 @@ pub(super) struct TournamentAccumulator {
     pub(super) score_aggregation: ScoreAggregation,
 }
 
+/// Complete outcome of a match: result, crash flags, TM stats, and last round.
 pub(super) struct MatchOutcome {
     pub(super) result: MatchResult,
     pub(super) a_crashed: bool,

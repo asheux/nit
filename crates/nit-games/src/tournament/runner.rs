@@ -1,3 +1,10 @@
+//! Step-driven tournament runner for interactive TUI playback.
+//!
+//! [`TournamentRunner`] drives the tournament one step at a time via
+//! [`step_rounds`](TournamentRunner::step_rounds), allowing the TUI to
+//! render progress, match snapshots, and leaderboard updates between ticks.
+//! For batch (run-to-completion) execution, see [`super::kernel::TournamentKernel`].
+
 use super::halting::select_halting_turing_machine_strategies;
 use super::metal::{
     adjusted_total_for_match, metal_batch_decline_reason,
@@ -9,20 +16,19 @@ use super::session::{
     tm_metrics_from_stats,
 };
 use super::types::{
-    MatchHistoryPreview, MatchOutcome, MatchResult, MatchSession, MatchSnapshot, Matchup,
-    MetalBatchState, Parallelism, RoundSnapshot, SeedDeriver, TournamentAccumulator,
-    TournamentProgress,
+    run_with_parallelism, MatchHistoryPreview, MatchOutcome, MatchResult, MatchSession,
+    MatchSnapshot, Matchup, MetalBatchState, Parallelism, RoundSnapshot, SeedDeriver,
+    TournamentAccumulator, TournamentProgress,
 };
 use crate::config::{NormalizedConfig, StrategySpec};
 use crate::events::{EventWriter, GameEvent};
 use crate::fast_eval::FastStrategyModel;
-use crate::game::Outcome;
 use crate::history_log::{HistoryWriter, MatchHistory};
 use crate::output::{RunSummary, RuntimeAcceleratorStats, StrategyDefinition, TournamentResults};
 use rayon::prelude::*;
-use rayon::ThreadPoolBuilder;
 use std::time::{Duration, Instant};
 
+/// Incremental tournament executor with match-level and round-level stepping.
 pub struct TournamentRunner {
     config: NormalizedConfig,
     seed: u64,
@@ -118,27 +124,14 @@ impl TournamentRunner {
         self.match_index >= self.schedule.len() && self.current.is_none()
     }
 
+    /// Current progress snapshot for the TUI status display.
     pub fn progress(&self) -> Option<TournamentProgress> {
         if self.schedule.is_empty() {
-            return Some(TournamentProgress {
-                match_index: 0,
-                total_matches: 0,
-                round: 0,
-                rounds: self.config.rounds,
-                match_complete: false,
-                a: "-".into(),
-                b: "-".into(),
-                total_payoff_a: 0,
-                total_payoff_b: 0,
-                last_action_a: None,
-                last_action_b: None,
-                last_payoff_a: None,
-                last_payoff_b: None,
-                last_halted_a: None,
-                last_halted_b: None,
-                last_outcome: None,
-                runtime: self.runtime.clone(),
-            });
+            return Some(TournamentProgress::build(
+                0, 0, 0, self.config.rounds, false,
+                "-".into(), "-".into(), 0, 0,
+                None, self.runtime.clone(),
+            ));
         }
         if let Some(current) = self.current.as_ref() {
             let matchup = &current.matchup;
@@ -149,25 +142,13 @@ impl TournamentRunner {
             } else {
                 None
             };
-            return Some(TournamentProgress {
-                match_index: self.match_index.saturating_add(1),
-                total_matches: self.schedule.len().max(1),
-                round: current.round,
-                rounds: current.rounds_total,
-                match_complete: false,
-                a,
-                b,
-                total_payoff_a: current.a_total,
-                total_payoff_b: current.b_total,
-                last_action_a: last_round.map(|r| r.a_action),
-                last_action_b: last_round.map(|r| r.b_action),
-                last_payoff_a: last_round.map(|r| r.a_payoff),
-                last_payoff_b: last_round.map(|r| r.b_payoff),
-                last_halted_a: last_round.map(|r| r.a_halted),
-                last_halted_b: last_round.map(|r| r.b_halted),
-                last_outcome: last_round.map(|r| Outcome::from_actions(r.a_action, r.b_action)),
-                runtime: self.runtime.clone(),
-            });
+            return Some(TournamentProgress::build(
+                self.match_index.saturating_add(1),
+                self.schedule.len().max(1),
+                current.round, current.rounds_total, false,
+                a, b, current.a_total, current.b_total,
+                last_round, self.runtime.clone(),
+            ));
         }
         if matches!(self.config.engine.mode, crate::config::EngineMode::Batch) {
             if let Some(mut progress) = self.last_progress.clone() {
@@ -178,25 +159,13 @@ impl TournamentRunner {
         if let Some(next_match) = self.schedule.matchup(self.match_index) {
             let a = strategy_log_id(self.strategies.get(next_match.a_idx)?);
             let b = strategy_log_id(self.strategies.get(next_match.b_idx)?);
-            return Some(TournamentProgress {
-                match_index: self.match_index.saturating_add(1),
-                total_matches: self.schedule.len().max(1),
-                round: 0,
-                rounds: self.config.rounds,
-                match_complete: false,
-                a,
-                b,
-                total_payoff_a: 0,
-                total_payoff_b: 0,
-                last_action_a: None,
-                last_action_b: None,
-                last_payoff_a: None,
-                last_payoff_b: None,
-                last_halted_a: None,
-                last_halted_b: None,
-                last_outcome: None,
-                runtime: self.runtime.clone(),
-            });
+            return Some(TournamentProgress::build(
+                self.match_index.saturating_add(1),
+                self.schedule.len().max(1),
+                0, self.config.rounds, false,
+                a, b, 0, 0,
+                None, self.runtime.clone(),
+            ));
         }
         self.last_progress.clone()
     }
@@ -258,25 +227,14 @@ impl TournamentRunner {
                         b: self.strategies[session.matchup.b_idx].id.clone(),
                         repetition: session.matchup.repetition + 1,
                     });
-                    self.last_progress = Some(TournamentProgress {
-                        match_index: self.match_index.saturating_add(1),
-                        total_matches: self.schedule.len().max(1),
-                        round: 0,
-                        rounds: session.rounds_total,
-                        match_complete: false,
-                        a: self.strategies[session.matchup.a_idx].id.clone(),
-                        b: self.strategies[session.matchup.b_idx].id.clone(),
-                        total_payoff_a: 0,
-                        total_payoff_b: 0,
-                        last_action_a: None,
-                        last_action_b: None,
-                        last_payoff_a: None,
-                        last_payoff_b: None,
-                        last_halted_a: None,
-                        last_halted_b: None,
-                        last_outcome: None,
-                        runtime: self.runtime.clone(),
-                    });
+                    self.last_progress = Some(TournamentProgress::build(
+                        self.match_index.saturating_add(1),
+                        self.schedule.len().max(1),
+                        0, session.rounds_total, false,
+                        self.strategies[session.matchup.a_idx].id.clone(),
+                        self.strategies[session.matchup.b_idx].id.clone(),
+                        0, 0, None, self.runtime.clone(),
+                    ));
                     self.current = Some(session);
                 } else {
                     break;
@@ -286,25 +244,15 @@ impl TournamentRunner {
             if let Some(mut session) = self.current.take() {
                 let snapshot = self.play_round(&mut session);
                 self.last_round = Some(snapshot.clone());
-                self.last_progress = Some(TournamentProgress {
-                    match_index: self.match_index.saturating_add(1),
-                    total_matches: self.schedule.len().max(1),
-                    round: session.round,
-                    rounds: session.rounds_total,
-                    match_complete: false,
-                    a: strategy_log_id(&self.strategies[session.matchup.a_idx]),
-                    b: strategy_log_id(&self.strategies[session.matchup.b_idx]),
-                    total_payoff_a: session.a_total,
-                    total_payoff_b: session.b_total,
-                    last_action_a: Some(snapshot.a_action),
-                    last_action_b: Some(snapshot.b_action),
-                    last_payoff_a: Some(snapshot.a_payoff),
-                    last_payoff_b: Some(snapshot.b_payoff),
-                    last_halted_a: Some(snapshot.a_halted),
-                    last_halted_b: Some(snapshot.b_halted),
-                    last_outcome: Some(Outcome::from_actions(snapshot.a_action, snapshot.b_action)),
-                    runtime: self.runtime.clone(),
-                });
+                self.last_progress = Some(TournamentProgress::build(
+                    self.match_index.saturating_add(1),
+                    self.schedule.len().max(1),
+                    session.round, session.rounds_total, false,
+                    strategy_log_id(&self.strategies[session.matchup.a_idx]),
+                    strategy_log_id(&self.strategies[session.matchup.b_idx]),
+                    session.a_total, session.b_total,
+                    Some(&snapshot), self.runtime.clone(),
+                ));
                 if session.round >= session.rounds_total {
                     if self.collect_match_history_previews {
                         self.completed_history_previews.push(MatchHistoryPreview {
@@ -606,21 +554,14 @@ impl TournamentRunner {
                 (gpu_outcomes, true)
             }
             Ok(None) => {
-                let outcomes = match Parallelism::from_config(&self.config.engine.parallelism) {
-                    Parallelism::Off => fast_forward_matchups
+                let par = Parallelism::from_config(&self.config.engine.parallelism);
+                let outcomes = if matches!(par, Parallelism::Off) {
+                    fast_forward_matchups
                         .iter()
                         .map(|matchup| run_matchup(matchup, true))
-                        .collect(),
-                    Parallelism::Threads(threads) if threads > 0 => {
-                        let pool = ThreadPoolBuilder::new()
-                            .num_threads(threads)
-                            .build()
-                            .unwrap_or_else(|_| {
-                                ThreadPoolBuilder::new().build().expect("thread pool")
-                            });
-                        pool.install(run_parallel)
-                    }
-                    _ => run_parallel(),
+                        .collect()
+                } else {
+                    run_with_parallelism(par, run_parallel)
                 };
                 (outcomes, false)
             }
@@ -632,21 +573,14 @@ impl TournamentRunner {
                         .note_metal_fallback_reason(format!("Metal backend error: {err}"));
                     self.metal_batch = MetalBatchState::Unavailable;
                 }
-                let outcomes = match Parallelism::from_config(&self.config.engine.parallelism) {
-                    Parallelism::Off => fast_forward_matchups
+                let par = Parallelism::from_config(&self.config.engine.parallelism);
+                let outcomes = if matches!(par, Parallelism::Off) {
+                    fast_forward_matchups
                         .iter()
                         .map(|matchup| run_matchup(matchup, true))
-                        .collect(),
-                    Parallelism::Threads(threads) if threads > 0 => {
-                        let pool = ThreadPoolBuilder::new()
-                            .num_threads(threads)
-                            .build()
-                            .unwrap_or_else(|_| {
-                                ThreadPoolBuilder::new().build().expect("thread pool")
-                            });
-                        pool.install(run_parallel)
-                    }
-                    _ => run_parallel(),
+                        .collect()
+                } else {
+                    run_with_parallelism(par, run_parallel)
                 };
                 (outcomes, false)
             }
@@ -714,27 +648,15 @@ impl TournamentRunner {
             .map(|progress| (progress.match_index, progress.round))
             != Some((completed_match, result.rounds))
         {
-            self.last_progress = Some(TournamentProgress {
-                match_index: completed_match,
-                total_matches: self.schedule.len().max(1),
-                round: result.rounds,
-                rounds: result.rounds,
-                match_complete: true,
-                a: strategy_log_id(&self.strategies[result.a_idx]),
-                b: strategy_log_id(&self.strategies[result.b_idx]),
-                total_payoff_a: result.a_total,
-                total_payoff_b: result.b_total,
-                last_action_a: last_round.as_ref().map(|round| round.a_action),
-                last_action_b: last_round.as_ref().map(|round| round.b_action),
-                last_payoff_a: last_round.as_ref().map(|round| round.a_payoff),
-                last_payoff_b: last_round.as_ref().map(|round| round.b_payoff),
-                last_halted_a: last_round.as_ref().map(|round| round.a_halted),
-                last_halted_b: last_round.as_ref().map(|round| round.b_halted),
-                last_outcome: last_round
-                    .as_ref()
-                    .map(|round| Outcome::from_actions(round.a_action, round.b_action)),
-                runtime: self.runtime.clone(),
-            });
+            self.last_progress = Some(TournamentProgress::build(
+                completed_match,
+                self.schedule.len().max(1),
+                result.rounds, result.rounds, true,
+                strategy_log_id(&self.strategies[result.a_idx]),
+                strategy_log_id(&self.strategies[result.b_idx]),
+                result.a_total, result.b_total,
+                last_round.as_ref(), self.runtime.clone(),
+            ));
         }
         if a_crashed {
             self.results.strategies[result.a_idx].crash_count += 1;

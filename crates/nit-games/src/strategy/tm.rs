@@ -86,6 +86,23 @@ pub struct TmRunResult {
     pub trace: Option<TmTrace>,
 }
 
+impl TmRunResult {
+    /// Construct a non-output termination result (max-steps, invalid-state, etc.).
+    ///
+    /// Most TM exits produce no output value — only the "Output" stop reason does.
+    /// This constructor captures the common pattern for all other exit paths.
+    fn terminated(steps_taken: u32, stop_reason: TmStopReason, trace: Option<TmTrace>) -> Self {
+        Self {
+            output_value: None,
+            output_symbol: None,
+            halted: false,
+            steps_taken,
+            stop_reason,
+            trace,
+        }
+    }
+}
+
 // ── TM evaluation engine ─────────────────────────────────────
 
 /// Run a one-sided TM with integer input converted to digit form.
@@ -145,24 +162,10 @@ pub fn run_one_sided_tm(
     };
 
     if max_steps == 0 {
-        return TmRunResult {
-            output_value: None,
-            output_symbol: None,
-            halted: false,
-            steps_taken: 0,
-            stop_reason: TmStopReason::MaxSteps,
-            trace,
-        };
+        return TmRunResult::terminated(0, TmStopReason::MaxSteps, trace);
     }
     if state == 0 {
-        return TmRunResult {
-            output_value: None,
-            output_symbol: None,
-            halted: false,
-            steps_taken: 0,
-            stop_reason: TmStopReason::InvalidState,
-            trace,
-        };
+        return TmRunResult::terminated(0, TmStopReason::InvalidState, trace);
     }
 
     for step in 0..(max_steps as usize) {
@@ -172,14 +175,11 @@ pub fn run_one_sided_tm(
             .saturating_mul(symbols as usize)
             .saturating_add(read as usize);
         let Some(trans) = transitions.get(idx).copied() else {
-            return TmRunResult {
-                output_value: None,
-                output_symbol: None,
-                halted: false,
-                steps_taken: (step + 1) as u32,
-                stop_reason: TmStopReason::MissingTransition,
+            return TmRunResult::terminated(
+                (step + 1) as u32,
+                TmStopReason::MissingTransition,
                 trace,
-            };
+            );
         };
 
         if let Some(cell) = tape.get_mut(head_before) {
@@ -247,25 +247,15 @@ pub fn run_one_sided_tm(
         head = head_after;
         state = trans.next;
         if state == 0 {
-            return TmRunResult {
-                output_value: None,
-                output_symbol: None,
-                halted: false,
-                steps_taken: (step + 1) as u32,
-                stop_reason: TmStopReason::InvalidState,
+            return TmRunResult::terminated(
+                (step + 1) as u32,
+                TmStopReason::InvalidState,
                 trace,
-            };
+            );
         }
     }
 
-    TmRunResult {
-        output_value: None,
-        output_symbol: None,
-        halted: false,
-        steps_taken: max_steps,
-        stop_reason: TmStopReason::MaxSteps,
-        trace,
-    }
+    TmRunResult::terminated(max_steps, TmStopReason::MaxSteps, trace)
 }
 
 // ── TM output helper ─────────────────────────────────────────

@@ -1,3 +1,10 @@
+//! Batch tournament kernel — runs all matches to completion in a single call.
+//!
+//! [`TournamentKernel`] is the simpler of the two tournament drivers. It runs
+//! the entire schedule without yielding, making it suitable for CLI batch mode
+//! and petri-dish evaluations. For TUI step-by-step playback, see
+//! [`super::runner::TournamentRunner`].
+
 use super::halting::select_halting_turing_machine_strategies;
 use super::metal::{
     metal_batch_decline_reason, try_metal_batch_outcomes_chunked_prepared,
@@ -5,16 +12,16 @@ use super::metal::{
 };
 use super::schedule::SchedulePlan;
 use super::session::{build_strategy_definitions, run_match_core};
-use super::types::{Parallelism, SeedDeriver, TournamentAccumulator};
+use super::types::{run_with_parallelism, Parallelism, SeedDeriver, TournamentAccumulator};
 use crate::config::{AcceleratorMode, NormalizedConfig};
 use crate::events::{EventWriter, GameEvent};
 use crate::fast_eval::FastStrategyModel;
 use crate::history_log::{HistoryWriter, MatchHistory};
 use crate::output::{RuntimeAcceleratorStats, StrategyDefinition, TournamentResults};
 use rayon::prelude::*;
-use rayon::ThreadPoolBuilder;
 use std::sync::mpsc::Sender;
 
+/// Selects between sequential and parallel execution for the kernel.
 pub enum KernelRunMode<'a> {
     Sequential {
         event_writer: Option<&'a mut EventWriter>,
@@ -30,6 +37,7 @@ pub enum KernelRunMode<'a> {
     },
 }
 
+/// Batch tournament executor: builds the schedule, runs all matches, returns results.
 pub struct TournamentKernel {
     config: NormalizedConfig,
     seed: u64,
@@ -368,16 +376,7 @@ impl TournamentKernel {
                 .collect::<Vec<_>>()
         };
 
-        let outcomes = match parallelism {
-            Parallelism::Threads(threads) if threads > 0 => {
-                let pool = ThreadPoolBuilder::new()
-                    .num_threads(threads)
-                    .build()
-                    .unwrap_or_else(|_| ThreadPoolBuilder::new().build().expect("thread pool"));
-                pool.install(run)
-            }
-            _ => run(),
-        };
+        let outcomes = run_with_parallelism(parallelism, run);
 
         if let Some(sender) = event_sender.as_ref() {
             let _ = sender.send(GameEvent::TournamentEnd {

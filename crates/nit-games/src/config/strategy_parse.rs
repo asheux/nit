@@ -1,5 +1,11 @@
+//! Strategy specification parsing from TOML configuration.
+//!
+//! Handles FSM, cellular automata, and Turing machine strategy definitions,
+//! including notebook-index decoding and transition-table validation.
+
 use super::types::{StrategyConfig, StrategySpec, StrategySpecKind};
 use crate::game::Action;
+use crate::strategy::math::checked_pow_u128;
 use crate::strategy::{
     decode_fsm_notebook_index, decode_tm_rule_code_wolfram, InputMode, TmMove, TmTransition,
 };
@@ -749,10 +755,3 @@ fn parse_two_r(r: f32) -> Option<u32> {
     }
 }
 
-fn checked_pow_u128(base: u128, exp: u32) -> Option<u128> {
-    let mut value: u128 = 1;
-    for _ in 0..exp {
-        value = value.checked_mul(base)?;
-    }
-    Some(value)
-}

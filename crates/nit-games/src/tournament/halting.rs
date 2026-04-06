@@ -1,9 +1,15 @@
+//! Turing machine halting filter — pre-screens TM strategies for non-halting behaviour.
+//!
+//! Before a tournament runs, this module identifies TM strategies that never halt
+//! within the configured step budget and replaces them with equivalent always-defect
+//! stubs to avoid wasting compute during the actual tournament.
+
 use super::metal::{metal_batch_decline_reason, try_prepare_metal_batch_for_workload};
 use super::schedule::{matches_per_repetition, total_schedule_matches, SchedulePlan};
 use super::session::run_match_core;
 use super::types::{
-    MatchOutcome, Matchup, Parallelism, SeedDeriver, TmHaltingFilterBackend,
-    TmHaltingFilterDiagnostics,
+    run_with_parallelism, MatchOutcome, Matchup, Parallelism, SeedDeriver,
+    TmHaltingFilterBackend, TmHaltingFilterDiagnostics,
 };
 use crate::config::{AcceleratorMode, NormalizedConfig, StrategySpec, StrategySpecKind};
 use crate::events::GameEvent;
@@ -14,7 +20,6 @@ use crate::strategy::{
 };
 use nit_metal::MatchPair;
 use rayon::prelude::*;
-use rayon::ThreadPoolBuilder;
 use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::collections::VecDeque;
@@ -330,14 +335,7 @@ fn notebook_tm_family_halting_mask(
             }
             keep
         }
-        Parallelism::Threads(threads) if threads > 0 => {
-            let pool = ThreadPoolBuilder::new()
-                .num_threads(threads)
-                .build()
-                .unwrap_or_else(|_| ThreadPoolBuilder::new().build().expect("thread pool"));
-            pool.install(scan_parallel)
-        }
-        _ => scan_parallel(),
+        other => run_with_parallelism(other, scan_parallel),
     };
 
     let mut stats = cache.snapshot();
@@ -475,6 +473,191 @@ fn mark_tm_halting_selection(
     }
 }
 
+/// Result from `try_metal_tm_family_halting_mask`: outer `Option` is `None`
+/// when the batch was declined, inner `Option` carries the keep-mask and stats.
+type MetalProbeResult = Result<Option<(Vec<bool>, MetalTmHaltingStats)>, String>;
+
+/// Dispatch Metal GPU probe for TM halting analysis, with auto-mode timeout guard.
+///
+/// In `Auto` mode a concurrent probe guard (`AUTO_TM_METAL_PROBE_IN_FLIGHT`)
+/// prevents multiple GPU probes from overlapping; the probe is run on a dedicated
+/// thread with a timeout. In explicit Metal mode the probe runs synchronously.
+fn dispatch_metal_tm_probe(
+    config: &NormalizedConfig,
+    diagnostics: &mut TmHaltingFilterDiagnostics,
+    probe_started: Instant,
+) -> Option<MetalProbeResult> {
+    if !matches!(config.engine.accelerator, AcceleratorMode::Auto) {
+        return Some(try_metal_tm_family_halting_mask(config));
+    }
+
+    // Guard against concurrent auto-mode probes.
+    if AUTO_TM_METAL_PROBE_IN_FLIGHT.swap(true, AtomicOrdering::AcqRel) {
+        diagnostics.backend_probe_elapsed = probe_started.elapsed();
+        diagnostics.metal_decline_reason = Some(
+            "Metal probe already in progress; using CPU fallback for this run.".into(),
+        );
+        return None;
+    }
+
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let probe_cfg = config.clone();
+    std::thread::spawn(move || {
+        let probe_outcome = catch_unwind(AssertUnwindSafe(|| {
+            try_metal_tm_family_halting_mask(&probe_cfg)
+        }))
+        .unwrap_or_else(|_| Err("Metal probe panicked".into()));
+        AUTO_TM_METAL_PROBE_IN_FLIGHT.store(false, AtomicOrdering::Release);
+        let _ = sender.send(probe_outcome);
+    });
+
+    match receiver.recv_timeout(AUTO_TM_METAL_PROBE_TIMEOUT) {
+        Ok(outcome) => Some(outcome),
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+            diagnostics.backend_probe_elapsed = probe_started.elapsed();
+            diagnostics.metal_decline_reason = Some(format!(
+                "Metal probe exceeded {}ms in auto mode; using CPU fallback",
+                AUTO_TM_METAL_PROBE_TIMEOUT.as_millis()
+            ));
+            None
+        }
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+            diagnostics.backend_probe_elapsed = probe_started.elapsed();
+            diagnostics.metal_error =
+                Some("Metal probe thread terminated unexpectedly".into());
+            None
+        }
+    }
+}
+
+/// Handle the result of a Metal probe, updating diagnostics and returning
+/// the keep-mask if the probe succeeded.
+///
+/// Returns `Ok(Some(keep))` when Metal produced valid results, `Ok(None)` when
+/// the probe declined or errored non-fatally, and `Err` when strict Metal mode
+/// requires GPU acceleration but it is unavailable.
+fn apply_metal_probe_result(
+    probe_result: MetalProbeResult,
+    config: &NormalizedConfig,
+    schedule_len: usize,
+    strict_metal: bool,
+    diagnostics: &mut TmHaltingFilterDiagnostics,
+    probe_started: Instant,
+) -> Result<Option<Vec<bool>>, String> {
+    match probe_result {
+        Ok(Some((halting_keep, gpu_stats))) => {
+            diagnostics.backend = TmHaltingFilterBackend::Metal;
+            diagnostics.scanned_matchups = gpu_stats.scanned_matchups;
+            diagnostics.backend_probe_elapsed = gpu_stats.prepare_elapsed;
+            diagnostics.halting_filter_elapsed = gpu_stats.execution_elapsed;
+            diagnostics.metal_batches_submitted = gpu_stats.batches_submitted;
+            diagnostics.metal_policy_source = Some(gpu_stats.policy_source);
+            diagnostics.metal_matches_per_batch = Some(gpu_stats.matches_per_batch);
+            diagnostics.metal_inflight_batches = Some(gpu_stats.inflight_batches);
+            diagnostics.metal_policy_cache_key = gpu_stats.policy_cache_key;
+            diagnostics.metal_policy_cache_path = gpu_stats.policy_cache_path;
+            Ok(Some(halting_keep))
+        }
+        Ok(None) => {
+            diagnostics.backend_probe_elapsed = probe_started.elapsed();
+            diagnostics.metal_decline_reason = metal_batch_decline_reason(
+                config,
+                &config.strategies,
+                schedule_len,
+            )
+            .or_else(|| {
+                Some(
+                    "Metal batch evaluator declined this TM family preparation workload.".into(),
+                )
+            });
+            if strict_metal && config.engine.accelerator.requires_metal() {
+                let decline_msg = diagnostics
+                    .metal_decline_reason
+                    .as_deref()
+                    .unwrap_or("TM family preparation is not supported by the active Metal backend");
+                return Err(format!("Metal accelerator was requested, but {decline_msg}."));
+            }
+            Ok(None)
+        }
+        Err(gpu_error) => {
+            diagnostics.backend_probe_elapsed = probe_started.elapsed();
+            diagnostics.metal_error = Some(gpu_error.clone());
+            if strict_metal && config.engine.accelerator.requires_metal() {
+                return Err(format!(
+                    "Metal accelerator unavailable during TM family preparation: {gpu_error}"
+                ));
+            }
+            Ok(None)
+        }
+    }
+}
+
+/// All-TM roster halting: try Metal GPU first, fall back to notebook CPU.
+///
+/// When every strategy in the roster is a Turing machine, we can use a
+/// specialised evaluation path (notebook pairwise or Metal batch). This
+/// function orchestrates the Metal probe → CPU fallback cascade.
+fn all_tm_halting_mask(
+    config: &NormalizedConfig,
+    strict_metal: bool,
+    diagnostics: &mut TmHaltingFilterDiagnostics,
+) -> Result<Vec<bool>, String> {
+    let strategy_count = config.strategies.len();
+    let attempted_metal = config.engine.accelerator.allows_metal();
+
+    if attempted_metal {
+        let probe_started = Instant::now();
+        let schedule_len =
+            SchedulePlan::new(strategy_count, config.repetitions, config.self_play).len();
+
+        // Fast rejection: check if the workload shape is compatible with Metal.
+        if let Some(decline_reason) =
+            metal_batch_decline_reason(config, &config.strategies, schedule_len)
+        {
+            diagnostics.backend_probe_elapsed = probe_started.elapsed();
+            diagnostics.metal_decline_reason = Some(decline_reason.clone());
+            if strict_metal && config.engine.accelerator.requires_metal() {
+                return Err(format!(
+                    "Metal accelerator was requested, but {decline_reason}."
+                ));
+            }
+        } else {
+            let maybe_probe = dispatch_metal_tm_probe(config, diagnostics, probe_started);
+            if let Some(probe_result) = maybe_probe {
+                let applied =
+                    apply_metal_probe_result(
+                        probe_result, config, schedule_len,
+                        strict_metal, diagnostics, probe_started,
+                    )?;
+                if let Some(halting_keep) = applied {
+                    return Ok(halting_keep);
+                }
+            }
+        }
+    }
+
+    // CPU fallback: notebook pairwise evaluation.
+    let filter_started = Instant::now();
+    let (keep, notebook_stats) = notebook_tm_family_halting_mask(config);
+    diagnostics.backend = if attempted_metal {
+        TmHaltingFilterBackend::NotebookCpuFallback
+    } else {
+        TmHaltingFilterBackend::NotebookCpu
+    };
+    diagnostics.halting_filter_elapsed = filter_started.elapsed();
+    diagnostics.scanned_matchups = notebook_stats.scanned_matchups;
+    diagnostics.tm_cache_hits = notebook_stats.tm_cache_hits;
+    diagnostics.tm_cache_misses = notebook_stats.tm_cache_misses;
+    diagnostics.tm_evaluations = notebook_stats.tm_evaluations;
+    diagnostics.tm_steps = notebook_stats.tm_steps;
+    Ok(keep)
+}
+
+/// Compute the halting mask for all strategies in a tournament.
+///
+/// Selects the fastest available backend (Metal GPU → notebook CPU → mixed-roster
+/// CPU) and populates `diagnostics` with timing and backend metadata. Returns a
+/// boolean vector where `true` means the strategy at that index should be kept.
 fn halting_turing_machine_mask(
     config: &NormalizedConfig,
     seed: u64,
@@ -484,132 +667,9 @@ fn halting_turing_machine_mask(
     let strategy_count = config.strategies.len();
     diagnostics.schedule_matches =
         total_schedule_matches(strategy_count, config.repetitions, config.self_play).unwrap_or(0);
-    if roster_is_all_tms(&config.strategies) {
-        let attempted_metal = config.engine.accelerator.allows_metal();
-        if attempted_metal {
-            let metal_probe_started = Instant::now();
-            let schedule_len =
-                SchedulePlan::new(strategy_count, config.repetitions, config.self_play).len();
-            let immediate_decline =
-                metal_batch_decline_reason(config, &config.strategies, schedule_len);
-            if let Some(reason) = immediate_decline {
-                diagnostics.backend_probe_elapsed = metal_probe_started.elapsed();
-                diagnostics.metal_decline_reason = Some(reason.clone());
-                if strict_metal && config.engine.accelerator.requires_metal() {
-                    return Err(format!("Metal accelerator was requested, but {reason}."));
-                }
-            } else {
-                let maybe_probe_result =
-                    if matches!(config.engine.accelerator, AcceleratorMode::Auto) {
-                        if AUTO_TM_METAL_PROBE_IN_FLIGHT.swap(true, AtomicOrdering::AcqRel) {
-                            diagnostics.backend_probe_elapsed = metal_probe_started.elapsed();
-                            diagnostics.metal_decline_reason = Some(
-                                "Metal probe already in progress; using CPU fallback for this run."
-                                    .into(),
-                            );
-                            None
-                        } else {
-                            let (probe_tx, probe_rx) = std::sync::mpsc::channel();
-                            let probe_config = config.clone();
-                            std::thread::spawn(move || {
-                                let result = catch_unwind(AssertUnwindSafe(|| {
-                                    try_metal_tm_family_halting_mask(&probe_config)
-                                }))
-                                .unwrap_or_else(|_| Err("Metal probe panicked".into()));
-                                AUTO_TM_METAL_PROBE_IN_FLIGHT.store(false, AtomicOrdering::Release);
-                                let _ = probe_tx.send(result);
-                            });
-                            match probe_rx.recv_timeout(AUTO_TM_METAL_PROBE_TIMEOUT) {
-                                Ok(result) => Some(result),
-                                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                                    diagnostics.backend_probe_elapsed =
-                                        metal_probe_started.elapsed();
-                                    diagnostics.metal_decline_reason = Some(format!(
-                                    "Metal probe exceeded {}ms in auto mode; using CPU fallback",
-                                    AUTO_TM_METAL_PROBE_TIMEOUT.as_millis()
-                                ));
-                                    None
-                                }
-                                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                                    diagnostics.backend_probe_elapsed =
-                                        metal_probe_started.elapsed();
-                                    diagnostics.metal_error =
-                                        Some("Metal probe thread terminated unexpectedly".into());
-                                    None
-                                }
-                            }
-                        }
-                    } else {
-                        Some(try_metal_tm_family_halting_mask(config))
-                    };
 
-                if let Some(probe_result) = maybe_probe_result {
-                    match probe_result {
-                        Ok(Some((keep, stats))) => {
-                            diagnostics.backend = TmHaltingFilterBackend::Metal;
-                            diagnostics.scanned_matchups = stats.scanned_matchups;
-                            diagnostics.backend_probe_elapsed = stats.prepare_elapsed;
-                            diagnostics.halting_filter_elapsed = stats.execution_elapsed;
-                            diagnostics.metal_batches_submitted = stats.batches_submitted;
-                            diagnostics.metal_policy_source = Some(stats.policy_source);
-                            diagnostics.metal_matches_per_batch = Some(stats.matches_per_batch);
-                            diagnostics.metal_inflight_batches = Some(stats.inflight_batches);
-                            diagnostics.metal_policy_cache_key = stats.policy_cache_key;
-                            diagnostics.metal_policy_cache_path = stats.policy_cache_path;
-                            return Ok(keep);
-                        }
-                        Ok(None) => {
-                            diagnostics.backend_probe_elapsed = metal_probe_started.elapsed();
-                            diagnostics.metal_decline_reason = metal_batch_decline_reason(
-                                config,
-                                &config.strategies,
-                                schedule_len,
-                            )
-                            .or_else(|| {
-                                Some(
-                                    "Metal batch evaluator declined this TM family preparation workload."
-                                        .into(),
-                                )
-                            });
-                            if strict_metal && config.engine.accelerator.requires_metal() {
-                                if let Some(reason) = diagnostics.metal_decline_reason.as_ref() {
-                                    return Err(format!(
-                                        "Metal accelerator was requested, but {reason}."
-                                    ));
-                                }
-                                return Err(
-                                    "Metal accelerator was requested, but TM family preparation is not supported by the active Metal backend."
-                                        .into(),
-                                );
-                            }
-                        }
-                        Err(err) => {
-                            diagnostics.backend_probe_elapsed = metal_probe_started.elapsed();
-                            diagnostics.metal_error = Some(err.clone());
-                            if strict_metal && config.engine.accelerator.requires_metal() {
-                                return Err(format!(
-                                    "Metal accelerator unavailable during TM family preparation: {err}"
-                                ));
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        let filter_started = Instant::now();
-        let (keep, stats) = notebook_tm_family_halting_mask(config);
-        diagnostics.backend = if attempted_metal {
-            TmHaltingFilterBackend::NotebookCpuFallback
-        } else {
-            TmHaltingFilterBackend::NotebookCpu
-        };
-        diagnostics.halting_filter_elapsed = filter_started.elapsed();
-        diagnostics.scanned_matchups = stats.scanned_matchups;
-        diagnostics.tm_cache_hits = stats.tm_cache_hits;
-        diagnostics.tm_cache_misses = stats.tm_cache_misses;
-        diagnostics.tm_evaluations = stats.tm_evaluations;
-        diagnostics.tm_steps = stats.tm_steps;
-        return Ok(keep);
+    if roster_is_all_tms(&config.strategies) {
+        return all_tm_halting_mask(config, strict_metal, diagnostics);
     }
     let tm_mask = config
         .strategies
@@ -701,14 +761,7 @@ fn halting_turing_machine_mask(
             }
             keep
         }
-        Parallelism::Threads(threads) if threads > 0 => {
-            let pool = ThreadPoolBuilder::new()
-                .num_threads(threads)
-                .build()
-                .unwrap_or_else(|_| ThreadPoolBuilder::new().build().expect("thread pool"));
-            pool.install(scan_parallel)
-        }
-        _ => scan_parallel(),
+        other => run_with_parallelism(other, scan_parallel),
     };
 
     diagnostics.halting_filter_elapsed = filter_started.elapsed();

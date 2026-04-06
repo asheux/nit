@@ -1,3 +1,9 @@
+//! Match session management: strategy construction, round execution, and match lifecycle.
+//!
+//! Contains [`MatchSession`] construction, the core round-play loop
+//! (`play_round_core`), and the batch-mode `run_match_core` entry point
+//! used by both the kernel and the runner.
+
 use super::metal::adjusted_total_for_match;
 use super::types::{
     MatchOutcome, MatchResult, MatchRole, MatchSession, Matchup, RoundOutcome, RoundSnapshot,
@@ -14,6 +20,7 @@ use crate::strategy::{CaStrategy, FsmStrategy, OneSidedTmStrategy, Strategy, TmR
 use nit_utils::hashing::SplitMix64;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 
+/// Convert TM runtime stats into the serializable metrics format.
 pub(super) fn tm_metrics_from_stats(stats: &TmRunStats) -> crate::output::TmDerivedMetrics {
     let rounds = stats.rounds.max(1);
     let avg_steps = stats.steps as f64 / rounds as f64;
