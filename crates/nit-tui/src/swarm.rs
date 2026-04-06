@@ -2819,7 +2819,7 @@ fn ensure_integrate_task(
         agent_id: integrator.to_string(),
         role: Some("integrate".into()),
         title: "Integrate + implement".into(),
-        task_prompt: "Implement the changes using the dependency outputs. You are the only agent allowed to make workspace edits. Prefer small, safe diffs and keep tests green.".into(),
+        task_prompt: "Implement the changes using the dependency outputs. You are the only agent allowed to make workspace edits. Process the FILE CHECKLIST above in order — open each file, refactor it, then move to the next. Prefer small, safe diffs and keep tests green.".into(),
         deps: all_deps,
         writes: true,
         artifacts: vec!["files".into(), "diffs".into(), "commands".into()],
@@ -5700,7 +5700,7 @@ fn sanitize_for_filename(input: &str) -> String {
 /// Extract directory/module paths from the operator prompt and enumerate their
 /// source files.  Returns relative paths sorted alphabetically, capped at 100
 /// entries to keep the planner prompt sane.
-fn enumerate_scope_files(workspace_root: &Path, prompt: &str) -> Vec<String> {
+pub(crate) fn enumerate_scope_files(workspace_root: &Path, prompt: &str) -> Vec<String> {
     // Look for path-like tokens that point to directories inside the workspace.
     let mut dirs: Vec<std::path::PathBuf> = Vec::new();
     for token in prompt.split_whitespace() {
@@ -5967,11 +5967,17 @@ fn build_planner_prompt(
     out.push_str("}\n");
 
     if !scope_files.is_empty() {
-        out.push_str("\nScope — files in the referenced module/directory:\n");
+        out.push_str("\nScope — files in the referenced module/directory (");
+        out.push_str(&format!("{} files):\n", scope_files.len()));
         for path in scope_files.iter() {
             out.push_str(&format!("  - {path}\n"));
         }
-        out.push_str("The plan MUST cover ALL of these files. Ensure the integrate task prompt explicitly lists every file that needs changes.\n");
+        out.push_str("\nSCOPE RULES:\n");
+        out.push_str("- \"Refactor module\" means refactor EVERY file listed above. No file may remain unchanged.\n");
+        out.push_str("- Each integrate task prompt MUST embed the exact file paths it is responsible for as a numbered checklist, e.g.:\n");
+        out.push_str("  \"Refactor the following files. Open each file, read it, and apply improvements. Check off each file as you go:\\n1. crates/foo/src/bar.rs\\n2. crates/foo/src/baz.rs\\n...\"\n");
+        out.push_str("- Distribute ALL files across integrate tasks so every file is assigned to exactly one task.\n");
+        out.push_str("- If there is one integrate task, it must list all files. If there are multiple, split them into disjoint subsets.\n");
     }
 
     out.push_str("\nOperator request:\n");
@@ -6007,6 +6013,7 @@ fn role_contract_lines(role: &str) -> &'static [&'static str] {
         "integrate" => &[
             "Implement the chosen plan and convert it into concrete edits.",
             "Do not restart broad ideation; focus on carrying the selected approach through.",
+            "If a FILE CHECKLIST is provided above, you MUST modify every listed file — process them in order, one by one. A file left unchanged means your task is incomplete.",
             "Report exact files changed and validation results.",
             "GENOME QUALITY OBLIGATION: You are the sole writer. Your code is measured by nit's genome system across four encoders. See the full ENCODER GUIDE and TARGETS in the genome instructions attached to this prompt. Maintain or improve genome scores on every file you touch. Aim for Tier III+ (Spaceship) minimum, aspire to Tier V (Replicator). Do NOT call [evaluate_genome] — nit evaluates automatically after your changes are written to disk.",
         ],
@@ -6114,12 +6121,11 @@ fn wrap_task_prompt(
 
     out.push_str("\nOperator request:\n");
     out.push_str(root_prompt.trim());
-    out.push_str("\n\nYour task:\n");
-    out.push_str(task.task_prompt.trim());
     out.push('\n');
 
-    // Inject the mandatory scope file list for integrate and propose roles so
-    // agents cannot silently skip files that fall within the operator's scope.
+    // Inject the scope file list BEFORE the task prompt so the agent sees the
+    // full file checklist first, then the task instructions.  This prevents the
+    // agent from forming a plan that ignores files.
     if !scope_files.is_empty() {
         let is_integrate = task
             .role
@@ -6134,20 +6140,27 @@ fn wrap_task_prompt(
             .as_deref()
             == Some("propose");
         if is_integrate {
-            out.push_str("\n## MANDATORY SCOPE — files you MUST refactor/modify\n");
-            out.push_str("The operator's request covers ALL of the following files. You MUST apply changes to EVERY file listed below — do not skip any. If a file needs no functional changes, still review it for style, naming, documentation, and structural consistency with the rest of the module.\n");
-            for path in scope_files.iter() {
-                out.push_str(&format!("  - {path}\n"));
+            out.push_str("\n## FILE CHECKLIST (non-negotiable)\n");
+            out.push_str("\"Refactor module\" = refactor EVERY file below. No exceptions, no skipping.\n");
+            out.push_str("Process this checklist in order. Open each file, read it, refactor it, then move to the next.\n");
+            out.push_str("Even if a file looks clean, improve naming, docs, structure, or consistency.\n");
+            out.push_str("Your task is NOT complete until every file has been modified.\n\n");
+            for (i, path) in scope_files.iter().enumerate() {
+                out.push_str(&format!("{}. {path}\n", i + 1));
             }
-            out.push_str("Confirm in your response that you touched each file.\n");
+            out.push_str("\nAfter finishing, list every file and what you changed in each.\n");
         } else if is_propose {
             out.push_str("\n## SCOPE — files in the target module\n");
-            out.push_str("Your proposal must consider ALL of these files:\n");
-            for path in scope_files.iter() {
-                out.push_str(&format!("  - {path}\n"));
+            out.push_str("Your proposal must cover ALL of these files (no exceptions):\n");
+            for (i, path) in scope_files.iter().enumerate() {
+                out.push_str(&format!("{}. {path}\n", i + 1));
             }
         }
     }
+
+    out.push_str("\nYour task:\n");
+    out.push_str(task.task_prompt.trim());
+    out.push('\n');
 
     if let Some(deps) = deps {
         if !deps.is_empty() {
