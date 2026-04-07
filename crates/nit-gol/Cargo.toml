@@ -1,18 +1,20 @@
 [package]
 name = "nit-gol"
 version = "0.1.0"
-description = "Game of Life simulation with rule parsing, seed generation, and grid evolution"
+description = "Game of Life simulation engine: rule parsing, grid evolution, attractor detection, and RLE snapshots"
 edition = "2021"
 license = "MIT"
 rust-version.workspace = true
+categories = ["simulation", "science"]
+keywords = ["game-of-life", "cellular-automata", "simulation"]
 
 [dependencies]
 blake3 = { workspace = true }
 crossbeam-channel = { workspace = true }
+nit-utils = { path = "../nit-utils" }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 time = { workspace = true, features = ["formatting"] }
-tracing = { workspace = true }
 toml = { workspace = true }
-nit-utils = { path = "../nit-utils" }
+tracing = { workspace = true }

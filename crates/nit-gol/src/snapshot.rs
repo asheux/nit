@@ -1,3 +1,10 @@
+//! Snapshot persistence: writing grid state to disk as RLE + JSON.
+//!
+//! Handles atomic file writes, metadata serialization, timestamp
+//! generation, and snapshot pruning. RLE encoding logic lives in
+//! the [`rle`](crate::rle) module; this module re-exports it for
+//! backward compatibility.
+
 use std::fs::{self, File};
 use std::io::{self, BufWriter, Write};
 use std::path::{Path, PathBuf};
@@ -7,6 +14,10 @@ use time::OffsetDateTime;
 
 use crate::{attractor::AttractorEvent, Grid, Rule};
 
+// Re-export RLE encoding functions from their dedicated module.
+pub use crate::rle::{encode_rle, write_rle, write_rle_bits};
+
+/// Metadata written alongside each snapshot as a JSON sidecar file.
 #[derive(Clone, Debug, serde::Serialize)]
 pub struct SnapshotMetadata {
     pub timestamp: String,
@@ -46,12 +57,14 @@ pub struct SnapshotMetadata {
     pub seed_components: Option<usize>,
 }
 
+/// Paths to the RLE and JSON files produced by a snapshot write.
 #[derive(Clone, Debug)]
 pub struct SnapshotPaths {
     pub rle_path: PathBuf,
     pub json_path: PathBuf,
 }
 
+/// Write a complete snapshot (RLE grid + JSON metadata) to `dir`.
 pub fn write_snapshot(
     dir: &Path,
     name_base: &str,
@@ -87,12 +100,7 @@ pub fn write_snapshot(
     })
 }
 
-pub fn encode_rle(grid: &Grid, rule: Rule) -> String {
-    let mut out = Vec::new();
-    let _ = write_rle(&mut out, grid, rule);
-    String::from_utf8(out).unwrap_or_default()
-}
-
+/// Build a default snapshot file-name stem from rule, generation, and hash.
 pub fn default_name(rule: Rule, generation: u64, hash: u64) -> String {
     let timestamp = OffsetDateTime::now_utc()
         .format(&Rfc3339)
@@ -104,12 +112,15 @@ pub fn default_name(rule: Rule, generation: u64, hash: u64) -> String {
     )
 }
 
+/// Current UTC time as an ISO 8601 / RFC 3339 string.
 pub fn now_iso8601() -> String {
     OffsetDateTime::now_utc()
         .format(&Rfc3339)
         .unwrap_or_else(|_| "unknown-time".into())
 }
 
+/// Delete the oldest `.rle` (and companion `.json`) files in `dir`
+/// until at most `max_files` remain.
 pub fn prune_oldest(dir: &Path, max_files: usize) -> io::Result<()> {
     if max_files == 0 {
         return Ok(());
@@ -139,85 +150,7 @@ pub fn prune_oldest(dir: &Path, max_files: usize) -> io::Result<()> {
     Ok(())
 }
 
-pub fn write_rle<W: Write>(writer: &mut W, grid: &Grid, rule: Rule) -> io::Result<()> {
-    writeln!(
-        writer,
-        "x = {}, y = {}, rule = {}",
-        grid.width(),
-        grid.height(),
-        rule
-    )?;
-    if grid.width() == 0 || grid.height() == 0 {
-        writer.write_all(b"!")?;
-        return Ok(());
-    }
-    for y in 0..grid.height() {
-        let mut run_char = if grid.get(0, y) { 'o' } else { 'b' };
-        let mut run_len = 1usize;
-        for x in 1..grid.width() {
-            let cell = if grid.get(x, y) { 'o' } else { 'b' };
-            if cell == run_char {
-                run_len += 1;
-            } else {
-                write_run(writer, run_len, run_char)?;
-                run_char = cell;
-                run_len = 1;
-            }
-        }
-        write_run(writer, run_len, run_char)?;
-        if y + 1 < grid.height() {
-            writer.write_all(b"$\n")?;
-        }
-    }
-    writer.write_all(b"!")?;
-    Ok(())
-}
-
-pub fn write_rle_bits<W: Write>(
-    writer: &mut W,
-    width: u16,
-    height: u16,
-    rule: &str,
-    bits: &[u64],
-) -> io::Result<()> {
-    let width = width as usize;
-    let height = height as usize;
-    let total = width.saturating_mul(height);
-    let needed_words = total.div_ceil(64);
-    if bits.len() < needed_words {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "grid bitset too small",
-        ));
-    }
-    writeln!(writer, "x = {width}, y = {height}, rule = {rule}")?;
-    if width == 0 || height == 0 {
-        writer.write_all(b"!")?;
-        return Ok(());
-    }
-    for y in 0..height {
-        let mut run_char = if bit_at(bits, y * width) { 'o' } else { 'b' };
-        let mut run_len = 1usize;
-        for x in 1..width {
-            let idx = y * width + x;
-            let cell = if bit_at(bits, idx) { 'o' } else { 'b' };
-            if cell == run_char {
-                run_len += 1;
-            } else {
-                write_run(writer, run_len, run_char)?;
-                run_char = cell;
-                run_len = 1;
-            }
-        }
-        write_run(writer, run_len, run_char)?;
-        if y + 1 < height {
-            writer.write_all(b"$\n")?;
-        }
-    }
-    writer.write_all(b"!")?;
-    Ok(())
-}
-
+/// Atomically write an RLE file from packed grid bits.
 pub fn write_rle_bits_atomic(
     path: &Path,
     width: u16,
@@ -226,11 +159,23 @@ pub fn write_rle_bits_atomic(
     bits: &[u64],
 ) -> io::Result<()> {
     write_atomic(path, |writer| {
-        write_rle_bits(writer, width, height, rule, bits)
+        crate::rle::write_rle_bits(writer, width, height, rule, bits)
     })
 }
 
-fn ensure_dir(dir: &Path) -> io::Result<()> {
+/// Atomically write JSON metadata to a sidecar file.
+pub fn write_metadata_atomic(path: &Path, meta: &SnapshotMetadata) -> io::Result<()> {
+    write_atomic(path, |writer| {
+        serde_json::to_writer(writer, meta).map_err(io::Error::other)
+    })
+}
+
+// ── Internal utilities ──────────────────────────────────────────────
+
+/// Ensure `dir` exists, creating it if necessary.
+///
+/// Rejects symlinks to prevent following links to unintended locations.
+pub(crate) fn ensure_dir(dir: &Path) -> io::Result<()> {
     if let Ok(meta) = fs::symlink_metadata(dir) {
         if meta.file_type().is_symlink() {
             return Err(io::Error::other("snapshot dir is a symlink"));
@@ -242,12 +187,7 @@ fn ensure_dir(dir: &Path) -> io::Result<()> {
     fs::create_dir_all(dir)
 }
 
-pub fn write_metadata_atomic(path: &Path, meta: &SnapshotMetadata) -> io::Result<()> {
-    write_atomic(path, |writer| {
-        serde_json::to_writer(writer, meta).map_err(io::Error::other)
-    })
-}
-
+/// Write to a temporary file then atomically rename into place.
 fn write_atomic<F>(path: &Path, write_fn: F) -> io::Result<()>
 where
     F: FnOnce(&mut BufWriter<File>) -> io::Result<()>,
@@ -262,22 +202,7 @@ where
     Ok(())
 }
 
-fn write_run<W: Write>(writer: &mut W, len: usize, ch: char) -> io::Result<()> {
-    if len > 1 {
-        write!(writer, "{len}")?;
-    }
-    let mut buf = [0u8; 4];
-    let s = ch.encode_utf8(&mut buf);
-    writer.write_all(s.as_bytes())?;
-    Ok(())
-}
-
-fn bit_at(bits: &[u64], idx: usize) -> bool {
-    let word = bits[idx / 64];
-    let mask = 1u64 << (idx % 64);
-    (word & mask) != 0
-}
-
+/// Emit debug output when `NIT_SNAPSHOT_DEBUG` is set.
 fn snapshot_debug<F>(msg: F)
 where
     F: FnOnce() -> String,

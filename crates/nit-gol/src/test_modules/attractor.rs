@@ -1,6 +1,8 @@
 use super::*;
 use crate::step::step;
 
+/// Verify that protocol-aware detection only matches when all extra
+/// fields (protocol hash, phase index) align — not just the grid state.
 #[test]
 fn repeat_requires_matching_protocol_phase() {
     let rule = Rule::conway();
@@ -32,6 +34,7 @@ fn repeat_requires_matching_protocol_phase() {
         }),
     );
 
+    // Phase 1 — new state, no repeat expected.
     let event1 = detector.observe_with_context(
         &g0,
         &g1,
@@ -46,6 +49,7 @@ fn repeat_requires_matching_protocol_phase() {
     );
     assert!(event1.is_none());
 
+    // Phase 2 — still accumulating.
     let event2 = detector.observe_with_context(
         &g1,
         &g2,
@@ -60,6 +64,7 @@ fn repeat_requires_matching_protocol_phase() {
     );
     assert!(event2.is_none());
 
+    // Phase 3 — one more unique state.
     let event3 = detector.observe_with_context(
         &g2,
         &g3,
@@ -74,6 +79,7 @@ fn repeat_requires_matching_protocol_phase() {
     );
     assert!(event3.is_none());
 
+    // Phase 0 again — the blinker repeats with the same protocol context.
     let event4 = detector.observe_with_context(
         &g3,
         &g4,

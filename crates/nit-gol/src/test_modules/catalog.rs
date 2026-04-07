@@ -1,5 +1,7 @@
 use super::*;
 
+/// Ensure all built-in rules have unique ids, unique rulestrings,
+/// and that the canonical rulestring round-trips through the parser.
 #[test]
 fn builtins_unique_and_canonical() {
     let mut warnings = Vec::new();
@@ -15,6 +17,8 @@ fn builtins_unique_and_canonical() {
     }
 }
 
+/// Verify that overlays can both modify existing entries (merge) and
+/// add entirely new rules (create), with correct field propagation.
 #[test]
 fn overlay_merges_and_adds_rules() {
     let builtin = r#"
@@ -45,8 +49,8 @@ favorite = true
 "#;
     let base_file: RuleFile = toml::from_str(builtin).expect("builtin parse");
     let mut entries = Vec::new();
-    for entry in base_file.rules {
-        entries.push(build_entry_from_file(entry, RuleSource::Builtin).unwrap());
+    for raw in base_file.rules {
+        entries.push(build_entry_from_file(raw, RuleSource::Builtin).unwrap());
     }
     let mut catalog = RuleCatalog::from_entries(entries);
     let overlay_file: RuleOverlayFile = toml::from_str(overlay).expect("overlay parse");
@@ -55,10 +59,12 @@ favorite = true
     catalog.apply_overlays(&overlays, &mut warnings);
     catalog.rebuild_indices(&mut warnings);
     assert!(warnings.is_empty());
+
     let base = catalog.find_by_id("base").expect("base present");
     assert_eq!(base.description, "Override rule");
     assert_eq!(base.tags, vec!["override"]);
     assert!(base.hidden);
+
     let custom = catalog.find_by_id("custom").expect("custom present");
     assert_eq!(custom.rulestring, "B2/S");
     assert!(custom.favorite);

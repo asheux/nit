@@ -2,6 +2,7 @@ use super::*;
 use crate::snapshot::SnapshotMetadata;
 use crate::Rule;
 
+/// Build a minimal metadata struct for testing.
 fn dummy_meta() -> SnapshotMetadata {
     SnapshotMetadata {
         timestamp: "2026-01-25T00:00:00Z".into(),
@@ -31,6 +32,7 @@ fn dummy_meta() -> SnapshotMetadata {
     }
 }
 
+/// Build a minimal snapshot request with the given event parameters.
 fn dummy_req(
     event: SnapshotEventKind,
     grid_hash: [u64; 2],
@@ -54,6 +56,7 @@ fn dummy_req(
     }
 }
 
+/// Requests with identical content should produce equal dedup keys.
 #[test]
 fn snapshot_key_dedupes() {
     let req1 = dummy_req(SnapshotEventKind::Cycle, [1, 2], Some(2));
@@ -69,6 +72,8 @@ fn snapshot_key_dedupes() {
     );
 }
 
+/// Non-manual events within the cooldown window should be blocked,
+/// but manual events with a different key should pass through.
 #[test]
 fn cooldown_blocks_non_manual() {
     let now = Instant::now();
@@ -102,6 +107,8 @@ fn cooldown_blocks_non_manual() {
     ));
 }
 
+/// When the bounded channel is full, excess requests are dropped
+/// and the dropped counter increments.
 #[test]
 fn bounded_queue_drops_when_full() {
     let dir = std::env::temp_dir().join("nit-snapshot-test");

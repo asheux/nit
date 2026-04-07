@@ -6,12 +6,16 @@ use crate::{
     Grid, Rule,
 };
 
+// ── Rule parsing ────────────────────────────────────────────────────
+
+/// Parse B36/S23 and verify the canonical round-trip.
 #[test]
 fn parse_rule_roundtrip() {
     let rule = Rule::parse("B36/S23").expect("parse");
     assert_eq!(rule.to_string(), "B36/S23");
 }
 
+/// Verify that individual bits in the birth/survival masks are correct.
 #[test]
 fn parse_rule_masks() {
     let rule = Rule::parse("B3/S23").expect("parse");
@@ -19,6 +23,7 @@ fn parse_rule_masks() {
     assert_eq!(rule.survives_mask(), (1 << 2) | (1 << 3));
 }
 
+/// Rules with an empty survive section should parse with zero survive mask.
 #[test]
 fn parse_rule_empty_survive() {
     let rule = Rule::parse("B2/S").expect("parse");
@@ -26,6 +31,7 @@ fn parse_rule_empty_survive() {
     assert_eq!(rule.survives_mask(), 0);
 }
 
+/// Various malformed inputs should all fail to parse.
 #[test]
 fn parse_rule_invalid_cases() {
     let invalid = ["B9/S23", "B3/S2x", "B3//S23", "B3/23", "B/S"];
@@ -34,6 +40,9 @@ fn parse_rule_invalid_cases() {
     }
 }
 
+// ── Grid evolution ──────────────────────────────────────────────────
+
+/// A 2x2 block is a period-1 still life under Conway's rules.
 #[test]
 fn block_still_life() {
     let mut grid = Grid::new(4, 4);
@@ -46,6 +55,7 @@ fn block_still_life() {
     assert_eq!(grid, next);
 }
 
+/// A 3-cell line oscillates with period 2 (the blinker).
 #[test]
 fn blinker_oscillator() {
     let mut grid = Grid::new(5, 5);
@@ -61,6 +71,7 @@ fn blinker_oscillator() {
     assert_eq!(grid, next2);
 }
 
+/// The rule evaluator should detect the blinker's period-2 cycle.
 #[test]
 fn evaluate_rule_detects_period() {
     let mut grid = Grid::new(5, 5);
@@ -73,6 +84,7 @@ fn evaluate_rule_detects_period() {
     assert!(eval.score > 0.0);
 }
 
+/// A glider should translate one cell down-right every 4 generations.
 #[test]
 fn glider_moves_down_right() {
     let mut grid = Grid::new(6, 6);
@@ -93,6 +105,9 @@ fn glider_moves_down_right() {
     assert!(next.get(3, 3));
 }
 
+// ── Grid hashing ────────────────────────────────────────────────────
+
+/// Flipping a cell should change the grid hash.
 #[test]
 fn grid_hash_changes() {
     let mut grid = Grid::new(3, 3);
@@ -102,6 +117,9 @@ fn grid_hash_changes() {
     assert_ne!(h1, h2);
 }
 
+// ── RLE encoding ────────────────────────────────────────────────────
+
+/// Basic sanity: header fields present and terminator correct.
 #[test]
 fn rle_basic_sanity() {
     let mut grid = Grid::new(3, 3);
@@ -114,6 +132,7 @@ fn rle_basic_sanity() {
     assert!(rle.contains('o'));
 }
 
+/// Exact byte-level RLE output for a 2x2 grid.
 #[test]
 fn rle_2x2_exact() {
     let mut grid = Grid::new(2, 2);
@@ -127,6 +146,7 @@ fn rle_2x2_exact() {
     assert_eq!(rle, expected);
 }
 
+/// Exact byte-level RLE output for a sparse 5x5 grid.
 #[test]
 fn rle_5x5_exact() {
     let mut grid = Grid::new(5, 5);
@@ -138,6 +158,9 @@ fn rle_5x5_exact() {
     assert_eq!(rle, expected);
 }
 
+// ── Attractor detection ─────────────────────────────────────────────
+
+/// A still-life block should emit a FixedPoint event on the first observe.
 #[test]
 fn attractor_still_life_fixed_point() {
     let mut grid = Grid::new(4, 4);
@@ -159,6 +182,7 @@ fn attractor_still_life_fixed_point() {
     assert_eq!(event, Some(AttractorEvent::FixedPoint { gen: 1 }));
 }
 
+/// A blinker should emit a Cycle event with period 2.
 #[test]
 fn attractor_blinker_cycle() {
     let mut grid = Grid::new(5, 5);
@@ -189,6 +213,7 @@ fn attractor_blinker_cycle() {
     );
 }
 
+/// An empty grid is a fixed point (no births possible under Conway).
 #[test]
 fn attractor_empty_grid_fixed_point() {
     let grid = Grid::new(3, 3);
@@ -205,6 +230,8 @@ fn attractor_empty_grid_fixed_point() {
     assert_eq!(event, Some(AttractorEvent::FixedPoint { gen: 1 }));
 }
 
+/// Two grids with the same fingerprint but different secondary hashes
+/// should not be treated as a cycle (collision guard).
 #[test]
 fn attractor_hash_collision_guard() {
     let mut grid_a = Grid::new(2, 2);

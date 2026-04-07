@@ -1,4 +1,7 @@
-//! Game of Life simulation with rule parsing, seed generation, and grid evolution.
+//! Game of Life simulation engine.
+//!
+//! Provides rule parsing, grid evolution, attractor detection,
+//! RLE snapshot encoding, and a scored rule evaluation framework.
 
 #![forbid(unsafe_code)]
 
@@ -6,6 +9,8 @@ pub mod analyze;
 pub mod attractor;
 pub mod catalog;
 pub mod grid;
+mod hash;
+mod rle;
 pub mod rule;
 pub mod snapshot;
 pub mod snapshot_manager;

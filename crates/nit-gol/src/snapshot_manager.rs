@@ -1,3 +1,10 @@
+//! Background snapshot manager with deduplication and rate limiting.
+//!
+//! Owns a dedicated I/O thread that receives [`SnapshotRequest`]s
+//! via a bounded channel, deduplicates them by content hash, enforces
+//! a minimum interval between writes, and delegates the actual file
+//! I/O to [`snapshot`](crate::snapshot).
+
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -9,8 +16,9 @@ use crossbeam_channel::{bounded, Receiver, Sender, TrySendError};
 use tracing::{info, warn};
 
 use crate::analyze::RuleEvaluation;
+use crate::hash::{blake3_u64, blake3_u64_pair};
 use crate::snapshot::{
-    now_iso8601, write_metadata_atomic, write_rle_bits_atomic, SnapshotMetadata,
+    ensure_dir, now_iso8601, write_metadata_atomic, write_rle_bits_atomic, SnapshotMetadata,
 };
 use crate::{EdgeMode, Grid};
 
@@ -19,6 +27,9 @@ const MIN_QUEUE_CAPACITY: usize = 1;
 const DROP_LOG_INTERVAL: Duration = Duration::from_secs(2);
 const IO_THREAD_STACK_BYTES: usize = 8 * 1024 * 1024;
 
+// ── Public types ────────────────────────────────────────────────────
+
+/// The kind of event that triggered a snapshot.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub enum SnapshotEventKind {
     FixedPoint,
@@ -33,27 +44,7 @@ impl SnapshotEventKind {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct SnapshotKey {
-    event_kind: SnapshotEventKind,
-    rule_hash: u64,
-    seed_hash: u64,
-    grid_hash: [u64; 2],
-    period: Option<u64>,
-}
-
-impl SnapshotKey {
-    fn from_request(req: &SnapshotRequest) -> Self {
-        Self {
-            event_kind: req.event,
-            rule_hash: rule_hash(&req.rule),
-            seed_hash: req.seed_hash,
-            grid_hash: req.grid_hash,
-            period: req.period,
-        }
-    }
-}
-
+/// All data needed to write one snapshot to disk.
 #[derive(Clone, Debug)]
 pub struct SnapshotRequest {
     pub event: SnapshotEventKind,
@@ -72,6 +63,7 @@ pub struct SnapshotRequest {
     pub meta: SnapshotMetadata,
 }
 
+/// Cumulative statistics reported by the snapshot manager.
 #[derive(Clone, Debug)]
 pub struct SnapshotStats {
     pub written: u64,
@@ -80,6 +72,7 @@ pub struct SnapshotStats {
     pub last_path: Option<PathBuf>,
 }
 
+/// Configuration for constructing a [`SnapshotManager`].
 #[derive(Clone, Debug)]
 pub struct SnapshotManagerConfig {
     pub dir: PathBuf,
@@ -99,6 +92,9 @@ impl SnapshotManagerConfig {
     }
 }
 
+// ── Snapshot manager ────────────────────────────────────────────────
+
+/// Manages asynchronous snapshot writing on a background I/O thread.
 pub struct SnapshotManager {
     inner: Arc<SnapshotManagerInner>,
     handle: Option<JoinHandle<()>>,
@@ -119,38 +115,8 @@ struct SnapshotManagerInner {
     max_files: usize,
 }
 
-struct LastSnapshotKey {
-    key: Option<SnapshotKey>,
-    last_at: Instant,
-}
-
-impl LastSnapshotKey {
-    fn allows(
-        &self,
-        key: &SnapshotKey,
-        event_kind: SnapshotEventKind,
-        now: Instant,
-        min_interval: Duration,
-    ) -> bool {
-        if let Some(last) = &self.key {
-            if last == key {
-                return false;
-            }
-        }
-        if !event_kind.is_manual() && now.duration_since(self.last_at) < min_interval {
-            return false;
-        }
-        true
-    }
-}
-
-enum IoCommand {
-    Snapshot(Box<SnapshotRequest>),
-    RecordRule(RuleLogEntry),
-    Shutdown,
-}
-
 impl SnapshotManager {
+    /// Create a new manager and spawn its background I/O thread.
     pub fn new(config: SnapshotManagerConfig) -> Self {
         let (tx, rx) = bounded(config.queue_capacity.max(MIN_QUEUE_CAPACITY));
         let min_interval = Duration::from_millis(config.min_interval_ms.max(1));
@@ -205,6 +171,7 @@ impl SnapshotManager {
         }
     }
 
+    /// Try to enqueue a snapshot request. Returns `false` if dropped.
     pub fn enqueue(&self, req: SnapshotRequest) -> bool {
         let key = SnapshotKey::from_request(&req);
         let now = Instant::now();
@@ -235,6 +202,7 @@ impl SnapshotManager {
         }
     }
 
+    /// Enqueue a rule-log entry for append to the JSON-lines log.
     pub fn record_rule(&self, entry: RuleLogEntry) -> bool {
         match self.inner.tx.try_send(IoCommand::RecordRule(entry)) {
             Ok(()) => true,
@@ -250,6 +218,7 @@ impl SnapshotManager {
         }
     }
 
+    /// Read current cumulative statistics (non-blocking).
     pub fn stats(&self) -> SnapshotStats {
         SnapshotStats {
             written: self.inner.written.load(Ordering::Relaxed),
@@ -259,6 +228,7 @@ impl SnapshotManager {
         }
     }
 
+    /// Gracefully shut down the background I/O thread.
     pub fn shutdown(&mut self) {
         if let Some(handle) = self.handle.take() {
             let _ = self.inner.tx.send(IoCommand::Shutdown);
@@ -282,6 +252,62 @@ impl Drop for SnapshotManager {
     }
 }
 
+// ── Deduplication key ───────────────────────────────────────────────
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct SnapshotKey {
+    event_kind: SnapshotEventKind,
+    rule_hash: u64,
+    seed_hash: u64,
+    grid_hash: [u64; 2],
+    period: Option<u64>,
+}
+
+impl SnapshotKey {
+    fn from_request(req: &SnapshotRequest) -> Self {
+        Self {
+            event_kind: req.event,
+            rule_hash: rule_hash(&req.rule),
+            seed_hash: req.seed_hash,
+            grid_hash: req.grid_hash,
+            period: req.period,
+        }
+    }
+}
+
+struct LastSnapshotKey {
+    key: Option<SnapshotKey>,
+    last_at: Instant,
+}
+
+impl LastSnapshotKey {
+    fn allows(
+        &self,
+        key: &SnapshotKey,
+        event_kind: SnapshotEventKind,
+        now: Instant,
+        min_interval: Duration,
+    ) -> bool {
+        if let Some(last) = &self.key {
+            if last == key {
+                return false;
+            }
+        }
+        if !event_kind.is_manual() && now.duration_since(self.last_at) < min_interval {
+            return false;
+        }
+        true
+    }
+}
+
+// ── I/O worker ──────────────────────────────────────────────────────
+
+enum IoCommand {
+    Snapshot(Box<SnapshotRequest>),
+    RecordRule(RuleLogEntry),
+    Shutdown,
+}
+
 fn spawn_worker(
     rx: Receiver<IoCommand>,
     inner: Arc<SnapshotManagerInner>,
@@ -293,7 +319,7 @@ fn spawn_worker(
     let builder = thread::Builder::new()
         .name("nit-gol-io".into())
         .stack_size(IO_THREAD_STACK_BYTES);
-    match builder.spawn(move || snapshot_worker_loop(rx, inner)) {
+    match builder.spawn(move || worker_loop(rx, inner)) {
         Ok(handle) => Some(handle),
         Err(err) => {
             warn!("Failed to spawn snapshot worker: {}", err);
@@ -302,7 +328,7 @@ fn spawn_worker(
     }
 }
 
-fn snapshot_worker_loop(rx: Receiver<IoCommand>, inner: Arc<SnapshotManagerInner>) {
+fn worker_loop(rx: Receiver<IoCommand>, inner: Arc<SnapshotManagerInner>) {
     while let Ok(cmd) = rx.recv() {
         match cmd {
             IoCommand::Snapshot(req) => {
@@ -330,7 +356,7 @@ fn handle_snapshot(req: SnapshotRequest, inner: &SnapshotManagerInner) -> std::i
     inner.written.fetch_add(1, Ordering::Relaxed);
     *inner.last_path.lock().unwrap() = Some(rle_path.clone());
     info!("Snapshot saved: {}", rle_path.display());
-    let _ = prune_oldest_snapshots(&inner.dir, inner.max_files);
+    let _ = crate::snapshot::prune_oldest(&inner.dir, inner.max_files);
     Ok(())
 }
 
@@ -345,31 +371,41 @@ fn snapshot_name_base(req: &SnapshotRequest) -> String {
     )
 }
 
-fn ensure_dir(dir: &Path) -> std::io::Result<()> {
-    if let Ok(meta) = fs::symlink_metadata(dir) {
-        if meta.file_type().is_symlink() {
-            return Err(std::io::Error::other("snapshot dir is a symlink"));
-        }
-        if meta.is_dir() {
-            return Ok(());
-        }
-    }
-    fs::create_dir_all(dir)
-}
-
-fn prune_oldest_snapshots(dir: &Path, max_files: usize) -> std::io::Result<()> {
-    crate::snapshot::prune_oldest(dir, max_files)
-}
+// ── Hashing helpers ─────────────────────────────────────────────────
 
 fn rule_hash(rule: &str) -> u64 {
     let mut hasher = blake3::Hasher::new();
     hasher.update(rule.as_bytes());
-    let bytes = hasher.finalize();
-    let mut out = [0u8; 8];
-    out.copy_from_slice(&bytes.as_bytes()[..8]);
-    u64::from_le_bytes(out)
+    blake3_u64(&hasher.finalize())
 }
 
+/// Compute a two-word blake3 fingerprint from a grid's dimensions and cells.
+///
+/// Used by the TUI to populate [`SnapshotRequest::grid_hash`].
+pub fn grid_fingerprint(grid: &Grid) -> [u64; 2] {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"nit-gol-snapshot-v1");
+    hasher.update(&grid.width().to_le_bytes());
+    hasher.update(&grid.height().to_le_bytes());
+    hasher.update(grid.cells());
+    blake3_u64_pair(&hasher.finalize())
+}
+
+/// Pack grid cells into a `u64` bitset for compact snapshot storage.
+///
+/// Bit `i` of word `i/64` corresponds to cell `i` in row-major order.
+pub fn pack_grid_bits(grid: &Grid) -> Vec<u64> {
+    let total = grid.width().saturating_mul(grid.height());
+    let mut bits = vec![0u64; total.div_ceil(64)];
+    for (idx, &cell) in grid.cells().iter().enumerate() {
+        if cell != 0 {
+            bits[idx / 64] |= 1u64 << (idx % 64);
+        }
+    }
+    bits
+}
+
+/// Read the snapshot queue capacity from `NIT_SNAPSHOT_QUEUE` or use 64.
 pub fn snapshot_queue_capacity() -> usize {
     let from_env = std::env::var("NIT_SNAPSHOT_QUEUE")
         .ok()
@@ -379,34 +415,9 @@ pub fn snapshot_queue_capacity() -> usize {
         .max(MIN_QUEUE_CAPACITY)
 }
 
-pub fn grid_fingerprint(grid: &Grid) -> [u64; 2] {
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(b"nit-gol-snapshot-v1");
-    hasher.update(&grid.width().to_le_bytes());
-    hasher.update(&grid.height().to_le_bytes());
-    hasher.update(grid.cells());
-    let hash = hasher.finalize();
-    let bytes = hash.as_bytes();
-    let mut a = [0u8; 8];
-    let mut b = [0u8; 8];
-    a.copy_from_slice(&bytes[0..8]);
-    b.copy_from_slice(&bytes[8..16]);
-    [u64::from_le_bytes(a), u64::from_le_bytes(b)]
-}
+// ── Rule log ────────────────────────────────────────────────────────
 
-pub fn pack_grid_bits(grid: &Grid) -> Vec<u64> {
-    let total = grid.width().saturating_mul(grid.height());
-    let mut bits = vec![0u64; total.div_ceil(64)];
-    for (idx, &cell) in grid.cells().iter().enumerate() {
-        if cell != 0 {
-            let word = idx / 64;
-            let offset = idx % 64;
-            bits[word] |= 1u64 << offset;
-        }
-    }
-    bits
-}
-
+/// A scored-rule discovery record appended to the JSON-lines log.
 #[derive(Clone, Debug, serde::Serialize)]
 pub struct RuleLogEntry {
     rule: String,
@@ -419,6 +430,7 @@ pub struct RuleLogEntry {
 }
 
 impl RuleLogEntry {
+    /// Create an entry from a completed rule evaluation.
     pub fn from_eval(eval: &RuleEvaluation, seed_hash: u64, path: &Path) -> Self {
         Self {
             rule: eval.rule.to_string(),
