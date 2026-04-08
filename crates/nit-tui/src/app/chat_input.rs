@@ -620,6 +620,7 @@ pub(super) fn submit_chat_input_and_dispatch(
                     augmented.push_str("\"Refactor module\" = refactor EVERY file below. No exceptions, no skipping.\n");
                     augmented.push_str("Process this checklist in order. Open each file, read it, refactor it, then move to the next.\n");
                     augmented.push_str("Even if a file looks clean, improve naming, docs, structure, or consistency.\n");
+                    augmented.push_str("Do NOT add inline test modules (`#[cfg(test)] mod tests { ... }`) inside source files. Tests must live in a dedicated tests directory or test file.\n");
                     augmented.push_str(
                         "Your task is NOT complete until every file has been modified.\n\n",
                     );

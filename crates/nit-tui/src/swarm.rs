@@ -6018,6 +6018,7 @@ fn role_contract_lines(role: &str) -> &'static [&'static str] {
             "Do not restart broad ideation; focus on carrying the selected approach through.",
             "If a FILE CHECKLIST is provided above, you MUST modify every listed file — process them in order, one by one. A file left unchanged means your task is incomplete.",
             "Report exact files changed and validation results.",
+            "CODE CONVENTION: Do NOT add inline test modules (`#[cfg(test)] mod tests { ... }`) inside source files. Tests must live in a dedicated tests directory or test file, not inline. If you encounter an existing inline test module during a refactor, move it to the appropriate test file/directory. Do NOT pad small files (lib.rs, mod.rs, re-export files) with unnecessary code to boost genome scores — trivially small files are auto-passed by the genome system.",
             "GENOME QUALITY OBLIGATION: You are the sole writer. Your code is measured by nit's genome system across four encoders. See the full ENCODER GUIDE and TARGETS in the genome instructions attached to this prompt. Maintain or improve genome scores on every file you touch. Aim for Tier III+ (Spaceship) minimum, aspire to Tier V (Replicator). Do NOT call [evaluate_genome] — nit evaluates automatically after your changes are written to disk.",
         ],
         "review" => &[
@@ -6151,6 +6152,7 @@ fn wrap_task_prompt(
             out.push_str(
                 "Even if a file looks clean, improve naming, docs, structure, or consistency.\n",
             );
+            out.push_str("Do NOT add inline test modules (`#[cfg(test)] mod tests { ... }`) inside source files. Tests must live in a dedicated tests directory or test file.\n");
             out.push_str("Your task is NOT complete until every file has been modified.\n\n");
             for (i, path) in scope_files.iter().enumerate() {
                 out.push_str(&format!("{}. {path}\n", i + 1));

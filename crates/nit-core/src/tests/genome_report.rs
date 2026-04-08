@@ -110,12 +110,10 @@ fn genome_report_gibberish() {
     let path = Path::new("test.rs");
     let report = compute_genome_report(GIBBERISH, path);
 
-    assert_eq!(report.encoder_scores.len(), 4);
-    // Gibberish is not parseable by tree-sitter, so AST encoders fall back
-    // to byte-level analysis.
-    for score in &report.encoder_scores {
-        assert!(score.generations_survived <= 3000);
-    }
+    // Gibberish is trivially small — auto-pass as Spaceship.
+    assert!(report.encoder_scores.is_empty());
+    assert_eq!(report.tier, GenomeTier::Spaceship);
+    assert!(!report.recommendations.is_empty());
 }
 
 #[test]
@@ -123,8 +121,9 @@ fn genome_report_empty_file() {
     let path = Path::new("empty.rs");
     let report = compute_genome_report("", path);
 
-    assert_eq!(report.encoder_scores.len(), 4);
-    assert_eq!(report.tier, GenomeTier::StillLife);
+    // Empty file is trivially small — auto-pass as Spaceship.
+    assert!(report.encoder_scores.is_empty());
+    assert_eq!(report.tier, GenomeTier::Spaceship);
     // Should not panic.
 }
 

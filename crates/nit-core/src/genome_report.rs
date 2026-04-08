@@ -236,7 +236,12 @@ not improving one that's already strong.\n\
 nit measures quality automatically after your changes are written to disk. \
 Do NOT call [evaluate_genome] — nit evaluates externally and will retry your \
 turn with specific feedback if quality degrades. Focus on writing good code; \
-if tier drops below III, nit will tell you exactly what to fix.";
+if tier drops below III, nit will tell you exactly what to fix.\n\
+\n\
+SMALL FILES: Files with fewer than 20 significant lines (lib.rs, mod.rs, \
+re-export files) receive an automatic Tier III pass. Do NOT pad these files \
+with unnecessary code, enums, helpers, or doc comments just to boost genome \
+scores. Keep small files minimal and clean.";
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct GenomeRecommendation {
@@ -317,7 +322,48 @@ const QUALITY_ENCODERS: [SeedEncoderId; 4] = [
 ];
 
 /// Compute a full genome report for the given source text and file path.
+/// Minimum number of non-blank, non-comment lines for a file to be evaluated by
+/// the genome encoders.  Files below this threshold are trivially small (module
+/// re-exports, bare `lib.rs`, etc.) and cannot produce meaningful AST structure.
+/// They receive an automatic Tier III pass so agents are not incentivised to pad
+/// them with unnecessary code.
+const GENOME_MIN_SIGNIFICANT_LINES: usize = 20;
+
 pub fn compute_genome_report(text: &str, file_path: &Path) -> GenomeReport {
+    let significant_lines = text
+        .lines()
+        .filter(|line| {
+            let trimmed = line.trim();
+            !trimmed.is_empty()
+                && !trimmed.starts_with("//")
+                && !trimmed.starts_with("/*")
+                && !trimmed.starts_with('*')
+        })
+        .count();
+
+    if significant_lines < GENOME_MIN_SIGNIFICANT_LINES {
+        let timestamp_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        return GenomeReport {
+            file_path: file_path.to_path_buf(),
+            encoder_scores: Vec::new(),
+            cross_encoder_consistency: 1.0,
+            tier: GenomeTier::Spaceship,
+            recommendations: vec![GenomeRecommendation {
+                metric: "file_size".into(),
+                severity: RecommendationSeverity::Info,
+                message: format!(
+                    "Trivial file ({significant_lines} significant lines < {GENOME_MIN_SIGNIFICANT_LINES}): auto-pass. Do not pad small files to boost scores."
+                ),
+                location: None,
+            }],
+            timestamp_ms,
+            grid_size: 0,
+        };
+    }
+
     let input = SeedInput {
         text,
         source: GolSeedSource::Editor,
