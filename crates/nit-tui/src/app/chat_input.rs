@@ -622,6 +622,14 @@ pub(super) fn submit_chat_input_and_dispatch(
                     augmented.push_str("Even if a file looks clean, improve naming, docs, structure, or consistency.\n");
                     augmented.push_str("Do NOT add inline test modules (`#[cfg(test)] mod tests { ... }`) inside source files. Tests must live in a dedicated tests directory or test file.\n");
                     augmented.push_str(
+                        "COMMENTS: Trim doc comments that restate the type/function name, \
+                         echo visible type signatures, or describe obvious behavior (e.g. \
+                         \"/// Returns the value\" on fn value()). Keep comments that explain \
+                         WHY something is done, document non-obvious constraints, safety \
+                         invariants, or algorithmic choices. A comment worth keeping tells \
+                         the reader something the code alone cannot.\n",
+                    );
+                    augmented.push_str(
                         "Your task is NOT complete until every file has been modified.\n\n",
                     );
                     for (i, path) in scope.iter().enumerate() {
