@@ -892,6 +892,18 @@ fn append_file_genome_context(
         report.cross_encoder_consistency,
     ));
 
+    if report.parsimony.bloat_detected {
+        ctx.push_str(&format!(
+            "  ⚠ PARSIMONY BLOAT — tier capped at IV. {} fns, avg {:.1} lines, \
+             {:.0}% tiny (<=5 lines), {:.0}% comments. Consolidate over-split \
+             functions and remove unnecessary comments. Do NOT add more structure.\n",
+            report.parsimony.fn_count,
+            report.parsimony.avg_fn_body_lines,
+            report.parsimony.tiny_fn_fraction * 100.0,
+            report.parsimony.comment_ratio * 100.0,
+        ));
+    }
+
     // Show all encoder scores (reports only contain the 4 quality encoders).
     ctx.push_str("  Encoders:\n");
     let scores = &report.encoder_scores;

@@ -1,7 +1,8 @@
+//! Deterministic hashing and pseudo-random number generation.
+
 use blake3::Hasher;
 
 /// Deterministic 64-bit hash of `data` via BLAKE3 (little-endian first 8 bytes).
-#[inline]
 #[must_use]
 pub fn stable_hash_bytes(data: &[u8]) -> u64 {
     let mut hasher = Hasher::new();
@@ -12,14 +13,20 @@ pub fn stable_hash_bytes(data: &[u8]) -> u64 {
     u64::from_le_bytes(buf)
 }
 
+/// Golden-ratio-derived additive constant for the SplitMix64 state update.
+const INCREMENT: u64 = 0x9E37_79B9_7F4A_7C15;
+
+/// Replacement seed when the caller supplies zero, avoiding degenerate output.
+const ZERO_GUARD: u64 = 0x4d59_5df4_d0f3_3173;
+
 /// SplitMix64 pseudo-random number generator for non-cryptographic use.
+///
+/// Implements `Iterator<Item = u64>` for convenient streaming. The sequence
+/// is fully deterministic given the same seed.
 #[derive(Clone, Debug)]
 pub struct SplitMix64 {
     state: u64,
 }
-
-const INCREMENT: u64 = 0x9E37_79B9_7F4A_7C15;
-const ZERO_GUARD: u64 = 0x4d59_5df4_d0f3_3173;
 
 impl SplitMix64 {
     /// Creates a new generator. Zero seeds are replaced to avoid degeneracy.
@@ -53,6 +60,14 @@ impl SplitMix64 {
     #[inline]
     pub fn next_f32(&mut self) -> f32 {
         (self.next_u64() >> 40) as f32 / (1u64 << 24) as f32
+    }
+}
+
+impl Iterator for SplitMix64 {
+    type Item = u64;
+
+    fn next(&mut self) -> Option<u64> {
+        Some(self.next_u64())
     }
 }
 

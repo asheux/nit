@@ -1634,6 +1634,14 @@ fn build_genome_retry_prompt(
             continue;
         }
 
+        // Skip files where bloat is detected — retrying would push the agent
+        // to add even more structure, making the bloat worse.  The parsimony
+        // warning in the agent prompt (via append_file_genome_context) tells
+        // the agent what to consolidate on their next natural turn.
+        if report.parsimony.bloat_detected {
+            continue;
+        }
+
         if let Some(base) = state.genome_baselines.get(file_path) {
             // Tier takes priority — a tier drop is always degradation.
             if report.tier < base.tier {

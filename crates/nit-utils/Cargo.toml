@@ -6,7 +6,9 @@ edition = "2021"
 license = "MIT"
 rust-version.workspace = true
 publish = false
+categories = ["filesystem", "development-tools"]
+keywords = ["utilities", "hashing", "atomic-write"]
 
 [dependencies]
-directories = { workspace = true }
 blake3 = { workspace = true }
+directories = { workspace = true }

@@ -4,30 +4,31 @@ use std::fs::{self, File};
 use std::io::{self, BufWriter, Write};
 use std::path::Path;
 
+/// RAII guard that removes a temporary file on drop unless disarmed.
 struct TmpGuard<'a> {
-    path: &'a Path,
-    armed: bool,
+    path: Option<&'a Path>,
 }
 
 impl<'a> TmpGuard<'a> {
     fn new(path: &'a Path) -> Self {
-        Self { path, armed: true }
+        Self { path: Some(path) }
     }
 
     fn disarm(&mut self) {
-        self.armed = false;
+        self.path = None;
     }
 }
 
 impl Drop for TmpGuard<'_> {
     fn drop(&mut self) {
-        if self.armed {
-            let _ = fs::remove_file(self.path);
+        if let Some(path) = self.path {
+            let _ = fs::remove_file(path);
         }
     }
 }
 
 /// Writes to `path` atomically via a temporary sibling file (`*.tmp`).
+///
 /// The closure receives a buffered writer; on success the data is flushed,
 /// synced, and renamed into place. The temp file is cleaned up on failure.
 pub fn write_atomic<F>(path: &Path, write_fn: F) -> io::Result<()>
@@ -38,14 +39,13 @@ where
     let file = File::create(&tmp_path)?;
     let mut guard = TmpGuard::new(&tmp_path);
     let mut writer = BufWriter::new(file);
-    write_fn(&mut writer)?;
-    flush_and_persist(&mut writer, &tmp_path, path)?;
-    guard.disarm();
-    Ok(())
-}
 
-fn flush_and_persist(writer: &mut BufWriter<File>, tmp: &Path, dest: &Path) -> io::Result<()> {
+    write_fn(&mut writer)?;
+
     writer.flush()?;
     writer.get_ref().sync_all()?;
-    fs::rename(tmp, dest)
+    fs::rename(&tmp_path, path)?;
+
+    guard.disarm();
+    Ok(())
 }

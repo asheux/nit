@@ -388,11 +388,7 @@ pub fn compute_genome_report_fast(text: &str, file_path: &Path) -> GenomeReport 
     compute_genome_report_inner(text, file_path, 500)
 }
 
-fn compute_genome_report_inner(
-    text: &str,
-    file_path: &Path,
-    max_generations: u32,
-) -> GenomeReport {
+fn compute_genome_report_inner(text: &str, file_path: &Path, max_generations: u32) -> GenomeReport {
     let significant_lines = text
         .lines()
         .filter(|line| {

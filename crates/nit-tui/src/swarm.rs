@@ -6510,6 +6510,20 @@ fn evaluate_genome_gate(state: &AppState) -> String {
             ));
         }
 
+        if report.parsimony.bloat_detected {
+            failures.push(format!(
+                "Genome FAIL: {} parsimony bloat detected (tier capped at IV). \
+                 {} fns avg {:.1} lines, {:.0}% tiny, {:.0}% comments. \
+                 Consolidate over-split functions, remove comment padding, \
+                 inline trivial predicates.",
+                file_path.display(),
+                report.parsimony.fn_count,
+                report.parsimony.avg_fn_body_lines,
+                report.parsimony.tiny_fn_fraction * 100.0,
+                report.parsimony.comment_ratio * 100.0,
+            ));
+        }
+
         if genome_config.require_no_regression {
             if let Some(prev) = state.genome_reports.get(file_path) {
                 if report.tier < prev.tier {
