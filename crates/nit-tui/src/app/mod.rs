@@ -1513,7 +1513,16 @@ fn record_agent_bus_vitals(vitals: &mut VitalsState, event: &AgentBusEvent) {
 /// Compute the genome report for the active editor buffer if one doesn't exist yet.
 /// This runs synchronously (~50-100ms) and only triggers once per file path.
 /// Maximum number of automatic genome-improvement retries per agent turn.
-const GENOME_RETRY_LIMIT: u8 = 10;
+/// Kept low (3) to avoid retry spirals that incentivise over-engineering.
+/// If the agent can't restore quality in 3 focused attempts, further retries
+/// are unlikely to help and risk triggering parsimony bloat detection.
+const GENOME_RETRY_LIMIT: u8 = 3;
+
+/// Minimum file line count for genome retry eligibility.  Files smaller than
+/// this are skipped during retry collection — retrying on small files pushes
+/// agents to over-engineer trivial code.  Larger files have enough structure
+/// that a focused retry is worthwhile.
+const GENOME_RETRY_MIN_LINES: usize = 100;
 
 /// Push a visible message to the agent console and diagnostics when a genome retry fires.
 fn push_genome_retry_message(
@@ -1614,6 +1623,17 @@ fn build_genome_retry_prompt(
             Some(r) => r,
             None => continue,
         };
+
+        // Skip small files (< 100 lines) — retrying on them pushes agents to
+        // over-engineer trivial code.  Larger files have enough structure that
+        // a retry is worthwhile.
+        let line_count = std::fs::read_to_string(file_path)
+            .map(|s| s.lines().count())
+            .unwrap_or(0);
+        if line_count < GENOME_RETRY_MIN_LINES {
+            continue;
+        }
+
         if let Some(base) = state.genome_baselines.get(file_path) {
             // Tier takes priority — a tier drop is always degradation.
             if report.tier < base.tier {
@@ -1812,14 +1832,14 @@ fn build_genome_retry_prompt(
          Your goal is to IMPROVE the structural quality above the baselines. If improvement \
          is not possible given the functional requirements, you MUST NOT degrade below \
          baseline. At minimum, restore quality to the baseline level for every file.\n\n\
-         Specific actions to take on YOUR code:\n\
-         - Split functions you wrote that have high cyclomatic complexity (> 8)\n\
-         - Reduce nesting depth in your code with early returns and guard clauses\n\
+         Focus on natural code quality improvements:\n\
+         - Reduce cyclomatic complexity in functions you wrote (aim for <= 8)\n\
+         - Flatten deep nesting with early returns and guard clauses\n\
          - Use descriptive, unique identifiers in code you added\n\
-         - Add whitespace between logical sections and comments on public interfaces you created\n\
          - Aim for {tier_target} or higher on all AST-driven encoders\n\
-         - Your ultimate aspiration is Tier V (Replicator) \u{2014} push toward it\n\n\
-         Fix your changes to improve the genome scores, then submit.\n",
+         Do NOT over-engineer: splitting every function into tiny pieces, adding \
+         unnecessary types, or padding with comments will trigger parsimony bloat \
+         detection and cap your tier. Write naturally structured code.\n",
     ));
 
     Some((prompt, degraded_files))

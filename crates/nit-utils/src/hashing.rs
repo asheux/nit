@@ -1,89 +1,65 @@
-//! Deterministic hashing and fast pseudo-random number generation.
-//!
-//! [`stable_hash_bytes`] produces a deterministic 64-bit hash from arbitrary
-//! byte slices using BLAKE3, suitable for content-addressing and deduplication.
-//!
-//! [`SplitMix64`] is a lightweight, seedable PRNG for cases where cryptographic
-//! security is unnecessary — simulations, shuffling, and procedural generation.
-
 use blake3::Hasher;
 
-/// Computes a deterministic 64-bit hash of `data` using BLAKE3.
-///
-/// The first 8 bytes of the BLAKE3 digest are interpreted as a little-endian
-/// `u64`. The result is stable across runs and platforms, making it suitable
-/// for content-addressing, deduplication keys, and reproducible seeding.
-///
-/// # Examples
-///
-/// ```
-/// let h = nit_utils::hashing::stable_hash_bytes(b"hello");
-/// assert_ne!(h, 0);
-/// ```
+/// Deterministic 64-bit hash of `data` via BLAKE3 (little-endian first 8 bytes).
 #[inline]
 #[must_use]
 pub fn stable_hash_bytes(data: &[u8]) -> u64 {
     let mut hasher = Hasher::new();
     hasher.update(data);
     let digest = hasher.finalize();
-    let mut out = [0u8; 8];
-    out.copy_from_slice(&digest.as_bytes()[..8]);
-    u64::from_le_bytes(out)
+    let mut buf = [0u8; 8];
+    buf.copy_from_slice(&digest.as_bytes()[..8]);
+    u64::from_le_bytes(buf)
 }
 
-/// A fast, seedable 64-bit pseudo-random number generator.
-///
-/// Implements the SplitMix64 algorithm, which provides excellent statistical
-/// quality for non-cryptographic use cases such as simulations, game logic, and
-/// reproducible test fixtures.
-///
-/// Seed `0` is mapped to a built-in constant to avoid the degenerate all-zeros
-/// state.
-///
-/// # Examples
-///
-/// ```
-/// let mut rng = nit_utils::hashing::SplitMix64::new(42);
-/// let value = rng.next_u64();
-/// assert_ne!(value, 0);
-/// ```
+/// SplitMix64 pseudo-random number generator for non-cryptographic use.
 #[derive(Clone, Debug)]
 pub struct SplitMix64 {
     state: u64,
 }
 
-impl SplitMix64 {
-    /// Internal fallback used when the caller supplies a zero seed, ensuring
-    /// the generator never starts in the degenerate all-zeros state.
-    const FALLBACK_SEED: u64 = 0x4d59_5df4_d0f3_3173;
+const INCREMENT: u64 = 0x9E37_79B9_7F4A_7C15;
+const ZERO_GUARD: u64 = 0x4d59_5df4_d0f3_3173;
 
-    /// Creates a new generator seeded with `seed`.
-    ///
-    /// A seed of `0` is replaced by an internal constant to guarantee the
-    /// generator never enters the all-zeros state.
+impl SplitMix64 {
+    /// Creates a new generator. Zero seeds are replaced to avoid degeneracy.
     #[must_use]
     pub fn new(seed: u64) -> Self {
-        let state = if seed == 0 { Self::FALLBACK_SEED } else { seed };
-        Self { state }
+        let initial = if seed == 0 { ZERO_GUARD } else { seed };
+        Self { state: initial }
     }
 
-    /// Advances the internal state and returns the next pseudo-random `u64`.
     #[inline]
     pub fn next_u64(&mut self) -> u64 {
-        self.state = self.state.wrapping_add(0x9E37_79B9_7F4A_7C15);
-        let mut z = self.state;
-        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-        z ^ (z >> 31)
+        self.state = self.state.wrapping_add(INCREMENT);
+        avalanche_mix(self.state)
     }
 
-    /// Returns a pseudo-random `f32` in the half-open range `[0.0, 1.0)`.
-    ///
-    /// Uses the upper 24 bits of a `u64` draw to fill the mantissa, giving
-    /// uniform distribution over representable single-precision floats in
-    /// that range.
+    /// Returns a value in `[0, upper)` using rejection sampling to avoid modulo bias.
+    pub fn next_bounded(&mut self, upper: u64) -> u64 {
+        if upper <= 1 {
+            return 0;
+        }
+        let threshold = upper.wrapping_neg() % upper;
+        loop {
+            let candidate = self.next_u64();
+            if candidate >= threshold {
+                return candidate % upper;
+            }
+        }
+    }
+
+    /// Pseudo-random `f32` in `[0.0, 1.0)` from the upper 24 mantissa bits.
     #[inline]
     pub fn next_f32(&mut self) -> f32 {
         (self.next_u64() >> 40) as f32 / (1u64 << 24) as f32
     }
+}
+
+/// Stafford Mix13 avalanche — spreads entropy across all 64 bits.
+#[inline]
+fn avalanche_mix(raw: u64) -> u64 {
+    let mixed = (raw ^ (raw >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    let refined = (mixed ^ (mixed >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    refined ^ (refined >> 31)
 }

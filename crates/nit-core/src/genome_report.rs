@@ -31,6 +31,48 @@ pub struct GenomeReport {
     pub timestamp_ms: u64,
     /// Grid dimension used for this report (adaptive: 32, 48, or 64).
     pub grid_size: usize,
+    /// Parsimony analysis — detects over-engineered code that games genome scores.
+    #[serde(default)]
+    pub parsimony: ParsimonyInfo,
+}
+
+/// Parsimony analysis: measures whether code structure is proportional to purpose.
+/// Detects over-split functions, excessive item counts, and comment padding that
+/// inflate genome scores without improving actual code quality.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ParsimonyInfo {
+    /// Number of function/method bodies found in the file.
+    pub fn_count: usize,
+    /// Average significant lines per function body (0.0 if no functions).
+    pub avg_fn_body_lines: f32,
+    /// Top-level items (fn, struct, enum, impl, trait, const, static, type) per
+    /// 100 significant lines.
+    pub item_density: f32,
+    /// Ratio of comment lines to total non-blank lines (0.0–1.0).
+    /// Comments include `//`, `///`, `/*`, `*` (doc + block continuation).
+    #[serde(default)]
+    pub comment_ratio: f32,
+    /// Fraction of functions whose body is <= 5 significant lines (0.0–1.0).
+    /// A high ratio means most functions are trivially small — likely predicate
+    /// extraction or stub duplication rather than meaningful decomposition.
+    #[serde(default)]
+    pub tiny_fn_fraction: f32,
+    /// `true` when the file shows signs of over-engineering for genome scores.
+    /// When set, the tier is capped at Methuselah (IV).
+    pub bloat_detected: bool,
+}
+
+impl Default for ParsimonyInfo {
+    fn default() -> Self {
+        Self {
+            fn_count: 0,
+            avg_fn_body_lines: 0.0,
+            item_density: 0.0,
+            comment_ratio: 0.0,
+            tiny_fn_fraction: 0.0,
+            bloat_detected: false,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -150,11 +192,10 @@ pub const GENOME_AGENT_INSTRUCTIONS: &str = "\
 MISSION — nit coding lab\n\
 You are an agent in nit, an agentic coding lab that measures structural code \
 quality by encoding source files as Game of Life genomes. nit's goal is to \
-produce superprogrammer agents — agents that consistently generate code whose \
-genomes survive and thrive. The highest tier is Replicator (Tier V, 2001+ \
-generations). Agents that routinely reach Replicator are elite. That is your \
-aspiration. Every line of code you write is measured. Maximize your genome \
-scores on every turn.\n\
+produce superprogrammer agents — agents that write naturally well-structured \
+code. The highest tier is Replicator (Tier V, 2001+ generations). Your \
+aspiration is Tier V, but never at the cost of over-engineering. Write code \
+that is good because it solves the problem well, not because it games a metric.\n\
 \n\
 TIER LADDER (your progression path):\n\
   I   Still Life   (0-50 gen)     — Failing. Code does not survive.\n\
@@ -162,76 +203,78 @@ TIER LADDER (your progression path):\n\
   III Spaceship    (201-500 gen)  — Standard. Acceptable baseline.\n\
   IV  Methuselah   (501-2000 gen) — Excellent. Strong architecture.\n\
   V   Replicator   (2001+ gen)    — Exceptional. Elite code genome.\n\
-Your minimum target is Tier III. Your aspiration is Tier V (Replicator). \
-nit adaptively raises your minimum bar as you prove competence — consistent \
-performance at your current tier will elevate your threshold. Falling below \
-your threshold triggers automatic retries. Strive upward.\n\
+Your minimum target is Tier III. Consistent quality at your current tier \
+will naturally elevate your threshold. Falling below your threshold triggers \
+automatic retries.\n\
+\n\
+EQUILIBRIUM RULE — quality without bloat:\n\
+nit enforces a parsimony check on every evaluation. Code that is \
+over-engineered — many trivially small functions, unnecessary type \
+declarations, or artificial structural variety added solely to inflate \
+genome scores — is detected and penalized. When parsimony bloat is \
+detected, the tier is capped at Methuselah (IV) regardless of how well the \
+GoL simulation performs. The right approach:\n\
+  - Write the simplest correct solution first.\n\
+  - If nit reports low quality, improve structure where it naturally helps \
+readability and maintainability.\n\
+  - Do NOT split a clear 15-line function into five 3-line functions.\n\
+  - Do NOT extract trivial predicates into their own functions. Inline \
+simple boolean checks — a 3-line function that just calls `.any()` or \
+checks two conditions is not a meaningful abstraction.\n\
+  - Do NOT copy-paste function bodies to create stubs or near-identical \
+variants. Use macros or generics for repetitive patterns.\n\
+  - Do NOT add enums, structs, or traits that serve no functional purpose.\n\
+  - Do NOT add comments to boost scores. Comments must explain non-obvious \
+logic only. Restating what code does (\"// increment counter\"), adding \
+doc comments on trivial private helpers, or inserting section markers \
+purely for token diversity is detected as comment padding and penalized.\n\
+  - Do NOT vary function signatures (generic bounds, error styles) purely \
+for token diversity.\n\
+  - Files with >40% comment lines are flagged and tier-capped automatically.\n\
+  - Files where >50% of functions have <= 5 lines are flagged and \
+tier-capped automatically.\n\
+Good code naturally scores well. Over-engineered code is caught and penalized.\n\
 \n\
 HOW YOU ARE MEASURED:\n\
 Your code is evaluated across four encoders. Each captures a different \
 dimension of code quality. Cross-encoder consistency measures how much they \
 agree — low consistency means some dimensions are strong but others are weak. \
-Your tier is determined by the weakest AST-driven encoder (bottleneck rule). \
-Focus on your weakest encoder to climb tiers.\n\
+Your tier is determined by a soft bottleneck of the AST-driven encoders — \
+the weakest encoder matters most, but strong performance on other encoders \
+provides a modest lift. Focus on balanced, natural code rather than \
+obsessing over one encoder.\n\
 \n\
-ENCODER GUIDE (what each measures → how to improve it):\n\
+ENCODER GUIDE (what each measures → how to improve naturally):\n\
 \n\
 AST-driven encoders (determine the overall tier):\n\
   token_spectrum — token semantic role distribution (keywords, operators, \
 identifiers, literals, comments).\n\
-    → Balance code vs comments vs whitespace. Add doc comments on public \
-items. Avoid long chains of similar tokens.\n\
+    → Write code with natural variety. Avoid long repetitive blocks of \
+similar tokens. Do NOT add comments to boost this encoder — comments \
+that exist only for score inflation are detected and penalized by the \
+parsimony system.\n\
   ast_structure — syntactic tree shape (nesting depth, branching factor, span \
 size, node type variety).\n\
-    → Split monolithic functions into smaller ones (>= 5 distinct \
-functions/structs). Reduce nesting with early returns. Vary node types \
-(mix structs, enums, impls, fns).\n\
+    → Use appropriate abstraction boundaries. Reduce deep nesting with early \
+returns. A mix of types (structs, enums, fns) emerges naturally from \
+good design — do not add types just for variety.\n\
   complexity_field — spatial heatmap of cyclomatic complexity, nesting depth, \
 token entropy, and identifier uniqueness.\n\
-    → Keep cyclomatic complexity <= 8 per function. Use unique, descriptive \
-names (>= 65% identifier uniqueness per scope). Distribute complexity \
-evenly across functions.\n\
+    → Keep cyclomatic complexity reasonable per function (aim for <= 8). \
+Use descriptive names. Distribute logic across well-motivated functions.\n\
 \n\
 Hybrid encoder (AST-aware, whitespace-filtered):\n\
-  structural — operates on semantic token roles from tree-sitter, with \
-whitespace stripped entirely. Four channels are computed on the filtered \
-token-role sequence and mapped to a 32x32 grid via Hilbert curve:\n\
-    1. Role diversity (35%) — count of distinct token roles (keyword, \
-variable, operator, type, function, etc.) per region. More diverse \
-regions = higher score.\n\
-    2. AST depth gradient (25%) — nesting depth from the actual AST, not \
-bracket counting. Varied depth levels across the file create gradients \
-that sustain GoL life.\n\
-    3. Role entropy (20%) — Shannon entropy of the token-role distribution \
-per region. Varied mixes of roles = high entropy.\n\
-    4. Role n-gram uniqueness (20%) — uniqueness of 4-token role sequences. \
-Repeated structural patterns (e.g., many functions with identical \
-keyword-variable-operator-punctuation sequences) score low.\n\
-  Tactics to boost this encoder:\n\
-    → Mix token role types within each region: intersperse keywords, \
-operators, identifiers, types, and literals.\n\
-    → Vary function shapes: different return types, parameter counts, \
-generic bounds, and error handling styles.\n\
-    → Use varied nesting depths: mix flat top-level declarations with \
-moderately nested blocks (closures, match arms with guards).\n\
-    → Avoid copy-paste structural patterns: even if identifiers differ, \
-repeated function shapes produce repeated role n-grams.\n\
-    → Add doc comments and section markers between functions — comments are \
-a distinct role that diversifies the token stream.\n\
+  structural — operates on semantic token roles from tree-sitter.\n\
+    → Naturally varied code scores well. Different function shapes emerge \
+from solving different sub-problems — not from artificially varying \
+signatures or padding with comments.\n\
 \n\
-TARGETS (minimum → aspirational):\n\
-- Tier III+ (Spaceship) on all AST encoders. Aim for Tier V (Replicator).\n\
-- Density >= 0.20 on AST encoders (higher density means richer structure).\n\
-- >= 5 components on ast_structure.\n\
+TARGETS (guidelines, not hard requirements to engineer toward):\n\
+- Tier III+ (Spaceship) on all AST encoders.\n\
 - Cyclomatic complexity <= 8 per function.\n\
 - Nesting depth <= 3 on average.\n\
-- Identifier uniqueness >= 65% per scope.\n\
-- Cross-encoder consistency >= 0.50 (elite: >= 0.85).\n\
-\n\
-When you see an OUTLIER encoder in the scores, that encoder is the bottleneck. \
-Use the encoder guide above to determine what specific code changes will \
-improve it. The fastest path to better quality is raising the weakest encoder, \
-not improving one that's already strong.\n\
+- Cross-encoder consistency >= 0.50.\n\
+These are outcomes of good code, not specifications to engineer toward.\n\
 \n\
 nit measures quality automatically after your changes are written to disk. \
 Do NOT call [evaluate_genome] — nit evaluates externally and will retry your \
@@ -281,6 +324,11 @@ pub struct EncoderDiff {
 // ---------------------------------------------------------------------------
 
 const MAX_GENERATIONS: u32 = 3000;
+
+/// Maximum lift (in generations) the soft bottleneck rule can apply.
+/// Caps at 200 so Replicator (2001+) still requires genuine quality across all
+/// encoders — the lift can bump you up roughly one tier at most.
+const SOFT_BOTTLENECK_MAX_LIFT: u32 = 200;
 
 /// Minimum grid dimension (small files).
 const GRID_MIN: usize = 32;
@@ -361,6 +409,7 @@ pub fn compute_genome_report(text: &str, file_path: &Path) -> GenomeReport {
             }],
             timestamp_ms,
             grid_size: 0,
+            parsimony: ParsimonyInfo::default(),
         };
     }
 
@@ -393,17 +442,42 @@ pub fn compute_genome_report(text: &str, file_path: &Path) -> GenomeReport {
     // Step 5: cross-encoder consistency.
     let cross_encoder_consistency = compute_consistency(&encoder_scores);
 
-    // Step 6: tier from minimum of AST-driven encoders.
-    let ast_min_gen = encoder_scores
+    // Step 6: tier from soft minimum of AST-driven encoders.
+    //
+    // The "soft bottleneck" rule replaces the old pure-min approach.  Pure min
+    // created extreme pressure on the weakest encoder, incentivising agents to
+    // over-engineer just to boost one lagging metric.  The soft minimum gives a
+    // modest lift (capped at 200 generations) proportional to the gap between
+    // the weakest and next-weakest encoder.  This means one moderately weak
+    // encoder no longer traps the file at a low tier when the others are strong,
+    // while genuinely bad structure still scores poorly.  The 200-gen cap also
+    // means Replicator (2001+) still requires real quality across all encoders.
+    let mut ast_gens: Vec<u32> = encoder_scores
         .iter()
         .filter(|s| AST_ENCODERS.contains(&s.encoder))
         .map(|s| s.generations_survived)
-        .min()
-        .unwrap_or(0);
-    let tier = GenomeTier::from_generations(ast_min_gen);
+        .collect();
+    ast_gens.sort_unstable();
+    let raw_min = ast_gens.first().copied().unwrap_or(0);
+    let effective_min = if ast_gens.len() >= 2 {
+        let next = ast_gens[1];
+        let gap = next.saturating_sub(raw_min);
+        let lift = (gap * 15 / 100).min(SOFT_BOTTLENECK_MAX_LIFT);
+        raw_min + lift
+    } else {
+        raw_min
+    };
+    let mut tier = GenomeTier::from_generations(effective_min);
 
-    // Step 7: recommendations.
-    let recommendations = generate_recommendations(text, file_path, &encoder_scores);
+    // Step 7: parsimony analysis — detect over-engineered code.
+    let parsimony = compute_parsimony(text, file_path, significant_lines);
+    if parsimony.bloat_detected && tier > GenomeTier::Methuselah {
+        tier = GenomeTier::Methuselah;
+    }
+
+    // Step 8: recommendations.
+    let mut recommendations = generate_recommendations(text, file_path, &encoder_scores);
+    generate_parsimony_recommendations(&parsimony, &mut recommendations);
 
     let timestamp_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -418,6 +492,7 @@ pub fn compute_genome_report(text: &str, file_path: &Path) -> GenomeReport {
         recommendations,
         timestamp_ms,
         grid_size,
+        parsimony,
     }
 }
 
@@ -525,6 +600,312 @@ fn compute_consistency(scores: &[EncoderScore]) -> f32 {
 }
 
 // ---------------------------------------------------------------------------
+// Parsimony analysis
+// ---------------------------------------------------------------------------
+
+/// Minimum significant lines before parsimony analysis is applied.
+/// Below this threshold, files are too small for meaningful bloat detection.
+const PARSIMONY_MIN_LINES: usize = 40;
+
+/// Maximum average function body lines before bloat is flagged.
+/// Functions averaging fewer than this many significant lines, combined with
+/// a high function count, indicate over-splitting.
+const PARSIMONY_AVG_FN_BODY_THRESHOLD: f32 = 3.0;
+
+/// Minimum function count before bloat can be flagged.
+/// Files with fewer functions than this are not considered over-split regardless
+/// of average body size.
+const PARSIMONY_MIN_FN_COUNT: usize = 15;
+
+/// A function body with this many significant lines or fewer is considered
+/// "tiny" for the tiny-function-fraction check.
+const PARSIMONY_TINY_FN_LINES: usize = 5;
+
+/// If more than this fraction of functions are tiny (body <= 5 sig lines),
+/// the file is flagged for predicate over-extraction / stub duplication.
+/// Requires at least 10 functions to avoid false positives on small files.
+const PARSIMONY_TINY_FN_FRACTION_THRESHOLD: f32 = 0.50;
+
+/// Minimum function count for the tiny-function-fraction check.
+/// Set at 12 to avoid false positives on small structs with one-liner
+/// accessor methods (a struct with 10 methods is normal; 12+ tiny functions
+/// in a single file suggests predicate over-extraction).
+const PARSIMONY_TINY_FN_MIN_COUNT: usize = 12;
+
+/// Maximum comment-to-code ratio before comment padding is flagged.
+/// Well-documented code typically sits at 15-25%.  Above 40% suggests comments
+/// are being added to diversify the token stream for genome scores rather than
+/// to explain non-obvious logic.
+const PARSIMONY_COMMENT_RATIO_THRESHOLD: f32 = 0.40;
+
+/// Compute parsimony metrics from the source text using tree-sitter AST analysis.
+fn compute_parsimony(text: &str, file_path: &Path, significant_lines: usize) -> ParsimonyInfo {
+    let tree = match ts_parse(text, file_path) {
+        Some(t) => t,
+        None => return ParsimonyInfo::default(),
+    };
+
+    let root = tree.root_node();
+    let mut fn_body_sizes: Vec<usize> = Vec::new();
+    let mut top_level_items: usize = 0;
+
+    count_items_recursive(&root, text, 0, &mut fn_body_sizes, &mut top_level_items);
+
+    let fn_count = fn_body_sizes.len();
+    let fn_body_lines_total: usize = fn_body_sizes.iter().sum();
+    let avg_fn_body_lines = if fn_count > 0 {
+        fn_body_lines_total as f32 / fn_count as f32
+    } else {
+        0.0
+    };
+    let tiny_fn_fraction = if fn_count > 0 {
+        let tiny = fn_body_sizes
+            .iter()
+            .filter(|&&s| s <= PARSIMONY_TINY_FN_LINES)
+            .count();
+        tiny as f32 / fn_count as f32
+    } else {
+        0.0
+    };
+
+    let item_density = if significant_lines > 0 {
+        top_level_items as f32 / significant_lines as f32 * 100.0
+    } else {
+        0.0
+    };
+
+    // Comment ratio: comment lines / total non-blank lines.
+    let mut comment_lines: usize = 0;
+    let mut non_blank_lines: usize = 0;
+    for line in text.lines() {
+        let t = line.trim();
+        if t.is_empty() {
+            continue;
+        }
+        non_blank_lines += 1;
+        if t.starts_with("//") || t.starts_with("///") || t.starts_with("/*") || t.starts_with('*')
+        {
+            comment_lines += 1;
+        }
+    }
+    let comment_ratio = if non_blank_lines > 0 {
+        comment_lines as f32 / non_blank_lines as f32
+    } else {
+        0.0
+    };
+
+    // Bloat detection: either over-split functions OR comment padding.
+    let over_split = significant_lines >= PARSIMONY_MIN_LINES
+        && fn_count >= PARSIMONY_MIN_FN_COUNT
+        && avg_fn_body_lines > 0.0
+        && avg_fn_body_lines < PARSIMONY_AVG_FN_BODY_THRESHOLD;
+
+    // For comment padding, use non_blank_lines (not significant_lines) as the
+    // minimum — the whole point of comment padding is that it inflates total
+    // lines while keeping significant (code-only) lines low.
+    let comment_padded =
+        non_blank_lines >= PARSIMONY_MIN_LINES && comment_ratio > PARSIMONY_COMMENT_RATIO_THRESHOLD;
+
+    // Tiny-function-fraction: catches predicate over-extraction and stub
+    // duplication even when the average body size is pulled up by a few
+    // larger functions (e.g. 10 two-liners + 2 fifty-liners → avg ~12,
+    // but 83% of functions are tiny).
+    let too_many_tiny = fn_count >= PARSIMONY_TINY_FN_MIN_COUNT
+        && tiny_fn_fraction > PARSIMONY_TINY_FN_FRACTION_THRESHOLD;
+
+    let bloat_detected = over_split || comment_padded || too_many_tiny;
+
+    ParsimonyInfo {
+        fn_count,
+        avg_fn_body_lines,
+        item_density,
+        comment_ratio,
+        tiny_fn_fraction,
+        bloat_detected,
+    }
+}
+
+/// Recursively count function bodies and top-level items in the AST.
+/// Each function's significant body line count is pushed to `fn_body_sizes`.
+fn count_items_recursive(
+    node: &tree_sitter::Node<'_>,
+    text: &str,
+    depth: usize,
+    fn_body_sizes: &mut Vec<usize>,
+    top_level_items: &mut usize,
+) {
+    let kind = node.kind();
+
+    // Count top-level items (depth 0 or inside impl/trait at depth 1).
+    let is_item = matches!(
+        kind,
+        "function_item"
+            | "function_definition"
+            | "function_declaration"
+            | "struct_item"
+            | "enum_item"
+            | "type_item"
+            | "trait_item"
+            | "impl_item"
+            | "const_item"
+            | "static_item"
+            | "class_definition"
+            | "decorated_definition"
+    );
+
+    if is_item && depth <= 1 {
+        *top_level_items += 1;
+    }
+
+    // Count function bodies and their significant line counts.
+    let is_fn = matches!(
+        kind,
+        "function_item"
+            | "function_definition"
+            | "function_declaration"
+            | "method_definition"
+            | "arrow_function"
+    );
+
+    if is_fn {
+        let start = node.start_position().row;
+        let end = node.end_position().row;
+        // Count significant lines within the function span.
+        let body_sig_lines = text
+            .lines()
+            .skip(start)
+            .take(end.saturating_sub(start) + 1)
+            .filter(|line| {
+                let t = line.trim();
+                !t.is_empty()
+                    && !t.starts_with("//")
+                    && !t.starts_with("/*")
+                    && !t.starts_with('*')
+                    && !t.starts_with("///")
+                    && t != "{"
+                    && t != "}"
+            })
+            .count();
+        fn_body_sizes.push(body_sig_lines);
+    }
+
+    // Recurse into children. For impl/trait blocks, increment depth so their
+    // inner items are counted at depth 1 (still top-level conceptually).
+    let child_depth = if matches!(kind, "impl_item" | "trait_item" | "class_definition") {
+        depth + 1
+    } else {
+        depth
+    };
+
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        // Don't double-count: skip nested function definitions inside functions
+        // (closures are fine — they don't match our function kinds).
+        if is_fn
+            && matches!(
+                child.kind(),
+                "function_item" | "function_definition" | "function_declaration"
+            )
+        {
+            continue;
+        }
+        count_items_recursive(&child, text, child_depth, fn_body_sizes, top_level_items);
+    }
+}
+
+/// Add parsimony-related recommendations when bloat is detected.
+fn generate_parsimony_recommendations(
+    parsimony: &ParsimonyInfo,
+    recs: &mut Vec<GenomeRecommendation>,
+) {
+    // Over-split functions.
+    let over_split = parsimony.fn_count >= PARSIMONY_MIN_FN_COUNT
+        && parsimony.avg_fn_body_lines > 0.0
+        && parsimony.avg_fn_body_lines < PARSIMONY_AVG_FN_BODY_THRESHOLD;
+
+    if over_split {
+        recs.push(GenomeRecommendation {
+            metric: "parsimony".into(),
+            severity: RecommendationSeverity::Warning,
+            message: format!(
+                "Over-engineered: {} functions averaging {:.1} lines each. \
+                 Tier capped at IV (Methuselah). Consolidate trivially small \
+                 functions — merge related logic instead of splitting into \
+                 many tiny functions to inflate genome scores.",
+                parsimony.fn_count, parsimony.avg_fn_body_lines,
+            ),
+            location: None,
+        });
+    } else if parsimony.fn_count >= 10
+        && parsimony.avg_fn_body_lines > 0.0
+        && parsimony.avg_fn_body_lines < PARSIMONY_AVG_FN_BODY_THRESHOLD
+    {
+        // Soft warning even below the hard threshold.
+        recs.push(GenomeRecommendation {
+            metric: "parsimony".into(),
+            severity: RecommendationSeverity::Info,
+            message: format!(
+                "Functions average {:.1} lines. Consider whether some can be \
+                 consolidated — small focused functions are good, but over-splitting \
+                 simple logic adds complexity without improving quality.",
+                parsimony.avg_fn_body_lines,
+            ),
+            location: None,
+        });
+    }
+
+    // Comment padding.
+    if parsimony.comment_ratio > PARSIMONY_COMMENT_RATIO_THRESHOLD {
+        recs.push(GenomeRecommendation {
+            metric: "comment_padding".into(),
+            severity: RecommendationSeverity::Warning,
+            message: format!(
+                "Comment padding detected: {:.0}% of non-blank lines are comments. \
+                 Tier capped at IV (Methuselah). Comments improve genome token \
+                 diversity scores but adding them to game the system is penalized. \
+                 Keep doc comments on public API items; remove trivial or redundant \
+                 comments on private helpers and obvious logic.",
+                parsimony.comment_ratio * 100.0,
+            ),
+            location: None,
+        });
+    } else if parsimony.comment_ratio > 0.30 {
+        recs.push(GenomeRecommendation {
+            metric: "comment_padding".into(),
+            severity: RecommendationSeverity::Info,
+            message: format!(
+                "Comment ratio is {:.0}%. Approaching the 40% parsimony threshold. \
+                 Ensure comments explain non-obvious logic rather than restating code.",
+                parsimony.comment_ratio * 100.0,
+            ),
+            location: None,
+        });
+    }
+
+    // Tiny-function-fraction: predicate over-extraction / stub duplication.
+    let too_many_tiny = parsimony.fn_count >= PARSIMONY_TINY_FN_MIN_COUNT
+        && parsimony.tiny_fn_fraction > PARSIMONY_TINY_FN_FRACTION_THRESHOLD;
+
+    if too_many_tiny {
+        let tiny_count = (parsimony.tiny_fn_fraction * parsimony.fn_count as f32).round() as usize;
+        recs.push(GenomeRecommendation {
+            metric: "tiny_functions".into(),
+            severity: RecommendationSeverity::Warning,
+            message: format!(
+                "Predicate over-extraction: {tiny_count} of {} functions have \
+                 <= {PARSIMONY_TINY_FN_LINES} significant lines ({:.0}%). Tier capped \
+                 at IV (Methuselah). Inline trivial predicates, combine related \
+                 checks into single functions, and use macros for repetitive stubs \
+                 instead of copy-pasting function bodies.",
+                parsimony.fn_count,
+                parsimony.tiny_fn_fraction * 100.0,
+            ),
+            location: None,
+        });
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Diff computation
 // ---------------------------------------------------------------------------
 
@@ -586,9 +967,24 @@ pub fn format_genome_report(report: &GenomeReport) -> String {
         report.grid_size,
     ));
     out.push_str(&format!(
-        "Cross-encoder consistency: {:.2}\n\n",
+        "Cross-encoder consistency: {:.2}\n",
         report.cross_encoder_consistency
     ));
+    if report.parsimony.fn_count > 0 || report.parsimony.comment_ratio > 0.0 {
+        out.push_str(&format!(
+            "Parsimony: {} fns, avg {:.1} lines/fn, {:.0}% tiny, {:.0}% comments{}\n",
+            report.parsimony.fn_count,
+            report.parsimony.avg_fn_body_lines,
+            report.parsimony.tiny_fn_fraction * 100.0,
+            report.parsimony.comment_ratio * 100.0,
+            if report.parsimony.bloat_detected {
+                " [BLOAT — tier capped]"
+            } else {
+                ""
+            },
+        ));
+    }
+    out.push('\n');
 
     out.push_str("Encoder scores:\n");
     for score in &report.encoder_scores {
@@ -1150,9 +1546,9 @@ fn analyze_structural_outlier(
             severity: RecommendationSeverity::Warning,
             message: format!(
                 "Structural encoder bottleneck: density {:.2} is very low. The token-role \
-                 distribution lacks variety. Mix different token types within each code region: \
-                 keywords, operators, identifiers, types, literals, and comments. Vary function \
-                 shapes and add doc comments between functions to diversify the role stream.",
+                 distribution lacks variety. This usually means code is structurally repetitive. \
+                 Solve different sub-problems with naturally different approaches rather than \
+                 repeating the same pattern. Do NOT add comments just for diversity.",
                 structural.density,
             ),
             location: None,
@@ -1185,9 +1581,9 @@ fn analyze_structural_outlier(
             message: format!(
                 "Structural encoder is a severe outlier ({} generations vs {:.0} AST mean). \
                  This encoder measures token-role diversity, AST depth variation, role entropy, \
-                 and role-pattern uniqueness. To boost it: vary function shapes and signatures, \
-                 mix token role types per region, use varied nesting depths, add doc comments \
-                 between functions, and avoid copy-paste structural patterns.",
+                 and role-pattern uniqueness. The code likely has repeated structural patterns. \
+                 Write naturally varied code — different sub-problems should produce different \
+                 shapes. Do NOT add comments or artificial variety to game this encoder.",
                 structural.generations_survived, ast_mean,
             ),
             location: None,

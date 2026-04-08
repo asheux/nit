@@ -34,7 +34,7 @@ pub use cursor::Cursor;
 pub use genome_report::{
     compute_genome_diff, compute_genome_report, format_genome_diff, format_genome_report,
     EncoderDiff, EncoderScore, GenomeDiff, GenomeRecommendation, GenomeReport, GenomeTier,
-    GrowthClass, RecommendationSeverity, GENOME_AGENT_INSTRUCTIONS,
+    GrowthClass, ParsimonyInfo, RecommendationSeverity, GENOME_AGENT_INSTRUCTIONS,
 };
 pub use gol_rules::{load_rule_catalog, NamedRule, RuleCatalog, RuleSelectError, SelectedRule};
 pub use io::{load_to_string, save_buffer};

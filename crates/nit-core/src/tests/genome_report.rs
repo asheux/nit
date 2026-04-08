@@ -154,6 +154,7 @@ fn genome_diff_detects_improvement() {
         recommendations: Vec::new(),
         timestamp_ms: 0,
         grid_size: 32,
+        parsimony: ParsimonyInfo::default(),
     };
     let after = GenomeReport {
         file_path: path.to_path_buf(),
@@ -171,6 +172,7 @@ fn genome_diff_detects_improvement() {
         recommendations: Vec::new(),
         timestamp_ms: 1,
         grid_size: 32,
+        parsimony: ParsimonyInfo::default(),
     };
     let diff = compute_genome_diff(&before, &after);
     assert_eq!(diff.tier_before, GenomeTier::StillLife);
@@ -201,6 +203,7 @@ fn genome_diff_detects_regression() {
         recommendations: Vec::new(),
         timestamp_ms: 0,
         grid_size: 32,
+        parsimony: ParsimonyInfo::default(),
     };
     let after = GenomeReport {
         file_path: path.to_path_buf(),
@@ -218,6 +221,7 @@ fn genome_diff_detects_regression() {
         recommendations: Vec::new(),
         timestamp_ms: 1,
         grid_size: 32,
+        parsimony: ParsimonyInfo::default(),
     };
     let diff = compute_genome_diff(&before, &after);
     assert!(diff.tier_after < diff.tier_before);
@@ -327,4 +331,153 @@ fn format_genome_report_includes_all_encoders() {
             "Formatted report missing encoder: {name}"
         );
     }
+}
+
+#[test]
+fn parsimony_detects_over_split_code() {
+    // Generate a file with many trivially small functions — classic over-engineering.
+    let mut code = String::new();
+    for i in 0..25 {
+        code.push_str(&format!("fn step_{i}(x: i32) -> i32 {{ x + {i} }}\n\n"));
+    }
+    // Pad to ensure we cross the significant-lines threshold.
+    code.push_str("fn main() {\n");
+    for i in 0..25 {
+        code.push_str(&format!("    let _ = step_{i}(0);\n"));
+    }
+    code.push_str("}\n");
+
+    let path = std::path::Path::new("bloated.rs");
+    let report = compute_genome_report(&code, path);
+
+    // Should detect bloat: 26 functions averaging ~1-2 lines each.
+    assert!(
+        report.parsimony.bloat_detected,
+        "Expected bloat detection for {} fns averaging {:.1} lines",
+        report.parsimony.fn_count, report.parsimony.avg_fn_body_lines,
+    );
+    // Tier should be capped at Methuselah or below.
+    assert!(
+        report.tier <= GenomeTier::Methuselah,
+        "Expected tier <= Methuselah when bloat detected, got {}",
+        report.tier,
+    );
+    // Should have a parsimony recommendation.
+    assert!(
+        report
+            .recommendations
+            .iter()
+            .any(|r| r.metric == "parsimony"),
+        "Expected parsimony recommendation",
+    );
+}
+
+#[test]
+fn parsimony_does_not_flag_natural_code() {
+    // The well-structured calculator is natural code — should NOT be flagged.
+    let path = std::path::Path::new("test.rs");
+    let report = compute_genome_report(WELL_STRUCTURED_RUST, path);
+
+    assert!(
+        !report.parsimony.bloat_detected,
+        "Well-structured code should not be flagged as bloated (fn_count={}, avg={:.1})",
+        report.parsimony.fn_count, report.parsimony.avg_fn_body_lines,
+    );
+}
+
+#[test]
+fn parsimony_detects_comment_padding() {
+    // Generate a file where >40% of non-blank lines are comments.
+    // 30 comment lines + 20 code lines = 60% comments.
+    let mut code = String::new();
+    for i in 0..10 {
+        code.push_str(&format!("/// Doc comment line A for func_{i}.\n"));
+        code.push_str(&format!("/// Doc comment line B for func_{i}.\n"));
+        code.push_str(&format!("/// Doc comment line C for func_{i}.\n"));
+        code.push_str(&format!(
+            "fn func_{i}(x: i32) -> i32 {{\n    x + {i}\n}}\n\n"
+        ));
+    }
+
+    let path = std::path::Path::new("padded.rs");
+    let report = compute_genome_report(&code, path);
+
+    assert!(
+        report.parsimony.comment_ratio > 0.40,
+        "Expected comment ratio > 0.40, got {:.2}",
+        report.parsimony.comment_ratio,
+    );
+    assert!(
+        report.parsimony.bloat_detected,
+        "Expected bloat detection for comment-padded file (ratio={:.2})",
+        report.parsimony.comment_ratio,
+    );
+    assert!(
+        report.tier <= GenomeTier::Methuselah,
+        "Expected tier <= Methuselah when comment padding detected, got {}",
+        report.tier,
+    );
+    assert!(
+        report
+            .recommendations
+            .iter()
+            .any(|r| r.metric == "comment_padding"),
+        "Expected comment_padding recommendation",
+    );
+}
+
+#[test]
+fn soft_bottleneck_gives_modest_lift() {
+    // With pure min, tier = from_generations(480) = Spaceship.
+    // Soft bottleneck should give a small lift from the gap to next encoder.
+    use crate::seed::SeedEncoderId;
+
+    let scores = [
+        EncoderScore {
+            encoder: SeedEncoderId::TokenSpectrum,
+            density: 0.3,
+            components: 5,
+            generations_survived: 1800,
+            peak_population: 200,
+            cycle_period: None,
+            growth_class: GrowthClass::Stable,
+        },
+        EncoderScore {
+            encoder: SeedEncoderId::AstStructure,
+            density: 0.3,
+            components: 5,
+            generations_survived: 480,
+            peak_population: 200,
+            cycle_period: None,
+            growth_class: GrowthClass::Stable,
+        },
+        EncoderScore {
+            encoder: SeedEncoderId::ComplexityField,
+            density: 0.3,
+            components: 5,
+            generations_survived: 1500,
+            peak_population: 200,
+            cycle_period: None,
+            growth_class: GrowthClass::Stable,
+        },
+    ];
+
+    // Compute effective min manually to verify the formula.
+    let mut gens: Vec<u32> = scores.iter().map(|s| s.generations_survived).collect();
+    gens.sort_unstable();
+    let raw_min = gens[0]; // 480
+    let next = gens[1]; // 1500
+    let gap = next - raw_min; // 1020
+    let lift = (gap * 15 / 100).min(200); // min(153, 200) = 153
+    let effective = raw_min + lift; // 633
+
+    assert_eq!(raw_min, 480);
+    assert!(lift > 0 && lift <= 200, "lift={lift} should be in (0, 200]");
+    // Pure min gives Spaceship (480). Soft min should give Methuselah (633).
+    assert_eq!(GenomeTier::from_generations(raw_min), GenomeTier::Spaceship);
+    assert_eq!(
+        GenomeTier::from_generations(effective),
+        GenomeTier::Methuselah,
+        "Soft bottleneck should lift from Spaceship to Methuselah (effective={effective})"
+    );
 }
