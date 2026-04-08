@@ -1,9 +1,4 @@
 //! Tournament result accumulation and final ranking computation.
-//!
-//! [`TournamentAccumulator`] collects individual [`MatchResult`] values as
-//! they arrive (from either CPU or GPU evaluation), maintains per-strategy
-//! running totals and optional pairwise head-to-head tables, and produces
-//! the final [`TournamentResults`] ranking at the end.
 
 use std::cmp::Ordering;
 
@@ -15,10 +10,6 @@ use crate::output::{DominanceEdge, PairwiseResult, StrategyResult, TournamentRes
 use crate::strategy::TmRunStats;
 
 impl TournamentAccumulator {
-    /// Create a new accumulator for `n` strategies.
-    ///
-    /// When `store_pairwise` is `true` an N x N pairwise grid is allocated
-    /// for head-to-head statistics (used by the TUI and non-batch modes).
     pub(super) fn new(
         n: usize,
         use_adjusted: bool,
@@ -47,10 +38,8 @@ impl TournamentAccumulator {
         }
     }
 
-    /// Fold a single match result into the running per-strategy and pairwise totals.
-    ///
-    /// Handles self-play (same strategy on both sides) as a special case, crediting
-    /// both roles to the same strategy entry.
+    /// Fold a single match result into running totals. Self-play (same index on
+    /// both sides) credits both roles to the same strategy entry.
     pub(super) fn apply_match(
         &mut self,
         result: MatchResult,
@@ -182,44 +171,38 @@ impl TournamentAccumulator {
         }
     }
 
-    /// Compute the sorted strategy ranking from accumulated statistics.
-    ///
-    /// Strategies are sorted by descending score (adjusted or raw depending on
-    /// the accumulator configuration).
     fn build_ranking(&self, specs: &[StrategySpec]) -> Vec<StrategyResult> {
-        let mut ranking = Vec::new();
-        for (idx, stats) in self.strategies.iter().enumerate() {
-            let score_samples = stats.score_samples.max(1);
-            let adjusted_avg = stats.adjusted_total / score_samples as f64;
-            ranking.push(StrategyResult {
-                id: specs[idx].id.clone(),
-                name: specs[idx].name.clone(),
-                total_payoff: stats.total,
-                average_payoff: stats.total as f64 / score_samples as f64,
-                adjusted_total_payoff: Some(stats.adjusted_total),
-                adjusted_average_payoff: Some(adjusted_avg),
-                matches: stats.matches,
-                wins: stats.wins,
-                losses: stats.losses,
-                draws: stats.draws,
-                crashed: stats.crashed,
-                crash_count: stats.crash_count,
-                tm_metrics: stats.tm_stats.as_ref().map(tm_metrics_from_stats),
-            });
-        }
-        if self.use_adjusted {
-            ranking.sort_by(|a, b| {
-                let a_score = a.score(self.score_aggregation, true);
-                let b_score = b.score(self.score_aggregation, true);
-                b_score.partial_cmp(&a_score).unwrap_or(Ordering::Equal)
-            });
-        } else {
-            ranking.sort_by(|a, b| {
-                let a_score = a.score(self.score_aggregation, false);
-                let b_score = b.score(self.score_aggregation, false);
-                b_score.partial_cmp(&a_score).unwrap_or(Ordering::Equal)
-            });
-        }
+        let mut ranking: Vec<StrategyResult> = self
+            .strategies
+            .iter()
+            .enumerate()
+            .map(|(idx, stats)| {
+                let score_samples = stats.score_samples.max(1);
+                let adjusted_avg = stats.adjusted_total / score_samples as f64;
+                StrategyResult {
+                    id: specs[idx].id.clone(),
+                    name: specs[idx].name.clone(),
+                    total_payoff: stats.total,
+                    average_payoff: stats.total as f64 / score_samples as f64,
+                    adjusted_total_payoff: Some(stats.adjusted_total),
+                    adjusted_average_payoff: Some(adjusted_avg),
+                    matches: stats.matches,
+                    wins: stats.wins,
+                    losses: stats.losses,
+                    draws: stats.draws,
+                    crashed: stats.crashed,
+                    crash_count: stats.crash_count,
+                    tm_metrics: stats.tm_stats.as_ref().map(tm_metrics_from_stats),
+                }
+            })
+            .collect();
+        let prefer_adjusted = self.use_adjusted;
+        let aggregation = self.score_aggregation;
+        ranking.sort_by(|a, b| {
+            let a_score = a.score(aggregation, prefer_adjusted);
+            let b_score = b.score(aggregation, prefer_adjusted);
+            b_score.partial_cmp(&a_score).unwrap_or(Ordering::Equal)
+        });
         ranking
     }
 

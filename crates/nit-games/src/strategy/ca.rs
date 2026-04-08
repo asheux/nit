@@ -1,14 +1,10 @@
 //! Cellular automaton (CA) strategy implementation.
-//!
-//! Provides [`CaStrategy`] and the shrinking-CA evaluation used by the
-//! tournament engine and Metal GPU accelerator.
 
 use super::math::{checked_pow_usize, integer_digits_unsigned};
 use crate::game::Action;
 use crate::history::{History, RoundRecord};
 use std::collections::VecDeque;
 
-/// Result of a single shrinking-CA evaluation pass.
 #[derive(Clone, Debug)]
 pub struct CaRunResult {
     pub rows: Vec<Vec<u8>>,
@@ -18,7 +14,7 @@ pub struct CaRunResult {
 }
 
 /// Decode a rule code into a lookup table for the given symbol count
-/// and neighborhood radius (`two_r = 2 * r`).
+/// and neighborhood diameter (`two_r = 2 * radius`).
 pub fn decode_ca_rule_table(rule_code: u64, symbols: u8, two_r: u32) -> Vec<u8> {
     let neighborhood = two_r.saturating_add(1) as usize;
     let table_len = checked_pow_usize(symbols.max(2) as usize, neighborhood).unwrap_or(0);
@@ -78,23 +74,23 @@ pub fn run_shrinking_ca(
     }
 }
 
-/// Look up the next cell symbol from the rule table for a given neighborhood window.
-///
-/// Interprets `window` as a mixed-radix index into `rule_table`, where each
-/// cell is a digit in base `symbols`. Returns 0 if the index is out of range.
+/// Look up the next cell value from the rule table for a neighborhood window.
+/// Interprets `window` as a mixed-radix index into the table.
 fn ca_transition_symbol(rule_table: &[u8], symbols: u8, window: &[u8]) -> u8 {
-    let base = symbols.max(2) as usize;
-    let mut idx = 0usize;
+    let radix = symbols.max(2) as usize;
+    let mut table_index = 0usize;
     for &digit in window {
-        idx = idx.saturating_mul(base).saturating_add(digit as usize);
+        table_index = table_index
+            .saturating_mul(radix)
+            .saturating_add(digit as usize);
     }
-    rule_table.get(idx).copied().unwrap_or(0)
+    rule_table.get(table_index).copied().unwrap_or(0)
 }
 
 // ── CA strategy ──────────────────────────────────────────────
 
-/// CA-based strategy: encodes opponent history as a bit row, then evaluates
-/// a shrinking cellular automaton to produce an action.
+/// Encodes opponent history as a bit row, then evaluates a shrinking CA
+/// to produce an action.
 #[derive(Clone, Debug)]
 pub struct CaStrategy {
     id: String,
@@ -108,10 +104,8 @@ pub struct CaStrategy {
 }
 
 impl CaStrategy {
-    /// Construct from rule parameters.
-    ///
-    /// Pre-decodes the rule table and allocates the sliding bit window
-    /// sized to the maximum input the CA can consume.
+    /// Pre-decodes the rule table and sizes the sliding bit window to the
+    /// maximum input the CA can consume.
     pub fn new(id: impl Into<String>, rule_code: u64, symbols: u8, two_r: u32, steps: u32) -> Self {
         let rule_table = decode_ca_rule_table(rule_code, symbols, two_r);
         let suffix_len = two_r.saturating_mul(steps).saturating_add(1).max(1) as usize;
@@ -127,7 +121,6 @@ impl CaStrategy {
         }
     }
 
-    /// The numeric rule code for this CA.
     pub fn rule_code(&self) -> u64 {
         self.rule_code
     }
@@ -169,46 +162,38 @@ impl super::Strategy for CaStrategy {
 
 // ── Sliding bit window ───────────────────────────────────────
 
-/// Fixed-capacity sliding window of binary symbols.
-///
-/// Maintains at most `max_len` bits in FIFO order. Older bits are
-/// discarded when the window is full. Used by [`CaStrategy`] to
-/// build the CA input row incrementally from game history.
+/// Fixed-capacity FIFO sliding window of binary symbols. Older bits are
+/// discarded when the window is full.
 #[derive(Clone, Debug)]
 struct BitWindow {
-    max_len: usize,
+    capacity: usize,
     bits: VecDeque<u8>,
 }
 
 impl BitWindow {
-    /// Create a new empty window with the given maximum length.
-    fn new(max_len: usize) -> Self {
+    fn new(capacity: usize) -> Self {
         Self {
-            max_len: max_len.max(1),
+            capacity: capacity.max(1),
             bits: VecDeque::new(),
         }
     }
 
-    /// Remove all bits from the window.
     fn clear(&mut self) {
         self.bits.clear();
     }
 
-    /// Append both player bits from a single round record.
     fn push_round(&mut self, record: RoundRecord) {
         self.push_bit(super::action_bit(record.a));
         self.push_bit(super::action_bit(record.b));
     }
 
-    /// Append a single bit, evicting the oldest if at capacity.
     fn push_bit(&mut self, bit: u8) {
         self.bits.push_back(bit.min(1));
-        while self.bits.len() > self.max_len {
+        while self.bits.len() > self.capacity {
             self.bits.pop_front();
         }
     }
 
-    /// Snapshot the current window contents as a contiguous vector.
     fn to_vec(&self) -> Vec<u8> {
         self.bits.iter().copied().collect()
     }

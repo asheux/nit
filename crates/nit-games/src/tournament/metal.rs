@@ -1,8 +1,4 @@
 //! Metal GPU batch evaluation for tournament matchups.
-//!
-//! This module translates the crate's strategy types (`FsmBatch`, `CaBatch`, `TmBatch`)
-//! into the packed representations that `nit-metal` expects, dispatches evaluation to
-//! the GPU, and converts raw score pairs back into `MatchOutcome` values.
 
 use super::types::{MatchOutcome, MatchResult, Matchup, PreparedMetalBatch};
 use crate::config::{NormalizedConfig, StrategySpec, StrategySpecKind};
@@ -14,19 +10,7 @@ use nit_metal::{
 };
 use std::collections::VecDeque;
 
-// ── Uniform-field helper ─────────────────────────────────────────────────────
-//
-// Many payload builders require that every strategy in the roster shares the
-// same structural parameters (state count, symbol count, etc.).  This helper
-// encapsulates the "first-wins, mismatch-rejects" check that was previously
-// inlined ~15 times.
-
-/// Ensures all strategies in a batch share the same value for a structural
-/// parameter.  The first call initialises the slot; subsequent calls verify
-/// that `incoming` matches the stored value.
-///
-/// Returns `None` when a mismatch is detected, signalling that the roster
-/// is not homogeneous and Metal batch evaluation cannot proceed.
+/// Checks that a structural parameter is uniform across all strategies in a batch.
 fn ensure_uniform<T: PartialEq>(slot: &mut Option<T>, incoming: T) -> Option<()> {
     match slot {
         Some(existing) if *existing != incoming => None,
@@ -38,14 +22,7 @@ fn ensure_uniform<T: PartialEq>(slot: &mut Option<T>, incoming: T) -> Option<()>
     }
 }
 
-// ── Complexity-cost adjustment ───────────────────────────────────────────────
-
-/// Adjusts a raw payoff total by subtracting any configured complexity
-/// penalties (TM step cost, FSM state cost).
-///
-/// When `cost.enabled` is false the raw total is returned unchanged.
-/// Otherwise the penalty is computed from strategy-specific metrics and
-/// subtracted from the integer total, yielding a floating-point result.
+/// Adjusts a raw payoff total by subtracting configured complexity penalties.
 pub(super) fn adjusted_total_for_match(
     raw_total: i64,
     strategy: &StrategySpec,
@@ -61,8 +38,6 @@ pub(super) fn adjusted_total_for_match(
     raw_total as f64 - penalty
 }
 
-/// Computes the complexity penalty for a single strategy based on its kind
-/// and the configured cost parameters.
 fn compute_complexity_penalty(
     strategy: &StrategySpec,
     round_count: u32,
@@ -92,14 +67,10 @@ fn compute_complexity_penalty(
     }
 }
 
-// ── Small utility functions ──────────────────────────────────────────────────
-
-/// Returns the (minimum, maximum) payoff values for timeout scoring.
 fn timeout_extrema(payoff: crate::game::PayoffMatrix) -> (i32, i32) {
     payoff.min_max()
 }
 
-/// Encodes a `TmMove` variant into the integer code used by the Metal shader.
 fn move_dir_code(direction: crate::strategy::TmMove) -> u32 {
     match direction {
         crate::strategy::TmMove::Left => 0,
@@ -108,16 +79,6 @@ fn move_dir_code(direction: crate::strategy::TmMove) -> u32 {
     }
 }
 
-// ── Payload builders ─────────────────────────────────────────────────────────
-//
-// Each builder converts a slice of `StrategySpec` into the packed GPU
-// representation for one strategy family.  All strategies in the slice must
-// belong to the same family and share structural parameters.
-
-/// Selects the correct family-specific builder based on the first strategy's kind.
-///
-/// Returns `None` when the roster is empty, heterogeneous, or contains parameters
-/// that the Metal shader cannot encode (e.g. non-binary FSM alphabet).
 fn build_metal_batch_payload(strategies: &[StrategySpec]) -> Option<BatchPayload> {
     let first = strategies.first()?;
     match &first.kind {
@@ -129,11 +90,6 @@ fn build_metal_batch_payload(strategies: &[StrategySpec]) -> Option<BatchPayload
     }
 }
 
-/// Validated FSM parameters extracted from a [`StrategySpec`], ready for Metal
-/// payload packing.
-///
-/// All structural checks (binary alphabet, consistent dimensions, valid start
-/// state) have already passed by the time this struct is constructed.
 struct ValidatedFsm<'a> {
     state_count: usize,
     alphabet_size: usize,
@@ -142,8 +98,6 @@ struct ValidatedFsm<'a> {
     transition_table: &'a [Vec<usize>],
 }
 
-/// Validates that an FSM spec is suitable for Metal batch evaluation and
-/// returns the extracted structural parameters.
 fn validate_fsm_spec(spec: &StrategySpec) -> Option<ValidatedFsm<'_>> {
     let StrategySpecKind::Fsm {
         num_states,
@@ -195,8 +149,6 @@ fn validate_fsm_spec(spec: &StrategySpec) -> Option<ValidatedFsm<'_>> {
     })
 }
 
-/// Packs a homogeneous FSM roster into the flat arrays that the Metal
-/// shader consumes.
 fn build_metal_fsm_payload(strategies: &[StrategySpec]) -> Option<FsmBatch> {
     let mut uniform_states: Option<usize> = None;
     let mut uniform_alphabet: Option<usize> = None;
@@ -247,8 +199,6 @@ fn build_metal_fsm_payload(strategies: &[StrategySpec]) -> Option<FsmBatch> {
     })
 }
 
-/// Packs a homogeneous cellular-automaton roster into the flat arrays that the
-/// Metal shader consumes.  All CAs must share `(k, r, t)` parameters.
 fn build_metal_ca_payload(strategies: &[StrategySpec]) -> Option<CaBatch> {
     let mut uniform_symbols: Option<u32> = None;
     let mut uniform_two_r: Option<u32> = None;

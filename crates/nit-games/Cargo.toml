@@ -8,13 +8,13 @@ publish = false
 rust-version.workspace = true
 
 [dependencies]
+nit-metal = { path = "../nit-metal" }
+nit-utils = { path = "../nit-utils" }
+rayon = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
-toml = { workspace = true }
 time = { workspace = true, features = ["formatting"] }
-nit-utils = { path = "../nit-utils" }
-nit-metal = { path = "../nit-metal" }
-rayon = { workspace = true }
+toml = { workspace = true }
 
 [dev-dependencies]
 criterion = { workspace = true }

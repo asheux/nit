@@ -1868,6 +1868,10 @@ pub struct AppState {
     /// Mission ID for the in-flight turn evaluation batch.
     #[serde(skip)]
     pub genome_eval_mission_id: Option<String>,
+    /// Set by `Action::Save` to request a background genome evaluation.
+    /// The TUI layer drains this and dispatches to `GenomeWorker`.
+    #[serde(skip)]
+    pub genome_save_eval_pending: Option<PathBuf>,
     /// Scroll offset for the gate monitor / structural quality pane.
     #[serde(skip)]
     pub gate_monitor_scroll: usize,
@@ -2083,6 +2087,7 @@ impl AppState {
             genome_eval_worst_delta: 0,
             genome_eval_agent_id: None,
             genome_eval_mission_id: None,
+            genome_save_eval_pending: None,
             gate_monitor_scroll: 0,
             gate_monitor_sub_view: GateMonitorSubView::default(),
         }
@@ -2238,55 +2243,11 @@ pub fn apply_action(state: &mut AppState, action: Action) -> ActionOutcome {
             } else {
                 buf.mark_clean();
                 state.status = Some("Saved".into());
-                // Recompute genome report for the saved file.
+                // Request background genome evaluation for the saved file.
+                // The TUI layer picks this up and dispatches to GenomeWorker
+                // so the UI never blocks on GoL simulation.
                 if let Some(file_path) = state.editor_buffer().path().cloned() {
-                    let text = state.editor_buffer().content_as_string();
-                    let report = crate::genome_report::compute_genome_report(&text, &file_path);
-                    let (msg, delta) = if let Some(prev) = state.genome_reports.get(&file_path) {
-                        let gen_before: i32 = prev
-                            .encoder_scores
-                            .iter()
-                            .map(|s| s.generations_survived as i32)
-                            .sum();
-                        let gen_after: i32 = report
-                            .encoder_scores
-                            .iter()
-                            .map(|s| s.generations_survived as i32)
-                            .sum();
-                        let d = gen_after - gen_before;
-                        let diff = crate::genome_report::compute_genome_diff(prev, &report);
-                        if diff.tier_after > diff.tier_before {
-                            (
-                                format!(
-                                    "Saved \u{2014} quality upgraded: {} \u{2192} {}",
-                                    diff.tier_before, diff.tier_after,
-                                ),
-                                1,
-                            )
-                        } else if diff.tier_after < diff.tier_before {
-                            (
-                                format!(
-                                    "Saved \u{2014} quality degraded: {} \u{2192} {}",
-                                    diff.tier_before, diff.tier_after,
-                                ),
-                                -1,
-                            )
-                        } else if d > 0 {
-                            (format!("Saved \u{2014} quality improved (+{d} gen)"), 1)
-                        } else if d < 0 {
-                            (format!("Saved \u{2014} quality declined ({d} gen)"), -1)
-                        } else {
-                            (
-                                format!("Saved \u{2014} quality unchanged ({})", report.tier),
-                                0,
-                            )
-                        }
-                    } else {
-                        (format!("Saved \u{2014} genome: {}", report.tier), 0)
-                    };
-                    state.genome_quality_delta = delta;
-                    state.genome_reports.insert(file_path, report);
-                    state.status = Some(msg);
+                    state.genome_save_eval_pending = Some(file_path);
                 }
             }
             if matches!(action, Action::SaveAndNormal) {

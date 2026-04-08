@@ -1,14 +1,4 @@
 //! Strategy specification parsing from TOML configuration.
-//!
-//! Each public function in this module converts a raw [`StrategyConfig`] (one
-//! `[[strategy]]` table from TOML) into a validated [`StrategySpecKind`] for a
-//! single strategy family:
-//!
-//! - [`normalize_fsm_kind`]  -- finite state machines (notebook-index or
-//!   explicit transitions)
-//! - [`normalize_ca_kind`]   -- elementary / totalistic cellular automata
-//! - [`normalize_tm_kind`]   -- one-sided Turing machines
-//! - [`load_generated_strategies`] -- bulk import from a JSONL file
 
 use super::types::{StrategyConfig, StrategySpec, StrategySpecKind};
 use crate::game::Action;
@@ -19,12 +9,6 @@ use crate::strategy::{
 use serde::Deserialize;
 use std::path::Path;
 
-/// Normalizes a raw strategy config into an FSM [`StrategySpecKind`].
-///
-/// Supports two encoding modes: a compact notebook index (when `raw.index` is
-/// set) or explicit `outputs` + `transitions` tables.  Validation errors are
-/// appended to `errors` rather than returned early so that as many problems as
-/// possible are reported in a single pass.
 pub(super) fn normalize_fsm_kind(
     raw: &StrategyConfig,
     errors: &mut Vec<String>,
@@ -142,11 +126,6 @@ pub(super) fn normalize_fsm_kind(
     }
 }
 
-/// Normalizes a raw strategy config into a cellular automaton [`StrategySpecKind`].
-///
-/// Validates the neighbourhood radius `r` (must be non-negative with `2r`
-/// integral), alphabet size `k`, and that the resulting rule table is not
-/// unreasonably large.
 pub(super) fn normalize_ca_kind(
     raw: &StrategyConfig,
     errors: &mut Vec<String>,
@@ -162,7 +141,7 @@ pub(super) fn normalize_ca_kind(
         errors.push(format!("strategy '{id}': ca.k must be <= {}", u8::MAX));
     }
     let r_raw = raw.r.unwrap_or(-1.0);
-    let two_r = match parse_two_r(r_raw) {
+    let two_r = match neighborhood_radius_to_diameter(r_raw) {
         Some(value) => value,
         None => {
             errors.push(format!(
@@ -763,11 +742,10 @@ pub(super) fn load_generated_strategies(
     }
 }
 
-/// Converts a CA neighbourhood radius `r` to `2r` as an integer.
-///
-/// Returns `None` when `r` is non-finite, negative, or `2r` is not
-/// (approximately) an integer.
-fn parse_two_r(r: f32) -> Option<u32> {
+/// Converts CA neighbourhood radius to diameter (`2r`) as an integer.
+/// Returns `None` when the input is invalid (non-finite, negative, or
+/// non-integer when doubled).
+fn neighborhood_radius_to_diameter(r: f32) -> Option<u32> {
     if !r.is_finite() || r < 0.0 {
         return None;
     }

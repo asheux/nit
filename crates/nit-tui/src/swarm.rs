@@ -5193,16 +5193,67 @@ fn task_artifacts_summary_for_prompt(task: &SwarmTask, mission_id: &str) -> Opti
 fn parse_task_artifacts(task_id: &str, message: &str) -> Option<SwarmTaskArtifacts> {
     let mut merged = SwarmTaskArtifacts::default();
     let mut found = false;
+
+    // Primary: look in fenced ```json blocks.
     for json in extract_json_code_blocks(message) {
         let Ok(value) = serde_json::from_str::<serde_json::Value>(&json) else {
             continue;
         };
-        let Some(parsed) = parse_task_artifacts_value(task_id, &value) else {
-            continue;
-        };
-        merge_task_artifacts(&mut merged, parsed);
-        found = true;
+        if let Some(parsed) = parse_task_artifacts_value(task_id, &value) {
+            merge_task_artifacts(&mut merged, parsed);
+            found = true;
+        }
     }
+
+    // Fallback: scan for raw JSON objects containing "swarm_artifacts" in the
+    // message body.  Agents sometimes emit the JSON without a code fence, or
+    // use a plain ``` fence instead of ```json.
+    if !found {
+        let text = message.trim();
+        let mut search_from = 0;
+        while let Some(start) = text[search_from..].find(r#""type":"#).or_else(|| {
+            text[search_from..].find(r#""type" :"#)
+        }) {
+            let abs_start = search_from + start;
+            // Walk backward to find the opening brace.
+            let obj_start = match text[..abs_start].rfind('{') {
+                Some(s) => s,
+                None => {
+                    search_from = abs_start + 1;
+                    continue;
+                }
+            };
+            // Walk forward to find the matching closing brace.
+            let mut depth = 0i32;
+            let mut obj_end = None;
+            for (i, ch) in text[obj_start..].char_indices() {
+                match ch {
+                    '{' => depth += 1,
+                    '}' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            obj_end = Some(obj_start + i);
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            let Some(end) = obj_end else {
+                search_from = abs_start + 1;
+                continue;
+            };
+            let candidate = &text[obj_start..=end];
+            if let Ok(value) = serde_json::from_str::<serde_json::Value>(candidate) {
+                if let Some(parsed) = parse_task_artifacts_value(task_id, &value) {
+                    merge_task_artifacts(&mut merged, parsed);
+                    found = true;
+                }
+            }
+            search_from = end + 1;
+        }
+    }
+
     if found && !merged.is_empty() {
         Some(merged)
     } else {

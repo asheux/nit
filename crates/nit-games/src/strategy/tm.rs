@@ -1,7 +1,4 @@
 //! One-sided Turing machine (TM) strategy implementation.
-//!
-//! Provides [`OneSidedTmStrategy`], the TM evaluation engine, trace capture,
-//! and the [`InputSuffix`] type used for incremental history encoding.
 
 use super::math::{digits_in_base, digits_to_u64};
 use crate::game::Action;
@@ -9,7 +6,6 @@ use crate::history::{History, RoundRecord};
 
 // ── TM run statistics ────────────────────────────────────────
 
-/// Accumulated runtime statistics for a TM strategy across multiple rounds.
 #[derive(Clone, Debug, Default)]
 pub struct TmRunStats {
     pub rounds: u64,
@@ -22,7 +18,6 @@ pub struct TmRunStats {
 }
 
 impl TmRunStats {
-    /// Merge another set of stats into this one (additive, min/max preserved).
     pub fn merge(&mut self, incoming: &Self) {
         if incoming.rounds > 0 {
             if self.rounds == 0 {
@@ -43,7 +38,6 @@ impl TmRunStats {
 
 // ── TM trace types ───────────────────────────────────────────
 
-/// A single step in a TM execution trace.
 #[derive(Clone, Debug)]
 pub struct TmTraceStep {
     pub step: usize,
@@ -57,7 +51,6 @@ pub struct TmTraceStep {
     pub tape: Vec<u8>,
 }
 
-/// Full execution trace of a TM run, including initial tape and all steps.
 #[derive(Clone, Debug)]
 pub struct TmTrace {
     pub input_digits: Vec<u8>,
@@ -66,20 +59,14 @@ pub struct TmTrace {
     pub steps: Vec<TmTraceStep>,
 }
 
-/// Reason a TM run terminated.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum TmStopReason {
-    /// Head moved right past the last tape cell, producing an output.
     Output,
-    /// Step limit reached without halting.
     MaxSteps,
-    /// No transition entry for the current (state, symbol) pair.
     MissingTransition,
-    /// State index was zero (the halt pseudo-state) before completion.
     InvalidState,
 }
 
-/// Result of running a one-sided TM on an input.
 #[derive(Clone, Debug)]
 pub struct TmRunResult {
     pub output_value: Option<u64>,
@@ -91,11 +78,7 @@ pub struct TmRunResult {
 }
 
 impl TmRunResult {
-    /// Construct a non-output termination result (max-steps, invalid-state, etc.).
-    ///
-    /// Most TM exits produce no output value -- only the `Output` stop reason
-    /// does. This constructor captures the common pattern for all other exit
-    /// paths.
+    /// Non-output termination (max-steps, invalid-state, missing-transition).
     fn terminated(steps_taken: u32, stop_reason: TmStopReason, trace: Option<TmTrace>) -> Self {
         Self {
             output_value: None,
@@ -110,19 +93,15 @@ impl TmRunResult {
 
 // ── TM evaluation engine ─────────────────────────────────────
 
-/// Compute the flat transition-table index for a given (state, symbol) pair.
-///
-/// States are 1-indexed externally; subtracting 1 converts to the 0-based row.
+/// States are 1-indexed externally; subtracting 1 gives the 0-based row.
 fn transition_index(current_state: u16, read_symbol: u8, symbol_count: u8) -> usize {
     (current_state.saturating_sub(1) as usize)
         .saturating_mul(symbol_count as usize)
         .saturating_add(read_symbol as usize)
 }
 
-/// Move the head according to the transition direction, expanding the tape
-/// leftward (with a blank cell) when the head would underflow position 0.
-///
-/// Returns the new head position after the move.
+/// Move the head, expanding the tape leftward with a blank when the head
+/// would underflow position 0.
 fn apply_head_movement(
     direction: super::TmMove,
     head_pos: usize,
@@ -149,8 +128,6 @@ fn apply_head_movement(
     }
 }
 
-/// Snapshot of a single TM step, used to build trace records without
-/// passing many individual arguments.
 struct StepSnapshot {
     step_number: usize,
     current_state: u16,
@@ -160,7 +137,6 @@ struct StepSnapshot {
     head_after: usize,
 }
 
-/// Append one step record to the trace (if tracing is enabled).
 fn record_trace_step(trace: &mut Option<TmTrace>, snap: &StepSnapshot, tape: &[u8]) {
     let Some(active_trace) = trace.as_mut() else {
         return;
@@ -178,7 +154,6 @@ fn record_trace_step(trace: &mut Option<TmTrace>, snap: &StepSnapshot, tape: &[u
     });
 }
 
-/// Run a one-sided TM with integer input converted to digit form.
 pub fn run_one_sided_tm_from_integer(
     transitions: &[super::TmTransition],
     symbols: u8,
@@ -200,13 +175,8 @@ pub fn run_one_sided_tm_from_integer(
     )
 }
 
-/// Run a one-sided Turing machine on explicit input digits.
-///
-/// The tape is initialized from `input_digits` (MSD first) with the head
-/// positioned at the rightmost cell. The TM halts with output when the head
-/// moves right past the last tape cell. Execution also terminates on step
-/// limit, missing transition, or entering the halt pseudo-state (0).
-/// Returns [`TmRunResult`] with the execution outcome and optional trace.
+/// Run a one-sided TM on explicit input digits (MSD first, head starts
+/// rightmost). Halts with output when head moves past the last cell.
 pub fn run_one_sided_tm(
     transitions: &[super::TmTransition],
     symbol_count: u8,
@@ -308,8 +278,6 @@ pub fn run_one_sided_tm(
 
 // ── TM output helper ─────────────────────────────────────────
 
-/// Map a TM output symbol to a game action: 0 maps to Cooperate,
-/// any non-zero symbol maps to Defect.
 pub(crate) fn tm_action_from_output_symbol(symbol: u8) -> Action {
     if symbol == 0 {
         Action::Cooperate
@@ -320,7 +288,6 @@ pub(crate) fn tm_action_from_output_symbol(symbol: u8) -> Action {
 
 // ── One-sided TM strategy ────────────────────────────────────
 
-/// Strategy that runs a one-sided Turing machine each round to decide an action.
 #[derive(Clone, Debug)]
 pub struct OneSidedTmStrategy {
     id: String,
@@ -335,7 +302,6 @@ pub struct OneSidedTmStrategy {
 }
 
 impl OneSidedTmStrategy {
-    /// Construct from TM parameters and transition table.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         id: impl Into<String>,

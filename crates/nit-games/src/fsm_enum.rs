@@ -1,11 +1,4 @@
-//! Enumeration, canonicalisation, and behavioural grouping of finite-state
-//! machine (FSM) strategies.
-//!
-//! This module provides the machinery to systematically enumerate the full FSM
-//! strategy space for a given `(states, actions)` pair, canonicalise each FSM
-//! via BFS state renumbering, and group behaviourally equivalent strategies
-//! together using either trace-based (WNBM) or Moore-minimisation-based
-//! (Moorem) signatures.
+//! Enumeration, canonicalisation, and behavioural grouping of FSM strategies.
 
 use std::collections::{HashMap, VecDeque};
 use std::hash::Hash;
@@ -19,8 +12,6 @@ use crate::strategy::math::{checked_pow_u128, floor_div_rem_i128, integer_digits
 use crate::strategy::InputMode;
 use nit_utils::hashing::stable_hash_bytes;
 
-/// A complete definition of a finite-state machine strategy, including state
-/// count, start state, per-state outputs, input mode, and the transition table.
 #[derive(Clone, Debug)]
 pub struct FsmDefinition {
     pub num_states: usize,
@@ -31,8 +22,6 @@ pub struct FsmDefinition {
 }
 
 impl FsmDefinition {
-    /// Convert this definition into a [`StrategySpec`] suitable for tournament
-    /// configuration, tagging it with the given `id`.
     pub fn to_spec(&self, id: String) -> StrategySpec {
         StrategySpec {
             id,
@@ -48,9 +37,7 @@ impl FsmDefinition {
         }
     }
 
-    /// Produce a deterministic, human-readable key that uniquely identifies
-    /// this FSM definition (mode, state count, start state, outputs,
-    /// transitions).
+    /// Deterministic human-readable key uniquely identifying this FSM.
     pub fn stable_key(&self) -> String {
         let mut out = String::new();
         out.push_str("mode=");
@@ -82,8 +69,6 @@ impl FsmDefinition {
         out
     }
 
-    /// A 64-bit hash of [`Self::stable_key`], suitable for compact identity
-    /// checks and caching.
     pub fn stable_hash(&self) -> u64 {
         stable_hash_bytes(self.stable_key().as_bytes())
     }
@@ -93,76 +78,41 @@ impl FsmDefinition {
 ///
 /// Unreachable states are discarded and the start state becomes state 0. Two
 /// FSMs that differ only in state numbering will produce identical canonical
-/// forms.
+/// forms. Delegates to the shared BFS implementation via `canonicalize_raw_fsm`.
 pub fn canonicalize_fsm(def: &FsmDefinition) -> FsmDefinition {
-    let alphabet = def.input_mode.alphabet_size();
     if def.num_states == 0 || def.outputs.is_empty() {
         return def.clone();
     }
-    let start_state = def.start_state.min(def.num_states.saturating_sub(1));
-    let mut map = vec![None; def.num_states];
-    let mut order = Vec::new();
-    let mut queue = VecDeque::new();
-    let mut next_id = 1usize;
-    map[start_state] = Some(0);
-    queue.push_back(start_state);
-
-    while let Some(state) = queue.pop_front() {
-        order.push(state);
-        if let Some(row) = def.transitions.get(state) {
-            for symbol in 0..alphabet {
-                let next = row
-                    .get(symbol)
-                    .copied()
-                    .filter(|candidate| *candidate < def.num_states)
-                    .unwrap_or(state);
-                if next < def.num_states && map[next].is_none() {
-                    map[next] = Some(next_id);
-                    next_id += 1;
-                    queue.push_back(next);
-                }
-            }
-        }
-    }
-
-    let reachable = order.len();
-    let mut outputs = Vec::with_capacity(reachable);
-    for &state in &order {
-        outputs.push(def.outputs.get(state).copied().unwrap_or(Action::Cooperate));
-    }
-
-    let mut transitions = Vec::with_capacity(reachable);
-    for &state in &order {
-        let mut row = Vec::with_capacity(alphabet);
-        for symbol in 0..alphabet {
-            let next = def
-                .transitions
-                .get(state)
-                .and_then(|row| row.get(symbol))
-                .copied()
-                .filter(|candidate| *candidate < def.num_states)
-                .unwrap_or(state);
-            let mapped = map[next].unwrap_or(0);
-            row.push(mapped);
-        }
-        transitions.push(row);
-    }
-
+    let start = def.start_state.min(def.num_states.saturating_sub(1));
+    let raw = RawFsm {
+        outputs: def
+            .outputs
+            .iter()
+            .map(|action| match action {
+                Action::Cooperate => 0,
+                Action::Defect => 1,
+            })
+            .collect(),
+        transitions: def.transitions.clone(),
+        actions: def.input_mode.alphabet_size(),
+    };
+    let canonical = canonicalize_raw_fsm(&raw, start);
     FsmDefinition {
-        num_states: reachable,
+        num_states: canonical.states(),
         start_state: 0,
-        outputs,
+        outputs: canonical
+            .outputs
+            .iter()
+            .map(|&idx| if idx == 0 { Action::Cooperate } else { Action::Defect })
+            .collect(),
         input_mode: def.input_mode,
-        transitions,
+        transitions: canonical.transitions,
     }
 }
 
-/// Enumerate all FSM strategies for the given state count and input mode,
-/// calling `emit` for each unique machine.
-///
-/// When `canonical` is true, each emitted FSM is canonicalised first and
-/// duplicates (under canonical equivalence) are suppressed. Returns the
-/// total number of emitted FSMs. An optional `limit` caps the count early.
+/// Enumerate all FSM strategies, calling `emit` for each unique machine.
+/// When `canonical` is true, duplicates under canonical equivalence are
+/// suppressed. Returns the total emitted count.
 pub fn enumerate_fsms<F>(
     num_states: usize,
     input_mode: InputMode,
@@ -250,15 +200,11 @@ where
     count
 }
 
-/// Internal representation of an FSM used by the enumeration and grouping
-/// internals, where outputs are stored as plain `usize` action indices.
+/// Internal FSM representation with outputs as plain action indices.
 #[derive(Clone, Debug)]
 struct RawFsm {
-    /// Per-state output action index (0-based).
     outputs: Vec<usize>,
-    /// Transition table: `transitions[state][input_symbol] -> next_state`.
     transitions: Vec<Vec<usize>>,
-    /// Number of distinct input symbols (alphabet size).
     actions: usize,
 }
 
@@ -320,9 +266,7 @@ fn merge_min_index_maps(left: &mut HashMap<Vec<u16>, u64>, right: HashMap<Vec<u1
     }
 }
 
-/// Return the sorted list of notebook indices that are canonical
-/// representatives of their isomorphism class for the given `(states,
-/// actions)` pair. Results are cached after the first computation.
+/// Sorted canonical representative indices for `(states, actions)`. Cached.
 pub fn canonical_fsm_indices(states: usize, actions: usize) -> Result<Vec<u64>, String> {
     clone_cached_vec_result(
         canonical_fsm_cache(),
@@ -333,8 +277,7 @@ pub fn canonical_fsm_indices(states: usize, actions: usize) -> Result<Vec<u64>, 
 
 const NOTEBOOK_BEHAVIOR_TRACE_STEPS: usize = 12;
 
-/// Group canonical FSM indices by behavioural equivalence using the default
-/// WNBM (trace-based) grouping mode.
+/// Group canonical indices by behavioural equivalence (default WNBM mode).
 pub fn group_canonical_fsm_indices_by_behavior(
     states: usize,
     actions: usize,
@@ -342,8 +285,6 @@ pub fn group_canonical_fsm_indices_by_behavior(
     group_canonical_fsm_indices_by_behavior_with_mode(states, actions, FsmGroupingMode::Wnbm)
 }
 
-/// Group canonical FSM indices by behavioural equivalence using the
-/// specified [`FsmGroupingMode`].
 pub fn group_canonical_fsm_indices_by_behavior_with_mode(
     states: usize,
     actions: usize,
@@ -370,8 +311,7 @@ pub fn group_canonical_fsm_indices_by_behavior_with_mode(
     Ok(groups)
 }
 
-/// Return one canonical index per distinct behaviour using the default WNBM
-/// grouping mode.
+/// One canonical index per distinct behaviour (default WNBM mode).
 pub fn unique_fsm_behavior_representatives(
     states: usize,
     actions: usize,
@@ -379,8 +319,7 @@ pub fn unique_fsm_behavior_representatives(
     unique_fsm_behavior_representatives_with_mode(states, actions, FsmGroupingMode::Wnbm)
 }
 
-/// Return one canonical index per distinct behaviour using the specified
-/// [`FsmGroupingMode`]. Results are cached.
+/// One canonical index per distinct behaviour, with explicit mode. Cached.
 pub fn unique_fsm_behavior_representatives_with_mode(
     states: usize,
     actions: usize,

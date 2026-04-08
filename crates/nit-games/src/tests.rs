@@ -1901,6 +1901,35 @@ fn select_halting_turing_machine_strategies_matches_results_06_good_tms() {
     assert_eq!(ids, vec!["tm_1", "tm_3", "tm_5", "tm_7", "tm_13", "tm_15"]);
 }
 
+#[cfg(target_os = "macos")]
+#[test]
+fn metal_halting_turing_machine_selection_matches_cpu_results_06_good_tms() {
+    let cfg_cpu = GamesConfig::from_toml(&tm_family_1x2_reference_toml(200)).expect("parse config");
+    let expected = select_halting_turing_machine_strategies(cfg_cpu);
+    let expected_ids = expected
+        .strategies
+        .iter()
+        .map(|spec| spec.id.as_str())
+        .collect::<Vec<_>>();
+
+    let mut cfg_metal =
+        GamesConfig::from_toml(&tm_family_1x2_reference_toml(200)).expect("parse config");
+    cfg_metal.engine.mode = EngineMode::Batch;
+    cfg_metal.engine.fast_eval = true;
+    cfg_metal.engine.accelerator = AcceleratorMode::Metal;
+    if accelerator_preflight(&cfg_metal).is_err() {
+        return;
+    }
+    let actual = select_halting_turing_machine_strategies(cfg_metal);
+    let actual_ids = actual
+        .strategies
+        .iter()
+        .map(|spec| spec.id.as_str())
+        .collect::<Vec<_>>();
+
+    assert_eq!(actual_ids, expected_ids);
+}
+
 #[test]
 fn strict_tm_selection_with_diagnostics_preserves_results_06_survivors() {
     let cfg = GamesConfig::from_toml(&tm_family_1x2_reference_toml(200)).expect("parse config");

@@ -11,8 +11,6 @@ use super::{canonical_game_name, ConfigResult, CONFIG_SCHEMA_VERSION};
 use crate::game::{Action, PayoffMatrix};
 use crate::strategy::InputMode;
 
-/// Raw optional fields shared by both [`GamesConfig`] and
-/// [`FamilyRunParseConfig`], bundled for [`validate_base`].
 struct RawBaseFields {
     schema_version: Option<u32>,
     game: Option<String>,
@@ -23,7 +21,6 @@ struct RawBaseFields {
     payoff: Option<super::types::PayoffConfig>,
 }
 
-/// Validated scalars and payoff matrix produced by [`validate_base`].
 struct ValidatedBase {
     schema_version: u32,
     game: String,
@@ -34,9 +31,6 @@ struct ValidatedBase {
     payoff: PayoffMatrix,
 }
 
-/// Shared validation for fields common to both full tournament configs and
-/// family-run base configs.  Returns the validated scalars and payoff matrix,
-/// appending any problems to `errors`.
 fn validate_base(raw: RawBaseFields, errors: &mut Vec<String>) -> ValidatedBase {
     let schema_version = raw.schema_version.unwrap_or(CONFIG_SCHEMA_VERSION);
     let game = resolve_game_name(raw.game, errors);
@@ -68,8 +62,6 @@ fn validate_base(raw: RawBaseFields, errors: &mut Vec<String>) -> ValidatedBase 
     }
 }
 
-/// Validates that an [`EngineConfig`]'s parallelism settings are sane,
-/// appending any problems to `errors`.
 fn validate_engine(engine: &super::types::EngineConfig, errors: &mut Vec<String>) {
     if let ParallelismConfig::Threads { threads } = engine.parallelism {
         if threads == 0 {
@@ -79,9 +71,6 @@ fn validate_engine(engine: &super::types::EngineConfig, errors: &mut Vec<String>
 }
 
 impl GamesConfig {
-    /// Parses a TOML string into a fully validated [`NormalizedConfig`].
-    ///
-    /// Equivalent to calling [`Self::from_toml_with_root`] with `base_dir = None`.
     pub fn from_toml(src: &str) -> ConfigResult<NormalizedConfig> {
         let raw: Self = toml::from_str(src).map_err(|err| ConfigError {
             errors: vec![err.to_string()],
@@ -89,8 +78,6 @@ impl GamesConfig {
         raw.normalize_with_root(None)
     }
 
-    /// Parses a TOML string into a fully validated [`NormalizedConfig`],
-    /// resolving relative strategy source paths against `base_dir`.
     pub fn from_toml_with_root(
         src: &str,
         base_dir: Option<&std::path::Path>,
@@ -101,8 +88,6 @@ impl GamesConfig {
         raw.normalize_with_root(base_dir)
     }
 
-    /// Parses a TOML string into a [`FamilyRunBaseConfig`] (shared tournament
-    /// parameters without individual strategy definitions).
     pub fn family_run_base_from_toml_with_root(
         src: &str,
         _base_dir: Option<&std::path::Path>,
@@ -113,14 +98,10 @@ impl GamesConfig {
         raw.normalize_family_run_base()
     }
 
-    /// Validates and normalizes this config using the current working directory
-    /// for any relative paths.
     pub fn normalize(self) -> ConfigResult<NormalizedConfig> {
         self.normalize_with_root(None)
     }
 
-    /// Validates and normalizes this config, resolving relative strategy source
-    /// paths against the optional `base_dir`.
     pub fn normalize_with_root(
         self,
         base_dir: Option<&std::path::Path>,
@@ -180,8 +161,6 @@ impl GamesConfig {
 }
 
 impl FamilyRunBaseConfig {
-    /// Extracts the shared tournament parameters from a fully normalized config,
-    /// including a TM blank-symbol hint when any strategy is a Turing machine.
     pub fn from_normalized(config: &NormalizedConfig) -> Self {
         let tm_blank_hint = config.strategies.iter().find_map(|spec| match &spec.kind {
             StrategySpecKind::OneSidedTm { blank, .. } => Some(*blank),
@@ -204,8 +183,6 @@ impl FamilyRunBaseConfig {
         }
     }
 
-    /// Combines this base config with a set of strategy specs to produce a
-    /// complete [`NormalizedConfig`] ready for tournament execution.
     pub fn into_normalized(self, strategies: Vec<StrategySpec>) -> NormalizedConfig {
         NormalizedConfig {
             schema_version: self.schema_version,
@@ -228,8 +205,6 @@ impl FamilyRunBaseConfig {
 }
 
 impl FamilyRunParseConfig {
-    /// Validates the raw parsed family-run TOML into a [`FamilyRunBaseConfig`],
-    /// applying the same scalar and engine checks as full config normalization.
     fn normalize_family_run_base(self) -> ConfigResult<FamilyRunBaseConfig> {
         let mut errors = Vec::new();
 
@@ -271,12 +246,6 @@ impl FamilyRunParseConfig {
     }
 }
 
-/// Resolves an optional raw game name to its canonical form.
-///
-/// Falls back to `"ipd"` when `raw_name` is `None`.  If the provided name
-/// does not match any known alias (see [`canonical_game_name`]), an error
-/// describing the unsupported game is appended to `errors` and the original
-/// input is returned unchanged so that later validation can still proceed.
 fn resolve_game_name(raw_name: Option<String>, errors: &mut Vec<String>) -> String {
     let input = raw_name.unwrap_or_else(|| "ipd".to_string());
     match canonical_game_name(&input) {

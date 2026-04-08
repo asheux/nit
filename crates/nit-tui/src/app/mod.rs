@@ -1377,6 +1377,12 @@ fn run_loop(
                 &claude_runner,
             );
 
+            // Dispatch save-triggered genome evaluation to background worker.
+            if let Some(path) = state.genome_save_eval_pending.take() {
+                let text = state.editor_buffer().content_as_string();
+                genome_worker.evaluate_save(path, text);
+            }
+
             // Auto-compute genome report for the active editor buffer if missing.
             maybe_compute_genome_report(state, &genome_worker);
 
@@ -1983,6 +1989,52 @@ fn drain_genome_results(
         if state.genome_computing && state.editor_buffer().path() == Some(&path) {
             state.genome_computing = false;
             state.gate_monitor_scroll = 0;
+        }
+
+        if result.save_eval {
+            // Save-triggered evaluation — update report and show quality delta in status.
+            let msg = if let Some(prev) = state.genome_reports.get(&path) {
+                let diff = nit_core::genome_report::compute_genome_diff(prev, &report);
+                let gen_before: i32 = prev
+                    .encoder_scores
+                    .iter()
+                    .map(|s| s.generations_survived as i32)
+                    .sum();
+                let gen_after: i32 = report
+                    .encoder_scores
+                    .iter()
+                    .map(|s| s.generations_survived as i32)
+                    .sum();
+                let d = gen_after - gen_before;
+                if diff.tier_after > diff.tier_before {
+                    state.genome_quality_delta = 1;
+                    format!(
+                        "Saved \u{2014} quality upgraded: {} \u{2192} {}",
+                        diff.tier_before, diff.tier_after,
+                    )
+                } else if diff.tier_after < diff.tier_before {
+                    state.genome_quality_delta = -1;
+                    format!(
+                        "Saved \u{2014} quality degraded: {} \u{2192} {}",
+                        diff.tier_before, diff.tier_after,
+                    )
+                } else if d > 0 {
+                    state.genome_quality_delta = 1;
+                    format!("Saved \u{2014} quality improved (+{d} gen)")
+                } else if d < 0 {
+                    state.genome_quality_delta = -1;
+                    format!("Saved \u{2014} quality declined ({d} gen)")
+                } else {
+                    state.genome_quality_delta = 0;
+                    format!("Saved \u{2014} quality unchanged ({})", report.tier)
+                }
+            } else {
+                state.genome_quality_delta = 0;
+                format!("Saved \u{2014} genome: {}", report.tier)
+            };
+            state.genome_reports.insert(path, report);
+            state.status = Some(msg);
+            continue;
         }
 
         if result.shadow {

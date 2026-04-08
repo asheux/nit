@@ -15,6 +15,8 @@ pub struct GenomeEvalResult {
     /// `true` for shadow evaluations (during a turn), `false` for
     /// authoritative turn-completion evaluations.
     pub shadow: bool,
+    /// `true` when this evaluation was triggered by a manual file save.
+    pub save_eval: bool,
 }
 
 /// Handle held by the main thread. Send files for evaluation, drain results.
@@ -43,6 +45,15 @@ impl GenomeWorker {
     /// Spawn a background thread to evaluate a single file.
     /// The result is sent to `self.rx` when ready.
     pub fn evaluate(&self, path: PathBuf, text: String, shadow: bool) {
+        self.evaluate_inner(path, text, shadow, false);
+    }
+
+    /// Like `evaluate`, but marks the result as originating from a manual save.
+    pub fn evaluate_save(&self, path: PathBuf, text: String) {
+        self.evaluate_inner(path, text, false, true);
+    }
+
+    fn evaluate_inner(&self, path: PathBuf, text: String, shadow: bool, save_eval: bool) {
         let tx = self.tx.clone();
         let _ = std::thread::Builder::new()
             .name("genome-eval".into())
@@ -53,6 +64,7 @@ impl GenomeWorker {
                     path,
                     report,
                     shadow,
+                    save_eval,
                 });
             });
     }

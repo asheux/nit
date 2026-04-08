@@ -1,26 +1,9 @@
 //! Configuration types, normalization, strategy parsing, and payoff handling.
-//!
-//! The config module owns the full pipeline from raw TOML input to the
-//! validated [`NormalizedConfig`] that the tournament engine consumes.
-//!
-//! # Module structure
-//!
-//! | Sub-module        | Responsibility                                      |
-//! |-------------------|-----------------------------------------------------|
-//! | [`types`]         | All public structs, enums, and serde definitions    |
-//! | [`normalize`]     | Top-level config + strategy kind normalization      |
-//! | [`strategy_parse`]| FSM/CA/TM transition and rule table parsing         |
-//! | [`payoff`]        | Payoff matrix construction and validation           |
 
 mod normalize;
 mod payoff;
 mod strategy_parse;
 mod types;
-
-// ── Core config types ────────────────────────────────────────────────────────
-//
-// Re-exported so consumers can `use nit_games::config::GamesConfig` without
-// reaching into the `types` sub-module.
 
 pub use types::{
     AcceleratorMode, ComplexityCostConfig, ConfigError, EngineConfig, EngineMode,
@@ -29,30 +12,11 @@ pub use types::{
     StrategySpec, StrategySpecKind,
 };
 
-// ── Constants ────────────────────────────────────────────────────────────────
-
-/// Current schema version for serialized config files.
 pub(crate) const CONFIG_SCHEMA_VERSION: u32 = 1;
 
-// ── Result alias ─────────────────────────────────────────────────────────────
-
-/// Convenience alias used throughout the config pipeline.
 pub(crate) type ConfigResult<T> = Result<T, ConfigError>;
 
-// ── Game name helpers ───────────────────────────────────────────────────────
-
-/// Maps a user-facing game name to the canonical identifier used internally.
-///
-/// Accepts any recognised alias for a supported game and returns the canonical
-/// form (e.g. `"pd"`, `"prisoners-dilemma"` -> `"ipd"`).  Returns `None` when
-/// `name` does not match any known game.
-///
-/// # Examples
-///
-/// ```ignore
-/// assert_eq!(canonical_game_name("pd"), Some("ipd"));
-/// assert_eq!(canonical_game_name("unknown"), None);
-/// ```
+/// Maps user-facing game aliases to the canonical identifier (e.g. `"pd"` -> `"ipd"`).
 pub(crate) fn canonical_game_name(name: &str) -> Option<&'static str> {
     match name {
         "ipd"

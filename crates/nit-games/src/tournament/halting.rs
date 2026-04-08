@@ -1,8 +1,4 @@
-//! Turing machine halting filter — pre-screens TM strategies for non-halting behaviour.
-//!
-//! Before a tournament runs, this module identifies TM strategies that never halt
-//! within the configured step budget and replaces them with equivalent always-defect
-//! stubs to avoid wasting compute during the actual tournament.
+//! TM halting filter — pre-screens strategies that never halt within the step budget.
 
 use super::metal::{metal_batch_decline_reason, try_prepare_metal_batch_for_workload};
 use super::schedule::{matches_per_repetition, total_schedule_matches, SchedulePlan};
@@ -29,15 +25,13 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 const AUTO_TM_METAL_PROBE_TIMEOUT: Duration = Duration::from_millis(300);
+const SCORE_EPSILON: f64 = 1e-9;
 static AUTO_TM_METAL_PROBE_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
 
-/// Compare two floating-point scores with a small epsilon tolerance.
-///
-/// Scores within `1e-9` of each other are considered equal, avoiding
-/// spurious win/loss distinctions from floating-point rounding.
+/// Compare two floating-point scores with epsilon tolerance.
 pub(super) fn compare_scores(a: f64, b: f64) -> Ordering {
     let diff = (a - b).abs();
-    if diff < 1e-9 {
+    if diff < SCORE_EPSILON {
         Ordering::Equal
     } else if a > b {
         Ordering::Greater
@@ -46,18 +40,14 @@ pub(super) fn compare_scores(a: f64, b: f64) -> Ordering {
     }
 }
 
-/// Returns `true` if the strategy spec describes a one-sided Turing machine.
 fn strategy_is_one_sided_tm(spec: &StrategySpec) -> bool {
     matches!(spec.kind, StrategySpecKind::OneSidedTm { .. })
 }
 
-/// Returns `true` when the roster is non-empty and every strategy is a one-sided TM.
 fn roster_is_all_tms(strategies: &[StrategySpec]) -> bool {
     !strategies.is_empty() && strategies.iter().all(strategy_is_one_sided_tm)
 }
 
-/// Returns `true` when the TM run stats indicate the machine halted on every round
-/// (zero fallbacks and output events equal to rounds played).
 fn tm_stats_always_halt(stats: Option<&TmRunStats>) -> bool {
     stats
         .map(|stats| stats.fallback == 0 && stats.output_events == stats.rounds)
@@ -262,11 +252,7 @@ fn notebook_tm_matchup_halts_all_rounds(
     (a_keep, b_keep)
 }
 
-/// Compute the halting mask for an all-TM roster using pairwise CPU simulation.
-///
-/// Scans one repetition of the schedule (TM-vs-TM outcomes are deterministic
-/// across repetitions) and marks any strategy that fails to halt in at least
-/// one matchup. Returns the per-strategy keep mask and cache/evaluation stats.
+/// Halting mask for an all-TM roster via pairwise CPU simulation.
 fn notebook_tm_family_halting_mask(
     config: &NormalizedConfig,
 ) -> (Vec<bool>, NotebookTmFamilyStats) {
@@ -486,15 +472,9 @@ fn mark_tm_halting_selection(
     }
 }
 
-/// Result from `try_metal_tm_family_halting_mask`: outer `Option` is `None`
-/// when the batch was declined, inner `Option` carries the keep-mask and stats.
 type MetalProbeResult = Result<Option<(Vec<bool>, MetalTmHaltingStats)>, String>;
 
-/// Dispatch Metal GPU probe for TM halting analysis, with auto-mode timeout guard.
-///
-/// In `Auto` mode a concurrent probe guard (`AUTO_TM_METAL_PROBE_IN_FLIGHT`)
-/// prevents multiple GPU probes from overlapping; the probe is run on a dedicated
-/// thread with a timeout. In explicit Metal mode the probe runs synchronously.
+/// Dispatch Metal probe with auto-mode timeout guard and concurrency protection.
 fn dispatch_metal_tm_probe(
     config: &NormalizedConfig,
     diagnostics: &mut TmHaltingFilterDiagnostics,
@@ -541,12 +521,7 @@ fn dispatch_metal_tm_probe(
     }
 }
 
-/// Handle the result of a Metal probe, updating diagnostics and returning
-/// the keep-mask if the probe succeeded.
-///
-/// Returns `Ok(Some(keep))` when Metal produced valid results, `Ok(None)` when
-/// the probe declined or errored non-fatally, and `Err` when strict Metal mode
-/// requires GPU acceleration but it is unavailable.
+/// Process a Metal probe result, updating diagnostics. Returns the keep-mask on success.
 fn apply_metal_probe_result(
     probe_result: MetalProbeResult,
     config: &NormalizedConfig,
@@ -602,11 +577,7 @@ fn apply_metal_probe_result(
     }
 }
 
-/// All-TM roster halting: try Metal GPU first, fall back to notebook CPU.
-///
-/// When every strategy in the roster is a Turing machine, we can use a
-/// specialised evaluation path (notebook pairwise or Metal batch). This
-/// function orchestrates the Metal probe → CPU fallback cascade.
+/// All-TM roster halting: Metal GPU → notebook CPU fallback cascade.
 fn all_tm_halting_mask(
     config: &NormalizedConfig,
     strict_metal: bool,
@@ -666,11 +637,7 @@ fn all_tm_halting_mask(
     Ok(keep)
 }
 
-/// Compute the halting mask for all strategies in a tournament.
-///
-/// Selects the fastest available backend (Metal GPU → notebook CPU → mixed-roster
-/// CPU) and populates `diagnostics` with timing and backend metadata. Returns a
-/// boolean vector where `true` means the strategy at that index should be kept.
+/// Compute per-strategy halting mask, selecting the fastest available backend.
 fn halting_turing_machine_mask(
     config: &NormalizedConfig,
     seed: u64,
