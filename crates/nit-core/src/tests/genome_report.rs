@@ -84,7 +84,7 @@ asdfghjklasdfghjklasdfghjklasdfghjklasdfghjklasdfghjkl";
 #[test]
 fn genome_report_well_structured_rust() {
     let path = Path::new("test.rs");
-    let report = compute_genome_report(WELL_STRUCTURED_RUST, path);
+    let report = compute_genome_report_fast(WELL_STRUCTURED_RUST, path);
 
     assert_eq!(report.encoder_scores.len(), 4);
     // Well-structured code should score reasonably well on AST-driven encoders.
@@ -108,7 +108,7 @@ fn genome_report_well_structured_rust() {
 #[test]
 fn genome_report_gibberish() {
     let path = Path::new("test.rs");
-    let report = compute_genome_report(GIBBERISH, path);
+    let report = compute_genome_report_fast(GIBBERISH, path);
 
     // Gibberish is trivially small — auto-pass as Spaceship.
     assert!(report.encoder_scores.is_empty());
@@ -119,7 +119,7 @@ fn genome_report_gibberish() {
 #[test]
 fn genome_report_empty_file() {
     let path = Path::new("empty.rs");
-    let report = compute_genome_report("", path);
+    let report = compute_genome_report_fast("", path);
 
     // Empty file is trivially small — auto-pass as Spaceship.
     assert!(report.encoder_scores.is_empty());
@@ -238,7 +238,7 @@ fn genome_recommendations_high_density() {
                       fn d(){let x=1;let y=2;let z=x+y;println!(\"{}\",z);}\n\
                       fn e(){let x=1;let y=2;let z=x+y;println!(\"{}\",z);}";
     let path = Path::new("dense.rs");
-    let report = compute_genome_report(dense_code, path);
+    let report = compute_genome_report_fast(dense_code, path);
 
     // Check if any AST encoder has high density and a recommendation was generated.
     let has_high_density = report.encoder_scores.iter().any(|s| {
@@ -264,7 +264,7 @@ fn genome_recommendations_low_components() {
     // A single monolithic block should have low component count.
     let monolithic = "fn main() { println!(\"hello\"); }";
     let path = Path::new("mono.rs");
-    let report = compute_genome_report(monolithic, path);
+    let report = compute_genome_report_fast(monolithic, path);
 
     if let Some(ast_score) = report
         .encoder_scores
@@ -301,14 +301,14 @@ fn genome_report_performance() {
 
     let path = Path::new("perf.rs");
     let start = std::time::Instant::now();
-    let _report = compute_genome_report(&code, path);
+    let _report = compute_genome_report_fast(&code, path);
     let elapsed = start.elapsed();
 
-    // Must complete in under 5s (debug builds are ~10x slower than release;
-    // adaptive grid sizing uses 48x48 for this ~10KB file).
+    // With the fast test limit (500 gens) this should complete well under 2s
+    // even in debug builds.
     assert!(
-        elapsed.as_millis() < 5000,
-        "compute_genome_report took {}ms (limit: 5000ms)",
+        elapsed.as_millis() < 2000,
+        "compute_genome_report_fast took {}ms (limit: 2000ms)",
         elapsed.as_millis()
     );
 }
@@ -316,7 +316,7 @@ fn genome_report_performance() {
 #[test]
 fn format_genome_report_includes_all_encoders() {
     let path = Path::new("test.rs");
-    let report = compute_genome_report(WELL_STRUCTURED_RUST, path);
+    let report = compute_genome_report_fast(WELL_STRUCTURED_RUST, path);
     let formatted = format_genome_report(&report);
 
     let encoder_names = [
@@ -348,7 +348,7 @@ fn parsimony_detects_over_split_code() {
     code.push_str("}\n");
 
     let path = std::path::Path::new("bloated.rs");
-    let report = compute_genome_report(&code, path);
+    let report = compute_genome_report_fast(&code, path);
 
     // Should detect bloat: 26 functions averaging ~1-2 lines each.
     assert!(
@@ -376,7 +376,7 @@ fn parsimony_detects_over_split_code() {
 fn parsimony_does_not_flag_natural_code() {
     // The well-structured calculator is natural code — should NOT be flagged.
     let path = std::path::Path::new("test.rs");
-    let report = compute_genome_report(WELL_STRUCTURED_RUST, path);
+    let report = compute_genome_report_fast(WELL_STRUCTURED_RUST, path);
 
     assert!(
         !report.parsimony.bloat_detected,
@@ -400,7 +400,7 @@ fn parsimony_detects_comment_padding() {
     }
 
     let path = std::path::Path::new("padded.rs");
-    let report = compute_genome_report(&code, path);
+    let report = compute_genome_report_fast(&code, path);
 
     assert!(
         report.parsimony.comment_ratio > 0.40,

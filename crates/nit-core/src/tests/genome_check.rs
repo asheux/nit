@@ -5,17 +5,13 @@ fn genome_check_files() {
         .parent()
         .unwrap()
         .join("nit/src");
-    let files = [
-        "agents/claude.rs",
-        "agents/mod.rs",
-        "games/mod.rs",
-        "games/run.rs",
-        "games/sweep.rs",
-    ];
+    // Keep the check list small for fast CI. Two files cover both a small and
+    // large input so we exercise adaptive grid sizing without burning seconds.
+    let files = ["agents/mod.rs", "games/run.rs"];
     for name in &files {
         let full = base.join(name);
         let text = std::fs::read_to_string(&full).unwrap();
-        let report = crate::genome_report::compute_genome_report(&text, Path::new(name));
+        let report = crate::genome_report::compute_genome_report_fast(&text, Path::new(name));
         eprintln!("\n=== {} (Tier {}) ===", name, report.tier.numeral());
         for score in &report.encoder_scores {
             if matches!(

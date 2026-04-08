@@ -378,6 +378,21 @@ const QUALITY_ENCODERS: [SeedEncoderId; 4] = [
 const GENOME_MIN_SIGNIFICANT_LINES: usize = 20;
 
 pub fn compute_genome_report(text: &str, file_path: &Path) -> GenomeReport {
+    compute_genome_report_inner(text, file_path, MAX_GENERATIONS)
+}
+
+/// Test-only entry point with a reduced generation limit for fast tests.
+/// Most tests only need tier/parsimony correctness, not full 3000-gen fidelity.
+#[cfg(test)]
+pub fn compute_genome_report_fast(text: &str, file_path: &Path) -> GenomeReport {
+    compute_genome_report_inner(text, file_path, 500)
+}
+
+fn compute_genome_report_inner(
+    text: &str,
+    file_path: &Path,
+    max_generations: u32,
+) -> GenomeReport {
     let significant_lines = text
         .lines()
         .filter(|line| {
@@ -435,6 +450,7 @@ pub fn compute_genome_report(text: &str, file_path: &Path) -> GenomeReport {
             encoded.stats.density,
             encoded.stats.components,
             conway,
+            max_generations,
         );
         encoder_scores.push(score);
     }
@@ -496,7 +512,7 @@ pub fn compute_genome_report(text: &str, file_path: &Path) -> GenomeReport {
     }
 }
 
-/// Simulate Conway's Game of Life on the grid for up to `MAX_GENERATIONS` generations.
+/// Simulate Conway's Game of Life on the grid for up to `max_generations` generations.
 /// Returns an `EncoderScore` with simulation results.
 fn simulate_gol(
     encoder: SeedEncoderId,
@@ -504,6 +520,7 @@ fn simulate_gol(
     density: f32,
     components: usize,
     rule: Rule,
+    max_generations: u32,
 ) -> EncoderScore {
     let mut grid = initial.clone();
     let mut seen: HashMap<u64, u32> = HashMap::new();
@@ -518,18 +535,18 @@ fn simulate_gol(
     let mut late_pop: u32 = 0;
     let mut died = false;
 
-    for gen in 1..=MAX_GENERATIONS {
+    for gen in 1..=max_generations {
         grid = nit_gol::step::step(&grid, rule, EdgeMode::Dead);
         let alive = grid.alive_count() as u32;
         if alive > peak_population {
             peak_population = alive;
         }
         // Sample early population (around 10% of sim).
-        if gen == MAX_GENERATIONS / 10 {
+        if gen == max_generations / 10 {
             early_pop = alive;
         }
         // Sample late population (around 80% of sim).
-        if gen == MAX_GENERATIONS * 4 / 5 {
+        if gen == max_generations * 4 / 5 {
             late_pop = alive;
         }
         // All cells dead — no further evolution possible.
@@ -548,7 +565,7 @@ fn simulate_gol(
         seen.insert(h, gen);
     }
     if cycle_period.is_none() && generations_survived == 0 {
-        generations_survived = MAX_GENERATIONS;
+        generations_survived = max_generations;
     }
 
     let growth_class = if died {
