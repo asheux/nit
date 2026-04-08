@@ -562,8 +562,7 @@ fn parsimony_over_split_at_boundary_15_fns_flags() {
     assert!(
         report.parsimony.bloat_detected,
         "15+ tiny fns should trigger (fn_count={}, avg={:.1})",
-        report.parsimony.fn_count,
-        report.parsimony.avg_fn_body_lines,
+        report.parsimony.fn_count, report.parsimony.avg_fn_body_lines,
     );
 }
 
@@ -582,9 +581,11 @@ fn parsimony_over_split_does_not_flag_medium_bodies() {
         report.parsimony.avg_fn_body_lines,
     );
     // Check the over-split signal specifically: it requires avg < 3.0.
-    let over_split = report.parsimony.fn_count >= 15
-        && report.parsimony.avg_fn_body_lines < 3.0;
-    assert!(!over_split, "Medium-body functions should not trigger over-split");
+    let over_split = report.parsimony.fn_count >= 15 && report.parsimony.avg_fn_body_lines < 3.0;
+    assert!(
+        !over_split,
+        "Medium-body functions should not trigger over-split"
+    );
 }
 
 #[test]
@@ -688,8 +689,7 @@ fn parsimony_tiny_fn_11_fns_no_flag() {
     let path = std::path::Path::new("tiny11.rs");
     let report = compute_genome_report_fast(&code, path);
 
-    let too_many_tiny = report.parsimony.fn_count >= 12
-        && report.parsimony.tiny_fn_fraction > 0.50;
+    let too_many_tiny = report.parsimony.fn_count >= 12 && report.parsimony.tiny_fn_fraction > 0.50;
     assert!(
         !too_many_tiny,
         "11 fns should not trigger tiny-fn check (fn_count={})",
@@ -830,7 +830,10 @@ fn parsimony_comment_and_split_both_flag() {
         .recommendations
         .iter()
         .any(|r| r.metric == "comment_padding");
-    assert!(has_split_rec, "Should have over-split or tiny_functions rec");
+    assert!(
+        has_split_rec,
+        "Should have over-split or tiny_functions rec"
+    );
     assert!(has_comment_rec, "Should have comment_padding rec");
 }
 

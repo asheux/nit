@@ -15,45 +15,23 @@ pub mod time;
 pub use fs::write_atomic;
 pub use hashing::{stable_hash_bytes, SplitMix64};
 
-/// Crate version derived from the `Cargo.toml` manifest at compile time.
 pub const CRATE_VERSION: &str = env!("CARGO_PKG_VERSION");
 
-/// Trait for types that produce a stable 64-bit content fingerprint.
-///
-/// Delegates to [`stable_hash_bytes`], keeping the digest algorithm consistent
-/// workspace-wide. Results are deterministic across runs and platforms.
+/// Delegates to [`stable_hash_bytes`] so the digest algorithm stays consistent
+/// workspace-wide. Deterministic across runs and platforms.
 pub trait Fingerprint {
     fn fingerprint(&self) -> u64;
 }
 
-impl Fingerprint for [u8] {
+impl<T: AsRef<[u8]> + ?Sized> Fingerprint for T {
     fn fingerprint(&self) -> u64 {
-        stable_hash_bytes(self)
+        stable_hash_bytes(self.as_ref())
     }
 }
 
-impl Fingerprint for str {
-    fn fingerprint(&self) -> u64 {
-        stable_hash_bytes(self.as_bytes())
-    }
-}
-
-impl Fingerprint for Vec<u8> {
-    fn fingerprint(&self) -> u64 {
-        self.as_slice().fingerprint()
-    }
-}
-
-impl Fingerprint for String {
-    fn fingerprint(&self) -> u64 {
-        self.as_str().fingerprint()
-    }
-}
-
-/// A content-derived tag pairing a human-readable prefix with a hex digest.
+/// Lower 32 bits of a [`stable_hash_bytes`] digest paired with a prefix.
 ///
-/// Built from the lower 32 bits of a [`stable_hash_bytes`] digest. Display
-/// format is `{prefix}-{hex8}`, e.g. `"v2-a1b2c3d4"`.
+/// Display format: `{prefix}-{hex8}`, e.g. `"v2-a1b2c3d4"`.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct ContentTag {
     prefix: String,
@@ -61,14 +39,13 @@ pub struct ContentTag {
 }
 
 impl ContentTag {
-    /// Hashes `payload` with BLAKE3, truncates to 32 bits, and pairs with `prefix`.
     #[must_use]
     pub fn new(prefix: &str, payload: &[u8]) -> Self {
-        let raw = stable_hash_bytes(payload);
-        let digest = (raw & 0xFFFF_FFFF) as u32;
+        let hash = stable_hash_bytes(payload);
+        let lower_32 = (hash & 0xFFFF_FFFF) as u32;
         Self {
             prefix: prefix.to_owned(),
-            digest,
+            digest: lower_32,
         }
     }
 
@@ -82,7 +59,6 @@ impl ContentTag {
         self.digest
     }
 
-    /// Returns `true` when two tags share the same digest regardless of prefix.
     #[must_use]
     pub fn digest_matches(&self, other: &Self) -> bool {
         self.digest == other.digest
@@ -95,19 +71,11 @@ impl fmt::Display for ContentTag {
     }
 }
 
-/// Produces a `{prefix}-{hex8}` content tag string from `payload`.
-///
-/// Shorthand for `ContentTag::new(prefix, payload).to_string()`.
 #[must_use]
 pub fn content_tag(prefix: &str, payload: &[u8]) -> String {
     ContentTag::new(prefix, payload).to_string()
 }
 
-/// Creates `target` and all missing parent directories, returning the path.
-///
-/// # Errors
-///
-/// Propagates [`io::Error`] on permission or filesystem failures.
 pub fn ensure_dir(target: &Path) -> io::Result<&Path> {
     create_dir_all(target)?;
     Ok(target)

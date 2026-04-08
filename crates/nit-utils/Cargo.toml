@@ -1,10 +1,10 @@
 [package]
 name = "nit-utils"
 version = "0.1.0"
-description = "Shared filesystem, hashing, path, and time utilities for the nit workspace"
 edition = "2021"
-license = "MIT"
 rust-version.workspace = true
+description = "Shared filesystem, hashing, path, and time utilities for the nit workspace"
+license = "MIT"
 publish = false
 categories = ["filesystem", "development-tools"]
 keywords = ["utilities", "hashing", "atomic-write"]

@@ -2,8 +2,6 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// Returns the current wall-clock time as milliseconds since the Unix epoch.
-///
 /// Falls back to `0` if the system clock predates the epoch.
 #[must_use]
 pub fn now_millis() -> u128 {

@@ -1,5 +1,4 @@
-use nit_utils::hashing::stable_hash_bytes;
-use nit_utils::{content_tag, ensure_dir, ContentTag, Fingerprint};
+use nit_utils::{content_tag, ensure_dir, stable_hash_bytes, ContentTag, Fingerprint};
 
 #[test]
 fn fingerprint_byte_slice_matches_direct_hash() {

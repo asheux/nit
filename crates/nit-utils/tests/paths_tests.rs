@@ -16,7 +16,7 @@ fn cache_dir_resolves() {
 }
 
 #[test]
-fn state_dir_returns_option() {
+fn state_dir_platform_dependent() {
     // state_dir is None on macOS (no XDG state equivalent), Some on Linux.
     let result = paths::state_dir();
     if cfg!(target_os = "linux") {

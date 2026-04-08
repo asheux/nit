@@ -1522,7 +1522,7 @@ const GENOME_RETRY_LIMIT: u8 = 3;
 /// this are skipped during retry collection — retrying on small files pushes
 /// agents to over-engineer trivial code.  Larger files have enough structure
 /// that a focused retry is worthwhile.
-const GENOME_RETRY_MIN_LINES: usize = 100;
+const GENOME_RETRY_MIN_LINES: usize = 120;
 
 /// Push a visible message to the agent console and diagnostics when a genome retry fires.
 fn push_genome_retry_message(
@@ -1624,7 +1624,18 @@ fn build_genome_retry_prompt(
             None => continue,
         };
 
-        // Skip small files (< 100 lines) — retrying on them pushes agents to
+        // Skip non-code files — docs, config, and data files should never
+        // trigger genome retries.
+        let ext = file_path.extension().and_then(|e| e.to_str()).unwrap_or("");
+        let is_code = matches!(
+            ext,
+            "rs" | "ts" | "tsx" | "js" | "jsx" | "py" | "go" | "c" | "cpp" | "h" | "hpp"
+        );
+        if !is_code {
+            continue;
+        }
+
+        // Skip small files (< 120 lines) — retrying on them pushes agents to
         // over-engineer trivial code.  Larger files have enough structure that
         // a retry is worthwhile.
         let line_count = std::fs::read_to_string(file_path)

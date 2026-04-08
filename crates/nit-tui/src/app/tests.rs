@@ -3103,7 +3103,7 @@ k = 2
     runtime.metal_matches_per_batch = Some(262_144);
     runtime.metal_inflight_batches = Some(5);
     runtime.metal_policy_cache_path = Some(
-        "/Users/nitrika/Library/Caches/dev.openai.nit/games/metal-policy/apple_m4_max_1872106799188804901_v1.json"
+        "/Users/nitrika/Library/Caches/dev.arcxlab.nit/games/metal-policy/apple_m4_max_1872106799188804901_v1.json"
             .into(),
     );
     state.games.last_run = Some(nit_games::output::RunSummary {

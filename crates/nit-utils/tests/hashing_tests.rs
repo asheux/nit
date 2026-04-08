@@ -1,4 +1,4 @@
-use nit_utils::hashing::{stable_hash_bytes, SplitMix64};
+use nit_utils::{stable_hash_bytes, SplitMix64};
 
 #[test]
 fn hash_deterministic_same_input() {

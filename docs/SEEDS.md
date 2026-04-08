@@ -238,7 +238,7 @@ Agents receive an equilibrium rule in their system prompt that explicitly lists 
 | `PARSIMONY_TINY_FN_MIN_COUNT` | 12 | Min fn count for tiny-fn flag |
 | `SOFT_BOTTLENECK_MAX_LIFT` | 200 | Max generation lift from soft bottleneck |
 | `GENOME_RETRY_LIMIT` | 3 | Max retries per agent turn |
-| `GENOME_RETRY_MIN_LINES` | 100 | Min file lines for retry eligibility |
+| `GENOME_RETRY_MIN_LINES` | 120 | Min file lines for retry eligibility |
 
 ## Key Files
 
