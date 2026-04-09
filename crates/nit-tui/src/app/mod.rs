@@ -1401,6 +1401,22 @@ fn run_loop(
                 );
             }
 
+            // Poll background genome review prompt builds — dispatches the
+            // genome reviewer agent once the per-file genome reports finish
+            // computing (never blocks the main loop on the GoL sim).
+            for dispatch in swarm.poll_genome_reviews(state) {
+                apply_swarm_task_role(state, &dispatch);
+                dispatch_agent_prompt(
+                    state,
+                    &mut vitals,
+                    Some(&codex_runner),
+                    Some(&claude_runner),
+                    dispatch.agent_id,
+                    Some(dispatch.mission_id),
+                    dispatch.prompt,
+                );
+            }
+
             draw(
                 terminal,
                 state,
@@ -6547,8 +6563,7 @@ fn handle_mouse_event_with_swarm(
                 let mut max_scroll = state.gate_monitor_last_max_scroll;
                 if max_scroll == usize::MAX {
                     let inner = Block::default().borders(Borders::ALL).inner(layout.gate);
-                    let lines =
-                        gate_monitor_view::build_lines(state, theme, inner.width as usize);
+                    let lines = gate_monitor_view::build_lines(state, theme, inner.width as usize);
                     max_scroll = lines.len().saturating_sub(inner.height as usize);
                     state.gate_monitor_last_max_scroll = max_scroll;
                 }

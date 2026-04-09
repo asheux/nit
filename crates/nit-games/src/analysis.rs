@@ -648,14 +648,8 @@ fn write_matches_csv_header(writer: &mut BufWriter<File>) -> Result<(), String> 
 fn write_match_csv_row(writer: &mut BufWriter<File>, summary: &MatchSummary) -> Result<(), String> {
     let a = csv_escape(&summary.a);
     let b = csv_escape(&summary.b);
-    let a_initial = summary
-        .a_initial
-        .map(|c| c.to_string())
-        .unwrap_or_else(|| "".into());
-    let b_initial = summary
-        .b_initial
-        .map(|c| c.to_string())
-        .unwrap_or_else(|| "".into());
+    let a_initial = summary.a_initial.map_or(String::new(), |c| c.to_string());
+    let b_initial = summary.b_initial.map_or(String::new(), |c| c.to_string());
     writeln!(
         writer,
         "{},{},{},{},{},{},{},{},{},{},{},{},{},{:.6},{:.6},{},{},{},{},{},{:.6},{:.6},{},{}",

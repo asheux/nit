@@ -1,7 +1,7 @@
 //! Atomic NDJSON file writer used by event and history logging.
 //!
-//! Records are written to a `.ndjson.tmp` sidecar; [`finish`](AtomicNdjsonWriter::finish)
-//! flushes, syncs, and renames to the final path so readers never see partial output.
+//! Writes to a `.ndjson.tmp` sidecar; [`finish`](AtomicNdjsonWriter::finish)
+//! atomically renames to the final path so readers never see partial output.
 
 use std::fs::{self, File};
 use std::io::{self, BufWriter, Write};

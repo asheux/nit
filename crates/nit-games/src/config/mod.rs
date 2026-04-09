@@ -28,7 +28,6 @@ pub(crate) fn canonical_game_name(name: &str) -> Option<&'static str> {
     }
 }
 
-/// Recognizes all user-facing aliases for the one-sided Turing machine strategy kind.
 pub(crate) fn is_tm_kind(kind: &str) -> bool {
     matches!(
         kind,
@@ -40,4 +39,11 @@ pub(crate) fn is_tm_kind(kind: &str) -> bool {
             | "tm"
             | "onesidedtm"
     )
+}
+
+/// Trims, filters empty, and lowercases a raw kind string from config input.
+pub(crate) fn normalize_kind_str(raw: Option<&str>) -> Option<String> {
+    raw.map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(|v| v.to_ascii_lowercase())
 }

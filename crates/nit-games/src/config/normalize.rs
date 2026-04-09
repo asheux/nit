@@ -7,7 +7,9 @@ use super::types::{
     FamilyRunStrategyHint, GamesConfig, NormalizedConfig, ParallelismConfig, StrategyConfig,
     StrategySpec, StrategySpecKind,
 };
-use super::{canonical_game_name, is_tm_kind, ConfigResult, CONFIG_SCHEMA_VERSION};
+use super::{
+    canonical_game_name, is_tm_kind, normalize_kind_str, ConfigResult, CONFIG_SCHEMA_VERSION,
+};
 use crate::game::{Action, PayoffMatrix};
 use crate::strategy::InputMode;
 
@@ -258,12 +260,7 @@ fn resolve_game_name(raw_name: Option<String>, errors: &mut Vec<String>) -> Stri
 }
 
 fn family_run_tm_blank_hint(raw: &FamilyRunStrategyHint) -> Option<u8> {
-    let kind_raw = raw
-        .kind
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(|value| value.to_ascii_lowercase());
+    let kind_raw = normalize_kind_str(raw.kind.as_deref());
     if let Some(kind) = kind_raw.as_deref() {
         if !is_tm_kind(kind) {
             return None;
@@ -271,9 +268,7 @@ fn family_run_tm_blank_hint(raw: &FamilyRunStrategyHint) -> Option<u8> {
     } else if raw.blank.is_none() {
         return None;
     }
-    raw.blank
-        .filter(|blank| *blank <= u8::MAX as usize)
-        .map(|blank| blank as u8)
+    raw.blank.map(|b| b as u8)
 }
 
 fn normalize_strategy(
@@ -281,12 +276,7 @@ fn normalize_strategy(
     base_dir: Option<&std::path::Path>,
 ) -> Result<Vec<StrategySpec>, Vec<String>> {
     let mut errors = Vec::new();
-    let kind_raw = raw
-        .kind
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(|value| value.to_ascii_lowercase());
+    let kind_raw = normalize_kind_str(raw.kind.as_deref());
     let resolved_kind = match kind_raw.as_deref() {
         Some("auto") | None => match infer_strategy_kind(&raw) {
             Ok(kind) => kind.to_string(),

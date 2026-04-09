@@ -87,17 +87,12 @@ pub fn format_score_value(value: f64) -> String {
     if (value - rounded).abs() < 1e-9 {
         return (rounded as i64).to_string();
     }
-    let mut formatted = format!("{value:.3}");
-    while formatted.contains('.') && formatted.ends_with('0') {
-        formatted.pop();
-    }
-    if formatted.ends_with('.') {
-        formatted.pop();
-    }
-    if formatted == "-0" {
+    let formatted = format!("{value:.3}");
+    let trimmed = formatted.trim_end_matches('0').trim_end_matches('.');
+    if trimmed == "-0" {
         "0".to_string()
     } else {
-        formatted
+        trimmed.to_string()
     }
 }
 
@@ -211,9 +206,7 @@ impl RuntimeAcceleratorStats {
     }
 
     pub fn note_metal_batch(&mut self, matches: usize) {
-        self.metal_batches = self.metal_batches.saturating_add(1);
-        self.metal_matches = self.metal_matches.saturating_add(matches as u64);
-        self.backend = RuntimeAcceleratorBackend::Metal;
+        self.note_metal_batches(1, matches);
     }
 
     pub fn note_metal_batches(&mut self, batches: usize, matches: usize) {

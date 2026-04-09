@@ -205,7 +205,6 @@ pub fn evaluate_match(
     }
 }
 
-/// Replicate the cycle portion of the outcome buffer for `full_cycles` repeats.
 fn replicate_cycle_outcomes(
     buf: Option<&mut Vec<u8>>,
     cycle_start: u32,
@@ -216,10 +215,11 @@ fn replicate_cycle_outcomes(
     if full_cycles == 0 {
         return;
     }
-    let cycle_slice = history[cycle_start as usize..cycle_end as usize].to_vec();
-    history.reserve(cycle_slice.len().saturating_mul(full_cycles as usize));
+    let range = cycle_start as usize..cycle_end as usize;
+    let cycle_len = range.len();
+    history.reserve(cycle_len.saturating_mul(full_cycles as usize));
     for _ in 0..full_cycles {
-        history.extend_from_slice(&cycle_slice);
+        history.extend_from_within(range.clone());
     }
 }
 

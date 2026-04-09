@@ -112,8 +112,7 @@ impl EventWriter {
     }
 
     pub fn default_name(prefix: &str) -> String {
-        let ts = Self::timestamp().replace(':', "-");
-        format!("{prefix}__{ts}")
+        format!("{prefix}__{}", Self::timestamp().replace(':', "-"))
     }
 
     pub fn final_path(&self) -> &Path {

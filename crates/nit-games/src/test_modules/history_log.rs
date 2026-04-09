@@ -132,9 +132,10 @@ fn compact_format_field_count() {
     let record = baseline_history_fixture();
     let val: serde_json::Value = serde_json::to_value(&record).expect("serialize to value");
     let obj = val.as_object().expect("should be JSON object");
-    assert!(
-        obj.len() >= COMPACT_REQUIRED_FIELDS,
-        "expected at least {COMPACT_REQUIRED_FIELDS} fields, got {}",
+    assert_eq!(
+        obj.len(),
+        COMPACT_REQUIRED_FIELDS,
+        "expected exactly {COMPACT_REQUIRED_FIELDS} fields, got {}",
         obj.len()
     );
 }

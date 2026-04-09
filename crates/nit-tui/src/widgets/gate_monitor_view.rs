@@ -32,12 +32,7 @@ pub fn title_button_hit(col_in_rect: u16, title_prefix_len: u16) -> Option<Actio
     }
 }
 
-pub fn render(
-    frame: &mut Frame,
-    area: ratatui::layout::Rect,
-    state: &mut AppState,
-    theme: &Theme,
-) {
+pub fn render(frame: &mut Frame, area: ratatui::layout::Rect, state: &mut AppState, theme: &Theme) {
     if state.app_kind == AppKind::Games {
         // Games variant has no scroll state to cache.
         return render_games(frame, area, state, theme);

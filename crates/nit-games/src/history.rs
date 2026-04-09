@@ -186,7 +186,10 @@ impl RollingHistory {
         self.window_a = ((self.window_a << 2) | outcome_bits_a) & self.window_mask;
         self.window_b = ((self.window_b << 2) | outcome_bits_b) & self.window_mask;
 
-        self.rounds_recorded = (self.rounds_recorded + 1).min(self.window_depth);
+        self.rounds_recorded = self
+            .rounds_recorded
+            .saturating_add(1)
+            .min(self.window_depth);
     }
 
     /// Returns the memory index for the given player over the last `depth`

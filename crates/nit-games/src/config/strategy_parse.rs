@@ -7,6 +7,7 @@ use crate::strategy::{
     decode_fsm_notebook_index, decode_tm_rule_code_wolfram, InputMode, TmMove, TmTransition,
 };
 use serde::Deserialize;
+use std::io::BufRead;
 use std::path::Path;
 
 pub(super) fn normalize_fsm_kind(
@@ -364,16 +365,17 @@ fn parse_actions(
     values: Vec<String>,
     errors: &mut Vec<String>,
 ) -> Vec<Action> {
-    let mut out = Vec::new();
-    for value in values {
-        match Action::parse(&value) {
-            Some(action) => out.push(action),
-            None => errors.push(format!(
-                "strategy '{id}': invalid action '{value}' in {field}"
-            )),
-        }
-    }
-    out
+    values
+        .into_iter()
+        .filter_map(|value| {
+            Action::parse(&value).or_else(|| {
+                errors.push(format!(
+                    "strategy '{id}': invalid action '{value}' in {field}"
+                ));
+                None
+            })
+        })
+        .collect()
 }
 
 fn normalize_index(
@@ -777,7 +779,6 @@ pub(super) fn load_generated_strategies(
             return Err(errors);
         }
     };
-    use std::io::BufRead;
     let reader = std::io::BufReader::new(file);
     let mut specs = Vec::new();
     for (line_idx, line) in reader.lines().enumerate() {

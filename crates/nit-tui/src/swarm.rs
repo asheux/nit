@@ -1045,8 +1045,7 @@ impl GateBundle {
                 },
                 Gate {
                     name: "clippy".into(),
-                    command: "cargo clippy --all-targets --all-features -- -D warnings"
-                        .into(),
+                    command: "cargo clippy --all-targets --all-features -- -D warnings".into(),
                     scoped_command: Some(
                         "cargo clippy {cargo_packages} --all-targets --all-features -- -D warnings"
                             .into(),
@@ -1055,9 +1054,7 @@ impl GateBundle {
                 Gate {
                     name: "test".into(),
                     command: "cargo test --workspace --all-features".into(),
-                    scoped_command: Some(
-                        "cargo test {cargo_packages} --all-features".into(),
-                    ),
+                    scoped_command: Some("cargo test {cargo_packages} --all-features".into()),
                 },
             ],
             GateBundle::Node => vec![
@@ -1358,6 +1355,15 @@ struct GenomeGatePending {
     verifier: String,
 }
 
+/// Holds the state for a genome reviewer prompt being built in a background
+/// thread. When the prompt is ready, the reviewer dispatch proceeds. An empty
+/// prompt means the worker had nothing to evaluate (no modified files) and
+/// the reviewer is silently skipped.
+struct GenomeReviewPending {
+    rx: mpsc::Receiver<String>,
+    reviewer_id: String,
+}
+
 struct SwarmRun {
     mission_id: String,
     root_prompt: String,
@@ -1386,6 +1392,10 @@ struct SwarmRun {
     /// Background genome gate evaluation — `None` when idle, `Some` while
     /// waiting for the background thread to finish.
     genome_gate_pending: Option<GenomeGatePending>,
+    /// Background genome review prompt build — `None` when idle, `Some`
+    /// while waiting for the worker to finish computing per-file genome
+    /// reports for the reviewer agent.
+    genome_review_pending: Option<GenomeReviewPending>,
     report_status: Option<String>,
     report_output: Option<String>,
     /// Source files in the scope referenced by the operator prompt (e.g.
@@ -1484,6 +1494,47 @@ impl SwarmRuntime {
                         prompt,
                         task_role: None,
                     });
+                }
+            }
+        }
+        dispatches
+    }
+
+    /// Poll all pending genome review prompt builds.  When a background
+    /// thread finishes, dispatch the reviewer agent.  An empty result means
+    /// the worker had nothing to evaluate (no modified files) — the reviewer
+    /// is silently skipped.  Disconnected channels (worker panic / drop) are
+    /// also skipped silently so the swarm never stalls.
+    pub fn poll_genome_reviews(&mut self, state: &mut AppState) -> Vec<SwarmDispatch> {
+        let mut dispatches = Vec::new();
+        for run in self.runs.values_mut() {
+            let pending = match run.genome_review_pending.take() {
+                Some(p) => p,
+                None => continue,
+            };
+            match pending.rx.try_recv() {
+                Ok(prompt) => {
+                    if prompt.is_empty() {
+                        continue;
+                    }
+                    push_system_message_to_mission(
+                        state,
+                        &run.mission_id,
+                        format!("Dispatching genome review to {}", pending.reviewer_id),
+                    );
+                    dispatches.push(SwarmDispatch {
+                        agent_id: pending.reviewer_id,
+                        mission_id: run.mission_id.clone(),
+                        prompt,
+                        task_role: Some("genome-reviewer".into()),
+                    });
+                }
+                Err(mpsc::TryRecvError::Empty) => {
+                    // Still computing — put it back.
+                    run.genome_review_pending = Some(pending);
+                }
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    // Worker died — skip silently, don't stall the swarm.
                 }
             }
         }
@@ -1954,6 +2005,7 @@ impl SwarmRuntime {
                 gate_report: None,
                 genome_gate_results: None,
                 genome_gate_pending: None,
+                genome_review_pending: None,
                 report_status: None,
                 report_output: None,
                 scope_files,
@@ -2244,9 +2296,7 @@ impl SwarmRuntime {
                                     push_system_message_to_mission(
                                         state,
                                         &run.mission_id,
-                                        format!(
-                                            "Starting VERIFY ({label}) on agent {verifier}",
-                                        ),
+                                        format!("Starting VERIFY ({label}) on agent {verifier}",),
                                     );
                                     let prompt = build_verify_prompt(&run);
                                     dispatches.push(SwarmDispatch {
@@ -2347,9 +2397,7 @@ impl SwarmRuntime {
                                     push_system_message_to_mission(
                                         state,
                                         &run.mission_id,
-                                        format!(
-                                            "Starting VERIFY ({label}) on agent {verifier}",
-                                        ),
+                                        format!("Starting VERIFY ({label}) on agent {verifier}",),
                                     );
                                     let prompt = build_verify_prompt(&run);
                                     dispatches.push(SwarmDispatch {
@@ -2409,25 +2457,7 @@ impl SwarmRuntime {
                             );
                         }
 
-                        // Dispatch genome reviewer if enabled.
-                        if state.settings.genome.genome_gate_enabled {
-                            if let Some(reviewer_id) = run.verifier_agent_id.clone() {
-                                let review_prompt = build_genome_review_prompt(state);
-                                if !review_prompt.is_empty() {
-                                    push_system_message_to_mission(
-                                        state,
-                                        &run.mission_id,
-                                        format!("Dispatching genome review to {reviewer_id}"),
-                                    );
-                                    dispatches.push(SwarmDispatch {
-                                        agent_id: reviewer_id,
-                                        mission_id: run.mission_id.clone(),
-                                        prompt: review_prompt,
-                                        task_role: Some("genome-reviewer".into()),
-                                    });
-                                }
-                            }
-                        }
+                        maybe_spawn_genome_review(&mut run, state);
 
                         run.stage = SwarmStage::Synthesizing;
                         update_mission_phase(state, &run.mission_id, MissionPhase::Report);
@@ -2711,9 +2741,7 @@ impl SwarmRuntime {
                                     push_system_message_to_mission(
                                         state,
                                         &run.mission_id,
-                                        format!(
-                                            "Starting VERIFY ({label}) on agent {verifier}",
-                                        ),
+                                        format!("Starting VERIFY ({label}) on agent {verifier}",),
                                     );
                                     let prompt = build_verify_prompt(&run);
                                     dispatches.push(SwarmDispatch {
@@ -2901,25 +2929,7 @@ impl SwarmRuntime {
                             format!("VERIFY result: ERROR ({message})"),
                         );
 
-                        // Dispatch genome reviewer if enabled.
-                        if state.settings.genome.genome_gate_enabled {
-                            if let Some(reviewer_id) = run.verifier_agent_id.clone() {
-                                let review_prompt = build_genome_review_prompt(state);
-                                if !review_prompt.is_empty() {
-                                    push_system_message_to_mission(
-                                        state,
-                                        &run.mission_id,
-                                        format!("Dispatching genome review to {reviewer_id}"),
-                                    );
-                                    dispatches.push(SwarmDispatch {
-                                        agent_id: reviewer_id,
-                                        mission_id: run.mission_id.clone(),
-                                        prompt: review_prompt,
-                                        task_role: Some("genome-reviewer".into()),
-                                    });
-                                }
-                            }
-                        }
+                        maybe_spawn_genome_review(&mut run, state);
 
                         run.stage = SwarmStage::Synthesizing;
                         update_mission_phase(state, &run.mission_id, MissionPhase::Report);
@@ -3137,7 +3147,7 @@ fn ensure_integrate_task(
         agent_id: integrator.to_string(),
         role: Some("integrate".into()),
         title: "Integrate + implement".into(),
-        task_prompt: "Implement the changes using the dependency outputs. You are the only agent allowed to make workspace edits. Process the FILE CHECKLIST above in order — open each file, refactor it, then move to the next. Prefer small, safe diffs and keep tests green.".into(),
+        task_prompt: "Implement the changes using the dependency outputs. You are the only agent allowed to make workspace edits. Process the FILE CHECKLIST above in order — open each file, refactor it, then move to the next. Prefer small, safe diffs. Follow the TEST DISCIPLINE in the role contract above for verification — do not run workspace-wide tests unless the operator explicitly asked.".into(),
         deps: all_deps,
         writes: true,
         artifacts: Vec::new(),
@@ -4400,7 +4410,7 @@ fn fallback_tasks(
                 agent_id,
                 role: Some("integrate".into()),
                 title: "Integrate selected approach".into(),
-                task_prompt: "Implement the selected approach using the judge output.\n\nConstraints:\n- You are the ONLY agent allowed to edit the workspace.\n- Prefer small, safe diffs.\n- Run the suggested verification commands.\n"
+                task_prompt: "Implement the selected approach using the judge output.\n\nConstraints:\n- You are the ONLY agent allowed to edit the workspace.\n- Prefer small, safe diffs.\n- For verification, follow the TEST DISCIPLINE in the role contract above (targeted only — no workspace-wide commands unless the operator explicitly asked).\n"
                     .into(),
                 deps: vec!["judge".into()],
                 writes: true,
@@ -4587,7 +4597,7 @@ fn fallback_tasks(
                 ),
                 SwarmMissionKind::General => (
                     "Integrate + implement".into(),
-                    "Implement the best approach using the dependency outputs. You are the only agent allowed to make workspace edits in this swarm. Prefer small, safe diffs and keep tests green.".into(),
+                    "Implement the best approach using the dependency outputs. You are the only agent allowed to make workspace edits in this swarm. Prefer small, safe diffs. Follow the TEST DISCIPLINE in the role contract above for verification — targeted runs only, no workspace-wide commands unless the operator asked.".into(),
                     true,
                     Vec::new(),
                     Some("Changes are implemented cleanly with validations to run.".into()),
@@ -4741,7 +4751,7 @@ fn fallback_tasks(
                 (SwarmTemplate::Lab, 2) => (
                     Some("integrate".to_string()),
                     "Integrate + implement",
-                    "Implement the best approach using the dependency outputs. You are the only agent allowed to make workspace edits in this swarm. Prefer small, safe diffs and keep tests green.",
+                    "Implement the best approach using the dependency outputs. You are the only agent allowed to make workspace edits in this swarm. Prefer small, safe diffs. Follow the TEST DISCIPLINE in the role contract above for verification — targeted runs only, no workspace-wide commands unless the operator asked.",
                     vec!["task-01".into(), "task-02".into()],
                     true,
                 ),
@@ -6534,7 +6544,7 @@ fn role_contract_lines(role: &str) -> &'static [&'static str] {
             "Do not restart broad ideation; focus on carrying the selected approach through.",
             "If a FILE CHECKLIST is provided above, you MUST modify every listed file — process them in order, one by one. A file left unchanged means your task is incomplete.",
             "Report exact files changed and validation results.",
-            "TEST DISCIPLINE: Run ONLY targeted tests that exercise the files you actually changed — use whatever test command the project's toolchain provides, scoped to the affected module/package/subdirectory/file (not the whole repo). Do NOT run the full project test suite, the project's full CI pipeline, full lint or type-check sweeps, or unrelated tests — broad verification is the review/test agent's job. If no review/test agent exists in this swarm, you may run one focused targeted command, not the full suite. Infer the appropriate command from the project layout; do not assume any specific language or tooling.",
+            "TEST DISCIPLINE — STRICT: Workspace-wide / repo-wide test commands (`cargo test --all` / `--workspace`, `go test ./...`, `pytest` from the repo root, `npm test --workspaces`, `just test`, `just ci`, full lint/type-check sweeps, etc.) are ONLY allowed when the OPERATOR explicitly asked for them in the request above (look for phrases like \"run full CI\", \"verify the whole workspace\", \"run all tests\"). Otherwise you MUST NOT run a workspace-wide command — broad verification is the review/test agent's job and the post-execution gate verifier's job. DEFAULT: run only targeted tests for the files you actually changed, using whatever scoping flag the project's toolchain provides (e.g. `cargo test -p <affected-crate>`, `pytest path/to/affected/dir`, `go test ./path/to/affected/...`). MULTI-MODULE CHANGES: combine targeted flags (`cargo test -p crate1 -p crate2`) or run one targeted command per module — do NOT widen to workspace-wide. Infer the appropriate command from the project layout; do not assume any specific language or tooling.",
             "CODE CONVENTION: Do NOT add inline test modules (`#[cfg(test)] mod tests { ... }`) inside source files. Tests must live in a dedicated tests directory or test file, not inline. If you encounter an existing inline test module during a refactor, move it to the appropriate test file/directory. Do NOT pad small files (lib.rs, mod.rs, re-export files) with unnecessary code to boost genome scores — trivially small files are auto-passed by the genome system. COMMENTS: Trim doc comments that restate the type/function name, echo visible type signatures, or describe obvious behavior. Keep comments that explain WHY, document non-obvious constraints, safety invariants, or algorithmic choices.",
             "GENOME QUALITY OBLIGATION: You are the sole writer. Your code is measured by nit's genome system across four encoders. See the full ENCODER GUIDE and TARGETS in the genome instructions attached to this prompt. Maintain or improve genome scores on every file you touch. Aim for Tier III+ (Spaceship) minimum, aspire to Tier V (Replicator). Do NOT call [evaluate_genome] — nit evaluates automatically after your changes are written to disk.",
         ],
@@ -6542,14 +6552,14 @@ fn role_contract_lines(role: &str) -> &'static [&'static str] {
             "Critique the current output or diff for correctness, UX, and maintainability.",
             "Call out risks, regressions, and missing tests.",
             "Do not edit the workspace; suggest follow-ups as text only.",
-            "TEST AUTHORITY: You ARE allowed (and expected) to run verification commands relevant to the change — tests, lints, type-checkers, or CI scripts as appropriate for this project's toolchain. You are the agent the rest of the swarm defers to for validation. Report the exact commands you ran, the results, and any failures verbatim.",
+            "VERIFICATION DISCIPLINE — STRICT: Workspace-wide / repo-wide verification commands (`cargo test --all` / `--workspace`, `cargo clippy --workspace`, `cargo fmt --all`, `go test ./...`, `pytest` from the repo root, `npm test --workspaces`, `just ci`, etc.) are ONLY allowed when the OPERATOR explicitly asked for them in the request above (e.g. \"run full CI\", \"verify the whole workspace\", \"run all tests\"). If the operator's request does not contain such an instruction, you MUST NOT run any workspace-wide command — not as a confirmation pass after a targeted run, not to be thorough, not even \"just to be safe\". DEFAULT: run only targeted commands scoped to the modules/packages/files the swarm actually touched (e.g. `cargo test -p <crate>`, `cargo clippy -p <crate>`, `pytest path/to/changed/dir`, `go test ./path/to/changed/...`, `npm test --workspace=<pkg>`). MULTI-MODULE CHANGES: when more than one module was touched, either combine them as multiple targeted flags (`cargo test -p crate1 -p crate2`) or run one targeted command per file/module. Do NOT widen to workspace-wide. The post-execution gate verifier handles workspace-wide gates as the next swarm stage — running them here just duplicates the work.",
             "GENOME: nit measures code across four encoders. See the full ENCODER GUIDE and TARGETS in the genome instructions attached to this prompt. Name the affected encoder when flagging issues — e.g., 'complexity 12 in parse_config (complexity_field: target <= 8)', 'only 2 node types (ast_structure: need >= 5 components)', 'repeated role sequence across match arms (structural: role n-gram uniqueness)', 'comment-to-code ratio too low (token_spectrum)'. Suggest concrete refactoring the integrator can apply.",
         ],
         "test" => &[
             "Focus on validation commands, expected results, and edge cases.",
             "Differentiate confirmed results from unrun suggestions.",
             "Do not redesign the solution unless a test failure makes it necessary.",
-            "TEST AUTHORITY: You ARE the swarm's test runner — run the full relevant test suite for the change (targeted or workspace-wide as appropriate). Report exact commands, outputs, and pass/fail verbatim.",
+            "TEST DISCIPLINE — STRICT: Workspace-wide / repo-wide test commands (`cargo test --all` / `--workspace`, `go test ./...`, `pytest` from the repo root, `npm test --workspaces`, `just test`, `just ci`, etc.) are ONLY allowed when the OPERATOR explicitly asked for them in the request above (look for phrases like \"run full CI\", \"verify the whole workspace\", \"run all tests\", \"make sure nothing else broke\"). If the operator did not say so, you MUST NOT run a workspace-wide command — not as a confirmation pass after a targeted run passes, not to be thorough, not even when a targeted test fails (in that case, report the failure and let the operator decide whether to widen). DEFAULT: run only targeted tests scoped to the modules/packages/files the swarm actually touched (e.g. `cargo test -p <affected-crate>`, `pytest path/to/affected/dir`, `go test ./path/to/affected/...`, `npm test --workspace=<pkg>`). MULTI-MODULE CHANGES: when more than one module was touched, either combine them as multiple targeted flags (`cargo test -p crate1 -p crate2 -p crate3`) or run one targeted command per affected module/file. Do NOT widen to workspace-wide. EXAMPLE OF WRONG BEHAVIOUR: running `cargo test -p nit-games` (passes) AND THEN running `cargo test --all` to \"verify the full results\" — that is exactly the duplication the rule forbids. Report exact commands, outputs, and pass/fail counts verbatim. The post-execution gate verifier handles workspace-wide gates as the next swarm stage — running them here just duplicates the work and wastes minutes.",
         ],
         "genome-reviewer" => &[
             "Evaluate the structural quality of code changes using the genome reports provided.",
@@ -6728,7 +6738,9 @@ fn wrap_task_prompt(
         out.push_str("  \"summary\": \"one-line summary of what you did or found\",\n");
         out.push_str("  \"artifacts\": {\n");
         out.push_str("    \"files\": [\"path/to/file\"],\n");
-        out.push_str("    \"diffs\": [{\"path\": \"path/to/file\", \"summary\": \"what changed\"}],\n");
+        out.push_str(
+            "    \"diffs\": [{\"path\": \"path/to/file\", \"summary\": \"what changed\"}],\n",
+        );
         out.push_str("    \"commands\": [\"<project test command>\"],\n");
         out.push_str("    \"risks\": [\"potential issue\"],\n");
         out.push_str("    \"notes\": [\"additional context\"]\n");
@@ -6907,15 +6919,42 @@ fn extract_json_code_blocks(text: &str) -> Vec<String> {
     blocks
 }
 
-/// Build the genome review prompt for the genome-reviewer role.
-fn build_genome_review_prompt(state: &AppState) -> String {
-    let mut prompt = String::from(
-        "You are the genome reviewer in nit's coding lab. nit measures structural code \
-         quality by encoding source files as Game of Life genomes. The lab's goal is to \
-         produce elite Replicator-tier (Tier V, 2001+ generations) code. Evaluate the \
-         structural quality of the code changes made by this swarm mission. For each \
-         modified file, a genome report shows before/after metrics across four encoders.\n\n",
-    );
+/// Snapshot of state needed by the genome review prompt builder thread.
+/// All AppState reads (modified files, baselines) are done on the main
+/// thread before the worker is spawned, so the worker is fully self-contained.
+struct GenomeReviewInput {
+    files_to_eval: Vec<std::path::PathBuf>,
+    /// Baselines captured at turn start, keyed by file path. Used as the
+    /// "before" side of the genome diff so the reviewer sees real change.
+    baselines: HashMap<std::path::PathBuf, nit_core::GenomeReport>,
+}
+
+/// If the genome gate is enabled and a verifier agent exists, kick off the
+/// background prompt build for the genome reviewer. Stores the receiver on
+/// the run so `poll_genome_reviews` can pick up the result on a later tick.
+fn maybe_spawn_genome_review(run: &mut SwarmRun, state: &AppState) {
+    if !state.settings.genome.genome_gate_enabled {
+        return;
+    }
+    let Some(reviewer_id) = run.verifier_agent_id.clone() else {
+        return;
+    };
+    run.genome_review_pending = Some(GenomeReviewPending {
+        rx: spawn_genome_review_prompt(state),
+        reviewer_id,
+    });
+}
+
+/// Spawn the genome review prompt build on a background thread and return a
+/// receiver that delivers the prompt string. The main thread polls this with
+/// `try_recv` so the UI never blocks while running multiple
+/// `compute_genome_report` calls (each one is a 3000-generation GoL sim).
+///
+/// An empty string in the channel means the worker had nothing to evaluate
+/// (no modified files) — the poller skips dispatching the reviewer in that
+/// case.
+fn spawn_genome_review_prompt(state: &AppState) -> mpsc::Receiver<String> {
+    let (tx, rx) = mpsc::channel();
 
     // Evaluate ALL modified files, not just the editor buffer.
     let mut files_to_eval: Vec<std::path::PathBuf> = state
@@ -6932,8 +6971,49 @@ fn build_genome_review_prompt(state: &AppState) -> String {
     }
     files_to_eval.sort();
 
+    // Use genome_baselines (captured at turn start) as the "before" —
+    // genome_reports contains post-change state and would produce zero diffs.
+    let baselines: HashMap<std::path::PathBuf, nit_core::GenomeReport> = files_to_eval
+        .iter()
+        .filter_map(|p| {
+            state
+                .genome_baselines
+                .get(p)
+                .map(|r| (p.clone(), r.clone()))
+        })
+        .collect();
+
+    let input = GenomeReviewInput {
+        files_to_eval,
+        baselines,
+    };
+
+    std::thread::Builder::new()
+        .name("genome-review".into())
+        .spawn(move || {
+            let result = build_genome_review_prompt_bg(&input);
+            let _ = tx.send(result);
+        })
+        .ok();
+
+    rx
+}
+
+/// Build the genome review prompt for the genome-reviewer role on a worker
+/// thread. Reads each modified file and computes a full genome report — this
+/// is the expensive work (tree-sitter + 3000-gen GoL + parsimony per file)
+/// that previously blocked the main loop for "Genome Quality Review".
+fn build_genome_review_prompt_bg(input: &GenomeReviewInput) -> String {
+    let mut prompt = String::from(
+        "You are the genome reviewer in nit's coding lab. nit measures structural code \
+         quality by encoding source files as Game of Life genomes. The lab's goal is to \
+         produce elite Replicator-tier (Tier V, 2001+ generations) code. Evaluate the \
+         structural quality of the code changes made by this swarm mission. For each \
+         modified file, a genome report shows before/after metrics across four encoders.\n\n",
+    );
+
     let mut has_content = false;
-    for file_path in &files_to_eval {
+    for file_path in &input.files_to_eval {
         let text = match std::fs::read_to_string(file_path) {
             Ok(t) => t,
             Err(_) => continue,
@@ -6943,9 +7023,7 @@ fn build_genome_review_prompt(state: &AppState) -> String {
         prompt.push_str(&nit_core::format_genome_report(&report));
         prompt.push('\n');
 
-        // Use genome_baselines (captured at turn start) as the "before" —
-        // genome_reports contains post-change state and would produce zero diffs.
-        if let Some(prev) = state.genome_baselines.get(file_path) {
+        if let Some(prev) = input.baselines.get(file_path) {
             let diff = nit_core::compute_genome_diff(prev, &report);
             prompt.push_str(&nit_core::format_genome_diff(&diff));
             prompt.push('\n');

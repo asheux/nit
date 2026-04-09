@@ -75,7 +75,7 @@ impl SchedulePlan {
     pub(super) fn matchups(&self, start: usize, count: usize) -> Vec<Matchup> {
         let end = start.saturating_add(count).min(self.total_matches);
         (start..end)
-            .filter_map(|match_id| self.matchup(match_id))
+            .map(|match_id| self.matchup(match_id).expect("in-range match id"))
             .collect()
     }
 }

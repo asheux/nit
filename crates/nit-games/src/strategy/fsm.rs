@@ -184,6 +184,8 @@ impl FsmStrategy {
         input_mode: super::InputMode,
         transitions: Vec<Vec<usize>>,
     ) -> Self {
+        // Derive alphabet from actual transitions; fall back to input_mode
+        // when transitions are empty (e.g. single-state strategies).
         let alphabet = match transitions.first() {
             Some(first_row) => first_row.len().max(1),
             None => input_mode.alphabet_size().max(2),

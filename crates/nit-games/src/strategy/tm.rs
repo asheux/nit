@@ -21,15 +21,21 @@ pub struct TmRunStats {
 }
 
 impl TmRunStats {
+    /// Update min/max step range. First call (rounds == 0) sets directly;
+    /// subsequent calls merge via min/max.
+    fn update_step_range(&mut self, min: u32, max: u32) {
+        if self.rounds == 0 {
+            self.min_steps = min;
+            self.max_steps = max;
+        } else {
+            self.min_steps = self.min_steps.min(min);
+            self.max_steps = self.max_steps.max(max);
+        }
+    }
+
     pub fn merge(&mut self, incoming: &Self) {
         if incoming.rounds > 0 {
-            if self.rounds == 0 {
-                self.min_steps = incoming.min_steps;
-                self.max_steps = incoming.max_steps;
-            } else {
-                self.min_steps = self.min_steps.min(incoming.min_steps);
-                self.max_steps = self.max_steps.max(incoming.max_steps);
-            }
+            self.update_step_range(incoming.min_steps, incoming.max_steps);
         }
         self.rounds = self.rounds.saturating_add(incoming.rounds);
         self.steps = self.steps.saturating_add(incoming.steps);
@@ -355,15 +361,9 @@ impl OneSidedTmStrategy {
         max_steps_hit: bool,
     ) {
         self.last_halted = halted;
+        self.stats.update_step_range(steps_taken, steps_taken);
         self.stats.rounds = self.stats.rounds.saturating_add(1);
         self.stats.steps = self.stats.steps.saturating_add(steps_taken as u64);
-        if self.stats.rounds == 1 {
-            self.stats.min_steps = steps_taken;
-            self.stats.max_steps = steps_taken;
-        } else {
-            self.stats.min_steps = self.stats.min_steps.min(steps_taken);
-            self.stats.max_steps = self.stats.max_steps.max(steps_taken);
-        }
         if output_event {
             self.stats.output_events = self.stats.output_events.saturating_add(1);
         } else {
@@ -469,7 +469,7 @@ impl InputSuffix {
     }
 
     pub(crate) fn push_pair_bits(&mut self, a_bit: u8, b_bit: u8) {
-        let action_pair = ((a_bit.min(1) << 1) | b_bit.min(1)) as u16;
+        let action_pair = ((a_bit << 1) | b_bit) as u16;
         self.mul_add(4, action_pair);
     }
 

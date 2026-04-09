@@ -2402,8 +2402,7 @@ fn artifacts_popup_scroll_clamps_before_moving_back_up() {
     // rely on this cache (updated per render) instead of rebuilding the rendered
     // markdown on every keystroke.
     state.agents.artifacts_popup_last_max_scroll = max_scroll;
-    state.agents.artifacts_popup_scroll =
-        state.agents.artifacts_popup_scroll.min(max_scroll);
+    state.agents.artifacts_popup_scroll = state.agents.artifacts_popup_scroll.min(max_scroll);
 
     let mut vitals = VitalsState::default();
     let mut clipboard = None;
@@ -2481,7 +2480,10 @@ fn artifacts_popup_wheel_clamps_forward_at_max_and_allows_reverse() {
         "content must actually be scrollable for this test to be meaningful",
     );
 
-    let area = dynamic_popup_rect(screen, crate::widgets::artifacts_popup::preferred_size(screen));
+    let area = dynamic_popup_rect(
+        screen,
+        crate::widgets::artifacts_popup::preferred_size(screen),
+    );
     let wheel_down = MouseEvent {
         kind: MouseEventKind::ScrollDown,
         column: area.x.saturating_add(2),

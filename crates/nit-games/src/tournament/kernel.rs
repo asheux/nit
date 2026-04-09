@@ -7,7 +7,9 @@ use super::metal::{
 };
 use super::schedule::SchedulePlan;
 use super::session::{build_strategy_definitions, run_match_core};
-use super::types::{run_with_parallelism, Parallelism, SeedDeriver, TournamentAccumulator};
+use super::types::{
+    run_with_parallelism, MatchOutcome, Parallelism, SeedDeriver, TournamentAccumulator,
+};
 use crate::config::{AcceleratorMode, NormalizedConfig};
 use crate::events::{EventWriter, GameEvent};
 use crate::fast_eval::FastStrategyModel;
@@ -121,7 +123,7 @@ impl TournamentKernel {
     fn try_metal_batch_path(
         &self,
         runtime: &mut RuntimeAcceleratorStats,
-    ) -> Option<Vec<super::types::MatchOutcome>> {
+    ) -> Option<Vec<MatchOutcome>> {
         if matches!(self.config.engine.accelerator, AcceleratorMode::Cpu)
             || self.schedule.is_empty()
         {
@@ -196,13 +198,7 @@ impl TournamentKernel {
         if fast_eval_allowed && !log_events && !log_history {
             if let Some(outcomes) = self.try_metal_batch_path(&mut runtime) {
                 for outcome in outcomes {
-                    results.apply_match(
-                        outcome.result,
-                        outcome.a_crashed,
-                        outcome.b_crashed,
-                        outcome.a_tm_stats,
-                        outcome.b_tm_stats,
-                    );
+                    results.apply_outcome(outcome);
                 }
                 if let Some(writer) = event_writer.as_mut() {
                     let _ = writer.write(&GameEvent::TournamentEnd {
@@ -246,13 +242,7 @@ impl TournamentKernel {
                 &mut emit_history,
                 false,
             );
-            results.apply_match(
-                outcome.result,
-                outcome.a_crashed,
-                outcome.b_crashed,
-                outcome.a_tm_stats,
-                outcome.b_tm_stats,
-            );
+            results.apply_outcome(outcome);
         }
         runtime.note_cpu_matches(self.schedule.len());
 
@@ -299,13 +289,7 @@ impl TournamentKernel {
                 }
                 let mut results = self.build_accumulator();
                 for outcome in all_outcomes {
-                    results.apply_match(
-                        outcome.result,
-                        outcome.a_crashed,
-                        outcome.b_crashed,
-                        outcome.a_tm_stats,
-                        outcome.b_tm_stats,
-                    );
+                    results.apply_outcome(outcome);
                 }
                 return (results.finalize(&self.config.strategies), runtime);
             }
@@ -360,13 +344,7 @@ impl TournamentKernel {
 
         let mut results = self.build_accumulator();
         for outcome in outcomes {
-            results.apply_match(
-                outcome.result,
-                outcome.a_crashed,
-                outcome.b_crashed,
-                outcome.a_tm_stats,
-                outcome.b_tm_stats,
-            );
+            results.apply_outcome(outcome);
         }
         runtime.note_cpu_matches(self.schedule.len());
         (results.finalize(&self.config.strategies), runtime)

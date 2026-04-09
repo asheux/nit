@@ -25,65 +25,16 @@ use crate::{
 
 // ── Shared test helpers ────────────────────────────────────
 
-/// Record a single round of actions into a match history.
-///
-/// Convenience wrapper around [`History::push`] that makes test
-/// setup more readable when building multi-round histories.
 fn record_round(history: &mut History, a: Action, b: Action) {
     history.push(a, b);
 }
 
-/// Construct a boxed [`Strategy`] from a [`StrategySpec`].
-///
-/// Dispatches on the spec kind (FSM, CA, or one-sided TM) and returns
-/// the corresponding strategy implementation. Used by tests that need
-/// to run matches outside the tournament kernel.
+/// Delegates to [`build_strategy`](crate::tournament::build_strategy).
 fn strategy_from_spec(spec: &crate::config::StrategySpec) -> Box<dyn Strategy> {
-    match &spec.kind {
-        StrategySpecKind::Fsm {
-            start_state,
-            outputs,
-            input_mode,
-            transitions,
-            ..
-        } => Box::new(FsmStrategy::new(
-            spec.id.clone(),
-            *start_state,
-            outputs.clone(),
-            input_mode.unwrap_or(InputMode::OpponentLastAction),
-            transitions.clone(),
-        )),
-        StrategySpecKind::Ca { n, k, r, t } => Box::new(CaStrategy::new(
-            spec.id.clone(),
-            *n,
-            *k,
-            (*r * 2.0).round() as u32,
-            *t,
-        )),
-        StrategySpecKind::OneSidedTm {
-            symbols,
-            start_state,
-            blank,
-            max_steps_per_round,
-            transitions,
-            ..
-        } => Box::new(OneSidedTmStrategy::new(
-            spec.id.clone(),
-            *symbols,
-            *start_state,
-            *blank,
-            *max_steps_per_round,
-            transitions.clone(),
-        )),
-    }
+    crate::tournament::build_strategy(spec, 0)
 }
 
-/// Simulate a full match between two strategies given their specs.
-///
-/// Instantiates both strategies, plays `rounds` rounds with the given
-/// payoff matrix (including halting-timeout penalties), and returns the
-/// cumulative `(a_total, b_total)` scores. Used to verify tournament
-/// kernel results against a reference implementation.
+/// Simulate a full match between two strategies; returns `(a_total, b_total)`.
 fn simulate_match_from_specs(
     a_spec: &crate::config::StrategySpec,
     b_spec: &crate::config::StrategySpec,

@@ -182,22 +182,18 @@ where
             if canonical {
                 let output_spec = canonicalize_fsm(&spec);
                 let key = output_spec.stable_key();
-                if seen.insert(key) {
-                    emit(output_spec);
-                    count += 1;
-                    if let Some(limit) = limit {
-                        if count >= limit {
-                            return count;
-                        }
-                    }
+                if !seen.insert(key) {
+                    done = !increment_odometer(&mut transitions, num_states, alphabet);
+                    continue;
                 }
+                emit(output_spec);
             } else {
                 emit(spec);
-                count += 1;
-                if let Some(limit) = limit {
-                    if count >= limit {
-                        return count;
-                    }
+            }
+            count += 1;
+            if let Some(limit) = limit {
+                if count >= limit {
+                    return count;
                 }
             }
 
@@ -523,14 +519,8 @@ fn minimize_raw_fsm(raw: &RawFsm, start_state: usize) -> RawFsm {
     let mut output_blocks: HashMap<usize, usize> = HashMap::new();
     for (state, slot) in block_by_state.iter_mut().enumerate() {
         let output = machine.outputs[state];
-        let block = if let Some(existing) = output_blocks.get(&output).copied() {
-            existing
-        } else {
-            let next_block = output_blocks.len();
-            output_blocks.insert(output, next_block);
-            next_block
-        };
-        *slot = block;
+        let next = output_blocks.len();
+        *slot = *output_blocks.entry(output).or_insert(next);
     }
 
     loop {
@@ -542,14 +532,8 @@ fn minimize_raw_fsm(raw: &RawFsm, start_state: usize) -> RawFsm {
             for &next in machine.transitions[state].iter() {
                 signature.push(block_by_state[next]);
             }
-            let block = if let Some(existing) = signature_blocks.get(&signature).copied() {
-                existing
-            } else {
-                let next_block = signature_blocks.len();
-                signature_blocks.insert(signature, next_block);
-                next_block
-            };
-            *slot = block;
+            let next = signature_blocks.len();
+            *slot = *signature_blocks.entry(signature).or_insert(next);
         }
         if refined == block_by_state {
             break;

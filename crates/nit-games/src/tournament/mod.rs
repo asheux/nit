@@ -43,3 +43,6 @@ pub use types::{
 
 #[cfg(test)]
 pub(crate) use metal::{metal_batch_totals_for_test, metal_policy_probe_for_test};
+
+#[cfg(test)]
+pub(crate) use session::build_strategy;

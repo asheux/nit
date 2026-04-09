@@ -73,6 +73,7 @@ pub struct TmTransitionRecord {
 /// normalising fields where necessary (e.g. Turing machine transition tables
 /// are expanded into per-`(state, read)` records).
 pub fn introspect_strategy(spec: &StrategySpec) -> StrategyIntrospection {
+    let id = spec.id.clone();
     match &spec.kind {
         StrategySpecKind::Fsm {
             num_states,
@@ -88,7 +89,7 @@ pub fn introspect_strategy(spec: &StrategySpec) -> StrategyIntrospection {
                 outputs.len()
             };
             StrategyIntrospection {
-                id: spec.id.clone(),
+                id,
                 kind: StrategyIntrospectionKind::Fsm,
                 parameters: StrategyIntrospectionParameters::Fsm {
                     states,
@@ -140,7 +141,7 @@ pub fn introspect_strategy(spec: &StrategySpec) -> StrategyIntrospection {
                 }
             }
             StrategyIntrospection {
-                id: spec.id.clone(),
+                id,
                 kind: StrategyIntrospectionKind::OneSidedTm,
                 parameters: StrategyIntrospectionParameters::OneSidedTm {
                     states: *states,
@@ -228,8 +229,87 @@ fn build_tm_rules_table(transitions: &[TmTransitionRecord]) -> Vec<String> {
     build_table(&headers, &rows)
 }
 
-/// Render a [`StrategyIntrospection`] as a sequence of plain-text lines,
-/// including ASCII tables for FSM transition graphs and Turing machine rules.
+fn format_fsm_lines(
+    lines: &mut Vec<String>,
+    states: usize,
+    start_state: usize,
+    outputs: &[Action],
+    transitions: &[Vec<usize>],
+    index: Option<u64>,
+) {
+    lines.push(format!("states: {states}"));
+    lines.push(format!("start_state: {}", start_state.saturating_add(1)));
+    if let Some(index) = index {
+        lines.push(format!("notebook_index: {index}"));
+    }
+    let outputs_str: String = outputs.iter().map(|a| a.as_char()).collect();
+    lines.push(format!("outputs: {outputs_str}"));
+    lines.push("input_semantics: opponent_last_action".to_string());
+    lines.push(String::new());
+    lines.push("graph:".to_string());
+    lines.push("legend: 0=C, 1=D (opponent last action)".to_string());
+    let headers = vec!["state".to_string(), "0".to_string(), "1".to_string()];
+    let mut rows = Vec::new();
+    for state_idx in 0..states {
+        let output = outputs.get(state_idx).map(|a| a.as_char()).unwrap_or('?');
+        let mut row = Vec::new();
+        row.push(format!("{}({output})", state_idx + 1));
+        let trans_row = transitions.get(state_idx);
+        for input in 0..2 {
+            row.push(
+                trans_row
+                    .and_then(|r| r.get(input))
+                    .map(|n| (n + 1).to_string())
+                    .unwrap_or_else(|| "-".to_string()),
+            );
+        }
+        rows.push(row);
+    }
+    lines.extend(build_table(&headers, &rows));
+}
+
+fn format_ca_lines(lines: &mut Vec<String>, n: u64, k: u8, r: f32, t: u32) {
+    lines.push(format!("rule_code: {n}"));
+    lines.push(format!("symbols: {k}"));
+    lines.push(format!("radius: {r}"));
+    lines.push(format!("steps: {t}"));
+    lines.push("input_semantics: Flatten[history] (global A,B order)".to_string());
+    lines.push("output: last cell of ShrinkingCA final row".to_string());
+}
+
+#[allow(clippy::too_many_arguments)]
+fn format_tm_lines(
+    lines: &mut Vec<String>,
+    states: u16,
+    symbols: u8,
+    start_state: u16,
+    blank: u8,
+    fallback_symbol: u8,
+    max_steps_per_round: u32,
+    transitions: &[TmTransitionRecord],
+    rule_code: Option<u64>,
+) {
+    lines.push(format!("states: {states}"));
+    lines.push(format!("symbols: {symbols}"));
+    lines.push(format!("start_state: {start_state}"));
+    lines.push(format!("blank: {blank}"));
+    lines.push(format!("fallback_symbol: {fallback_symbol}"));
+    lines.push(format!("max_steps_per_round: {max_steps_per_round}"));
+    if let Some(code) = rule_code {
+        lines.push(format!("rule_code: {code}"));
+    }
+    lines.push(
+        "input_semantics: input = FromDigits[Flatten[history], 2]; head starts on the least-significant digit".to_string(),
+    );
+    lines.push(
+        "output_semantics: empty history -> C; halted -> output_symbol 0 => C, non-zero => D; timeout -> Defect".to_string(),
+    );
+    lines.push(String::new());
+    lines.push("transitions:".to_string());
+    lines.extend(build_tm_rules_table(transitions));
+}
+
+/// Render a [`StrategyIntrospection`] as plain-text lines with ASCII tables.
 pub fn format_strategy_introspection(intro: &StrategyIntrospection) -> Vec<String> {
     let mut lines = Vec::new();
     lines.push(format!("id: {}", intro.id));
@@ -248,44 +328,16 @@ pub fn format_strategy_introspection(intro: &StrategyIntrospection) -> Vec<Strin
             outputs,
             transitions,
             index,
-        } => {
-            lines.push(format!("states: {states}"));
-            lines.push(format!("start_state: {}", start_state.saturating_add(1)));
-            if let Some(index) = index {
-                lines.push(format!("notebook_index: {index}"));
-            }
-            let outputs_str: String = outputs.iter().map(|a| a.as_char()).collect();
-            lines.push(format!("outputs: {outputs_str}"));
-            lines.push("input_semantics: opponent_last_action".to_string());
-            lines.push(String::new());
-            lines.push("graph:".to_string());
-            lines.push("legend: 0=C, 1=D (opponent last action)".to_string());
-            let headers = vec!["state".to_string(), "0".to_string(), "1".to_string()];
-            let mut rows = Vec::new();
-            for state_idx in 0..*states {
-                let output = outputs.get(state_idx).map(|a| a.as_char()).unwrap_or('?');
-                let mut row = Vec::new();
-                row.push(format!("{}({output})", state_idx + 1));
-                let trans_row = transitions.get(state_idx);
-                for input in 0..2 {
-                    row.push(
-                        trans_row
-                            .and_then(|r| r.get(input))
-                            .map(|n| (n + 1).to_string())
-                            .unwrap_or_else(|| "-".to_string()),
-                    );
-                }
-                rows.push(row);
-            }
-            lines.extend(build_table(&headers, &rows));
-        }
+        } => format_fsm_lines(
+            &mut lines,
+            *states,
+            *start_state,
+            outputs,
+            transitions,
+            *index,
+        ),
         StrategyIntrospectionParameters::Ca { n, k, r, t } => {
-            lines.push(format!("rule_code: {n}"));
-            lines.push(format!("symbols: {k}"));
-            lines.push(format!("radius: {r}"));
-            lines.push(format!("steps: {t}"));
-            lines.push("input_semantics: Flatten[history] (global A,B order)".to_string());
-            lines.push("output: last cell of ShrinkingCA final row".to_string());
+            format_ca_lines(&mut lines, *n, *k, *r, *t)
         }
         StrategyIntrospectionParameters::OneSidedTm {
             states,
@@ -296,26 +348,17 @@ pub fn format_strategy_introspection(intro: &StrategyIntrospection) -> Vec<Strin
             max_steps_per_round,
             transitions,
             rule_code,
-        } => {
-            lines.push(format!("states: {states}"));
-            lines.push(format!("symbols: {symbols}"));
-            lines.push(format!("start_state: {start_state}"));
-            lines.push(format!("blank: {blank}"));
-            lines.push(format!("fallback_symbol: {fallback_symbol}"));
-            lines.push(format!("max_steps_per_round: {max_steps_per_round}"));
-            if let Some(code) = rule_code {
-                lines.push(format!("rule_code: {code}"));
-            }
-            lines.push(
-                "input_semantics: input = FromDigits[Flatten[history], 2]; head starts on the least-significant digit".to_string(),
-            );
-            lines.push(
-                "output_semantics: empty history -> C; halted -> output_symbol 0 => C, non-zero => D; timeout -> Defect".to_string(),
-            );
-            lines.push(String::new());
-            lines.push("transitions:".to_string());
-            lines.extend(build_tm_rules_table(transitions));
-        }
+        } => format_tm_lines(
+            &mut lines,
+            *states,
+            *symbols,
+            *start_state,
+            *blank,
+            *fallback_symbol,
+            *max_steps_per_round,
+            transitions,
+            *rule_code,
+        ),
     }
     lines
 }

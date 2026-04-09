@@ -789,8 +789,8 @@ fn select_halting_turing_machine_strategies_inner(
         config.strategies = config
             .strategies
             .into_iter()
-            .enumerate()
-            .filter_map(|(idx, spec)| keep[idx].then_some(spec))
+            .zip(keep.iter())
+            .filter_map(|(spec, &kept)| kept.then_some(spec))
             .collect();
     }
     config.tm_filter_applied = true;

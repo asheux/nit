@@ -164,9 +164,13 @@ impl PayoffMatrix {
     /// Returns `(min, max)` payoff across all cells. Widens the range when
     /// all values are identical to prevent division-by-zero in normalization.
     pub fn min_max(self) -> (i32, i32) {
-        let all_values = self.matrix.iter().flatten().flatten().copied();
-        let mut lo = all_values.clone().min().unwrap_or(0);
-        let hi = all_values.max().unwrap_or(0);
+        let (mut lo, hi) = self
+            .matrix
+            .iter()
+            .flatten()
+            .flatten()
+            .copied()
+            .fold((i32::MAX, i32::MIN), |(lo, hi), v| (lo.min(v), hi.max(v)));
         if lo == hi {
             lo = if lo > 0 { 0 } else { lo.saturating_sub(1) };
         }
@@ -190,9 +194,9 @@ pub fn payoffs_with_timeouts(
 
     let (penalty, bonus) = payoff_matrix.min_max();
     match (player_a_halted, player_b_halted) {
-        // Both-halted already handled above by the early return.
         (false, true) => (penalty, bonus),
         (true, false) => (bonus, penalty),
-        _ => (penalty, penalty),
+        (false, false) => (penalty, penalty),
+        (true, true) => unreachable!("both-halted handled by early return"),
     }
 }

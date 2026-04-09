@@ -753,52 +753,38 @@ impl TournamentRunner {
     ///
     /// Updates the leaderboard progress, marks any crash flags on the
     /// per-strategy stats, and delegates scoring to `TournamentAccumulator`.
-    fn record_completed_outcome(&mut self, finished_outcome: MatchOutcome) {
-        let MatchOutcome {
-            result: scoring_result,
-            a_crashed: first_player_crashed,
-            b_crashed: second_player_crashed,
-            a_tm_stats: first_tm_statistics,
-            b_tm_stats: second_tm_statistics,
-            last_round: final_round_snapshot,
-        } = finished_outcome;
+    fn record_completed_outcome(&mut self, outcome: MatchOutcome) {
         let completed_ordinal = self.match_index.saturating_add(1);
-        self.last_round = final_round_snapshot.clone();
+        self.last_round = outcome.last_round.clone();
         let progress_needs_update = self
             .last_progress
             .as_ref()
             .map(|tracked| (tracked.match_index, tracked.round))
-            != Some((completed_ordinal, scoring_result.rounds));
+            != Some((completed_ordinal, outcome.result.rounds));
         if progress_needs_update {
             self.last_progress = Some(TournamentProgress::build(
                 completed_ordinal,
                 self.schedule.len().max(1),
-                scoring_result.rounds,
-                scoring_result.rounds,
+                outcome.result.rounds,
+                outcome.result.rounds,
                 true,
-                strategy_log_id(&self.strategies[scoring_result.a_idx]),
-                strategy_log_id(&self.strategies[scoring_result.b_idx]),
-                scoring_result.a_total,
-                scoring_result.b_total,
-                final_round_snapshot.as_ref(),
+                strategy_log_id(&self.strategies[outcome.result.a_idx]),
+                strategy_log_id(&self.strategies[outcome.result.b_idx]),
+                outcome.result.a_total,
+                outcome.result.b_total,
+                outcome.last_round.as_ref(),
                 self.runtime.clone(),
             ));
         }
-        if first_player_crashed {
-            self.results.strategies[scoring_result.a_idx].crash_count += 1;
-            self.results.strategies[scoring_result.a_idx].crashed = true;
+        if outcome.a_crashed {
+            self.results.strategies[outcome.result.a_idx].crash_count += 1;
+            self.results.strategies[outcome.result.a_idx].crashed = true;
         }
-        if second_player_crashed {
-            self.results.strategies[scoring_result.b_idx].crash_count += 1;
-            self.results.strategies[scoring_result.b_idx].crashed = true;
+        if outcome.b_crashed {
+            self.results.strategies[outcome.result.b_idx].crash_count += 1;
+            self.results.strategies[outcome.result.b_idx].crashed = true;
         }
-        self.results.apply_match(
-            scoring_result,
-            first_player_crashed,
-            second_player_crashed,
-            first_tm_statistics,
-            second_tm_statistics,
-        );
+        self.results.apply_outcome(outcome);
         self.match_index += 1;
     }
 

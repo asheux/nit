@@ -1,9 +1,6 @@
 use super::types::PayoffConfig;
 use crate::game::PayoffMatrix;
 
-/// When a full 2x2 matrix is provided, validates dimensions and cross-checks
-/// against explicit R/S/T/P scalars for symmetric games. Falls back to scalar
-/// construction on malformed input.
 pub(super) fn payoff_from_config(config: PayoffConfig, errors: &mut Vec<String>) -> PayoffMatrix {
     let Some(raw_matrix) = config.matrix.as_ref() else {
         return fallback_payoff(config);
@@ -65,7 +62,6 @@ const DEFAULT_SUCKER: i32 = 0;
 const DEFAULT_TEMPTATION: i32 = 5;
 const DEFAULT_PUNISHMENT: i32 = 1;
 
-/// Symmetric matrix from scalar R/S/T/P fields, defaulting to PD payoffs.
 pub(super) fn fallback_payoff(config: PayoffConfig) -> PayoffMatrix {
     let reward = config.r.unwrap_or(DEFAULT_REWARD);
     let sucker = config.s.unwrap_or(DEFAULT_SUCKER);

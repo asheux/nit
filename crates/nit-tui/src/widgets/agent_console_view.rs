@@ -2652,12 +2652,24 @@ fn append_swarm_meta_footer_rows(
     }
 
     let max_inner = inner.max(1);
+    let border = "─".repeat(max_inner);
 
-    // Blank row before the footer so it has breathing room from the last
-    // thread message without drawing an explicit border rule.
+    // Footer layout:
+    //   [blank]           ← breathing room from the last thread message
+    //   ────────          ← top border rule
+    //   Swarm · X · Y     ← compact header
+    //   Gates: …          ← gate summary (if any)
+    //   ────────          ← bottom border rule
+    //
+    // The borders frame the footer as a distinct block so it's visually
+    // separated from both the thread above and the chat input below.
     rows.push(ThreadRow {
         text: pad_to_width(indent_str, width),
         kind: ThreadRowKind::StatusRow,
+    });
+    rows.push(ThreadRow {
+        text: pad_to_width(&format!("{indent_str}{border}"), width),
+        kind: ThreadRowKind::StatusHeader,
     });
     append_swarm_footer_line(rows, indent_str, width, max_inner, &header_line, true);
     if let Some(gates) = meta.gates.as_deref() {
@@ -2670,6 +2682,10 @@ fn append_swarm_meta_footer_rows(
             false,
         );
     }
+    rows.push(ThreadRow {
+        text: pad_to_width(&format!("{indent_str}{border}"), width),
+        kind: ThreadRowKind::StatusHeader,
+    });
 }
 
 #[derive(Default)]

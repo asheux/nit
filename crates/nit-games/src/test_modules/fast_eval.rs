@@ -26,13 +26,8 @@ fn constant_strategy_model(label: &str, action: Action) -> FastStrategyModel {
 
 // ── Tests ─────────────────────────────────────────────────────────────────
 
-/// Verify that `evaluate_match` produces the correct per-round outcome
-/// string and cumulative scores when called with `record_outcomes = true`
-/// but `record_rounds = false` (the common fast-eval configuration).
-///
-/// Scenario: Always-Cooperate vs Always-Defect over 8 rounds. Every round
-/// is outcome index 1 (C vs D), yielding scores of -24 and 0 under the
-/// standard Prisoner's Dilemma payoff matrix.
+/// Always-C vs Always-D over 8 rounds: every round is outcome index 1,
+/// yielding scores of -24 and 0 under the standard PD matrix.
 #[test]
 fn outcomes_recorded_without_round_trace() {
     let cooperator_model = constant_strategy_model("always_cooperate", Action::Cooperate);
@@ -58,9 +53,7 @@ fn outcomes_recorded_without_round_trace() {
     assert_eq!(eval_result.b_total, 0);
 }
 
-/// Verify that mutual cooperation (Always-C vs Always-C) yields outcome
-/// index 0 every round and symmetric negative scores under the standard
-/// Prisoner's Dilemma matrix (both players receive -1 per round).
+/// Always-C vs Always-C: outcome index 0 every round, both get -1/round.
 #[test]
 fn mutual_cooperation_yields_symmetric_scores() {
     let cooperator_a = constant_strategy_model("cooperator_a", Action::Cooperate);

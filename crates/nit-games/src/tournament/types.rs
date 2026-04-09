@@ -165,23 +165,14 @@ impl MatchHistoryPreview {
 /// otherwise they equal the raw totals cast to `f64`.
 #[derive(Clone, Debug)]
 pub struct MatchResult {
-    /// Index of strategy A in the roster.
     pub a_idx: usize,
-    /// Index of strategy B in the roster.
     pub b_idx: usize,
-    /// Number of rounds played.
     pub rounds: u32,
-    /// Raw cumulative payoff for strategy A.
     pub a_total: i64,
-    /// Raw cumulative payoff for strategy B.
     pub b_total: i64,
-    /// Payoff for A after complexity-cost adjustment.
     pub a_adjusted_total: f64,
-    /// Payoff for B after complexity-cost adjustment.
     pub b_adjusted_total: f64,
-    /// Zero-based repetition index for this matchup.
     pub repetition: u32,
-    /// Global match identifier within the schedule.
     pub match_id: usize,
 }
 
@@ -405,18 +396,11 @@ pub(super) struct PreparedMetalBatch {
 // ── Match types ─────────────────────────────────────────────
 
 /// A scheduled matchup: two strategy indices, a repetition, and a global match id.
-///
-/// Produced by [`SchedulePlan::matchup`](super::schedule::SchedulePlan::matchup)
-/// and consumed by `run_match_core` and the Metal batch path.
 #[derive(Clone, Debug)]
 pub(super) struct Matchup {
-    /// Globally unique match identifier within the schedule.
     pub(super) match_id: usize,
-    /// Index of strategy A in the roster.
     pub(super) a_idx: usize,
-    /// Index of strategy B in the roster.
     pub(super) b_idx: usize,
-    /// Zero-based repetition index.
     pub(super) repetition: u32,
 }
 
@@ -494,6 +478,16 @@ pub(super) struct PairStats {
     pub(super) a_wins: u32,
     pub(super) b_wins: u32,
     pub(super) draws: u32,
+}
+
+impl PairStats {
+    pub(super) fn is_empty(&self) -> bool {
+        self.a_total == 0
+            && self.b_total == 0
+            && self.a_wins == 0
+            && self.b_wins == 0
+            && self.draws == 0
+    }
 }
 
 /// Aggregates match results into per-strategy and pairwise statistics.

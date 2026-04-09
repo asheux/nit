@@ -1178,6 +1178,7 @@ fn dag_scheduler_dispatches_after_deps() {
         gate_report: None,
         genome_gate_results: None,
         genome_gate_pending: None,
+        genome_review_pending: None,
         report_status: None,
         report_output: None,
         scope_files: Vec::new(),
@@ -1280,6 +1281,7 @@ fn single_writer_limits_concurrent_write_tasks() {
         gate_report: None,
         genome_gate_results: None,
         genome_gate_pending: None,
+        genome_review_pending: None,
         report_status: None,
         report_output: None,
         scope_files: Vec::new(),
@@ -1442,6 +1444,7 @@ fn deadlock_detection_skips_pending_tasks() {
         gate_report: None,
         genome_gate_results: None,
         genome_gate_pending: None,
+        genome_review_pending: None,
         report_status: None,
         report_output: None,
         scope_files: Vec::new(),
@@ -1779,6 +1782,7 @@ fn dashboard_distinguishes_pending_queued_and_skipped() {
         }),
         genome_gate_results: None,
         genome_gate_pending: None,
+        genome_review_pending: None,
         report_status: None,
         report_output: None,
         scope_files: Vec::new(),
@@ -2005,10 +2009,7 @@ fn gate_rendered_command_falls_back_when_no_scoped_template() {
         scoped_command: None,
     };
     let pkgs = vec!["some-pkg".to_string()];
-    assert_eq!(
-        gate.rendered_command(&pkgs),
-        "npm run lint --if-present"
-    );
+    assert_eq!(gate.rendered_command(&pkgs), "npm run lint --if-present");
 }
 
 #[test]
@@ -2027,5 +2028,142 @@ fn rust_bundle_gates_render_scoped_when_cargo_packages_provided() {
             "cargo clippy -p nit-tui --all-targets --all-features -- -D warnings".to_string(),
             "cargo test -p nit-tui --all-features".to_string(),
         ]
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Role contract regression tests — pin the "operator-only workspace-wide
+// widening" rule into the test suite so a future prompt edit can't quietly
+// soften the language. The user explicitly fixed this twice; we don't want
+// it to come back.
+// ---------------------------------------------------------------------------
+
+/// Returns the joined role-contract text for a role so we can grep for
+/// required phrases. Reaches into the private `role_contract_lines` helper.
+fn role_contract_text(role: &str) -> String {
+    role_contract_lines(role).join("\n")
+}
+
+/// Returns true when `text` semantically forbids running tests / builds /
+/// lints / CI commands. Checks case-insensitively for both a "do not run" /
+/// "must not run" directive and at least one verification verb. Lets the
+/// arms phrase the rule slightly differently without breaking the test.
+fn forbids_verification_commands(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    let directive_present = lower.contains("do not run") || lower.contains("must not run");
+    let verb_present = lower.contains("test")
+        || lower.contains("build")
+        || lower.contains("lint")
+        || lower.contains(" ci");
+    directive_present && verb_present
+}
+
+#[test]
+fn integrate_role_contract_forbids_unauthorized_workspace_wide_runs() {
+    let text = role_contract_text("integrate");
+    // Must contain the operator-only widening rule.
+    assert!(
+        text.contains("ONLY allowed when the OPERATOR explicitly asked"),
+        "integrate role must include the operator-only widening rule, got: {text}"
+    );
+    // Must list the canonical workspace-wide commands as forbidden examples
+    // so the agent recognizes them when tempted.
+    assert!(
+        text.contains("cargo test --all"),
+        "integrate role must name `cargo test --all` as forbidden"
+    );
+    assert!(
+        text.contains("--workspace"),
+        "integrate role must name `--workspace` as forbidden"
+    );
+    // Must guide the agent to combine targeted flags rather than widen.
+    assert!(
+        text.contains("targeted") || text.contains("Targeted"),
+        "integrate role must steer toward targeted commands"
+    );
+    // Must NOT contain the old loophole language we removed.
+    assert!(
+        !text.contains("as appropriate"),
+        "integrate role must not contain the 'as appropriate' loophole that the agent reads as license to widen"
+    );
+}
+
+#[test]
+fn test_role_contract_forbids_unauthorized_workspace_wide_runs() {
+    let text = role_contract_text("test");
+    assert!(
+        text.contains("ONLY allowed when the OPERATOR explicitly asked"),
+        "test role must include the operator-only widening rule, got: {text}"
+    );
+    assert!(
+        text.contains("cargo test --all"),
+        "test role must name `cargo test --all` as forbidden"
+    );
+    assert!(
+        text.contains("--workspace"),
+        "test role must name `--workspace` as forbidden"
+    );
+    // Must mention multi-module guidance (combine flags, not widen).
+    assert!(
+        text.contains("multiple targeted flags") || text.contains("MULTI-MODULE"),
+        "test role must include multi-module guidance"
+    );
+    assert!(
+        !text.contains("as appropriate"),
+        "test role must not contain the 'as appropriate' loophole"
+    );
+    // Must NOT have the old TEST AUTHORITY line that authorized broad runs.
+    assert!(
+        !text.contains("TEST AUTHORITY"),
+        "test role must not still grant unconditional TEST AUTHORITY"
+    );
+}
+
+#[test]
+fn review_role_contract_forbids_unauthorized_workspace_wide_runs() {
+    let text = role_contract_text("review");
+    assert!(
+        text.contains("ONLY allowed when the OPERATOR explicitly asked"),
+        "review role must include the operator-only widening rule, got: {text}"
+    );
+    assert!(
+        text.contains("cargo test --all") || text.contains("cargo clippy --workspace"),
+        "review role must name workspace-wide commands as forbidden"
+    );
+    assert!(
+        !text.contains("as appropriate"),
+        "review role must not contain the 'as appropriate' loophole"
+    );
+    assert!(
+        !text.contains("TEST AUTHORITY"),
+        "review role must not still grant unconditional TEST AUTHORITY"
+    );
+}
+
+#[test]
+fn read_only_roles_forbid_all_verification_commands() {
+    // propose / research / computational-research / judge / genome-reviewer
+    // are read-only — they should never run any verification command, period.
+    for role in [
+        "propose",
+        "research",
+        "computational-research",
+        "judge",
+        "genome-reviewer",
+    ] {
+        let text = role_contract_text(role);
+        assert!(
+            forbids_verification_commands(&text),
+            "read-only role '{role}' must explicitly forbid running tests/builds/lints/CI, got: {text}"
+        );
+    }
+}
+
+#[test]
+fn default_role_contract_forbids_verification_unless_assigned() {
+    let text = role_contract_text("some-unrecognised-future-role");
+    assert!(
+        forbids_verification_commands(&text),
+        "default role contract must forbid verification commands by default, got: {text}"
     );
 }

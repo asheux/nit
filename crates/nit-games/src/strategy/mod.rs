@@ -120,23 +120,18 @@ pub fn decode_tm_rule_code_wolfram(
     if states == 0 || symbols == 0 {
         return (transitions, rule_code);
     }
-    let mixed_radix_base = (symbols as u64) * (states as u64) * 2;
-    if mixed_radix_base == 0 {
-        return (transitions, rule_code);
-    }
-    let mut remaining_code = rule_code;
-    for current_state in (1..=states).rev() {
-        for tape_symbol in 0..symbols {
-            let transition = decode_single_wolfram_digit(remaining_code, mixed_radix_base, symbols);
-            remaining_code /= mixed_radix_base;
-
-            let transition_index = (current_state - 1) * symbols + tape_symbol;
-            if let Some(slot) = transitions.get_mut(transition_index) {
-                *slot = transition;
-            }
+    // Both dimensions are non-zero (early return above), so digit_radix cannot be 0.
+    let digit_radix = (symbols as u64) * (states as u64) * 2;
+    let mut undecoded_suffix = rule_code;
+    for wolfram_state in (1..=states).rev() {
+        for read_symbol in 0..symbols {
+            let decoded_rule = decode_single_wolfram_digit(undecoded_suffix, digit_radix, symbols);
+            undecoded_suffix /= digit_radix;
+            let table_offset = (wolfram_state - 1) * symbols + read_symbol;
+            transitions[table_offset] = decoded_rule;
         }
     }
-    (transitions, remaining_code)
+    (transitions, undecoded_suffix)
 }
 
 /// Extract a single TM transition from the lowest digit of the rule code.
@@ -177,10 +172,9 @@ pub fn tm_max_index(states: usize, symbols: usize) -> Option<u128> {
 
 /// Map a numeric output symbol to an action: 0 → Cooperate, anything else → Defect.
 pub(crate) fn symbol_to_action(symbol: u8) -> Action {
-    if symbol == 0 {
-        Action::Cooperate
-    } else {
-        Action::Defect
+    match symbol {
+        0 => Action::Cooperate,
+        _ => Action::Defect,
     }
 }
 

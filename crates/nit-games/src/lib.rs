@@ -3,8 +3,6 @@
 
 #![forbid(unsafe_code)]
 
-pub(crate) mod ndjson;
-
 pub mod analysis;
 pub mod config;
 pub mod events;
@@ -14,6 +12,7 @@ pub mod game;
 pub mod history;
 pub mod history_log;
 pub mod introspection;
+pub(crate) mod ndjson;
 pub mod output;
 pub mod strategy;
 pub mod tournament;

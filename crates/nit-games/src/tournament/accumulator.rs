@@ -4,7 +4,7 @@ use std::cmp::Ordering;
 
 use super::halting::compare_scores;
 use super::session::tm_metrics_from_stats;
-use super::types::{MatchResult, PairStats, StrategyStats, TournamentAccumulator};
+use super::types::{MatchOutcome, MatchResult, PairStats, StrategyStats, TournamentAccumulator};
 use crate::config::{ScoreAggregation, StrategySpec};
 use crate::output::{DominanceEdge, PairwiseResult, StrategyResult, TournamentResults};
 use crate::strategy::TmRunStats;
@@ -177,6 +177,18 @@ impl TournamentAccumulator {
         }
     }
 
+    /// Convenience wrapper that destructures a [`MatchOutcome`] into the
+    /// fields expected by [`apply_match`](Self::apply_match).
+    pub(super) fn apply_outcome(&mut self, outcome: MatchOutcome) {
+        self.apply_match(
+            outcome.result,
+            outcome.a_crashed,
+            outcome.b_crashed,
+            outcome.a_tm_stats,
+            outcome.b_tm_stats,
+        );
+    }
+
     fn build_ranking(&self, specs: &[StrategySpec]) -> Vec<StrategyResult> {
         let mut ranking: Vec<StrategyResult> = self
             .strategies
@@ -234,12 +246,7 @@ impl TournamentAccumulator {
                     if i >= j {
                         continue;
                     }
-                    if pair.a_total == 0
-                        && pair.b_total == 0
-                        && pair.a_wins == 0
-                        && pair.b_wins == 0
-                        && pair.draws == 0
-                    {
+                    if pair.is_empty() {
                         continue;
                     }
                     pairwise.push(PairwiseResult {
@@ -259,16 +266,16 @@ impl TournamentAccumulator {
 
         let mut dominance = Vec::new();
         for pair in &pairwise {
-            if pair.a_total > pair.b_total {
-                dominance.push(DominanceEdge {
+            match pair.a_total.cmp(&pair.b_total) {
+                Ordering::Greater => dominance.push(DominanceEdge {
                     winner: pair.a.clone(),
                     loser: pair.b.clone(),
-                });
-            } else if pair.b_total > pair.a_total {
-                dominance.push(DominanceEdge {
+                }),
+                Ordering::Less => dominance.push(DominanceEdge {
                     winner: pair.b.clone(),
                     loser: pair.a.clone(),
-                });
+                }),
+                Ordering::Equal => {}
             }
         }
 

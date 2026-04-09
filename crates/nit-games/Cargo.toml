@@ -10,7 +10,6 @@ rust-version.workspace = true
 [dependencies]
 nit-metal = { path = "../nit-metal" }
 nit-utils = { path = "../nit-utils" }
-
 rayon = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }

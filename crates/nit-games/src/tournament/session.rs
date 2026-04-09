@@ -498,7 +498,7 @@ pub(super) fn strategy_log_id(spec: &StrategySpec) -> String {
 ///
 /// Dispatches on the spec kind to build the correct concrete strategy type
 /// (FSM, CA, or one-sided TM).
-fn build_strategy(spec: &StrategySpec, seed: u64) -> Box<dyn Strategy> {
+pub(crate) fn build_strategy(spec: &StrategySpec, seed: u64) -> Box<dyn Strategy> {
     let _ = seed;
     match &spec.kind {
         StrategySpecKind::Fsm {

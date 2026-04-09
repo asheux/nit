@@ -55,14 +55,12 @@ pub struct MatchHistory {
 }
 
 impl MatchHistory {
-    /// Returns the effective number of rounds, falling back to the length
-    /// of the `score_idx` string when the `rounds` field is zero.
+    /// Falls back to `score_idx` length when `rounds` is zero.
     pub fn resolved_rounds(&self) -> u32 {
         if self.rounds > 0 {
-            self.rounds
-        } else {
-            self.score_idx.len().min(u32::MAX as usize) as u32
+            return self.rounds;
         }
+        self.score_idx.len().min(u32::MAX as usize) as u32
     }
 }
 

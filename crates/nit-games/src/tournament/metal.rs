@@ -67,6 +67,16 @@ fn compute_complexity_penalty(
     }
 }
 
+/// Returns `true` when the roster is all-TM and step-cost penalties are enabled,
+/// which forces the CPU path (the Metal shader does not track per-step costs).
+fn has_tm_step_cost_conflict(config: &NormalizedConfig, strategies: &[StrategySpec]) -> bool {
+    config.engine.complexity_cost.enabled
+        && config.engine.complexity_cost.tm_step_cost != 0.0
+        && strategies
+            .iter()
+            .all(|spec| matches!(spec.kind, StrategySpecKind::OneSidedTm { .. }))
+}
+
 fn timeout_extrema(payoff: crate::game::PayoffMatrix) -> (i32, i32) {
     payoff.min_max()
 }
@@ -327,15 +337,7 @@ pub(super) fn prepare_metal_batch_inputs(
         return Ok(None);
     }
 
-    // TM rosters with step-cost penalties must use the CPU path, because the
-    // Metal shader does not track per-step costs.
-    let all_tms = strategies
-        .iter()
-        .all(|spec| matches!(spec.kind, StrategySpecKind::OneSidedTm { .. }));
-    if all_tms
-        && config.engine.complexity_cost.enabled
-        && config.engine.complexity_cost.tm_step_cost != 0.0
-    {
+    if has_tm_step_cost_conflict(config, strategies) {
         return Ok(None);
     }
 
@@ -442,13 +444,7 @@ pub(super) fn metal_batch_decline_reason(
         return None;
     }
 
-    let all_tms = strategies
-        .iter()
-        .all(|spec| matches!(spec.kind, StrategySpecKind::OneSidedTm { .. }));
-    if all_tms
-        && config.engine.complexity_cost.enabled
-        && config.engine.complexity_cost.tm_step_cost != 0.0
-    {
+    if has_tm_step_cost_conflict(config, strategies) {
         return Some("TM complexity penalties are not supported on the Metal path".into());
     }
 
@@ -531,14 +527,7 @@ pub fn accelerator_preflight(config: &NormalizedConfig) -> Result<(), String> {
         return Ok(());
     }
 
-    let all_tms = config
-        .strategies
-        .iter()
-        .all(|spec| matches!(spec.kind, StrategySpecKind::OneSidedTm { .. }));
-    if all_tms
-        && config.engine.complexity_cost.enabled
-        && config.engine.complexity_cost.tm_step_cost != 0.0
-    {
+    if has_tm_step_cost_conflict(config, &config.strategies) {
         return Err(
             "Metal accelerator does not support TM complexity penalties; \
              disable `engine.complexity_cost.tm_step_cost` or use `accelerator = \"auto\"`."

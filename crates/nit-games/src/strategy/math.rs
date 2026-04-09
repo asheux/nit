@@ -6,13 +6,7 @@
 /// negative infinity, ensuring the remainder is non-negative.
 /// Returns `(q, r)` such that `numer == q * denom + r` and `0 <= r < denom`.
 pub(crate) fn floor_div_rem_i128(numer: i128, denom: i128) -> (i128, i128) {
-    let mut quotient = numer / denom;
-    let mut remainder = numer % denom;
-    if remainder < 0 {
-        quotient -= 1;
-        remainder += denom;
-    }
-    (quotient, remainder)
+    (numer.div_euclid(denom), numer.rem_euclid(denom))
 }
 
 /// Decompose a signed integer (by absolute value) into base-`radix` digits,

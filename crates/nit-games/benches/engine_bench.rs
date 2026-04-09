@@ -297,7 +297,7 @@ fn build_deterministic_strategy_suite(rounds: u32) -> NormalizedConfig {
         vec![vec![1, 0], vec![1, 0]],
     );
 
-    let ca_rule30 = ca_spec("ca30", 30, 1.0_f32, 2);
+    let ca_rule30 = ca_spec("ca30", 30, 1.0, 2);
     let tm_basic = tm_spec("tm", binary_tm_transitions(HeadMovement::Advancing), 32);
 
     let mut cfg = config_scaffold(
@@ -580,7 +580,7 @@ fn apply_mixed_strategy_overrides(cfg: &mut NormalizedConfig) {
     );
 
     // Slot 2: Rule-30 cellular automaton (radius 1, threshold 3).
-    cfg.strategies[2] = ca_spec(cfg.strategies[2].id.clone(), 30, 1.0_f32, 3);
+    cfg.strategies[2] = ca_spec(cfg.strategies[2].id.clone(), 30, 1.0, 3);
 
     // Slot 3: minimal right-moving Turing machine.
     cfg.strategies[3] = tm_spec(
