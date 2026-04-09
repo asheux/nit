@@ -640,6 +640,14 @@ pub(super) fn handle_artifacts_popup_chat_key(
     }
 }
 
+/// Compute `(max_scroll, content_height)` for the artifacts popup by actually
+/// rebuilding the rendered markdown via `build_lines`. This is expensive, so
+/// the hot scroll paths (wheel / keyboard) prefer the cached
+/// `state.agents.artifacts_popup_last_max_scroll` updated on each render and
+/// only fall back to this function when the cache is still `usize::MAX`
+/// (i.e. before the first render after the popup opened — guarantees that
+/// forward-at-max clamping works on the very first scroll event, so reverse
+/// scroll is never blocked by an inflated over-scrolled state).
 pub(super) fn artifacts_popup_scroll_metrics(
     state: &AppState,
     swarm: &SwarmRuntime,
@@ -659,6 +667,10 @@ pub(super) fn artifacts_popup_scroll_metrics(
 pub(super) fn close_artifacts_popup(state: &mut AppState) {
     state.agents.artifacts_popup_open = false;
     state.agents.artifacts_popup_scroll = 0;
+    // Reset the cached max_scroll so the next popup open starts with a clean
+    // slate — the sentinel triggers the fallback-compute path on the first
+    // scroll event if no render has happened yet.
+    state.agents.artifacts_popup_last_max_scroll = usize::MAX;
     state.agents.global_archive_opened_entry = None;
     state.agents.artifacts_popup_chat_input.clear();
     state.agents.artifacts_popup_chat_cursor = 0;
@@ -726,11 +738,31 @@ pub(super) fn handle_artifacts_popup_key(
     }
 
     // Content scrolling:
-    //   Ctrl+Up / Ctrl+Down   — one line at a time
+    //   Ctrl+Up / Ctrl+Down   — three lines at a time (matches editor wheel step)
     //   PgUp / PgDown         — one page at a time
     //   Ctrl+Home / Ctrl+End  — jump to top / bottom
     // Plain Up/Down go to the text editor (cursor movement in the input).
-    let (max_scroll, page_step) = artifacts_popup_scroll_metrics(state, swarm, screen, theme);
+    //
+    // Scroll metrics are read from the cached `artifacts_popup_last_max_scroll`
+    // (updated each render) plus a cheap layout-only `page_step` computation —
+    // we deliberately avoid `artifacts_popup_scroll_metrics` in the hot path
+    // because it rebuilds the entire rendered markdown via `build_lines`,
+    // which was making scroll feel sluggish on large artifacts. Render
+    // re-clamps. If the cache is still `usize::MAX` (popup just opened, no
+    // render yet), compute metrics inline once so the forward-at-max clamp
+    // actually holds and reverse scroll is never blocked by an over-inflated
+    // scroll offset.
+    let mut max_scroll = state.agents.artifacts_popup_last_max_scroll;
+    if max_scroll == usize::MAX {
+        let (computed, _) = artifacts_popup_scroll_metrics(state, swarm, screen, theme);
+        max_scroll = computed;
+        state.agents.artifacts_popup_last_max_scroll = computed;
+    }
+    let page_step = {
+        let area = dynamic_popup_rect(screen, artifacts_popup::preferred_size(screen));
+        (artifacts_popup::content_area_height(state, swarm, area) as usize).max(1)
+    };
+    const SCROLL_LINES: i32 = 3;
     match *key {
         KeyEvent {
             code: KeyCode::Up,
@@ -739,7 +771,11 @@ pub(super) fn handle_artifacts_popup_key(
         } if modifiers.contains(KeyModifiers::CONTROL)
             && !modifiers.contains(KeyModifiers::SHIFT) =>
         {
-            bump_scroll_clamped(&mut state.agents.artifacts_popup_scroll, -1, max_scroll);
+            bump_scroll_clamped(
+                &mut state.agents.artifacts_popup_scroll,
+                -SCROLL_LINES,
+                max_scroll,
+            );
             return true;
         }
         KeyEvent {
@@ -749,7 +785,11 @@ pub(super) fn handle_artifacts_popup_key(
         } if modifiers.contains(KeyModifiers::CONTROL)
             && !modifiers.contains(KeyModifiers::SHIFT) =>
         {
-            bump_scroll_clamped(&mut state.agents.artifacts_popup_scroll, 1, max_scroll);
+            bump_scroll_clamped(
+                &mut state.agents.artifacts_popup_scroll,
+                SCROLL_LINES,
+                max_scroll,
+            );
             return true;
         }
         KeyEvent {

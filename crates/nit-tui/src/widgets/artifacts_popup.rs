@@ -404,7 +404,7 @@ pub fn map_chat_input_point_to_cursor(
 pub fn render(
     frame: &mut Frame,
     area: Rect,
-    state: &AppState,
+    state: &mut AppState,
     swarm: &SwarmRuntime,
     theme: &Theme,
 ) -> Option<(u16, u16)> {
@@ -434,9 +434,11 @@ pub fn render(
         return render_content_only(frame, area, inner_full, block, state, swarm, theme);
     }
 
-    // Compute input layout using popup-specific chat state.
+    // Compute input layout using popup-specific chat state. Clone `popup_input`
+    // up-front so we don't hold an immutable borrow on `state` while we later
+    // need to mutate `state.agents.artifacts_popup_scroll` / `last_max_scroll`.
     let input_wrap_width = inner_full.width.saturating_sub(2) as usize;
-    let popup_input = &state.agents.artifacts_popup_chat_input;
+    let popup_input = state.agents.artifacts_popup_chat_input.clone();
     let popup_cursor = state.agents.artifacts_popup_chat_cursor;
     let popup_sel_anchor = state.agents.artifacts_popup_chat_selection_anchor;
     let popup_scroll = state.agents.artifacts_popup_chat_scroll;
@@ -444,7 +446,7 @@ pub fn render(
     let (input_lines_all, cursor_line_all, cursor_col_all) =
         agent_console_view::wrap_input_with_cursor(
             "",
-            popup_input,
+            &popup_input,
             cursor_char_idx,
             input_wrap_width,
         );
@@ -469,6 +471,10 @@ pub fn render(
     let content_height = content_area.height as usize;
     let max_scroll = lines.len().saturating_sub(content_height);
     let scroll = state.agents.artifacts_popup_scroll.min(max_scroll);
+    // Cache max_scroll + clamped scroll back to state so wheel/keyboard input
+    // handlers can scroll without calling the expensive `build_lines` path.
+    state.agents.artifacts_popup_last_max_scroll = max_scroll;
+    state.agents.artifacts_popup_scroll = scroll;
     let visible: Vec<Line> = lines
         .into_iter()
         .skip(scroll)
@@ -535,12 +541,12 @@ pub fn render(
     let (sel_start_line, sel_start_col, sel_end_line, sel_end_col) = selection_range
         .map(|(start, end)| {
             let (start_line, start_col) = agent_console_view::chat_input_display_pos_for_char_idx(
-                popup_input,
+                &popup_input,
                 render_wrap_width,
                 start,
             );
             let (end_line, end_col) = agent_console_view::chat_input_display_pos_for_char_idx(
-                popup_input,
+                &popup_input,
                 render_wrap_width,
                 end,
             );
@@ -611,7 +617,7 @@ fn render_content_only(
     area: Rect,
     inner: Rect,
     block: Block<'_>,
-    state: &AppState,
+    state: &mut AppState,
     swarm: &SwarmRuntime,
     theme: &Theme,
 ) -> Option<(u16, u16)> {
@@ -619,6 +625,10 @@ fn render_content_only(
     let height = inner.height as usize;
     let max_scroll = lines.len().saturating_sub(height);
     let scroll = state.agents.artifacts_popup_scroll.min(max_scroll);
+    // Cache max_scroll + clamped scroll so scroll input handlers can skip
+    // recomputing expensive `build_lines` on every wheel/keyboard event.
+    state.agents.artifacts_popup_last_max_scroll = max_scroll;
+    state.agents.artifacts_popup_scroll = scroll;
     let visible: Vec<Line> = lines.into_iter().skip(scroll).take(height).collect();
     let visible = apply_ui_selection(
         visible,

@@ -2397,10 +2397,19 @@ fn artifacts_popup_scroll_clamps_before_moving_back_up() {
     let mut swarm = SwarmRuntime::default();
     let (max_scroll, _) = artifacts_popup_scroll_metrics(&state, &swarm, screen, &theme);
     state.agents.artifacts_popup_scroll = max_scroll.saturating_add(25);
+    // Simulate what `artifacts_popup::render` does on each frame: cache the
+    // current max_scroll and clamp the stored scroll. The scroll handlers now
+    // rely on this cache (updated per render) instead of rebuilding the rendered
+    // markdown on every keystroke.
+    state.agents.artifacts_popup_last_max_scroll = max_scroll;
+    state.agents.artifacts_popup_scroll =
+        state.agents.artifacts_popup_scroll.min(max_scroll);
 
     let mut vitals = VitalsState::default();
     let mut clipboard = None;
-    // Ctrl+Up scrolls the content (plain Up navigates the input cursor).
+    // Ctrl+Up scrolls the content by the fast scroll step (plain Up navigates
+    // the input cursor). Matches the editor's wheel step so keyboard nav feels
+    // as fast as mouse-wheel scrolling.
     assert!(handle_artifacts_popup_key(
         &KeyEvent::new(KeyCode::Up, KeyModifiers::CONTROL),
         &mut state,
@@ -2414,7 +2423,119 @@ fn artifacts_popup_scroll_clamps_before_moving_back_up() {
     ));
     assert_eq!(
         state.agents.artifacts_popup_scroll,
-        max_scroll.saturating_sub(1)
+        max_scroll.saturating_sub(3)
+    );
+}
+
+/// The forward-at-max clamp must hold on the very first wheel event even when
+/// the cached `artifacts_popup_last_max_scroll` is still `usize::MAX` (i.e. no
+/// render has run yet since the popup opened). Otherwise a burst of wheel-down
+/// events would over-inflate the scroll offset past the real max, and a
+/// subsequent reverse wheel would appear stuck until the inflation unwound.
+#[test]
+fn artifacts_popup_wheel_clamps_forward_at_max_and_allows_reverse() {
+    let mut state = state_for_test();
+    state.agents.artifacts_popup_open = true;
+    state.agents.selected_agent = Some("planner".into());
+    state.agents.agents.push(nit_core::AgentLane {
+        id: "planner".into(),
+        role: "Planner".into(),
+        lane: "Local".into(),
+        kind: nit_core::AgentLaneKind::Mock,
+        status: nit_core::AgentStatus::Idle,
+        heartbeat_age_secs: 0,
+        queue_len: 0,
+        current_mission: None,
+        last_message: String::new(),
+    });
+    state.agents.messages.push(AgentMessage {
+        at: "10:00:00".into(),
+        channel: AgentChannel::Agent,
+        agent_id: None,
+        mission_id: None,
+        text: (0..80).map(|idx| format!("prompt-line-{idx}\n")).collect(),
+        prompt_msg_idx: None,
+        kind: None,
+    });
+
+    // Cache is still the sentinel — simulates "no render has run yet since
+    // popup open". The first wheel event must compute metrics inline and
+    // clamp forward; reverse must work without being blocked by inflation.
+    assert_eq!(
+        state.agents.artifacts_popup_last_max_scroll,
+        usize::MAX,
+        "cache starts as sentinel",
+    );
+
+    let theme = Theme::default();
+    let screen = ratatui::layout::Rect {
+        x: 0,
+        y: 0,
+        width: 120,
+        height: 36,
+    };
+    let swarm = SwarmRuntime::default();
+    let (expected_max, _) = artifacts_popup_scroll_metrics(&state, &swarm, screen, &theme);
+    assert!(
+        expected_max > 0,
+        "content must actually be scrollable for this test to be meaningful",
+    );
+
+    let area = dynamic_popup_rect(screen, crate::widgets::artifacts_popup::preferred_size(screen));
+    let wheel_down = MouseEvent {
+        kind: MouseEventKind::ScrollDown,
+        column: area.x.saturating_add(2),
+        row: area.y.saturating_add(2),
+        modifiers: KeyModifiers::NONE,
+    };
+    let wheel_up = MouseEvent {
+        kind: MouseEventKind::ScrollUp,
+        column: area.x.saturating_add(2),
+        row: area.y.saturating_add(2),
+        modifiers: KeyModifiers::NONE,
+    };
+
+    let mut fuzzy_runtime =
+        FuzzySearchRuntime::new(&Theme::default(), state.settings.highlight.clone());
+    let mut input_state = InputState::new();
+    let mut clipboard = None;
+
+    // Burst of wheel-down events well past the real max. The fallback path
+    // (cache == usize::MAX) must compute metrics inline on the first event
+    // and populate the cache, so subsequent events clamp at `expected_max`.
+    for _ in 0..(expected_max + 25) {
+        assert!(handle_mouse_event(
+            wheel_down,
+            screen,
+            &mut state,
+            &mut fuzzy_runtime,
+            &mut input_state,
+            &mut clipboard,
+            &theme,
+        ));
+    }
+    assert_eq!(
+        state.agents.artifacts_popup_scroll, expected_max,
+        "forward wheel past max must clamp at max_scroll, not inflate",
+    );
+    assert_eq!(
+        state.agents.artifacts_popup_last_max_scroll, expected_max,
+        "cache must be populated after first wheel event",
+    );
+
+    // Reverse wheel: must decrease from max immediately (not stuck).
+    assert!(handle_mouse_event(
+        wheel_up,
+        screen,
+        &mut state,
+        &mut fuzzy_runtime,
+        &mut input_state,
+        &mut clipboard,
+        &theme,
+    ));
+    assert!(
+        state.agents.artifacts_popup_scroll < expected_max,
+        "reverse wheel from max must actually decrease the scroll offset",
     );
 }
 

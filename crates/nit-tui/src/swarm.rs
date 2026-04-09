@@ -6286,7 +6286,7 @@ fn build_planner_prompt(
         out.push_str("\nSCOPE RULES:\n");
         out.push_str("- \"Refactor module\" means refactor EVERY file listed above. No file may remain unchanged.\n");
         out.push_str("- Each integrate task prompt MUST embed the exact file paths it is responsible for as a numbered checklist, e.g.:\n");
-        out.push_str("  \"Refactor the following files. Open each file, read it, and apply improvements. Check off each file as you go:\\n1. crates/foo/src/bar.rs\\n2. crates/foo/src/baz.rs\\n...\"\n");
+        out.push_str("  \"Refactor the following files. Open each file, read it, and apply improvements. Check off each file as you go:\\n1. <path/to/first/file>\\n2. <path/to/second/file>\\n...\"\n");
         out.push_str("- Distribute ALL files across integrate tasks so every file is assigned to exactly one task.\n");
         out.push_str("- If there is one integrate task, it must list all files. If there are multiple, split them into disjoint subsets.\n");
     }
@@ -6303,22 +6303,26 @@ fn role_contract_lines(role: &str) -> &'static [&'static str] {
             "Advance one concrete solution candidate from your assigned lens.",
             "Do not judge between candidates or claim final implementation ownership.",
             "Be specific about files, commands, and risks.",
+            "ROLE DISCIPLINE: You are read-only and propose-only. Do NOT run tests, builds, type-checkers, lints, formatters, CI pipelines, or any other verification commands in this project — whatever toolchain it uses. Suggest commands as text only; running them is the integrate/test/review agent's job. Do NOT redo investigation that an upstream task already covered; build on dependency outputs instead of repeating them.",
             "GENOME: nit measures the integrator's code across four encoders: token_spectrum (token role balance), ast_structure (tree shape variety, >= 5 components), complexity_field (cyclomatic complexity <= 8, identifier uniqueness >= 65%), structural (token-role diversity, AST depth variation, role n-gram uniqueness). See the full ENCODER GUIDE and TARGETS in the genome instructions attached to this prompt. Help the integrator score well — suggest function decomposition, varied patterns, and low-complexity approaches that target these encoders.",
         ],
         "research" => &[
             "Explore the topic through papers, docs, web resources, and related references when available.",
             "Surface competing ideas, promising directions, and the best strategy candidates with evidence.",
             "Do not turn this into a final implementation or winner-picking step; hand off concrete findings.",
+            "ROLE DISCIPLINE: You are read-only research. Do NOT run tests, builds, lints, formatters, or any CI commands — verification belongs to the integrate/test/review agents. Do NOT repeat work already covered by an upstream dependency task; cite it and move on.",
         ],
         COMPUTATIONAL_RESEARCH_ROLE => &[
             "Handle the broad computation-heavy lane: simulations, modeling, numerical methods, optimization, data/model fitting, pattern or network analysis, and reproducible research workflows.",
             "Perform tool-assisted research with explicit methods, commands, sources, assumptions, and computations.",
             "Use the findings to recommend strong strategies or narrow the search space for downstream roles across technical domains.",
+            "ROLE DISCIPLINE: Tool use must be in service of computation/analysis for this task — do NOT run the project's test suite, build, lints, or CI as a side activity. Do not duplicate investigation an upstream task already produced.",
         ],
         "judge" => &[
             "Compare the dependency outputs and choose the best path forward.",
             "Produce a decisive recommendation, acceptance criteria, and verification steps.",
             "Do not edit the workspace or perform the final implementation.",
+            "ROLE DISCIPLINE: Pure decision step. Do NOT run tests, builds, lints, or any verification commands — list them as recommendations for the integrator/reviewer. Do NOT re-explore the problem space that the proposers already covered; just compare and decide.",
             "GENOME: nit measures code across four encoders: token_spectrum, ast_structure, complexity_field, structural. See the full ENCODER GUIDE and TARGETS in the genome instructions attached to this prompt. Prefer proposals that enable varied AST node types, low per-function complexity (<= 8), diverse token-role sequences, and >= 5 structural components. Flag proposals that would force monolithic functions or repetitive patterns.",
         ],
         "integrate" => &[
@@ -6326,6 +6330,7 @@ fn role_contract_lines(role: &str) -> &'static [&'static str] {
             "Do not restart broad ideation; focus on carrying the selected approach through.",
             "If a FILE CHECKLIST is provided above, you MUST modify every listed file — process them in order, one by one. A file left unchanged means your task is incomplete.",
             "Report exact files changed and validation results.",
+            "TEST DISCIPLINE: Run ONLY targeted tests that exercise the files you actually changed — use whatever test command the project's toolchain provides, scoped to the affected module/package/subdirectory/file (not the whole repo). Do NOT run the full project test suite, the project's full CI pipeline, full lint or type-check sweeps, or unrelated tests — broad verification is the review/test agent's job. If no review/test agent exists in this swarm, you may run one focused targeted command, not the full suite. Infer the appropriate command from the project layout; do not assume any specific language or tooling.",
             "CODE CONVENTION: Do NOT add inline test modules (`#[cfg(test)] mod tests { ... }`) inside source files. Tests must live in a dedicated tests directory or test file, not inline. If you encounter an existing inline test module during a refactor, move it to the appropriate test file/directory. Do NOT pad small files (lib.rs, mod.rs, re-export files) with unnecessary code to boost genome scores — trivially small files are auto-passed by the genome system. COMMENTS: Trim doc comments that restate the type/function name, echo visible type signatures, or describe obvious behavior. Keep comments that explain WHY, document non-obvious constraints, safety invariants, or algorithmic choices.",
             "GENOME QUALITY OBLIGATION: You are the sole writer. Your code is measured by nit's genome system across four encoders. See the full ENCODER GUIDE and TARGETS in the genome instructions attached to this prompt. Maintain or improve genome scores on every file you touch. Aim for Tier III+ (Spaceship) minimum, aspire to Tier V (Replicator). Do NOT call [evaluate_genome] — nit evaluates automatically after your changes are written to disk.",
         ],
@@ -6333,12 +6338,14 @@ fn role_contract_lines(role: &str) -> &'static [&'static str] {
             "Critique the current output or diff for correctness, UX, and maintainability.",
             "Call out risks, regressions, and missing tests.",
             "Do not edit the workspace; suggest follow-ups as text only.",
+            "TEST AUTHORITY: You ARE allowed (and expected) to run verification commands relevant to the change — tests, lints, type-checkers, or CI scripts as appropriate for this project's toolchain. You are the agent the rest of the swarm defers to for validation. Report the exact commands you ran, the results, and any failures verbatim.",
             "GENOME: nit measures code across four encoders. See the full ENCODER GUIDE and TARGETS in the genome instructions attached to this prompt. Name the affected encoder when flagging issues — e.g., 'complexity 12 in parse_config (complexity_field: target <= 8)', 'only 2 node types (ast_structure: need >= 5 components)', 'repeated role sequence across match arms (structural: role n-gram uniqueness)', 'comment-to-code ratio too low (token_spectrum)'. Suggest concrete refactoring the integrator can apply.",
         ],
         "test" => &[
             "Focus on validation commands, expected results, and edge cases.",
             "Differentiate confirmed results from unrun suggestions.",
             "Do not redesign the solution unless a test failure makes it necessary.",
+            "TEST AUTHORITY: You ARE the swarm's test runner — run the full relevant test suite for the change (targeted or workspace-wide as appropriate). Report exact commands, outputs, and pass/fail verbatim.",
         ],
         "genome-reviewer" => &[
             "Evaluate the structural quality of code changes using the genome reports provided.",
@@ -6346,10 +6353,12 @@ fn role_contract_lines(role: &str) -> &'static [&'static str] {
             "Produce a structured review: which files improved, which regressed, critical issues, and specific refactoring recommendations.",
             "Overall verdict: PASS (all files tier III+ Spaceship) or FAIL (any file below tier III). Aspiration is tier V (Replicator).",
             "Do not edit the workspace; report findings as text only.",
+            "ROLE DISCIPLINE: Genome metrics only — do NOT run tests, builds, lints, or any verification commands. The genome reports above are your sole input.",
         ],
         _ => &[
             "Stay within the assigned task scope.",
             "Do not silently switch into a different swarm role.",
+            "Do not run tests, builds, lints, or other verification commands unless your role explicitly assigns that work to you.",
         ],
     }
 }
@@ -6514,9 +6523,9 @@ fn wrap_task_prompt(
         out.push_str(&format!("  \"task_id\": \"{}\",\n", task.id));
         out.push_str("  \"summary\": \"one-line summary of what you did or found\",\n");
         out.push_str("  \"artifacts\": {\n");
-        out.push_str("    \"files\": [\"path/to/file.rs\"],\n");
-        out.push_str("    \"diffs\": [{\"path\": \"file.rs\", \"summary\": \"what changed\"}],\n");
-        out.push_str("    \"commands\": [\"cargo test\"],\n");
+        out.push_str("    \"files\": [\"path/to/file\"],\n");
+        out.push_str("    \"diffs\": [{\"path\": \"path/to/file\", \"summary\": \"what changed\"}],\n");
+        out.push_str("    \"commands\": [\"<project test command>\"],\n");
         out.push_str("    \"risks\": [\"potential issue\"],\n");
         out.push_str("    \"notes\": [\"additional context\"]\n");
         out.push_str("  }\n");
@@ -6537,10 +6546,25 @@ fn wrap_task_prompt(
 }
 
 fn build_synthesis_prompt(run: &SwarmRun) -> String {
+    let has_reviewer = run.tasks.iter().any(|t| {
+        t.role
+            .as_deref()
+            .map(|r| matches!(r.trim(), "review" | "test" | "genome-reviewer"))
+            .unwrap_or(false)
+    });
     let mut out = String::new();
     out.push_str(
         "You are the SWARM SYNTHESIZER. Produce a single cohesive response for the operator by combining the parallel agent outputs below.\n\n",
     );
+    if has_reviewer {
+        out.push_str(
+            "ROLE DISCIPLINE: You ONLY synthesize. Do NOT run tests, builds, lints, type-checkers, CI pipelines, or any other workspace/CLI commands — whatever toolchain this project uses. Do NOT re-investigate the codebase. The agent reports below — including a review/test agent's verification output — are your sole input. If verification is missing or contradictory, surface that as a gap in the synthesis rather than running commands yourself.\n\n",
+        );
+    } else {
+        out.push_str(
+            "ROLE DISCIPLINE: This swarm has no dedicated review/test agent, so you ALSO act as the verifier. Synthesize the agent outputs first, then run the minimum targeted verification needed to confirm the result using whatever test/build command is appropriate for this project's toolchain — scoped to the affected module/package/subdirectory, not the whole project. Keep verification scoped — do not run unrelated tests, full CI, or broad lint sweeps.\n\n",
+        );
+    }
     out.push_str("Operator request:\n");
     out.push_str(run.root_prompt.trim());
     out.push_str("\n\nAgent outputs:\n");

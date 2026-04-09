@@ -6376,8 +6376,24 @@ fn handle_mouse_event_with_swarm(
             if state.agents.artifacts_popup_open {
                 let area = dynamic_popup_rect(screen, artifacts_popup::preferred_size(screen));
                 if point_in_rect(mouse.column, mouse.row, area) {
-                    let (max_scroll, _) =
-                        artifacts_popup_scroll_metrics(state, swarm, screen, theme);
+                    // Use the cached max_scroll from the last render — rebuilding
+                    // the rendered markdown just to clamp a wheel tick was making
+                    // scroll feel sluggish on large artifacts. Render re-clamps.
+                    //
+                    // If the cache is still `usize::MAX` (popup just opened and
+                    // no render has run yet), fall back to computing metrics
+                    // inline ONCE so the forward clamp at max actually holds.
+                    // Without this, a burst of wheel-down events before the
+                    // first render could over-inflate `artifacts_popup_scroll`
+                    // past the real max, and subsequent reverse scrolls would
+                    // appear stuck until the inflation unwound.
+                    let mut max_scroll = state.agents.artifacts_popup_last_max_scroll;
+                    if max_scroll == usize::MAX {
+                        let (computed, _) =
+                            artifacts_popup_scroll_metrics(state, swarm, screen, theme);
+                        max_scroll = computed;
+                        state.agents.artifacts_popup_last_max_scroll = computed;
+                    }
                     bump_scroll_clamped(
                         &mut state.agents.artifacts_popup_scroll,
                         delta,

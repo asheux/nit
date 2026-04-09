@@ -785,6 +785,13 @@ pub struct AgentsState {
     pub artifacts_popup_open: bool,
     #[serde(skip)]
     pub artifacts_popup_scroll: usize,
+    /// Last max scroll computed during render. Cached so wheel/keyboard scroll
+    /// handlers can clamp without paying the cost of rebuilding the rendered
+    /// markdown (`build_lines`) on every input event. Updated on each render,
+    /// starts at `usize::MAX` so the first scroll before any render is unclamped.
+    /// Runtime-only.
+    #[serde(skip, default = "artifacts_popup_last_max_scroll_default")]
+    pub artifacts_popup_last_max_scroll: usize,
     /// Chat input text for the artifacts popup compose box. Runtime-only.
     #[serde(skip)]
     pub artifacts_popup_chat_input: String,
@@ -1004,6 +1011,10 @@ fn chat_input_scroll_default() -> usize {
     usize::MAX
 }
 
+fn artifacts_popup_last_max_scroll_default() -> usize {
+    usize::MAX
+}
+
 fn swarm_default_template_default() -> String {
     "lab".into()
 }
@@ -1152,6 +1163,7 @@ impl AgentsState {
             artifacts_collapsed_prompts: HashSet::new(),
             artifacts_popup_open: false,
             artifacts_popup_scroll: 0,
+            artifacts_popup_last_max_scroll: usize::MAX,
             artifacts_popup_chat_input: String::new(),
             artifacts_popup_chat_cursor: 0,
             artifacts_popup_chat_selection_anchor: None,
@@ -1285,6 +1297,7 @@ impl Default for AgentsState {
             artifacts_collapsed_prompts: HashSet::new(),
             artifacts_popup_open: false,
             artifacts_popup_scroll: 0,
+            artifacts_popup_last_max_scroll: usize::MAX,
             artifacts_popup_chat_input: String::new(),
             artifacts_popup_chat_cursor: 0,
             artifacts_popup_chat_selection_anchor: None,
