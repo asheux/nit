@@ -6541,9 +6541,17 @@ fn handle_mouse_event_with_swarm(
                 return true;
             }
             if point_in_rect(mouse.column, mouse.row, layout.gate) {
-                let inner = Block::default().borders(Borders::ALL).inner(layout.gate);
-                let lines = gate_monitor_view::build_lines(state, theme, inner.width as usize);
-                let max_scroll = lines.len().saturating_sub(inner.height as usize);
+                // Prefer cached max_scroll populated during render. Fall back
+                // to rebuilding the full genome report only when no render
+                // has run yet since the panel became visible.
+                let mut max_scroll = state.gate_monitor_last_max_scroll;
+                if max_scroll == usize::MAX {
+                    let inner = Block::default().borders(Borders::ALL).inner(layout.gate);
+                    let lines =
+                        gate_monitor_view::build_lines(state, theme, inner.width as usize);
+                    max_scroll = lines.len().saturating_sub(inner.height as usize);
+                    state.gate_monitor_last_max_scroll = max_scroll;
+                }
                 bump_scroll_clamped(&mut state.gate_monitor_scroll, delta, max_scroll);
                 return true;
             }
@@ -6707,50 +6715,52 @@ fn popup_text_metrics(area: ratatui::layout::Rect, line_count: usize) -> (usize,
 fn global_archive_scroll_metrics(
     state: &AppState,
     screen: ratatui::layout::Rect,
-    theme: &Theme,
+    _theme: &Theme,
 ) -> (usize, usize) {
+    // Cheap line count — avoids reallocating styled entry rows on every
+    // wheel tick. Stays in sync with `artifacts_history_popup::build_lines`.
     let area = dynamic_popup_rect(screen, artifacts_history_popup::preferred_size(screen));
     let text_area = popup_text_area(area);
-    let lines = artifacts_history_popup::build_lines(state, theme, text_area.width);
     (
-        popup_max_scroll(lines.len(), text_area),
+        popup_max_scroll(artifacts_history_popup::line_count(state), text_area),
         popup_page_step(text_area),
     )
 }
 
-fn help_popup_max_scroll(screen: ratatui::layout::Rect, theme: &Theme) -> usize {
+fn help_popup_max_scroll(screen: ratatui::layout::Rect, _theme: &Theme) -> usize {
+    // Help content is static — use the memoized line count instead of
+    // rebuilding ~600 styled help lines on every scroll tick.
     let area = dynamic_popup_rect(screen, help_overlay::preferred_size(screen));
     let text_area = popup_text_area(area);
-    let lines = help_overlay::build_lines(theme);
-    popup_max_scroll(lines.len(), text_area)
+    popup_max_scroll(help_overlay::line_count(), text_area)
 }
 
-fn help_popup_scroll_metrics(screen: ratatui::layout::Rect, theme: &Theme) -> (usize, usize) {
+fn help_popup_scroll_metrics(screen: ratatui::layout::Rect, _theme: &Theme) -> (usize, usize) {
     let area = dynamic_popup_rect(screen, help_overlay::preferred_size(screen));
-    popup_text_metrics(area, help_overlay::build_lines(theme).len())
+    popup_text_metrics(area, help_overlay::line_count())
 }
 
 fn games_analysis_popup_max_scroll(
     state: &AppState,
     screen: ratatui::layout::Rect,
-    theme: &Theme,
+    _theme: &Theme,
 ) -> usize {
+    // Cheap line count — avoids rebuilding sparklines, strategy tables, and
+    // styled spans on every wheel tick. Must stay in sync with `build_lines`.
     let area = dynamic_popup_rect(screen, games_analysis_popup::preferred_size(screen));
     let text_area = popup_text_area(area);
-    let lines = games_analysis_popup::build_lines(state, theme, text_area.width);
-    popup_max_scroll(lines.len(), text_area)
+    popup_max_scroll(games_analysis_popup::line_count(state), text_area)
 }
 
 fn games_analysis_popup_scroll_metrics(
     state: &AppState,
     screen: ratatui::layout::Rect,
-    theme: &Theme,
+    _theme: &Theme,
 ) -> (usize, usize) {
     let area = dynamic_popup_rect(screen, games_analysis_popup::preferred_size(screen));
     let text_area = popup_text_area(area);
-    let lines = games_analysis_popup::build_lines(state, theme, text_area.width);
     (
-        popup_max_scroll(lines.len(), text_area),
+        popup_max_scroll(games_analysis_popup::line_count(state), text_area),
         popup_page_step(text_area),
     )
 }
@@ -6758,23 +6768,26 @@ fn games_analysis_popup_scroll_metrics(
 fn games_run_browser_popup_max_scroll(
     state: &AppState,
     screen: ratatui::layout::Rect,
-    theme: &Theme,
+    _theme: &Theme,
 ) -> usize {
+    // Cheap line count — avoids rebuilding styled line vectors on every wheel
+    // tick. Must stay in sync with `games_run_browser_popup::build_lines`.
     let area = dynamic_popup_rect(screen, games_run_browser_popup::preferred_size(screen));
     let text_area = popup_text_area(area);
-    let lines = games_run_browser_popup::build_lines(state, theme, text_area.width);
-    popup_max_scroll(lines.len(), text_area)
+    popup_max_scroll(games_run_browser_popup::line_count(state), text_area)
 }
 
 fn games_replay_popup_max_scroll(
     state: &AppState,
     screen: ratatui::layout::Rect,
-    theme: &Theme,
+    _theme: &Theme,
 ) -> usize {
+    // Use the cheap `line_count` helper instead of `build_lines` — the scroll
+    // hot path does not need styled/wrapped lines just to know how many there
+    // are.
     let area = dynamic_popup_rect(screen, games_replay_popup::preferred_size(screen));
     let text_area = popup_text_area(area);
-    let lines = games_replay_popup::build_lines(state, theme, text_area.width);
-    popup_max_scroll(lines.len(), text_area)
+    popup_max_scroll(games_replay_popup::line_count(state), text_area)
 }
 
 fn games_strategy_popup_max_scroll(state: &AppState, screen: ratatui::layout::Rect) -> usize {
@@ -6784,14 +6797,22 @@ fn games_strategy_popup_max_scroll(state: &AppState, screen: ratatui::layout::Re
 }
 
 fn games_tm_sim_popup_max_scroll(
-    state: &AppState,
+    state: &mut AppState,
     screen: ratatui::layout::Rect,
     theme: &Theme,
 ) -> usize {
+    // Prefer the cached value from the last render. Only fall back to
+    // rebuilding `build_columns` (runs the TM simulation and formats grid +
+    // rule tables) when the cache is still the `usize::MAX` sentinel — i.e.
+    // a scroll event arrived before the first render after the popup opened.
+    let cached = state.games.tm_sim.last_max_scroll;
+    if cached != usize::MAX {
+        return cached;
+    }
     let area = dynamic_popup_rect(screen, games_tm_sim_popup::preferred_size(screen));
     let text_area = popup_text_area(area);
     let (left_area, right_area) = games_tm_sim_popup::layout_for_tm_sim(text_area);
-    if let Some(right_area) = right_area {
+    let computed = if let Some(right_area) = right_area {
         let right_inner = Block::default().borders(Borders::ALL).inner(right_area);
         let (left_lines, right_lines) = games_tm_sim_popup::build_columns(
             state,
@@ -6805,18 +6826,27 @@ fn games_tm_sim_popup_max_scroll(
         let (lines, _) =
             games_tm_sim_popup::build_columns(state, theme, text_area.width.max(1) as usize, 0);
         popup_max_scroll(lines.len(), text_area)
-    }
+    };
+    state.games.tm_sim.last_max_scroll = computed;
+    computed
 }
 
 fn games_ca_sim_popup_max_scroll(
-    state: &AppState,
+    state: &mut AppState,
     screen: ratatui::layout::Rect,
     theme: &Theme,
 ) -> usize {
+    // Prefer the cached value from the last render. Fall back to rebuilding
+    // `build_columns` (runs CA simulation + formats grid/rules) only when
+    // no render has populated the cache yet.
+    let cached = state.games.ca_sim.last_max_scroll;
+    if cached != usize::MAX {
+        return cached;
+    }
     let area = dynamic_popup_rect(screen, games_ca_sim_popup::preferred_size(screen));
     let text_area = popup_text_area(area);
     let (left_area, right_area) = games_ca_sim_popup::layout_for_ca_sim(text_area);
-    if let Some(right_area) = right_area {
+    let computed = if let Some(right_area) = right_area {
         let right_inner = Block::default().borders(Borders::ALL).inner(right_area);
         let (left_lines, right_lines) = games_ca_sim_popup::build_columns(
             state,
@@ -6830,7 +6860,9 @@ fn games_ca_sim_popup_max_scroll(
         let (lines, _) =
             games_ca_sim_popup::build_columns(state, theme, text_area.width.max(1) as usize, 0);
         popup_max_scroll(lines.len(), text_area)
-    }
+    };
+    state.games.ca_sim.last_max_scroll = computed;
+    computed
 }
 
 fn games_match_history_max_offset(state: &AppState, screen: ratatui::layout::Rect) -> usize {
@@ -10712,6 +10744,8 @@ fn handle_tm_sim_popup_key(
     match key.code {
         KeyCode::Esc | KeyCode::Char('q') => {
             state.games.tm_sim.open = false;
+            // Reset the scroll cache so the next open starts fresh.
+            state.games.tm_sim.last_max_scroll = usize::MAX;
             if let Some(selection) = state.ui_selection {
                 if matches!(
                     selection.pane,
@@ -10780,6 +10814,8 @@ fn handle_ca_sim_popup_key(
     match key.code {
         KeyCode::Esc | KeyCode::Char('q') => {
             state.games.ca_sim.open = false;
+            // Reset the scroll cache so the next open starts fresh.
+            state.games.ca_sim.last_max_scroll = usize::MAX;
             if let Some(selection) = state.ui_selection {
                 if matches!(
                     selection.pane,

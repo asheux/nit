@@ -122,7 +122,7 @@ pub struct GamesStrategyInspectState {
     pub source_label: Option<String>,
 }
 
-#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct GamesTmSimState {
     pub open: bool,
     pub last_error: Option<String>,
@@ -136,9 +136,30 @@ pub struct GamesTmSimState {
     pub source_label: Option<String>,
     #[serde(skip)]
     pub scroll_offset: usize,
+    /// Last max_scroll computed during render. Cached so wheel/keyboard scroll
+    /// handlers can clamp without calling the expensive `build_columns`
+    /// function (which runs the TM simulation and formats grid + rule tables)
+    /// on every input event. `usize::MAX` is the sentinel for "no render yet".
+    #[serde(skip, default = "scroll_cache_sentinel")]
+    pub last_max_scroll: usize,
 }
 
-#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+impl Default for GamesTmSimState {
+    fn default() -> Self {
+        Self {
+            open: false,
+            last_error: None,
+            definition: None,
+            input: None,
+            steps_override: None,
+            source_label: None,
+            scroll_offset: 0,
+            last_max_scroll: usize::MAX,
+        }
+    }
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct GamesCaSimState {
     pub open: bool,
     pub last_error: Option<String>,
@@ -152,6 +173,34 @@ pub struct GamesCaSimState {
     pub source_label: Option<String>,
     #[serde(skip)]
     pub scroll_offset: usize,
+    /// Last max_scroll computed during render. Cached so wheel/keyboard scroll
+    /// handlers can clamp without calling the expensive `build_columns`
+    /// function on every input event. `usize::MAX` = no render yet.
+    #[serde(skip, default = "scroll_cache_sentinel")]
+    pub last_max_scroll: usize,
+}
+
+impl Default for GamesCaSimState {
+    fn default() -> Self {
+        Self {
+            open: false,
+            last_error: None,
+            definition: None,
+            input: None,
+            steps_override: None,
+            source_label: None,
+            scroll_offset: 0,
+            last_max_scroll: usize::MAX,
+        }
+    }
+}
+
+fn scroll_cache_sentinel() -> usize {
+    usize::MAX
+}
+
+fn gate_monitor_max_scroll_default() -> usize {
+    usize::MAX
 }
 
 #[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
@@ -1888,6 +1937,12 @@ pub struct AppState {
     /// Scroll offset for the gate monitor / structural quality pane.
     #[serde(skip)]
     pub gate_monitor_scroll: usize,
+    /// Cached max_scroll for the gate monitor pane, updated per render by
+    /// `gate_monitor_view::render`. Scroll handlers read this instead of
+    /// rebuilding the full genome report on every wheel tick. `usize::MAX`
+    /// is the "no render yet" sentinel.
+    #[serde(skip, default = "gate_monitor_max_scroll_default")]
+    pub gate_monitor_last_max_scroll: usize,
     /// Active sub-view for the structural quality pane: Stats or FileScores.
     #[serde(skip)]
     pub gate_monitor_sub_view: GateMonitorSubView,
@@ -2102,6 +2157,7 @@ impl AppState {
             genome_eval_mission_id: None,
             genome_save_eval_pending: None,
             gate_monitor_scroll: 0,
+            gate_monitor_last_max_scroll: usize::MAX,
             gate_monitor_sub_view: GateMonitorSubView::default(),
         }
     }

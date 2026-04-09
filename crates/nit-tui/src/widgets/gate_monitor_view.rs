@@ -32,8 +32,14 @@ pub fn title_button_hit(col_in_rect: u16, title_prefix_len: u16) -> Option<Actio
     }
 }
 
-pub fn render(frame: &mut Frame, area: ratatui::layout::Rect, state: &AppState, theme: &Theme) {
+pub fn render(
+    frame: &mut Frame,
+    area: ratatui::layout::Rect,
+    state: &mut AppState,
+    theme: &Theme,
+) {
     if state.app_kind == AppKind::Games {
+        // Games variant has no scroll state to cache.
         return render_games(frame, area, state, theme);
     }
     let focused = state.focus == PaneId::GateMonitor;
@@ -127,6 +133,10 @@ pub fn render(frame: &mut Frame, area: ratatui::layout::Rect, state: &AppState, 
     );
     let max_scroll = lines.len().saturating_sub(inner.height as usize);
     let scroll = state.gate_monitor_scroll.min(max_scroll);
+    // Cache max_scroll + clamp stored offset so scroll handlers can skip
+    // rebuilding the genome report on every wheel tick.
+    state.gate_monitor_last_max_scroll = max_scroll;
+    state.gate_monitor_scroll = scroll;
     let para = Paragraph::new(lines)
         .style(Style::default().bg(theme.background).fg(theme.foreground))
         .scroll((scroll as u16, 0));

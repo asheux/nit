@@ -22,6 +22,44 @@ pub fn preferred_size(screen: Rect) -> (u16, u16) {
     (width, height)
 }
 
+/// Count the rendered lines without building any `Line`/`Span` structures.
+/// Used by the scroll hot path so wheel ticks don't rebuild sparklines,
+/// strategy tables, or styled spans just to figure out `max_scroll`. Must
+/// stay in lock-step with `build_lines` below.
+pub fn line_count(state: &AppState) -> usize {
+    // status line
+    let mut count = 1usize;
+    if state.games.analysis.source_path.is_some() {
+        count += 1;
+    }
+    if state.games.analysis.last_error.is_some() {
+        count += 1;
+    }
+    if state.games.analysis.running && state.games.analysis.summary.is_none() {
+        count += 2;
+    }
+    if let Some(summary) = state.games.analysis.summary.as_ref() {
+        // blank + matches/rounds + rounds/match samples
+        count += 3;
+        // blank + "Outputs" header + 4 path rows
+        count += 6;
+        // blank + "Strategy cooperation" header
+        count += 2;
+        count += summary.strategies.len();
+        if let Some(preview) = state.games.analysis.preview.as_ref() {
+            // blank + "Random match trajectories" header
+            count += 2;
+            if preview.trajectories.is_empty() {
+                count += 1;
+            } else {
+                // title + A: + B: per trajectory
+                count += preview.trajectories.len() * 3;
+            }
+        }
+    }
+    count
+}
+
 pub fn build_lines(state: &AppState, theme: &Theme, inner_width: u16) -> Vec<Line<'static>> {
     let header_style = Style::default()
         .fg(theme.title)

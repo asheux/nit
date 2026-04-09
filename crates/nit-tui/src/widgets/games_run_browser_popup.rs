@@ -19,6 +19,34 @@ pub fn preferred_size(screen: Rect) -> (u16, u16) {
     (width, height)
 }
 
+/// Count the rendered lines without actually building them. Used by the
+/// scroll hot path to compute `max_scroll` cheaply — rebuilding styled line
+/// vectors on every wheel tick was causing sluggish scrolling. Must stay in
+/// lock-step with `build_lines` below.
+pub fn line_count(state: &AppState) -> usize {
+    // status line
+    let mut count = 1usize;
+    // error line
+    if state.games.run_browser.last_error.is_some() {
+        count += 1;
+    }
+    if state.games.run_browser.loading {
+        // blank + "Loading runs..."
+        return count + 2;
+    }
+    // blank
+    count += 1;
+    if state.games.run_browser.entries.is_empty() {
+        // "No runs found ..."
+        count += 1;
+    } else {
+        count += state.games.run_browser.entries.len();
+    }
+    // blank + footer hint
+    count += 2;
+    count
+}
+
 pub fn build_lines(state: &AppState, theme: &Theme, inner_width: u16) -> Vec<Line<'static>> {
     let label_style = Style::default().fg(theme.title).add_modifier(Modifier::DIM);
     let value_style = Style::default().fg(theme.foreground);

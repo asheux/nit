@@ -65,6 +65,23 @@ fn kind_color(kind: &str, theme: &Theme) -> Color {
     }
 }
 
+/// Count rendered lines without building any styled `Line`/`Span` vectors.
+/// Used by the scroll hot path so wheel ticks don't re-iterate filtered
+/// entries + allocate styled spans just to compute `max_scroll`. Must stay
+/// in lock-step with `build_lines` below.
+pub fn line_count(state: &AppState) -> usize {
+    let filtered = &state.agents.global_archive_filtered;
+    let mut count = HEADER_LINES;
+    count += filtered.len();
+    if filtered.is_empty() {
+        // blank separator + "no results" message
+        count += 2;
+    }
+    // footer blank + footer text
+    count += 2;
+    count
+}
+
 pub fn build_lines(state: &AppState, theme: &Theme, inner_width: u16) -> Vec<Line<'static>> {
     let label_style = Style::default().fg(theme.title).add_modifier(Modifier::DIM);
     let value_style = Style::default().fg(theme.foreground);

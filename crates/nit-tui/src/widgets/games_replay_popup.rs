@@ -69,7 +69,10 @@ fn trim_to_width(text: &str, max_width: usize) -> String {
     text.chars().take(max_width).collect()
 }
 
-fn line_count(state: &AppState) -> usize {
+/// Count the rendered lines without actually building them. Used by the
+/// scroll-handling hot path to compute `max_scroll` cheaply — rebuilding the
+/// full `Vec<Line>` on every wheel tick was making scroll feel sluggish.
+pub fn line_count(state: &AppState) -> usize {
     let mut count = 1; // status line
     if state.games.replay.last_error.is_some() {
         count += 1;

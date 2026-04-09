@@ -1,3 +1,5 @@
+use std::sync::OnceLock;
+
 use nit_core::AppState;
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
@@ -15,6 +17,19 @@ pub fn preferred_size(screen: Rect) -> (u16, u16) {
     let width = (screen.width.saturating_sub(4)).clamp(30, 110);
     let height = (screen.height.saturating_sub(4)).clamp(12, 36);
     (width, height)
+}
+
+/// Memoized line count for the help overlay. The overlay content is static
+/// (theme only affects styling, not line structure), so we can compute it
+/// once on first access and reuse forever. Used by the scroll hot path so
+/// wheel ticks don't rebuild the full ~600-line styled help buffer just to
+/// clamp `max_scroll`.
+pub fn line_count() -> usize {
+    static CACHED: OnceLock<usize> = OnceLock::new();
+    *CACHED.get_or_init(|| {
+        // Count with a dummy theme — only structure matters, not colors.
+        build_lines(&Theme::default()).len()
+    })
 }
 
 pub fn build_lines(theme: &Theme) -> Vec<Line<'static>> {

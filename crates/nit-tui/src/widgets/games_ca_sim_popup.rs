@@ -248,7 +248,7 @@ pub fn build_columns(
     (left_lines, right_lines)
 }
 
-pub fn render(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
+pub fn render(frame: &mut Frame, area: Rect, state: &mut AppState, theme: &Theme) {
     if !state.games.ca_sim.open {
         return;
     }
@@ -287,6 +287,11 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
         let max_lines = left_lines.len().max(right_lines.len());
         let max_scroll = max_lines.saturating_sub(content_height);
         let scroll = state.games.ca_sim.scroll_offset.min(max_scroll);
+        // Cache max_scroll + clamped offset so scroll handlers can skip
+        // rebuilding `build_columns` (runs CA sim + formats grid/rules)
+        // on every wheel or key event.
+        state.games.ca_sim.last_max_scroll = max_scroll;
+        state.games.ca_sim.scroll_offset = scroll;
 
         let left_visible: Vec<Line> = left_lines
             .into_iter()
@@ -328,6 +333,8 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
         let height = inner.height as usize;
         let max_scroll = lines.len().saturating_sub(height);
         let scroll = state.games.ca_sim.scroll_offset.min(max_scroll);
+        state.games.ca_sim.last_max_scroll = max_scroll;
+        state.games.ca_sim.scroll_offset = scroll;
         let visible: Vec<Line> = lines.into_iter().skip(scroll).take(height).collect();
         let visible = apply_ui_selection(
             visible,
