@@ -1430,6 +1430,17 @@ pub fn ensure_swarm_agents_for_followup(
         &config.planner_agent_id,
         &mut agents,
     );
+    // Re-apply parallel-template clone role coverage so follow-up dispatches
+    // see the same role assignments as the original mission. No-op when the
+    // planner is `all`/unset or coverage is already satisfied (most common
+    // case for follow-ups since the original setup already assigned hints).
+    let _ = assign_clone_roles_for_parallel_coverage(
+        state,
+        template,
+        &config.planner_agent_id,
+        None,
+        &agents,
+    );
     // Update the mission's assigned_agents so broadcast_target_agents can find them.
     if let Some(mission) = state
         .agents
@@ -1881,6 +1892,32 @@ impl SwarmRuntime {
                 }
             }
         }
+
+        // Parallel-template only: ensure clones cover propose + review/test
+        // when the planner has a deliberate role hint. No-op when planner is
+        // `all`/unset, so the existing "let the LLM decide" path is preserved.
+        let coverage_assignments = assign_clone_roles_for_parallel_coverage(
+            state,
+            template_kind,
+            planner_agent_id.as_str(),
+            integrator_agent_id.as_deref(),
+            &agents,
+        );
+        if !coverage_assignments.is_empty() {
+            let summary = coverage_assignments
+                .iter()
+                .map(|(id, role)| format!("{id}={role}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            push_system_message_to_mission(
+                state,
+                &mission_id,
+                format!(
+                    "Parallel role coverage: assigned clone roles to satisfy propose + review/test ({summary})"
+                ),
+            );
+        }
+
         let mut role_hints: Vec<(String, String)> = Vec::new();
         if matches!(template_kind, SwarmTemplate::Parallel | SwarmTemplate::Bulk) {
             for id in agents
@@ -3703,6 +3740,92 @@ fn deduplicate_inherited_role_hints(
         }
         *count += 1;
     }
+}
+
+/// Always assigns role hints to fresh clones in the parallel template so the
+/// swarm covers a `propose` lane and a `review`/`test` lane — mirroring the
+/// lab template's read-only worker structure (synthesizer, propose, review,
+/// integrator). Priority agents (or other agents with pre-assigned hints)
+/// that already declare those roles satisfy the requirement; clones are only
+/// filled in where coverage is missing.
+///
+/// Runs regardless of the planner's own role hint — there is no escape hatch.
+/// The planner is always the synthesizer, and the swarm should always have
+/// reasonable role coverage so the LLM produces a balanced plan instead of
+/// the all-integrate failure mode.
+///
+/// Coverage rules:
+/// - The `propose` slot is satisfied by any non-planner agent with role hint
+///   `propose`, `research`, or `computational-research`.
+/// - The `review`/`test` slot is satisfied by any non-planner agent with role
+///   hint `review` or `test`.
+/// - The designated integrator (already chosen by the caller) is excluded
+///   from clone role assignment so it stays a writer.
+fn assign_clone_roles_for_parallel_coverage(
+    state: &mut AppState,
+    template: SwarmTemplate,
+    planner_agent_id: &str,
+    integrator_agent_id: Option<&str>,
+    agents: &[String],
+) -> Vec<(String, &'static str)> {
+    if !matches!(template, SwarmTemplate::Parallel) {
+        return Vec::new();
+    }
+
+    let mut has_propose = false;
+    let mut has_review_or_test = false;
+    for id in agents {
+        if id.as_str() == planner_agent_id {
+            continue;
+        }
+        let Some(role) =
+            direct_role_hint_for_agent(&state.agents.swarm_role_by_agent_id, id.as_str())
+        else {
+            continue;
+        };
+        match role.as_str() {
+            "propose" | "research" => has_propose = true,
+            r if r == COMPUTATIONAL_RESEARCH_ROLE => has_propose = true,
+            "review" | "test" => has_review_or_test = true,
+            _ => {}
+        }
+    }
+
+    if has_propose && has_review_or_test {
+        return Vec::new();
+    }
+
+    // Find clones without an explicit role hint that we can assign to.
+    // Exclude the designated integrator so it stays a writer.
+    let assignable_clones: Vec<String> = agents
+        .iter()
+        .filter(|id| id.as_str() != planner_agent_id)
+        .filter(|id| Some(id.as_str()) != integrator_agent_id)
+        .filter(|id| is_swarm_clone_agent_id(id.as_str()))
+        .filter(|id| {
+            direct_role_hint_for_agent(&state.agents.swarm_role_by_agent_id, id.as_str())
+                .is_none()
+        })
+        .cloned()
+        .collect();
+
+    let mut to_assign: Vec<&'static str> = Vec::new();
+    if !has_propose {
+        to_assign.push("propose");
+    }
+    if !has_review_or_test {
+        to_assign.push("review");
+    }
+
+    let mut assignments = Vec::new();
+    for (clone_id, role) in assignable_clones.into_iter().zip(to_assign.into_iter()) {
+        state
+            .agents
+            .swarm_role_by_agent_id
+            .insert(clone_id.clone(), role.to_string());
+        assignments.push((clone_id, role));
+    }
+    assignments
 }
 
 fn infer_role_from_task_id(task_id: &str) -> Option<&'static str> {
@@ -6449,7 +6572,7 @@ fn build_planner_prompt(
             out.push_str(&format!("  - {id}: {role}\n"));
         }
         out.push_str(
-            "- Prefer assigning tasks whose `role` matches each agent's hint (unless role=all).\n",
+            "- REQUIRED: when an agent has a specific role hint (anything other than `all`), you MUST assign that agent a task with the matching `role`. These hints reflect the swarm's deliberate role coverage — propose/recon, review/test, and integrate lanes are reserved this way to keep the swarm balanced. Do not reassign or ignore them. Agents with `all` are unconstrained and can take any role you find useful.\n",
         );
     }
     out.push_str(

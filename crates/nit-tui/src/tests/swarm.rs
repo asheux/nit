@@ -2386,3 +2386,419 @@ fn ensure_proposer_task_falls_back_when_all_integrates_on_integrator() {
     assert!(tasks[1].deps.contains(&"t1".to_string()));
     assert!(!warnings.is_empty());
 }
+
+// ---------------------------------------------------------------------------
+// assign_clone_roles_for_parallel_coverage — proactively assigns role hints
+// to fresh clones so the parallel-template swarm covers a propose lane and a
+// review/test lane, mirroring the lab template's read-only worker structure.
+// The user's escape hatch: setting the planner role to `all` (or leaving it
+// unset) opts out of this enforcement and lets the LLM decide everything.
+// ---------------------------------------------------------------------------
+
+/// Build a fresh AppState with the given lanes and role hints already set up.
+/// Used by the clone-coverage tests below.
+fn make_coverage_state(lanes: &[(&str, &str)], role_hints: &[(&str, &str)]) -> AppState {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let editor = Buffer::empty("editor", None);
+    let notes = Buffer::empty("notes", None);
+    let mut state = AppState::new(root, editor, notes);
+    state.agents.messages.clear();
+    state.agents.missions.clear();
+    state.agents.agents.clear();
+    for (id, role) in lanes {
+        state.agents.agents.push(make_lane(id, role));
+    }
+    for (id, role) in role_hints {
+        state
+            .agents
+            .swarm_role_by_agent_id
+            .insert((*id).into(), (*role).into());
+    }
+    state
+}
+
+#[test]
+fn coverage_assigns_propose_and_review_when_planner_has_role_hint() {
+    // Planner has role=integrate (a deliberate non-`all` hint), 3 clones, no
+    // priority agents. Expected: clones get propose + review (one each), one
+    // clone left unassigned (the integrator candidate).
+    let mut state = make_coverage_state(
+        &[
+            ("planner", "p"),
+            ("planner#swarm-mis-001-clone-01", "c1"),
+            ("planner#swarm-mis-001-clone-02", "c2"),
+            ("planner#swarm-mis-001-clone-03", "c3"),
+        ],
+        &[("planner", "integrate")],
+    );
+    let agents = vec![
+        "planner".to_string(),
+        "planner#swarm-mis-001-clone-01".to_string(),
+        "planner#swarm-mis-001-clone-02".to_string(),
+        "planner#swarm-mis-001-clone-03".to_string(),
+    ];
+    let assignments = assign_clone_roles_for_parallel_coverage(
+        &mut state,
+        SwarmTemplate::Parallel,
+        "planner",
+        Some("planner#swarm-mis-001-clone-01"),
+        &agents,
+    );
+
+    let map = &state.agents.swarm_role_by_agent_id;
+    let roles: Vec<Option<&str>> = agents
+        .iter()
+        .map(|id| map.get(id).map(String::as_str))
+        .collect();
+    // planner stays integrate; clone-01 (integrator) is untouched; clone-02
+    // and clone-03 get propose and review (in order).
+    assert_eq!(roles[0], Some("integrate"));
+    assert_eq!(roles[1], None, "integrator clone must NOT be assigned a role");
+    assert_eq!(roles[2], Some("propose"));
+    assert_eq!(roles[3], Some("review"));
+    assert_eq!(assignments.len(), 2);
+}
+
+#[test]
+fn coverage_assigns_when_planner_role_is_all() {
+    // Even when the planner is explicitly `all`, the helper still assigns
+    // sensible defaults so the swarm has propose + review/test coverage.
+    // The planner is always the synthesizer; we want a balanced worker mix.
+    let mut state = make_coverage_state(
+        &[
+            ("planner", "p"),
+            ("planner#swarm-mis-001-clone-01", "c1"),
+            ("planner#swarm-mis-001-clone-02", "c2"),
+            ("planner#swarm-mis-001-clone-03", "c3"),
+        ],
+        &[("planner", "all")],
+    );
+    let agents = vec![
+        "planner".to_string(),
+        "planner#swarm-mis-001-clone-01".to_string(),
+        "planner#swarm-mis-001-clone-02".to_string(),
+        "planner#swarm-mis-001-clone-03".to_string(),
+    ];
+    let assignments = assign_clone_roles_for_parallel_coverage(
+        &mut state,
+        SwarmTemplate::Parallel,
+        "planner",
+        // clone-01 is the integrator → excluded from coverage assignment.
+        Some("planner#swarm-mis-001-clone-01"),
+        &agents,
+    );
+    assert_eq!(assignments.len(), 2);
+    assert_eq!(
+        state
+            .agents
+            .swarm_role_by_agent_id
+            .get("planner#swarm-mis-001-clone-02")
+            .map(String::as_str),
+        Some("propose")
+    );
+    assert_eq!(
+        state
+            .agents
+            .swarm_role_by_agent_id
+            .get("planner#swarm-mis-001-clone-03")
+            .map(String::as_str),
+        Some("review")
+    );
+}
+
+#[test]
+fn coverage_assigns_when_planner_role_unset() {
+    // Default state — no role hints anywhere. The helper still ensures the
+    // swarm covers propose + review/test by assigning roles to clones.
+    let mut state = make_coverage_state(
+        &[
+            ("planner", "p"),
+            ("planner#swarm-mis-001-clone-01", "c1"),
+            ("planner#swarm-mis-001-clone-02", "c2"),
+            ("planner#swarm-mis-001-clone-03", "c3"),
+        ],
+        &[],
+    );
+    let agents = vec![
+        "planner".to_string(),
+        "planner#swarm-mis-001-clone-01".to_string(),
+        "planner#swarm-mis-001-clone-02".to_string(),
+        "planner#swarm-mis-001-clone-03".to_string(),
+    ];
+    let assignments = assign_clone_roles_for_parallel_coverage(
+        &mut state,
+        SwarmTemplate::Parallel,
+        "planner",
+        Some("planner#swarm-mis-001-clone-01"),
+        &agents,
+    );
+    assert_eq!(assignments.len(), 2);
+    let assigned_roles: Vec<&str> = assignments.iter().map(|(_, r)| *r).collect();
+    assert!(assigned_roles.contains(&"propose"));
+    assert!(assigned_roles.contains(&"review"));
+}
+
+#[test]
+fn coverage_noop_when_priority_agents_already_cover_both_slots() {
+    let mut state = make_coverage_state(
+        &[
+            ("planner", "p"),
+            ("priority-a", "a"),
+            ("priority-b", "b"),
+            ("planner#swarm-mis-001-clone-01", "c1"),
+        ],
+        &[
+            ("planner", "integrate"),
+            ("priority-a", "propose"),
+            ("priority-b", "review"),
+        ],
+    );
+    let agents = vec![
+        "planner".to_string(),
+        "priority-a".to_string(),
+        "priority-b".to_string(),
+        "planner#swarm-mis-001-clone-01".to_string(),
+    ];
+    let assignments = assign_clone_roles_for_parallel_coverage(
+        &mut state,
+        SwarmTemplate::Parallel,
+        "planner",
+        Some("planner#swarm-mis-001-clone-01"),
+        &agents,
+    );
+    assert!(assignments.is_empty());
+    assert!(!state
+        .agents
+        .swarm_role_by_agent_id
+        .contains_key("planner#swarm-mis-001-clone-01"));
+}
+
+#[test]
+fn coverage_assigns_only_review_when_priority_already_covers_propose() {
+    let mut state = make_coverage_state(
+        &[
+            ("planner", "p"),
+            ("priority-a", "a"),
+            ("planner#swarm-mis-001-clone-01", "c1"),
+            ("planner#swarm-mis-001-clone-02", "c2"),
+        ],
+        &[("planner", "integrate"), ("priority-a", "propose")],
+    );
+    let agents = vec![
+        "planner".to_string(),
+        "priority-a".to_string(),
+        "planner#swarm-mis-001-clone-01".to_string(),
+        "planner#swarm-mis-001-clone-02".to_string(),
+    ];
+    let assignments = assign_clone_roles_for_parallel_coverage(
+        &mut state,
+        SwarmTemplate::Parallel,
+        "planner",
+        Some("planner#swarm-mis-001-clone-01"),
+        &agents,
+    );
+    assert_eq!(assignments.len(), 1);
+    assert_eq!(assignments[0].1, "review");
+    assert_eq!(
+        state
+            .agents
+            .swarm_role_by_agent_id
+            .get("planner#swarm-mis-001-clone-02")
+            .map(String::as_str),
+        Some("review")
+    );
+}
+
+#[test]
+fn coverage_research_role_satisfies_propose_slot() {
+    let mut state = make_coverage_state(
+        &[
+            ("planner", "p"),
+            ("priority-a", "a"),
+            ("planner#swarm-mis-001-clone-01", "c1"),
+            ("planner#swarm-mis-001-clone-02", "c2"),
+        ],
+        &[("planner", "integrate"), ("priority-a", "research")],
+    );
+    let agents = vec![
+        "planner".to_string(),
+        "priority-a".to_string(),
+        "planner#swarm-mis-001-clone-01".to_string(),
+        "planner#swarm-mis-001-clone-02".to_string(),
+    ];
+    let assignments = assign_clone_roles_for_parallel_coverage(
+        &mut state,
+        SwarmTemplate::Parallel,
+        "planner",
+        Some("planner#swarm-mis-001-clone-01"),
+        &agents,
+    );
+    // research counts as propose — only review needs to be added.
+    assert_eq!(assignments.len(), 1);
+    assert_eq!(assignments[0].1, "review");
+}
+
+#[test]
+fn coverage_test_role_satisfies_review_slot() {
+    let mut state = make_coverage_state(
+        &[
+            ("planner", "p"),
+            ("priority-a", "a"),
+            ("planner#swarm-mis-001-clone-01", "c1"),
+            ("planner#swarm-mis-001-clone-02", "c2"),
+        ],
+        &[("planner", "integrate"), ("priority-a", "test")],
+    );
+    let agents = vec![
+        "planner".to_string(),
+        "priority-a".to_string(),
+        "planner#swarm-mis-001-clone-01".to_string(),
+        "planner#swarm-mis-001-clone-02".to_string(),
+    ];
+    let assignments = assign_clone_roles_for_parallel_coverage(
+        &mut state,
+        SwarmTemplate::Parallel,
+        "planner",
+        Some("planner#swarm-mis-001-clone-01"),
+        &agents,
+    );
+    // test counts as review/test — only propose needs to be added.
+    assert_eq!(assignments.len(), 1);
+    assert_eq!(assignments[0].1, "propose");
+}
+
+#[test]
+fn coverage_noop_for_lab_template() {
+    let mut state = make_coverage_state(
+        &[
+            ("planner", "p"),
+            ("planner#swarm-mis-001-clone-01", "c1"),
+            ("planner#swarm-mis-001-clone-02", "c2"),
+        ],
+        &[("planner", "integrate")],
+    );
+    let agents = vec![
+        "planner".to_string(),
+        "planner#swarm-mis-001-clone-01".to_string(),
+        "planner#swarm-mis-001-clone-02".to_string(),
+    ];
+    let assignments = assign_clone_roles_for_parallel_coverage(
+        &mut state,
+        SwarmTemplate::Lab,
+        "planner",
+        None,
+        &agents,
+    );
+    assert!(
+        assignments.is_empty(),
+        "lab template handles role coverage via fallback_tasks; helper is parallel-only"
+    );
+}
+
+#[test]
+fn coverage_excludes_integrator_clone_from_assignment() {
+    // The integrator must stay a writer, so the helper must NOT assign a
+    // read-only role to the designated integrator clone.
+    let mut state = make_coverage_state(
+        &[
+            ("planner", "p"),
+            ("planner#swarm-mis-001-clone-01", "c1"),
+            ("planner#swarm-mis-001-clone-02", "c2"),
+            ("planner#swarm-mis-001-clone-03", "c3"),
+        ],
+        &[("planner", "integrate")],
+    );
+    let agents = vec![
+        "planner".to_string(),
+        "planner#swarm-mis-001-clone-01".to_string(),
+        "planner#swarm-mis-001-clone-02".to_string(),
+        "planner#swarm-mis-001-clone-03".to_string(),
+    ];
+    let assignments = assign_clone_roles_for_parallel_coverage(
+        &mut state,
+        SwarmTemplate::Parallel,
+        "planner",
+        Some("planner#swarm-mis-001-clone-02"),
+        &agents,
+    );
+    let assigned_ids: Vec<&str> = assignments.iter().map(|(id, _)| id.as_str()).collect();
+    assert!(
+        !assigned_ids.contains(&"planner#swarm-mis-001-clone-02"),
+        "integrator clone must be excluded from coverage assignments, got: {assigned_ids:?}"
+    );
+    assert_eq!(assignments.len(), 2);
+}
+
+#[test]
+fn coverage_does_not_overwrite_clone_with_existing_role_hint() {
+    // A clone that already has a direct role hint (e.g. from a follow-up
+    // dispatch re-using clone IDs) must not be overwritten.
+    let mut state = make_coverage_state(
+        &[
+            ("planner", "p"),
+            ("planner#swarm-mis-001-clone-01", "c1"),
+            ("planner#swarm-mis-001-clone-02", "c2"),
+            ("planner#swarm-mis-001-clone-03", "c3"),
+        ],
+        &[
+            ("planner", "integrate"),
+            ("planner#swarm-mis-001-clone-01", "judge"),
+        ],
+    );
+    let agents = vec![
+        "planner".to_string(),
+        "planner#swarm-mis-001-clone-01".to_string(),
+        "planner#swarm-mis-001-clone-02".to_string(),
+        "planner#swarm-mis-001-clone-03".to_string(),
+    ];
+    let assignments = assign_clone_roles_for_parallel_coverage(
+        &mut state,
+        SwarmTemplate::Parallel,
+        "planner",
+        None,
+        &agents,
+    );
+    // clone-01 already has judge — must remain judge. propose + review go to
+    // clone-02 and clone-03.
+    assert_eq!(
+        state
+            .agents
+            .swarm_role_by_agent_id
+            .get("planner#swarm-mis-001-clone-01")
+            .map(String::as_str),
+        Some("judge")
+    );
+    assert_eq!(assignments.len(), 2);
+    let assigned_ids: Vec<&str> = assignments.iter().map(|(id, _)| id.as_str()).collect();
+    assert!(assigned_ids.contains(&"planner#swarm-mis-001-clone-02"));
+    assert!(assigned_ids.contains(&"planner#swarm-mis-001-clone-03"));
+}
+
+#[test]
+fn coverage_partial_assignment_when_not_enough_clones() {
+    // Only 1 unassigned clone available but 2 roles needed — fill the first
+    // (propose) and skip the second.
+    let mut state = make_coverage_state(
+        &[
+            ("planner", "p"),
+            ("planner#swarm-mis-001-clone-01", "c1"),
+            ("planner#swarm-mis-001-clone-02", "c2"),
+        ],
+        &[("planner", "integrate")],
+    );
+    let agents = vec![
+        "planner".to_string(),
+        "planner#swarm-mis-001-clone-01".to_string(),
+        "planner#swarm-mis-001-clone-02".to_string(),
+    ];
+    let assignments = assign_clone_roles_for_parallel_coverage(
+        &mut state,
+        SwarmTemplate::Parallel,
+        "planner",
+        // clone-01 is the integrator → only clone-02 is assignable.
+        Some("planner#swarm-mis-001-clone-01"),
+        &agents,
+    );
+    assert_eq!(assignments.len(), 1);
+    assert_eq!(assignments[0].1, "propose");
+}
