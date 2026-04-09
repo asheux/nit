@@ -40,7 +40,7 @@ unicode-segmentation = "1.10"
 unicode-width = "0.1"
 sysinfo = "0.29.11"
 rayon = "1.10"
-criterion = "0.5"
+criterion = "0.8"
 
 [profile.release]
 debug = true
