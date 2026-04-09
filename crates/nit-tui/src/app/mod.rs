@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashSet};
 use std::fs;
 use std::io::{self, Stdout};
 use std::path::{Path, PathBuf};
@@ -1574,8 +1574,13 @@ fn push_genome_retry_message(
         } else {
             "+"
         };
+        let bloat_tag = if report.parsimony.bloat_detected {
+            " [bloat]"
+        } else {
+            ""
+        };
         lines.push(format!(
-            "  {delta} {file_name} {} {} c={:.2}",
+            "  {delta} {file_name} {} {} c={:.2}{bloat_tag}",
             report.tier.numeral(),
             report.quality_level(),
             report.cross_encoder_consistency,
@@ -1596,22 +1601,33 @@ fn push_genome_retry_message(
     });
     state.agents.console_scroll = nit_core::CONSOLE_SCROLL_BOTTOM;
 
+    let any_bloat = degraded_files.iter().any(|p| {
+        state
+            .genome_reports
+            .get(p)
+            .is_some_and(|r| r.parsimony.bloat_detected)
+    });
+    let reason = if any_bloat {
+        "parsimony bloat / degraded quality"
+    } else {
+        "quality degraded"
+    };
     state
         .agents
         .diag_events
         .push(nit_core::AgentDiagnosticEvent {
             severity: nit_core::AgentAlertSeverity::Warn,
             source: "genome".into(),
-            message: format!(
-                "[{agent_id}] genome quality degraded, retry {attempt}/{GENOME_RETRY_LIMIT}"
-            ),
+            message: format!("[{agent_id}] {reason}, retry {attempt}/{GENOME_RETRY_LIMIT}"),
             at,
         });
     state.agents.note_event();
 }
 
-/// Build a follow-up prompt if the agent's last turn degraded genome quality.
-/// Returns `None` if quality did not degrade or retry limit is reached.
+/// Build a follow-up prompt if the agent's last turn degraded genome quality
+/// or tripped the parsimony detector. Returns `None` if neither condition
+/// applies or the retry limit is reached. Parsimony bloat is routed through
+/// this same path because only the writer can fix it.
 fn build_genome_retry_prompt(
     state: &mut AppState,
     agent_id: &str,
@@ -1619,8 +1635,25 @@ fn build_genome_retry_prompt(
     if !state.settings.genome.genome_context_enabled {
         return None;
     }
-    // Only retry on degradation relative to baselines.
-    if state.genome_quality_delta >= 0 {
+
+    let agent_files: Vec<std::path::PathBuf> = state
+        .genome_turn_modified
+        .get(agent_id)
+        .map(|s| s.iter().cloned().collect())
+        .unwrap_or_default();
+
+    // Detect parsimony bloat across the agent's modified files. Bloat
+    // triggers a retry even when overall quality didn't degrade — only the
+    // writer can fix it, so we route the fix to the agent that wrote it.
+    let any_bloat = agent_files.iter().any(|p| {
+        state
+            .genome_reports
+            .get(p)
+            .is_some_and(|r| r.parsimony.bloat_detected)
+    });
+
+    // Retry on degradation relative to baselines OR parsimony bloat.
+    if state.genome_quality_delta >= 0 && !any_bloat {
         state.genome_retry_count = 0;
         state.genome_baselines.clear();
         return None;
@@ -1632,13 +1665,10 @@ fn build_genome_retry_prompt(
     state.genome_retry_count += 1;
     let attempt = state.genome_retry_count;
 
-    // Collect files that degraded relative to their baseline OR new files below threshold.
+    // Collect files that degraded relative to their baseline, tripped
+    // parsimony bloat, OR new files below the agent's quality threshold.
     let mut degraded_files: Vec<std::path::PathBuf> = Vec::new();
-    let agent_files: Vec<_> = state
-        .genome_turn_modified
-        .get(agent_id)
-        .map(|s| s.iter().cloned().collect())
-        .unwrap_or_default();
+    let mut bloated_files: HashSet<std::path::PathBuf> = HashSet::new();
     for file_path in &agent_files {
         let report = match state.genome_reports.get(file_path) {
             Some(r) => r,
@@ -1666,18 +1696,20 @@ fn build_genome_retry_prompt(
             continue;
         }
 
-        // Skip files where bloat is detected — retrying would push the agent
-        // to add even more structure, making the bloat worse.  The parsimony
-        // warning in the agent prompt (via append_file_genome_context) tells
-        // the agent what to consolidate on their next natural turn.
+        let mut should_include = false;
+
+        // Parsimony bloat: the writer needs to consolidate over-split
+        // functions, inline trivial predicates, and remove comment padding.
+        // Track separately so the retry prompt can give targeted guidance.
         if report.parsimony.bloat_detected {
-            continue;
+            bloated_files.insert(file_path.clone());
+            should_include = true;
         }
 
         if let Some(base) = state.genome_baselines.get(file_path) {
             // Tier takes priority — a tier drop is always degradation.
             if report.tier < base.tier {
-                degraded_files.push(file_path.clone());
+                should_include = true;
             } else if report.tier == base.tier {
                 let gen_base: i32 = base
                     .encoder_scores
@@ -1690,7 +1722,7 @@ fn build_genome_retry_prompt(
                     .map(|s| s.generations_survived as i32)
                     .sum();
                 if gen_now < gen_base {
-                    degraded_files.push(file_path.clone());
+                    should_include = true;
                 }
             }
         } else {
@@ -1703,8 +1735,12 @@ fn build_genome_retry_prompt(
                 .copied()
                 .unwrap_or(nit_core::GenomeTier::Spaceship);
             if report.tier < min_tier {
-                degraded_files.push(file_path.clone());
+                should_include = true;
             }
+        }
+
+        if should_include {
+            degraded_files.push(file_path.clone());
         }
     }
     if degraded_files.is_empty() {
@@ -1721,11 +1757,12 @@ fn build_genome_retry_prompt(
          disregard any scores you computed or estimated yourself.\n\n",
     );
 
-    // Include files that degraded or new files below threshold.
+    // Categorise files for the header summary.
     let new_below_threshold = degraded_files
         .iter()
         .filter(|p| !state.genome_baselines.contains_key(*p))
         .count();
+    let bloated_count = bloated_files.len();
     let existing_degraded = degraded_files.len() - new_below_threshold;
     prompt.push_str(&format!(
         "Files requiring attention ({} of {} modified",
@@ -1737,15 +1774,32 @@ fn build_genome_retry_prompt(
             "; {existing_degraded} degraded, {new_below_threshold} new below threshold",
         ));
     }
+    if bloated_count > 0 {
+        prompt.push_str(&format!("; {bloated_count} parsimony bloat"));
+    }
     prompt.push_str("):\n\n");
     for file_path in &degraded_files {
         let report = match state.genome_reports.get(file_path) {
             Some(r) => r,
             None => continue,
         };
+        let is_bloated = bloated_files.contains(file_path);
         prompt.push_str(&format!("--- {} ---\n", file_path.display()));
         prompt.push_str("[ACTUAL]\n");
         prompt.push_str(&nit_core::format_genome_report(report));
+
+        if is_bloated {
+            prompt.push_str(&format!(
+                "[PARSIMONY BLOAT] tier capped at IV. {} fns, avg {:.1} lines/fn, \
+                 {:.0}% tiny (<=5 lines), {:.0}% comments.\n\
+                 \u{2192} Consolidate over-split functions, inline trivial predicates, \
+                 remove comment padding. Do NOT add more structure.\n",
+                report.parsimony.fn_count,
+                report.parsimony.avg_fn_body_lines,
+                report.parsimony.tiny_fn_fraction * 100.0,
+                report.parsimony.comment_ratio * 100.0,
+            ));
+        }
 
         if let Some(base) = state.genome_baselines.get(file_path) {
             let gen_base: i32 = base
@@ -1758,9 +1812,16 @@ fn build_genome_retry_prompt(
                 .iter()
                 .map(|s| s.generations_survived as i32)
                 .sum();
+            let delta_label = if report.tier < base.tier || gen_now < gen_base {
+                "DEGRADED"
+            } else if is_bloated {
+                "BLOAT (tier capped)"
+            } else {
+                "UNCHANGED"
+            };
             prompt.push_str(&format!(
                 "[BASELINE] {} (tier {}, consistency {:.2}, total gen {})\n\
-                 [DELTA]    DEGRADED ({:+} generations)\n",
+                 [DELTA]    {delta_label} ({:+} generations)\n",
                 base.quality_level(),
                 base.tier.numeral(),
                 base.cross_encoder_consistency,
@@ -1856,23 +1917,46 @@ fn build_genome_retry_prompt(
             nit_core::GenomeTier::Replicator => 2001,
         }
     );
+    let header = if bloated_count > 0 && existing_degraded == 0 && new_below_threshold == 0 {
+        format!(
+            "[PARSIMONY BLOAT DETECTED \u{2014} automatic retry {attempt}/{GENOME_RETRY_LIMIT}]"
+        )
+    } else if bloated_count > 0 {
+        format!(
+            "[GENOME QUALITY DEGRADED + PARSIMONY BLOAT \u{2014} automatic retry {attempt}/{GENOME_RETRY_LIMIT}]"
+        )
+    } else {
+        format!("[GENOME QUALITY DEGRADED \u{2014} automatic retry {attempt}/{GENOME_RETRY_LIMIT}]")
+    };
     prompt.push_str(&format!(
-        "[GENOME QUALITY DEGRADED \u{2014} automatic retry {attempt}/{GENOME_RETRY_LIMIT}]\n\n\
-         Your changes degraded the structural quality of the files listed above. \
-         Only fix those files \u{2014} do not touch files that maintained or improved quality.\n\n\
-         The ACTUAL results above were measured by nit AFTER your changes were \
-         written to disk. These are authoritative \u{2014} your code scored WORSE than \
-         the baseline. Do NOT call [evaluate_genome]; nit measures automatically.\n\n\
+        "{header}\n\n\
+         Only fix the files listed above \u{2014} do not touch files that maintained or \
+         improved quality. The ACTUAL results were measured by nit AFTER your changes \
+         were written to disk. Do NOT call [evaluate_genome]; nit measures automatically.\n\n\
          SCOPE CONSTRAINT: You may ONLY modify code that YOU added or changed during \
          this session. Do NOT refactor, rename, restructure, or rewrite pre-existing code \
-         that you did not touch. The degradation was caused by YOUR changes \u{2014} fix it \
-         by improving the quality of YOUR code only. Leave all other code exactly as it was.\n\n\
+         that you did not touch. Leave all other code exactly as it was.\n\n\
          Exception: if the operator's original prompt explicitly asked you to refactor the \
          entire file, you may do so. Otherwise, constrain your fixes to your own changes.\n\n\
-         Your goal is to IMPROVE the structural quality above the baselines. If improvement \
+         Your goal is to IMPROVE structural quality above the baselines. If improvement \
          is not possible given the functional requirements, you MUST NOT degrade below \
-         baseline. At minimum, restore quality to the baseline level for every file.\n\n\
-         Focus on natural code quality improvements:\n\
+         baseline. At minimum, restore quality to the baseline level for every file.\n\n",
+    ));
+    if bloated_count > 0 {
+        prompt.push_str(
+            "PARSIMONY FIX (for files marked [PARSIMONY BLOAT]):\n\
+             - Consolidate over-split functions: inline trivial predicates, merge \
+             one-line wrappers into their callers, collapse stub functions.\n\
+             - Remove comment padding: delete doc comments that restate the type or \
+             function name and section markers added purely for token diversity. \
+             Keep comments that explain WHY.\n\
+             - Replace duplicated near-identical function bodies with macros, \
+             generics, or shared helpers.\n\
+             - Do NOT add more structure to fix bloat. The fix is REMOVAL.\n\n",
+        );
+    }
+    prompt.push_str(&format!(
+        "For files marked [DEGRADED], focus on natural quality improvements:\n\
          - Reduce cyclomatic complexity in functions you wrote (aim for <= 8)\n\
          - Flatten deep nesting with early returns and guard clauses\n\
          - Use descriptive, unique identifiers in code you added\n\

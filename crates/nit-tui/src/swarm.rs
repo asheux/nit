@@ -6867,19 +6867,11 @@ fn evaluate_genome_gate_bg(input: &GenomeGateInput) -> String {
             ));
         }
 
-        if report.parsimony.bloat_detected {
-            failures.push(format!(
-                "Genome FAIL: {} parsimony bloat detected (tier capped at IV). \
-                 {} fns avg {:.1} lines, {:.0}% tiny, {:.0}% comments. \
-                 Consolidate over-split functions, remove comment padding, \
-                 inline trivial predicates.",
-                file_path.display(),
-                report.parsimony.fn_count,
-                report.parsimony.avg_fn_body_lines,
-                report.parsimony.tiny_fn_fraction * 100.0,
-                report.parsimony.comment_ratio * 100.0,
-            ));
-        }
+        // Parsimony bloat is intentionally not a swarm-gate failure: only the
+        // writer (integrator) can fix it, and the per-agent genome retry path
+        // (build_genome_retry_prompt) already routes bloat fixes back to the
+        // writer. Surfacing it here would fail the verifier/synthesizer roles
+        // for an issue they have no way to address.
 
         if genome_config.require_no_regression {
             if let Some(prev_tier) = input.prev_tiers.get(file_path) {

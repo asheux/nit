@@ -3279,10 +3279,7 @@ fn pad_to_width(input: &str, width: usize) -> String {
 /// currently active swarm agents (e.g. "Coding ...", "Reviewing ...",
 /// "Integrating ...").  Falls back to "Executing ..." when roles are mixed or
 /// absent.
-fn swarm_exec_label<'a>(
-    state: &nit_core::AppState,
-    ordered_ids: &[String],
-) -> &'a str {
+fn swarm_exec_label<'a>(state: &nit_core::AppState, ordered_ids: &[String]) -> &'a str {
     // Collect the normalised roles of all currently active agents.
     let mut roles: Vec<&str> = Vec::new();
     for id in ordered_ids {
