@@ -3,8 +3,7 @@
 //! Events are written to a temporary file first and atomically renamed on
 //! completion to avoid partial or corrupt output.
 
-use std::fs::{self, File};
-use std::io::{self, BufWriter, Write};
+use std::io;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -80,22 +79,16 @@ fn default_true() -> bool {
     true
 }
 
-/// Writes NDJSON to a temp file, then atomically renames on completion.
+/// Writes NDJSON event records with atomic rename on completion.
 pub struct EventWriter {
-    writer: BufWriter<File>,
-    tmp_path: PathBuf,
-    final_path: PathBuf,
+    inner: crate::ndjson::AtomicNdjsonWriter,
     include_rounds: bool,
 }
 
 impl EventWriter {
     pub fn new(final_path: PathBuf, include_rounds: bool) -> io::Result<Self> {
-        let tmp_path = final_path.with_extension("ndjson.tmp");
-        let file = File::create(&tmp_path)?;
         Ok(Self {
-            writer: BufWriter::new(file),
-            tmp_path,
-            final_path,
+            inner: crate::ndjson::AtomicNdjsonWriter::create(final_path)?,
             include_rounds,
         })
     }
@@ -105,15 +98,11 @@ impl EventWriter {
     }
 
     pub fn write(&mut self, event: &GameEvent) -> io::Result<()> {
-        serde_json::to_writer(&mut self.writer, event).map_err(io::Error::other)?;
-        self.writer.write_all(b"\n")
+        self.inner.append(event)
     }
 
-    pub fn finish(mut self) -> io::Result<PathBuf> {
-        self.writer.flush()?;
-        self.writer.get_ref().sync_all()?;
-        fs::rename(&self.tmp_path, &self.final_path)?;
-        Ok(self.final_path)
+    pub fn finish(self) -> io::Result<PathBuf> {
+        self.inner.finish()
     }
 
     pub fn timestamp() -> String {
@@ -128,6 +117,6 @@ impl EventWriter {
     }
 
     pub fn final_path(&self) -> &Path {
-        &self.final_path
+        self.inner.final_path()
     }
 }

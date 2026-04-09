@@ -1386,6 +1386,21 @@ fn run_loop(
             // Auto-compute genome report for the active editor buffer if missing.
             maybe_compute_genome_report(state, &genome_worker);
 
+            // Poll background genome gate evaluations — dispatches the
+            // verifier agent once results arrive (never blocks).
+            for dispatch in swarm.poll_genome_gates(state) {
+                apply_swarm_task_role(state, &dispatch);
+                dispatch_agent_prompt(
+                    state,
+                    &mut vitals,
+                    Some(&codex_runner),
+                    Some(&claude_runner),
+                    dispatch.agent_id,
+                    Some(dispatch.mission_id),
+                    dispatch.prompt,
+                );
+            }
+
             draw(
                 terminal,
                 state,
@@ -1930,9 +1945,9 @@ fn dispatch_turn_genome_evals(
     state.genome_eval_mission_id = mission_id.clone();
 
     for file_path in modified {
-        if let Ok(text) = std::fs::read_to_string(&file_path) {
-            genome.evaluate(file_path, text, false);
-        } else {
+        // File read + genome computation happen on the worker thread —
+        // no blocking I/O on the main thread.
+        if !genome.evaluate_from_disk(file_path) {
             state.genome_eval_pending = state.genome_eval_pending.saturating_sub(1);
         }
     }
@@ -1963,11 +1978,10 @@ fn drain_file_watcher(
             }
         }
 
-        // Dispatch shadow genome evaluation to background thread.
+        // Dispatch shadow genome evaluation — file read happens on the
+        // worker thread to avoid blocking the main loop.
         if !state.genome_turn_active.is_empty() && state.settings.genome.genome_context_enabled {
-            if let Ok(text) = std::fs::read_to_string(&changed_path) {
-                genome.evaluate(changed_path, text, true);
-            }
+            genome.evaluate_from_disk_shadow(changed_path);
         }
     }
 }
@@ -1983,7 +1997,17 @@ fn drain_genome_results(
 ) {
     while let Ok(result) = genome.rx.try_recv() {
         let path = result.path;
-        let report = result.report;
+        let report = match result.report {
+            Some(r) => r,
+            None => {
+                // File could not be read (e.g. deleted). Still decrement
+                // pending counters so turn finalization is not stuck.
+                if !result.shadow && !result.save_eval {
+                    state.genome_eval_pending = state.genome_eval_pending.saturating_sub(1);
+                }
+                continue;
+            }
+        };
 
         // Clear genome_computing flag when result arrives for the current editor buffer.
         if state.genome_computing && state.editor_buffer().path() == Some(&path) {
@@ -2165,7 +2189,15 @@ fn drain_genome_results(
                 state.genome_eval_worst_delta = delta;
             }
 
-            nit_core::agent_bus::persist_genome_report(&state.workspace_root, &report);
+            // Persist to disk on a background thread to avoid blocking the UI.
+            {
+                let ws = state.workspace_root.clone();
+                let r = report.clone();
+                std::thread::Builder::new()
+                    .name("genome-persist".into())
+                    .spawn(move || nit_core::agent_bus::persist_genome_report(&ws, &r))
+                    .ok();
+            }
             state.genome_reports.insert(path, report);
 
             state.genome_eval_pending = state.genome_eval_pending.saturating_sub(1);

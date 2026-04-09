@@ -98,10 +98,7 @@ fn decode_output_actions(output_code: u128, num_states: usize, num_actions: usiz
     };
     raw_digits
         .into_iter()
-        .map(|digit| match digit {
-            0 => Action::Cooperate,
-            _ => Action::Defect,
-        })
+        .map(|digit| super::symbol_to_action(digit as u8))
         .collect()
 }
 

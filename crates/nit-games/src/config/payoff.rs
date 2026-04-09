@@ -60,12 +60,17 @@ pub(super) fn payoff_from_config(config: PayoffConfig, errors: &mut Vec<String>)
     ])
 }
 
-/// Symmetric matrix from scalar R/S/T/P fields, defaulting to PD (R=3, S=0, T=5, P=1).
+const DEFAULT_REWARD: i32 = 3;
+const DEFAULT_SUCKER: i32 = 0;
+const DEFAULT_TEMPTATION: i32 = 5;
+const DEFAULT_PUNISHMENT: i32 = 1;
+
+/// Symmetric matrix from scalar R/S/T/P fields, defaulting to PD payoffs.
 pub(super) fn fallback_payoff(config: PayoffConfig) -> PayoffMatrix {
-    let reward = config.r.unwrap_or(3);
-    let sucker = config.s.unwrap_or(0);
-    let temptation = config.t.unwrap_or(5);
-    let punishment = config.p.unwrap_or(1);
+    let reward = config.r.unwrap_or(DEFAULT_REWARD);
+    let sucker = config.s.unwrap_or(DEFAULT_SUCKER);
+    let temptation = config.t.unwrap_or(DEFAULT_TEMPTATION);
+    let punishment = config.p.unwrap_or(DEFAULT_PUNISHMENT);
     PayoffMatrix::from_matrix([
         [[reward, reward], [sucker, temptation]],
         [[temptation, sucker], [punishment, punishment]],

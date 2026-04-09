@@ -33,6 +33,15 @@ impl RoundRecord {
     pub fn outcome_for_b(self) -> Outcome {
         Outcome::from_actions(self.b, self.a)
     }
+
+    /// Returns `(own_action, opponent_action)` oriented to the given player.
+    pub fn oriented_actions(self, player_a: bool) -> (Action, Action) {
+        if player_a {
+            (self.a, self.b)
+        } else {
+            (self.b, self.a)
+        }
+    }
 }
 
 impl std::fmt::Display for RoundRecord {
@@ -89,37 +98,19 @@ impl History {
     /// When `player_a` is `true` the outcome is oriented so that player A's
     /// action is "self" and player B's action is "opponent", and vice versa.
     pub fn last_outcome_for(&self, player_a: bool) -> Option<Outcome> {
-        let most_recent = self.last()?;
-
-        let (own_action, opponent_action) = if player_a {
-            (most_recent.a, most_recent.b)
-        } else {
-            (most_recent.b, most_recent.a)
-        };
-
-        Some(Outcome::from_actions(own_action, opponent_action))
+        let (own, opp) = self.last()?.oriented_actions(player_a);
+        Some(Outcome::from_actions(own, opp))
     }
 
     /// Returns `(self_action, opponent_action)` for the most recent round,
     /// oriented to the given player's perspective.
     pub fn last_actions_for(&self, player_a: bool) -> Option<(Action, Action)> {
-        let most_recent = self.last()?;
-
-        if player_a {
-            Some((most_recent.a, most_recent.b))
-        } else {
-            Some((most_recent.b, most_recent.a))
-        }
+        Some(self.last()?.oriented_actions(player_a))
     }
 
     /// Returns the opponent's most recent action from the given player's perspective.
     pub fn last_opponent_action(&self, player_a: bool) -> Option<Action> {
-        let most_recent = self.last()?;
-        Some(if player_a {
-            most_recent.b
-        } else {
-            most_recent.a
-        })
+        Some(self.last()?.oriented_actions(player_a).1)
     }
 
     /// Returns the rolling memory index for the given player over the last `n`

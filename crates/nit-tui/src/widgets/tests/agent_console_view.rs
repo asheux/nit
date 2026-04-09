@@ -1100,7 +1100,7 @@ fn breather_rows_include_swarm_assigned_agents_even_when_idle() {
 
     let rows = thread_rows(&state, None, 120, true);
     let flattened = rows.iter().map(|row| row.text.as_str()).collect::<Vec<_>>();
-    assert!(flattened.iter().any(|line| line.contains("Working ...")));
+    assert!(flattened.iter().any(|line| line.contains("Executing ...")));
     assert!(flattened.iter().any(|line| line.contains("Planner")));
     assert!(flattened.iter().any(|line| line.contains("Coder")));
     assert!(flattened.iter().any(|line| line.contains("Swarm pending")));

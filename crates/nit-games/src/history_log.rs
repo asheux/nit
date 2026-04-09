@@ -1,12 +1,13 @@
-// std
-use std::fs::{self, File};
-use std::io::{self, BufWriter, Write};
+//! Serializable match-history records and buffered NDJSON writer.
+//!
+//! Records are written to a temporary file first and atomically renamed on
+//! completion to avoid partial or corrupt output.
+
+use std::io;
 use std::path::{Path, PathBuf};
 
-// external
 use serde::{Deserialize, Serialize};
 
-// crate
 use crate::fast_eval::CycleMetadata;
 use crate::output::TmDerivedMetrics;
 
@@ -66,45 +67,27 @@ impl MatchHistory {
 }
 
 /// Buffered NDJSON writer for [`MatchHistory`] records.
-///
-/// Writes to a temporary file and atomically renames on
-/// [`finish`](Self::finish) to avoid partial output.
 pub struct HistoryWriter {
-    writer: BufWriter<File>,
-    tmp_path: PathBuf,
-    final_path: PathBuf,
+    inner: crate::ndjson::AtomicNdjsonWriter,
 }
 
 impl HistoryWriter {
-    /// Creates a new writer targeting the given `final_path`.
     pub fn new(final_path: PathBuf) -> io::Result<Self> {
-        let tmp_path = final_path.with_extension("ndjson.tmp");
-        let file = File::create(&tmp_path)?;
         Ok(Self {
-            writer: BufWriter::new(file),
-            tmp_path,
-            final_path,
+            inner: crate::ndjson::AtomicNdjsonWriter::create(final_path)?,
         })
     }
 
-    /// Serializes and appends a single match record as one NDJSON line.
     pub fn write(&mut self, record: &MatchHistory) -> io::Result<()> {
-        serde_json::to_writer(&mut self.writer, record).map_err(io::Error::other)?;
-        self.writer.write_all(b"\n")?;
-        Ok(())
+        self.inner.append(record)
     }
 
-    /// Flushes, syncs, and atomically renames the temporary file to the final path.
-    pub fn finish(mut self) -> io::Result<PathBuf> {
-        self.writer.flush()?;
-        self.writer.get_ref().sync_all()?;
-        fs::rename(&self.tmp_path, &self.final_path)?;
-        Ok(self.final_path)
+    pub fn finish(self) -> io::Result<PathBuf> {
+        self.inner.finish()
     }
 
-    /// Returns the destination path that the log will be written to.
     pub fn final_path(&self) -> &Path {
-        &self.final_path
+        self.inner.final_path()
     }
 }
 

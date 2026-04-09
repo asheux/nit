@@ -21,7 +21,7 @@ pub use tm::{
 
 // ── Crate-internal re-exports ────────────────────────────────
 
-pub(crate) use tm::{tm_action_from_output_symbol, InputSuffix};
+pub(crate) use tm::InputSuffix;
 
 // ── Strategy trait ───────────────────────────────────────────
 
@@ -174,6 +174,15 @@ pub fn tm_max_index(states: usize, symbols: usize) -> Option<u128> {
 }
 
 // ── Internal helpers ─────────────────────────────────────────
+
+/// Map a numeric output symbol to an action: 0 → Cooperate, anything else → Defect.
+pub(crate) fn symbol_to_action(symbol: u8) -> Action {
+    if symbol == 0 {
+        Action::Cooperate
+    } else {
+        Action::Defect
+    }
+}
 
 pub(crate) fn action_bit(action: Action) -> u8 {
     match action {

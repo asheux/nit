@@ -2,6 +2,7 @@ use std::{
     collections::{HashMap, HashSet},
     fs,
     path::Path,
+    sync::mpsc,
 };
 
 use nit_core::{AgentBusEvent, AgentMessage, AgentStatus, AppState, MissionPhase, MissionRecord};
@@ -1259,7 +1260,15 @@ struct SwarmTask {
     retries: u8,
 }
 
-#[derive(Clone, Debug)]
+/// Holds the state for a genome gate evaluation running in a background thread.
+/// When the evaluation completes, the result is received via `rx` and the
+/// verifier dispatch proceeds using the stored `bundle` and `verifier`.
+struct GenomeGatePending {
+    rx: mpsc::Receiver<String>,
+    bundle: GateBundle,
+    verifier: String,
+}
+
 struct SwarmRun {
     mission_id: String,
     root_prompt: String,
@@ -1278,6 +1287,9 @@ struct SwarmRun {
     gate_output: Option<String>,
     gate_report: Option<GateReport>,
     genome_gate_results: Option<String>,
+    /// Background genome gate evaluation — `None` when idle, `Some` while
+    /// waiting for the background thread to finish.
+    genome_gate_pending: Option<GenomeGatePending>,
     report_status: Option<String>,
     report_output: Option<String>,
     /// Source files in the scope referenced by the operator prompt (e.g.
@@ -1325,6 +1337,65 @@ pub fn ensure_swarm_agents_for_followup(
 }
 
 impl SwarmRuntime {
+    /// Poll all pending genome gate evaluations.  When a background thread
+    /// finishes, store the result in the run and return a `SwarmDispatch` so
+    /// the main loop can kick off the verifier agent — without ever blocking.
+    pub fn poll_genome_gates(&mut self, state: &mut AppState) -> Vec<SwarmDispatch> {
+        let mut dispatches = Vec::new();
+        for run in self.runs.values_mut() {
+            let pending = match run.genome_gate_pending.take() {
+                Some(p) => p,
+                None => continue,
+            };
+            match pending.rx.try_recv() {
+                Ok(result) => {
+                    run.genome_gate_results = Some(result);
+                    push_system_message_to_mission(
+                        state,
+                        &run.mission_id,
+                        format!(
+                            "Starting VERIFY ({}) on agent {}",
+                            pending.bundle.label(),
+                            pending.verifier,
+                        ),
+                    );
+                    let prompt = build_verify_prompt(run, &pending.bundle);
+                    dispatches.push(SwarmDispatch {
+                        agent_id: pending.verifier,
+                        mission_id: run.mission_id.clone(),
+                        prompt,
+                        task_role: None,
+                    });
+                }
+                Err(mpsc::TryRecvError::Empty) => {
+                    // Still computing — put it back.
+                    run.genome_gate_pending = Some(pending);
+                }
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    // Thread panicked or was dropped — dispatch verifier
+                    // without genome gate results so the swarm doesn't stall.
+                    push_system_message_to_mission(
+                        state,
+                        &run.mission_id,
+                        format!(
+                            "Genome gate evaluation failed; starting VERIFY ({}) on agent {}",
+                            pending.bundle.label(),
+                            pending.verifier,
+                        ),
+                    );
+                    let prompt = build_verify_prompt(run, &pending.bundle);
+                    dispatches.push(SwarmDispatch {
+                        agent_id: pending.verifier,
+                        mission_id: run.mission_id.clone(),
+                        prompt,
+                        task_role: None,
+                    });
+                }
+            }
+        }
+        dispatches
+    }
+
     pub fn is_active_mission(&self, mission_id: &str) -> bool {
         self.runs.contains_key(mission_id)
     }
@@ -1779,6 +1850,7 @@ impl SwarmRuntime {
                 gate_output: None,
                 gate_report: None,
                 genome_gate_results: None,
+                genome_gate_pending: None,
                 report_status: None,
                 report_output: None,
                 scope_files,
@@ -2050,23 +2122,39 @@ impl SwarmRuntime {
                                 update_mission_phase(state, &run.mission_id, MissionPhase::Verify);
                                 update_mission_status(state, &run, Some(done));
                                 if state.settings.genome.genome_gate_enabled {
-                                    run.genome_gate_results = Some(evaluate_genome_gate(state));
+                                    // Dispatch genome gate to background thread;
+                                    // verifier will be dispatched when result arrives
+                                    // (polled via poll_genome_gates).
+                                    run.genome_gate_pending = Some(GenomeGatePending {
+                                        rx: spawn_genome_gate_eval(state),
+                                        bundle: bundle.clone(),
+                                        verifier: verifier.clone(),
+                                    });
+                                    push_system_message_to_mission(
+                                        state,
+                                        &run.mission_id,
+                                        format!(
+                                            "Genome gate evaluating\u{2026} VERIFY ({}) will start on agent {verifier} when complete",
+                                            bundle.label()
+                                        ),
+                                    );
+                                } else {
+                                    push_system_message_to_mission(
+                                        state,
+                                        &run.mission_id,
+                                        format!(
+                                            "Starting VERIFY ({}) on agent {verifier}",
+                                            bundle.label()
+                                        ),
+                                    );
+                                    let prompt = build_verify_prompt(&run, &bundle);
+                                    dispatches.push(SwarmDispatch {
+                                        agent_id: verifier,
+                                        mission_id: run.mission_id.clone(),
+                                        prompt,
+                                        task_role: None,
+                                    });
                                 }
-                                push_system_message_to_mission(
-                                    state,
-                                    &run.mission_id,
-                                    format!(
-                                        "Starting VERIFY ({}) on agent {verifier}",
-                                        bundle.label()
-                                    ),
-                                );
-                                let prompt = build_verify_prompt(&run, &bundle);
-                                dispatches.push(SwarmDispatch {
-                                    agent_id: verifier,
-                                    mission_id: run.mission_id.clone(),
-                                    prompt,
-                                    task_role: None,
-                                });
                             } else {
                                 run.stage = SwarmStage::Synthesizing;
                                 update_mission_phase(state, &run.mission_id, MissionPhase::Report);
@@ -2086,7 +2174,7 @@ impl SwarmRuntime {
                         let agent_has_writes = state
                             .genome_turn_modified
                             .get(agent_id)
-                            .map_or(false, |files| !files.is_empty());
+                            .is_some_and(|files| !files.is_empty());
                         if let Some(completed) = mark_task_finished(
                             &mut run,
                             agent_id,
@@ -2139,23 +2227,39 @@ impl SwarmRuntime {
                                 update_mission_phase(state, &run.mission_id, MissionPhase::Verify);
                                 update_mission_status(state, &run, Some(done));
                                 if state.settings.genome.genome_gate_enabled {
-                                    run.genome_gate_results = Some(evaluate_genome_gate(state));
+                                    // Dispatch genome gate to background thread;
+                                    // verifier will be dispatched when result arrives
+                                    // (polled via poll_genome_gates).
+                                    run.genome_gate_pending = Some(GenomeGatePending {
+                                        rx: spawn_genome_gate_eval(state),
+                                        bundle: bundle.clone(),
+                                        verifier: verifier.clone(),
+                                    });
+                                    push_system_message_to_mission(
+                                        state,
+                                        &run.mission_id,
+                                        format!(
+                                            "Genome gate evaluating\u{2026} VERIFY ({}) will start on agent {verifier} when complete",
+                                            bundle.label()
+                                        ),
+                                    );
+                                } else {
+                                    push_system_message_to_mission(
+                                        state,
+                                        &run.mission_id,
+                                        format!(
+                                            "Starting VERIFY ({}) on agent {verifier}",
+                                            bundle.label()
+                                        ),
+                                    );
+                                    let prompt = build_verify_prompt(&run, &bundle);
+                                    dispatches.push(SwarmDispatch {
+                                        agent_id: verifier,
+                                        mission_id: run.mission_id.clone(),
+                                        prompt,
+                                        task_role: None,
+                                    });
                                 }
-                                push_system_message_to_mission(
-                                    state,
-                                    &run.mission_id,
-                                    format!(
-                                        "Starting VERIFY ({}) on agent {verifier}",
-                                        bundle.label()
-                                    ),
-                                );
-                                let prompt = build_verify_prompt(&run, &bundle);
-                                dispatches.push(SwarmDispatch {
-                                    agent_id: verifier,
-                                    mission_id: run.mission_id.clone(),
-                                    prompt,
-                                    task_role: None,
-                                });
                             } else {
                                 run.stage = SwarmStage::Synthesizing;
                                 update_mission_phase(state, &run.mission_id, MissionPhase::Report);
@@ -2489,23 +2593,39 @@ impl SwarmRuntime {
                                 update_mission_phase(state, &run.mission_id, MissionPhase::Verify);
                                 update_mission_status(state, &run, Some(done));
                                 if state.settings.genome.genome_gate_enabled {
-                                    run.genome_gate_results = Some(evaluate_genome_gate(state));
+                                    // Dispatch genome gate to background thread;
+                                    // verifier will be dispatched when result arrives
+                                    // (polled via poll_genome_gates).
+                                    run.genome_gate_pending = Some(GenomeGatePending {
+                                        rx: spawn_genome_gate_eval(state),
+                                        bundle: bundle.clone(),
+                                        verifier: verifier.clone(),
+                                    });
+                                    push_system_message_to_mission(
+                                        state,
+                                        &run.mission_id,
+                                        format!(
+                                            "Genome gate evaluating\u{2026} VERIFY ({}) will start on agent {verifier} when complete",
+                                            bundle.label()
+                                        ),
+                                    );
+                                } else {
+                                    push_system_message_to_mission(
+                                        state,
+                                        &run.mission_id,
+                                        format!(
+                                            "Starting VERIFY ({}) on agent {verifier}",
+                                            bundle.label()
+                                        ),
+                                    );
+                                    let prompt = build_verify_prompt(&run, &bundle);
+                                    dispatches.push(SwarmDispatch {
+                                        agent_id: verifier,
+                                        mission_id: run.mission_id.clone(),
+                                        prompt,
+                                        task_role: None,
+                                    });
                                 }
-                                push_system_message_to_mission(
-                                    state,
-                                    &run.mission_id,
-                                    format!(
-                                        "Starting VERIFY ({}) on agent {verifier}",
-                                        bundle.label()
-                                    ),
-                                );
-                                let prompt = build_verify_prompt(&run, &bundle);
-                                dispatches.push(SwarmDispatch {
-                                    agent_id: verifier,
-                                    mission_id: run.mission_id.clone(),
-                                    prompt,
-                                    task_role: None,
-                                });
                             } else {
                                 run.stage = SwarmStage::Synthesizing;
                                 update_mission_phase(state, &run.mission_id, MissionPhase::Report);
@@ -2525,7 +2645,7 @@ impl SwarmRuntime {
                         let agent_has_writes = state
                             .genome_turn_modified
                             .get(agent_id)
-                            .map_or(false, |files| !files.is_empty());
+                            .is_some_and(|files| !files.is_empty());
 
                         // Retry write-role tasks once on failure — the agent may
                         // have crashed due to a transient issue (rate limit,
@@ -2623,23 +2743,36 @@ impl SwarmRuntime {
                                     );
                                     update_mission_status(state, &run, Some(done));
                                     if state.settings.genome.genome_gate_enabled {
-                                        run.genome_gate_results = Some(evaluate_genome_gate(state));
+                                        run.genome_gate_pending = Some(GenomeGatePending {
+                                            rx: spawn_genome_gate_eval(state),
+                                            bundle: bundle.clone(),
+                                            verifier: verifier.clone(),
+                                        });
+                                        push_system_message_to_mission(
+                                            state,
+                                            &run.mission_id,
+                                            format!(
+                                                "Genome gate evaluating\u{2026} VERIFY ({}) will start on agent {verifier} when complete",
+                                                bundle.label()
+                                            ),
+                                        );
+                                    } else {
+                                        push_system_message_to_mission(
+                                            state,
+                                            &run.mission_id,
+                                            format!(
+                                                "Starting VERIFY ({}) on agent {verifier}",
+                                                bundle.label()
+                                            ),
+                                        );
+                                        let prompt = build_verify_prompt(&run, &bundle);
+                                        dispatches.push(SwarmDispatch {
+                                            agent_id: verifier,
+                                            mission_id: run.mission_id.clone(),
+                                            prompt,
+                                            task_role: None,
+                                        });
                                     }
-                                    push_system_message_to_mission(
-                                        state,
-                                        &run.mission_id,
-                                        format!(
-                                            "Starting VERIFY ({}) on agent {verifier}",
-                                            bundle.label()
-                                        ),
-                                    );
-                                    let prompt = build_verify_prompt(&run, &bundle);
-                                    dispatches.push(SwarmDispatch {
-                                        agent_id: verifier,
-                                        mission_id: run.mission_id.clone(),
-                                        prompt,
-                                        task_role: None,
-                                    });
                                 } else {
                                     run.stage = SwarmStage::Synthesizing;
                                     update_mission_phase(
@@ -6569,7 +6702,9 @@ fn build_genome_review_prompt(state: &AppState) -> String {
         prompt.push_str(&nit_core::format_genome_report(&report));
         prompt.push('\n');
 
-        if let Some(prev) = state.genome_reports.get(file_path) {
+        // Use genome_baselines (captured at turn start) as the "before" —
+        // genome_reports contains post-change state and would produce zero diffs.
+        if let Some(prev) = state.genome_baselines.get(file_path) {
             let diff = nit_core::compute_genome_diff(prev, &report);
             prompt.push_str(&nit_core::format_genome_diff(&diff));
             prompt.push('\n');
@@ -6593,16 +6728,19 @@ fn build_genome_review_prompt(state: &AppState) -> String {
     prompt
 }
 
-/// Evaluate genome quality on ALL modified files and produce a gate result string.
-fn evaluate_genome_gate(state: &AppState) -> String {
-    let genome_config = &state.settings.genome.genome_gate;
-    let min_tier = nit_core::GenomeTier::from_generations(match genome_config.min_tier {
-        0 => 0,
-        1 => 51,
-        2 => 201,
-        3 => 501,
-        _ => 2001,
-    });
+/// Snapshot of state needed by the genome gate evaluation thread.
+struct GenomeGateInput {
+    config: nit_core::config::GenomeGateConfig,
+    files_to_eval: Vec<std::path::PathBuf>,
+    /// Previous genome reports for regression checks (file → tier).
+    prev_tiers: HashMap<std::path::PathBuf, nit_core::GenomeTier>,
+}
+
+/// Spawn the genome gate evaluation on a background thread and return a
+/// receiver that will deliver the result string. The main thread should
+/// poll this with `try_recv` so the UI never blocks.
+fn spawn_genome_gate_eval(state: &AppState) -> mpsc::Receiver<String> {
+    let (tx, rx) = mpsc::channel();
 
     // Collect all files to evaluate: modified files + editor buffer.
     let mut files_to_eval: Vec<std::path::PathBuf> = state
@@ -6619,12 +6757,55 @@ fn evaluate_genome_gate(state: &AppState) -> String {
     }
     files_to_eval.sort();
 
+    // Use baselines (captured at turn start) for regression comparison —
+    // genome_reports may already reflect post-change state, producing false
+    // "no regression" results.
+    let prev_tiers: HashMap<std::path::PathBuf, nit_core::GenomeTier> = files_to_eval
+        .iter()
+        .filter_map(|p| {
+            state
+                .genome_baselines
+                .get(p)
+                .or_else(|| state.genome_reports.get(p))
+                .map(|r| (p.clone(), r.tier))
+        })
+        .collect();
+
+    let input = GenomeGateInput {
+        config: state.settings.genome.genome_gate.clone(),
+        files_to_eval,
+        prev_tiers,
+    };
+
+    std::thread::Builder::new()
+        .name("genome-gate".into())
+        .spawn(move || {
+            let result = evaluate_genome_gate_bg(&input);
+            let _ = tx.send(result);
+        })
+        .ok();
+
+    rx
+}
+
+/// Evaluate genome quality on ALL modified files and produce a gate result
+/// string.  Runs on a background thread — all data is passed via `input`.
+fn evaluate_genome_gate_bg(input: &GenomeGateInput) -> String {
+    let genome_config = &input.config;
+    let min_tier = nit_core::GenomeTier::from_generations(match genome_config.min_tier {
+        0 => 0,
+        1 => 51,
+        2 => 201,
+        3 => 501,
+        _ => 2001,
+    });
+
     let mut out = String::new();
     let mut all_failures: Vec<String> = Vec::new();
     let mut file_count = 0u32;
     let mut pass_count = 0u32;
 
-    for file_path in &files_to_eval {
+    for file_path in &input.files_to_eval {
         let text = match std::fs::read_to_string(file_path) {
             Ok(t) => t,
             Err(_) => continue,
@@ -6701,13 +6882,13 @@ fn evaluate_genome_gate(state: &AppState) -> String {
         }
 
         if genome_config.require_no_regression {
-            if let Some(prev) = state.genome_reports.get(file_path) {
-                if report.tier < prev.tier {
+            if let Some(prev_tier) = input.prev_tiers.get(file_path) {
+                if report.tier < *prev_tier {
                     failures.push(format!(
                         "Genome FAIL: {} regressed from {} ({}) to {} ({})",
                         file_path.display(),
-                        prev.tier.numeral(),
-                        prev.tier.name(),
+                        prev_tier.numeral(),
+                        prev_tier.name(),
                         report.tier.numeral(),
                         report.tier.name(),
                     ));

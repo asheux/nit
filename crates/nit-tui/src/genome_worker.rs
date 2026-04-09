@@ -11,7 +11,9 @@ use std::sync::mpsc::{self, Receiver, Sender};
 /// Result of a background genome evaluation.
 pub struct GenomeEvalResult {
     pub path: PathBuf,
-    pub report: GenomeReport,
+    /// `None` when the file could not be read (e.g. deleted before the worker
+    /// ran).  The main loop should still decrement pending counters.
+    pub report: Option<GenomeReport>,
     /// `true` for shadow evaluations (during a turn), `false` for
     /// authoritative turn-completion evaluations.
     pub shadow: bool,
@@ -53,6 +55,43 @@ impl GenomeWorker {
         self.evaluate_inner(path, text, false, true);
     }
 
+    /// Like `evaluate`, but reads the file from disk on the worker thread
+    /// instead of requiring the caller to pass the text.  Returns `false` if
+    /// the thread could not be spawned (the caller should decrement pending
+    /// counts in that case).
+    /// Like `evaluate`, but reads the file from disk on the worker thread
+    /// instead of requiring the caller to pass the text.  Returns `false` if
+    /// the thread could not be spawned (the caller should decrement pending
+    /// counts in that case).  If the file read fails on the worker, a result
+    /// with `report: None` is sent so pending counts still decrement.
+    pub fn evaluate_from_disk(&self, path: PathBuf) -> bool {
+        self.evaluate_from_disk_inner(path, false)
+    }
+
+    /// Shadow variant of `evaluate_from_disk`.
+    pub fn evaluate_from_disk_shadow(&self, path: PathBuf) -> bool {
+        self.evaluate_from_disk_inner(path, true)
+    }
+
+    fn evaluate_from_disk_inner(&self, path: PathBuf, shadow: bool) -> bool {
+        let tx = self.tx.clone();
+        std::thread::Builder::new()
+            .name("genome-eval".into())
+            .stack_size(EVAL_STACK_SIZE)
+            .spawn(move || {
+                let report = std::fs::read_to_string(&path)
+                    .ok()
+                    .map(|text| nit_core::compute_genome_report(&text, &path));
+                let _ = tx.send(GenomeEvalResult {
+                    path,
+                    report,
+                    shadow,
+                    save_eval: false,
+                });
+            })
+            .is_ok()
+    }
+
     fn evaluate_inner(&self, path: PathBuf, text: String, shadow: bool, save_eval: bool) {
         let tx = self.tx.clone();
         let _ = std::thread::Builder::new()
@@ -62,7 +101,7 @@ impl GenomeWorker {
                 let report = nit_core::compute_genome_report(&text, &path);
                 let _ = tx.send(GenomeEvalResult {
                     path,
-                    report,
+                    report: Some(report),
                     shadow,
                     save_eval,
                 });

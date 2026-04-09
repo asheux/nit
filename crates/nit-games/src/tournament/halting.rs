@@ -11,9 +11,7 @@ use crate::config::{AcceleratorMode, NormalizedConfig, StrategySpec, StrategySpe
 use crate::events::GameEvent;
 use crate::game::Action;
 use crate::history_log::MatchHistory;
-use crate::strategy::{
-    run_one_sided_tm, tm_action_from_output_symbol, InputSuffix, TmRunStats, TmTransition,
-};
+use crate::strategy::{run_one_sided_tm, symbol_to_action, InputSuffix, TmRunStats, TmTransition};
 use nit_metal::MatchPair;
 use rayon::prelude::*;
 use std::cmp::Ordering;
@@ -196,7 +194,7 @@ fn notebook_tm_action_cached(
 
     let action = run
         .output_symbol
-        .map(tm_action_from_output_symbol)
+        .map(symbol_to_action)
         .unwrap_or(Action::Defect);
     let result = NotebookTmActionResult {
         action,

@@ -116,7 +116,7 @@ fn tm_spec(
 }
 
 /// A minimal two-transition TM table: writes the opposite symbol and moves in
-/// the given direction. Shared by `build_tm_tournament` and `build_tm_heavy_tournament`.
+/// the given direction. Shared by `build_tm_uniform_tournament`.
 fn binary_tm_transitions(movement: HeadMovement) -> Vec<TmTransition> {
     let move_dir = movement.to_tm_move();
     vec![
@@ -158,15 +158,12 @@ fn ca_spec(
 /// together, providing `run_sequential` as a convenience for benchmarks.
 struct BenchTournament {
     kernel: TournamentKernel,
-    #[allow(dead_code)]
-    config: NormalizedConfig,
 }
 
 impl BenchTournament {
-    /// Build a tournament from the given config, applying any engine overrides.
     fn from_config(config: NormalizedConfig) -> Self {
-        let kernel = TournamentKernel::new(config.clone());
-        Self { kernel, config }
+        let kernel = TournamentKernel::new(config);
+        Self { kernel }
     }
 
     /// Execute one full tournament pass with no event or history writers.
@@ -337,33 +334,25 @@ fn build_fsm_heavy_tournament(strategy_count: usize, rounds: u32) -> NormalizedC
     cfg
 }
 
-/// Turing machine tournament with identical right-moving 1-state strategies.
-fn build_tm_tournament(strategy_count: usize, rounds: u32) -> NormalizedConfig {
-    let shared_transitions = binary_tm_transitions(HeadMovement::Advancing);
-    let specs: Vec<StrategySpec> = (0..strategy_count)
-        .map(|idx| tm_spec(format!("tm{idx}"), shared_transitions.clone(), 32))
-        .collect();
-
-    config_scaffold(specs, rounds, 1, false)
-}
-
-/// Heavy-compute TM tournament with stationary head and large step budgets.
-fn build_tm_heavy_tournament(
+/// Uniform TM tournament: all strategies share the same transition table,
+/// head movement pattern, and step budget.
+fn build_tm_uniform_tournament(
     strategy_count: usize,
     rounds: u32,
+    movement: HeadMovement,
     step_budget: u32,
+    label_prefix: &str,
 ) -> NormalizedConfig {
-    let stay_transitions = binary_tm_transitions(HeadMovement::Stationary);
+    let transitions = binary_tm_transitions(movement);
     let specs: Vec<StrategySpec> = (0..strategy_count)
         .map(|idx| {
             tm_spec(
-                format!("tm_heavy{idx}"),
-                stay_transitions.clone(),
+                format!("{label_prefix}{idx}"),
+                transitions.clone(),
                 step_budget,
             )
         })
         .collect();
-
     config_scaffold(specs, rounds, 1, false)
 }
 
@@ -418,19 +407,6 @@ fn build_alternating_baseline(strategy_count: usize, rounds: u32) -> NormalizedC
     config_scaffold(specs, rounds, 1, false)
 }
 
-// ── Sequential kernel run helper ────────────────────────────
-
-/// Convenience wrapper: run a kernel in sequential mode with no writers.
-///
-/// Almost every benchmark calls `kernel.run(KernelRunMode::Sequential { ... })`
-/// with both writers set to `None`. This helper removes that boilerplate.
-fn run_sequential(kernel: &TournamentKernel) -> nit_games::output::TournamentResults {
-    kernel.run(KernelRunMode::Sequential {
-        event_writer: None,
-        history_writer: None,
-    })
-}
-
 // ── Benchmarks: single match and tournament sizes ───────────
 
 /// Baseline latency for a single 200-round match between two FSM strategies.
@@ -475,7 +451,12 @@ fn bench_logging(c: &mut Criterion) {
     let mut group = c.benchmark_group("logging");
 
     group.bench_function(BenchmarkId::new("logging_off", "events"), |b| {
-        b.iter(|| run_sequential(&kernel));
+        b.iter(|| {
+            kernel.run(KernelRunMode::Sequential {
+                event_writer: None,
+                history_writer: None,
+            })
+        });
     });
 
     group.bench_function(BenchmarkId::new("logging_on", "events_history"), |b| {
@@ -553,32 +534,23 @@ fn bench_parallel(c: &mut Criterion) {
 fn bench_fast_eval(c: &mut Criterion) {
     let mut group = c.benchmark_group("fast_eval");
 
-    // Deterministic suite: fast-eval should detect cycles within ~20 rounds.
-    let mut fast_config = build_deterministic_strategy_suite(5000);
-    fast_config.engine.fast_eval = true;
-    let kernel_with_fast_eval = TournamentKernel::new(fast_config.clone());
-
-    group.bench_function("deterministic_fast", |b| {
-        b.iter(|| run_sequential(&kernel_with_fast_eval));
-    });
-
-    // Same suite without fast-eval: must play all 5000 rounds per match.
-    fast_config.engine.fast_eval = false;
-    let kernel_brute_force = TournamentKernel::new(fast_config);
-
-    group.bench_function("deterministic_slow", |b| {
-        b.iter(|| run_sequential(&kernel_brute_force));
-    });
+    let deterministic_config = build_deterministic_strategy_suite(5000);
+    bench_fast_eval_pair(
+        &mut group,
+        deterministic_config,
+        "deterministic_fast",
+        "deterministic_slow",
+    );
 
     // Mixed family benchmark: splice FSM/CA/TM into slots 0-3.
     let mut mixed_config = build_generic_fsm_tournament(12, 500, 1, false);
     mixed_config.engine.fast_eval = true;
     apply_mixed_strategy_overrides(&mut mixed_config);
 
-    let kernel_mixed_families = TournamentKernel::new(mixed_config);
+    let bench_mixed = BenchTournament::from_config(mixed_config);
 
     group.bench_function("mixed_fsm_ca_tm", |b| {
-        b.iter(|| run_sequential(&kernel_mixed_families));
+        b.iter(|| bench_mixed.run_sequential());
     });
 
     group.finish();
@@ -618,6 +590,26 @@ fn apply_mixed_strategy_overrides(cfg: &mut NormalizedConfig) {
     );
 }
 
+/// Benchmark a config with fast_eval on vs off, using the given label pair.
+fn bench_fast_eval_pair(
+    group: &mut criterion::BenchmarkGroup<'_, criterion::measurement::WallTime>,
+    mut config: NormalizedConfig,
+    fast_label: &str,
+    slow_label: &str,
+) {
+    config.engine.fast_eval = true;
+    let bench_fast = BenchTournament::from_config(config.clone());
+    group.bench_function(fast_label, |b| {
+        b.iter(|| bench_fast.run_sequential());
+    });
+
+    config.engine.fast_eval = false;
+    let bench_slow = BenchTournament::from_config(config);
+    group.bench_function(slow_label, |b| {
+        b.iter(|| bench_slow.run_sequential());
+    });
+}
+
 // ── Benchmarks: FSM fast-eval stress ────────────────────────
 
 /// Stress-test fast-eval with 32 FSM strategies over 3000 rounds.
@@ -627,22 +619,8 @@ fn apply_mixed_strategy_overrides(cfg: &mut NormalizedConfig) {
 /// quantifies the cycle-detection benefit for pure-FSM tournaments.
 fn bench_fsm_fast_eval_heavy(c: &mut Criterion) {
     let mut group = c.benchmark_group("fsm_fast_eval");
-
-    let mut fast_fsm_config = build_fsm_heavy_tournament(32, 3000);
-    fast_fsm_config.engine.fast_eval = true;
-    let kernel_cycle_detect = TournamentKernel::new(fast_fsm_config.clone());
-
-    group.bench_function("fsm_fast", |b| {
-        b.iter(|| run_sequential(&kernel_cycle_detect));
-    });
-
-    fast_fsm_config.engine.fast_eval = false;
-    let kernel_no_cycle_detect = TournamentKernel::new(fast_fsm_config);
-
-    group.bench_function("fsm_slow", |b| {
-        b.iter(|| run_sequential(&kernel_no_cycle_detect));
-    });
-
+    let fsm_config = build_fsm_heavy_tournament(32, 3000);
+    bench_fast_eval_pair(&mut group, fsm_config, "fsm_fast", "fsm_slow");
     group.finish();
 }
 
@@ -684,17 +662,21 @@ fn bench_tm_micro(c: &mut Criterion) {
 fn bench_tm_tournament(c: &mut Criterion) {
     let mut group = c.benchmark_group("tm_tournament");
 
-    let tm_tournament_config = build_tm_tournament(12, 200);
-    let fsm_baseline_config = build_alternating_baseline(12, 200);
-    let kernel_turing = TournamentKernel::new(tm_tournament_config);
-    let kernel_baseline = TournamentKernel::new(fsm_baseline_config);
+    let bench_turing = BenchTournament::from_config(build_tm_uniform_tournament(
+        12,
+        200,
+        HeadMovement::Advancing,
+        32,
+        "tm",
+    ));
+    let bench_baseline = BenchTournament::from_config(build_alternating_baseline(12, 200));
 
     group.bench_function("tm", |b| {
-        b.iter(|| run_sequential(&kernel_turing));
+        b.iter(|| bench_turing.run_sequential());
     });
 
     group.bench_function("baseline", |b| {
-        b.iter(|| run_sequential(&kernel_baseline));
+        b.iter(|| bench_baseline.run_sequential());
     });
 
     group.finish();
@@ -708,11 +690,16 @@ fn bench_tm_tournament(c: &mut Criterion) {
 fn bench_tm_heavy(c: &mut Criterion) {
     let mut group = c.benchmark_group("tm_heavy");
 
-    let heavy_config = build_tm_heavy_tournament(8, 150, 512);
-    let kernel_heavy = TournamentKernel::new(heavy_config);
+    let bench_heavy = BenchTournament::from_config(build_tm_uniform_tournament(
+        8,
+        150,
+        HeadMovement::Stationary,
+        512,
+        "tm_heavy",
+    ));
 
     group.bench_function("tm_steps_heavy", |b| {
-        b.iter(|| run_sequential(&kernel_heavy));
+        b.iter(|| bench_heavy.run_sequential());
     });
 
     group.finish();
@@ -754,9 +741,12 @@ fn bench_tm_family_halting_filter(c: &mut Criterion) {
 /// to temporary files via `nit_utils::fs::write_atomic`, simulating the
 /// I/O path taken during a sweep run's cell-completion step.
 fn bench_sweep_io(c: &mut Criterion) {
-    let sweep_config = build_tm_tournament(6, 60);
+    let sweep_config = build_tm_uniform_tournament(6, 60, HeadMovement::Advancing, 32, "tm");
     let kernel = TournamentKernel::new(sweep_config.clone());
-    let tournament_results = run_sequential(&kernel);
+    let tournament_results = kernel.run(KernelRunMode::Sequential {
+        event_writer: None,
+        history_writer: None,
+    });
 
     let summary_dest = temp_bench_path("sweep_summary", "json");
     let results_dest = temp_bench_path("sweep_results", "json");

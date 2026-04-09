@@ -418,8 +418,8 @@ impl AgentBusEvent {
                     at,
                 });
 
-                // Reload editor buffer from disk (agent may have written to the file).
-                state.editor_buffer_mut().reload_from_disk();
+                // Editor buffer reload is handled by the file watcher on the
+                // next frame — no synchronous I/O here to avoid blocking.
 
                 // Mark genome turn as inactive. Actual evaluation is dispatched
                 // to background threads by the TUI event loop (genome_worker)

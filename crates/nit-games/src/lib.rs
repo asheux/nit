@@ -3,7 +3,7 @@
 
 #![forbid(unsafe_code)]
 
-pub const CRATE_VERSION: &str = env!("CARGO_PKG_VERSION");
+pub(crate) mod ndjson;
 
 pub mod analysis;
 pub mod config;

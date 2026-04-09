@@ -4,6 +4,9 @@ use super::math::{digits_in_base, digits_to_u64};
 use crate::game::Action;
 use crate::history::{History, RoundRecord};
 
+/// Maximum number of trace steps to pre-allocate.
+const MAX_TRACE_CAPACITY: u32 = 10_000;
+
 // ── TM run statistics ────────────────────────────────────────
 
 #[derive(Clone, Debug, Default)]
@@ -201,7 +204,7 @@ pub fn run_one_sided_tm(
             input_digits: initial_digits.clone(),
             initial_tape: tape.clone(),
             initial_head: head_pos,
-            steps: Vec::with_capacity(max_steps.min(10_000) as usize),
+            steps: Vec::with_capacity(max_steps.min(MAX_TRACE_CAPACITY) as usize),
         })
     } else {
         None
@@ -274,16 +277,6 @@ pub fn run_one_sided_tm(
     }
 
     TmRunResult::terminated(max_steps, TmStopReason::MaxSteps, trace)
-}
-
-// ── TM output helper ─────────────────────────────────────────
-
-pub(crate) fn tm_action_from_output_symbol(symbol: u8) -> Action {
-    if symbol == 0 {
-        Action::Cooperate
-    } else {
-        Action::Defect
-    }
 }
 
 // ── One-sided TM strategy ────────────────────────────────────
@@ -419,7 +412,7 @@ impl super::Strategy for OneSidedTmStrategy {
         );
 
         if let Some(symbol) = run.output_symbol {
-            tm_action_from_output_symbol(symbol)
+            super::symbol_to_action(symbol)
         } else {
             Action::Defect
         }
@@ -516,11 +509,11 @@ impl InputSuffix {
     /// Drop digits beyond `self.width`, flagging prefix overflow if any
     /// non-zero digit is discarded.
     fn truncate_to_width(&mut self) {
-        while self.digits_le.len() > self.width {
-            let discarded = self.digits_le.pop();
-            if discarded.unwrap_or(0) != 0 {
+        if self.digits_le.len() > self.width {
+            if self.digits_le[self.width..].iter().any(|&d| d != 0) {
                 self.prefix_nonzero = true;
             }
+            self.digits_le.truncate(self.width);
         }
     }
 
@@ -532,16 +525,16 @@ impl InputSuffix {
         if self.digits_le.is_empty() {
             return vec![0];
         }
-        let mut reversed = self.digits_le.iter().rev().copied().collect::<Vec<_>>();
-        if !self.prefix_nonzero {
-            while reversed.len() > 1 && reversed.first() == Some(&0) {
-                reversed.remove(0);
-            }
-        }
-        if reversed.is_empty() {
-            vec![0]
+        let msd_iter = self.digits_le.iter().rev().copied();
+        if self.prefix_nonzero {
+            msd_iter.collect()
         } else {
-            reversed
+            let result: Vec<u8> = msd_iter.skip_while(|&d| d == 0).collect();
+            if result.is_empty() {
+                vec![0]
+            } else {
+                result
+            }
         }
     }
 

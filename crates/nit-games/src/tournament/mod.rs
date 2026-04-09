@@ -12,7 +12,6 @@ mod session;
 mod types;
 
 pub const TOURNAMENT_FORMAT_VERSION: u32 = 1;
-pub const DEFAULT_REPETITIONS: u32 = 1;
 
 pub type MatchResultWithPreview = (MatchResult, Option<MatchHistoryPreview>);
 pub type StrategyIndex = usize;

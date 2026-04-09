@@ -2335,16 +2335,20 @@ fn breather_rows_for_user_prompt(
     });
     let working = any_active || any_queued;
     let swarm_phase = swarm_mission_id.and_then(|mid| swarm.and_then(|s| s.swarm_stage_label(mid)));
+    let is_swarm = swarm_mission_id.is_some();
     let label = if any_active || any_queued {
         match swarm_phase {
+            Some("PLAN") => "Planning ...",
             Some("VERIFY") => "Verifying ...",
             Some("SYNTH") => "Synthesizing ...",
+            Some("EXEC") => swarm_exec_label(state, &ordered_ids),
+            _ if is_swarm && any_active => "Executing ...",
             _ if any_active => "Working ...",
             _ => "Queued ...",
         }
-    } else if swarm_mission_id.is_some() && all_swarm_done {
+    } else if is_swarm && all_swarm_done {
         "Done"
-    } else if swarm_mission_id.is_some() {
+    } else if is_swarm {
         "Waiting ..."
     } else {
         "Working ..."
@@ -3269,6 +3273,58 @@ fn pad_to_width(input: &str, width: usize) -> String {
     out.push_str(input);
     out.push_str(&" ".repeat(width - current));
     out
+}
+
+/// Derive a human-readable label for the EXEC phase based on the roles of the
+/// currently active swarm agents (e.g. "Coding ...", "Reviewing ...",
+/// "Integrating ...").  Falls back to "Executing ..." when roles are mixed or
+/// absent.
+fn swarm_exec_label<'a>(
+    state: &nit_core::AppState,
+    ordered_ids: &[String],
+) -> &'a str {
+    // Collect the normalised roles of all currently active agents.
+    let mut roles: Vec<&str> = Vec::new();
+    for id in ordered_ids {
+        if !state.agents.active_turns.contains_key(id.as_str()) {
+            continue;
+        }
+        if let Some(agent) = state.agents.agents.iter().find(|a| a.id == *id) {
+            let r = agent.role.trim();
+            if !r.is_empty() {
+                roles.push(r);
+            }
+        }
+    }
+
+    if roles.is_empty() {
+        return "Executing ...";
+    }
+
+    // If all active agents share the same role, use a specific label.
+    let first = roles[0];
+    let uniform = roles.iter().all(|r| r.eq_ignore_ascii_case(first));
+    if uniform {
+        let lower = first.to_ascii_lowercase();
+        return match lower.as_str() {
+            "code" | "coding" | "implement" => "Coding ...",
+            "review" | "reviewer" => "Reviewing ...",
+            "test" | "testing" | "tester" => "Testing ...",
+            "integrate" | "integrator" | "integration" => "Integrating ...",
+            "judge" | "judging" => "Judging ...",
+            "research" | "researcher" => "Researching ...",
+            "computational-research" | "computational research" => "Researching ...",
+            "propose" | "proposer" => "Proposing ...",
+            "design" | "designer" => "Designing ...",
+            "recon" | "reconnaissance" | "scout" => "Scouting ...",
+            "refactor" | "refactoring" => "Refactoring ...",
+            "fix" | "fixer" | "bugfix" => "Fixing ...",
+            "document" | "docs" | "documentation" => "Documenting ...",
+            _ => "Executing ...",
+        };
+    }
+
+    "Executing ..."
 }
 
 fn ecg_indicator(

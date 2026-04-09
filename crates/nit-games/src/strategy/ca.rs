@@ -6,6 +6,9 @@ use super::math::{checked_pow_usize, integer_digits_unsigned};
 use crate::game::Action;
 use crate::history::{History, RoundRecord};
 
+/// Minimum symbol count for CA rule tables (binary minimum).
+const MIN_SYMBOLS: u8 = 2;
+
 #[derive(Clone, Debug)]
 pub struct CaRunResult {
     pub rows: Vec<Vec<u8>>,
@@ -18,11 +21,15 @@ pub struct CaRunResult {
 /// and neighborhood diameter (`two_r = 2 * radius`).
 pub fn decode_ca_rule_table(rule_code: u64, symbols: u8, two_r: u32) -> Vec<u8> {
     let neighborhood = two_r.saturating_add(1) as usize;
-    let table_len = checked_pow_usize(symbols.max(2) as usize, neighborhood).unwrap_or(0);
-    integer_digits_unsigned(rule_code as u128, symbols.max(2) as usize, table_len)
-        .into_iter()
-        .map(|digit| digit as u8)
-        .collect()
+    let table_len = checked_pow_usize(symbols.max(MIN_SYMBOLS) as usize, neighborhood).unwrap_or(0);
+    integer_digits_unsigned(
+        rule_code as u128,
+        symbols.max(MIN_SYMBOLS) as usize,
+        table_len,
+    )
+    .into_iter()
+    .map(|digit| digit as u8)
+    .collect()
 }
 
 /// Run a shrinking cellular automaton: each step reduces the row width by `2r`,
@@ -31,44 +38,41 @@ pub fn run_shrinking_ca(
     rule_table: &[u8],
     symbols: u8,
     two_r: u32,
-    steps: u32,
-    input_row: &[u8],
+    step_limit: u32,
+    initial_row: &[u8],
 ) -> CaRunResult {
-    let mut row = if input_row.is_empty() {
+    let mut current_row = if initial_row.is_empty() {
         vec![0]
     } else {
-        input_row.to_vec()
+        initial_row.to_vec()
     };
-    let mut rows = vec![row.clone()];
+    let mut collected_rows = vec![current_row.clone()];
     let mut steps_executed = 0u32;
     let mut stopped_early = false;
-    let two_r = two_r as usize;
-    let neighborhood = two_r.saturating_add(1);
+    let diameter = two_r as usize;
+    let neighborhood_width = diameter.saturating_add(1);
 
-    for _ in 0..steps {
-        if neighborhood == 0 || row.len() <= two_r {
+    for _ in 0..step_limit {
+        let shrunk_len = current_row.len().saturating_sub(diameter);
+        if neighborhood_width == 0 || shrunk_len == 0 {
             stopped_early = true;
             break;
         }
-        let next_len = row.len().saturating_sub(two_r);
-        if next_len == 0 {
-            stopped_early = true;
-            break;
+        let mut next_row = Vec::with_capacity(shrunk_len);
+        for window_start in 0..shrunk_len {
+            let window_end = window_start.saturating_add(neighborhood_width);
+            let cell =
+                ca_transition_symbol(rule_table, symbols, &current_row[window_start..window_end]);
+            next_row.push(cell);
         }
-        let mut next = Vec::with_capacity(next_len);
-        for start in 0..next_len {
-            let end = start.saturating_add(neighborhood);
-            let value = ca_transition_symbol(rule_table, symbols, &row[start..end]);
-            next.push(value);
-        }
-        row = next;
-        rows.push(row.clone());
+        current_row = next_row;
+        collected_rows.push(current_row.clone());
         steps_executed = steps_executed.saturating_add(1);
     }
 
-    let output_symbol = row.last().copied().unwrap_or(0);
+    let output_symbol = current_row.last().copied().unwrap_or(0);
     CaRunResult {
-        rows,
+        rows: collected_rows,
         output_symbol,
         steps_executed,
         stopped_early,
@@ -78,13 +82,10 @@ pub fn run_shrinking_ca(
 /// Look up the next cell value from the rule table for a neighborhood window.
 /// Interprets `window` as a mixed-radix index into the table.
 fn ca_transition_symbol(rule_table: &[u8], symbols: u8, window: &[u8]) -> u8 {
-    let radix = symbols.max(2) as usize;
-    let mut table_index = 0usize;
-    for &digit in window {
-        table_index = table_index
-            .saturating_mul(radix)
-            .saturating_add(digit as usize);
-    }
+    let radix = symbols.max(MIN_SYMBOLS) as usize;
+    let table_index = window.iter().fold(0usize, |acc, &digit| {
+        acc.saturating_mul(radix).saturating_add(digit as usize)
+    });
     rule_table.get(table_index).copied().unwrap_or(0)
 }
 
@@ -113,7 +114,7 @@ impl CaStrategy {
         Self {
             id: id.into(),
             rule_code,
-            symbols: symbols.max(2),
+            symbols: symbols.max(MIN_SYMBOLS),
             two_r,
             steps,
             rule_table,
@@ -124,15 +125,6 @@ impl CaStrategy {
 
     pub fn rule_code(&self) -> u64 {
         self.rule_code
-    }
-
-    fn sync_history(&mut self, history: &History) {
-        sync_bit_window(&mut self.bit_window, history, &mut self.last_history_len);
-    }
-
-    fn evaluate_ca(&self, row: &[u8]) -> u8 {
-        let run = run_shrinking_ca(&self.rule_table, self.symbols, self.two_r, self.steps, row);
-        run.output_symbol
     }
 }
 
@@ -147,17 +139,19 @@ impl super::Strategy for CaStrategy {
     }
 
     fn next_action(&mut self, history: &History, _player_a: bool) -> Action {
-        self.sync_history(history);
+        self.bit_window.sync(history, &mut self.last_history_len);
         if history.is_empty() {
             return Action::Cooperate;
         }
-        let bits = self.bit_window.to_vec();
-        let symbol = self.evaluate_ca(&bits);
-        if symbol == 0 {
-            Action::Cooperate
-        } else {
-            Action::Defect
-        }
+        let input_bits = self.bit_window.to_vec();
+        let ca_result = run_shrinking_ca(
+            &self.rule_table,
+            self.symbols,
+            self.two_r,
+            self.steps,
+            &input_bits,
+        );
+        super::symbol_to_action(ca_result.output_symbol)
     }
 }
 
@@ -184,13 +178,12 @@ impl BitWindow {
     }
 
     fn push_round(&mut self, record: RoundRecord) {
-        self.push_bit(super::action_bit(record.a));
-        self.push_bit(super::action_bit(record.b));
-    }
-
-    fn push_bit(&mut self, bit: u8) {
-        self.bits.push_back(bit.min(1));
-        while self.bits.len() > self.capacity {
+        self.bits.push_back(super::action_bit(record.a).min(1));
+        if self.bits.len() > self.capacity {
+            self.bits.pop_front();
+        }
+        self.bits.push_back(super::action_bit(record.b).min(1));
+        if self.bits.len() > self.capacity {
             self.bits.pop_front();
         }
     }
@@ -198,22 +191,22 @@ impl BitWindow {
     fn to_vec(&self) -> Vec<u8> {
         self.bits.iter().copied().collect()
     }
-}
 
-fn sync_bit_window(window: &mut BitWindow, history: &History, last_history_len: &mut usize) {
-    let len = history.len();
-    if len < *last_history_len || len > (*last_history_len).saturating_add(1) {
-        window.clear();
-        for record in history.iter() {
-            window.push_round(record);
+    fn sync(&mut self, history: &History, last_len: &mut usize) {
+        let current_len = history.len();
+        if current_len == *last_len {
+            return;
         }
-        *last_history_len = len;
-        return;
-    }
-    if len == *last_history_len + 1 {
-        if let Some(last) = history.last() {
-            window.push_round(last);
+        if current_len == *last_len + 1 {
+            if let Some(most_recent) = history.last() {
+                self.push_round(most_recent);
+            }
+        } else {
+            self.clear();
+            for record in history.iter() {
+                self.push_round(record);
+            }
         }
-        *last_history_len = len;
+        *last_len = current_len;
     }
 }
