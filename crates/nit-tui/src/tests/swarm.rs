@@ -2167,3 +2167,222 @@ fn default_role_contract_forbids_verification_unless_assigned() {
         "default role contract must forbid verification commands by default, got: {text}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// ensure_proposer_task safety net — guarantees that a parallel-template
+// general-mission plan never ends up with every agent assigned `integrate`.
+// Without this, large-scope refactors (>15 files) trip the multi-integrator
+// branch in build_planner_prompt and the LLM happily makes everyone a writer.
+// ---------------------------------------------------------------------------
+
+/// Build a minimal SwarmTask with the given id, agent, role, and writes flag.
+/// Used by the proposer-safety-net tests below. Distinct from `make_task`
+/// (defined earlier in this file) which sets `writes=false` unconditionally.
+fn make_writer_task(id: &str, agent: &str, role: Option<&str>, writes: bool) -> SwarmTask {
+    SwarmTask {
+        id: id.into(),
+        agent_id: agent.into(),
+        role: role.map(str::to_string),
+        title: format!("Task {id}"),
+        task_prompt: format!("prompt {id}"),
+        deps: Vec::new(),
+        writes,
+        artifacts: Vec::new(),
+        done_when: None,
+        state: SwarmTaskState::Pending,
+        output: None,
+        parsed_artifacts: None,
+        expected_artifacts_missing: false,
+        failed: false,
+        retries: 0,
+    }
+}
+
+/// Structurally-relevant fields of a task, used by `task_fingerprint` to
+/// snapshot a plan for no-op assertions. Avoids needing `PartialEq` on
+/// `SwarmTask` (which would also force it on every nested type).
+type TaskFingerprint = (String, String, Option<String>, bool, Vec<String>);
+
+/// Snapshot of the structurally-relevant fields of a task list, used to assert
+/// that a no-op safety-net call leaves the plan untouched.
+fn task_fingerprint(tasks: &[SwarmTask]) -> Vec<TaskFingerprint> {
+    tasks
+        .iter()
+        .map(|t| {
+            (
+                t.id.clone(),
+                t.agent_id.clone(),
+                t.role.clone(),
+                t.writes,
+                t.deps.clone(),
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn ensure_proposer_task_demotes_one_integrate_when_no_proposer_lane() {
+    // Reproduces the user's bug: parallel template, general mission, large-scope
+    // refactor where the planner emitted 4 integrate tasks (one per clone) and
+    // no propose/recon lane. The safety net should demote exactly one task —
+    // preferably one not on the designated integrator — and wire it as a dep
+    // for the remaining integrate tasks.
+    let mut tasks = vec![
+        make_writer_task("t1", "integrator-agent", Some("integrate"), true),
+        make_writer_task("t2", "clone-01", Some("integrate"), true),
+        make_writer_task("t3", "clone-02", Some("integrate"), true),
+        make_writer_task("t4", "clone-03", Some("integrate"), true),
+    ];
+
+    let warnings = ensure_proposer_task(
+        &mut tasks,
+        SwarmTemplate::Parallel,
+        SwarmMissionKind::General,
+        Some("integrator-agent"),
+    );
+
+    let propose: Vec<&SwarmTask> = tasks
+        .iter()
+        .filter(|t| t.role.as_deref() == Some("propose"))
+        .collect();
+    assert_eq!(
+        propose.len(),
+        1,
+        "exactly one task should have been demoted to propose, tasks: {tasks:?}"
+    );
+    let demoted = propose[0];
+    assert!(!demoted.writes, "demoted task must be read-only");
+    assert_ne!(
+        demoted.agent_id, "integrator-agent",
+        "should prefer demoting a task NOT on the designated integrator agent"
+    );
+    let demoted_id = demoted.id.clone();
+
+    let integrators: Vec<&SwarmTask> = tasks
+        .iter()
+        .filter(|t| t.role.as_deref() == Some("integrate"))
+        .collect();
+    assert_eq!(
+        integrators.len(),
+        3,
+        "three integrate tasks should remain after demotion"
+    );
+    for task in &integrators {
+        assert!(
+            task.deps.contains(&demoted_id),
+            "integrate task '{}' should depend on the demoted propose task '{demoted_id}', deps: {:?}",
+            task.id,
+            task.deps
+        );
+    }
+    assert!(
+        warnings.iter().any(|w| w.contains("demoted")),
+        "safety net should emit a 'demoted' warning, got: {warnings:?}"
+    );
+}
+
+#[test]
+fn ensure_proposer_task_noop_when_propose_already_present() {
+    let mut tasks = vec![
+        make_writer_task("recon", "a1", Some("propose"), false),
+        make_writer_task("impl-1", "a2", Some("integrate"), true),
+        make_writer_task("impl-2", "a3", Some("integrate"), true),
+    ];
+    let before = task_fingerprint(&tasks);
+    let warnings = ensure_proposer_task(
+        &mut tasks,
+        SwarmTemplate::Parallel,
+        SwarmMissionKind::General,
+        Some("a2"),
+    );
+    assert!(
+        warnings.is_empty(),
+        "no-op when propose lane already exists, got: {warnings:?}"
+    );
+    assert_eq!(
+        task_fingerprint(&tasks),
+        before,
+        "task list should be unchanged when a propose lane already exists"
+    );
+}
+
+#[test]
+fn ensure_proposer_task_noop_when_only_one_integrate_task() {
+    // Demoting would leave zero writers — bail out instead.
+    let mut tasks = vec![
+        make_writer_task("impl", "integrator", Some("integrate"), true),
+        make_writer_task("test", "clone-01", Some("test"), false),
+    ];
+    let before = task_fingerprint(&tasks);
+    let warnings = ensure_proposer_task(
+        &mut tasks,
+        SwarmTemplate::Parallel,
+        SwarmMissionKind::General,
+        Some("integrator"),
+    );
+    assert!(warnings.is_empty(), "single integrate must be left alone");
+    assert_eq!(task_fingerprint(&tasks), before);
+}
+
+#[test]
+fn ensure_proposer_task_noop_for_lab_template() {
+    let mut tasks = vec![
+        make_writer_task("impl-1", "a1", Some("integrate"), true),
+        make_writer_task("impl-2", "a2", Some("integrate"), true),
+    ];
+    let before = task_fingerprint(&tasks);
+    let warnings = ensure_proposer_task(
+        &mut tasks,
+        SwarmTemplate::Lab,
+        SwarmMissionKind::General,
+        Some("a1"),
+    );
+    assert!(
+        warnings.is_empty(),
+        "lab template handles single-writer via prompt; safety net is parallel-only"
+    );
+    assert_eq!(task_fingerprint(&tasks), before);
+}
+
+#[test]
+fn ensure_proposer_task_noop_for_research_mission() {
+    let mut tasks = vec![
+        make_writer_task("impl-1", "a1", Some("integrate"), true),
+        make_writer_task("impl-2", "a2", Some("integrate"), true),
+    ];
+    let before = task_fingerprint(&tasks);
+    let warnings = ensure_proposer_task(
+        &mut tasks,
+        SwarmTemplate::Parallel,
+        SwarmMissionKind::Research,
+        Some("a1"),
+    );
+    assert!(
+        warnings.is_empty(),
+        "research missions already lean read-only; safety net is general-mission-only"
+    );
+    assert_eq!(task_fingerprint(&tasks), before);
+}
+
+#[test]
+fn ensure_proposer_task_falls_back_when_all_integrates_on_integrator() {
+    // Edge case: every integrate task is on the integrator agent (e.g. the
+    // planner only handed work to one agent). The safety net should still fire
+    // and demote the first integrate task — better one writer + one proposer
+    // than two writers and zero recon.
+    let mut tasks = vec![
+        make_writer_task("t1", "integrator", Some("integrate"), true),
+        make_writer_task("t2", "integrator", Some("integrate"), true),
+    ];
+    let warnings = ensure_proposer_task(
+        &mut tasks,
+        SwarmTemplate::Parallel,
+        SwarmMissionKind::General,
+        Some("integrator"),
+    );
+    assert_eq!(tasks[0].role.as_deref(), Some("propose"));
+    assert!(!tasks[0].writes);
+    assert_eq!(tasks[1].role.as_deref(), Some("integrate"));
+    assert!(tasks[1].deps.contains(&"t1".to_string()));
+    assert!(!warnings.is_empty());
+}

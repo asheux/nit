@@ -3,7 +3,7 @@ use std::fs;
 
 use super::discover::{find_executable_in_path, probe_models_from_cli};
 
-/// Probe the Gemini CLI for available models, falling back to the installed package.
+/// Try CLI-based discovery first, fall back to scanning the installed npm package.
 pub(super) fn probe_gemini_models() -> (Vec<String>, Option<String>) {
     let cli_attempts: &[&[&str]] = &[
         &["models", "--json"],
@@ -70,7 +70,6 @@ pub(crate) fn select_current_gemini_models(raw_models: Vec<String>) -> Vec<Strin
 
 // ── Classification Types ──
 
-/// A classified Gemini model with its family, stability status, and parsed version.
 struct ClassifiedModel {
     family_tag: &'static str,
     preview_variant: bool,
@@ -106,7 +105,6 @@ fn discover_models_from_package() -> Option<Vec<String>> {
 
 // ── JavaScript Parsing Helpers ──
 
-/// Resolve a single set member token to a model ID string.
 fn resolve_set_member(token: &str, bindings: &HashMap<String, String>) -> Option<String> {
     if let Some(quoted_value) = strip_single_quotes(token) {
         return Some(quoted_value.to_string());
@@ -120,7 +118,6 @@ fn collect_js_const_bindings(js_source: &str) -> HashMap<String, String> {
     js_source.lines().filter_map(parse_js_const_line).collect()
 }
 
-/// Try to parse a single JS const declaration into (name, value).
 fn parse_js_const_line(line: &str) -> Option<(String, String)> {
     let after_export = line.trim().strip_prefix("export const ")?;
     let (binding_name, rhs) = after_export.split_once('=')?;
@@ -163,7 +160,6 @@ fn strip_single_quotes(text: &str) -> Option<&str> {
 
 // ── Model Classification and Selection ──
 
-/// Classify a model ID into its family, stability status, and version.
 fn classify_gemini_model(raw_identifier: &str) -> Option<ClassifiedModel> {
     let normalized_name = raw_identifier.trim().to_ascii_lowercase();
     let remainder = normalized_name.strip_prefix("gemini-")?;
@@ -175,11 +171,14 @@ fn classify_gemini_model(raw_identifier: &str) -> Option<ClassifiedModel> {
         return None;
     }
 
-    let family_tag = match () {
-        _ if descriptor.contains("flash-lite") => "flash-lite",
-        _ if descriptor.contains("flash") => "flash",
-        _ if descriptor.contains("pro") => "pro",
-        _ => return None,
+    let family_tag = if descriptor.contains("flash-lite") {
+        "flash-lite"
+    } else if descriptor.contains("flash") {
+        "flash"
+    } else if descriptor.contains("pro") {
+        "pro"
+    } else {
+        return None;
     };
 
     Some(ClassifiedModel {
@@ -213,54 +212,33 @@ fn record_if_better(
     );
 }
 
-/// Check whether a challenger classification should replace the current best candidate.
-///
-/// Preference order: stable release over preview, higher version, shorter name.
+/// Preference order: stable over preview, higher version, shorter name.
 fn beats_incumbent(
     current_best: &ModelCandidate,
     challenger: &ClassifiedModel,
     challenger_name: &str,
 ) -> bool {
-    // Stable release always takes priority over a preview variant.
-    if current_best.preview_variant && !challenger.preview_variant {
-        return true;
-    }
-
-    // A preview variant cannot displace a stable release.
     if current_best.preview_variant != challenger.preview_variant {
-        return false;
+        return !challenger.preview_variant;
     }
 
-    // Same stability tier: compare by version magnitude, then by name brevity.
-    let version_advantage = challenger.version_components > current_best.version_components;
-    let version_tied = challenger.version_components == current_best.version_components;
-    version_advantage
-        || (version_tied
+    // Same stability tier: higher version wins, then shorter name.
+    challenger.version_components > current_best.version_components
+        || (challenger.version_components == current_best.version_components
             && super::prefer_shorter_model_name(challenger_name, &current_best.full_identifier))
 }
 
 // ── Version Parsing ──
 
-/// Parse a dotted version string like "2.5" into a component vector [2, 5].
+/// Parse "2.5" → [2, 5]. Rejects non-digit segments.
 fn parse_dotted_version(raw: &str) -> Option<Vec<u32>> {
-    if raw.is_empty() {
-        return None;
-    }
     raw.split('.').map(parse_version_segment).collect()
 }
 
-/// Parse a single numeric segment from a version string.
-fn parse_version_segment(digit_str: &str) -> Option<u32> {
-    if digit_str.is_empty() {
-        return None;
+fn parse_version_segment(s: &str) -> Option<u32> {
+    if !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()) {
+        s.parse().ok()
+    } else {
+        None
     }
-
-    let all_numeric = digit_str
-        .chars()
-        .all(|character| character.is_ascii_digit());
-    if !all_numeric {
-        return None;
-    }
-
-    digit_str.parse::<u32>().ok()
 }

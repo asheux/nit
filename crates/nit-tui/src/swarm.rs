@@ -2106,6 +2106,14 @@ impl SwarmRuntime {
                                 .as_deref()
                                 .or(parsed.integrator_agent_id.as_deref()),
                         ));
+                        parsed.warnings.extend(ensure_proposer_task(
+                            &mut parsed.tasks,
+                            run.template,
+                            run.mission_kind,
+                            run.integrator_agent_id
+                                .as_deref()
+                                .or(parsed.integrator_agent_id.as_deref()),
+                        ));
 
                         let dag_mode = match read_workspace_dag_validation_mode(
                             state.workspace_root.as_path(),
@@ -2546,6 +2554,14 @@ impl SwarmRuntime {
                         ));
                         parsed.warnings.extend(ensure_integrate_task(
                             &mut parsed.tasks,
+                            run.mission_kind,
+                            run.integrator_agent_id
+                                .as_deref()
+                                .or(parsed.integrator_agent_id.as_deref()),
+                        ));
+                        parsed.warnings.extend(ensure_proposer_task(
+                            &mut parsed.tasks,
+                            run.template,
                             run.mission_kind,
                             run.integrator_agent_id
                                 .as_deref()
@@ -3161,6 +3177,113 @@ fn ensure_integrate_task(
     });
     warnings
         .push("Plan safety net: injected integrate task because the planner omitted one.".into());
+    warnings
+}
+
+/// Safety net for parallel template + general mission: if the planner
+/// produced multiple integrate tasks but no read-only proposer/recon lane,
+/// demote one of the integrate tasks (preferring one not on the designated
+/// integrator agent) to a `propose` role and wire it as a dependency of the
+/// remaining integrate tasks. This preserves parallel's write fan-out while
+/// guaranteeing that at least one agent surveys the module before edits begin.
+///
+/// Mirrors `ensure_integrate_task` for the read-only side. Only acts when:
+/// - template == Parallel (lab/bulk already enforce single-writer or
+///   propose-then-judge-then-integrate via the planner prompt)
+/// - mission_kind == General (research missions already lean read-only)
+/// - no existing read-only role lane (propose / research / computational-research / review)
+/// - at least 2 integrate tasks (so demoting one still leaves a writer)
+///
+/// Mutates tasks in place — never pushes or removes — so the slice is passed
+/// as `&mut [SwarmTask]`, distinct from `ensure_integrate_task` which may
+/// inject a new task.
+fn ensure_proposer_task(
+    tasks: &mut [SwarmTask],
+    template: SwarmTemplate,
+    mission_kind: SwarmMissionKind,
+    integrator_agent_id: Option<&str>,
+) -> Vec<String> {
+    let mut warnings = Vec::new();
+    if !matches!(template, SwarmTemplate::Parallel) {
+        return warnings;
+    }
+    if !matches!(mission_kind, SwarmMissionKind::General) {
+        return warnings;
+    }
+
+    // Bail out if any read-only proposal/research/review lane already exists.
+    let has_read_only_lane = tasks.iter().any(|t| {
+        if t.writes {
+            return false;
+        }
+        let Some(role) = t.role.as_deref().and_then(normalize_role_label) else {
+            return false;
+        };
+        matches!(
+            role.as_str(),
+            "propose" | "research" | COMPUTATIONAL_RESEARCH_ROLE | "review"
+        )
+    });
+    if has_read_only_lane {
+        return warnings;
+    }
+
+    let is_integrate = |task: &SwarmTask| -> bool {
+        task.role
+            .as_deref()
+            .and_then(normalize_role_label)
+            .as_deref()
+            == Some("integrate")
+    };
+
+    // Need at least 2 integrate tasks: demoting one must still leave a writer.
+    if tasks.iter().filter(|t| is_integrate(t)).count() < 2 {
+        return warnings;
+    }
+
+    // Pick the demote target: prefer an integrate task whose agent is NOT
+    // the designated integrator (so the integrator stays a writer). Fall back
+    // to the first integrate task if every integrate is on the integrator.
+    let demote_idx = tasks
+        .iter()
+        .position(|t| is_integrate(t) && Some(t.agent_id.as_str()) != integrator_agent_id)
+        .or_else(|| tasks.iter().position(is_integrate));
+    let Some(idx) = demote_idx else {
+        return warnings;
+    };
+
+    let demoted_id = tasks[idx].id.clone();
+    let demoted_agent = tasks[idx].agent_id.clone();
+    tasks[idx].role = Some("propose".into());
+    tasks[idx].writes = false;
+    tasks[idx].title = "Module recon + design proposal".into();
+    tasks[idx].task_prompt = "Survey the target module's structure (files, modules, key \
+         functions) and produce a concrete file-by-file implementation plan for the integrate \
+         agents to follow. List the files that need changes, the order they should be touched, \
+         which integrate agent should take which subset, and any cross-file risks. Stay \
+         read-only — the integrate agents will apply the changes after reading your output."
+        .into();
+    tasks[idx].artifacts = vec!["files".into(), "plan".into(), "risks".into()];
+    tasks[idx].done_when = Some(
+        "We have a concrete file-by-file implementation plan and the main risks identified."
+            .into(),
+    );
+    tasks[idx].deps.clear();
+
+    // Wire the propose task as a dep of every remaining integrate task so
+    // they wait for the recon output before touching files.
+    for task in tasks.iter_mut() {
+        if task.id == demoted_id {
+            continue;
+        }
+        if is_integrate(task) && !task.deps.contains(&demoted_id) {
+            task.deps.push(demoted_id.clone());
+        }
+    }
+
+    warnings.push(format!(
+        "Plan safety net: demoted task '{demoted_id}' (agent '{demoted_agent}') to role=propose because the parallel template plan had no proposer/recon lane.",
+    ));
     warnings
 }
 
@@ -6419,7 +6542,10 @@ fn build_planner_prompt(
                 "- Prefer ONE task per agent id (max parallelism, deterministic tracking).\n",
             );
             out.push_str(
-                "- Prefer tasks that can run in parallel (deps should usually be empty).\n",
+                "- REQUIRED: reserve at least ONE non-integrate lane for a `propose` (or `research` / `recon`) task that surveys the target module first and outputs a concrete file-by-file implementation plan. The remaining agents take `integrate` and split the file work, with the propose task as a dep. Even when the scope is large and multiple integrate tasks are allowed, do NOT make every agent an integrator — a single propose/recon lane should always run first as a dep for the integrate tasks.\n",
+            );
+            out.push_str(
+                "- Prefer tasks that can run in parallel (deps should usually be empty), except where the propose lane feeds the integrate tasks.\n",
             );
             out.push_str(
                 "- If you assign producer/consumer-style roles (e.g. research or computational-research → judge), use deps to express required ordering.\n",

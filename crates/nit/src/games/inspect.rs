@@ -1,10 +1,10 @@
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::Context;
 use nit_core::io as core_io;
 use nit_games::output::RunSummary;
-use nit_games::{format_strategy_introspection, introspect_strategy};
+use nit_games::{format_strategy_introspection, introspect_strategy, StrategySpec};
 
 use crate::cli::OutputFormat;
 use crate::graph::{build_strategy_graph, render_strategy_graph_dot, write_strategy_graph_json};
@@ -16,13 +16,7 @@ pub(super) fn run_games_inspect(
     out: Option<PathBuf>,
 ) -> anyhow::Result<()> {
     let (_config_path, _config_text, config) = super::load_games_config(config_path, None)?;
-
-    let spec = config
-        .strategies
-        .iter()
-        .find(|spec| spec.id == id)
-        .cloned()
-        .ok_or_else(|| anyhow::anyhow!("strategy '{id}' not found"))?;
+    let spec = resolve_strategy(&config.strategies, &id)?;
     let intro = introspect_strategy(&spec);
     let output = match format {
         OutputFormat::Json => serde_json::to_string(&intro)?,
@@ -30,16 +24,9 @@ pub(super) fn run_games_inspect(
     };
 
     if let Some(out_path) = out {
-        if let Some(parent) = out_path.parent() {
-            if !parent.as_os_str().is_empty() {
-                let parent_display = parent.display().to_string();
-                fs::create_dir_all(parent)
-                    .with_context(|| format!("failed to create directory {parent_display}"))?;
-            }
-        }
-        let out_path_display = out_path.display().to_string();
+        ensure_parent_dir(&out_path)?;
         fs::write(&out_path, output)
-            .with_context(|| format!("failed to write {out_path_display}"))?;
+            .with_context(|| format!("failed to write {}", out_path.display()))?;
     } else {
         println!("{output}");
     }
@@ -53,30 +40,19 @@ pub(super) fn run_games_graph(
     strategy_id: String,
     out_path: PathBuf,
 ) -> anyhow::Result<()> {
-    let spec = if let Some(run_path) = run_path {
-        let run_path_display = run_path.display().to_string();
+    let strategies = if let Some(run_path) = run_path {
         let run_text = core_io::load_to_string(&run_path)
-            .with_context(|| format!("failed to read {run_path_display}"))?;
+            .with_context(|| format!("failed to read {}", run_path.display()))?;
         let summary: RunSummary = serde_json::from_str(&run_text)
-            .with_context(|| format!("failed to parse {run_path_display}"))?;
-        summary
-            .config
-            .strategies
-            .iter()
-            .find(|spec| spec.id == strategy_id)
-            .cloned()
-            .ok_or_else(|| anyhow::anyhow!("strategy '{strategy_id}' not found"))?
+            .with_context(|| format!("failed to parse {}", run_path.display()))?;
+        summary.config.strategies
     } else {
         let (_config_path, _config_text, config) = super::load_games_config(config_path, None)?;
-        config
-            .strategies
-            .iter()
-            .find(|spec| spec.id == strategy_id)
-            .cloned()
-            .ok_or_else(|| anyhow::anyhow!("strategy '{strategy_id}' not found"))?
+        config.strategies
     };
+    let spec = resolve_strategy(&strategies, &strategy_id)?;
     let intro = introspect_strategy(&spec);
-    let graph = build_strategy_graph(&intro)?;
+    let graph = build_strategy_graph(&intro);
 
     let ext = out_path
         .extension()
@@ -88,12 +64,7 @@ pub(super) fn run_games_graph(
         anyhow::bail!("output path must end with .json, .dot, or .gv");
     }
 
-    if let Some(parent) = out_path.parent() {
-        if !parent.as_os_str().is_empty() {
-            fs::create_dir_all(parent)
-                .with_context(|| format!("failed to create directory {}", parent.display()))?;
-        }
-    }
+    ensure_parent_dir(&out_path)?;
 
     if is_json {
         write_strategy_graph_json(&out_path, &graph)?;
@@ -104,5 +75,21 @@ pub(super) fn run_games_graph(
     }
 
     eprintln!("Graph written: {}", out_path.display());
+    Ok(())
+}
+
+fn resolve_strategy(strategies: &[StrategySpec], id: &str) -> anyhow::Result<StrategySpec> {
+    strategies
+        .iter()
+        .find(|spec| spec.id == id)
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("strategy '{id}' not found"))
+}
+
+fn ensure_parent_dir(path: &Path) -> anyhow::Result<()> {
+    if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create directory {}", parent.display()))?;
+    }
     Ok(())
 }

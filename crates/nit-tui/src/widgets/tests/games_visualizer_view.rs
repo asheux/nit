@@ -397,15 +397,17 @@ k = 2
         nit_core::Buffer::empty("x", None),
         nit_core::Buffer::empty("n", None),
     );
-    let mut runtime = nit_games::RuntimeAcceleratorStats::default();
-    runtime.backend = nit_games::RuntimeAcceleratorBackend::Metal;
-    runtime.metal_matches = 913_936;
-    runtime.metal_matches_per_batch = Some(262_144);
-    runtime.metal_inflight_batches = Some(5);
-    runtime.metal_policy_cache_path = Some(
-        "/Users/nitrika/Library/Caches/dev.arcxlab.nit/games/metal-policy/apple_m4_max_1872106799188804901_v1.json"
-            .into(),
-    );
+    let runtime = nit_games::RuntimeAcceleratorStats {
+        backend: nit_games::RuntimeAcceleratorBackend::Metal,
+        metal_matches: 913_936,
+        metal_matches_per_batch: Some(262_144),
+        metal_inflight_batches: Some(5),
+        metal_policy_cache_path: Some(
+            "/Users/nitrika/Library/Caches/dev.arcxlab.nit/games/metal-policy/apple_m4_max_1872106799188804901_v1.json"
+                .into(),
+        ),
+        ..nit_games::RuntimeAcceleratorStats::default()
+    };
     state.games.last_run = Some(nit_games::output::RunSummary {
         schema_version: nit_games::output::RUN_SUMMARY_SCHEMA_VERSION,
         timestamp: "2026-03-11T23:19:22.86116Z".into(),
@@ -466,9 +468,9 @@ k = 2
         .position(|line| line.starts_with("summary: "))
         .expect("summary line");
     assert!(rendered[accel_cache_idx + 1].starts_with("             "));
-    assert!(rendered[accel_cache_idx + 1].trim().len() > 0);
+    assert!(!rendered[accel_cache_idx + 1].trim().is_empty());
     assert!(rendered[summary_idx + 1].starts_with("         "));
-    assert!(rendered[summary_idx + 1].trim().len() > 0);
+    assert!(!rendered[summary_idx + 1].trim().is_empty());
     assert!(display_width(&rendered[accel_cache_idx]) <= width);
     assert!(display_width(&rendered[accel_cache_idx + 1]) <= width);
     assert!(display_width(&rendered[summary_idx]) <= width);

@@ -148,9 +148,11 @@ fn cache_clear_all_confirmation_can_be_cancelled() {
 
 #[test]
 fn match_inspector_uses_progress_summary_when_snapshot_is_missing() {
-    let mut runtime = nit_games::RuntimeAcceleratorStats::default();
-    runtime.backend = nit_games::RuntimeAcceleratorBackend::Metal;
-    runtime.metal_matches = 1024;
+    let runtime = nit_games::RuntimeAcceleratorStats {
+        backend: nit_games::RuntimeAcceleratorBackend::Metal,
+        metal_matches: 1024,
+        ..nit_games::RuntimeAcceleratorStats::default()
+    };
     let lines = render_match_inspector(
         None,
         Some(TournamentProgress {

@@ -42,15 +42,16 @@ pub(super) fn load_agents_from_codex_models_cache() -> anyhow::Result<nit_core::
     let cache: CodexModelsCache =
         serde_json::from_str(&raw).context("parse ~/.codex/models_cache.json")?;
 
-    let mut entries = cache
+    let mut entries: Vec<_> = cache
         .models
         .into_iter()
         .filter(|m| m.visibility.as_deref().unwrap_or("list") == "list")
-        .collect::<Vec<_>>();
+        .collect();
     entries.sort_by(|a, b| {
-        let pa = a.priority.unwrap_or(i64::MAX);
-        let pb = b.priority.unwrap_or(i64::MAX);
-        pa.cmp(&pb).then_with(|| a.slug.cmp(&b.slug))
+        a.priority
+            .unwrap_or(i64::MAX)
+            .cmp(&b.priority.unwrap_or(i64::MAX))
+            .then_with(|| a.slug.cmp(&b.slug))
     });
 
     let mut agents = nit_core::AgentsState::default();
@@ -59,23 +60,21 @@ pub(super) fn load_agents_from_codex_models_cache() -> anyhow::Result<nit_core::
     agents.mcp.latency_ms = None;
     agents.mcp.last_error = None;
 
-    for model in entries.iter() {
-        if let Some(context_window) = model.context_window {
-            let effective_pct = model.effective_context_window_percent.unwrap_or(100) as u64;
-            let effective_tokens = (context_window as u64)
-                .saturating_mul(effective_pct)
-                .saturating_div(100) as u32;
+    for entry in &entries {
+        if let Some(window) = entry.context_window {
+            let pct = entry.effective_context_window_percent.unwrap_or(100) as u64;
+            let tokens = (window as u64).saturating_mul(pct).saturating_div(100) as u32;
             agents
                 .codex_effective_context_window_tokens
-                .insert(model.slug.clone(), effective_tokens.max(1));
+                .insert(entry.slug.clone(), tokens.max(1));
         }
 
-        if let Some(levels) = model.supported_reasoning_levels.as_ref() {
-            let mut efforts = levels
+        if let Some(levels) = entry.supported_reasoning_levels.as_ref() {
+            let mut efforts: Vec<String> = levels
                 .iter()
                 .map(|lvl| lvl.effort.trim().to_string())
                 .filter(|s| !s.is_empty())
-                .collect::<Vec<_>>();
+                .collect();
             efforts.sort_by(|a, b| {
                 reasoning_effort_rank(a)
                     .cmp(&reasoning_effort_rank(b))
@@ -85,39 +84,39 @@ pub(super) fn load_agents_from_codex_models_cache() -> anyhow::Result<nit_core::
             if !efforts.is_empty() {
                 agents
                     .codex_supported_reasoning_efforts
-                    .insert(model.slug.clone(), efforts);
+                    .insert(entry.slug.clone(), efforts);
             }
         }
 
-        if let Some(effort) = pick_codex_reasoning_effort(model) {
+        if let Some(effort) = pick_codex_reasoning_effort(entry) {
             agents
                 .codex_default_reasoning_effort
-                .insert(model.slug.clone(), effort.clone());
+                .insert(entry.slug.clone(), effort.clone());
             agents
                 .codex_selected_reasoning_effort
-                .insert(model.slug.clone(), effort);
+                .insert(entry.slug.clone(), effort);
         }
     }
 
     agents.agents = entries
         .into_iter()
-        .map(|model| nit_core::AgentLane {
-            id: model.slug.clone(),
-            role: model
+        .map(|entry| nit_core::AgentLane {
+            id: entry.slug.clone(),
+            role: entry
                 .display_name
                 .clone()
-                .unwrap_or_else(|| model.slug.clone()),
+                .unwrap_or_else(|| entry.slug.clone()),
             lane: "Codex".into(),
             kind: nit_core::AgentLaneKind::Codex,
             status: nit_core::AgentStatus::Idle,
             heartbeat_age_secs: 0,
             queue_len: 0,
             current_mission: None,
-            last_message: model.description.unwrap_or_default(),
+            last_message: entry.description.unwrap_or_default(),
         })
         .collect();
 
-    agents.selected_agent = agents.agents.first().map(|a| a.id.clone());
+    agents.selected_agent = agents.agents.first().map(|lane| lane.id.clone());
     agents.roster_selected = 0;
     Ok(agents)
 }
@@ -136,59 +135,49 @@ pub(super) fn load_only_codex_agents() -> nit_core::AgentsState {
 }
 
 fn reasoning_effort_rank(effort: &str) -> u8 {
-    if effort.eq_ignore_ascii_case("low") {
-        0
-    } else if effort.eq_ignore_ascii_case("medium") {
-        1
-    } else if effort.eq_ignore_ascii_case("high") {
-        2
-    } else if effort.eq_ignore_ascii_case("xhigh") {
-        3
-    } else {
-        10
+    match effort.to_ascii_lowercase().as_str() {
+        "low" => 0,
+        "medium" => 1,
+        "high" => 2,
+        "xhigh" => 3,
+        _ => 10,
     }
 }
 
 fn pick_codex_reasoning_effort(model: &CodexModelEntry) -> Option<String> {
-    let supported = model
-        .supported_reasoning_levels
-        .as_ref()
-        .map(|levels| {
-            levels
-                .iter()
-                .map(|lvl| lvl.effort.trim())
-                .filter(|s| !s.is_empty())
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-
     let default = model
         .default_reasoning_level
         .as_deref()
         .unwrap_or("medium")
         .trim();
+
+    let Some(levels) = model.supported_reasoning_levels.as_ref() else {
+        return Some(default.to_string());
+    };
+
+    let supported: Vec<&str> = levels
+        .iter()
+        .map(|lvl| lvl.effort.trim())
+        .filter(|s| !s.is_empty())
+        .collect();
+
     if supported.is_empty() {
         return Some(default.to_string());
     }
 
-    if let Some(found) = supported
-        .iter()
-        .find(|effort| effort.eq_ignore_ascii_case(default))
-    {
-        return Some((*found).to_string());
-    }
-    for effort in ["medium", "high", "low"] {
-        if let Some(found) = supported
+    let find = |target: &str| {
+        supported
             .iter()
-            .find(|candidate| candidate.eq_ignore_ascii_case(effort))
-        {
-            return Some((*found).to_string());
-        }
-    }
+            .find(|e| e.eq_ignore_ascii_case(target))
+            .copied()
+    };
 
-    supported
-        .first()
-        .copied()
-        .map(str::to_string)
-        .or_else(|| Some(default.to_string()))
+    // Prefer the model's default, then common tiers, then whatever is first.
+    let chosen = find(default)
+        .or_else(|| find("medium"))
+        .or_else(|| find("high"))
+        .or_else(|| find("low"))
+        .unwrap_or(supported[0]);
+
+    Some(chosen.to_string())
 }

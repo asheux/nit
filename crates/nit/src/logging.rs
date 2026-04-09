@@ -8,23 +8,26 @@ use nit_utils::hashing::stable_hash_bytes;
 use nit_utils::paths;
 use tracing_subscriber::fmt::MakeWriter;
 
+type SharedFile = Arc<Mutex<fs::File>>;
+
 pub(crate) fn init_tracing(
     tx: mpsc::Sender<String>,
     log_path: Option<PathBuf>,
 ) -> anyhow::Result<()> {
-    let file = log_path
+    let file: Option<SharedFile> = log_path
         .as_ref()
-        .and_then(|path| open_log_file(path).ok())
-        .map(|file| Arc::new(Mutex::new(file)));
-    let writer = LogWriter { tx, file };
+        .and_then(|p| open_log_file(p).ok())
+        .map(|f| Arc::new(Mutex::new(f)));
+
     tracing_subscriber::fmt()
-        .with_writer(writer)
+        .with_writer(LogWriter { tx, file })
         .with_ansi(false)
         .with_env_filter("info,nit_syntax::tree_sitter_engine=error")
         .try_init()
         .ok();
+
     if let Some(path) = log_path {
-        tracing::info!("Log file: {}", path.display());
+        tracing::info!("log file: {}", path.display());
     }
     Ok(())
 }
@@ -40,7 +43,7 @@ pub(crate) fn install_panic_hook() {
 #[derive(Clone)]
 struct LogWriter {
     tx: mpsc::Sender<String>,
-    file: Option<Arc<Mutex<std::fs::File>>>,
+    file: Option<SharedFile>,
 }
 
 impl<'a> MakeWriter<'a> for LogWriter {
@@ -58,7 +61,29 @@ impl<'a> MakeWriter<'a> for LogWriter {
 struct ChannelWriter {
     tx: mpsc::Sender<String>,
     buf: Vec<u8>,
-    file: Option<Arc<Mutex<std::fs::File>>>,
+    file: Option<SharedFile>,
+}
+
+impl ChannelWriter {
+    /// Emit complete lines from the buffer to both the log file and the TUI channel.
+    fn drain_lines(&mut self) {
+        while let Some(newline_pos) = self.buf.iter().position(|&b| b == b'\n') {
+            let raw_bytes: Vec<u8> = self.buf.drain(..=newline_pos).collect();
+            let trimmed_line = String::from_utf8_lossy(&raw_bytes).trim().to_string();
+            if trimmed_line.is_empty() {
+                continue;
+            }
+            self.emit(&trimmed_line);
+        }
+    }
+
+    fn emit(&self, log_line: &str) {
+        let file_guard = self.file.as_ref().and_then(|f| f.lock().ok());
+        if let Some(mut handle) = file_guard {
+            let _ = writeln!(handle, "{log_line}");
+        }
+        let _ = self.tx.send(log_line.to_string());
+    }
 }
 
 impl Write for ChannelWriter {
@@ -70,39 +95,12 @@ impl Write for ChannelWriter {
 
     fn flush(&mut self) -> io::Result<()> {
         self.drain_lines();
-        if !self.buf.is_empty() {
-            let msg = String::from_utf8_lossy(&self.buf).trim().to_string();
-            if !msg.is_empty() {
-                if let Some(file) = &self.file {
-                    if let Ok(mut file) = file.lock() {
-                        let _ = writeln!(file, "{msg}");
-                    }
-                }
-                let _ = self.tx.send(msg);
-            }
-            self.buf.clear();
+        let trailing = String::from_utf8_lossy(&self.buf).trim().to_string();
+        if !trailing.is_empty() {
+            self.emit(&trailing);
         }
+        self.buf.clear();
         Ok(())
-    }
-}
-
-impl ChannelWriter {
-    fn drain_lines(&mut self) {
-        loop {
-            let Some(pos) = self.buf.iter().position(|b| *b == b'\n') else {
-                break;
-            };
-            let line_bytes: Vec<u8> = self.buf.drain(..=pos).collect();
-            let line = String::from_utf8_lossy(&line_bytes).trim().to_string();
-            if !line.is_empty() {
-                if let Some(file) = &self.file {
-                    if let Ok(mut file) = file.lock() {
-                        let _ = writeln!(file, "{line}");
-                    }
-                }
-                let _ = self.tx.send(line);
-            }
-        }
     }
 }
 
@@ -113,18 +111,13 @@ pub(crate) fn log_path_for_workspace(workspace_root: &Path) -> Option<PathBuf> {
     let base = paths::state_dir().or_else(paths::data_dir)?;
     let logs_dir = base.join("logs");
     let _ = fs::create_dir_all(&logs_dir);
-    let key = workspace_root.to_string_lossy();
-    let hash = stable_hash_bytes(key.as_bytes());
-    let filename = format!("{hash:016x}.log");
-    Some(logs_dir.join(filename))
+    let hash = stable_hash_bytes(workspace_root.to_string_lossy().as_bytes());
+    Some(logs_dir.join(format!("{hash:016x}.log")))
 }
 
-fn open_log_file(path: &Path) -> io::Result<std::fs::File> {
+fn open_log_file(path: &Path) -> io::Result<fs::File> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-    std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
+    fs::OpenOptions::new().create(true).append(true).open(path)
 }

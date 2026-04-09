@@ -14,7 +14,7 @@ use nit_games::output::{RunPaths, RunSummary, RUN_SUMMARY_SCHEMA_VERSION};
 use nit_games::tournament::TournamentKernel;
 use nit_games::{
     accelerator_run_preflight, run_id_from_seed_config,
-    try_select_halting_turing_machine_strategies, PayoffMatrix, ScoreAggregation,
+    try_select_halting_turing_machine_strategies, NormalizedConfig, PayoffMatrix, ScoreAggregation,
 };
 use nit_utils::hashing::stable_hash_bytes;
 use serde::Serialize;
@@ -27,12 +27,6 @@ const PODIUM_SIZE: usize = 3;
 /// Schema version for sweep summary output files.
 const SWEEP_SCHEMA_VERSION: u32 = 1;
 
-/// Decimal precision when formatting noise values in directory names.
-///
-/// Used as documentation; the format string `{:.4}` encodes this value at compile time.
-#[allow(dead_code)]
-const NOISE_DECIMAL_PLACES: usize = 4;
-
 /// Runtime context shared across all cells during a parameter sweep.
 struct SweepContext<'a> {
     /// Template configuration cloned and mutated per cell.
@@ -43,11 +37,9 @@ struct SweepContext<'a> {
     base_seed: u64,
     /// ISO-8601 timestamp shared across all cells in this sweep.
     timestamp: &'a str,
-    /// Parent directory where individual cell output directories are created.
     cells_root: &'a Path,
-    /// When true, recompute cells even if cached results exist on disk.
+    /// Recompute cells even if cached results exist on disk.
     force: bool,
-    /// Enable diagnostic output to stderr during execution.
     verbose: bool,
     /// Scoring mode used when ranking strategies within each cell.
     score_aggregation: ScoreAggregation,
@@ -63,46 +55,37 @@ struct SweepAccumulators {
     top_counts: HashMap<String, u32>,
 }
 
-/// A single point in the parameter space grid.
+/// Per-cell configuration produced by applying grid-point overrides to the base sweep config.
+struct CellConfig {
+    seed: u64,
+    normalized: NormalizedConfig,
+    serialized: String,
+    content_hash: String,
+}
+
 struct GridCell {
-    /// Number of rounds per match in this cell's tournament.
     rounds: u32,
-    /// Probability of action noise (bit-flip) per round.
+    /// Bit-flip probability per round.
     noise: f32,
-    /// Number of independent repetitions of each matchup.
     repetitions: u32,
-    /// Reward payoff for mutual cooperation.
     payoff_r: i32,
-    /// Sucker's payoff when cooperating against a defector.
     payoff_s: i32,
-    /// Temptation payoff for defecting against a cooperator.
     payoff_t: i32,
-    /// Punishment payoff for mutual defection.
     payoff_p: i32,
 }
 
-/// Resolved parameter vectors for each sweep dimension.
 struct ParameterGrids {
-    /// Sweep axis: rounds-per-match values.
     rounds: Vec<u32>,
-    /// Sweep axis: noise probability values.
     noise: Vec<f32>,
-    /// Sweep axis: repetition count values.
     repetitions: Vec<u32>,
-    /// Sweep axis: reward (R) payoff values.
     payoff_r: Vec<i32>,
-    /// Sweep axis: sucker (S) payoff values.
     payoff_s: Vec<i32>,
-    /// Sweep axis: temptation (T) payoff values.
     payoff_t: Vec<i32>,
-    /// Sweep axis: punishment (P) payoff values.
     payoff_p: Vec<i32>,
 }
 
-/// Return `explicit_values` if non-empty, otherwise a singleton of `config_fallback`.
-///
-/// Used to resolve each parameter dimension: CLI overrides take precedence, falling
-/// back to the single value from the parsed config.
+/// Resolve a parameter dimension: CLI overrides take precedence,
+/// falling back to the single value from the parsed config.
 fn grid_or_default<T>(explicit_values: Vec<T>, config_fallback: T) -> Vec<T> {
     if explicit_values.is_empty() {
         vec![config_fallback]
@@ -235,7 +218,7 @@ pub(super) fn run_games_sweep(
     Ok(())
 }
 
-/// Collect top-k results from a tournament and update the running score/top-count accumulators.
+/// Update running score/top-count accumulators and return the podium for a single cell.
 fn collect_sweep_results(
     tournament_outcome: &nit_games::output::TournamentResults,
     sweep_context: &SweepContext<'_>,
@@ -260,7 +243,7 @@ fn collect_sweep_results(
     *running_totals
         .top_counts
         .entry(winner_id.clone())
-        .or_insert(0) += 1;
+        .or_default() += 1;
     for contestant in &tournament_outcome.ranking {
         running_totals
             .scores_by_strategy
@@ -274,19 +257,16 @@ fn collect_sweep_results(
     (winner_id, podium_entries)
 }
 
-/// Execute a single sweep cell: build config, run tournament, write artifacts, collect results.
-fn run_sweep_cell(
-    sweep_context: &SweepContext<'_>,
-    running_totals: &mut SweepAccumulators,
-    ordinal: usize,
+/// Derive a deterministic per-cell seed, apply grid-point overrides, and validate the config.
+fn prepare_cell_config(
+    ctx: &SweepContext<'_>,
     grid_point: &GridCell,
-) -> anyhow::Result<SweepCellSummary> {
-    // Derive a deterministic per-cell seed from the base seed and all grid parameters.
+) -> anyhow::Result<CellConfig> {
     let noise_fingerprint = grid_point.noise.to_bits();
-    let derived_seed = stable_hash_bytes(
+    let seed = stable_hash_bytes(
         format!(
             "{}:{}:{}:{noise_fingerprint}:{}:{}:{}:{}",
-            sweep_context.base_seed,
+            ctx.base_seed,
             grid_point.rounds,
             grid_point.repetitions,
             grid_point.payoff_r,
@@ -297,36 +277,43 @@ fn run_sweep_cell(
         .as_bytes(),
     );
 
-    // Clone the base config and apply this cell's parameter overrides.
-    let mut point_config = sweep_context.base_config.clone();
-    point_config.rounds = grid_point.rounds;
-    point_config.repetitions = grid_point.repetitions;
-    point_config.noise = grid_point.noise.clamp(0.0, 1.0);
-    point_config.payoff = payoff_from_rstp(
+    let mut config = ctx.base_config.clone();
+    config.rounds = grid_point.rounds;
+    config.repetitions = grid_point.repetitions;
+    config.noise = grid_point.noise.clamp(0.0, 1.0);
+    config.payoff = payoff_from_rstp(
         grid_point.payoff_r,
         grid_point.payoff_s,
         grid_point.payoff_t,
         grid_point.payoff_p,
     );
-    point_config.seed = Some(derived_seed);
-    point_config.engine.mode = EngineMode::Batch;
-    point_config = try_select_halting_turing_machine_strategies(point_config)
-        .map_err(|err| anyhow::anyhow!(err))?;
+    config.seed = Some(seed);
+    config.engine.mode = EngineMode::Batch;
+    config =
+        try_select_halting_turing_machine_strategies(config).map_err(|err| anyhow::anyhow!(err))?;
     accelerator_run_preflight(
-        &point_config,
-        point_config.save_data && point_config.event_log.enabled,
-        point_config.save_data && point_config.history.enabled,
+        &config,
+        config.save_data && config.event_log.enabled,
+        config.save_data && config.history.enabled,
         false,
     )
     .map_err(|err| anyhow::anyhow!(err))?;
 
-    // Construct the content-addressed run ID and output path for this cell.
-    let serialized_point_config =
-        toml::to_string(&point_config).unwrap_or_else(|_| sweep_context.config_text.to_owned());
-    let content_hash = run_id_from_seed_config(derived_seed, &serialized_point_config);
-    // Format noise to NOISE_DECIMAL_PLACES decimal places.
+    let serialized = toml::to_string(&config).unwrap_or_else(|_| ctx.config_text.to_owned());
+    let content_hash = run_id_from_seed_config(seed, &serialized);
+
+    Ok(CellConfig {
+        seed,
+        normalized: config,
+        serialized,
+        content_hash,
+    })
+}
+
+/// Build the on-disk directory path for a sweep cell from its ordinal and grid parameters.
+fn cell_output_dir(cells_root: &Path, ordinal: usize, grid_point: &GridCell) -> PathBuf {
     let noise_tag = format!("{:.4}", grid_point.noise).replace('.', "_");
-    let point_output_dir = sweep_context.cells_root.join(format!(
+    cells_root.join(format!(
         "{ordinal:04}__r{}__n{noise_tag}__rep{}__R{}__S{}__T{}__P{}",
         grid_point.rounds,
         grid_point.repetitions,
@@ -334,22 +321,33 @@ fn run_sweep_cell(
         grid_point.payoff_s,
         grid_point.payoff_t,
         grid_point.payoff_p
-    ));
+    ))
+}
+
+/// Execute a single sweep cell: run tournament, write artifacts, collect results.
+fn run_sweep_cell(
+    sweep_context: &SweepContext<'_>,
+    running_totals: &mut SweepAccumulators,
+    ordinal: usize,
+    grid_point: &GridCell,
+) -> anyhow::Result<SweepCellSummary> {
+    let cell_cfg = prepare_cell_config(sweep_context, grid_point)?;
+
+    let point_output_dir = cell_output_dir(sweep_context.cells_root, ordinal, grid_point);
     fs::create_dir_all(&point_output_dir)
         .with_context(|| format!("failed to create {}", point_output_dir.display()))?;
 
     let point_summary_file = point_output_dir.join("run_summary.json");
 
-    // Try to reuse an existing cell result if not forcing a rerun.
     if point_summary_file.exists() && !sweep_context.force {
-        if let Some(cached_summary) = try_reuse_existing_cell(
+        if let Some(cached) = try_reuse_existing_cell(
             &point_summary_file,
             sweep_context,
             running_totals,
             ordinal,
             grid_point,
         ) {
-            return Ok(cached_summary);
+            return Ok(cached);
         }
     }
 
@@ -360,31 +358,42 @@ fn run_sweep_cell(
     let point_history_file = point_output_dir.join("history.ndjson");
     let point_analysis_dir = point_output_dir.join("analysis");
 
-    // Execute the tournament for this cell's configuration.
-    let tournament_engine = TournamentKernel::new(point_config.clone());
-    let frozen_point_config = tournament_engine.config().clone();
+    let tournament_engine = TournamentKernel::new(cell_cfg.normalized.clone());
+    let frozen_config = tournament_engine.config().clone();
     let execution_output = super::execute_tournament(
         &tournament_engine,
-        point_config.event_log.enabled.then_some(point_events_file),
-        point_config.history.enabled.then_some(point_history_file),
+        cell_cfg
+            .normalized
+            .event_log
+            .enabled
+            .then_some(point_events_file),
+        cell_cfg
+            .normalized
+            .history
+            .enabled
+            .then_some(point_history_file),
     )?;
 
     super::write_run_artifacts(
         &point_config_file,
-        &serialized_point_config,
+        &cell_cfg.serialized,
         &point_definitions_file,
         tournament_engine.definitions(),
         &point_results_file,
         &execution_output.results,
     );
 
+    // Collect top-k before moving results into the summary to avoid a clone.
+    let (winner_id, podium_entries) =
+        collect_sweep_results(&execution_output.results, sweep_context, running_totals);
+
     let cell_run_summary = RunSummary {
         schema_version: RUN_SUMMARY_SCHEMA_VERSION,
         timestamp: sweep_context.timestamp.to_owned(),
-        run_id: content_hash.clone(),
-        seed: derived_seed,
-        config_text: serialized_point_config,
-        config: frozen_point_config,
+        run_id: cell_cfg.content_hash.clone(),
+        seed: cell_cfg.seed,
+        config_text: cell_cfg.serialized,
+        config: frozen_config,
         paths: RunPaths {
             summary: Some(point_summary_file.display().to_string()),
             events: execution_output.event_log_path.clone(),
@@ -395,7 +404,7 @@ fn run_sweep_cell(
             analysis_dir: Some(point_analysis_dir.display().to_string()),
         },
         strategies: tournament_engine.definitions().to_vec(),
-        results: execution_output.results.clone(),
+        results: execution_output.results,
         event_log: execution_output.event_log_path,
         history_log: execution_output.history_log_path,
         runtime: execution_output.runtime,
@@ -405,15 +414,11 @@ fn run_sweep_cell(
     nit_games::output::write_summary(&point_summary_file, &cell_run_summary)
         .with_context(|| format!("failed to write {}", point_summary_file.display()))?;
 
-    // Collect top-k results and update cross-cell accumulators.
-    let (winner_id, podium_entries) =
-        collect_sweep_results(&execution_output.results, sweep_context, running_totals);
-
     Ok(assemble_cell_summary(
         ordinal,
         grid_point,
-        derived_seed,
-        content_hash,
+        cell_cfg.seed,
+        cell_cfg.content_hash,
         point_output_dir.display().to_string(),
         point_summary_file.display().to_string(),
         winner_id,
@@ -512,7 +517,6 @@ enum PayoffPreset {
 }
 
 impl PayoffPreset {
-    /// Parse a human-readable label into the corresponding preset variant.
     fn from_label(preset_label: &str) -> Option<Self> {
         let canonical: String = preset_label
             .chars()
@@ -586,44 +590,24 @@ fn resolve_parameter_grids(
 }
 
 /// Build the full Cartesian product of parameter dimensions as a flat grid.
-fn build_cartesian_grid(parameter_space: &ParameterGrids) -> Vec<GridCell> {
-    let estimated_capacity = parameter_space.rounds.len()
-        * parameter_space.noise.len()
-        * parameter_space.repetitions.len()
-        * parameter_space.payoff_r.len()
-        * parameter_space.payoff_s.len()
-        * parameter_space.payoff_t.len()
-        * parameter_space.payoff_p.len();
+fn build_cartesian_grid(space: &ParameterGrids) -> Vec<GridCell> {
+    let capacity = space.rounds.len()
+        * space.noise.len()
+        * space.repetitions.len()
+        * space.payoff_r.len()
+        * space.payoff_s.len()
+        * space.payoff_t.len()
+        * space.payoff_p.len();
 
-    let mut grid_points = Vec::with_capacity(estimated_capacity);
-
-    // Build round x noise x repetition dimension combinations first.
-    let dimension_triples = expand_execution_dimensions(parameter_space);
-
-    // Cross each execution triple with the full payoff matrix space.
-    for (round_count, noise_level, rep_count) in &dimension_triples {
-        expand_payoff_combinations(
-            &mut grid_points,
-            *round_count,
-            *noise_level,
-            *rep_count,
-            parameter_space,
-        );
-    }
-    grid_points
-}
-
-/// Expand the execution-parameter dimensions (rounds x noise x repetitions).
-fn expand_execution_dimensions(space: &ParameterGrids) -> Vec<(u32, f32, u32)> {
-    let mut triples = Vec::new();
-    for &round_val in &space.rounds {
-        for &noise_val in &space.noise {
-            for &rep_val in &space.repetitions {
-                triples.push((round_val, noise_val, rep_val));
+    let mut grid = Vec::with_capacity(capacity);
+    for &rounds in &space.rounds {
+        for &noise in &space.noise {
+            for &repetitions in &space.repetitions {
+                expand_payoff_combinations(&mut grid, rounds, noise, repetitions, space);
             }
         }
     }
-    triples
+    grid
 }
 
 /// Expand the payoff-matrix dimensions and append GridCells for one execution triple.

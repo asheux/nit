@@ -29,7 +29,7 @@ fn run_games_enumerate_fsm(
     let range = parse_states_range(states)?;
     let mode = parse_input_mode_arg(input_mode.as_deref())?;
 
-    let out_path = if out.extension().map(|ext| ext == "ndjson").unwrap_or(false) {
+    let out_path = if out.extension().is_some_and(|ext| ext == "ndjson") {
         out.to_path_buf()
     } else {
         fs::create_dir_all(out)?;
@@ -66,24 +66,20 @@ fn run_games_enumerate_fsm(
 
 fn parse_states_range(input: &str) -> anyhow::Result<std::ops::RangeInclusive<usize>> {
     let trimmed = input.trim();
-    if let Some((left, right)) = trimmed.split_once("..=") {
+    // Try `..=` before `..` to avoid partial match on the inclusive separator.
+    let bounds = trimmed
+        .split_once("..=")
+        .or_else(|| trimmed.split_once(".."));
+
+    if let Some((left, right)) = bounds {
         let start: usize = left.trim().parse()?;
         let end: usize = right.trim().parse()?;
-        if start > end {
-            anyhow::bail!("states range start must be <= end");
-        }
-        return Ok(start..=end);
+        anyhow::ensure!(start <= end, "states range start must be <= end");
+        Ok(start..=end)
+    } else {
+        let value: usize = trimmed.parse()?;
+        Ok(value..=value)
     }
-    if let Some((left, right)) = trimmed.split_once("..") {
-        let start: usize = left.trim().parse()?;
-        let end: usize = right.trim().parse()?;
-        if start > end {
-            anyhow::bail!("states range start must be <= end");
-        }
-        return Ok(start..=end);
-    }
-    let value: usize = trimmed.parse()?;
-    Ok(value..=value)
 }
 
 fn parse_input_mode_arg(input: Option<&str>) -> anyhow::Result<InputMode> {
@@ -95,15 +91,14 @@ fn parse_input_mode_arg(input: Option<&str>) -> anyhow::Result<InputMode> {
         .filter(|c| c.is_ascii_alphanumeric())
         .map(|c| c.to_ascii_lowercase())
         .collect();
-    let mode = match normalized.as_str() {
+    match normalized.as_str() {
         "opponentlastaction" | "opponent" | "opp" | "opplastaction" => {
-            InputMode::OpponentLastAction
+            Ok(InputMode::OpponentLastAction)
         }
-        "selflastaction" | "self" | "selflast" => InputMode::SelfLastAction,
-        "jointlastaction" | "joint" | "jointlast" => InputMode::JointLastAction,
+        "selflastaction" | "self" | "selflast" => Ok(InputMode::SelfLastAction),
+        "jointlastaction" | "joint" | "jointlast" => Ok(InputMode::JointLastAction),
         _ => anyhow::bail!(
             "invalid input_mode '{raw}': expected opponent_last_action, self_last_action, or joint_last_action"
         ),
-    };
-    Ok(mode)
+    }
 }

@@ -1,3 +1,4 @@
+use std::fmt::Write as _;
 use std::io;
 
 use nit_games::{
@@ -36,7 +37,9 @@ pub(crate) struct StrategyGraph {
     notes: Option<Vec<String>>,
 }
 
-pub(crate) fn build_strategy_graph(intro: &StrategyIntrospection) -> anyhow::Result<StrategyGraph> {
+pub(crate) fn build_strategy_graph(intro: &StrategyIntrospection) -> StrategyGraph {
+    let id = intro.id.clone();
+    let kind = intro.kind.clone();
     match &intro.parameters {
         StrategyIntrospectionParameters::Fsm {
             states,
@@ -45,35 +48,24 @@ pub(crate) fn build_strategy_graph(intro: &StrategyIntrospection) -> anyhow::Res
             transitions,
             index,
             ..
-        } => Ok(build_fsm_graph(
-            intro.id.clone(),
-            intro.kind.clone(),
+        } => build_fsm_graph(
+            id,
+            kind,
             *states,
             *start_state,
             outputs,
             transitions,
             index.map(|value| vec![format!("notebook_index={value}")]),
-        )),
-        StrategyIntrospectionParameters::Ca { n, k, r, t } => Ok(build_ca_graph(
-            intro.id.clone(),
-            intro.kind.clone(),
-            *n,
-            *k,
-            *r,
-            *t,
-        )),
+        ),
+        StrategyIntrospectionParameters::Ca { n, k, r, t } => {
+            build_ca_graph(id, kind, *n, *k, *r, *t)
+        }
         StrategyIntrospectionParameters::OneSidedTm {
             states,
             start_state,
             transitions,
             ..
-        } => Ok(build_tm_graph(
-            intro.id.clone(),
-            intro.kind.clone(),
-            *states,
-            *start_state,
-            transitions,
-        )),
+        } => build_tm_graph(id, kind, *states, *start_state, transitions),
     }
 }
 
@@ -192,44 +184,44 @@ fn build_ca_graph(
     }
 }
 
+const EDGE_COLORS: [&str; 4] = ["#e74c3c", "#2ecc71", "#3498db", "#9b59b6"];
+
 fn edge_color_for_label(label: &str) -> Option<String> {
-    match label {
-        "0" => Some("#e74c3c".to_string()),
-        "1" => Some("#2ecc71".to_string()),
-        "2" => Some("#3498db".to_string()),
-        "3" => Some("#9b59b6".to_string()),
-        _ => None,
-    }
+    label
+        .parse::<usize>()
+        .ok()
+        .and_then(|i| EDGE_COLORS.get(i))
+        .map(|c| (*c).to_string())
 }
 
 pub(crate) fn render_strategy_graph_dot(graph: &StrategyGraph) -> String {
     let mut dot = String::new();
-    dot.push_str("digraph strategy {\n");
-    dot.push_str("  rankdir=LR;\n");
-    dot.push_str("  node [shape=box];\n");
+    writeln!(dot, "digraph strategy {{").unwrap();
+    writeln!(dot, "  rankdir=LR;").unwrap();
+    writeln!(dot, "  node [shape=box];").unwrap();
     if let Some(start) = &graph.start_state {
-        dot.push_str("  start [shape=point];\n");
-        let start_id = dot_id(start);
-        dot.push_str(&format!("  start -> {start_id};\n"));
+        writeln!(dot, "  start [shape=point];").unwrap();
+        writeln!(dot, "  start -> {};", dot_id(start)).unwrap();
     }
     for node in &graph.nodes {
         let label = node.label.replace('"', "\\\"");
-        let node_id = dot_id(&node.id);
-        dot.push_str(&format!("  {node_id} [label=\"{label}\"];\n"));
+        writeln!(dot, "  {} [label=\"{label}\"];", dot_id(&node.id)).unwrap();
     }
     for edge in &graph.edges {
         let label = edge.label.replace('"', "\\\"");
-        let mut attrs = vec![format!("label=\"{label}\"")];
+        let mut attrs = format!("label=\"{label}\"");
         if let Some(color) = &edge.color {
-            attrs.push(format!("color=\"{color}\""));
-            attrs.push(format!("fontcolor=\"{color}\""));
+            write!(attrs, ", color=\"{color}\", fontcolor=\"{color}\"").unwrap();
         }
-        let from = dot_id(&edge.from);
-        let to = dot_id(&edge.to);
-        let attrs_joined = attrs.join(", ");
-        dot.push_str(&format!("  {from} -> {to} [{attrs_joined}];\n"));
+        writeln!(
+            dot,
+            "  {} -> {} [{attrs}];",
+            dot_id(&edge.from),
+            dot_id(&edge.to)
+        )
+        .unwrap();
     }
-    dot.push_str("}\n");
+    writeln!(dot, "}}").unwrap();
     dot
 }
 

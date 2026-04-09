@@ -1,42 +1,39 @@
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use anyhow::Context;
 use nit_core::{io as core_io, Buffer};
 use nit_utils::hashing::stable_hash_bytes;
 use nit_utils::paths;
 
-/// Try to get the git HEAD version of a file for diff base.
-fn git_head_content(path: &Path) -> Option<String> {
-    use std::process::Command;
-    let dir = path.parent()?;
-    // Get the repo-relative path
-    let rel = Command::new("git")
+/// Retrieve the HEAD revision of a tracked file via a single `git show` invocation.
+/// Returns `None` for untracked files or if git is unavailable.
+fn git_head_content(file_path: &Path) -> Option<String> {
+    let working_dir = file_path.parent()?;
+    // Two-step: resolve repo-relative path, then retrieve HEAD content.
+    let tracked_check = Command::new("git")
         .args(["ls-files", "--full-name", "--error-unmatch"])
-        .arg(path)
-        .current_dir(dir)
+        .arg(file_path)
+        .current_dir(working_dir)
         .output()
-        .ok()?;
-    if !rel.status.success() {
-        return None; // not tracked by git
-    }
-    let rel_path = String::from_utf8(rel.stdout).ok()?;
-    let rel_path = rel_path.trim();
-    let output = Command::new("git")
-        .args(["show", &format!("HEAD:{rel_path}")])
-        .current_dir(dir)
+        .ok()
+        .filter(|result| result.status.success())?;
+
+    let repo_relative = String::from_utf8(tracked_check.stdout).ok()?;
+    let head_revision = Command::new("git")
+        .args(["show", &format!("HEAD:{}", repo_relative.trim())])
+        .current_dir(working_dir)
         .output()
-        .ok()?;
-    if output.status.success() {
-        String::from_utf8(output.stdout).ok()
-    } else {
-        None
-    }
+        .ok()
+        .filter(|result| result.status.success())?;
+
+    String::from_utf8(head_revision.stdout).ok()
 }
 
 fn load_file_buffer(path: &Path, default_name: &str) -> anyhow::Result<Buffer> {
-    let content = core_io::load_to_string(path)
-        .with_context(|| format!("failed to read {}", path.display()))?;
+    let content =
+        core_io::load_to_string(path).with_context(|| format!("reading {}", path.display()))?;
     let name = path
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
@@ -54,45 +51,41 @@ fn parent_or_cwd(path: &Path) -> anyhow::Result<PathBuf> {
         .unwrap_or_else(|| std::env::current_dir().map_err(Into::into))
 }
 
+/// Open a target path for the GoL lab.
 pub(crate) fn open_target_gol(path: Option<&Path>) -> anyhow::Result<(PathBuf, Buffer)> {
-    match path {
-        Some(p) if p.is_file() => {
-            let buffer = load_file_buffer(p, "untitled")?;
-            let root = parent_or_cwd(p)?;
-            Ok((root, buffer))
-        }
-        Some(p) if p.is_dir() => {
-            let root = p.to_path_buf();
-            let buffer = Buffer::empty("untitled", None);
-            Ok((root, buffer))
-        }
-        None => {
-            let root = std::env::current_dir()?;
-            let buffer = Buffer::empty("untitled", None);
-            Ok((root, buffer))
-        }
-        Some(other) => anyhow::bail!("path does not exist: {}", other.display()),
-    }
+    open_target(path, "untitled", empty_gol_buffer)
 }
 
+/// Open a target path for the Games lab, loading `games.toml` or scaffolding a template.
 pub(crate) fn open_target_games(path: Option<&Path>) -> anyhow::Result<(PathBuf, Buffer)> {
+    open_target(path, "games.toml", games_dir_buffer)
+}
+
+/// Shared dispatcher: routes file / dir / missing / nonexistent paths through a
+/// common pattern, with `dir_handler` called when the target is a directory.
+fn open_target(
+    path: Option<&Path>,
+    default_name: &str,
+    dir_handler: fn(&Path) -> anyhow::Result<(PathBuf, Buffer)>,
+) -> anyhow::Result<(PathBuf, Buffer)> {
     match path {
         Some(p) if p.is_file() => {
-            let buffer = load_file_buffer(p, "games.toml")?;
+            let buffer = load_file_buffer(p, default_name)?;
             let root = parent_or_cwd(p)?;
             Ok((root, buffer))
         }
-        Some(p) if p.is_dir() => open_games_workspace(p),
-        None => {
-            let root = std::env::current_dir()?;
-            open_games_workspace(&root)
-        }
-        Some(other) => anyhow::bail!("path does not exist: {}", other.display()),
+        Some(p) if p.is_dir() => dir_handler(p),
+        None => dir_handler(&std::env::current_dir()?),
+        Some(missing) => anyhow::bail!("path does not exist: {}", missing.display()),
     }
 }
 
-fn open_games_workspace(root: &Path) -> anyhow::Result<(PathBuf, Buffer)> {
-    let root = root.to_path_buf();
+fn empty_gol_buffer(dir: &Path) -> anyhow::Result<(PathBuf, Buffer)> {
+    Ok((dir.to_path_buf(), Buffer::empty("untitled", None)))
+}
+
+fn games_dir_buffer(dir: &Path) -> anyhow::Result<(PathBuf, Buffer)> {
+    let root = dir.to_path_buf();
     let config_path = root.join("games.toml");
     if config_path.exists() {
         let buffer = load_file_buffer(&config_path, "games.toml")?;
@@ -107,54 +100,50 @@ fn open_games_workspace(root: &Path) -> anyhow::Result<(PathBuf, Buffer)> {
 }
 
 pub(crate) fn find_theme() -> Option<PathBuf> {
-    let cwd = std::env::current_dir().ok()?;
-    let local = cwd.join("assets/themes/devs.toml");
-    if local.exists() {
-        return Some(local);
-    }
-    None
+    let candidate = std::env::current_dir()
+        .ok()?
+        .join("assets/themes/devs.toml");
+    candidate.exists().then_some(candidate)
 }
 
 pub(crate) fn load_notes(workspace_root: &Path) -> Buffer {
-    let Some(path) = notes_path_for_workspace(workspace_root) else {
+    let Some(notes_path) = hashed_state_path(workspace_root, "notes", "md") else {
         return Buffer::empty("notes", None);
     };
-    if path.exists() {
-        if let Ok(content) = core_io::load_to_string(&path) {
-            return Buffer::from_str("notes", &content, Some(path));
-        }
+    if !notes_path.exists() {
+        return Buffer::empty("notes", Some(notes_path));
     }
-    Buffer::empty("notes", Some(path))
+    match core_io::load_to_string(&notes_path) {
+        Ok(saved_content) => Buffer::from_str("notes", &saved_content, Some(notes_path)),
+        Err(_) => Buffer::empty("notes", Some(notes_path)),
+    }
 }
 
-fn notes_path_for_workspace(workspace_root: &Path) -> Option<PathBuf> {
+/// Build a hashed path under the nit state directory: `<state>/<subdir>/<hash>.<ext>`.
+fn hashed_state_path(workspace_root: &Path, subdir: &str, ext: &str) -> Option<PathBuf> {
     let base = paths::state_dir().or_else(paths::data_dir)?;
-    let notes_dir = base.join("notes");
-    let _ = fs::create_dir_all(&notes_dir);
-    let key = workspace_root.to_string_lossy();
-    let hash = stable_hash_bytes(key.as_bytes());
-    let filename = format!("{hash:016x}.md");
-    Some(notes_dir.join(filename))
+    let dir = base.join(subdir);
+    let _ = fs::create_dir_all(&dir);
+    let hash = stable_hash_bytes(workspace_root.to_string_lossy().as_bytes());
+    Some(dir.join(format!("{hash:016x}.{ext}")))
 }
 
 pub(crate) fn export_legacy_notes_snapshot(
     workspace_root: &Path,
     buffer: &Buffer,
 ) -> Option<PathBuf> {
-    let content = buffer.content_as_string();
-    if content.trim().is_empty() {
+    let notes_text = buffer.content_as_string();
+    if notes_text.trim().is_empty() {
         return None;
     }
-    let path = workspace_root.join(".nit").join("legacy_notes.md");
-    if path.exists() {
-        return Some(path);
+    let snapshot_path = workspace_root.join(".nit/legacy_notes.md");
+    if snapshot_path.exists() {
+        return Some(snapshot_path);
     }
-    if let Some(parent) = path.parent() {
-        let _ = fs::create_dir_all(parent);
+    if let Some(parent_dir) = snapshot_path.parent() {
+        let _ = fs::create_dir_all(parent_dir);
     }
-    if fs::write(&path, content).is_ok() {
-        Some(path)
-    } else {
-        None
-    }
+    fs::write(&snapshot_path, notes_text)
+        .ok()
+        .map(|()| snapshot_path)
 }

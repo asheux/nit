@@ -26,7 +26,6 @@ use nit_games::{
 
 use crate::cli::GamesCommand;
 
-/// File name for the default games configuration when none is specified.
 const DEFAULT_CONFIG_FILENAME: &str = "games.toml";
 
 /// Minimum contiguous bytes required for an NDJSON strategy line to be non-blank.
@@ -357,19 +356,14 @@ fn persist_artifact(
 
 // ── Tournament Execution ──
 
-/// Result bundle from a tournament run: results, runtime stats, and optional output paths.
 struct TournamentRun {
-    /// Tournament match results with per-strategy rankings and scores.
     results: TournamentResults,
-    /// Runtime acceleration statistics (GPU utilization, kernel timing).
+    /// GPU utilization and kernel timing metrics.
     runtime: RuntimeAcceleratorStats,
-    /// Filesystem path to the event log, if event recording was enabled.
     event_log_path: Option<String>,
-    /// Filesystem path to the match history log, if history recording was enabled.
     history_log_path: Option<String>,
 }
 
-/// Execute a tournament, choosing sequential or parallel mode based on config.
 fn execute_tournament(
     tournament_engine: &TournamentKernel,
     event_output_file: Option<PathBuf>,
@@ -397,7 +391,6 @@ fn execute_tournament(
     }
 }
 
-/// Execute a tournament sequentially with optional event and history writers.
 fn run_sequential(
     tournament_engine: &TournamentKernel,
     engine_settings: &NormalizedConfig,
@@ -429,7 +422,6 @@ fn run_sequential(
     })
 }
 
-/// Execute a tournament in parallel with threaded event and history writers.
 fn run_parallel(
     tournament_engine: &TournamentKernel,
     engine_settings: &NormalizedConfig,
@@ -437,13 +429,14 @@ fn run_parallel(
     event_file: Option<PathBuf>,
     history_file: Option<PathBuf>,
 ) -> anyhow::Result<TournamentRun> {
-    // Create channel-backed background writers for event and history streams.
-    let (event_sender, event_thread) =
-        spawn_event_writer(event_file, engine_settings.event_log.include_rounds)?;
+    let event_writer = event_file
+        .map(|path| EventWriter::new(path, engine_settings.event_log.include_rounds))
+        .transpose()?;
+    let (event_sender, event_thread) = spawn_writer_thread(event_writer);
 
-    let (history_sender, history_thread) = spawn_history_writer(history_file)?;
+    let history_writer = history_file.map(HistoryWriter::new).transpose()?;
+    let (history_sender, history_thread) = spawn_writer_thread(history_writer);
 
-    // Run the tournament kernel in parallel mode with channel-based senders.
     let (tournament_outcomes, acceleration_metrics) =
         tournament_engine.run_with_runtime(KernelRunMode::Parallel {
             parallelism: thread_strategy,
@@ -452,11 +445,9 @@ fn run_parallel(
             history_sender: history_sender.clone(),
         });
 
-    // Close channels so background threads drain their queues and exit cleanly.
     drop(event_sender);
     drop(history_sender);
 
-    // Collect results from background writer threads after channel shutdown.
     let finalized_event_path = collect_worker_result(event_thread, "event log")?;
     let finalized_history_path = collect_worker_result(history_thread, "history log")?;
 
@@ -470,8 +461,7 @@ fn run_parallel(
 
 // ── Writer Lifecycle Helpers ──
 
-/// Finalize a sequential writer, returning its output path as a display string.
-fn finalize_writer<W: WriterWithFinish>(
+fn finalize_writer<W: RecordSink>(
     optional_writer: Option<W>,
     writer_description: &str,
 ) -> anyhow::Result<Option<String>> {
@@ -484,58 +474,27 @@ fn finalize_writer<W: WriterWithFinish>(
     Ok(Some(completed_output_path.to_string_lossy().to_string()))
 }
 
-/// Handle for a background writer thread: optional channel sender plus join handle.
 type WriterHandle<T> = (
     Option<mpsc::Sender<T>>,
     Option<thread::JoinHandle<std::io::Result<PathBuf>>>,
 );
 
-/// Spawn a background thread for event writing; returns the channel sender and join handle.
-fn spawn_event_writer(
-    output_file: Option<PathBuf>,
-    write_round_data: bool,
-) -> anyhow::Result<WriterHandle<GameEvent>> {
-    let Some(target_file) = output_file else {
-        return Ok((None, None));
+/// Spawn a background writer thread that drains a channel into the given sink.
+fn spawn_writer_thread<W: RecordSink>(writer: Option<W>) -> WriterHandle<W::Record> {
+    let Some(sink) = writer else {
+        return (None, None);
     };
-
-    let file_recorder = EventWriter::new(target_file, write_round_data)?;
-    let (channel_tx, channel_rx) = mpsc::channel::<GameEvent>();
-
-    let background_thread = thread::spawn(move || {
-        let mut recorder = file_recorder;
-        for incoming_event in channel_rx {
-            recorder.write(&incoming_event)?;
+    let (tx, rx) = mpsc::channel();
+    let handle = thread::spawn(move || {
+        let mut sink = sink;
+        for record in rx {
+            sink.accept(&record)?;
         }
-        recorder.finish()
+        sink.finish()
     });
-
-    Ok((Some(channel_tx), Some(background_thread)))
+    (Some(tx), Some(handle))
 }
 
-/// Spawn a background thread for history writing; returns the channel sender and join handle.
-fn spawn_history_writer(
-    output_file: Option<PathBuf>,
-) -> anyhow::Result<WriterHandle<MatchHistory>> {
-    let Some(target_file) = output_file else {
-        return Ok((None, None));
-    };
-
-    let file_recorder = HistoryWriter::new(target_file)?;
-    let (channel_tx, channel_rx) = mpsc::channel::<MatchHistory>();
-
-    let background_thread = thread::spawn(move || {
-        let mut recorder = file_recorder;
-        for incoming_match in channel_rx {
-            recorder.write(&incoming_match)?;
-        }
-        recorder.finish()
-    });
-
-    Ok((Some(channel_tx), Some(background_thread)))
-}
-
-/// Join a background writer thread and return its output path as a display string.
 fn collect_worker_result(
     thread_handle: Option<thread::JoinHandle<std::io::Result<PathBuf>>>,
     writer_description: &str,
@@ -552,20 +511,30 @@ fn collect_worker_result(
 
 // ── Writer Trait Abstraction ──
 
-/// Trait abstracting over EventWriter and HistoryWriter for uniform finalization.
-trait WriterWithFinish {
-    /// Flush buffered data and close the output file, returning the written path.
-    fn finish(self) -> anyhow::Result<PathBuf>;
+/// Unified interface for event and history writers, enabling generic
+/// background threading and sequential finalization.
+trait RecordSink: Send + 'static {
+    type Record: Send + 'static;
+    fn accept(&mut self, record: &Self::Record) -> std::io::Result<()>;
+    fn finish(self) -> std::io::Result<PathBuf>;
 }
 
-impl WriterWithFinish for EventWriter {
-    fn finish(self) -> anyhow::Result<PathBuf> {
-        EventWriter::finish(self).map_err(Into::into)
+impl RecordSink for EventWriter {
+    type Record = GameEvent;
+    fn accept(&mut self, record: &GameEvent) -> std::io::Result<()> {
+        self.write(record)
+    }
+    fn finish(self) -> std::io::Result<PathBuf> {
+        EventWriter::finish(self)
     }
 }
 
-impl WriterWithFinish for HistoryWriter {
-    fn finish(self) -> anyhow::Result<PathBuf> {
-        HistoryWriter::finish(self).map_err(Into::into)
+impl RecordSink for HistoryWriter {
+    type Record = MatchHistory;
+    fn accept(&mut self, record: &MatchHistory) -> std::io::Result<()> {
+        self.write(record)
+    }
+    fn finish(self) -> std::io::Result<PathBuf> {
+        HistoryWriter::finish(self)
     }
 }

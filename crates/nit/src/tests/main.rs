@@ -4,9 +4,23 @@ use crate::agents::{
 };
 use crate::cli::AgentsArg;
 
+fn test_lane(id: &str, role: &str, kind: nit_core::AgentLaneKind) -> nit_core::AgentLane {
+    nit_core::AgentLane {
+        id: id.into(),
+        role: role.into(),
+        lane: role.into(),
+        kind,
+        status: nit_core::AgentStatus::Idle,
+        heartbeat_age_secs: 0,
+        queue_len: 0,
+        current_mission: None,
+        last_message: String::new(),
+    }
+}
+
 #[test]
 fn parses_gemini_models_from_backend_source() {
-    let source = r#"
+    let typescript_source = r#"
         export const PREVIEW_GEMINI_MODEL = 'gemini-3-pro-preview';
         export const DEFAULT_GEMINI_MODEL = 'gemini-2.5-pro';
         export const DEFAULT_GEMINI_FLASH_MODEL = 'gemini-2.5-flash';
@@ -17,40 +31,41 @@ fn parses_gemini_models_from_backend_source() {
         ]);
     "#;
 
+    // Assert directly on fn call — no intermediate binding needed.
     assert_eq!(
-        parse_gemini_models_from_source(source),
-        vec![
-            "gemini-2.5-flash".to_string(),
-            "gemini-2.5-pro".to_string(),
-            "gemini-3-pro-preview".to_string(),
-        ]
+        parse_gemini_models_from_source(typescript_source),
+        ["gemini-2.5-flash", "gemini-2.5-pro", "gemini-3-pro-preview"]
     );
 }
 
 #[test]
 fn keeps_only_current_gemini_models_by_family() {
-    let models = vec![
-        "gemini-3-pro-preview".to_string(),
-        "gemini-3.1-pro-preview-customtools".to_string(),
-        "gemini-2.5-pro".to_string(),
-        "gemini-3-flash-preview".to_string(),
-        "gemini-2.5-flash".to_string(),
-        "gemini-2.5-flash-lite".to_string(),
-    ];
+    let gemini_candidates: Vec<String> = [
+        "gemini-3-pro-preview",
+        "gemini-3.1-pro-preview-customtools",
+        "gemini-2.5-pro",
+        "gemini-3-flash-preview",
+        "gemini-2.5-flash",
+        "gemini-2.5-flash-lite",
+    ]
+    .into_iter()
+    .map(String::from)
+    .collect();
 
+    let filtered = select_current_gemini_models(gemini_candidates);
     assert_eq!(
-        select_current_gemini_models(models),
-        vec![
-            "gemini-2.5-flash".to_string(),
-            "gemini-2.5-flash-lite".to_string(),
-            "gemini-2.5-pro".to_string(),
+        filtered,
+        [
+            "gemini-2.5-flash",
+            "gemini-2.5-flash-lite",
+            "gemini-2.5-pro"
         ]
     );
 }
 
 #[test]
 fn parses_claude_models_from_backend_binary_strings() {
-    let binary = br#"
+    let binary_blob = br#"
         foundry
         claude-opus-4-6[1m]
         Opus 4.6 (with 1M context)
@@ -78,78 +93,70 @@ fn parses_claude_models_from_backend_binary_strings() {
         claude-plugin-directory
     "#;
 
+    let extracted = parse_claude_models_from_binary(binary_blob);
     assert_eq!(
-        parse_claude_models_from_binary(binary),
-        vec![
-            "claude-3-7-sonnet".to_string(),
-            "claude-haiku-4-5".to_string(),
-            "claude-opus-4-5".to_string(),
-            "claude-opus-4-6".to_string(),
-            "claude-sonnet-4".to_string(),
-            "claude-sonnet-4-6".to_string(),
+        extracted,
+        [
+            "claude-3-7-sonnet",
+            "claude-haiku-4-5",
+            "claude-opus-4-5",
+            "claude-opus-4-6",
+            "claude-sonnet-4",
+            "claude-sonnet-4-6",
         ]
     );
 }
 
 #[test]
 fn keeps_only_current_claude_models_by_family() {
-    let models = vec![
-        "claude-3-5-haiku".to_string(),
-        "claude-haiku-4-5".to_string(),
-        "claude-3-7-sonnet".to_string(),
-        "claude-sonnet-4".to_string(),
-        "claude-sonnet-4-6".to_string(),
-        "claude-opus-4-5".to_string(),
-        "claude-opus-4-6".to_string(),
-    ];
-
+    let latest = select_current_claude_models(vec![
+        "claude-3-5-haiku".into(),
+        "claude-haiku-4-5".into(),
+        "claude-3-7-sonnet".into(),
+        "claude-sonnet-4".into(),
+        "claude-sonnet-4-6".into(),
+        "claude-opus-4-5".into(),
+        "claude-opus-4-6".into(),
+    ]);
     assert_eq!(
-        select_current_claude_models(models),
-        vec![
-            "claude-haiku-4-5".to_string(),
-            "claude-opus-4-6".to_string(),
-            "claude-sonnet-4-6".to_string(),
-        ]
+        latest,
+        ["claude-haiku-4-5", "claude-opus-4-6", "claude-sonnet-4-6"]
     );
 }
 
 #[test]
 fn sync_backend_model_lanes_replaces_placeholder_backend_rows() {
-    let mut agents = nit_core::AgentsState::default();
-    agents.agents.push(nit_core::AgentLane {
-        id: "local".into(),
-        role: "Local".into(),
-        lane: "Local".into(),
-        kind: nit_core::AgentLaneKind::Mock,
-        status: nit_core::AgentStatus::Idle,
-        heartbeat_age_secs: 0,
-        queue_len: 0,
-        current_mission: None,
-        last_message: String::new(),
-    });
-    agents.agents.push(nit_core::AgentLane {
-        id: "claude".into(),
-        role: "Claude".into(),
-        lane: "Claude".into(),
-        kind: nit_core::AgentLaneKind::Claude,
-        status: nit_core::AgentStatus::Idle,
-        heartbeat_age_secs: 0,
-        queue_len: 0,
-        current_mission: None,
-        last_message: String::new(),
-    });
-    agents.claude_models = vec!["claude-sonnet-4-6".into(), "claude-opus-4-6".into()];
+    let mut state = nit_core::AgentsState::default();
+    state
+        .agents
+        .push(test_lane("local", "Local", nit_core::AgentLaneKind::Mock));
+    state.agents.push(test_lane(
+        "claude",
+        "Claude",
+        nit_core::AgentLaneKind::Claude,
+    ));
+    state.claude_models = vec!["claude-sonnet-4-6".into(), "claude-opus-4-6".into()];
 
-    sync_backend_model_lanes(&mut agents, AgentsArg::All);
+    sync_backend_model_lanes(&mut state, AgentsArg::All);
 
-    assert!(agents.agents.iter().any(|lane| lane.id == "local"));
-    assert!(agents
+    assert_eq!(state.agents.len(), 3);
+
+    // Non-Claude lane preserved with original kind.
+    let mock_lane = state
         .agents
         .iter()
-        .any(|lane| lane.id == "claude-sonnet-4-6"));
-    assert!(agents
-        .agents
-        .iter()
-        .any(|lane| lane.id == "claude-opus-4-6"));
-    assert!(!agents.agents.iter().any(|lane| lane.id == "claude"));
+        .find(|lane| lane.id == "local")
+        .expect("mock lane preserved");
+    assert!(matches!(mock_lane.kind, nit_core::AgentLaneKind::Mock));
+
+    // Placeholder replaced by per-model lanes.
+    assert!(!state.agents.iter().any(|lane| lane.id == "claude"));
+    for expected_model in ["claude-sonnet-4-6", "claude-opus-4-6"] {
+        let expanded = state
+            .agents
+            .iter()
+            .find(|lane| lane.id == expected_model)
+            .unwrap_or_else(|| panic!("missing lane {expected_model}"));
+        assert!(matches!(expanded.kind, nit_core::AgentLaneKind::Claude));
+    }
 }

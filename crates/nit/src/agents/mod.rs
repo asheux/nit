@@ -17,14 +17,9 @@ use nit_core::{
 
 use crate::cli::AgentsArg;
 
-/// Status message for freshly materialized model lanes.
 const IDLE_LANE_MESSAGE: &str = "";
-
-/// Default local lane identifier.
 const LOCAL_LANE_ID: &str = "local";
 
-/// Initialize the complete agent roster by detecting CLI tooling, probing backends,
-/// and expanding placeholder lanes into per-model lanes.
 /// Discover installed CLI tooling, build the agent roster, probe model catalogs,
 /// and expand placeholder lanes into per-model lanes.
 pub(crate) fn init_agents(backend_selection: AgentsArg) -> AgentsState {
@@ -49,34 +44,29 @@ pub(crate) fn init_agents(backend_selection: AgentsArg) -> AgentsState {
     assembled_roster
 }
 
-/// Replace placeholder backend lanes with per-model lanes from discovered catalogs.
-///
-/// When a backend probe found models, the single placeholder lane (e.g. "Claude")
-/// is removed and replaced with one lane per discovered model identifier.
+/// Replace placeholder backend lanes with one lane per discovered model.
 pub(crate) fn sync_backend_model_lanes(roster: &mut AgentsState, selection: AgentsArg) {
-    // Determine which backend catalogs have discovered models to expand.
-    let expanding_claude_catalog =
+    let expand_claude =
         matches!(selection, AgentsArg::All | AgentsArg::Claude) && !roster.claude_models.is_empty();
+    let expand_gemini = matches!(selection, AgentsArg::All) && !roster.gemini_models.is_empty();
 
-    let expanding_gemini_catalog =
-        matches!(selection, AgentsArg::All) && !roster.gemini_models.is_empty();
-
-    if !expanding_claude_catalog && !expanding_gemini_catalog {
+    if !expand_claude && !expand_gemini {
         return;
     }
 
-    let previously_selected_agent = roster.selected_agent.clone();
+    let prior_selection = roster.selected_agent.clone();
 
-    // Filter out placeholder lanes that will be replaced by per-model lanes.
-    let retained_lanes = filter_replaced_placeholders(
-        roster.agents.drain(..).collect(),
-        expanding_claude_catalog,
-        expanding_gemini_catalog,
-    );
-    roster.agents = retained_lanes;
+    roster.agents.retain(|lane| {
+        if expand_claude && matches!(lane.kind, AgentLaneKind::Claude) {
+            return false;
+        }
+        if expand_gemini && matches!(lane.kind, AgentLaneKind::Gemini) {
+            return false;
+        }
+        true
+    });
 
-    // Materialize individual lanes for each discovered Claude model.
-    if expanding_claude_catalog {
+    if expand_claude {
         materialize_model_lanes(
             &mut roster.agents,
             &roster.claude_models,
@@ -84,9 +74,7 @@ pub(crate) fn sync_backend_model_lanes(roster: &mut AgentsState, selection: Agen
             AgentLaneKind::Claude,
         );
     }
-
-    // Materialize individual lanes for each discovered Gemini model.
-    if expanding_gemini_catalog {
+    if expand_gemini {
         materialize_model_lanes(
             &mut roster.agents,
             &roster.gemini_models,
@@ -95,18 +83,13 @@ pub(crate) fn sync_backend_model_lanes(roster: &mut AgentsState, selection: Agen
         );
     }
 
-    restore_selection_after_expansion(roster, previously_selected_agent);
+    restore_selection_after_expansion(roster, prior_selection);
 }
 
 // ── Initialization Sequence ──
 
-/// Build the initial skeleton roster based on the user's CLI backend selection flag.
-fn load_roster_for(
-    requested_backend: AgentsArg,
-    codex_present: bool,
-    claude_present: bool,
-) -> AgentsState {
-    match requested_backend {
+fn load_roster_for(backend: AgentsArg, codex_present: bool, claude_present: bool) -> AgentsState {
+    match backend {
         AgentsArg::Local => assemble_local_roster(),
         AgentsArg::Codex => codex::load_only_codex_agents(),
         AgentsArg::Claude => claude::load_only_claude_agents(claude_present),
@@ -114,7 +97,6 @@ fn load_roster_for(
     }
 }
 
-/// Attempt to discover Claude models when that backend was requested and is installed.
 fn probe_claude_backend(selection: AgentsArg, roster: &mut AgentsState) {
     if !matches!(selection, AgentsArg::All | AgentsArg::Claude) || !roster.claude_cli_available {
         roster.claude_models.clear();
@@ -128,7 +110,6 @@ fn probe_claude_backend(selection: AgentsArg, roster: &mut AgentsState) {
     claude::populate_claude_model_metadata(roster);
 }
 
-/// Attempt to discover Gemini models when the combined backend was requested.
 fn probe_gemini_backend(selection: AgentsArg, roster: &mut AgentsState) {
     if !matches!(selection, AgentsArg::All) || !roster.gemini_cli_available {
         roster.gemini_models.clear();
@@ -141,43 +122,20 @@ fn probe_gemini_backend(selection: AgentsArg, roster: &mut AgentsState) {
     roster.gemini_models_error = probe_error;
 }
 
-// ── Lane Filtering and Expansion ──
+// ── Lane Expansion ──
 
-/// Remove placeholder lanes for backends being expanded, keeping all others intact.
-fn filter_replaced_placeholders(
-    all_lanes: Vec<AgentLane>,
-    replacing_claude: bool,
-    replacing_gemini: bool,
-) -> Vec<AgentLane> {
-    all_lanes
-        .into_iter()
-        .filter(|lane| !is_expansion_target(lane, replacing_claude, replacing_gemini))
-        .collect()
-}
-
-/// Determine whether a lane is a placeholder scheduled for per-model replacement.
-fn is_expansion_target(
-    lane_candidate: &AgentLane,
-    claude_replacement_active: bool,
-    gemini_replacement_active: bool,
-) -> bool {
-    (claude_replacement_active && matches!(lane_candidate.kind, AgentLaneKind::Claude))
-        || (gemini_replacement_active && matches!(lane_candidate.kind, AgentLaneKind::Gemini))
-}
-
-/// Materialize one agent lane per discovered model identifier for a backend family.
 fn materialize_model_lanes(
-    lane_roster: &mut Vec<AgentLane>,
-    model_catalog: &[String],
-    backend_display_name: &str,
-    lane_classification: AgentLaneKind,
+    lanes: &mut Vec<AgentLane>,
+    models: &[String],
+    display_name: &str,
+    kind: AgentLaneKind,
 ) {
-    for catalog_entry in model_catalog {
-        lane_roster.push(AgentLane {
-            id: catalog_entry.clone(),
-            role: catalog_entry.clone(),
-            lane: backend_display_name.into(),
-            kind: lane_classification,
+    for model_id in models {
+        lanes.push(AgentLane {
+            id: model_id.clone(),
+            role: model_id.clone(),
+            lane: display_name.into(),
+            kind,
             status: AgentStatus::Idle,
             heartbeat_age_secs: 0,
             queue_len: 0,
@@ -187,35 +145,24 @@ fn materialize_model_lanes(
     }
 }
 
-/// After lane expansion, restore the user's prior agent selection if it still exists.
-fn restore_selection_after_expansion(
-    roster: &mut AgentsState,
-    previously_selected: Option<String>,
-) {
-    let matching_roster_index = previously_selected
+fn restore_selection_after_expansion(roster: &mut AgentsState, prior: Option<String>) {
+    let idx = prior
         .as_ref()
-        .and_then(|target_id| roster.agents.iter().position(|lane| lane.id == *target_id));
+        .and_then(|id| roster.agents.iter().position(|lane| lane.id == *id));
 
-    if let (Some(confirmed_selection), Some(confirmed_index)) =
-        (previously_selected, matching_roster_index)
-    {
-        roster.selected_agent = Some(confirmed_selection);
-        roster.roster_selected = confirmed_index;
-        return;
+    if let (Some(id), Some(i)) = (prior, idx) {
+        roster.selected_agent = Some(id);
+        roster.roster_selected = i;
+    } else {
+        roster.selected_agent = roster.agents.first().map(|lane| lane.id.clone());
+        roster.roster_selected = 0;
     }
-
-    roster.selected_agent = roster
-        .agents
-        .first()
-        .map(|first_lane| first_lane.id.clone());
-    roster.roster_selected = 0;
 }
 
 // ── Roster Assembly ──
 
-/// Assemble a local-only roster containing a single built-in mock lane.
 fn assemble_local_roster() -> AgentsState {
-    let builtin_local_lane = AgentLane {
+    let local_lane = AgentLane {
         id: LOCAL_LANE_ID.into(),
         role: "Local".into(),
         lane: "Local".into(),
@@ -227,77 +174,58 @@ fn assemble_local_roster() -> AgentsState {
         last_message: "Built-in local lane.".into(),
     };
 
-    let mut local_only_roster = AgentsState::default();
-    local_only_roster.agents.push(builtin_local_lane);
-    local_only_roster.selected_agent = Some(LOCAL_LANE_ID.into());
-    local_only_roster.roster_selected = 0;
-    local_only_roster
+    let mut roster = AgentsState::default();
+    roster.agents.push(local_lane);
+    roster.selected_agent = Some(LOCAL_LANE_ID.into());
+    roster.roster_selected = 0;
+    roster
 }
 
-/// Assemble a comprehensive roster merging local, Claude, and Codex backends together.
 fn assemble_combined_roster(codex_available: bool, claude_available: bool) -> AgentsState {
-    let mut merged_roster = AgentsState::default();
-    merged_roster.agents.extend(assemble_local_roster().agents);
+    let mut roster = assemble_local_roster();
 
     if claude_available {
-        merged_roster.agents.push(claude::claude_lane());
+        roster.agents.push(claude::claude_lane());
     }
-
     if codex_available {
-        incorporate_codex_cache(&mut merged_roster);
+        incorporate_codex_cache(&mut roster);
     }
 
-    merged_roster.selected_agent = merged_roster
-        .agents
-        .first()
-        .map(|first_lane| first_lane.id.clone());
-    merged_roster.roster_selected = 0;
-    merged_roster
+    roster.selected_agent = roster.agents.first().map(|lane| lane.id.clone());
+    roster.roster_selected = 0;
+    roster
 }
 
-/// Load the Codex models cache and incorporate its metadata into the destination roster.
-///
-/// On failure, a warning alert is pushed rather than aborting the full initialization.
+/// On failure, pushes a warning alert rather than aborting initialization.
 fn incorporate_codex_cache(destination: &mut AgentsState) {
-    let codex_agents_data = match codex::load_agents_from_codex_models_cache() {
-        Ok(parsed_cache) => parsed_cache,
-        Err(load_failure) => {
+    let codex_state = match codex::load_agents_from_codex_models_cache() {
+        Ok(state) => state,
+        Err(err) => {
             destination.alerts.push(AgentAlert {
                 severity: AgentAlertSeverity::Warn,
                 source: "codex".into(),
-                message: format!("Failed to load Codex models: {load_failure}"),
+                message: format!("Failed to load Codex models: {err}"),
                 at: "t+0".into(),
             });
             return;
         }
     };
 
-    apply_codex_fields(destination, codex_agents_data);
+    apply_codex_fields(destination, codex_state);
 }
 
-/// Transfer Codex-specific configuration fields from the loaded cache into the target roster.
-fn apply_codex_fields(destination: &mut AgentsState, codex_snapshot: AgentsState) {
-    transfer_reasoning_fields(destination, &codex_snapshot);
-    destination.codex_effective_context_window_tokens =
-        codex_snapshot.codex_effective_context_window_tokens;
-    destination.agents.extend(codex_snapshot.agents);
-    destination.mcp = codex_snapshot.mcp;
-}
-
-/// Copy the three reasoning-effort fields from a Codex snapshot into the destination.
-fn transfer_reasoning_fields(destination: &mut AgentsState, source: &AgentsState) {
-    destination.codex_default_reasoning_effort = source.codex_default_reasoning_effort.clone();
-    destination.codex_supported_reasoning_efforts =
-        source.codex_supported_reasoning_efforts.clone();
-    destination.codex_selected_reasoning_effort = source.codex_selected_reasoning_effort.clone();
+fn apply_codex_fields(dest: &mut AgentsState, src: AgentsState) {
+    dest.codex_default_reasoning_effort = src.codex_default_reasoning_effort;
+    dest.codex_supported_reasoning_efforts = src.codex_supported_reasoning_efforts;
+    dest.codex_selected_reasoning_effort = src.codex_selected_reasoning_effort;
+    dest.codex_effective_context_window_tokens = src.codex_effective_context_window_tokens;
+    dest.agents.extend(src.agents);
+    dest.mcp = src.mcp;
 }
 
 // ── Model Name Comparison ──
 
-/// Tiebreak between two model identifiers: prefer the shorter, or lexicographically first.
-fn prefer_shorter_model_name(challenger_name: &str, current_best_name: &str) -> bool {
-    let challenger_len = challenger_name.len();
-    let current_best_len = current_best_name.len();
-    challenger_len < current_best_len
-        || (challenger_len == current_best_len && challenger_name < current_best_name)
+/// Tiebreak: prefer shorter identifier, then lexicographic order.
+fn prefer_shorter_model_name(challenger: &str, incumbent: &str) -> bool {
+    (challenger.len(), challenger) < (incumbent.len(), incumbent)
 }

@@ -17,43 +17,44 @@ pub(crate) fn gemini_cli_available() -> bool {
     is_executable_in_path("gemini")
 }
 
-pub(super) fn find_executable_in_path(bin: &str) -> Option<PathBuf> {
-    for dir in executable_search_dirs() {
-        if dir.as_os_str().is_empty() {
+pub(super) fn find_executable_in_path(binary_name: &str) -> Option<PathBuf> {
+    for search_dir in executable_search_dirs() {
+        if search_dir.as_os_str().is_empty() {
             continue;
         }
         #[cfg(windows)]
         {
-            let mut exts = std::env::var_os("PATHEXT")
-                .map(|v| {
-                    v.to_string_lossy()
+            let mut extensions = std::env::var_os("PATHEXT")
+                .map(|raw_pathext| {
+                    raw_pathext
+                        .to_string_lossy()
                         .split(';')
-                        .map(|s| s.trim())
-                        .filter(|s| !s.is_empty())
-                        .map(|s| s.trim_start_matches('.').to_ascii_lowercase())
+                        .map(|segment| segment.trim())
+                        .filter(|segment| !segment.is_empty())
+                        .map(|segment| segment.trim_start_matches('.').to_ascii_lowercase())
                         .collect::<Vec<_>>()
                 })
                 .unwrap_or_else(|| vec!["exe".into(), "cmd".into(), "bat".into()]);
-            if exts.is_empty() {
-                exts = vec!["exe".into(), "cmd".into(), "bat".into()];
+            if extensions.is_empty() {
+                extensions = vec!["exe".into(), "cmd".into(), "bat".into()];
             }
 
-            let candidate = dir.join(bin);
-            if candidate.is_file() {
-                return Some(candidate);
+            let bare_path = search_dir.join(binary_name);
+            if bare_path.is_file() {
+                return Some(bare_path);
             }
-            for ext in exts.iter() {
-                let candidate = dir.join(format!("{bin}.{ext}"));
-                if candidate.is_file() {
-                    return Some(candidate);
+            for ext in &extensions {
+                let with_extension = search_dir.join(format!("{binary_name}.{ext}"));
+                if with_extension.is_file() {
+                    return Some(with_extension);
                 }
             }
         }
         #[cfg(not(windows))]
         {
-            let candidate = dir.join(bin);
-            if candidate.is_file() {
-                return Some(candidate);
+            let full_path = search_dir.join(binary_name);
+            if full_path.is_file() {
+                return Some(full_path);
             }
         }
     }
@@ -61,87 +62,104 @@ pub(super) fn find_executable_in_path(bin: &str) -> Option<PathBuf> {
 }
 
 pub(super) fn probe_models_from_cli(
-    bin: &str,
-    attempts: &[&[&str]],
+    binary_name: &str,
+    arg_sets: &[&[&str]],
 ) -> (Vec<String>, Option<String>) {
     let timeout = Duration::from_millis(1500);
-    let mut last_err: Option<String> = None;
+    let mut latest_error: Option<String> = None;
 
-    for args in attempts {
-        match run_command_capture_timeout(bin, args, timeout) {
-            Ok((status, stdout, stderr)) => {
-                if !status.success() {
-                    let err = String::from_utf8_lossy(&stderr).trim().to_string();
-                    last_err = Some(if err.is_empty() {
-                        format!("{bin} {} exited with {status}", args.join(" "))
-                    } else {
-                        err
-                    });
+    for attempt_args in arg_sets {
+        let (exit_status, raw_stdout, raw_stderr) =
+            match run_command_capture_timeout(binary_name, attempt_args, timeout) {
+                Ok(captured) => captured,
+                Err(spawn_err) => {
+                    latest_error = Some(spawn_err.to_string());
                     continue;
                 }
+            };
 
-                let models = parse_model_list_from_output(&stdout);
-                if !models.is_empty() {
-                    return (models, None);
-                }
-
-                let err = String::from_utf8_lossy(&stderr).trim().to_string();
-                last_err = Some(if err.is_empty() {
-                    format!("{bin} {} returned no models", args.join(" "))
-                } else {
-                    err
-                });
-            }
-            Err(err) => {
-                last_err = Some(err.to_string());
-            }
+        if !exit_status.success() {
+            latest_error = Some(stderr_or_fallback(
+                &raw_stderr,
+                format!(
+                    "{binary_name} {} exited with {exit_status}",
+                    attempt_args.join(" ")
+                ),
+            ));
+            continue;
         }
+
+        let discovered_models = parse_model_list_from_output(&raw_stdout);
+        if !discovered_models.is_empty() {
+            return (discovered_models, None);
+        }
+
+        latest_error = Some(stderr_or_fallback(
+            &raw_stderr,
+            format!(
+                "{binary_name} {} returned no models",
+                attempt_args.join(" ")
+            ),
+        ));
     }
 
-    (Vec::new(), last_err)
+    (Vec::new(), latest_error)
 }
 
-fn is_executable_in_path(bin: &str) -> bool {
-    find_executable_in_path(bin).is_some()
+fn is_executable_in_path(binary_name: &str) -> bool {
+    find_executable_in_path(binary_name).is_some()
+}
+
+fn stderr_or_fallback(raw_stderr: &[u8], fallback_message: String) -> String {
+    let decoded = String::from_utf8_lossy(raw_stderr).trim().to_string();
+    if decoded.is_empty() {
+        fallback_message
+    } else {
+        decoded
+    }
 }
 
 fn run_command_capture_timeout(
-    bin: &str,
-    args: &[&str],
+    binary_name: &str,
+    cli_args: &[&str],
     timeout: Duration,
 ) -> io::Result<(std::process::ExitStatus, Vec<u8>, Vec<u8>)> {
-    let executable = find_executable_in_path(bin).unwrap_or_else(|| PathBuf::from(bin));
-    let mut command = ProcessCommand::new(&executable);
-    command
-        .args(args)
+    let resolved_exe =
+        find_executable_in_path(binary_name).unwrap_or_else(|| PathBuf::from(binary_name));
+    let mut process = ProcessCommand::new(&resolved_exe);
+    process
+        .args(cli_args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    if let Some(path_override) = preferred_path_for_executable(&executable) {
-        command.env("PATH", path_override);
+    if let Some(augmented_path) = preferred_path_for_executable(&resolved_exe) {
+        process.env("PATH", augmented_path);
     }
-    let mut child = command.spawn()?;
+    let mut child = process.spawn()?;
 
-    let start = Instant::now();
+    let started_at = Instant::now();
     loop {
-        if let Some(status) = child.try_wait()? {
-            let mut stdout = Vec::new();
-            let mut stderr = Vec::new();
-            if let Some(mut out) = child.stdout.take() {
-                let _ = out.read_to_end(&mut stdout);
+        if let Some(exit_status) = child.try_wait()? {
+            let mut captured_stdout = Vec::new();
+            let mut captured_stderr = Vec::new();
+            if let Some(mut out_pipe) = child.stdout.take() {
+                let _ = out_pipe.read_to_end(&mut captured_stdout);
             }
-            if let Some(mut err) = child.stderr.take() {
-                let _ = err.read_to_end(&mut stderr);
+            if let Some(mut err_pipe) = child.stderr.take() {
+                let _ = err_pipe.read_to_end(&mut captured_stderr);
             }
-            return Ok((status, stdout, stderr));
+            return Ok((exit_status, captured_stdout, captured_stderr));
         }
 
-        if start.elapsed() >= timeout {
+        if started_at.elapsed() >= timeout {
             let _ = child.kill();
             let _ = child.wait();
             return Err(io::Error::new(
                 io::ErrorKind::TimedOut,
-                format!("{bin} {} timed out after {timeout:?}", args.join(" ")),
+                format!(
+                    "{binary_name} {} timed out after {timeout:?}",
+                    cli_args.join(" ")
+                ),
             ));
         }
         thread::sleep(Duration::from_millis(25));
@@ -149,128 +167,124 @@ fn run_command_capture_timeout(
 }
 
 fn executable_search_dirs() -> Vec<PathBuf> {
-    let mut dirs = Vec::new();
-    if let Some(path) = std::env::var_os("PATH") {
-        dirs.extend(std::env::split_paths(&path));
+    let mut locations = Vec::new();
+    if let Some(system_path) = std::env::var_os("PATH") {
+        locations.extend(std::env::split_paths(&system_path));
     }
-    if let Some(home) = std::env::var_os("HOME") {
-        let home = PathBuf::from(home);
-        dirs.push(home.join(".local/bin"));
-        dirs.push(home.join("bin"));
+    if let Some(home_os) = std::env::var_os("HOME") {
+        let home_root = PathBuf::from(home_os);
+        locations.push(home_root.join(".local/bin"));
+        locations.push(home_root.join("bin"));
     }
 
     #[cfg(target_os = "macos")]
     {
-        dirs.push(PathBuf::from("/opt/homebrew/bin"));
-        dirs.push(PathBuf::from("/opt/homebrew/sbin"));
+        locations.push(PathBuf::from("/opt/homebrew/bin"));
+        locations.push(PathBuf::from("/opt/homebrew/sbin"));
     }
 
-    dirs.push(PathBuf::from("/usr/local/bin"));
-    dirs.push(PathBuf::from("/usr/local/sbin"));
-
-    let mut unique = Vec::new();
-    for dir in dirs {
-        if dir.as_os_str().is_empty() || unique.iter().any(|existing| existing == &dir) {
-            continue;
-        }
-        unique.push(dir);
-    }
-    unique
+    locations.push(PathBuf::from("/usr/local/bin"));
+    locations.push(PathBuf::from("/usr/local/sbin"));
+    dedup_paths(locations)
 }
 
-fn preferred_path_for_executable(executable: &Path) -> Option<OsString> {
-    let mut paths = Vec::<PathBuf>::new();
-    if let Some(dir) = executable.parent() {
-        paths.push(dir.to_path_buf());
+fn preferred_path_for_executable(resolved_exe: &Path) -> Option<OsString> {
+    let mut combined = Vec::new();
+    if let Some(parent_dir) = resolved_exe.parent() {
+        combined.push(parent_dir.to_path_buf());
     }
-    paths.extend(executable_search_dirs());
-    let mut deduped = Vec::new();
-    for path in paths {
-        if deduped.iter().any(|existing| existing == &path) {
-            continue;
-        }
-        deduped.push(path);
-    }
-    std::env::join_paths(deduped).ok()
+    combined.extend(executable_search_dirs());
+    std::env::join_paths(dedup_paths(combined)).ok()
 }
 
-fn parse_model_list_from_output(stdout: &[u8]) -> Vec<String> {
-    let raw = String::from_utf8_lossy(stdout);
-    let raw = raw.trim();
-    if raw.is_empty() {
+fn dedup_paths(candidates: Vec<PathBuf>) -> Vec<PathBuf> {
+    let mut seen = Vec::with_capacity(candidates.len());
+    for entry in candidates {
+        if entry.as_os_str().is_empty() || seen.contains(&entry) {
+            continue;
+        }
+        seen.push(entry);
+    }
+    seen
+}
+
+fn parse_model_list_from_output(raw_stdout: &[u8]) -> Vec<String> {
+    let decoded_output = String::from_utf8_lossy(raw_stdout);
+    let trimmed_content = decoded_output.trim();
+    if trimmed_content.is_empty() {
         return Vec::new();
     }
 
-    if let Ok(value) = serde_json::from_str::<serde_json::Value>(raw) {
-        let mut out = Vec::new();
-        extract_models_from_json(&value, &mut out);
-        out.sort();
-        out.dedup();
-        return out;
+    if let Ok(json_value) = serde_json::from_str::<serde_json::Value>(trimmed_content) {
+        let mut collected = Vec::new();
+        extract_models_from_json(&json_value, &mut collected);
+        collected.sort();
+        collected.dedup();
+        return collected;
     }
 
-    let mut out = Vec::new();
-    for line in raw.lines() {
-        let mut line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
-        line = line
-            .trim_start_matches('-')
-            .trim_start_matches('*')
-            .trim_start_matches('•')
+    let mut model_ids = Vec::new();
+    for output_line in trimmed_content.lines() {
+        let cleaned = output_line
+            .trim()
+            .trim_start_matches(['-', '*', '•'])
             .trim();
-        if line.is_empty() {
+        if cleaned.is_empty() {
             continue;
         }
-        let Some(candidate) = line.split_whitespace().next() else {
+        let Some(first_token) = cleaned.split_whitespace().next() else {
             continue;
         };
-        if candidate.ends_with(':') {
+        if first_token.ends_with(':') || first_token.len() < 3 {
             continue;
         }
-        if candidate.eq_ignore_ascii_case("models") || candidate.eq_ignore_ascii_case("model") {
+        if first_token.eq_ignore_ascii_case("models") || first_token.eq_ignore_ascii_case("model") {
             continue;
         }
-        if candidate.len() < 3 {
-            continue;
-        }
-        out.push(candidate.to_string());
+        model_ids.push(first_token.to_string());
     }
-    out.sort();
-    out.dedup();
-    out
+    model_ids.sort();
+    model_ids.dedup();
+    model_ids
 }
 
-fn extract_models_from_json(value: &serde_json::Value, out: &mut Vec<String>) {
-    match value {
-        serde_json::Value::String(s) => {
-            let s = s.trim();
-            if !s.is_empty() {
-                out.push(s.to_string());
+fn extract_models_from_json(json_node: &serde_json::Value, collector: &mut Vec<String>) {
+    match json_node {
+        serde_json::Value::String(text) => {
+            let cleaned = text.trim();
+            if !cleaned.is_empty() {
+                collector.push(cleaned.to_string());
             }
         }
-        serde_json::Value::Array(arr) => {
-            for v in arr {
-                extract_models_from_json(v, out);
+        serde_json::Value::Array(elements) => {
+            for child in elements {
+                extract_models_from_json(child, collector);
             }
         }
-        serde_json::Value::Object(map) => {
-            for key in ["id", "name", "model", "slug"] {
-                if let Some(serde_json::Value::String(s)) = map.get(key) {
-                    let s = s.trim();
-                    if !s.is_empty() {
-                        out.push(s.to_string());
-                        return;
-                    }
-                }
+        serde_json::Value::Object(fields) => {
+            if let Some(identity_value) = first_identity_field(fields) {
+                collector.push(identity_value);
+                return;
             }
-            for key in ["models", "data"] {
-                if let Some(v) = map.get(key) {
-                    extract_models_from_json(v, out);
+            for container_key in ["models", "data"] {
+                if let Some(nested_value) = fields.get(container_key) {
+                    extract_models_from_json(nested_value, collector);
                 }
             }
         }
         _ => {}
     }
+}
+
+fn first_identity_field(fields: &serde_json::Map<String, serde_json::Value>) -> Option<String> {
+    for field_name in ["id", "name", "model", "slug"] {
+        let Some(serde_json::Value::String(text)) = fields.get(field_name) else {
+            continue;
+        };
+        let cleaned = text.trim();
+        if !cleaned.is_empty() {
+            return Some(cleaned.to_string());
+        }
+    }
+    None
 }

@@ -20,19 +20,14 @@ use nit_utils::hashing::stable_hash_bytes;
 
 use crate::cli::OutputFormat;
 
-/// Error message when save_data is disabled for batch runs.
 const SAVE_DATA_REQUIRED_MSG: &str = "`save_data = false` is not supported for `games run`.";
 
 /// Phases of a headless tournament run, used for diagnostic tracing.
 #[derive(Debug, Clone, Copy)]
 enum RunPhase {
-    /// Loading and validating the configuration.
     ConfigPrep,
-    /// Executing the tournament kernel.
     Execution,
-    /// Writing output artifacts to disk.
     ArtifactWrite,
-    /// Emitting the final summary.
     SummaryEmit,
 }
 
@@ -47,19 +42,14 @@ impl std::fmt::Display for RunPhase {
     }
 }
 
-/// Validated and seed-resolved configuration ready for batch execution.
 struct PreparedBatchConfig {
-    /// Absolute path to the source TOML configuration file.
     resolved_path: PathBuf,
-    /// Raw TOML text as read from disk.
     source_text: String,
-    /// Parsed and validated configuration with all defaults applied.
+    /// All defaults applied and validated.
     normalized: NormalizedConfig,
-    /// ISO-8601 timestamp marking the start of this batch.
     batch_timestamp: String,
-    /// Deterministic seed for reproducible tournament execution.
     effective_seed: u64,
-    /// Content-addressed identifier derived from seed and config text.
+    /// Content-addressed: derived from seed + config text.
     deterministic_run_id: String,
 }
 
@@ -148,7 +138,6 @@ pub(super) fn run_games_headless(
     )
 }
 
-/// Load, validate, and resolve a games configuration for batch execution.
 fn prepare_batch_config(
     toml_source: Option<PathBuf>,
     sidecar_source: Option<PathBuf>,
@@ -198,7 +187,6 @@ fn prepare_batch_config(
     })
 }
 
-/// Log the resolved configuration path and artifact summary destination before execution.
 fn log_run_preamble(toml_location: &Path, storage_layout: &Option<RunLayout>) {
     eprintln!(
         "[{}] Games config: {}",
@@ -220,7 +208,6 @@ fn log_run_preamble(toml_location: &Path, storage_layout: &Option<RunLayout>) {
     }
 }
 
-/// Derive output file paths from the on-disk layout and tournament output.
 fn build_run_paths(
     storage_layout: &Option<RunLayout>,
     tournament_output: &super::TournamentRun,
@@ -242,7 +229,6 @@ fn build_run_paths(
     }
 }
 
-/// Assemble the final run summary from tournament results and resolved configuration.
 fn build_headless_summary(
     batch_cfg: &PreparedBatchConfig,
     engine_snapshot: NormalizedConfig,
@@ -298,7 +284,6 @@ fn persist_and_emit_summary(
     Ok(())
 }
 
-/// Emit diagnostic path information to stderr when verbose mode is active.
 fn emit_diagnostic_paths(report: &RunSummary) {
     if let Some(ref event_path) = report.paths.events {
         eprintln!("Events: {event_path}");
