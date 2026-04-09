@@ -1,8 +1,4 @@
 //! Deterministic match scheduling for round-robin tournaments.
-//!
-//! Converts `(strategy_count, repetitions, self_play)` into a flat,
-//! deterministic sequence of [`Matchup`] values that both the kernel and
-//! runner iterate over.
 
 use super::types::Matchup;
 
@@ -53,6 +49,9 @@ impl SchedulePlan {
         let (a_idx, b_idx) = if self.self_play {
             (offset / self.strategy_count, offset % self.strategy_count)
         } else {
+            // Map a flat offset into an ordered pair (a, b) where a != b.
+            // Each row `a` has `N-1` opponents; b_offset skips index `a`
+            // itself so that b_offset >= a maps to b_offset + 1.
             let stride = self.strategy_count.saturating_sub(1);
             let a_idx = offset / stride;
             let b_offset = offset % stride;

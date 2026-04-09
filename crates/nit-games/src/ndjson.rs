@@ -1,7 +1,4 @@
-//! Atomic NDJSON file writer used by event and history logging.
-//!
-//! Writes to a `.ndjson.tmp` sidecar; [`finish`](AtomicNdjsonWriter::finish)
-//! atomically renames to the final path so readers never see partial output.
+//! Atomic NDJSON file writer.
 
 use std::fs::{self, File};
 use std::io::{self, BufWriter, Write};
@@ -9,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
-/// Buffered NDJSON writer with atomic-rename-on-finish semantics.
+/// Buffered NDJSON writer with atomic rename on finish.
 pub(crate) struct AtomicNdjsonWriter {
     writer: BufWriter<File>,
     tmp_path: PathBuf,

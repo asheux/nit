@@ -1,22 +1,16 @@
 //! Pure numeric helpers for strategy index encoding and decoding.
 
-/// Floor division with non-negative remainder for signed 128-bit integers.
-///
-/// Unlike Rust's truncating division, this rounds the quotient toward
-/// negative infinity, ensuring the remainder is non-negative.
 /// Returns `(q, r)` such that `numer == q * denom + r` and `0 <= r < denom`.
 pub(crate) fn floor_div_rem_i128(numer: i128, denom: i128) -> (i128, i128) {
     (numer.div_euclid(denom), numer.rem_euclid(denom))
 }
 
-/// Decompose a signed integer (by absolute value) into base-`radix` digits,
-/// most-significant digit first, zero-padded to `len`.
+/// Absolute-value digits of a signed integer, MSD first, zero-padded to `len`.
 pub(crate) fn integer_digits_signed_abs(value: i128, radix: usize, len: usize) -> Vec<usize> {
     integer_digits_unsigned(value.unsigned_abs(), radix, len)
 }
 
-/// Decompose an unsigned 128-bit integer into `len` base-`radix` digits,
-/// most-significant digit first. Clamps `radix` to a minimum of 2.
+/// MSD-first base-`radix` digits, zero-padded to `len`. Radix clamped to >= 2.
 pub(crate) fn integer_digits_unsigned(mut value: u128, radix: usize, len: usize) -> Vec<usize> {
     if len == 0 {
         return Vec::new();
@@ -46,8 +40,7 @@ macro_rules! define_checked_pow {
 define_checked_pow!(checked_pow_u128, u128, u32);
 define_checked_pow!(checked_pow_usize, usize, usize);
 
-/// Convert a `u64` to its digit representation in the given base,
-/// most-significant digit first. Returns `[0]` for zero input.
+/// MSD-first digits of `input` in the given base. Returns `[0]` for zero.
 pub(crate) fn digits_in_base(input: u64, base: u8) -> Vec<u8> {
     let radix = base.max(2) as u64;
     if input == 0 {

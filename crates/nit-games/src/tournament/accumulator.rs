@@ -63,8 +63,7 @@ impl TournamentAccumulator {
         }
     }
 
-    /// Fold a single match result into running totals. Self-play (same index on
-    /// both sides) credits both roles to the same strategy entry.
+    /// Fold a single match result into running totals.
     pub(super) fn apply_match(
         &mut self,
         result: MatchResult,
@@ -240,18 +239,29 @@ impl TournamentAccumulator {
         let ranking = self.build_ranking(specs);
 
         let mut pairwise = Vec::new();
+        let mut dominance = Vec::new();
         if let Some(rows) = self.pairwise.as_ref() {
             for (i, row) in rows.iter().enumerate() {
-                for (j, pair) in row.iter().enumerate() {
-                    if i >= j {
-                        continue;
-                    }
+                for (j, pair) in row.iter().enumerate().skip(i + 1) {
                     if pair.is_empty() {
                         continue;
                     }
+                    let a_id = specs[i].id.clone();
+                    let b_id = specs[j].id.clone();
+                    match pair.a_total.cmp(&pair.b_total) {
+                        Ordering::Greater => dominance.push(DominanceEdge {
+                            winner: a_id.clone(),
+                            loser: b_id.clone(),
+                        }),
+                        Ordering::Less => dominance.push(DominanceEdge {
+                            winner: b_id.clone(),
+                            loser: a_id.clone(),
+                        }),
+                        Ordering::Equal => {}
+                    }
                     pairwise.push(PairwiseResult {
-                        a: specs[i].id.clone(),
-                        b: specs[j].id.clone(),
+                        a: a_id,
+                        b: b_id,
                         a_total: pair.a_total,
                         b_total: pair.b_total,
                         a_adjusted_total: Some(pair.a_adjusted_total),
@@ -261,21 +271,6 @@ impl TournamentAccumulator {
                         draws: pair.draws,
                     });
                 }
-            }
-        }
-
-        let mut dominance = Vec::new();
-        for pair in &pairwise {
-            match pair.a_total.cmp(&pair.b_total) {
-                Ordering::Greater => dominance.push(DominanceEdge {
-                    winner: pair.a.clone(),
-                    loser: pair.b.clone(),
-                }),
-                Ordering::Less => dominance.push(DominanceEdge {
-                    winner: pair.b.clone(),
-                    loser: pair.a.clone(),
-                }),
-                Ordering::Equal => {}
             }
         }
 

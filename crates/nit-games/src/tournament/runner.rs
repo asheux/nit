@@ -36,7 +36,8 @@ const SNAPSHOT_REFRESH_MS: u64 = 100;
 /// snapshot is still requested (e.g. during empty-roster dry runs).
 const EMPTY_SCHEDULE_SENTINEL: usize = 0;
 
-/// Incremental tournament executor with match-level and round-level stepping.
+/// Incremental tournament executor with match-level and round-level stepping,
+/// used by the TUI for live playback.
 pub struct TournamentRunner {
     config: NormalizedConfig,
     seed: u64,
@@ -62,44 +63,44 @@ pub struct TournamentRunner {
 impl TournamentRunner {
     pub fn new(config: NormalizedConfig) -> Self {
         let mut config = select_halting_turing_machine_strategies(config);
-        let tournament_seed = config.seed.unwrap_or(0);
-        config.seed = Some(tournament_seed);
-        let round_robin_schedule = SchedulePlan::new(
+        let seed = config.seed.unwrap_or(0);
+        config.seed = Some(seed);
+        let schedule = SchedulePlan::new(
             config.strategies.len(),
             config.repetitions,
             config.self_play,
         );
-        let match_seed_deriver = SeedDeriver::new(tournament_seed);
-        let strategy_definitions =
-            build_strategy_definitions(&config.strategies, &match_seed_deriver);
-        let precompiled_fast_models = config
+        let seed_deriver = SeedDeriver::new(seed);
+        let definitions = build_strategy_definitions(&config.strategies);
+        let fast_models = config
             .strategies
             .iter()
             .map(FastStrategyModel::from_spec)
             .collect();
-        let adjusted_scoring_enabled = config.engine.complexity_cost.enabled;
-        let score_accumulator = TournamentAccumulator::new(
+        let results = TournamentAccumulator::new(
             config.strategies.len(),
-            adjusted_scoring_enabled,
+            config.engine.complexity_cost.enabled,
             config.engine.score_aggregation,
             !matches!(config.engine.mode, crate::config::EngineMode::Batch),
         );
+        let strategies = config.strategies.clone();
+        let runtime = RuntimeAcceleratorStats::new(config.engine.accelerator);
         Self {
-            config: config.clone(),
-            seed: tournament_seed,
-            schedule: round_robin_schedule,
+            config,
+            seed,
+            schedule,
             match_index: 0,
             current: None,
-            results: score_accumulator,
-            strategies: config.strategies.clone(),
-            definitions: strategy_definitions,
-            seed_deriver: match_seed_deriver,
-            fast_models: precompiled_fast_models,
+            results,
+            strategies,
+            definitions,
+            seed_deriver,
+            fast_models,
             event_writer: None,
             history_writer: None,
             last_round: None,
             last_progress: None,
-            runtime: RuntimeAcceleratorStats::new(config.engine.accelerator),
+            runtime,
             metal_batch: MetalBatchState::Uninitialized,
             collect_match_history_previews: true,
             completed_history_previews: Vec::new(),
@@ -664,25 +665,16 @@ impl TournamentRunner {
                     .note_metal_batches(metal_batch_count, pending_matchup_slice.len());
                 (gpu_outcomes, true)
             }
-            Ok(None) => {
-                let parallelism_mode = Parallelism::from_config(&self.config.engine.parallelism);
-                let cpu_outcomes = if matches!(parallelism_mode, Parallelism::Off) {
-                    pending_matchup_slice
-                        .iter()
-                        .map(|queued_matchup| evaluate_single_matchup(queued_matchup, true))
-                        .collect()
-                } else {
-                    run_with_parallelism(parallelism_mode, evaluate_parallel)
-                };
-                (cpu_outcomes, false)
-            }
-            Err(gpu_error) => {
-                if !pending_matchup_slice.is_empty()
-                    && self.config.engine.accelerator.allows_metal()
-                {
-                    self.runtime
-                        .note_metal_fallback_reason(format!("Metal backend error: {gpu_error}"));
-                    self.metal_batch = MetalBatchState::Unavailable;
+            other => {
+                if let Err(gpu_error) = other {
+                    if !pending_matchup_slice.is_empty()
+                        && self.config.engine.accelerator.allows_metal()
+                    {
+                        self.runtime.note_metal_fallback_reason(format!(
+                            "Metal backend error: {gpu_error}"
+                        ));
+                        self.metal_batch = MetalBatchState::Unavailable;
+                    }
                 }
                 let parallelism_mode = Parallelism::from_config(&self.config.engine.parallelism);
                 let cpu_outcomes = if matches!(parallelism_mode, Parallelism::Off) {

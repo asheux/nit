@@ -1,4 +1,4 @@
-//! Tournament output types, run layout, and summary serialisation.
+//! Tournament output types, run layout, and summary serialization.
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -192,9 +192,9 @@ impl RuntimeAcceleratorStats {
         }
     }
 
-    pub fn note_cpu_matches(&mut self, matches: usize) {
-        self.cpu_matches = self.cpu_matches.saturating_add(matches as u64);
-        if matches > 0 && matches!(self.backend, RuntimeAcceleratorBackend::None) {
+    pub fn note_cpu_matches(&mut self, match_count: usize) {
+        self.cpu_matches = self.cpu_matches.saturating_add(match_count as u64);
+        if match_count > 0 && matches!(self.backend, RuntimeAcceleratorBackend::None) {
             self.backend = RuntimeAcceleratorBackend::Cpu;
         }
     }
@@ -203,10 +203,6 @@ impl RuntimeAcceleratorStats {
         if matches!(self.backend, RuntimeAcceleratorBackend::None) {
             self.backend = RuntimeAcceleratorBackend::Cpu;
         }
-    }
-
-    pub fn note_metal_batch(&mut self, matches: usize) {
-        self.note_metal_batches(1, matches);
     }
 
     pub fn note_metal_batches(&mut self, batches: usize, matches: usize) {
@@ -232,12 +228,8 @@ impl RuntimeAcceleratorStats {
         self.metal_policy_cache_path = cache_path;
     }
 
-    pub fn note_metal_fallback(&mut self) {
-        self.metal_fallbacks = self.metal_fallbacks.saturating_add(1);
-    }
-
     pub fn note_metal_fallback_reason(&mut self, reason: impl Into<String>) {
-        self.note_metal_fallback();
+        self.metal_fallbacks = self.metal_fallbacks.saturating_add(1);
         self.metal_fallback_reason = Some(reason.into());
     }
 
@@ -250,7 +242,6 @@ impl RuntimeAcceleratorStats {
     }
 }
 
-/// Each path is `Option<String>` so older schema versions still deserialise.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RunPaths {
     pub summary: Option<String>,
@@ -336,11 +327,6 @@ impl RunLayout {
     }
 }
 
-/// Find a unique directory name under `root` for this run.
-///
-/// Tries, in order: `<base>`, `<base>__run-<suffix>`, then
-/// `<base>__run-<suffix>-1` through `-9`, and finally falls back to
-/// `<base>__run-<suffix>-overflow`.
 fn unique_run_dir(root: &Path, base: &str, run_id: &str) -> PathBuf {
     let candidate = root.join(base);
     if !candidate.exists() {

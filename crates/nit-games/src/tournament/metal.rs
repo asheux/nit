@@ -3,7 +3,7 @@
 use super::types::{MatchOutcome, MatchResult, Matchup, PreparedMetalBatch};
 use crate::config::{NormalizedConfig, StrategySpec, StrategySpecKind};
 use crate::game::Action;
-use crate::strategy::TmRunStats;
+use crate::strategy::{TmMove, TmRunStats};
 use nit_metal::{
     BatchEvalConfig, BatchExecutionPolicy, BatchPayload, BatchPolicySource, CaBatch, FsmBatch,
     MatchPair, TmBatch,
@@ -77,15 +77,11 @@ fn has_tm_step_cost_conflict(config: &NormalizedConfig, strategies: &[StrategySp
             .all(|spec| matches!(spec.kind, StrategySpecKind::OneSidedTm { .. }))
 }
 
-fn timeout_extrema(payoff: crate::game::PayoffMatrix) -> (i32, i32) {
-    payoff.min_max()
-}
-
-fn move_dir_code(direction: crate::strategy::TmMove) -> u32 {
+fn move_dir_code(direction: TmMove) -> u32 {
     match direction {
-        crate::strategy::TmMove::Left => 0,
-        crate::strategy::TmMove::Right => 1,
-        crate::strategy::TmMove::Stay => 2,
+        TmMove::Left => 0,
+        TmMove::Right => 1,
+        TmMove::Stay => 2,
     }
 }
 
@@ -245,8 +241,7 @@ fn build_metal_ca_payload(strategies: &[StrategySpec]) -> Option<CaBatch> {
     })
 }
 
-/// Packs a homogeneous Turing-machine roster into the flat arrays that the
-/// Metal shader consumes.  All TMs must share `(states, symbols, blank, max_steps)`.
+/// Packs a homogeneous TM roster into the flat arrays the Metal shader consumes.
 fn build_metal_tm_payload(strategies: &[StrategySpec]) -> Option<TmBatch> {
     let mut uniform_states: Option<u32> = None;
     let mut uniform_symbols: Option<u32> = None;
@@ -311,7 +306,7 @@ fn build_metal_tm_payload(strategies: &[StrategySpec]) -> Option<TmBatch> {
 /// Constructs the `BatchEvalConfig` that the Metal evaluator needs from the
 /// normalised tournament configuration.
 pub(super) fn metal_batch_eval_config(config: &NormalizedConfig) -> BatchEvalConfig {
-    let (timeout_lose, timeout_win) = timeout_extrema(config.payoff);
+    let (timeout_lose, timeout_win) = config.payoff.min_max();
     BatchEvalConfig {
         rounds: config.rounds,
         payoff: config.payoff.matrix,
@@ -735,14 +730,9 @@ fn try_metal_batch_outcomes_prepared(
     )))
 }
 
-/// Runs a Metal batch for the given index pairs and returns raw score totals.
-/// Used by integration tests to compare GPU and CPU results.
 #[cfg(test)]
-pub(crate) fn metal_batch_totals_for_test(
-    config: &NormalizedConfig,
-    index_pairs: &[(usize, usize)],
-) -> Result<Option<Vec<(i64, i64)>>, String> {
-    let test_matchups: Vec<Matchup> = index_pairs
+fn build_test_matchups(index_pairs: &[(usize, usize)]) -> Vec<Matchup> {
+    index_pairs
         .iter()
         .enumerate()
         .map(|(match_id, (a_idx, b_idx))| Matchup {
@@ -751,8 +741,17 @@ pub(crate) fn metal_batch_totals_for_test(
             b_idx: *b_idx,
             repetition: 0,
         })
-        .collect();
+        .collect()
+}
 
+/// Runs a Metal batch for the given index pairs and returns raw score totals.
+/// Used by integration tests to compare GPU and CPU results.
+#[cfg(test)]
+pub(crate) fn metal_batch_totals_for_test(
+    config: &NormalizedConfig,
+    index_pairs: &[(usize, usize)],
+) -> Result<Option<Vec<(i64, i64)>>, String> {
+    let test_matchups = build_test_matchups(index_pairs);
     let batch_outcomes = try_metal_batch_outcomes(config, &config.strategies, &test_matchups)?;
     Ok(batch_outcomes.map(|outcomes| {
         outcomes
@@ -773,17 +772,7 @@ pub(crate) fn metal_policy_probe_for_test(
     matches_per_batch: usize,
     inflight_depth: usize,
 ) -> Result<Option<(Vec<(i64, i64)>, std::time::Duration)>, String> {
-    let test_matchups: Vec<Matchup> = index_pairs
-        .iter()
-        .enumerate()
-        .map(|(match_id, (a_idx, b_idx))| Matchup {
-            match_id,
-            a_idx: *a_idx,
-            b_idx: *b_idx,
-            repetition: 0,
-        })
-        .collect();
-
+    let test_matchups = build_test_matchups(index_pairs);
     let mut prepared = match try_prepare_metal_batch(config, &config.strategies)? {
         Some(p) => p,
         None => return Ok(None),

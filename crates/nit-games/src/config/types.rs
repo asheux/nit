@@ -17,8 +17,7 @@ impl std::fmt::Display for ConfigError {
 
 impl std::error::Error for ConfigError {}
 
-/// Raw deserialized representation of a games TOML config file.
-/// All fields are optional; validation happens during normalization.
+/// Raw deserialized `games.toml` configuration before normalization.
 #[derive(Clone, Debug, Deserialize)]
 pub struct GamesConfig {
     pub schema_version: Option<u32>,

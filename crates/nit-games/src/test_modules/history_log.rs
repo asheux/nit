@@ -1,28 +1,14 @@
-//! Tests for the history log serialisation format.
-//!
-//! Verifies that [`MatchHistory`] serialises to a compact JSON payload
-//! containing only the fields defined in the schema, with no legacy
-//! or internal-only fields leaking into the output.
+//! Tests for the history log serialization format.
 
 use super::MatchHistory;
 
-// ── Constants ─────────────────────────────────────────────────────────────
-
-/// Number of rounds in the baseline fixture match.
 const FIXTURE_ROUND_COUNT: usize = 4;
 
-/// Expected field count in the compact JSON format (excluding optional fields).
-const COMPACT_REQUIRED_FIELDS: usize = 10;
+/// Excludes optional fields (`cycle`, `a_tm_metrics`, `b_tm_metrics`).
+const EXPECTED_FIELD_COUNT: usize = 10;
 
-// ── Fixtures ──────────────────────────────────────────────────────────────
-
-/// Outcome index string covering all four joint outcomes in order.
 const ALL_OUTCOMES_SEQUENCE: &str = "0123";
 
-/// Build a [`MatchHistory`] fixture with sensible defaults for testing.
-///
-/// The returned record represents a 4-round match between two FSM strategies
-/// with no cycle detection and no Turing-machine metrics attached.
 fn baseline_history_fixture() -> MatchHistory {
     MatchHistory {
         match_id: 7,
@@ -41,7 +27,6 @@ fn baseline_history_fixture() -> MatchHistory {
     }
 }
 
-/// Build a minimal single-round fixture for edge-case testing.
 fn single_round_fixture() -> MatchHistory {
     MatchHistory {
         match_id: 0,
@@ -60,15 +45,6 @@ fn single_round_fixture() -> MatchHistory {
     }
 }
 
-// ── Tests ─────────────────────────────────────────────────────────────────
-
-/// Verify that `MatchHistory` serialises to compact JSON with expected
-/// fields present and legacy/internal fields absent.
-///
-/// The compact format uses `score_idx` (a string of per-round outcome
-/// indices) instead of separate `a_moves`/`b_moves` arrays, and omits
-/// event-log fields like `timestamp` and `event` that belong to the
-/// event stream rather than the history log.
 #[test]
 fn compact_payload_contains_expected_fields() {
     let compact_history_record = baseline_history_fixture();
@@ -90,9 +66,6 @@ fn compact_payload_contains_expected_fields() {
     assert!(!json_output_string.contains("event"));
 }
 
-/// Verify that `None`-valued optional fields (`cycle`, `a_tm_metrics`,
-/// `b_tm_metrics`) are omitted entirely from the serialised JSON thanks to
-/// `#[serde(skip_serializing_if = "Option::is_none")]`.
 #[test]
 fn none_optional_fields_are_omitted_from_json() {
     let history_without_optionals = baseline_history_fixture();
@@ -114,8 +87,6 @@ fn none_optional_fields_are_omitted_from_json() {
     );
 }
 
-/// Verify that a single-round fixture serialises without panicking and
-/// contains the expected strategy identifiers.
 #[test]
 fn single_round_fixture_serialises_correctly() {
     let record = single_round_fixture();
@@ -126,22 +97,20 @@ fn single_round_fixture_serialises_correctly() {
     assert_eq!(record.score_idx.len(), 1);
 }
 
-/// Verify field count in compact format matches expectation.
 #[test]
-fn compact_format_field_count() {
+fn serialized_field_count() {
     let record = baseline_history_fixture();
     let val: serde_json::Value = serde_json::to_value(&record).expect("serialize to value");
     let obj = val.as_object().expect("should be JSON object");
     assert_eq!(
         obj.len(),
-        COMPACT_REQUIRED_FIELDS,
-        "expected exactly {COMPACT_REQUIRED_FIELDS} fields, got {}",
+        EXPECTED_FIELD_COUNT,
+        "expected exactly {EXPECTED_FIELD_COUNT} fields, got {}",
         obj.len()
     );
 }
 
-/// Verify that the `"outcomes"` alias for `score_idx` is accepted during
-/// deserialisation, preserving backwards compatibility with older log files.
+/// The `"outcomes"` alias preserves backwards compatibility with older log files.
 #[test]
 fn score_idx_accepts_outcomes_alias_on_deserialise() {
     let legacy_json_payload = r#"{

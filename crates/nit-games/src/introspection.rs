@@ -1,10 +1,4 @@
 //! Strategy introspection and human-readable formatting.
-//!
-//! Given a [`StrategySpec`], this module produces a structured
-//! [`StrategyIntrospection`] record that exposes the strategy's internal
-//! parameters (FSM graph, CA rule, or Turing machine transitions) in a
-//! serialisable form, and can render them as plain-text tables for display
-//! in the TUI or CLI output.
 
 use serde::{Deserialize, Serialize};
 
@@ -12,7 +6,7 @@ use crate::config::{StrategySpec, StrategySpecKind};
 use crate::game::Action;
 use crate::strategy::TmMove;
 
-/// Discriminant identifying which family of strategy a spec belongs to.
+/// Strategy family discriminant.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum StrategyIntrospectionKind {
@@ -21,8 +15,6 @@ pub enum StrategyIntrospectionKind {
     OneSidedTm,
 }
 
-/// A structured, serialisable view of a strategy's internal parameters,
-/// suitable for JSON export or human-readable rendering.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct StrategyIntrospection {
     pub id: String,
@@ -69,9 +61,33 @@ pub struct TmTransitionRecord {
     pub next: u16,
 }
 
-/// Build a [`StrategyIntrospection`] from the given [`StrategySpec`],
-/// normalising fields where necessary (e.g. Turing machine transition tables
-/// are expanded into per-`(state, read)` records).
+/// Expand a flat TM transition table into per-`(state, read)` records.
+fn expand_tm_transitions(
+    states: u16,
+    symbols: u8,
+    transitions: &[crate::strategy::TmTransition],
+) -> Vec<TmTransitionRecord> {
+    let symbols_usize = symbols as usize;
+    let mut out = Vec::new();
+    for state in 1..=states {
+        for read in 0..symbols {
+            let idx = (state as usize - 1)
+                .saturating_mul(symbols_usize)
+                .saturating_add(read as usize);
+            if let Some(rule) = transitions.get(idx) {
+                out.push(TmTransitionRecord {
+                    state,
+                    read,
+                    write: rule.write,
+                    move_dir: rule.move_dir,
+                    next: rule.next,
+                });
+            }
+        }
+    }
+    out
+}
+
 pub fn introspect_strategy(spec: &StrategySpec) -> StrategyIntrospection {
     let id = spec.id.clone();
     match &spec.kind {
@@ -101,7 +117,7 @@ pub fn introspect_strategy(spec: &StrategySpec) -> StrategyIntrospection {
             }
         }
         StrategySpecKind::Ca { n, k, r, t } => StrategyIntrospection {
-            id: spec.id.clone(),
+            id,
             kind: StrategyIntrospectionKind::Ca,
             parameters: StrategyIntrospectionParameters::Ca {
                 n: *n,
@@ -122,24 +138,7 @@ pub fn introspect_strategy(spec: &StrategySpec) -> StrategyIntrospection {
             ..
         } => {
             let fallback_symbol = fallback_symbol.unwrap_or(*blank);
-            let mut normalized = Vec::new();
-            let symbols_usize = *symbols as usize;
-            for state in 1..=*states {
-                for read in 0..*symbols {
-                    let idx = (state as usize - 1)
-                        .saturating_mul(symbols_usize)
-                        .saturating_add(read as usize);
-                    if let Some(rule) = transitions.get(idx) {
-                        normalized.push(TmTransitionRecord {
-                            state,
-                            read,
-                            write: rule.write,
-                            move_dir: rule.move_dir,
-                            next: rule.next,
-                        });
-                    }
-                }
-            }
+            let normalized = expand_tm_transitions(*states, *symbols, transitions);
             StrategyIntrospection {
                 id,
                 kind: StrategyIntrospectionKind::OneSidedTm,
@@ -277,18 +276,20 @@ fn format_ca_lines(lines: &mut Vec<String>, n: u64, k: u8, r: f32, t: u32) {
     lines.push("output: last cell of ShrinkingCA final row".to_string());
 }
 
-#[allow(clippy::too_many_arguments)]
-fn format_tm_lines(
-    lines: &mut Vec<String>,
-    states: u16,
-    symbols: u8,
-    start_state: u16,
-    blank: u8,
-    fallback_symbol: u8,
-    max_steps_per_round: u32,
-    transitions: &[TmTransitionRecord],
-    rule_code: Option<u64>,
-) {
+fn format_tm_lines(lines: &mut Vec<String>, params: &StrategyIntrospectionParameters) {
+    let StrategyIntrospectionParameters::OneSidedTm {
+        states,
+        symbols,
+        start_state,
+        blank,
+        fallback_symbol,
+        max_steps_per_round,
+        transitions,
+        rule_code,
+    } = params
+    else {
+        return;
+    };
     lines.push(format!("states: {states}"));
     lines.push(format!("symbols: {symbols}"));
     lines.push(format!("start_state: {start_state}"));
@@ -309,7 +310,6 @@ fn format_tm_lines(
     lines.extend(build_tm_rules_table(transitions));
 }
 
-/// Render a [`StrategyIntrospection`] as plain-text lines with ASCII tables.
 pub fn format_strategy_introspection(intro: &StrategyIntrospection) -> Vec<String> {
     let mut lines = Vec::new();
     lines.push(format!("id: {}", intro.id));
@@ -339,26 +339,9 @@ pub fn format_strategy_introspection(intro: &StrategyIntrospection) -> Vec<Strin
         StrategyIntrospectionParameters::Ca { n, k, r, t } => {
             format_ca_lines(&mut lines, *n, *k, *r, *t)
         }
-        StrategyIntrospectionParameters::OneSidedTm {
-            states,
-            symbols,
-            start_state,
-            blank,
-            fallback_symbol,
-            max_steps_per_round,
-            transitions,
-            rule_code,
-        } => format_tm_lines(
-            &mut lines,
-            *states,
-            *symbols,
-            *start_state,
-            *blank,
-            *fallback_symbol,
-            *max_steps_per_round,
-            transitions,
-            *rule_code,
-        ),
+        params @ StrategyIntrospectionParameters::OneSidedTm { .. } => {
+            format_tm_lines(&mut lines, params)
+        }
     }
     lines
 }

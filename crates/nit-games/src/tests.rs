@@ -1,8 +1,4 @@
-//! Unit and integration tests for the `nit-games` crate.
-//!
-//! Covers FSM/CA/TM strategy correctness, notebook index encoding/decoding,
-//! tournament kernel execution, fast-eval cycle detection, halting filters,
-//! Metal GPU acceleration (macOS), and configuration validation.
+//! Tests for the `nit-games` crate.
 
 use crate::config::{
     AcceleratorMode, EngineMode, FsmGroupingMode, GamesConfig, ScoreAggregation, StrategySpecKind,
@@ -23,18 +19,16 @@ use crate::{
     KernelRunMode, TmHaltingFilterBackend, TournamentKernel, TournamentRunner,
 };
 
-// ── Shared test helpers ────────────────────────────────────
+// ── Shared test helpers ──
 
 fn record_round(history: &mut History, a: Action, b: Action) {
     history.push(a, b);
 }
 
-/// Delegates to [`build_strategy`](crate::tournament::build_strategy).
 fn strategy_from_spec(spec: &crate::config::StrategySpec) -> Box<dyn Strategy> {
     crate::tournament::build_strategy(spec, 0)
 }
 
-/// Simulate a full match between two strategies; returns `(a_total, b_total)`.
 fn simulate_match_from_specs(
     a_spec: &crate::config::StrategySpec,
     b_spec: &crate::config::StrategySpec,
@@ -58,7 +52,7 @@ fn simulate_match_from_specs(
     (a_total, b_total)
 }
 
-// ── macOS Metal GPU helpers ─────────────────────────────────
+// ── macOS Metal GPU helpers ──
 
 #[cfg(target_os = "macos")]
 fn metal_totals_or_skip(
@@ -94,7 +88,7 @@ fn simple_four_state_fsm_spec(id: String) -> crate::config::StrategySpec {
     }
 }
 
-// ── Notebook FSM index helpers ──────────────────────────────
+// ── Notebook FSM index helpers ──
 
 fn notebook_buggy_state_outputs(
     outputs: &[Action],

@@ -10,7 +10,7 @@ use super::session::{build_strategy_definitions, run_match_core};
 use super::types::{
     run_with_parallelism, MatchOutcome, Parallelism, SeedDeriver, TournamentAccumulator,
 };
-use crate::config::{AcceleratorMode, NormalizedConfig};
+use crate::config::{AcceleratorMode, EngineMode, NormalizedConfig};
 use crate::events::{EventWriter, GameEvent};
 use crate::fast_eval::FastStrategyModel;
 use crate::history_log::{HistoryWriter, MatchHistory};
@@ -34,7 +34,7 @@ pub enum KernelRunMode<'a> {
     },
 }
 
-/// Batch tournament executor: builds the schedule, runs all matches, returns results.
+/// Batch tournament executor.
 pub struct TournamentKernel {
     config: NormalizedConfig,
     seed: u64,
@@ -55,7 +55,7 @@ impl TournamentKernel {
             config.self_play,
         );
         let seed_deriver = SeedDeriver::new(seed);
-        let definitions = build_strategy_definitions(&config.strategies, &seed_deriver);
+        let definitions = build_strategy_definitions(&config.strategies);
         let fast_models = config
             .strategies
             .iter()
@@ -114,7 +114,7 @@ impl TournamentKernel {
             self.config.strategies.len(),
             self.config.engine.complexity_cost.enabled,
             self.config.engine.score_aggregation,
-            !matches!(self.config.engine.mode, crate::config::EngineMode::Batch),
+            !matches!(self.config.engine.mode, EngineMode::Batch),
         )
     }
 

@@ -4,7 +4,6 @@ use super::math::{digits_in_base, digits_to_u64};
 use crate::game::Action;
 use crate::history::{History, RoundRecord};
 
-/// Maximum number of trace steps to pre-allocate.
 const MAX_TRACE_CAPACITY: u32 = 10_000;
 
 // ── TM run statistics ────────────────────────────────────────
@@ -21,8 +20,6 @@ pub struct TmRunStats {
 }
 
 impl TmRunStats {
-    /// Update min/max step range. First call (rounds == 0) sets directly;
-    /// subsequent calls merge via min/max.
     fn update_step_range(&mut self, min: u32, max: u32) {
         if self.rounds == 0 {
             self.min_steps = min;
@@ -87,7 +84,6 @@ pub struct TmRunResult {
 }
 
 impl TmRunResult {
-    /// Non-output termination (max-steps, invalid-state, missing-transition).
     fn terminated(steps_taken: u32, stop_reason: TmStopReason, trace: Option<TmTrace>) -> Self {
         Self {
             output_value: None,
@@ -431,9 +427,6 @@ impl super::Strategy for OneSidedTmStrategy {
 
 /// Incrementally tracks the base-`base` representation of the joint action
 /// history as a suffix of width `width` least-significant digits.
-///
-/// Used by [`OneSidedTmStrategy`] and the halting filter to convert round
-/// history into TM input without recomputing from scratch each round.
 #[derive(Clone, Debug)]
 pub(crate) struct InputSuffix {
     base: u8,
@@ -444,7 +437,6 @@ pub(crate) struct InputSuffix {
 }
 
 impl InputSuffix {
-    /// Create a new suffix tracker with the given numeric base and digit width.
     pub(crate) fn new(base: u8, width: usize) -> Self {
         Self {
             base: base.max(2),
@@ -455,7 +447,6 @@ impl InputSuffix {
         }
     }
 
-    /// Reset the suffix to its initial zero state.
     fn reset(&mut self) {
         self.digits_le.clear();
         self.digits_le.push(0);
@@ -463,7 +454,6 @@ impl InputSuffix {
         self.history_len = 0;
     }
 
-    /// Encode a single round (two action bits) into the suffix.
     fn push_round(&mut self, round: RoundRecord) {
         self.push_pair_bits(super::action_bit(round.a), super::action_bit(round.b));
     }

@@ -15,8 +15,7 @@ use crate::strategy::{run_one_sided_tm, symbol_to_action, InputSuffix, TmRunStat
 use nit_metal::MatchPair;
 use rayon::prelude::*;
 use std::cmp::Ordering;
-use std::collections::HashMap;
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering};
 use std::sync::{Arc, Mutex};
@@ -647,7 +646,7 @@ fn classify_roster(strategies: &[StrategySpec]) -> RosterKind {
         return RosterKind::AllTm;
     }
     let tm_mask: Vec<bool> = strategies.iter().map(strategy_is_one_sided_tm).collect();
-    if tm_mask.iter().any(|&is_tm| is_tm) {
+    if tm_mask.contains(&true) {
         RosterKind::Mixed { tm_mask }
     } else {
         RosterKind::NoTm

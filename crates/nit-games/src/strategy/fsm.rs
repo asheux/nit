@@ -10,19 +10,14 @@ use super::math::{
 use crate::game::Action;
 use crate::history::History;
 
-// ── Decoded FSM representation ─────────────────────────────
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct FsmDecodeResult {
     pub(crate) output_actions: Vec<Action>,
-    /// Indexed as `[state][input_symbol]`.
     pub(crate) transition_table: Vec<Vec<usize>>,
 }
 
-// ── FSM enumeration ─────────────────────────────────────────
-
-/// Total distinct FSMs for the given state/alphabet dimensions:
-/// `states^(states*alphabet) * alphabet^states`. Returns `None` on overflow.
+/// Total distinct FSMs: `states^(states*alphabet) * alphabet^states`.
+/// Returns `None` on overflow.
 pub fn fsm_count(num_states: usize, alphabet_size: usize) -> Option<u128> {
     let transition_entries = num_states.checked_mul(alphabet_size)?;
     let total_transitions = checked_pow_u128(num_states as u128, transition_entries as u32)?;
@@ -30,10 +25,6 @@ pub fn fsm_count(num_states: usize, alphabet_size: usize) -> Option<u128> {
     total_transitions.checked_mul(output_assignments)
 }
 
-// ── Notebook codec ──────────────────────────────────────────
-
-/// Decode a notebook-style FSM index into `(outputs, transitions)`.
-/// Errors when dimensions are zero or the index exceeds the FSM space.
 pub fn decode_fsm_notebook_index(
     index: u64,
     states: usize,
@@ -45,32 +36,53 @@ pub fn decode_fsm_notebook_index(
     Ok((decoded.output_actions, decoded.transition_table))
 }
 
-/// Splits the packed integer into output-function and transition-function
-/// codes, then decodes each independently.
-fn decode_notebook_index_inner(
+/// Decode notebook index into raw numeric output digits and transition table.
+/// Preserves original digit values without converting to Action — used by
+/// fsm_enum for canonicalization where raw digit identity matters for k>2.
+pub(crate) fn decode_notebook_index_digits(
     index: u64,
     num_states: usize,
     action_count: usize,
-) -> Result<FsmDecodeResult, String> {
+) -> Result<(Vec<usize>, Vec<Vec<usize>>), String> {
     let flat_size = num_states.saturating_mul(action_count);
     let action_block_size = checked_pow_u128(action_count as u128, num_states as u32)
         .ok_or_else(|| "fsm action block overflows u128".to_string())?;
     let (transition_code, output_code) =
         floor_div_rem_i128(index as i128 - 1, action_block_size as i128);
 
-    let output_actions = decode_output_actions(output_code as u128, num_states, action_count);
+    let output_digits = if action_count <= 1 {
+        vec![0usize; num_states]
+    } else {
+        integer_digits_unsigned(output_code as u128, action_count, num_states)
+    };
     let flat_next_states = decode_flat_transitions(transition_code, num_states, flat_size);
     let transition_table = reshape_transition_table(&flat_next_states, num_states, action_count);
 
+    Ok((output_digits, transition_table))
+}
+
+fn decode_notebook_index_inner(
+    index: u64,
+    num_states: usize,
+    action_count: usize,
+) -> Result<FsmDecodeResult, String> {
+    let (output_digits, transition_table) =
+        decode_notebook_index_digits(index, num_states, action_count)?;
+    let output_actions = output_digits
+        .into_iter()
+        .map(|digit| super::symbol_to_action(digit as u8))
+        .collect();
     Ok(FsmDecodeResult {
         output_actions,
         transition_table,
     })
 }
 
-// ── Validation ─────────────────────────────────────────────
-
-fn validate_decode_params(index: u64, states: usize, actions: usize) -> Result<(), String> {
+pub(crate) fn validate_decode_params(
+    index: u64,
+    states: usize,
+    actions: usize,
+) -> Result<(), String> {
     if states == 0 {
         return Err("fsm decode requires states > 0".to_string());
     }
@@ -87,19 +99,6 @@ fn validate_decode_params(index: u64, states: usize, actions: usize) -> Result<(
     } else {
         Ok(())
     }
-}
-
-/// Convert output-code digits into per-state actions (0 → Cooperate, else Defect).
-fn decode_output_actions(output_code: u128, num_states: usize, num_actions: usize) -> Vec<Action> {
-    let raw_digits = if num_actions <= 1 {
-        vec![0usize; num_states]
-    } else {
-        integer_digits_unsigned(output_code, num_actions, num_states)
-    };
-    raw_digits
-        .into_iter()
-        .map(|digit| super::symbol_to_action(digit as u8))
-        .collect()
 }
 
 fn decode_flat_transitions(

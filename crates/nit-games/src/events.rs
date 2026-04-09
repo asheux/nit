@@ -1,7 +1,4 @@
 //! Structured NDJSON event logging for tournament execution.
-//!
-//! Events are written to a temporary file first and atomically renamed on
-//! completion to avoid partial or corrupt output.
 
 use std::io;
 use std::path::{Path, PathBuf};

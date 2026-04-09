@@ -287,11 +287,12 @@ pub(super) fn run_with_parallelism<T: Send>(
 ///
 /// Reported in [`TmHaltingFilterDiagnostics`] so the caller can see which code
 /// path actually ran (Metal GPU, notebook CPU, mixed-roster CPU, or skipped).
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 pub enum TmHaltingFilterBackend {
     /// The filter was skipped because it had already been applied.
     NotApplied,
     /// No TM strategies were present, so no filtering was needed.
+    #[default]
     NotRequired,
     /// Mixed roster (TMs + non-TMs): full match simulation on the CPU.
     MixedRosterCpu,
@@ -318,10 +319,7 @@ impl TmHaltingFilterBackend {
 }
 
 /// Diagnostic telemetry from the TM halting filter pass.
-///
-/// Captures timing, backend selection, cache statistics, and Metal-specific
-/// metadata so the TUI and CLI can display a detailed filter summary.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct TmHaltingFilterDiagnostics {
     /// Which backend actually executed the halting analysis.
     pub backend: TmHaltingFilterBackend,
@@ -345,34 +343,6 @@ pub struct TmHaltingFilterDiagnostics {
     pub metal_inflight_batches: Option<usize>,
     pub metal_policy_cache_key: Option<String>,
     pub metal_policy_cache_path: Option<String>,
-}
-
-impl Default for TmHaltingFilterDiagnostics {
-    fn default() -> Self {
-        Self {
-            backend: TmHaltingFilterBackend::NotRequired,
-            requested_accelerator: AcceleratorMode::default(),
-            strategy_count_before: 0,
-            strategy_count_after: 0,
-            schedule_matches: 0,
-            scanned_matchups: 0,
-            backend_probe_elapsed: Duration::ZERO,
-            halting_filter_elapsed: Duration::ZERO,
-            total_elapsed: Duration::ZERO,
-            tm_cache_hits: 0,
-            tm_cache_misses: 0,
-            tm_evaluations: 0,
-            tm_steps: 0,
-            metal_batches_submitted: 0,
-            metal_decline_reason: None,
-            metal_error: None,
-            metal_policy_source: None,
-            metal_matches_per_batch: None,
-            metal_inflight_batches: None,
-            metal_policy_cache_key: None,
-            metal_policy_cache_path: None,
-        }
-    }
 }
 
 // ── Metal GPU state ─────────────────────────────────────────

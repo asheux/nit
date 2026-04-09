@@ -1,4 +1,4 @@
-//! Strategy specification parsing from TOML configuration.
+//! Strategy specification parsing: FSM, CA, and TM normalization from TOML.
 
 use super::types::{StrategyConfig, StrategySpec, StrategySpecKind};
 use crate::game::Action;

@@ -1,6 +1,6 @@
 //! Enumeration, canonicalisation, and behavioural grouping of FSM strategies.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::hash::Hash;
 use std::sync::{Mutex, OnceLock};
 
@@ -8,8 +8,10 @@ use rayon::prelude::*;
 
 use crate::config::{FsmGroupingMode, StrategySpec, StrategySpecKind};
 use crate::game::Action;
-use crate::strategy::math::{checked_pow_u128, floor_div_rem_i128, integer_digits_unsigned};
-use crate::strategy::InputMode;
+use crate::strategy::math::checked_pow_u128;
+use crate::strategy::{
+    action_bit, decode_notebook_index_digits, symbol_to_action, validate_decode_params, InputMode,
+};
 use nit_utils::hashing::stable_hash_bytes;
 
 #[derive(Clone, Debug)]
@@ -37,7 +39,6 @@ impl FsmDefinition {
         }
     }
 
-    /// Deterministic human-readable key uniquely identifying this FSM.
     pub fn stable_key(&self) -> String {
         let mut out = String::new();
         out.push_str("mode=");
@@ -88,10 +89,7 @@ pub fn canonicalize_fsm(def: &FsmDefinition) -> FsmDefinition {
         outputs: def
             .outputs
             .iter()
-            .map(|action| match action {
-                Action::Cooperate => 0,
-                Action::Defect => 1,
-            })
+            .map(|&a| action_bit(a) as usize)
             .collect(),
         transitions: def.transitions.clone(),
         actions: def.input_mode.alphabet_size(),
@@ -103,13 +101,7 @@ pub fn canonicalize_fsm(def: &FsmDefinition) -> FsmDefinition {
         outputs: canonical
             .outputs
             .iter()
-            .map(|&idx| {
-                if idx == 0 {
-                    Action::Cooperate
-                } else {
-                    Action::Defect
-                }
-            })
+            .map(|&idx| symbol_to_action(idx as u8))
             .collect(),
         input_mode: def.input_mode,
         transitions: canonical.transitions,
@@ -155,7 +147,7 @@ where
     }
     let output_variants = 1u64 << num_states;
     let mut count = 0usize;
-    let mut seen = std::collections::HashSet::new();
+    let mut seen = HashSet::new();
 
     for mask in 0..output_variants {
         let mut outputs = Vec::with_capacity(num_states);
@@ -257,11 +249,9 @@ where
 }
 
 fn insert_min_index(map: &mut HashMap<Vec<u16>, u64>, key: Vec<u16>, idx: u64) {
-    if let Some(existing) = map.get_mut(&key) {
-        *existing = (*existing).min(idx);
-    } else {
-        map.insert(key, idx);
-    }
+    map.entry(key)
+        .and_modify(|existing| *existing = (*existing).min(idx))
+        .or_insert(idx);
 }
 
 fn merge_min_index_maps(left: &mut HashMap<Vec<u16>, u64>, right: HashMap<Vec<u16>, u64>) {
@@ -407,46 +397,8 @@ fn decode_fsm_notebook_index_raw(
     states: usize,
     actions: usize,
 ) -> Result<RawFsm, String> {
-    if states == 0 {
-        return Err("fsm decode requires states > 0".to_string());
-    }
-    if actions == 0 {
-        return Err("fsm decode requires actions > 0".to_string());
-    }
-    let Some(max) = crate::strategy::fsm_count(states, actions) else {
-        return Err("fsm index space overflows u128 for this (states, actions)".to_string());
-    };
-    if index as u128 >= max {
-        return Err(format!("fsm index {index} out of range (0..{})", max - 1));
-    }
-
-    let transition_digits = states.saturating_mul(actions);
-    let Some(action_block) = checked_pow_u128(actions as u128, states as u32) else {
-        return Err("fsm action block overflows u128".to_string());
-    };
-    let (transition_code, output_code) =
-        floor_div_rem_i128(index as i128 - 1, action_block as i128);
-
-    let transitions_flat = if states == 1 {
-        vec![0usize; transition_digits]
-    } else {
-        integer_digits_unsigned(transition_code.unsigned_abs(), states, transition_digits)
-    };
-    let outputs = if actions == 1 {
-        vec![0usize; states]
-    } else {
-        integer_digits_unsigned(output_code as u128, actions, states)
-    };
-
-    let mut transitions = vec![vec![0usize; actions]; states];
-    for (state_idx, row) in transitions.iter_mut().enumerate() {
-        for (input_idx, cell) in row.iter_mut().enumerate() {
-            let flat_idx = state_idx.saturating_mul(actions).saturating_add(input_idx);
-            let next = transitions_flat.get(flat_idx).copied().unwrap_or(0);
-            *cell = next.min(states - 1);
-        }
-    }
-
+    validate_decode_params(index, states, actions)?;
+    let (outputs, transitions) = decode_notebook_index_digits(index, states, actions)?;
     Ok(RawFsm {
         outputs,
         transitions,

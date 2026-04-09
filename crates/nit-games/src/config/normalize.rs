@@ -72,32 +72,29 @@ fn validate_engine(engine: &super::types::EngineConfig, errors: &mut Vec<String>
     }
 }
 
+fn parse_toml<T: serde::de::DeserializeOwned>(src: &str) -> ConfigResult<T> {
+    toml::from_str(src).map_err(|err| ConfigError {
+        errors: vec![err.to_string()],
+    })
+}
+
 impl GamesConfig {
     pub fn from_toml(src: &str) -> ConfigResult<NormalizedConfig> {
-        let raw: Self = toml::from_str(src).map_err(|err| ConfigError {
-            errors: vec![err.to_string()],
-        })?;
-        raw.normalize_with_root(None)
+        parse_toml::<Self>(src)?.normalize_with_root(None)
     }
 
     pub fn from_toml_with_root(
         src: &str,
         base_dir: Option<&std::path::Path>,
     ) -> ConfigResult<NormalizedConfig> {
-        let raw: Self = toml::from_str(src).map_err(|err| ConfigError {
-            errors: vec![err.to_string()],
-        })?;
-        raw.normalize_with_root(base_dir)
+        parse_toml::<Self>(src)?.normalize_with_root(base_dir)
     }
 
     pub fn family_run_base_from_toml_with_root(
         src: &str,
         _base_dir: Option<&std::path::Path>,
     ) -> ConfigResult<FamilyRunBaseConfig> {
-        let raw: FamilyRunParseConfig = toml::from_str(src).map_err(|err| ConfigError {
-            errors: vec![err.to_string()],
-        })?;
-        raw.normalize_family_run_base()
+        parse_toml::<FamilyRunParseConfig>(src)?.normalize_family_run_base()
     }
 
     pub fn normalize(self) -> ConfigResult<NormalizedConfig> {

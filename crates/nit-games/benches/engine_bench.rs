@@ -1,28 +1,4 @@
 //! Benchmark suite for the `nit-games` tournament engine.
-//!
-//! Covers sequential and parallel kernel execution modes, cycle-detection fast-eval,
-//! Turing-machine halting filters, event/history logging overhead, and sweep I/O
-//! throughput across FSM, cellular automaton, and Turing machine strategy families.
-//!
-//! ## Benchmark groups
-//!
-//! | Group | Focus |
-//! |-------|-------|
-//! | Single match / tournament sizes | Baseline latency scaling from 2 to 128 strategies |
-//! | Logging overhead | I/O cost of NDJSON event and history writers |
-//! | Parallel execution | Rayon-parallel throughput at 64 and 256 strategies |
-//! | Fast-eval cycle detection | Cycle-detecting vs brute-force execution |
-//! | FSM fast-eval stress | Pure-FSM cycle detection at scale |
-//! | TM micro / tournament / heavy | Raw tape-simulation cost and tournament overhead |
-//! | TM halting filter | Pre-tournament halting analysis throughput |
-//! | Sweep I/O serialisation | JSON write throughput for tournament artefacts |
-//!
-//! ## Running
-//!
-//! ```text
-//! cargo bench -p nit-games            # full suite
-//! cargo bench -p nit-games -- --test  # compile-check only
-//! ```
 
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -39,12 +15,7 @@ use nit_games::output::{RunPaths, RunSummary, RUN_SUMMARY_SCHEMA_VERSION};
 use nit_games::tournament::{KernelRunMode, Parallelism, TournamentKernel};
 use nit_games::{decode_tm_rule_code_wolfram, InputMode, Strategy, TmMove, TmTransition};
 
-// ── Temporary file paths ────────────────────────────────────
-
-/// Generate a collision-resistant temporary file path for benchmark I/O.
-///
-/// Combines the process ID with a nanosecond timestamp so that parallel
-/// benchmark iterations never race on the same filesystem path.
+/// PID + nanosecond timestamp avoids races between parallel benchmark iterations.
 fn temp_bench_path(label: &str, extension: &str) -> PathBuf {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -56,18 +27,12 @@ fn temp_bench_path(label: &str, extension: &str) -> PathBuf {
     target
 }
 
-// ── Strategy spec constructors ──────────────────────────────
-
 /// The standard cooperate/defect output pair used by most benchmark strategies.
 #[inline]
 fn cooperate_defect_outputs() -> Vec<Action> {
     vec![Action::Cooperate, Action::Defect]
 }
 
-/// Build an FSM strategy spec with a given state count and transition table.
-///
-/// `start_state` is always 0; `input_mode` defaults to `OpponentLastAction`.
-/// The `outputs` vector maps each state to its initial action.
 fn fsm_spec(
     label: impl Into<String>,
     num_states: usize,
@@ -88,10 +53,6 @@ fn fsm_spec(
     }
 }
 
-/// Build a Turing machine strategy spec with explicit transitions.
-///
-/// Uses 1-state, 2-symbol defaults (the most common benchmark configuration)
-/// and allows overriding `max_steps_per_round` for heavy-compute scenarios.
 fn tm_spec(
     label: impl Into<String>,
     transitions: Vec<TmTransition>,
@@ -115,8 +76,6 @@ fn tm_spec(
     }
 }
 
-/// A minimal two-transition TM table: writes the opposite symbol and moves in
-/// the given direction. Shared by `build_tm_uniform_tournament`.
 fn binary_tm_transitions(movement: HeadMovement) -> Vec<TmTransition> {
     let move_dir = movement.to_tm_move();
     vec![
@@ -133,7 +92,6 @@ fn binary_tm_transitions(movement: HeadMovement) -> Vec<TmTransition> {
     ]
 }
 
-/// Build a cellular automaton strategy spec from rule parameters.
 fn ca_spec(
     label: impl Into<String>,
     rule_number: u64,
@@ -152,10 +110,6 @@ fn ca_spec(
     }
 }
 
-// ── Benchmark kernel wrapper ────────────────────────────────
-
-/// Thin wrapper around [`TournamentKernel`] that bundles config and kernel
-/// together, providing `run_sequential` as a convenience for benchmarks.
 struct BenchTournament {
     kernel: TournamentKernel,
 }
@@ -166,7 +120,6 @@ impl BenchTournament {
         Self { kernel }
     }
 
-    /// Execute one full tournament pass with no event or history writers.
     fn run_sequential(&self) -> nit_games::output::TournamentResults {
         self.kernel.run(KernelRunMode::Sequential {
             event_writer: None,
@@ -175,12 +128,6 @@ impl BenchTournament {
     }
 }
 
-// ── TM head-movement patterns ───────────────────────────────
-
-/// Named movement patterns for TM benchmark transitions.
-///
-/// Using an enum instead of raw `TmMove` values improves readability at
-/// call sites and lets each benchmark clearly declare its movement intent.
 #[derive(Clone, Copy)]
 enum HeadMovement {
     /// Head advances right each step — tape is consumed linearly.
@@ -208,17 +155,8 @@ impl std::fmt::Display for HeadMovement {
     }
 }
 
-/// Standard round count used for baseline benchmarks where latency scaling
-/// (rather than absolute throughput) is the metric of interest.
 const BASELINE_ROUNDS: u32 = 200;
 
-// ── Config scaffold ─────────────────────────────────────────
-
-/// Construct a `NormalizedConfig` with standard IPD benchmark defaults.
-///
-/// All optional fields (event logging, history, noise) are disabled.
-/// The `engine` and `max_memory_n` fields use their defaults; callers
-/// override them on the returned struct when needed.
 fn config_scaffold(
     strategies: Vec<StrategySpec>,
     rounds: u32,
@@ -250,10 +188,8 @@ fn config_scaffold(
     }
 }
 
-// ── Parameterised config builders ───────────────────────────
+// ── Config builders ──
 
-/// Variable-size FSM tournament: each strategy gets a unique 2-state transition
-/// table derived from its index, producing varied cooperation/defection patterns.
 fn build_generic_fsm_tournament(
     strategy_count: usize,
     rounds: u32,
@@ -276,10 +212,6 @@ fn build_generic_fsm_tournament(
     config_scaffold(specs, rounds, repetitions, self_play)
 }
 
-/// Classic IPD strategy suite for deterministic-outcome benchmarks.
-///
-/// Includes Always-Cooperate, Always-Defect, Tit-for-Tat, Anti-TFT,
-/// a Rule-30 cellular automaton, and a minimal Turing machine.
 fn build_deterministic_strategy_suite(rounds: u32) -> NormalizedConfig {
     let allc = fsm_spec("fsm_allc", 1, vec![Action::Cooperate], vec![vec![0, 0]]);
     let alld = fsm_spec("fsm_alld", 1, vec![Action::Defect], vec![vec![0, 0]]);
@@ -311,7 +243,6 @@ fn build_deterministic_strategy_suite(rounds: u32) -> NormalizedConfig {
     cfg
 }
 
-/// Pure-FSM tournament with many 2-state strategies for fast-eval stress testing.
 fn build_fsm_heavy_tournament(strategy_count: usize, rounds: u32) -> NormalizedConfig {
     let specs: Vec<StrategySpec> = (0..strategy_count)
         .map(|idx| {
@@ -407,7 +338,7 @@ fn build_alternating_baseline(strategy_count: usize, rounds: u32) -> NormalizedC
     config_scaffold(specs, rounds, 1, false)
 }
 
-// ── Benchmarks: single match and tournament sizes ───────────
+// ── Benchmarks: tournament sizes ──
 
 /// Baseline latency for a single 200-round match between two FSM strategies.
 fn bench_single_match(c: &mut Criterion) {
@@ -437,7 +368,7 @@ fn bench_tournament_medium(c: &mut Criterion) {
     });
 }
 
-// ── Benchmarks: logging overhead ────────────────────────────
+// ── Benchmarks: logging overhead ──
 
 /// Measures the I/O cost of NDJSON event and history logging during a tournament.
 ///
@@ -479,7 +410,7 @@ fn bench_logging(c: &mut Criterion) {
     group.finish();
 }
 
-// ── Benchmarks: parallel execution ──────────────────────────
+// ── Benchmarks: parallel execution ──
 
 /// Rayon-parallel tournament at two field sizes (64 and 256 strategies).
 ///
@@ -523,7 +454,7 @@ fn bench_parallel(c: &mut Criterion) {
     group.finish();
 }
 
-// ── Benchmarks: fast-eval cycle detection ───────────────────
+// ── Benchmarks: fast-eval ──
 
 /// Compare fast-eval (cycle-detecting) vs brute-force execution.
 ///
@@ -610,7 +541,7 @@ fn bench_fast_eval_pair(
     });
 }
 
-// ── Benchmarks: FSM fast-eval stress ────────────────────────
+// ── Benchmarks: FSM fast-eval stress ──
 
 /// Stress-test fast-eval with 32 FSM strategies over 3000 rounds.
 ///
@@ -624,7 +555,7 @@ fn bench_fsm_fast_eval_heavy(c: &mut Criterion) {
     group.finish();
 }
 
-// ── Benchmarks: Turing machine micro and tournament ─────────
+// ── Benchmarks: Turing machine ──
 
 /// Micro-benchmark for raw TM evaluation throughput.
 ///
@@ -705,7 +636,7 @@ fn bench_tm_heavy(c: &mut Criterion) {
     group.finish();
 }
 
-// ── Benchmarks: TM halting filter ───────────────────────────
+// ── Benchmarks: TM halting filter ──
 
 /// Pre-tournament TM halting filter over the full 1-state-2-symbol Wolfram family.
 ///
@@ -733,7 +664,7 @@ fn bench_tm_family_halting_filter(c: &mut Criterion) {
     group.finish();
 }
 
-// ── Benchmarks: sweep I/O serialisation ─────────────────────
+// ── Benchmarks: sweep I/O ──
 
 /// Measures JSON serialisation throughput for tournament artefacts.
 ///
@@ -793,7 +724,7 @@ fn bench_sweep_io(c: &mut Criterion) {
     });
 }
 
-// ── Criterion harness ───────────────────────────────────────
+// ── Criterion harness ──
 
 criterion_group!(
     benches,

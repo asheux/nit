@@ -57,16 +57,16 @@ pub(super) fn payoff_from_config(config: PayoffConfig, errors: &mut Vec<String>)
     ])
 }
 
-const DEFAULT_REWARD: i32 = 3;
-const DEFAULT_SUCKER: i32 = 0;
-const DEFAULT_TEMPTATION: i32 = 5;
-const DEFAULT_PUNISHMENT: i32 = 1;
+const DEFAULT_R: i32 = 3;
+const DEFAULT_S: i32 = 0;
+const DEFAULT_T: i32 = 5;
+const DEFAULT_P: i32 = 1;
 
 pub(super) fn fallback_payoff(config: PayoffConfig) -> PayoffMatrix {
-    let reward = config.r.unwrap_or(DEFAULT_REWARD);
-    let sucker = config.s.unwrap_or(DEFAULT_SUCKER);
-    let temptation = config.t.unwrap_or(DEFAULT_TEMPTATION);
-    let punishment = config.p.unwrap_or(DEFAULT_PUNISHMENT);
+    let reward = config.r.unwrap_or(DEFAULT_R);
+    let sucker = config.s.unwrap_or(DEFAULT_S);
+    let temptation = config.t.unwrap_or(DEFAULT_T);
+    let punishment = config.p.unwrap_or(DEFAULT_P);
     PayoffMatrix::from_matrix([
         [[reward, reward], [sucker, temptation]],
         [[temptation, sucker], [punishment, punishment]],

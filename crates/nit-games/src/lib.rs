@@ -1,5 +1,4 @@
-//! Game theory tournament engine with configurable strategies, payoff matrices,
-//! and analysis.
+//! Game-theory tournament engine: strategies, payoff matrices, and analysis.
 
 #![forbid(unsafe_code)]
 

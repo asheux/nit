@@ -1,10 +1,4 @@
 //! Post-tournament history analysis.
-//!
-//! Given an NDJSON history log produced by a tournament run, this module
-//! computes per-match summaries (outcome counts, cooperation rates),
-//! per-strategy aggregates, and trajectory samples for randomness-tagged
-//! matches. Results are written as CSV, NDJSON, and a JSON summary file
-//! under a configurable output directory.
 
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -18,13 +12,14 @@ use crate::events::EventWriter;
 use nit_utils::fs::write_atomic;
 
 const ANALYSIS_SCHEMA_VERSION: u32 = 1;
+
+fn str_err<E: std::fmt::Display>(err: E) -> String {
+    err.to_string()
+}
 const DEFAULT_TAIL_ROUNDS: usize = 10_000;
 const DEFAULT_TRAJECTORY_SAMPLES: usize = 50;
 const DEFAULT_PREVIEW_LIMIT: usize = 3;
 
-/// Configuration controlling the history analysis pass: how many tail rounds
-/// to consider, how many trajectory sample buckets to produce, and which
-/// strategy-ID substrings identify "random" matches.
 #[derive(Clone, Debug)]
 pub struct AnalysisConfig {
     pub tail_rounds: usize,
@@ -61,8 +56,6 @@ pub struct OutcomeCounts {
     pub dd: u32,
 }
 
-/// Per-match analysis record: outcome counts, cooperation rates, and
-/// tail-window statistics for a single match between two strategies.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct MatchSummary {
     pub match_id: usize,
@@ -85,8 +78,6 @@ pub struct MatchSummary {
     pub b_initial: Option<char>,
 }
 
-/// Aggregate analysis for a single strategy across all its matches:
-/// total rounds, cooperation rate, tail cooperation rate, and average score.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct StrategySummary {
     pub id: String,
@@ -185,11 +176,6 @@ struct StrategyAgg {
     total_score: i64,
 }
 
-/// Run the full analysis pipeline over the given NDJSON history log, writing
-/// CSV and JSON artefacts into `out_dir`.
-///
-/// Returns a [`HistoryAnalysis`] containing both the serialised summary and a
-/// small preview suitable for TUI display.
 pub fn analyze_history(
     history_path: &Path,
     out_dir: &Path,
@@ -240,12 +226,10 @@ pub fn analyze_history(
         File::open(history_path).map_err(|err| format!("Failed to open history log: {err}"))?;
     let reader = BufReader::new(history_file);
 
-    let mut matches_csv =
-        BufWriter::new(File::create(&paths.matches_csv).map_err(|err| err.to_string())?);
-    let mut matches_ndjson =
-        BufWriter::new(File::create(&paths.matches_ndjson).map_err(|err| err.to_string())?);
+    let mut matches_csv = BufWriter::new(File::create(&paths.matches_csv).map_err(str_err)?);
+    let mut matches_ndjson = BufWriter::new(File::create(&paths.matches_ndjson).map_err(str_err)?);
     let mut trajectories_csv =
-        BufWriter::new(File::create(&paths.trajectories_csv).map_err(|err| err.to_string())?);
+        BufWriter::new(File::create(&paths.trajectories_csv).map_err(str_err)?);
 
     write_matches_csv_header(&mut matches_csv)?;
     write_trajectories_csv_header(&mut trajectories_csv)?;
@@ -327,9 +311,9 @@ pub fn analyze_history(
         max_rounds = max_rounds.max(rounds);
     }
 
-    matches_csv.flush().map_err(|err| err.to_string())?;
-    matches_ndjson.flush().map_err(|err| err.to_string())?;
-    trajectories_csv.flush().map_err(|err| err.to_string())?;
+    matches_csv.flush().map_err(str_err)?;
+    matches_ndjson.flush().map_err(str_err)?;
+    trajectories_csv.flush().map_err(str_err)?;
 
     let mut strategies: Vec<StrategySummary> = strategy_map
         .into_iter()
@@ -379,7 +363,6 @@ pub fn analyze_history(
     })
 }
 
-/// Build a [`MatchSummary`] from a parsed history record.
 fn summarize_record(
     record: &MatchHistoryLite,
     tail_rounds: usize,
@@ -512,34 +495,21 @@ fn update_strategy(
     entry.total_score = entry.total_score.saturating_add(score);
 }
 
-/// Convert a [`StrategyAgg`] accumulator into the public [`StrategySummary`],
-/// computing derived rates.
-fn agg_to_summary(id: String, aggregate: StrategyAgg) -> StrategySummary {
-    let coop_rate = if aggregate.rounds == 0 {
-        0.0
-    } else {
-        aggregate.coop_rounds as f64 / aggregate.rounds as f64
-    };
-    let tail_coop_rate = if aggregate.tail_rounds == 0 {
-        0.0
-    } else {
-        aggregate.tail_coop_rounds as f64 / aggregate.tail_rounds as f64
-    };
-    let avg_score_per_round = if aggregate.rounds == 0 {
-        0.0
-    } else {
-        aggregate.total_score as f64 / aggregate.rounds as f64
-    };
+fn agg_to_summary(id: String, agg: StrategyAgg) -> StrategySummary {
+    let safe_div = |num: f64, den: u64| if den == 0 { 0.0 } else { num / den as f64 };
+    let coop_rate = safe_div(agg.coop_rounds as f64, agg.rounds);
+    let tail_coop_rate = safe_div(agg.tail_coop_rounds as f64, agg.tail_rounds);
+    let avg_score_per_round = safe_div(agg.total_score as f64, agg.rounds);
     StrategySummary {
         id,
-        matches: aggregate.matches,
-        rounds: aggregate.rounds,
-        coop_rounds: aggregate.coop_rounds,
+        matches: agg.matches,
+        rounds: agg.rounds,
+        coop_rounds: agg.coop_rounds,
         coop_rate,
-        tail_rounds: aggregate.tail_rounds,
-        tail_coop_rounds: aggregate.tail_coop_rounds,
+        tail_rounds: agg.tail_rounds,
+        tail_coop_rounds: agg.tail_coop_rounds,
         tail_coop_rate,
-        total_score: aggregate.total_score,
+        total_score: agg.total_score,
         avg_score_per_round,
     }
 }
@@ -609,8 +579,8 @@ fn build_trajectory(outcomes: &[u8], samples: usize) -> TrajectoryData {
 }
 
 fn write_match_summary(writer: &mut BufWriter<File>, summary: &MatchSummary) -> Result<(), String> {
-    serde_json::to_writer(&mut *writer, summary).map_err(|err| err.to_string())?;
-    writer.write_all(b"\n").map_err(|err| err.to_string())?;
+    serde_json::to_writer(&mut *writer, summary).map_err(str_err)?;
+    writer.write_all(b"\n").map_err(str_err)?;
     Ok(())
 }
 
@@ -642,7 +612,7 @@ fn write_matches_csv_header(writer: &mut BufWriter<File>) -> Result<(), String> 
         "b_initial",
     ]
     .join(",");
-    writeln!(writer, "{header}").map_err(|err| err.to_string())
+    writeln!(writer, "{header}").map_err(str_err)
 }
 
 fn write_match_csv_row(writer: &mut BufWriter<File>, summary: &MatchSummary) -> Result<(), String> {
@@ -678,11 +648,11 @@ fn write_match_csv_row(writer: &mut BufWriter<File>, summary: &MatchSummary) -> 
         a_initial,
         b_initial
     )
-    .map_err(|err| err.to_string())
+    .map_err(str_err)
 }
 
 fn write_strategies_csv(path: &str, strategies: &[StrategySummary]) -> Result<(), String> {
-    let mut writer = BufWriter::new(File::create(path).map_err(|err| err.to_string())?);
+    let mut writer = BufWriter::new(File::create(path).map_err(str_err)?);
     let header = [
         "id",
         "matches",
@@ -696,7 +666,7 @@ fn write_strategies_csv(path: &str, strategies: &[StrategySummary]) -> Result<()
         "avg_score_per_round",
     ]
     .join(",");
-    writeln!(writer, "{header}").map_err(|err| err.to_string())?;
+    writeln!(writer, "{header}").map_err(str_err)?;
     for strategy in strategies {
         let id = csv_escape(&strategy.id);
         writeln!(
@@ -713,9 +683,9 @@ fn write_strategies_csv(path: &str, strategies: &[StrategySummary]) -> Result<()
             strategy.total_score,
             strategy.avg_score_per_round
         )
-        .map_err(|err| err.to_string())?;
+        .map_err(str_err)?;
     }
-    writer.flush().map_err(|err| err.to_string())?;
+    writer.flush().map_err(str_err)?;
     Ok(())
 }
 
@@ -733,7 +703,7 @@ fn write_trajectories_csv_header(writer: &mut BufWriter<File>) -> Result<(), Str
         "b_coop_rate",
     ]
     .join(",");
-    writeln!(writer, "{header}").map_err(|err| err.to_string())
+    writeln!(writer, "{header}").map_err(str_err)
 }
 
 fn write_trajectory_samples(
@@ -771,7 +741,7 @@ fn write_trajectory_samples(
             a_rate,
             b_rate
         )
-        .map_err(|err| err.to_string())?;
+        .map_err(str_err)?;
     }
     Ok(())
 }

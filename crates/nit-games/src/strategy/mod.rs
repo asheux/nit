@@ -21,6 +21,7 @@ pub use tm::{
 
 // ── Crate-internal re-exports ────────────────────────────────
 
+pub(crate) use fsm::{decode_notebook_index_digits, validate_decode_params};
 pub(crate) use tm::InputSuffix;
 
 // ── Strategy trait ───────────────────────────────────────────
@@ -87,7 +88,6 @@ pub enum TmMove {
     Stay,
 }
 
-/// A single TM transition rule: write symbol, move head, go to next state.
 #[derive(Copy, Clone, Debug, Serialize, Deserialize)]
 pub struct TmTransition {
     pub write: u8,
@@ -100,9 +100,7 @@ pub struct TmTransition {
 // ── Codec functions ──────────────────────────────────────────
 
 /// Decode a Wolfram-style rule code into a flat transition table.
-///
-/// Returns `(transitions, remaining)` where `remaining` is any unused
-/// higher-order digits from the rule code.
+/// `remaining` in the return is any unused higher-order digits.
 pub fn decode_tm_rule_code_wolfram(
     rule_code: u64,
     states: usize,
@@ -170,7 +168,6 @@ pub fn tm_max_index(states: usize, symbols: usize) -> Option<u128> {
 
 // ── Internal helpers ─────────────────────────────────────────
 
-/// Map a numeric output symbol to an action: 0 → Cooperate, anything else → Defect.
 pub(crate) fn symbol_to_action(symbol: u8) -> Action {
     match symbol {
         0 => Action::Cooperate,

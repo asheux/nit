@@ -462,10 +462,7 @@ where
 /// Build the serializable [`StrategyDefinition`] list from the roster specs.
 ///
 /// Used by both the kernel and runner to populate the run summary output.
-pub(super) fn build_strategy_definitions(
-    strategies: &[StrategySpec],
-    _seed_deriver: &SeedDeriver,
-) -> Vec<StrategyDefinition> {
+pub(super) fn build_strategy_definitions(strategies: &[StrategySpec]) -> Vec<StrategyDefinition> {
     strategies
         .iter()
         .map(|spec| StrategyDefinition {
@@ -498,8 +495,7 @@ pub(super) fn strategy_log_id(spec: &StrategySpec) -> String {
 ///
 /// Dispatches on the spec kind to build the correct concrete strategy type
 /// (FSM, CA, or one-sided TM).
-pub(crate) fn build_strategy(spec: &StrategySpec, seed: u64) -> Box<dyn Strategy> {
-    let _ = seed;
+pub(crate) fn build_strategy(spec: &StrategySpec, _seed: u64) -> Box<dyn Strategy> {
     match &spec.kind {
         StrategySpecKind::Fsm {
             start_state,
