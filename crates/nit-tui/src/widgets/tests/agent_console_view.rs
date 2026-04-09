@@ -1104,11 +1104,23 @@ fn breather_rows_include_swarm_assigned_agents_even_when_idle() {
     assert!(flattened.iter().any(|line| line.contains("Planner")));
     assert!(flattened.iter().any(|line| line.contains("Coder")));
     assert!(flattened.iter().any(|line| line.contains("Swarm pending")));
-    // While agents are working, the footer shows only mission, gates, and notes.
+    // Compact footer: only the "Swarm · template · mission" header and the
+    // gates summary should appear. Integrator/Verifier/Status/Notes labels
+    // are deliberately dropped — the clone agents for those roles are in the
+    // breather rows above, and the "Done" badge covers overall status.
     assert!(!rows.iter().any(|row| row.text.contains("Template:")));
+    assert!(!rows.iter().any(|row| row.text.contains("Mission:")));
     assert!(!rows.iter().any(|row| row.text.contains("Integrator:")));
     assert!(!rows.iter().any(|row| row.text.contains("Verifier:")));
-    assert!(rows.iter().any(|row| row.text.contains("Gates:")));
+    assert!(!rows.iter().any(|row| row.text.contains("Status:")));
+    assert!(!rows.iter().any(|row| row.text.contains("Notes:")));
+    // Bullet markers (`• `) used by the old footer must not appear anywhere.
+    assert!(!rows.iter().any(|row| row.text.contains("• ")));
+    // Header and gates line are both present in the compact form. The
+    // fixture's launch message has no explicit "mission:" field, so the
+    // header collapses to "Swarm · <template>".
+    assert!(rows.iter().any(|row| row.text.contains("Swarm · lab")));
+    assert!(rows.iter().any(|row| row.text.contains("Gates: rust-ci")));
 }
 
 #[test]

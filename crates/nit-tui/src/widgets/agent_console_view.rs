@@ -2623,126 +2623,98 @@ fn append_swarm_meta_footer_rows(
     indent_str: &str,
     width: usize,
     inner: usize,
-    working: bool,
+    _working: bool,
 ) {
     let Some(meta) = collect_swarm_footer_meta(state, mission_id) else {
         return;
     };
 
-    let max_inner = inner.max(1);
-    let mut entries: Vec<(&str, String)> = Vec::new();
-    // When agents are actively working, show only the essential fields.
-    if !working {
-        if let Some(value) = meta.template {
-            entries.push(("Template", value));
-        }
+    // Compact header: "Swarm · <template> · <mission>". Template and mission
+    // both sit on one line because the full launch-message with all fields is
+    // already visible higher up in the thread, and the integrator/verifier
+    // clones are already listed in the agent breather rows at the top.
+    let mut header_parts: Vec<String> = vec!["Swarm".to_string()];
+    if let Some(template) = meta.template.as_deref() {
+        header_parts.push(template.to_string());
     }
-    if let Some(value) = meta.mission {
-        entries.push(("Mission", value));
+    if let Some(mission) = meta.mission.as_deref() {
+        header_parts.push(mission.to_string());
     }
-    if !working {
-        if let Some(value) = meta.integrator {
-            entries.push(("Integrator", value));
-        }
-        if let Some(value) = meta.verifier {
-            entries.push(("Verifier", value));
-        }
-    }
-    if let Some(value) = meta.gates {
-        entries.push(("Gates", value));
-    }
-    if !working {
-        if let Some(value) = meta.status {
-            entries.push(("Status", value));
-        }
-    }
-    if !meta.notes.is_empty() {
-        entries.push(("Notes", meta.notes.join(" | ")));
-    }
+    let header_line = header_parts.join(" · ");
 
-    if entries.is_empty() {
+    // Gates is the only piece of info worth keeping here — it's the
+    // at-a-glance pass/fail summary the operator can't get without scrolling
+    // to the gate monitor pane. Overall status is redundant with the "Done"
+    // badge at the top of the pane and is derivable from the gate entries.
+    if header_parts.len() == 1 && meta.gates.is_none() {
+        // Nothing useful to show beyond "Swarm".
         return;
     }
 
+    let max_inner = inner.max(1);
+
+    // Blank row before the footer so it has breathing room from the last
+    // thread message without drawing an explicit border rule.
     rows.push(ThreadRow {
         text: pad_to_width(indent_str, width),
         kind: ThreadRowKind::StatusRow,
     });
-    rows.push(ThreadRow {
-        text: pad_to_width(&format!("{indent_str}{}", "─".repeat(max_inner)), width),
-        kind: ThreadRowKind::StatusHeader,
-    });
-    rows.push(ThreadRow {
-        text: pad_to_width(&format!("{indent_str}Swarm"), width),
-        kind: ThreadRowKind::StatusHeader,
-    });
-
-    for (label, value) in entries.iter() {
-        append_swarm_footer_entry(rows, indent_str, width, max_inner, label, value);
+    append_swarm_footer_line(rows, indent_str, width, max_inner, &header_line, true);
+    if let Some(gates) = meta.gates.as_deref() {
+        append_swarm_footer_line(
+            rows,
+            indent_str,
+            width,
+            max_inner,
+            &format!("Gates: {gates}"),
+            false,
+        );
     }
-
-    rows.push(ThreadRow {
-        text: pad_to_width(&format!("{indent_str}{}", "─".repeat(max_inner)), width),
-        kind: ThreadRowKind::StatusHeader,
-    });
-    rows.push(ThreadRow {
-        text: pad_to_width(indent_str, width),
-        kind: ThreadRowKind::StatusRow,
-    });
 }
 
 #[derive(Default)]
 struct SwarmFooterMeta {
     template: Option<String>,
     mission: Option<String>,
-    integrator: Option<String>,
-    verifier: Option<String>,
     gates: Option<String>,
-    status: Option<String>,
-    notes: Vec<String>,
 }
 
 impl SwarmFooterMeta {
     fn is_empty(&self) -> bool {
-        self.template.is_none()
-            && self.mission.is_none()
-            && self.integrator.is_none()
-            && self.verifier.is_none()
-            && self.gates.is_none()
-            && self.status.is_none()
-            && self.notes.is_empty()
+        self.template.is_none() && self.mission.is_none() && self.gates.is_none()
     }
 }
 
-fn append_swarm_footer_entry(
+/// Push one footer line with wrapping if it overflows the inner width.
+/// `header` rows use the `StatusHeader` kind (so the theme can render them
+/// with the footer-title color); continuation lines use `StatusSubRow`.
+fn append_swarm_footer_line(
     rows: &mut Vec<ThreadRow>,
     indent_str: &str,
     width: usize,
     max_inner: usize,
-    label: &str,
-    value: &str,
+    text: &str,
+    header: bool,
 ) {
-    let prefix = format!("• {label}: ");
-    let prefix_len = prefix.chars().count();
-    let available = max_inner.saturating_sub(prefix_len).max(1);
-    let segments = wrap_visual_line(value, available);
+    let available = max_inner.max(1);
+    let segments = wrap_visual_line(text, available);
+    let kind = if header {
+        ThreadRowKind::StatusHeader
+    } else {
+        ThreadRowKind::StatusSubRow
+    };
     if segments.is_empty() {
         rows.push(ThreadRow {
-            text: pad_to_width(&format!("{indent_str}{prefix}"), width),
-            kind: ThreadRowKind::StatusSubRow,
+            text: pad_to_width(indent_str, width),
+            kind,
         });
         return;
     }
-
-    for (idx, seg) in segments.iter().enumerate() {
-        let line = if idx == 0 {
-            format!("{indent_str}{prefix}{seg}")
-        } else {
-            format!("{indent_str}{}{}", " ".repeat(prefix_len), seg)
-        };
+    for seg in segments.iter() {
+        let line = format!("{indent_str}{seg}");
         rows.push(ThreadRow {
             text: pad_to_width(&line, width),
-            kind: ThreadRowKind::StatusSubRow,
+            kind,
         });
     }
 }
@@ -2764,12 +2736,6 @@ fn collect_swarm_footer_meta(state: &AppState, mission_id: &str) -> Option<Swarm
             if meta.mission.is_none() {
                 meta.mission = template_line.mission;
             }
-            if meta.integrator.is_none() {
-                meta.integrator = template_line.integrator;
-            }
-            if meta.verifier.is_none() {
-                meta.verifier = template_line.verifier;
-            }
             if meta.gates.is_none() {
                 meta.gates = template_line.gates;
             }
@@ -2781,19 +2747,6 @@ fn collect_swarm_footer_meta(state: &AppState, mission_id: &str) -> Option<Swarm
                 continue;
             }
         }
-        if meta.status.is_none() {
-            if let Some(status) = parse_verify_status_line(text) {
-                meta.status = Some(status);
-                continue;
-            }
-        }
-        if text.starts_with("Swarm ") || text.starts_with("VERIFY") {
-            meta.notes.push(text.to_string());
-        }
-    }
-
-    if meta.notes.len() > 3 {
-        meta.notes.truncate(3);
     }
 
     if meta.is_empty() {
@@ -2806,8 +2759,6 @@ fn collect_swarm_footer_meta(state: &AppState, mission_id: &str) -> Option<Swarm
 struct SwarmTemplateMeta {
     template: String,
     mission: Option<String>,
-    integrator: Option<String>,
-    verifier: Option<String>,
     gates: Option<String>,
 }
 
@@ -2820,8 +2771,6 @@ fn parse_swarm_template_meta(text: &str) -> Option<SwarmTemplateMeta> {
     }
 
     let mut mission: Option<String> = None;
-    let mut integrator: Option<String> = None;
-    let mut verifier: Option<String> = None;
     let mut gates: Option<String> = None;
     for part in parts {
         let part = part.trim();
@@ -2829,14 +2778,10 @@ fn parse_swarm_template_meta(text: &str) -> Option<SwarmTemplateMeta> {
             mission = Some(normalize_swarm_meta_value(value));
             continue;
         }
-        if let Some(value) = part.strip_prefix("integrator:") {
-            integrator = Some(normalize_swarm_meta_value(value));
-            continue;
-        }
-        if let Some(value) = part.strip_prefix("verifier:") {
-            verifier = Some(normalize_swarm_meta_value(value));
-            continue;
-        }
+        // integrator: and verifier: are intentionally dropped from the footer
+        // meta — the clone agents that play those roles are already listed in
+        // the breather rows at the top of this pane, so showing them again
+        // here just adds clutter without new information.
         if let Some(value) = part.strip_prefix("gates:") {
             gates = Some(normalize_swarm_meta_value(short_gate_bundle_label(value)));
         }
@@ -2845,8 +2790,6 @@ fn parse_swarm_template_meta(text: &str) -> Option<SwarmTemplateMeta> {
     Some(SwarmTemplateMeta {
         template: normalize_swarm_meta_value(template),
         mission,
-        integrator,
-        verifier,
         gates,
     })
 }
@@ -2857,14 +2800,6 @@ fn parse_swarm_gates_line(text: &str) -> Option<String> {
         return None;
     }
     Some(normalize_swarm_meta_value(short_gate_bundle_label(rest)))
-}
-
-fn parse_verify_status_line(text: &str) -> Option<String> {
-    let rest = text.trim().strip_prefix("VERIFY result:")?.trim();
-    if rest.is_empty() {
-        return None;
-    }
-    Some(rest.to_string())
 }
 
 fn normalize_swarm_meta_value(value: &str) -> String {
