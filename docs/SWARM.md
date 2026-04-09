@@ -322,17 +322,164 @@ Notes:
 
 ## Verification Gates
 
-Swarm can optionally run a “gate bundle” after tasks finish (e.g. `rust-ci`).
+After tasks finish, swarm can optionally dispatch a **verifier agent** that runs
+a list of gate commands against the workspace and produces a JSON report. Gates
+are how you tell nit *what "done" means* for your project — formatters, linters,
+type-checkers, tests, benchmarks, whatever matters.
 
-Gate selection:
+### Selecting a bundle
 
-- auto-detected from the workspace (e.g. `Cargo.toml` → Rust), or
-- overridden via `.nit/config.toml`:
+By default, nit auto-detects a built-in **gate bundle** from the workspace root:
+
+| Marker file          | Bundle       | Default commands                                                                                                          |
+|----------------------|--------------|---------------------------------------------------------------------------------------------------------------------------|
+| `Cargo.toml`         | `rust-ci`    | `cargo fmt --all -- --check`, `cargo clippy --all-targets --all-features -- -D warnings`, `cargo test --workspace --all-features` |
+| `package.json`       | `node-ci`    | `npm run lint --if-present`, `npm run build --if-present`, `npm test -- --watch=false --passWithNoTests`                  |
+| `pyproject.toml` / `requirements.txt` / `setup.py` / `setup.cfg` | `python-ci`  | `python -m ruff check .`, `python -m mypy .`, `python -m pytest -q` |
+| `go.mod`             | `go-ci`      | `gofmt -l .`, `go vet ./...`, `go test ./...`                                                                             |
+
+You can override the auto-detected bundle in `.nit/config.toml`:
 
 ```toml
 [swarm.gates]
-default = "auto"   # or "none", "rust-ci", "node-ci", "python-ci", "go-ci"
+default = "auto"
+# Values: "auto" (default), "none", "rust-ci", "node-ci", "python-ci", "go-ci"
 ```
+
+Set `default = "none"` to skip verification entirely — the swarm will jump
+straight from Executing → Synthesizing with no verifier agent.
+
+### Scope-aware Rust commands
+
+The built-in `rust-ci` bundle is **scope-aware**. When the operator's prompt
+mentions one or more `crates/<pkg>/` paths, nit derives the set of touched
+cargo packages from those paths and substitutes them into the gate commands
+using the `{cargo_packages}` placeholder. The verifier then runs targeted
+commands instead of the full workspace suite:
+
+```text
+Operator prompt: "refactor crates/nit-utils/src/ for clarity"
+  ↓ derive_cargo_packages → ["nit-utils"]
+  ↓ substituted into the rust-ci templates
+Verifier runs:
+  cargo fmt -p nit-utils -- --check
+  cargo clippy -p nit-utils --all-targets --all-features -- -D warnings
+  cargo test -p nit-utils --all-features
+```
+
+If the scope spans multiple packages, the templates expand into multiple
+`-p` flags (`cargo test -p nit-utils -p nit-core --all-features`).
+
+**Fallback to full workspace** happens when:
+- No scope files were declared in the prompt, OR
+- Any scope file sits outside `crates/<pkg>/...` (e.g. a workspace-root
+  `Cargo.toml` edit, a file under `scripts/`, or `docs/`) — in that case,
+  nit can't cleanly map the scope to packages and runs `--workspace` /
+  `--all` to stay correct.
+
+The `node-ci`, `python-ci`, and `go-ci` bundles do **not** currently ship
+scoped templates — they always run their full-workspace commands. If you
+want scoped behavior on those stacks, define custom gates (see below).
+
+### Custom gates — `[[swarm.gates.custom]]`
+
+When the built-in bundles don't match your project's toolchain, define an
+explicit gate list in `.nit/config.toml`. Custom gates **fully override** the
+auto-detected bundle — the swarm will run exactly what you list, in order.
+
+```toml
+[[swarm.gates.custom]]
+name = "fmt"
+command = "just fmt-check"
+scoped_command = "just fmt-check-crates {cargo_packages}"  # optional
+
+[[swarm.gates.custom]]
+name = "lint"
+command = "just clippy"
+scoped_command = "just clippy-crates {cargo_packages}"
+
+[[swarm.gates.custom]]
+name = "test"
+command = "cargo nextest run --workspace"
+scoped_command = "cargo nextest run {cargo_packages}"
+
+[[swarm.gates.custom]]
+name = "bench-smoke"
+command = "cargo bench --bench smoke -- --quick"
+# No scoped_command → this gate always runs the full command, even when
+# scope is known.
+```
+
+**Fields:**
+
+| Field            | Required | Description                                                                                                                           |
+|------------------|----------|---------------------------------------------------------------------------------------------------------------------------------------|
+| `name`           | yes      | Short label shown in the gate dashboard and in `report.json` (e.g. `"fmt"`, `"test"`, `"genome"`).                                    |
+| `command`        | yes      | Full, workspace-wide command. Used as the fallback when scope cannot be derived cleanly.                                              |
+| `scoped_command` | no       | Template run when nit successfully derives cargo packages from the prompt scope. Supports `{cargo_packages}` / `{packages}` substitution (see below). Omit to always run `command`. |
+
+**Placeholders in `scoped_command`:**
+
+| Placeholder        | Expands to                                                                 |
+|--------------------|----------------------------------------------------------------------------|
+| `{cargo_packages}` | Space-joined `-p <pkg>` flags, e.g. `-p nit-tui -p nit-core`. Best for cargo. |
+| `{packages}`       | Plain space-joined package names, e.g. `nit-tui nit-core`. Best for `just`, `make`, scripts. |
+
+If you use a language other than Rust, the simplest pattern is to wrap your
+project's scoped operations in scripts or justfile recipes, then reference
+them from `scoped_command`. Example for a pnpm workspace:
+
+```toml
+[[swarm.gates.custom]]
+name = "lint"
+command = "pnpm -r lint"
+scoped_command = "pnpm --filter {packages} lint"
+
+[[swarm.gates.custom]]
+name = "test"
+command = "pnpm -r test"
+scoped_command = "pnpm --filter {packages} test"
+```
+
+> **Note:** `{cargo_packages}` and `{packages}` are only substituted when the
+> operator's prompt scope maps cleanly onto the `crates/<pkg>/` layout. For
+> non-Rust projects, the current scope derivation won't populate packages,
+> so `scoped_command` will never fire unless you also extend scope detection
+> (see `derive_cargo_packages` in `crates/nit-tui/src/swarm.rs` — open to
+> contributions for language-agnostic scope mapping).
+
+### Config resolution order
+
+1. **`[[swarm.gates.custom]]` entries exist** → use them verbatim. The
+   detected language bundle is ignored.
+2. **`[swarm.gates] default` is set to a specific bundle** (e.g. `"rust-ci"`)
+   → use that bundle's built-in commands.
+3. **`[swarm.gates] default = "none"`** → skip verification entirely.
+4. **Default (`"auto"` or no config)** → auto-detect from workspace marker
+   files and use the matching built-in bundle.
+
+Malformed custom-gate entries surface as a `config-error:…` segment in the
+mission's "gates:" system message, and nit falls back to the detected bundle
+so the swarm still makes progress.
+
+### Genome quality gate
+
+The `genome-quality` gate is independent of the bundle/custom selection: it
+runs automatically as a background task when `state.settings.genome.genome_gate_enabled`
+is true, evaluating the structural quality of files the integrator touched.
+Its results are injected into the verifier's prompt so the verifier can
+include a `genome-quality` entry in the report alongside the bundle gates.
+
+### Output artifacts
+
+Every verify pass writes:
+
+- `.nit/swarm/<mission-id>/gates/report.json` — structured `GateReport` with
+  per-gate `ok`/`status`/`notes` plus `overall_ok`.
+- `.nit/swarm/<mission-id>/gates/output.txt` — the verifier agent's raw
+  command output (truncated to `SWARM_VERIFY_MAX_CHARS`).
+- `.nit/swarm/<mission-id>/gates/verify.md` — a readable summary combining
+  the two above.
 
 ---
 
@@ -368,10 +515,8 @@ Persistence:
   - `.nit/swarm/<mission-id>/tasks/<task-id>/artifacts.json`
 - Task outputs are written under:
   - `.nit/swarm/<mission-id>/tasks/<task-id>/output.md`
-- Gate verification is written under:
-  - `.nit/swarm/<mission-id>/gates/report.json`
-  - `.nit/swarm/<mission-id>/gates/output.txt`
-  - `.nit/swarm/<mission-id>/gates/verify.md`
+- Gate verification outputs live under `.nit/swarm/<mission-id>/gates/` — see
+  [Verification Gates → Output artifacts](#output-artifacts) for the file list.
 
 If a task declares artifacts but no parseable JSON block is found, nit emits a mission message like:
 

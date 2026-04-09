@@ -1093,6 +1093,7 @@ fn dag_scheduler_dispatches_after_deps() {
         integrator_locked: false,
         verifier_agent_id: None,
         gate_bundle: None,
+        gate_custom: None,
         gate_selection: "auto:none".into(),
         agent_ids: vec![
             "planner".into(),
@@ -1217,6 +1218,7 @@ fn single_writer_limits_concurrent_write_tasks() {
         integrator_locked: false,
         verifier_agent_id: None,
         gate_bundle: None,
+        gate_custom: None,
         gate_selection: "auto:none".into(),
         agent_ids: vec!["planner".into(), "a1".into(), "a2".into()],
         stage: SwarmStage::Executing,
@@ -1395,6 +1397,7 @@ fn deadlock_detection_skips_pending_tasks() {
         integrator_locked: false,
         verifier_agent_id: None,
         gate_bundle: None,
+        gate_custom: None,
         gate_selection: "auto:none".into(),
         agent_ids: vec!["planner".into(), "a1".into()],
         stage: SwarmStage::Executing,
@@ -1688,6 +1691,7 @@ fn dashboard_distinguishes_pending_queued_and_skipped() {
         integrator_locked: false,
         verifier_agent_id: Some("a2".into()),
         gate_bundle: Some(GateBundle::Rust),
+        gate_custom: None,
         gate_selection: "auto:rust-ci(Cargo.toml)".into(),
         agent_ids: vec!["planner".into(), "a1".into(), "a2".into(), "a3".into()],
         stage: SwarmStage::Executing,
@@ -1935,4 +1939,93 @@ fn chat_clones_excluded_from_select_swarm_agents() {
     assert!(!agents.iter().any(|id| id.contains("#chat-clone-")));
     assert!(agents.contains(&"a".to_string()));
     assert!(agents.contains(&"b".to_string()));
+}
+
+#[test]
+fn derive_cargo_packages_collects_unique_crate_names() {
+    let files = vec![
+        "crates/nit-tui/src/swarm.rs".to_string(),
+        "crates/nit-tui/src/app/mod.rs".to_string(),
+        "crates/nit-core/src/state.rs".to_string(),
+        "crates/nit-tui/src/swarm.rs".to_string(), // duplicate
+    ];
+    let pkgs = derive_cargo_packages(&files);
+    assert_eq!(pkgs, vec!["nit-tui".to_string(), "nit-core".to_string()]);
+}
+
+#[test]
+fn derive_cargo_packages_returns_empty_when_any_file_is_outside_crates_dir() {
+    // A file outside `crates/` (e.g., workspace-root file) means the scope is
+    // mixed and we cannot safely run scoped cargo commands — fall back to the
+    // full workspace.
+    let files = vec![
+        "crates/nit-tui/src/swarm.rs".to_string(),
+        "Cargo.toml".to_string(),
+    ];
+    assert!(derive_cargo_packages(&files).is_empty());
+}
+
+#[test]
+fn derive_cargo_packages_empty_scope_returns_empty() {
+    assert!(derive_cargo_packages(&[]).is_empty());
+}
+
+#[test]
+fn gate_rendered_command_substitutes_cargo_packages_when_scoped() {
+    let gate = Gate {
+        name: "test".into(),
+        command: "cargo test --workspace --all-features".into(),
+        scoped_command: Some("cargo test {cargo_packages} --all-features".into()),
+    };
+    let pkgs = vec!["nit-tui".to_string(), "nit-core".to_string()];
+    assert_eq!(
+        gate.rendered_command(&pkgs),
+        "cargo test -p nit-tui -p nit-core --all-features"
+    );
+}
+
+#[test]
+fn gate_rendered_command_falls_back_to_full_when_no_scope() {
+    let gate = Gate {
+        name: "test".into(),
+        command: "cargo test --workspace --all-features".into(),
+        scoped_command: Some("cargo test {cargo_packages} --all-features".into()),
+    };
+    assert_eq!(
+        gate.rendered_command(&[]),
+        "cargo test --workspace --all-features"
+    );
+}
+
+#[test]
+fn gate_rendered_command_falls_back_when_no_scoped_template() {
+    let gate = Gate {
+        name: "lint".into(),
+        command: "npm run lint --if-present".into(),
+        scoped_command: None,
+    };
+    let pkgs = vec!["some-pkg".to_string()];
+    assert_eq!(
+        gate.rendered_command(&pkgs),
+        "npm run lint --if-present"
+    );
+}
+
+#[test]
+fn rust_bundle_gates_render_scoped_when_cargo_packages_provided() {
+    let bundle = GateBundle::Rust;
+    let pkgs = vec!["nit-tui".to_string()];
+    let rendered: Vec<String> = bundle
+        .gates()
+        .into_iter()
+        .map(|g| g.rendered_command(&pkgs))
+        .collect();
+    assert_eq!(
+        rendered,
+        vec![
+            "cargo fmt -p nit-tui -- --check".to_string(),
+            "cargo clippy -p nit-tui --all-targets --all-features -- -D warnings".to_string(),
+            "cargo test -p nit-tui --all-features".to_string(),
+        ]
+    );
 }

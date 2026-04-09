@@ -1,19 +1,19 @@
 use nit_utils::{stable_hash_bytes, SplitMix64};
 
 #[test]
-fn hash_deterministic_same_input() {
+fn stable_hash_deterministic_same_input() {
     let a = stable_hash_bytes(b"test");
     let b = stable_hash_bytes(b"test");
     assert_eq!(a, b);
 }
 
 #[test]
-fn hash_differs_for_different_input() {
+fn stable_hash_differs_for_different_input() {
     assert_ne!(stable_hash_bytes(b"aaa"), stable_hash_bytes(b"bbb"));
 }
 
 #[test]
-fn hash_empty_input_is_stable() {
+fn stable_hash_empty_input_is_stable() {
     let a = stable_hash_bytes(b"");
     let b = stable_hash_bytes(b"");
     assert_eq!(a, b);

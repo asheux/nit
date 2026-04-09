@@ -3,19 +3,14 @@
 #![forbid(unsafe_code)]
 
 use std::fmt;
-use std::fs::create_dir_all;
-use std::io;
-use std::path::Path;
 
 pub mod fs;
 pub mod hashing;
 pub mod paths;
 pub mod time;
 
-pub use fs::write_atomic;
+pub use fs::{ensure_dir, write_atomic};
 pub use hashing::{stable_hash_bytes, SplitMix64};
-
-pub const CRATE_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Delegates to [`stable_hash_bytes`] so the digest algorithm stays consistent
 /// workspace-wide. Deterministic across runs and platforms.
@@ -74,9 +69,4 @@ impl fmt::Display for ContentTag {
 #[must_use]
 pub fn content_tag(prefix: &str, payload: &[u8]) -> String {
     ContentTag::new(prefix, payload).to_string()
-}
-
-pub fn ensure_dir(target: &Path) -> io::Result<&Path> {
-    create_dir_all(target)?;
-    Ok(target)
 }

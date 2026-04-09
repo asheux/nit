@@ -17,16 +17,16 @@ fn cache_dir_resolves() {
 
 #[test]
 fn state_dir_platform_dependent() {
-    // state_dir is None on macOS (no XDG state equivalent), Some on Linux.
     let result = paths::state_dir();
     if cfg!(target_os = "linux") {
         assert!(result.is_some(), "Linux should have a state directory");
+    } else if cfg!(target_os = "macos") {
+        assert!(result.is_none(), "macOS has no XDG state equivalent");
     }
-    // On macOS/Windows, None is acceptable — just verify no panic.
 }
 
 #[test]
-fn all_dirs_contain_app_name() {
+fn resolved_dirs_contain_app_name() {
     let app = "nit";
     for dir in [paths::config_dir(), paths::data_dir(), paths::cache_dir()] {
         let path = dir.expect("directory should resolve");

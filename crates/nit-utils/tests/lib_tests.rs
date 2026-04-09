@@ -1,4 +1,4 @@
-use nit_utils::{content_tag, ensure_dir, stable_hash_bytes, ContentTag, Fingerprint};
+use nit_utils::{content_tag, stable_hash_bytes, ContentTag, Fingerprint};
 
 #[test]
 fn fingerprint_byte_slice_matches_direct_hash() {
@@ -52,20 +52,4 @@ fn content_tag_different_payloads_differ() {
     let a = ContentTag::new("v1", b"aaa");
     let b = ContentTag::new("v1", b"bbb");
     assert_ne!(a.digest(), b.digest());
-}
-
-#[test]
-fn ensure_dir_creates_and_returns_target() {
-    let dir = std::env::temp_dir().join(format!("nit_lib_{}", std::process::id()));
-    let _cleanup = DirCleanup(&dir);
-    let returned = ensure_dir(&dir).expect("mkdir failed");
-    assert!(returned.is_dir());
-}
-
-struct DirCleanup<'a>(&'a std::path::Path);
-
-impl Drop for DirCleanup<'_> {
-    fn drop(&mut self) {
-        std::fs::remove_dir_all(self.0).ok();
-    }
 }

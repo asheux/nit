@@ -1,4 +1,4 @@
-//! Wall-clock timestamp helpers.
+//! Wall-clock timestamps.
 
 use std::time::{SystemTime, UNIX_EPOCH};
 

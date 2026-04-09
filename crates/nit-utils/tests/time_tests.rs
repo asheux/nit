@@ -1,12 +1,12 @@
 use nit_utils::time::now_millis;
 
 #[test]
-fn now_millis_is_positive() {
+fn now_millis_nonzero() {
     assert!(now_millis() > 0);
 }
 
 #[test]
-fn now_millis_is_monotonic() {
+fn now_millis_monotonic() {
     let a = now_millis();
     let b = now_millis();
     assert!(b >= a);

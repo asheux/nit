@@ -861,8 +861,71 @@ enum GateBundle {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Gate {
-    name: &'static str,
-    command: &'static str,
+    name: String,
+    /// Full command as a fallback when no scope information is available.
+    /// Typically runs against the whole workspace (e.g. `cargo test --workspace`).
+    command: String,
+    /// Optional scoped command template. When the swarm knows which cargo
+    /// packages were touched (derived from the operator's scope_files), the
+    /// verifier prompt renders this template with `{cargo_packages}` replaced
+    /// by `-p pkg1 -p pkg2 ...`. Leave `None` to always run the full command.
+    scoped_command: Option<String>,
+}
+
+impl Gate {
+    /// Build the command text to embed in the verifier prompt. When scoped
+    /// execution is viable (we have cargo packages AND the gate has a scoped
+    /// template), substitute placeholders; otherwise fall back to the full
+    /// command.
+    fn rendered_command(&self, cargo_packages: &[String]) -> String {
+        if !cargo_packages.is_empty() {
+            if let Some(template) = self.scoped_command.as_deref() {
+                let cargo_flags = cargo_packages
+                    .iter()
+                    .map(|pkg| format!("-p {pkg}"))
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                let packages_list = cargo_packages.join(" ");
+                return template
+                    .replace("{cargo_packages}", &cargo_flags)
+                    .replace("{packages}", &packages_list);
+            }
+        }
+        self.command.clone()
+    }
+}
+
+/// Extract the unique set of cargo package names from a list of scope-file
+/// paths. Files under `crates/<pkg>/...` contribute their package name; any
+/// file outside that layout causes the function to return an empty vector,
+/// which signals the caller to fall back to the full-workspace command.
+///
+/// The fallback-on-unknown behaviour is deliberate — we'd rather run the
+/// full suite than miss a test living outside the obvious layout.
+fn derive_cargo_packages(scope_files: &[String]) -> Vec<String> {
+    if scope_files.is_empty() {
+        return Vec::new();
+    }
+    let mut packages: Vec<String> = Vec::new();
+    for path in scope_files {
+        // Normalize separators for cross-platform path handling.
+        let normalized = path.replace('\\', "/");
+        let Some(rest) = normalized.strip_prefix("crates/") else {
+            // File sits outside `crates/` — scope is mixed or unknown.
+            return Vec::new();
+        };
+        let Some(pkg) = rest.split('/').next() else {
+            return Vec::new();
+        };
+        if pkg.is_empty() {
+            return Vec::new();
+        }
+        let pkg = pkg.to_string();
+        if !packages.contains(&pkg) {
+            packages.push(pkg);
+        }
+    }
+    packages
 }
 
 impl GateBundle {
@@ -967,67 +1030,91 @@ impl GateBundle {
         }
     }
 
+    /// Default gate steps for this bundle. Rust gates include `scoped_command`
+    /// templates so the verifier prompt can run `-p <pkg>` commands when the
+    /// swarm's scope maps cleanly onto cargo packages. Other bundles currently
+    /// only expose full-workspace commands — users who want scoped Node/Python/
+    /// Go runs can provide custom gates via `.nit/config.toml`.
     fn gates(&self) -> Vec<Gate> {
         match self {
             GateBundle::Rust => vec![
                 Gate {
-                    name: "fmt",
-                    command: "cargo fmt --all -- --check",
+                    name: "fmt".into(),
+                    command: "cargo fmt --all -- --check".into(),
+                    scoped_command: Some("cargo fmt {cargo_packages} -- --check".into()),
                 },
                 Gate {
-                    name: "clippy",
-                    command: "cargo clippy --all-targets --all-features -- -D warnings",
+                    name: "clippy".into(),
+                    command: "cargo clippy --all-targets --all-features -- -D warnings"
+                        .into(),
+                    scoped_command: Some(
+                        "cargo clippy {cargo_packages} --all-targets --all-features -- -D warnings"
+                            .into(),
+                    ),
                 },
                 Gate {
-                    name: "test",
-                    command: "cargo test --workspace --all-features",
+                    name: "test".into(),
+                    command: "cargo test --workspace --all-features".into(),
+                    scoped_command: Some(
+                        "cargo test {cargo_packages} --all-features".into(),
+                    ),
                 },
             ],
             GateBundle::Node => vec![
                 Gate {
-                    name: "lint",
-                    command: "npm run lint --if-present",
+                    name: "lint".into(),
+                    command: "npm run lint --if-present".into(),
+                    scoped_command: None,
                 },
                 Gate {
-                    name: "build",
-                    command: "npm run build --if-present",
+                    name: "build".into(),
+                    command: "npm run build --if-present".into(),
+                    scoped_command: None,
                 },
                 Gate {
-                    name: "test",
-                    command: "npm test -- --watch=false --passWithNoTests",
+                    name: "test".into(),
+                    command: "npm test -- --watch=false --passWithNoTests".into(),
+                    scoped_command: None,
                 },
             ],
             GateBundle::Python => vec![
                 Gate {
-                    name: "ruff",
-                    command: "python -m ruff check .",
+                    name: "ruff".into(),
+                    command: "python -m ruff check .".into(),
+                    scoped_command: None,
                 },
                 Gate {
-                    name: "mypy",
-                    command: "python -m mypy .",
+                    name: "mypy".into(),
+                    command: "python -m mypy .".into(),
+                    scoped_command: None,
                 },
                 Gate {
-                    name: "pytest",
-                    command: "python -m pytest -q",
+                    name: "pytest".into(),
+                    command: "python -m pytest -q".into(),
+                    scoped_command: None,
                 },
             ],
             GateBundle::Go => vec![
                 Gate {
-                    name: "fmt",
-                    command: "gofmt -l .",
+                    name: "fmt".into(),
+                    command: "gofmt -l .".into(),
+                    scoped_command: None,
                 },
                 Gate {
-                    name: "vet",
-                    command: "go vet ./...",
+                    name: "vet".into(),
+                    command: "go vet ./...".into(),
+                    scoped_command: None,
                 },
                 Gate {
-                    name: "test",
-                    command: "go test ./...",
+                    name: "test".into(),
+                    command: "go test ./...".into(),
+                    scoped_command: None,
                 },
             ],
             GateBundle::Genome => vec![Gate {
-                name: "genome-quality",
-                command: "(evaluated locally by nit)",
+                name: "genome-quality".into(),
+                command: "(evaluated locally by nit)".into(),
+                scoped_command: None,
             }],
         }
     }
@@ -1262,10 +1349,12 @@ struct SwarmTask {
 
 /// Holds the state for a genome gate evaluation running in a background thread.
 /// When the evaluation completes, the result is received via `rx` and the
-/// verifier dispatch proceeds using the stored `bundle` and `verifier`.
+/// verifier dispatch proceeds — the verifier prompt reads the effective gate
+/// list directly from the `SwarmRun`, so we only need the display label
+/// ("rust-ci", "custom", etc.) for system-message logging.
 struct GenomeGatePending {
     rx: mpsc::Receiver<String>,
-    bundle: GateBundle,
+    label: String,
     verifier: String,
 }
 
@@ -1279,6 +1368,13 @@ struct SwarmRun {
     integrator_locked: bool,
     verifier_agent_id: Option<String>,
     gate_bundle: Option<GateBundle>,
+    /// Project-defined custom gates from `.nit/config.toml` (via
+    /// `read_workspace_custom_gates`). When `Some`, these fully override the
+    /// auto-detected `gate_bundle` — the downstream verify/dashboard code
+    /// should iterate this list instead of `bundle.gates()`. Kept separate
+    /// from `gate_bundle` so the UI source label can still show which
+    /// language was detected and whether the user overrode it.
+    gate_custom: Option<Vec<Gate>>,
     gate_selection: String,
     agent_ids: Vec<String>,
     stage: SwarmStage,
@@ -1355,11 +1451,10 @@ impl SwarmRuntime {
                         &run.mission_id,
                         format!(
                             "Starting VERIFY ({}) on agent {}",
-                            pending.bundle.label(),
-                            pending.verifier,
+                            pending.label, pending.verifier,
                         ),
                     );
-                    let prompt = build_verify_prompt(run, &pending.bundle);
+                    let prompt = build_verify_prompt(run);
                     dispatches.push(SwarmDispatch {
                         agent_id: pending.verifier,
                         mission_id: run.mission_id.clone(),
@@ -1379,11 +1474,10 @@ impl SwarmRuntime {
                         &run.mission_id,
                         format!(
                             "Genome gate evaluation failed; starting VERIFY ({}) on agent {}",
-                            pending.bundle.label(),
-                            pending.verifier,
+                            pending.label, pending.verifier,
                         ),
                     );
-                    let prompt = build_verify_prompt(run, &pending.bundle);
+                    let prompt = build_verify_prompt(run);
                     dispatches.push(SwarmDispatch {
                         agent_id: pending.verifier,
                         mission_id: run.mission_id.clone(),
@@ -1551,10 +1645,7 @@ impl SwarmRuntime {
             queued,
             pending,
             tasks,
-            gate_bundle: run
-                .gate_bundle
-                .as_ref()
-                .map(|bundle| bundle.label().to_string()),
+            gate_bundle: run_gates_label(run),
             gates: dashboard_gate_rows(run),
         })
     }
@@ -1585,10 +1676,7 @@ impl SwarmRuntime {
             mission_id: run.mission_id.clone(),
             template: run.template.label().into(),
             phase: stage_label(run.stage).into(),
-            gate_bundle: run
-                .gate_bundle
-                .as_ref()
-                .map(|bundle| bundle.label().to_string()),
+            gate_bundle: run_gates_label(run),
             gate_selection: run.gate_selection.clone(),
             gate_report: run.gate_report.clone(),
             gate_output: run.gate_output.clone(),
@@ -1786,9 +1874,23 @@ impl SwarmRuntime {
 
         let scope_files = enumerate_scope_files(state.workspace_root.as_path(), &root_prompt);
 
+        // Load project-specific custom gates first; if defined, they fully
+        // override the auto-detected language bundle.
+        let custom_gates_result = read_workspace_custom_gates(state.workspace_root.as_path());
+        let gate_custom = match custom_gates_result.as_ref() {
+            Ok(gates) => gates.clone(),
+            Err(_) => None,
+        };
         let gate_selection = GateBundle::detect(state);
         let gate_bundle = gate_selection.bundle.clone();
-        let verifier_agent_id = gate_bundle.as_ref().and_then(|_| {
+        let gate_selection_source = match (custom_gates_result.as_ref(), gate_custom.as_ref()) {
+            (Err(err), _) => format!("config-error:{err}|{}", gate_selection.source),
+            (_, Some(gates)) => format!("custom({} gates)|{}", gates.len(), gate_selection.source),
+            _ => gate_selection.source.clone(),
+        };
+        // Verifier is needed when we have either a bundle or custom gates.
+        let has_gates = gate_custom.is_some() || gate_bundle.is_some();
+        let verifier_agent_id = has_gates.then_some(()).and_then(|_| {
             let eligible = agents
                 .iter()
                 .filter(|id| id.as_str() != planner_agent_id.as_str())
@@ -1825,7 +1927,7 @@ impl SwarmRuntime {
                 mission_kind.label(),
                 integrator_agent_id.as_deref().unwrap_or("(none)"),
                 verifier_agent_id.as_deref().unwrap_or("(none)"),
-                gate_bundle_label(gate_bundle.as_ref(), &gate_selection.source)
+                gate_bundle_label(gate_bundle.as_ref(), &gate_selection_source)
             ),
         );
 
@@ -1842,7 +1944,8 @@ impl SwarmRuntime {
                 integrator_locked,
                 verifier_agent_id,
                 gate_bundle,
-                gate_selection: gate_selection.source,
+                gate_custom,
+                gate_selection: gate_selection_source,
                 agent_ids: agents,
                 stage: SwarmStage::Planning,
                 tasks: Vec::new(),
@@ -2115,8 +2218,8 @@ impl SwarmRuntime {
                         let done = tasks_terminal_count(&run.tasks);
                         update_mission_status(state, &run, Some(done));
                         if done == run.tasks.len() {
-                            if let (Some(bundle), Some(verifier)) =
-                                (run.gate_bundle.clone(), run.verifier_agent_id.clone())
+                            if let (Some(label), Some(verifier)) =
+                                (run_gates_label(&run), run.verifier_agent_id.clone())
                             {
                                 run.stage = SwarmStage::Verifying;
                                 update_mission_phase(state, &run.mission_id, MissionPhase::Verify);
@@ -2127,15 +2230,14 @@ impl SwarmRuntime {
                                     // (polled via poll_genome_gates).
                                     run.genome_gate_pending = Some(GenomeGatePending {
                                         rx: spawn_genome_gate_eval(state),
-                                        bundle: bundle.clone(),
+                                        label: label.clone(),
                                         verifier: verifier.clone(),
                                     });
                                     push_system_message_to_mission(
                                         state,
                                         &run.mission_id,
                                         format!(
-                                            "Genome gate evaluating\u{2026} VERIFY ({}) will start on agent {verifier} when complete",
-                                            bundle.label()
+                                            "Genome gate evaluating\u{2026} VERIFY ({label}) will start on agent {verifier} when complete",
                                         ),
                                     );
                                 } else {
@@ -2143,11 +2245,10 @@ impl SwarmRuntime {
                                         state,
                                         &run.mission_id,
                                         format!(
-                                            "Starting VERIFY ({}) on agent {verifier}",
-                                            bundle.label()
+                                            "Starting VERIFY ({label}) on agent {verifier}",
                                         ),
                                     );
-                                    let prompt = build_verify_prompt(&run, &bundle);
+                                    let prompt = build_verify_prompt(&run);
                                     dispatches.push(SwarmDispatch {
                                         agent_id: verifier,
                                         mission_id: run.mission_id.clone(),
@@ -2220,8 +2321,8 @@ impl SwarmRuntime {
                         let done = tasks_terminal_count(&run.tasks);
                         update_mission_status(state, &run, Some(done));
                         if done == run.tasks.len() {
-                            if let (Some(bundle), Some(verifier)) =
-                                (run.gate_bundle.clone(), run.verifier_agent_id.clone())
+                            if let (Some(label), Some(verifier)) =
+                                (run_gates_label(&run), run.verifier_agent_id.clone())
                             {
                                 run.stage = SwarmStage::Verifying;
                                 update_mission_phase(state, &run.mission_id, MissionPhase::Verify);
@@ -2232,15 +2333,14 @@ impl SwarmRuntime {
                                     // (polled via poll_genome_gates).
                                     run.genome_gate_pending = Some(GenomeGatePending {
                                         rx: spawn_genome_gate_eval(state),
-                                        bundle: bundle.clone(),
+                                        label: label.clone(),
                                         verifier: verifier.clone(),
                                     });
                                     push_system_message_to_mission(
                                         state,
                                         &run.mission_id,
                                         format!(
-                                            "Genome gate evaluating\u{2026} VERIFY ({}) will start on agent {verifier} when complete",
-                                            bundle.label()
+                                            "Genome gate evaluating\u{2026} VERIFY ({label}) will start on agent {verifier} when complete",
                                         ),
                                     );
                                 } else {
@@ -2248,11 +2348,10 @@ impl SwarmRuntime {
                                         state,
                                         &run.mission_id,
                                         format!(
-                                            "Starting VERIFY ({}) on agent {verifier}",
-                                            bundle.label()
+                                            "Starting VERIFY ({label}) on agent {verifier}",
                                         ),
                                     );
-                                    let prompt = build_verify_prompt(&run, &bundle);
+                                    let prompt = build_verify_prompt(&run);
                                     dispatches.push(SwarmDispatch {
                                         agent_id: verifier,
                                         mission_id: run.mission_id.clone(),
@@ -2586,8 +2685,8 @@ impl SwarmRuntime {
                         let done = tasks_terminal_count(&run.tasks);
                         update_mission_status(state, &run, Some(done));
                         if done == run.tasks.len() {
-                            if let (Some(bundle), Some(verifier)) =
-                                (run.gate_bundle.clone(), run.verifier_agent_id.clone())
+                            if let (Some(label), Some(verifier)) =
+                                (run_gates_label(&run), run.verifier_agent_id.clone())
                             {
                                 run.stage = SwarmStage::Verifying;
                                 update_mission_phase(state, &run.mission_id, MissionPhase::Verify);
@@ -2598,15 +2697,14 @@ impl SwarmRuntime {
                                     // (polled via poll_genome_gates).
                                     run.genome_gate_pending = Some(GenomeGatePending {
                                         rx: spawn_genome_gate_eval(state),
-                                        bundle: bundle.clone(),
+                                        label: label.clone(),
                                         verifier: verifier.clone(),
                                     });
                                     push_system_message_to_mission(
                                         state,
                                         &run.mission_id,
                                         format!(
-                                            "Genome gate evaluating\u{2026} VERIFY ({}) will start on agent {verifier} when complete",
-                                            bundle.label()
+                                            "Genome gate evaluating\u{2026} VERIFY ({label}) will start on agent {verifier} when complete",
                                         ),
                                     );
                                 } else {
@@ -2614,11 +2712,10 @@ impl SwarmRuntime {
                                         state,
                                         &run.mission_id,
                                         format!(
-                                            "Starting VERIFY ({}) on agent {verifier}",
-                                            bundle.label()
+                                            "Starting VERIFY ({label}) on agent {verifier}",
                                         ),
                                     );
-                                    let prompt = build_verify_prompt(&run, &bundle);
+                                    let prompt = build_verify_prompt(&run);
                                     dispatches.push(SwarmDispatch {
                                         agent_id: verifier,
                                         mission_id: run.mission_id.clone(),
@@ -2732,8 +2829,8 @@ impl SwarmRuntime {
                             let done = tasks_terminal_count(&run.tasks);
                             update_mission_status(state, &run, Some(done));
                             if done == run.tasks.len() {
-                                if let (Some(bundle), Some(verifier)) =
-                                    (run.gate_bundle.clone(), run.verifier_agent_id.clone())
+                                if let (Some(label), Some(verifier)) =
+                                    (run_gates_label(&run), run.verifier_agent_id.clone())
                                 {
                                     run.stage = SwarmStage::Verifying;
                                     update_mission_phase(
@@ -2745,15 +2842,14 @@ impl SwarmRuntime {
                                     if state.settings.genome.genome_gate_enabled {
                                         run.genome_gate_pending = Some(GenomeGatePending {
                                             rx: spawn_genome_gate_eval(state),
-                                            bundle: bundle.clone(),
+                                            label: label.clone(),
                                             verifier: verifier.clone(),
                                         });
                                         push_system_message_to_mission(
                                             state,
                                             &run.mission_id,
                                             format!(
-                                                "Genome gate evaluating\u{2026} VERIFY ({}) will start on agent {verifier} when complete",
-                                                bundle.label()
+                                                "Genome gate evaluating\u{2026} VERIFY ({label}) will start on agent {verifier} when complete",
                                             ),
                                         );
                                     } else {
@@ -2761,11 +2857,10 @@ impl SwarmRuntime {
                                             state,
                                             &run.mission_id,
                                             format!(
-                                                "Starting VERIFY ({}) on agent {verifier}",
-                                                bundle.label()
+                                                "Starting VERIFY ({label}) on agent {verifier}",
                                             ),
                                         );
-                                        let prompt = build_verify_prompt(&run, &bundle);
+                                        let prompt = build_verify_prompt(&run);
                                         dispatches.push(SwarmDispatch {
                                             agent_id: verifier,
                                             mission_id: run.mission_id.clone(),
@@ -5887,17 +5982,53 @@ fn stage_label(stage: SwarmStage) -> &'static str {
     }
 }
 
+/// Returns the display label for the gates configured on this run. Prefers
+/// the custom-gates source ("custom") over the detected language bundle
+/// ("rust-ci", "node-ci", etc.). Returns `None` when no gates are configured.
+fn run_gates_label(run: &SwarmRun) -> Option<String> {
+    if run.gate_custom.is_some() {
+        Some("custom".to_string())
+    } else {
+        run.gate_bundle.as_ref().map(|b| b.label().to_string())
+    }
+}
+
+/// Resolve the effective gate list for a swarm run. Prefers project-defined
+/// custom gates from `.nit/config.toml` (if any), otherwise falls back to the
+/// auto-detected language bundle's default gates. Returns the gates as
+/// already-rendered commands scoped to the run's cargo packages (when the
+/// scope can be derived cleanly) or as full-workspace commands otherwise.
+fn run_effective_gates(run: &SwarmRun) -> Vec<Gate> {
+    let cargo_packages = derive_cargo_packages(&run.scope_files);
+    let base_gates = if let Some(custom) = run.gate_custom.as_ref() {
+        custom.clone()
+    } else if let Some(bundle) = run.gate_bundle.as_ref() {
+        bundle.gates()
+    } else {
+        return Vec::new();
+    };
+    base_gates
+        .into_iter()
+        .map(|gate| {
+            let rendered = gate.rendered_command(&cargo_packages);
+            Gate {
+                name: gate.name,
+                command: rendered,
+                scoped_command: None,
+            }
+        })
+        .collect()
+}
+
 fn dashboard_gate_rows(run: &SwarmRun) -> Vec<SwarmGateDashboardRow> {
     let mut rows = Vec::new();
-    if let Some(bundle) = run.gate_bundle.as_ref() {
-        for gate in bundle.gates() {
-            rows.push(SwarmGateDashboardRow {
-                name: gate.name.to_string(),
-                command: gate.command.to_string(),
-                status: "PENDING".into(),
-                notes: None,
-            });
-        }
+    for gate in run_effective_gates(run) {
+        rows.push(SwarmGateDashboardRow {
+            name: gate.name,
+            command: gate.command,
+            status: "PENDING".into(),
+            notes: None,
+        });
     }
     if let Some(report) = run.gate_report.as_ref() {
         for reported in report.gates.iter() {
@@ -5951,6 +6082,79 @@ fn read_workspace_gate_default(workspace_root: &Path) -> Result<Option<String>, 
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(|value| value.to_ascii_lowercase()))
+}
+
+/// Read project-specific custom gate definitions from `.nit/config.toml`.
+/// Schema:
+///
+/// ```toml
+/// [[swarm.gates.custom]]
+/// name = "fmt"
+/// command = "just fmt-check"
+/// scoped_command = "just fmt-check-crates {cargo_packages}"  # optional
+///
+/// [[swarm.gates.custom]]
+/// name = "test"
+/// command = "just test"
+/// scoped_command = "just test-crates {cargo_packages}"
+/// ```
+///
+/// Returns `Ok(None)` when no custom gates are configured, `Ok(Some(gates))`
+/// when at least one is defined, or `Err` on a malformed config file. When
+/// custom gates are returned, they fully replace the auto-detected language
+/// bundle — the project owner is asserting "these are my gates".
+fn read_workspace_custom_gates(workspace_root: &Path) -> Result<Option<Vec<Gate>>, String> {
+    let path = workspace_root.join(".nit").join("config.toml");
+    if !path.exists() {
+        return Ok(None);
+    }
+    let contents = fs::read_to_string(&path)
+        .map_err(|err| format!("failed reading {}: {err}", path.display()))?;
+    let value = toml::from_str::<toml::Value>(&contents)
+        .map_err(|err| format!("failed parsing {}: {err}", path.display()))?;
+    let Some(array) = value
+        .get("swarm")
+        .and_then(|value| value.get("gates"))
+        .and_then(|value| value.get("custom"))
+        .and_then(|value| value.as_array())
+    else {
+        return Ok(None);
+    };
+    if array.is_empty() {
+        return Ok(None);
+    }
+    let mut gates = Vec::with_capacity(array.len());
+    for (idx, entry) in array.iter().enumerate() {
+        let table = entry
+            .as_table()
+            .ok_or_else(|| format!("swarm.gates.custom[{idx}] must be a table"))?;
+        let name = table
+            .get("name")
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| format!("swarm.gates.custom[{idx}].name is required"))?
+            .to_string();
+        let command = table
+            .get("command")
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| format!("swarm.gates.custom[{idx}].command is required"))?
+            .to_string();
+        let scoped_command = table
+            .get("scoped_command")
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(|value| value.to_string());
+        gates.push(Gate {
+            name,
+            command,
+            scoped_command,
+        });
+    }
+    Ok(Some(gates))
 }
 
 fn read_workspace_dag_validation_mode(
@@ -6554,15 +6758,23 @@ fn build_synthesis_prompt(run: &SwarmRun) -> String {
     });
     let mut out = String::new();
     out.push_str(
-        "You are the SWARM SYNTHESIZER. Produce a single cohesive response for the operator by combining the parallel agent outputs below.\n\n",
+        "You are the SWARM SYNTHESIZER. Your ONLY job is to produce a text report that combines the agent outputs below into a single cohesive answer for the operator.\n\n",
+    );
+    out.push_str(
+        "ABSOLUTE CONSTRAINTS (these override any other instruction you may have received):\n\
+        1. DO NOT USE ANY TOOLS that edit files, write files, create files, delete files, move files, apply patches, or modify the workspace in any way. You are a pure read-only text summarizer.\n\
+        2. DO NOT USE ANY TOOLS that run shell commands, bash, tests, builds, linters, formatters, type-checkers, CI pipelines, `cargo`/`npm`/`just`/`make`/`python -m pytest`/etc. — whatever this project's toolchain uses. Verification has ALREADY happened upstream.\n\
+        3. DO NOT re-read source files, re-investigate the codebase, or call any code-search/grep/glob/find tools. The agent reports below are your ONLY source of truth.\n\
+        4. DO NOT call any MCP tools or external integrations. Text output only.\n\
+        5. DO NOT attempt to \"fix\" anything you notice in the reports — if you notice a problem, REPORT it in your synthesis as a known issue for the operator to decide on. You are not the integrator, not the reviewer, not the test runner.\n\n",
     );
     if has_reviewer {
         out.push_str(
-            "ROLE DISCIPLINE: You ONLY synthesize. Do NOT run tests, builds, lints, type-checkers, CI pipelines, or any other workspace/CLI commands — whatever toolchain this project uses. Do NOT re-investigate the codebase. The agent reports below — including a review/test agent's verification output — are your sole input. If verification is missing or contradictory, surface that as a gap in the synthesis rather than running commands yourself.\n\n",
+            "A dedicated review/test agent already ran in this swarm — its output is in the agent reports below. Treat its verification findings as authoritative. If its findings are missing, ambiguous, or contradict another agent, note the gap in your synthesis text — DO NOT run verification yourself to resolve it.\n\n",
         );
     } else {
         out.push_str(
-            "ROLE DISCIPLINE: This swarm has no dedicated review/test agent, so you ALSO act as the verifier. Synthesize the agent outputs first, then run the minimum targeted verification needed to confirm the result using whatever test/build command is appropriate for this project's toolchain — scoped to the affected module/package/subdirectory, not the whole project. Keep verification scoped — do not run unrelated tests, full CI, or broad lint sweeps.\n\n",
+            "This swarm did not include a dedicated review/test agent. If verification is missing from the agent reports below, SURFACE THAT AS A GAP in your synthesis text (e.g. \"tests were not run by any agent — operator should verify manually\"). DO NOT run verification yourself. DO NOT edit files to fix issues. Your output is text only.\n\n",
         );
     }
     out.push_str("Operator request:\n");
@@ -6607,9 +6819,9 @@ fn build_synthesis_prompt(run: &SwarmRun) -> String {
             out.push_str("(no output)\n");
         }
     }
-    if let Some(bundle) = run.gate_bundle.as_ref() {
+    if let Some(label) = run_gates_label(run) {
         out.push_str("\n\nVerification gates:\n");
-        out.push_str(&format!("Bundle: {}\n", bundle.label()));
+        out.push_str(&format!("Bundle: {label}\n"));
         for gate in dashboard_gate_rows(run).iter() {
             out.push_str(&format!(
                 "- {}: {} ({})\n",
@@ -6644,7 +6856,12 @@ fn build_synthesis_prompt(run: &SwarmRun) -> String {
         out.push('\n');
     }
     out.push_str(
-        "\nResponse requirements:\n- Be decisive: choose a best approach.\n- Include specific next steps.\n- If code changes are needed, outline exact edits and validation steps.\n",
+        "\nResponse requirements (TEXT ONLY — no tool calls, no edits, no commands):\n\
+        - Produce a cohesive synthesis of what the agents actually did and found.\n\
+        - Be decisive about the outcome: what worked, what didn't, what's still open.\n\
+        - If follow-up work or code changes are needed, DESCRIBE them in prose — do NOT perform them and do NOT produce diffs/patches. The operator will decide what to do next.\n\
+        - If gates failed or tests are missing, REPORT that as a finding in the synthesis. Do NOT attempt to fix or rerun anything.\n\
+        - Remember: you are a read-only text summarizer. Every tool call you make is a bug.\n",
     );
     out
 }
@@ -6949,23 +7166,45 @@ fn evaluate_genome_gate_bg(input: &GenomeGateInput) -> String {
     out
 }
 
-fn build_verify_prompt(run: &SwarmRun, bundle: &GateBundle) -> String {
+fn build_verify_prompt(run: &SwarmRun) -> String {
+    let effective = run_effective_gates(run);
+    let cargo_packages = derive_cargo_packages(&run.scope_files);
+    let bundle_label = run
+        .gate_custom
+        .as_ref()
+        .map(|_| "custom".to_string())
+        .or_else(|| run.gate_bundle.as_ref().map(|b| b.label().to_string()))
+        .unwrap_or_else(|| "(none)".to_string());
+
     let mut out = String::new();
     out.push_str(
         "You are the SWARM VERIFIER. Run the verification gate bundle below against the current workspace.\n\n",
     );
     out.push_str("Rules:\n");
-    out.push_str("- Run commands in order.\n");
+    out.push_str("- Run EXACTLY the commands listed below, in order. Do not substitute or broaden them (e.g. do not replace a scoped `-p <pkg>` command with `--workspace`).\n");
     out.push_str(
         "- If a gate fails, keep going when feasible (collect as much signal as possible).\n",
     );
     out.push_str("- Keep logs concise: include only the key error snippets needed to debug.\n");
+    out.push_str("- Do NOT edit the workspace to fix issues you find — report them in the JSON `notes` field and let the operator / next integrator fix them.\n");
     out.push_str("- At the end, output a single JSON report in a ```json code block.\n");
     out.push_str("\nOperator request (context):\n");
     out.push_str(run.root_prompt.trim());
     out.push_str("\n\nGate bundle:\n");
-    out.push_str(&format!("Bundle: {}\n", bundle.label()));
-    for gate in bundle.gates() {
+    out.push_str(&format!("Bundle: {bundle_label}\n"));
+    if !cargo_packages.is_empty() {
+        out.push_str(&format!(
+            "Scope: cargo packages {} (derived from scope_files — only these packages were touched; do not widen to --workspace)\n",
+            cargo_packages.join(", ")
+        ));
+    } else if !run.scope_files.is_empty() {
+        out.push_str(
+            "Scope: scope_files did not map to cargo packages — running full-workspace commands.\n",
+        );
+    } else {
+        out.push_str("Scope: (no scope_files declared — running full-workspace commands)\n");
+    }
+    for gate in effective.iter() {
         out.push_str(&format!("- {}: `{}`\n", gate.name, gate.command));
     }
 

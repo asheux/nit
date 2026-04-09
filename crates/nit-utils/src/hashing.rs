@@ -1,6 +1,7 @@
 //! Deterministic hashing and pseudo-random number generation.
 
 /// BLAKE3 digest truncated to 64 bits (little-endian).
+#[inline]
 #[must_use]
 pub fn stable_hash_bytes(data: &[u8]) -> u64 {
     let digest = blake3::hash(data);

@@ -6,8 +6,8 @@ rust-version.workspace = true
 description = "Shared filesystem, hashing, path, and time utilities for the nit workspace"
 license = "MIT"
 publish = false
-categories = ["filesystem", "development-tools"]
-keywords = ["utilities", "hashing", "atomic-write"]
+categories = ["development-tools", "filesystem"]
+keywords = ["atomic-write", "hashing", "utilities"]
 
 [dependencies]
 blake3 = { workspace = true }
