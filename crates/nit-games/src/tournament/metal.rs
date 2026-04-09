@@ -10,7 +10,7 @@ use nit_metal::{
 };
 use std::collections::VecDeque;
 
-/// Checks that a structural parameter is uniform across all strategies in a batch.
+/// Verifies that a batch parameter is the same for all strategies; returns `None` on mismatch.
 fn ensure_uniform<T: PartialEq>(slot: &mut Option<T>, incoming: T) -> Option<()> {
     match slot {
         Some(existing) if *existing != incoming => None,
@@ -22,7 +22,7 @@ fn ensure_uniform<T: PartialEq>(slot: &mut Option<T>, incoming: T) -> Option<()>
     }
 }
 
-/// Adjusts a raw payoff total by subtracting configured complexity penalties.
+/// Raw payoff minus complexity-cost penalties when enabled.
 pub(super) fn adjusted_total_for_match(
     raw_total: i64,
     strategy: &StrategySpec,
@@ -465,8 +465,7 @@ pub(super) fn metal_batch_decline_reason(
 
 // ── Score-to-outcome conversion ──────────────────────────────────────────────
 
-/// Converts raw `ScorePair` values from the GPU into fully-formed `MatchOutcome`
-/// values, applying any configured complexity-cost adjustments.
+/// GPU `ScorePair` values into `MatchOutcome` with complexity-cost adjustments.
 fn match_outcomes_from_scores(
     config: &NormalizedConfig,
     strategies: &[StrategySpec],
@@ -516,11 +515,8 @@ fn match_outcomes_from_scores(
 
 // ── Preflight checks ────────────────────────────────────────────────────────
 
-/// Validates that the Metal accelerator can handle the given configuration.
-///
-/// Called before a tournament begins when `accelerator = "metal"` is set.
-/// Checks fast-eval, noise, roster homogeneity, and runs a single-pair probe
-/// batch to confirm the GPU pipeline is functional.
+/// Pre-tournament validation: confirms fast-eval, noise, roster shape, and a
+/// single-pair probe batch all pass when Metal acceleration is requested.
 pub fn accelerator_preflight(config: &NormalizedConfig) -> Result<(), String> {
     if !config.engine.accelerator.requires_metal() {
         return Ok(());
@@ -579,11 +575,8 @@ pub fn accelerator_preflight(config: &NormalizedConfig) -> Result<(), String> {
     }
 }
 
-/// Extended preflight that additionally checks for features incompatible with
-/// the Metal fast-path (event logging, history logging, match previews).
-///
-/// Should be called at the start of a TUI or CLI run to give the user an
-/// early error rather than a silent fallback to CPU.
+/// Preflight with additional checks for features that force CPU fallback
+/// (event/history logging, match previews).
 pub fn accelerator_run_preflight(
     config: &NormalizedConfig,
     event_logging: bool,
@@ -606,7 +599,6 @@ pub fn accelerator_run_preflight(
     accelerator_preflight(config)
 }
 
-/// Gathers the list of feature names that block Metal acceleration.
 fn collect_metal_blockers(
     event_logging: bool,
     history_logging: bool,
@@ -625,8 +617,7 @@ fn collect_metal_blockers(
     blockers
 }
 
-/// Formats a list of blocker names into a natural-language string
-/// ("A", "A and B", or "A, B, and C").
+/// Join items as "A", "A and B", or "A, B, and C".
 fn format_blocker_list(items: &[&str]) -> String {
     match items {
         [] => String::new(),
@@ -685,13 +676,11 @@ pub(super) fn try_metal_batch_outcomes_chunked_prepared(
     Ok(Some((collected_outcomes, dispatch_count)))
 }
 
-/// A GPU batch that has been submitted but not yet collected.
 struct InflightChunk<'a> {
     source_matchups: &'a [Matchup],
     pending: nit_metal::PendingBatch,
 }
 
-/// Converts a matchup slice into the `MatchPair` indices the GPU expects.
 fn encode_matchup_pairs(matchups: &[Matchup]) -> Vec<MatchPair> {
     matchups
         .iter()
@@ -702,8 +691,6 @@ fn encode_matchup_pairs(matchups: &[Matchup]) -> Vec<MatchPair> {
         .collect()
 }
 
-/// Pops the oldest in-flight chunk, waits for GPU completion, and appends
-/// the resulting outcomes to the output vector.
 fn drain_one_inflight(
     inflight: &mut VecDeque<InflightChunk<'_>>,
     config: &NormalizedConfig,

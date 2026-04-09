@@ -5,18 +5,18 @@
 
 pub const CRATE_VERSION: &str = env!("CARGO_PKG_VERSION");
 
+pub mod analysis;
+pub mod config;
+pub mod events;
+pub mod fast_eval;
+pub mod fsm_enum;
 pub mod game;
 pub mod history;
-pub mod fast_eval;
-pub mod strategy;
-pub mod fsm_enum;
-pub mod config;
-pub mod tournament;
-pub mod analysis;
-pub mod introspection;
-pub mod events;
 pub mod history_log;
+pub mod introspection;
 pub mod output;
+pub mod strategy;
+pub mod tournament;
 
 pub use game::{Action, Outcome, PayoffMatrix, ACTION_COUNT, OUTCOME_COUNT};
 pub use history::{History, RoundRecord, MAX_ROLLING_DEPTH};

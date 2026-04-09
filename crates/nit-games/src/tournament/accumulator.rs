@@ -9,6 +9,31 @@ use crate::config::{ScoreAggregation, StrategySpec};
 use crate::output::{DominanceEdge, PairwiseResult, StrategyResult, TournamentResults};
 use crate::strategy::TmRunStats;
 
+fn record_pairwise(
+    pair: &mut PairStats,
+    a_total: i64,
+    b_total: i64,
+    a_adj: f64,
+    b_adj: f64,
+    outcome: Ordering,
+) {
+    pair.a_total += a_total;
+    pair.b_total += b_total;
+    pair.a_adjusted_total += a_adj;
+    pair.b_adjusted_total += b_adj;
+    match outcome {
+        Ordering::Greater => pair.a_wins += 1,
+        Ordering::Less => pair.b_wins += 1,
+        Ordering::Equal => pair.draws += 1,
+    }
+}
+
+fn merge_tm_stats(target: &mut Option<TmRunStats>, source: Option<&TmRunStats>) {
+    if let Some(stats) = source {
+        target.get_or_insert_with(TmRunStats::default).merge(stats);
+    }
+}
+
 impl TournamentAccumulator {
     pub(super) fn new(
         n: usize,
@@ -74,25 +99,17 @@ impl TournamentAccumulator {
                 stats.crashed = true;
             }
             if let Some(pairwise) = self.pairwise.as_mut() {
-                let pair = &mut pairwise[result.a_idx][result.b_idx];
-                pair.a_total += result.a_total;
-                pair.b_total += result.b_total;
-                pair.a_adjusted_total += result.a_adjusted_total;
-                pair.b_adjusted_total += result.b_adjusted_total;
-                match outcome_order {
-                    Ordering::Greater => pair.a_wins += 1,
-                    Ordering::Less => pair.b_wins += 1,
-                    Ordering::Equal => pair.draws += 1,
-                }
+                record_pairwise(
+                    &mut pairwise[result.a_idx][result.b_idx],
+                    result.a_total,
+                    result.b_total,
+                    result.a_adjusted_total,
+                    result.b_adjusted_total,
+                    outcome_order,
+                );
             }
-            if let Some(tm_stats) = a_tm_stats.as_ref() {
-                let entry = stats.tm_stats.get_or_insert_with(TmRunStats::default);
-                entry.merge(tm_stats);
-            }
-            if let Some(tm_stats) = b_tm_stats.as_ref() {
-                let entry = stats.tm_stats.get_or_insert_with(TmRunStats::default);
-                entry.merge(tm_stats);
-            }
+            merge_tm_stats(&mut stats.tm_stats, a_tm_stats.as_ref());
+            merge_tm_stats(&mut stats.tm_stats, b_tm_stats.as_ref());
             return;
         }
         let (a_stats, b_stats) = if result.a_idx < result.b_idx {
@@ -120,14 +137,8 @@ impl TournamentAccumulator {
         if b_crashed {
             b_stats.crashed = true;
         }
-        if let Some(tm_stats) = a_tm_stats.as_ref() {
-            let entry = a_stats.tm_stats.get_or_insert_with(TmRunStats::default);
-            entry.merge(tm_stats);
-        }
-        if let Some(tm_stats) = b_tm_stats.as_ref() {
-            let entry = b_stats.tm_stats.get_or_insert_with(TmRunStats::default);
-            entry.merge(tm_stats);
-        }
+        merge_tm_stats(&mut a_stats.tm_stats, a_tm_stats.as_ref());
+        merge_tm_stats(&mut b_stats.tm_stats, b_tm_stats.as_ref());
 
         match outcome_order {
             Ordering::Greater => {
@@ -145,29 +156,24 @@ impl TournamentAccumulator {
         }
 
         if let Some(pairwise) = self.pairwise.as_mut() {
-            let pair = &mut pairwise[result.a_idx][result.b_idx];
-            pair.a_total += result.a_total;
-            pair.b_total += result.b_total;
-            pair.a_adjusted_total += result.a_adjusted_total;
-            pair.b_adjusted_total += result.b_adjusted_total;
-            match outcome_order {
-                Ordering::Greater => pair.a_wins += 1,
-                Ordering::Less => pair.b_wins += 1,
-                Ordering::Equal => pair.draws += 1,
-            }
-
-            if result.a_idx != result.b_idx {
-                let reverse = &mut pairwise[result.b_idx][result.a_idx];
-                reverse.a_total += result.b_total;
-                reverse.b_total += result.a_total;
-                reverse.a_adjusted_total += result.b_adjusted_total;
-                reverse.b_adjusted_total += result.a_adjusted_total;
-                match compare_scores(b_outcome, a_outcome) {
-                    Ordering::Greater => reverse.a_wins += 1,
-                    Ordering::Less => reverse.b_wins += 1,
-                    Ordering::Equal => reverse.draws += 1,
-                }
-            }
+            record_pairwise(
+                &mut pairwise[result.a_idx][result.b_idx],
+                result.a_total,
+                result.b_total,
+                result.a_adjusted_total,
+                result.b_adjusted_total,
+                outcome_order,
+            );
+            // Record the reverse perspective for the B-vs-A cell.
+            let reverse_order = compare_scores(b_outcome, a_outcome);
+            record_pairwise(
+                &mut pairwise[result.b_idx][result.a_idx],
+                result.b_total,
+                result.a_total,
+                result.b_adjusted_total,
+                result.a_adjusted_total,
+                reverse_order,
+            );
         }
     }
 
@@ -217,10 +223,7 @@ impl TournamentAccumulator {
         }
     }
 
-    /// Produce the final [`TournamentResults`] with ranking, pairwise table, and
-    /// dominance edges.
-    ///
-    /// Called once after all matches have been accumulated.
+    /// Produce ranking, pairwise table, and dominance edges once all matches are done.
     pub(super) fn finalize(&self, specs: &[StrategySpec]) -> TournamentResults {
         let ranking = self.build_ranking(specs);
 

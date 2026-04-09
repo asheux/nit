@@ -658,12 +658,9 @@ fn bench_tm_micro(c: &mut Criterion) {
     let mut tm_strategy = nit_games::OneSidedTmStrategy::new(
         "tm",
         2,   // symbols
-        1,   // states
+        1,   // start_state
         0,   // blank symbol
-        0,   // fallback symbol
         256, // max steps per round
-        InputMode::OpponentLastAction,
-        cooperate_defect_outputs(),
         stay_transitions,
     );
 

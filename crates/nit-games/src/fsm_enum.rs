@@ -103,11 +103,34 @@ pub fn canonicalize_fsm(def: &FsmDefinition) -> FsmDefinition {
         outputs: canonical
             .outputs
             .iter()
-            .map(|&idx| if idx == 0 { Action::Cooperate } else { Action::Defect })
+            .map(|&idx| {
+                if idx == 0 {
+                    Action::Cooperate
+                } else {
+                    Action::Defect
+                }
+            })
             .collect(),
         input_mode: def.input_mode,
         transitions: canonical.transitions,
     }
+}
+
+/// Advance a mixed-radix odometer over the flattened transition table.
+/// Returns `true` if the increment succeeded, `false` when all combinations
+/// have been exhausted (i.e. every digit has wrapped back to zero).
+fn increment_odometer(transitions: &mut [Vec<usize>], num_states: usize, alphabet: usize) -> bool {
+    let total = num_states * alphabet;
+    for idx in 0..total {
+        let row = idx / alphabet;
+        let col = idx % alphabet;
+        if transitions[row][col] + 1 < num_states {
+            transitions[row][col] += 1;
+            return true;
+        }
+        transitions[row][col] = 0;
+    }
+    false
 }
 
 /// Enumerate all FSM strategies, calling `emit` for each unique machine.
@@ -178,22 +201,7 @@ where
                 }
             }
 
-            let mut idx = 0usize;
-            loop {
-                if idx >= num_states * alphabet {
-                    done = true;
-                    break;
-                }
-                let row = idx / alphabet;
-                let col = idx % alphabet;
-                if transitions[row][col] + 1 < num_states {
-                    transitions[row][col] += 1;
-                    break;
-                } else {
-                    transitions[row][col] = 0;
-                    idx += 1;
-                }
-            }
+            done = !increment_odometer(&mut transitions, num_states, alphabet);
         }
     }
 

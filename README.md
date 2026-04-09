@@ -90,6 +90,45 @@ nit --agents local
 cargo run -p nit -- --agents codex
 ```
 
+## Project layout
+
+```
+nit/
+├─ crates/
+│  ├─ nit/                CLI binary entry point
+│  │  └─ src/
+│  │     ├─ agents/       Backend discovery + model probing (Codex, Claude, Gemini)
+│  │     └─ games/        Headless games CLI (tournament, sweep, enumerate, inspect)
+│  ├─ nit-core/           State (AppState), agent bus, config, genome report, buffer
+│  │  └─ src/
+│  │     └─ tests/        Core unit tests
+│  ├─ nit-tui/            TUI app loop, widgets, swarm orchestration, runners
+│  │  └─ src/
+│  │     ├─ app/          Main event loop, input handling, dispatch, chat input
+│  │     ├─ widgets/      All TUI widgets (agent ops, gate monitor, artifacts, etc.)
+│  │     ├─ gol_render/   Game of Life rendering
+│  │     └─ seed_render/  Genome seed visualization
+│  ├─ nit-games/          Game theory tournament engine
+│  │  └─ src/
+│  │     ├─ config/       Config parsing, normalization, payoff matrices
+│  │     ├─ strategy/     Strategy codecs (FSM, CA, Turing machine)
+│  │     └─ tournament/   Match execution, accumulation, Metal GPU batching
+│  ├─ nit-gol/            Game of Life simulation
+│  │  └─ src/             Grid, step, rules, hashing, snapshots, catalog
+│  ├─ nit-metal/          Metal GPU acceleration (macOS)
+│  │  └─ src/
+│  │     ├─ macos/        Device, dispatch, shader, policy, cache
+│  │     └─ stubs.rs      No-op stubs for non-macOS platforms
+│  ├─ nit-syntax/         Syntax highlighting (tree-sitter)
+│  │  ├─ src/             Engine, registry, captures, debounce
+│  │  └─ queries/         Tree-sitter highlight queries per language
+│  └─ nit-utils/          Shared filesystem, hashing, path utilities
+├─ docs/                  Architecture, keybindings, swarm, games, security, seeds
+├─ vendor/                Vendored dependencies (time crate)
+├─ scripts/               Build and CI helpers
+└─ assets/                Static assets
+```
+
 ## Documentation
 
 - `docs/ARCHITECTURE.md` — state model, rendering pipeline, agent system, swarm orchestration.

@@ -1,10 +1,4 @@
 //! Tournament output types, run layout, and summary serialisation.
-//!
-//! This module defines the data structures written to disk after a tournament
-//! run: per-strategy results, pairwise match results, dominance edges, and the
-//! top-level [`RunSummary`] that ties everything together. It also handles
-//! unique run directory creation and the [`RuntimeAcceleratorStats`] that
-//! records which compute backend was used.
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -15,8 +9,6 @@ use crate::config::{AcceleratorMode, NormalizedConfig, ScoreAggregation, Strateg
 use nit_utils::fs::write_atomic;
 use nit_utils::hashing::stable_hash_bytes;
 
-/// Static definition of a strategy as recorded in the run output, including
-/// the specification kind and optional per-player RNG seeds.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct StrategyDefinition {
     pub id: String,
@@ -27,8 +19,6 @@ pub struct StrategyDefinition {
     pub rng_seed_b: Option<u64>,
 }
 
-/// Aggregated tournament result for a single strategy: total/average payoff,
-/// win/loss/draw record, and optional Turing-machine-specific metrics.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct StrategyResult {
     pub id: String,
@@ -145,8 +135,6 @@ pub struct DominanceEdge {
     pub loser: String,
 }
 
-/// The complete results of a tournament: a ranked list of strategies, all
-/// pairwise match outcomes, and the strict dominance graph.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TournamentResults {
     pub ranking: Vec<StrategyResult>,
@@ -155,8 +143,6 @@ pub struct TournamentResults {
 }
 
 impl TournamentResults {
-    /// Return an empty result set with no rankings, pairwise data, or dominance
-    /// edges.
     pub fn empty() -> Self {
         Self {
             ranking: Vec::new(),
@@ -175,9 +161,7 @@ pub enum RuntimeAcceleratorBackend {
     Metal,
 }
 
-/// Runtime statistics for the compute accelerator backend (CPU or Metal GPU)
-/// used during tournament evaluation.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct RuntimeAcceleratorStats {
     #[serde(default)]
     pub requested: AcceleratorMode,
@@ -273,29 +257,7 @@ impl RuntimeAcceleratorStats {
     }
 }
 
-impl Default for RuntimeAcceleratorStats {
-    fn default() -> Self {
-        Self {
-            requested: AcceleratorMode::default(),
-            backend: RuntimeAcceleratorBackend::None,
-            metal_batches: 0,
-            metal_matches: 0,
-            cpu_matches: 0,
-            metal_fallbacks: 0,
-            metal_fallback_reason: None,
-            metal_matches_per_batch: None,
-            metal_inflight_batches: None,
-            metal_policy_source: None,
-            metal_policy_cache_key: None,
-            metal_policy_cache_path: None,
-        }
-    }
-}
-
-/// File paths emitted by a tournament run (summary, events, history, etc.).
-/// Each path is stored as an `Option<String>` so older schema versions that
-/// lack a given file can still deserialise.
-
+/// Each path is `Option<String>` so older schema versions still deserialise.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RunPaths {
     pub summary: Option<String>,
@@ -316,9 +278,6 @@ pub fn run_id_from_seed_config(seed: u64, config_text: &str) -> String {
     format!("{hash:016x}")
 }
 
-/// Top-level summary of a single tournament run, combining configuration,
-/// strategy definitions, results, and output paths into a single
-/// JSON-serialisable record.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RunSummary {
     pub schema_version: u32,
@@ -346,8 +305,6 @@ pub fn write_summary(path: &Path, summary: &RunSummary) -> io::Result<()> {
     })
 }
 
-/// Filesystem layout for a single tournament run, mapping each output
-/// artefact to a concrete path under the run directory.
 #[derive(Clone, Debug)]
 pub struct RunLayout {
     pub run_dir: PathBuf,

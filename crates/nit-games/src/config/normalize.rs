@@ -7,7 +7,7 @@ use super::types::{
     FamilyRunStrategyHint, GamesConfig, NormalizedConfig, ParallelismConfig, StrategyConfig,
     StrategySpec, StrategySpecKind,
 };
-use super::{canonical_game_name, ConfigResult, CONFIG_SCHEMA_VERSION};
+use super::{canonical_game_name, is_tm_kind, ConfigResult, CONFIG_SCHEMA_VERSION};
 use crate::game::{Action, PayoffMatrix};
 use crate::strategy::InputMode;
 
@@ -265,16 +265,7 @@ fn family_run_tm_blank_hint(raw: &FamilyRunStrategyHint) -> Option<u8> {
         .filter(|value| !value.is_empty())
         .map(|value| value.to_ascii_lowercase());
     if let Some(kind) = kind_raw.as_deref() {
-        if !matches!(
-            kind,
-            "leftside_tm"
-                | "left-side-tm"
-                | "one_sided_tm"
-                | "one-sided-tm"
-                | "one_sided_tm_strategy"
-                | "tm"
-                | "onesidedtm"
-        ) {
+        if !is_tm_kind(kind) {
             return None;
         }
     } else if raw.blank.is_none() {
@@ -315,13 +306,7 @@ fn normalize_strategy(
         }
         "fsm" => normalize_fsm_kind(&raw, &mut errors),
         "ca" | "cellular_automaton" | "cellular-automaton" => normalize_ca_kind(&raw, &mut errors),
-        "leftside_tm"
-        | "left-side-tm"
-        | "one_sided_tm"
-        | "one-sided-tm"
-        | "one_sided_tm_strategy"
-        | "tm"
-        | "onesidedtm" => normalize_tm_kind(&raw, &mut errors),
+        kind if is_tm_kind(kind) => normalize_tm_kind(&raw, &mut errors),
         other => {
             errors.push(format!(
                 "strategy '{id}': unknown type '{other}' (expected fsm, ca, tm, or generated)"

@@ -16,7 +16,6 @@ pub(crate) const CONFIG_SCHEMA_VERSION: u32 = 1;
 
 pub(crate) type ConfigResult<T> = Result<T, ConfigError>;
 
-/// Maps user-facing game aliases to the canonical identifier (e.g. `"pd"` -> `"ipd"`).
 pub(crate) fn canonical_game_name(name: &str) -> Option<&'static str> {
     match name {
         "ipd"
@@ -27,4 +26,18 @@ pub(crate) fn canonical_game_name(name: &str) -> Option<&'static str> {
         | "iterated-prisoners-dilemma" => Some("ipd"),
         _ => None,
     }
+}
+
+/// Recognizes all user-facing aliases for the one-sided Turing machine strategy kind.
+pub(crate) fn is_tm_kind(kind: &str) -> bool {
+    matches!(
+        kind,
+        "leftside_tm"
+            | "left-side-tm"
+            | "one_sided_tm"
+            | "one-sided-tm"
+            | "one_sided_tm_strategy"
+            | "tm"
+            | "onesidedtm"
+    )
 }

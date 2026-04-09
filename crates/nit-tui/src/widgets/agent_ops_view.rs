@@ -6854,30 +6854,53 @@ fn roster_styled_line(
 
             let role_style = selected_row_style(
                 if is_clone {
-                    Style::default().fg(theme.seed.accent_2).bg(table_bg)
+                    Style::default()
+                        .fg(theme.border)
+                        .add_modifier(Modifier::DIM)
+                        .bg(table_bg)
                 } else {
                     Style::default().fg(theme.foreground).bg(table_bg)
                 },
                 selected,
                 theme,
             );
+            let clone_dim = Style::default()
+                .fg(theme.border)
+                .add_modifier(Modifier::DIM)
+                .bg(table_bg);
+            let clone_is_active =
+                is_clone && matches!(agent.status, nit_core::AgentStatus::Running);
             let status_style = selected_row_style(
-                agent_status_style(agent.status, theme).bg(table_bg),
+                if is_clone && !clone_is_active {
+                    clone_dim
+                } else {
+                    agent_status_style(agent.status, theme).bg(table_bg)
+                },
                 selected,
                 theme,
             );
             let hb_style = selected_row_style(
-                heartbeat_age_style(agent.heartbeat_age_secs, theme).bg(table_bg),
+                if is_clone {
+                    clone_dim
+                } else {
+                    heartbeat_age_style(agent.heartbeat_age_secs, theme).bg(table_bg)
+                },
                 selected,
                 theme,
             );
             let q_style = selected_row_style(
-                queue_len_style(agent.queue_len, theme).bg(table_bg),
+                if is_clone {
+                    clone_dim
+                } else {
+                    queue_len_style(agent.queue_len, theme).bg(table_bg)
+                },
                 selected,
                 theme,
             );
             let mission_style = selected_row_style(
-                if agent.current_mission.is_some() {
+                if is_clone {
+                    clone_dim
+                } else if agent.current_mission.is_some() {
                     Style::default().fg(theme.title).bg(table_bg)
                 } else {
                     Style::default()

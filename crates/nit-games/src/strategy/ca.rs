@@ -1,9 +1,10 @@
 //! Cellular automaton (CA) strategy implementation.
 
+use std::collections::VecDeque;
+
 use super::math::{checked_pow_usize, integer_digits_unsigned};
 use crate::game::Action;
 use crate::history::{History, RoundRecord};
-use std::collections::VecDeque;
 
 #[derive(Clone, Debug)]
 pub struct CaRunResult {
@@ -129,8 +130,8 @@ impl CaStrategy {
         sync_bit_window(&mut self.bit_window, history, &mut self.last_history_len);
     }
 
-    fn evaluate_ca(&self, row: Vec<u8>) -> u8 {
-        let run = run_shrinking_ca(&self.rule_table, self.symbols, self.two_r, self.steps, &row);
+    fn evaluate_ca(&self, row: &[u8]) -> u8 {
+        let run = run_shrinking_ca(&self.rule_table, self.symbols, self.two_r, self.steps, row);
         run.output_symbol
     }
 }
@@ -151,7 +152,7 @@ impl super::Strategy for CaStrategy {
             return Action::Cooperate;
         }
         let bits = self.bit_window.to_vec();
-        let symbol = self.evaluate_ca(bits);
+        let symbol = self.evaluate_ca(&bits);
         if symbol == 0 {
             Action::Cooperate
         } else {

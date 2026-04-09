@@ -267,63 +267,21 @@ pub fn analyze_history(
         let record: MatchHistoryLite =
             serde_json::from_str(&line).map_err(|err| format!("History parse error: {err}"))?;
 
-        let outcomes = record.score_idx.as_bytes();
-        let rounds = outcomes.len().min(u32::MAX as usize) as u32;
-        let tail_len = config.tail_rounds.min(outcomes.len());
-
-        let counts = count_outcomes(outcomes);
-        let (a_coop, b_coop) = coop_counts(&counts);
-        let (a_rate, b_rate) = coop_rates(a_coop, b_coop, rounds);
-
-        let tail_counts = if tail_len > 0 {
-            count_outcomes(&outcomes[outcomes.len() - tail_len..])
-        } else {
-            OutcomeCounts::default()
-        };
-        let (a_tail, b_tail) = coop_counts(&tail_counts);
-        let (a_tail_rate, b_tail_rate) = coop_rates(a_tail, b_tail, tail_len as u32);
-        let (a_initial, b_initial) = initial_actions(&record.score_idx);
-        let match_index = if record.match_index == 0 {
-            record.match_id.saturating_add(1)
-        } else {
-            record.match_index
-        };
-        let total_matches_reported = if record.total_matches == 0 {
-            match_index.max(total_matches.saturating_add(1))
-        } else {
-            record.total_matches
-        };
-
-        let summary = MatchSummary {
-            match_id: record.match_id,
-            match_index,
-            total_matches: total_matches_reported,
-            repetition: record.repetition,
-            rounds,
-            a: record.a.clone(),
-            b: record.b.clone(),
-            a_score: record.a_score,
-            b_score: record.b_score,
-            outcomes: counts.clone(),
-            a_coop_rate: a_rate,
-            b_coop_rate: b_rate,
-            tail_rounds: tail_len as u32,
-            tail_outcomes: tail_counts.clone(),
-            a_tail_coop_rate: a_tail_rate,
-            b_tail_coop_rate: b_tail_rate,
-            a_initial,
-            b_initial,
-        };
+        let summary = summarize_record(&record, config.tail_rounds, total_matches);
+        let rounds = summary.rounds;
 
         write_match_summary(&mut matches_ndjson, &summary)?;
         write_match_csv_row(&mut matches_csv, &summary)?;
+
+        let (a_coop, b_coop) = coop_counts(&summary.outcomes);
+        let (a_tail, b_tail) = coop_counts(&summary.tail_outcomes);
 
         update_strategy(
             &mut strategy_map,
             &record.a,
             rounds,
             a_coop,
-            tail_len as u32,
+            summary.tail_rounds,
             a_tail,
             record.a_score,
         );
@@ -332,18 +290,19 @@ pub fn analyze_history(
             &record.b,
             rounds,
             b_coop,
-            tail_len as u32,
+            summary.tail_rounds,
             b_tail,
             record.b_score,
         );
 
         if is_random_match(&record.a, &record.b, &config.random_match_substrings) {
             random_match_ids.push(record.match_id);
-            let trajectory = build_trajectory(outcomes, config.trajectory_samples);
+            let trajectory =
+                build_trajectory(record.score_idx.as_bytes(), config.trajectory_samples);
             write_trajectory_samples(
                 &mut trajectories_csv,
                 record.match_id,
-                match_index,
+                summary.match_index,
                 &record.a,
                 &record.b,
                 rounds,
@@ -352,7 +311,7 @@ pub fn analyze_history(
             if preview_trajectories.len() < config.preview_limit {
                 preview_trajectories.push(TrajectoryPreview {
                     match_id: record.match_id,
-                    match_index,
+                    match_index: summary.match_index,
                     a: record.a.clone(),
                     b: record.b.clone(),
                     rounds,
@@ -418,6 +377,62 @@ pub fn analyze_history(
             trajectories: preview_trajectories,
         },
     })
+}
+
+/// Build a [`MatchSummary`] from a parsed history record.
+fn summarize_record(
+    record: &MatchHistoryLite,
+    tail_rounds: usize,
+    running_total: usize,
+) -> MatchSummary {
+    let outcomes = record.score_idx.as_bytes();
+    let rounds = outcomes.len().min(u32::MAX as usize) as u32;
+    let tail_len = tail_rounds.min(outcomes.len());
+
+    let counts = count_outcomes(outcomes);
+    let (a_coop, b_coop) = coop_counts(&counts);
+    let (a_rate, b_rate) = coop_rates(a_coop, b_coop, rounds);
+
+    let tail_counts = if tail_len > 0 {
+        count_outcomes(&outcomes[outcomes.len() - tail_len..])
+    } else {
+        OutcomeCounts::default()
+    };
+    let (a_tail, b_tail) = coop_counts(&tail_counts);
+    let (a_tail_rate, b_tail_rate) = coop_rates(a_tail, b_tail, tail_len as u32);
+    let (a_initial, b_initial) = initial_actions(&record.score_idx);
+
+    let match_index = if record.match_index == 0 {
+        record.match_id.saturating_add(1)
+    } else {
+        record.match_index
+    };
+    let total_matches_reported = if record.total_matches == 0 {
+        match_index.max(running_total.saturating_add(1))
+    } else {
+        record.total_matches
+    };
+
+    MatchSummary {
+        match_id: record.match_id,
+        match_index,
+        total_matches: total_matches_reported,
+        repetition: record.repetition,
+        rounds,
+        a: record.a.clone(),
+        b: record.b.clone(),
+        a_score: record.a_score,
+        b_score: record.b_score,
+        outcomes: counts,
+        a_coop_rate: a_rate,
+        b_coop_rate: b_rate,
+        tail_rounds: tail_len as u32,
+        tail_outcomes: tail_counts,
+        a_tail_coop_rate: a_tail_rate,
+        b_tail_coop_rate: b_tail_rate,
+        a_initial,
+        b_initial,
+    }
 }
 
 fn analysis_base_name(history_path: &Path) -> String {

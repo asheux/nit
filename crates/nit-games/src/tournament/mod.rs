@@ -18,7 +18,7 @@ pub type MatchResultWithPreview = (MatchResult, Option<MatchHistoryPreview>);
 pub type StrategyIndex = usize;
 pub type MatchId = u64;
 
-/// Unique pairings in a round-robin: `n*(n+1)/2` with self-play, `n*(n-1)/2` without.
+/// Unique undirected pairings in a round-robin schedule.
 pub fn round_robin_pair_count(strategy_count: usize, self_play: bool) -> usize {
     if self_play {
         strategy_count * (strategy_count + 1) / 2

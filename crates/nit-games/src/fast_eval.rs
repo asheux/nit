@@ -90,7 +90,10 @@ impl FastStrategyModel {
             Action::Defect => 1,
         };
         let idx = current.saturating_mul(self.alphabet).saturating_add(symbol);
-        self.transitions.get(idx as usize).copied().unwrap_or(current)
+        self.transitions
+            .get(idx as usize)
+            .copied()
+            .unwrap_or(current)
     }
 }
 
@@ -107,8 +110,6 @@ struct Snapshot {
     b_total: i64,
     outcome_counts: [u64; 4],
 }
-
-const OUTCOME_BYTE: [u8; 4] = [b'0', b'1', b'2', b'3'];
 
 /// Evaluates a match between two FSM strategies with optional cycle detection.
 /// When the combined state revisits a previously-seen pair, remaining rounds
@@ -157,12 +158,7 @@ pub fn evaluate_match(
                     for (acc, delta) in outcome_counts.iter_mut().zip(delta_counts.iter()) {
                         *acc += delta * full_cycles as u64;
                     }
-                    replicate_cycle_outcomes(
-                        outcomes.as_mut(),
-                        snap.round,
-                        round,
-                        full_cycles,
-                    );
+                    replicate_cycle_outcomes(outcomes.as_mut(), snap.round, round, full_cycles);
                     round += period * full_cycles;
                 }
                 detect_cycles = false;
@@ -170,12 +166,15 @@ pub fn evaluate_match(
                     break;
                 }
             } else {
-                seen.insert(joint, Snapshot {
-                    round,
-                    a_total,
-                    b_total,
-                    outcome_counts,
-                });
+                seen.insert(
+                    joint,
+                    Snapshot {
+                        round,
+                        a_total,
+                        b_total,
+                        outcome_counts,
+                    },
+                );
             }
         }
 
@@ -191,7 +190,7 @@ pub fn evaluate_match(
         let outcome = Outcome::from_actions(act_a, act_b);
         outcome_counts[outcome.index()] += 1;
         if let Some(buf) = outcomes.as_mut() {
-            buf.push(OUTCOME_BYTE[outcome.index()]);
+            buf.push(outcome.digit_byte());
         }
         joint.a = model_a.next_state(joint.a, act_b);
         joint.b = model_b.next_state(joint.b, act_a);
@@ -214,7 +213,9 @@ fn replicate_cycle_outcomes(
     full_cycles: u32,
 ) {
     let Some(history) = buf else { return };
-    if full_cycles == 0 { return; }
+    if full_cycles == 0 {
+        return;
+    }
     let cycle_slice = history[cycle_start as usize..cycle_end as usize].to_vec();
     history.reserve(cycle_slice.len().saturating_mul(full_cycles as usize));
     for _ in 0..full_cycles {

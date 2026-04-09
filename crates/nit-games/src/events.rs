@@ -27,7 +27,6 @@ impl Default for EventLogConfig {
     }
 }
 
-/// Structured event emitted during tournament execution, serialized as NDJSON.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "event", rename_all = "snake_case")]
 pub enum GameEvent {
@@ -45,7 +44,6 @@ pub enum GameEvent {
         b: String,
         repetition: u32,
     },
-    /// Only emitted when `include_rounds` is enabled.
     Round {
         timestamp: String,
         match_id: usize,
@@ -53,7 +51,7 @@ pub enum GameEvent {
         round: u32,
         a_action: char,
         b_action: char,
-        /// Defaults to `true` so non-TM matches deserialize correctly.
+        /// Defaults to `true` for backward compat with non-TM match records.
         #[serde(default = "default_true")]
         a_halted: bool,
         #[serde(default = "default_true")]
@@ -82,8 +80,7 @@ fn default_true() -> bool {
     true
 }
 
-/// Buffered NDJSON writer that writes to a temp file and atomically renames
-/// on completion to prevent partial output.
+/// Writes NDJSON to a temp file, then atomically renames on completion.
 pub struct EventWriter {
     writer: BufWriter<File>,
     tmp_path: PathBuf,
@@ -112,7 +109,6 @@ impl EventWriter {
         self.writer.write_all(b"\n")
     }
 
-    /// Flushes, syncs, and atomically renames the temp file to the final path.
     pub fn finish(mut self) -> io::Result<PathBuf> {
         self.writer.flush()?;
         self.writer.get_ref().sync_all()?;

@@ -166,7 +166,7 @@ impl RollingHistory {
     /// Creates an empty rolling window that will track the most recent
     /// `depth` rounds (silently clamped to 31).
     fn new(depth: usize) -> Self {
-        let window_depth = depth.min(31);
+        let window_depth = depth.min(MAX_ROLLING_DEPTH);
 
         let window_mask = if window_depth == 0 {
             0

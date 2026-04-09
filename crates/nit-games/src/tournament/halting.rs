@@ -474,7 +474,7 @@ fn mark_tm_halting_selection(
 
 type MetalProbeResult = Result<Option<(Vec<bool>, MetalTmHaltingStats)>, String>;
 
-/// Dispatch Metal probe with auto-mode timeout guard and concurrency protection.
+/// Metal probe with auto-mode timeout guard and concurrency gate.
 fn dispatch_metal_tm_probe(
     config: &NormalizedConfig,
     diagnostics: &mut TmHaltingFilterDiagnostics,
@@ -521,7 +521,7 @@ fn dispatch_metal_tm_probe(
     }
 }
 
-/// Process a Metal probe result, updating diagnostics. Returns the keep-mask on success.
+/// Translate a Metal probe result into a keep-mask, recording diagnostics.
 fn apply_metal_probe_result(
     probe_result: MetalProbeResult,
     config: &NormalizedConfig,
@@ -637,6 +637,25 @@ fn all_tm_halting_mask(
     Ok(keep)
 }
 
+/// Roster classification for the halting filter dispatch.
+enum RosterKind {
+    AllTm,
+    Mixed { tm_mask: Vec<bool> },
+    NoTm,
+}
+
+fn classify_roster(strategies: &[StrategySpec]) -> RosterKind {
+    if roster_is_all_tms(strategies) {
+        return RosterKind::AllTm;
+    }
+    let tm_mask: Vec<bool> = strategies.iter().map(strategy_is_one_sided_tm).collect();
+    if tm_mask.iter().any(|&is_tm| is_tm) {
+        RosterKind::Mixed { tm_mask }
+    } else {
+        RosterKind::NoTm
+    }
+}
+
 /// Compute per-strategy halting mask, selecting the fastest available backend.
 fn halting_turing_machine_mask(
     config: &NormalizedConfig,
@@ -648,24 +667,21 @@ fn halting_turing_machine_mask(
     diagnostics.schedule_matches =
         total_schedule_matches(strategy_count, config.repetitions, config.self_play).unwrap_or(0);
 
-    if roster_is_all_tms(&config.strategies) {
-        return all_tm_halting_mask(config, strict_metal, diagnostics);
-    }
-    let tm_mask = config
-        .strategies
-        .iter()
-        .map(strategy_is_one_sided_tm)
-        .collect::<Vec<_>>();
-    let mut keep = vec![true; strategy_count];
-    if !tm_mask.iter().any(|&is_tm| is_tm) {
-        diagnostics.backend = TmHaltingFilterBackend::NotRequired;
-        return Ok(keep);
-    }
-    diagnostics.backend = TmHaltingFilterBackend::MixedRosterCpu;
+    let tm_mask = match classify_roster(&config.strategies) {
+        RosterKind::AllTm => {
+            return all_tm_halting_mask(config, strict_metal, diagnostics);
+        }
+        RosterKind::NoTm => {
+            diagnostics.backend = TmHaltingFilterBackend::NotRequired;
+            return Ok(vec![true; strategy_count]);
+        }
+        RosterKind::Mixed { tm_mask } => tm_mask,
+    };
 
+    diagnostics.backend = TmHaltingFilterBackend::MixedRosterCpu;
     let schedule = SchedulePlan::new(strategy_count, config.repetitions, config.self_play);
     if schedule.is_empty() {
-        return Ok(keep);
+        return Ok(vec![true; strategy_count]);
     }
     let scanned_matchups = (0..schedule.len())
         .filter(|match_id| {
@@ -700,6 +716,7 @@ fn halting_turing_machine_mask(
         )
     };
 
+    let mut keep = vec![true; strategy_count];
     let scan_parallel = || {
         (0..total_matches)
             .into_par_iter()

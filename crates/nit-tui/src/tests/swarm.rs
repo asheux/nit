@@ -649,6 +649,7 @@ fn make_task(id: &str, agent_id: &str, role: Option<&str>, deps: Vec<&str>) -> S
         parsed_artifacts: None,
         expected_artifacts_missing: false,
         failed: false,
+        retries: 0,
     }
 }
 
@@ -1117,6 +1118,7 @@ fn dag_scheduler_dispatches_after_deps() {
                 parsed_artifacts: None,
                 expected_artifacts_missing: false,
                 failed: false,
+                retries: 0,
             },
             SwarmTask {
                 id: "design".into(),
@@ -1133,6 +1135,7 @@ fn dag_scheduler_dispatches_after_deps() {
                 parsed_artifacts: None,
                 expected_artifacts_missing: false,
                 failed: false,
+                retries: 0,
             },
             SwarmTask {
                 id: "implement".into(),
@@ -1149,6 +1152,7 @@ fn dag_scheduler_dispatches_after_deps() {
                 parsed_artifacts: None,
                 expected_artifacts_missing: false,
                 failed: false,
+                retries: 0,
             },
             SwarmTask {
                 id: "review".into(),
@@ -1165,6 +1169,7 @@ fn dag_scheduler_dispatches_after_deps() {
                 parsed_artifacts: None,
                 expected_artifacts_missing: false,
                 failed: false,
+                retries: 0,
             },
         ],
         synthesis_prompt: None,
@@ -1184,15 +1189,15 @@ fn dag_scheduler_dispatches_after_deps() {
     assert!(first.iter().any(|d| d.agent_id == "a2"));
     assert!(first.iter().any(|d| d.agent_id == "a3"));
 
-    assert!(mark_task_finished(&mut run, "a2", "recon out".into(), false).is_some());
-    assert!(mark_task_finished(&mut run, "a3", "design out".into(), false).is_some());
+    assert!(mark_task_finished(&mut run, "a2", "recon out".into(), false, false).is_some());
+    assert!(mark_task_finished(&mut run, "a3", "design out".into(), false, false).is_some());
     refresh_task_readiness(&mut run);
 
     let second = dispatch_ready_tasks(&mut run);
     assert_eq!(second.len(), 1);
     assert_eq!(second[0].agent_id, "a1");
 
-    assert!(mark_task_finished(&mut run, "a1", "impl out".into(), false).is_some());
+    assert!(mark_task_finished(&mut run, "a1", "impl out".into(), false, false).is_some());
     refresh_task_readiness(&mut run);
     let third = dispatch_ready_tasks(&mut run);
     assert_eq!(third.len(), 1);
@@ -1230,6 +1235,7 @@ fn single_writer_limits_concurrent_write_tasks() {
                 parsed_artifacts: None,
                 expected_artifacts_missing: false,
                 failed: false,
+                retries: 0,
             },
             SwarmTask {
                 id: "w2".into(),
@@ -1246,6 +1252,7 @@ fn single_writer_limits_concurrent_write_tasks() {
                 parsed_artifacts: None,
                 expected_artifacts_missing: false,
                 failed: false,
+                retries: 0,
             },
             SwarmTask {
                 id: "r1".into(),
@@ -1262,6 +1269,7 @@ fn single_writer_limits_concurrent_write_tasks() {
                 parsed_artifacts: None,
                 expected_artifacts_missing: false,
                 failed: false,
+                retries: 0,
             },
         ],
         synthesis_prompt: None,
@@ -1283,7 +1291,7 @@ fn single_writer_limits_concurrent_write_tasks() {
     assert!(first.iter().any(|d| d.prompt.contains("Read (r1)")));
     assert!(!first.iter().any(|d| d.prompt.contains("Write 2 (w2)")));
 
-    assert!(mark_task_finished(&mut run, "a1", "w1 out".into(), false).is_some());
+    assert!(mark_task_finished(&mut run, "a1", "w1 out".into(), false, false).is_some());
     refresh_task_readiness(&mut run);
     let second = dispatch_ready_tasks(&mut run);
     assert_eq!(second.len(), 1);
@@ -1404,6 +1412,7 @@ fn deadlock_detection_skips_pending_tasks() {
                 parsed_artifacts: None,
                 expected_artifacts_missing: false,
                 failed: false,
+                retries: 0,
             },
             SwarmTask {
                 id: "t2".into(),
@@ -1420,6 +1429,7 @@ fn deadlock_detection_skips_pending_tasks() {
                 parsed_artifacts: None,
                 expected_artifacts_missing: false,
                 failed: false,
+                retries: 0,
             },
         ],
         synthesis_prompt: None,
@@ -1694,6 +1704,7 @@ fn dashboard_distinguishes_pending_queued_and_skipped() {
                 parsed_artifacts: None,
                 expected_artifacts_missing: false,
                 failed: false,
+                retries: 0,
             },
             SwarmTask {
                 id: "ready".into(),
@@ -1710,6 +1721,7 @@ fn dashboard_distinguishes_pending_queued_and_skipped() {
                 parsed_artifacts: None,
                 expected_artifacts_missing: false,
                 failed: false,
+                retries: 0,
             },
             SwarmTask {
                 id: "blocked".into(),
@@ -1726,6 +1738,7 @@ fn dashboard_distinguishes_pending_queued_and_skipped() {
                 parsed_artifacts: None,
                 expected_artifacts_missing: false,
                 failed: false,
+                retries: 0,
             },
             SwarmTask {
                 id: "skip".into(),
@@ -1742,6 +1755,7 @@ fn dashboard_distinguishes_pending_queued_and_skipped() {
                 parsed_artifacts: None,
                 expected_artifacts_missing: false,
                 failed: true,
+                retries: 0,
             },
         ],
         synthesis_prompt: None,

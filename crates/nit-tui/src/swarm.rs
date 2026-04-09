@@ -10,7 +10,10 @@ const DEFAULT_SWARM_SIZE: usize = 4;
 const MAX_SWARM_SIZE: usize = 16;
 const SWARM_VERIFY_MAX_CHARS: usize = 12_000;
 const SWARM_DEP_OUTPUT_MAX_CHARS: usize = 8_000;
-const SWARM_DEP_OUTPUT_MAX_CHARS_JUDGE: usize = 24_000;
+/// Limit for roles that need full dependency output (judge, integrate, and any
+/// write-role task).  Set high enough to avoid truncating detailed proposals —
+/// a comprehensive multi-file refactoring proposal can reach 20-30K chars.
+const SWARM_DEP_OUTPUT_MAX_CHARS_FULL: usize = 32_000;
 const COMPUTATIONAL_RESEARCH_ROLE: &str = "computational-research";
 const COMPUTATIONAL_RESEARCH_ROLE_LEGACY: &str = "computational research";
 
@@ -1252,6 +1255,8 @@ struct SwarmTask {
     parsed_artifacts: Option<SwarmTaskArtifacts>,
     expected_artifacts_missing: bool,
     failed: bool,
+    /// Number of times this task has been retried after failure.
+    retries: u8,
 }
 
 #[derive(Clone, Debug)]
@@ -2078,9 +2083,17 @@ impl SwarmRuntime {
                         self.runs.insert(mid.clone(), run);
                     }
                     SwarmStage::Executing => {
-                        if let Some(completed) =
-                            mark_task_finished(&mut run, agent_id, message.clone(), false)
-                        {
+                        let agent_has_writes = state
+                            .genome_turn_modified
+                            .get(agent_id)
+                            .map_or(false, |files| !files.is_empty());
+                        if let Some(completed) = mark_task_finished(
+                            &mut run,
+                            agent_id,
+                            message.clone(),
+                            false,
+                            agent_has_writes,
+                        ) {
                             outcome.artifact_focus = Some(SwarmArtifactFocus::Task {
                                 mission_id: run.mission_id.clone(),
                                 task_id: completed.task_id.clone(),
@@ -2091,6 +2104,17 @@ impl SwarmRuntime {
                                     &run.mission_id,
                                     format!(
                                         "Swarm artifacts: task '{}' declared artifacts but no parseable swarm_artifacts JSON block was found.",
+                                        completed.task_id
+                                    ),
+                                );
+                            }
+                            if completed.writes_expected && !completed.writes_detected {
+                                push_system_message_to_mission(
+                                    state,
+                                    &run.mission_id,
+                                    format!(
+                                        "WARNING: task '{}' was expected to write files but no file modifications were detected. \
+                                         The agent may have described changes without executing them.",
                                         completed.task_id
                                     ),
                                 );
@@ -2498,15 +2522,61 @@ impl SwarmRuntime {
                         self.runs.insert(mid.clone(), run);
                     }
                     SwarmStage::Executing => {
-                        if let Some(completed) =
-                            mark_task_finished(&mut run, agent_id, message.clone(), true)
-                        {
-                            outcome.artifact_focus = Some(SwarmArtifactFocus::Task {
-                                mission_id: run.mission_id.clone(),
-                                task_id: completed.task_id.clone(),
-                            });
-                            if completed.expected_artifacts_missing {
+                        let agent_has_writes = state
+                            .genome_turn_modified
+                            .get(agent_id)
+                            .map_or(false, |files| !files.is_empty());
+
+                        // Retry write-role tasks once on failure — the agent may
+                        // have crashed due to a transient issue (rate limit,
+                        // context overflow, etc.).  Reset the task to Ready so it
+                        // gets re-dispatched with its dependency outputs.
+                        let mut retried = false;
+                        let task_idx = run.tasks.iter().position(|t| {
+                            t.agent_id == *agent_id
+                                && matches!(
+                                    t.state,
+                                    SwarmTaskState::Running | SwarmTaskState::Dispatched
+                                )
+                        });
+                        if let Some(idx) = task_idx {
+                            let task = &mut run.tasks[idx];
+                            if task.writes && task.retries < 1 {
+                                task.retries += 1;
+                                task.state = SwarmTaskState::Ready;
+                                task.output = None;
                                 push_system_message_to_mission(
+                                    state,
+                                    &run.mission_id,
+                                    format!(
+                                        "Task '{}' failed ({}); retrying (attempt {}).",
+                                        task.id,
+                                        message.chars().take(120).collect::<String>(),
+                                        task.retries + 1,
+                                    ),
+                                );
+                                retried = true;
+                            }
+                        }
+
+                        if retried {
+                            refresh_task_readiness(&mut run);
+                            dispatches.extend(dispatch_ready_tasks(&mut run));
+                            self.runs.insert(mid.clone(), run);
+                        } else {
+                            if let Some(completed) = mark_task_finished(
+                                &mut run,
+                                agent_id,
+                                message.clone(),
+                                true,
+                                agent_has_writes,
+                            ) {
+                                outcome.artifact_focus = Some(SwarmArtifactFocus::Task {
+                                    mission_id: run.mission_id.clone(),
+                                    task_id: completed.task_id.clone(),
+                                });
+                                if completed.expected_artifacts_missing {
+                                    push_system_message_to_mission(
                                     state,
                                     &run.mission_id,
                                     format!(
@@ -2514,61 +2584,81 @@ impl SwarmRuntime {
                                         completed.task_id
                                     ),
                                 );
-                            }
-                        }
-                        // Drain orphaned queued turns for the failed agent so
-                        // queue_len doesn't leak.
-                        drain_queued_turns_for_agent(state, agent_id);
-                        refresh_task_readiness(&mut run);
-                        dispatches.extend(dispatch_ready_tasks(&mut run));
-                        if let Some(deadlock) = maybe_resolve_deadlock(&mut run) {
-                            push_system_message_to_mission(
-                                state,
-                                &run.mission_id,
-                                deadlock.message,
-                            );
-                        }
-                        let done = tasks_terminal_count(&run.tasks);
-                        update_mission_status(state, &run, Some(done));
-                        if done == run.tasks.len() {
-                            if let (Some(bundle), Some(verifier)) =
-                                (run.gate_bundle.clone(), run.verifier_agent_id.clone())
-                            {
-                                run.stage = SwarmStage::Verifying;
-                                update_mission_phase(state, &run.mission_id, MissionPhase::Verify);
-                                update_mission_status(state, &run, Some(done));
-                                if state.settings.genome.genome_gate_enabled {
-                                    run.genome_gate_results = Some(evaluate_genome_gate(state));
                                 }
-                                push_system_message_to_mission(
+                                if completed.writes_expected && !completed.writes_detected {
+                                    push_system_message_to_mission(
                                     state,
                                     &run.mission_id,
                                     format!(
-                                        "Starting VERIFY ({}) on agent {verifier}",
-                                        bundle.label()
+                                        "WARNING: task '{}' was expected to write files but no file modifications were detected. \
+                                         The agent may have described changes without executing them.",
+                                        completed.task_id
                                     ),
                                 );
-                                let prompt = build_verify_prompt(&run, &bundle);
-                                dispatches.push(SwarmDispatch {
-                                    agent_id: verifier,
-                                    mission_id: run.mission_id.clone(),
-                                    prompt,
-                                    task_role: None,
-                                });
-                            } else {
-                                run.stage = SwarmStage::Synthesizing;
-                                update_mission_phase(state, &run.mission_id, MissionPhase::Report);
-                                update_mission_status(state, &run, Some(done));
-                                let prompt = build_synthesis_prompt(&run);
-                                dispatches.push(SwarmDispatch {
-                                    agent_id: run.planner_agent_id.clone(),
-                                    mission_id: run.mission_id.clone(),
-                                    prompt,
-                                    task_role: None,
-                                });
+                                }
                             }
+                            // Drain orphaned queued turns for the failed agent so
+                            // queue_len doesn't leak.
+                            drain_queued_turns_for_agent(state, agent_id);
+                            refresh_task_readiness(&mut run);
+                            dispatches.extend(dispatch_ready_tasks(&mut run));
+                            if let Some(deadlock) = maybe_resolve_deadlock(&mut run) {
+                                push_system_message_to_mission(
+                                    state,
+                                    &run.mission_id,
+                                    deadlock.message,
+                                );
+                            }
+                            let done = tasks_terminal_count(&run.tasks);
+                            update_mission_status(state, &run, Some(done));
+                            if done == run.tasks.len() {
+                                if let (Some(bundle), Some(verifier)) =
+                                    (run.gate_bundle.clone(), run.verifier_agent_id.clone())
+                                {
+                                    run.stage = SwarmStage::Verifying;
+                                    update_mission_phase(
+                                        state,
+                                        &run.mission_id,
+                                        MissionPhase::Verify,
+                                    );
+                                    update_mission_status(state, &run, Some(done));
+                                    if state.settings.genome.genome_gate_enabled {
+                                        run.genome_gate_results = Some(evaluate_genome_gate(state));
+                                    }
+                                    push_system_message_to_mission(
+                                        state,
+                                        &run.mission_id,
+                                        format!(
+                                            "Starting VERIFY ({}) on agent {verifier}",
+                                            bundle.label()
+                                        ),
+                                    );
+                                    let prompt = build_verify_prompt(&run, &bundle);
+                                    dispatches.push(SwarmDispatch {
+                                        agent_id: verifier,
+                                        mission_id: run.mission_id.clone(),
+                                        prompt,
+                                        task_role: None,
+                                    });
+                                } else {
+                                    run.stage = SwarmStage::Synthesizing;
+                                    update_mission_phase(
+                                        state,
+                                        &run.mission_id,
+                                        MissionPhase::Report,
+                                    );
+                                    update_mission_status(state, &run, Some(done));
+                                    let prompt = build_synthesis_prompt(&run);
+                                    dispatches.push(SwarmDispatch {
+                                        agent_id: run.planner_agent_id.clone(),
+                                        mission_id: run.mission_id.clone(),
+                                        prompt,
+                                        task_role: None,
+                                    });
+                                }
+                            }
+                            self.runs.insert(mid.clone(), run);
                         }
-                        self.runs.insert(mid.clone(), run);
                     }
                     SwarmStage::Verifying => {
                         if run.verifier_agent_id.as_deref() != Some(agent_id.as_str()) {
@@ -2822,13 +2912,14 @@ fn ensure_integrate_task(
         task_prompt: "Implement the changes using the dependency outputs. You are the only agent allowed to make workspace edits. Process the FILE CHECKLIST above in order — open each file, refactor it, then move to the next. Prefer small, safe diffs and keep tests green.".into(),
         deps: all_deps,
         writes: true,
-        artifacts: vec!["files".into(), "diffs".into(), "commands".into()],
+        artifacts: Vec::new(),
         done_when: Some("Changes are implemented cleanly with validations to run.".into()),
         state: SwarmTaskState::Pending,
         output: None,
         parsed_artifacts: None,
         expected_artifacts_missing: false,
         failed: false,
+        retries: 0,
     });
     warnings
         .push("Plan safety net: injected integrate task because the planner omitted one.".into());
@@ -3763,6 +3854,7 @@ fn parse_plan_from_planner(
             parsed_artifacts: None,
             expected_artifacts_missing: false,
             failed: false,
+            retries: 0,
         });
     }
 
@@ -3912,12 +4004,20 @@ fn parse_v2_plan(
             .map(|dep| dep.trim().to_string())
             .filter(|dep| !dep.is_empty() && dep != &id)
             .collect::<Vec<_>>();
-        let artifacts = task
-            .artifacts
-            .into_iter()
-            .map(|a| a.trim().to_string())
-            .filter(|a| !a.is_empty())
-            .collect::<Vec<_>>();
+        // Write-role tasks (integrate) produce file modifications as output —
+        // don't declare artifacts for them. Declaring artifacts injects a
+        // STRUCTURED ARTIFACTS section into the prompt that forces the agent to
+        // produce a JSON block instead of focusing on code edits, and when it
+        // doesn't, downstream tasks see a misleading "artifacts missing" error.
+        let artifacts = if writes {
+            Vec::new()
+        } else {
+            task.artifacts
+                .into_iter()
+                .map(|a| a.trim().to_string())
+                .filter(|a| !a.is_empty())
+                .collect::<Vec<_>>()
+        };
 
         tasks.push(SwarmTask {
             id,
@@ -3940,6 +4040,7 @@ fn parse_v2_plan(
             parsed_artifacts: None,
             expected_artifacts_missing: false,
             failed: false,
+            retries: 0,
         });
     }
 
@@ -4040,6 +4141,7 @@ fn fallback_tasks(
                 parsed_artifacts: None,
                 expected_artifacts_missing: false,
                 failed: false,
+                retries: 0,
             });
         }
 
@@ -4060,6 +4162,7 @@ fn fallback_tasks(
                 parsed_artifacts: None,
                 expected_artifacts_missing: false,
                 failed: false,
+                retries: 0,
             });
         }
 
@@ -4073,13 +4176,14 @@ fn fallback_tasks(
                     .into(),
                 deps: vec!["judge".into()],
                 writes: true,
-                artifacts: vec!["diffs".into(), "commands".into()],
+                artifacts: Vec::new(),
                 done_when: Some("Changes are implemented cleanly with validations passing.".into()),
                 state: SwarmTaskState::Pending,
                 output: None,
                 parsed_artifacts: None,
                 expected_artifacts_missing: false,
                 failed: false,
+                retries: 0,
             });
         }
 
@@ -4100,6 +4204,7 @@ fn fallback_tasks(
                 parsed_artifacts: None,
                 expected_artifacts_missing: false,
                 failed: false,
+                retries: 0,
             });
         }
 
@@ -4191,6 +4296,7 @@ fn fallback_tasks(
                 parsed_artifacts: None,
                 expected_artifacts_missing: false,
                 failed: false,
+                retries: 0,
             });
         }
         if let Some(agent_id) = design_agent {
@@ -4232,6 +4338,7 @@ fn fallback_tasks(
                 parsed_artifacts: None,
                 expected_artifacts_missing: false,
                 failed: false,
+                retries: 0,
             });
         }
         if let Some(agent_id) = integrator.clone() {
@@ -4254,7 +4361,7 @@ fn fallback_tasks(
                     "Integrate + implement".into(),
                     "Implement the best approach using the dependency outputs. You are the only agent allowed to make workspace edits in this swarm. Prefer small, safe diffs and keep tests green.".into(),
                     true,
-                    vec!["diffs".into(), "commands".into()],
+                    Vec::new(),
                     Some("Changes are implemented cleanly with validations to run.".into()),
                 ),
             };
@@ -4273,6 +4380,7 @@ fn fallback_tasks(
                 parsed_artifacts: None,
                 expected_artifacts_missing: false,
                 failed: false,
+                retries: 0,
             });
         }
         if let Some(agent_id) = review_agent {
@@ -4304,6 +4412,7 @@ fn fallback_tasks(
                 parsed_artifacts: None,
                 expected_artifacts_missing: false,
                 failed: false,
+                retries: 0,
             });
         }
 
@@ -4462,6 +4571,7 @@ fn fallback_tasks(
             parsed_artifacts: None,
             expected_artifacts_missing: false,
             failed: false,
+            retries: 0,
         });
     }
 
@@ -4797,6 +4907,10 @@ fn mark_task_running(run: &mut SwarmRun, agent_id: &str) {
 struct TaskCompletion {
     task_id: String,
     expected_artifacts_missing: bool,
+    /// Task declared `writes: true` — it was supposed to modify files.
+    writes_expected: bool,
+    /// At least one file was attributed to this agent via `FileWrite` events.
+    writes_detected: bool,
 }
 
 fn mark_task_finished(
@@ -4804,6 +4918,7 @@ fn mark_task_finished(
     agent_id: &str,
     message: String,
     failed: bool,
+    agent_has_file_writes: bool,
 ) -> Option<TaskCompletion> {
     // Look for an active (Running or Dispatched) task first.
     let pos_active = run
@@ -4828,8 +4943,12 @@ fn mark_task_finished(
     let already_finished = pos_active.is_none();
 
     let parsed_artifacts = parse_task_artifacts(&run.tasks[pos].id, &message);
-    let expected_artifacts_missing =
-        !run.tasks[pos].artifacts.is_empty() && parsed_artifacts.is_none();
+    // Write-role tasks (integrate) produce file modifications as their primary
+    // output — the structured artifacts JSON is optional metadata.  Only flag
+    // missing artifacts for read-only tasks where the JSON is the sole output.
+    let expected_artifacts_missing = !run.tasks[pos].artifacts.is_empty()
+        && parsed_artifacts.is_none()
+        && !run.tasks[pos].writes;
 
     let task = &mut run.tasks[pos];
 
@@ -4859,6 +4978,8 @@ fn mark_task_finished(
         _ => {}
     }
 
+    let writes_expected = task.writes;
+
     Some(TaskCompletion {
         task_id: task.id.clone(),
         expected_artifacts_missing: if already_finished {
@@ -4866,6 +4987,8 @@ fn mark_task_finished(
         } else {
             expected_artifacts_missing
         },
+        writes_expected,
+        writes_detected: agent_has_file_writes,
     })
 }
 
@@ -5039,14 +5162,16 @@ fn select_dispatchable_ready_task_indices(run: &SwarmRun) -> Vec<usize> {
 }
 
 fn collect_dependency_payload(run: &SwarmRun, task: &SwarmTask) -> Vec<(String, String)> {
-    let is_judge = task
-        .role
-        .as_deref()
-        .and_then(normalize_role_label)
-        .as_deref()
-        == Some("judge");
-    let max_chars = if is_judge {
-        SWARM_DEP_OUTPUT_MAX_CHARS_JUDGE
+    let role = task.role.as_deref().and_then(normalize_role_label);
+    // Tasks that must ACT on dependency outputs need the full raw text —
+    // compact artifact summaries strip reasoning and implementation details,
+    // causing agents to describe changes instead of executing them.
+    //
+    // Full output for: judge (comparing proposals), integrate (implementing),
+    // and any task with `writes: true` (custom write-role tasks from planner).
+    let needs_full_output = matches!(role.as_deref(), Some("judge" | "integrate")) || task.writes;
+    let max_chars = if needs_full_output {
+        SWARM_DEP_OUTPUT_MAX_CHARS_FULL
     } else {
         SWARM_DEP_OUTPUT_MAX_CHARS
     };
@@ -5062,9 +5187,7 @@ fn collect_dependency_payload(run: &SwarmRun, task: &SwarmTask) -> Vec<(String, 
             _ => "PENDING",
         };
         let label = format!("{} [{}] (agent {})", dep.id, status, dep.agent_id);
-        // Judge needs full raw output to compare proposals properly;
-        // other roles get the compact artifact summary when available.
-        let text = if is_judge {
+        let text = if needs_full_output {
             dependency_payload_text_full(dep)
         } else {
             dependency_payload_text(run, dep)
@@ -5211,9 +5334,10 @@ fn parse_task_artifacts(task_id: &str, message: &str) -> Option<SwarmTaskArtifac
     if !found {
         let text = message.trim();
         let mut search_from = 0;
-        while let Some(start) = text[search_from..].find(r#""type":"#).or_else(|| {
-            text[search_from..].find(r#""type" :"#)
-        }) {
+        while let Some(start) = text[search_from..]
+            .find(r#""type":"#)
+            .or_else(|| text[search_from..].find(r#""type" :"#))
+        {
             let abs_start = search_from + start;
             // Walk backward to find the opening brace.
             let obj_start = match text[..abs_start].rfind('{') {

@@ -16,7 +16,7 @@ use crate::output::{RuntimeAcceleratorStats, StrategyDefinition, TournamentResul
 use rayon::prelude::*;
 use std::sync::mpsc::Sender;
 
-/// Sequential (ordered output) or parallel (channel-based, nondeterministic order) execution.
+/// Execution mode: ordered sequential or channel-based parallel.
 pub enum KernelRunMode<'a> {
     Sequential {
         event_writer: Option<&'a mut EventWriter>,
@@ -107,6 +107,65 @@ impl TournamentKernel {
         self.schedule.len()
     }
 
+    fn build_accumulator(&self) -> TournamentAccumulator {
+        TournamentAccumulator::new(
+            self.config.strategies.len(),
+            self.config.engine.complexity_cost.enabled,
+            self.config.engine.score_aggregation,
+            !matches!(self.config.engine.mode, crate::config::EngineMode::Batch),
+        )
+    }
+
+    /// Attempt the Metal GPU batch path for the full schedule. Returns outcomes
+    /// and runtime stats on success, or `None` to fall back to CPU.
+    fn try_metal_batch_path(
+        &self,
+        runtime: &mut RuntimeAcceleratorStats,
+    ) -> Option<Vec<super::types::MatchOutcome>> {
+        if matches!(self.config.engine.accelerator, AcceleratorMode::Cpu)
+            || self.schedule.is_empty()
+        {
+            return None;
+        }
+        match try_prepare_metal_batch_for_workload(
+            &self.config,
+            &self.config.strategies,
+            self.schedule.len(),
+        ) {
+            Ok(Some(prepared)) => {
+                runtime.note_metal_policy(
+                    prepared.policy.matches_per_batch,
+                    prepared.policy.inflight_batches,
+                    prepared.policy_source,
+                    prepared.policy_cache_key.clone(),
+                    prepared.policy_cache_path.clone(),
+                );
+                let matchups = self.schedule.matchups(0, self.schedule.len());
+                let (outcomes, batches) = try_metal_batch_outcomes_chunked_prepared(
+                    &self.config,
+                    &self.config.strategies,
+                    &prepared,
+                    &matchups,
+                )
+                .expect("metal batch support should remain stable across chunks")
+                .expect("metal batch support should remain stable across chunks");
+                runtime.note_metal_batches(batches, self.schedule.len());
+                Some(outcomes)
+            }
+            Ok(None) => {
+                runtime.note_metal_fallback_reason(
+                    metal_batch_decline_reason(&self.config, &self.config.strategies, 1)
+                        .unwrap_or_else(|| "Metal batch evaluator declined the probe".into()),
+                );
+                None
+            }
+            Err(err) => {
+                runtime.note_metal_fallback_reason(format!("Metal backend error: {err}"));
+                None
+            }
+        }
+    }
+
     fn run_sequential(
         &self,
         mut event_writer: Option<&mut EventWriter>,
@@ -114,12 +173,7 @@ impl TournamentKernel {
     ) -> (TournamentResults, RuntimeAcceleratorStats) {
         let total_matches = self.schedule.len();
         let mut runtime = RuntimeAcceleratorStats::new(self.config.engine.accelerator);
-        let mut results = TournamentAccumulator::new(
-            self.config.strategies.len(),
-            self.config.engine.complexity_cost.enabled,
-            self.config.engine.score_aggregation,
-            !matches!(self.config.engine.mode, crate::config::EngineMode::Batch),
-        );
+        let mut results = self.build_accumulator();
         if let Some(writer) = event_writer.as_mut() {
             let _ = writer.write(&GameEvent::TournamentStart {
                 timestamp: EventWriter::timestamp(),
@@ -139,58 +193,23 @@ impl TournamentKernel {
             && self.config.noise == 0.0
             && !(log_events && include_rounds);
 
-        if fast_eval_allowed
-            && !matches!(self.config.engine.accelerator, AcceleratorMode::Cpu)
-            && !log_events
-            && !log_history
-            && !self.schedule.is_empty()
-        {
-            match try_prepare_metal_batch_for_workload(
-                &self.config,
-                &self.config.strategies,
-                self.schedule.len(),
-            ) {
-                Ok(Some(prepared)) => {
-                    runtime.note_metal_policy(
-                        prepared.policy.matches_per_batch,
-                        prepared.policy.inflight_batches,
-                        prepared.policy_source,
-                        prepared.policy_cache_key.clone(),
-                        prepared.policy_cache_path.clone(),
+        if fast_eval_allowed && !log_events && !log_history {
+            if let Some(outcomes) = self.try_metal_batch_path(&mut runtime) {
+                for outcome in outcomes {
+                    results.apply_match(
+                        outcome.result,
+                        outcome.a_crashed,
+                        outcome.b_crashed,
+                        outcome.a_tm_stats,
+                        outcome.b_tm_stats,
                     );
-                    let matchups = self.schedule.matchups(0, self.schedule.len());
-                    let (outcomes, batches) = try_metal_batch_outcomes_chunked_prepared(
-                        &self.config,
-                        &self.config.strategies,
-                        &prepared,
-                        &matchups,
-                    )
-                    .expect("metal batch support should remain stable across chunks")
-                    .expect("metal batch support should remain stable across chunks");
-                    for outcome in outcomes {
-                        results.apply_match(
-                            outcome.result,
-                            outcome.a_crashed,
-                            outcome.b_crashed,
-                            outcome.a_tm_stats,
-                            outcome.b_tm_stats,
-                        );
-                    }
-                    runtime.note_metal_batches(batches, self.schedule.len());
-                    if let Some(writer) = event_writer.as_mut() {
-                        let _ = writer.write(&GameEvent::TournamentEnd {
-                            timestamp: EventWriter::timestamp(),
-                        });
-                    }
-                    return (results.finalize(&self.config.strategies), runtime);
                 }
-                Ok(None) => runtime.note_metal_fallback_reason(
-                    metal_batch_decline_reason(&self.config, &self.config.strategies, 1)
-                        .unwrap_or_else(|| "Metal batch evaluator declined the probe".into()),
-                ),
-                Err(err) => {
-                    runtime.note_metal_fallback_reason(format!("Metal backend error: {err}"))
+                if let Some(writer) = event_writer.as_mut() {
+                    let _ = writer.write(&GameEvent::TournamentEnd {
+                        timestamp: EventWriter::timestamp(),
+                    });
                 }
+                return (results.finalize(&self.config.strategies), runtime);
             }
         }
 
@@ -271,64 +290,24 @@ impl TournamentKernel {
             && self.config.noise == 0.0
             && !(log_events && include_rounds);
 
-        if fast_eval_allowed
-            && !matches!(self.config.engine.accelerator, AcceleratorMode::Cpu)
-            && !log_events
-            && !log_history
-            && !self.schedule.is_empty()
-        {
-            match try_prepare_metal_batch_for_workload(
-                &self.config,
-                &self.config.strategies,
-                self.schedule.len(),
-            ) {
-                Ok(Some(prepared)) => {
-                    runtime.note_metal_policy(
-                        prepared.policy.matches_per_batch,
-                        prepared.policy.inflight_batches,
-                        prepared.policy_source,
-                        prepared.policy_cache_key.clone(),
-                        prepared.policy_cache_path.clone(),
-                    );
-                    let matchups = self.schedule.matchups(0, self.schedule.len());
-                    let (all_outcomes, batches) = try_metal_batch_outcomes_chunked_prepared(
-                        &self.config,
-                        &self.config.strategies,
-                        &prepared,
-                        &matchups,
-                    )
-                    .expect("metal batch support should remain stable across chunks")
-                    .expect("metal batch support should remain stable across chunks");
-                    runtime.note_metal_batches(batches, self.schedule.len());
-                    if let Some(sender) = event_sender.as_ref() {
-                        let _ = sender.send(GameEvent::TournamentEnd {
-                            timestamp: EventWriter::timestamp(),
-                        });
-                    }
-                    let mut results = TournamentAccumulator::new(
-                        self.config.strategies.len(),
-                        self.config.engine.complexity_cost.enabled,
-                        self.config.engine.score_aggregation,
-                        !matches!(self.config.engine.mode, crate::config::EngineMode::Batch),
-                    );
-                    for outcome in all_outcomes {
-                        results.apply_match(
-                            outcome.result,
-                            outcome.a_crashed,
-                            outcome.b_crashed,
-                            outcome.a_tm_stats,
-                            outcome.b_tm_stats,
-                        );
-                    }
-                    return (results.finalize(&self.config.strategies), runtime);
+        if fast_eval_allowed && !log_events && !log_history {
+            if let Some(all_outcomes) = self.try_metal_batch_path(&mut runtime) {
+                if let Some(sender) = event_sender.as_ref() {
+                    let _ = sender.send(GameEvent::TournamentEnd {
+                        timestamp: EventWriter::timestamp(),
+                    });
                 }
-                Ok(None) => runtime.note_metal_fallback_reason(
-                    metal_batch_decline_reason(&self.config, &self.config.strategies, 1)
-                        .unwrap_or_else(|| "Metal batch evaluator declined the probe".into()),
-                ),
-                Err(err) => {
-                    runtime.note_metal_fallback_reason(format!("Metal backend error: {err}"))
+                let mut results = self.build_accumulator();
+                for outcome in all_outcomes {
+                    results.apply_match(
+                        outcome.result,
+                        outcome.a_crashed,
+                        outcome.b_crashed,
+                        outcome.a_tm_stats,
+                        outcome.b_tm_stats,
+                    );
                 }
+                return (results.finalize(&self.config.strategies), runtime);
             }
         }
 
@@ -379,12 +358,7 @@ impl TournamentKernel {
             });
         }
 
-        let mut results = TournamentAccumulator::new(
-            self.config.strategies.len(),
-            self.config.engine.complexity_cost.enabled,
-            self.config.engine.score_aggregation,
-            !matches!(self.config.engine.mode, crate::config::EngineMode::Batch),
-        );
+        let mut results = self.build_accumulator();
         for outcome in outcomes {
             results.apply_match(
                 outcome.result,

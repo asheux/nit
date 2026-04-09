@@ -302,16 +302,12 @@ pub struct OneSidedTmStrategy {
 }
 
 impl OneSidedTmStrategy {
-    #[allow(clippy::too_many_arguments)]
     pub fn new(
         id: impl Into<String>,
         symbols: u8,
         start_state: u16,
         blank: u8,
-        _fallback_symbol: u8,
         max_steps_per_round: u32,
-        _input_mode: super::InputMode,
-        _output_map: Vec<Action>,
         transitions: Vec<super::TmTransition>,
     ) -> Self {
         let symbols = symbols.max(2);
@@ -329,13 +325,8 @@ impl OneSidedTmStrategy {
         }
     }
 
-    /// Accumulated run statistics.
     pub fn stats(&self) -> &TmRunStats {
         &self.stats
-    }
-
-    fn action_from_output_symbol(&self, symbol: u8) -> Action {
-        tm_action_from_output_symbol(symbol)
     }
 
     /// Bring the input suffix up to date with the current history.
@@ -428,7 +419,7 @@ impl super::Strategy for OneSidedTmStrategy {
         );
 
         if let Some(symbol) = run.output_symbol {
-            self.action_from_output_symbol(symbol)
+            tm_action_from_output_symbol(symbol)
         } else {
             Action::Defect
         }

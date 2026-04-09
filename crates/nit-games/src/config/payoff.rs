@@ -1,9 +1,9 @@
 use super::types::PayoffConfig;
 use crate::game::PayoffMatrix;
 
-/// Builds a [`PayoffMatrix`] from config. When a full 2x2 matrix is provided,
-/// validates dimensions and cross-checks against explicit R/S/T/P scalars
-/// for symmetric games. Falls back to scalar construction on malformed input.
+/// When a full 2x2 matrix is provided, validates dimensions and cross-checks
+/// against explicit R/S/T/P scalars for symmetric games. Falls back to scalar
+/// construction on malformed input.
 pub(super) fn payoff_from_config(config: PayoffConfig, errors: &mut Vec<String>) -> PayoffMatrix {
     let Some(raw_matrix) = config.matrix.as_ref() else {
         return fallback_payoff(config);
@@ -53,11 +53,11 @@ pub(super) fn payoff_from_config(config: PayoffConfig, errors: &mut Vec<String>)
         }
     }
 
-    let built = [
-        [[cells[0][0].0, cells[0][0].1], [cells[0][1].0, cells[0][1].1]],
-        [[cells[1][0].0, cells[1][0].1], [cells[1][1].0, cells[1][1].1]],
-    ];
-    PayoffMatrix::from_matrix(built)
+    let unpack = |c: (i32, i32)| [c.0, c.1];
+    PayoffMatrix::from_matrix([
+        [unpack(cells[0][0]), unpack(cells[0][1])],
+        [unpack(cells[1][0]), unpack(cells[1][1])],
+    ])
 }
 
 /// Symmetric matrix from scalar R/S/T/P fields, defaulting to PD (R=3, S=0, T=5, P=1).

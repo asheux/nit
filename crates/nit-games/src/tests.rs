@@ -64,10 +64,7 @@ fn strategy_from_spec(spec: &crate::config::StrategySpec) -> Box<dyn Strategy> {
             symbols,
             start_state,
             blank,
-            fallback_symbol,
             max_steps_per_round,
-            input_mode,
-            output_map,
             transitions,
             ..
         } => Box::new(OneSidedTmStrategy::new(
@@ -75,10 +72,7 @@ fn strategy_from_spec(spec: &crate::config::StrategySpec) -> Box<dyn Strategy> {
             *symbols,
             *start_state,
             *blank,
-            fallback_symbol.unwrap_or(*blank),
             *max_steps_per_round,
-            *input_mode,
-            output_map.clone(),
             transitions.clone(),
         )),
     }
@@ -394,17 +388,7 @@ fn tm_always_move_right_write_zero_cooperates_and_halts() {
             next: 1,
         },
     ];
-    let mut tm = OneSidedTmStrategy::new(
-        "tm",
-        2,
-        1,
-        0,
-        0,
-        4,
-        InputMode::OpponentLastAction,
-        vec![Action::Cooperate, Action::Defect],
-        transitions,
-    );
+    let mut tm = OneSidedTmStrategy::new("tm", 2, 1, 0, 4, transitions);
 
     let mut history = History::new(0);
     for _ in 0..3 {
@@ -418,17 +402,7 @@ fn tm_always_move_right_write_zero_cooperates_and_halts() {
 #[test]
 fn tm_rule_code_zero_cooperates_on_first_round_then_times_out() {
     let (transitions, _) = decode_tm_rule_code_wolfram(0, 1, 2);
-    let mut tm = OneSidedTmStrategy::new(
-        "tm_zero",
-        2,
-        1,
-        0,
-        0,
-        4,
-        InputMode::OpponentLastAction,
-        vec![Action::Cooperate, Action::Defect],
-        transitions,
-    );
+    let mut tm = OneSidedTmStrategy::new("tm_zero", 2, 1, 0, 4, transitions);
     let mut history = History::new(0);
     let action = tm.next_action(&history, true);
     assert_eq!(action, Action::Cooperate);

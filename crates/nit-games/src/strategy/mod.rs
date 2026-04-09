@@ -1,17 +1,14 @@
 //! Strategy trait and shared types for game theory tournament strategies.
-//!
-//! This module defines the [`Strategy`] trait, shared enumerations, and codec
-//! functions. Concrete implementations live in submodules: [`fsm`], [`ca`],
-//! and [`tm`].
 
 mod ca;
 mod fsm;
 pub(crate) mod math;
 mod tm;
 
+use serde::{Deserialize, Serialize};
+
 use crate::game::Action;
 use crate::history::History;
-use serde::{Deserialize, Serialize};
 
 // ── Public re-exports (preserving lib.rs surface) ────────────
 

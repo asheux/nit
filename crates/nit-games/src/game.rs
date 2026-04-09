@@ -103,6 +103,16 @@ impl Outcome {
             Self::DD => Self::DD,
         }
     }
+
+    /// ASCII digit byte encoding: CC=`b'0'`, CD=`b'1'`, DC=`b'2'`, DD=`b'3'`.
+    pub fn digit_byte(self) -> u8 {
+        b'0' + self.index() as u8
+    }
+
+    /// ASCII digit char encoding: CC=`'0'`, CD=`'1'`, DC=`'2'`, DD=`'3'`.
+    pub fn digit_char(self) -> char {
+        char::from(self.digit_byte())
+    }
 }
 
 impl std::fmt::Display for Outcome {

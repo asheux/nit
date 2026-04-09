@@ -95,7 +95,7 @@ pub(super) fn play_round_core(
     session.b_total += b_payoff as i64;
     session.history.push(a_action, b_action);
     if session.record_history || session.record_trace {
-        session.history_scores.push(outcome_digit_char(outcome));
+        session.history_scores.push(outcome.digit_char());
     }
     if session.record_trace {
         session.history_payoffs.push([a_payoff, b_payoff]);
@@ -459,18 +459,6 @@ where
     }
 }
 
-/// Map an [`Outcome`] to a single digit character for the history score string.
-///
-/// CC -> `'0'`, CD -> `'1'`, DC -> `'2'`, DD -> `'3'`.
-fn outcome_digit_char(outcome: Outcome) -> char {
-    match outcome {
-        Outcome::CC => '0',
-        Outcome::CD => '1',
-        Outcome::DC => '2',
-        Outcome::DD => '3',
-    }
-}
-
 /// Build the serializable [`StrategyDefinition`] list from the roster specs.
 ///
 /// Used by both the kernel and runner to populate the run summary output.
@@ -537,10 +525,7 @@ fn build_strategy(spec: &StrategySpec, seed: u64) -> Box<dyn Strategy> {
             symbols,
             start_state,
             blank,
-            fallback_symbol,
             max_steps_per_round,
-            input_mode,
-            output_map,
             transitions,
             ..
         } => Box::new(OneSidedTmStrategy::new(
@@ -548,10 +533,7 @@ fn build_strategy(spec: &StrategySpec, seed: u64) -> Box<dyn Strategy> {
             *symbols,
             *start_state,
             *blank,
-            fallback_symbol.unwrap_or(*blank),
             *max_steps_per_round,
-            *input_mode,
-            output_map.clone(),
             transitions.clone(),
         )),
     }

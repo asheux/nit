@@ -60,10 +60,6 @@ pub struct TournamentRunner {
 }
 
 impl TournamentRunner {
-    /// Build a new runner from a normalised game-theory configuration.
-    ///
-    /// Selects halting TM strategies, derives seeds, compiles fast-eval
-    /// models, and lays out the full round-robin schedule.
     pub fn new(config: NormalizedConfig) -> Self {
         let mut config = select_halting_turing_machine_strategies(config);
         let tournament_seed = config.seed.unwrap_or(0);
@@ -111,22 +107,16 @@ impl TournamentRunner {
         }
     }
 
-    /// Attach an event log writer. Events (match start/end, rounds, errors) will
-    /// be serialised to this writer during tournament execution.
     pub fn with_event_writer(mut self, writer: EventWriter) -> Self {
         self.event_writer = Some(writer);
         self
     }
 
-    /// Attach a match history writer. Per-match history records will be serialised
-    /// to this writer as each match completes.
     pub fn with_history_writer(mut self, writer: HistoryWriter) -> Self {
         self.history_writer = Some(writer);
         self
     }
 
-    /// Enable or disable collection of per-match history previews for the
-    /// TUI match replay panel.
     pub fn with_match_history_previews(mut self, enabled: bool) -> Self {
         self.collect_match_history_previews = enabled;
         if !enabled {
@@ -135,21 +125,16 @@ impl TournamentRunner {
         self
     }
 
-    /// Drain all accumulated match history previews, returning them and
-    /// leaving the internal buffer empty for the next collection cycle.
     pub fn drain_match_history_previews(&mut self) -> Vec<MatchHistoryPreview> {
         std::mem::take(&mut self.completed_history_previews)
     }
 
-    /// Returns `true` when every match in the schedule has been completed.
     pub fn is_done(&self) -> bool {
         self.match_index >= self.schedule.len() && self.current.is_none()
     }
 
-    /// Current progress snapshot for the TUI status display.
-    ///
-    /// Prioritises the active session, then batch-mode cached progress,
-    /// then the next scheduled matchup, falling back to the last saved progress.
+    /// Progress snapshot with cascading fallback: active session, batch cache,
+    /// next scheduled matchup, then last saved progress.
     pub fn progress(&self) -> Option<TournamentProgress> {
         if self.schedule.is_empty() {
             return Some(TournamentProgress::build(
@@ -192,7 +177,6 @@ impl TournamentRunner {
         self.last_progress.clone()
     }
 
-    /// Build a progress snapshot from the currently active match session.
     fn progress_from_active_session(
         &self,
         active_session: &MatchSession,
@@ -220,8 +204,6 @@ impl TournamentRunner {
         ))
     }
 
-    /// In batch mode, return a copy of the last cached progress with fresh
-    /// runtime stats, or `None` when not applicable.
     fn progress_from_batch_cache(&self) -> Option<TournamentProgress> {
         if !matches!(self.config.engine.mode, crate::config::EngineMode::Batch) {
             return None;
@@ -231,9 +213,6 @@ impl TournamentRunner {
         Some(cached_snapshot)
     }
 
-    /// Snapshot the in-progress match for the TUI match detail panel.
-    ///
-    /// Returns `None` when no match is currently active.
     pub fn match_snapshot(&self) -> Option<MatchSnapshot> {
         let active_session = self.current.as_ref()?;
         let active_matchup = &active_session.matchup;
@@ -255,11 +234,8 @@ impl TournamentRunner {
         })
     }
 
-    /// Advance the tournament by up to `steps` rounds.
-    ///
-    /// Opens new matches as needed, plays rounds, records results, and attempts
-    /// to fast-forward remaining budget through batch evaluation when eligible.
-    /// The TUI calls this once per tick to drive incremental progress.
+    /// Advance by up to `steps` rounds, opening new matches and fast-forwarding
+    /// via batch evaluation when eligible.
     pub fn step_rounds(&mut self, steps: u32) {
         if self.schedule.is_empty() {
             return;
@@ -312,8 +288,6 @@ impl TournamentRunner {
         }
     }
 
-    /// Initialise a new [`MatchSession`] from a schedule matchup and emit
-    /// the corresponding start event and initial progress snapshot.
     fn open_new_match(&mut self, next_matchup: Matchup) {
         let new_session = MatchSession::new(
             next_matchup,
@@ -350,8 +324,6 @@ impl TournamentRunner {
         self.current = Some(new_session);
     }
 
-    /// Record the final results from a completed match session, including
-    /// complexity-adjusted scores, history previews, and TM statistics.
     fn finalize_completed_session(&mut self, completed_session: MatchSession) {
         if self.collect_match_history_previews {
             self.completed_history_previews.push(MatchHistoryPreview {
@@ -417,22 +389,18 @@ impl TournamentRunner {
         }
     }
 
-    /// Produce the final tournament results (ranking, pairwise, dominance).
     pub fn results(&self) -> TournamentResults {
         self.results.finalize(&self.strategies)
     }
 
-    /// Lightweight leaderboard snapshot (ranking only, no pairwise matrix).
     pub fn leaderboard(&self) -> TournamentResults {
         self.results.leaderboard(&self.strategies)
     }
 
-    /// Strategy definition metadata used for result display headers.
     pub fn definitions(&self) -> &[StrategyDefinition] {
         &self.definitions
     }
 
-    /// The tournament-level random seed.
     pub fn seed(&self) -> u64 {
         self.seed
     }

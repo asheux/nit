@@ -36,9 +36,9 @@ pub(crate) fn integer_digits_unsigned(mut value: u128, radix: usize, len: usize)
     digits
 }
 
-// Checked exponentiation: `base.pow(exponent)`, returning `None` on overflow.
 macro_rules! define_checked_pow {
     ($name:ident, $val_ty:ty, $exp_ty:ty) => {
+        /// Checked exponentiation returning `None` on overflow.
         pub(crate) fn $name(base: $val_ty, exponent: $exp_ty) -> Option<$val_ty> {
             let mut result: $val_ty = 1;
             for _ in 0..exponent {
