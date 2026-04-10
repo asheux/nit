@@ -60,7 +60,29 @@ pub(super) fn load_agents_from_codex_models_cache() -> anyhow::Result<nit_core::
     agents.mcp.latency_ms = None;
     agents.mcp.last_error = None;
 
-    for entry in &entries {
+    populate_codex_metadata(&mut agents, &entries);
+    agents.agents = build_codex_lanes(entries);
+
+    agents.selected_agent = agents.agents.first().map(|lane| lane.id.clone());
+    agents.roster_selected = 0;
+    Ok(agents)
+}
+
+pub(super) fn load_only_codex_agents() -> nit_core::AgentsState {
+    load_agents_from_codex_models_cache().unwrap_or_else(|err| {
+        let mut agents = nit_core::AgentsState::default();
+        agents.alerts.push(nit_core::AgentAlert {
+            severity: nit_core::AgentAlertSeverity::Warn,
+            source: "codex".into(),
+            message: format!("Failed to load Codex models: {err}"),
+            at: "t+0".into(),
+        });
+        agents
+    })
+}
+
+fn populate_codex_metadata(agents: &mut nit_core::AgentsState, entries: &[CodexModelEntry]) {
+    for entry in entries {
         if let Some(window) = entry.context_window {
             let pct = entry.effective_context_window_percent.unwrap_or(100) as u64;
             let tokens = (window as u64).saturating_mul(pct).saturating_div(100) as u32;
@@ -97,8 +119,10 @@ pub(super) fn load_agents_from_codex_models_cache() -> anyhow::Result<nit_core::
                 .insert(entry.slug.clone(), effort);
         }
     }
+}
 
-    agents.agents = entries
+fn build_codex_lanes(entries: Vec<CodexModelEntry>) -> Vec<nit_core::AgentLane> {
+    entries
         .into_iter()
         .map(|entry| nit_core::AgentLane {
             id: entry.slug.clone(),
@@ -114,24 +138,7 @@ pub(super) fn load_agents_from_codex_models_cache() -> anyhow::Result<nit_core::
             current_mission: None,
             last_message: entry.description.unwrap_or_default(),
         })
-        .collect();
-
-    agents.selected_agent = agents.agents.first().map(|lane| lane.id.clone());
-    agents.roster_selected = 0;
-    Ok(agents)
-}
-
-pub(super) fn load_only_codex_agents() -> nit_core::AgentsState {
-    load_agents_from_codex_models_cache().unwrap_or_else(|err| {
-        let mut agents = nit_core::AgentsState::default();
-        agents.alerts.push(nit_core::AgentAlert {
-            severity: nit_core::AgentAlertSeverity::Warn,
-            source: "codex".into(),
-            message: format!("Failed to load Codex models: {err}"),
-            at: "t+0".into(),
-        });
-        agents
-    })
+        .collect()
 }
 
 fn reasoning_effort_rank(effort: &str) -> u8 {

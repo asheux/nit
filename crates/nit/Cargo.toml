@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "Terminal-native AI agent orchestrator with TUI"
 edition = "2021"
 license = "MIT"
+publish = false
 rust-version.workspace = true
 
 [dependencies]

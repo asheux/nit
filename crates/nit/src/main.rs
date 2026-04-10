@@ -46,7 +46,7 @@ fn main() -> anyhow::Result<()> {
         max_parallel_turns: parallel_turns,
         permission_mode: None,
     };
-    let agents_selection = cli.agents;
+    let backend_selection = cli.agents;
 
     // Resolve the application mode and filesystem target.
     let (app_kind, target_path) = match cli.command {
@@ -70,7 +70,7 @@ fn main() -> anyhow::Result<()> {
     let mut app_state = nit_core::AppState::new(workspace_root, editor_buffer, notes_buffer);
     configure_app_state(
         &mut app_state,
-        agents_selection,
+        backend_selection,
         app_kind,
         target_path.as_deref(),
     );
@@ -101,6 +101,17 @@ fn configure_app_state(
     state.visualizer.seed = stable_hash_bytes(state.editor_buffer().content_as_string().as_bytes());
     state.mode = Mode::Normal;
 
+    check_legacy_notes(state);
+
+    // Open the file tree when launching into a directory rather than a single file.
+    if target_path.is_none_or(|p| p.is_dir()) {
+        state.file_tree.root = state.workspace_root.clone();
+        state.file_tree.open = true;
+        state.focus = PaneId::Editor;
+    }
+}
+
+fn check_legacy_notes(state: &mut nit_core::AppState) {
     if let Some(snapshot_path) =
         export_legacy_notes_snapshot(&state.workspace_root, state.notes_buffer())
     {
@@ -108,13 +119,6 @@ fn configure_app_state(
             "Legacy Notes were preserved in {} and are available in Agent Ops > Scratchpad.",
             snapshot_path.display()
         ));
-    }
-
-    // Open the file tree when launching into a directory rather than a single file.
-    if target_path.is_none_or(|p| p.is_dir()) {
-        state.file_tree.root = state.workspace_root.clone();
-        state.file_tree.open = true;
-        state.focus = PaneId::Editor;
     }
 }
 

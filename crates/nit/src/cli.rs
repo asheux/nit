@@ -239,7 +239,7 @@ pub(crate) enum CodexSandboxArg {
 }
 
 impl CodexSandboxArg {
-    pub(crate) fn as_str(self) -> &'static str {
+    pub(crate) const fn as_str(self) -> &'static str {
         match self {
             Self::ReadOnly => "read-only",
             Self::WorkspaceWrite => "workspace-write",
@@ -257,7 +257,7 @@ pub(crate) enum CodexApprovalPolicyArg {
 }
 
 impl CodexApprovalPolicyArg {
-    pub(crate) fn as_str(self) -> &'static str {
+    pub(crate) const fn as_str(self) -> &'static str {
         match self {
             Self::Untrusted => "untrusted",
             Self::OnFailure => "on-failure",

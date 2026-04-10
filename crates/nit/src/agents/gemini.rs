@@ -96,21 +96,15 @@ fn discover_models_from_package() -> Option<Vec<String>> {
     let js_content = fs::read_to_string(models_js_path).ok()?;
 
     let parsed = parse_gemini_models_from_source(&js_content);
-    if parsed.is_empty() {
-        None
-    } else {
-        Some(parsed)
-    }
+    (!parsed.is_empty()).then_some(parsed)
 }
 
 // ── JavaScript Parsing Helpers ──
 
 fn resolve_set_member(token: &str, bindings: &HashMap<String, String>) -> Option<String> {
-    if let Some(quoted_value) = strip_single_quotes(token) {
-        return Some(quoted_value.to_string());
-    }
-
-    bindings.get(token).cloned()
+    strip_single_quotes(token)
+        .map(|v| v.to_string())
+        .or_else(|| bindings.get(token).cloned())
 }
 
 /// Parse `export const NAME = 'value';` lines into a name-to-value map.

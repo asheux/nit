@@ -1,5 +1,5 @@
 use std::fs;
-use std::io::Write;
+use std::io::{BufWriter, Write};
 use std::path::Path;
 
 use anyhow::Context;
@@ -40,8 +40,8 @@ fn run_games_enumerate_fsm(
         out.join(filename)
     };
 
-    let mut writer = std::io::BufWriter::new(
-        std::fs::File::create(&out_path)
+    let mut writer = BufWriter::new(
+        fs::File::create(&out_path)
             .with_context(|| format!("failed to create {}", out_path.display()))?,
     );
 

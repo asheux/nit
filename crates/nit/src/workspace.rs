@@ -7,7 +7,7 @@ use nit_core::{io as core_io, Buffer};
 use nit_utils::hashing::stable_hash_bytes;
 use nit_utils::paths;
 
-/// Retrieve the HEAD revision of a tracked file via a single `git show` invocation.
+/// Retrieve the HEAD revision of a tracked file via `git ls-files` + `git show`.
 /// Returns `None` for untracked files or if git is unavailable.
 fn git_head_content(file_path: &Path) -> Option<String> {
     let working_dir = file_path.parent()?;
@@ -46,9 +46,10 @@ fn load_file_buffer(path: &Path, default_name: &str) -> anyhow::Result<Buffer> {
 }
 
 fn parent_or_cwd(path: &Path) -> anyhow::Result<PathBuf> {
-    path.parent()
-        .map(|p| Ok(p.to_path_buf()))
-        .unwrap_or_else(|| std::env::current_dir().map_err(Into::into))
+    match path.parent() {
+        Some(p) => Ok(p.to_path_buf()),
+        None => std::env::current_dir().map_err(Into::into),
+    }
 }
 
 /// Open a target path for the GoL lab.

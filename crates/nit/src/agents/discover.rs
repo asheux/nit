@@ -223,8 +223,12 @@ fn parse_model_list_from_output(raw_stdout: &[u8]) -> Vec<String> {
         return collected;
     }
 
+    parse_text_model_list(trimmed_content)
+}
+
+fn parse_text_model_list(content: &str) -> Vec<String> {
     let mut model_ids = Vec::new();
-    for output_line in trimmed_content.lines() {
+    for output_line in content.lines() {
         let cleaned = output_line
             .trim()
             .trim_start_matches(['-', '*', '•'])
@@ -238,7 +242,8 @@ fn parse_model_list_from_output(raw_stdout: &[u8]) -> Vec<String> {
         if first_token.ends_with(':') || first_token.len() < 3 {
             continue;
         }
-        if first_token.eq_ignore_ascii_case("models") || first_token.eq_ignore_ascii_case("model") {
+        if first_token.eq_ignore_ascii_case("models") || first_token.eq_ignore_ascii_case("model")
+        {
             continue;
         }
         model_ids.push(first_token.to_string());

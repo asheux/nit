@@ -1,6 +1,7 @@
 use std::fmt::Write as _;
 use std::io;
 
+use anyhow::Context;
 use nit_games::{
     Action, InputMode, StrategyIntrospection, StrategyIntrospectionKind,
     StrategyIntrospectionParameters, TmTransitionRecord,
@@ -78,14 +79,15 @@ fn build_fsm_graph(
     transitions: &[Vec<usize>],
     notes: Option<Vec<String>>,
 ) -> StrategyGraph {
-    let mut nodes = Vec::new();
-    for idx in 0..states {
-        let output = outputs.get(idx).map(|a| a.as_char()).unwrap_or('?');
-        nodes.push(GraphNode {
-            id: (idx + 1).to_string(),
-            label: format!("{}({output})", idx + 1),
-        });
-    }
+    let nodes: Vec<GraphNode> = (0..states)
+        .map(|idx| {
+            let output = outputs.get(idx).map(|a| a.as_char()).unwrap_or('?');
+            GraphNode {
+                id: (idx + 1).to_string(),
+                label: format!("{}({output})", idx + 1),
+            }
+        })
+        .collect();
     let mut edges = Vec::new();
     for (state_idx, row) in transitions.iter().enumerate() {
         for (input_idx, next) in row.iter().enumerate() {
@@ -117,13 +119,12 @@ fn build_tm_graph(
     start_state: u16,
     transitions: &[TmTransitionRecord],
 ) -> StrategyGraph {
-    let mut nodes = Vec::new();
-    for state in 1..=states {
-        nodes.push(GraphNode {
+    let mut nodes: Vec<GraphNode> = (1..=states)
+        .map(|state| GraphNode {
             id: state.to_string(),
             label: state.to_string(),
-        });
-    }
+        })
+        .collect();
     let mut edges = Vec::new();
     let mut uses_halt = false;
     for trans in transitions {
@@ -234,7 +235,6 @@ pub(crate) fn write_strategy_graph_json(
     out_path: &std::path::Path,
     graph: &StrategyGraph,
 ) -> anyhow::Result<()> {
-    use anyhow::Context;
     nit_utils::fs::write_atomic(out_path, |writer| {
         serde_json::to_writer_pretty(writer, graph).map_err(io::Error::other)
     })

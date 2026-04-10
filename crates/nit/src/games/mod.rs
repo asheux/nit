@@ -17,29 +17,24 @@ use std::thread;
 use anyhow::Context;
 use nit_core::io as core_io;
 use nit_games::{
+    accelerator_run_preflight,
     events::{EventWriter, GameEvent},
     history_log::MatchHistory,
     output::{StrategyDefinition, TournamentResults},
     tournament::{KernelRunMode, Parallelism, TournamentKernel},
-    GamesConfig, HistoryWriter, NormalizedConfig, RuntimeAcceleratorStats, StrategySpec,
+    try_select_halting_turing_machine_strategies, GamesConfig, HistoryWriter, NormalizedConfig,
+    RuntimeAcceleratorStats, StrategySpec,
 };
 
 use crate::cli::GamesCommand;
 
 const DEFAULT_CONFIG_FILENAME: &str = "games.toml";
 
-/// Minimum contiguous bytes required for an NDJSON strategy line to be non-blank.
-const MIN_STRATEGY_LINE_LEN: usize = 1;
-
 // ── Subcommand Dispatch ──
 
 /// Route a games subcommand to the appropriate handler.
-///
-/// Each variant of [`GamesCommand`] maps to a dedicated function in a submodule
-/// that handles configuration loading, tournament execution, and output generation.
 pub(crate) fn dispatch_subcommand(cmd: GamesCommand) -> anyhow::Result<()> {
     match cmd {
-        // Run a single headless tournament and write output artifacts.
         GamesCommand::Run {
             config,
             strategies,
@@ -50,7 +45,6 @@ pub(crate) fn dispatch_subcommand(cmd: GamesCommand) -> anyhow::Result<()> {
             verbose,
         } => run::run_games_headless(config, strategies, out, seed, format, quiet, verbose),
 
-        // Sweep a parameter space, running many tournaments across a grid.
         GamesCommand::Sweep {
             config,
             strategies,
@@ -87,7 +81,6 @@ pub(crate) fn dispatch_subcommand(cmd: GamesCommand) -> anyhow::Result<()> {
             verbose,
         ),
 
-        // Inspect stored tournament results or a specific match.
         GamesCommand::Inspect {
             config,
             id,
@@ -95,7 +88,6 @@ pub(crate) fn dispatch_subcommand(cmd: GamesCommand) -> anyhow::Result<()> {
             out,
         } => inspect::run_games_inspect(config, id, format, out),
 
-        // Render the cooperation graph from a tournament run.
         GamesCommand::Graph {
             config,
             run,
@@ -103,17 +95,13 @@ pub(crate) fn dispatch_subcommand(cmd: GamesCommand) -> anyhow::Result<()> {
             out,
         } => inspect::run_games_graph(config, run, id, out),
 
-        // Enumerate strategy types, FSM state spaces, or input modes.
         GamesCommand::Enumerate { kind } => enumerate::dispatch_enumerate(kind),
     }
 }
 
 // ── Template ──
 
-/// Default TOML template for bootstrapping new games workspaces.
-///
-/// Contains a minimal configuration with IPD game settings, two FSM strategies,
-/// a cellular automaton strategy, and a Turing machine strategy.
+/// Default TOML template for new games workspaces.
 pub(crate) fn games_template() -> &'static str {
     r#"schema_version = 1
 game = "ipd"
@@ -187,12 +175,9 @@ rule_code = 3111
 
 // ── Config Loading and Path Resolution ──
 
-/// Loaded config bundle: resolved path, raw TOML text, and parsed configuration.
 type LoadedConfig = (PathBuf, String, NormalizedConfig);
 
 /// Load and parse a games config, optionally appending strategies from an NDJSON sidecar.
-///
-/// Returns the resolved config path, raw TOML text, and the normalized configuration.
 fn load_games_config(
     toml_source: Option<PathBuf>,
     sidecar_source: Option<PathBuf>,
@@ -254,6 +239,20 @@ fn resolve_relative_path(candidate_path: &Path, resolution_anchor: Option<&Path>
         .join(candidate_path)
 }
 
+/// Apply TM strategy selection and accelerator validation before tournament execution.
+fn finalize_config(config: NormalizedConfig) -> anyhow::Result<NormalizedConfig> {
+    let config = try_select_halting_turing_machine_strategies(config)
+        .map_err(|e| anyhow::anyhow!(e))?;
+    accelerator_run_preflight(
+        &config,
+        config.save_data && config.event_log.enabled,
+        config.save_data && config.history.enabled,
+        false,
+    )
+    .map_err(|e| anyhow::anyhow!(e))?;
+    Ok(config)
+}
+
 // ── Strategy Loading ──
 
 /// Load strategy specs from an NDJSON file and append them to the config.
@@ -286,7 +285,7 @@ fn parse_ndjson_line(
     input_text: String,
 ) -> anyhow::Result<Option<StrategySpec>> {
     let stripped_line = input_text.trim();
-    if stripped_line.len() < MIN_STRATEGY_LINE_LEN {
+    if stripped_line.is_empty() {
         return Ok(None);
     }
     let deserialized_spec: StrategySpec =
@@ -370,7 +369,6 @@ fn execute_tournament(
     history_output_file: Option<PathBuf>,
 ) -> anyhow::Result<TournamentRun> {
     let engine_settings = tournament_engine.config();
-    // Determine concurrency strategy from the engine configuration.
     let parallelism_mode = Parallelism::from_config(&engine_settings.engine.parallelism);
 
     if matches!(parallelism_mode, Parallelism::Off) {
@@ -397,14 +395,12 @@ fn run_sequential(
     event_file: Option<PathBuf>,
     history_file: Option<PathBuf>,
 ) -> anyhow::Result<TournamentRun> {
-    // Initialize optional event and history writers for sequential recording.
     let mut event_recorder = event_file
         .map(|path| EventWriter::new(path, engine_settings.event_log.include_rounds))
         .transpose()?;
 
     let mut history_recorder = history_file.map(HistoryWriter::new).transpose()?;
 
-    // Run the tournament kernel in sequential mode with direct writer references.
     let (tournament_outcomes, acceleration_metrics) =
         tournament_engine.run_with_runtime(KernelRunMode::Sequential {
             event_writer: event_recorder.as_mut(),

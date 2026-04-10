@@ -24,7 +24,7 @@ pub(crate) fn init_tracing(
         .with_ansi(false)
         .with_env_filter("info,nit_syntax::tree_sitter_engine=error")
         .try_init()
-        .ok();
+        .ok(); // Ignore if another subscriber is already installed.
 
     if let Some(path) = log_path {
         tracing::info!("log file: {}", path.display());
@@ -68,8 +68,10 @@ impl ChannelWriter {
     /// Emit complete lines from the buffer to both the log file and the TUI channel.
     fn drain_lines(&mut self) {
         while let Some(newline_pos) = self.buf.iter().position(|&b| b == b'\n') {
-            let raw_bytes: Vec<u8> = self.buf.drain(..=newline_pos).collect();
-            let trimmed_line = String::from_utf8_lossy(&raw_bytes).trim().to_string();
+            let trimmed_line = String::from_utf8_lossy(&self.buf[..=newline_pos])
+                .trim()
+                .to_string();
+            self.buf.drain(..=newline_pos);
             if trimmed_line.is_empty() {
                 continue;
             }

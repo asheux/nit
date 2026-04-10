@@ -12,10 +12,7 @@ use nit_games::output::{
     RunLayout, RunPaths, RunSummary, StrategyDefinition, RUN_SUMMARY_SCHEMA_VERSION,
 };
 use nit_games::tournament::TournamentKernel;
-use nit_games::{
-    accelerator_run_preflight, config::EngineMode, try_select_halting_turing_machine_strategies,
-    NormalizedConfig,
-};
+use nit_games::{config::EngineMode, NormalizedConfig};
 use nit_utils::hashing::stable_hash_bytes;
 
 use crate::cli::OutputFormat;
@@ -163,17 +160,7 @@ fn prepare_batch_config(
         .unwrap_or_else(|| stable_hash_bytes(format!("{creation_stamp}\n{raw_toml}").as_bytes()));
     parsed_cfg.seed = Some(resolved_seed);
 
-    // Select halting Turing machine strategies where applicable.
-    parsed_cfg = try_select_halting_turing_machine_strategies(parsed_cfg)
-        .map_err(|halting_error| anyhow::anyhow!(halting_error))?;
-    // Validate accelerator compatibility before execution.
-    accelerator_run_preflight(
-        &parsed_cfg,
-        parsed_cfg.save_data && parsed_cfg.event_log.enabled,
-        parsed_cfg.save_data && parsed_cfg.history.enabled,
-        false,
-    )
-    .map_err(|validation_error| anyhow::anyhow!(validation_error))?;
+    parsed_cfg = super::finalize_config(parsed_cfg)?;
 
     let content_hash_id = nit_games::run_id_from_seed_config(resolved_seed, &raw_toml);
 
@@ -212,18 +199,22 @@ fn build_run_paths(
     storage_layout: &Option<RunLayout>,
     tournament_output: &super::TournamentRun,
 ) -> RunPaths {
-    let format_path = |extractor: fn(&RunLayout) -> &std::path::Path| -> Option<String> {
-        storage_layout
-            .as_ref()
-            .map(|layout| extractor(layout).display().to_string())
-    };
-
     RunPaths {
-        summary: format_path(|l| &l.summary_path),
-        definitions: format_path(|l| &l.definitions_path),
-        results: format_path(|l| &l.results_path),
-        config: format_path(|l| &l.config_path),
-        analysis_dir: format_path(|l| &l.analysis_dir),
+        summary: storage_layout
+            .as_ref()
+            .map(|l| l.summary_path.display().to_string()),
+        definitions: storage_layout
+            .as_ref()
+            .map(|l| l.definitions_path.display().to_string()),
+        results: storage_layout
+            .as_ref()
+            .map(|l| l.results_path.display().to_string()),
+        config: storage_layout
+            .as_ref()
+            .map(|l| l.config_path.display().to_string()),
+        analysis_dir: storage_layout
+            .as_ref()
+            .map(|l| l.analysis_dir.display().to_string()),
         events: tournament_output.event_log_path.clone(),
         history: tournament_output.history_log_path.clone(),
     }
@@ -260,8 +251,8 @@ fn persist_and_emit_summary(
     final_report: &RunSummary,
     storage_layout: &Option<RunLayout>,
     serialization_format: OutputFormat,
-    silent_mode: bool,
-    diagnostic_output: bool,
+    suppress_stdout: bool,
+    verbose: bool,
 ) -> anyhow::Result<()> {
     if let Some(ref writable_layout) = storage_layout {
         let report_destination = &writable_layout.summary_path;
@@ -269,11 +260,11 @@ fn persist_and_emit_summary(
             .with_context(|| format!("failed to write {}", report_destination.display()))?;
     }
 
-    if diagnostic_output {
+    if verbose {
         emit_diagnostic_paths(final_report);
     }
 
-    if !silent_mode {
+    if !suppress_stdout {
         let serialized_output = match serialization_format {
             OutputFormat::Json => serde_json::to_string(final_report)?,
             OutputFormat::Pretty => serde_json::to_string_pretty(final_report)?,

@@ -24,7 +24,7 @@ pub(super) fn run_games_inspect(
     };
 
     if let Some(out_path) = out {
-        ensure_parent_dir(&out_path)?;
+        create_parent_dirs(&out_path)?;
         fs::write(&out_path, output)
             .with_context(|| format!("failed to write {}", out_path.display()))?;
     } else {
@@ -64,7 +64,7 @@ pub(super) fn run_games_graph(
         anyhow::bail!("output path must end with .json, .dot, or .gv");
     }
 
-    ensure_parent_dir(&out_path)?;
+    create_parent_dirs(&out_path)?;
 
     if is_json {
         write_strategy_graph_json(&out_path, &graph)?;
@@ -86,7 +86,7 @@ fn resolve_strategy(strategies: &[StrategySpec], id: &str) -> anyhow::Result<Str
         .ok_or_else(|| anyhow::anyhow!("strategy '{id}' not found"))
 }
 
-fn ensure_parent_dir(path: &Path) -> anyhow::Result<()> {
+fn create_parent_dirs(path: &Path) -> anyhow::Result<()> {
     if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
         fs::create_dir_all(parent)
             .with_context(|| format!("failed to create directory {}", parent.display()))?;

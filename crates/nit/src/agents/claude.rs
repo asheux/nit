@@ -69,7 +69,8 @@ pub(super) fn probe_claude_models() -> ModelProbeResult {
 }
 
 pub(super) fn populate_claude_model_metadata(roster: &mut nit_core::AgentsState) {
-    for id in roster.claude_models.clone() {
+    let model_ids = roster.claude_models.clone();
+    for id in model_ids {
         let window = if id.contains("[1m]") || id.contains("1m") {
             EXTENDED_CONTEXT_WINDOW
         } else {
@@ -174,9 +175,7 @@ fn extract_ascii_runs(bytes: &[u8]) -> Vec<String> {
 
     for (i, &b) in bytes.iter().enumerate() {
         if b.is_ascii_graphic() || b == b' ' {
-            if start.is_none() {
-                start = Some(i);
-            }
+            start.get_or_insert(i);
             continue;
         }
         if let Some(begin) = start.take() {
@@ -230,16 +229,21 @@ const DISQUALIFYING_KEYWORDS: &[&str] = &[
 
 fn is_probable_claude_model(raw: &str) -> bool {
     let name = raw.to_ascii_lowercase();
-    name.starts_with("claude-")
-        && !name.ends_with('-')
-        && !name.contains("--")
-        && !name.contains("..")
-        && !name.ends_with("-latest")
-        && !name.contains("-latest-")
-        && !name.contains("-v1")
-        && !name.contains("-v2")
-        && !name.contains("-v3")
-        && RECOGNIZED_FAMILIES.iter().any(|tag| name.contains(tag))
+    if !name.starts_with("claude-") || name.ends_with('-') {
+        return false;
+    }
+    if name.contains("--") || name.contains("..") {
+        return false;
+    }
+    if name.ends_with("-latest")
+        || name.contains("-latest-")
+        || name.contains("-v1")
+        || name.contains("-v2")
+        || name.contains("-v3")
+    {
+        return false;
+    }
+    RECOGNIZED_FAMILIES.iter().any(|tag| name.contains(tag))
         && !DISQUALIFYING_KEYWORDS.iter().any(|kw| name.contains(kw))
 }
 
@@ -276,13 +280,14 @@ fn parse_version_segments(tokens: &[&str]) -> Option<Vec<u32>> {
     if tokens.is_empty() {
         return None;
     }
-    let mut digits = Vec::with_capacity(tokens.len());
-    for seg in tokens {
-        // Accept 1-2 digit numeric segments only (0..=99).
-        if seg.is_empty() || seg.len() > 2 || !seg.chars().all(|c| c.is_ascii_digit()) {
-            return None;
-        }
-        digits.push(seg.parse::<u32>().ok()?);
-    }
-    Some(digits)
+    tokens
+        .iter()
+        .map(|seg| {
+            // Only 1-2 digit numeric segments (0..=99).
+            if seg.is_empty() || seg.len() > 2 || !seg.chars().all(|c| c.is_ascii_digit()) {
+                return None;
+            }
+            seg.parse::<u32>().ok()
+        })
+        .collect()
 }

@@ -139,9 +139,12 @@ fn sync_backend_model_lanes_replaces_placeholder_backend_rows() {
 
     sync_backend_model_lanes(&mut state, AgentsArg::All);
 
-    assert_eq!(state.agents.len(), 3);
+    assert_eq!(
+        state.agents.len(),
+        3,
+        "expected local + 2 claude model lanes"
+    );
 
-    // Non-Claude lane preserved with original kind.
     let mock_lane = state
         .agents
         .iter()
@@ -149,8 +152,10 @@ fn sync_backend_model_lanes_replaces_placeholder_backend_rows() {
         .expect("mock lane preserved");
     assert!(matches!(mock_lane.kind, nit_core::AgentLaneKind::Mock));
 
-    // Placeholder replaced by per-model lanes.
-    assert!(!state.agents.iter().any(|lane| lane.id == "claude"));
+    assert!(
+        !state.agents.iter().any(|lane| lane.id == "claude"),
+        "placeholder claude lane should be expanded into per-model lanes"
+    );
     for expected_model in ["claude-sonnet-4-6", "claude-opus-4-6"] {
         let expanded = state
             .agents

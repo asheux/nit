@@ -17,7 +17,6 @@ use nit_core::{
 
 use crate::cli::AgentsArg;
 
-const IDLE_LANE_MESSAGE: &str = "";
 const LOCAL_LANE_ID: &str = "local";
 
 /// Discover installed CLI tooling, build the agent roster, probe model catalogs,
@@ -140,7 +139,7 @@ fn materialize_model_lanes(
             heartbeat_age_secs: 0,
             queue_len: 0,
             current_mission: None,
-            last_message: IDLE_LANE_MESSAGE.into(),
+            last_message: String::new(),
         });
     }
 }

@@ -12,10 +12,7 @@ use nit_games::config::EngineMode;
 use nit_games::events::EventWriter;
 use nit_games::output::{RunPaths, RunSummary, RUN_SUMMARY_SCHEMA_VERSION};
 use nit_games::tournament::TournamentKernel;
-use nit_games::{
-    accelerator_run_preflight, run_id_from_seed_config,
-    try_select_halting_turing_machine_strategies, NormalizedConfig, PayoffMatrix, ScoreAggregation,
-};
+use nit_games::{run_id_from_seed_config, NormalizedConfig, PayoffMatrix, ScoreAggregation};
 use nit_utils::hashing::stable_hash_bytes;
 use serde::Serialize;
 
@@ -289,15 +286,7 @@ fn prepare_cell_config(
     );
     config.seed = Some(seed);
     config.engine.mode = EngineMode::Batch;
-    config =
-        try_select_halting_turing_machine_strategies(config).map_err(|err| anyhow::anyhow!(err))?;
-    accelerator_run_preflight(
-        &config,
-        config.save_data && config.event_log.enabled,
-        config.save_data && config.history.enabled,
-        false,
-    )
-    .map_err(|err| anyhow::anyhow!(err))?;
+    config = super::finalize_config(config)?;
 
     let serialized = toml::to_string(&config).unwrap_or_else(|_| ctx.config_text.to_owned());
     let content_hash = run_id_from_seed_config(seed, &serialized);
@@ -644,12 +633,9 @@ fn compute_sweep_aggregates(completed_data: SweepAccumulators) -> Vec<SweepStrat
         let observation_count = observed_scores.len() as f64;
         let arithmetic_mean = observed_scores.iter().sum::<f64>() / observation_count.max(1.0);
         // Compute population variance as mean of squared residuals.
-        let squared_deviation_sum = observed_scores
+        let variance = observed_scores
             .iter()
-            .map(|observation| {
-                let residual = *observation - arithmetic_mean;
-                residual * residual
-            })
+            .map(|score| (*score - arithmetic_mean).powi(2))
             .sum::<f64>()
             / observation_count.max(1.0);
         let victory_count = completed_data
@@ -660,7 +646,7 @@ fn compute_sweep_aggregates(completed_data: SweepAccumulators) -> Vec<SweepStrat
         sorted_rankings.push(SweepStrategyAggregate {
             id: contestant_name,
             mean_score: arithmetic_mean,
-            std_score: squared_deviation_sum.sqrt(),
+            std_score: variance.sqrt(),
             top1_count: victory_count,
         });
     }
