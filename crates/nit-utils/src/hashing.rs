@@ -1,5 +1,5 @@
 /// BLAKE3 digest truncated to 64 bits (little-endian).
-#[inline]
+/// BLAKE3 digest truncated to 64 bits (little-endian).
 #[must_use]
 pub fn stable_hash_bytes(data: &[u8]) -> u64 {
     let digest = blake3::hash(data);
@@ -17,11 +17,11 @@ pub struct SplitMix64 {
 
 impl SplitMix64 {
     const INCREMENT: u64 = 0x9E37_79B9_7F4A_7C15;
-    const ZERO_GUARD: u64 = 0x4d59_5df4_d0f3_3173;
+    const NONZERO_SEED: u64 = 0x4d59_5df4_d0f3_3173;
 
     #[must_use]
     pub fn new(seed: u64) -> Self {
-        let state = if seed == 0 { Self::ZERO_GUARD } else { seed };
+        let state = if seed == 0 { Self::NONZERO_SEED } else { seed };
         Self { state }
     }
 

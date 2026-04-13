@@ -52,7 +52,7 @@ fn rng_bounded_stays_in_range() {
 }
 
 #[test]
-fn rng_bounded_degenerate_upper() {
+fn rng_bounded_edge_cases() {
     let mut rng = SplitMix64::new(7);
     assert_eq!(rng.next_bounded(1), 0);
     assert_eq!(rng.next_bounded(0), 0);

@@ -6,7 +6,7 @@ struct ScratchDir(PathBuf);
 impl ScratchDir {
     fn new(label: &str) -> Self {
         let dir = std::env::temp_dir().join(format!("nit_{label}_{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::create_dir_all(&dir).expect("failed to create scratch directory");
         Self(dir)
     }
 }

@@ -16,7 +16,7 @@ fn cache_dir_resolves() {
 }
 
 #[test]
-fn state_dir_varies_by_platform() {
+fn state_dir_platform_dependent() {
     let result = paths::state_dir();
     if cfg!(target_os = "linux") {
         assert!(result.is_some(), "Linux should have a state directory");

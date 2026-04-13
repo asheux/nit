@@ -9,7 +9,7 @@ fn now_millis_nonzero() {
 fn now_millis_monotonic() {
     let a = now_millis();
     let b = now_millis();
-    assert!(b >= a, "timestamps should be monotonic: {a} > {b}");
+    assert!(b >= a, "expected non-decreasing: got {a} then {b}");
 }
 
 #[test]

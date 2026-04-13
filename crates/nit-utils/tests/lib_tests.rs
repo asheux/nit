@@ -1,4 +1,4 @@
-use nit_utils::{content_tag, stable_hash_bytes, ContentTag, Fingerprint};
+use nit_utils::{stable_hash_bytes, ContentTag, Fingerprint};
 
 #[test]
 fn fingerprint_matches_direct_hash() {
@@ -25,26 +25,27 @@ fn fingerprint_vec_matches_slice() {
 }
 
 #[test]
-fn content_tag_format_is_deterministic() {
-    let tag = content_tag("v2", b"payload");
-    assert!(tag.starts_with("v2-"), "expected v2- prefix, got {tag}");
-    assert_eq!(tag.len(), "v2-".len() + 8);
-    assert_eq!(tag, content_tag("v2", b"payload"), "must be deterministic");
+fn content_tag_display_is_deterministic() {
+    let tag = ContentTag::new("v2", b"payload");
+    let display = tag.to_string();
+    assert!(display.starts_with("v2-"), "expected v2- prefix, got {display}");
+    assert_eq!(display.len(), "v2-".len() + 8);
+    assert_eq!(display, ContentTag::new("v2", b"payload").to_string());
 }
 
 #[test]
-fn tag_display_matches_content_tag() {
+fn content_tag_accessors() {
     let tag = ContentTag::new("v2", b"payload");
     assert_eq!(tag.prefix(), "v2");
-    assert_eq!(tag.to_string(), content_tag("v2", b"payload"));
+    assert_eq!(tag.digest(), ContentTag::new("v2", b"payload").digest());
 }
 
 #[test]
-fn tag_digest_matches_across_prefixes() {
+fn same_payload_same_digest_across_prefixes() {
     let a = ContentTag::new("alpha", b"same");
     let b = ContentTag::new("beta", b"same");
-    assert!(a.digest_matches(&b), "same payload should match");
-    assert_ne!(a, b, "different prefixes means different tags");
+    assert_eq!(a.digest(), b.digest());
+    assert_ne!(a, b);
 }
 
 #[test]

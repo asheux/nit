@@ -25,7 +25,6 @@ impl<T: AsRef<[u8]> + ?Sized> Fingerprint for T {
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct ContentTag {
     prefix: String,
-    /// Lower 32 bits of a [`stable_hash_bytes`] digest.
     digest: u32,
 }
 
@@ -39,22 +38,14 @@ impl ContentTag {
         }
     }
 
-    #[inline]
     #[must_use]
     pub fn prefix(&self) -> &str {
         &self.prefix
     }
 
-    #[inline]
     #[must_use]
     pub fn digest(&self) -> u32 {
         self.digest
-    }
-
-    #[inline]
-    #[must_use]
-    pub fn digest_matches(&self, other: &Self) -> bool {
-        self.digest == other.digest
     }
 }
 
@@ -62,10 +53,4 @@ impl fmt::Display for ContentTag {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}-{:08x}", self.prefix, self.digest)
     }
-}
-
-#[inline]
-#[must_use]
-pub fn content_tag(prefix: &str, payload: &[u8]) -> String {
-    ContentTag::new(prefix, payload).to_string()
 }

@@ -1,6 +1,5 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
-#[inline]
 #[must_use]
 pub fn now_millis() -> u128 {
     SystemTime::now()
