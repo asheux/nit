@@ -70,6 +70,13 @@ pub enum AgentBusEvent {
     /// used by the genome system instead of filesystem-level tracking.
     FileWrite {
         agent_id: String,
+        /// Mission context the runner had when it emitted this event. Carrying
+        /// this explicitly avoids a race between `TurnStarted` (which sets
+        /// `agent.current_mission`) being applied and `FileWrite` being
+        /// processed — without it, an out-of-order `FileWrite` would skip the
+        /// mission-scoped accumulator and the genome reviewer would miss
+        /// the file.
+        mission_id: Option<String>,
         path: std::path::PathBuf,
     },
     /// Report token usage for context-window tracking.
@@ -213,7 +220,11 @@ impl AgentBusEvent {
                     agent.current_mission = mission_id.clone();
                 }
             }
-            AgentBusEvent::FileWrite { agent_id, path } => {
+            AgentBusEvent::FileWrite {
+                agent_id,
+                mission_id,
+                path,
+            } => {
                 // Authoritative per-agent file attribution from the runner.
                 state
                     .genome_turn_modified
@@ -223,13 +234,18 @@ impl AgentBusEvent {
                 // Mission-scoped accumulator so a reviewer running at swarm
                 // end can see every file touched during the mission, even
                 // when the same agent's per-turn set was cleared between
-                // sequential tasks.
-                let mission = state
-                    .agents
-                    .agents
-                    .iter()
-                    .find(|a| a.id == *agent_id)
-                    .and_then(|a| a.current_mission.clone());
+                // sequential tasks.  Prefer the mission_id the runner sent
+                // with the event (eliminates the race with TurnStarted);
+                // fall back to the agent's `current_mission` for legacy
+                // emitters that don't carry it yet.
+                let mission = mission_id.clone().or_else(|| {
+                    state
+                        .agents
+                        .agents
+                        .iter()
+                        .find(|a| a.id == *agent_id)
+                        .and_then(|a| a.current_mission.clone())
+                });
                 if let Some(mission) = mission {
                     state
                         .genome_mission_modified

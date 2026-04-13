@@ -229,6 +229,7 @@ fn file_write_populates_mission_accumulator_when_agent_has_mission() {
 
     AgentBusEvent::FileWrite {
         agent_id: "gpt-test".into(),
+        mission_id: None,
         path: std::path::PathBuf::from("src/a.rs"),
     }
     .apply(&mut state);
@@ -241,12 +242,35 @@ fn file_write_populates_mission_accumulator_when_agent_has_mission() {
 }
 
 #[test]
+fn file_write_with_explicit_mission_id_wins_over_agent_lookup() {
+    // New emitters carry mission_id directly in the event. This eliminates
+    // the race with TurnStarted where the agent's `current_mission` may not
+    // yet be populated.
+    let mut state = test_state();
+    add_codex_agent(&mut state, "gpt-test");
+    // Agent has no current_mission set — the lookup path would fail.
+    AgentBusEvent::FileWrite {
+        agent_id: "gpt-test".into(),
+        mission_id: Some("mis-042".into()),
+        path: std::path::PathBuf::from("src/x.rs"),
+    }
+    .apply(&mut state);
+
+    assert!(state
+        .genome_mission_modified
+        .get("mis-042")
+        .unwrap()
+        .contains(&std::path::PathBuf::from("src/x.rs")));
+}
+
+#[test]
 fn file_write_without_mission_skips_mission_accumulator() {
     let mut state = test_state();
     add_codex_agent(&mut state, "gpt-test");
 
     AgentBusEvent::FileWrite {
         agent_id: "gpt-test".into(),
+        mission_id: None,
         path: std::path::PathBuf::from("src/a.rs"),
     }
     .apply(&mut state);
@@ -279,6 +303,7 @@ fn mission_accumulator_survives_turn_started_clearing_per_turn_set() {
     // Turn 1: write file a.
     AgentBusEvent::FileWrite {
         agent_id: "gpt-test".into(),
+        mission_id: Some("mis-001".into()),
         path: std::path::PathBuf::from("a.rs"),
     }
     .apply(&mut state);
@@ -294,6 +319,7 @@ fn mission_accumulator_survives_turn_started_clearing_per_turn_set() {
     // Turn 2: write file b.
     AgentBusEvent::FileWrite {
         agent_id: "gpt-test".into(),
+        mission_id: Some("mis-001".into()),
         path: std::path::PathBuf::from("b.rs"),
     }
     .apply(&mut state);

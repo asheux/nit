@@ -388,15 +388,28 @@ pub fn compute_genome_report_fast(text: &str, file_path: &Path) -> GenomeReport 
     compute_genome_report_inner(text, file_path, 500)
 }
 
+/// True for a trimmed line that is syntactically a comment or comment
+/// continuation — used by both `significant_lines` (exclude) and the
+/// parsimony comment-ratio check (include).  The `*` rules are narrow on
+/// purpose: a bare `starts_with('*')` would misclassify real code like
+/// `*ptr = 5` or `*mut T = ...` as a comment, which both undercounts code
+/// lines AND inflates the comment ratio enough to wrongly flag a file as
+/// comment-padded.  Block-comment continuation lines in practice are
+/// `* text`, a bare `*`, or `*/`.
+fn is_comment_line(t: &str) -> bool {
+    t.starts_with("//")
+        || t.starts_with("/*")
+        || t == "*"
+        || t.starts_with("* ")
+        || t.starts_with("*/")
+}
+
 fn compute_genome_report_inner(text: &str, file_path: &Path, max_generations: u32) -> GenomeReport {
     let significant_lines = text
         .lines()
         .filter(|line| {
             let trimmed = line.trim();
-            !trimmed.is_empty()
-                && !trimmed.starts_with("//")
-                && !trimmed.starts_with("/*")
-                && !trimmed.starts_with('*')
+            !trimmed.is_empty() && !is_comment_line(trimmed)
         })
         .count();
 
@@ -696,8 +709,7 @@ fn compute_parsimony(text: &str, file_path: &Path, significant_lines: usize) -> 
             continue;
         }
         non_blank_lines += 1;
-        if t.starts_with("//") || t.starts_with("///") || t.starts_with("/*") || t.starts_with('*')
-        {
+        if is_comment_line(t) {
             comment_lines += 1;
         }
     }
@@ -790,13 +802,7 @@ fn count_items_recursive(
             .take(end.saturating_sub(start) + 1)
             .filter(|line| {
                 let t = line.trim();
-                !t.is_empty()
-                    && !t.starts_with("//")
-                    && !t.starts_with("/*")
-                    && !t.starts_with('*')
-                    && !t.starts_with("///")
-                    && t != "{"
-                    && t != "}"
+                !t.is_empty() && !is_comment_line(t) && t != "{" && t != "}"
             })
             .count();
         fn_body_sizes.push(body_sig_lines);

@@ -882,6 +882,65 @@ fn parsimony_real_file_agents_claude() {
 }
 
 #[test]
+fn parsimony_does_not_treat_deref_as_comment() {
+    // Regression: `starts_with('*')` used to include `*ptr = 5` and `*mut_ref`
+    // as "comment" lines, inflating comment_ratio AND undercounting real
+    // code.  The fix narrows the `*` heuristic to block-comment continuation
+    // patterns: bare `*`, `* text`, or `*/`.
+    let code = r#"
+fn deref_and_mut(ptr: *mut i32) {
+    *ptr = 5;
+    *ptr += 1;
+    *ptr *= 2;
+    *ptr = *ptr + *ptr;
+    *ptr = (*ptr).saturating_add(1);
+    *ptr = 2;
+    *ptr = 3;
+    *ptr = 4;
+    *ptr = 5;
+    *ptr = 6;
+    *ptr = 7;
+    *ptr = 8;
+    *ptr = 9;
+    *ptr = 10;
+    *ptr = 11;
+    *ptr = 12;
+    *ptr = 13;
+}
+"#;
+    let path = std::path::Path::new("deref.rs");
+    let report = compute_genome_report_fast(code, path);
+    assert_eq!(
+        report.parsimony.comment_ratio, 0.0,
+        "Deref lines starting with '*' must not be counted as comments",
+    );
+}
+
+#[test]
+fn parsimony_probe_nit_syntax_captures_rs() {
+    // Probe: user reports nit-syntax/captures.rs looks over-engineered but
+    // parsimony didn't flag it. Dump metrics so we can see the numbers.
+    let base = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .join("nit-syntax/src/captures.rs");
+    if !base.exists() {
+        return;
+    }
+    let text = std::fs::read_to_string(&base).unwrap();
+    let report = compute_genome_report_fast(&text, &base);
+    eprintln!(
+        "captures.rs parsimony: fn_count={}, avg={:.2}, tiny={:.2}%, comments={:.2}%, bloat={}, tier={:?}",
+        report.parsimony.fn_count,
+        report.parsimony.avg_fn_body_lines,
+        report.parsimony.tiny_fn_fraction * 100.0,
+        report.parsimony.comment_ratio * 100.0,
+        report.parsimony.bloat_detected,
+        report.tier,
+    );
+}
+
+#[test]
 fn parsimony_format_includes_bloat_tag() {
     // Verify that format_genome_report includes the BLOAT tag when detected.
     let code = gen_tiny_fns(25);

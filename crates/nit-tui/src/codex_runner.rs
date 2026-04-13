@@ -1256,6 +1256,7 @@ fn handle_codex_mcp_notification(
                 .for_each(|path| {
                     let _ = event_tx.send(AgentBusEvent::FileWrite {
                         agent_id: agent_id.to_string(),
+                        mission_id: mission_id.map(str::to_string),
                         path,
                     });
                 });

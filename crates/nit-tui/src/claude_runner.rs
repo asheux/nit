@@ -483,6 +483,7 @@ fn run_turn(
                                         if path.exists() {
                                             let _ = event_tx.send(AgentBusEvent::FileWrite {
                                                 agent_id: model.clone(),
+                                                mission_id: mission_id.clone(),
                                                 path,
                                             });
                                         }
