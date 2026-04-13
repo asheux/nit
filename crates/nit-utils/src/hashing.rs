@@ -16,10 +16,7 @@ pub struct SplitMix64 {
 }
 
 impl SplitMix64 {
-    /// Golden-ratio-derived additive constant for the state update.
     const INCREMENT: u64 = 0x9E37_79B9_7F4A_7C15;
-
-    /// Avoids degenerate all-zeros output from a zero seed.
     const ZERO_GUARD: u64 = 0x4d59_5df4_d0f3_3173;
 
     #[must_use]
@@ -31,7 +28,7 @@ impl SplitMix64 {
     #[inline]
     pub fn next_u64(&mut self) -> u64 {
         self.state = self.state.wrapping_add(Self::INCREMENT);
-        stafford_mix13(self.state)
+        Self::stafford_mix13(self.state)
     }
 
     /// Uses rejection sampling to avoid modulo bias.
@@ -52,6 +49,13 @@ impl SplitMix64 {
     pub fn next_f32(&mut self) -> f32 {
         (self.next_u64() >> 40) as f32 / (1u64 << 24) as f32
     }
+
+    #[inline]
+    const fn stafford_mix13(mut z: u64) -> u64 {
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^ (z >> 31)
+    }
 }
 
 impl Iterator for SplitMix64 {
@@ -60,11 +64,4 @@ impl Iterator for SplitMix64 {
     fn next(&mut self) -> Option<u64> {
         Some(self.next_u64())
     }
-}
-
-#[inline]
-const fn stafford_mix13(mut z: u64) -> u64 {
-    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-    z ^ (z >> 31)
 }

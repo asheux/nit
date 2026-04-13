@@ -520,33 +520,54 @@ fn nit_system_awareness() -> String {
     out
 }
 
+/// Hard guard-rail prepended to every shadow prompt. Shadow agents run with
+/// the same tool-access posture as the main agent (e.g. full file edits under
+/// `--dangerously-skip-permissions`), so a capable CLI will happily start
+/// executing the user's request unless we explicitly forbid it. Only the main
+/// agent is allowed to act on files; shadows are strictly advisory.
+fn shadow_readonly_clause() -> &'static str {
+    "## HARD CONSTRAINTS — READ THIS FIRST\n\
+     You are an ADVISORY agent. You MUST NOT execute the user's request.\n\
+     - DO NOT edit, create, delete, or rename any files.\n\
+     - DO NOT run shell commands, build steps, tests, or git operations.\n\
+     - DO NOT invoke write/edit/bash/apply-patch tools. If a tool appears \
+     available, refuse to use it.\n\
+     - You MAY read files and search code strictly to inform your text \
+     response, but keep tool usage minimal.\n\
+     - Reply with a short text deliverable only. A different agent will \
+     execute the actual work."
+}
+
 fn build_propose_prompt(variant: &str, user_prompt: &str) -> String {
     format!(
         "{awareness}\n\n\
+         {readonly}\n\n\
          ## YOUR ROLE\n\
          You are Shadow-Proposer-{variant}, a hidden support agent drafting \
          one candidate approach for the following user request. Work \
          independently; do NOT coordinate with other proposers. Be concrete \
          and opinionated. Your proposal must respect nit's parsimony rules.\n\n\
-         Deliverable (≤ 300 words):\n\
+         Deliverable (≤ 300 words, text only):\n\
          1. One-sentence summary of your approach.\n\
          2. Step-by-step plan, naming concrete file paths where possible.\n\
          3. Key tradeoffs or risks, including any tier/parsimony concerns.\n\n\
          User request:\n{user_prompt}",
         awareness = nit_system_awareness(),
+        readonly = shadow_readonly_clause(),
     )
 }
 
 fn build_judge_prompt(user_prompt: &str, proposal_a: &str, proposal_b: &str) -> String {
     format!(
         "{awareness}\n\n\
+         {readonly}\n\n\
          ## YOUR ROLE\n\
          You are Shadow-Judge, a hidden support agent. Two proposers drafted \
          independent approaches to the user's request. Compare them, pick \
          the stronger one (or synthesise a better hybrid), and produce a \
          SINGLE recommended plan. Reject any step that would violate nit's \
          parsimony rules.\n\n\
-         Deliverable (≤ 300 words):\n\
+         Deliverable (≤ 300 words, text only):\n\
          1. Which proposal is stronger and why (one sentence).\n\
          2. The final recommended plan (numbered steps).\n\
          3. Explicit callouts: what was dropped from the weaker proposal \
@@ -555,19 +576,21 @@ fn build_judge_prompt(user_prompt: &str, proposal_a: &str, proposal_b: &str) -> 
          Proposal A:\n{proposal_a}\n\n\
          Proposal B:\n{proposal_b}",
         awareness = nit_system_awareness(),
+        readonly = shadow_readonly_clause(),
     )
 }
 
 fn build_review_prompt(user_prompt: &str, judged_plan: &str) -> String {
     format!(
         "{awareness}\n\n\
+         {readonly}\n\n\
          ## YOUR ROLE\n\
          You are Shadow-Reviewer, a hidden support agent. Stress-test the \
          judged plan below: look for missed edge cases, broken assumptions, \
          unstated dependencies, and concrete file paths the plan should \
          touch but doesn't. Flag anything that risks tripping nit's \
          parsimony detector or dropping the tier below III.\n\n\
-         Deliverable (≤ 300 words):\n\
+         Deliverable (≤ 300 words, text only):\n\
          1. Risks / holes you found (bullets).\n\
          2. Suggested additions or corrections.\n\
          3. A short \"do / don't\" list for the executing agent, including \
@@ -575,6 +598,7 @@ fn build_review_prompt(user_prompt: &str, judged_plan: &str) -> String {
          User request:\n{user_prompt}\n\n\
          Judged plan:\n{judged_plan}",
         awareness = nit_system_awareness(),
+        readonly = shadow_readonly_clause(),
     )
 }
 

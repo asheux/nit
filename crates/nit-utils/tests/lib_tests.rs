@@ -13,19 +13,19 @@ fn fingerprint_str_matches_bytes() {
 }
 
 #[test]
-fn fingerprint_string_delegates_to_str() {
+fn fingerprint_string_matches_str() {
     let owned = String::from("test");
     assert_eq!(owned.fingerprint(), "test".fingerprint());
 }
 
 #[test]
-fn fingerprint_vec_delegates_to_slice() {
+fn fingerprint_vec_matches_slice() {
     let owned = vec![1u8, 2, 3];
     assert_eq!(owned.fingerprint(), [1u8, 2, 3].as_slice().fingerprint());
 }
 
 #[test]
-fn tag_format_and_determinism() {
+fn content_tag_format_is_deterministic() {
     let tag = content_tag("v2", b"payload");
     assert!(tag.starts_with("v2-"), "expected v2- prefix, got {tag}");
     assert_eq!(tag.len(), "v2-".len() + 8);
@@ -33,7 +33,7 @@ fn tag_format_and_determinism() {
 }
 
 #[test]
-fn tag_struct_round_trips() {
+fn tag_display_matches_content_tag() {
     let tag = ContentTag::new("v2", b"payload");
     assert_eq!(tag.prefix(), "v2");
     assert_eq!(tag.to_string(), content_tag("v2", b"payload"));

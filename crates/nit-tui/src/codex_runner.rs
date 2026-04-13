@@ -50,6 +50,9 @@ pub enum CodexCommand {
         persist_session: bool,
         reasoning_effort: Option<String>,
         prompt: String,
+        /// Restrict the turn to a read-only sandbox (no workspace writes, no
+        /// shell). Used for shadow advisory agents.
+        read_only: bool,
     },
     McpStart,
     McpStop,
@@ -207,6 +210,7 @@ fn runner_loop_exec(
                     persist_session,
                     reasoning_effort,
                     prompt,
+                    read_only,
                 } = cmd
                 else {
                     continue;
@@ -235,6 +239,7 @@ fn runner_loop_exec(
                     persist_session,
                     reasoning_effort,
                     prompt,
+                    read_only,
                     config.clone(),
                 ));
             }
@@ -1030,6 +1035,7 @@ fn runner_loop_mcp(
                     persist_session: _persist_session,
                     reasoning_effort,
                     prompt,
+                    read_only,
                 } = cmd
                 else {
                     continue;
@@ -1060,6 +1066,7 @@ fn runner_loop_mcp(
                     reasoning_effort.as_deref(),
                     &config,
                     resume_thread_id.as_deref(),
+                    read_only,
                 );
 
                 let stage = format!("tools/call({tool_name})");
@@ -1424,6 +1431,7 @@ fn spawn_turn_worker(
     persist_session: bool,
     reasoning_effort: Option<String>,
     prompt: String,
+    read_only: bool,
     config: CodexRunnerConfig,
 ) -> ActiveTurn {
     let agent_id = model.clone();
@@ -1444,6 +1452,7 @@ fn spawn_turn_worker(
                 persist_session,
                 reasoning_effort,
                 prompt,
+                read_only,
                 config,
                 cancel_worker,
             );
@@ -1469,6 +1478,7 @@ fn run_turn(
     persist_session: bool,
     reasoning_effort: Option<String>,
     prompt: String,
+    read_only: bool,
     config: CodexRunnerConfig,
     cancel: Arc<AtomicBool>,
 ) {
@@ -1483,6 +1493,7 @@ fn run_turn(
         reasoning_effort.as_deref(),
         out_file.as_path(),
         resume_thread_id.as_deref(),
+        read_only,
         &config,
     ))
     // Read prompt from stdin so multi-line input works without shell escaping.
@@ -1772,6 +1783,7 @@ fn codex_model_slug_for_agent_id(agent_id: &str) -> &str {
     agent_id
         .split_once("#swarm-")
         .or_else(|| agent_id.split_once("#chat-clone-"))
+        .or_else(|| agent_id.split_once("#shadow-"))
         .map(|(base, _)| {
             if base.trim().is_empty() {
                 agent_id
@@ -1789,6 +1801,7 @@ fn build_codex_mcp_tool_call(
     reasoning_effort: Option<&str>,
     config: &CodexRunnerConfig,
     resume_thread_id: Option<&str>,
+    read_only: bool,
 ) -> (&'static str, serde_json::Value) {
     if let Some(thread_id) = resume_thread_id {
         return (
@@ -1816,12 +1829,15 @@ fn build_codex_mcp_tool_call(
             serde_json::json!({ "model_reasoning_effort": effort }),
         );
     }
-    if let Some(sandbox) = config
-        .sandbox
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-    {
+    let sandbox_override = if read_only { Some("read-only") } else { None };
+    let sandbox_value = sandbox_override.or_else(|| {
+        config
+            .sandbox
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+    });
+    if let Some(sandbox) = sandbox_value {
         args.insert(
             "sandbox".into(),
             serde_json::Value::String(sandbox.to_string()),
@@ -1848,6 +1864,7 @@ fn build_codex_exec_args(
     reasoning_effort: Option<&str>,
     out_file: &Path,
     resume_thread_id: Option<&str>,
+    read_only: bool,
     config: &CodexRunnerConfig,
 ) -> Vec<String> {
     let mut args = Vec::new();
@@ -1860,12 +1877,15 @@ fn build_codex_exec_args(
         args.push("-a".into());
         args.push(policy.to_string());
     }
-    if let Some(sandbox) = config
-        .sandbox
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-    {
+    let sandbox_override = if read_only { Some("read-only") } else { None };
+    let sandbox_value = sandbox_override.or_else(|| {
+        config
+            .sandbox
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+    });
+    if let Some(sandbox) = sandbox_value {
         args.push("-s".into());
         args.push(sandbox.to_string());
     }

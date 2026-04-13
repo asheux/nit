@@ -14,6 +14,14 @@ fn test_claude_model_slug_for_agent_id() {
         claude_model_slug_for_agent_id("claude-sonnet-4-6#chat-clone-02"),
         "claude-sonnet-4-6"
     );
+    assert_eq!(
+        claude_model_slug_for_agent_id("claude-opus-4-6#shadow-01-propose-a"),
+        "claude-opus-4-6"
+    );
+    assert_eq!(
+        claude_model_slug_for_agent_id("claude-sonnet-4-6#shadow-07-judge"),
+        "claude-sonnet-4-6"
+    );
 }
 
 #[test]
@@ -84,6 +92,7 @@ fn test_build_claude_args_basic() {
         Some("high"),
         Path::new("/tmp/out.txt"),
         None,
+        false,
         &config,
     );
     assert!(args.contains(&"-p".to_string()));
@@ -91,6 +100,7 @@ fn test_build_claude_args_basic() {
     assert!(args.contains(&"claude-opus-4-6".to_string()));
     assert!(args.contains(&"high".to_string()));
     assert!(!args.contains(&"--no-session-persistence".to_string()));
+    assert!(args.contains(&"Read,Edit,Write,Bash,Glob,Grep,WebSearch,WebFetch".to_string()));
 }
 
 #[test]
@@ -103,11 +113,32 @@ fn test_build_claude_args_resume() {
         None,
         Path::new("/tmp/out.txt"),
         Some("session-abc-123"),
+        false,
         &config,
     );
     assert!(args.contains(&"--resume".to_string()));
     assert!(args.contains(&"session-abc-123".to_string()));
     assert!(args.contains(&"--no-session-persistence".to_string()));
+}
+
+#[test]
+fn test_build_claude_args_read_only_for_shadow_turns() {
+    let config = ClaudeRunnerConfig::default();
+    let args = build_claude_args(
+        "claude-opus-4-6#shadow-01-propose-a",
+        Path::new("/tmp/project"),
+        false,
+        Some("medium"),
+        Path::new("/tmp/out.txt"),
+        None,
+        true,
+        &config,
+    );
+    // Read-only turns get a narrow tool allow-list with no Write/Edit/Bash.
+    assert!(args.contains(&"Read,Glob,Grep".to_string()));
+    assert!(!args
+        .iter()
+        .any(|a| a.contains("Write") || a.contains("Edit") || a.contains("Bash")));
 }
 
 #[test]

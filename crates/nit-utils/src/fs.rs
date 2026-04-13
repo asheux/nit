@@ -14,8 +14,7 @@ impl Drop for TempGuard<'_> {
     }
 }
 
-/// Atomically writes to `path` via a temporary sibling file that is flushed,
-/// synced, and renamed into place. The temp file is cleaned up on failure.
+/// Writes via temp file; cleans up on failure or panic.
 pub fn write_atomic<F>(path: &Path, f: F) -> io::Result<()>
 where
     F: FnOnce(&mut BufWriter<File>) -> io::Result<()>,
@@ -37,6 +36,7 @@ where
     Ok(())
 }
 
+#[must_use = "returns the created directory path"]
 pub fn ensure_dir(target: &Path) -> io::Result<&Path> {
     fs::create_dir_all(target)?;
     Ok(target)

@@ -2134,6 +2134,12 @@ fn agent_roster_label(agent: &AgentLane) -> String {
             return role_full.to_string();
         }
     }
+    if crate::shadow::parse_shadow_lane_id(id_full).is_some() {
+        let role_full = agent.role.trim();
+        if !role_full.is_empty() {
+            return role_full.to_string();
+        }
+    }
     let role_full = agent.role.trim();
     if role_full.is_empty() {
         return id_full.to_string();

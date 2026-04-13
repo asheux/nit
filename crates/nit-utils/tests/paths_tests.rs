@@ -16,7 +16,7 @@ fn cache_dir_resolves() {
 }
 
 #[test]
-fn state_dir_platform_dependent() {
+fn state_dir_varies_by_platform() {
     let result = paths::state_dir();
     if cfg!(target_os = "linux") {
         assert!(result.is_some(), "Linux should have a state directory");
@@ -26,7 +26,7 @@ fn state_dir_platform_dependent() {
 }
 
 #[test]
-fn resolved_dirs_contain_app_name() {
+fn all_dirs_contain_app_name() {
     for dir in [paths::config_dir(), paths::data_dir(), paths::cache_dir()] {
         let path = dir.expect("directory should resolve");
         let s = path.to_string_lossy();

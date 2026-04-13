@@ -40,6 +40,9 @@ pub enum ClaudeCommand {
         persist_session: bool,
         effort: Option<String>,
         prompt: String,
+        /// Restrict the turn to read-only tools (no Write/Edit/Bash). Used for
+        /// shadow advisory agents that must not modify the workspace.
+        read_only: bool,
     },
     Shutdown,
 }
@@ -178,6 +181,7 @@ fn runner_loop(
                     persist_session,
                     effort,
                     prompt,
+                    read_only,
                 } = cmd
                 else {
                     continue;
@@ -206,6 +210,7 @@ fn runner_loop(
                     persist_session,
                     effort,
                     prompt,
+                    read_only,
                     config.clone(),
                 ));
             }
@@ -250,6 +255,7 @@ fn spawn_turn_worker(
     persist_session: bool,
     effort: Option<String>,
     prompt: String,
+    read_only: bool,
     config: ClaudeRunnerConfig,
 ) -> ActiveTurn {
     let agent_id = model.clone();
@@ -270,6 +276,7 @@ fn spawn_turn_worker(
                 persist_session,
                 effort,
                 prompt,
+                read_only,
                 config,
                 cancel_worker,
             );
@@ -295,6 +302,7 @@ fn run_turn(
     persist_session: bool,
     effort: Option<String>,
     prompt: String,
+    read_only: bool,
     config: ClaudeRunnerConfig,
     cancel: Arc<AtomicBool>,
 ) {
@@ -309,6 +317,7 @@ fn run_turn(
         effort.as_deref(),
         out_file.as_path(),
         resume_session_id.as_deref(),
+        read_only,
         &config,
     ))
     .stdin(Stdio::piped())
@@ -664,6 +673,7 @@ pub fn claude_model_slug_for_agent_id(agent_id: &str) -> &str {
     agent_id
         .split_once("#swarm-")
         .or_else(|| agent_id.split_once("#chat-clone-"))
+        .or_else(|| agent_id.split_once("#shadow-"))
         .map(|(base, _)| {
             if base.trim().is_empty() {
                 agent_id
@@ -681,6 +691,7 @@ fn build_claude_args(
     effort: Option<&str>,
     _out_file: &Path,
     resume_session_id: Option<&str>,
+    read_only: bool,
     config: &ClaudeRunnerConfig,
 ) -> Vec<String> {
     let model_slug = claude_model_slug_for_agent_id(agent_id);
@@ -714,7 +725,12 @@ fn build_claude_args(
     }
 
     // Permission handling: auto-allow common tools for headless operation.
-    if let Some(mode) = config
+    // Shadow/advisory turns restrict tools to read-only so the subprocess
+    // can't edit files or run commands regardless of what the prompt says.
+    if read_only {
+        args.push("--allowedTools".into());
+        args.push("Read,Glob,Grep".into());
+    } else if let Some(mode) = config
         .permission_mode
         .as_deref()
         .map(str::trim)

@@ -383,6 +383,7 @@ pub(super) fn maybe_dispatch_codex_turn(
         })
         .unwrap_or_else(|| "medium".into());
 
+    let read_only = crate::shadow::parse_shadow_lane_id(&model).is_some();
     let ok = codex.send(CodexCommand::RunTurn {
         model: model.clone(),
         cwd: state.workspace_root.clone(),
@@ -391,6 +392,7 @@ pub(super) fn maybe_dispatch_codex_turn(
         persist_session,
         reasoning_effort: Some(reasoning_effort),
         prompt,
+        read_only,
     });
     if !ok {
         // Runner channel is dead -- clean up the optimistic state we just set.
@@ -782,6 +784,7 @@ pub(super) fn maybe_dispatch_claude_turn(
         .or_else(|| state.agents.claude_default_effort.get(&model).cloned())
         .unwrap_or_else(|| "high".into());
 
+    let read_only = crate::shadow::parse_shadow_lane_id(&model).is_some();
     let ok = claude.send(ClaudeCommand::RunTurn {
         model: model.clone(),
         cwd: state.workspace_root.clone(),
@@ -790,6 +793,7 @@ pub(super) fn maybe_dispatch_claude_turn(
         persist_session,
         effort: Some(effort),
         prompt,
+        read_only,
     });
     if !ok {
         // Runner channel is dead -- clean up the optimistic state we just set.

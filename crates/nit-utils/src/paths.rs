@@ -1,5 +1,4 @@
-//! Resolved paths are cached in a process-lifetime static since the
-//! qualifier, organisation, and application name are compile-time constants.
+//! Process-lifetime cached project directories; all inputs are compile-time constants.
 
 use std::path::PathBuf;
 use std::sync::LazyLock;

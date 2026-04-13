@@ -54,6 +54,18 @@ fn chat_clone_agent_ids_resolve_to_base_model_slug() {
 }
 
 #[test]
+fn shadow_clone_agent_ids_resolve_to_base_model_slug() {
+    assert_eq!(
+        codex_model_slug_for_agent_id("gpt-5.2#shadow-01-propose-a"),
+        "gpt-5.2"
+    );
+    assert_eq!(
+        codex_model_slug_for_agent_id("gpt-5.4#shadow-07-judge"),
+        "gpt-5.4"
+    );
+}
+
+#[test]
 fn mcp_new_session_uses_base_model_slug_for_swarm_clone() {
     let config = CodexRunnerConfig {
         sandbox: Some("workspace-write".into()),
@@ -68,6 +80,7 @@ fn mcp_new_session_uses_base_model_slug_for_swarm_clone() {
         Some("high"),
         &config,
         None,
+        false,
     );
 
     assert_eq!(tool_name, "codex");
@@ -95,6 +108,7 @@ fn mcp_resume_uses_codex_reply_without_model_lookup() {
         Some("high"),
         &config,
         Some("thread-123"),
+        false,
     );
 
     assert_eq!(tool_name, "codex-reply");
@@ -122,6 +136,7 @@ fn exec_args_use_base_model_slug_for_swarm_clone() {
         Some("high"),
         Path::new("/tmp/out.txt"),
         None,
+        false,
         &config,
     );
 
@@ -161,6 +176,7 @@ fn exec_resume_args_use_base_model_slug_for_swarm_clone() {
         Some("medium"),
         Path::new("/tmp/out.txt"),
         Some("thread-123"),
+        false,
         &config,
     );
 
@@ -182,6 +198,54 @@ fn exec_resume_args_use_base_model_slug_for_swarm_clone() {
             "-",
         ]
     );
+}
+
+#[test]
+fn read_only_shadow_turn_forces_read_only_sandbox_in_mcp_args() {
+    let config = CodexRunnerConfig {
+        sandbox: Some("workspace-write".into()),
+        approval_policy: Some("never".into()),
+        max_parallel_turns: 2,
+    };
+
+    let (_, arguments) = build_codex_mcp_tool_call(
+        "gpt-5.2#shadow-01-propose-a",
+        "propose something",
+        Path::new("/tmp/work"),
+        Some("medium"),
+        &config,
+        None,
+        true,
+    );
+    assert_eq!(
+        arguments.get("sandbox"),
+        Some(&json!("read-only")),
+        "shadow turn must override sandbox to read-only regardless of config"
+    );
+}
+
+#[test]
+fn read_only_shadow_turn_forces_read_only_sandbox_in_exec_args() {
+    let config = CodexRunnerConfig {
+        sandbox: Some("workspace-write".into()),
+        approval_policy: Some("never".into()),
+        max_parallel_turns: 2,
+    };
+
+    let args = build_codex_exec_args(
+        "gpt-5.2#shadow-01-judge",
+        Path::new("/tmp/work"),
+        false,
+        Some("medium"),
+        Path::new("/tmp/out.txt"),
+        None,
+        true,
+        &config,
+    );
+    // -s read-only must replace the workspace-write config value.
+    let pos = args.iter().position(|a| a == "-s").expect("-s flag present");
+    assert_eq!(args.get(pos + 1).map(String::as_str), Some("read-only"));
+    assert!(!args.contains(&"workspace-write".to_string()));
 }
 
 #[test]

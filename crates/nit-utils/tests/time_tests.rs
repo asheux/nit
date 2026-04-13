@@ -1,24 +1,24 @@
 use nit_utils::time::now_millis;
 
 #[test]
-fn nonzero() {
+fn now_millis_nonzero() {
     assert!(now_millis() > 0);
 }
 
 #[test]
-fn monotonic() {
+fn now_millis_monotonic() {
     let a = now_millis();
     let b = now_millis();
     assert!(b >= a, "timestamps should be monotonic: {a} > {b}");
 }
 
 #[test]
-fn in_reasonable_range() {
-    const EPOCH_2020: u128 = 1_577_836_800_000;
-    const EPOCH_2100: u128 = 4_102_444_800_000;
+fn now_millis_in_reasonable_range() {
+    const JAN_2020_MS: u128 = 1_577_836_800_000;
+    const JAN_2100_MS: u128 = 4_102_444_800_000;
     let now = now_millis();
     assert!(
-        now > EPOCH_2020 && now < EPOCH_2100,
+        now > JAN_2020_MS && now < JAN_2100_MS,
         "timestamp {now} outside 2020..2100 range"
     );
 }

@@ -1,17 +1,17 @@
 use nit_utils::{stable_hash_bytes, SplitMix64};
 
 #[test]
-fn hash_deterministic() {
+fn stable_hash_deterministic() {
     assert_eq!(stable_hash_bytes(b"test"), stable_hash_bytes(b"test"));
 }
 
 #[test]
-fn hash_differs_for_different_input() {
+fn stable_hash_differs_for_different_input() {
     assert_ne!(stable_hash_bytes(b"aaa"), stable_hash_bytes(b"bbb"));
 }
 
 #[test]
-fn hash_empty_is_stable_and_nonzero() {
+fn stable_hash_empty_nonzero() {
     let a = stable_hash_bytes(b"");
     let b = stable_hash_bytes(b"");
     assert_eq!(a, b);
@@ -71,6 +71,5 @@ fn rng_f32_in_unit_interval() {
 fn rng_iterator_yields_distinct_values() {
     let rng = SplitMix64::new(77);
     let vals: Vec<u64> = rng.take(5).collect();
-    assert_eq!(vals.len(), 5);
     assert_ne!(vals[0], vals[1]);
 }
