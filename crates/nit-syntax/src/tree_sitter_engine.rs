@@ -195,14 +195,7 @@ fn run_highlight_job(
         }
         Ok(Err(err)) => {
             log_error(job.buffer_id, job.version, &err);
-            let mut snap = HighlightSnapshot::plain(
-                job.buffer_id,
-                job.version,
-                job.language,
-                EngineKind::TreeSitter,
-                SyntaxStatus::Error(err.to_string()),
-                &job.text,
-            );
+            let mut snap = plain_ts_snapshot(job, SyntaxStatus::Error(err.to_string()));
             snap.duration_ms = start.elapsed().as_millis();
             snap
         }
@@ -214,14 +207,8 @@ fn run_highlight_job(
                 "syntax worker panic: {msg}"
             );
             buffers.remove(&job.buffer_id);
-            let mut snap = HighlightSnapshot::plain(
-                job.buffer_id,
-                job.version,
-                job.language,
-                EngineKind::TreeSitter,
-                SyntaxStatus::Error(format!("worker panic: {msg}")),
-                &job.text,
-            );
+            let mut snap =
+                plain_ts_snapshot(job, SyntaxStatus::Error(format!("worker panic: {msg}")));
             snap.duration_ms = start.elapsed().as_millis();
             snap
         }
@@ -254,6 +241,17 @@ fn make_progressive_fill(
     })
 }
 
+fn plain_ts_snapshot(job: &HighlightRequest, status: SyntaxStatus) -> HighlightSnapshot {
+    HighlightSnapshot::plain(
+        job.buffer_id,
+        job.version,
+        job.language,
+        EngineKind::TreeSitter,
+        status,
+        &job.text,
+    )
+}
+
 // ── Core highlight logic ──────────────────────────────────────────────────
 
 fn highlight_job(
@@ -267,13 +265,9 @@ fn highlight_job(
 
     let Some(config) = hl_configs.get(&lang) else {
         debug!("no highlight config for {lang:?}");
-        return Ok(HighlightSnapshot::plain(
-            job.buffer_id,
-            job.version,
-            lang,
-            EngineKind::TreeSitter,
+        return Ok(plain_ts_snapshot(
+            job,
             SyntaxStatus::Error("no highlight config".into()),
-            &job.text,
         ));
     };
 
@@ -314,13 +308,9 @@ fn highlight_job(
     };
 
     let Some(tree) = tree else {
-        return Ok(HighlightSnapshot::plain(
-            job.buffer_id,
-            job.version,
-            lang,
-            EngineKind::TreeSitter,
+        return Ok(plain_ts_snapshot(
+            job,
             SyntaxStatus::Error("parse failed".into()),
-            &job.text,
         ));
     };
 
@@ -368,13 +358,9 @@ fn viewport_highlight(
     let end_byte = offsets.get(end_line + 1).copied().unwrap_or(job.text.len());
 
     let Some(cfg) = query_configs.get(&job.language) else {
-        return Ok(HighlightSnapshot::plain(
-            job.buffer_id,
-            job.version,
-            job.language,
-            EngineKind::TreeSitter,
+        return Ok(plain_ts_snapshot(
+            job,
             SyntaxStatus::Error("no query config".into()),
-            &job.text,
         ));
     };
 
@@ -679,7 +665,7 @@ fn collect_spans(
         for m in cursor.matches(&cfg.query, root, source) {
             let priority = cmp::min(m.pattern_index, u8::MAX as usize) as u8;
             for cap in m.captures {
-                let group = cfg.group_for_index(cap.index as usize);
+                let group = cfg.highlight_for_index(cap.index as usize);
                 if group == HighlightGroup::Normal {
                     continue;
                 }
@@ -766,21 +752,35 @@ fn extract_panic_message(info: &(dyn std::any::Any + Send)) -> String {
 
 // ── Rate-limited logging ──────────────────────────────────────────────────
 
-static LOG_COMPLETE: OnceLock<Mutex<Instant>> = OnceLock::new();
-static LOG_ERROR: OnceLock<Mutex<Instant>> = OnceLock::new();
+struct RateLimiter {
+    state: OnceLock<Mutex<Instant>>,
+    interval: Duration,
+}
 
-fn rate_limited(lock: &'static OnceLock<Mutex<Instant>>, interval: Duration, f: impl FnOnce()) {
-    let now = Instant::now();
-    let guard = lock.get_or_init(|| Mutex::new(now - interval));
-    let mut last = guard.lock().unwrap();
-    if now.duration_since(*last) >= interval {
-        *last = now;
-        f();
+impl RateLimiter {
+    const fn new(interval: Duration) -> Self {
+        Self {
+            state: OnceLock::new(),
+            interval,
+        }
+    }
+
+    fn throttled(&self, f: impl FnOnce()) {
+        let now = Instant::now();
+        let guard = self.state.get_or_init(|| Mutex::new(now - self.interval));
+        let mut last = guard.lock().unwrap();
+        if now.duration_since(*last) >= self.interval {
+            *last = now;
+            f();
+        }
     }
 }
 
+static LOG_COMPLETE: RateLimiter = RateLimiter::new(Duration::from_secs(1));
+static LOG_ERROR: RateLimiter = RateLimiter::new(Duration::from_secs(1));
+
 fn log_completion(buffer_id: usize, version: u64, snapshot: &HighlightSnapshot) {
-    rate_limited(&LOG_COMPLETE, Duration::from_secs(1), || {
+    LOG_COMPLETE.throttled(|| {
         let span_count: usize = snapshot.per_line.iter().map(|l| l.len()).sum();
         debug!(
             buffer_id,
@@ -793,7 +793,7 @@ fn log_completion(buffer_id: usize, version: u64, snapshot: &HighlightSnapshot) 
 }
 
 fn log_error(buffer_id: usize, version: u64, err: &anyhow::Error) {
-    rate_limited(&LOG_ERROR, Duration::from_secs(1), || {
+    LOG_ERROR.throttled(|| {
         error!(buffer_id, version, error = %err, "syntax highlight error");
     });
 }

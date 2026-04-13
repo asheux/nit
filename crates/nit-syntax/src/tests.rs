@@ -2,6 +2,7 @@ use std::time::{Duration, Instant};
 
 use nit_core::Buffer;
 
+use crate::debounce::{Debouncer, DebouncerPhase};
 use crate::engine::{HighlightRequest, SyntaxEngine, ViewportRange};
 use crate::highlight::{
     map_line_segments_to_chars, EngineKind, HighlightGroup, HighlightSnapshot, HighlightSpan,
@@ -9,6 +10,7 @@ use crate::highlight::{
 };
 use crate::registry::LanguageId;
 use crate::tree_sitter_engine::TreeSitterEngine;
+use crate::{FileClassification, HighlightOutcome, MAX_HIGHLIGHT_BYTES};
 
 fn make_request(buffer_id: usize, version: u64, lang: LanguageId, text: &str) -> HighlightRequest {
     HighlightRequest {
@@ -312,7 +314,7 @@ fn language_change_invalidates_cache() {
 }
 
 #[test]
-fn worker_recovers_from_error() {
+fn worker_handles_plaintext_then_real_language() {
     let mut engine = TreeSitterEngine::new();
 
     engine.schedule_rehighlight(make_request(50, 1, LanguageId::PlainText, "hello\n"));
@@ -343,5 +345,66 @@ fn highlighted_range_none_for_eager_mode() {
     assert!(
         snap.highlighted_range.is_none(),
         "eager mode should have highlighted_range = None"
+    );
+}
+
+#[test]
+fn debouncer_idle_to_ready_cycle() {
+    let mut d = Debouncer::new(0);
+    assert_eq!(d.phase(), DebouncerPhase::Idle);
+    assert!(!d.ready());
+    assert!(!d.pending());
+
+    d.mark();
+    assert_eq!(d.phase(), DebouncerPhase::Ready);
+    assert!(d.ready());
+
+    d.clear();
+    assert_eq!(d.phase(), DebouncerPhase::Idle);
+}
+
+#[test]
+fn debouncer_pending_with_long_quiet_period() {
+    let d = Debouncer::new(60_000);
+    assert_eq!(d.phase(), DebouncerPhase::Idle);
+}
+
+#[test]
+fn file_classification_boundaries() {
+    assert_eq!(
+        FileClassification::from_byte_length(0),
+        FileClassification::Empty
+    );
+    assert_eq!(
+        FileClassification::from_byte_length(1),
+        FileClassification::Normal
+    );
+    assert_eq!(
+        FileClassification::from_byte_length(MAX_HIGHLIGHT_BYTES),
+        FileClassification::Normal
+    );
+    assert_eq!(
+        FileClassification::from_byte_length(MAX_HIGHLIGHT_BYTES + 1),
+        FileClassification::Oversized
+    );
+}
+
+#[test]
+fn file_classification_expected_outcomes() {
+    assert_eq!(
+        FileClassification::Normal.expected_outcome(false),
+        HighlightOutcome::Parsed
+    );
+    assert_eq!(
+        FileClassification::Normal.expected_outcome(true),
+        HighlightOutcome::ViewportOnly
+    );
+    assert_eq!(
+        FileClassification::Oversized.expected_outcome(false),
+        HighlightOutcome::PlainText
+    );
+    assert_eq!(
+        FileClassification::Empty.expected_outcome(false),
+        HighlightOutcome::PlainText
     );
 }

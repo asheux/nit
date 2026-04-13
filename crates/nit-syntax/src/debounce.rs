@@ -22,14 +22,8 @@ impl fmt::Display for DebouncerPhase {
     }
 }
 
-/// Rate-limiter that collapses rapid events and reports readiness
-/// once a configurable quiet period elapses.
-///
-/// | State       | `ready()` | `pending()` | Transition            |
-/// |-------------|-----------|-------------|-----------------------|
-/// | **Idle**    | `false`   | `false`     | → Pending via `mark`  |
-/// | **Pending** | `false`   | `true`      | → Ready after delay   |
-/// | **Ready**   | `true`    | `false`     | → Idle via `clear`    |
+/// Collapses rapid events and fires once a quiet period elapses.
+/// Transitions: Idle → (mark) → Pending → (elapsed) → Ready → (clear) → Idle.
 #[derive(Debug, Clone)]
 pub struct Debouncer {
     quiet_period: Duration,
@@ -43,9 +37,9 @@ impl Default for Debouncer {
 }
 
 impl Debouncer {
-    pub fn new(delay_ms: u64) -> Self {
+    pub fn new(quiet_period_ms: u64) -> Self {
         Self {
-            quiet_period: Duration::from_millis(delay_ms),
+            quiet_period: Duration::from_millis(quiet_period_ms),
             last_event_at: None,
         }
     }
@@ -58,6 +52,7 @@ impl Debouncer {
         self.last_event_at = None;
     }
 
+    #[must_use]
     pub fn phase(&self) -> DebouncerPhase {
         match self.last_event_at {
             None => DebouncerPhase::Idle,
@@ -66,18 +61,17 @@ impl Debouncer {
         }
     }
 
-    /// Returns `false` when idle (no event recorded).
+    #[must_use]
     pub fn ready(&self) -> bool {
-        self.last_event_at
-            .is_some_and(|ts| ts.elapsed() >= self.quiet_period)
+        self.phase() == DebouncerPhase::Ready
     }
 
-    /// Returns `false` when idle or already ready.
+    #[must_use]
     pub fn pending(&self) -> bool {
-        self.last_event_at
-            .is_some_and(|ts| ts.elapsed() < self.quiet_period)
+        self.phase() == DebouncerPhase::Pending
     }
 
+    #[must_use]
     pub fn delay(&self) -> Duration {
         self.quiet_period
     }

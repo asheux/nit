@@ -1,46 +1,27 @@
-//! Language identification and grammar registry.
-//!
-//! [`LanguageRegistry`] provides static methods that resolve a buffer's
-//! language from its file path, shebang line, or an explicit override, and
-//! then return the matching tree-sitter grammar and highlight queries.
+//! Language identification and tree-sitter grammar registry.
 
 use std::fmt;
 use std::path::Path;
 
 // ── Language identifier ────────────────────────────────────────────────────
 
-/// Enum of supported languages, used as a key into the grammar and query
-/// tables. [`PlainText`](Self::PlainText) is the fallback when no grammar
-/// matches the buffer's content.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub enum LanguageId {
-    /// Rust (`*.rs`)
     Rust,
-    /// Python (`*.py`)
     Python,
-    /// JavaScript (`*.js`, `*.mjs`, `*.cjs`, `*.jsx`)
     JavaScript,
-    /// TypeScript (`*.ts`, `*.tsx`)
     TypeScript,
-    /// Markdown (`*.md`, `*.markdown`)
     Markdown,
-    /// HTML (`*.html`, `*.htm`)
     Html,
-    /// CSS / SCSS / Sass (`*.css`, `*.scss`, `*.sass`)
     Css,
-    /// JSON / JSONC (`*.json`, `*.jsonc`)
     Json,
-    /// TOML (`*.toml`, `Cargo.toml`)
     Toml,
-    /// YAML (`*.yml`, `*.yaml`)
     Yaml,
-    /// Shell scripts (`*.sh`, `*.bash`, `*.zsh`, `*.fish`)
     Bash,
-    /// Unrecognised — no grammar available.
     PlainText,
 }
 
-/// All languages that have a tree-sitter grammar bound to the crate.
+/// Does not include `PlainText` (no grammar).
 impl LanguageId {
     pub const ALL: [LanguageId; 11] = [
         Self::Rust,
@@ -78,17 +59,12 @@ impl fmt::Display for LanguageId {
 
 // ── Registry ───────────────────────────────────────────────────────────────
 
-/// Static methods for language detection and tree-sitter resource lookup.
-///
-/// There is no runtime state — all data is compiled into the binary via
-/// `include_str!` and the `tree-sitter-*` crate constants.
 pub struct LanguageRegistry;
 
 // ── Detection ──────────────────────────────────────────────────────────────
 
 impl LanguageRegistry {
-    /// Detect the buffer language from path, shebang, or an explicit
-    /// override.  Priority: override > shebang > path > `PlainText`.
+    /// Priority: override > shebang > path > `PlainText`.
     pub fn detect(
         file_path: Option<&Path>,
         first_line: Option<&str>,
@@ -109,8 +85,6 @@ impl LanguageRegistry {
 // ── Grammar and query lookup ───────────────────────────────────────────────
 
 impl LanguageRegistry {
-    /// Return the tree-sitter [`Language`](tree_sitter::Language) for a
-    /// known language, or `None` for `PlainText`.
     pub fn tree_sitter_language(language_id: LanguageId) -> Option<tree_sitter::Language> {
         match language_id {
             LanguageId::Rust => Some(tree_sitter_rust::language()),
@@ -224,15 +198,23 @@ fn detect_shebang(first_line: &str) -> Option<LanguageId> {
     if !shebang_line.starts_with("#!") {
         return None;
     }
-    let normalized = shebang_line.to_lowercase();
-    if normalized.contains("python") {
-        Some(LanguageId::Python)
-    } else if normalized.contains("node") || normalized.contains("deno") {
-        Some(LanguageId::JavaScript)
-    } else if normalized.contains("bash") || normalized.contains("sh") || normalized.contains("zsh")
-    {
-        Some(LanguageId::Bash)
-    } else {
-        None
+
+    // Extract the interpreter name from the shebang path.
+    // Handles both `#!/usr/bin/bash` and `#!/usr/bin/env bash`.
+    let after_hash = &shebang_line[2..];
+    let interpreter = after_hash
+        .rsplit('/')
+        .next()
+        .unwrap_or(after_hash)
+        .split_whitespace()
+        .last()
+        .unwrap_or("")
+        .to_lowercase();
+
+    match interpreter.as_str() {
+        "bash" | "sh" | "zsh" => Some(LanguageId::Bash),
+        "python" | "python3" => Some(LanguageId::Python),
+        "node" | "deno" => Some(LanguageId::JavaScript),
+        _ => None,
     }
 }

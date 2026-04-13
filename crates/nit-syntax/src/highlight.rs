@@ -1,9 +1,4 @@
-//! Highlight output types and span-to-line distribution.
-//!
-//! Data flow: tree-sitter produces [`HighlightSpan`]s covering byte ranges
-//! → [`sort_spans`] orders them → [`distribute_spans_to_lines`] splits them
-//! into per-line [`LineSegment`]s → [`map_line_segments_to_chars`] converts
-//! byte offsets to character indices for the renderer.
+//! Highlight output types and span→line distribution pipeline.
 
 use std::cmp::Ordering;
 
@@ -11,11 +6,9 @@ use crate::registry::LanguageId;
 
 // ── Highlight groups ────────────────────────────────────────────────────────
 
-/// Semantic highlight category mapped to theme colours by the renderer.
-///
-/// Variant order is stable — new entries are appended at the end.
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Hash)]
 pub enum HighlightGroup {
+    #[default]
     Normal,
     Comment,
     DocComment,
@@ -51,14 +44,12 @@ pub enum HighlightGroup {
 
 // ── Engine identification ───────────────────────────────────────────────────
 
-/// Identifies which highlighting backend produced the result.
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub enum EngineKind {
     TreeSitter,
     Plain,
 }
 
-/// Current operational state of highlighting for a buffer.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SyntaxStatus {
     Ok(EngineKind),
@@ -67,20 +58,19 @@ pub enum SyntaxStatus {
 }
 
 impl SyntaxStatus {
-    /// Human-readable status-bar label.
-    pub fn label(&self) -> String {
+    #[must_use]
+    pub fn label(&self) -> &'static str {
         match self {
-            Self::Ok(EngineKind::TreeSitter) => "TS(ok)".to_string(),
-            Self::Ok(EngineKind::Plain) => "Plain(ok)".to_string(),
-            Self::Disabled => "Off".to_string(),
-            Self::Error(_) => "TS(error)".to_string(),
+            Self::Ok(EngineKind::TreeSitter) => "TS(ok)",
+            Self::Ok(EngineKind::Plain) => "Plain(ok)",
+            Self::Disabled => "Off",
+            Self::Error(_) => "TS(error)",
         }
     }
 }
 
 // ── Span and segment types ──────────────────────────────────────────────────
 
-/// Byte-range highlight span before per-line splitting.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HighlightSpan {
     pub start_byte: usize,
@@ -90,7 +80,6 @@ pub struct HighlightSpan {
     pub modifiers: u8,
 }
 
-/// Byte-range segment relative to a single source line.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct LineSegment {
     pub start: usize,
@@ -98,7 +87,6 @@ pub struct LineSegment {
     pub group: HighlightGroup,
 }
 
-/// Character-index segment produced by [`map_line_segments_to_chars`].
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct MappedLineSegment {
     pub start: usize,
@@ -106,7 +94,6 @@ pub struct MappedLineSegment {
     pub group: HighlightGroup,
 }
 
-/// Error when a segment boundary falls inside a multi-byte character.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SegmentMapError {
     pub start: usize,
@@ -116,7 +103,6 @@ pub struct SegmentMapError {
 
 // ── Snapshot ────────────────────────────────────────────────────────────────
 
-/// Immutable, versioned output of a highlight pass for one buffer.
 #[derive(Clone, Debug)]
 pub struct HighlightSnapshot {
     pub buffer_id: usize,
@@ -133,7 +119,6 @@ pub struct HighlightSnapshot {
 }
 
 impl HighlightSnapshot {
-    /// Construct a snapshot with zero highlight spans (plain-text fallback).
     pub fn plain(
         buffer_id: usize,
         version: u64,
@@ -159,8 +144,6 @@ impl HighlightSnapshot {
         }
     }
 
-    /// Build a snapshot by sorting raw spans and distributing them across
-    /// line boundaries into per-line segment lists.
     #[allow(clippy::too_many_arguments)]
     pub fn from_spans(
         buffer_id: usize,
@@ -196,110 +179,36 @@ impl HighlightSnapshot {
     }
 }
 
-// ── FNV-1a line hashing ─────────────────────────────────────────────────────
+// ── Line offset index ───────────────────────────────────────────────────────
 
-/// Compute an FNV-1a hash of a source line, stripping trailing `\n` and
-/// ignoring `\r` so that hashes are line-ending-agnostic.
-pub fn hash_line_bytes(raw: &[u8]) -> u64 {
-    const BASIS: u64 = 14695981039346656037;
-    const PRIME: u64 = 1099511628211;
+pub(crate) fn compute_line_starts(text: &str) -> Vec<usize> {
+    let mut offsets = vec![0usize];
 
-    let end = if raw.last() == Some(&b'\n') {
-        raw.len() - 1
-    } else {
-        raw.len()
-    };
+    offsets.extend(
+        text.bytes()
+            .enumerate()
+            .filter_map(|(i, b)| (b == b'\n').then_some(i + 1)),
+    );
 
-    raw[..end]
-        .iter()
-        .filter(|&&b| b != b'\r')
-        .fold(BASIS, |hash, &b| (hash ^ b as u64).wrapping_mul(PRIME))
-}
-
-/// Recompute [`hash_line_bytes`] for a set of lines, writing results
-/// directly into `hashes`. Safely skips out-of-range indices.
-pub(crate) fn rehash_lines(
-    text: &[u8],
-    line_starts: &[usize],
-    hashes: &mut [u64],
-    lines: impl Iterator<Item = usize>,
-) {
-    for i in lines {
-        if i + 1 < line_starts.len() && i < hashes.len() {
-            hashes[i] = hash_line_bytes(&text[line_starts[i]..line_starts[i + 1]]);
-        }
-    }
-}
-
-/// Hash every line in the buffer using [`hash_line_bytes`].
-fn compute_line_hashes(text: &str, offsets: &[usize]) -> Vec<u64> {
-    let bytes = text.as_bytes();
-    (0..offsets.len().saturating_sub(1))
-        .map(|i| hash_line_bytes(&bytes[offsets[i]..offsets[i + 1]]))
-        .collect()
-}
-
-// ── Byte→char segment mapping ───────────────────────────────────────────────
-
-/// Map a single byte-offset segment to character indices via binary search.
-fn resolve_segment_chars(
-    seg: &LineSegment,
-    byte_len: usize,
-    boundaries: &[usize],
-) -> Result<Option<MappedLineSegment>, SegmentMapError> {
-    let start = seg.start;
-    let end = seg.end.min(byte_len);
-
-    if start >= byte_len || start >= end {
-        return Ok(None);
+    let last = *offsets.last().unwrap_or(&0);
+    if last != text.len() {
+        offsets.push(text.len());
     }
 
-    let err = || SegmentMapError {
-        start,
-        end,
-        line_len: byte_len,
-    };
-
-    let char_start = boundaries.binary_search(&start).map_err(|_| err())?;
-    let char_end = boundaries.binary_search(&end).map_err(|_| err())?;
-
-    Ok((char_start < char_end).then_some(MappedLineSegment {
-        start: char_start,
-        end: char_end,
-        group: seg.group,
-    }))
+    offsets
 }
 
-/// Convert byte-offset [`LineSegment`]s to character-index
-/// [`MappedLineSegment`]s. Fails if any boundary falls inside a multi-byte
-/// character.
-pub fn map_line_segments_to_chars(
-    line: &str,
-    segments: &[LineSegment],
-) -> Result<Vec<MappedLineSegment>, SegmentMapError> {
-    if segments.is_empty() || line.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    let byte_len = line.len();
-    let mut boundaries: Vec<usize> = line.char_indices().map(|(pos, _)| pos).collect();
-    boundaries.push(byte_len);
-
-    let mut result = Vec::with_capacity(segments.len());
-    for seg in segments {
-        if let Some(mapped) = resolve_segment_chars(seg, byte_len, &boundaries)? {
-            result.push(mapped);
-        }
-    }
-    Ok(result)
+pub(crate) fn find_line(offsets: &[usize], target_byte: usize) -> usize {
+    offsets
+        .partition_point(|&boundary| boundary <= target_byte)
+        .saturating_sub(1)
 }
 
 // ── Span sorting ────────────────────────────────────────────────────────────
 
-/// Sort highlight spans in source order: `start_byte` ascending, `priority`
-/// descending for ties. Skips the sort when already ordered.
+/// `start_byte` ascending, `priority` descending for ties.
 pub(crate) fn sort_spans(spans: &mut [HighlightSpan]) {
-    spans.sort_by(|a, b| match a.start_byte.cmp(&b.start_byte) {
+    spans.sort_unstable_by(|a, b| match a.start_byte.cmp(&b.start_byte) {
         Ordering::Equal => b.priority.cmp(&a.priority),
         ord => ord,
     });
@@ -307,9 +216,6 @@ pub(crate) fn sort_spans(spans: &mut [HighlightSpan]) {
 
 // ── Span→line distribution ──────────────────────────────────────────────────
 
-/// Distribute pre-sorted [`HighlightSpan`]s into per-line segment lists.
-///
-/// Only lines where `predicate(line_index)` returns `true` receive segments.
 pub(crate) fn distribute_spans_to_lines(
     spans: &[HighlightSpan],
     offsets: &[usize],
@@ -325,8 +231,6 @@ pub(crate) fn distribute_spans_to_lines(
     }
 }
 
-/// Clamp a single highlight span to each intersecting line and append the
-/// resulting line-relative segment.
 fn assign_span_to_lines(
     span: &HighlightSpan,
     offsets: &[usize],
@@ -363,31 +267,93 @@ fn assign_span_to_lines(
     }
 }
 
-// ── Line offset index ───────────────────────────────────────────────────────
+// ── FNV-1a line hashing ─────────────────────────────────────────────────────
 
-/// Build a sorted table of byte offsets where each source line begins.
-/// The final entry equals `text.len()`.
-pub(crate) fn compute_line_starts(text: &str) -> Vec<usize> {
-    let mut offsets = vec![0usize];
+/// Line-ending-agnostic FNV-1a: strips trailing `\n`, ignores `\r`.
+#[must_use]
+pub fn hash_line_bytes(raw: &[u8]) -> u64 {
+    const BASIS: u64 = 14695981039346656037;
+    const PRIME: u64 = 1099511628211;
 
-    offsets.extend(
-        text.bytes()
-            .enumerate()
-            .filter_map(|(i, b)| (b == b'\n').then_some(i + 1)),
-    );
+    let end = if raw.last() == Some(&b'\n') {
+        raw.len() - 1
+    } else {
+        raw.len()
+    };
 
-    let last = *offsets.last().unwrap_or(&0);
-    if last != text.len() {
-        offsets.push(text.len());
-    }
-
-    offsets
+    raw[..end]
+        .iter()
+        .filter(|&&b| b != b'\r')
+        .fold(BASIS, |hash, &b| (hash ^ b as u64).wrapping_mul(PRIME))
 }
 
-/// Binary-search the line offset table to find which line contains
-/// `target_byte`. Returns the zero-based line index.
-pub(crate) fn find_line(offsets: &[usize], target_byte: usize) -> usize {
-    offsets
-        .partition_point(|&boundary| boundary <= target_byte)
-        .saturating_sub(1)
+pub(crate) fn rehash_lines(
+    text: &[u8],
+    line_starts: &[usize],
+    hashes: &mut [u64],
+    lines: impl Iterator<Item = usize>,
+) {
+    for i in lines {
+        if i + 1 < line_starts.len() && i < hashes.len() {
+            hashes[i] = hash_line_bytes(&text[line_starts[i]..line_starts[i + 1]]);
+        }
+    }
+}
+
+fn compute_line_hashes(text: &str, offsets: &[usize]) -> Vec<u64> {
+    let bytes = text.as_bytes();
+    (0..offsets.len().saturating_sub(1))
+        .map(|i| hash_line_bytes(&bytes[offsets[i]..offsets[i + 1]]))
+        .collect()
+}
+
+// ── Byte→char segment mapping ───────────────────────────────────────────────
+
+fn resolve_segment_chars(
+    seg: &LineSegment,
+    byte_len: usize,
+    boundaries: &[usize],
+) -> Result<Option<MappedLineSegment>, SegmentMapError> {
+    let start = seg.start;
+    let end = seg.end.min(byte_len);
+
+    if start >= byte_len || start >= end {
+        return Ok(None);
+    }
+
+    let err = || SegmentMapError {
+        start,
+        end,
+        line_len: byte_len,
+    };
+
+    let char_start = boundaries.binary_search(&start).map_err(|_| err())?;
+    let char_end = boundaries.binary_search(&end).map_err(|_| err())?;
+
+    Ok((char_start < char_end).then_some(MappedLineSegment {
+        start: char_start,
+        end: char_end,
+        group: seg.group,
+    }))
+}
+
+pub fn map_line_segments_to_chars(
+    line: &str,
+    segments: &[LineSegment],
+) -> Result<Vec<MappedLineSegment>, SegmentMapError> {
+    if segments.is_empty() || line.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let byte_len = line.len();
+    let mut boundaries: Vec<usize> = line.char_indices().map(|(pos, _)| pos).collect();
+    boundaries.push(byte_len);
+
+    let mut result = Vec::with_capacity(segments.len());
+    for seg in segments {
+        if let Some(mapped) = resolve_segment_chars(seg, byte_len, &boundaries)? {
+            result.push(mapped);
+        }
+    }
+    Ok(result)
 }
