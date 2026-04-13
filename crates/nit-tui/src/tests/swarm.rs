@@ -1183,6 +1183,7 @@ fn dag_scheduler_dispatches_after_deps() {
         report_output: None,
         scope_files: Vec::new(),
         initial_genome_baselines: std::collections::HashMap::new(),
+        gate_retry_count: 0,
     };
 
     initialize_task_graph(&mut run);
@@ -1287,6 +1288,7 @@ fn single_writer_limits_concurrent_write_tasks() {
         report_output: None,
         scope_files: Vec::new(),
         initial_genome_baselines: std::collections::HashMap::new(),
+        gate_retry_count: 0,
     };
 
     initialize_task_graph(&mut run);
@@ -1451,6 +1453,7 @@ fn deadlock_detection_skips_pending_tasks() {
         report_output: None,
         scope_files: Vec::new(),
         initial_genome_baselines: std::collections::HashMap::new(),
+        gate_retry_count: 0,
     };
     initialize_task_graph(&mut run);
     refresh_task_readiness(&mut run);
@@ -1790,6 +1793,7 @@ fn dashboard_distinguishes_pending_queued_and_skipped() {
         report_output: None,
         scope_files: Vec::new(),
         initial_genome_baselines: std::collections::HashMap::new(),
+        gate_retry_count: 0,
     };
     let mut runtime = SwarmRuntime::default();
     runtime.runs.insert("mis-001".into(), run);
@@ -2808,4 +2812,167 @@ fn coverage_partial_assignment_when_not_enough_clones() {
     );
     assert_eq!(assignments.len(), 1);
     assert_eq!(assignments[0].1, "propose");
+}
+
+// -- Gate retry dispatch -----------------------------------------------------
+
+fn make_verifying_run_with_fail_report() -> SwarmRun {
+    SwarmRun {
+        mission_id: "mis-retry".into(),
+        root_prompt: "root".into(),
+        template: SwarmTemplate::Lab,
+        mission_kind: SwarmMissionKind::General,
+        planner_agent_id: "planner".into(),
+        integrator_agent_id: Some("integ".into()),
+        integrator_locked: false,
+        verifier_agent_id: Some("verify".into()),
+        gate_bundle: Some(GateBundle::Rust),
+        gate_custom: None,
+        gate_selection: "auto:rust-ci".into(),
+        agent_ids: vec!["planner".into(), "integ".into(), "verify".into()],
+        stage: SwarmStage::Verifying,
+        tasks: vec![SwarmTask {
+            id: "integrate".into(),
+            agent_id: "integ".into(),
+            role: Some("integrate".into()),
+            title: "Integrate".into(),
+            task_prompt: "integ".into(),
+            deps: Vec::new(),
+            writes: true,
+            artifacts: Vec::new(),
+            done_when: None,
+            state: SwarmTaskState::Done,
+            output: Some("done".into()),
+            parsed_artifacts: None,
+            expected_artifacts_missing: false,
+            failed: false,
+            retries: 0,
+        }],
+        synthesis_prompt: None,
+        gate_output: Some("prior".into()),
+        gate_report: None,
+        genome_gate_results: Some("stale".into()),
+        genome_gate_pending: None,
+        genome_review_pending: None,
+        report_status: None,
+        report_output: None,
+        scope_files: Vec::new(),
+        initial_genome_baselines: std::collections::HashMap::new(),
+        gate_retry_count: 0,
+    }
+}
+
+fn make_state_for_retry() -> nit_core::AppState {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let editor = Buffer::empty("editor", None);
+    let notes = Buffer::empty("notes", None);
+    let mut state = nit_core::AppState::new(root, editor, notes);
+    state.agents.messages.clear();
+    state.agents.missions.clear();
+    state.agents.agents.clear();
+    state.agents.agents.push(make_lane("planner", "planner"));
+    state.agents.agents.push(make_lane("integ", "integrate"));
+    state.agents.agents.push(make_lane("verify", "verify"));
+    state
+}
+
+const FAILING_GATE_REPORT: &str = "```json\n{\"overall_ok\":false,\"gates\":[{\"name\":\"fmt\",\"command\":\"cargo fmt -- --check\",\"ok\":false,\"status\":\"fail\",\"notes\":\"4 files need formatting\"}]}\n```";
+
+#[test]
+fn gate_fail_dispatches_retry_to_integrator() {
+    let mut state = make_state_for_retry();
+    let run = make_verifying_run_with_fail_report();
+    let mut runtime = SwarmRuntime::default();
+    runtime.runs.insert("mis-retry".into(), run);
+
+    let event = AgentBusEvent::TurnCompleted {
+        agent_id: "verify".into(),
+        mission_id: Some("mis-retry".into()),
+        thread_id: None,
+        token_count: None,
+        message: FAILING_GATE_REPORT.into(),
+    };
+    let outcome = runtime.handle_event_outcome(&mut state, &event);
+
+    assert_eq!(outcome.dispatches.len(), 1, "expected retry dispatch");
+    let dispatch = &outcome.dispatches[0];
+    assert_eq!(dispatch.agent_id, "integ");
+    assert_eq!(dispatch.task_role.as_deref(), Some("integrate"));
+    assert!(dispatch.prompt.contains("fmt"));
+    assert!(dispatch.prompt.contains("4 files need formatting"));
+
+    let run = runtime.runs.get("mis-retry").expect("run still active");
+    assert!(matches!(run.stage, SwarmStage::Executing));
+    assert_eq!(run.gate_retry_count, 1);
+    assert!(run.gate_report.is_none());
+    assert!(run.gate_output.is_none());
+    assert!(run.genome_gate_results.is_none());
+    assert!(run.tasks.iter().any(|t| t.id == "gate-retry-1"));
+}
+
+#[test]
+fn gate_fail_skips_retry_when_limit_reached() {
+    let mut state = make_state_for_retry();
+    let mut run = make_verifying_run_with_fail_report();
+    run.gate_retry_count = state.settings.swarm.gate_retry_limit;
+    let mut runtime = SwarmRuntime::default();
+    runtime.runs.insert("mis-retry".into(), run);
+
+    let event = AgentBusEvent::TurnCompleted {
+        agent_id: "verify".into(),
+        mission_id: Some("mis-retry".into()),
+        thread_id: None,
+        token_count: None,
+        message: FAILING_GATE_REPORT.into(),
+    };
+    let outcome = runtime.handle_event_outcome(&mut state, &event);
+
+    assert_eq!(outcome.dispatches.len(), 1);
+    assert_eq!(outcome.dispatches[0].agent_id, "planner");
+    let run = runtime.runs.get("mis-retry").expect("run still active");
+    assert!(matches!(run.stage, SwarmStage::Synthesizing));
+}
+
+#[test]
+fn gate_fail_skips_retry_when_limit_is_zero() {
+    let mut state = make_state_for_retry();
+    state.settings.swarm.gate_retry_limit = 0;
+    let run = make_verifying_run_with_fail_report();
+    let mut runtime = SwarmRuntime::default();
+    runtime.runs.insert("mis-retry".into(), run);
+
+    let event = AgentBusEvent::TurnCompleted {
+        agent_id: "verify".into(),
+        mission_id: Some("mis-retry".into()),
+        thread_id: None,
+        token_count: None,
+        message: FAILING_GATE_REPORT.into(),
+    };
+    let outcome = runtime.handle_event_outcome(&mut state, &event);
+    assert_eq!(outcome.dispatches[0].agent_id, "planner");
+    let run = runtime.runs.get("mis-retry").expect("run still active");
+    assert!(matches!(run.stage, SwarmStage::Synthesizing));
+    assert_eq!(run.gate_retry_count, 0);
+}
+
+#[test]
+fn gate_pass_does_not_retry() {
+    let mut state = make_state_for_retry();
+    let run = make_verifying_run_with_fail_report();
+    let mut runtime = SwarmRuntime::default();
+    runtime.runs.insert("mis-retry".into(), run);
+
+    let pass_report = "```json\n{\"overall_ok\":true,\"gates\":[{\"name\":\"fmt\",\"command\":\"cargo fmt -- --check\",\"ok\":true}]}\n```";
+    let event = AgentBusEvent::TurnCompleted {
+        agent_id: "verify".into(),
+        mission_id: Some("mis-retry".into()),
+        thread_id: None,
+        token_count: None,
+        message: pass_report.into(),
+    };
+    let outcome = runtime.handle_event_outcome(&mut state, &event);
+    assert_eq!(outcome.dispatches[0].agent_id, "planner");
+    let run = runtime.runs.get("mis-retry").expect("run still active");
+    assert!(matches!(run.stage, SwarmStage::Synthesizing));
+    assert_eq!(run.gate_retry_count, 0);
 }

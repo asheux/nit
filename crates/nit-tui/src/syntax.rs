@@ -547,7 +547,7 @@ impl SyntaxRuntime {
                 return "TS(lag)".to_string();
             }
         }
-        status.label()
+        status.label().to_string()
     }
 
     pub fn engine_state_label(&self, buffer_id: usize) -> String {

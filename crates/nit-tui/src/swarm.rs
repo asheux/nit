@@ -1409,6 +1409,10 @@ struct SwarmRun {
     /// between agent turns and re-captured from post-edit state on the next
     /// `TurnStarted` — making every review show `+0.00` across all encoders.
     initial_genome_baselines: HashMap<std::path::PathBuf, nit_core::GenomeReport>,
+    /// Number of swarm-level retries consumed after a gate FAIL. Capped by
+    /// `settings.swarm.gate_retry_limit` (default 3). Each increment
+    /// dispatches a fix task to the integrator and re-enters `Verifying`.
+    gate_retry_count: u8,
 }
 
 /// Configuration from a previous swarm run, used to re-launch follow-up prompts
@@ -1569,6 +1573,22 @@ impl SwarmRuntime {
             .map(|run| stage_label(run.stage))
     }
 
+    /// Optional hint describing what background work is blocking the current
+    /// stage, e.g. `"genome gate"` while the pre-verify genome evaluation is
+    /// running or `"genome review"` while the post-verify reviewer prompt is
+    /// being built. Returning `Some` lets the UI explain why `Verifying …` or
+    /// `Synthesizing …` appears to hang with no visible agent activity.
+    pub fn swarm_stage_hint(&self, mission_id: &str) -> Option<&'static str> {
+        let run = self.run_for_mission(mission_id)?;
+        if run.genome_gate_pending.is_some() {
+            return Some("genome gate");
+        }
+        if run.genome_review_pending.is_some() {
+            return Some("genome review");
+        }
+        None
+    }
+
     /// Returns the swarm configuration for a mission (active or completed)
     /// so follow-up prompts can reuse the same template and agent count.
     pub fn session_config(&self, mission_id: &str) -> Option<SwarmSessionConfig> {
@@ -1663,6 +1683,7 @@ impl SwarmRuntime {
         run.gate_report = None;
         run.report_status = None;
         run.report_output = None;
+        run.gate_retry_count = 0;
         // Re-anchor mission baselines to the current state so the follow-up's
         // genome review and gate measure deltas from THIS follow-up's work —
         // not cumulative deltas from the original swarm's starting point.
@@ -2062,6 +2083,7 @@ impl SwarmRuntime {
                 report_output: None,
                 scope_files,
                 initial_genome_baselines: state.genome_reports.clone(),
+                gate_retry_count: 0,
             },
         );
 
@@ -2524,6 +2546,14 @@ impl SwarmRuntime {
                                 &run.mission_id,
                                 "VERIFY result: ERROR (no parseable JSON report)".into(),
                             );
+                        }
+
+                        if let Some(retry_dispatch) =
+                            try_dispatch_gate_retry(&mut run, state)
+                        {
+                            dispatches.push(retry_dispatch);
+                            self.runs.insert(mid.clone(), run);
+                            return outcome;
                         }
 
                         maybe_spawn_genome_review(&mut run, state);
@@ -7610,6 +7640,145 @@ fn parse_gate_report(message: &str) -> Option<GateReport> {
     }
     let json = extract_json_code_block(message)?;
     serde_json::from_str::<GateReport>(&json).ok()
+}
+
+/// If the just-received gate report is a recoverable FAIL, build the retry
+/// fix task, append it to the run, roll stage back to `Executing`, and return
+/// the dispatch for the integrator.  Returns `None` when we should proceed to
+/// `Synthesizing` (PASS, no integrator, retries exhausted, or unparseable
+/// report).
+fn try_dispatch_gate_retry(run: &mut SwarmRun, state: &mut AppState) -> Option<SwarmDispatch> {
+    let limit = state.settings.swarm.gate_retry_limit;
+    if limit == 0 {
+        return None;
+    }
+    let report = run.gate_report.as_ref()?;
+    if report.overall_ok {
+        return None;
+    }
+    let integrator = run.integrator_agent_id.clone()?;
+    if run.gate_retry_count >= limit {
+        push_system_message_to_mission(
+            state,
+            &run.mission_id,
+            format!(
+                "Swarm verify FAILED after {} retry attempt(s); giving up and writing the report.",
+                run.gate_retry_count,
+            ),
+        );
+        return None;
+    }
+
+    let attempt = run.gate_retry_count + 1;
+    let prompt = build_gate_retry_prompt(run, report, attempt, limit);
+    let task_id = format!("gate-retry-{attempt}");
+    let task = SwarmTask {
+        id: task_id.clone(),
+        agent_id: integrator.clone(),
+        role: Some("integrate".into()),
+        title: format!("Fix gate FAIL (retry {attempt}/{limit})"),
+        task_prompt: prompt.clone(),
+        deps: Vec::new(),
+        writes: true,
+        artifacts: Vec::new(),
+        done_when: Some("Failing gates addressed; ready for verify re-run.".into()),
+        state: SwarmTaskState::Dispatched,
+        output: None,
+        parsed_artifacts: None,
+        expected_artifacts_missing: false,
+        failed: false,
+        retries: 0,
+    };
+    run.tasks.push(task);
+    run.gate_retry_count = attempt;
+    run.gate_output = None;
+    run.gate_report = None;
+    // Drop the previous genome gate evaluation — the integrator is about to
+    // change files, so any cached result would describe a stale workspace.
+    run.genome_gate_results = None;
+
+    push_system_message_to_mission(
+        state,
+        &run.mission_id,
+        format!(
+            "Swarm verify FAIL: dispatching fix task '{task_id}' to {integrator} (retry {attempt}/{limit})",
+        ),
+    );
+
+    run.stage = SwarmStage::Executing;
+    update_mission_phase(state, &run.mission_id, MissionPhase::Execute);
+    update_mission_status(state, run, Some(tasks_terminal_count(&run.tasks)));
+
+    Some(SwarmDispatch {
+        agent_id: integrator,
+        mission_id: run.mission_id.clone(),
+        prompt,
+        task_role: Some("integrate".into()),
+    })
+}
+
+/// Build the fix prompt for the integrator when a gate bundle came back FAIL
+/// and the swarm still has retries available. Enumerates only failing gates so
+/// the agent does not waste cycles on ones that passed.
+fn build_gate_retry_prompt(run: &SwarmRun, report: &GateReport, attempt: u8, limit: u8) -> String {
+    let failing: Vec<&GateReportGate> = report
+        .gates
+        .iter()
+        .filter(|gate| gate.ui_status() == "FAIL")
+        .collect();
+
+    let mut out = String::new();
+    out.push_str(&format!(
+        "The swarm verify gate returned FAIL on attempt {attempt} of {limit}. Fix the failing gates below, then stop — the verifier will re-run automatically.\n\n",
+    ));
+    out.push_str("Rules:\n");
+    out.push_str(
+        "- You are the integrator. Apply the smallest workspace edits needed to make every failing gate pass.\n",
+    );
+    out.push_str(
+        "- Do NOT broaden scope or refactor unrelated code. Only fix what the gates report.\n",
+    );
+    out.push_str(
+        "- Do NOT run the verify commands yourself — the verifier agent will re-run them.\n",
+    );
+    out.push_str(
+        "- If a gate's failure cannot be fixed in code (e.g. missing tool, env issue), say so explicitly in your reply so the verifier can mark it SKIP.\n",
+    );
+    out.push_str("\nOperator request (context):\n");
+    out.push_str(run.root_prompt.trim());
+
+    out.push_str("\n\nFailing gates:\n");
+    if failing.is_empty() {
+        out.push_str(
+            "(report says overall_ok=false but no individual gate is FAIL — treat the verifier's notes as the failure signal.)\n",
+        );
+    } else {
+        for gate in failing.iter() {
+            out.push_str(&format!("- {} (`{}`)\n", gate.name, gate.command));
+            if let Some(notes) = gate.notes.as_deref() {
+                let trimmed = notes.trim();
+                if !trimmed.is_empty() {
+                    out.push_str("  notes: ");
+                    out.push_str(&truncate_chars(trimmed, 1200));
+                    out.push('\n');
+                }
+            }
+        }
+    }
+
+    if let Some(raw) = run.gate_output.as_deref() {
+        let trimmed = raw.trim();
+        if !trimmed.is_empty() {
+            out.push_str("\nVerifier raw output (truncated):\n");
+            out.push_str(&truncate_chars(trimmed, 4000));
+            out.push('\n');
+        }
+    }
+
+    out.push_str(
+        "\nWhen done, reply briefly describing the edits you made — do not include a JSON report.\n",
+    );
+    out
 }
 
 fn truncate_chars(text: &str, max_chars: usize) -> String {

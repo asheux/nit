@@ -2335,23 +2335,40 @@ fn breather_rows_for_user_prompt(
     });
     let working = any_active || any_queued;
     let swarm_phase = swarm_mission_id.and_then(|mid| swarm.and_then(|s| s.swarm_stage_label(mid)));
+    let swarm_hint = swarm_mission_id.and_then(|mid| swarm.and_then(|s| s.swarm_stage_hint(mid)));
     let is_swarm = swarm_mission_id.is_some();
-    let label = if any_active || any_queued {
+    let base_label: std::borrow::Cow<'_, str> = if any_active || any_queued {
         match swarm_phase {
-            Some("PLAN") => "Planning ...",
-            Some("VERIFY") => "Verifying ...",
-            Some("SYNTH") => "Synthesizing ...",
-            Some("EXEC") => swarm_exec_label(state, &ordered_ids),
-            _ if is_swarm && any_active => "Executing ...",
-            _ if any_active => "Working ...",
-            _ => "Queued ...",
+            Some("PLAN") => "Planning ...".into(),
+            Some("VERIFY") => "Verifying ...".into(),
+            Some("SYNTH") => "Synthesizing ...".into(),
+            Some("EXEC") => swarm_exec_label(state, &ordered_ids).into(),
+            _ if is_swarm && any_active => "Executing ...".into(),
+            _ if any_active => "Working ...".into(),
+            _ => "Queued ...".into(),
+        }
+    } else if is_swarm && swarm_hint.is_some() {
+        // Background genome work is running but no agent is active yet. Use
+        // the stage + hint instead of a generic "Waiting" so the user knows
+        // what's causing the delay.
+        match swarm_phase {
+            Some("VERIFY") => "Verifying ...".into(),
+            Some("SYNTH") => "Synthesizing ...".into(),
+            _ => "Waiting ...".into(),
         }
     } else if is_swarm && all_swarm_done {
-        "Done"
+        "Done".into()
     } else if is_swarm {
-        "Waiting ..."
+        "Waiting ...".into()
     } else {
-        "Working ..."
+        "Working ...".into()
+    };
+    let label: std::borrow::Cow<'_, str> = match swarm_hint {
+        Some(hint) if base_label.ends_with("...") => {
+            let trimmed = base_label.trim_end_matches("...").trim_end();
+            format!("{trimmed} ({hint}) ...").into()
+        }
+        _ => base_label,
     };
 
     let seed_id = primary_ids
