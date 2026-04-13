@@ -1,5 +1,3 @@
-//! Shared utilities: atomic I/O, hashing, paths, and timestamps.
-
 #![forbid(unsafe_code)]
 
 use std::fmt;
@@ -12,8 +10,7 @@ pub mod time;
 pub use fs::{ensure_dir, write_atomic};
 pub use hashing::{stable_hash_bytes, SplitMix64};
 
-/// Delegates to [`stable_hash_bytes`] so the digest algorithm stays consistent
-/// workspace-wide. Deterministic across runs and platforms.
+/// Deterministic 64-bit fingerprint, consistent across runs and platforms.
 pub trait Fingerprint {
     fn fingerprint(&self) -> u64;
 }
@@ -25,8 +22,6 @@ impl<T: AsRef<[u8]> + ?Sized> Fingerprint for T {
 }
 
 /// Lower 32 bits of a [`stable_hash_bytes`] digest paired with a prefix.
-///
-/// Display format: `{prefix}-{hex8}`, e.g. `"v2-a1b2c3d4"`.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct ContentTag {
     prefix: String,
@@ -36,11 +31,10 @@ pub struct ContentTag {
 impl ContentTag {
     #[must_use]
     pub fn new(prefix: &str, payload: &[u8]) -> Self {
-        let hash = stable_hash_bytes(payload);
-        let lower_32 = (hash & 0xFFFF_FFFF) as u32;
+        let digest = stable_hash_bytes(payload) as u32;
         Self {
             prefix: prefix.to_owned(),
-            digest: lower_32,
+            digest,
         }
     }
 

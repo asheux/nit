@@ -2,17 +2,17 @@ use nit_utils::paths;
 
 #[test]
 fn config_dir_resolves() {
-    assert!(paths::config_dir().is_some());
+    assert!(paths::config_dir().is_some(), "config dir should resolve");
 }
 
 #[test]
 fn data_dir_resolves() {
-    assert!(paths::data_dir().is_some());
+    assert!(paths::data_dir().is_some(), "data dir should resolve");
 }
 
 #[test]
 fn cache_dir_resolves() {
-    assert!(paths::cache_dir().is_some());
+    assert!(paths::cache_dir().is_some(), "cache dir should resolve");
 }
 
 #[test]
@@ -27,13 +27,9 @@ fn state_dir_platform_dependent() {
 
 #[test]
 fn resolved_dirs_contain_app_name() {
-    let app = "nit";
     for dir in [paths::config_dir(), paths::data_dir(), paths::cache_dir()] {
         let path = dir.expect("directory should resolve");
-        let path_str = path.to_string_lossy();
-        assert!(
-            path_str.contains(app),
-            "expected '{app}' in path: {path_str}"
-        );
+        let s = path.to_string_lossy();
+        assert!(s.contains("nit"), "expected 'nit' in path: {s}");
     }
 }

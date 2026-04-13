@@ -3,11 +3,9 @@ name = "nit-utils"
 version = "0.1.0"
 edition = "2021"
 rust-version.workspace = true
-description = "Shared filesystem, hashing, path, and time utilities for the nit workspace"
+description = "Shared utilities for the nit workspace"
 license = "MIT"
 publish = false
-categories = ["development-tools", "filesystem"]
-keywords = ["atomic-write", "hashing", "utilities"]
 
 [dependencies]
 blake3 = { workspace = true }

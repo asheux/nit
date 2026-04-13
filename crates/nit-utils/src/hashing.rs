@@ -1,5 +1,3 @@
-//! Deterministic hashing and pseudo-random number generation.
-
 /// BLAKE3 digest truncated to 64 bits (little-endian).
 #[inline]
 #[must_use]
@@ -11,7 +9,7 @@ pub fn stable_hash_bytes(data: &[u8]) -> u64 {
     u64::from_le_bytes(bytes)
 }
 
-/// SplitMix64 PRNG — not suitable for cryptographic use.
+/// Not suitable for cryptographic use.
 #[derive(Clone, Debug)]
 pub struct SplitMix64 {
     state: u64,
@@ -33,7 +31,7 @@ impl SplitMix64 {
     #[inline]
     pub fn next_u64(&mut self) -> u64 {
         self.state = self.state.wrapping_add(Self::INCREMENT);
-        avalanche_mix(self.state)
+        stafford_mix13(self.state)
     }
 
     /// Uses rejection sampling to avoid modulo bias.
@@ -64,9 +62,8 @@ impl Iterator for SplitMix64 {
     }
 }
 
-/// Stafford Mix13 avalanche — spreads entropy across all 64 bits.
 #[inline]
-const fn avalanche_mix(mut z: u64) -> u64 {
+const fn stafford_mix13(mut z: u64) -> u64 {
     z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
     z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
     z ^ (z >> 31)

@@ -1,14 +1,14 @@
 use nit_utils::{content_tag, stable_hash_bytes, ContentTag, Fingerprint};
 
 #[test]
-fn fingerprint_byte_slice_matches_direct_hash() {
+fn fingerprint_matches_direct_hash() {
     let via_fn = stable_hash_bytes(b"hello");
     let via_trait: u64 = b"hello".as_slice().fingerprint();
     assert_eq!(via_fn, via_trait);
 }
 
 #[test]
-fn fingerprint_str_matches_byte_hash() {
+fn fingerprint_str_matches_bytes() {
     assert_eq!("world".fingerprint(), stable_hash_bytes(b"world"));
 }
 
@@ -25,7 +25,7 @@ fn fingerprint_vec_delegates_to_slice() {
 }
 
 #[test]
-fn content_tag_format_and_determinism() {
+fn tag_format_and_determinism() {
     let tag = content_tag("v2", b"payload");
     assert!(tag.starts_with("v2-"), "expected v2- prefix, got {tag}");
     assert_eq!(tag.len(), "v2-".len() + 8);
@@ -33,14 +33,14 @@ fn content_tag_format_and_determinism() {
 }
 
 #[test]
-fn content_tag_struct_round_trips() {
+fn tag_struct_round_trips() {
     let tag = ContentTag::new("v2", b"payload");
     assert_eq!(tag.prefix(), "v2");
     assert_eq!(tag.to_string(), content_tag("v2", b"payload"));
 }
 
 #[test]
-fn content_tag_digest_matches_across_prefixes() {
+fn tag_digest_matches_across_prefixes() {
     let a = ContentTag::new("alpha", b"same");
     let b = ContentTag::new("beta", b"same");
     assert!(a.digest_matches(&b), "same payload should match");
@@ -48,7 +48,7 @@ fn content_tag_digest_matches_across_prefixes() {
 }
 
 #[test]
-fn content_tag_different_payloads_differ() {
+fn tag_different_payloads_differ() {
     let a = ContentTag::new("v1", b"aaa");
     let b = ContentTag::new("v1", b"bbb");
     assert_ne!(a.digest(), b.digest());

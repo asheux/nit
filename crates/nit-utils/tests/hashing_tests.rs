@@ -1,19 +1,17 @@
 use nit_utils::{stable_hash_bytes, SplitMix64};
 
 #[test]
-fn stable_hash_deterministic_same_input() {
-    let a = stable_hash_bytes(b"test");
-    let b = stable_hash_bytes(b"test");
-    assert_eq!(a, b);
+fn hash_deterministic() {
+    assert_eq!(stable_hash_bytes(b"test"), stable_hash_bytes(b"test"));
 }
 
 #[test]
-fn stable_hash_differs_for_different_input() {
+fn hash_differs_for_different_input() {
     assert_ne!(stable_hash_bytes(b"aaa"), stable_hash_bytes(b"bbb"));
 }
 
 #[test]
-fn stable_hash_empty_input_is_stable() {
+fn hash_empty_is_stable_and_nonzero() {
     let a = stable_hash_bytes(b"");
     let b = stable_hash_bytes(b"");
     assert_eq!(a, b);
@@ -21,7 +19,7 @@ fn stable_hash_empty_input_is_stable() {
 }
 
 #[test]
-fn rng_deterministic_same_seed() {
+fn rng_deterministic() {
     let mut a = SplitMix64::new(42);
     let mut b = SplitMix64::new(42);
     for _ in 0..10 {
@@ -54,7 +52,7 @@ fn rng_bounded_stays_in_range() {
 }
 
 #[test]
-fn rng_bounded_upper_one_returns_zero() {
+fn rng_bounded_degenerate_upper() {
     let mut rng = SplitMix64::new(7);
     assert_eq!(rng.next_bounded(1), 0);
     assert_eq!(rng.next_bounded(0), 0);
@@ -70,7 +68,7 @@ fn rng_f32_in_unit_interval() {
 }
 
 #[test]
-fn rng_iterator_yields_values() {
+fn rng_iterator_yields_distinct_values() {
     let rng = SplitMix64::new(77);
     let vals: Vec<u64> = rng.take(5).collect();
     assert_eq!(vals.len(), 5);

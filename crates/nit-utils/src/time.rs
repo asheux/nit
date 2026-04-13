@@ -1,5 +1,3 @@
-//! Wall-clock timestamps.
-
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Falls back to `0` if the system clock predates the epoch.
