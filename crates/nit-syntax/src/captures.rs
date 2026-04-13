@@ -80,6 +80,7 @@ pub(crate) fn capture_group(event_index: usize) -> HighlightGroup {
         .unwrap_or(HighlightGroup::Normal)
 }
 
+#[must_use]
 pub const fn capture_entry_count() -> usize {
     CAPTURES.len()
 }
@@ -131,6 +132,7 @@ impl CaptureCategory {
         }
     }
 
+    #[must_use]
     pub fn of_group(group: HighlightGroup) -> Self {
         use HighlightGroup::*;
         match group {
@@ -140,11 +142,12 @@ impl CaptureCategory {
             Type | TypeBuiltin => Self::TypeSystem,
             Function | Method | Macro => Self::Callable,
             Attribute | Namespace => Self::Declaration,
-            Variable | Parameter | Property | Constant => Self::Value,
+            Normal | Variable | Parameter | Property | Constant | DiffAdd | DiffRemove => {
+                Self::Value
+            }
             Operator | Punctuation => Self::Operator,
             Tag | Heading | Emphasis | Link => Self::Markup,
             Error | Warning => Self::Diagnostic,
-            _ => Self::Value,
         }
     }
 
@@ -156,6 +159,22 @@ impl CaptureCategory {
 impl fmt::Display for CaptureCategory {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.as_str())
+    }
+}
+
+// ── Categorizable bridge ──────────────────────────────────────────────────
+
+pub trait Categorizable {
+    fn category(&self) -> CaptureCategory;
+
+    fn belongs_to(&self, target_category: CaptureCategory) -> bool {
+        self.category() == target_category
+    }
+}
+
+impl Categorizable for HighlightGroup {
+    fn category(&self) -> CaptureCategory {
+        CaptureCategory::of_group(*self)
     }
 }
 
@@ -178,19 +197,12 @@ impl QueryConfig {
 
 // ── Language iteration helper ──────────────────────────────────────────────
 
-/// Yield `(LanguageId, grammar, highlights_query)` for every language with
-/// a bound tree-sitter grammar, skipping languages whose grammar or query
-/// is unavailable.
-fn for_each_grammar(mut f: impl FnMut(LanguageId, tree_sitter::Language, &'static str)) {
-    for lang in LanguageId::ALL {
-        let Some(grammar) = LanguageRegistry::tree_sitter_language(lang) else {
-            continue;
-        };
-        let Some(highlights) = LanguageRegistry::highlights_query(lang) else {
-            continue;
-        };
-        f(lang, grammar, highlights);
-    }
+fn grammar_entries() -> impl Iterator<Item = (LanguageId, tree_sitter::Language, &'static str)> {
+    LanguageId::ALL.into_iter().filter_map(|lang| {
+        let grammar = LanguageRegistry::tree_sitter_language(lang)?;
+        let highlights = LanguageRegistry::highlights_query(lang)?;
+        Some((lang, grammar, highlights))
+    })
 }
 
 // ── Highlight-configuration builder ────────────────────────────────────────
@@ -200,15 +212,15 @@ pub(crate) fn build_highlight_configs() -> HashMap<LanguageId, HighlightConfigur
     let mut configs: HashMap<LanguageId, HighlightConfiguration> =
         HashMap::with_capacity(LanguageId::ALL.len());
 
-    for_each_grammar(|lang, grammar, highlights| {
+    for (lang, grammar, highlights) in grammar_entries() {
         let injections = LanguageRegistry::injections_query(lang);
         let Some(mut cfg) = try_build_config(grammar, highlights, injections) else {
             debug!("highlight config for {lang:?} failed (with and without injections)");
-            return;
+            continue;
         };
         cfg.configure(&names);
         configs.insert(lang, cfg);
-    });
+    }
 
     configs
 }
@@ -234,9 +246,9 @@ pub(crate) fn build_query_configs() -> HashMap<LanguageId, QueryConfig> {
     let mut configs: HashMap<LanguageId, QueryConfig> =
         HashMap::with_capacity(LanguageId::ALL.len());
 
-    for_each_grammar(|lang, grammar, highlights| {
+    for (lang, grammar, highlights) in grammar_entries() {
         let Ok(query) = Query::new(grammar, highlights) else {
-            return;
+            continue;
         };
         let highlight_groups = resolve_highlight_groups(&query, &groups);
         configs.insert(
@@ -246,7 +258,7 @@ pub(crate) fn build_query_configs() -> HashMap<LanguageId, QueryConfig> {
                 highlight_groups,
             },
         );
-    });
+    }
 
     configs
 }

@@ -13,7 +13,7 @@ use tree_sitter_highlight::{HighlightConfiguration, HighlightEvent, Highlighter}
 use crate::captures::{build_highlight_configs, build_query_configs, capture_group, QueryConfig};
 use crate::engine::{HighlightRequest, SyntaxEngine};
 use crate::highlight::{
-    compute_line_starts, distribute_spans_to_lines, find_line, rehash_lines, sort_spans,
+    compute_line_starts, distribute_spans_to_lines, find_line, recompute_line_hashes, sort_spans,
     EngineKind, HighlightGroup, HighlightSnapshot, HighlightSpan, SyntaxStatus,
 };
 use crate::registry::{LanguageId, LanguageRegistry};
@@ -100,11 +100,20 @@ struct ProgressiveFill {
     max_spans_per_line: usize,
 }
 
+struct WorkerState {
+    buffers: HashMap<usize, BufferState>,
+    hl_configs: HashMap<LanguageId, HighlightConfiguration>,
+    query_configs: HashMap<LanguageId, QueryConfig>,
+    highlighter: Highlighter,
+}
+
 fn worker_loop(rx: Receiver<HighlightRequest>, res_tx: Sender<HighlightResult>) {
-    let mut buffers: HashMap<usize, BufferState> = HashMap::new();
-    let mut hl_configs = build_highlight_configs();
-    let mut query_configs = build_query_configs();
-    let mut highlighter = Highlighter::new();
+    let mut state = WorkerState {
+        buffers: HashMap::new(),
+        hl_configs: build_highlight_configs(),
+        query_configs: build_query_configs(),
+        highlighter: Highlighter::new(),
+    };
     let mut fills: HashMap<usize, ProgressiveFill> = HashMap::new();
 
     loop {
@@ -127,13 +136,7 @@ fn worker_loop(rx: Receiver<HighlightRequest>, res_tx: Sender<HighlightResult>) 
             for job in &jobs {
                 fills.remove(&job.buffer_id);
 
-                let snapshot = run_highlight_job(
-                    job,
-                    &mut buffers,
-                    &mut hl_configs,
-                    &mut query_configs,
-                    &mut highlighter,
-                );
+                let snapshot = run_highlight_job(job, &mut state);
 
                 if let Some(fill) = make_progressive_fill(job, &snapshot) {
                     fills.insert(job.buffer_id, fill);
@@ -146,11 +149,10 @@ fn worker_loop(rx: Receiver<HighlightRequest>, res_tx: Sender<HighlightResult>) 
             }
         }
 
-        // Process one progressive fill chunk per idle cycle
         let ids: Vec<usize> = fills.keys().copied().collect();
         for id in ids {
             let fill = fills.get_mut(&id).unwrap();
-            if process_fill_chunk(fill, &mut buffers, &query_configs, &res_tx) {
+            if process_fill_chunk(fill, &mut state.buffers, &state.query_configs, &res_tx) {
                 fills.remove(&id);
             }
         }
@@ -173,15 +175,14 @@ fn drain_pending(
     jobs
 }
 
-/// Run a single highlight job with panic recovery.
-fn run_highlight_job(
-    job: &HighlightRequest,
-    buffers: &mut HashMap<usize, BufferState>,
-    hl_configs: &mut HashMap<LanguageId, HighlightConfiguration>,
-    query_configs: &mut HashMap<LanguageId, QueryConfig>,
-    highlighter: &mut Highlighter,
-) -> HighlightSnapshot {
+fn run_highlight_job(job: &HighlightRequest, state: &mut WorkerState) -> HighlightSnapshot {
     let start = Instant::now();
+    let WorkerState {
+        buffers,
+        hl_configs,
+        query_configs,
+        highlighter,
+    } = state;
 
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         highlight_job(buffers, hl_configs, query_configs, highlighter, job)
@@ -256,8 +257,8 @@ fn plain_ts_snapshot(job: &HighlightRequest, status: SyntaxStatus) -> HighlightS
 
 fn highlight_job(
     buffers: &mut HashMap<usize, BufferState>,
-    hl_configs: &mut HashMap<LanguageId, HighlightConfiguration>,
-    query_configs: &mut HashMap<LanguageId, QueryConfig>,
+    hl_configs: &HashMap<LanguageId, HighlightConfiguration>,
+    query_configs: &HashMap<LanguageId, QueryConfig>,
     highlighter: &mut Highlighter,
     job: &HighlightRequest,
 ) -> anyhow::Result<HighlightSnapshot> {
@@ -385,7 +386,7 @@ fn viewport_highlight(
     );
 
     let mut line_hashes = vec![0u64; total];
-    rehash_lines(
+    recompute_line_hashes(
         job.text.as_bytes(),
         &offsets,
         &mut line_hashes,
@@ -532,7 +533,7 @@ fn incremental_highlight(
             );
         }
 
-        rehash_lines(
+        recompute_line_hashes(
             job.text.as_bytes(),
             &offsets,
             &mut line_hashes,
@@ -617,7 +618,7 @@ fn process_fill_chunk(
         |line| line >= start_line && line <= end_line,
     );
 
-    rehash_lines(
+    recompute_line_hashes(
         fill.text.as_bytes(),
         &fill.line_start_bytes,
         &mut snapshot.line_hashes,

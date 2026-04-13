@@ -11,7 +11,7 @@ mod highlight;
 mod registry;
 mod tree_sitter_engine;
 
-pub use captures::{capture_entry_count, CaptureCategory, CATEGORY_COUNT};
+pub use captures::{capture_entry_count, CaptureCategory, Categorizable, CATEGORY_COUNT};
 pub use debounce::{Debouncer, DebouncerPhase};
 pub use engine::{
     HighlightRequest, PlainTextEngine, SyntaxConfig, SyntaxEngine, SyntaxManager, ViewportRange,
@@ -44,6 +44,7 @@ impl HighlightOutcome {
         matches!(self, Self::Parsed | Self::ViewportOnly)
     }
 
+    #[must_use]
     pub const fn from_engine(engine_kind: EngineKind, viewport_scoped: bool) -> Self {
         match engine_kind {
             EngineKind::TreeSitter if viewport_scoped => Self::ViewportOnly,
@@ -67,6 +68,7 @@ pub enum FileClassification {
 }
 
 impl FileClassification {
+    #[must_use]
     pub const fn from_byte_length(total_bytes: usize) -> Self {
         if total_bytes == 0 {
             return Self::Empty;
@@ -77,10 +79,12 @@ impl FileClassification {
         Self::Normal
     }
 
+    #[must_use]
     pub const fn supports_full_highlight(self) -> bool {
         matches!(self, Self::Normal)
     }
 
+    #[must_use]
     pub const fn expected_outcome(self, viewport_scoped: bool) -> HighlightOutcome {
         match self {
             Self::Normal if viewport_scoped => HighlightOutcome::ViewportOnly,
@@ -97,20 +101,6 @@ impl fmt::Display for FileClassification {
             Self::Oversized => "oversized (viewport-only)",
             Self::Empty => "empty (no-op)",
         })
-    }
-}
-
-pub trait Categorizable {
-    fn category(&self) -> CaptureCategory;
-
-    fn belongs_to(&self, target_category: CaptureCategory) -> bool {
-        self.category() == target_category
-    }
-}
-
-impl Categorizable for HighlightGroup {
-    fn category(&self) -> CaptureCategory {
-        CaptureCategory::of_group(*self)
     }
 }
 

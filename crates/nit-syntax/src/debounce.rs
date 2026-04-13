@@ -37,7 +37,8 @@ impl Default for Debouncer {
 }
 
 impl Debouncer {
-    pub fn new(quiet_period_ms: u64) -> Self {
+    #[must_use]
+    pub const fn new(quiet_period_ms: u64) -> Self {
         Self {
             quiet_period: Duration::from_millis(quiet_period_ms),
             last_event_at: None,

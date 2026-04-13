@@ -64,7 +64,7 @@ pub struct LanguageRegistry;
 // ── Detection ──────────────────────────────────────────────────────────────
 
 impl LanguageRegistry {
-    /// Priority: override > shebang > path > `PlainText`.
+    #[must_use]
     pub fn detect(
         file_path: Option<&Path>,
         first_line: Option<&str>,
@@ -73,18 +73,73 @@ impl LanguageRegistry {
         if let Some(language) = explicit_override {
             return language;
         }
-        if let Some(language) = first_line.and_then(detect_shebang) {
+        if let Some(language) = first_line.and_then(Self::detect_shebang) {
             return language;
         }
         file_path
-            .map(detect_from_path)
+            .map(Self::detect_from_path)
             .unwrap_or(LanguageId::PlainText)
+    }
+
+    fn detect_from_path(file_path: &Path) -> LanguageId {
+        if let Some(filename) = file_path.file_name().and_then(|os| os.to_str()) {
+            match filename.to_lowercase().as_str() {
+                "cargo.toml" => return LanguageId::Toml,
+                "makefile" => return LanguageId::Bash,
+                _ => {}
+            }
+        }
+
+        let extension = match file_path.extension().and_then(|os| os.to_str()) {
+            Some(ext) => ext.to_lowercase(),
+            None => return LanguageId::PlainText,
+        };
+
+        match extension.as_str() {
+            "rs" => LanguageId::Rust,
+            "py" => LanguageId::Python,
+            "js" | "mjs" | "cjs" | "jsx" => LanguageId::JavaScript,
+            "ts" | "tsx" => LanguageId::TypeScript,
+            "md" | "markdown" => LanguageId::Markdown,
+            "html" | "htm" => LanguageId::Html,
+            "css" | "scss" | "sass" => LanguageId::Css,
+            "json" | "jsonc" => LanguageId::Json,
+            "toml" => LanguageId::Toml,
+            "yml" | "yaml" => LanguageId::Yaml,
+            "sh" | "bash" | "zsh" | "fish" => LanguageId::Bash,
+            _ => LanguageId::PlainText,
+        }
+    }
+
+    fn detect_shebang(first_line: &str) -> Option<LanguageId> {
+        let shebang_line = first_line.trim();
+        if !shebang_line.starts_with("#!") {
+            return None;
+        }
+
+        let after_hash = &shebang_line[2..];
+        let interpreter = after_hash
+            .rsplit('/')
+            .next()
+            .unwrap_or(after_hash)
+            .split_whitespace()
+            .last()
+            .unwrap_or("")
+            .to_lowercase();
+
+        match interpreter.as_str() {
+            "bash" | "sh" | "zsh" => Some(LanguageId::Bash),
+            "python" | "python3" => Some(LanguageId::Python),
+            "node" | "deno" => Some(LanguageId::JavaScript),
+            _ => None,
+        }
     }
 }
 
 // ── Grammar and query lookup ───────────────────────────────────────────────
 
 impl LanguageRegistry {
+    #[must_use]
     pub fn tree_sitter_language(language_id: LanguageId) -> Option<tree_sitter::Language> {
         match language_id {
             LanguageId::Rust => Some(tree_sitter_rust::language()),
@@ -102,7 +157,7 @@ impl LanguageRegistry {
         }
     }
 
-    /// Return the SCM highlights query source for a known language.
+    #[must_use]
     pub fn highlights_query(language_id: LanguageId) -> Option<&'static str> {
         match language_id {
             LanguageId::Rust => Some(include_str!("../queries/rust/highlights.scm")),
@@ -120,7 +175,7 @@ impl LanguageRegistry {
         }
     }
 
-    /// Return the SCM injections query (for embedded language blocks).
+    #[must_use]
     pub fn injections_query(language_id: LanguageId) -> &'static str {
         match language_id {
             LanguageId::Markdown => include_str!("../queries/markdown/injections.scm"),
@@ -129,8 +184,7 @@ impl LanguageRegistry {
         }
     }
 
-    /// Resolve an injection language name (from a tree-sitter grammar)
-    /// back to a [`LanguageId`].
+    #[must_use]
     pub fn from_injection_name(injection_name: &str) -> Option<LanguageId> {
         let token = injection_name
             .split(|ch: char| !ch.is_alphanumeric() && ch != '-' && ch != '_')
@@ -151,70 +205,5 @@ impl LanguageRegistry {
             "bash" | "sh" => Some(LanguageId::Bash),
             _ => None,
         }
-    }
-}
-
-// ── Path-based detection ───────────────────────────────────────────────────
-
-/// Match a file path against known filenames and extensions.
-fn detect_from_path(file_path: &Path) -> LanguageId {
-    // Check well-known filenames first (e.g. `Cargo.toml`, `Makefile`).
-    if let Some(filename) = file_path.file_name().and_then(|os| os.to_str()) {
-        match filename.to_lowercase().as_str() {
-            "cargo.toml" => return LanguageId::Toml,
-            "makefile" => return LanguageId::Bash,
-            _ => {}
-        }
-    }
-
-    // Fall back to extension matching.
-    let extension = match file_path.extension().and_then(|os| os.to_str()) {
-        Some(ext) => ext.to_lowercase(),
-        None => return LanguageId::PlainText,
-    };
-
-    match extension.as_str() {
-        "rs" => LanguageId::Rust,
-        "py" => LanguageId::Python,
-        "js" | "mjs" | "cjs" | "jsx" => LanguageId::JavaScript,
-        "ts" | "tsx" => LanguageId::TypeScript,
-        "md" | "markdown" => LanguageId::Markdown,
-        "html" | "htm" => LanguageId::Html,
-        "css" | "scss" | "sass" => LanguageId::Css,
-        "json" | "jsonc" => LanguageId::Json,
-        "toml" => LanguageId::Toml,
-        "yml" | "yaml" => LanguageId::Yaml,
-        "sh" | "bash" | "zsh" | "fish" => LanguageId::Bash,
-        _ => LanguageId::PlainText,
-    }
-}
-
-// ── Shebang detection ──────────────────────────────────────────────────────
-
-/// Inspect the first line of a file for a `#!` shebang and map the
-/// interpreter name to a [`LanguageId`].
-fn detect_shebang(first_line: &str) -> Option<LanguageId> {
-    let shebang_line = first_line.trim();
-    if !shebang_line.starts_with("#!") {
-        return None;
-    }
-
-    // Extract the interpreter name from the shebang path.
-    // Handles both `#!/usr/bin/bash` and `#!/usr/bin/env bash`.
-    let after_hash = &shebang_line[2..];
-    let interpreter = after_hash
-        .rsplit('/')
-        .next()
-        .unwrap_or(after_hash)
-        .split_whitespace()
-        .last()
-        .unwrap_or("")
-        .to_lowercase();
-
-    match interpreter.as_str() {
-        "bash" | "sh" | "zsh" => Some(LanguageId::Bash),
-        "python" | "python3" => Some(LanguageId::Python),
-        "node" | "deno" => Some(LanguageId::JavaScript),
-        _ => None,
     }
 }

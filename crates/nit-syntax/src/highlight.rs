@@ -287,7 +287,7 @@ pub fn hash_line_bytes(raw: &[u8]) -> u64 {
         .fold(BASIS, |hash, &b| (hash ^ b as u64).wrapping_mul(PRIME))
 }
 
-pub(crate) fn rehash_lines(
+pub(crate) fn recompute_line_hashes(
     text: &[u8],
     line_starts: &[usize],
     hashes: &mut [u64],

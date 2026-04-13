@@ -45,14 +45,15 @@ fn poll_snapshot(
     timeout: Duration,
     interval: Duration,
 ) -> HighlightSnapshot {
-    let start = Instant::now();
+    let deadline = Instant::now() + timeout;
     loop {
         if let Some(snap) = engine.try_get_highlights(buffer_id, version) {
             return snap;
         }
-        if start.elapsed() > timeout {
-            panic!("timed out waiting for highlight snapshot ({timeout:?})");
-        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for snapshot ({timeout:?})"
+        );
         std::thread::sleep(interval);
     }
 }
@@ -86,6 +87,29 @@ fn has_group(snapshot: &HighlightSnapshot, line: usize, group: HighlightGroup) -
         .per_line
         .get(line)
         .is_some_and(|segs| segs.iter().any(|s| s.group == group))
+}
+
+fn poll_until(
+    engine: &mut TreeSitterEngine,
+    buffer_id: usize,
+    version: u64,
+    predicate: impl Fn(&HighlightSnapshot) -> bool,
+    timeout: Duration,
+) -> HighlightSnapshot {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let candidate = engine
+            .try_get_highlights(buffer_id, version)
+            .filter(|s| predicate(s));
+        if let Some(snap) = candidate {
+            return snap;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for predicate ({timeout:?})"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
 }
 
 #[test]
@@ -214,10 +238,11 @@ fn viewport_scoped_highlight_produces_spans_for_visible_range() {
     engine.schedule_rehighlight(req);
     let snap = wait_for(&mut engine, 10, 1);
 
-    assert!(snap.highlighted_range.is_some());
-    let (hl_start, hl_end) = snap.highlighted_range.unwrap();
-    assert!(hl_start <= 100, "hl_start={hl_start}");
-    assert!(hl_end >= 320, "hl_end={hl_end}");
+    // None means progressive fill already completed (entire file covered)
+    if let Some((hl_start, hl_end)) = snap.highlighted_range {
+        assert!(hl_start <= 100, "hl_start={hl_start}");
+        assert!(hl_end >= 320, "hl_end={hl_end}");
+    }
 
     assert!(
         !snap.per_line[200].is_empty(),
@@ -228,7 +253,8 @@ fn viewport_scoped_highlight_produces_spans_for_visible_range() {
         "viewport line 210 should have spans"
     );
 
-    if hl_start > 0 {
+    let viewport_excludes_start = matches!(snap.highlighted_range, Some((s, _)) if s > 0);
+    if viewport_excludes_start {
         assert_eq!(
             snap.line_hashes[0], 0,
             "line 0 should have sentinel hash when outside initial range"
@@ -281,22 +307,17 @@ fn progressive_fill_covers_full_file() {
     );
     engine.schedule_rehighlight(req);
 
-    let start = Instant::now();
-    loop {
-        if let Some(snap) = engine.try_get_highlights(30, 1) {
-            if snap.highlighted_range.is_none() {
-                assert!(
-                    !snap.per_line[350].is_empty(),
-                    "line 350 should have spans after progressive fill"
-                );
-                return;
-            }
-        }
-        if start.elapsed() > Duration::from_secs(5) {
-            panic!("progressive fill did not complete within 5 seconds");
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    }
+    let snap = poll_until(
+        &mut engine,
+        30,
+        1,
+        |s| s.highlighted_range.is_none(),
+        Duration::from_secs(5),
+    );
+    assert!(
+        !snap.per_line[350].is_empty(),
+        "line 350 should have spans after progressive fill"
+    );
 }
 
 #[test]
@@ -318,18 +339,8 @@ fn worker_handles_plaintext_then_real_language() {
     let mut engine = TreeSitterEngine::new();
 
     engine.schedule_rehighlight(make_request(50, 1, LanguageId::PlainText, "hello\n"));
-
-    let start = Instant::now();
-    loop {
-        if let Some(snap) = engine.try_get_highlights(50, 1) {
-            assert_eq!(snap.buffer_id, 50);
-            break;
-        }
-        if start.elapsed() > Duration::from_millis(500) {
-            panic!("worker did not respond");
-        }
-        std::thread::sleep(Duration::from_millis(10));
-    }
+    let snap = wait_for(&mut engine, 50, 1);
+    assert_eq!(snap.buffer_id, 50);
 
     engine.schedule_rehighlight(make_request(51, 1, LanguageId::Rust, "let x = 1;\n"));
     let snap = wait_for(&mut engine, 51, 1);
@@ -365,8 +376,12 @@ fn debouncer_idle_to_ready_cycle() {
 
 #[test]
 fn debouncer_pending_with_long_quiet_period() {
-    let d = Debouncer::new(60_000);
+    let mut d = Debouncer::new(60_000);
     assert_eq!(d.phase(), DebouncerPhase::Idle);
+    d.mark();
+    assert_eq!(d.phase(), DebouncerPhase::Pending);
+    assert!(d.pending());
+    assert!(!d.ready());
 }
 
 #[test]

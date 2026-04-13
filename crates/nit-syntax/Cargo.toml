@@ -15,7 +15,7 @@ tracing = { workspace = true }
 # Local
 nit-core = { path = "../nit-core" }
 
-# Tree-sitter core
+# Tree-sitter runtime
 tree-sitter = "0.20.10"
 tree-sitter-highlight = "0.20.1"
 

@@ -80,6 +80,7 @@ pub struct PlainTextEngine {
 }
 
 impl PlainTextEngine {
+    #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
@@ -121,6 +122,7 @@ pub struct SyntaxManager {
 }
 
 impl SyntaxManager {
+    #[must_use]
     pub fn new(config: SyntaxConfig) -> Self {
         Self {
             config,
@@ -162,8 +164,7 @@ impl SyntaxManager {
     fn engine_for(&self, buffer_id: usize) -> EngineKind {
         self.buffers
             .get(&buffer_id)
-            .map(|m| m.engine)
-            .unwrap_or(EngineKind::Plain)
+            .map_or(EngineKind::Plain, |m| m.engine)
     }
 }
 

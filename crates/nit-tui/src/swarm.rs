@@ -2548,9 +2548,7 @@ impl SwarmRuntime {
                             );
                         }
 
-                        if let Some(retry_dispatch) =
-                            try_dispatch_gate_retry(&mut run, state)
-                        {
+                        if let Some(retry_dispatch) = try_dispatch_gate_retry(&mut run, state) {
                             dispatches.push(retry_dispatch);
                             self.runs.insert(mid.clone(), run);
                             return outcome;
