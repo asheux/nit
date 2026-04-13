@@ -1893,6 +1893,15 @@ pub struct AppState {
     /// Key: agent_id, Value: set of file paths modified during that agent's turn.
     #[serde(skip)]
     pub genome_turn_modified: HashMap<String, HashSet<PathBuf>>,
+    /// Files modified across an entire mission (per-mission accumulator).
+    /// Key: mission_id, Value: set of file paths modified by any agent during
+    /// that mission. Unlike `genome_turn_modified`, this is NOT cleared
+    /// between turns — so when an agent runs multiple sequential tasks within
+    /// the same mission, files from earlier turns are still visible at swarm
+    /// end. Populated by the `FileWrite` handler when the writing agent has a
+    /// `current_mission`; cleared on swarm start and follow-up reactivation.
+    #[serde(skip)]
+    pub genome_mission_modified: HashMap<String, HashSet<PathBuf>>,
     /// Which agents currently have active turns. File attribution is done
     /// by the runners via `FileWrite` events — not by filesystem tracking.
     #[serde(skip)]
@@ -2146,6 +2155,7 @@ impl AppState {
             genome_quality_delta: 0,
             genome_baselines: HashMap::new(),
             genome_turn_modified: HashMap::new(),
+            genome_mission_modified: HashMap::new(),
             genome_turn_active: HashSet::new(),
             genome_retry_count: 0,
             genome_agent_streak: HashMap::new(),

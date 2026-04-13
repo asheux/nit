@@ -220,6 +220,23 @@ impl AgentBusEvent {
                     .entry(agent_id.clone())
                     .or_default()
                     .insert(path.clone());
+                // Mission-scoped accumulator so a reviewer running at swarm
+                // end can see every file touched during the mission, even
+                // when the same agent's per-turn set was cleared between
+                // sequential tasks.
+                let mission = state
+                    .agents
+                    .agents
+                    .iter()
+                    .find(|a| a.id == *agent_id)
+                    .and_then(|a| a.current_mission.clone());
+                if let Some(mission) = mission {
+                    state
+                        .genome_mission_modified
+                        .entry(mission)
+                        .or_default()
+                        .insert(path.clone());
+                }
             }
             AgentBusEvent::TurnLog { agent_id, message } => {
                 let source = backend_source_for_agent(state, agent_id);

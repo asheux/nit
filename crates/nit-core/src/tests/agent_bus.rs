@@ -216,6 +216,100 @@ fn turn_failed_source_label_matches_backend() {
 }
 
 #[test]
+fn file_write_populates_mission_accumulator_when_agent_has_mission() {
+    let mut state = test_state();
+    add_codex_agent(&mut state, "gpt-test");
+    state
+        .agents
+        .agents
+        .iter_mut()
+        .find(|a| a.id == "gpt-test")
+        .unwrap()
+        .current_mission = Some("mis-001".into());
+
+    AgentBusEvent::FileWrite {
+        agent_id: "gpt-test".into(),
+        path: std::path::PathBuf::from("src/a.rs"),
+    }
+    .apply(&mut state);
+
+    assert!(state
+        .genome_mission_modified
+        .get("mis-001")
+        .unwrap()
+        .contains(&std::path::PathBuf::from("src/a.rs")));
+}
+
+#[test]
+fn file_write_without_mission_skips_mission_accumulator() {
+    let mut state = test_state();
+    add_codex_agent(&mut state, "gpt-test");
+
+    AgentBusEvent::FileWrite {
+        agent_id: "gpt-test".into(),
+        path: std::path::PathBuf::from("src/a.rs"),
+    }
+    .apply(&mut state);
+
+    assert!(state.genome_mission_modified.is_empty());
+    // Per-turn attribution still works.
+    assert!(state
+        .genome_turn_modified
+        .get("gpt-test")
+        .unwrap()
+        .contains(&std::path::PathBuf::from("src/a.rs")));
+}
+
+#[test]
+fn mission_accumulator_survives_turn_started_clearing_per_turn_set() {
+    // Regression: when a swarm agent runs multiple sequential tasks, each
+    // TurnStarted clears `genome_turn_modified[agent]`. Before the mission
+    // accumulator existed, the swarm's genome review saw only files from the
+    // last turn — every earlier turn's work was invisible.
+    let mut state = test_state();
+    add_codex_agent(&mut state, "gpt-test");
+    state
+        .agents
+        .agents
+        .iter_mut()
+        .find(|a| a.id == "gpt-test")
+        .unwrap()
+        .current_mission = Some("mis-001".into());
+
+    // Turn 1: write file a.
+    AgentBusEvent::FileWrite {
+        agent_id: "gpt-test".into(),
+        path: std::path::PathBuf::from("a.rs"),
+    }
+    .apply(&mut state);
+
+    // TurnStarted for turn 2 — this clears `genome_turn_modified[gpt-test]`.
+    AgentBusEvent::TurnStarted {
+        agent_id: "gpt-test".into(),
+        mission_id: Some("mis-001".into()),
+        resume_thread_id: None,
+    }
+    .apply(&mut state);
+
+    // Turn 2: write file b.
+    AgentBusEvent::FileWrite {
+        agent_id: "gpt-test".into(),
+        path: std::path::PathBuf::from("b.rs"),
+    }
+    .apply(&mut state);
+
+    // Per-turn only has the current turn's file.
+    let per_turn = state.genome_turn_modified.get("gpt-test").unwrap();
+    assert!(!per_turn.contains(&std::path::PathBuf::from("a.rs")));
+    assert!(per_turn.contains(&std::path::PathBuf::from("b.rs")));
+
+    // Mission accumulator has both.
+    let mission = state.genome_mission_modified.get("mis-001").unwrap();
+    assert!(mission.contains(&std::path::PathBuf::from("a.rs")));
+    assert!(mission.contains(&std::path::PathBuf::from("b.rs")));
+}
+
+#[test]
 fn turn_completed_prompt_idx_checks_both_codex_and_claude_maps() {
     let mut state = test_state();
     add_claude_agent(&mut state, "claude-opus");

@@ -1402,6 +1402,13 @@ struct SwarmRun {
     /// `crates/nit-games`).  Populated at run creation; injected into
     /// integrate task prompts so agents cannot skip files.
     scope_files: Vec<String>,
+    /// Genome reports snapshot taken at swarm start, frozen for the life of
+    /// the mission. Used as the "before" side of the final genome review so
+    /// the reviewer sees real swarm-wide deltas.  The per-turn
+    /// `state.genome_baselines` is unsuitable here because it gets cleared
+    /// between agent turns and re-captured from post-edit state on the next
+    /// `TurnStarted` — making every review show `+0.00` across all encoders.
+    initial_genome_baselines: HashMap<std::path::PathBuf, nit_core::GenomeReport>,
 }
 
 /// Configuration from a previous swarm run, used to re-launch follow-up prompts
@@ -1656,6 +1663,13 @@ impl SwarmRuntime {
         run.gate_report = None;
         run.report_status = None;
         run.report_output = None;
+        // Re-anchor mission baselines to the current state so the follow-up's
+        // genome review and gate measure deltas from THIS follow-up's work —
+        // not cumulative deltas from the original swarm's starting point.
+        run.initial_genome_baselines = state.genome_reports.clone();
+        // Drop files accumulated from the prior run; the follow-up should
+        // only report on files it actually touches.
+        state.genome_mission_modified.remove(mission_id);
         self.runs.insert(mission_id.to_string(), run);
         true
     }
@@ -2020,6 +2034,7 @@ impl SwarmRuntime {
         );
 
         self.completed_runs.remove(&mission_id);
+        state.genome_mission_modified.remove(&mission_id);
         self.runs.insert(
             mission_id.clone(),
             SwarmRun {
@@ -2046,6 +2061,7 @@ impl SwarmRuntime {
                 report_status: None,
                 report_output: None,
                 scope_files,
+                initial_genome_baselines: state.genome_reports.clone(),
             },
         );
 
@@ -2326,7 +2342,7 @@ impl SwarmRuntime {
                                     // verifier will be dispatched when result arrives
                                     // (polled via poll_genome_gates).
                                     run.genome_gate_pending = Some(GenomeGatePending {
-                                        rx: spawn_genome_gate_eval(state),
+                                        rx: spawn_genome_gate_eval(state, &run.mission_id, &run.initial_genome_baselines),
                                         label: label.clone(),
                                         verifier: verifier.clone(),
                                     });
@@ -2427,7 +2443,7 @@ impl SwarmRuntime {
                                     // verifier will be dispatched when result arrives
                                     // (polled via poll_genome_gates).
                                     run.genome_gate_pending = Some(GenomeGatePending {
-                                        rx: spawn_genome_gate_eval(state),
+                                        rx: spawn_genome_gate_eval(state, &run.mission_id, &run.initial_genome_baselines),
                                         label: label.clone(),
                                         verifier: verifier.clone(),
                                     });
@@ -2779,7 +2795,7 @@ impl SwarmRuntime {
                                     // verifier will be dispatched when result arrives
                                     // (polled via poll_genome_gates).
                                     run.genome_gate_pending = Some(GenomeGatePending {
-                                        rx: spawn_genome_gate_eval(state),
+                                        rx: spawn_genome_gate_eval(state, &run.mission_id, &run.initial_genome_baselines),
                                         label: label.clone(),
                                         verifier: verifier.clone(),
                                     });
@@ -2922,7 +2938,7 @@ impl SwarmRuntime {
                                     update_mission_status(state, &run, Some(done));
                                     if state.settings.genome.genome_gate_enabled {
                                         run.genome_gate_pending = Some(GenomeGatePending {
-                                            rx: spawn_genome_gate_eval(state),
+                                            rx: spawn_genome_gate_eval(state, &run.mission_id, &run.initial_genome_baselines),
                                             label: label.clone(),
                                             verifier: verifier.clone(),
                                         });
@@ -7189,7 +7205,7 @@ fn maybe_spawn_genome_review(run: &mut SwarmRun, state: &AppState) {
         return;
     };
     run.genome_review_pending = Some(GenomeReviewPending {
-        rx: spawn_genome_review_prompt(state),
+        rx: spawn_genome_review_prompt(state, &run.mission_id, &run.initial_genome_baselines),
         reviewer_id,
     });
 }
@@ -7202,17 +7218,31 @@ fn maybe_spawn_genome_review(run: &mut SwarmRun, state: &AppState) {
 /// An empty string in the channel means the worker had nothing to evaluate
 /// (no modified files) — the poller skips dispatching the reviewer in that
 /// case.
-fn spawn_genome_review_prompt(state: &AppState) -> mpsc::Receiver<String> {
+fn spawn_genome_review_prompt(
+    state: &AppState,
+    mission_id: &str,
+    mission_baselines: &HashMap<std::path::PathBuf, nit_core::GenomeReport>,
+) -> mpsc::Receiver<String> {
     let (tx, rx) = mpsc::channel();
 
-    // Evaluate ALL modified files, not just the editor buffer.
-    let mut files_to_eval: Vec<std::path::PathBuf> = state
-        .genome_turn_modified
-        .values()
-        .flat_map(|s| s.iter().cloned())
-        .collect::<std::collections::HashSet<_>>()
-        .into_iter()
-        .collect();
+    // Prefer the mission-scoped accumulator so files from earlier turns of
+    // the same mission aren't lost when an agent runs multiple sequential
+    // tasks (each TurnStarted clears `genome_turn_modified[agent]`).
+    // Fall back to unioning `genome_turn_modified` for defence-in-depth if
+    // the mission key is somehow empty.
+    let mut files_to_eval: Vec<std::path::PathBuf> = match state
+        .genome_mission_modified
+        .get(mission_id)
+    {
+        Some(set) if !set.is_empty() => set.iter().cloned().collect(),
+        _ => state
+            .genome_turn_modified
+            .values()
+            .flat_map(|s| s.iter().cloned())
+            .collect::<std::collections::HashSet<_>>()
+            .into_iter()
+            .collect(),
+    };
     if let Some(editor_path) = state.editor_buffer().path().cloned() {
         if !files_to_eval.contains(&editor_path) {
             files_to_eval.push(editor_path);
@@ -7220,16 +7250,13 @@ fn spawn_genome_review_prompt(state: &AppState) -> mpsc::Receiver<String> {
     }
     files_to_eval.sort();
 
-    // Use genome_baselines (captured at turn start) as the "before" —
-    // genome_reports contains post-change state and would produce zero diffs.
+    // Use the mission-scoped snapshot (frozen at swarm start) as the "before".
+    // `state.genome_baselines` is per-turn and gets cleared/re-captured
+    // between agents, so by the time the review runs it equals current state
+    // and `compute_genome_diff` returns +0.00 for every encoder.
     let baselines: HashMap<std::path::PathBuf, nit_core::GenomeReport> = files_to_eval
         .iter()
-        .filter_map(|p| {
-            state
-                .genome_baselines
-                .get(p)
-                .map(|r| (p.clone(), r.clone()))
-        })
+        .filter_map(|p| mission_baselines.get(p).map(|r| (p.clone(), r.clone())))
         .collect();
 
     let input = GenomeReviewInput {
@@ -7307,17 +7334,30 @@ struct GenomeGateInput {
 /// Spawn the genome gate evaluation on a background thread and return a
 /// receiver that will deliver the result string. The main thread should
 /// poll this with `try_recv` so the UI never blocks.
-fn spawn_genome_gate_eval(state: &AppState) -> mpsc::Receiver<String> {
+fn spawn_genome_gate_eval(
+    state: &AppState,
+    mission_id: &str,
+    mission_baselines: &HashMap<std::path::PathBuf, nit_core::GenomeReport>,
+) -> mpsc::Receiver<String> {
     let (tx, rx) = mpsc::channel();
 
-    // Collect all files to evaluate: modified files + editor buffer.
-    let mut files_to_eval: Vec<std::path::PathBuf> = state
-        .genome_turn_modified
-        .values()
-        .flat_map(|s| s.iter().cloned())
-        .collect::<std::collections::HashSet<_>>()
-        .into_iter()
-        .collect();
+    // Prefer the mission-scoped accumulator for the same reason as the
+    // reviewer path: `genome_turn_modified` is cleared on each TurnStarted,
+    // so an agent running multiple sequential tasks within a mission would
+    // lose files from earlier turns without this.
+    let mut files_to_eval: Vec<std::path::PathBuf> = match state
+        .genome_mission_modified
+        .get(mission_id)
+    {
+        Some(set) if !set.is_empty() => set.iter().cloned().collect(),
+        _ => state
+            .genome_turn_modified
+            .values()
+            .flat_map(|s| s.iter().cloned())
+            .collect::<std::collections::HashSet<_>>()
+            .into_iter()
+            .collect(),
+    };
     if let Some(editor_path) = state.editor_buffer().path().cloned() {
         if !files_to_eval.contains(&editor_path) {
             files_to_eval.push(editor_path);
@@ -7325,14 +7365,17 @@ fn spawn_genome_gate_eval(state: &AppState) -> mpsc::Receiver<String> {
     }
     files_to_eval.sort();
 
-    // Use baselines (captured at turn start) for regression comparison —
-    // genome_reports may already reflect post-change state, producing false
-    // "no regression" results.
+    // Use the mission-scoped snapshot (frozen at swarm start) for regression
+    // comparison. `state.genome_baselines` is per-turn and gets cleared
+    // between agents, so by the time the gate runs it's empty and falling
+    // back to `state.genome_reports` (post-change state) silently masks real
+    // regressions. For files not in the mission snapshot (created during the
+    // swarm), fall back to current state — "new file not regressed" is the
+    // correct semantics there.
     let prev_tiers: HashMap<std::path::PathBuf, nit_core::GenomeTier> = files_to_eval
         .iter()
         .filter_map(|p| {
-            state
-                .genome_baselines
+            mission_baselines
                 .get(p)
                 .or_else(|| state.genome_reports.get(p))
                 .map(|r| (p.clone(), r.tier))

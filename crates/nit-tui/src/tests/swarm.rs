@@ -1182,6 +1182,7 @@ fn dag_scheduler_dispatches_after_deps() {
         report_status: None,
         report_output: None,
         scope_files: Vec::new(),
+        initial_genome_baselines: std::collections::HashMap::new(),
     };
 
     initialize_task_graph(&mut run);
@@ -1285,6 +1286,7 @@ fn single_writer_limits_concurrent_write_tasks() {
         report_status: None,
         report_output: None,
         scope_files: Vec::new(),
+        initial_genome_baselines: std::collections::HashMap::new(),
     };
 
     initialize_task_graph(&mut run);
@@ -1448,6 +1450,7 @@ fn deadlock_detection_skips_pending_tasks() {
         report_status: None,
         report_output: None,
         scope_files: Vec::new(),
+        initial_genome_baselines: std::collections::HashMap::new(),
     };
     initialize_task_graph(&mut run);
     refresh_task_readiness(&mut run);
@@ -1786,6 +1789,7 @@ fn dashboard_distinguishes_pending_queued_and_skipped() {
         report_status: None,
         report_output: None,
         scope_files: Vec::new(),
+        initial_genome_baselines: std::collections::HashMap::new(),
     };
     let mut runtime = SwarmRuntime::default();
     runtime.runs.insert("mis-001".into(), run);
