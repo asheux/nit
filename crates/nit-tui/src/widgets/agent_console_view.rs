@@ -2325,12 +2325,20 @@ fn breather_rows_for_user_prompt(
 
     // Shadow agents are hidden from the roster but still count for
     // activity/queue detection — otherwise the breather would show "Waiting"
-    // while a shadow (propose/judge/review) is actively working.
+    // while a shadow (propose/judge/review) is actively working. Scope to
+    // the selected agent context so a shadow on agent A doesn't trigger
+    // agent B's breather.
     let shadow_ids: Vec<&str> = state
         .agents
         .agents
         .iter()
         .filter(|lane| lane.shadow)
+        .filter(|lane| match agent_ctx {
+            Some(ctx) => crate::shadow::parse_shadow_lane_id(&lane.id)
+                .map(|(base, _, _)| base == ctx)
+                .unwrap_or(false),
+            None => true,
+        })
         .map(|lane| lane.id.as_str())
         .collect();
 
@@ -2376,7 +2384,7 @@ fn breather_rows_for_user_prompt(
     let swarm_phase = swarm_mission_id.and_then(|mid| swarm.and_then(|s| s.swarm_stage_label(mid)));
     let swarm_hint = swarm_mission_id.and_then(|mid| swarm.and_then(|s| s.swarm_stage_hint(mid)));
     let is_swarm = swarm_mission_id.is_some();
-    let shadow_stage = crate::shadow::shadow_stage_label_from_state(state);
+    let shadow_stage = crate::shadow::shadow_stage_label_from_state(state, agent_ctx);
     let base_label: std::borrow::Cow<'_, str> = if !is_swarm && shadow_stage.is_some() {
         // Shadow pipeline is running for a single agent — surface the stage
         // explicitly so the user has real feedback while the hidden agents work.

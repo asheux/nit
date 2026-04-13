@@ -247,7 +247,16 @@ fn stage_label_reflects_current_active_shadow() {
     .unwrap();
 
     // No active turns yet → Finalizing (lanes exist, none active).
-    assert_eq!(shadow_stage_label_from_state(&state), Some("Finalizing"));
+    assert_eq!(
+        shadow_stage_label_from_state(&state, None),
+        Some("Finalizing")
+    );
+    assert_eq!(
+        shadow_stage_label_from_state(&state, Some("codex-main")),
+        Some("Finalizing")
+    );
+    // A different main agent id has no shadow lanes → None.
+    assert_eq!(shadow_stage_label_from_state(&state, Some("other")), None);
 
     // Simulate proposer-a running.
     let a_id = shadow_lane_id("codex-main", "01", "propose-a");
@@ -255,7 +264,10 @@ fn stage_label_reflects_current_active_shadow() {
         .agents
         .active_turns
         .insert(a_id.clone(), active_turn_state());
-    assert_eq!(shadow_stage_label_from_state(&state), Some("Proposing"));
+    assert_eq!(
+        shadow_stage_label_from_state(&state, None),
+        Some("Proposing")
+    );
 
     // Proposer done, judge running.
     state.agents.active_turns.remove(&a_id);
@@ -264,13 +276,16 @@ fn stage_label_reflects_current_active_shadow() {
         .agents
         .active_turns
         .insert(j_id.clone(), active_turn_state());
-    assert_eq!(shadow_stage_label_from_state(&state), Some("Judging"));
+    assert_eq!(shadow_stage_label_from_state(&state, None), Some("Judging"));
 
     // Judge done, reviewer running.
     state.agents.active_turns.remove(&j_id);
     let r_id = shadow_lane_id("codex-main", "01", "review");
     state.agents.active_turns.insert(r_id, active_turn_state());
-    assert_eq!(shadow_stage_label_from_state(&state), Some("Reviewing"));
+    assert_eq!(
+        shadow_stage_label_from_state(&state, None),
+        Some("Reviewing")
+    );
 }
 
 #[test]

@@ -8001,9 +8001,15 @@ pub fn is_agent_busy(state: &AppState, agent_id: &str) -> bool {
 }
 
 /// Resolve any clone agent ID back to its base (non-clone) agent ID.
+///
+/// Understands chat clones (`#chat-clone-`), swarm clones (`#swarm-`), and
+/// shadow clones (`#shadow-`). Without shadow-awareness here,
+/// [`is_agent_family_busy`] wouldn't notice that a base agent's shadow
+/// pipeline is in flight, and `@new` / queueing decisions would race.
 pub fn resolve_base_agent_id(agent_id: &str) -> &str {
     chat_clone_base_id(agent_id)
         .or_else(|| swarm_clone_base_id(agent_id))
+        .or_else(|| crate::shadow::parse_shadow_lane_id(agent_id).map(|(base, _, _)| base))
         .unwrap_or(agent_id)
 }
 

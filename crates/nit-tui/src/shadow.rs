@@ -415,9 +415,43 @@ fn ensure_shadow_lane(
 fn cleanup_shadow_lanes(state: &mut AppState, lane_ids: &[String]) {
     for id in lane_ids {
         state.agents.active_turns.remove(id);
+        // Thread/session bookkeeping — shadow clones open fresh contexts on
+        // each dispatch, but the bus events still record an id we must drop.
         state.agents.codex_thread_ids.remove(id);
         state.agents.codex_used_tokens.remove(id);
         state.agents.codex_context_remaining_pct.remove(id);
+        state.agents.codex_turn_prompt_idx.remove(id);
+        state.agents.claude_session_ids.remove(id);
+        state.agents.claude_used_tokens.remove(id);
+        state.agents.claude_context_remaining_pct.remove(id);
+        state.agents.claude_turn_prompt_idx.remove(id);
+        for map in state.agents.codex_mission_thread_ids.values_mut() {
+            map.remove(id);
+        }
+        for map in state.agents.codex_mission_used_tokens.values_mut() {
+            map.remove(id);
+        }
+        for map in state
+            .agents
+            .codex_mission_context_remaining_pct
+            .values_mut()
+        {
+            map.remove(id);
+        }
+        for map in state.agents.claude_mission_session_ids.values_mut() {
+            map.remove(id);
+        }
+        for map in state.agents.claude_mission_used_tokens.values_mut() {
+            map.remove(id);
+        }
+        for map in state
+            .agents
+            .claude_mission_context_remaining_pct
+            .values_mut()
+        {
+            map.remove(id);
+        }
+        // Runtime/UI metadata copied from the base lane.
         state
             .agents
             .codex_effective_context_window_tokens
@@ -435,6 +469,16 @@ fn cleanup_shadow_lanes(state: &mut AppState, lane_ids: &[String]) {
         state.agents.swarm_role_by_agent_id.remove(id);
         state.agents.swarm_priority_agent_ids.remove(id);
         state.agents.roster_tree_collapsed_agent_ids.remove(id);
+        state.genome_turn_modified.remove(id);
+        // Orphan queued turns that never dispatched.
+        state
+            .agents
+            .queued_codex_turns
+            .retain(|turn| &turn.agent_id != id);
+        state
+            .agents
+            .queued_claude_turns
+            .retain(|turn| &turn.agent_id != id);
     }
     state
         .agents
@@ -446,47 +490,91 @@ fn cleanup_shadow_lanes(state: &mut AppState, lane_ids: &[String]) {
 // Prompt builders
 // ---------------------------------------------------------------------------
 
+/// System-awareness preamble shared by every shadow role. Each shadow agent
+/// runs in its own isolated context, so it won't see the full genome
+/// instructions the main agent receives through the normal dispatch pipeline
+/// unless we paste them inline. This ensures proposers, judges, and reviewers
+/// all factor nit's quality/parsimony constraints into their outputs.
+fn nit_system_awareness() -> String {
+    let mut out = String::from(
+        "## NIT SYSTEM AWARENESS\n\
+         You are operating inside nit, an agentic coding lab that scores \
+         structural code quality by encoding source files as Game of Life \
+         genomes. The main agent you are advising will be graded on this \
+         system. Factor these constraints into whatever you produce:\n\n\
+         - Tier ladder: I Still Life · II Oscillator · III Spaceship · \
+         IV Methuselah · V Replicator. Minimum acceptable tier is III.\n\
+         - A parsimony check penalises over-engineering: tiny trivial \
+         functions, padded comments, artificial type/trait variety, \
+         near-duplicate function bodies. Detected bloat caps the tier at \
+         IV regardless of GoL performance.\n\
+         - Prefer the simplest correct solution. Do not split clear \
+         functions into micro-helpers to inflate structure. Do not add \
+         comments that restate the code.\n\
+         - Files with >40% comment lines, or where >50% of functions are \
+         <=5 lines, are auto-flagged and tier-capped.\n\n\
+         Full genome instructions (read-only reference — follow these when \
+         proposing/judging/reviewing):\n",
+    );
+    out.push_str(nit_core::GENOME_AGENT_INSTRUCTIONS);
+    out
+}
+
 fn build_propose_prompt(variant: &str, user_prompt: &str) -> String {
     format!(
-        "You are Shadow-Proposer-{variant}, a hidden support agent drafting one \
-         candidate approach for the following user request. Work independently; \
-         do NOT coordinate with other proposers. Be concrete and opinionated.\n\n\
+        "{awareness}\n\n\
+         ## YOUR ROLE\n\
+         You are Shadow-Proposer-{variant}, a hidden support agent drafting \
+         one candidate approach for the following user request. Work \
+         independently; do NOT coordinate with other proposers. Be concrete \
+         and opinionated. Your proposal must respect nit's parsimony rules.\n\n\
          Deliverable (≤ 300 words):\n\
          1. One-sentence summary of your approach.\n\
-         2. Step-by-step plan.\n\
-         3. Key tradeoffs or risks for this approach.\n\n\
-         User request:\n{user_prompt}"
+         2. Step-by-step plan, naming concrete file paths where possible.\n\
+         3. Key tradeoffs or risks, including any tier/parsimony concerns.\n\n\
+         User request:\n{user_prompt}",
+        awareness = nit_system_awareness(),
     )
 }
 
 fn build_judge_prompt(user_prompt: &str, proposal_a: &str, proposal_b: &str) -> String {
     format!(
-        "You are Shadow-Judge, a hidden support agent. Two proposers drafted \
-         independent approaches to the user's request. Compare them, pick the \
-         stronger one (or synthesise a better hybrid), and produce a SINGLE \
-         recommended plan.\n\n\
+        "{awareness}\n\n\
+         ## YOUR ROLE\n\
+         You are Shadow-Judge, a hidden support agent. Two proposers drafted \
+         independent approaches to the user's request. Compare them, pick \
+         the stronger one (or synthesise a better hybrid), and produce a \
+         SINGLE recommended plan. Reject any step that would violate nit's \
+         parsimony rules.\n\n\
          Deliverable (≤ 300 words):\n\
          1. Which proposal is stronger and why (one sentence).\n\
          2. The final recommended plan (numbered steps).\n\
-         3. Explicit callouts: what was dropped from the weaker proposal and why.\n\n\
+         3. Explicit callouts: what was dropped from the weaker proposal \
+         and why, including any parsimony/tier concerns.\n\n\
          User request:\n{user_prompt}\n\n\
          Proposal A:\n{proposal_a}\n\n\
-         Proposal B:\n{proposal_b}"
+         Proposal B:\n{proposal_b}",
+        awareness = nit_system_awareness(),
     )
 }
 
 fn build_review_prompt(user_prompt: &str, judged_plan: &str) -> String {
     format!(
-        "You are Shadow-Reviewer, a hidden support agent. Stress-test the \
+        "{awareness}\n\n\
+         ## YOUR ROLE\n\
+         You are Shadow-Reviewer, a hidden support agent. Stress-test the \
          judged plan below: look for missed edge cases, broken assumptions, \
-         unstated dependencies, and concrete file paths the plan should touch \
-         but doesn't.\n\n\
+         unstated dependencies, and concrete file paths the plan should \
+         touch but doesn't. Flag anything that risks tripping nit's \
+         parsimony detector or dropping the tier below III.\n\n\
          Deliverable (≤ 300 words):\n\
          1. Risks / holes you found (bullets).\n\
          2. Suggested additions or corrections.\n\
-         3. A short \"do / don't\" list for the executing agent.\n\n\
+         3. A short \"do / don't\" list for the executing agent, including \
+         parsimony reminders.\n\n\
          User request:\n{user_prompt}\n\n\
-         Judged plan:\n{judged_plan}"
+         Judged plan:\n{judged_plan}",
+        awareness = nit_system_awareness(),
     )
 }
 
@@ -501,7 +589,9 @@ fn build_final_prompt(run: &ShadowRun) -> String {
          The following analysis was produced by four hidden support agents \
          (propose-a, propose-b, judge, review) to help you answer the user. \
          Treat it as advisory context — override any suggestion you disagree \
-         with, and cite the risks the reviewer surfaced when relevant.\n\n\
+         with, and cite the risks the reviewer surfaced when relevant. The \
+         shadows have already been briefed on nit's tier ladder and \
+         parsimony detector, so their plans should be quality-aware.\n\n\
          ### Proposal A\n{propose_a}\n\n\
          ### Proposal B\n{propose_b}\n\n\
          ### Judge's recommended plan\n{judge}\n\n\
@@ -513,21 +603,36 @@ fn build_final_prompt(run: &ShadowRun) -> String {
 
 /// Inspect live state and derive a stage label for shadow activity.
 ///
-/// Returns the highest-priority active stage across all shadow runs tracked
-/// by `state.agents.active_turns`:
+/// When `main_agent_id` is `Some(id)`, only shadow lanes whose base resolves
+/// to that id are considered — this is what the breather uses so a shadow
+/// run on agent A doesn't leak its stage into agent B's view.
+///
+/// When `main_agent_id` is `None`, any shadow lane counts (legacy "is
+/// anything shadowing?" query).
+///
+/// Returns the highest-priority active stage:
 ///   * any proposer active → "Proposing"
 ///   * judge active → "Judging"
 ///   * reviewer active → "Reviewing"
-///   * none active, but shadow lanes exist → "Finalizing"
+///   * none active, but matching shadow lanes exist → "Finalizing"
 ///
-/// Returns `None` if there are no shadow lanes. This avoids threading
-/// `&ShadowRuntime` into widget code.
-pub fn shadow_stage_label_from_state(state: &AppState) -> Option<&'static str> {
+/// Returns `None` if there are no matching shadow lanes. This avoids
+/// threading `&ShadowRuntime` into widget code.
+pub fn shadow_stage_label_from_state(
+    state: &AppState,
+    main_agent_id: Option<&str>,
+) -> Option<&'static str> {
     let shadow_lanes: Vec<&str> = state
         .agents
         .agents
         .iter()
         .filter(|lane| lane.shadow)
+        .filter(|lane| match main_agent_id {
+            Some(id) => parse_shadow_lane_id(&lane.id)
+                .map(|(base, _, _)| base == id)
+                .unwrap_or(false),
+            None => true,
+        })
         .map(|lane| lane.id.as_str())
         .collect();
     if shadow_lanes.is_empty() {

@@ -1079,14 +1079,12 @@ fn run_loop(
             }
             let shadow_outcome = shadow.handle_event_outcome(state, &event);
             for dispatch in shadow_outcome.dispatches {
-                dispatch_agent_prompt(
+                dispatch_shadow_outcome(
                     state,
                     &mut vitals,
-                    Some(&codex_runner),
-                    Some(&claude_runner),
-                    dispatch.agent_id,
-                    dispatch.mission_id,
-                    dispatch.prompt,
+                    &codex_runner,
+                    &claude_runner,
+                    dispatch,
                 );
             }
             if finished {
@@ -1174,14 +1172,12 @@ fn run_loop(
             }
             let shadow_outcome = shadow.handle_event_outcome(state, &event);
             for dispatch in shadow_outcome.dispatches {
-                dispatch_agent_prompt(
+                dispatch_shadow_outcome(
                     state,
                     &mut vitals,
-                    Some(&codex_runner),
-                    Some(&claude_runner),
-                    dispatch.agent_id,
-                    dispatch.mission_id,
-                    dispatch.prompt,
+                    &codex_runner,
+                    &claude_runner,
+                    dispatch,
                 );
             }
             if finished {
@@ -2026,6 +2022,47 @@ fn maybe_compute_genome_report(state: &mut AppState, genome: &crate::genome_work
     state.genome_computing = true;
     let text = state.editor_buffer().content_as_string();
     genome.evaluate(file_path, text, true);
+}
+
+/// Route a shadow-runtime dispatch back into the main dispatcher, preserving
+/// `prompt_msg_idx` so the main agent's final response is still anchored to
+/// the user's original prompt in the chat view. `dispatch_agent_prompt` drops
+/// the index, so we stash it in the right backend map ahead of the call.
+fn dispatch_shadow_outcome(
+    state: &mut AppState,
+    vitals: &mut VitalsState,
+    codex: &CodexRunner,
+    claude: &ClaudeRunner,
+    dispatch: crate::shadow::ShadowDispatch,
+) {
+    if let Some(idx) = dispatch.prompt_msg_idx {
+        let is_claude = state
+            .agents
+            .agents
+            .iter()
+            .find(|lane| lane.id == dispatch.agent_id)
+            .is_some_and(|lane| lane.is_claude());
+        if is_claude {
+            state
+                .agents
+                .claude_turn_prompt_idx
+                .insert(dispatch.agent_id.clone(), idx);
+        } else {
+            state
+                .agents
+                .codex_turn_prompt_idx
+                .insert(dispatch.agent_id.clone(), idx);
+        }
+    }
+    dispatch_agent_prompt(
+        state,
+        vitals,
+        Some(codex),
+        Some(claude),
+        dispatch.agent_id,
+        dispatch.mission_id,
+        dispatch.prompt,
+    );
 }
 
 /// Dispatch authoritative genome evaluations to background threads after a turn completes.
