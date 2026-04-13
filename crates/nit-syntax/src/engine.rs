@@ -9,9 +9,7 @@ use crate::highlight::{EngineKind, HighlightSnapshot, SyntaxStatus};
 use crate::registry::{LanguageId, LanguageRegistry};
 use crate::tree_sitter_engine::TreeSitterEngine;
 
-// ---------------------------------------------------------------------------
-// Configuration
-// ---------------------------------------------------------------------------
+// ── Configuration ─────────────────────────────────────────────────────────
 
 /// Tuning knobs for the syntax highlighting subsystem.
 #[derive(Clone, Debug)]
@@ -40,9 +38,7 @@ impl Default for SyntaxConfig {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Viewport
-// ---------------------------------------------------------------------------
+// ── Viewport ──────────────────────────────────────────────────────────────
 
 /// Visible line range sent with each highlight request so large files can
 /// prioritise the on-screen region.
@@ -53,9 +49,7 @@ pub struct ViewportRange {
     pub total_lines: usize,
 }
 
-// ---------------------------------------------------------------------------
-// Highlight request
-// ---------------------------------------------------------------------------
+// ── Highlight request ─────────────────────────────────────────────────────
 
 /// A request to (re)highlight a single buffer.
 #[derive(Clone, Debug)]
@@ -70,9 +64,7 @@ pub struct HighlightRequest {
     pub viewport: Option<ViewportRange>,
 }
 
-// ---------------------------------------------------------------------------
-// Engine trait
-// ---------------------------------------------------------------------------
+// ── Engine trait ──────────────────────────────────────────────────────────
 
 /// Common interface implemented by every highlighting backend.
 pub trait SyntaxEngine {
@@ -94,9 +86,7 @@ pub trait SyntaxEngine {
     fn try_get_highlights(&mut self, buffer_id: usize, version: u64) -> Option<HighlightSnapshot>;
 }
 
-// ---------------------------------------------------------------------------
-// Plain-text fallback engine
-// ---------------------------------------------------------------------------
+// ── Plain-text fallback engine ────────────────────────────────────────────
 
 /// Trivial engine that produces empty highlight spans.
 #[derive(Default)]
@@ -106,23 +96,21 @@ pub struct PlainTextEngine {
 
 impl PlainTextEngine {
     pub fn new() -> Self {
-        Self {
-            snapshots: HashMap::new(),
-        }
+        Self::default()
     }
 }
 
 impl SyntaxEngine for PlainTextEngine {
-    fn schedule_rehighlight(&mut self, req: HighlightRequest) {
+    fn schedule_rehighlight(&mut self, request: HighlightRequest) {
         let snap = HighlightSnapshot::plain(
-            req.buffer_id,
-            req.version,
-            req.language,
+            request.buffer_id,
+            request.version,
+            request.language,
             EngineKind::Plain,
             SyntaxStatus::Ok(EngineKind::Plain),
-            &req.text,
+            &request.text,
         );
-        self.snapshots.insert(req.buffer_id, snap);
+        self.snapshots.insert(request.buffer_id, snap);
     }
 
     fn try_get_highlights(&mut self, buffer_id: usize, version: u64) -> Option<HighlightSnapshot> {
@@ -133,9 +121,7 @@ impl SyntaxEngine for PlainTextEngine {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Manager (multiplexer)
-// ---------------------------------------------------------------------------
+// ── Manager (multiplexer) ─────────────────────────────────────────────────
 
 /// Routes highlight requests to the appropriate backend based on config.
 pub struct SyntaxManager {

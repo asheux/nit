@@ -10,8 +10,6 @@ use crate::highlight::{
 use crate::registry::LanguageId;
 use crate::tree_sitter_engine::TreeSitterEngine;
 
-// ── Test helpers ───────────────────────────────────────────────────────────
-
 fn make_request(buffer_id: usize, version: u64, lang: LanguageId, text: &str) -> HighlightRequest {
     HighlightRequest {
         buffer_id,
@@ -38,17 +36,33 @@ fn make_viewport_request(
     }
 }
 
-fn wait_for(engine: &mut TreeSitterEngine, buffer_id: usize, version: u64) -> HighlightSnapshot {
+fn poll_snapshot(
+    engine: &mut TreeSitterEngine,
+    buffer_id: usize,
+    version: u64,
+    timeout: Duration,
+    interval: Duration,
+) -> HighlightSnapshot {
     let start = Instant::now();
     loop {
         if let Some(snap) = engine.try_get_highlights(buffer_id, version) {
             return snap;
         }
-        if start.elapsed() > Duration::from_secs(2) {
-            panic!("timed out waiting for highlight snapshot");
+        if start.elapsed() > timeout {
+            panic!("timed out waiting for highlight snapshot ({timeout:?})");
         }
-        std::thread::sleep(Duration::from_millis(10));
+        std::thread::sleep(interval);
     }
+}
+
+fn wait_for(engine: &mut TreeSitterEngine, buffer_id: usize, version: u64) -> HighlightSnapshot {
+    poll_snapshot(
+        engine,
+        buffer_id,
+        version,
+        Duration::from_secs(2),
+        Duration::from_millis(10),
+    )
 }
 
 fn wait_for_long(
@@ -56,16 +70,13 @@ fn wait_for_long(
     buffer_id: usize,
     version: u64,
 ) -> HighlightSnapshot {
-    let start = Instant::now();
-    loop {
-        if let Some(snap) = engine.try_get_highlights(buffer_id, version) {
-            return snap;
-        }
-        if start.elapsed() > Duration::from_secs(5) {
-            panic!("timed out waiting for highlight snapshot (large file)");
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    }
+    poll_snapshot(
+        engine,
+        buffer_id,
+        version,
+        Duration::from_secs(5),
+        Duration::from_millis(50),
+    )
 }
 
 fn has_group(snapshot: &HighlightSnapshot, line: usize, group: HighlightGroup) -> bool {
@@ -74,8 +85,6 @@ fn has_group(snapshot: &HighlightSnapshot, line: usize, group: HighlightGroup) -
         .get(line)
         .is_some_and(|segs| segs.iter().any(|s| s.group == group))
 }
-
-// ── Tests ──────────────────────────────────────────────────────────────────
 
 #[test]
 fn split_spans_across_lines() {

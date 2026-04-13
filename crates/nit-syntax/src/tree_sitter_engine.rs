@@ -18,9 +18,7 @@ use crate::highlight::{
 };
 use crate::registry::{LanguageId, LanguageRegistry};
 
-// ---------------------------------------------------------------------------
-// Public engine
-// ---------------------------------------------------------------------------
+// ── Public engine ─────────────────────────────────────────────────────────
 
 pub struct TreeSitterEngine {
     req_tx: Sender<HighlightRequest>,
@@ -79,9 +77,7 @@ impl SyntaxEngine for TreeSitterEngine {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Worker thread
-// ---------------------------------------------------------------------------
+// ── Worker thread ─────────────────────────────────────────────────────────
 
 struct BufferState {
     language: LanguageId,
@@ -152,15 +148,11 @@ fn worker_loop(rx: Receiver<HighlightRequest>, res_tx: Sender<HighlightResult>) 
 
         // Process one progressive fill chunk per idle cycle
         let ids: Vec<usize> = fills.keys().copied().collect();
-        let mut done = Vec::new();
         for id in ids {
             let fill = fills.get_mut(&id).unwrap();
             if process_fill_chunk(fill, &mut buffers, &query_configs, &res_tx) {
-                done.push(id);
+                fills.remove(&id);
             }
-        }
-        for id in done {
-            fills.remove(&id);
         }
     }
 }
@@ -262,9 +254,7 @@ fn make_progressive_fill(
     })
 }
 
-// ---------------------------------------------------------------------------
-// Core highlight logic
-// ---------------------------------------------------------------------------
+// ── Core highlight logic ──────────────────────────────────────────────────
 
 fn highlight_job(
     buffers: &mut HashMap<usize, BufferState>,
@@ -358,9 +348,7 @@ fn highlight_job(
     Ok(snapshot)
 }
 
-// ---------------------------------------------------------------------------
-// Highlight strategies
-// ---------------------------------------------------------------------------
+// ── Highlight strategies ──────────────────────────────────────────────────
 
 fn viewport_highlight(
     query_configs: &HashMap<LanguageId, QueryConfig>,
@@ -537,7 +525,7 @@ fn incremental_highlight(
         }
     }
 
-    if dirty.iter().any(|&d| d) {
+    if dirty.contains(&true) {
         for (i, &is_dirty) in dirty.iter().enumerate() {
             if is_dirty {
                 per_line[i].clear();
@@ -580,9 +568,7 @@ fn incremental_highlight(
     }
 }
 
-// ---------------------------------------------------------------------------
-// Progressive fill
-// ---------------------------------------------------------------------------
+// ── Progressive fill ──────────────────────────────────────────────────────
 
 fn process_fill_chunk(
     fill: &mut ProgressiveFill,
@@ -674,9 +660,7 @@ fn process_fill_chunk(
     fill.next_below.is_none() && fill.next_above.is_none()
 }
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
+// ── Helpers ───────────────────────────────────────────────────────────────
 
 fn collect_spans(
     cfg: &QueryConfig,
@@ -700,12 +684,12 @@ fn collect_spans(
                     continue;
                 }
                 let node = cap.node;
-                let s = node.start_byte().max(start);
-                let e = node.end_byte().min(end);
-                if s < e {
+                let span_start = node.start_byte().max(start);
+                let span_end = node.end_byte().min(end);
+                if span_start < span_end {
                     spans.push(HighlightSpan {
-                        start_byte: s,
-                        end_byte: e,
+                        start_byte: span_start,
+                        end_byte: span_end,
                         group,
                         priority,
                         modifiers: 0,
@@ -748,7 +732,8 @@ fn build_line_map(old_lines: usize, edits: &[BufferEdit]) -> Vec<Option<usize>> 
             if line < start {
                 continue;
             } else if line > old_end {
-                *entry = (line as isize + delta >= 0).then(|| (line as isize + delta) as usize);
+                let shifted = line as isize + delta;
+                *entry = (shifted >= 0).then_some(shifted as usize);
             } else {
                 *entry = None;
             }
@@ -772,16 +757,14 @@ fn to_point(p: BufferPoint) -> Point {
     Point::new(p.row, p.column)
 }
 
-fn extract_panic_message(info: &Box<dyn std::any::Any + Send>) -> String {
+fn extract_panic_message(info: &(dyn std::any::Any + Send)) -> String {
     info.downcast_ref::<&str>()
         .map(|s| s.to_string())
         .or_else(|| info.downcast_ref::<String>().cloned())
         .unwrap_or_else(|| "unknown panic".to_string())
 }
 
-// ---------------------------------------------------------------------------
-// Rate-limited logging
-// ---------------------------------------------------------------------------
+// ── Rate-limited logging ──────────────────────────────────────────────────
 
 static LOG_COMPLETE: OnceLock<Mutex<Instant>> = OnceLock::new();
 static LOG_ERROR: OnceLock<Mutex<Instant>> = OnceLock::new();

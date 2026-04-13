@@ -144,7 +144,6 @@ impl HighlightSnapshot {
     ) -> Self {
         let offsets = compute_line_starts(text);
         let hashes = compute_line_hashes(text, &offsets);
-        let line_count = offsets.len().saturating_sub(1);
 
         Self {
             buffer_id,
@@ -153,9 +152,9 @@ impl HighlightSnapshot {
             engine,
             status,
             duration_ms: 0,
+            per_line: vec![Vec::new(); hashes.len()],
             line_start_bytes: offsets,
             line_hashes: hashes,
-            per_line: vec![Vec::new(); line_count],
             highlighted_range: None,
         }
     }
@@ -176,8 +175,7 @@ impl HighlightSnapshot {
         sort_spans(&mut spans);
 
         let offsets = compute_line_starts(text);
-        let line_count = offsets.len().saturating_sub(1);
-        let mut lines = vec![Vec::new(); line_count];
+        let mut lines = vec![Vec::new(); offsets.len().saturating_sub(1)];
 
         distribute_spans_to_lines(&spans, &offsets, &mut lines, max_per_line, |_| true);
 
@@ -236,9 +234,7 @@ pub(crate) fn rehash_lines(
 /// Hash every line in the buffer using [`hash_line_bytes`].
 fn compute_line_hashes(text: &str, offsets: &[usize]) -> Vec<u64> {
     let bytes = text.as_bytes();
-    let line_count = offsets.len().saturating_sub(1);
-
-    (0..line_count)
+    (0..offsets.len().saturating_sub(1))
         .map(|i| hash_line_bytes(&bytes[offsets[i]..offsets[i + 1]]))
         .collect()
 }
@@ -303,21 +299,10 @@ pub fn map_line_segments_to_chars(
 /// Sort highlight spans in source order: `start_byte` ascending, `priority`
 /// descending for ties. Skips the sort when already ordered.
 pub(crate) fn sort_spans(spans: &mut [HighlightSpan]) {
-    let needs_sort = spans.windows(2).any(|pair| {
-        let (a, b) = (&pair[0], &pair[1]);
-        match a.start_byte.cmp(&b.start_byte) {
-            Ordering::Greater => true,
-            Ordering::Equal => a.priority < b.priority,
-            Ordering::Less => false,
-        }
+    spans.sort_by(|a, b| match a.start_byte.cmp(&b.start_byte) {
+        Ordering::Equal => b.priority.cmp(&a.priority),
+        ord => ord,
     });
-
-    if needs_sort {
-        spans.sort_by(|a, b| match a.start_byte.cmp(&b.start_byte) {
-            Ordering::Equal => b.priority.cmp(&a.priority),
-            ord => ord,
-        });
-    }
 }
 
 // ── Span→line distribution ──────────────────────────────────────────────────

@@ -87,10 +87,7 @@ const CAPTURES: &[(&str, HighlightGroup)] = &[
 
 /// Collect all capture names for [`HighlightConfiguration::configure`].
 pub(crate) fn capture_names() -> Vec<&'static str> {
-    CAPTURES
-        .iter()
-        .map(|(capture_name, _)| *capture_name)
-        .collect()
+    CAPTURES.iter().map(|(name, _)| *name).collect()
 }
 
 /// Resolve a highlight-event index to its [`HighlightGroup`], falling
@@ -98,7 +95,7 @@ pub(crate) fn capture_names() -> Vec<&'static str> {
 pub(crate) fn capture_group(event_index: usize) -> HighlightGroup {
     CAPTURES
         .get(event_index)
-        .map(|(_, highlight_group)| *highlight_group)
+        .map(|(_, group)| *group)
         .unwrap_or(HighlightGroup::Normal)
 }
 
@@ -143,44 +140,9 @@ pub enum CaptureCategory {
 /// Number of distinct [`CaptureCategory`] variants.
 pub const CATEGORY_COUNT: usize = 10;
 
-// ── CaptureCategory Display ───────────────────────────────────────────────
-
-impl fmt::Display for CaptureCategory {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(self.as_str())
-    }
-}
-
-// ── CaptureCategory classification ────────────────────────────────────────
+// ── CaptureCategory ───────────────────────────────────────────────────────
 
 impl CaptureCategory {
-    /// Classify a [`HighlightGroup`] into its semantic category.
-    ///
-    /// Uses a glob import to keep the match arms concise. Groups that
-    /// represent diff markers or the default `Normal` variant are
-    /// classified as [`Value`](Self::Value).
-    pub fn of_group(source_group: HighlightGroup) -> Self {
-        use HighlightGroup::*;
-        match source_group {
-            Comment | DocComment => Self::Annotation,
-            String | Char | Number | Boolean => Self::Literal,
-            Keyword | KeywordControl | KeywordOperator => Self::Keyword,
-            Type | TypeBuiltin => Self::TypeSystem,
-            Function | Method | Macro => Self::Callable,
-            Attribute | Namespace => Self::Declaration,
-            Variable | Parameter | Property | Constant => Self::Value,
-            Operator | Punctuation => Self::Operator,
-            Tag | Heading | Emphasis | Link => Self::Markup,
-            Error | Warning => Self::Diagnostic,
-            _ => Self::Value,
-        }
-    }
-}
-
-// ── CaptureCategory queries ──────────────────────────────────────────────
-
-impl CaptureCategory {
-    /// Human-readable label for this category.
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Annotation => "annotation",
@@ -196,31 +158,47 @@ impl CaptureCategory {
         }
     }
 
-    /// Returns `true` when the category covers literal-value tokens
-    /// (strings, characters, numbers, and booleans).
+    /// Classify a [`HighlightGroup`] into its semantic category.
+    ///
+    /// Diff markers and the default `Normal` variant map to [`Value`](Self::Value).
+    pub fn of_group(group: HighlightGroup) -> Self {
+        use HighlightGroup::*;
+        match group {
+            Comment | DocComment => Self::Annotation,
+            String | Char | Number | Boolean => Self::Literal,
+            Keyword | KeywordControl | KeywordOperator => Self::Keyword,
+            Type | TypeBuiltin => Self::TypeSystem,
+            Function | Method | Macro => Self::Callable,
+            Attribute | Namespace => Self::Declaration,
+            Variable | Parameter | Property | Constant => Self::Value,
+            Operator | Punctuation => Self::Operator,
+            Tag | Heading | Emphasis | Link => Self::Markup,
+            Error | Warning => Self::Diagnostic,
+            _ => Self::Value,
+        }
+    }
+
     pub fn is_literal(self) -> bool {
         matches!(self, Self::Literal)
     }
 }
 
-// ── Query config ───────────────────────────────────────────────────────────
+impl fmt::Display for CaptureCategory {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+// ── QueryConfig ───────────────────────────────────────────────────────────
 
 /// Pre-compiled query paired with a per-capture highlight group vector
 /// for a single language. Used by the raw `QueryCursor` path.
 pub(crate) struct QueryConfig {
-    /// Compiled tree-sitter query (highlights only, no injections).
     pub query: Query,
-    /// One entry per capture in `query`; `None` for captures that have
-    /// no matching [`HighlightGroup`].
     pub capture_groups: Vec<Option<HighlightGroup>>,
 }
 
-// ── QueryConfig accessors ─────────────────────────────────────────────────
-
 impl QueryConfig {
-    /// Resolve capture at `capture_idx` to a highlight group, defaulting
-    /// to [`HighlightGroup::Normal`] when the index is out of range or
-    /// the capture is unmapped.
     pub fn group_for_index(&self, capture_idx: usize) -> HighlightGroup {
         self.capture_groups
             .get(capture_idx)
@@ -237,45 +215,42 @@ impl QueryConfig {
 /// Each configuration receives the unified capture name list so that
 /// highlight-event indices align with the [`CAPTURES`] table.
 pub(crate) fn build_highlight_configs() -> HashMap<LanguageId, HighlightConfiguration> {
-    let ordered_capture_names = capture_names();
-    let language_count: usize = LanguageId::ALL.len();
-    let mut result_map: HashMap<LanguageId, HighlightConfiguration> =
-        HashMap::with_capacity(language_count);
+    let names = capture_names();
+    let mut configs: HashMap<LanguageId, HighlightConfiguration> =
+        HashMap::with_capacity(LanguageId::ALL.len());
 
-    for target_lang in LanguageId::ALL {
-        let Some(ts_grammar) = LanguageRegistry::tree_sitter_language(target_lang) else {
+    for lang in LanguageId::ALL {
+        let Some(grammar) = LanguageRegistry::tree_sitter_language(lang) else {
             continue;
         };
 
-        let highlight_source = LanguageRegistry::highlights_query(target_lang).unwrap_or("");
-        let injection_source = LanguageRegistry::injections_query(target_lang);
+        let highlights = LanguageRegistry::highlights_query(lang).unwrap_or("");
+        let injections = LanguageRegistry::injections_query(lang);
 
-        let Some(mut highlight_cfg) =
-            try_build_config(ts_grammar, highlight_source, injection_source)
-        else {
-            debug!("highlight config for {target_lang:?} failed (with and without injections)");
+        let Some(mut cfg) = try_build_config(grammar, highlights, injections) else {
+            debug!("highlight config for {lang:?} failed (with and without injections)");
             continue;
         };
 
-        highlight_cfg.configure(&ordered_capture_names);
-        result_map.insert(target_lang, highlight_cfg);
+        cfg.configure(&names);
+        configs.insert(lang, cfg);
     }
 
-    result_map
+    configs
 }
 
 /// Attempt to create a [`HighlightConfiguration`], falling back to an
 /// injection-free config if the injections query fails to parse.
 fn try_build_config(
     grammar: tree_sitter::Language,
-    highlight_source: &str,
-    injection_source: &str,
+    highlights: &str,
+    injections: &str,
 ) -> Option<HighlightConfiguration> {
-    match HighlightConfiguration::new(grammar, highlight_source, injection_source, "") {
-        Ok(built_config) => Some(built_config),
-        Err(injection_error) => {
-            debug!("injections failed ({injection_error}), retrying without");
-            HighlightConfiguration::new(grammar, highlight_source, "", "").ok()
+    match HighlightConfiguration::new(grammar, highlights, injections, "") {
+        Ok(cfg) => Some(cfg),
+        Err(err) => {
+            debug!("injections failed ({err}), retrying without");
+            HighlightConfiguration::new(grammar, highlights, "", "").ok()
         }
     }
 }
@@ -285,37 +260,34 @@ fn try_build_config(
 /// Build [`QueryConfig`]s for every supported language (used by the
 /// raw `QueryCursor` path for incremental and viewport highlighting).
 pub(crate) fn build_query_configs() -> HashMap<LanguageId, QueryConfig> {
-    let group_table: HashMap<&str, HighlightGroup> = CAPTURES
-        .iter()
-        .map(|&(capture_label, mapped_group)| (capture_label, mapped_group))
-        .collect();
+    let groups: HashMap<&str, HighlightGroup> = CAPTURES.iter().copied().collect();
 
-    let total_languages: usize = LanguageId::ALL.len();
-    let mut result_map: HashMap<LanguageId, QueryConfig> = HashMap::with_capacity(total_languages);
+    let mut configs: HashMap<LanguageId, QueryConfig> =
+        HashMap::with_capacity(LanguageId::ALL.len());
 
-    for target_lang in LanguageId::ALL {
-        let Some(ts_grammar) = LanguageRegistry::tree_sitter_language(target_lang) else {
+    for lang in LanguageId::ALL {
+        let Some(grammar) = LanguageRegistry::tree_sitter_language(lang) else {
             continue;
         };
-        let Some(highlight_source) = LanguageRegistry::highlights_query(target_lang) else {
+        let Some(highlights) = LanguageRegistry::highlights_query(lang) else {
             continue;
         };
-        let Ok(compiled_query) = Query::new(ts_grammar, highlight_source) else {
+        let Ok(query) = Query::new(grammar, highlights) else {
             continue;
         };
 
-        let resolved_groups = resolve_capture_groups(&compiled_query, &group_table);
+        let captures = resolve_capture_groups(&query, &groups);
 
-        result_map.insert(
-            target_lang,
+        configs.insert(
+            lang,
             QueryConfig {
-                query: compiled_query,
-                capture_groups: resolved_groups,
+                query,
+                capture_groups: captures,
             },
         );
     }
 
-    result_map
+    configs
 }
 
 // ── Capture-group resolution ─────────────────────────────────────────────
@@ -324,26 +296,25 @@ pub(crate) fn build_query_configs() -> HashMap<LanguageId, QueryConfig> {
 /// [`HighlightGroup`], falling back to the dotless parent of dotted
 /// capture names (e.g. `"variable.parameter"` → `"variable"`).
 fn resolve_capture_groups(
-    compiled_query: &Query,
-    group_table: &HashMap<&str, HighlightGroup>,
+    query: &Query,
+    groups: &HashMap<&str, HighlightGroup>,
 ) -> Vec<Option<HighlightGroup>> {
-    compiled_query
+    query
         .capture_names()
         .iter()
-        .map(|capture_name| lookup_with_parent_fallback(capture_name, group_table))
+        .map(|name| lookup_with_parent_fallback(name, groups))
         .collect()
 }
 
-/// Look up a single capture name in the group table, trying the full
-/// dotted name first and falling back to the root segment before the
-/// first dot (e.g. `"function.method"` → `"function"`).
+/// Try the full dotted name first, then fall back to the root segment
+/// (e.g. `"function.method"` → `"function"`).
 fn lookup_with_parent_fallback(
-    full_capture_name: &str,
-    group_table: &HashMap<&str, HighlightGroup>,
+    name: &str,
+    groups: &HashMap<&str, HighlightGroup>,
 ) -> Option<HighlightGroup> {
-    if let Some(&direct_hit) = group_table.get(full_capture_name) {
-        return Some(direct_hit);
+    if let Some(&group) = groups.get(name) {
+        return Some(group);
     }
-    let parent_prefix = full_capture_name.split('.').next()?;
-    group_table.get(parent_prefix).copied()
+    let root = name.split('.').next()?;
+    groups.get(root).copied()
 }

@@ -2457,7 +2457,10 @@ fn coverage_assigns_propose_and_review_when_planner_has_role_hint() {
     // planner stays integrate; clone-01 (integrator) is untouched; clone-02
     // and clone-03 get propose and review (in order).
     assert_eq!(roles[0], Some("integrate"));
-    assert_eq!(roles[1], None, "integrator clone must NOT be assigned a role");
+    assert_eq!(
+        roles[1], None,
+        "integrator clone must NOT be assigned a role"
+    );
     assert_eq!(roles[2], Some("propose"));
     assert_eq!(roles[3], Some("review"));
     assert_eq!(assignments.len(), 2);

@@ -57,10 +57,9 @@ impl LanguageId {
     ];
 }
 
-/// Human-readable label for status-bar display and logging.
 impl fmt::Display for LanguageId {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let label = match self {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
             Self::Rust => "Rust",
             Self::Python => "Python",
             Self::JavaScript => "JavaScript",
@@ -73,8 +72,7 @@ impl fmt::Display for LanguageId {
             Self::Yaml => "YAML",
             Self::Bash => "Bash",
             Self::PlainText => "Plain Text",
-        };
-        formatter.write_str(label)
+        })
     }
 }
 
@@ -226,12 +224,12 @@ fn detect_shebang(first_line: &str) -> Option<LanguageId> {
     if !shebang_line.starts_with("#!") {
         return None;
     }
-    let normalised = shebang_line.to_lowercase();
-    if normalised.contains("python") {
+    let normalized = shebang_line.to_lowercase();
+    if normalized.contains("python") {
         Some(LanguageId::Python)
-    } else if normalised.contains("node") || normalised.contains("deno") {
+    } else if normalized.contains("node") || normalized.contains("deno") {
         Some(LanguageId::JavaScript)
-    } else if normalised.contains("bash") || normalised.contains("sh") || normalised.contains("zsh")
+    } else if normalized.contains("bash") || normalized.contains("sh") || normalized.contains("zsh")
     {
         Some(LanguageId::Bash)
     } else {

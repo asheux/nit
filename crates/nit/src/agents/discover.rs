@@ -242,8 +242,7 @@ fn parse_text_model_list(content: &str) -> Vec<String> {
         if first_token.ends_with(':') || first_token.len() < 3 {
             continue;
         }
-        if first_token.eq_ignore_ascii_case("models") || first_token.eq_ignore_ascii_case("model")
-        {
+        if first_token.eq_ignore_ascii_case("models") || first_token.eq_ignore_ascii_case("model") {
             continue;
         }
         model_ids.push(first_token.to_string());

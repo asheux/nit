@@ -241,8 +241,8 @@ fn resolve_relative_path(candidate_path: &Path, resolution_anchor: Option<&Path>
 
 /// Apply TM strategy selection and accelerator validation before tournament execution.
 fn finalize_config(config: NormalizedConfig) -> anyhow::Result<NormalizedConfig> {
-    let config = try_select_halting_turing_machine_strategies(config)
-        .map_err(|e| anyhow::anyhow!(e))?;
+    let config =
+        try_select_halting_turing_machine_strategies(config).map_err(|e| anyhow::anyhow!(e))?;
     accelerator_run_preflight(
         &config,
         config.save_data && config.event_log.enabled,

@@ -2342,7 +2342,11 @@ impl SwarmRuntime {
                                     // verifier will be dispatched when result arrives
                                     // (polled via poll_genome_gates).
                                     run.genome_gate_pending = Some(GenomeGatePending {
-                                        rx: spawn_genome_gate_eval(state, &run.mission_id, &run.initial_genome_baselines),
+                                        rx: spawn_genome_gate_eval(
+                                            state,
+                                            &run.mission_id,
+                                            &run.initial_genome_baselines,
+                                        ),
                                         label: label.clone(),
                                         verifier: verifier.clone(),
                                     });
@@ -2443,7 +2447,11 @@ impl SwarmRuntime {
                                     // verifier will be dispatched when result arrives
                                     // (polled via poll_genome_gates).
                                     run.genome_gate_pending = Some(GenomeGatePending {
-                                        rx: spawn_genome_gate_eval(state, &run.mission_id, &run.initial_genome_baselines),
+                                        rx: spawn_genome_gate_eval(
+                                            state,
+                                            &run.mission_id,
+                                            &run.initial_genome_baselines,
+                                        ),
                                         label: label.clone(),
                                         verifier: verifier.clone(),
                                     });
@@ -2795,7 +2803,11 @@ impl SwarmRuntime {
                                     // verifier will be dispatched when result arrives
                                     // (polled via poll_genome_gates).
                                     run.genome_gate_pending = Some(GenomeGatePending {
-                                        rx: spawn_genome_gate_eval(state, &run.mission_id, &run.initial_genome_baselines),
+                                        rx: spawn_genome_gate_eval(
+                                            state,
+                                            &run.mission_id,
+                                            &run.initial_genome_baselines,
+                                        ),
                                         label: label.clone(),
                                         verifier: verifier.clone(),
                                     });
@@ -2938,7 +2950,11 @@ impl SwarmRuntime {
                                     update_mission_status(state, &run, Some(done));
                                     if state.settings.genome.genome_gate_enabled {
                                         run.genome_gate_pending = Some(GenomeGatePending {
-                                            rx: spawn_genome_gate_eval(state, &run.mission_id, &run.initial_genome_baselines),
+                                            rx: spawn_genome_gate_eval(
+                                                state,
+                                                &run.mission_id,
+                                                &run.initial_genome_baselines,
+                                            ),
                                             label: label.clone(),
                                             verifier: verifier.clone(),
                                         });
@@ -3318,8 +3334,7 @@ fn ensure_proposer_task(
         .into();
     tasks[idx].artifacts = vec!["files".into(), "plan".into(), "risks".into()];
     tasks[idx].done_when = Some(
-        "We have a concrete file-by-file implementation plan and the main risks identified."
-            .into(),
+        "We have a concrete file-by-file implementation plan and the main risks identified.".into(),
     );
     tasks[idx].deps.clear();
 
@@ -3819,8 +3834,7 @@ fn assign_clone_roles_for_parallel_coverage(
         .filter(|id| Some(id.as_str()) != integrator_agent_id)
         .filter(|id| is_swarm_clone_agent_id(id.as_str()))
         .filter(|id| {
-            direct_role_hint_for_agent(&state.agents.swarm_role_by_agent_id, id.as_str())
-                .is_none()
+            direct_role_hint_for_agent(&state.agents.swarm_role_by_agent_id, id.as_str()).is_none()
         })
         .cloned()
         .collect();
@@ -7230,19 +7244,17 @@ fn spawn_genome_review_prompt(
     // tasks (each TurnStarted clears `genome_turn_modified[agent]`).
     // Fall back to unioning `genome_turn_modified` for defence-in-depth if
     // the mission key is somehow empty.
-    let mut files_to_eval: Vec<std::path::PathBuf> = match state
-        .genome_mission_modified
-        .get(mission_id)
-    {
-        Some(set) if !set.is_empty() => set.iter().cloned().collect(),
-        _ => state
-            .genome_turn_modified
-            .values()
-            .flat_map(|s| s.iter().cloned())
-            .collect::<std::collections::HashSet<_>>()
-            .into_iter()
-            .collect(),
-    };
+    let mut files_to_eval: Vec<std::path::PathBuf> =
+        match state.genome_mission_modified.get(mission_id) {
+            Some(set) if !set.is_empty() => set.iter().cloned().collect(),
+            _ => state
+                .genome_turn_modified
+                .values()
+                .flat_map(|s| s.iter().cloned())
+                .collect::<std::collections::HashSet<_>>()
+                .into_iter()
+                .collect(),
+        };
     if let Some(editor_path) = state.editor_buffer().path().cloned() {
         if !files_to_eval.contains(&editor_path) {
             files_to_eval.push(editor_path);
@@ -7345,19 +7357,17 @@ fn spawn_genome_gate_eval(
     // reviewer path: `genome_turn_modified` is cleared on each TurnStarted,
     // so an agent running multiple sequential tasks within a mission would
     // lose files from earlier turns without this.
-    let mut files_to_eval: Vec<std::path::PathBuf> = match state
-        .genome_mission_modified
-        .get(mission_id)
-    {
-        Some(set) if !set.is_empty() => set.iter().cloned().collect(),
-        _ => state
-            .genome_turn_modified
-            .values()
-            .flat_map(|s| s.iter().cloned())
-            .collect::<std::collections::HashSet<_>>()
-            .into_iter()
-            .collect(),
-    };
+    let mut files_to_eval: Vec<std::path::PathBuf> =
+        match state.genome_mission_modified.get(mission_id) {
+            Some(set) if !set.is_empty() => set.iter().cloned().collect(),
+            _ => state
+                .genome_turn_modified
+                .values()
+                .flat_map(|s| s.iter().cloned())
+                .collect::<std::collections::HashSet<_>>()
+                .into_iter()
+                .collect(),
+        };
     if let Some(editor_path) = state.editor_buffer().path().cloned() {
         if !files_to_eval.contains(&editor_path) {
             files_to_eval.push(editor_path);
