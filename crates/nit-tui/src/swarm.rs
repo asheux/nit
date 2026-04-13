@@ -57,7 +57,7 @@ fn is_swarm_clone_for_mission(agent_id: &str, mission_id: &str) -> bool {
         .is_some_and(|suffix| suffix.starts_with('-'))
 }
 
-fn copy_codex_runtime_metadata(state: &mut AppState, base_id: &str, clone_id: &str) {
+pub(crate) fn copy_codex_runtime_metadata(state: &mut AppState, base_id: &str, clone_id: &str) {
     if let Some(tokens) = state
         .agents
         .codex_effective_context_window_tokens
@@ -104,7 +104,7 @@ fn copy_codex_runtime_metadata(state: &mut AppState, base_id: &str, clone_id: &s
     }
 }
 
-fn copy_claude_runtime_metadata(state: &mut AppState, base_id: &str, clone_id: &str) {
+pub(crate) fn copy_claude_runtime_metadata(state: &mut AppState, base_id: &str, clone_id: &str) {
     if let Some(tokens) = state
         .agents
         .claude_effective_context_window_tokens
@@ -136,7 +136,11 @@ fn copy_claude_runtime_metadata(state: &mut AppState, base_id: &str, clone_id: &
     }
 }
 
-fn insert_swarm_clone_lane(state: &mut AppState, base_id: &str, clone_lane: nit_core::AgentLane) {
+pub(crate) fn insert_swarm_clone_lane(
+    state: &mut AppState,
+    base_id: &str,
+    clone_lane: nit_core::AgentLane,
+) {
     if state
         .agents
         .agents

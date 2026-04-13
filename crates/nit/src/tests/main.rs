@@ -14,6 +14,7 @@ fn test_lane(id: &str, role: &str, kind: nit_core::AgentLaneKind) -> nit_core::A
         heartbeat_age_secs: 0,
         queue_len: 0,
         current_mission: None,
+        shadow: false,
         last_message: String::new(),
     }
 }

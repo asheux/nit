@@ -96,6 +96,7 @@ fn make_lane(id: &str, role: &str) -> AgentLane {
         heartbeat_age_secs: 0,
         queue_len: 0,
         current_mission: None,
+        shadow: false,
         last_message: String::new(),
     }
 }
@@ -1487,6 +1488,7 @@ fn strict_dag_validation_aborts_before_execute() {
         heartbeat_age_secs: 0,
         queue_len: 0,
         current_mission: None,
+        shadow: false,
         last_message: String::new(),
     });
     state.agents.agents.push(AgentLane {
@@ -1498,6 +1500,7 @@ fn strict_dag_validation_aborts_before_execute() {
         heartbeat_age_secs: 0,
         queue_len: 0,
         current_mission: None,
+        shadow: false,
         last_message: String::new(),
     });
 

@@ -20,3 +20,4 @@ vendor/
 !vendor/time/
 !vendor/time/**
 .cargo-local/
+.claude/

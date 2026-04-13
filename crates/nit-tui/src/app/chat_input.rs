@@ -7,6 +7,7 @@ use nit_core::{
 
 use crate::claude_runner::ClaudeRunner;
 use crate::codex_runner::{CodexRunner, CodexRunnerConfig};
+use crate::shadow::{parse_shadow_command, should_auto_enable_shadows, ShadowRuntime};
 use crate::swarm::{
     create_chat_clone, detect_swarm_mission_kind_from_prompt,
     explicit_swarm_mission_kind_from_prompt, is_agent_busy, is_agent_family_busy,
@@ -489,22 +490,38 @@ pub(super) fn submit_chat_input_and_dispatch(
     codex: Option<&CodexRunner>,
     claude: Option<&ClaudeRunner>,
     swarm: &mut SwarmRuntime,
+    shadow: &mut ShadowRuntime,
 ) -> bool {
     let raw = state.agents.chat_input.clone();
     if raw.trim().is_empty() {
         return false;
     }
+    // `@shadow <prompt>` — explicit opt-in to the single-agent shadow pipeline.
+    // Strip the prefix from `chat_input` before falling through so the rest of
+    // the flow (including `push_chat_message`) sees just the user's text.
+    let shadow_explicit = parse_shadow_command(&raw).is_some();
+    if shadow_explicit {
+        let stripped = raw.trim_start().strip_prefix("@shadow").unwrap_or(&raw);
+        state.agents.chat_input = stripped.trim_start().to_string();
+        state.agents.chat_input_cursor = state.agents.chat_input.chars().count();
+    }
     let mut swarm_handled = false;
-    let mut cmd = parse_swarm_command(&raw)
-        .map(|mut cmd| {
-            if cmd.template.is_none() {
-                cmd.template = Some(state.agents.swarm_default_template.clone());
-            }
-            cmd.mission_kind =
-                effective_swarm_mission_kind(state, cmd.prompt.as_str(), cmd.mission_kind);
-            cmd
-        })
-        .or_else(|| detect_implicit_swarm_command(state, &raw));
+    // When `@shadow` was given explicitly, do NOT also try to interpret the
+    // prompt as `@swarm` — the user picked shadows on purpose.
+    let mut cmd = if shadow_explicit {
+        None
+    } else {
+        parse_swarm_command(&raw)
+            .map(|mut cmd| {
+                if cmd.template.is_none() {
+                    cmd.template = Some(state.agents.swarm_default_template.clone());
+                }
+                cmd.mission_kind =
+                    effective_swarm_mission_kind(state, cmd.prompt.as_str(), cmd.mission_kind);
+                cmd
+            })
+            .or_else(|| detect_implicit_swarm_command(state, &raw))
+    };
     if let Some(cmd) = cmd.as_mut() {
         let auto_switch_ops_dag = cmd
             .template
@@ -700,7 +717,53 @@ pub(super) fn submit_chat_input_and_dispatch(
                 maybe_dispatch_next_queued_codex_turn(state, vitals, codex);
                 maybe_dispatch_next_queued_claude_turn(state, vitals, claude);
             }
-            let targets = if is_swarm_mission {
+            // Shadow pipeline: enabled explicitly (@shadow) or auto for heavy
+            // single-agent prompts. Skipped for swarm followups, broadcasts,
+            // @new clone dispatches, @queue prompts, and when no single agent
+            // is selected.
+            let shadow_eligible = !is_swarm_mission
+                && !force_new
+                && !legacy_queue
+                && matches!(channel, AgentChannel::Agent);
+            let shadow_requested =
+                shadow_eligible && (shadow_explicit || should_auto_enable_shadows(&prompt));
+            let mut shadow_handled = false;
+            if shadow_requested {
+                if let Some(main_agent_id) = selected_agent.as_ref() {
+                    let dispatchable = state
+                        .agents
+                        .agents
+                        .iter()
+                        .find(|lane| &lane.id == main_agent_id)
+                        .is_some_and(|lane| lane.is_codex() || lane.is_claude());
+                    if dispatchable && !shadow.has_run_for(main_agent_id) {
+                        if let Some(dispatches) = shadow.start(
+                            state,
+                            main_agent_id.clone(),
+                            prompt.clone(),
+                            mission_id.clone(),
+                            Some(prompt_msg_idx),
+                        ) {
+                            for d in dispatches {
+                                dispatch_agent_prompt(
+                                    state,
+                                    vitals,
+                                    codex,
+                                    claude,
+                                    d.agent_id,
+                                    d.mission_id,
+                                    d.prompt,
+                                );
+                            }
+                            maybe_dispatch_next_queued_codex_turn(state, vitals, codex);
+                            maybe_dispatch_next_queued_claude_turn(state, vitals, claude);
+                            shadow_handled = true;
+                        }
+                    }
+                }
+            }
+
+            let targets = if is_swarm_mission || shadow_handled {
                 Vec::new() // already dispatched above
             } else if matches!(channel, AgentChannel::Broadcast) {
                 broadcast_target_agents(state, mission_id.as_deref())

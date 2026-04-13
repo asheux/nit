@@ -137,6 +137,7 @@ fn build_codex_lanes(entries: Vec<CodexModelEntry>) -> Vec<nit_core::AgentLane> 
             queue_len: 0,
             current_mission: None,
             last_message: entry.description.unwrap_or_default(),
+            shadow: false,
         })
         .collect()
 }

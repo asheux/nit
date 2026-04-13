@@ -19,6 +19,7 @@ fn handle_agent_station_key(
     swarm: &mut SwarmRuntime,
 ) -> bool {
     let mut clipboard = None;
+    let mut shadow = crate::shadow::ShadowRuntime::default();
     handle_agent_station_key_with_clipboard(
         key,
         state,
@@ -26,6 +27,7 @@ fn handle_agent_station_key(
         codex,
         claude,
         swarm,
+        &mut shadow,
         &mut clipboard,
     )
 }
@@ -225,6 +227,7 @@ fn codex_dispatch_marks_turn_waiting_until_backend_starts() {
         heartbeat_age_secs: 0,
         queue_len: 0,
         current_mission: None,
+        shadow: false,
         last_message: String::new(),
     });
 
@@ -326,6 +329,7 @@ fn codex_turn_completed_stores_mission_thread_id_and_marks_live() {
         heartbeat_age_secs: 0,
         queue_len: 0,
         current_mission: None,
+        shadow: false,
         last_message: String::new(),
     });
 
@@ -380,6 +384,7 @@ fn reset_context_in_mission_forgets_codex_thread_id_and_clears_mission_thread() 
         heartbeat_age_secs: 0,
         queue_len: 0,
         current_mission: Some("mis-001".into()),
+        shadow: false,
         last_message: String::new(),
     });
     state.agents.selected_agent = Some("gpt-5.1-codex-mini".into());
@@ -459,6 +464,7 @@ fn reset_context_persists_mission_artifacts_before_clearing_live_thread() {
         heartbeat_age_secs: 0,
         queue_len: 0,
         current_mission: Some("mis-401".into()),
+        shadow: false,
         last_message: String::new(),
     });
     state.agents.selected_agent = Some("gpt-5.1-codex-mini".into());
@@ -495,6 +501,7 @@ fn reset_context_persists_ad_hoc_artifacts_before_clearing_live_thread() {
         heartbeat_age_secs: 0,
         queue_len: 0,
         current_mission: None,
+        shadow: false,
         last_message: String::new(),
     });
     state.agents.selected_mission = None;
@@ -557,6 +564,7 @@ fn reset_context_archives_saved_run_history_snapshot() {
         heartbeat_age_secs: 0,
         queue_len: 0,
         current_mission: Some("mis-777".into()),
+        shadow: false,
         last_message: String::new(),
     });
     state.agents.selected_agent = Some("gpt-5.1-codex-mini".into());
@@ -974,6 +982,7 @@ fn swarm_bulk_auto_switches_ops_to_dag() {
         heartbeat_age_secs: 0,
         queue_len: 0,
         current_mission: None,
+        shadow: false,
         last_message: String::new(),
     });
     state.agents.agents.push(nit_core::AgentLane {
@@ -985,6 +994,7 @@ fn swarm_bulk_auto_switches_ops_to_dag() {
         heartbeat_age_secs: 0,
         queue_len: 0,
         current_mission: None,
+        shadow: false,
         last_message: String::new(),
     });
     state.agents.chat_input = "@swarm 2 template=bulk do thing".into();
@@ -1016,6 +1026,7 @@ fn swarm_auto_detects_template_line_without_prefix() {
         heartbeat_age_secs: 0,
         queue_len: 0,
         current_mission: None,
+        shadow: false,
         last_message: String::new(),
     });
     state.agents.agents.push(nit_core::AgentLane {
@@ -1027,6 +1038,7 @@ fn swarm_auto_detects_template_line_without_prefix() {
         heartbeat_age_secs: 0,
         queue_len: 0,
         current_mission: None,
+        shadow: false,
         last_message: String::new(),
     });
 
@@ -1067,6 +1079,7 @@ fn swarm_auto_detects_swarm_role_and_uses_default_template() {
         heartbeat_age_secs: 0,
         queue_len: 0,
         current_mission: None,
+        shadow: false,
         last_message: String::new(),
     });
     state.agents.agents.push(nit_core::AgentLane {
@@ -1078,6 +1091,7 @@ fn swarm_auto_detects_swarm_role_and_uses_default_template() {
         heartbeat_age_secs: 0,
         queue_len: 0,
         current_mission: None,
+        shadow: false,
         last_message: String::new(),
     });
     state.agents.chat_input = "You are the SWARM SYNTHESIZER.\nCombine agent outputs.".into();
@@ -1116,6 +1130,7 @@ fn swarm_auto_detects_plain_prompt_when_bulk_template_selected() {
         heartbeat_age_secs: 0,
         queue_len: 0,
         current_mission: None,
+        shadow: false,
         last_message: String::new(),
     });
     state.agents.agents.push(nit_core::AgentLane {
@@ -1127,6 +1142,7 @@ fn swarm_auto_detects_plain_prompt_when_bulk_template_selected() {
         heartbeat_age_secs: 0,
         queue_len: 0,
         current_mission: None,
+        shadow: false,
         last_message: String::new(),
     });
     state.agents.chat_input = "do a quick repo health check and suggest next steps".into();
@@ -1171,6 +1187,7 @@ fn swarm_autostart_uses_codex_max_parallel_turns_as_size_hint() {
             heartbeat_age_secs: 0,
             queue_len: 0,
             current_mission: None,
+            shadow: false,
             last_message: String::new(),
         });
     }
@@ -1210,6 +1227,7 @@ fn swarm_uses_roster_default_template_when_argument_missing() {
         heartbeat_age_secs: 0,
         queue_len: 0,
         current_mission: None,
+        shadow: false,
         last_message: String::new(),
     });
     state.agents.agents.push(nit_core::AgentLane {
@@ -1221,6 +1239,7 @@ fn swarm_uses_roster_default_template_when_argument_missing() {
         heartbeat_age_secs: 0,
         queue_len: 0,
         current_mission: None,
+        shadow: false,
         last_message: String::new(),
     });
     state.agents.chat_input = "@swarm 2 do thing".into();
@@ -1258,6 +1277,7 @@ fn swarm_uses_roster_default_mission_when_argument_missing() {
         heartbeat_age_secs: 0,
         queue_len: 0,
         current_mission: None,
+        shadow: false,
         last_message: String::new(),
     });
     state.agents.agents.push(nit_core::AgentLane {
@@ -1269,6 +1289,7 @@ fn swarm_uses_roster_default_mission_when_argument_missing() {
         heartbeat_age_secs: 0,
         queue_len: 0,
         current_mission: None,
+        shadow: false,
         last_message: String::new(),
     });
     state.agents.chat_input = "@swarm 2 read papers and compare ideas".into();
@@ -1306,6 +1327,7 @@ fn explicit_prompt_mission_overrides_roster_default_mission() {
         heartbeat_age_secs: 0,
         queue_len: 0,
         current_mission: None,
+        shadow: false,
         last_message: String::new(),
     });
     state.agents.agents.push(nit_core::AgentLane {
@@ -1317,6 +1339,7 @@ fn explicit_prompt_mission_overrides_roster_default_mission() {
         heartbeat_age_secs: 0,
         queue_len: 0,
         current_mission: None,
+        shadow: false,
         last_message: String::new(),
     });
     state.agents.chat_input = "@swarm 2 Mission: research\nread papers and compare ideas".into();
@@ -1778,6 +1801,7 @@ fn map_agent_console_mouse_maps_chat_thread_lines() {
         heartbeat_age_secs: 0,
         queue_len: 0,
         current_mission: None,
+        shadow: false,
         last_message: "idle".into(),
     });
     state.agents.messages.push(AgentMessage {
@@ -1827,6 +1851,7 @@ fn clicking_agent_console_artifact_row_opens_matching_artifact_popup() {
         heartbeat_age_secs: 0,
         queue_len: 0,
         current_mission: None,
+        shadow: false,
         last_message: "idle".into(),
     });
     state.agents.messages.push(AgentMessage {
@@ -2066,6 +2091,7 @@ fn roster_row_click_is_aligned_with_rendered_body() {
             heartbeat_age_secs: 0,
             queue_len: 0,
             current_mission: None,
+            shadow: false,
             last_message: "idle".into(),
         },
         nit_core::AgentLane {
@@ -2077,6 +2103,7 @@ fn roster_row_click_is_aligned_with_rendered_body() {
             heartbeat_age_secs: 0,
             queue_len: 0,
             current_mission: None,
+            shadow: false,
             last_message: "idle".into(),
         },
     ];
@@ -2147,6 +2174,7 @@ fn roster_backend_row_click_toggles_backend_expansion() {
         heartbeat_age_secs: 0,
         queue_len: 0,
         current_mission: None,
+        shadow: false,
         last_message: "idle".into(),
     }];
 
@@ -2230,6 +2258,7 @@ fn roster_keyboard_navigation_includes_backend_rows() {
             heartbeat_age_secs: 0,
             queue_len: 0,
             current_mission: None,
+            shadow: false,
             last_message: String::new(),
         },
         nit_core::AgentLane {
@@ -2241,6 +2270,7 @@ fn roster_keyboard_navigation_includes_backend_rows() {
             heartbeat_age_secs: 0,
             queue_len: 0,
             current_mission: None,
+            shadow: false,
             last_message: String::new(),
         },
     ];
@@ -2291,6 +2321,7 @@ fn roster_enter_toggles_selected_backend() {
         heartbeat_age_secs: 0,
         queue_len: 0,
         current_mission: None,
+        shadow: false,
         last_message: String::new(),
     });
 
@@ -2375,6 +2406,7 @@ fn artifacts_popup_scroll_clamps_before_moving_back_up() {
         heartbeat_age_secs: 0,
         queue_len: 0,
         current_mission: None,
+        shadow: false,
         last_message: String::new(),
     });
     state.agents.messages.push(AgentMessage {
@@ -2406,6 +2438,7 @@ fn artifacts_popup_scroll_clamps_before_moving_back_up() {
 
     let mut vitals = VitalsState::default();
     let mut clipboard = None;
+    let mut shadow = crate::shadow::ShadowRuntime::default();
     // Ctrl+Up scrolls the content by the fast scroll step (plain Up navigates
     // the input cursor). Matches the editor's wheel step so keyboard nav feels
     // as fast as mouse-wheel scrolling.
@@ -2413,6 +2446,7 @@ fn artifacts_popup_scroll_clamps_before_moving_back_up() {
         &KeyEvent::new(KeyCode::Up, KeyModifiers::CONTROL),
         &mut state,
         &mut swarm,
+        &mut shadow,
         &mut vitals,
         None,
         None,
@@ -2445,6 +2479,7 @@ fn artifacts_popup_wheel_clamps_forward_at_max_and_allows_reverse() {
         heartbeat_age_secs: 0,
         queue_len: 0,
         current_mission: None,
+        shadow: false,
         last_message: String::new(),
     });
     state.agents.messages.push(AgentMessage {
@@ -2622,6 +2657,7 @@ fn swarm_artifacts_popup_follows_completed_clone_task() {
         heartbeat_age_secs: 0,
         queue_len: 0,
         current_mission: None,
+        shadow: false,
         last_message: String::new(),
     });
 
@@ -2713,6 +2749,7 @@ fn swarm_artifacts_popup_follows_final_report() {
         heartbeat_age_secs: 0,
         queue_len: 0,
         current_mission: None,
+        shadow: false,
         last_message: String::new(),
     });
 
@@ -2826,6 +2863,7 @@ fn write_swarm_run_provenance_persists_final_report_markdown() {
         heartbeat_age_secs: 0,
         queue_len: 0,
         current_mission: None,
+        shadow: false,
         last_message: String::new(),
     });
 
@@ -2933,6 +2971,7 @@ fn clicking_swarm_clone_artifact_row_opens_matching_task_card() {
         heartbeat_age_secs: 0,
         queue_len: 0,
         current_mission: None,
+        shadow: false,
         last_message: String::new(),
     });
 
@@ -3069,6 +3108,7 @@ fn non_artifact_swarm_console_row_does_not_open_artifact_popup() {
         heartbeat_age_secs: 0,
         queue_len: 0,
         current_mission: None,
+        shadow: false,
         last_message: String::new(),
     });
 
@@ -3137,6 +3177,7 @@ fn chat_thread_selection_starts_at_clicked_column() {
         heartbeat_age_secs: 0,
         queue_len: 0,
         current_mission: None,
+        shadow: false,
         last_message: "idle".into(),
     });
     state.agents.messages.push(AgentMessage {
@@ -4284,6 +4325,7 @@ fn agent_console_selection_does_not_strip_markdown_table_pipes_in_user_prompt() 
         heartbeat_age_secs: 1,
         queue_len: 1,
         current_mission: None,
+        shadow: false,
         last_message: "active".into(),
     });
     state.agents.messages.push(AgentMessage {
@@ -4825,6 +4867,7 @@ fn toggle_roster_priority_supports_claude_and_gemini_models() {
         heartbeat_age_secs: 0,
         queue_len: 0,
         current_mission: None,
+        shadow: false,
         last_message: String::new(),
     });
     state.agents.agents.push(nit_core::AgentLane {
@@ -4836,6 +4879,7 @@ fn toggle_roster_priority_supports_claude_and_gemini_models() {
         heartbeat_age_secs: 0,
         queue_len: 0,
         current_mission: None,
+        shadow: false,
         last_message: String::new(),
     });
 
@@ -5009,6 +5053,7 @@ fn codex_dispatch_uses_stored_thread_id_for_context_continuity() {
         heartbeat_age_secs: 0,
         queue_len: 0,
         current_mission: None,
+        shadow: false,
         last_message: String::new(),
     });
     state
@@ -5127,6 +5172,7 @@ fn claude_dispatch_uses_stored_session_id_for_context_continuity() {
         heartbeat_age_secs: 0,
         queue_len: 0,
         current_mission: None,
+        shadow: false,
         last_message: String::new(),
     });
     state
@@ -5179,6 +5225,7 @@ fn turn_completed_stores_thread_id_for_codex() {
         heartbeat_age_secs: 0,
         queue_len: 1,
         current_mission: None,
+        shadow: false,
         last_message: String::new(),
     });
     state.agents.active_turns.insert(
@@ -5223,6 +5270,7 @@ fn turn_completed_stores_session_id_for_claude_via_apply_claude_event() {
         heartbeat_age_secs: 0,
         queue_len: 1,
         current_mission: None,
+        shadow: false,
         last_message: String::new(),
     });
     state.agents.active_turns.insert(
@@ -5268,6 +5316,7 @@ fn turn_completed_stores_mission_scoped_session_for_claude() {
         heartbeat_age_secs: 0,
         queue_len: 1,
         current_mission: Some("mis-001".into()),
+        shadow: false,
         last_message: String::new(),
     });
     state.agents.active_turns.insert(
@@ -5316,6 +5365,7 @@ fn artifact_popup_context_overrides_agent_and_mission() {
         heartbeat_age_secs: 0,
         queue_len: 0,
         current_mission: None,
+        shadow: false,
         last_message: String::new(),
     });
     state.agents.agents.push(nit_core::AgentLane {
@@ -5327,6 +5377,7 @@ fn artifact_popup_context_overrides_agent_and_mission() {
         heartbeat_age_secs: 0,
         queue_len: 0,
         current_mission: None,
+        shadow: false,
         last_message: String::new(),
     });
 
@@ -5383,6 +5434,7 @@ fn artifact_popup_dispatches_idle_agent_even_when_other_agents_busy() {
         heartbeat_age_secs: 0,
         queue_len: 1,
         current_mission: None,
+        shadow: false,
         last_message: String::new(),
     });
     state.agents.active_turns.insert(
@@ -5409,6 +5461,7 @@ fn artifact_popup_dispatches_idle_agent_even_when_other_agents_busy() {
         heartbeat_age_secs: 0,
         queue_len: 0,
         current_mission: None,
+        shadow: false,
         last_message: String::new(),
     });
     state
@@ -5457,6 +5510,7 @@ fn artifact_popup_queues_when_artifact_agent_is_busy() {
         heartbeat_age_secs: 0,
         queue_len: 1,
         current_mission: None,
+        shadow: false,
         last_message: String::new(),
     });
     state.agents.active_turns.insert(

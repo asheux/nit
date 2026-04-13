@@ -927,6 +927,9 @@ fn roster_grouped_agent_indices(state: &AppState) -> Vec<(AgentLaneKind, Vec<usi
     let mut other: Vec<usize> = Vec::new();
 
     for (idx, agent) in state.agents.agents.iter().enumerate() {
+        if agent.shadow {
+            continue;
+        }
         match roster_backend_group_for_agent(agent) {
             AgentLaneKind::Codex => codex.push(idx),
             AgentLaneKind::Claude => claude.push(idx),

@@ -140,6 +140,7 @@ fn materialize_model_lanes(
             queue_len: 0,
             current_mission: None,
             last_message: String::new(),
+            shadow: false,
         });
     }
 }
@@ -171,6 +172,7 @@ fn assemble_local_roster() -> AgentsState {
         queue_len: 0,
         current_mission: None,
         last_message: "Built-in local lane.".into(),
+        shadow: false,
     };
 
     let mut roster = AgentsState::default();

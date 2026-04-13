@@ -88,6 +88,7 @@ fn agent_messages_use_stable_badge_header() {
         heartbeat_age_secs: 1,
         queue_len: 1,
         current_mission: None,
+        shadow: false,
         last_message: "active".into(),
     });
     let msg = AgentMessage {
@@ -137,6 +138,7 @@ fn clone_identity_badge_uses_compact_label() {
         heartbeat_age_secs: 0,
         queue_len: 1,
         current_mission: Some("mis-001".into()),
+        shadow: false,
         last_message: String::new(),
     });
 
@@ -157,6 +159,7 @@ fn clone_roster_label_shows_base_model_and_clone_suffix() {
         heartbeat_age_secs: 0,
         queue_len: 0,
         current_mission: Some("mis-001".into()),
+        shadow: false,
         last_message: String::new(),
     };
 
@@ -194,6 +197,7 @@ fn breather_rows_show_clone_source_model_name() {
         heartbeat_age_secs: 0,
         queue_len: 1,
         current_mission: Some("mis-001".into()),
+        shadow: false,
         last_message: "active".into(),
     });
 
@@ -239,6 +243,7 @@ fn agent_badge_shown_when_single_agent_context_selected() {
         heartbeat_age_secs: 1,
         queue_len: 0,
         current_mission: None,
+        shadow: false,
         last_message: "idle".into(),
     });
     let msg = AgentMessage {
@@ -278,6 +283,7 @@ fn artifact_message_index_for_line_maps_transcript_artifact_row() {
         heartbeat_age_secs: 0,
         queue_len: 0,
         current_mission: None,
+        shadow: false,
         last_message: String::new(),
     });
     state.agents.messages.push(AgentMessage {
@@ -314,6 +320,7 @@ fn swarm_planning_message_stays_plain_done_when_no_artifact_exists() {
         heartbeat_age_secs: 0,
         queue_len: 0,
         current_mission: None,
+        shadow: false,
         last_message: String::new(),
     });
 
@@ -384,6 +391,7 @@ fn swarm_report_message_renders_artifact_link() {
         heartbeat_age_secs: 0,
         queue_len: 0,
         current_mission: None,
+        shadow: false,
         last_message: String::new(),
     });
 
@@ -478,6 +486,7 @@ fn agent_header_includes_truncated_role_badge() {
         heartbeat_age_secs: 1,
         queue_len: 0,
         current_mission: None,
+        shadow: false,
         last_message: "active".into(),
     });
     let msg = AgentMessage {
@@ -692,6 +701,7 @@ fn breather_row_renders_below_user_prompt_when_agent_running() {
         heartbeat_age_secs: 0,
         queue_len: 1,
         current_mission: None,
+        shadow: false,
         last_message: "active".into(),
     });
     let now = Instant::now();
@@ -741,6 +751,7 @@ fn breather_row_hidden_when_latest_message_is_agent() {
         heartbeat_age_secs: 0,
         queue_len: 1,
         current_mission: None,
+        shadow: false,
         last_message: "active".into(),
     });
     state.agents.messages.push(AgentMessage {
@@ -784,6 +795,7 @@ fn breather_rows_include_multiple_running_agents() {
         heartbeat_age_secs: 0,
         queue_len: 1,
         current_mission: None,
+        shadow: false,
         last_message: "active".into(),
     });
     state.agents.agents.push(AgentLane {
@@ -795,6 +807,7 @@ fn breather_rows_include_multiple_running_agents() {
         heartbeat_age_secs: 0,
         queue_len: 1,
         current_mission: None,
+        shadow: false,
         last_message: "active".into(),
     });
 
@@ -854,6 +867,7 @@ fn breather_rows_hide_stage_column_and_show_stage_subrow() {
         heartbeat_age_secs: 0,
         queue_len: 1,
         current_mission: None,
+        shadow: false,
         last_message: "active".into(),
     });
 
@@ -908,6 +922,7 @@ fn breather_rows_show_when_prompt_queued_but_not_yet_started() {
         heartbeat_age_secs: 0,
         queue_len: 1,
         current_mission: None,
+        shadow: false,
         last_message: "queued".into(),
     });
     state.agents.queued_codex_turns.push_back(QueuedCodexTurn {
@@ -948,6 +963,7 @@ fn breather_rows_suppress_turn_metrics_when_queued_in_wide_layout() {
         heartbeat_age_secs: 0,
         queue_len: 1,
         current_mission: None,
+        shadow: false,
         last_message: "queued".into(),
     });
     let now = Instant::now();
@@ -987,6 +1003,7 @@ fn breather_rows_suppress_turn_metrics_when_queued_in_narrow_layout() {
         heartbeat_age_secs: 0,
         queue_len: 1,
         current_mission: None,
+        shadow: false,
         last_message: "queued".into(),
     });
     state.agents.queued_codex_turns.push_back(QueuedCodexTurn {
@@ -1054,6 +1071,7 @@ fn breather_rows_include_swarm_assigned_agents_even_when_idle() {
         heartbeat_age_secs: 0,
         queue_len: 1,
         current_mission: Some("mis-001".into()),
+        shadow: false,
         last_message: "active".into(),
     });
     state.agents.agents.push(AgentLane {
@@ -1065,6 +1083,7 @@ fn breather_rows_include_swarm_assigned_agents_even_when_idle() {
         heartbeat_age_secs: 0,
         queue_len: 0,
         current_mission: Some("mis-001".into()),
+        shadow: false,
         last_message: "idle".into(),
     });
 
@@ -1154,6 +1173,7 @@ fn breather_rows_show_done_when_swarm_idle_and_all_assigned_reported() {
         heartbeat_age_secs: 0,
         queue_len: 0,
         current_mission: Some("mis-001".into()),
+        shadow: false,
         last_message: "done".into(),
     });
     state.agents.agents.push(AgentLane {
@@ -1165,6 +1185,7 @@ fn breather_rows_show_done_when_swarm_idle_and_all_assigned_reported() {
         heartbeat_age_secs: 0,
         queue_len: 0,
         current_mission: Some("mis-001".into()),
+        shadow: false,
         last_message: "done".into(),
     });
 

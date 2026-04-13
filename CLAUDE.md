@@ -64,5 +64,6 @@ MSRV: Rust 1.88.0 (pinned in `rust-toolchain.toml`).
 
 - `@all <prompt>` — fan-out to multiple agents (Codex and Claude)
 - `@swarm [all|N] [template=lab|parallel|bulk] [mission=general|research|computational-research] <prompt>` — orchestrated multi-agent workflow
+- `@shadow <prompt>` — single-agent dispatch with hidden propose/judge/review support agents; auto-enables for heavy prompts when no prefix is present (see `docs/SHADOWS.md`)
 - `@new <prompt>` — spawn fresh-context clone when agent is busy
 - `@queue` / `@q` — legacy alias for queued prompt (now same as default queueing)

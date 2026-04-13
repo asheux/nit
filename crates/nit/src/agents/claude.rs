@@ -23,6 +23,7 @@ pub(super) fn claude_lane() -> nit_core::AgentLane {
         queue_len: 0,
         current_mission: None,
         last_message: "Claude backend detected.".into(),
+        shadow: false,
     }
 }
 

@@ -556,6 +556,8 @@ pub struct AgentLane {
     pub queue_len: usize,
     pub current_mission: Option<String>,
     pub last_message: String,
+    #[serde(default)]
+    pub shadow: bool,
 }
 
 impl AgentLane {
@@ -1093,6 +1095,7 @@ impl AgentsState {
                 queue_len: 1,
                 current_mission: Some("mis-001".into()),
                 last_message: "Drafted execution plan".into(),
+                shadow: false,
             },
             AgentLane {
                 id: "coder".into(),
@@ -1104,6 +1107,7 @@ impl AgentsState {
                 queue_len: 2,
                 current_mission: Some("mis-001".into()),
                 last_message: "Generated 2 patch proposals".into(),
+                shadow: false,
             },
             AgentLane {
                 id: "reviewer".into(),
@@ -1115,6 +1119,7 @@ impl AgentsState {
                 queue_len: 0,
                 current_mission: Some("mis-001".into()),
                 last_message: "Waiting for patch review".into(),
+                shadow: false,
             },
         ];
         let missions = vec![MissionRecord {

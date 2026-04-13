@@ -717,6 +717,7 @@ pub(super) fn handle_artifacts_popup_key(
     key: &KeyEvent,
     state: &mut AppState,
     swarm: &mut SwarmRuntime,
+    shadow: &mut crate::shadow::ShadowRuntime,
     vitals: &mut VitalsState,
     codex: Option<&CodexRunner>,
     claude: Option<&ClaudeRunner>,
@@ -961,7 +962,7 @@ pub(super) fn handle_artifacts_popup_key(
         } else {
             // No artifact agent resolved — fall back to normal submit path.
             swap_in_artifacts_popup_chat(state);
-            if submit_chat_input_and_dispatch(state, vitals, codex, claude, swarm) {
+            if submit_chat_input_and_dispatch(state, vitals, codex, claude, swarm, shadow) {
                 swap_out_artifacts_popup_chat(state);
                 close_artifacts_popup(state);
                 state.agents.note_event();

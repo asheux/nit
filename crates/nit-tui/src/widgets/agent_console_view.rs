@@ -1880,12 +1880,26 @@ fn visible_messages_grouped<'a>(
     mission: Option<&str>,
     agent: Option<&str>,
 ) -> Vec<(usize, &'a AgentMessage)> {
+    let shadow_lanes: std::collections::HashSet<&str> = state
+        .agents
+        .agents
+        .iter()
+        .filter(|lane| lane.shadow)
+        .map(|lane| lane.id.as_str())
+        .collect();
     let visible: Vec<(usize, &AgentMessage)> = state
         .agents
         .messages
         .iter()
         .enumerate()
-        .filter(|(_, msg)| message_matches_context(msg, mission, agent))
+        .filter(|(_, msg)| {
+            if let Some(id) = msg.agent_id.as_deref() {
+                if shadow_lanes.contains(id) {
+                    return false;
+                }
+            }
+            message_matches_context(msg, mission, agent)
+        })
         .collect();
 
     let visible_prompt_indices: std::collections::HashSet<usize> = visible
@@ -2309,9 +2323,23 @@ fn breather_rows_for_user_prompt(
         return Vec::new();
     }
 
+    // Shadow agents are hidden from the roster but still count for
+    // activity/queue detection — otherwise the breather would show "Waiting"
+    // while a shadow (propose/judge/review) is actively working.
+    let shadow_ids: Vec<&str> = state
+        .agents
+        .agents
+        .iter()
+        .filter(|lane| lane.shadow)
+        .map(|lane| lane.id.as_str())
+        .collect();
+
     let any_active = ordered_ids
         .iter()
-        .any(|id| state.agents.active_turns.contains_key(id.as_str()));
+        .any(|id| state.agents.active_turns.contains_key(id.as_str()))
+        || shadow_ids
+            .iter()
+            .any(|id| state.agents.active_turns.contains_key(*id));
     let any_queued = ordered_ids.iter().any(|id| {
         state
             .agents
@@ -2323,6 +2351,17 @@ fn breather_rows_for_user_prompt(
                 .queued_claude_turns
                 .iter()
                 .any(|turn| turn.agent_id == id.as_str())
+    }) || shadow_ids.iter().any(|id| {
+        state
+            .agents
+            .queued_codex_turns
+            .iter()
+            .any(|turn| turn.agent_id == *id)
+            || state
+                .agents
+                .queued_claude_turns
+                .iter()
+                .any(|turn| turn.agent_id == *id)
     });
     let all_swarm_done = swarm_mission_id.is_some_and(|mid| {
         !swarm_assigned_ids.is_empty()
@@ -2337,7 +2376,12 @@ fn breather_rows_for_user_prompt(
     let swarm_phase = swarm_mission_id.and_then(|mid| swarm.and_then(|s| s.swarm_stage_label(mid)));
     let swarm_hint = swarm_mission_id.and_then(|mid| swarm.and_then(|s| s.swarm_stage_hint(mid)));
     let is_swarm = swarm_mission_id.is_some();
-    let base_label: std::borrow::Cow<'_, str> = if any_active || any_queued {
+    let shadow_stage = crate::shadow::shadow_stage_label_from_state(state);
+    let base_label: std::borrow::Cow<'_, str> = if !is_swarm && shadow_stage.is_some() {
+        // Shadow pipeline is running for a single agent — surface the stage
+        // explicitly so the user has real feedback while the hidden agents work.
+        format!("{} ...", shadow_stage.unwrap()).into()
+    } else if any_active || any_queued {
         match swarm_phase {
             Some("PLAN") => "Planning ...".into(),
             Some("VERIFY") => "Verifying ...".into(),

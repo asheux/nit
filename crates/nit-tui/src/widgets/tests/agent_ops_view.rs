@@ -539,6 +539,7 @@ fn roster_backend_group_rows_render_plain_backend_labels() {
         heartbeat_age_secs: 0,
         queue_len: 0,
         current_mission: None,
+        shadow: false,
         last_message: String::new(),
     });
 
@@ -570,6 +571,7 @@ fn roster_backend_rows_expand_and_collapse_model_lists() {
         heartbeat_age_secs: 0,
         queue_len: 0,
         current_mission: None,
+        shadow: false,
         last_message: String::new(),
     });
 
@@ -608,6 +610,7 @@ fn roster_selected_backend_row_shows_cursor_marker() {
         heartbeat_age_secs: 0,
         queue_len: 0,
         current_mission: None,
+        shadow: false,
         last_message: String::new(),
     });
 
@@ -647,6 +650,7 @@ fn roster_lists_discovered_claude_and_gemini_models_as_rows() {
         heartbeat_age_secs: 0,
         queue_len: 0,
         current_mission: None,
+        shadow: false,
         last_message: String::new(),
     });
     state.agents.agents.push(nit_core::AgentLane {
@@ -658,6 +662,7 @@ fn roster_lists_discovered_claude_and_gemini_models_as_rows() {
         heartbeat_age_secs: 0,
         queue_len: 0,
         current_mission: None,
+        shadow: false,
         last_message: String::new(),
     });
 
@@ -705,6 +710,7 @@ fn roster_shows_priority_checkbox_for_supported_backend_models() {
         heartbeat_age_secs: 0,
         queue_len: 0,
         current_mission: None,
+        shadow: false,
         last_message: String::new(),
     });
     state.agents.agents.push(nit_core::AgentLane {
@@ -716,6 +722,7 @@ fn roster_shows_priority_checkbox_for_supported_backend_models() {
         heartbeat_age_secs: 0,
         queue_len: 0,
         current_mission: None,
+        shadow: false,
         last_message: String::new(),
     });
     state.agents.agents.push(nit_core::AgentLane {
@@ -727,6 +734,7 @@ fn roster_shows_priority_checkbox_for_supported_backend_models() {
         heartbeat_age_secs: 0,
         queue_len: 0,
         current_mission: None,
+        shadow: false,
         last_message: String::new(),
     });
 

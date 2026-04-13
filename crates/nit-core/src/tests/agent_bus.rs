@@ -18,6 +18,7 @@ fn add_codex_agent(state: &mut AppState, id: &str) {
         queue_len: 1,
         current_mission: None,
         last_message: String::new(),
+        shadow: false,
     });
     state.agents.active_turns.insert(
         id.into(),
@@ -41,6 +42,7 @@ fn add_claude_agent(state: &mut AppState, id: &str) {
         queue_len: 1,
         current_mission: None,
         last_message: String::new(),
+        shadow: false,
     });
     state.agents.active_turns.insert(
         id.into(),

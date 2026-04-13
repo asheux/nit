@@ -535,6 +535,7 @@ fn run_loop(
     state.agents.claude_max_parallel_turns = claude_config.max_parallel_turns;
     let mut claude_runner = ClaudeRunner::spawn(claude_config);
     let mut swarm = SwarmRuntime::default();
+    let mut shadow = crate::shadow::ShadowRuntime::default();
     let mut fuzzy_runtime = FuzzySearchRuntime::new(theme, state.settings.highlight.clone());
     let mut seed_runtime = if state.app_kind == AppKind::Gol {
         Some(SeedRuntime::new(state))
@@ -730,6 +731,7 @@ fn run_loop(
                             &key,
                             state,
                             &mut swarm,
+                            &mut shadow,
                             &mut vitals,
                             Some(&codex_runner),
                             Some(&claude_runner),
@@ -855,6 +857,7 @@ fn run_loop(
                         Some(&codex_runner),
                         Some(&claude_runner),
                         &mut swarm,
+                        &mut shadow,
                         &mut clipboard,
                     ) {
                         needs_redraw = true;
@@ -1074,6 +1077,18 @@ fn run_loop(
                     dispatch.prompt,
                 );
             }
+            let shadow_outcome = shadow.handle_event_outcome(state, &event);
+            for dispatch in shadow_outcome.dispatches {
+                dispatch_agent_prompt(
+                    state,
+                    &mut vitals,
+                    Some(&codex_runner),
+                    Some(&claude_runner),
+                    dispatch.agent_id,
+                    dispatch.mission_id,
+                    dispatch.prompt,
+                );
+            }
             if finished {
                 maybe_dispatch_next_queued_codex_turn(state, &mut vitals, Some(&codex_runner));
                 maybe_dispatch_next_queued_claude_turn(state, &mut vitals, Some(&claude_runner));
@@ -1154,6 +1169,18 @@ fn run_loop(
                     Some(&claude_runner),
                     dispatch.agent_id,
                     Some(dispatch.mission_id),
+                    dispatch.prompt,
+                );
+            }
+            let shadow_outcome = shadow.handle_event_outcome(state, &event);
+            for dispatch in shadow_outcome.dispatches {
+                dispatch_agent_prompt(
+                    state,
+                    &mut vitals,
+                    Some(&codex_runner),
+                    Some(&claude_runner),
+                    dispatch.agent_id,
+                    dispatch.mission_id,
                     dispatch.prompt,
                 );
             }
@@ -3182,6 +3209,7 @@ fn handle_editor_buffer_shortcuts(
     false
 }
 
+#[allow(clippy::too_many_arguments)]
 fn handle_agent_station_key_with_clipboard(
     key: KeyEvent,
     state: &mut AppState,
@@ -3189,6 +3217,7 @@ fn handle_agent_station_key_with_clipboard(
     codex: Option<&CodexRunner>,
     claude: Option<&ClaudeRunner>,
     swarm: &mut SwarmRuntime,
+    shadow: &mut crate::shadow::ShadowRuntime,
     clipboard: &mut Option<Clipboard>,
 ) -> bool {
     if let Some(target) = map_focus_hotkey(&key) {
@@ -3214,7 +3243,7 @@ fn handle_agent_station_key_with_clipboard(
     match state.focus {
         PaneId::JobOutput => handle_agent_ops_key(key, state, vitals, codex, claude, swarm),
         PaneId::Notes => {
-            handle_agent_console_key(key, state, vitals, codex, claude, swarm, clipboard)
+            handle_agent_console_key(key, state, vitals, codex, claude, swarm, shadow, clipboard)
         }
         _ => false,
     }
@@ -4437,6 +4466,7 @@ fn reset_roster_context(state: &mut AppState, swarm: &SwarmRuntime) -> bool {
     true
 }
 
+#[allow(clippy::too_many_arguments)]
 fn handle_agent_console_key(
     key: KeyEvent,
     state: &mut AppState,
@@ -4444,6 +4474,7 @@ fn handle_agent_console_key(
     codex: Option<&CodexRunner>,
     claude: Option<&ClaudeRunner>,
     swarm: &mut SwarmRuntime,
+    shadow: &mut crate::shadow::ShadowRuntime,
     clipboard: &mut Option<Clipboard>,
 ) -> bool {
     let mut changed = false;
@@ -4466,7 +4497,8 @@ fn handle_agent_console_key(
                 ..
             } => {
                 handled = true;
-                changed = submit_chat_input_and_dispatch(state, vitals, codex, claude, swarm);
+                changed =
+                    submit_chat_input_and_dispatch(state, vitals, codex, claude, swarm, shadow);
                 follow_chat_cursor = changed;
             }
             KeyEvent {
