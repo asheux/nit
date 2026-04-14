@@ -325,18 +325,12 @@ fn infer_strategy_kind(raw: &StrategyConfig) -> Result<&'static str, String> {
         || raw.fallback_symbol.is_some()
         || raw.max_steps_per_round.is_some()
         || raw.output_map.is_some();
-    let mut has_fsm_markers = raw.index.is_some()
+    let has_fsm_markers = raw.index.is_some()
         || raw.num_states.is_some()
         || raw.input_index_base.is_some()
-        || raw.outputs.is_some();
+        || raw.outputs.is_some()
+        || (raw.transitions.is_some() && !has_tm_markers);
     let has_generated_markers = raw.source.is_some() || raw.limit.is_some();
-
-    if raw.transitions.is_some() && !has_tm_markers {
-        has_fsm_markers = true;
-    }
-    if raw.k.is_some() && raw.index.is_some() {
-        has_fsm_markers = true;
-    }
 
     let families = has_ca_markers as u8 + has_tm_markers as u8 + has_fsm_markers as u8;
     if families > 1 {

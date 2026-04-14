@@ -1,5 +1,3 @@
-//! Metal GPU batch evaluation for tournament matchups.
-
 use super::types::{MatchOutcome, MatchResult, Matchup, PreparedMetalBatch};
 use crate::config::{NormalizedConfig, StrategySpec, StrategySpecKind};
 use crate::game::Action;
@@ -10,7 +8,6 @@ use nit_metal::{
 };
 use std::collections::VecDeque;
 
-/// Verifies that a batch parameter is the same for all strategies; returns `None` on mismatch.
 fn ensure_uniform<T: PartialEq>(slot: &mut Option<T>, incoming: T) -> Option<()> {
     match slot {
         Some(existing) if *existing != incoming => None,
@@ -22,7 +19,6 @@ fn ensure_uniform<T: PartialEq>(slot: &mut Option<T>, incoming: T) -> Option<()>
     }
 }
 
-/// Raw payoff minus complexity-cost penalties when enabled.
 pub(super) fn adjusted_total_for_match(
     raw_total: i64,
     strategy: &StrategySpec,
@@ -67,8 +63,6 @@ fn compute_complexity_penalty(
     }
 }
 
-/// Returns `true` when the roster is all-TM and step-cost penalties are enabled,
-/// which forces the CPU path (the Metal shader does not track per-step costs).
 fn has_tm_step_cost_conflict(config: &NormalizedConfig, strategies: &[StrategySpec]) -> bool {
     config.engine.complexity_cost.enabled
         && config.engine.complexity_cost.tm_step_cost != 0.0
@@ -117,7 +111,6 @@ fn validate_fsm_spec(spec: &StrategySpec) -> Option<ValidatedFsm<'_>> {
         return None;
     };
 
-    // Only opponent-last-action semantics are supported on the GPU.
     let effective_mode = input_mode.unwrap_or(crate::strategy::InputMode::OpponentLastAction);
     if !matches!(
         effective_mode,
@@ -129,7 +122,6 @@ fn validate_fsm_spec(spec: &StrategySpec) -> Option<ValidatedFsm<'_>> {
     let state_count = (*num_states).max(state_outputs.len());
     let alphabet_size = transition_table.first().map_or(0, Vec::len);
 
-    // Structural sanity: binary alphabet, non-empty, consistent dimensions.
     if alphabet_size != 2
         || state_count == 0
         || transition_table.len() != state_count
@@ -138,7 +130,6 @@ fn validate_fsm_spec(spec: &StrategySpec) -> Option<ValidatedFsm<'_>> {
         return None;
     }
 
-    // Every row must have the same width.
     if transition_table
         .iter()
         .any(|row| row.len() != alphabet_size)
@@ -177,7 +168,6 @@ fn build_metal_fsm_payload(strategies: &[StrategySpec]) -> Option<FsmBatch> {
 
         start_indices.push(start as u32);
 
-        // Encode outputs: Cooperate → 0, Defect → 1, zero-padded to state_count.
         flat_outputs.extend(outputs.iter().map(|action| match action {
             Action::Cooperate => 0u32,
             Action::Defect => 1u32,
@@ -185,7 +175,6 @@ fn build_metal_fsm_payload(strategies: &[StrategySpec]) -> Option<FsmBatch> {
         let padding_needed = state_count.saturating_sub(outputs.len());
         flat_outputs.extend(std::iter::repeat_n(0u32, padding_needed));
 
-        // Encode transition targets, validating each is in-bounds.
         for row in table {
             for &next_state in row {
                 if next_state >= state_count {
@@ -241,7 +230,6 @@ fn build_metal_ca_payload(strategies: &[StrategySpec]) -> Option<CaBatch> {
     })
 }
 
-/// Packs a homogeneous TM roster into the flat arrays the Metal shader consumes.
 fn build_metal_tm_payload(strategies: &[StrategySpec]) -> Option<TmBatch> {
     let mut uniform_states: Option<u32> = None;
     let mut uniform_symbols: Option<u32> = None;
@@ -269,7 +257,6 @@ fn build_metal_tm_payload(strategies: &[StrategySpec]) -> Option<TmBatch> {
         ensure_uniform(&mut uniform_blank, *tm_blank_symbol as u32)?;
         ensure_uniform(&mut uniform_max_steps, *max_steps_per_round)?;
 
-        // Validate transition table dimensions and bounds.
         let expected_entries = (*tm_state_count as usize).saturating_mul(*tm_symbol_count as usize);
         if tm_rules.len() != expected_entries {
             return None;
@@ -301,10 +288,6 @@ fn build_metal_tm_payload(strategies: &[StrategySpec]) -> Option<TmBatch> {
     })
 }
 
-// ── Batch preparation and dispatch ───────────────────────────────────────────
-
-/// Constructs the `BatchEvalConfig` that the Metal evaluator needs from the
-/// normalised tournament configuration.
 pub(super) fn metal_batch_eval_config(config: &NormalizedConfig) -> BatchEvalConfig {
     let (timeout_lose, timeout_win) = config.payoff.min_max();
     BatchEvalConfig {
@@ -317,9 +300,6 @@ pub(super) fn metal_batch_eval_config(config: &NormalizedConfig) -> BatchEvalCon
 
 const SMALL_METAL_WORKLOAD_MATCHUPS: usize = 4_096;
 
-/// Prepares Metal batch inputs (eval config + payload) if the tournament
-/// configuration permits GPU evaluation.  Returns `Ok(None)` when Metal
-/// is not applicable rather than raising an error.
 pub(super) fn prepare_metal_batch_inputs(
     config: &NormalizedConfig,
     strategies: &[StrategySpec],
@@ -336,30 +316,24 @@ pub(super) fn prepare_metal_batch_inputs(
         return Ok(None);
     }
 
-    let payload = match build_metal_batch_payload(strategies) {
-        Some(p) => p,
-        None => return Ok(None),
+    let Some(payload) = build_metal_batch_payload(strategies) else {
+        return Ok(None);
     };
     Ok(Some((metal_batch_eval_config(config), payload)))
 }
 
-/// Attempts to prepare a Metal batch with an auto-discovered execution
-/// policy from `nit-metal`.
 fn try_prepare_metal_batch(
     config: &NormalizedConfig,
     strategies: &[StrategySpec],
 ) -> Result<Option<PreparedMetalBatch>, String> {
-    let (eval, payload) = match prepare_metal_batch_inputs(config, strategies)? {
-        Some(pair) => pair,
-        None => return Ok(None),
+    let Some((eval, payload)) = prepare_metal_batch_inputs(config, strategies)? else {
+        return Ok(None);
     };
-    let policy_report = match nit_metal::recommended_batch_policy(&eval, &payload)? {
-        Some(report) => report,
-        None => return Ok(None),
+    let Some(policy_report) = nit_metal::recommended_batch_policy(&eval, &payload)? else {
+        return Ok(None);
     };
-    let prepared_handle = match nit_metal::try_prepare_batch(&eval, &payload)? {
-        Some(handle) => handle,
-        None => return Ok(None),
+    let Some(prepared_handle) = nit_metal::try_prepare_batch(&eval, &payload)? else {
+        return Ok(None);
     };
 
     Ok(Some(PreparedMetalBatch {
@@ -371,20 +345,16 @@ fn try_prepare_metal_batch(
     }))
 }
 
-/// Prepares a Metal batch with a fixed policy sized for a known matchup count
-/// (used for small workloads where profiling is not worthwhile).
 fn try_prepare_metal_batch_for_matchups(
     config: &NormalizedConfig,
     strategies: &[StrategySpec],
     matchup_count: usize,
 ) -> Result<Option<PreparedMetalBatch>, String> {
-    let (eval, payload) = match prepare_metal_batch_inputs(config, strategies)? {
-        Some(pair) => pair,
-        None => return Ok(None),
+    let Some((eval, payload)) = prepare_metal_batch_inputs(config, strategies)? else {
+        return Ok(None);
     };
-    let prepared_handle = match nit_metal::try_prepare_batch(&eval, &payload)? {
-        Some(handle) => handle,
-        None => return Ok(None),
+    let Some(prepared_handle) = nit_metal::try_prepare_batch(&eval, &payload)? else {
+        return Ok(None);
     };
 
     Ok(Some(PreparedMetalBatch {
@@ -399,8 +369,6 @@ fn try_prepare_metal_batch_for_matchups(
     }))
 }
 
-/// Chooses between the small-workload heuristic path and the full profiled
-/// path based on the matchup count.
 pub(super) fn try_prepare_metal_batch_for_workload(
     config: &NormalizedConfig,
     strategies: &[StrategySpec],
@@ -413,11 +381,6 @@ pub(super) fn try_prepare_metal_batch_for_workload(
     }
 }
 
-// ── Decline-reason diagnostics ───────────────────────────────────────────────
-
-/// Returns a human-readable reason why Metal batch evaluation was declined,
-/// or `None` if no blocker is detected.  Used by the TUI to show diagnostic
-/// messages.
 pub(super) fn metal_batch_decline_reason(
     config: &NormalizedConfig,
     strategies: &[StrategySpec],
@@ -454,9 +417,6 @@ pub(super) fn metal_batch_decline_reason(
     None
 }
 
-// ── Score-to-outcome conversion ──────────────────────────────────────────────
-
-/// GPU `ScorePair` values into `MatchOutcome` with complexity-cost adjustments.
 fn match_outcomes_from_scores(
     config: &NormalizedConfig,
     strategies: &[StrategySpec],
@@ -504,10 +464,6 @@ fn match_outcomes_from_scores(
         .collect()
 }
 
-// ── Preflight checks ────────────────────────────────────────────────────────
-
-/// Pre-tournament validation: confirms fast-eval, noise, roster shape, and a
-/// single-pair probe batch all pass when Metal acceleration is requested.
 pub fn accelerator_preflight(config: &NormalizedConfig) -> Result<(), String> {
     if !config.engine.accelerator.requires_metal() {
         return Ok(());
@@ -536,10 +492,6 @@ pub fn accelerator_preflight(config: &NormalizedConfig) -> Result<(), String> {
             .to_string()
     })?;
 
-    // ShaderKey dynamically compiles with the exact width needed — no hard
-    // limits on CA window size or TM max_steps.
-    let _ = payload;
-
     let eval = metal_batch_eval_config(config);
     let prepared = nit_metal::try_prepare_batch(&eval, &payload)?.ok_or_else(|| {
         "Metal accelerator was requested, but this run is not supported \
@@ -559,8 +511,6 @@ pub fn accelerator_preflight(config: &NormalizedConfig) -> Result<(), String> {
     }
 }
 
-/// Preflight with additional checks for features that force CPU fallback
-/// (event/history logging, match previews).
 pub fn accelerator_run_preflight(
     config: &NormalizedConfig,
     event_logging: bool,
@@ -601,7 +551,6 @@ fn collect_metal_blockers(
     blockers
 }
 
-/// Join items as "A", "A and B", or "A, B, and C".
 fn format_blocker_list(items: &[&str]) -> String {
     match items {
         [] => String::new(),
@@ -614,11 +563,6 @@ fn format_blocker_list(items: &[&str]) -> String {
     }
 }
 
-// ── Chunked GPU dispatch ─────────────────────────────────────────────────────
-
-/// Evaluates matchups in GPU-sized chunks according to the prepared batch
-/// policy.  Returns the collected outcomes and the number of GPU batches
-/// dispatched.
 pub(super) fn try_metal_batch_outcomes_chunked_prepared(
     config: &NormalizedConfig,
     strategies: &[StrategySpec],
@@ -646,13 +590,11 @@ pub(super) fn try_metal_batch_outcomes_chunked_prepared(
             pending,
         });
 
-        // Drain completed batches to limit GPU memory pressure.
         if inflight.len() >= prepared.policy.inflight_batches {
             drain_one_inflight(&mut inflight, config, strategies, &mut collected_outcomes)?;
         }
     }
 
-    // Drain remaining in-flight batches.
     while !inflight.is_empty() {
         drain_one_inflight(&mut inflight, config, strategies, &mut collected_outcomes)?;
     }
@@ -692,20 +634,14 @@ fn drain_one_inflight(
     Ok(())
 }
 
-// ── Test-only helpers ────────────────────────────────────────────────────────
-//
-// These are `pub(crate)` so that the integration tests in `tests.rs` can
-// exercise the Metal batch path directly.
-
 #[cfg(test)]
 fn try_metal_batch_outcomes(
     config: &NormalizedConfig,
     strategies: &[StrategySpec],
     matchups: &[Matchup],
 ) -> Result<Option<Vec<MatchOutcome>>, String> {
-    let prepared = match try_prepare_metal_batch(config, strategies)? {
-        Some(p) => p,
-        None => return Ok(None),
+    let Some(prepared) = try_prepare_metal_batch(config, strategies)? else {
+        return Ok(None);
     };
     try_metal_batch_outcomes_prepared(config, strategies, &prepared, matchups)
 }
@@ -721,9 +657,9 @@ fn try_metal_batch_outcomes_prepared(
         return Ok(Some(Vec::new()));
     }
     let gpu_pairs = encode_matchup_pairs(matchups);
-    let raw_scores = match nit_metal::try_evaluate_prepared_batch(&prepared.prepared, &gpu_pairs)? {
-        Some(scores) => scores,
-        None => return Ok(None),
+    let Some(raw_scores) = nit_metal::try_evaluate_prepared_batch(&prepared.prepared, &gpu_pairs)?
+    else {
+        return Ok(None);
     };
     Ok(Some(match_outcomes_from_scores(
         config, strategies, matchups, raw_scores,
@@ -744,8 +680,6 @@ fn build_test_matchups(index_pairs: &[(usize, usize)]) -> Vec<Matchup> {
         .collect()
 }
 
-/// Runs a Metal batch for the given index pairs and returns raw score totals.
-/// Used by integration tests to compare GPU and CPU results.
 #[cfg(test)]
 pub(crate) fn metal_batch_totals_for_test(
     config: &NormalizedConfig,
@@ -761,9 +695,6 @@ pub(crate) fn metal_batch_totals_for_test(
     }))
 }
 
-/// Runs a Metal batch with a custom execution policy and returns raw score
-/// totals together with the wall-clock duration.  Used by profiling tests
-/// to explore batch-size / inflight-depth trade-offs.
 #[cfg(test)]
 #[allow(clippy::type_complexity)]
 pub(crate) fn metal_policy_probe_for_test(
@@ -773,9 +704,8 @@ pub(crate) fn metal_policy_probe_for_test(
     inflight_depth: usize,
 ) -> Result<Option<(Vec<(i64, i64)>, std::time::Duration)>, String> {
     let test_matchups = build_test_matchups(index_pairs);
-    let mut prepared = match try_prepare_metal_batch(config, &config.strategies)? {
-        Some(p) => p,
-        None => return Ok(None),
+    let Some(mut prepared) = try_prepare_metal_batch(config, &config.strategies)? else {
+        return Ok(None);
     };
     prepared.policy.matches_per_batch = matches_per_batch.max(1);
     prepared.policy.inflight_batches = inflight_depth.max(1);
@@ -789,9 +719,8 @@ pub(crate) fn metal_policy_probe_for_test(
     )?;
     let wall_time = clock_start.elapsed();
 
-    let (outcomes, _batch_count) = match chunked_result {
-        Some(pair) => pair,
-        None => return Ok(None),
+    let Some((outcomes, _batch_count)) = chunked_result else {
+        return Ok(None);
     };
 
     let score_totals = outcomes

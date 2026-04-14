@@ -4,7 +4,8 @@ use super::types::{StrategyConfig, StrategySpec, StrategySpecKind};
 use crate::game::Action;
 use crate::strategy::math::checked_pow_u128;
 use crate::strategy::{
-    decode_fsm_notebook_index, decode_tm_rule_code_wolfram, InputMode, TmMove, TmTransition,
+    decode_fsm_notebook_index, decode_tm_rule_code_wolfram, symbol_to_action, InputMode, TmMove,
+    TmTransition,
 };
 use serde::Deserialize;
 use std::io::BufRead;
@@ -314,15 +315,7 @@ fn validate_tm_output_map(
     }
 
     // Build the canonical notebook mapping and validate against user input.
-    let notebook: Vec<Action> = (0..symbols)
-        .map(|s| {
-            if s == 0 {
-                Action::Cooperate
-            } else {
-                Action::Defect
-            }
-        })
-        .collect();
+    let notebook: Vec<Action> = (0..symbols).map(|s| symbol_to_action(s as u8)).collect();
 
     if parsed.len() >= symbols && parsed[..symbols] != notebook[..symbols] {
         errors.push(format!(
@@ -385,18 +378,16 @@ fn normalize_index(
     input_index_base: u8,
     errors: &mut Vec<String>,
 ) -> usize {
-    if input_index_base == 1 {
-        if value == 0 {
-            errors.push(format!(
-                "strategy '{id}': {field} must be >= 1 when input_index_base = 1"
-            ));
-            0
-        } else {
-            value - 1
-        }
-    } else {
-        value
+    if input_index_base != 1 {
+        return value;
     }
+    if value == 0 {
+        errors.push(format!(
+            "strategy '{id}': {field} must be >= 1 when input_index_base = 1"
+        ));
+        return 0;
+    }
+    value - 1
 }
 
 fn parse_input_mode(id: &str, raw: Option<&str>, errors: &mut Vec<String>) -> Option<InputMode> {

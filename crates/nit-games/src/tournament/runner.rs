@@ -1,10 +1,3 @@
-//! Step-driven tournament runner for interactive TUI playback.
-//!
-//! [`TournamentRunner`] drives the tournament one step at a time via
-//! [`step_rounds`](TournamentRunner::step_rounds), allowing the TUI to
-//! render progress, match snapshots, and leaderboard updates between ticks.
-//! For batch (run-to-completion) execution, see [`super::kernel::TournamentKernel`].
-
 use super::halting::select_halting_turing_machine_strategies;
 use super::metal::{
     adjusted_total_for_match, metal_batch_decline_reason,
@@ -28,16 +21,9 @@ use crate::output::{RunSummary, RuntimeAcceleratorStats, StrategyDefinition, Tou
 use rayon::prelude::*;
 use std::time::{Duration, Instant};
 
-/// How often (in wall-clock time) the TUI samples a round-level preview
-/// snapshot during batch fast-forward execution.
 const SNAPSHOT_REFRESH_MS: u64 = 100;
-
-/// Sentinel value used when a schedule contains zero matches but a progress
-/// snapshot is still requested (e.g. during empty-roster dry runs).
 const EMPTY_SCHEDULE_SENTINEL: usize = 0;
 
-/// Incremental tournament executor with match-level and round-level stepping,
-/// used by the TUI for live playback.
 pub struct TournamentRunner {
     config: NormalizedConfig,
     seed: u64,
@@ -134,8 +120,6 @@ impl TournamentRunner {
         self.match_index >= self.schedule.len() && self.current.is_none()
     }
 
-    /// Progress snapshot with cascading fallback: active session, batch cache,
-    /// next scheduled matchup, then last saved progress.
     pub fn progress(&self) -> Option<TournamentProgress> {
         if self.schedule.is_empty() {
             return Some(TournamentProgress::build(
@@ -235,8 +219,6 @@ impl TournamentRunner {
         })
     }
 
-    /// Advance by up to `steps` rounds, opening new matches and fast-forwarding
-    /// via batch evaluation when eligible.
     pub fn step_rounds(&mut self, steps: u32) {
         if self.schedule.is_empty() {
             return;
@@ -406,30 +388,22 @@ impl TournamentRunner {
         self.seed
     }
 
-    /// Borrow the normalised configuration driving this tournament.
     pub fn config(&self) -> &NormalizedConfig {
         &self.config
     }
 
-    /// Current runtime accelerator statistics (CPU/GPU match counts).
     pub fn runtime(&self) -> &RuntimeAcceleratorStats {
         &self.runtime
     }
 
-    /// Number of matches that have been fully scored so far.
     pub fn completed_matches(&self) -> usize {
         self.match_index
     }
 
-    /// Total number of matches in the tournament schedule.
     pub fn total_matches(&self) -> usize {
         self.schedule.len()
     }
 
-    /// Consume the runner, flush writers, and produce the final [`RunSummary`].
-    ///
-    /// Closes event and history log files, builds the result ranking, and
-    /// assembles all metadata into a single summary struct for serialisation.
     pub fn finish(mut self, timestamp: String, run_id: String, config_text: String) -> RunSummary {
         let event_log_path = self
             .event_writer
@@ -467,10 +441,6 @@ impl TournamentRunner {
         }
     }
 
-    /// Write a game event to the attached event log, if present.
-    ///
-    /// Round-level events are suppressed when the writer is configured to
-    /// exclude per-round granularity.
     fn emit(&mut self, event: GameEvent) {
         let Some(event_log_writer) = self.event_writer.as_mut() else {
             return;
@@ -481,10 +451,6 @@ impl TournamentRunner {
         let _ = event_log_writer.write(&event);
     }
 
-    /// Serialise a completed match session into the history log.
-    ///
-    /// Optionally includes Turing-machine cycle metadata when enabled in
-    /// the history configuration.
     fn emit_history(&mut self, finished_session: &MatchSession) {
         let Some(history_log_writer) = self.history_writer.as_mut() else {
             return;
@@ -526,10 +492,6 @@ impl TournamentRunner {
         let _ = history_log_writer.write(&history_record);
     }
 
-    /// Check whether the batch fast-forward path is eligible.
-    ///
-    /// Fast-forwarding requires no active session, fast-eval enabled, zero
-    /// noise, and no attached event/history writers or preview collection.
     fn fast_forward_allowed(&self) -> bool {
         self.current.is_none()
             && self.config.engine.fast_eval
@@ -539,11 +501,6 @@ impl TournamentRunner {
             && !self.collect_match_history_previews
     }
 
-    /// Lazily initialise the Metal batch pipeline when the GPU accelerator
-    /// has not yet been probed for this tournament.
-    ///
-    /// After this call, `self.metal_batch` is guaranteed to be either
-    /// `Prepared` or `Unavailable` (never `Uninitialized`).
     fn ensure_metal_batch(&mut self) {
         if !matches!(self.metal_batch, MetalBatchState::Uninitialized) {
             return;
@@ -580,8 +537,6 @@ impl TournamentRunner {
         }
     }
 
-    /// Record the reason the Metal batch evaluator declined this workload,
-    /// but only when the accelerator configuration permits Metal.
     fn note_metal_decline_reason(&mut self) {
         if !self.config.engine.accelerator.allows_metal() {
             return;
@@ -591,12 +546,6 @@ impl TournamentRunner {
         self.runtime.note_metal_fallback_reason(decline_reason);
     }
 
-    /// Attempt to skip ahead by evaluating multiple complete matches in a
-    /// single batch, using the Metal GPU pipeline when available or falling
-    /// back to parallel CPU evaluation.
-    ///
-    /// This is the primary fast-path for batch mode: instead of stepping one
-    /// round at a time, entire matches are evaluated in bulk.
     fn try_fast_forward_matches(&mut self, remaining_step_budget: &mut u32) {
         if !self.fast_forward_allowed() {
             return;
@@ -688,10 +637,6 @@ impl TournamentRunner {
                 (cpu_outcomes, false)
             }
         };
-        // Rate-limit the snapshot sample: running a full match round-by-round
-        // to obtain a last_round preview is O(rounds) on the CPU.  At high
-        // round counts (e.g. 500K) this dominates each tick.  Only recompute
-        // when enough wall-clock time has elapsed since the previous sample.
         let snapshot_refresh_interval = Duration::from_millis(SNAPSHOT_REFRESH_MS);
         let snapshot_is_stale = self
             .last_snapshot_sample_at
@@ -740,11 +685,6 @@ impl TournamentRunner {
         }
     }
 
-    /// Integrate a completed match outcome into the accumulator and advance
-    /// the match index.
-    ///
-    /// Updates the leaderboard progress, marks any crash flags on the
-    /// per-strategy stats, and delegates scoring to `TournamentAccumulator`.
     fn record_completed_outcome(&mut self, outcome: MatchOutcome) {
         let completed_ordinal = self.match_index.saturating_add(1);
         self.last_round = outcome.last_round.clone();
@@ -780,11 +720,6 @@ impl TournamentRunner {
         self.match_index += 1;
     }
 
-    /// Execute a single round of the active match session, recording any
-    /// strategy crashes and emitting the round-level game event.
-    ///
-    /// Returns the round snapshot for use in progress updates and
-    /// last-round caching.
     fn play_round(&mut self, active_session: &mut MatchSession) -> RoundSnapshot {
         self.runtime.note_cpu_activity();
         let first_player_idx = active_session.matchup.a_idx;

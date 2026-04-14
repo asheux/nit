@@ -1,5 +1,3 @@
-//! Batch tournament kernel — runs all matches to completion in a single call.
-
 use super::halting::select_halting_turing_machine_strategies;
 use super::metal::{
     metal_batch_decline_reason, try_metal_batch_outcomes_chunked_prepared,
@@ -18,7 +16,6 @@ use crate::output::{RuntimeAcceleratorStats, StrategyDefinition, TournamentResul
 use rayon::prelude::*;
 use std::sync::mpsc::Sender;
 
-/// Execution mode: ordered sequential or channel-based parallel.
 pub enum KernelRunMode<'a> {
     Sequential {
         event_writer: Option<&'a mut EventWriter>,
@@ -26,15 +23,12 @@ pub enum KernelRunMode<'a> {
     },
     Parallel {
         parallelism: Parallelism,
-        // Logs are written via channels; NDJSON line order is nondeterministic.
-        // Use match_id/match_index fields to reconstruct ordering.
         event_sender: Option<Sender<GameEvent>>,
         include_rounds: bool,
         history_sender: Option<Sender<MatchHistory>>,
     },
 }
 
-/// Batch tournament executor.
 pub struct TournamentKernel {
     config: NormalizedConfig,
     seed: u64,
@@ -109,6 +103,10 @@ impl TournamentKernel {
         self.schedule.len()
     }
 
+    fn fast_eval_eligible(&self, log_events: bool, include_rounds: bool) -> bool {
+        self.config.engine.fast_eval && self.config.noise == 0.0 && !(log_events && include_rounds)
+    }
+
     fn build_accumulator(&self) -> TournamentAccumulator {
         TournamentAccumulator::new(
             self.config.strategies.len(),
@@ -118,8 +116,6 @@ impl TournamentKernel {
         )
     }
 
-    /// Attempt the Metal GPU batch path for the full schedule. Returns outcomes
-    /// and runtime stats on success, or `None` to fall back to CPU.
     fn try_metal_batch_path(
         &self,
         runtime: &mut RuntimeAcceleratorStats,
@@ -191,9 +187,7 @@ impl TournamentKernel {
         let log_events = event_writer.is_some();
         let log_history = history_writer.is_some();
 
-        let fast_eval_allowed = self.config.engine.fast_eval
-            && self.config.noise == 0.0
-            && !(log_events && include_rounds);
+        let fast_eval_allowed = self.fast_eval_eligible(log_events, include_rounds);
 
         if fast_eval_allowed && !log_events && !log_history {
             if let Some(outcomes) = self.try_metal_batch_path(&mut runtime) {
@@ -276,9 +270,7 @@ impl TournamentKernel {
         let event_sender_for_run = event_sender.clone();
         let history_sender_for_run = history_sender.clone();
 
-        let fast_eval_allowed = self.config.engine.fast_eval
-            && self.config.noise == 0.0
-            && !(log_events && include_rounds);
+        let fast_eval_allowed = self.fast_eval_eligible(log_events, include_rounds);
 
         if fast_eval_allowed && !log_events && !log_history {
             if let Some(all_outcomes) = self.try_metal_batch_path(&mut runtime) {

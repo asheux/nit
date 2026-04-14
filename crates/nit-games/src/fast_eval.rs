@@ -178,10 +178,6 @@ pub fn evaluate_match(
             }
         }
 
-        if round >= rounds {
-            break;
-        }
-
         let act_a = model_a.action(joint.a);
         let act_b = model_b.action(joint.b);
         let (pay_a, pay_b) = payoff.payoffs(act_a, act_b);

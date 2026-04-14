@@ -1,5 +1,3 @@
-//! TM halting filter — pre-screens strategies that never halt within the step budget.
-
 use super::metal::{metal_batch_decline_reason, try_prepare_metal_batch_for_workload};
 use super::schedule::{matches_per_repetition, total_schedule_matches, SchedulePlan};
 use super::session::run_match_core;
@@ -25,7 +23,6 @@ const AUTO_TM_METAL_PROBE_TIMEOUT: Duration = Duration::from_millis(300);
 const SCORE_EPSILON: f64 = 1e-9;
 static AUTO_TM_METAL_PROBE_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
 
-/// Compare two floating-point scores with epsilon tolerance.
 pub(super) fn compare_scores(a: f64, b: f64) -> Ordering {
     let diff = (a - b).abs();
     if diff < SCORE_EPSILON {
@@ -46,9 +43,7 @@ fn roster_is_all_tms(strategies: &[StrategySpec]) -> bool {
 }
 
 fn tm_stats_always_halt(stats: Option<&TmRunStats>) -> bool {
-    stats
-        .map(|stats| stats.fallback == 0 && stats.output_events == stats.rounds)
-        .unwrap_or(false)
+    stats.is_some_and(|s| s.fallback == 0 && s.output_events == s.rounds)
 }
 
 #[derive(Copy, Clone)]
@@ -204,13 +199,7 @@ fn notebook_tm_action_cached(
 }
 
 fn notebook_tm_history_bit(action: Action, halted: bool) -> u8 {
-    if !halted {
-        return 0;
-    }
-    match action {
-        Action::Cooperate => 0,
-        Action::Defect => 1,
-    }
+    u8::from(halted && matches!(action, Action::Defect))
 }
 
 fn notebook_tm_matchup_halts_all_rounds(
@@ -249,7 +238,6 @@ fn notebook_tm_matchup_halts_all_rounds(
     (a_keep, b_keep)
 }
 
-/// Halting mask for an all-TM roster via pairwise CPU simulation.
 fn notebook_tm_family_halting_mask(
     config: &NormalizedConfig,
 ) -> (Vec<bool>, NotebookTmFamilyStats) {
@@ -272,36 +260,39 @@ fn notebook_tm_family_halting_mask(
     }
     let cache = Arc::new(NotebookTmEvaluationCache::new(strategy_count));
 
+    let evaluate_matchup = |match_id: usize, keep: &mut [bool]| {
+        let matchup = schedule
+            .matchup(match_id)
+            .expect("matchup should exist for in-range id");
+        let (a_keep, b_keep) = notebook_tm_matchup_halts_all_rounds(
+            matchup.a_idx,
+            matchup.b_idx,
+            &tm_specs,
+            config.rounds,
+            &cache,
+        );
+        if !a_keep {
+            keep[matchup.a_idx] = false;
+        }
+        if !b_keep {
+            keep[matchup.b_idx] = false;
+        }
+    };
+
     let scan_parallel = || {
-        let cache = Arc::clone(&cache);
         (0..scanned_matchups)
             .into_par_iter()
             .fold(
                 || vec![true; strategy_count],
                 |mut local_keep, match_id| {
-                    let matchup = schedule
-                        .matchup(match_id)
-                        .expect("matchup should exist for in-range id");
-                    let (a_keep, b_keep) = notebook_tm_matchup_halts_all_rounds(
-                        matchup.a_idx,
-                        matchup.b_idx,
-                        &tm_specs,
-                        config.rounds,
-                        &cache,
-                    );
-                    if !a_keep {
-                        local_keep[matchup.a_idx] = false;
-                    }
-                    if !b_keep {
-                        local_keep[matchup.b_idx] = false;
-                    }
+                    evaluate_matchup(match_id, &mut local_keep);
                     local_keep
                 },
             )
             .reduce(
                 || vec![true; strategy_count],
                 |mut left, right| {
-                    for (slot, keep_right) in left.iter_mut().zip(right.into_iter()) {
+                    for (slot, keep_right) in left.iter_mut().zip(right) {
                         *slot &= keep_right;
                     }
                     left
@@ -312,22 +303,7 @@ fn notebook_tm_family_halting_mask(
     keep = match Parallelism::from_config(&config.engine.parallelism) {
         Parallelism::Off => {
             for match_id in 0..scanned_matchups {
-                let matchup = schedule
-                    .matchup(match_id)
-                    .expect("matchup should exist for in-range id");
-                let (a_keep, b_keep) = notebook_tm_matchup_halts_all_rounds(
-                    matchup.a_idx,
-                    matchup.b_idx,
-                    &tm_specs,
-                    config.rounds,
-                    &cache,
-                );
-                if !a_keep {
-                    keep[matchup.a_idx] = false;
-                }
-                if !b_keep {
-                    keep[matchup.b_idx] = false;
-                }
+                evaluate_matchup(match_id, &mut keep);
             }
             keep
         }
@@ -471,7 +447,6 @@ fn mark_tm_halting_selection(
 
 type MetalProbeResult = Result<Option<(Vec<bool>, MetalTmHaltingStats)>, String>;
 
-/// Metal probe with auto-mode timeout guard and concurrency gate.
 fn dispatch_metal_tm_probe(
     config: &NormalizedConfig,
     diagnostics: &mut TmHaltingFilterDiagnostics,
@@ -481,7 +456,6 @@ fn dispatch_metal_tm_probe(
         return Some(try_metal_tm_family_halting_mask(config));
     }
 
-    // Guard against concurrent auto-mode probes.
     if AUTO_TM_METAL_PROBE_IN_FLIGHT.swap(true, AtomicOrdering::AcqRel) {
         diagnostics.backend_probe_elapsed = probe_started.elapsed();
         diagnostics.metal_decline_reason =
@@ -518,7 +492,6 @@ fn dispatch_metal_tm_probe(
     }
 }
 
-/// Translate a Metal probe result into a keep-mask, recording diagnostics.
 fn apply_metal_probe_result(
     probe_result: MetalProbeResult,
     config: &NormalizedConfig,
@@ -574,7 +547,6 @@ fn apply_metal_probe_result(
     }
 }
 
-/// All-TM roster halting: Metal GPU → notebook CPU fallback cascade.
 fn all_tm_halting_mask(
     config: &NormalizedConfig,
     strict_metal: bool,
@@ -588,7 +560,6 @@ fn all_tm_halting_mask(
         let schedule_len =
             SchedulePlan::new(strategy_count, config.repetitions, config.self_play).len();
 
-        // Fast rejection: check if the workload shape is compatible with Metal.
         if let Some(decline_reason) =
             metal_batch_decline_reason(config, &config.strategies, schedule_len)
         {
@@ -617,7 +588,6 @@ fn all_tm_halting_mask(
         }
     }
 
-    // CPU fallback: notebook pairwise evaluation.
     let filter_started = Instant::now();
     let (keep, notebook_stats) = notebook_tm_family_halting_mask(config);
     diagnostics.backend = if attempted_metal {
@@ -634,7 +604,6 @@ fn all_tm_halting_mask(
     Ok(keep)
 }
 
-/// Roster classification for the halting filter dispatch.
 enum RosterKind {
     AllTm,
     Mixed { tm_mask: Vec<bool> },
@@ -646,14 +615,13 @@ fn classify_roster(strategies: &[StrategySpec]) -> RosterKind {
         return RosterKind::AllTm;
     }
     let tm_mask: Vec<bool> = strategies.iter().map(strategy_is_one_sided_tm).collect();
-    if tm_mask.contains(&true) {
+    if tm_mask.iter().any(|&is_tm| is_tm) {
         RosterKind::Mixed { tm_mask }
     } else {
         RosterKind::NoTm
     }
 }
 
-/// Compute per-strategy halting mask, selecting the fastest available backend.
 fn halting_turing_machine_mask(
     config: &NormalizedConfig,
     seed: u64,
@@ -733,7 +701,7 @@ fn halting_turing_machine_mask(
             .reduce(
                 || vec![true; strategy_count],
                 |mut left, right| {
-                    for (slot, keep_right) in left.iter_mut().zip(right.into_iter()) {
+                    for (slot, keep_right) in left.iter_mut().zip(right) {
                         *slot &= keep_right;
                     }
                     left
@@ -747,7 +715,7 @@ fn halting_turing_machine_mask(
                 let matchup = schedule
                     .matchup(match_id)
                     .expect("matchup should exist for in-range id");
-                if !(tm_mask[matchup.a_idx] || tm_mask[matchup.b_idx]) {
+                if !tm_mask[matchup.a_idx] && !tm_mask[matchup.b_idx] {
                     continue;
                 }
                 let outcome = evaluate_matchup(&matchup);

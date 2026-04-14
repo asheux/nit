@@ -1,11 +1,11 @@
 [package]
 name = "nit-games"
 version = "0.1.0"
-description = "Game-theory tournament engine: strategies, payoff matrices, and analysis"
 edition = "2021"
+rust-version.workspace = true
+description = "Game-theory tournament engine: strategies, payoff matrices, and analysis"
 license = "MIT"
 publish = false
-rust-version.workspace = true
 
 [dependencies]
 nit-metal = { path = "../nit-metal" }

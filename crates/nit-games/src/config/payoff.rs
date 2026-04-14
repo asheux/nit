@@ -26,11 +26,10 @@ pub(super) fn payoff_from_config(config: PayoffConfig, errors: &mut Vec<String>)
         }
     }
 
-    let derived = [cells[0][0].0, cells[0][1].0, cells[1][0].0, cells[1][1].0];
-    let is_symmetric = cells[0][0].1 == derived[0]
-        && cells[0][1].1 == derived[2]
-        && cells[1][0].1 == derived[1]
-        && cells[1][1].1 == derived[3];
+    let [[cc, cd], [dc, dd]] = cells;
+    let derived = [cc.0, cd.0, dc.0, dd.0];
+    let is_symmetric =
+        cc.1 == derived[0] && cd.1 == derived[2] && dc.1 == derived[1] && dd.1 == derived[3];
 
     if is_symmetric {
         let scalar_overrides = [
@@ -50,11 +49,7 @@ pub(super) fn payoff_from_config(config: PayoffConfig, errors: &mut Vec<String>)
         }
     }
 
-    let unpack = |c: (i32, i32)| [c.0, c.1];
-    PayoffMatrix::from_matrix([
-        [unpack(cells[0][0]), unpack(cells[0][1])],
-        [unpack(cells[1][0]), unpack(cells[1][1])],
-    ])
+    PayoffMatrix::from_matrix([[[cc.0, cc.1], [cd.0, cd.1]], [[dc.0, dc.1], [dd.0, dd.1]]])
 }
 
 const DEFAULT_R: i32 = 3;

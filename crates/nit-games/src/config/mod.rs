@@ -41,7 +41,6 @@ pub(crate) fn is_tm_kind(kind: &str) -> bool {
     )
 }
 
-/// Normalize a raw strategy-kind string: trim, reject empty, lowercase.
 pub(crate) fn normalize_kind_str(raw: Option<&str>) -> Option<String> {
     raw.map(str::trim)
         .filter(|v| !v.is_empty())

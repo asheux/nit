@@ -230,7 +230,7 @@ impl super::Strategy for FsmStrategy {
             return self.current_output();
         };
 
-        let opponent_action = if player_a { last_round.b } else { last_round.a };
+        let (_, opponent_action) = last_round.oriented_actions(player_a);
         let input_symbol = super::action_bit(opponent_action) as usize;
 
         if let Some(next_state) = self.lookup_transition(input_symbol) {

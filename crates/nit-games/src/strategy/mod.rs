@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use crate::game::Action;
 use crate::history::History;
 
-// ── Public re-exports (preserving lib.rs surface) ────────────
+// ── Public re-exports ───────────────────────────────────────
 
 pub use ca::{decode_ca_rule_table, run_shrinking_ca, CaRunResult, CaStrategy};
 pub use fsm::{decode_fsm_notebook_index, fsm_count, history_to_input_u64, FsmStrategy};

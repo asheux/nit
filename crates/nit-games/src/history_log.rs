@@ -47,7 +47,6 @@ impl MatchHistory {
     }
 }
 
-/// Buffered NDJSON writer for [`MatchHistory`] records.
 pub struct HistoryWriter {
     inner: crate::ndjson::AtomicNdjsonWriter,
 }

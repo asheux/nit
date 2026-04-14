@@ -178,12 +178,11 @@ impl BitWindow {
     }
 
     fn push_round(&mut self, record: RoundRecord) {
-        self.bits.push_back(super::action_bit(record.a));
-        if self.bits.len() > self.capacity {
-            self.bits.pop_front();
-        }
-        self.bits.push_back(super::action_bit(record.b));
-        if self.bits.len() > self.capacity {
+        let action_a_bit = super::action_bit(record.a);
+        let action_b_bit = super::action_bit(record.b);
+        self.bits.push_back(action_a_bit);
+        self.bits.push_back(action_b_bit);
+        while self.bits.len() > self.capacity {
             self.bits.pop_front();
         }
     }

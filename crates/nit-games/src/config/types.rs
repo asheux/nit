@@ -290,15 +290,15 @@ pub enum ParallelismMode {
     Off,
 }
 
-pub(super) fn default_progress_interval_ms() -> u64 {
+pub(super) const fn default_progress_interval_ms() -> u64 {
     80
 }
 
-pub(super) fn default_fast_eval() -> bool {
+pub(super) const fn default_fast_eval() -> bool {
     true
 }
 
-pub(super) fn default_save_data() -> bool {
+pub(super) const fn default_save_data() -> bool {
     true
 }
 

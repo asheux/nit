@@ -203,10 +203,10 @@ pub fn run_one_sided_tm(
 
     let mut trace = if with_trace {
         Some(TmTrace {
-            input_digits: initial_digits.clone(),
             initial_tape: tape.clone(),
             initial_head: head_pos,
             steps: Vec::with_capacity(max_steps.min(MAX_TRACE_CAPACITY) as usize),
+            input_digits: initial_digits,
         })
     } else {
         None

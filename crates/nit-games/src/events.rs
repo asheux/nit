@@ -10,7 +10,6 @@ use time::OffsetDateTime;
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct EventLogConfig {
     pub enabled: bool,
-    /// Including per-round events can be very verbose.
     pub include_rounds: bool,
 }
 

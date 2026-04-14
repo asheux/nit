@@ -1,5 +1,3 @@
-//! Tournament result accumulation and final ranking computation.
-
 use std::cmp::Ordering;
 
 use super::halting::compare_scores;
@@ -63,7 +61,6 @@ impl TournamentAccumulator {
         }
     }
 
-    /// Fold a single match result into running totals.
     pub(super) fn apply_match(
         &mut self,
         result: MatchResult,
@@ -176,8 +173,6 @@ impl TournamentAccumulator {
         }
     }
 
-    /// Convenience wrapper that destructures a [`MatchOutcome`] into the
-    /// fields expected by [`apply_match`](Self::apply_match).
     pub(super) fn apply_outcome(&mut self, outcome: MatchOutcome) {
         self.apply_match(
             outcome.result,
@@ -223,9 +218,6 @@ impl TournamentAccumulator {
         ranking
     }
 
-    /// Produce a lightweight leaderboard (ranking only, no pairwise or dominance data).
-    ///
-    /// Used by the TUI for the live leaderboard display during tournament execution.
     pub(super) fn leaderboard(&self, specs: &[StrategySpec]) -> TournamentResults {
         TournamentResults {
             ranking: self.build_ranking(specs),
@@ -234,7 +226,6 @@ impl TournamentAccumulator {
         }
     }
 
-    /// Produce ranking, pairwise table, and dominance edges once all matches are done.
     pub(super) fn finalize(&self, specs: &[StrategySpec]) -> TournamentResults {
         let ranking = self.build_ranking(specs);
 

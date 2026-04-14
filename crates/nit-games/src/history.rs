@@ -35,8 +35,8 @@ pub struct History {
 }
 
 impl History {
-    /// Creates a new empty history. `max_memory` controls how many recent
-    /// rounds are tracked by the rolling window (capped at 31).
+    /// `max_memory` controls how many recent rounds the rolling window
+    /// tracks (capped at 31).
     pub fn new(max_memory: usize) -> Self {
         Self {
             rounds: Vec::new(),
@@ -66,7 +66,6 @@ impl History {
         self.memory_window.index_for(player_a, n)
     }
 
-    /// Records a new round of play and updates the rolling memory window.
     pub fn push(&mut self, a: Action, b: Action) {
         self.rounds.push(RoundRecord { a, b });
         self.memory_window.update(a, b);
@@ -88,24 +87,21 @@ impl RollingHistory {
     /// Creates an empty rolling window that will track the most recent
     /// `depth` rounds (silently clamped to 31).
     fn new(depth: usize) -> Self {
-        let window_depth = depth.min(MAX_ROLLING_DEPTH);
-
-        let window_mask = if window_depth == 0 {
+        let clamped_depth = depth.min(MAX_ROLLING_DEPTH);
+        let computed_mask = if clamped_depth == 0 {
             0
         } else {
-            (1u64 << (2 * window_depth)) - 1
+            (1u64 << (2 * clamped_depth)) - 1
         };
-
         Self {
-            window_depth,
-            window_mask,
+            window_depth: clamped_depth,
+            window_mask: computed_mask,
             window_a: 0,
             window_b: 0,
             rounds_recorded: 0,
         }
     }
 
-    /// Shifts a new round's outcomes into both player windows.
     fn update(&mut self, action_a: Action, action_b: Action) {
         if self.window_depth == 0 {
             return;

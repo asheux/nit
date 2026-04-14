@@ -111,16 +111,15 @@ pub fn canonicalize_fsm(def: &FsmDefinition) -> FsmDefinition {
 /// Advance a mixed-radix odometer over the flattened transition table.
 /// Returns `true` if the increment succeeded, `false` when all combinations
 /// have been exhausted (i.e. every digit has wrapped back to zero).
-fn increment_odometer(transitions: &mut [Vec<usize>], num_states: usize, alphabet: usize) -> bool {
-    let total = num_states * alphabet;
-    for idx in 0..total {
-        let row = idx / alphabet;
-        let col = idx % alphabet;
-        if transitions[row][col] + 1 < num_states {
-            transitions[row][col] += 1;
-            return true;
+fn increment_odometer(transitions: &mut [Vec<usize>], num_states: usize) -> bool {
+    for row in transitions.iter_mut() {
+        for cell in row.iter_mut() {
+            if *cell + 1 < num_states {
+                *cell += 1;
+                return true;
+            }
+            *cell = 0;
         }
-        transitions[row][col] = 0;
     }
     false
 }
@@ -175,7 +174,7 @@ where
                 let output_spec = canonicalize_fsm(&spec);
                 let key = output_spec.stable_key();
                 if !seen.insert(key) {
-                    done = !increment_odometer(&mut transitions, num_states, alphabet);
+                    done = !increment_odometer(&mut transitions, num_states);
                     continue;
                 }
                 emit(output_spec);
@@ -189,7 +188,7 @@ where
                 }
             }
 
-            done = !increment_odometer(&mut transitions, num_states, alphabet);
+            done = !increment_odometer(&mut transitions, num_states);
         }
     }
 

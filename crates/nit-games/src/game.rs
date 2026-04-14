@@ -193,10 +193,10 @@ pub fn payoffs_with_timeouts(
         return payoff_matrix.payoffs(player_a_action, player_b_action);
     }
 
-    let (penalty, bonus) = payoff_matrix.min_max();
+    let (min_payoff, max_payoff) = payoff_matrix.min_max();
     match (player_a_halted, player_b_halted) {
-        (true, false) => (bonus, penalty),
-        (false, true) => (penalty, bonus),
-        _ => (penalty, penalty),
+        (true, false) => (max_payoff, min_payoff),
+        (false, true) => (min_payoff, max_payoff),
+        _ => (min_payoff, min_payoff),
     }
 }
