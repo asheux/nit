@@ -1,7 +1,4 @@
 //! Batch execution policy: heuristics and GPU benchmarking.
-//!
-//! Determines optimal batch sizes and inflight counts based on device
-//! capabilities, payload characteristics, and empirical benchmarks.
 
 use crate::{
     BatchEvalConfig, BatchExecutionPolicy, BatchPayload, BatchPolicySource, MatchPair,
@@ -21,96 +18,58 @@ use super::dispatch::{
 };
 use super::shader::{context_for_key, ShaderKey};
 
-/// Minimum batch size enforced across all policies and candidates.
 const MIN_BATCH_SIZE: usize = 4_096;
-
-/// Default memory budget (bytes) when the device working set is unavailable.
 const DEFAULT_MEMORY_BUDGET: usize = 64 * 1024 * 1024;
 
-// ---------------------------------------------------------------------------
-// Payload introspection
-// ---------------------------------------------------------------------------
-
-/// Total GPU buffer bytes for the static (non-per-pair) payload data.
-///
-/// Accounts for strategy tables, transition tables, and rule tables
-/// that are uploaded once regardless of how many match pairs are dispatched.
 fn payload_static_bytes(payload: &BatchPayload) -> usize {
     let u32_stride = size_of::<u32>();
     match payload {
         BatchPayload::Fsm(fsm) => {
             (fsm.starts.len() + fsm.outputs.len() + fsm.transitions.len()) * u32_stride
         }
-        BatchPayload::Ca(automaton) => automaton.rule_tables.len() * u32_stride,
-        BatchPayload::Tm(machine) => {
+        BatchPayload::Ca(ca) => ca.rule_tables.len() * u32_stride,
+        BatchPayload::Tm(tm) => {
             let packed_stride = size_of::<TmTransitionPacked>();
-            machine.start_states.len() * u32_stride + machine.transitions.len() * packed_stride
+            tm.start_states.len() * u32_stride + tm.transitions.len() * packed_stride
         }
     }
 }
 
-/// Number of distinct strategies encoded in the payload.
-///
-/// For FSM and TM payloads this equals the start-state count;
-/// for CA payloads it derives from the rule table length.
+/// Strategy count with a `.max(1)` guard on the CA divisor, unlike
+/// `BatchPayload::population_count` which returns 0 for zero-stride CA.
 fn payload_strategy_count(payload: &BatchPayload) -> usize {
     match payload {
         BatchPayload::Fsm(fsm) => fsm.starts.len(),
-        BatchPayload::Ca(automaton) => {
-            let elements_per_strategy = automaton.rule_table_len.max(1) as usize;
-            automaton.rule_tables.len() / elements_per_strategy
+        BatchPayload::Ca(ca) => {
+            let entries_per_strategy = ca.rule_table_len.max(1) as usize;
+            ca.rule_tables.len() / entries_per_strategy
         }
-        BatchPayload::Tm(machine) => machine.start_states.len(),
+        BatchPayload::Tm(tm) => tm.start_states.len(),
     }
 }
 
-/// Generates a human-readable signature for cache key derivation.
-///
-/// Captures the payload type, key dimensions, strategy count, and a
-/// power-of-two bucket of the static buffer size in MiB.
 pub(crate) fn payload_signature(payload: &BatchPayload) -> String {
     let raw_static_bytes = payload_static_bytes(payload);
     let mib_rounded = raw_static_bytes.div_ceil(1024 * 1024).max(1);
     let static_mib_bucket = mib_rounded.next_power_of_two();
+    let strategy_count = payload_strategy_count(payload);
 
     match payload {
         BatchPayload::Fsm(fsm) => format!(
             "fsm_s{}_a{}_n{}_static{}mib",
-            fsm.states,
-            fsm.alphabet,
-            fsm.starts.len(),
-            static_mib_bucket
+            fsm.states, fsm.alphabet, strategy_count, static_mib_bucket
         ),
-        BatchPayload::Ca(automaton) => {
-            let entries_per_strategy = automaton.rule_table_len.max(1) as usize;
-            let strategy_total = automaton.rule_tables.len() / entries_per_strategy;
-            format!(
-                "ca_sym{}_twor{}_steps{}_table{}_n{}_static{}mib",
-                automaton.symbols,
-                automaton.two_r,
-                automaton.steps,
-                automaton.rule_table_len,
-                strategy_total,
-                static_mib_bucket
-            )
-        }
-        BatchPayload::Tm(machine) => format!(
+        BatchPayload::Ca(ca) => format!(
+            "ca_sym{}_twor{}_steps{}_table{}_n{}_static{}mib",
+            ca.symbols, ca.two_r, ca.steps, ca.rule_table_len, strategy_count, static_mib_bucket
+        ),
+        BatchPayload::Tm(tm) => format!(
             "tm_s{}_sym{}_steps{}_n{}_static{}mib",
-            machine.states,
-            machine.symbols,
-            machine.max_steps,
-            machine.start_states.len(),
-            static_mib_bucket
+            tm.states, tm.symbols, tm.max_steps, strategy_count, static_mib_bucket
         ),
     }
 }
 
-// ---------------------------------------------------------------------------
-// Device-aware heuristics
-// ---------------------------------------------------------------------------
-
-/// Returns the recommended inflight batch count for a given Apple Silicon tier.
-///
 /// Higher-end chips with more GPU cores benefit from deeper dispatch queues.
 pub(crate) fn preferred_inflight_batches(gpu_device_name: &str) -> usize {
     if gpu_device_name.contains("Ultra") {
@@ -125,10 +84,8 @@ pub(crate) fn preferred_inflight_batches(gpu_device_name: &str) -> usize {
     2
 }
 
-/// Returns the base matches-per-batch limit by device tier and payload type.
-///
-/// FSM kernels are lightweight per-pair, so they benefit from larger batches.
-/// TM kernels are heavier, requiring smaller batches to stay within budget.
+/// FSM kernels are lightweight per-pair (larger batches); TM kernels are
+/// heavier (smaller batches to stay within budget).
 pub(crate) fn preferred_base_limit(gpu_device_name: &str, payload: &BatchPayload) -> usize {
     match payload {
         BatchPayload::Fsm(_) if gpu_device_name.contains("Max") => 262_144,
@@ -138,30 +95,13 @@ pub(crate) fn preferred_base_limit(gpu_device_name: &str, payload: &BatchPayload
     }
 }
 
-// ---------------------------------------------------------------------------
-// Batch size limits per payload type
-// ---------------------------------------------------------------------------
-
-/// Per-payload-type batch size limits for benchmarking and candidate generation.
-///
-/// Consolidates the ceiling and floor constants that govern benchmark scope
-/// and policy candidate space, varying by computational weight per pair.
 struct PayloadBatchLimits {
-    /// Maximum batch size for policy candidate generation.
     candidate_ceiling: usize,
-
-    /// Minimum pairs for a meaningful benchmark run.
     benchmark_floor: usize,
-
-    /// Maximum pairs for benchmark runs to cap memory usage.
     benchmark_ceiling: usize,
 }
 
 impl PayloadBatchLimits {
-    /// Derive limits from the payload type's computational characteristics.
-    ///
-    /// Lightweight payloads (FSM) get higher ceilings; heavy payloads (TM)
-    /// use conservative limits to avoid excessive memory allocation.
     fn for_payload(payload: &BatchPayload) -> Self {
         match payload {
             BatchPayload::Fsm(_) => Self {
@@ -183,15 +123,6 @@ impl PayloadBatchLimits {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Benchmark candidate generation
-// ---------------------------------------------------------------------------
-
-/// Generates candidate policies by varying batch size and inflight depth.
-///
-/// Produces a combinatorial grid: several fractions and multiples of the
-/// device base limit, crossed with one or two inflight depths near the
-/// device default. Duplicate sizes are collapsed.
 fn candidate_policies(
     payload: &BatchPayload,
     device_name: &str,
@@ -230,10 +161,6 @@ fn candidate_policies(
         .collect()
 }
 
-/// Creates synthetic match pairs for benchmarking GPU throughput.
-///
-/// Pairs cycle through strategy indices to exercise the full strategy space
-/// and ensure even GPU workload distribution across all compute units.
 fn generate_benchmark_pairs(
     payload: &BatchPayload,
     candidates: &[BatchExecutionPolicy],
@@ -270,14 +197,6 @@ fn generate_benchmark_pairs(
         .collect()
 }
 
-// ---------------------------------------------------------------------------
-// Benchmark execution
-// ---------------------------------------------------------------------------
-
-/// Drains all remaining in-flight GPU batches, discarding their results.
-///
-/// Called after the main dispatch loop to flush the pipeline before
-/// recording the elapsed wall-clock time.
 fn drain_inflight(queue: VecDeque<PendingBatch>) -> Result<(), String> {
     for batch in queue {
         let _ = try_finish_prepared_batch(batch)?;
@@ -285,11 +204,8 @@ fn drain_inflight(queue: VecDeque<PendingBatch>) -> Result<(), String> {
     Ok(())
 }
 
-/// Runs a single benchmark trial for a candidate policy, returning elapsed seconds.
-///
-/// Simulates the real dispatch pattern: submitting batches in chunks and
-/// retiring the oldest completed batch when the inflight depth is saturated.
-/// Uses a `VecDeque` so that retiring the front is O(1).
+/// Simulates real dispatch: submitting chunks and retiring the oldest when
+/// inflight depth is saturated.
 fn time_benchmark_trial(
     prepared: &PreparedBatch,
     policy: BatchExecutionPolicy,
@@ -316,8 +232,6 @@ fn time_benchmark_trial(
     Ok(timer.elapsed().as_secs_f64())
 }
 
-/// Benchmarks every candidate policy and returns the one with the lowest
-/// wall-clock time, falling back to `fallback` if the candidate set is empty.
 fn select_fastest_policy(
     prepared: &PreparedBatch,
     candidates: Vec<BatchExecutionPolicy>,
@@ -345,14 +259,8 @@ fn select_fastest_policy(
     Ok(winner)
 }
 
-// ---------------------------------------------------------------------------
-// Memory budget computation
-// ---------------------------------------------------------------------------
-
-/// Computes the maximum matches-per-batch given GPU memory constraints.
-///
-/// Derives a budget from the device's recommended working set, subtracts
-/// static payload overhead, and divides by per-pair buffer requirements.
+/// Derives budget from device working set, subtracts static payload overhead,
+/// divides by per-pair buffer requirements.
 fn compute_memory_cap(
     working_set_size: u64,
     static_payload_bytes: usize,
@@ -373,10 +281,6 @@ fn compute_memory_cap(
         .max(MIN_BATCH_SIZE)
 }
 
-/// Resolves the cache key and optional file path for a device/signature pair.
-///
-/// Returns a tuple of `(cache_key, optional_file_path)` used for both
-/// cache lookups and result metadata in [`RecommendedBatchPolicy`].
 fn resolve_cache_location(gpu_device_name: &str, payload_sig: &str) -> (String, Option<String>) {
     let derived_key = policy_cache_key(gpu_device_name, payload_sig);
 
@@ -389,11 +293,6 @@ fn resolve_cache_location(gpu_device_name: &str, payload_sig: &str) -> (String, 
     (derived_key, resolved_path)
 }
 
-// ---------------------------------------------------------------------------
-// Recommendation builders
-// ---------------------------------------------------------------------------
-
-/// Constructs a heuristic-only recommendation (no cache involvement).
 fn heuristic_recommendation(policy: BatchExecutionPolicy) -> RecommendedBatchPolicy {
     RecommendedBatchPolicy {
         policy,
@@ -403,7 +302,6 @@ fn heuristic_recommendation(policy: BatchExecutionPolicy) -> RecommendedBatchPol
     }
 }
 
-/// Constructs a recommendation backed by a cached or benchmarked result.
 fn sourced_recommendation(
     policy: BatchExecutionPolicy,
     source: BatchPolicySource,
@@ -418,16 +316,7 @@ fn sourced_recommendation(
     }
 }
 
-// ---------------------------------------------------------------------------
-// Public API
-// ---------------------------------------------------------------------------
-
-/// Determines the best batch execution policy for a payload.
-///
-/// Resolution order:
-/// 1. On-disk cache hit → return the stored policy (clamped to current memory budget).
-/// 2. GPU benchmark sweep → time candidate policies and persist the winner.
-/// 3. Heuristic fallback → device-tier defaults when benchmarking cannot run.
+/// Resolution order: cache hit → GPU benchmark sweep → heuristic fallback.
 pub fn recommended_batch_policy(
     config: &BatchEvalConfig,
     payload: &BatchPayload,
@@ -453,7 +342,6 @@ pub fn recommended_batch_policy(
     let sig = payload_signature(payload);
     let (cache_key, cache_path) = resolve_cache_location(&device_name, &sig);
 
-    // Fast path: reuse a previously benchmarked result from disk.
     if let Some(hit) = load_cached_policy(&device_name, &sig) {
         let restored = BatchExecutionPolicy {
             matches_per_batch: hit.matches_per_batch_cap.min(mem_cap).max(MIN_BATCH_SIZE),
@@ -467,7 +355,6 @@ pub fn recommended_batch_policy(
         )));
     }
 
-    // Prepare payload buffers for a GPU benchmark sweep.
     let Some(prepared) = try_prepare_batch(config, payload)? else {
         return Ok(Some(heuristic_recommendation(heuristic)));
     };
@@ -482,7 +369,6 @@ pub fn recommended_batch_policy(
         return Ok(Some(heuristic_recommendation(heuristic)));
     }
 
-    // Benchmark all candidates and persist the winner.
     let winner = select_fastest_policy(&prepared, candidates, &synthetic_pairs, heuristic)?;
 
     persist_cached_policy(&PolicyCacheEntry {

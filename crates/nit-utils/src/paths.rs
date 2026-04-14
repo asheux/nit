@@ -14,7 +14,9 @@ static PROJECT_DIRS: LazyLock<Option<ProjectDirs>> =
 
 #[must_use]
 pub fn config_dir() -> Option<PathBuf> {
-    PROJECT_DIRS.as_ref().map(|pd| pd.config_dir().to_path_buf())
+    PROJECT_DIRS
+        .as_ref()
+        .map(|pd| pd.config_dir().to_path_buf())
 }
 
 #[must_use]
@@ -24,7 +26,8 @@ pub fn data_dir() -> Option<PathBuf> {
 
 #[must_use]
 pub fn state_dir() -> Option<PathBuf> {
-    PROJECT_DIRS.as_ref()
+    PROJECT_DIRS
+        .as_ref()
         .and_then(|pd| pd.state_dir().map(|d| d.to_path_buf()))
 }
 

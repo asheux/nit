@@ -243,7 +243,10 @@ fn read_only_shadow_turn_forces_read_only_sandbox_in_exec_args() {
         &config,
     );
     // -s read-only must replace the workspace-write config value.
-    let pos = args.iter().position(|a| a == "-s").expect("-s flag present");
+    let pos = args
+        .iter()
+        .position(|a| a == "-s")
+        .expect("-s flag present");
     assert_eq!(args.get(pos + 1).map(String::as_str), Some("read-only"));
     assert!(!args.contains(&"workspace-write".to_string()));
 }

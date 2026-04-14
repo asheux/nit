@@ -28,7 +28,10 @@ fn fingerprint_vec_matches_slice() {
 fn content_tag_display_is_deterministic() {
     let tag = ContentTag::new("v2", b"payload");
     let display = tag.to_string();
-    assert!(display.starts_with("v2-"), "expected v2- prefix, got {display}");
+    assert!(
+        display.starts_with("v2-"),
+        "expected v2- prefix, got {display}"
+    );
     assert_eq!(display.len(), "v2-".len() + 8);
     assert_eq!(display, ContentTag::new("v2", b"payload").to_string());
 }

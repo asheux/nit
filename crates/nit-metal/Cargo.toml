@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "Metal GPU acceleration for compute-intensive operations (macOS only)"
 edition = "2021"
 license = "MIT"
+publish = false
 rust-version.workspace = true
 
 [dependencies]

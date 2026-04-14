@@ -1,39 +1,21 @@
 //! Metal shader compilation and GPU context management.
-//!
-//! Compiles specialized Metal shader variants for different payload types
-//! (FSM, CA, TM), caching compiled pipeline states behind a process-global
-//! singleton keyed by [`ShaderKey`].
 
 use crate::{BatchPayload, CA_MAX_WINDOW, FSM_MAX_STATES, TM_MAX_WIDTH};
 use metal::{CompileOptions, ComputePipelineState, Device, Library};
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 
-/// Raw Metal shader source embedded at compile time.
 const SHADER_SOURCE: &str = include_str!("../batch_eval.metal");
 
-// ---------------------------------------------------------------------------
-// Compile-time constant management
-// ---------------------------------------------------------------------------
-
-/// Returns the larger of `required` and `compiled_default`, both floored at 1.
-///
-/// Used when a payload's actual dimension exceeds the default constant
-/// compiled into the shader — the shader must be recompiled with a wider
-/// array bound to accommodate the larger dimension.
 fn widen_limit(required: u32, compiled_default: u32) -> u32 {
     let floor = compiled_default.max(1);
     required.max(1).max(floor)
 }
 
-// ---------------------------------------------------------------------------
-// Shader variant identification
-// ---------------------------------------------------------------------------
-
-/// Identifies a specialized shader variant by its compile-time constants.
+/// Identifies a specialized shader variant by its compile-time array bounds.
 ///
-/// Each combination of array bounds produces a distinct Metal library.
-/// Variants are compiled once and cached for the lifetime of the process.
+/// Each combination produces a distinct Metal library, compiled once and
+/// cached for the process lifetime.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct ShaderKey {
     pub(crate) ca_max_window: u32,
@@ -42,9 +24,6 @@ pub(crate) struct ShaderKey {
 }
 
 impl ShaderKey {
-    /// Default key using the crate-level constant limits.
-    ///
-    /// Suitable for payloads whose dimensions fit within the compiled defaults.
     pub(crate) fn defaults() -> Self {
         Self {
             ca_max_window: CA_MAX_WINDOW.max(1),
@@ -53,17 +32,13 @@ impl ShaderKey {
         }
     }
 
-    /// Key for FSM payloads, widening the state table if needed.
     pub(crate) fn for_fsm(required_states: u32) -> Self {
         let mut key = Self::defaults();
         key.fsm_max_states = widen_limit(required_states, FSM_MAX_STATES);
         key
     }
 
-    /// Key for TM payloads, widening the tape scratch buffer if needed.
-    ///
-    /// The scratch width must be at least `max_steps + 1` to accommodate
-    /// the longest possible tape expansion during simulation.
+    /// Scratch width must be at least `max_steps + 1` for longest tape expansion.
     pub(crate) fn for_tm(max_steps: u32) -> Self {
         let mut key = Self::defaults();
         let required_width = max_steps.saturating_add(1);
@@ -71,17 +46,12 @@ impl ShaderKey {
         key
     }
 
-    /// Key for CA payloads, widening the evolution window if needed.
     pub(crate) fn for_ca(window_size: u32) -> Self {
         let mut key = Self::defaults();
         key.ca_max_window = widen_limit(window_size, CA_MAX_WINDOW);
         key
     }
 
-    /// Derive the appropriate key from a payload's runtime parameters.
-    ///
-    /// Dispatches to the variant-specific constructor, which determines
-    /// whether the default constants are sufficient or need widening.
     pub(crate) fn for_payload(payload: &BatchPayload) -> Self {
         match payload {
             BatchPayload::Fsm(fsm) => Self::for_fsm(fsm.states),
@@ -93,14 +63,6 @@ impl ShaderKey {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Shader source generation
-// ---------------------------------------------------------------------------
-
-/// Generates Metal source code with `#define` constants for the given key.
-///
-/// Prepends the three dimension constants before the embedded shader source
-/// so that array bounds in the Metal kernels match the payload requirements.
 fn shader_source_with_defines(key: ShaderKey) -> String {
     format!(
         "#define CA_MAX_WINDOW {}u\n#define TM_MAX_WIDTH {}u\n#define FSM_MAX_STATES {}u\n{}",
@@ -108,14 +70,6 @@ fn shader_source_with_defines(key: ShaderKey) -> String {
     )
 }
 
-// ---------------------------------------------------------------------------
-// Pipeline compilation
-// ---------------------------------------------------------------------------
-
-/// Compiles a single named kernel function into a compute pipeline state.
-///
-/// Looks up the function by name in the compiled Metal library, then creates
-/// a compute pipeline optimized for the current device.
 fn compile_kernel(
     device: &Device,
     library: &Library,
@@ -127,10 +81,7 @@ fn compile_kernel(
     device.new_compute_pipeline_state_with_function(&function)
 }
 
-/// Holds a compiled Metal device, command queue, and per-kernel pipeline states.
-///
-/// Each `MetalContext` represents a fully compiled shader variant: three
-/// compute pipelines (FSM, CA, TM) sharing a single device and queue.
+/// Compiled Metal device, command queue, and per-kernel pipeline states.
 pub(super) struct MetalContext {
     pub(super) device: Device,
     pub(super) queue: metal::CommandQueue,
@@ -141,11 +92,6 @@ pub(super) struct MetalContext {
 }
 
 impl MetalContext {
-    /// Compiles all three shader kernels for the given key dimensions.
-    ///
-    /// Acquires the system default Metal device, compiles the shader source
-    /// with dimension-specific `#define` constants, and creates a pipeline
-    /// state for each kernel variant.
     fn compile(key: ShaderKey) -> Result<Self, String> {
         let device =
             Device::system_default().ok_or_else(|| "Metal device unavailable".to_string())?;
@@ -171,16 +117,8 @@ impl MetalContext {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Process-global context cache
-// ---------------------------------------------------------------------------
-
-/// Returns a cached `MetalContext` for the given shader key.
-///
-/// The first call for a given key compiles the shader; subsequent calls
-/// return the cached reference. Contexts are intentionally leaked to provide
-/// a `'static` lifetime — GPU pipeline objects are expensive to create and
-/// are reused for the entire process lifetime.
+/// Contexts are intentionally leaked to provide `'static` lifetime — GPU
+/// pipeline objects are expensive to create and reused for the entire process.
 pub(super) fn context_for_key(key: ShaderKey) -> Result<&'static MetalContext, String> {
     static CONTEXTS: OnceLock<Mutex<HashMap<ShaderKey, Result<&'static MetalContext, String>>>> =
         OnceLock::new();
@@ -200,10 +138,6 @@ pub(super) fn context_for_key(key: ShaderKey) -> Result<&'static MetalContext, S
     result
 }
 
-/// Compiles the default shader variant, warming the pipeline cache.
-///
-/// Call this at startup to avoid compilation latency on the first batch
-/// dispatch. The compiled pipelines are cached for the process lifetime.
 pub fn prewarm_default_batch_shaders() -> Result<(), String> {
     let _ = context_for_key(ShaderKey::defaults())?;
     Ok(())

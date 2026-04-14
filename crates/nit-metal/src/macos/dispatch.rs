@@ -1,7 +1,4 @@
 //! Metal GPU dispatch and batch execution for game-theory tournaments.
-//!
-//! Manages GPU buffer allocation, command encoding, and the lifecycle
-//! of prepared and pending batches across FSM, CA, and TM payloads.
 
 use crate::{
     BatchEvalConfig, BatchPayload, CaBatch, FsmBatch, MatchPair, ScorePair, TmBatch, TmHaltingPair,
@@ -14,11 +11,7 @@ use std::slice;
 
 use super::shader::{context_for_key, MetalContext, ShaderKey};
 
-// ---------------------------------------------------------------------------
-// GPU-side repr(C) structs mirroring the Metal shader parameter layouts
-// ---------------------------------------------------------------------------
-
-/// Parameters shared across all kernel dispatches.
+/// GPU-side shared evaluation parameters.
 #[repr(C)]
 #[derive(Copy, Clone)]
 struct EvalParams {
@@ -36,7 +29,7 @@ struct EvalParams {
     timeout_win: i32,
 }
 
-/// FSM-specific kernel parameters.
+/// GPU-side FSM kernel parameters.
 #[repr(C)]
 #[derive(Copy, Clone)]
 struct FsmParams {
@@ -44,7 +37,7 @@ struct FsmParams {
     alphabet: u32,
 }
 
-/// Cellular automaton kernel parameters.
+/// GPU-side CA kernel parameters.
 #[repr(C)]
 #[derive(Copy, Clone)]
 struct CaParams {
@@ -54,7 +47,7 @@ struct CaParams {
     rule_table_len: u32,
 }
 
-/// Turing machine kernel parameters.
+/// GPU-side TM kernel parameters.
 #[repr(C)]
 #[derive(Copy, Clone)]
 struct TmParams {
@@ -65,7 +58,7 @@ struct TmParams {
     transitions_per_strategy: u32,
 }
 
-/// GPU-side match pair with aligned layout.
+/// GPU-side match pair (mirrors Metal shader layout).
 #[repr(C)]
 #[derive(Copy, Clone)]
 struct MatchPairPod {
@@ -73,7 +66,7 @@ struct MatchPairPod {
     b_idx: u32,
 }
 
-/// GPU-side score accumulator with aligned layout.
+/// GPU-side score accumulator (mirrors Metal shader layout).
 #[repr(C)]
 #[derive(Copy, Clone)]
 struct ScorePairPod {
@@ -81,7 +74,7 @@ struct ScorePairPod {
     b_total: i64,
 }
 
-/// GPU-side TM halting flags.
+/// GPU-side TM halting flags (mirrors Metal shader layout).
 #[repr(C)]
 #[derive(Copy, Clone)]
 struct TmHaltingPairPod {
@@ -98,10 +91,6 @@ struct TmTransitionPod {
     next: u32,
     _pad: u32,
 }
-
-// ---------------------------------------------------------------------------
-// Prepared and pending batch types
-// ---------------------------------------------------------------------------
 
 /// Pre-uploaded payload buffers, ready for repeated dispatch with different pairs.
 enum PreparedPayload {
@@ -123,7 +112,6 @@ enum PreparedPayload {
 }
 
 impl PreparedPayload {
-    /// Uploads FSM strategy tables (starts, outputs, transitions) to GPU memory.
     fn upload_fsm(device: &metal::Device, fsm: &FsmBatch) -> Self {
         Self::Fsm {
             params: FsmParams {
@@ -136,7 +124,6 @@ impl PreparedPayload {
         }
     }
 
-    /// Uploads cellular automaton rule tables to GPU memory.
     fn upload_ca(device: &metal::Device, ca: &CaBatch) -> Self {
         Self::Ca {
             params: CaParams {
@@ -149,10 +136,7 @@ impl PreparedPayload {
         }
     }
 
-    /// Uploads Turing machine state tables and transitions to GPU memory.
-    ///
-    /// Transitions are converted to the padded GPU-side representation
-    /// to satisfy Metal's alignment requirements.
+    /// Transitions are converted to padded GPU-side representation for Metal alignment.
     fn upload_tm(device: &metal::Device, tm: &TmBatch) -> Self {
         let gpu_transitions = tm_transition_pods(&tm.transitions);
         Self::Tm {
@@ -168,8 +152,6 @@ impl PreparedPayload {
         }
     }
 
-    /// Uploads a batch payload to GPU memory, dispatching to the
-    /// variant-specific upload method.
     fn upload(device: &metal::Device, payload: &BatchPayload) -> Self {
         match payload {
             BatchPayload::Fsm(fsm) => Self::upload_fsm(device, fsm),
@@ -179,8 +161,6 @@ impl PreparedPayload {
     }
 }
 
-/// A fully prepared batch: shader selected, payload uploaded to GPU.
-///
 /// Reusable across multiple dispatches with different match pair sets.
 pub struct PreparedBatch {
     shader_key: ShaderKey,
@@ -188,9 +168,7 @@ pub struct PreparedBatch {
     payload: PreparedPayload,
 }
 
-/// A submitted GPU command buffer awaiting completion.
-///
-/// Owns the input/output buffers to keep them alive until the GPU finishes.
+/// Owns input/output buffers to keep them alive until the GPU finishes.
 pub struct PendingBatch {
     _pair_input: metal::Buffer,
     score_output: metal::Buffer,
@@ -199,16 +177,10 @@ pub struct PendingBatch {
     dispatched_pair_count: usize,
 }
 
-// ---------------------------------------------------------------------------
-// Buffer helpers
-// ---------------------------------------------------------------------------
-
-/// Returns the GPU memory footprint per match pair (input + output buffers).
 pub(super) fn bytes_per_match_pair() -> usize {
     size_of::<MatchPairPod>() + size_of::<ScorePairPod>()
 }
 
-/// Converts config + pair count into the GPU-side `EvalParams` struct.
 fn build_eval_params(config: &BatchEvalConfig, pair_count: usize) -> EvalParams {
     EvalParams {
         rounds: config.rounds,
@@ -226,7 +198,6 @@ fn build_eval_params(config: &BatchEvalConfig, pair_count: usize) -> EvalParams 
     }
 }
 
-/// Creates a Metal buffer initialized from a CPU-side slice.
 fn buffer_from_slice<T>(device: &metal::Device, data: &[T]) -> metal::Buffer {
     if data.is_empty() {
         return device.new_buffer(1, MTLResourceOptions::StorageModeShared);
@@ -239,7 +210,6 @@ fn buffer_from_slice<T>(device: &metal::Device, data: &[T]) -> metal::Buffer {
     )
 }
 
-/// Allocates a zeroed output buffer for `count` elements of type `T`.
 fn allocate_output_buffer<T>(device: &metal::Device, count: usize) -> metal::Buffer {
     device.new_buffer(
         (count.max(1) * size_of::<T>()) as u64,
@@ -247,14 +217,8 @@ fn allocate_output_buffer<T>(device: &metal::Device, count: usize) -> metal::Buf
     )
 }
 
-// ---------------------------------------------------------------------------
-// GPU result extraction (unsafe: reads from raw buffer pointers)
-// ---------------------------------------------------------------------------
-
-/// Reads score pairs from a completed GPU output buffer.
-///
 /// # Safety
-/// The buffer must contain at least `count` valid `ScorePairPod` values
+/// Buffer must contain at least `count` valid `ScorePairPod` values
 /// and the command buffer must have completed execution.
 unsafe fn extract_scores(buffer: &metal::BufferRef, count: usize) -> Vec<ScorePair> {
     let raw_ptr = buffer.contents() as *const ScorePairPod;
@@ -268,10 +232,8 @@ unsafe fn extract_scores(buffer: &metal::BufferRef, count: usize) -> Vec<ScorePa
         .collect()
 }
 
-/// Reads TM halting flags from a completed GPU output buffer.
-///
 /// # Safety
-/// The buffer must contain at least `count` valid `TmHaltingPairPod` values
+/// Buffer must contain at least `count` valid `TmHaltingPairPod` values
 /// and the command buffer must have completed execution.
 unsafe fn extract_tm_halting(buffer: &metal::BufferRef, count: usize) -> Vec<TmHaltingPair> {
     let raw_ptr = buffer.contents() as *const TmHaltingPairPod;
@@ -285,16 +247,11 @@ unsafe fn extract_tm_halting(buffer: &metal::BufferRef, count: usize) -> Vec<TmH
         .collect()
 }
 
-// ---------------------------------------------------------------------------
-// GPU dispatch
-// ---------------------------------------------------------------------------
-
-/// Casts a reference to a `*const c_void` for Metal's `set_bytes`.
 fn as_void_ptr<T>(value: &T) -> *const c_void {
     (value as *const T).cast()
 }
 
-/// Encodes and commits a compute command, returning the owned command buffer.
+/// Encodes compute commands and commits the command buffer.
 fn encode_and_commit(
     pipeline: &metal::ComputePipelineState,
     command_queue: &metal::CommandQueue,
@@ -324,7 +281,6 @@ fn encode_and_commit(
     cmd_buf.to_owned()
 }
 
-/// Converts public `MatchPair` values to their GPU-side pod representation.
 fn match_pair_pods(pairs: &[MatchPair]) -> Vec<MatchPairPod> {
     pairs
         .iter()
@@ -335,7 +291,6 @@ fn match_pair_pods(pairs: &[MatchPair]) -> Vec<MatchPairPod> {
         .collect()
 }
 
-/// Converts public `TmTransitionPacked` values to padded GPU-side pods.
 fn tm_transition_pods(transitions: &[TmTransitionPacked]) -> Vec<TmTransitionPod> {
     transitions
         .iter()
@@ -348,15 +303,7 @@ fn tm_transition_pods(transitions: &[TmTransitionPacked]) -> Vec<TmTransitionPod
         .collect()
 }
 
-// ---------------------------------------------------------------------------
-// Core dispatch: submits a prepared batch to the GPU
-// ---------------------------------------------------------------------------
-
-/// Binds the pair input buffer and eval params that are common to every kernel.
-///
-/// Writes buffer slot 0 (pair input) and a trailing bytes slot for `EvalParams`.
-/// Returns the byte-encoded eval params for the caller to bind at the correct
-/// index via `set_bytes`.
+/// Binds pair input buffer (slot 0) and eval params at `eval_slot`.
 fn bind_common_inputs(
     enc: &metal::ComputeCommandEncoderRef,
     pair_buf: &metal::Buffer,
@@ -367,10 +314,6 @@ fn bind_common_inputs(
     enc.set_bytes(eval_slot, size_of::<EvalParams>() as u64, as_void_ptr(eval));
 }
 
-/// Encodes and dispatches a prepared batch with the given match pairs.
-///
-/// Allocates per-dispatch input/output buffers, selects the pipeline for
-/// the payload variant, binds all GPU resources, and commits the command.
 fn dispatch_prepared(
     ctx: &MetalContext,
     prepared: &PreparedBatch,
@@ -455,12 +398,6 @@ fn dispatch_prepared(
     })
 }
 
-// ---------------------------------------------------------------------------
-// Public batch API
-// ---------------------------------------------------------------------------
-
-/// Evaluates a full batch request synchronously, returning scores or `None`
-/// if Metal is unavailable.
 pub fn try_evaluate_batch(request: &crate::BatchRequest) -> Result<Option<Vec<ScorePair>>, String> {
     let eval_config = BatchEvalConfig {
         rounds: request.common.rounds,
@@ -474,7 +411,6 @@ pub fn try_evaluate_batch(request: &crate::BatchRequest) -> Result<Option<Vec<Sc
     try_evaluate_prepared_batch(&prepared, &request.common.pairs)
 }
 
-/// Uploads payload data to the GPU, returning a reusable `PreparedBatch`.
 pub fn try_prepare_batch(
     config: &BatchEvalConfig,
     payload: &BatchPayload,
@@ -489,7 +425,6 @@ pub fn try_prepare_batch(
     }))
 }
 
-/// Dispatches and synchronously waits for a prepared batch to complete.
 pub fn try_evaluate_prepared_batch(
     prepared: &PreparedBatch,
     pairs: &[MatchPair],
@@ -503,7 +438,6 @@ pub fn try_evaluate_prepared_batch(
     try_finish_prepared_batch(pending).map(Some)
 }
 
-/// Dispatches a TM batch and synchronously waits for halting results.
 pub fn try_evaluate_prepared_tm_halting_batch(
     prepared: &PreparedBatch,
     pairs: &[MatchPair],
@@ -517,7 +451,6 @@ pub fn try_evaluate_prepared_tm_halting_batch(
     try_finish_prepared_tm_halting_batch(pending).map(Some)
 }
 
-/// Submits a prepared batch to the GPU without waiting for completion.
 pub fn try_begin_prepared_batch(
     prepared: &PreparedBatch,
     pairs: &[MatchPair],
@@ -529,13 +462,11 @@ pub fn try_begin_prepared_batch(
     dispatch_prepared(ctx, prepared, pairs).map(Some)
 }
 
-/// Waits for a pending batch to complete and reads back score results.
 pub fn try_finish_prepared_batch(pending: PendingBatch) -> Result<Vec<ScorePair>, String> {
     pending.command_buffer.wait_until_completed();
     Ok(unsafe { extract_scores(&pending.score_output, pending.dispatched_pair_count) })
 }
 
-/// Waits for a pending TM batch and reads back halting flags.
 pub fn try_finish_prepared_tm_halting_batch(
     pending: PendingBatch,
 ) -> Result<Vec<TmHaltingPair>, String> {

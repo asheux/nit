@@ -1,12 +1,7 @@
-//! Metal GPU acceleration for compute-intensive game-theory tournaments.
+//! Metal GPU acceleration for game-theory tournament batch evaluation.
 //!
-//! This crate provides a platform-adaptive backend for evaluating large
-//! populations of finite state machines, cellular automata, and Turing
-//! machines in batch on Apple Silicon GPUs via Metal.
-//!
-//! On non-macOS platforms every public function returns a no-op stub so that
-//! the rest of the workspace compiles unconditionally without `#[cfg]`
-//! guards at every call site.
+//! On non-macOS platforms every public function is a no-op stub so the
+//! workspace compiles unconditionally.
 
 mod types;
 pub use types::*;
