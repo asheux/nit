@@ -15,7 +15,7 @@ pub(super) fn run_games_inspect(
     format: OutputFormat,
     out: Option<PathBuf>,
 ) -> anyhow::Result<()> {
-    let (_config_path, _config_text, config) = super::load_games_config(config_path, None)?;
+    let (_, _, config) = super::load_games_config(config_path, None)?;
     let spec = resolve_strategy(&config.strategies, &id)?;
     let intro = introspect_strategy(&spec);
     let output = match format {
@@ -47,7 +47,7 @@ pub(super) fn run_games_graph(
             .with_context(|| format!("failed to parse {}", run_path.display()))?;
         summary.config.strategies
     } else {
-        let (_config_path, _config_text, config) = super::load_games_config(config_path, None)?;
+        let (_, _, config) = super::load_games_config(config_path, None)?;
         config.strategies
     };
     let spec = resolve_strategy(&strategies, &strategy_id)?;

@@ -313,5 +313,5 @@ where
 }
 
 fn is_lab_name(value: &str) -> bool {
-    matches!(value.to_ascii_lowercase().as_str(), "gol" | "games")
+    value.eq_ignore_ascii_case("gol") || value.eq_ignore_ascii_case("games")
 }

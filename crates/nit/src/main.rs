@@ -36,14 +36,14 @@ fn main() -> anyhow::Result<()> {
 
     // Build runner configs while `cli` is fully intact (before partial moves).
     let runtime_mode = CodexRuntimeMode::from(cli.codex_runtime);
-    let parallel_turns = cli.codex_max_parallel_turns as usize;
+    let max_turns = cli.codex_max_parallel_turns as usize;
     let codex_runner_config = CodexRunnerConfig {
         sandbox: cli.codex_sandbox.map(|s| s.as_str().to_string()),
         approval_policy: Some(cli.codex_approval_policy.as_str().to_string()),
-        max_parallel_turns: parallel_turns,
+        max_parallel_turns: max_turns,
     };
     let claude_runner_config = ClaudeRunnerConfig {
-        max_parallel_turns: parallel_turns,
+        max_parallel_turns: max_turns,
         permission_mode: None,
     };
     let backend_selection = cli.agents;
@@ -122,7 +122,6 @@ fn check_legacy_notes(state: &mut nit_core::AppState) {
     }
 }
 
-/// Load the GoL rule catalog and resolve the active rule from persisted config.
 fn init_gol_rules(state: &mut nit_core::AppState) {
     let persisted = nit_core::load_rule_config(&state.workspace_root);
 

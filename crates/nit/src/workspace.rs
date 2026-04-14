@@ -7,8 +7,6 @@ use nit_core::{io as core_io, Buffer};
 use nit_utils::hashing::stable_hash_bytes;
 use nit_utils::paths;
 
-/// Retrieve the HEAD revision of a tracked file via `git ls-files` + `git show`.
-/// Returns `None` for untracked files or if git is unavailable.
 fn git_head_content(file_path: &Path) -> Option<String> {
     let working_dir = file_path.parent()?;
     // Two-step: resolve repo-relative path, then retrieve HEAD content.
@@ -48,22 +46,18 @@ fn load_file_buffer(path: &Path, default_name: &str) -> anyhow::Result<Buffer> {
 fn parent_or_cwd(path: &Path) -> anyhow::Result<PathBuf> {
     match path.parent() {
         Some(p) => Ok(p.to_path_buf()),
-        None => std::env::current_dir().map_err(Into::into),
+        None => Ok(std::env::current_dir()?),
     }
 }
 
-/// Open a target path for the GoL lab.
 pub(crate) fn open_target_gol(path: Option<&Path>) -> anyhow::Result<(PathBuf, Buffer)> {
     open_target(path, "untitled", empty_gol_buffer)
 }
 
-/// Open a target path for the Games lab, loading `games.toml` or scaffolding a template.
 pub(crate) fn open_target_games(path: Option<&Path>) -> anyhow::Result<(PathBuf, Buffer)> {
     open_target(path, "games.toml", games_dir_buffer)
 }
 
-/// Shared dispatcher: routes file / dir / missing / nonexistent paths through a
-/// common pattern, with `dir_handler` called when the target is a directory.
 fn open_target(
     path: Option<&Path>,
     default_name: &str,

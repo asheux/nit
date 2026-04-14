@@ -10,6 +10,7 @@ mod run;
 mod sweep;
 
 use std::fs;
+use std::io::BufRead;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::thread;
@@ -262,7 +263,6 @@ fn append_strategies_from_ndjson(
     target_config: &mut NormalizedConfig,
     sidecar_file: &Path,
 ) -> anyhow::Result<()> {
-    use std::io::BufRead;
     let opened_handle = std::fs::File::open(sidecar_file)
         .with_context(|| format!("failed to open strategies {}", sidecar_file.display()))?;
 

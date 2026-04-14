@@ -650,7 +650,7 @@ fn compute_sweep_aggregates(completed_data: SweepAccumulators) -> Vec<SweepStrat
             top1_count: victory_count,
         });
     }
-    sorted_rankings.sort_by(|a, b| b.mean_score.partial_cmp(&a.mean_score).unwrap());
+    sorted_rankings.sort_by(|a, b| b.mean_score.total_cmp(&a.mean_score));
     sorted_rankings
 }
 

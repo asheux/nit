@@ -16,8 +16,7 @@ pub(crate) fn init_tracing(
 ) -> anyhow::Result<()> {
     let file: Option<SharedFile> = log_path
         .as_ref()
-        .and_then(|p| open_log_file(p).ok())
-        .map(|f| Arc::new(Mutex::new(f)));
+        .and_then(|p| open_log_file(p).ok().map(|f| Arc::new(Mutex::new(f))));
 
     tracing_subscriber::fmt()
         .with_writer(LogWriter { tx, file })
@@ -80,8 +79,7 @@ impl ChannelWriter {
     }
 
     fn emit(&self, log_line: &str) {
-        let file_guard = self.file.as_ref().and_then(|f| f.lock().ok());
-        if let Some(mut handle) = file_guard {
+        if let Some(mut handle) = self.file.as_ref().and_then(|f| f.lock().ok()) {
             let _ = writeln!(handle, "{log_line}");
         }
         let _ = self.tx.send(log_line.to_string());

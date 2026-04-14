@@ -188,11 +188,8 @@ fn build_ca_graph(
 const EDGE_COLORS: [&str; 4] = ["#e74c3c", "#2ecc71", "#3498db", "#9b59b6"];
 
 fn edge_color_for_label(label: &str) -> Option<String> {
-    label
-        .parse::<usize>()
-        .ok()
-        .and_then(|i| EDGE_COLORS.get(i))
-        .map(|c| (*c).to_string())
+    let idx = label.parse::<usize>().ok()?;
+    EDGE_COLORS.get(idx).map(|c| c.to_string())
 }
 
 pub(crate) fn render_strategy_graph_dot(graph: &StrategyGraph) -> String {

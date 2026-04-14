@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::ffi::OsString;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
@@ -198,14 +199,11 @@ fn preferred_path_for_executable(resolved_exe: &Path) -> Option<OsString> {
 }
 
 fn dedup_paths(candidates: Vec<PathBuf>) -> Vec<PathBuf> {
-    let mut seen = Vec::with_capacity(candidates.len());
-    for entry in candidates {
-        if entry.as_os_str().is_empty() || seen.contains(&entry) {
-            continue;
-        }
-        seen.push(entry);
-    }
-    seen
+    let mut seen = HashSet::with_capacity(candidates.len());
+    candidates
+        .into_iter()
+        .filter(|entry| !entry.as_os_str().is_empty() && seen.insert(entry.clone()))
+        .collect()
 }
 
 fn parse_model_list_from_output(raw_stdout: &[u8]) -> Vec<String> {
@@ -281,14 +279,13 @@ fn extract_models_from_json(json_node: &serde_json::Value, collector: &mut Vec<S
 }
 
 fn first_identity_field(fields: &serde_json::Map<String, serde_json::Value>) -> Option<String> {
-    for field_name in ["id", "name", "model", "slug"] {
-        let Some(serde_json::Value::String(text)) = fields.get(field_name) else {
-            continue;
-        };
-        let cleaned = text.trim();
-        if !cleaned.is_empty() {
-            return Some(cleaned.to_string());
-        }
-    }
-    None
+    ["id", "name", "model", "slug"]
+        .iter()
+        .find_map(|key| match fields.get(*key) {
+            Some(serde_json::Value::String(text)) => {
+                let trimmed = text.trim();
+                (!trimmed.is_empty()).then(|| trimmed.to_string())
+            }
+            _ => None,
+        })
 }

@@ -2434,7 +2434,12 @@ fn breather_rows_for_user_prompt(
         .or_else(|| secondary_ids.first())
         .or_else(|| ordered_ids.first())
         .map(String::as_str);
-    let ecg = ecg_indicator(state.metrics.frame_count, seed_id, pulse_on, working);
+    // Animate whenever the label reflects in-progress pipeline work, not
+    // just active/queued agent turns — background genome stages (gate,
+    // review) and shadow runs have no active turn on `ordered_ids` but
+    // the breather should still breathe.
+    let animating = working || swarm_hint.is_some() || shadow_stage.is_some();
+    let ecg = ecg_indicator(state.metrics.frame_count, seed_id, pulse_on, animating);
 
     let mut rows = Vec::new();
     rows.push(ThreadRow {

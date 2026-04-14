@@ -1,6 +1,3 @@
-//! Claude backend: model discovery via CLI probing and binary inspection,
-//! family-based version selection, context window and effort metadata.
-
 use std::collections::HashMap;
 use std::fs;
 
@@ -44,7 +41,6 @@ pub(super) fn load_only_claude_agents(cli_available: bool) -> nit_core::AgentsSt
     agents
 }
 
-/// Try CLI-based discovery first, fall back to scanning the installed binary.
 pub(super) fn probe_claude_models() -> ModelProbeResult {
     let (cli_raw_output, cli_error) = probe_models_from_cli(
         "claude",
@@ -70,8 +66,8 @@ pub(super) fn probe_claude_models() -> ModelProbeResult {
 }
 
 pub(super) fn populate_claude_model_metadata(roster: &mut nit_core::AgentsState) {
-    let model_ids = roster.claude_models.clone();
-    for id in model_ids {
+    for idx in 0..roster.claude_models.len() {
+        let id = roster.claude_models[idx].clone();
         let window = if id.contains("[1m]") || id.contains("1m") {
             EXTENDED_CONTEXT_WINDOW
         } else {
@@ -90,9 +86,7 @@ pub(super) fn populate_claude_model_metadata(roster: &mut nit_core::AgentsState)
         roster
             .claude_default_effort
             .insert(id.clone(), "high".into());
-        roster
-            .claude_selected_effort
-            .insert(id.clone(), "high".into());
+        roster.claude_selected_effort.insert(id, "high".into());
     }
 }
 
@@ -113,7 +107,6 @@ pub(crate) fn parse_claude_models_from_binary(bytes: &[u8]) -> Vec<String> {
     models
 }
 
-/// Keep only the latest version per model family; returns all if no families recognized.
 pub(crate) fn select_current_claude_models(models: Vec<String>) -> Vec<String> {
     let mut deduped = models;
     deduped.sort();
@@ -158,14 +151,9 @@ fn probe_claude_models_from_install() -> Option<Vec<String>> {
     let executable = find_executable_in_path("claude")?;
     let bytes = fs::read(executable).ok()?;
     let models = parse_claude_models_from_binary(&bytes);
-    if models.is_empty() {
-        None
-    } else {
-        Some(models)
-    }
+    (!models.is_empty()).then_some(models)
 }
 
-/// Collect contiguous printable ASCII runs of at least `MIN_ASCII_RUN_LENGTH` bytes.
 fn extract_ascii_runs(bytes: &[u8]) -> Vec<String> {
     if bytes.is_empty() {
         return Vec::new();
@@ -197,11 +185,7 @@ fn extract_ascii_runs(bytes: &[u8]) -> Vec<String> {
 
 fn normalize_claude_model_token(raw: &str) -> Option<&str> {
     let stripped = raw.trim().strip_suffix("[1m]").unwrap_or(raw.trim());
-    if is_probable_claude_model(stripped) {
-        Some(stripped)
-    } else {
-        None
-    }
+    is_probable_claude_model(stripped).then_some(stripped)
 }
 
 const RECOGNIZED_FAMILIES: &[&str] = &["-haiku", "-sonnet", "-opus"];

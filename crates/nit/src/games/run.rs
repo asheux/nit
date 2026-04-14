@@ -19,26 +19,6 @@ use crate::cli::OutputFormat;
 
 const SAVE_DATA_REQUIRED_MSG: &str = "`save_data = false` is not supported for `games run`.";
 
-/// Phases of a headless tournament run, used for diagnostic tracing.
-#[derive(Debug, Clone, Copy)]
-enum RunPhase {
-    ConfigPrep,
-    Execution,
-    ArtifactWrite,
-    SummaryEmit,
-}
-
-impl std::fmt::Display for RunPhase {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::ConfigPrep => f.write_str("config-prep"),
-            Self::Execution => f.write_str("execution"),
-            Self::ArtifactWrite => f.write_str("artifact-write"),
-            Self::SummaryEmit => f.write_str("summary-emit"),
-        }
-    }
-}
-
 struct PreparedBatchConfig {
     resolved_path: PathBuf,
     source_text: String,
@@ -85,7 +65,7 @@ pub(super) fn run_games_headless(
 
     // Phase 3: build and execute the tournament kernel.
     if verbose_logging {
-        eprintln!("[{}] Starting tournament execution", RunPhase::Execution);
+        eprintln!("[execution] Starting tournament execution");
     }
     let engine = TournamentKernel::new(batch_cfg.normalized.clone());
     let snapshot_config = engine.config().clone();
@@ -104,7 +84,7 @@ pub(super) fn run_games_headless(
 
     // Phase 4: write artifacts to the run directory.
     if verbose_logging {
-        eprintln!("[{}] Writing run artifacts", RunPhase::ArtifactWrite);
+        eprintln!("[artifact-write] Writing run artifacts");
     }
     if let Some(ref artifact_layout) = storage_layout {
         super::write_run_artifacts(
@@ -175,23 +155,15 @@ fn prepare_batch_config(
 }
 
 fn log_run_preamble(toml_location: &Path, storage_layout: &Option<RunLayout>) {
-    eprintln!(
-        "[{}] Games config: {}",
-        RunPhase::ConfigPrep,
-        toml_location.display()
-    );
+    eprintln!("[config-prep] Games config: {}", toml_location.display());
     match storage_layout.as_ref() {
         Some(available_layout) => {
             eprintln!(
-                "[{}] Games summary: {}",
-                RunPhase::SummaryEmit,
+                "[summary-emit] Games summary: {}",
                 available_layout.summary_path.display(),
             );
         }
-        None => eprintln!(
-            "[{}] Games summary: disabled (`save_data = false`)",
-            RunPhase::SummaryEmit,
-        ),
+        None => eprintln!("[summary-emit] Games summary: disabled (`save_data = false`)"),
     }
 }
 
@@ -199,22 +171,13 @@ fn build_run_paths(
     storage_layout: &Option<RunLayout>,
     tournament_output: &super::TournamentRun,
 ) -> RunPaths {
+    let layout = storage_layout.as_ref();
     RunPaths {
-        summary: storage_layout
-            .as_ref()
-            .map(|l| l.summary_path.display().to_string()),
-        definitions: storage_layout
-            .as_ref()
-            .map(|l| l.definitions_path.display().to_string()),
-        results: storage_layout
-            .as_ref()
-            .map(|l| l.results_path.display().to_string()),
-        config: storage_layout
-            .as_ref()
-            .map(|l| l.config_path.display().to_string()),
-        analysis_dir: storage_layout
-            .as_ref()
-            .map(|l| l.analysis_dir.display().to_string()),
+        summary: layout.map(|l| l.summary_path.display().to_string()),
+        definitions: layout.map(|l| l.definitions_path.display().to_string()),
+        results: layout.map(|l| l.results_path.display().to_string()),
+        config: layout.map(|l| l.config_path.display().to_string()),
+        analysis_dir: layout.map(|l| l.analysis_dir.display().to_string()),
         events: tournament_output.event_log_path.clone(),
         history: tournament_output.history_log_path.clone(),
     }

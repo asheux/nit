@@ -3,7 +3,6 @@ use std::fs;
 
 use super::discover::{find_executable_in_path, probe_models_from_cli};
 
-/// Try CLI-based discovery first, fall back to scanning the installed npm package.
 pub(super) fn probe_gemini_models() -> (Vec<String>, Option<String>) {
     let cli_attempts: &[&[&str]] = &[
         &["models", "--json"],
@@ -27,7 +26,6 @@ pub(super) fn probe_gemini_models() -> (Vec<String>, Option<String>) {
     (filtered, probe_error)
 }
 
-/// Extract model identifiers from the Gemini CLI-core JavaScript source.
 pub(crate) fn parse_gemini_models_from_source(js_source: &str) -> Vec<String> {
     let const_bindings = collect_js_const_bindings(js_source);
     let set_member_tokens = extract_valid_models_set_members(js_source);
@@ -41,7 +39,6 @@ pub(crate) fn parse_gemini_models_from_source(js_source: &str) -> Vec<String> {
     resolved
 }
 
-/// Keep only the latest non-preview model per family (pro, flash, flash-lite).
 pub(crate) fn select_current_gemini_models(raw_models: Vec<String>) -> Vec<String> {
     let mut deduplicated = raw_models;
     deduplicated.sort();
@@ -68,24 +65,18 @@ pub(crate) fn select_current_gemini_models(raw_models: Vec<String>) -> Vec<Strin
     selected
 }
 
-// ── Classification Types ──
-
 struct ClassifiedModel {
     family_tag: &'static str,
     preview_variant: bool,
     version_components: Vec<u32>,
 }
 
-/// Tracks the best model discovered so far within a given family.
 struct ModelCandidate {
     preview_variant: bool,
     version_components: Vec<u32>,
     full_identifier: String,
 }
 
-// ── Package Discovery ──
-
-/// Locate models by reading the gemini-cli-core package source on disk.
 fn discover_models_from_package() -> Option<Vec<String>> {
     let gemini_bin = find_executable_in_path("gemini")?;
     let canonical_path = fs::canonicalize(gemini_bin).ok()?;
@@ -99,15 +90,12 @@ fn discover_models_from_package() -> Option<Vec<String>> {
     (!parsed.is_empty()).then_some(parsed)
 }
 
-// ── JavaScript Parsing Helpers ──
-
 fn resolve_set_member(token: &str, bindings: &HashMap<String, String>) -> Option<String> {
     strip_single_quotes(token)
         .map(|v| v.to_string())
         .or_else(|| bindings.get(token).cloned())
 }
 
-/// Parse `export const NAME = 'value';` lines into a name-to-value map.
 fn collect_js_const_bindings(js_source: &str) -> HashMap<String, String> {
     js_source.lines().filter_map(parse_js_const_line).collect()
 }
@@ -120,7 +108,6 @@ fn parse_js_const_line(line: &str) -> Option<(String, String)> {
     Some((binding_name.trim().to_string(), unquoted.to_string()))
 }
 
-/// Find the `VALID_GEMINI_MODELS = new Set([...])` block and return member tokens.
 fn extract_valid_models_set_members(js_source: &str) -> Vec<&str> {
     let set_constructor_prefix = "export const VALID_GEMINI_MODELS = new Set([";
 
@@ -141,18 +128,10 @@ fn extract_valid_models_set_members(js_source: &str) -> Vec<&str> {
         .collect()
 }
 
-/// Strip surrounding single quotes from a JS string literal.
 fn strip_single_quotes(text: &str) -> Option<&str> {
-    let trimmed = text.trim();
-    let inner = trimmed.strip_prefix('\'')?.strip_suffix('\'')?;
-    if inner.is_empty() {
-        None
-    } else {
-        Some(inner)
-    }
+    let inner = text.trim().strip_prefix('\'')?.strip_suffix('\'')?;
+    (!inner.is_empty()).then_some(inner)
 }
-
-// ── Model Classification and Selection ──
 
 fn classify_gemini_model(raw_identifier: &str) -> Option<ClassifiedModel> {
     let normalized_name = raw_identifier.trim().to_ascii_lowercase();
@@ -182,7 +161,6 @@ fn classify_gemini_model(raw_identifier: &str) -> Option<ClassifiedModel> {
     })
 }
 
-/// Record a classified model as the best for its family if it improves on the current pick.
 fn record_if_better(
     family_winners: &mut HashMap<&'static str, ModelCandidate>,
     classification: ClassifiedModel,
@@ -206,7 +184,6 @@ fn record_if_better(
     );
 }
 
-/// Preference order: stable over preview, higher version, shorter name.
 fn beats_incumbent(
     current_best: &ModelCandidate,
     challenger: &ClassifiedModel,
@@ -222,9 +199,6 @@ fn beats_incumbent(
             && super::prefer_shorter_model_name(challenger_name, &current_best.full_identifier))
 }
 
-// ── Version Parsing ──
-
-/// Parse "2.5" → [2, 5]. Rejects non-digit segments.
 fn parse_dotted_version(raw: &str) -> Option<Vec<u32>> {
     raw.split('.').map(parse_version_segment).collect()
 }

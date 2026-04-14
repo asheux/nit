@@ -124,20 +124,21 @@ fn populate_codex_metadata(agents: &mut nit_core::AgentsState, entries: &[CodexM
 fn build_codex_lanes(entries: Vec<CodexModelEntry>) -> Vec<nit_core::AgentLane> {
     entries
         .into_iter()
-        .map(|entry| nit_core::AgentLane {
-            id: entry.slug.clone(),
-            role: entry
-                .display_name
-                .clone()
-                .unwrap_or_else(|| entry.slug.clone()),
-            lane: "Codex".into(),
-            kind: nit_core::AgentLaneKind::Codex,
-            status: nit_core::AgentStatus::Idle,
-            heartbeat_age_secs: 0,
-            queue_len: 0,
-            current_mission: None,
-            last_message: entry.description.unwrap_or_default(),
-            shadow: false,
+        .map(|entry| {
+            let role = entry.display_name.unwrap_or_else(|| entry.slug.clone());
+            let description = entry.description.unwrap_or_default();
+            nit_core::AgentLane {
+                id: entry.slug,
+                role,
+                lane: "Codex".into(),
+                kind: nit_core::AgentLaneKind::Codex,
+                status: nit_core::AgentStatus::Idle,
+                heartbeat_age_secs: 0,
+                queue_len: 0,
+                current_mission: None,
+                last_message: description,
+                shadow: false,
+            }
         })
         .collect()
 }
@@ -180,7 +181,6 @@ fn pick_codex_reasoning_effort(model: &CodexModelEntry) -> Option<String> {
             .copied()
     };
 
-    // Prefer the model's default, then common tiers, then whatever is first.
     let chosen = find(default)
         .or_else(|| find("medium"))
         .or_else(|| find("high"))

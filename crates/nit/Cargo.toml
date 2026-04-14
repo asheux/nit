@@ -1,9 +1,9 @@
 [package]
 name = "nit"
-version = "0.1.0"
+version.workspace = true
 description = "Terminal-native AI agent orchestrator with TUI"
-edition = "2021"
-license = "MIT"
+edition.workspace = true
+license.workspace = true
 publish = false
 rust-version.workspace = true
 

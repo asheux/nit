@@ -32,7 +32,6 @@ fn parses_gemini_models_from_backend_source() {
         ]);
     "#;
 
-    // Assert directly on fn call — no intermediate binding needed.
     assert_eq!(
         parse_gemini_models_from_source(typescript_source),
         ["gemini-2.5-flash", "gemini-2.5-pro", "gemini-3-pro-preview"]
@@ -41,7 +40,7 @@ fn parses_gemini_models_from_backend_source() {
 
 #[test]
 fn keeps_only_current_gemini_models_by_family() {
-    let gemini_candidates: Vec<String> = [
+    let gemini_candidates = [
         "gemini-3-pro-preview",
         "gemini-3.1-pro-preview-customtools",
         "gemini-2.5-pro",
@@ -49,9 +48,8 @@ fn keeps_only_current_gemini_models_by_family() {
         "gemini-2.5-flash",
         "gemini-2.5-flash-lite",
     ]
-    .into_iter()
     .map(String::from)
-    .collect();
+    .to_vec();
 
     let filtered = select_current_gemini_models(gemini_candidates);
     assert_eq!(

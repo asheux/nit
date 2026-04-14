@@ -48,7 +48,7 @@ fn run_games_enumerate_fsm(
     let mut total = 0usize;
     for states in range {
         let remaining = limit.and_then(|limit| limit.checked_sub(total));
-        if matches!(remaining, Some(0)) {
+        if remaining == Some(0) {
             break;
         }
         total += enumerate_fsms(states, mode, remaining, canonical, |def: FsmDefinition| {
