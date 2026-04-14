@@ -427,6 +427,126 @@ fn parsimony_detects_comment_padding() {
 }
 
 #[test]
+fn parsimony_detects_duplicate_doc_comments() {
+    // Two consecutive identical `///` lines — the exact pattern that slipped
+    // through a refactor in nit-utils/src/hashing.rs. File padded to clear
+    // the trivial-file auto-pass threshold.
+    let code = "\
+/// BLAKE3 digest truncated to 64 bits (little-endian).
+/// BLAKE3 digest truncated to 64 bits (little-endian).
+#[must_use]
+pub fn stable_hash_bytes(data: &[u8]) -> u64 {
+    let digest = blake3::hash(data);
+    let bytes: [u8; 8] = digest.as_bytes()[..8]
+        .try_into()
+        .expect(\"blake3 digest is 32 bytes\");
+    u64::from_le_bytes(bytes)
+}
+
+pub struct SplitMix64 {
+    state: u64,
+}
+
+impl SplitMix64 {
+    pub fn new(seed: u64) -> Self {
+        Self { state: seed }
+    }
+
+    pub fn next_u64(&mut self) -> u64 {
+        self.state = self.state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = self.state;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^ (z >> 31)
+    }
+}
+";
+    let report = compute_genome_report_fast(code, std::path::Path::new("dup.rs"));
+
+    assert!(
+        report.parsimony.duplicate_comment_lines >= 1,
+        "Expected duplicate comment detection, got {}",
+        report.parsimony.duplicate_comment_lines,
+    );
+    assert!(
+        report.parsimony.bloat_detected,
+        "Expected bloat flagged for duplicate doc comments",
+    );
+    assert!(
+        report.tier <= GenomeTier::Methuselah,
+        "Expected tier capped at Methuselah, got {}",
+        report.tier,
+    );
+    assert!(
+        report
+            .recommendations
+            .iter()
+            .any(|r| r.metric == "duplicate_comments"),
+        "Expected duplicate_comments recommendation",
+    );
+}
+
+#[test]
+fn parsimony_allows_blank_doc_dividers() {
+    // Blank `///` lines used as section separators are fine — only non-blank
+    // repeats count. Padded past the trivial-file threshold.
+    let code = "\
+/// Module overview.
+///
+/// Another paragraph of the doc.
+///
+/// Yet another paragraph.
+pub fn example_one() -> u32 { 1 }
+
+pub fn example_two() -> u32 { 2 }
+
+pub struct Holder { a: u32, b: u32 }
+
+impl Holder {
+    pub fn new(a: u32, b: u32) -> Self { Self { a, b } }
+    pub fn sum(&self) -> u32 { self.a + self.b }
+    pub fn product(&self) -> u32 { self.a * self.b }
+    pub fn diff(&self) -> u32 { self.a.saturating_sub(self.b) }
+}
+";
+    let report = compute_genome_report_fast(code, std::path::Path::new("divider.rs"));
+
+    assert_eq!(
+        report.parsimony.duplicate_comment_lines, 0,
+        "Blank `///` dividers should not count as duplicates",
+    );
+}
+
+#[test]
+fn parsimony_ignores_non_consecutive_repeats() {
+    // Two `// TODO` lines separated by code — not consecutive, should not flag.
+    // Padded past the trivial-file threshold so parsimony actually runs.
+    let code = "\
+// TODO: fix
+fn a() -> u32 { 1 }
+
+// TODO: fix
+fn b() -> u32 { 2 }
+
+pub struct Pair { x: u32, y: u32 }
+
+impl Pair {
+    pub fn new(x: u32, y: u32) -> Self { Self { x, y } }
+    pub fn sum(&self) -> u32 { self.x + self.y }
+    pub fn product(&self) -> u32 { self.x * self.y }
+    pub fn max(&self) -> u32 { self.x.max(self.y) }
+    pub fn min(&self) -> u32 { self.x.min(self.y) }
+}
+";
+    let report = compute_genome_report_fast(code, std::path::Path::new("todos.rs"));
+
+    assert_eq!(
+        report.parsimony.duplicate_comment_lines, 0,
+        "Non-consecutive identical comments should not count",
+    );
+}
+
+#[test]
 fn soft_bottleneck_gives_modest_lift() {
     // With pure min, tier = from_generations(480) = Spaceship.
     // Soft bottleneck should give a small lift from the gap to next encoder.

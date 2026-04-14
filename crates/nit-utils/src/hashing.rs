@@ -1,5 +1,4 @@
 /// BLAKE3 digest truncated to 64 bits (little-endian).
-/// BLAKE3 digest truncated to 64 bits (little-endian).
 #[must_use]
 pub fn stable_hash_bytes(data: &[u8]) -> u64 {
     let digest = blake3::hash(data);

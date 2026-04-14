@@ -57,6 +57,12 @@ pub struct ParsimonyInfo {
     /// extraction or stub duplication rather than meaningful decomposition.
     #[serde(default)]
     pub tiny_fn_fraction: f32,
+    /// Count of consecutive-duplicate `//` / `///` comment lines (each repeat
+    /// of a non-blank comment after an identical prior comment counts once).
+    /// A single duplicate is almost always a merge/refactor accident — it
+    /// never carries new information — so any occurrence is flagged.
+    #[serde(default)]
+    pub duplicate_comment_lines: usize,
     /// `true` when the file shows signs of over-engineering for genome scores.
     /// When set, the tier is capped at Methuselah (IV).
     pub bloat_detected: bool,
@@ -70,6 +76,7 @@ impl Default for ParsimonyInfo {
             item_density: 0.0,
             comment_ratio: 0.0,
             tiny_fn_fraction: 0.0,
+            duplicate_comment_lines: 0,
             bloat_detected: false,
         }
     }
@@ -233,6 +240,9 @@ for token diversity.\n\
   - Files with >40% comment lines are flagged and tier-capped automatically.\n\
   - Files where >50% of functions have <= 5 lines are flagged and \
 tier-capped automatically.\n\
+  - Any two consecutive identical `//` or `///` comment lines are flagged \
+and tier-capped automatically. A repeated comment adds no information; \
+it is always a merge or refactor accident.\n\
 Good code naturally scores well. Over-engineered code is caught and penalized.\n\
 \n\
 HOW YOU ARE MEASURED:\n\
@@ -664,6 +674,11 @@ const PARSIMONY_TINY_FN_MIN_COUNT: usize = 12;
 /// to explain non-obvious logic.
 const PARSIMONY_COMMENT_RATIO_THRESHOLD: f32 = 0.40;
 
+/// Any occurrence of consecutive identical non-blank comment lines is a
+/// duplicate-doc accident (a merge artifact or a refactor that forgot to
+/// dedupe). Legitimate comments carry new information; a repeat never does.
+const PARSIMONY_DUPLICATE_COMMENT_THRESHOLD: usize = 1;
+
 /// Compute parsimony metrics from the source text using tree-sitter AST analysis.
 fn compute_parsimony(text: &str, file_path: &Path, significant_lines: usize) -> ParsimonyInfo {
     let tree = match ts_parse(text, file_path) {
@@ -701,8 +716,14 @@ fn compute_parsimony(text: &str, file_path: &Path, significant_lines: usize) -> 
     };
 
     // Comment ratio: comment lines / total non-blank lines.
+    // Also scans for consecutive-duplicate line comments (// / ///) — each
+    // repeat of a non-blank comment after an identical prior comment counts
+    // once. Blank doc dividers (`//`, `///`) and any non-comment line break
+    // the chain so repetition across code blocks isn't falsely counted.
     let mut comment_lines: usize = 0;
     let mut non_blank_lines: usize = 0;
+    let mut duplicate_comment_lines: usize = 0;
+    let mut prev_nonblank_comment: Option<&str> = None;
     for line in text.lines() {
         let t = line.trim();
         if t.is_empty() {
@@ -711,6 +732,21 @@ fn compute_parsimony(text: &str, file_path: &Path, significant_lines: usize) -> 
         non_blank_lines += 1;
         if is_comment_line(t) {
             comment_lines += 1;
+            if t.starts_with("//") {
+                let content = t.trim_start_matches('/').trim_start_matches('!').trim();
+                if content.is_empty() {
+                    prev_nonblank_comment = None;
+                } else {
+                    if prev_nonblank_comment == Some(t) {
+                        duplicate_comment_lines += 1;
+                    }
+                    prev_nonblank_comment = Some(t);
+                }
+            } else {
+                prev_nonblank_comment = None;
+            }
+        } else {
+            prev_nonblank_comment = None;
         }
     }
     let comment_ratio = if non_blank_lines > 0 {
@@ -738,7 +774,11 @@ fn compute_parsimony(text: &str, file_path: &Path, significant_lines: usize) -> 
     let too_many_tiny = fn_count >= PARSIMONY_TINY_FN_MIN_COUNT
         && tiny_fn_fraction > PARSIMONY_TINY_FN_FRACTION_THRESHOLD;
 
-    let bloat_detected = over_split || comment_padded || too_many_tiny;
+    let duplicate_comments_flagged =
+        duplicate_comment_lines >= PARSIMONY_DUPLICATE_COMMENT_THRESHOLD;
+
+    let bloat_detected =
+        over_split || comment_padded || too_many_tiny || duplicate_comments_flagged;
 
     ParsimonyInfo {
         fn_count,
@@ -746,6 +786,7 @@ fn compute_parsimony(text: &str, file_path: &Path, significant_lines: usize) -> 
         item_density,
         comment_ratio,
         tiny_fn_fraction,
+        duplicate_comment_lines,
         bloat_detected,
     }
 }
@@ -896,6 +937,21 @@ fn generate_parsimony_recommendations(
                 "Comment ratio is {:.0}%. Approaching the 40% parsimony threshold. \
                  Ensure comments explain non-obvious logic rather than restating code.",
                 parsimony.comment_ratio * 100.0,
+            ),
+            location: None,
+        });
+    }
+
+    // Consecutive-duplicate comment lines: always a merge/refactor accident.
+    if parsimony.duplicate_comment_lines >= PARSIMONY_DUPLICATE_COMMENT_THRESHOLD {
+        recs.push(GenomeRecommendation {
+            metric: "duplicate_comments".into(),
+            severity: RecommendationSeverity::Warning,
+            message: format!(
+                "Found {} consecutive-duplicate comment line(s). Tier capped at \
+                 IV (Methuselah). A repeated comment never adds information — \
+                 delete the duplicate.",
+                parsimony.duplicate_comment_lines,
             ),
             location: None,
         });
