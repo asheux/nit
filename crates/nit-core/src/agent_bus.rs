@@ -101,6 +101,8 @@ pub enum AgentBusEvent {
         token_count: Option<AgentTokenCount>,
         message: String,
     },
+    /// Emit a stigmergic signal into the substrate.
+    EmitSignal { signal: crate::substrate::Signal },
 }
 
 impl AgentBusEvent {
@@ -458,6 +460,14 @@ impl AgentBusEvent {
                 // to background threads by the TUI event loop (genome_worker)
                 // to avoid blocking the main thread.
                 state.genome_turn_active.remove(agent_id);
+
+                state.substrate.advance_generation();
+                state
+                    .substrate
+                    .prune_signals_below(crate::substrate::SubstrateState::DEFAULT_PRUNE_THRESHOLD);
+            }
+            AgentBusEvent::EmitSignal { signal } => {
+                state.substrate.emit_signal(signal.clone());
             }
         }
 

@@ -378,3 +378,62 @@ fn turn_completed_prompt_idx_checks_both_codex_and_claude_maps() {
         .get("claude-opus")
         .is_none());
 }
+
+#[test]
+fn emit_signal_event_round_trip_and_apply() {
+    let signal = crate::substrate::Signal {
+        id: "1-agent-a-0".into(),
+        kind: crate::substrate::SignalKind::Warning,
+        posted_by: "agent-a".into(),
+        posted_at_gen: 0,
+        target: crate::substrate::SignalTarget::Global,
+        initial_strength: 1.0,
+        payload: serde_json::Value::Null,
+    };
+    let event = AgentBusEvent::EmitSignal {
+        signal: signal.clone(),
+    };
+    let json = serde_json::to_string(&event).unwrap();
+    let restored: AgentBusEvent = serde_json::from_str(&json).unwrap();
+
+    let mut state = test_state();
+    restored.apply(&mut state);
+    assert_eq!(state.substrate.signals.len(), 1);
+    assert!(state.substrate.signals.contains_key(&signal.id));
+}
+
+#[test]
+fn turn_completed_advances_substrate_generation() {
+    let mut state = test_state();
+    add_codex_agent(&mut state, "gpt-test");
+
+    // Pre-seed a low-strength HelpNeeded signal that will fall below the
+    // prune threshold after the TurnCompleted tick advances the generation.
+    // HelpNeeded decay_rate = 0.5. With an initial strength of 0.05 at gen=0,
+    // at gen=1 the effective strength is 0.025 < 0.05 threshold.
+    let weak = crate::substrate::Signal {
+        id: "seed".into(),
+        kind: crate::substrate::SignalKind::HelpNeeded,
+        posted_by: "seed".into(),
+        posted_at_gen: 0,
+        target: crate::substrate::SignalTarget::Global,
+        initial_strength: 0.05,
+        payload: serde_json::Value::Null,
+    };
+    state.substrate.emit_signal(weak);
+    assert_eq!(state.substrate.current_generation(), 0);
+    assert_eq!(state.substrate.signals.len(), 1);
+
+    let event = AgentBusEvent::TurnCompleted {
+        agent_id: "gpt-test".into(),
+        mission_id: None,
+        thread_id: None,
+        token_count: None,
+        message: "ok".into(),
+    };
+    event.apply(&mut state);
+
+    assert_eq!(state.substrate.current_generation(), 1);
+    assert!(state.substrate.signals.is_empty());
+}
+

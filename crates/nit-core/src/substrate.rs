@@ -4,15 +4,72 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+/// Stable signal id. Format: "{posted_at_gen}-{agent_id}-{counter}".
+/// Collision-free under the single-writer `apply()` invariant.
+pub type SignalId = String;
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SignalKind {
+    Warning,
+    Lead,
+    Deadend,
+    HelpNeeded,
+    ClaimViolation,
+    DoneMarker,
+}
+
+impl SignalKind {
+    pub fn decay_rate(self) -> f32 {
+        match self {
+            SignalKind::HelpNeeded => 0.5,
+            SignalKind::Lead => 0.7,
+            SignalKind::Warning => 0.8,
+            SignalKind::ClaimViolation => 0.85,
+            SignalKind::Deadend => 0.9,
+            SignalKind::DoneMarker => 0.95,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum SignalTarget {
+    File { path: PathBuf },
+    Agent { agent_id: String },
+    Global,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Signal {
+    pub id: SignalId,
+    pub kind: SignalKind,
+    pub posted_by: String,
+    pub posted_at_gen: u64,
+    pub target: SignalTarget,
+    pub initial_strength: f32,
+    #[serde(default)]
+    pub payload: serde_json::Value,
+}
+
+impl Signal {
+    pub fn effective_strength(&self, current_gen: u64) -> f32 {
+        let delta = current_gen.saturating_sub(self.posted_at_gen) as i32;
+        self.initial_strength * self.kind.decay_rate().powi(delta)
+    }
+}
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct SubstrateState {
     pub generation: u64,
     #[serde(default)]
-    pub signals: HashMap<String, serde_json::Value>,
+    pub signals: HashMap<SignalId, Signal>,
     #[serde(default)]
     pub claims: HashMap<String, serde_json::Value>,
     #[serde(default)]
     pub observations: Vec<serde_json::Value>,
+    #[serde(default)]
+    pub signal_counter: u64,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -24,6 +81,9 @@ pub enum SubstrateError {
 }
 
 impl SubstrateState {
+    pub const DEFAULT_PRUNE_THRESHOLD: f32 = 0.05;
+    pub const DEFAULT_INITIAL_STRENGTH: f32 = 1.0;
+
     pub fn new() -> Self {
         Self::default()
     }
@@ -37,7 +97,17 @@ impl SubstrateState {
         self.generation
     }
 
-    pub(crate) fn signals(&self) -> &HashMap<String, serde_json::Value> {
+    pub fn next_signal_id(&mut self, agent_id: &str) -> SignalId {
+        let id = format!("{}-{}-{}", self.generation, agent_id, self.signal_counter);
+        self.signal_counter = self.signal_counter.saturating_add(1);
+        id
+    }
+
+    pub fn emit_signal(&mut self, signal: Signal) {
+        self.signals.insert(signal.id.clone(), signal);
+    }
+
+    pub(crate) fn signals(&self) -> &HashMap<SignalId, Signal> {
         &self.signals
     }
     pub(crate) fn claims(&self) -> &HashMap<String, serde_json::Value> {
@@ -45,6 +115,32 @@ impl SubstrateState {
     }
     pub(crate) fn observations(&self) -> &[serde_json::Value] {
         &self.observations
+    }
+
+    pub fn signals_iter(&self) -> impl Iterator<Item = (&Signal, f32)> + '_ {
+        let gen = self.generation;
+        self.signals
+            .values()
+            .map(move |s| (s, s.effective_strength(gen)))
+    }
+
+    pub fn signals_by_kind(&self, kind: SignalKind) -> impl Iterator<Item = (&Signal, f32)> + '_ {
+        self.signals_iter().filter(move |(s, _)| s.kind == kind)
+    }
+
+    pub fn signals_by_target<'a>(
+        &'a self,
+        target: &'a SignalTarget,
+    ) -> impl Iterator<Item = (&'a Signal, f32)> + 'a {
+        self.signals_iter().filter(move |(s, _)| &s.target == target)
+    }
+
+    pub fn prune_signals_below(&mut self, threshold: f32) -> usize {
+        let gen = self.generation;
+        let before = self.signals.len();
+        self.signals
+            .retain(|_, s| s.effective_strength(gen) >= threshold);
+        before - self.signals.len()
     }
 
     fn state_path(workspace_root: &Path) -> PathBuf {

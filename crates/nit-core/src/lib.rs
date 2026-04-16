@@ -71,5 +71,7 @@ pub use state::{
     UiSelectionPane, VisualizerMode, VisualizerRuleEntry, VisualizerState, YankKind,
     CONSOLE_SCROLL_BOTTOM,
 };
-pub use substrate::{SubstrateError, SubstrateState};
+pub use substrate::{
+    Signal, SignalId, SignalKind, SignalTarget, SubstrateError, SubstrateState,
+};
 pub use viewport::Viewport;
