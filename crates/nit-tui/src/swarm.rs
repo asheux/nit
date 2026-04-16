@@ -1571,6 +1571,14 @@ impl SwarmRuntime {
         self.runs.contains_key(mission_id)
     }
 
+    /// True once the planner's synthesis step has moved the run into
+    /// `completed_runs`. Use this as the source of truth for "is the swarm
+    /// done" — per-agent message scans can miss clones whose tasks were
+    /// skipped or never dispatched.
+    pub fn mission_is_complete(&self, mission_id: &str) -> bool {
+        self.completed_runs.contains_key(mission_id)
+    }
+
     /// Returns the current swarm stage label (e.g. "VERIFY", "SYNTH") for a mission.
     pub fn swarm_stage_label(&self, mission_id: &str) -> Option<&'static str> {
         self.run_for_mission(mission_id)
@@ -2193,6 +2201,12 @@ impl SwarmRuntime {
                                 .as_deref()
                                 .or(parsed.integrator_agent_id.as_deref()),
                         ));
+                        parsed.warnings.extend(ensure_agent_coverage(
+                            &mut parsed.tasks,
+                            run.template,
+                            run.mission_kind,
+                            &available,
+                        ));
 
                         let dag_mode = match read_workspace_dag_validation_mode(
                             state.workspace_root.as_path(),
@@ -2659,6 +2673,12 @@ impl SwarmRuntime {
                             run.integrator_agent_id
                                 .as_deref()
                                 .or(parsed.integrator_agent_id.as_deref()),
+                        ));
+                        parsed.warnings.extend(ensure_agent_coverage(
+                            &mut parsed.tasks,
+                            run.template,
+                            run.mission_kind,
+                            &available,
                         ));
 
                         let dag_mode = match read_workspace_dag_validation_mode(
@@ -3384,6 +3404,101 @@ fn ensure_proposer_task(
     warnings.push(format!(
         "Plan safety net: demoted task '{demoted_id}' (agent '{demoted_agent}') to role=propose because the parallel template plan had no proposer/recon lane.",
     ));
+    warnings
+}
+
+/// Safety net for the parallel template: synthesize a read-only task for
+/// every agent the planner left without one. The planner prompt says "prefer
+/// ONE task per agent id" but the LLM sometimes drops a role it deems
+/// redundant, leaving a provisioned clone stuck at `swarm_pending`. This
+/// gives that clone a role-appropriate review/research lane so the whole
+/// swarm's work completes predictably.
+///
+/// Only runs for `Parallel`. `Lab` allows multiple tasks per agent
+/// (sequentially) and may deliberately leave agents silent; `Bulk` uses an
+/// explicit proposers -> judge -> integrate shape whose coverage is already
+/// checked by `validate_bulk_plan`.
+fn ensure_agent_coverage(
+    tasks: &mut Vec<SwarmTask>,
+    template: SwarmTemplate,
+    mission_kind: SwarmMissionKind,
+    available_agents: &[String],
+) -> Vec<String> {
+    if !matches!(template, SwarmTemplate::Parallel) {
+        return Vec::new();
+    }
+
+    let assigned: HashSet<&str> = tasks.iter().map(|t| t.agent_id.as_str()).collect();
+    let uncovered: Vec<String> = available_agents
+        .iter()
+        .filter(|id| !assigned.contains(id.as_str()))
+        .cloned()
+        .collect();
+    if uncovered.is_empty() {
+        return Vec::new();
+    }
+
+    let mut used_ids: HashSet<String> = tasks.iter().map(|t| t.id.clone()).collect();
+    let mut warnings = Vec::new();
+    let mut counter = 1usize;
+
+    for agent_id in uncovered.iter() {
+        let (role, title, prompt, artifacts, done_when) = match mission_kind {
+            SwarmMissionKind::Research => (
+                "research",
+                "Independent review & gap check",
+                "Independently scan the operator request and sibling research outputs. Surface any missing sources, weak assumptions, or overlooked strategies. Do not repeat work already covered by a dependency task.",
+                vec!["sources".to_string(), "risks".to_string()],
+                Some("Evidence gaps and overlooked directions are identified.".to_string()),
+            ),
+            SwarmMissionKind::ComputationalResearch => (
+                COMPUTATIONAL_RESEARCH_ROLE,
+                "Independent methods & sanity check",
+                "Independently review the operator request and sibling computational-research outputs. Sanity-check methods, assumptions, and proposed experiments; call out missing baselines or risks. Do not repeat work already covered by a dependency task.",
+                vec!["methods".to_string(), "risks".to_string()],
+                Some("Method gaps and missing baselines are identified.".to_string()),
+            ),
+            SwarmMissionKind::General => (
+                "review",
+                "Independent review",
+                "Review the current approach for correctness, UX, and maintainability. Call out risks, regressions, and missing tests. Suggest follow-ups as text only; do not edit the workspace. Do not repeat work already covered by a dependency task.",
+                vec!["risks".to_string(), "commands".to_string()],
+                Some("We have an independent critique of the approach and the main risks.".to_string()),
+            ),
+        };
+
+        let task_id = loop {
+            let candidate = format!("cover-{counter:02}");
+            counter = counter.saturating_add(1);
+            if !used_ids.contains(&candidate) {
+                used_ids.insert(candidate.clone());
+                break candidate;
+            }
+        };
+
+        warnings.push(format!(
+            "Plan safety net: injected '{role}' task '{task_id}' for agent '{agent_id}' because the planner omitted it."
+        ));
+
+        tasks.push(SwarmTask {
+            id: task_id,
+            agent_id: agent_id.clone(),
+            role: Some(role.to_string()),
+            title: title.to_string(),
+            task_prompt: prompt.to_string(),
+            deps: Vec::new(),
+            writes: false,
+            artifacts,
+            done_when,
+            state: SwarmTaskState::Pending,
+            output: None,
+            parsed_artifacts: None,
+            expected_artifacts_missing: false,
+            failed: false,
+            retries: 0,
+        });
+    }
+
     warnings
 }
 

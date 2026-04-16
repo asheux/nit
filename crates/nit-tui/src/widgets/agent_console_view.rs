@@ -2377,14 +2377,23 @@ fn breather_rows_for_user_prompt(
                 .iter()
                 .any(|turn| turn.agent_id == *id)
     });
-    let all_swarm_done = swarm_mission_id.is_some_and(|mid| {
-        !swarm_assigned_ids.is_empty()
-            && swarm_assigned_ids.iter().all(|id| {
-                state.agents.messages.iter().any(|msg| {
-                    msg.mission_id.as_deref() == Some(mid)
-                        && msg.agent_id.as_deref() == Some(id.as_str())
+    // Source of truth (production): the swarm runtime moves a run into
+    // `completed_runs` once the planner's synthesis step lands. Per-agent
+    // message scans miss clones whose tasks were skipped or never
+    // dispatched, leaving the UI stuck at "Waiting ..." even though the
+    // swarm was done. Fall back to the message scan only when no swarm
+    // runtime is provided (test-only path).
+    let all_swarm_done = swarm_mission_id.is_some_and(|mid| match swarm {
+        Some(s) => s.mission_is_complete(mid),
+        None => {
+            !swarm_assigned_ids.is_empty()
+                && swarm_assigned_ids.iter().all(|id| {
+                    state.agents.messages.iter().any(|msg| {
+                        msg.mission_id.as_deref() == Some(mid)
+                            && msg.agent_id.as_deref() == Some(id.as_str())
+                    })
                 })
-            })
+        }
     });
     let working = any_active || any_queued;
     let swarm_phase = swarm_mission_id.and_then(|mid| swarm.and_then(|s| s.swarm_stage_label(mid)));
@@ -2434,11 +2443,10 @@ fn breather_rows_for_user_prompt(
         .or_else(|| secondary_ids.first())
         .or_else(|| ordered_ids.first())
         .map(String::as_str);
-    // Animate whenever the label reflects in-progress pipeline work, not
-    // just active/queued agent turns — background genome stages (gate,
-    // review) and shadow runs have no active turn on `ordered_ids` but
-    // the breather should still breathe.
-    let animating = working || swarm_hint.is_some() || shadow_stage.is_some();
+    // Animate whenever the label isn't "Done" — even transitional states
+    // like "Waiting ..." between swarm stages should breathe so the UI
+    // doesn't look frozen to the user.
+    let animating = label.as_ref() != "Done";
     let ecg = ecg_indicator(state.metrics.frame_count, seed_id, pulse_on, animating);
 
     let mut rows = Vec::new();

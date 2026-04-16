@@ -2399,6 +2399,183 @@ fn ensure_proposer_task_falls_back_when_all_integrates_on_integrator() {
 }
 
 // ---------------------------------------------------------------------------
+// ensure_agent_coverage safety net — guarantees that a parallel-template
+// plan never leaves a provisioned clone without a task. Without this, the
+// LLM planner occasionally drops an agent it deems redundant, leaving the
+// clone stuck at `swarm_pending` and stalling the swarm.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn ensure_agent_coverage_injects_review_task_for_uncovered_general_agent() {
+    // Planner produced tasks for 2 of 3 available agents; the 3rd should get
+    // a synthesized review task so it isn't left idle.
+    let mut tasks = vec![
+        make_writer_task("t1", "agent-a", Some("propose"), false),
+        make_writer_task("t2", "agent-b", Some("integrate"), true),
+    ];
+    let available = vec![
+        "agent-a".to_string(),
+        "agent-b".to_string(),
+        "agent-c".to_string(),
+    ];
+    let warnings = ensure_agent_coverage(
+        &mut tasks,
+        SwarmTemplate::Parallel,
+        SwarmMissionKind::General,
+        &available,
+    );
+    assert_eq!(tasks.len(), 3, "uncovered agent must receive a task");
+    let injected = tasks.last().expect("at least one injected task");
+    assert_eq!(injected.agent_id, "agent-c");
+    assert_eq!(injected.role.as_deref(), Some("review"));
+    assert!(!injected.writes, "injected task must be read-only");
+    assert!(injected.deps.is_empty(), "injected task should not add deps");
+    assert!(
+        warnings.iter().any(|w| w.contains("agent-c")),
+        "warning should name the uncovered agent, got: {warnings:?}"
+    );
+}
+
+#[test]
+fn ensure_agent_coverage_uses_research_role_for_research_missions() {
+    let mut tasks = vec![make_writer_task(
+        "t1",
+        "agent-a",
+        Some("research"),
+        false,
+    )];
+    let available = vec!["agent-a".to_string(), "agent-b".to_string()];
+    let _warnings = ensure_agent_coverage(
+        &mut tasks,
+        SwarmTemplate::Parallel,
+        SwarmMissionKind::Research,
+        &available,
+    );
+    let injected = tasks.last().expect("one injected task");
+    assert_eq!(injected.agent_id, "agent-b");
+    assert_eq!(injected.role.as_deref(), Some("research"));
+}
+
+#[test]
+fn ensure_agent_coverage_uses_computational_research_for_that_mission() {
+    let mut tasks = vec![make_writer_task(
+        "t1",
+        "agent-a",
+        Some(COMPUTATIONAL_RESEARCH_ROLE),
+        false,
+    )];
+    let available = vec!["agent-a".to_string(), "agent-b".to_string()];
+    let _warnings = ensure_agent_coverage(
+        &mut tasks,
+        SwarmTemplate::Parallel,
+        SwarmMissionKind::ComputationalResearch,
+        &available,
+    );
+    let injected = tasks.last().expect("one injected task");
+    assert_eq!(injected.agent_id, "agent-b");
+    assert_eq!(injected.role.as_deref(), Some(COMPUTATIONAL_RESEARCH_ROLE));
+}
+
+#[test]
+fn ensure_agent_coverage_noop_when_all_agents_covered() {
+    let mut tasks = vec![
+        make_writer_task("t1", "agent-a", Some("propose"), false),
+        make_writer_task("t2", "agent-b", Some("integrate"), true),
+    ];
+    let available = vec!["agent-a".to_string(), "agent-b".to_string()];
+    let before = task_fingerprint(&tasks);
+    let warnings = ensure_agent_coverage(
+        &mut tasks,
+        SwarmTemplate::Parallel,
+        SwarmMissionKind::General,
+        &available,
+    );
+    assert!(
+        warnings.is_empty(),
+        "no-op when every agent already has a task, got: {warnings:?}"
+    );
+    assert_eq!(task_fingerprint(&tasks), before);
+}
+
+#[test]
+fn ensure_agent_coverage_noop_for_lab_template() {
+    // Lab intentionally allows multiple tasks per agent and silent agents,
+    // so the safety net should not fire.
+    let mut tasks = vec![make_writer_task(
+        "t1",
+        "agent-a",
+        Some("integrate"),
+        true,
+    )];
+    let available = vec![
+        "agent-a".to_string(),
+        "agent-b".to_string(),
+        "agent-c".to_string(),
+    ];
+    let before = task_fingerprint(&tasks);
+    let warnings = ensure_agent_coverage(
+        &mut tasks,
+        SwarmTemplate::Lab,
+        SwarmMissionKind::General,
+        &available,
+    );
+    assert!(warnings.is_empty(), "lab template opts out of coverage fill");
+    assert_eq!(task_fingerprint(&tasks), before);
+}
+
+#[test]
+fn ensure_agent_coverage_noop_for_bulk_template() {
+    // Bulk has its own validate_bulk_plan check for proposer/judge/integrate
+    // roles; ensure_agent_coverage should not pile on.
+    let mut tasks = vec![
+        make_writer_task("propose-01", "agent-a", Some("propose"), false),
+        make_writer_task("judge", "agent-b", Some("judge"), false),
+        make_writer_task("integrate", "agent-c", Some("integrate"), true),
+    ];
+    let available = vec![
+        "agent-a".to_string(),
+        "agent-b".to_string(),
+        "agent-c".to_string(),
+        "agent-d".to_string(),
+    ];
+    let before = task_fingerprint(&tasks);
+    let warnings = ensure_agent_coverage(
+        &mut tasks,
+        SwarmTemplate::Bulk,
+        SwarmMissionKind::General,
+        &available,
+    );
+    assert!(warnings.is_empty(), "bulk template opts out of coverage fill");
+    assert_eq!(task_fingerprint(&tasks), before);
+}
+
+#[test]
+fn ensure_agent_coverage_avoids_id_collision_with_existing_tasks() {
+    // If the planner already used `cover-01` as a task id, the injected task
+    // must pick a different id instead of silently dropping via duplicate-id
+    // filter downstream.
+    let mut tasks = vec![
+        make_writer_task("cover-01", "agent-a", Some("propose"), false),
+        make_writer_task("cover-02", "agent-b", Some("integrate"), true),
+    ];
+    let available = vec![
+        "agent-a".to_string(),
+        "agent-b".to_string(),
+        "agent-c".to_string(),
+    ];
+    let _warnings = ensure_agent_coverage(
+        &mut tasks,
+        SwarmTemplate::Parallel,
+        SwarmMissionKind::General,
+        &available,
+    );
+    let injected = tasks.last().expect("one injected task");
+    assert_eq!(injected.agent_id, "agent-c");
+    assert_ne!(injected.id, "cover-01");
+    assert_ne!(injected.id, "cover-02");
+}
+
+// ---------------------------------------------------------------------------
 // assign_clone_roles_for_parallel_coverage — proactively assigns role hints
 // to fresh clones so the parallel-template swarm covers a propose lane and a
 // review/test lane, mirroring the lab template's read-only worker structure.
