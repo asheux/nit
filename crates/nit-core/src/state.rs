@@ -2034,6 +2034,8 @@ pub struct AppState {
     /// Active sub-view for the structural quality pane: Stats or FileScores.
     #[serde(skip)]
     pub gate_monitor_sub_view: GateMonitorSubView,
+    #[serde(default)]
+    pub substrate: crate::substrate::SubstrateState,
 }
 
 /// Sub-view toggle for the CODE STRUCTURAL QUALITY pane.
@@ -2250,6 +2252,7 @@ impl AppState {
             gate_monitor_scroll: 0,
             gate_monitor_last_max_scroll: usize::MAX,
             gate_monitor_sub_view: GateMonitorSubView::default(),
+            substrate: crate::substrate::SubstrateState::default(),
         }
     }
 

@@ -68,6 +68,7 @@ fn main() -> anyhow::Result<()> {
 
     let notes_buffer = load_notes(&workspace_root);
     let mut app_state = nit_core::AppState::new(workspace_root, editor_buffer, notes_buffer);
+    app_state.substrate = nit_core::SubstrateState::load(&app_state.workspace_root);
     configure_app_state(
         &mut app_state,
         backend_selection,

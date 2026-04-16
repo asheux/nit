@@ -19,6 +19,7 @@ pub mod rule_protocol;
 pub mod search;
 pub mod seed;
 pub mod state;
+pub mod substrate;
 pub mod viewport;
 
 pub use actions::Action;
@@ -70,4 +71,5 @@ pub use state::{
     UiSelectionPane, VisualizerMode, VisualizerRuleEntry, VisualizerState, YankKind,
     CONSOLE_SCROLL_BOTTOM,
 };
+pub use substrate::{SubstrateError, SubstrateState};
 pub use viewport::Viewport;
