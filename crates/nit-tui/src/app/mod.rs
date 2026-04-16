@@ -1451,7 +1451,7 @@ fn run_loop(
                 &mut gol_petri,
                 &mut games_petri,
                 fuzzy_runtime.preview_model.as_ref(),
-                fuzzy_runtime.preview_scroll_delta,
+                &mut fuzzy_runtime.preview_scroll_delta,
                 &vitals_snapshot,
             )?;
             needs_redraw = false;
@@ -2558,7 +2558,7 @@ fn draw(
     gol_petri: &mut Option<PetriDishRuntime>,
     games_petri: &mut Option<GamesPetriDishRuntime>,
     fuzzy_preview: Option<&PreviewModel>,
-    fuzzy_preview_scroll_delta: i32,
+    fuzzy_preview_scroll_delta: &mut i32,
     vitals: &LabVitalsSnapshot,
 ) -> io::Result<()> {
     let start = Instant::now();
@@ -5238,6 +5238,15 @@ fn map_key_to_action(key: KeyEvent, state: &AppState, input: &mut InputState) ->
         return Some(Action::FocusPane(focus_by_direction(state, dir)));
     }
 
+    let had_pending_editor_op = input.pending_editor_op.is_some();
+    if let Some(action) = handle_editor_pending_op(&key, state, input) {
+        return Some(action);
+    }
+    if had_pending_editor_op {
+        // Pending vim op consumed or cancelled the key — don't let it fall through.
+        return None;
+    }
+
     if let Some(action) = handle_insert_chords(&key, state, input) {
         return Some(action);
     }
@@ -5496,6 +5505,245 @@ fn map_key_to_action(key: KeyEvent, state: &AppState, input: &mut InputState) ->
             modifiers: KeyModifiers::NONE,
             ..
         } if is_motion_mode(state) => Some(Action::MoveRight),
+        // --- Vim word motions ---
+        KeyEvent {
+            code: KeyCode::Char('w'),
+            modifiers: KeyModifiers::NONE,
+            ..
+        } if is_motion_mode(state) => Some(Action::MoveWordForward),
+        KeyEvent {
+            code: KeyCode::Char('W'),
+            modifiers,
+            ..
+        } if is_motion_mode(state)
+            && (modifiers.is_empty() || modifiers == KeyModifiers::SHIFT) =>
+        {
+            Some(Action::MoveBigWordForward)
+        }
+        KeyEvent {
+            code: KeyCode::Char('B'),
+            modifiers,
+            ..
+        } if is_motion_mode(state)
+            && (modifiers.is_empty() || modifiers == KeyModifiers::SHIFT) =>
+        {
+            Some(Action::MoveBigWordBack)
+        }
+        KeyEvent {
+            code: KeyCode::Char('E'),
+            modifiers,
+            ..
+        } if is_motion_mode(state)
+            && (modifiers.is_empty() || modifiers == KeyModifiers::SHIFT) =>
+        {
+            Some(Action::MoveBigWordEnd)
+        }
+        // --- Vim line-anchor motions ---
+        KeyEvent {
+            code: KeyCode::Char('0'),
+            modifiers: KeyModifiers::NONE,
+            ..
+        } if is_motion_mode(state) => Some(Action::Home),
+        KeyEvent {
+            code: KeyCode::Char('^'),
+            modifiers,
+            ..
+        } if is_motion_mode(state)
+            && (modifiers.is_empty() || modifiers == KeyModifiers::SHIFT) =>
+        {
+            Some(Action::MoveFirstNonBlank)
+        }
+        // --- Vim paragraph motions ---
+        KeyEvent {
+            code: KeyCode::Char('{'),
+            modifiers,
+            ..
+        } if is_motion_mode(state)
+            && (modifiers.is_empty() || modifiers == KeyModifiers::SHIFT) =>
+        {
+            Some(Action::MoveParagraphUp)
+        }
+        KeyEvent {
+            code: KeyCode::Char('}'),
+            modifiers,
+            ..
+        } if is_motion_mode(state)
+            && (modifiers.is_empty() || modifiers == KeyModifiers::SHIFT) =>
+        {
+            Some(Action::MoveParagraphDown)
+        }
+        // --- Vim viewport-anchor motions H / M / L ---
+        KeyEvent {
+            code: KeyCode::Char('H'),
+            modifiers,
+            ..
+        } if is_motion_mode(state)
+            && (modifiers.is_empty() || modifiers == KeyModifiers::SHIFT) =>
+        {
+            Some(Action::MoveViewportTop)
+        }
+        KeyEvent {
+            code: KeyCode::Char('M'),
+            modifiers,
+            ..
+        } if is_motion_mode(state)
+            && (modifiers.is_empty() || modifiers == KeyModifiers::SHIFT) =>
+        {
+            Some(Action::MoveViewportMiddle)
+        }
+        KeyEvent {
+            code: KeyCode::Char('L'),
+            modifiers,
+            ..
+        } if is_motion_mode(state)
+            && (modifiers.is_empty() || modifiers == KeyModifiers::SHIFT) =>
+        {
+            Some(Action::MoveViewportBottom)
+        }
+        // --- Vim simple operators in Normal mode ---
+        KeyEvent {
+            code: KeyCode::Char('x'),
+            modifiers: KeyModifiers::NONE,
+            ..
+        } if is_normal_mode(state) => Some(Action::Delete),
+        KeyEvent {
+            code: KeyCode::Char('X'),
+            modifiers,
+            ..
+        } if is_normal_mode(state)
+            && (modifiers.is_empty() || modifiers == KeyModifiers::SHIFT) =>
+        {
+            Some(Action::Backspace)
+        }
+        KeyEvent {
+            code: KeyCode::Char('D'),
+            modifiers,
+            ..
+        } if is_normal_mode(state)
+            && (modifiers.is_empty() || modifiers == KeyModifiers::SHIFT) =>
+        {
+            Some(Action::DeleteToEnd)
+        }
+        KeyEvent {
+            code: KeyCode::Char('C'),
+            modifiers,
+            ..
+        } if is_normal_mode(state)
+            && (modifiers.is_empty() || modifiers == KeyModifiers::SHIFT) =>
+        {
+            Some(Action::ChangeToEnd)
+        }
+        KeyEvent {
+            code: KeyCode::Char('s'),
+            modifiers: KeyModifiers::NONE,
+            ..
+        } if is_normal_mode(state) => Some(Action::SubstituteChar),
+        KeyEvent {
+            code: KeyCode::Char('J'),
+            modifiers,
+            ..
+        } if is_normal_mode(state)
+            && (modifiers.is_empty() || modifiers == KeyModifiers::SHIFT) =>
+        {
+            Some(Action::JoinLines)
+        }
+        KeyEvent {
+            code: KeyCode::Char('~'),
+            modifiers,
+            ..
+        } if is_normal_mode(state)
+            && (modifiers.is_empty() || modifiers == KeyModifiers::SHIFT) =>
+        {
+            Some(Action::ToggleCaseChar)
+        }
+        KeyEvent {
+            code: KeyCode::Char('Y'),
+            modifiers,
+            ..
+        } if is_normal_mode(state)
+            && (modifiers.is_empty() || modifiers == KeyModifiers::SHIFT) =>
+        {
+            Some(Action::YankLine)
+        }
+        // --- Vim pending-arg chord starts: r / f / F / t / T / z ---
+        KeyEvent {
+            code: KeyCode::Char('r'),
+            modifiers: KeyModifiers::NONE,
+            ..
+        } if is_normal_mode(state) => {
+            input.set_pending_editor_op(PendingEditorOp::Replace);
+            None
+        }
+        KeyEvent {
+            code: KeyCode::Char('f'),
+            modifiers: KeyModifiers::NONE,
+            ..
+        } if is_motion_mode(state) => {
+            input.set_pending_editor_op(PendingEditorOp::FindForward);
+            None
+        }
+        KeyEvent {
+            code: KeyCode::Char('F'),
+            modifiers,
+            ..
+        } if is_motion_mode(state)
+            && (modifiers.is_empty() || modifiers == KeyModifiers::SHIFT) =>
+        {
+            input.set_pending_editor_op(PendingEditorOp::FindBack);
+            None
+        }
+        KeyEvent {
+            code: KeyCode::Char('t'),
+            modifiers: KeyModifiers::NONE,
+            ..
+        } if is_motion_mode(state) => {
+            input.set_pending_editor_op(PendingEditorOp::TillForward);
+            None
+        }
+        KeyEvent {
+            code: KeyCode::Char('T'),
+            modifiers,
+            ..
+        } if is_motion_mode(state)
+            && (modifiers.is_empty() || modifiers == KeyModifiers::SHIFT) =>
+        {
+            input.set_pending_editor_op(PendingEditorOp::TillBack);
+            None
+        }
+        KeyEvent {
+            code: KeyCode::Char('z'),
+            modifiers: KeyModifiers::NONE,
+            ..
+        } if is_motion_mode(state) => {
+            input.set_pending_editor_op(PendingEditorOp::ZMotion);
+            None
+        }
+        // --- Vim repeat-find: ; and , ---
+        KeyEvent {
+            code: KeyCode::Char(';'),
+            modifiers: KeyModifiers::NONE,
+            ..
+        } if is_motion_mode(state) => input
+            .last_find
+            .map(|(ch, forward, till)| Action::FindChar(ch, forward, till)),
+        KeyEvent {
+            code: KeyCode::Char(','),
+            modifiers: KeyModifiers::NONE,
+            ..
+        } if is_motion_mode(state) => input
+            .last_find
+            .map(|(ch, forward, till)| Action::FindChar(ch, !forward, till)),
+        // --- Vim scroll: Ctrl-d / Ctrl-u ---
+        KeyEvent {
+            code: KeyCode::Char('d'),
+            modifiers: KeyModifiers::CONTROL,
+            ..
+        } if is_motion_mode(state) => Some(Action::ScrollHalfPageDown),
+        KeyEvent {
+            code: KeyCode::Char('u'),
+            modifiers: KeyModifiers::CONTROL,
+            ..
+        } if is_motion_mode(state) => Some(Action::ScrollHalfPageUp),
         KeyEvent {
             code: KeyCode::Char(' '),
             modifiers: KeyModifiers::CONTROL,
@@ -5739,6 +5987,24 @@ fn focus_by_direction(state: &AppState, dir: FocusDir) -> PaneId {
     }
 }
 
+/// Pending vim operator waiting for its character argument.
+/// Scoped to the editor (only consumed when the editor is in motion mode).
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum PendingEditorOp {
+    /// `r<c>` — replace char under cursor with `c`.
+    Replace,
+    /// `f<c>` — jump to next occurrence of `c` on this line.
+    FindForward,
+    /// `F<c>` — jump to previous occurrence of `c` on this line.
+    FindBack,
+    /// `t<c>` — jump to one before next `c` on this line.
+    TillForward,
+    /// `T<c>` — jump to one after previous `c` on this line.
+    TillBack,
+    /// `z<z|t|b>` — viewport alignment chord.
+    ZMotion,
+}
+
 struct InputState {
     normal_last_char: Option<char>,
     normal_last_time: Instant,
@@ -5748,6 +6014,9 @@ struct InputState {
     last_selection: Option<SelectionSignature>,
     mouse_select_anchor: Option<MouseSelectAnchor>,
     last_ui_selection: Option<UiSelectionSignature>,
+    pending_editor_op: Option<PendingEditorOp>,
+    /// Last f/F/t/T so `;` and `,` can repeat. (ch, forward, till)
+    last_find: Option<(char, bool, bool)>,
 }
 
 impl InputState {
@@ -5761,7 +6030,17 @@ impl InputState {
             last_selection: None,
             mouse_select_anchor: None,
             last_ui_selection: None,
+            pending_editor_op: None,
+            last_find: None,
         }
+    }
+
+    fn set_pending_editor_op(&mut self, op: PendingEditorOp) {
+        self.pending_editor_op = Some(op);
+    }
+
+    fn clear_pending_editor_op(&mut self) {
+        self.pending_editor_op = None;
     }
 
     fn reset_normal(&mut self) {
@@ -5970,6 +6249,72 @@ fn handle_normal_chords(
         }
         _ => {
             input.reset_normal();
+            None
+        }
+    }
+}
+
+/// Intercept the next keystroke when a vim chord op is waiting for its argument
+/// (e.g. the `<c>` after `r`, `f`, `F`, `t`, `T`, or the second key of `zz`/`zt`/`zb`).
+/// Only consumes keys while the editor is in motion mode.
+fn handle_editor_pending_op(
+    key: &KeyEvent,
+    state: &AppState,
+    input: &mut InputState,
+) -> Option<Action> {
+    if !is_motion_mode(state) {
+        input.clear_pending_editor_op();
+        return None;
+    }
+    let op = input.pending_editor_op?;
+
+    if matches!(key.code, KeyCode::Esc) {
+        // Cancel the pending op silently; stay in normal/visual mode.
+        input.clear_pending_editor_op();
+        return None;
+    }
+
+    let plain_or_shift = key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT;
+
+    match (op, key.code) {
+        (PendingEditorOp::Replace, KeyCode::Char(c)) if plain_or_shift => {
+            input.clear_pending_editor_op();
+            Some(Action::ReplaceChar(c))
+        }
+        (PendingEditorOp::FindForward, KeyCode::Char(c)) if plain_or_shift => {
+            input.clear_pending_editor_op();
+            input.last_find = Some((c, true, false));
+            Some(Action::FindChar(c, true, false))
+        }
+        (PendingEditorOp::FindBack, KeyCode::Char(c)) if plain_or_shift => {
+            input.clear_pending_editor_op();
+            input.last_find = Some((c, false, false));
+            Some(Action::FindChar(c, false, false))
+        }
+        (PendingEditorOp::TillForward, KeyCode::Char(c)) if plain_or_shift => {
+            input.clear_pending_editor_op();
+            input.last_find = Some((c, true, true));
+            Some(Action::FindChar(c, true, true))
+        }
+        (PendingEditorOp::TillBack, KeyCode::Char(c)) if plain_or_shift => {
+            input.clear_pending_editor_op();
+            input.last_find = Some((c, false, true));
+            Some(Action::FindChar(c, false, true))
+        }
+        (PendingEditorOp::ZMotion, KeyCode::Char('z')) if plain_or_shift => {
+            input.clear_pending_editor_op();
+            Some(Action::CenterViewportOnCursor)
+        }
+        (PendingEditorOp::ZMotion, KeyCode::Char('t')) if plain_or_shift => {
+            input.clear_pending_editor_op();
+            Some(Action::ViewportTopOnCursor)
+        }
+        (PendingEditorOp::ZMotion, KeyCode::Char('b')) if plain_or_shift => {
+            input.clear_pending_editor_op();
+            Some(Action::ViewportBottomOnCursor)
+        }
+        _ => {
+            input.clear_pending_editor_op();
             None
         }
     }

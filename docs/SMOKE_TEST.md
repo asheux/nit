@@ -13,6 +13,8 @@ It's meant for quick confidence after changes to UI, commands, or engine wiring.
   - Expect: all tests pass.
 - Build: `cargo build`
   - Expect: clean compile.
+- Preflight (one-shot): `scripts/healthcheck.sh` (add `--deep` for clippy + tests)
+  - Expect: every check labelled `[green] pass`; exit code 0.
 
 ## Core TUI (Applies To All Labs)
 
@@ -149,6 +151,14 @@ It's meant for quick confidence after changes to UI, commands, or engine wiring.
   - Focus Agent Chat, send a short prompt.
   - Expect: stage updates while running; the thread shows `done (see ARTIFACTS)` when finished.
   - Expect: session resumption works across multiple prompts (Claude uses `--resume <session_id>`).
+- Verify `@shadow` pipeline (single-agent propose/judge/review augmentation):
+  - Select a single Codex or Claude agent in Agent Ops → Roster.
+  - In Agent Chat send `@shadow <short prompt>`.
+  - Expect: the "breather" above the chat cycles through `Proposing ...` → `Judging ...` → `Reviewing ...` → `Finalizing ...` before the main agent answers.
+  - Expect: no shadow lanes are visible in the roster or chat — only the main agent's reply shows up at the end.
+  - Auto-shadow sanity: without any `@` prefix, send a prompt longer than 500 chars OR containing a keyword like `refactor` / `rewrite` / `implement`. Expect the same four-stage breather before the final reply.
+  - Suppression sanity: `@swarm` / `@all` / `@new` / `@queue` / `@q` prompts must NOT trigger shadows. Shadows also never run inside an active swarm mission.
+  - Failure fallback: if any shadow turn fails, the main agent is re-dispatched with the unaugmented prompt as a graceful fallback.
 - Verify mixed agents:
   - Launch with `cargo run -- --agents all` (default).
   - Expect: roster shows Codex, Claude, and (if detected) Gemini models.

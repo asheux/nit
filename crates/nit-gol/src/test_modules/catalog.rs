@@ -1,27 +1,27 @@
 use super::*;
 
-/// Ensure all built-in rules have unique ids, unique rulestrings,
-/// and that the canonical rulestring round-trips through the parser.
+/// Every built-in rule has a unique (case-insensitive) id, a unique
+/// canonical rulestring, and round-trips cleanly through the parser.
 #[test]
 fn builtins_unique_and_canonical() {
     let mut warnings = Vec::new();
     let catalog = RuleCatalog::load_builtin(&mut warnings);
     assert!(warnings.is_empty());
-    let mut ids = HashSet::new();
-    let mut rules = HashSet::new();
-    for entry in catalog.entries.iter() {
-        assert!(ids.insert(entry.id.to_ascii_lowercase()));
-        assert!(rules.insert(rule_key(entry.rule)));
+    let mut seen_ids = HashSet::new();
+    let mut seen_rules = HashSet::new();
+    for entry in &catalog.entries {
+        assert!(seen_ids.insert(entry.id.to_ascii_lowercase()));
+        assert!(seen_rules.insert(rule_key(entry.rule)));
         let parsed = Rule::parse(&entry.rulestring).expect("parse canonical");
         assert_eq!(parsed.to_string(), entry.rulestring);
     }
 }
 
-/// Verify that overlays can both modify existing entries (merge) and
-/// add entirely new rules (create), with correct field propagation.
+/// Overlays both modify existing entries (merge) and add entirely new
+/// rules (create), with correct field propagation.
 #[test]
 fn overlay_merges_and_adds_rules() {
-    let builtin = r#"
+    let builtin_toml = r#"
 [[rules]]
 id = "base"
 display_name = "Base"
@@ -30,7 +30,7 @@ description = "Base rule"
 tags = ["classic"]
 aliases = ["base"]
 "#;
-    let overlay = r#"
+    let overlay_toml = r#"
 [[rules]]
 id = "base"
 description = "Override rule"
@@ -47,16 +47,16 @@ tags = ["custom"]
 aliases = ["c"]
 favorite = true
 "#;
-    let base_file: RuleFile = toml::from_str(builtin).expect("builtin parse");
+    let builtin: RuleFile = toml::from_str(builtin_toml).expect("builtin parse");
     let mut entries = Vec::new();
-    for raw in base_file.rules {
+    for raw in builtin.rules {
         entries.push(build_entry_from_file(raw, RuleSource::Builtin).unwrap());
     }
     let mut catalog = RuleCatalog::from_entries(entries);
-    let overlay_file: RuleOverlayFile = toml::from_str(overlay).expect("overlay parse");
-    let overlays = overlay_file.rules;
+
+    let overlay: RuleOverlayFile = toml::from_str(overlay_toml).expect("overlay parse");
     let mut warnings = Vec::new();
-    catalog.apply_overlays(&overlays, &mut warnings);
+    catalog.apply_overlays(&overlay.rules, &mut warnings);
     catalog.rebuild_indices(&mut warnings);
     assert!(warnings.is_empty());
 

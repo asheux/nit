@@ -25,6 +25,9 @@ use crate::{EdgeMode, Grid};
 const DEFAULT_QUEUE_CAPACITY: usize = 64;
 const MIN_QUEUE_CAPACITY: usize = 1;
 const DROP_LOG_INTERVAL: Duration = Duration::from_secs(2);
+
+/// Generous I/O-thread stack — large grid bitsets and serde buffers can
+/// push past the default 2 MiB on debug builds.
 const IO_THREAD_STACK_BYTES: usize = 8 * 1024 * 1024;
 
 // ── Public types ────────────────────────────────────────────────────
@@ -36,12 +39,6 @@ pub enum SnapshotEventKind {
     Cycle,
     NewBestRule,
     Manual,
-}
-
-impl SnapshotEventKind {
-    fn is_manual(self) -> bool {
-        matches!(self, SnapshotEventKind::Manual)
-    }
 }
 
 /// All data needed to write one snapshot to disk.
@@ -118,24 +115,7 @@ struct SnapshotManagerInner {
 impl SnapshotManager {
     /// Create a new manager and spawn its background I/O thread.
     pub fn new(config: SnapshotManagerConfig) -> Self {
-        let (tx, rx) = bounded(config.queue_capacity.max(MIN_QUEUE_CAPACITY));
-        let min_interval = Duration::from_millis(config.min_interval_ms.max(1));
-        let now = Instant::now();
-        let inner = Arc::new(SnapshotManagerInner {
-            tx,
-            last_enqueued: Mutex::new(LastSnapshotKey {
-                key: None,
-                last_at: now.checked_sub(min_interval).unwrap_or(now),
-            }),
-            dropped: AtomicU64::new(0),
-            written: AtomicU64::new(0),
-            last_path: Mutex::new(None),
-            last_drop_log: Mutex::new(now.checked_sub(DROP_LOG_INTERVAL).unwrap_or(now)),
-            min_interval,
-            dir: config.dir.clone(),
-            max_files: config.max_files,
-        });
-
+        let (inner, rx) = build_inner(&config);
         let handle = spawn_worker(rx, Arc::clone(&inner));
         Self {
             inner,
@@ -147,23 +127,7 @@ impl SnapshotManager {
 
     #[cfg(test)]
     fn new_for_tests(config: SnapshotManagerConfig) -> Self {
-        let (tx, rx) = bounded(config.queue_capacity.max(MIN_QUEUE_CAPACITY));
-        let min_interval = Duration::from_millis(config.min_interval_ms.max(1));
-        let now = Instant::now();
-        let inner = Arc::new(SnapshotManagerInner {
-            tx,
-            last_enqueued: Mutex::new(LastSnapshotKey {
-                key: None,
-                last_at: now.checked_sub(min_interval).unwrap_or(now),
-            }),
-            dropped: AtomicU64::new(0),
-            written: AtomicU64::new(0),
-            last_path: Mutex::new(None),
-            last_drop_log: Mutex::new(now.checked_sub(DROP_LOG_INTERVAL).unwrap_or(now)),
-            min_interval,
-            dir: config.dir.clone(),
-            max_files: config.max_files,
-        });
+        let (inner, rx) = build_inner(&config);
         Self {
             inner,
             handle: None,
@@ -252,6 +216,29 @@ impl Drop for SnapshotManager {
     }
 }
 
+fn build_inner(
+    config: &SnapshotManagerConfig,
+) -> (Arc<SnapshotManagerInner>, Receiver<IoCommand>) {
+    let (tx, rx) = bounded(config.queue_capacity.max(MIN_QUEUE_CAPACITY));
+    let min_interval = Duration::from_millis(config.min_interval_ms.max(1));
+    let now = Instant::now();
+    let inner = Arc::new(SnapshotManagerInner {
+        tx,
+        last_enqueued: Mutex::new(LastSnapshotKey {
+            key: None,
+            last_at: now.checked_sub(min_interval).unwrap_or(now),
+        }),
+        dropped: AtomicU64::new(0),
+        written: AtomicU64::new(0),
+        last_path: Mutex::new(None),
+        last_drop_log: Mutex::new(now.checked_sub(DROP_LOG_INTERVAL).unwrap_or(now)),
+        min_interval,
+        dir: config.dir.clone(),
+        max_files: config.max_files,
+    });
+    (inner, rx)
+}
+
 // ── Deduplication key ───────────────────────────────────────────────
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -293,7 +280,10 @@ impl LastSnapshotKey {
                 return false;
             }
         }
-        if !event_kind.is_manual() && now.duration_since(self.last_at) < min_interval {
+        // Manual events bypass the cooldown but still respect dedup above.
+        if !matches!(event_kind, SnapshotEventKind::Manual)
+            && now.duration_since(self.last_at) < min_interval
+        {
             return false;
         }
         true
@@ -365,8 +355,7 @@ fn snapshot_name_base(req: &SnapshotRequest) -> String {
     let rule_tag = req.rule.replace('/', "");
     let hash = req.grid_hash[0] as u32;
     format!(
-        "sim__{timestamp}__rule-{}__gen-{gen:05}__hash-{hash:08x}",
-        rule_tag,
+        "sim__{timestamp}__rule-{rule_tag}__gen-{gen:05}__hash-{hash:08x}",
         gen = req.gen
     )
 }
@@ -379,7 +368,7 @@ fn rule_hash(rule: &str) -> u64 {
     blake3_u64(&hasher.finalize())
 }
 
-/// Compute a two-word blake3 fingerprint from a grid's dimensions and cells.
+/// Two-word blake3 fingerprint of a grid's dimensions and cells.
 ///
 /// Used by the TUI to populate [`SnapshotRequest::grid_hash`].
 pub fn grid_fingerprint(grid: &Grid) -> [u64; 2] {
@@ -425,6 +414,7 @@ pub struct RuleLogEntry {
     discovered_at: String,
     seed_hash: u64,
     notes: String,
+    /// Destination log file; routed by the worker, not serialized.
     #[serde(skip)]
     path: PathBuf,
 }

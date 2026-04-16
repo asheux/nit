@@ -2,7 +2,8 @@ use super::*;
 use crate::snapshot::SnapshotMetadata;
 use crate::Rule;
 
-/// Build a minimal metadata struct for testing.
+/// Minimal metadata fixture; field values are stable so tests reading
+/// the resulting filename / blob are not date-sensitive.
 fn dummy_meta() -> SnapshotMetadata {
     SnapshotMetadata {
         timestamp: "2026-01-25T00:00:00Z".into(),
@@ -32,7 +33,6 @@ fn dummy_meta() -> SnapshotMetadata {
     }
 }
 
-/// Build a minimal snapshot request with the given event parameters.
 fn dummy_req(
     event: SnapshotEventKind,
     grid_hash: [u64; 2],
@@ -56,7 +56,8 @@ fn dummy_req(
     }
 }
 
-/// Requests with identical content should produce equal dedup keys.
+/// Two requests with identical content produce equal dedup keys; one
+/// with a different grid hash does not.
 #[test]
 fn snapshot_key_dedupes() {
     let req1 = dummy_req(SnapshotEventKind::Cycle, [1, 2], Some(2));
@@ -72,8 +73,8 @@ fn snapshot_key_dedupes() {
     );
 }
 
-/// Non-manual events within the cooldown window should be blocked,
-/// but manual events with a different key should pass through.
+/// Non-manual events inside the cooldown window are blocked, but a
+/// manual event with a different key still passes.
 #[test]
 fn cooldown_blocks_non_manual() {
     let now = Instant::now();
@@ -88,27 +89,20 @@ fn cooldown_blocks_non_manual() {
         key: Some(key.clone()),
         last_at: now,
     };
+    let cooldown = Duration::from_millis(500);
     let later = now + Duration::from_millis(10);
-    assert!(!gate.allows(
-        &key,
-        SnapshotEventKind::Cycle,
-        later,
-        Duration::from_millis(500)
-    ));
+
+    assert!(!gate.allows(&key, SnapshotEventKind::Cycle, later, cooldown));
+
     let other_key = SnapshotKey {
         grid_hash: [3, 4],
         ..key
     };
-    assert!(gate.allows(
-        &other_key,
-        SnapshotEventKind::Manual,
-        later,
-        Duration::from_millis(500)
-    ));
+    assert!(gate.allows(&other_key, SnapshotEventKind::Manual, later, cooldown));
 }
 
-/// When the bounded channel is full, excess requests are dropped
-/// and the dropped counter increments.
+/// When the bounded channel is full, excess requests are dropped and
+/// the dropped counter increments.
 #[test]
 fn bounded_queue_drops_when_full() {
     let dir = std::env::temp_dir().join("nit-snapshot-test");

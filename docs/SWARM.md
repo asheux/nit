@@ -7,6 +7,10 @@ debug common MCP/runtime issues.
 If you’re looking for implementation details, see `docs/ARCHITECTURE.md` (Swarm section).
 For a practical checklist, see `docs/SMOKE_TEST.md`. For shortcuts, see `docs/KEYBINDINGS.md`.
 
+> Looking for **single-agent** augmentation instead of a multi-agent DAG? See `docs/SHADOWS.md`
+> (`@shadow` + auto-shadow). Shadows run a fixed propose/judge/review pipeline behind one agent and
+> are **suppressed inside a swarm mission**, so the two features do not stack.
+
 ---
 
 ## Quickstart

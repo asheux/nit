@@ -5,12 +5,13 @@
 
 #![forbid(unsafe_code)]
 
+mod hash;
+mod rle;
+
 pub mod analyze;
 pub mod attractor;
 pub mod catalog;
 pub mod grid;
-mod hash;
-mod rle;
 pub mod rule;
 pub mod snapshot;
 pub mod snapshot_manager;

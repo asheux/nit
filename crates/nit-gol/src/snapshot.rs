@@ -2,8 +2,7 @@
 //!
 //! Handles atomic file writes, metadata serialization, timestamp
 //! generation, and snapshot pruning. RLE encoding logic lives in
-//! the [`rle`](crate::rle) module; this module re-exports it for
-//! backward compatibility.
+//! the [`rle`](crate::rle) module.
 
 use std::fs::{self, File};
 use std::io::{self, BufWriter, Write};
@@ -14,7 +13,6 @@ use time::OffsetDateTime;
 
 use crate::{attractor::AttractorEvent, Grid, Rule};
 
-// Re-export RLE encoding functions from their dedicated module.
 pub use crate::rle::{encode_rle, write_rle, write_rle_bits};
 
 /// Metadata written alongside each snapshot as a JSON sidecar file.
@@ -100,12 +98,9 @@ pub fn write_snapshot(
     })
 }
 
-/// Build a default snapshot file-name stem from rule, generation, and hash.
+/// Build a default snapshot file-name stem (timestamp + rule + generation + hash).
 pub fn default_name(rule: Rule, generation: u64, hash: u64) -> String {
-    let timestamp = OffsetDateTime::now_utc()
-        .format(&Rfc3339)
-        .unwrap_or_else(|_| "unknown-time".into())
-        .replace(':', "-");
+    let timestamp = now_iso8601().replace(':', "-");
     format!(
         "{timestamp}__rule-{}__gen-{generation:05}__hash-{hash:08x}",
         rule.to_string().replace('/', "")
@@ -119,7 +114,7 @@ pub fn now_iso8601() -> String {
         .unwrap_or_else(|_| "unknown-time".into())
 }
 
-/// Delete the oldest `.rle` (and companion `.json`) files in `dir`
+/// Delete the oldest `.rle` files (and their `.json` sidecars) in `dir`
 /// until at most `max_files` remain.
 pub fn prune_oldest(dir: &Path, max_files: usize) -> io::Result<()> {
     if max_files == 0 {
@@ -132,8 +127,7 @@ pub fn prune_oldest(dir: &Path, max_files: usize) -> io::Result<()> {
             if path.extension().and_then(|ext| ext.to_str()) != Some("rle") {
                 return None;
             }
-            let meta = e.metadata().ok()?;
-            let modified = meta.modified().ok()?;
+            let modified = e.metadata().ok()?.modified().ok()?;
             Some((modified, path))
         })
         .collect();
@@ -144,13 +138,12 @@ pub fn prune_oldest(dir: &Path, max_files: usize) -> io::Result<()> {
     let remove_count = entries.len().saturating_sub(max_files);
     for (_, path) in entries.into_iter().take(remove_count) {
         let _ = fs::remove_file(&path);
-        let json_path = path.with_extension("json");
-        let _ = fs::remove_file(json_path);
+        let _ = fs::remove_file(path.with_extension("json"));
     }
     Ok(())
 }
 
-/// Atomically write an RLE file from packed grid bits.
+/// Atomically write an RLE file from a packed grid bitset.
 pub fn write_rle_bits_atomic(
     path: &Path,
     width: u16,
@@ -164,17 +157,14 @@ pub fn write_rle_bits_atomic(
 }
 
 /// Atomically write JSON metadata to a sidecar file.
-pub fn write_metadata_atomic(path: &Path, meta: &SnapshotMetadata) -> io::Result<()> {
+pub(crate) fn write_metadata_atomic(path: &Path, meta: &SnapshotMetadata) -> io::Result<()> {
     write_atomic(path, |writer| {
         serde_json::to_writer(writer, meta).map_err(io::Error::other)
     })
 }
 
-// ── Internal utilities ──────────────────────────────────────────────
-
-/// Ensure `dir` exists, creating it if necessary.
-///
-/// Rejects symlinks to prevent following links to unintended locations.
+/// Ensure `dir` exists; reject symlinks so a hostile or stale link
+/// cannot redirect snapshot writes outside the intended directory.
 pub(crate) fn ensure_dir(dir: &Path) -> io::Result<()> {
     if let Ok(meta) = fs::symlink_metadata(dir) {
         if meta.file_type().is_symlink() {
@@ -187,7 +177,12 @@ pub(crate) fn ensure_dir(dir: &Path) -> io::Result<()> {
     fs::create_dir_all(dir)
 }
 
-/// Write to a temporary file then atomically rename into place.
+/// Write to a `.tmp` sibling then rename into place.
+///
+/// The `flush` + `sync_all` + `rename` sequence is the durability
+/// contract — readers see either the prior file or the new one,
+/// never a partially written state. Concurrent writers targeting
+/// the same path race on the temp file; callers must serialize.
 fn write_atomic<F>(path: &Path, write_fn: F) -> io::Result<()>
 where
     F: FnOnce(&mut BufWriter<File>) -> io::Result<()>,
@@ -202,7 +197,6 @@ where
     Ok(())
 }
 
-/// Emit debug output when `NIT_SNAPSHOT_DEBUG` is set.
 fn snapshot_debug<F>(msg: F)
 where
     F: FnOnce() -> String,

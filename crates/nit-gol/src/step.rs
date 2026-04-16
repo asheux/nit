@@ -6,9 +6,7 @@
 use crate::{grid::EdgeMode, Grid, Rule};
 
 /// Advance the grid by one generation under the given rule.
-///
-/// Returns a new grid where each cell's state is determined by the
-/// neighbor count and the rule's birth/survival conditions.
+#[must_use]
 pub fn step(grid: &Grid, rule: Rule, edge: EdgeMode) -> Grid {
     let width = grid.width();
     let height = grid.height();
@@ -31,10 +29,6 @@ pub fn step(grid: &Grid, rule: Rule, edge: EdgeMode) -> Grid {
     next
 }
 
-/// Count the live neighbors of cell `(x, y)` under the given edge policy.
-///
-/// Checks all eight adjacent cells. Out-of-bounds neighbors are either
-/// dead ([`EdgeMode::Dead`]) or wrapped toroidally ([`EdgeMode::Toroid`]).
 fn count_neighbors(grid: &Grid, x: usize, y: usize, edge: EdgeMode) -> u8 {
     let width = grid.width() as isize;
     let height = grid.height() as isize;
@@ -52,10 +46,6 @@ fn count_neighbors(grid: &Grid, x: usize, y: usize, edge: EdgeMode) -> u8 {
     count
 }
 
-/// Resolve a neighbor coordinate under the given edge policy.
-///
-/// Returns `Some((col, row))` when the neighbor is valid, or `None`
-/// when out of bounds under [`EdgeMode::Dead`].
 fn resolve_neighbor(
     x: usize,
     y: usize,

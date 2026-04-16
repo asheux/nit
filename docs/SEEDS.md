@@ -142,7 +142,7 @@ Snapshots store the complete encoding context: encoder ID, parameters fingerprin
 
 The seed source is the editor's open file buffer (`GolSeedSource::Editor`). An alternative source is the notes/scratch buffer (`GolSeedSource::Notes`). Toggle with the `:gol seed source` command.
 
-The seed runtime debounces updates with a configurable delay (default 120ms via `seed_debounce_ms`). Parameter changes are detected by direct `PartialEq` comparison on `SeedParams`, so arbitrarily small changes trigger recomputation.
+The seed runtime debounces updates with a 120ms interval (hardcoded in `seed_runtime.rs`). Parameter changes are detected by direct `PartialEq` comparison on `SeedParams`, so arbitrarily small changes trigger recomputation.
 
 ## Seed Search
 
@@ -176,6 +176,7 @@ After computing encoder scores, `compute_genome_report` runs a parsimony analysi
 | **Over-split functions** | 15+ functions averaging < 3 significant lines | Mass function splitting to inflate AST structure scores |
 | **Comment padding** | > 40% of non-blank lines are comments | Adding doc comments / section markers for token diversity |
 | **Tiny-function fraction** | 12+ functions with > 50% having ≤ 5 significant lines | Predicate over-extraction, stub duplication |
+| **Duplicate comment lines** | ≥ 1 repeated comment line | Copy-pasted doc headers used to pad token diversity |
 
 **Any** of these signals triggers `bloat_detected = true`, which **caps the tier at Methuselah (IV)**. This means Replicator (Tier V) requires genuinely good code, not just well-gamed metrics.
 
@@ -236,9 +237,10 @@ Agents receive an equilibrium rule in their system prompt that explicitly lists 
 | `PARSIMONY_TINY_FN_LINES` | 5 | Body size threshold for "tiny" |
 | `PARSIMONY_TINY_FN_FRACTION_THRESHOLD` | 0.50 | Max fraction of tiny fns before flag |
 | `PARSIMONY_TINY_FN_MIN_COUNT` | 12 | Min fn count for tiny-fn flag |
+| `PARSIMONY_DUPLICATE_COMMENT_THRESHOLD` | 1 | Min duplicate comment lines before flag |
 | `SOFT_BOTTLENECK_MAX_LIFT` | 200 | Max generation lift from soft bottleneck |
-| `GENOME_RETRY_LIMIT` | 3 | Max retries per agent turn |
-| `GENOME_RETRY_MIN_LINES` | 120 | Min file lines for retry eligibility |
+| `GENOME_RETRY_LIMIT` | 3 | Max retries per agent turn (defined in `crates/nit-tui/src/app/mod.rs`) |
+| `GENOME_RETRY_MIN_LINES` | 120 | Min file lines for retry eligibility (defined in `crates/nit-tui/src/app/mod.rs`) |
 
 ## Key Files
 

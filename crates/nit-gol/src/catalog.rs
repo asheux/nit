@@ -6,7 +6,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::{Rule, RuleParseError};
 use nit_utils::paths;
@@ -255,18 +255,17 @@ impl RuleCatalog {
         if let Some(id) = &selected.id {
             let key = id.to_ascii_lowercase();
             if let Some(&idx) = self.id_index.get(&key) {
-                return self
-                    .visible_indices
-                    .iter()
-                    .position(|visible| *visible == idx);
+                return self.visible_position(idx);
             }
         }
         let key = rule_key(selected.rule);
-        self.rule_index.get(&key).and_then(|idx| {
-            self.visible_indices
-                .iter()
-                .position(|visible| *visible == *idx)
-        })
+        self.rule_index
+            .get(&key)
+            .and_then(|idx| self.visible_position(*idx))
+    }
+
+    fn visible_position(&self, entry_idx: usize) -> Option<usize> {
+        self.visible_indices.iter().position(|v| *v == entry_idx)
     }
 
     /// Return visible-list positions matching a free-text query.
@@ -515,27 +514,19 @@ fn build_overlay_entry(
     entries: &[RuleEntry],
     warnings: &mut Vec<String>,
 ) -> Option<RuleEntry> {
-    let rulestring = overlay.rulestring.as_deref().or_else(|| {
-        warnings.push(format!(
-            "Overlay rule '{}' missing rulestring; skipping",
-            overlay.id
-        ));
-        None
-    })?;
-    let name = overlay.display_name.as_deref().or_else(|| {
-        warnings.push(format!(
-            "Overlay rule '{}' missing display_name; skipping",
-            overlay.id
-        ));
-        None
-    })?;
-    let description = overlay.description.as_deref().or_else(|| {
-        warnings.push(format!(
-            "Overlay rule '{}' missing description; skipping",
-            overlay.id
-        ));
-        None
-    })?;
+    let rulestring = require_field(overlay.rulestring.as_deref(), "rulestring", overlay, warnings)?;
+    let name = require_field(
+        overlay.display_name.as_deref(),
+        "display_name",
+        overlay,
+        warnings,
+    )?;
+    let description = require_field(
+        overlay.description.as_deref(),
+        "description",
+        overlay,
+        warnings,
+    )?;
     let (rule, canonical) = match normalize_rulestring(rulestring) {
         Ok(pair) => pair,
         Err(err) => {
@@ -577,6 +568,22 @@ fn build_overlay_entry(
 
 // ── Utility functions ───────────────────────────────────────────────
 
+/// Return the field value or warn that a required overlay field is missing.
+fn require_field<'a>(
+    value: Option<&'a str>,
+    field: &str,
+    overlay: &RuleOverlay,
+    warnings: &mut Vec<String>,
+) -> Option<&'a str> {
+    if value.is_none() {
+        warnings.push(format!(
+            "Overlay rule '{}' missing {field}; skipping",
+            overlay.id
+        ));
+    }
+    value
+}
+
 fn normalize_rulestring(text: &str) -> Result<(Rule, String), RuleParseError> {
     let rule = Rule::parse(text)?;
     let canonical = rule.to_string();
@@ -610,6 +617,10 @@ fn normalize_lines(items: Vec<String>) -> Vec<String> {
 }
 
 /// Encode a rule as a compact `u32` key for index lookups.
+///
+/// Packs the 9-bit births mask into the high bits and the 9-bit
+/// survives mask into the low bits so that every distinct rule maps
+/// to a unique key without collision.
 fn rule_key(rule: Rule) -> u32 {
     ((rule.births_mask() as u32) << 9) | (rule.survives_mask() as u32)
 }
@@ -662,7 +673,7 @@ fn default_overlay_path() -> Option<PathBuf> {
     paths::config_dir().map(|dir| dir.join("rules.toml"))
 }
 
-fn read_overlay_file(path: &PathBuf) -> Result<Vec<RuleOverlay>, String> {
+fn read_overlay_file(path: &Path) -> Result<Vec<RuleOverlay>, String> {
     let contents = fs::read_to_string(path).map_err(|e| e.to_string())?;
     let file: RuleOverlayFile = toml::from_str(&contents).map_err(|e| e.to_string())?;
     Ok(file.rules)

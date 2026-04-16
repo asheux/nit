@@ -33,7 +33,7 @@ pub fn write_rle<W: Write>(writer: &mut W, grid: &Grid, rule: Rule) -> io::Resul
         return Ok(());
     }
     for y in 0..grid.height() {
-        encode_row_cells(writer, grid, y)?;
+        encode_row(writer, grid.width(), |x| grid.get(x, y))?;
         write_row_separator(writer, y, grid.height())?;
     }
     writer.write_all(b"!")?;
@@ -61,14 +61,14 @@ pub fn write_rle_bits<W: Write>(
         return Ok(());
     }
     for y in 0..h {
-        encode_row_bits(writer, bits, y, w)?;
+        let base = y * w;
+        encode_row(writer, w, |x| bit_at(bits, base + x))?;
         write_row_separator(writer, y, h)?;
     }
     writer.write_all(b"!")?;
     Ok(())
 }
 
-/// Write the RLE header line with dimensions and rule string.
 fn write_rle_header<W: Write>(
     writer: &mut W,
     width: usize,
@@ -78,7 +78,6 @@ fn write_rle_header<W: Write>(
     writeln!(writer, "x = {width}, y = {height}, rule = {rule}")
 }
 
-/// Write the separator between rows, or nothing after the last row.
 fn write_row_separator<W: Write>(writer: &mut W, row: usize, total_rows: usize) -> io::Result<()> {
     if row + 1 < total_rows {
         writer.write_all(b"$\n")
@@ -87,7 +86,6 @@ fn write_row_separator<W: Write>(writer: &mut W, row: usize, total_rows: usize) 
     }
 }
 
-/// Validate that the bitset has enough words for the grid dimensions.
 fn validate_bitset_size(width: usize, height: usize, bits: &[u64]) -> io::Result<()> {
     let total = width.saturating_mul(height);
     let needed_words = total.div_ceil(64);
@@ -100,74 +98,44 @@ fn validate_bitset_size(width: usize, height: usize, bits: &[u64]) -> io::Result
     Ok(())
 }
 
-/// Run-length encode a single row from grid cells.
-fn encode_row_cells<W: Write>(writer: &mut W, grid: &Grid, y: usize) -> io::Result<()> {
-    let mut run_char = cell_tag(grid.get(0, y));
-    let mut run_len = 1usize;
-    for x in 1..grid.width() {
-        let cell = cell_tag(grid.get(x, y));
-        if cell == run_char {
-            run_len += 1;
-        } else {
-            write_run(writer, run_len, run_char)?;
-            run_char = cell;
-            run_len = 1;
-        }
-    }
-    write_run(writer, run_len, run_char)
-}
-
-/// Run-length encode a single row from a packed bitset.
-fn encode_row_bits<W: Write>(
+/// Run-length encode a single row by polling cells via a closure.
+fn encode_row<W: Write, F: FnMut(usize) -> bool>(
     writer: &mut W,
-    bits: &[u64],
-    y: usize,
     width: usize,
+    mut get: F,
 ) -> io::Result<()> {
-    let base = y * width;
-    let mut run_char = cell_tag(bit_at(bits, base));
+    let mut run_tag = cell_tag(get(0));
     let mut run_len = 1usize;
     for x in 1..width {
-        let cell = cell_tag(bit_at(bits, base + x));
-        if cell == run_char {
+        let tag = cell_tag(get(x));
+        if tag == run_tag {
             run_len += 1;
         } else {
-            write_run(writer, run_len, run_char)?;
-            run_char = cell;
+            write_run(writer, run_len, run_tag)?;
+            run_tag = tag;
             run_len = 1;
         }
     }
-    write_run(writer, run_len, run_char)
+    write_run(writer, run_len, run_tag)
 }
 
-/// Map a boolean alive state to the RLE cell character.
-///
-/// Returns `'o'` for alive cells and `'b'` for dead cells, matching
-/// the Life community's standard encoding convention.
-fn cell_tag(alive: bool) -> char {
+fn cell_tag(alive: bool) -> u8 {
     if alive {
-        'o'
+        b'o'
     } else {
-        'b'
+        b'b'
     }
 }
 
-/// Emit a single run-length encoded pair.
-///
-/// Writes `<count><ch>` for runs longer than 1, or just `<ch>`
-/// for singleton runs, per the `.rle` specification.
-fn write_run<W: Write>(writer: &mut W, len: usize, ch: char) -> io::Result<()> {
+/// Emit a single run-length encoded pair: `<count><tag>` for runs longer
+/// than 1, or just `<tag>` for singletons, per the `.rle` specification.
+fn write_run<W: Write>(writer: &mut W, len: usize, tag: u8) -> io::Result<()> {
     if len > 1 {
         write!(writer, "{len}")?;
     }
-    let mut buf = [0u8; 4];
-    let encoded = ch.encode_utf8(&mut buf);
-    writer.write_all(encoded.as_bytes())
+    writer.write_all(&[tag])
 }
 
-/// Extract a single bit from a packed `u64` bitset.
-///
-/// Bit `idx` is stored in word `idx / 64` at position `idx % 64`.
 fn bit_at(bits: &[u64], idx: usize) -> bool {
     let word = bits[idx / 64];
     let mask = 1u64 << (idx % 64);

@@ -27,12 +27,14 @@ MSRV: Rust 1.88.0 (pinned in `rust-toolchain.toml`).
 
 ## Key source files
 
-- `crates/nit-tui/src/app/mod.rs` — main event loop, input handling, keybinding dispatch
+- `crates/nit-tui/src/app/mod.rs` — main event loop, input handling, keybinding dispatch, genome retry logic (`GENOME_RETRY_LIMIT = 3`, `GENOME_RETRY_MIN_LINES = 120`)
 - `crates/nit-tui/src/app/dispatch.rs` — agent prompt dispatch (Codex and Claude routing, queue management)
-- `crates/nit-tui/src/app/chat_input.rs` — chat input command parsing (`@all`, `@swarm`, `@new`, `@queue`)
+- `crates/nit-tui/src/app/chat_input.rs` — chat input command parsing (`@all`, `@swarm`, `@shadow`, `@new`, `@queue`)
 - `crates/nit-core/src/agent_bus.rs` — `AgentBusEvent` enum and state application
-- `crates/nit-core/src/state.rs` — `AppState`, `AgentsState`, `AgentLane`, `MissionRecord`, queue types
-- `crates/nit-tui/src/swarm.rs` — swarm orchestrator (DAG planning/execution, gate bundles)
+- `crates/nit-core/src/state.rs` — `AppState`, `AgentsState`, `AgentLane`, `MissionRecord`, queue types, `AgentOpsTab` (8 UI tabs + 1 internal `Patch`)
+- `crates/nit-core/src/genome_report.rs` — code-as-genome tier scoring, parsimony detector, soft-bottleneck lift
+- `crates/nit-tui/src/swarm.rs` — swarm orchestrator (DAG planning/execution, gate bundles `rust-ci`/`node-ci`/`python-ci`/`go-ci`, custom gates)
+- `crates/nit-tui/src/shadow.rs` — shadow agent pipeline (`propose-a` / `propose-b` → `judge` → `review` → main)
 - `crates/nit-tui/src/codex_runner.rs` — Codex CLI integration (MCP server + exec runtime)
 - `crates/nit-tui/src/claude_runner.rs` — Claude CLI subprocess integration (`claude -p`)
 - `crates/nit-tui/src/widgets/` — all TUI widgets (agent_console_view, agent_ops_view, artifacts_popup, gate_monitor_view, etc.)

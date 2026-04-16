@@ -73,7 +73,7 @@
 - Esc: Switch to Normal mode
 
 ## Agent Ops
-- Tab / Shift+Tab / Left/Right: Cycle Ops tabs (Roster/Missions/DAG/MCP/Alerts/Patch/Evidence/Diagnostics/Scratchpad)
+- Tab / Shift+Tab / Left/Right: Cycle Ops tabs (ROSTER / MISSIONS / DAG / ARTIFACTS / MCP / ALERTS / DIAG / SCRATCHPAD)
 - j/k or Up/Down: Move selection
 - Enter: Focus Agent Chat with selected context (except ARTIFACTS tab; see below)
 - n: New mission (mock runner in MVP)
@@ -84,7 +84,7 @@
   - h: Exit the roster tree cursor (then collapse on next h)
   - Mouse: Click the model name (left column) to expand; click again to collapse
   - Space/Enter (in the tree): Select the highlighted Size/Role option
-- Patch/Evidence:
+- Artifacts (ARTIFACTS tab):
   - Enter or mouse click: Open selected artifact detail popup
   - Esc or q: Close artifact popup
   - j/k or Up/Down: Scroll popup content (when open)
@@ -96,8 +96,10 @@
 - Type message, Enter to send, Esc or Ctrl+C to clear input
   - Note: agent reply bodies are captured in Agent Ops → ARTIFACTS; the thread shows `done (see ARTIFACTS)` placeholders.
   - `@all <msg>`: broadcast (same prompt) to multiple agents (Codex and Claude)
-  - `@swarm [all|N] [template=lab|parallel|bulk] [mission=general|research|computational-research] <msg>`: orchestrated multi-agent workflow
+  - `@swarm [all|N] [template=lab|parallel|bulk] [mission=general|research|computational-research] <msg>`: orchestrated multi-agent workflow (`t=` and `m=` are accepted as shorthands)
+  - `@shadow <msg>`: single-agent dispatch with hidden propose/judge/review pipeline (also auto-enables for heavy prompts, see `docs/SHADOWS.md`)
   - `@new <msg>`: spawn a fresh-context clone when the agent is busy
+  - `@queue` / `@q <msg>`: explicit queue (same as the implicit behaviour below)
   - Prompts sent while an agent is busy are automatically queued and dispatched when it becomes idle
 - Left/Right/Home/End: Move input cursor
 - Up/Down: Move input cursor between lines
@@ -162,15 +164,21 @@
 - Commands are routed to the active lab; use `--lab gol|games` at startup to switch labs.
 - :gol hide / :petri hide: Hide GoL Petri Dish (sim keeps running)
 - :gol show / :petri show: Show GoL Petri Dish
+- :gol stop / :run stop (in GoL): Stop the GoL Petri Dish
 - :gol rule: Show current rule + built-ins
-- :gol rule <id|B/S>: Set rule by id or B/S string
+- :gol rule <id|B/S>: Set rule by id or B/S string (e.g. `:gol rule conway`, `:gol rule B3/S23`)
 - :gol rules: List available rules
+- :gol seed / :seed view: Cycle seed view (GENOME → PLATE → MAP → STATS)
+- :gol encoder / :seed encoder: Cycle to next seed encoder
+- :gol encoder <name> / :seed encoder <name>: Switch to a named encoder (`ascii_bytes`, `hilbert_bits`, `lifehash16`, `structural`, `token_spectrum`, `ast_structure`, `complexity_field`)
 - :games run: Run Games tournament
+- :games run force <fsm|ca|tm> {params}: Force a family-scope run (e.g. `:games run force fsm {3,2}`)
 - :games hide: Hide Games Petri Dish (tournament keeps running)
 - :games show: Show Games Petri Dish
+- :games stop: Stop the Games tournament
 - :games status: Show tournament status
 - :games export: Re-emit last run summary (if present)
-- :games runs: Open run browser
+- :games runs / :games browse / :games browser: Open run browser
 - :games replay: Open match replay selector (uses loaded run summary)
 - :games history / :games hist / :games plot: Open match history viewer
 - :games strategy [run|all|config]: Open strategy inspector

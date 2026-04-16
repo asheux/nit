@@ -4,7 +4,9 @@ mod discover;
 mod gemini;
 
 #[cfg(test)]
-pub(crate) use claude::{parse_claude_models_from_binary, select_current_claude_models};
+pub(crate) use claude::{
+    parse_claude_models_from_binary, parse_effort_choices_from_help, select_current_claude_models,
+};
 #[cfg(test)]
 pub(crate) use gemini::{parse_gemini_models_from_source, select_current_gemini_models};
 

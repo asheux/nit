@@ -11,14 +11,16 @@ use crate::{EdgeMode, Grid, Rule};
 
 /// Additional context for protocol-aware attractor detection.
 ///
-/// When a simulation runs a multi-phase protocol, the extra fields
-/// ensure that fingerprints incorporate the protocol identity and
-/// current phase so that identical grids in different protocol
-/// states are distinguished.
+/// When a simulation runs a multi-phase protocol, these fields are
+/// mixed into the grid fingerprint so that identical grids in
+/// different protocol states are not mistaken for a cycle.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct AttractorExtra {
+    /// Stable digest of the protocol definition.
     pub protocol_hash: u64,
+    /// Zero-based index of the active phase within the protocol.
     pub phase_idx: u32,
+    /// Generations elapsed since this phase began.
     pub step_in_phase: u32,
 }
 
@@ -166,15 +168,7 @@ impl AttractorDetector {
 
     /// Register the initial grid state before observation begins.
     pub fn seed(&mut self, grid: &Grid, gen: u64, rule: Rule, edge: EdgeMode) {
-        let (fp, secondary) =
-            fingerprint_with_secondary(grid, rule, edge, None, self.cfg.confirm_on_repeat);
-        self.last = Some(fp);
-        self.seeded = true;
-        self.completed = false;
-        if self.cfg.max_history == 0 {
-            return;
-        }
-        self.insert_entry(fp, gen, secondary);
+        self.seed_with_context(grid, gen, rule, edge, None);
     }
 
     /// Observe a generation transition and check for attractors.
@@ -260,18 +254,12 @@ impl AttractorDetector {
         next_gen: u64,
     ) -> Option<AttractorEvent> {
         let entries = self.seen.get(&fp)?;
-        if self.cfg.confirm_on_repeat {
+        let entry = if self.cfg.confirm_on_repeat {
             let secondary = secondary?;
-            let entry = entries.iter().find(|e| e.secondary == Some(secondary))?;
-            let first_seen = entry.first_seen;
-            return Some(AttractorEvent::Cycle {
-                gen: next_gen,
-                first_seen,
-                period: next_gen.saturating_sub(first_seen),
-                transient: first_seen,
-            });
-        }
-        let entry = entries.first()?;
+            entries.iter().find(|e| e.secondary == Some(secondary))?
+        } else {
+            entries.first()?
+        };
         let first_seen = entry.first_seen;
         Some(AttractorEvent::Cycle {
             gen: next_gen,

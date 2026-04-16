@@ -9,35 +9,27 @@ use crate::{step::step, EdgeMode, Grid, Rule};
 
 /// Complete evaluation result for a single rule on a given seed.
 ///
-/// Contains both the scalar score and the supporting metrics
+/// Carries both the scalar score and the supporting metrics
 /// (period, transient length, population statistics) that produced it,
-/// along with the final grid state for downstream inspection.
+/// plus the final grid state for downstream inspection.
 #[derive(Clone, Debug)]
 pub struct RuleEvaluation {
-    /// The rule that was evaluated.
     pub rule: Rule,
-    /// Composite quality score (higher is better).
+    /// Composite quality score — higher is better.
     pub score: f32,
     /// Detected oscillation period, if any.
     pub period: Option<u32>,
-    /// Number of generations before the first repeat or extinction.
+    /// Generations elapsed before the first repeat or extinction.
     pub transient: u32,
-    /// Mean alive-cell count across all simulated generations.
     pub avg_population: f32,
-    /// Peak alive-cell count observed during the run.
     pub max_population: u32,
-    /// Alive-cell count at the final generation.
     pub alive_end: u32,
-    /// Total generations simulated before halting.
+    /// Always equal to `transient`; retained for API stability.
     pub steps: u32,
-    /// Grid state at the end of the simulation.
     pub final_grid: Grid,
 }
 
-/// Lightweight score summary without the final grid.
-///
-/// Used when only the ranking metrics are needed and carrying
-/// the full grid would be wasteful.
+/// Lightweight score summary used for ranking when the final grid is not needed.
 #[derive(Clone, Debug)]
 pub struct RuleScore {
     pub rule: Rule,
@@ -55,6 +47,7 @@ pub struct RuleScore {
 /// a previously seen grid hash is encountered (cycle detection). The
 /// returned [`RuleEvaluation`] carries both the score and supporting
 /// metrics.
+#[must_use]
 pub fn evaluate_rule(
     seed: &Grid,
     rule: Rule,
@@ -123,7 +116,8 @@ pub fn evaluate_rule(
 ///
 /// Rewards longevity and periodic behavior while penalizing
 /// extinction and near-total saturation of the grid.
-pub fn score_rule(
+#[must_use]
+pub(crate) fn score_rule(
     grid_area: usize,
     transient: u32,
     period: Option<u32>,

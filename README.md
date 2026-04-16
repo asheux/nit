@@ -23,6 +23,13 @@ just fmt
 just clippy
 just test
 just run -- path/to/file
+
+# Full CI gates (fmt-check + clippy + test + cargo deny):
+just ci
+
+# Quick repo-health preflight (add --deep to include clippy + tests):
+scripts/healthcheck.sh
+scripts/healthcheck.sh --deep
 ```
 
 ### Toolchain
@@ -65,7 +72,9 @@ nit includes an Agent Station UI (Agent Ops + Agent Chat) with multiple backends
   - In Agent Chat:
     - `@all <prompt>` broadcasts to multiple agents — Codex and Claude (fan-out).
     - `@swarm [all|N] [template=lab|parallel|bulk] [mission=general|research|computational-research] <prompt>` runs an orchestrated multi-agent workflow (plan → DAG tasks → verify → synthesis). (`lab` is the default.)
+    - `@shadow <prompt>` runs a single-agent turn with hidden propose/judge/review support agents; auto-enables for heavy prompts (>500 chars or keywords like `refactor`, `rewrite`, `implement`). See `docs/SHADOWS.md`.
     - `@new <prompt>` spawns a fresh-context clone when the agent is busy (queued turns continue on the original).
+    - `@queue` / `@q <prompt>` explicitly enqueues (same as the implicit queueing below).
     - Prompt queuing: if an agent is busy, prompts are automatically queued and dispatched when the agent becomes idle.
 
 Examples:
@@ -132,13 +141,16 @@ nit/
 ## Documentation
 
 - `docs/ARCHITECTURE.md` — state model, rendering pipeline, agent system, swarm orchestration.
-- `docs/KEYBINDINGS.md` — full keymap.
+- `docs/KEYBINDINGS.md` — full keymap and `:` command reference.
 - `docs/SMOKE_TEST.md` — feature tour + quick manual test checklist.
-- `docs/SWARM.md` — swarm orchestration operator guide (templates, roles, DAG, gates).
-- `docs/GAMES.md` — games engine details (strategies, config, headless CLI, analysis).
-- `docs/PERF.md` — benchmarks and flamegraphs.
+- `docs/SWARM.md` — swarm orchestration operator guide (templates, roles, DAG, gates, custom gates).
+- `docs/SHADOWS.md` — shadow agents (propose/judge/review pipeline behind a single agent).
+- `docs/GAMES.md` — games engine details (strategies, config, headless CLI, analysis, Metal accelerator).
+- `docs/SEEDS.md` — seed encoding (code-as-genome), encoders, parsimony rule, retry guardrails.
 - `docs/RULES.md` — Game of Life rule catalog and contribution guide.
+- `docs/PERF.md` — benchmarks and flamegraphs.
 - `docs/SECURITY.md` — security policy, protections, and hardening backlog.
+- `docs/REPO_HEALTH.md` — snapshot of the last repo-health audit (fmt/clippy/tests/deny).
 
 ## Command prompt (`:`)
 
@@ -156,8 +168,9 @@ Full command and keybinding reference: `docs/KEYBINDINGS.md`.
 
 - Run Petri Dish: `Ctrl+Enter`; show hidden: `Ctrl+^`
 - Petri Dish popup: `Space` pause, `Enter` step, `+/-` speed, `H` hide, `S` snapshot, `F2` rule picker, `P` protocol picker, `G` rule search, `A` apply best rule
-- Visualizer seed controls: `Ctrl+E` encoder, `Ctrl+V` view, `Ctrl+R` cycle seed view, `Ctrl+M` plate render, `Ctrl+Y` seed source, `Ctrl+G` search, `Ctrl+A` apply, `Ctrl+N` snapshot
-- Rule selection: built-in catalog (`crates/nit-gol/assets/rules.toml`), custom B/S input, user overlay (`~/.config/nit/rules.toml`). See `docs/RULES.md`.
+- Visualizer seed controls: `Ctrl+E` encoder, `Ctrl+S` symmetry, `Ctrl+V` view, `Ctrl+R` cycle seed view, `Ctrl+M` plate render, `Ctrl+Y` seed source, `Ctrl+G` search, `Ctrl+A` apply, `Ctrl+N` snapshot
+- Seed encoders: 7 encoders (byte-level, hybrid, AST-driven) that turn the open buffer into a Game of Life genome. See `docs/SEEDS.md`.
+- Rule selection: 28-rule built-in catalog (`crates/nit-gol/assets/rules.toml`), custom B/S input, user overlay (`~/.config/nit/rules.toml`). See `docs/RULES.md`.
 - Snapshots land in `gol-snapshots/` (async, bounded, deduped).
 
 ## Games
@@ -165,6 +178,8 @@ Full command and keybinding reference: `docs/KEYBINDINGS.md`.
 - Launch: `nit games [path]` (opens `games.toml` by default).
 - Run tournament: `Ctrl+Enter` or `:games run`; hide/show: `H` / `Ctrl+^`.
 - Outputs land in `runs/games/` under the workspace root.
+- Optional Metal GPU acceleration on macOS (`engine.accelerator = "auto" | "cpu" | "metal"` in `games.toml`).
+- Headless CLI: `nit games {run | sweep | enumerate fsm | inspect | graph}` — see `docs/GAMES.md`.
 
 For strategy types (FSM, CA, one-sided TM), config format (payoff, history, scoring, engine), headless CLI, and analysis: see `docs/GAMES.md`.
 

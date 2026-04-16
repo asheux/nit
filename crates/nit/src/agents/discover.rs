@@ -62,6 +62,15 @@ pub(super) fn find_executable_in_path(binary_name: &str) -> Option<PathBuf> {
     None
 }
 
+pub(super) fn capture_cli_help_text(binary_name: &str) -> Option<String> {
+    let (exit_status, raw_stdout, _raw_stderr) =
+        run_command_capture_timeout(binary_name, &["--help"], Duration::from_millis(1500)).ok()?;
+    if !exit_status.success() {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&raw_stdout).into_owned())
+}
+
 pub(super) fn probe_models_from_cli(
     binary_name: &str,
     arg_sets: &[&[&str]],

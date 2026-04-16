@@ -30,7 +30,6 @@ fn main() {
     }
 }
 
-/// Parsed command-line parameters for the stress test.
 struct StressParams {
     width: usize,
     height: usize,
@@ -40,28 +39,37 @@ struct StressParams {
     seed: u64,
 }
 
-impl StressParams {
-    fn from_args(args: &[String]) -> Self {
+impl Default for StressParams {
+    fn default() -> Self {
         Self {
-            width: parse_arg(args, 0).unwrap_or(120),
-            height: parse_arg(args, 1).unwrap_or(40),
-            iterations: parse_arg(args, 2).unwrap_or(50),
-            dir: args
-                .get(3)
-                .map(PathBuf::from)
-                .unwrap_or_else(|| PathBuf::from("/tmp/nit-snapshot-stress")),
-            max_files: parse_arg(args, 4).unwrap_or(500),
-            seed: parse_arg(args, 5).unwrap_or(1),
+            width: 120,
+            height: 40,
+            iterations: 50,
+            dir: PathBuf::from("/tmp/nit-snapshot-stress"),
+            max_files: 500,
+            seed: 1,
         }
     }
 }
 
-/// Parse a positional argument at the given index.
+impl StressParams {
+    fn from_args(args: &[String]) -> Self {
+        let d = Self::default();
+        Self {
+            width: parse_arg(args, 0).unwrap_or(d.width),
+            height: parse_arg(args, 1).unwrap_or(d.height),
+            iterations: parse_arg(args, 2).unwrap_or(d.iterations),
+            dir: args.get(3).map(PathBuf::from).unwrap_or(d.dir),
+            max_files: parse_arg(args, 4).unwrap_or(d.max_files),
+            seed: parse_arg(args, 5).unwrap_or(d.seed),
+        }
+    }
+}
+
 fn parse_arg<T: std::str::FromStr>(args: &[String], idx: usize) -> Option<T> {
     args.get(idx).and_then(|s| s.parse().ok())
 }
 
-/// Generate a deterministic initial grid from the seed value.
 fn generate_seed_grid(width: usize, height: usize, seed: u64) -> Grid {
     let mut grid = Grid::new(width, height);
     for y in 0..height {
@@ -73,7 +81,6 @@ fn generate_seed_grid(width: usize, height: usize, seed: u64) -> Grid {
     grid
 }
 
-/// Build a [`SnapshotMetadata`] for a single stress-test iteration.
 fn build_meta(rule: Rule, grid: &Grid, seed: u64, iteration: usize) -> SnapshotMetadata {
     SnapshotMetadata {
         timestamp: now_iso8601(),
@@ -103,7 +110,6 @@ fn build_meta(rule: Rule, grid: &Grid, seed: u64, iteration: usize) -> SnapshotM
     }
 }
 
-/// Execute the stress-test loop: write snapshots and prune.
 fn run_stress(params: &StressParams) -> std::io::Result<()> {
     std::fs::create_dir_all(&params.dir)?;
     let rule = Rule::conway();
@@ -120,7 +126,7 @@ fn run_stress(params: &StressParams) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Resolve the worker thread stack size from environment variables.
+/// Resolve the worker thread stack size from environment.
 ///
 /// Checks `NIT_GOL_IO_STACK_MB` first, falls back to `NIT_GOL_STACK_MB`,
 /// then defaults to 256 MB with a 32 MB minimum.

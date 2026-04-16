@@ -25,7 +25,7 @@ pub fn render(
     state: &AppState,
     theme: &Theme,
     preview: Option<&PreviewModel>,
-    preview_scroll_delta: i32,
+    preview_scroll_delta: &mut i32,
 ) {
     frame.render_widget(Clear, area);
     let title = " NIT FUZZY SEARCH ";
@@ -127,7 +127,7 @@ fn render_body(
     state: &AppState,
     theme: &Theme,
     preview: Option<&PreviewModel>,
-    preview_scroll_delta: i32,
+    preview_scroll_delta: &mut i32,
 ) {
     let halves = Layout::default()
         .direction(Direction::Horizontal)
@@ -226,7 +226,7 @@ fn render_preview(
     area: Rect,
     theme: &Theme,
     preview: Option<&PreviewModel>,
-    preview_scroll_delta: i32,
+    preview_scroll_delta: &mut i32,
 ) {
     let mut title = " PREVIEW ".to_string();
     let mut truncated = false;
@@ -266,7 +266,11 @@ fn render_preview(
     let max_scroll = model.lines.len().saturating_sub(height.max(1));
     let desired = model.anchor_line.saturating_sub(height / 3);
     let base = desired.min(max_scroll) as i32;
-    let scroll = (base + preview_scroll_delta).clamp(0, max_scroll as i32) as usize;
+    let scroll = (base + *preview_scroll_delta).clamp(0, max_scroll as i32);
+    // Snap the accumulator back to the clamped effective offset so repeated
+    // scroll events at the edge don't overshoot — otherwise reverse scrolls
+    // first have to "work off" the accumulated overshoot before taking effect.
+    *preview_scroll_delta = scroll - base;
 
     let paragraph = Paragraph::new(model.lines.clone())
         .style(Style::default().bg(theme.background))

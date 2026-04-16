@@ -1,6 +1,7 @@
 use crate::agents::{
-    parse_claude_models_from_binary, parse_gemini_models_from_source, select_current_claude_models,
-    select_current_gemini_models, sync_backend_model_lanes,
+    parse_claude_models_from_binary, parse_effort_choices_from_help,
+    parse_gemini_models_from_source, select_current_claude_models, select_current_gemini_models,
+    sync_backend_model_lanes,
 };
 use crate::cli::AgentsArg;
 
@@ -163,4 +164,46 @@ fn sync_backend_model_lanes_replaces_placeholder_backend_rows() {
             .unwrap_or_else(|| panic!("missing lane {expected_model}"));
         assert!(matches!(expanded.kind, nit_core::AgentLaneKind::Claude));
     }
+}
+
+#[test]
+fn parses_claude_effort_choices_from_help_text() {
+    let help_output = "\
+Usage: claude [options] [command] [prompt]
+
+Options:
+  --allowedTools <tools...>                         tools list
+  --effort <level>                                  Effort level for the current session (low, medium, high, xhigh, max)
+  --model <model>                                   Model for the current session.
+";
+
+    let parsed = parse_effort_choices_from_help(help_output).expect("parsed effort list");
+    assert_eq!(parsed, ["low", "medium", "high", "xhigh", "max"]);
+}
+
+#[test]
+fn parses_claude_effort_choices_sorts_by_canonical_rank() {
+    let help_output =
+        "--effort <level>   Effort level for the current session (max, low, xhigh, high, medium)";
+    let parsed = parse_effort_choices_from_help(help_output).expect("parsed effort list");
+    assert_eq!(parsed, ["low", "medium", "high", "xhigh", "max"]);
+}
+
+#[test]
+fn parses_claude_effort_choices_ignores_unknown_tokens() {
+    let help_output = "--effort <level>    Effort level (low, medium, high, experimental!!, )";
+    let parsed = parse_effort_choices_from_help(help_output).expect("parsed effort list");
+    assert_eq!(parsed, ["low", "medium", "high"]);
+}
+
+#[test]
+fn parses_claude_effort_choices_returns_none_when_flag_absent() {
+    let help_output = "--model <model>    Model for the current session.";
+    assert!(parse_effort_choices_from_help(help_output).is_none());
+}
+
+#[test]
+fn parses_claude_effort_choices_returns_none_when_parens_missing() {
+    let help_output = "--effort <level>    Effort level for the current session";
+    assert!(parse_effort_choices_from_help(help_output).is_none());
 }

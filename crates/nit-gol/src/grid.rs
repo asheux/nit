@@ -25,6 +25,7 @@ pub struct Grid {
 
 impl Grid {
     /// Create an all-dead grid with the given dimensions.
+    #[must_use]
     pub fn new(width: usize, height: usize) -> Self {
         let len = width.saturating_mul(height);
         Self {
@@ -34,20 +35,24 @@ impl Grid {
         }
     }
 
+    #[must_use]
     pub fn width(&self) -> usize {
         self.width
     }
 
+    #[must_use]
     pub fn height(&self) -> usize {
         self.height
     }
 
     /// Raw cell storage (row-major, one byte per cell).
+    #[must_use]
     pub fn cells(&self) -> &[u8] {
         &self.cells
     }
 
-    /// Returns `true` if the cell at `(x, y)` is alive.
+    /// Read the cell at `(x, y)`. Out-of-bounds coordinates read as dead.
+    #[must_use]
     pub fn get(&self, x: usize, y: usize) -> bool {
         if x >= self.width || y >= self.height {
             return false;
@@ -55,7 +60,7 @@ impl Grid {
         self.cells[self.index(x, y)] != 0
     }
 
-    /// Set the cell at `(x, y)` to alive or dead.
+    /// Write the cell at `(x, y)`. Out-of-bounds writes are silently ignored.
     pub fn set(&mut self, x: usize, y: usize, alive: bool) {
         if x >= self.width || y >= self.height {
             return;
@@ -69,15 +74,17 @@ impl Grid {
         self.cells.fill(0);
     }
 
-    /// Count the number of alive cells in the grid.
+    /// Number of live cells in the grid.
+    #[must_use]
     pub fn alive_count(&self) -> usize {
         self.cells.iter().map(|v| *v as usize).sum()
     }
 
-    /// Compute a 64-bit FNV-1a hash over dimensions and cell data.
+    /// 64-bit FNV-1a hash over dimensions and cell data.
     ///
-    /// This hash is used for fast grid-equality checks in the rule
-    /// evaluator and must remain deterministic across versions.
+    /// Deterministic across versions; used as a fast identity key for
+    /// attractor detection and snapshot deduplication.
+    #[must_use]
     pub fn hash(&self) -> u64 {
         let mut h = hash::FNV_OFFSET;
         h = hash::fnv1a(h, &self.width.to_le_bytes());
@@ -85,10 +92,11 @@ impl Grid {
         hash::fnv1a(h, &self.cells)
     }
 
-    /// Copy this grid into a new grid with different dimensions.
+    /// Copy this grid into a new grid of different dimensions.
     ///
-    /// Cells within the overlapping region are preserved; new cells
-    /// are initialized to dead.
+    /// Cells within the overlapping region are preserved; new cells are
+    /// initialized to dead.
+    #[must_use]
     pub fn clone_with_size(&self, width: usize, height: usize) -> Grid {
         let mut new_grid = Grid::new(width, height);
         let copy_w = width.min(self.width);
@@ -101,7 +109,6 @@ impl Grid {
         new_grid
     }
 
-    /// Convert `(x, y)` to a flat index into the cell storage.
     fn index(&self, x: usize, y: usize) -> usize {
         y * self.width + x
     }

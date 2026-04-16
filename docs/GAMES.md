@@ -207,11 +207,20 @@ are prefixed with `gen::`.
 
 ## Enumeration helpers
 
-Enumerate FSMs and emit NDJSON:
+Enumerate FSMs and emit NDJSON (the `fsm` subcommand is currently the only variant of `nit games enumerate`):
 
 ```
-nit games enumerate fsm --states 2..4 --out ./generated --canonical --limit 5000
+nit games enumerate fsm --states 2..4 --out ./generated --canonical --limit 5000 \
+    --input-mode opponent_last_action
 ```
+
+Flags:
+
+- `--states <range>` — state-count range (`2..4`) or a single value
+- `--out <path>` — output directory or NDJSON file
+- `--canonical` — deduplicate isomorphic FSMs via canonicalization
+- `--limit <N>` — cap the number of emitted strategies
+- `--input-mode <name>` — `opponent_last_action` (default), `self_last_action`, `joint_last_action`
 
 ## Strategy inspection/export
 

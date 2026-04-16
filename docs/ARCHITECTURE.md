@@ -61,7 +61,20 @@ Codex (MCP or exec runtime), Claude (subprocess per turn), and a local mock lane
 
 ### Agent Ops tabs
 
-Agent Ops provides nine tabs: **Roster**, **Missions**, **DAG**, **MCP**, **Alerts**, **Patch**, **Evidence**, **Diagnostics**, **Scratchpad**.
+Agent Ops exposes **eight** tabs in the UI (defined in `crates/nit-core/src/state.rs::AgentOpsTab` and rendered in `crates/nit-tui/src/widgets/agent_ops_view.rs`). The user-visible labels are:
+
+| Tab label     | Enum variant  | Purpose                                                       |
+|---------------|---------------|---------------------------------------------------------------|
+| `ROSTER`      | `Roster`      | Agent lanes grouped by backend; swarm template + priority pins |
+| `MISSIONS`    | `Missions`    | Mission history and phase (`PLAN` / `EXECUTE` / `VERIFY` / `REPORT`) |
+| `DAG`         | `Dag`         | Swarm DAG view (task cards, deps, gate report)                 |
+| `ARTIFACTS`   | `Evidence`    | Agent output bodies, task artifacts, verify summary            |
+| `MCP`         | `Mcp`         | Codex MCP connection status and controls                       |
+| `ALERTS`      | `Alerts`      | Operator-visible warnings / errors                             |
+| `DIAG`        | `Diagnostics` | Ops timeline (`TurnStarted`/`TurnHeartbeat`/…)                 |
+| `SCRATCHPAD`  | `Scratchpad`  | Genome feedback + mission-local notes                          |
+
+(There is also a non-visible `Patch` variant in the enum; next/prev navigation routes around it — it is internal state only.)
 
 ### Roster seeding
 
@@ -76,7 +89,28 @@ Agent Ops provides nine tabs: **Roster**, **Missions**, **DAG**, **MCP**, **Aler
 ### Agent lane kinds
 
 `AgentLaneKind` in `nit-core` distinguishes backends: `Unknown`, `Mock`, `Codex`, `Claude`, `Gemini`.
-Each `AgentLane` has an `id`, `kind`, `role`, `status`, `queue_len`, and optional `current_mission`.
+Each `AgentLane` has an `id`, `kind`, `role`, `status`, `queue_len`, optional `current_mission`, and a `shadow: bool` flag that hides support agents from the roster and chat UI (see Shadow Agents below).
+
+### AgentBusEvent protocol
+
+Runners emit `AgentBusEvent` (see `crates/nit-core/src/agent_bus.rs`) which the TUI applies to `AppState`. Variants:
+
+| Variant              | Purpose                                                    |
+|----------------------|------------------------------------------------------------|
+| `AgentUpsert`        | Register or update a lane                                  |
+| `MissionUpsert`      | Create or update a mission record                          |
+| `MessageAppend`      | Append a message to the console                            |
+| `AlertAppend`        | Operator alert (Info / Warn / Error)                       |
+| `DiagnosticAppend`   | Ops-timeline entry                                         |
+| `McpStatus`          | Codex MCP connection state                                 |
+| `TurnStarted`        | Turn began (carries optional `resume_thread_id`)           |
+| `TurnHeartbeat`      | Keep-alive (used to detect idle timeouts)                  |
+| `TurnStage`          | Stage label (`"context"`, `"tool:edit"`, etc.)             |
+| `TurnLog`            | Free-form log line                                         |
+| `FileWrite`          | File attribution (agent → path) for genome tracking        |
+| `TokenCount`         | Live token / context budget update                         |
+| `TurnCompleted`      | Final result + `threadId` / `session_id` for resumption    |
+| `TurnFailed`         | Failure (includes last known thread/session id)            |
 
 ### Runtime modes (Exec vs MCP)
 
@@ -334,6 +368,17 @@ Safety note:
 - `@swarm` is orchestration and aggregation; it does not automatically merge code changes.
   The planner prompt encourages using a single “integrator” for file edits to reduce conflicts.
 
+#### Shadow agents (`@shadow`, auto-shadow)
+
+Shadows are a complementary pattern to `@swarm`: instead of planning a DAG across the roster, they run a fixed **propose-a / propose-b → judge → review → main** pipeline behind a single selected agent and prepend the four outputs as advisory context. Operator guide: `docs/SHADOWS.md`.
+
+- Implemented in `crates/nit-tui/src/shadow.rs` (`ShadowRuntime`, stage enum, prompt builders, lane id helpers).
+- Activated either explicitly via `@shadow <prompt>` or automatically when `should_auto_enable_shadows(prompt)` returns true (prompt > 500 chars or contains `refactor` / `migrate` / `rewrite` / `implement` / `overhaul` / `restructure`).
+- Suppressed inside an active swarm mission and for `@all` / `@swarm` / `@new` / `@queue` prefixes; suppression is decided in `chat_input.rs` before dispatch.
+- Shadow lanes are created with `AgentLane { shadow: true, ... }` and the id format `<base_id>#shadow-<run_id>-<role>` (parse with `shadow::parse_shadow_lane_id`). Roster, chat, and Ops views filter them out so only the main agent's turn is visible.
+- Shadow turns run `read_only = true`, which in the Claude runner restricts `--allowedTools` to `Read,Glob,Grep` and in the Codex runner forwards the read-only sandbox flag.
+- Only one shadow run per main agent can be in flight at once; concurrent prompts to the same agent queue normally.
+
 ### API wiring (CLI → TUI → runner)
 
 The wiring for Codex runtime configuration is intentionally explicit:
@@ -348,6 +393,10 @@ The wiring for Codex runtime configuration is intentionally explicit:
   - Exec runtime: adds `-a <policy>` and `-s <sandbox>` to `codex exec ...`.
   - MCP runtime: forwards `approval-policy` and `sandbox` only when starting new sessions via the
     `codex` tool (continuations via `codex-reply` resume the existing session settings).
+
+### Genome feedback + auto-retry
+
+When an agent edits files (tracked via `AgentBusEvent::FileWrite`), nit re-runs the genome/parsimony analyzer on the changed files and compares tiers against a baseline captured before the turn. If quality degraded OR the parsimony detector flags bloat, `build_genome_retry_prompt` (in `crates/nit-tui/src/app/mod.rs`) re-dispatches a follow-up prompt to the writer. Constants live in the same file: `GENOME_RETRY_LIMIT = 3` and `GENOME_RETRY_MIN_LINES = 120` (files shorter than that are skipped to avoid over-engineering trivial modules). See `docs/SEEDS.md` for the parsimony rule and tier system.
 
 ### Thread + mission context
 

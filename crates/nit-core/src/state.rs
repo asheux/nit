@@ -3046,6 +3046,150 @@ pub fn apply_action(state: &mut AppState, action: Action) -> ActionOutcome {
                 }
             }
         }
+        Action::MoveWordForward => {
+            if let Some(buf) = state.focused_buffer_mut() {
+                buf.move_word_forward();
+                buf.ensure_visible();
+            }
+        }
+        Action::MoveBigWordForward => {
+            if let Some(buf) = state.focused_buffer_mut() {
+                buf.move_big_word_forward();
+                buf.ensure_visible();
+            }
+        }
+        Action::MoveBigWordBack => {
+            if let Some(buf) = state.focused_buffer_mut() {
+                buf.move_big_word_back();
+                buf.ensure_visible();
+            }
+        }
+        Action::MoveBigWordEnd => {
+            if let Some(buf) = state.focused_buffer_mut() {
+                buf.move_big_word_end();
+                buf.ensure_visible();
+            }
+        }
+        Action::MoveFirstNonBlank => {
+            if let Some(buf) = state.focused_buffer_mut() {
+                buf.move_first_non_blank();
+                buf.ensure_visible();
+            }
+        }
+        Action::MoveLastNonBlank => {
+            if let Some(buf) = state.focused_buffer_mut() {
+                buf.move_last_non_blank();
+                buf.ensure_visible();
+            }
+        }
+        Action::MoveParagraphUp => {
+            if let Some(buf) = state.focused_buffer_mut() {
+                buf.move_paragraph_up();
+                buf.ensure_visible();
+            }
+        }
+        Action::MoveParagraphDown => {
+            if let Some(buf) = state.focused_buffer_mut() {
+                buf.move_paragraph_down();
+                buf.ensure_visible();
+            }
+        }
+        Action::MoveViewportTop => {
+            if let Some(buf) = state.focused_buffer_mut() {
+                buf.move_viewport_top();
+                buf.ensure_visible();
+            }
+        }
+        Action::MoveViewportMiddle => {
+            if let Some(buf) = state.focused_buffer_mut() {
+                buf.move_viewport_middle();
+                buf.ensure_visible();
+            }
+        }
+        Action::MoveViewportBottom => {
+            if let Some(buf) = state.focused_buffer_mut() {
+                buf.move_viewport_bottom();
+                buf.ensure_visible();
+            }
+        }
+        Action::DeleteToEnd => {
+            if let Some(buf) = state.focused_buffer_mut() {
+                buf.delete_to_end();
+                buf.ensure_visible();
+            }
+        }
+        Action::ChangeToEnd => {
+            if let Some(buf) = state.focused_buffer_mut() {
+                buf.delete_to_end();
+                buf.ensure_visible();
+            }
+            state.mode = Mode::Insert;
+        }
+        Action::SubstituteChar => {
+            if let Some(buf) = state.focused_buffer_mut() {
+                buf.delete_forward();
+                buf.ensure_visible();
+            }
+            state.mode = Mode::Insert;
+        }
+        Action::SubstituteLine => {
+            if let Some(buf) = state.focused_buffer_mut() {
+                buf.substitute_line();
+                buf.ensure_visible();
+            }
+            state.mode = Mode::Insert;
+        }
+        Action::JoinLines => {
+            if let Some(buf) = state.focused_buffer_mut() {
+                buf.join_lines();
+                buf.ensure_visible();
+            }
+        }
+        Action::ToggleCaseChar => {
+            if let Some(buf) = state.focused_buffer_mut() {
+                buf.toggle_case_char();
+                buf.ensure_visible();
+            }
+        }
+        Action::ReplaceChar(c) => {
+            if let Some(buf) = state.focused_buffer_mut() {
+                buf.replace_char(c);
+                buf.ensure_visible();
+            }
+        }
+        Action::FindChar(ch, forward, till) => {
+            if let Some(buf) = state.focused_buffer_mut() {
+                buf.find_char_in_line(ch, forward, till);
+                buf.ensure_visible();
+            }
+        }
+        Action::ScrollHalfPageDown => {
+            if let Some(buf) = state.focused_buffer_mut() {
+                buf.scroll_half_page_down();
+                buf.ensure_visible();
+            }
+        }
+        Action::ScrollHalfPageUp => {
+            if let Some(buf) = state.focused_buffer_mut() {
+                buf.scroll_half_page_up();
+                buf.ensure_visible();
+            }
+        }
+        Action::CenterViewportOnCursor => {
+            if let Some(buf) = state.focused_buffer_mut() {
+                buf.center_viewport_on_cursor();
+            }
+        }
+        Action::ViewportTopOnCursor => {
+            if let Some(buf) = state.focused_buffer_mut() {
+                buf.viewport_top_on_cursor();
+            }
+        }
+        Action::ViewportBottomOnCursor => {
+            if let Some(buf) = state.focused_buffer_mut() {
+                buf.viewport_bottom_on_cursor();
+            }
+        }
     }
 
     ActionOutcome {

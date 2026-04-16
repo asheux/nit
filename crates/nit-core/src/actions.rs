@@ -108,4 +108,36 @@ pub enum Action {
     OpenFile(PathBuf),
     OpenSearchPopup(SearchMode),
     CloseSearchPopup,
+    // --- Vim-style editor motions ---
+    MoveWordForward,
+    MoveBigWordForward,
+    MoveBigWordBack,
+    MoveBigWordEnd,
+    MoveFirstNonBlank,
+    MoveLastNonBlank,
+    MoveParagraphUp,
+    MoveParagraphDown,
+    MoveViewportTop,
+    MoveViewportMiddle,
+    MoveViewportBottom,
+    // --- Vim-style editor operators (no explicit motion pairing) ---
+    DeleteToEnd,
+    ChangeToEnd,
+    SubstituteChar,
+    SubstituteLine,
+    JoinLines,
+    ToggleCaseChar,
+    ReplaceChar(char),
+    /// Find a character on the current line.
+    /// Fields: (ch, forward, till)
+    ///   forward=true  → f / t
+    ///   forward=false → F / T
+    ///   till=true     → stop one character before the target (t / T)
+    FindChar(char, bool, bool),
+    // --- Vim-style scroll / viewport ---
+    ScrollHalfPageDown,
+    ScrollHalfPageUp,
+    CenterViewportOnCursor,
+    ViewportTopOnCursor,
+    ViewportBottomOnCursor,
 }

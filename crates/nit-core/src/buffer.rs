@@ -1280,6 +1280,468 @@ impl Buffer {
         let text = self.rope.line(line).to_string();
         text.trim_end_matches('\n').trim().is_empty()
     }
+
+    // ======================================================================
+    // Vim-style motions and operators.
+    //
+    // These are additive helpers that mirror vim's single-key commands.
+    // Every method here only mutates buffer state; mode/selection changes
+    // belong to the action dispatcher in `state::apply_action`.
+    // ======================================================================
+
+    /// vim `w`: move to the start of the next word.
+    /// A "word" is a run of word chars (alnum + `_`) OR a run of other
+    /// non-whitespace punctuation. Whitespace is skipped.
+    pub fn move_word_forward(&mut self) {
+        self.end_edit_group();
+        let len = self.rope.len_chars();
+        if len == 0 {
+            return;
+        }
+        let mut idx = self.char_index().min(len);
+        if idx >= len {
+            return;
+        }
+        let is_word = |c: char| c.is_alphanumeric() || c == '_';
+        let cur = self.rope.char(idx);
+        if cur.is_whitespace() {
+            // skip whitespace only
+        } else if is_word(cur) {
+            while idx < len && is_word(self.rope.char(idx)) {
+                idx += 1;
+            }
+        } else {
+            while idx < len {
+                let c = self.rope.char(idx);
+                if c.is_whitespace() || is_word(c) {
+                    break;
+                }
+                idx += 1;
+            }
+        }
+        while idx < len && self.rope.char(idx).is_whitespace() {
+            idx += 1;
+        }
+        if idx >= len {
+            idx = len.saturating_sub(1);
+        }
+        self.set_cursor_from_char_index(idx);
+    }
+
+    /// vim `W`: move to the start of the next WORD (whitespace-separated).
+    pub fn move_big_word_forward(&mut self) {
+        self.end_edit_group();
+        let len = self.rope.len_chars();
+        if len == 0 {
+            return;
+        }
+        let mut idx = self.char_index().min(len);
+        if idx >= len {
+            return;
+        }
+        while idx < len && !self.rope.char(idx).is_whitespace() {
+            idx += 1;
+        }
+        while idx < len && self.rope.char(idx).is_whitespace() {
+            idx += 1;
+        }
+        if idx >= len {
+            idx = len.saturating_sub(1);
+        }
+        self.set_cursor_from_char_index(idx);
+    }
+
+    /// vim `B`: move to the previous WORD start.
+    pub fn move_big_word_back(&mut self) {
+        self.end_edit_group();
+        let len = self.rope.len_chars();
+        if len == 0 {
+            return;
+        }
+        let mut idx = self.char_index().min(len);
+        if idx == 0 {
+            return;
+        }
+        idx = idx.saturating_sub(1);
+        while idx > 0 && self.rope.char(idx).is_whitespace() {
+            idx = idx.saturating_sub(1);
+        }
+        if self.rope.char(idx).is_whitespace() {
+            self.set_cursor_from_char_index(idx);
+            return;
+        }
+        while idx > 0 && !self.rope.char(idx - 1).is_whitespace() {
+            idx = idx.saturating_sub(1);
+        }
+        self.set_cursor_from_char_index(idx);
+    }
+
+    /// vim `E`: move to the end of the current/next WORD.
+    pub fn move_big_word_end(&mut self) {
+        self.end_edit_group();
+        let len = self.rope.len_chars();
+        if len == 0 {
+            return;
+        }
+        let mut idx = self.char_index().min(len);
+        if idx + 1 >= len {
+            if idx < len {
+                self.set_cursor_from_char_index(len.saturating_sub(1));
+            }
+            return;
+        }
+        let on_nonws = !self.rope.char(idx).is_whitespace();
+        let at_word_end = on_nonws && self.rope.char(idx + 1).is_whitespace();
+        if at_word_end || self.rope.char(idx).is_whitespace() {
+            idx += 1;
+            while idx < len && self.rope.char(idx).is_whitespace() {
+                idx += 1;
+            }
+        }
+        if idx >= len {
+            return;
+        }
+        while idx + 1 < len && !self.rope.char(idx + 1).is_whitespace() {
+            idx += 1;
+        }
+        self.set_cursor_from_char_index(idx);
+    }
+
+    /// vim `^`: move to the first non-blank character on the line.
+    pub fn move_first_non_blank(&mut self) {
+        self.end_edit_group();
+        let line = self.cursor.line.min(self.rope.len_lines().saturating_sub(1));
+        let line_start = self.rope.line_to_char(line);
+        let line_len = self.line_char_len(line);
+        let mut col = 0;
+        while col < line_len {
+            let c = self.rope.char(line_start + col);
+            if c != ' ' && c != '\t' {
+                break;
+            }
+            col += 1;
+        }
+        self.cursor.col = col;
+    }
+
+    /// vim `g_`: move to the last non-blank character on the line.
+    pub fn move_last_non_blank(&mut self) {
+        self.end_edit_group();
+        let line = self.cursor.line.min(self.rope.len_lines().saturating_sub(1));
+        let line_start = self.rope.line_to_char(line);
+        let line_len = self.line_char_len(line);
+        if line_len == 0 {
+            self.cursor.col = 0;
+            return;
+        }
+        let mut col = line_len.saturating_sub(1);
+        loop {
+            let c = self.rope.char(line_start + col);
+            if c != ' ' && c != '\t' {
+                break;
+            }
+            if col == 0 {
+                break;
+            }
+            col -= 1;
+        }
+        self.cursor.col = col;
+    }
+
+    /// vim `{`: move to the previous blank-line paragraph boundary.
+    pub fn move_paragraph_up(&mut self) {
+        self.end_edit_group();
+        if self.cursor.line == 0 {
+            self.cursor.col = 0;
+            return;
+        }
+        let mut line = self.cursor.line - 1;
+        while line > 0 && self.is_line_blank(line) {
+            line -= 1;
+        }
+        while line > 0 && !self.is_line_blank(line) {
+            line -= 1;
+        }
+        self.cursor.line = line;
+        self.cursor.col = 0;
+    }
+
+    /// vim `}`: move to the next blank-line paragraph boundary.
+    pub fn move_paragraph_down(&mut self) {
+        self.end_edit_group();
+        let total = self.rope.len_lines();
+        if total == 0 {
+            return;
+        }
+        let last = total.saturating_sub(1);
+        let mut line = (self.cursor.line + 1).min(last);
+        while line < last && self.is_line_blank(line) {
+            line += 1;
+        }
+        while line < last && !self.is_line_blank(line) {
+            line += 1;
+        }
+        self.cursor.line = line;
+        self.cursor.col = 0;
+        self.clamp_col();
+    }
+
+    /// vim `H`: move to the top of the visible viewport.
+    pub fn move_viewport_top(&mut self) {
+        self.end_edit_group();
+        let total = self.rope.len_lines().saturating_sub(1);
+        self.cursor.line = self.viewport.offset_line.min(total);
+        self.clamp_col();
+    }
+
+    /// vim `M`: move to the middle of the visible viewport.
+    pub fn move_viewport_middle(&mut self) {
+        self.end_edit_group();
+        let total = self.rope.len_lines().saturating_sub(1);
+        let h = self.viewport.height.max(1);
+        let target = self.viewport.offset_line + h / 2;
+        self.cursor.line = target.min(total);
+        self.clamp_col();
+    }
+
+    /// vim `L`: move to the bottom of the visible viewport.
+    pub fn move_viewport_bottom(&mut self) {
+        self.end_edit_group();
+        let total = self.rope.len_lines().saturating_sub(1);
+        let h = self.viewport.height.max(1);
+        let target = self.viewport.offset_line + h.saturating_sub(1);
+        self.cursor.line = target.min(total);
+        self.clamp_col();
+    }
+
+    /// vim `D`: delete from cursor to end of line.
+    pub fn delete_to_end(&mut self) {
+        self.end_edit_group();
+        let line = self.cursor.line.min(self.rope.len_lines().saturating_sub(1));
+        let line_start = self.rope.line_to_char(line);
+        let line_len = self.line_char_len(line);
+        let col = self.cursor.col.min(line_len);
+        let start = line_start + col;
+        let end = line_start + line_len;
+        if end <= start {
+            return;
+        }
+        self.push_undo();
+        self.record_delete(start, end);
+        self.rope.remove(start..end);
+        self.dirty = true;
+        self.clamp_col();
+    }
+
+    /// vim `S` / `cc`: clear the current line, preserving leading indent.
+    /// Caller is expected to switch to insert mode afterwards.
+    pub fn substitute_line(&mut self) {
+        self.end_edit_group();
+        let line = self.cursor.line.min(self.rope.len_lines().saturating_sub(1));
+        let line_start = self.rope.line_to_char(line);
+        let line_len = self.line_char_len(line);
+        let indent = self.line_indent(line);
+        let indent_chars = indent.chars().count().min(line_len);
+        if line_len > indent_chars {
+            let start = line_start + indent_chars;
+            let end = line_start + line_len;
+            self.push_undo();
+            self.record_delete(start, end);
+            self.rope.remove(start..end);
+            self.dirty = true;
+        }
+        self.cursor.col = indent_chars;
+    }
+
+    /// vim `J`: join the next line onto the current line with a single space.
+    pub fn join_lines(&mut self) {
+        self.end_edit_group();
+        let total = self.rope.len_lines();
+        let line = self.cursor.line;
+        if line + 1 >= total {
+            return;
+        }
+        let line_start = self.rope.line_to_char(line);
+        let line_len = self.line_char_len(line);
+        let newline_idx = line_start + line_len;
+        let next_start = self.rope.line_to_char(line + 1);
+        let next_len = self.line_char_len(line + 1);
+        let mut ws_end = 0;
+        while ws_end < next_len {
+            let c = self.rope.char(next_start + ws_end);
+            if c != ' ' && c != '\t' {
+                break;
+            }
+            ws_end += 1;
+        }
+        let end_idx = next_start + ws_end;
+        self.push_undo();
+        if end_idx > newline_idx {
+            self.record_delete(newline_idx, end_idx);
+            self.rope.remove(newline_idx..end_idx);
+        }
+        let has_next_content = ws_end < next_len;
+        let our_line_has_content = line_len > 0;
+        let mut final_col = line_len;
+        if has_next_content && our_line_has_content {
+            let insert_idx = line_start + line_len;
+            self.record_insert(insert_idx, " ");
+            self.rope.insert_char(insert_idx, ' ');
+            final_col = line_len;
+        } else if !our_line_has_content {
+            final_col = 0;
+        }
+        self.cursor.line = line;
+        self.cursor.col = final_col;
+        self.dirty = true;
+        self.clamp_col();
+    }
+
+    /// vim `~`: toggle case of the character under the cursor and advance.
+    pub fn toggle_case_char(&mut self) {
+        self.end_edit_group();
+        let len = self.rope.len_chars();
+        let idx = self.char_index();
+        if idx >= len {
+            return;
+        }
+        let c = self.rope.char(idx);
+        if c == '\n' {
+            return;
+        }
+        let new_c = if c.is_ascii_uppercase() {
+            c.to_ascii_lowercase()
+        } else if c.is_ascii_lowercase() {
+            c.to_ascii_uppercase()
+        } else {
+            c
+        };
+        if new_c != c {
+            self.push_undo();
+            self.record_delete(idx, idx + 1);
+            self.rope.remove(idx..idx + 1);
+            let mut buf = [0u8; 4];
+            let s = new_c.encode_utf8(&mut buf);
+            self.record_insert(idx, s);
+            self.rope.insert(idx, s);
+            self.dirty = true;
+        }
+        let line_len = self.line_char_len(self.cursor.line);
+        if self.cursor.col < line_len {
+            self.cursor.col += 1;
+        }
+    }
+
+    /// vim `r<c>`: replace the character under the cursor with `new_c`.
+    /// Does nothing if the cursor is on a newline or past end of buffer.
+    pub fn replace_char(&mut self, new_c: char) {
+        self.end_edit_group();
+        let len = self.rope.len_chars();
+        let idx = self.char_index();
+        if idx >= len {
+            return;
+        }
+        let c = self.rope.char(idx);
+        if c == '\n' {
+            return;
+        }
+        self.push_undo();
+        self.record_delete(idx, idx + 1);
+        self.rope.remove(idx..idx + 1);
+        let mut buf = [0u8; 4];
+        let s = new_c.encode_utf8(&mut buf);
+        self.record_insert(idx, s);
+        self.rope.insert(idx, s);
+        self.dirty = true;
+    }
+
+    /// vim `f` / `F` / `t` / `T`: search for `ch` on the current line only.
+    /// Returns `true` if the character was found and the cursor moved.
+    pub fn find_char_in_line(&mut self, ch: char, forward: bool, till: bool) -> bool {
+        self.end_edit_group();
+        let line = self.cursor.line.min(self.rope.len_lines().saturating_sub(1));
+        let line_start = self.rope.line_to_char(line);
+        let line_len = self.line_char_len(line);
+        let cur_col = self.cursor.col.min(line_len);
+        if forward {
+            let start = cur_col.saturating_add(1);
+            let mut col = start;
+            while col < line_len {
+                if self.rope.char(line_start + col) == ch {
+                    let target = if till { col.saturating_sub(1) } else { col };
+                    if till && target < cur_col {
+                        return false;
+                    }
+                    self.cursor.col = target;
+                    return true;
+                }
+                col += 1;
+            }
+        } else {
+            if cur_col == 0 {
+                return false;
+            }
+            let mut col = cur_col - 1;
+            loop {
+                if self.rope.char(line_start + col) == ch {
+                    let target = if till { col + 1 } else { col };
+                    if till && target > cur_col {
+                        return false;
+                    }
+                    self.cursor.col = target;
+                    return true;
+                }
+                if col == 0 {
+                    break;
+                }
+                col -= 1;
+            }
+        }
+        false
+    }
+
+    /// vim `Ctrl-d`: scroll half a screen down and move the cursor with it.
+    pub fn scroll_half_page_down(&mut self) {
+        self.end_edit_group();
+        let h = self.viewport.height.max(1);
+        let half = (h / 2).max(1);
+        let max_line = self.rope.len_lines().saturating_sub(1);
+        self.cursor.line = (self.cursor.line + half).min(max_line);
+        self.viewport.offset_line = self
+            .viewport
+            .offset_line
+            .saturating_add(half)
+            .min(max_line);
+        self.clamp_col();
+    }
+
+    /// vim `Ctrl-u`: scroll half a screen up and move the cursor with it.
+    pub fn scroll_half_page_up(&mut self) {
+        self.end_edit_group();
+        let h = self.viewport.height.max(1);
+        let half = (h / 2).max(1);
+        self.cursor.line = self.cursor.line.saturating_sub(half);
+        self.viewport.offset_line = self.viewport.offset_line.saturating_sub(half);
+        self.clamp_col();
+    }
+
+    /// vim `zz`: center the viewport on the cursor line.
+    pub fn center_viewport_on_cursor(&mut self) {
+        let h = self.viewport.height.max(1);
+        let half = h / 2;
+        self.viewport.offset_line = self.cursor.line.saturating_sub(half);
+    }
+
+    /// vim `zt`: scroll so the cursor line is at the top of the viewport.
+    pub fn viewport_top_on_cursor(&mut self) {
+        self.viewport.offset_line = self.cursor.line;
+    }
+
+    /// vim `zb`: scroll so the cursor line is at the bottom of the viewport.
+    pub fn viewport_bottom_on_cursor(&mut self) {
+        let h = self.viewport.height.max(1);
+        self.viewport.offset_line = self.cursor.line.saturating_sub(h.saturating_sub(1));
+    }
 }
 
 fn advance_point(start_byte: usize, start_point: BufferPoint, text: &str) -> (usize, BufferPoint) {

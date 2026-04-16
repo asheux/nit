@@ -1,11 +1,14 @@
 use std::collections::HashMap;
 use std::fs;
 
-use super::discover::{find_executable_in_path, probe_models_from_cli};
+use super::discover::{capture_cli_help_text, find_executable_in_path, probe_models_from_cli};
 
 const STANDARD_CONTEXT_WINDOW: u32 = 200_000;
 const EXTENDED_CONTEXT_WINDOW: u32 = 1_000_000;
 const MIN_ASCII_RUN_LENGTH: usize = 8;
+
+const DEFAULT_CLAUDE_EFFORTS: &[&str] = &["low", "medium", "high"];
+const PREFERRED_DEFAULT_EFFORT: &str = "high";
 
 type ModelProbeResult = (Vec<String>, Option<String>);
 
@@ -66,6 +69,9 @@ pub(super) fn probe_claude_models() -> ModelProbeResult {
 }
 
 pub(super) fn populate_claude_model_metadata(roster: &mut nit_core::AgentsState) {
+    let supported = probe_claude_supported_efforts();
+    let default_effort = pick_claude_default_effort(&supported);
+
     for idx in 0..roster.claude_models.len() {
         let id = roster.claude_models[idx].clone();
         let window = if id.contains("[1m]") || id.contains("1m") {
@@ -77,17 +83,77 @@ pub(super) fn populate_claude_model_metadata(roster: &mut nit_core::AgentsState)
             .claude_effective_context_window_tokens
             .insert(id.clone(), window);
 
-        let tiers = if id.to_lowercase().contains("opus") {
-            vec!["low".into(), "medium".into(), "high".into(), "max".into()]
-        } else {
-            vec!["low".into(), "medium".into(), "high".into()]
-        };
-        roster.claude_supported_efforts.insert(id.clone(), tiers);
+        roster
+            .claude_supported_efforts
+            .insert(id.clone(), supported.clone());
         roster
             .claude_default_effort
-            .insert(id.clone(), "high".into());
-        roster.claude_selected_effort.insert(id, "high".into());
+            .insert(id.clone(), default_effort.clone());
+        roster
+            .claude_selected_effort
+            .insert(id, default_effort.clone());
     }
+}
+
+fn probe_claude_supported_efforts() -> Vec<String> {
+    capture_cli_help_text("claude")
+        .as_deref()
+        .and_then(parse_effort_choices_from_help)
+        .unwrap_or_else(fallback_claude_efforts)
+}
+
+fn fallback_claude_efforts() -> Vec<String> {
+    DEFAULT_CLAUDE_EFFORTS.iter().map(|s| (*s).into()).collect()
+}
+
+pub(crate) fn parse_effort_choices_from_help(help_output: &str) -> Option<Vec<String>> {
+    let needle = "--effort";
+    let start = help_output.find(needle)?;
+    let after = &help_output[start + needle.len()..];
+    let open = after.find('(')?;
+    let close = after[open + 1..].find(')')?;
+    let raw = &after[open + 1..open + 1 + close];
+
+    let mut choices: Vec<String> = raw
+        .split(',')
+        .map(|piece| piece.trim().to_ascii_lowercase())
+        .filter(|piece| !piece.is_empty() && piece.chars().all(|c| c.is_ascii_alphanumeric()))
+        .collect();
+
+    choices.sort_by(|a, b| {
+        claude_effort_rank(a)
+            .cmp(&claude_effort_rank(b))
+            .then_with(|| a.cmp(b))
+    });
+    choices.dedup();
+
+    (!choices.is_empty()).then_some(choices)
+}
+
+fn claude_effort_rank(effort: &str) -> u8 {
+    match effort.to_ascii_lowercase().as_str() {
+        "low" => 0,
+        "medium" => 1,
+        "high" => 2,
+        "xhigh" => 3,
+        "max" => 4,
+        _ => 10,
+    }
+}
+
+fn pick_claude_default_effort(supported: &[String]) -> String {
+    let find = |target: &str| {
+        supported
+            .iter()
+            .find(|effort| effort.eq_ignore_ascii_case(target))
+            .cloned()
+    };
+
+    find(PREFERRED_DEFAULT_EFFORT)
+        .or_else(|| find("medium"))
+        .or_else(|| find("low"))
+        .or_else(|| supported.first().cloned())
+        .unwrap_or_else(|| PREFERRED_DEFAULT_EFFORT.to_string())
 }
 
 pub(crate) fn parse_claude_models_from_binary(bytes: &[u8]) -> Vec<String> {
