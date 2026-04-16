@@ -1742,6 +1742,199 @@ impl Buffer {
         let h = self.viewport.height.max(1);
         self.viewport.offset_line = self.cursor.line.saturating_sub(h.saturating_sub(1));
     }
+
+    // ======================================================================
+    // Vim-style in-buffer search helpers (used by `*`, `#`, `n`, `N` and by
+    // the renderer for highlighting occurrences).
+    // ======================================================================
+
+    /// Return the identifier-style word under the cursor.
+    /// A "word" is a contiguous run of `alphanumeric + '_'`. If the cursor is
+    /// not on a word character, scan forward on the same line to find one.
+    pub fn word_at_cursor(&self) -> Option<String> {
+        let is_word = |c: char| c.is_alphanumeric() || c == '_';
+        let len = self.rope.len_chars();
+        if len == 0 {
+            return None;
+        }
+        let line = self.cursor.line.min(self.rope.len_lines().saturating_sub(1));
+        let line_start = self.rope.line_to_char(line);
+        let line_len = self.line_char_len(line);
+        let mut col = self.cursor.col.min(line_len);
+
+        if col >= line_len || !is_word(self.rope.char(line_start + col)) {
+            while col < line_len && !is_word(self.rope.char(line_start + col)) {
+                col += 1;
+            }
+            if col >= line_len {
+                return None;
+            }
+        }
+
+        let mut start = col;
+        while start > 0 && is_word(self.rope.char(line_start + start - 1)) {
+            start -= 1;
+        }
+        let mut end = col;
+        while end < line_len && is_word(self.rope.char(line_start + end)) {
+            end += 1;
+        }
+        if end <= start {
+            return None;
+        }
+        let abs_start = line_start + start;
+        let abs_end = line_start + end;
+        Some(self.rope.slice(abs_start..abs_end).to_string())
+    }
+
+    /// Return all character-index ranges on `line` that match `term`.
+    /// When `whole_word` is true, matches must be bounded by non-word chars
+    /// (or line boundaries). The returned ranges are `(col_start, col_end)`
+    /// within the line's character space, not the full buffer.
+    pub fn search_line_matches(
+        &self,
+        line: usize,
+        term: &str,
+        whole_word: bool,
+    ) -> Vec<(usize, usize)> {
+        let mut out = Vec::new();
+        if term.is_empty() || line >= self.rope.len_lines() {
+            return out;
+        }
+        let line_start = self.rope.line_to_char(line);
+        let line_len = self.line_char_len(line);
+        if line_len == 0 {
+            return out;
+        }
+        let is_word = |c: char| c.is_alphanumeric() || c == '_';
+        let term_chars: Vec<char> = term.chars().collect();
+        let tlen = term_chars.len();
+        if tlen == 0 || tlen > line_len {
+            return out;
+        }
+        let mut i = 0;
+        while i + tlen <= line_len {
+            let mut matched = true;
+            for (k, &tc) in term_chars.iter().enumerate() {
+                if self.rope.char(line_start + i + k) != tc {
+                    matched = false;
+                    break;
+                }
+            }
+            if matched {
+                if whole_word {
+                    let before_ok = i == 0 || !is_word(self.rope.char(line_start + i - 1));
+                    let after_ok = i + tlen >= line_len
+                        || !is_word(self.rope.char(line_start + i + tlen));
+                    if before_ok && after_ok {
+                        out.push((i, i + tlen));
+                        i += tlen;
+                        continue;
+                    }
+                } else {
+                    out.push((i, i + tlen));
+                    i += tlen;
+                    continue;
+                }
+            }
+            i += 1;
+        }
+        out
+    }
+
+    /// Move cursor to the next match of `term` starting strictly after the
+    /// current cursor position; wrap to the top of the buffer on miss.
+    /// Returns `true` if a match was found.
+    pub fn search_next_match(&mut self, term: &str, whole_word: bool) -> bool {
+        if term.is_empty() {
+            return false;
+        }
+        self.end_edit_group();
+        let total_lines = self.rope.len_lines();
+        if total_lines == 0 {
+            return false;
+        }
+        let cursor_line = self.cursor.line;
+        let cursor_col = self.cursor.col;
+        // Search current line after cursor.
+        for (s, _e) in self.search_line_matches(cursor_line, term, whole_word) {
+            if s > cursor_col {
+                self.cursor.line = cursor_line;
+                self.cursor.col = s;
+                self.clamp_col();
+                return true;
+            }
+        }
+        // Search subsequent lines.
+        for l in (cursor_line + 1)..total_lines {
+            let matches = self.search_line_matches(l, term, whole_word);
+            if let Some(&(s, _)) = matches.first() {
+                self.cursor.line = l;
+                self.cursor.col = s;
+                self.clamp_col();
+                return true;
+            }
+        }
+        // Wrap: lines 0..=cursor_line (on cursor_line, accept first match regardless of position).
+        for l in 0..=cursor_line {
+            let matches = self.search_line_matches(l, term, whole_word);
+            if let Some(&(s, _)) = matches.first() {
+                self.cursor.line = l;
+                self.cursor.col = s;
+                self.clamp_col();
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Move cursor to the previous match of `term` before the current cursor
+    /// position; wrap to the bottom of the buffer on miss. If the cursor is
+    /// inside a match, the boundary is that match's start (so we skip past
+    /// the enclosing occurrence rather than snapping to its start).
+    pub fn search_prev_match(&mut self, term: &str, whole_word: bool) -> bool {
+        if term.is_empty() {
+            return false;
+        }
+        self.end_edit_group();
+        let total_lines = self.rope.len_lines();
+        if total_lines == 0 {
+            return false;
+        }
+        let cursor_line = self.cursor.line;
+        let cursor_col = self.cursor.col;
+        let matches = self.search_line_matches(cursor_line, term, whole_word);
+        let enclosing_start = matches
+            .iter()
+            .find(|(s, e)| *s <= cursor_col && *e > cursor_col)
+            .map(|(s, _)| *s);
+        let boundary = enclosing_start.unwrap_or(cursor_col);
+        if let Some(&(s, _)) = matches.iter().rev().find(|(s, _)| *s < boundary) {
+            self.cursor.line = cursor_line;
+            self.cursor.col = s;
+            self.clamp_col();
+            return true;
+        }
+        for l in (0..cursor_line).rev() {
+            let matches = self.search_line_matches(l, term, whole_word);
+            if let Some(&(s, _)) = matches.last() {
+                self.cursor.line = l;
+                self.cursor.col = s;
+                self.clamp_col();
+                return true;
+            }
+        }
+        for l in (cursor_line..total_lines).rev() {
+            let matches = self.search_line_matches(l, term, whole_word);
+            if let Some(&(s, _)) = matches.last() {
+                self.cursor.line = l;
+                self.cursor.col = s;
+                self.clamp_col();
+                return true;
+            }
+        }
+        false
+    }
 }
 
 fn advance_point(start_byte: usize, start_point: BufferPoint, text: &str) -> (usize, BufferPoint) {

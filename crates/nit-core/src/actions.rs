@@ -140,4 +140,26 @@ pub enum Action {
     CenterViewportOnCursor,
     ViewportTopOnCursor,
     ViewportBottomOnCursor,
+    // --- Vim-style in-editor word search: * / # / n / N ---
+    /// `*`: set search term to word under cursor and jump to next match.
+    SearchWordForward,
+    /// `#`: set search term to word under cursor and jump to previous match.
+    SearchWordBack,
+    /// `n`: jump to next occurrence of the active search term.
+    SearchNext,
+    /// `N`: jump to previous occurrence of the active search term.
+    SearchPrev,
+    /// Clear the highlighted search term (vim's `:nohlsearch`).
+    SearchClear,
+    // --- `/` search prompt ---
+    /// Open the `/` search input; the user types a term and Enter confirms.
+    SearchPromptOpen,
+    /// Cancel the search prompt without applying a term.
+    SearchPromptCancel,
+    /// Execute the search (Enter in prompt): set the term and jump to next match.
+    SearchPromptExecute,
+    /// Append a char into the search prompt input.
+    SearchPromptInput(char),
+    /// Backspace inside the search prompt.
+    SearchPromptBackspace,
 }

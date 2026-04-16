@@ -692,3 +692,147 @@ fn join_lines_is_undoable() {
     assert!(buf.undo());
     assert_eq!(buf.content_as_string(), "hello\nworld\n");
 }
+
+// --- Vim search (* / # / n / N) tests ---
+
+#[test]
+fn word_at_cursor_returns_identifier() {
+    let buf = Buffer::from_str("t", "foo bar_baz qux", None);
+    let mut b = buf;
+    b.cursor.line = 0;
+    b.cursor.col = 5; // inside 'bar_baz'
+    assert_eq!(b.word_at_cursor().as_deref(), Some("bar_baz"));
+}
+
+#[test]
+fn word_at_cursor_scans_forward_from_whitespace() {
+    let mut buf = Buffer::from_str("t", "   hello", None);
+    buf.cursor.line = 0;
+    buf.cursor.col = 0; // on whitespace
+    assert_eq!(buf.word_at_cursor().as_deref(), Some("hello"));
+}
+
+#[test]
+fn word_at_cursor_none_on_blank_line() {
+    let mut buf = Buffer::from_str("t", "   \n", None);
+    buf.cursor.line = 0;
+    buf.cursor.col = 0;
+    assert_eq!(buf.word_at_cursor(), None);
+}
+
+#[test]
+fn search_line_matches_plain_substring() {
+    let buf = Buffer::from_str("t", "foo foobar foo\n", None);
+    let matches = buf.search_line_matches(0, "foo", false);
+    assert_eq!(matches, vec![(0, 3), (4, 7), (11, 14)]);
+}
+
+#[test]
+fn search_line_matches_whole_word_ignores_partials() {
+    let buf = Buffer::from_str("t", "foo foobar foo\n", None);
+    let matches = buf.search_line_matches(0, "foo", true);
+    assert_eq!(matches, vec![(0, 3), (11, 14)]);
+}
+
+#[test]
+fn search_next_match_advances_cursor() {
+    let mut buf = Buffer::from_str("t", "foo\nbar foo baz\nfoo end\n", None);
+    buf.cursor.line = 0;
+    buf.cursor.col = 0;
+    assert!(buf.search_next_match("foo", true));
+    // Next match is "foo" on line 1 at column 4 (after "bar ").
+    assert_eq!(buf.cursor.line, 1);
+    assert_eq!(buf.cursor.col, 4);
+    // Again: advances to line 2.
+    assert!(buf.search_next_match("foo", true));
+    assert_eq!(buf.cursor.line, 2);
+    assert_eq!(buf.cursor.col, 0);
+    // Again: wraps back to line 0.
+    assert!(buf.search_next_match("foo", true));
+    assert_eq!(buf.cursor.line, 0);
+    assert_eq!(buf.cursor.col, 0);
+}
+
+#[test]
+fn search_next_match_wraps_around() {
+    let mut buf = Buffer::from_str("t", "alpha beta\ngamma delta\n", None);
+    buf.cursor.line = 1;
+    buf.cursor.col = 6;
+    assert!(buf.search_next_match("beta", false));
+    assert_eq!(buf.cursor.line, 0);
+    assert_eq!(buf.cursor.col, 6);
+}
+
+#[test]
+fn search_next_match_returns_false_when_missing() {
+    let mut buf = Buffer::from_str("t", "alpha beta\n", None);
+    buf.cursor.line = 0;
+    buf.cursor.col = 0;
+    assert!(!buf.search_next_match("missing", false));
+    // Cursor doesn't move when no match.
+    assert_eq!(buf.cursor.col, 0);
+}
+
+#[test]
+fn search_prev_match_walks_backwards() {
+    let mut buf = Buffer::from_str("t", "foo bar foo\nbaz foo\n", None);
+    buf.cursor.line = 1;
+    buf.cursor.col = 5;
+    assert!(buf.search_prev_match("foo", true));
+    assert_eq!(buf.cursor.line, 0);
+    assert_eq!(buf.cursor.col, 8);
+}
+
+#[test]
+fn search_prev_match_wraps_to_end() {
+    let mut buf = Buffer::from_str("t", "aaa bbb ccc\n", None);
+    buf.cursor.line = 0;
+    buf.cursor.col = 0;
+    assert!(buf.search_prev_match("ccc", false));
+    assert_eq!(buf.cursor.col, 8);
+}
+
+#[test]
+fn search_whole_word_skips_substring_matches() {
+    let mut buf = Buffer::from_str("t", "result results result\n", None);
+    buf.cursor.line = 0;
+    buf.cursor.col = 0;
+    // `whole_word` search from col 0 must skip "results" (substring) and
+    // land on the final "result" at col 15.
+    assert!(buf.search_next_match("result", true));
+    assert_eq!(buf.cursor.col, 15);
+}
+
+#[test]
+fn repeated_star_scans_through_matches_forward() {
+    // `*` jumps to next match each time. From inside the first match we
+    // should skip it and advance.
+    let mut buf = Buffer::from_str("t", "foo foo foo\n", None);
+    buf.cursor.line = 0;
+    buf.cursor.col = 0;
+    // First `*` → already on first "foo", skip it and jump to second.
+    assert!(buf.search_next_match("foo", true));
+    assert_eq!(buf.cursor.col, 4);
+    // Second call → jump to third.
+    assert!(buf.search_next_match("foo", true));
+    assert_eq!(buf.cursor.col, 8);
+    // Third call → wraps to first.
+    assert!(buf.search_next_match("foo", true));
+    assert_eq!(buf.cursor.col, 0);
+}
+
+#[test]
+fn repeated_hash_scans_through_matches_backward() {
+    let mut buf = Buffer::from_str("t", "foo foo foo\n", None);
+    buf.cursor.line = 0;
+    buf.cursor.col = 8; // on third "foo"
+    // First `#` from inside a match → go to previous match.
+    assert!(buf.search_prev_match("foo", true));
+    assert_eq!(buf.cursor.col, 4);
+    // Next call → first match.
+    assert!(buf.search_prev_match("foo", true));
+    assert_eq!(buf.cursor.col, 0);
+    // Wrap: go back to last match.
+    assert!(buf.search_prev_match("foo", true));
+    assert_eq!(buf.cursor.col, 8);
+}

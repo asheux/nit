@@ -42,6 +42,40 @@ pub fn render_editor(
         tab_width,
         true,
         mode,
+        None,
+    )
+}
+
+/// Same as `render_editor` but overlays a search highlight on occurrences of
+/// `term` (respecting `whole_word`). Call this variant when a vim `/`, `*` or
+/// `#` search is active.
+#[allow(clippy::too_many_arguments)]
+pub fn render_editor_with_search(
+    frame: &mut Frame,
+    area: Rect,
+    buffer: &Buffer,
+    snapshot: Option<&HighlightSnapshot>,
+    line_map: Option<&[Option<usize>]>,
+    focus: PaneId,
+    mode: Mode,
+    theme: &Theme,
+    tab_width: usize,
+    search: Option<(&str, bool)>,
+) -> Option<CursorPlacement> {
+    render_buffer(
+        frame,
+        area,
+        buffer,
+        snapshot,
+        line_map,
+        PaneId::Editor,
+        focus,
+        "EDITOR  [ SAVE ]",
+        theme,
+        tab_width,
+        true,
+        mode,
+        search,
     )
 }
 
@@ -59,6 +93,7 @@ pub fn render_buffer(
     tab_width: usize,
     show_cursor: bool,
     mode: Mode,
+    search: Option<(&str, bool)>,
 ) -> Option<CursorPlacement> {
     let focused = focus == pane_id;
     let content_bg = buffer_input_bg(theme, focused);
@@ -216,6 +251,19 @@ pub fn render_buffer(
         let mut styles = vec![data.base_style; data.chars.len()];
         if let Some(mapped) = data.mapped_segments.as_ref() {
             apply_syntax_spans(mapped, &mut styles, theme);
+        }
+
+        if let Some((term, whole_word)) = search {
+            if !term.is_empty() && line_idx < actual_lines {
+                let matches = buffer.search_line_matches(line_idx, term, whole_word);
+                for (m_start, m_end) in matches {
+                    for idx in m_start..m_end.min(styles.len()) {
+                        styles[idx] = styles[idx]
+                            .bg(theme.selection_bg)
+                            .add_modifier(Modifier::BOLD);
+                    }
+                }
+            }
         }
 
         if line_idx < actual_lines {

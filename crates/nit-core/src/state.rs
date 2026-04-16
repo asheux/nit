@@ -1682,6 +1682,74 @@ pub struct SyntaxDebugInfo {
     pub last_job_ms: Option<u128>,
 }
 
+/// Vim-style in-editor search state.
+///
+/// Tracks the active search term, whether it was started by `*` / `#` (which
+/// implies whole-word matching), and the last direction (so `n` repeats in
+/// the same direction and `N` reverses it). The state is shared across all
+/// editor buffers, matching vim's behaviour where the last search pattern is
+/// global to the editor.
+#[derive(Clone, Debug, Default)]
+pub struct EditorSearch {
+    pub term: Option<String>,
+    pub whole_word: bool,
+    pub forward: bool,
+}
+
+impl EditorSearch {
+    pub fn is_active(&self) -> bool {
+        self.term.as_deref().is_some_and(|t| !t.is_empty())
+    }
+
+    pub fn clear(&mut self) {
+        self.term = None;
+        self.whole_word = false;
+    }
+}
+
+/// `/` search prompt input state. Mirrors `CommandLine` but for buffer search.
+#[derive(Clone, Debug, Default)]
+pub struct SearchPrompt {
+    pub input: String,
+    pub cursor: usize,
+}
+
+impl SearchPrompt {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn insert(&mut self, ch: char) {
+        let idx = self.char_idx_to_byte(self.cursor);
+        self.input.insert(idx, ch);
+        self.cursor = self.cursor.saturating_add(1);
+    }
+
+    pub fn backspace(&mut self) {
+        if self.cursor == 0 {
+            return;
+        }
+        let end = self.char_idx_to_byte(self.cursor);
+        let start = self.char_idx_to_byte(self.cursor.saturating_sub(1));
+        if start < end {
+            self.input.replace_range(start..end, "");
+            self.cursor = self.cursor.saturating_sub(1);
+        }
+    }
+
+    fn char_idx_to_byte(&self, idx: usize) -> usize {
+        if idx == 0 {
+            return 0;
+        }
+        for (count, (byte_idx, _)) in self.input.char_indices().enumerate() {
+            if count == idx {
+                return byte_idx;
+            }
+        }
+        self.input.len()
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct CommandLine {
     pub input: String,
@@ -1856,6 +1924,12 @@ pub struct AppState {
     pub games: GamesState,
     pub file_tree: FileTreeState,
     pub fuzzy_search: FuzzySearchState,
+    /// Vim-style in-editor search (set by `*` / `#`, navigated by `n` / `N`).
+    #[serde(skip)]
+    pub editor_search: EditorSearch,
+    /// Active `/` search prompt; `Some` while the user is typing a term.
+    #[serde(skip)]
+    pub search_prompt: Option<SearchPrompt>,
     #[serde(skip)]
     pub yank: Option<String>,
     #[serde(skip)]
@@ -2142,6 +2216,8 @@ impl AppState {
             },
             file_tree,
             fuzzy_search,
+            editor_search: EditorSearch::default(),
+            search_prompt: None,
             yank: None,
             yank_kind: YankKind::Char,
             command_line: None,
@@ -3188,6 +3264,114 @@ pub fn apply_action(state: &mut AppState, action: Action) -> ActionOutcome {
         Action::ViewportBottomOnCursor => {
             if let Some(buf) = state.focused_buffer_mut() {
                 buf.viewport_bottom_on_cursor();
+            }
+        }
+        Action::SearchWordForward => {
+            let word = state.focused_buffer_mut().and_then(|b| b.word_at_cursor());
+            if let Some(term) = word {
+                state.editor_search.term = Some(term.clone());
+                state.editor_search.whole_word = true;
+                state.editor_search.forward = true;
+                if let Some(buf) = state.focused_buffer_mut() {
+                    buf.search_next_match(&term, true);
+                    buf.ensure_visible();
+                }
+                state.status = Some(format!("/\\<{term}\\>"));
+            } else {
+                state.status = Some("No word under cursor".into());
+            }
+        }
+        Action::SearchWordBack => {
+            let word = state.focused_buffer_mut().and_then(|b| b.word_at_cursor());
+            if let Some(term) = word {
+                state.editor_search.term = Some(term.clone());
+                state.editor_search.whole_word = true;
+                state.editor_search.forward = false;
+                if let Some(buf) = state.focused_buffer_mut() {
+                    buf.search_prev_match(&term, true);
+                    buf.ensure_visible();
+                }
+                state.status = Some(format!("?\\<{term}\\>"));
+            } else {
+                state.status = Some("No word under cursor".into());
+            }
+        }
+        Action::SearchNext => {
+            let term = state.editor_search.term.clone();
+            let whole_word = state.editor_search.whole_word;
+            let forward = state.editor_search.forward;
+            if let Some(term) = term {
+                if let Some(buf) = state.focused_buffer_mut() {
+                    let found = if forward {
+                        buf.search_next_match(&term, whole_word)
+                    } else {
+                        buf.search_prev_match(&term, whole_word)
+                    };
+                    buf.ensure_visible();
+                    if !found {
+                        state.status = Some(format!("Pattern not found: {term}"));
+                    }
+                }
+            } else {
+                state.status = Some("No previous search".into());
+            }
+        }
+        Action::SearchPrev => {
+            let term = state.editor_search.term.clone();
+            let whole_word = state.editor_search.whole_word;
+            let forward = state.editor_search.forward;
+            if let Some(term) = term {
+                if let Some(buf) = state.focused_buffer_mut() {
+                    let found = if forward {
+                        buf.search_prev_match(&term, whole_word)
+                    } else {
+                        buf.search_next_match(&term, whole_word)
+                    };
+                    buf.ensure_visible();
+                    if !found {
+                        state.status = Some(format!("Pattern not found: {term}"));
+                    }
+                }
+            } else {
+                state.status = Some("No previous search".into());
+            }
+        }
+        Action::SearchClear => {
+            state.editor_search.clear();
+        }
+        Action::SearchPromptOpen => {
+            state.search_prompt = Some(SearchPrompt::new());
+        }
+        Action::SearchPromptCancel => {
+            state.search_prompt = None;
+        }
+        Action::SearchPromptBackspace => {
+            if let Some(p) = state.search_prompt.as_mut() {
+                p.backspace();
+            }
+        }
+        Action::SearchPromptInput(ch) => {
+            if let Some(p) = state.search_prompt.as_mut() {
+                p.insert(ch);
+            }
+        }
+        Action::SearchPromptExecute => {
+            if let Some(prompt) = state.search_prompt.take() {
+                let term = prompt.input;
+                if !term.is_empty() {
+                    state.editor_search.term = Some(term.clone());
+                    state.editor_search.whole_word = false;
+                    state.editor_search.forward = true;
+                    if let Some(buf) = state.focused_buffer_mut() {
+                        let found = buf.search_next_match(&term, false);
+                        buf.ensure_visible();
+                        if !found {
+                            state.status = Some(format!("Pattern not found: {term}"));
+                        } else {
+                            state.status = Some(format!("/{term}"));
+                        }
+                    }
+                }
             }
         }
     }

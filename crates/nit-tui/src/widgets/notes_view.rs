@@ -32,5 +32,6 @@ pub fn render_notes(
         tab_width,
         true,
         mode,
+        None,
     )
 }

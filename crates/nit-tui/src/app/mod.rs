@@ -2596,7 +2596,12 @@ fn draw(
         } else {
             state.editor_buffer_mut().compute_diff_if_needed();
             let editor_render = syntax.render_snapshot_for(editor_id, state.editor_buffer());
-            editor_view::render_editor(
+            let search = state
+                .editor_search
+                .term
+                .as_deref()
+                .map(|t| (t, state.editor_search.whole_word));
+            editor_view::render_editor_with_search(
                 f,
                 layout.editor,
                 state.editor_buffer(),
@@ -2606,6 +2611,7 @@ fn draw(
                 state.mode,
                 theme,
                 state.settings.editor.tab_width as usize,
+                search,
             )
         };
         let notes_cursor = agent_console_view::render(f, layout.notes, state, swarm, theme);
@@ -2677,6 +2683,7 @@ fn draw(
                     state.settings.editor.tab_width as usize,
                     true,
                     state.mode,
+                    None,
                 )
             } else {
                 None
@@ -2810,6 +2817,12 @@ fn draw(
             let area = dynamic_popup_rect(screen, prompt_size(&message));
             render_command_prompt(f, area, theme, &message);
             command_cursor = command_prompt_cursor(area, &cmd.input, cmd.cursor);
+        }
+        if let Some(prompt) = state.search_prompt.as_ref() {
+            let message = format!("/{}", prompt.input);
+            let area = dynamic_popup_rect(screen, prompt_size(&message));
+            render_search_prompt(f, area, theme, &message);
+            command_cursor = command_prompt_cursor(area, &prompt.input, prompt.cursor);
         }
         let fuzzy_cursor = if state.fuzzy_search.open {
             let area = dynamic_popup_rect(screen, fuzzy_popup_size(screen, state));
@@ -5204,6 +5217,20 @@ fn map_key_to_action(key: KeyEvent, state: &AppState, input: &mut InputState) ->
         };
     }
 
+    if state.search_prompt.is_some() {
+        return match key.code {
+            KeyCode::Esc => Some(Action::SearchPromptCancel),
+            KeyCode::Enter => Some(Action::SearchPromptExecute),
+            KeyCode::Backspace => Some(Action::SearchPromptBackspace),
+            KeyCode::Char(c)
+                if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT =>
+            {
+                Some(Action::SearchPromptInput(c))
+            }
+            _ => None,
+        };
+    }
+
     if is_job_pause_key(&key) {
         return Some(Action::ToggleJobPause);
     }
@@ -5744,6 +5771,44 @@ fn map_key_to_action(key: KeyEvent, state: &AppState, input: &mut InputState) ->
             modifiers: KeyModifiers::CONTROL,
             ..
         } if is_motion_mode(state) => Some(Action::ScrollHalfPageUp),
+        // --- Vim in-buffer search: * / # / n / N and `/` prompt ---
+        KeyEvent {
+            code: KeyCode::Char('*'),
+            modifiers,
+            ..
+        } if is_motion_mode(state)
+            && (modifiers.is_empty() || modifiers == KeyModifiers::SHIFT) =>
+        {
+            Some(Action::SearchWordForward)
+        }
+        KeyEvent {
+            code: KeyCode::Char('#'),
+            modifiers,
+            ..
+        } if is_motion_mode(state)
+            && (modifiers.is_empty() || modifiers == KeyModifiers::SHIFT) =>
+        {
+            Some(Action::SearchWordBack)
+        }
+        KeyEvent {
+            code: KeyCode::Char('n'),
+            modifiers: KeyModifiers::NONE,
+            ..
+        } if is_motion_mode(state) => Some(Action::SearchNext),
+        KeyEvent {
+            code: KeyCode::Char('N'),
+            modifiers,
+            ..
+        } if is_motion_mode(state)
+            && (modifiers.is_empty() || modifiers == KeyModifiers::SHIFT) =>
+        {
+            Some(Action::SearchPrev)
+        }
+        KeyEvent {
+            code: KeyCode::Char('/'),
+            modifiers: KeyModifiers::NONE,
+            ..
+        } if is_motion_mode(state) => Some(Action::SearchPromptOpen),
         KeyEvent {
             code: KeyCode::Char(' '),
             modifiers: KeyModifiers::CONTROL,
@@ -11850,6 +11915,24 @@ fn render_command_prompt(
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme.border_focused))
         .title("COMMAND")
+        .style(Style::default().bg(theme.selection_bg));
+    let paragraph = Paragraph::new(message)
+        .style(Style::default().bg(theme.selection_bg).fg(theme.foreground))
+        .block(block);
+    frame.render_widget(Clear, area);
+    frame.render_widget(paragraph, area);
+}
+
+fn render_search_prompt(
+    frame: &mut ratatui::Frame,
+    area: ratatui::layout::Rect,
+    theme: &Theme,
+    message: &str,
+) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme.border_focused))
+        .title("SEARCH")
         .style(Style::default().bg(theme.selection_bg));
     let paragraph = Paragraph::new(message)
         .style(Style::default().bg(theme.selection_bg).fg(theme.foreground))

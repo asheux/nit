@@ -2,8 +2,7 @@
 //!
 //! Detects fixed points and periodic cycles during grid evolution by
 //! maintaining a fingerprint history of observed states. Supports both
-//! simple and protocol-aware (multi-phase) observation.
-
+//! simple and protocol-aware (multi-phase) observation
 use std::collections::{HashMap, VecDeque};
 
 use crate::hash::{blake3_u64_pair, edge_tag, fnv1a, FNV_OFFSET};
