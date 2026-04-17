@@ -2062,6 +2062,13 @@ pub struct AppState {
     /// `gate_monitor_last_max_scroll`'s "no render yet" sentinel semantics.
     #[serde(skip, default = "gate_monitor_max_scroll_default")]
     pub substrate_last_max_scroll: usize,
+    /// Scroll offset for the substrate-claims body (Visualizer pane).
+    #[serde(skip)]
+    pub substrate_claims_scroll: usize,
+    /// Cached max_scroll for the substrate-claims body, updated per render.
+    /// Mirrors `substrate_last_max_scroll`'s "no render yet" sentinel semantics.
+    #[serde(skip, default = "gate_monitor_max_scroll_default")]
+    pub substrate_claims_last_max_scroll: usize,
     #[serde(default)]
     pub substrate: crate::substrate::SubstrateState,
 }
@@ -2079,6 +2086,7 @@ pub enum GateMonitorSubView {
 pub enum VisualizerSubView {
     #[default]
     SubstrateSignals,
+    SubstrateClaims,
     Visualizer,
 }
 
@@ -2292,6 +2300,8 @@ impl AppState {
             visualizer_sub_view: VisualizerSubView::default(),
             substrate_scroll: 0,
             substrate_last_max_scroll: usize::MAX,
+            substrate_claims_scroll: 0,
+            substrate_claims_last_max_scroll: usize::MAX,
             substrate: crate::substrate::SubstrateState::default(),
         }
     }
@@ -2923,10 +2933,12 @@ pub fn apply_action(state: &mut AppState, action: Action) -> ActionOutcome {
         }
         Action::VisualizerToggleSubView => {
             state.visualizer_sub_view = match state.visualizer_sub_view {
-                VisualizerSubView::SubstrateSignals => VisualizerSubView::Visualizer,
+                VisualizerSubView::SubstrateSignals => VisualizerSubView::SubstrateClaims,
+                VisualizerSubView::SubstrateClaims => VisualizerSubView::Visualizer,
                 VisualizerSubView::Visualizer => VisualizerSubView::SubstrateSignals,
             };
             state.substrate_scroll = 0;
+            state.substrate_claims_scroll = 0;
         }
         Action::VisualizerCycleSeedView => {
             state.visualizer.seed_view = state.visualizer.seed_view.next();

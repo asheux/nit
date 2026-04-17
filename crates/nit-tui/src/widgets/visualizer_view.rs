@@ -18,6 +18,7 @@ use crate::{
 // gate_monitor_view.rs).
 const TITLE_PREFIX: &str = "VISUALIZER ";
 const BTN_SIGNALS_LABEL: &str = " SUBSTRATE SIGNALS ";
+const BTN_CLAIMS_LABEL: &str = " SUBSTRATE CLAIMS ";
 const BTN_VIZ_LABEL: &str = " VISUALIZER ";
 // APPLY/SEED/SNAP/SEARCH only render on the Visualizer sub-view.
 const BTN_APPLY_LABEL: &str = " APPLY ";
@@ -27,18 +28,23 @@ const BTN_SEARCH_LABEL: &str = " SEARCH ";
 
 /// Returns an action if the click column (relative to the visualizer rect)
 /// hits a title button. `sub_view` gates the inner buttons (APPLY/SEED/…) so
-/// they are unresponsive on the Signals tab where they aren't rendered.
+/// they are unresponsive on the substrate tabs where they aren't rendered.
 pub fn title_button_hit(col_in_rect: u16, sub_view: VisualizerSubView) -> Option<Action> {
     // Title text starts 1 cell in from the left border.
     let col = col_in_rect.saturating_sub(1);
     let prefix_len = TITLE_PREFIX.len() as u16;
 
-    // Tab buttons: [" SUBSTRATE SIGNALS "] [space] [" VISUALIZER "]
+    // Tab buttons: [" SUBSTRATE SIGNALS "] [sp] [" SUBSTRATE CLAIMS "] [sp] [" VISUALIZER "]
     let sig_start = prefix_len + 1; // single-space separator after prefix
     let sig_end = sig_start + BTN_SIGNALS_LABEL.len() as u16;
-    let viz_start = sig_end + 1;
+    let claims_start = sig_end + 1;
+    let claims_end = claims_start + BTN_CLAIMS_LABEL.len() as u16;
+    let viz_start = claims_end + 1;
     let viz_end = viz_start + BTN_VIZ_LABEL.len() as u16;
-    if (sig_start..sig_end).contains(&col) || (viz_start..viz_end).contains(&col) {
+    if (sig_start..sig_end).contains(&col)
+        || (claims_start..claims_end).contains(&col)
+        || (viz_start..viz_end).contains(&col)
+    {
         return Some(Action::VisualizerToggleSubView);
     }
 
@@ -105,18 +111,23 @@ pub fn render(
 
     let sub_view = state.visualizer_sub_view;
     let is_signals = sub_view == VisualizerSubView::SubstrateSignals;
+    let is_claims = sub_view == VisualizerSubView::SubstrateClaims;
+    let is_visualizer = sub_view == VisualizerSubView::Visualizer;
     let signals_style = if is_signals { btn_active } else { btn_inactive };
-    let viz_style = if is_signals { btn_inactive } else { btn_active };
+    let claims_style = if is_claims { btn_active } else { btn_inactive };
+    let viz_style = if is_visualizer { btn_active } else { btn_inactive };
 
     let mut title_spans: Vec<Span<'static>> = vec![
         Span::styled(TITLE_PREFIX, title_style),
         Span::styled(" ", sep_style),
         Span::styled(BTN_SIGNALS_LABEL, signals_style),
         Span::styled(" ", sep_style),
+        Span::styled(BTN_CLAIMS_LABEL, claims_style),
+        Span::styled(" ", sep_style),
         Span::styled(BTN_VIZ_LABEL, viz_style),
     ];
     // APPLY/SEED/SNAP/SEARCH only appear on the Visualizer tab.
-    if !is_signals {
+    if is_visualizer {
         title_spans.extend([
             Span::styled(" ", sep_style),
             Span::styled(BTN_APPLY_LABEL, btn_active),
@@ -130,9 +141,9 @@ pub fn render(
     }
     let title = Line::from(title_spans);
 
-    // Signals tab uses the ordinary pane background; visualizer tab uses the
+    // Substrate tabs use the ordinary pane background; visualizer tab uses the
     // seed palette background for the plate/genome canvas.
-    let body_bg = if is_signals { theme.background } else { palette.bg };
+    let body_bg = if is_visualizer { palette.bg } else { theme.background };
 
     let block = Block::default()
         .borders(Borders::ALL)
@@ -147,9 +158,18 @@ pub fn render(
         return;
     }
 
-    if is_signals {
-        crate::widgets::signals_view::render_body(frame, inner, state, theme);
-        return;
+    match sub_view {
+        VisualizerSubView::SubstrateSignals => {
+            crate::widgets::signals_view::render_body(frame, inner, state, theme);
+            return;
+        }
+        VisualizerSubView::SubstrateClaims => {
+            crate::widgets::claims_view::render_body(frame, inner, state, theme);
+            return;
+        }
+        VisualizerSubView::Visualizer => {
+            // Existing visualizer rendering continues below.
+        }
     }
 
     let hud_area = ratatui::layout::Rect {

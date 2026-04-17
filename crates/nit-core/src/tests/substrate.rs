@@ -488,6 +488,122 @@ fn assert_claim_inserts_on_no_conflict() {
 }
 
 #[test]
+fn claims_sorted_by_remaining_ttl_empty() {
+    let state = SubstrateState::default();
+    assert!(state.claims_sorted_by_remaining_ttl().is_empty());
+}
+
+#[test]
+fn claims_sorted_by_remaining_ttl_filters_expired() {
+    let mut state = SubstrateState::new();
+    state.generation = 5;
+    // Non-expired: 2 + 10 = 12, current 5 → remaining 7.
+    let live = mk_claim(
+        "live",
+        ClaimKind::ExclusiveWrite,
+        ClaimTarget::File {
+            path: PathBuf::from("a.rs"),
+        },
+        2,
+        10,
+    );
+    // Expired: 0 + 3 = 3, current 5 → past TTL.
+    let expired = mk_claim(
+        "expired",
+        ClaimKind::SharedRead,
+        ClaimTarget::File {
+            path: PathBuf::from("b.rs"),
+        },
+        0,
+        3,
+    );
+    state.claims.insert(live.id.clone(), live);
+    state.claims.insert(expired.id.clone(), expired);
+    let sorted = state.claims_sorted_by_remaining_ttl();
+    assert_eq!(sorted.len(), 1);
+    assert_eq!(sorted[0].0.id, "live");
+    assert_eq!(sorted[0].1, 7);
+}
+
+#[test]
+fn claims_sorted_by_remaining_ttl_descending() {
+    let mut state = SubstrateState::new();
+    state.generation = 0;
+    // Three claims, same claimed_at_gen (0), different TTLs.
+    let short = mk_claim(
+        "short",
+        ClaimKind::ExclusiveWrite,
+        ClaimTarget::File {
+            path: PathBuf::from("a.rs"),
+        },
+        0,
+        1,
+    );
+    let mid = mk_claim(
+        "mid",
+        ClaimKind::ExclusiveWrite,
+        ClaimTarget::File {
+            path: PathBuf::from("b.rs"),
+        },
+        0,
+        5,
+    );
+    let long = mk_claim(
+        "long",
+        ClaimKind::ExclusiveWrite,
+        ClaimTarget::File {
+            path: PathBuf::from("c.rs"),
+        },
+        0,
+        10,
+    );
+    state.claims.insert(short.id.clone(), short);
+    state.claims.insert(mid.id.clone(), mid);
+    state.claims.insert(long.id.clone(), long);
+    let sorted = state.claims_sorted_by_remaining_ttl();
+    let ids: Vec<&str> = sorted.iter().map(|(c, _)| c.id.as_str()).collect();
+    assert_eq!(ids, vec!["long", "mid", "short"]);
+    // Remaining must be monotonically non-increasing.
+    for pair in sorted.windows(2) {
+        assert!(pair[0].1 >= pair[1].1);
+    }
+}
+
+#[test]
+fn claims_sorted_by_remaining_ttl_tiebreak_by_claimed_at_gen() {
+    let mut state = SubstrateState::new();
+    state.generation = 5;
+    // Both remaining = 10, but newer claimed_at_gen wins on tiebreak.
+    // old: claimed_at_gen=0, ttl=15 → expiry 15, remaining 10.
+    // new: claimed_at_gen=3, ttl=12 → expiry 15, remaining 10.
+    let old = mk_claim(
+        "old",
+        ClaimKind::ExclusiveWrite,
+        ClaimTarget::File {
+            path: PathBuf::from("a.rs"),
+        },
+        0,
+        15,
+    );
+    let new = mk_claim(
+        "new",
+        ClaimKind::ExclusiveWrite,
+        ClaimTarget::File {
+            path: PathBuf::from("b.rs"),
+        },
+        3,
+        12,
+    );
+    state.claims.insert(old.id.clone(), old);
+    state.claims.insert(new.id.clone(), new);
+    let sorted = state.claims_sorted_by_remaining_ttl();
+    assert_eq!(sorted.len(), 2);
+    assert_eq!(sorted[0].0.id, "new");
+    assert_eq!(sorted[1].0.id, "old");
+    assert_eq!(sorted[0].1, sorted[1].1);
+}
+
+#[test]
 fn assert_claim_returns_err_on_conflict() {
     let mut state = SubstrateState::new();
     let path = PathBuf::from("a.rs");

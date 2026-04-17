@@ -1361,7 +1361,7 @@ fn command_games_history_avoids_empty_error_when_capture_is_disabled() {
 }
 
 #[test]
-fn visualizer_toggle_sub_view_cycles_and_resets_scroll() {
+fn visualizer_toggle_sub_view_cycles_through_three_tabs() {
     let root = temp_dir("viz-toggle-sub-view");
     let mut state = AppState::new(
         root.clone(),
@@ -1371,13 +1371,27 @@ fn visualizer_toggle_sub_view_cycles_and_resets_scroll() {
     // Default is SubstrateSignals.
     assert_eq!(state.visualizer_sub_view, VisualizerSubView::SubstrateSignals);
     state.substrate_scroll = 17;
+    state.substrate_claims_scroll = 23;
 
+    // Tick 1: SubstrateSignals → SubstrateClaims, both scrolls reset.
+    let _ = apply_action(&mut state, Action::VisualizerToggleSubView);
+    assert_eq!(state.visualizer_sub_view, VisualizerSubView::SubstrateClaims);
+    assert_eq!(state.substrate_scroll, 0);
+    assert_eq!(state.substrate_claims_scroll, 0);
+
+    state.substrate_scroll = 11;
+    state.substrate_claims_scroll = 42;
+    // Tick 2: SubstrateClaims → Visualizer, both scrolls reset.
     let _ = apply_action(&mut state, Action::VisualizerToggleSubView);
     assert_eq!(state.visualizer_sub_view, VisualizerSubView::Visualizer);
     assert_eq!(state.substrate_scroll, 0);
+    assert_eq!(state.substrate_claims_scroll, 0);
 
-    state.substrate_scroll = 42;
+    state.substrate_scroll = 7;
+    state.substrate_claims_scroll = 9;
+    // Tick 3: Visualizer → SubstrateSignals, both scrolls reset (wraps).
     let _ = apply_action(&mut state, Action::VisualizerToggleSubView);
     assert_eq!(state.visualizer_sub_view, VisualizerSubView::SubstrateSignals);
     assert_eq!(state.substrate_scroll, 0);
+    assert_eq!(state.substrate_claims_scroll, 0);
 }

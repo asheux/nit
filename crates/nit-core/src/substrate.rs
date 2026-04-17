@@ -283,6 +283,30 @@ impl SubstrateState {
         self.claims.values().filter(move |c| !c.is_expired(gen))
     }
 
+    /// Non-expired claims ordered by remaining generations until TTL expiry
+    /// (descending). Tiebreak on `claimed_at_gen` (newest first). Mirrors
+    /// `signals_sorted_by_strength` — same stable-sort contract.
+    pub fn claims_sorted_by_remaining_ttl(&self) -> Vec<(&Claim, u64)> {
+        let current_gen = self.generation;
+        let mut v: Vec<_> = self
+            .claims
+            .values()
+            .filter(|c| !c.is_expired(current_gen))
+            .map(|c| {
+                let expiry_gen = c.claimed_at_gen.saturating_add(c.ttl_gens);
+                let remaining = expiry_gen.saturating_sub(current_gen);
+                (c, remaining)
+            })
+            .collect();
+        // Most-remaining-TTL first; tiebreak by claimed_at_gen descending
+        // (newest first).
+        v.sort_by(|a, b| {
+            b.1.cmp(&a.1)
+                .then(b.0.claimed_at_gen.cmp(&a.0.claimed_at_gen))
+        });
+        v
+    }
+
     pub fn claims_for_path<'a>(&'a self, path: &'a Path) -> impl Iterator<Item = &'a Claim> + 'a {
         self.claims_iter().filter(move |c| match &c.target {
             ClaimTarget::File { path: p } => p == path,

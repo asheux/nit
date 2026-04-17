@@ -3,6 +3,7 @@ pub mod agent_ops_view;
 pub mod artifacts_history_popup;
 pub mod artifacts_popup;
 pub mod bottom_bar;
+pub mod claims_view;
 pub mod editor_view;
 pub mod file_tree_view;
 pub mod fuzzy_search_popup;
