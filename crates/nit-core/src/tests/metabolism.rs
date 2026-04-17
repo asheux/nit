@@ -5,7 +5,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::metabolism::tick;
 use crate::state::AppState;
 use crate::substrate::{
-    Claim, ClaimKind, ClaimTarget, Signal, SignalKind, SignalTarget,
+    Assumption, AssumptionTarget, Claim, ClaimKind, ClaimTarget, Signal, SignalKind, SignalTarget,
 };
 use crate::Buffer;
 
@@ -149,6 +149,33 @@ fn tick_saves_only_when_dirty() {
     assert!(!second.saved);
     let contents_after_second = fs::read(&state_file).unwrap();
     assert_eq!(contents_after_first, contents_after_second);
+}
+
+#[test]
+fn tick_expires_assumptions_past_ttl() {
+    let mut state = test_state("metabolism-expire-assumptions");
+    // Assumption posted at gen 0 with ttl 2 — expired by gen 5.
+    state.substrate.generation = 5;
+    let assumption = Assumption {
+        id: "a-seed-0".to_string(),
+        target: AssumptionTarget::File {
+            path: PathBuf::from("foo.rs"),
+        },
+        fact: serde_json::json!({}),
+        posted_by: "seed".to_string(),
+        posted_at_gen: 0,
+        ttl_gens: 2,
+        rationale: "test".to_string(),
+    };
+    state
+        .substrate
+        .assumptions
+        .insert(assumption.id.clone(), assumption);
+
+    let outcome = tick(&mut state);
+
+    assert!(state.substrate.assumptions.is_empty());
+    assert_eq!(outcome.assumptions_expired, 1);
 }
 
 #[test]

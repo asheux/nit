@@ -76,7 +76,8 @@ pub use state::{
 pub use metabolism::{MetabolicTickOutcome, METABOLIC_TICK_INTERVAL};
 pub use observers::{ObservedEmission, Observer, OBSERVER_INITIAL_STRENGTH, REGISTERED_OBSERVERS};
 pub use substrate::{
-    claims_conflict, targets_overlap, Claim, ClaimConflict, ClaimId, ClaimKind, ClaimTarget,
-    Signal, SignalId, SignalKind, SignalTarget, SubstrateError, SubstrateState,
+    claims_conflict, targets_overlap, Assumption, AssumptionId, AssumptionTarget, Claim,
+    ClaimConflict, ClaimId, ClaimKind, ClaimTarget, Signal, SignalId, SignalKind, SignalTarget,
+    SubstrateError, SubstrateState,
 };
 pub use viewport::Viewport;

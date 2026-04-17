@@ -631,3 +631,208 @@ fn assert_claim_returns_err_on_conflict() {
     // Original claim must still be in the map; second must NOT have been inserted.
     assert_eq!(state.claims.len(), 1);
 }
+
+fn mk_assumption(
+    id: &str,
+    target: AssumptionTarget,
+    gen: u64,
+    ttl: u64,
+    fact: serde_json::Value,
+) -> Assumption {
+    Assumption {
+        id: id.into(),
+        target,
+        fact,
+        posted_by: "agent-a".into(),
+        posted_at_gen: gen,
+        ttl_gens: ttl,
+        rationale: "test-assumption".into(),
+    }
+}
+
+#[test]
+fn default_state_has_empty_assumptions() {
+    let state = SubstrateState::default();
+    assert!(state.assumptions.is_empty());
+    assert_eq!(state.assumption_counter, 0);
+}
+
+#[test]
+fn assumption_round_trip_serialization() {
+    let cases = vec![
+        mk_assumption(
+            "a-file",
+            AssumptionTarget::File {
+                path: PathBuf::from("src/lib.rs"),
+            },
+            1,
+            5,
+            serde_json::json!({"fact": "file-level"}),
+        ),
+        mk_assumption(
+            "a-region",
+            AssumptionTarget::Region {
+                path: PathBuf::from("src/lib.rs"),
+                start_line: 10,
+                end_line: 20,
+            },
+            2,
+            8,
+            serde_json::json!({"fact": "region-level"}),
+        ),
+        mk_assumption(
+            "a-global",
+            AssumptionTarget::Global,
+            3,
+            11,
+            serde_json::json!({"fact": "global"}),
+        ),
+    ];
+
+    for original in cases {
+        let json = serde_json::to_string(&original).unwrap();
+        let restored: Assumption = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.id, original.id);
+        assert_eq!(restored.target, original.target);
+        assert_eq!(restored.fact, original.fact);
+        assert_eq!(restored.posted_by, original.posted_by);
+        assert_eq!(restored.posted_at_gen, original.posted_at_gen);
+        assert_eq!(restored.ttl_gens, original.ttl_gens);
+        assert_eq!(restored.rationale, original.rationale);
+    }
+}
+
+#[test]
+fn assumption_targets_overlap_matches_claims_geometry() {
+    use crate::substrate::assumption_targets_overlap;
+    let path_a = PathBuf::from("a.rs");
+    let path_b = PathBuf::from("b.rs");
+
+    // File+File same path
+    assert!(assumption_targets_overlap(
+        &AssumptionTarget::File { path: path_a.clone() },
+        &AssumptionTarget::File { path: path_a.clone() },
+    ));
+    // File+File different paths
+    assert!(!assumption_targets_overlap(
+        &AssumptionTarget::File { path: path_a.clone() },
+        &AssumptionTarget::File { path: path_b.clone() },
+    ));
+    // Region+Region overlapping lines
+    assert!(assumption_targets_overlap(
+        &AssumptionTarget::Region {
+            path: path_a.clone(),
+            start_line: 10,
+            end_line: 20,
+        },
+        &AssumptionTarget::Region {
+            path: path_a.clone(),
+            start_line: 15,
+            end_line: 25,
+        },
+    ));
+    // Non-overlapping Region same path
+    assert!(!assumption_targets_overlap(
+        &AssumptionTarget::Region {
+            path: path_a.clone(),
+            start_line: 10,
+            end_line: 20,
+        },
+        &AssumptionTarget::Region {
+            path: path_a.clone(),
+            start_line: 30,
+            end_line: 40,
+        },
+    ));
+    // Global + anything
+    assert!(assumption_targets_overlap(
+        &AssumptionTarget::Global,
+        &AssumptionTarget::File { path: path_a.clone() },
+    ));
+    assert!(assumption_targets_overlap(
+        &AssumptionTarget::File { path: path_a },
+        &AssumptionTarget::Global,
+    ));
+    assert!(assumption_targets_overlap(
+        &AssumptionTarget::Global,
+        &AssumptionTarget::Global,
+    ));
+}
+
+#[test]
+fn assert_assumption_inserts_and_is_idempotent_on_same_id() {
+    let mut state = SubstrateState::new();
+    let a = mk_assumption(
+        "dup",
+        AssumptionTarget::File {
+            path: PathBuf::from("src/a.rs"),
+        },
+        0,
+        5,
+        serde_json::json!({"v": 1}),
+    );
+    state.assert_assumption(a);
+    assert_eq!(state.assumptions.len(), 1);
+
+    // Insert again with same id — should remain size 1 (idempotent by id).
+    let a2 = mk_assumption(
+        "dup",
+        AssumptionTarget::File {
+            path: PathBuf::from("src/a.rs"),
+        },
+        0,
+        5,
+        serde_json::json!({"v": 2}),
+    );
+    state.assert_assumption(a2);
+    assert_eq!(state.assumptions.len(), 1);
+}
+
+#[test]
+fn assumption_expiry_removes_past_ttl() {
+    let mut state = SubstrateState::new();
+    let a = mk_assumption(
+        "e1",
+        AssumptionTarget::File {
+            path: PathBuf::from("a.rs"),
+        },
+        0,
+        2,
+        serde_json::json!({}),
+    );
+    state.assert_assumption(a);
+    assert_eq!(state.assumptions.len(), 1);
+
+    state.generation = 5;
+    let removed = state.expire_assumptions(5);
+    assert_eq!(removed, 1);
+    assert!(state.assumptions.is_empty());
+}
+
+#[test]
+fn tolerant_load_of_phase3_missing_assumptions_field() {
+    let root = temp_dir("substrate-phase3-no-assumptions");
+    let dir = root.join(".nit").join("substrate");
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(
+        dir.join("state.json"),
+        r#"{"generation":3,"signals":{},"claims":{},"observations":[]}"#,
+    )
+    .unwrap();
+
+    let loaded = SubstrateState::load(&root);
+    assert_eq!(loaded.generation, 3);
+    assert!(loaded.assumptions.is_empty());
+    assert_eq!(loaded.assumption_counter, 0);
+}
+
+#[test]
+fn next_assumption_id_format_and_monotonic() {
+    let mut state = SubstrateState::new();
+    state.generation = 5;
+    let first = state.next_assumption_id("a1");
+    let second = state.next_assumption_id("a1");
+    assert_eq!(first, "5-a1-0");
+    assert_eq!(second, "5-a1-1");
+    assert_eq!(state.assumption_counter, 2);
+}

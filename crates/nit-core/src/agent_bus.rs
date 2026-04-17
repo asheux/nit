@@ -107,6 +107,12 @@ pub enum AgentBusEvent {
     /// conflict; no retry is queued (callers of this variant are responsible
     /// for their own back-off strategy).
     AssertClaim { claim: crate::substrate::Claim },
+    /// Assert an assumption into the substrate. Infallible —
+    /// assumptions don't form a lattice. Mirrors AssertClaim as
+    /// framework plumbing with no v1 caller.
+    AssertAssumption {
+        assumption: crate::substrate::Assumption,
+    },
 }
 
 impl AgentBusEvent {
@@ -309,6 +315,34 @@ impl AgentBusEvent {
                                 conflicting_rationale: first.rationale.clone(),
                             });
                     }
+                }
+
+                // Phase-4: invalidate assumptions whose target overlaps the written
+                // path. Runs after the auto-claim block so it fires whether the
+                // auto-claim succeeded or conflicted — the write hit disk either way.
+                let invalidated = state.substrate.invalidate_assumptions_for_write(path);
+                for gone in invalidated {
+                    let id = state.substrate.next_signal_id(agent_id);
+                    let posted_at_gen = state.substrate.current_generation();
+                    let assumption_value = serde_json::to_value(&gone)
+                        .unwrap_or(serde_json::Value::Null);
+                    state.substrate.emit_signal(crate::substrate::Signal {
+                        id,
+                        kind: crate::substrate::SignalKind::Warning,
+                        posted_by: agent_id.clone(),
+                        posted_at_gen,
+                        target: crate::substrate::SignalTarget::Agent {
+                            agent_id: gone.posted_by.clone(),
+                        },
+                        initial_strength:
+                            crate::substrate::SubstrateState::DEFAULT_INITIAL_STRENGTH,
+                        payload: serde_json::json!({
+                            "reason": "assumption_invalidated_by_write",
+                            "written_path": path,
+                            "writer": agent_id,
+                            "assumption": assumption_value,
+                        }),
+                    });
                 }
             }
             AgentBusEvent::TurnLog { agent_id, message } => {
@@ -618,6 +652,9 @@ impl AgentBusEvent {
                         });
                     }
                 }
+            }
+            AgentBusEvent::AssertAssumption { assumption } => {
+                state.substrate.assert_assumption(assumption.clone());
             }
         }
 

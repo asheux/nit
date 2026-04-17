@@ -19,6 +19,7 @@ pub const METABOLIC_TICK_INTERVAL: Duration = Duration::from_secs(5);
 pub struct MetabolicTickOutcome {
     pub claims_expired: usize,
     pub signals_pruned: usize,
+    pub assumptions_expired: usize,
     pub observer_emissions: usize,
     pub saved: bool,
 }
@@ -27,6 +28,7 @@ impl MetabolicTickOutcome {
     pub fn is_noop(&self) -> bool {
         self.claims_expired == 0
             && self.signals_pruned == 0
+            && self.assumptions_expired == 0
             && self.observer_emissions == 0
             && !self.saved
     }
@@ -37,6 +39,7 @@ impl MetabolicTickOutcome {
 pub fn tick(state: &mut AppState) -> MetabolicTickOutcome {
     let current_gen = state.substrate.current_generation();
     let claims_expired = state.substrate.expire_claims(current_gen);
+    let assumptions_expired = state.substrate.expire_assumptions(current_gen);
     let signals_pruned = state
         .substrate
         .prune_signals_below(SubstrateState::DEFAULT_PRUNE_THRESHOLD);
@@ -60,7 +63,10 @@ pub fn tick(state: &mut AppState) -> MetabolicTickOutcome {
         });
     }
 
-    let dirty = claims_expired > 0 || signals_pruned > 0 || observer_emissions > 0;
+    let dirty = claims_expired > 0
+        || signals_pruned > 0
+        || assumptions_expired > 0
+        || observer_emissions > 0;
     let saved = if dirty {
         state.substrate.save(&state.workspace_root).is_ok()
     } else {
@@ -70,6 +76,7 @@ pub fn tick(state: &mut AppState) -> MetabolicTickOutcome {
     MetabolicTickOutcome {
         claims_expired,
         signals_pruned,
+        assumptions_expired,
         observer_emissions,
         saved,
     }

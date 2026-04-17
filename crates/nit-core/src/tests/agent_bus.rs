@@ -679,3 +679,242 @@ fn turn_completed_expires_stale_claims() {
     assert!(state.substrate.claims.is_empty());
 }
 
+#[test]
+fn file_write_invalidates_overlapping_assumption_and_emits_warning() {
+    let mut state = test_state();
+    add_codex_agent(&mut state, "writer-b");
+    let path = std::path::PathBuf::from("src/a.rs");
+
+    // Seed an assumption for "poster-a" targeting the path.
+    let assumption = crate::substrate::Assumption {
+        id: "assm-1".into(),
+        target: crate::substrate::AssumptionTarget::File { path: path.clone() },
+        fact: serde_json::json!({"depends_on": "a.rs exists"}),
+        posted_by: "poster-a".into(),
+        posted_at_gen: state.substrate.current_generation(),
+        ttl_gens: 10,
+        rationale: "read-dependency".into(),
+    };
+    state.substrate.assert_assumption(assumption);
+    assert_eq!(state.substrate.assumptions.len(), 1);
+    let signals_before = state.substrate.signals.len();
+
+    AgentBusEvent::FileWrite {
+        agent_id: "writer-b".into(),
+        mission_id: None,
+        path: path.clone(),
+    }
+    .apply(&mut state);
+
+    // (i) Assumption gone from substrate.
+    assert!(
+        state.substrate.assumptions.is_empty(),
+        "assumption should be invalidated by overlapping write"
+    );
+
+    // (ii) A new Warning signal exists posted_by="writer-b" targeting
+    // Agent{"poster-a"} with reason="assumption_invalidated_by_write".
+    let new_signal_count = state.substrate.signals.len() - signals_before;
+    assert!(
+        new_signal_count >= 1,
+        "expected at least one new signal, got {new_signal_count}"
+    );
+    let warning = state
+        .substrate
+        .signals
+        .values()
+        .find(|s| {
+            s.kind == crate::substrate::SignalKind::Warning
+                && s.payload.get("reason").and_then(|v| v.as_str())
+                    == Some("assumption_invalidated_by_write")
+        })
+        .expect("expected an invalidation Warning signal");
+    assert_eq!(warning.posted_by, "writer-b");
+    match &warning.target {
+        crate::substrate::SignalTarget::Agent { agent_id } => {
+            assert_eq!(agent_id, "poster-a");
+        }
+        other => panic!("expected Agent target, got {other:?}"),
+    }
+    assert_eq!(
+        warning.payload.get("writer").and_then(|v| v.as_str()),
+        Some("writer-b")
+    );
+}
+
+#[test]
+fn file_write_leaves_non_overlapping_assumption_intact() {
+    let mut state = test_state();
+    add_codex_agent(&mut state, "writer-b");
+
+    // Assumption on a.rs.
+    let assumption = crate::substrate::Assumption {
+        id: "assm-a".into(),
+        target: crate::substrate::AssumptionTarget::File {
+            path: std::path::PathBuf::from("a.rs"),
+        },
+        fact: serde_json::json!({}),
+        posted_by: "poster-a".into(),
+        posted_at_gen: state.substrate.current_generation(),
+        ttl_gens: 10,
+        rationale: "read".into(),
+    };
+    state.substrate.assert_assumption(assumption);
+    let signals_before_invalidation: Vec<_> = state
+        .substrate
+        .signals
+        .values()
+        .filter(|s| {
+            s.payload.get("reason").and_then(|v| v.as_str())
+                == Some("assumption_invalidated_by_write")
+        })
+        .cloned()
+        .collect();
+    assert!(signals_before_invalidation.is_empty());
+
+    // Write to b.rs, not a.rs.
+    AgentBusEvent::FileWrite {
+        agent_id: "writer-b".into(),
+        mission_id: None,
+        path: std::path::PathBuf::from("b.rs"),
+    }
+    .apply(&mut state);
+
+    // Assumption is still present.
+    assert_eq!(state.substrate.assumptions.len(), 1);
+    assert!(state.substrate.assumptions.contains_key("assm-a"));
+
+    // No invalidation-reason Warning signal emitted.
+    let invalidation_warnings = state
+        .substrate
+        .signals
+        .values()
+        .filter(|s| {
+            s.payload.get("reason").and_then(|v| v.as_str())
+                == Some("assumption_invalidated_by_write")
+        })
+        .count();
+    assert_eq!(invalidation_warnings, 0);
+}
+
+#[test]
+fn file_write_invalidates_assumption_even_when_auto_claim_conflicts() {
+    let mut state = test_state();
+    add_codex_agent(&mut state, "writer-c");
+    let path = std::path::PathBuf::from("src/contested.rs");
+
+    // Seed ExclusiveWrite claim by "other-a" on P with long TTL.
+    let pre_claim = crate::substrate::Claim {
+        id: "pre-claim".into(),
+        kind: crate::substrate::ClaimKind::ExclusiveWrite,
+        target: crate::substrate::ClaimTarget::File { path: path.clone() },
+        claimed_by: "other-a".into(),
+        claimed_at_gen: state.substrate.current_generation(),
+        ttl_gens: 50,
+        rationale: "holds lock".into(),
+    };
+    state.substrate.assert_claim(pre_claim).unwrap();
+
+    // Seed an assumption by "poster-b" on P.
+    let assumption = crate::substrate::Assumption {
+        id: "assm-b".into(),
+        target: crate::substrate::AssumptionTarget::File { path: path.clone() },
+        fact: serde_json::json!({}),
+        posted_by: "poster-b".into(),
+        posted_at_gen: state.substrate.current_generation(),
+        ttl_gens: 50,
+        rationale: "read-dep".into(),
+    };
+    state.substrate.assert_assumption(assumption);
+    assert_eq!(state.substrate.assumptions.len(), 1);
+
+    AgentBusEvent::FileWrite {
+        agent_id: "writer-c".into(),
+        mission_id: None,
+        path: path.clone(),
+    }
+    .apply(&mut state);
+
+    // (i) ClaimViolation signal emitted for writer-c's conflict.
+    let violations: Vec<_> = state
+        .substrate
+        .signals
+        .values()
+        .filter(|s| s.kind == crate::substrate::SignalKind::ClaimViolation)
+        .collect();
+    assert!(
+        !violations.is_empty(),
+        "expected a ClaimViolation signal for the conflicting write"
+    );
+    assert!(violations.iter().any(|v| v.posted_by == "writer-c"));
+
+    // (ii) Assumption gone.
+    assert!(
+        state.substrate.assumptions.is_empty(),
+        "assumption should be invalidated even when auto-claim conflicted"
+    );
+
+    // (iii) Warning signal emitted for invalidation.
+    let invalidation = state
+        .substrate
+        .signals
+        .values()
+        .find(|s| {
+            s.kind == crate::substrate::SignalKind::Warning
+                && s.payload.get("reason").and_then(|v| v.as_str())
+                    == Some("assumption_invalidated_by_write")
+        })
+        .expect("expected an invalidation Warning signal");
+    assert_eq!(invalidation.posted_by, "writer-c");
+    match &invalidation.target {
+        crate::substrate::SignalTarget::Agent { agent_id } => {
+            assert_eq!(agent_id, "poster-b");
+        }
+        other => panic!("expected Agent target, got {other:?}"),
+    }
+}
+
+#[test]
+fn file_write_global_assumption_invalidated_by_any_path() {
+    let mut state = test_state();
+    add_codex_agent(&mut state, "writer-z");
+
+    let assumption = crate::substrate::Assumption {
+        id: "assm-global".into(),
+        target: crate::substrate::AssumptionTarget::Global,
+        fact: serde_json::json!({"depends_on": "everything"}),
+        posted_by: "poster-g".into(),
+        posted_at_gen: state.substrate.current_generation(),
+        ttl_gens: 50,
+        rationale: "global-read-dep".into(),
+    };
+    state.substrate.assert_assumption(assumption);
+
+    AgentBusEvent::FileWrite {
+        agent_id: "writer-z".into(),
+        mission_id: None,
+        path: std::path::PathBuf::from("any/random/path.rs"),
+    }
+    .apply(&mut state);
+
+    // Global-targeted assumption is invalidated by any write.
+    assert!(state.substrate.assumptions.is_empty());
+
+    let invalidation = state
+        .substrate
+        .signals
+        .values()
+        .find(|s| {
+            s.kind == crate::substrate::SignalKind::Warning
+                && s.payload.get("reason").and_then(|v| v.as_str())
+                    == Some("assumption_invalidated_by_write")
+        })
+        .expect("expected an invalidation Warning signal for global assumption");
+    match &invalidation.target {
+        crate::substrate::SignalTarget::Agent { agent_id } => {
+            assert_eq!(agent_id, "poster-g");
+        }
+        other => panic!("expected Agent target, got {other:?}"),
+    }
+}
+
