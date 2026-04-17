@@ -103,6 +103,10 @@ pub enum AgentBusEvent {
     },
     /// Emit a stigmergic signal into the substrate.
     EmitSignal { signal: crate::substrate::Signal },
+    /// Assert a claim into the substrate. Emits `ClaimViolation` signals on
+    /// conflict; no retry is queued (callers of this variant are responsible
+    /// for their own back-off strategy).
+    AssertClaim { claim: crate::substrate::Claim },
 }
 
 impl AgentBusEvent {
@@ -255,6 +259,57 @@ impl AgentBusEvent {
                         .or_default()
                         .insert(path.clone());
                 }
+
+                // Phase-3-lattice: auto-claim the written file as ExclusiveWrite.
+                let current_gen = state.substrate.current_generation();
+                let claim_id = state.substrate.next_claim_id(agent_id);
+                let claim = crate::substrate::Claim {
+                    id: claim_id,
+                    kind: crate::substrate::ClaimKind::ExclusiveWrite,
+                    target: crate::substrate::ClaimTarget::File { path: path.clone() },
+                    claimed_by: agent_id.clone(),
+                    claimed_at_gen: current_gen,
+                    ttl_gens: 3,
+                    rationale: "auto-claim from FileWrite".to_string(),
+                };
+                if let Err(conflict) = state.substrate.assert_claim(claim) {
+                    // Emit ClaimViolation signal(s) and queue a retry for the violator.
+                    for existing in &conflict.conflicts {
+                        let id = state.substrate.next_signal_id(agent_id);
+                        let posted_at_gen = state.substrate.current_generation();
+                        state.substrate.emit_signal(crate::substrate::Signal {
+                            id,
+                            kind: crate::substrate::SignalKind::ClaimViolation,
+                            posted_by: agent_id.clone(),
+                            posted_at_gen,
+                            target: crate::substrate::SignalTarget::Agent {
+                                agent_id: agent_id.clone(),
+                            },
+                            initial_strength:
+                                crate::substrate::SubstrateState::DEFAULT_INITIAL_STRENGTH,
+                            payload: serde_json::json!({
+                                "path": path,
+                                "attempted_kind": "exclusive_write",
+                                "conflicting_holder": existing.claimed_by,
+                                "conflicting_kind": format!("{:?}", existing.kind),
+                                "conflicting_rationale": existing.rationale,
+                            }),
+                        });
+                    }
+                    // Queue a retry request with the strongest conflicting rationale
+                    // (first in the list is fine for v1).
+                    if let Some(first) = conflict.conflicts.first() {
+                        state
+                            .pending_claim_retries
+                            .push(crate::state::ClaimRetryRequest {
+                                agent_id: agent_id.clone(),
+                                path: path.clone(),
+                                conflicting_holder: first.claimed_by.clone(),
+                                conflicting_kind: format!("{:?}", first.kind),
+                                conflicting_rationale: first.rationale.clone(),
+                            });
+                    }
+                }
             }
             AgentBusEvent::TurnLog { agent_id, message } => {
                 let source = backend_source_for_agent(state, agent_id);
@@ -370,6 +425,13 @@ impl AgentBusEvent {
                     }),
                 });
                 let _ = state.substrate.save(&state.workspace_root);
+
+                // TurnFailed does not advance the generation, but we still
+                // clear expired claims so stale holds don't linger when turns
+                // keep failing.
+                state
+                    .substrate
+                    .expire_claims(state.substrate.current_generation());
 
                 state.status = Some(format!(
                     "{source_label} failed: {}",
@@ -505,6 +567,9 @@ impl AgentBusEvent {
                 state
                     .substrate
                     .prune_signals_below(crate::substrate::SubstrateState::DEFAULT_PRUNE_THRESHOLD);
+                state
+                    .substrate
+                    .expire_claims(state.substrate.current_generation());
 
                 // Phase 5: observers run AFTER advance + prune. Emissions are
                 // frozen to a Vec first so no observer sees another observer's
@@ -529,6 +594,30 @@ impl AgentBusEvent {
             }
             AgentBusEvent::EmitSignal { signal } => {
                 state.substrate.emit_signal(signal.clone());
+            }
+            AgentBusEvent::AssertClaim { claim } => {
+                if let Err(conflict) = state.substrate.assert_claim(claim.clone()) {
+                    for existing in &conflict.conflicts {
+                        let id = state.substrate.next_signal_id(&claim.claimed_by);
+                        let posted_at_gen = state.substrate.current_generation();
+                        state.substrate.emit_signal(crate::substrate::Signal {
+                            id,
+                            kind: crate::substrate::SignalKind::ClaimViolation,
+                            posted_by: claim.claimed_by.clone(),
+                            posted_at_gen,
+                            target: crate::substrate::SignalTarget::Agent {
+                                agent_id: claim.claimed_by.clone(),
+                            },
+                            initial_strength:
+                                crate::substrate::SubstrateState::DEFAULT_INITIAL_STRENGTH,
+                            payload: serde_json::json!({
+                                "attempted_kind": format!("{:?}", claim.kind),
+                                "conflicting_holder": existing.claimed_by,
+                                "conflicting_kind": format!("{:?}", existing.kind),
+                            }),
+                        });
+                    }
+                }
             }
         }
 

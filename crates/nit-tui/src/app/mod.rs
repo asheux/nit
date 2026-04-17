@@ -1059,6 +1059,7 @@ fn run_loop(
                     mission_id.as_deref(),
                 );
             }
+            drain_pending_claim_retries(state, &mut vitals, &codex_runner, &claude_runner);
             let swarm_outcome = swarm.handle_event_outcome(state, &event);
             maybe_follow_swarm_artifact_in_popup(
                 state,
@@ -1152,6 +1153,7 @@ fn run_loop(
                     mission_id.as_deref(),
                 );
             }
+            drain_pending_claim_retries(state, &mut vitals, &codex_runner, &claude_runner);
             let swarm_outcome = swarm.handle_event_outcome(state, &event);
             maybe_follow_swarm_artifact_in_popup(
                 state,
@@ -1661,6 +1663,40 @@ fn push_genome_retry_message(
             at,
         });
     state.agents.note_event();
+}
+
+/// Drain pending claim-violation retries queued by `agent_bus` on FileWrite
+/// conflict. Each request becomes a corrective prompt for the violating
+/// agent, dispatched through the same pipe as genome retries. Shares
+/// `GENOME_RETRY_LIMIT` / `state.genome_retry_count` as the budget.
+fn drain_pending_claim_retries(
+    state: &mut AppState,
+    vitals: &mut VitalsState,
+    codex: &CodexRunner,
+    claude: &ClaudeRunner,
+) {
+    while let Some(req) = state.pending_claim_retries.pop() {
+        if state.genome_retry_count >= GENOME_RETRY_LIMIT {
+            break;
+        }
+        state.genome_retry_count = state.genome_retry_count.saturating_add(1);
+        let prompt = format!(
+            "CLAIM VIOLATION: you wrote to {} but {} holds an {} claim. Rationale: {}. Back off and coordinate — choose a different file or wait for the claim to expire.",
+            req.path.display(),
+            req.conflicting_holder,
+            req.conflicting_kind,
+            req.conflicting_rationale,
+        );
+        dispatch_agent_prompt(
+            state,
+            vitals,
+            Some(codex),
+            Some(claude),
+            req.agent_id,
+            None,
+            prompt,
+        );
+    }
 }
 
 /// Build a follow-up prompt if the agent's last turn degraded genome quality

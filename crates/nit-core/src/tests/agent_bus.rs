@@ -571,3 +571,111 @@ fn turn_failed_emits_warning_signal() {
     assert_eq!(state.substrate.current_generation(), before_gen);
 }
 
+#[test]
+fn file_write_auto_claim_inserts_exclusive_write() {
+    let mut state = test_state();
+    add_codex_agent(&mut state, "gpt-test");
+    assert_eq!(state.substrate.claims.len(), 0);
+
+    AgentBusEvent::FileWrite {
+        agent_id: "gpt-test".into(),
+        mission_id: None,
+        path: std::path::PathBuf::from("src/a.rs"),
+    }
+    .apply(&mut state);
+
+    assert_eq!(state.substrate.claims.len(), 1);
+    let claim = state.substrate.claims.values().next().unwrap();
+    assert_eq!(claim.kind, crate::substrate::ClaimKind::ExclusiveWrite);
+    match &claim.target {
+        crate::substrate::ClaimTarget::File { path } => {
+            assert_eq!(path, &std::path::PathBuf::from("src/a.rs"));
+        }
+        other => panic!("expected File target, got {other:?}"),
+    }
+    assert_eq!(claim.claimed_by, "gpt-test");
+}
+
+#[test]
+fn file_write_auto_claim_conflict_emits_violation_and_queues_retry() {
+    let mut state = test_state();
+    add_codex_agent(&mut state, "a1");
+    add_codex_agent(&mut state, "a2");
+    let path = std::path::PathBuf::from("src/a.rs");
+
+    // Pre-seed an ExclusiveWrite claim for the path by agent "a2" with TTL=5.
+    let seeded = crate::substrate::Claim {
+        id: "seed-c".into(),
+        kind: crate::substrate::ClaimKind::ExclusiveWrite,
+        target: crate::substrate::ClaimTarget::File { path: path.clone() },
+        claimed_by: "a2".into(),
+        claimed_at_gen: state.substrate.current_generation(),
+        ttl_gens: 5,
+        rationale: "seeded by test".into(),
+    };
+    state.substrate.assert_claim(seeded).unwrap();
+    let claims_before = state.substrate.claims.len();
+    let signals_before = state.substrate.signals.len();
+
+    AgentBusEvent::FileWrite {
+        agent_id: "a1".into(),
+        mission_id: None,
+        path: path.clone(),
+    }
+    .apply(&mut state);
+
+    // (iii) The conflicting write's claim was NOT inserted.
+    assert_eq!(state.substrate.claims.len(), claims_before);
+
+    // (i) Exactly 1 new ClaimViolation signal emitted, posted by a1.
+    let new_signals = state.substrate.signals.len() - signals_before;
+    assert_eq!(new_signals, 1);
+    let violation = state
+        .substrate
+        .signals
+        .values()
+        .find(|s| s.kind == crate::substrate::SignalKind::ClaimViolation)
+        .expect("expected a ClaimViolation signal");
+    assert_eq!(violation.posted_by, "a1");
+
+    // (ii) Retry queued with agent_id=a1, conflicting_holder=a2.
+    assert_eq!(state.pending_claim_retries.len(), 1);
+    let req = &state.pending_claim_retries[0];
+    assert_eq!(req.agent_id, "a1");
+    assert_eq!(req.conflicting_holder, "a2");
+    assert_eq!(req.path, path);
+}
+
+#[test]
+fn turn_completed_expires_stale_claims() {
+    let mut state = test_state();
+    add_codex_agent(&mut state, "gpt-test");
+    // Seed a claim with TTL=1 at gen=0. After TurnCompleted advances gen to 1,
+    // expire_claims should drop it.
+    let claim = crate::substrate::Claim {
+        id: "stale".into(),
+        kind: crate::substrate::ClaimKind::ExclusiveWrite,
+        target: crate::substrate::ClaimTarget::File {
+            path: std::path::PathBuf::from("a.rs"),
+        },
+        claimed_by: "seed".into(),
+        claimed_at_gen: 0,
+        ttl_gens: 1,
+        rationale: "stale".into(),
+    };
+    state.substrate.assert_claim(claim).unwrap();
+    assert_eq!(state.substrate.claims.len(), 1);
+
+    AgentBusEvent::TurnCompleted {
+        agent_id: "gpt-test".into(),
+        mission_id: None,
+        thread_id: None,
+        token_count: None,
+        message: "ok".into(),
+    }
+    .apply(&mut state);
+
+    assert_eq!(state.substrate.current_generation(), 1);
+    assert!(state.substrate.claims.is_empty());
+}
+

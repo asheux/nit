@@ -1898,6 +1898,19 @@ impl Default for FileTreeState {
     }
 }
 
+/// Queued claim-violation retry request. Populated by `agent_bus` when a
+/// FileWrite auto-claim conflicts; drained by the TUI event loop which turns
+/// each request into a corrective follow-up prompt for the violating agent.
+#[derive(Clone, Debug)]
+pub struct ClaimRetryRequest {
+    pub agent_id: String,
+    pub path: std::path::PathBuf,
+    pub conflicting_holder: String,
+    /// Rendered form of `ClaimKind` for the prompt (e.g. "ExclusiveWrite").
+    pub conflicting_kind: String,
+    pub conflicting_rationale: String,
+}
+
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct AppState {
     pub app_kind: AppKind,
@@ -1992,6 +2005,11 @@ pub struct AppState {
     /// Reset to 0 when quality improves or stays the same.
     #[serde(skip)]
     pub genome_retry_count: u8,
+    /// Pending claim-violation retry requests queued by `agent_bus` when a
+    /// FileWrite auto-claim conflicts. Drained by the TUI event loop after
+    /// each event-apply cycle; shares `genome_retry_count` as its budget.
+    #[serde(skip)]
+    pub pending_claim_retries: Vec<ClaimRetryRequest>,
     /// Rolling count of consecutive turns where quality met or exceeded the
     /// agent's adaptive min tier. Used for adaptive quality thresholds — agents
     /// that consistently hit their tier get pushed toward the next one, up to
@@ -2259,6 +2277,7 @@ impl AppState {
             genome_mission_modified: HashMap::new(),
             genome_turn_active: HashSet::new(),
             genome_retry_count: 0,
+            pending_claim_retries: Vec::new(),
             genome_agent_streak: HashMap::new(),
             genome_agent_min_tier: HashMap::new(),
             genome_shadow_evals: HashMap::new(),

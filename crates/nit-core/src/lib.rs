@@ -60,20 +60,21 @@ pub use state::{
     build_family_run_override_from_base_config_with_timings, AgentAlert, AgentAlertSeverity,
     AgentChannel, AgentConsoleRow, AgentConsoleRowKind, AgentConsoleRowsCache,
     AgentConsoleRowsCacheKey, AgentConsoleTab, AgentDiagnosticEvent, AgentLane, AgentLaneKind,
-    AgentMessage, AgentOpsTab, AgentStatus, AgentsState, AppState, DirEntryModel, EvidenceItem,
-    FamilyRunBuildTimings, FileTreeKind, FileTreeRow, FileTreeState, GamesAnalysisRequest,
-    GamesAnalysisState, GamesCaSimState, GamesConfigPreview, GamesFamilyRunRequest,
-    GamesReplayRequest, GamesReplayState, GamesRunBrowserState, GamesRunEntry, GamesRunOverride,
-    GamesState, GamesStatus, GamesStrategyInspectState, GateMonitorSubView, GenomeShadowEval,
-    GlobalArchiveEntry, GlobalArchiveSourceKind, GolRenderMode, JobState, LogBuffer,
-    McpConnectionState, McpStatus, Metrics, MissionPhase, MissionRecord, PatchProposal,
-    PatchStatus, QueuedClaudeTurn, QueuedCodexTurn, RosterTreeBranch, RosterTreeSelection,
-    SavedRunHistoryFilter, SavedRunHistoryPendingAction, SyntaxDebugInfo, UiSelection,
-    UiSelectionPane, VisualizerMode, VisualizerRuleEntry, VisualizerState, VisualizerSubView,
-    YankKind, CONSOLE_SCROLL_BOTTOM,
+    AgentMessage, AgentOpsTab, AgentStatus, AgentsState, AppState, ClaimRetryRequest,
+    DirEntryModel, EvidenceItem, FamilyRunBuildTimings, FileTreeKind, FileTreeRow, FileTreeState,
+    GamesAnalysisRequest, GamesAnalysisState, GamesCaSimState, GamesConfigPreview,
+    GamesFamilyRunRequest, GamesReplayRequest, GamesReplayState, GamesRunBrowserState,
+    GamesRunEntry, GamesRunOverride, GamesState, GamesStatus, GamesStrategyInspectState,
+    GateMonitorSubView, GenomeShadowEval, GlobalArchiveEntry, GlobalArchiveSourceKind,
+    GolRenderMode, JobState, LogBuffer, McpConnectionState, McpStatus, Metrics, MissionPhase,
+    MissionRecord, PatchProposal, PatchStatus, QueuedClaudeTurn, QueuedCodexTurn,
+    RosterTreeBranch, RosterTreeSelection, SavedRunHistoryFilter, SavedRunHistoryPendingAction,
+    SyntaxDebugInfo, UiSelection, UiSelectionPane, VisualizerMode, VisualizerRuleEntry,
+    VisualizerState, VisualizerSubView, YankKind, CONSOLE_SCROLL_BOTTOM,
 };
 pub use observers::{ObservedEmission, Observer, OBSERVER_INITIAL_STRENGTH, REGISTERED_OBSERVERS};
 pub use substrate::{
+    claims_conflict, targets_overlap, Claim, ClaimConflict, ClaimId, ClaimKind, ClaimTarget,
     Signal, SignalId, SignalKind, SignalTarget, SubstrateError, SubstrateState,
 };
 pub use viewport::Viewport;

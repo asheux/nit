@@ -295,3 +295,223 @@ fn sorted_by_strength_tiebreak_by_posted_gen() {
     assert_eq!(sorted[0].0.id, "new");
     assert_eq!(sorted[1].0.id, "old");
 }
+
+fn mk_claim(id: &str, kind: ClaimKind, target: ClaimTarget, gen: u64, ttl: u64) -> Claim {
+    Claim {
+        id: id.into(),
+        kind,
+        target,
+        claimed_by: "agent-a".into(),
+        claimed_at_gen: gen,
+        ttl_gens: ttl,
+        rationale: "test".into(),
+    }
+}
+
+#[test]
+fn claim_compat_exclusive_x_shared_conflict() {
+    let path = PathBuf::from("src/lib.rs");
+    let a = mk_claim(
+        "a",
+        ClaimKind::ExclusiveWrite,
+        ClaimTarget::File { path: path.clone() },
+        0,
+        5,
+    );
+    let b = mk_claim(
+        "b",
+        ClaimKind::SharedRead,
+        ClaimTarget::File { path },
+        0,
+        5,
+    );
+    assert!(claims_conflict(&a, &b));
+    assert!(claims_conflict(&b, &a));
+}
+
+#[test]
+fn claim_compat_shared_x_shared_ok() {
+    let path = PathBuf::from("src/lib.rs");
+    let a = mk_claim(
+        "a",
+        ClaimKind::SharedRead,
+        ClaimTarget::File { path: path.clone() },
+        0,
+        5,
+    );
+    let b = mk_claim(
+        "b",
+        ClaimKind::SharedRead,
+        ClaimTarget::File { path },
+        0,
+        5,
+    );
+    assert!(!claims_conflict(&a, &b));
+}
+
+#[test]
+fn claim_compat_append_x_append_ok() {
+    let path = PathBuf::from("src/lib.rs");
+    let a = mk_claim(
+        "a",
+        ClaimKind::AppendOnly,
+        ClaimTarget::File { path: path.clone() },
+        0,
+        5,
+    );
+    let b = mk_claim(
+        "b",
+        ClaimKind::AppendOnly,
+        ClaimTarget::File { path },
+        0,
+        5,
+    );
+    assert!(!claims_conflict(&a, &b));
+}
+
+#[test]
+fn claim_compat_soft_never_conflicts() {
+    let path = PathBuf::from("src/lib.rs");
+    let soft = mk_claim(
+        "soft",
+        ClaimKind::Soft,
+        ClaimTarget::File { path: path.clone() },
+        0,
+        5,
+    );
+    let excl = mk_claim(
+        "excl",
+        ClaimKind::ExclusiveWrite,
+        ClaimTarget::File { path },
+        0,
+        5,
+    );
+    assert!(!claims_conflict(&soft, &excl));
+    assert!(!claims_conflict(&excl, &soft));
+}
+
+#[test]
+fn claim_target_region_overlaps_by_lines() {
+    let path_a = PathBuf::from("src/lib.rs");
+    let path_b = PathBuf::from("src/other.rs");
+    let r1 = ClaimTarget::Region {
+        path: path_a.clone(),
+        start_line: 10,
+        end_line: 20,
+    };
+    let r2_overlap = ClaimTarget::Region {
+        path: path_a.clone(),
+        start_line: 15,
+        end_line: 25,
+    };
+    let r3_disjoint = ClaimTarget::Region {
+        path: path_a.clone(),
+        start_line: 30,
+        end_line: 40,
+    };
+    let r4_other_file = ClaimTarget::Region {
+        path: path_b,
+        start_line: 15,
+        end_line: 25,
+    };
+    assert!(targets_overlap(&r1, &r2_overlap));
+    assert!(!targets_overlap(&r1, &r3_disjoint));
+    assert!(!targets_overlap(&r1, &r4_other_file));
+}
+
+#[test]
+fn claim_target_file_subsumes_region_on_same_path() {
+    let path = PathBuf::from("src/lib.rs");
+    let file = ClaimTarget::File { path: path.clone() };
+    let region = ClaimTarget::Region {
+        path,
+        start_line: 5,
+        end_line: 10,
+    };
+    assert!(targets_overlap(&file, &region));
+    assert!(targets_overlap(&region, &file));
+}
+
+#[test]
+fn claim_expiry_removes_past_ttl() {
+    let mut state = SubstrateState::new();
+    let claim = mk_claim(
+        "c1",
+        ClaimKind::ExclusiveWrite,
+        ClaimTarget::File {
+            path: PathBuf::from("a.rs"),
+        },
+        0,
+        1,
+    );
+    state.assert_claim(claim).unwrap();
+    assert_eq!(state.claims.len(), 1);
+    // Advance generation past TTL (0 + 1 = 1, so gen=2 is past-expiry).
+    state.advance_generation();
+    state.advance_generation();
+    let removed = state.expire_claims(state.current_generation());
+    assert_eq!(removed, 1);
+    assert!(state.claims.is_empty());
+}
+
+#[test]
+fn tolerant_load_of_phase1_empty_claims() {
+    let root = temp_dir("substrate-phase1-claims");
+    let dir = root.join(".nit").join("substrate");
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(
+        dir.join("state.json"),
+        r#"{"generation":3,"signals":{},"claims":{},"observations":[]}"#,
+    )
+    .unwrap();
+
+    let loaded = SubstrateState::load(&root);
+    assert_eq!(loaded.generation, 3);
+    assert!(loaded.claims.is_empty());
+    assert_eq!(loaded.claim_counter, 0);
+}
+
+#[test]
+fn assert_claim_inserts_on_no_conflict() {
+    let mut state = SubstrateState::new();
+    let claim = mk_claim(
+        "c1",
+        ClaimKind::ExclusiveWrite,
+        ClaimTarget::File {
+            path: PathBuf::from("a.rs"),
+        },
+        0,
+        5,
+    );
+    state.assert_claim(claim).unwrap();
+    assert_eq!(state.claims.len(), 1);
+}
+
+#[test]
+fn assert_claim_returns_err_on_conflict() {
+    let mut state = SubstrateState::new();
+    let path = PathBuf::from("a.rs");
+    let first = mk_claim(
+        "c1",
+        ClaimKind::ExclusiveWrite,
+        ClaimTarget::File { path: path.clone() },
+        0,
+        5,
+    );
+    state.assert_claim(first).unwrap();
+
+    let second = Claim {
+        id: "c2".into(),
+        kind: ClaimKind::ExclusiveWrite,
+        target: ClaimTarget::File { path },
+        claimed_by: "agent-b".into(),
+        claimed_at_gen: 0,
+        ttl_gens: 5,
+        rationale: "conflicting".into(),
+    };
+    let err = state.assert_claim(second).expect_err("should conflict");
+    assert_eq!(err.conflicts.len(), 1);
+    assert_eq!(err.conflicts[0].id, "c1");
+    // Original claim must still be in the map; second must NOT have been inserted.
+    assert_eq!(state.claims.len(), 1);
+}
