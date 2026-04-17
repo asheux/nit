@@ -505,6 +505,26 @@ impl AgentBusEvent {
                 state
                     .substrate
                     .prune_signals_below(crate::substrate::SubstrateState::DEFAULT_PRUNE_THRESHOLD);
+
+                // Phase 5: observers run AFTER advance + prune. Emissions are
+                // frozen to a Vec first so no observer sees another observer's
+                // emissions within the same tick.
+                let emissions = crate::observers::run_all(state);
+                for (observer_name, em) in emissions {
+                    let posted_by = format!("observer:{observer_name}");
+                    let id = state.substrate.next_signal_id(&posted_by);
+                    let posted_at_gen = state.substrate.current_generation();
+                    state.substrate.emit_signal(crate::substrate::Signal {
+                        id,
+                        kind: em.kind,
+                        posted_by,
+                        posted_at_gen,
+                        target: em.target,
+                        initial_strength: em.initial_strength,
+                        payload: em.payload,
+                    });
+                }
+
                 let _ = state.substrate.save(&state.workspace_root);
             }
             AgentBusEvent::EmitSignal { signal } => {
