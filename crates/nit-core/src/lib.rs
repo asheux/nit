@@ -11,6 +11,7 @@ pub mod genome_report;
 pub mod gol_rules;
 pub mod io;
 pub mod lab;
+pub mod metabolism;
 pub mod mode;
 pub mod observers;
 pub mod pane;
@@ -72,6 +73,7 @@ pub use state::{
     SyntaxDebugInfo, UiSelection, UiSelectionPane, VisualizerMode, VisualizerRuleEntry,
     VisualizerState, VisualizerSubView, YankKind, CONSOLE_SCROLL_BOTTOM,
 };
+pub use metabolism::{MetabolicTickOutcome, METABOLIC_TICK_INTERVAL};
 pub use observers::{ObservedEmission, Observer, OBSERVER_INITIAL_STRENGTH, REGISTERED_OBSERVERS};
 pub use substrate::{
     claims_conflict, targets_overlap, Claim, ClaimConflict, ClaimId, ClaimKind, ClaimTarget,

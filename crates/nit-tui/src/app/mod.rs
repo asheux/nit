@@ -504,6 +504,7 @@ fn run_loop(
 ) -> io::Result<()> {
     let mut last_tick = Instant::now();
     let mut last_job = Instant::now();
+    let mut last_metabolism = Instant::now();
     let mut last_vitals_sample = Instant::now();
     let mut last_busy_pulse = Instant::now();
     let app_start = Instant::now();
@@ -977,6 +978,15 @@ fn run_loop(
             tick_agent_turn_liveness(state);
             last_job = Instant::now();
             needs_redraw = true;
+        }
+
+        // metabolic tick — wall-clock substrate sweep, no gen advance
+        if last_metabolism.elapsed() >= nit_core::metabolism::METABOLIC_TICK_INTERVAL {
+            let outcome = nit_core::metabolism::tick(state);
+            if !outcome.is_noop() {
+                needs_redraw = true;
+            }
+            last_metabolism = Instant::now();
         }
 
         // drain logs
