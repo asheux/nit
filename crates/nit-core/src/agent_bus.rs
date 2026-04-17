@@ -465,6 +465,7 @@ impl AgentBusEvent {
                 state
                     .substrate
                     .prune_signals_below(crate::substrate::SubstrateState::DEFAULT_PRUNE_THRESHOLD);
+                let _ = state.substrate.save(&state.workspace_root);
             }
             AgentBusEvent::EmitSignal { signal } => {
                 state.substrate.emit_signal(signal.clone());

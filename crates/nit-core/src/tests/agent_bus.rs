@@ -437,3 +437,51 @@ fn turn_completed_advances_substrate_generation() {
     assert!(state.substrate.signals.is_empty());
 }
 
+#[test]
+fn turn_completed_persists_substrate_to_disk() {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let mut dir = std::env::temp_dir();
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    dir.push(format!(
+        "nit-test-apply-persist-{now}-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let editor = crate::Buffer::from_str("editor", "", None);
+    let notes = crate::Buffer::from_str("notes", "", None);
+    let mut state = AppState::new(dir.clone(), editor, notes);
+    add_codex_agent(&mut state, "gpt-test");
+
+    let signal = crate::substrate::Signal {
+        id: "0-agent-a-0".into(),
+        kind: crate::substrate::SignalKind::DoneMarker,
+        posted_by: "agent-a".into(),
+        posted_at_gen: 0,
+        target: crate::substrate::SignalTarget::Global,
+        initial_strength: 1.0,
+        payload: serde_json::Value::Null,
+    };
+    AgentBusEvent::EmitSignal { signal }.apply(&mut state);
+
+    AgentBusEvent::TurnCompleted {
+        agent_id: "gpt-test".into(),
+        mission_id: None,
+        thread_id: None,
+        token_count: None,
+        message: "ok".into(),
+    }
+    .apply(&mut state);
+
+    let path = dir.join(".nit").join("substrate").join("state.json");
+    assert!(path.exists(), "substrate state.json should be written");
+
+    let reloaded = crate::substrate::SubstrateState::load(&dir);
+    assert_eq!(reloaded.current_generation(), 1);
+    assert_eq!(reloaded.signals.len(), 1);
+    assert!(reloaded.signals.contains_key("0-agent-a-0"));
+}
+
