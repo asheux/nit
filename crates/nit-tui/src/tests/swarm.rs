@@ -1366,6 +1366,7 @@ fn planner_prompt_describes_research_roles_as_topic_research() {
         &[],
         &[],
         std::path::Path::new("."),
+        &[],
     );
 
     assert!(prompt.contains("web/paper/resource exploration"));
@@ -1385,6 +1386,7 @@ fn planner_prompt_describes_computational_research_mission_shape() {
         &[],
         &[],
         std::path::Path::new("."),
+        &[],
     );
 
     assert!(prompt.contains("source survey -> modeling / experiments / analysis"));

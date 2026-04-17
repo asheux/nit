@@ -1652,6 +1652,20 @@ impl SwarmRuntime {
                 }
             }
         }
+        // Phase 8: also inject cross-mission memory into follow-up prompts.
+        let memory_scope_files =
+            enumerate_scope_files(state.workspace_root.as_path(), user_prompt);
+        let memory_scope_tokens = nit_core::mission_memory::path_tokens(&memory_scope_files);
+        let memory_index =
+            nit_core::mission_memory::load_or_build(state.workspace_root.as_path());
+        let memory_exclude: Vec<&str> = vec![mission_id];
+        let memory_hits = nit_core::mission_memory::retrieve_similar(
+            &memory_index,
+            user_prompt,
+            &memory_scope_tokens,
+            &memory_exclude,
+            3,
+        );
         Some(build_planner_prompt(
             user_prompt,
             run.template,
@@ -1662,6 +1676,7 @@ impl SwarmRuntime {
             &role_hints,
             &priority_agent_ids,
             state.workspace_root.as_path(),
+            &memory_hits,
         ))
     }
 
@@ -1995,6 +2010,22 @@ impl SwarmRuntime {
             }
         }
 
+        // Phase 8: cross-mission structural memory — retrieve top-K
+        // precedents to inject into the planner prompt.
+        let memory_scope_files =
+            enumerate_scope_files(state.workspace_root.as_path(), &root_prompt);
+        let memory_scope_tokens = nit_core::mission_memory::path_tokens(&memory_scope_files);
+        let memory_index =
+            nit_core::mission_memory::load_or_build(state.workspace_root.as_path());
+        let memory_exclude: Vec<&str> = vec![mission_id.as_str()];
+        let memory_hits = nit_core::mission_memory::retrieve_similar(
+            &memory_index,
+            &root_prompt,
+            &memory_scope_tokens,
+            &memory_exclude,
+            3,
+        );
+
         let plan_prompt = build_planner_prompt(
             &root_prompt,
             template_kind,
@@ -2005,6 +2036,7 @@ impl SwarmRuntime {
             &role_hints,
             &priority_agent_ids,
             state.workspace_root.as_path(),
+            &memory_hits,
         );
 
         let scope_files = enumerate_scope_files(state.workspace_root.as_path(), &root_prompt);
@@ -6716,6 +6748,7 @@ fn build_planner_prompt(
     role_hints: &[(String, String)],
     priority_agent_ids: &[String],
     workspace_root: &Path,
+    memory_hits: &[nit_core::MissionHit],
 ) -> String {
     let available = agent_ids
         .iter()
@@ -6929,6 +6962,33 @@ fn build_planner_prompt(
         out.push_str("  \"Refactor the following files. Open each file, read it, and apply improvements. Check off each file as you go:\\n1. <path/to/first/file>\\n2. <path/to/second/file>\\n...\"\n");
         out.push_str("- Distribute ALL files across integrate tasks so every file is assigned to exactly one task.\n");
         out.push_str("- If there is one integrate task, it must list all files. If there are multiple, split them into disjoint subsets.\n");
+    }
+
+    if !memory_hits.is_empty() {
+        out.push_str(
+            "\nPrior similar missions (read-only context — do not re-plan these, use as precedent):\n",
+        );
+        for hit in memory_hits.iter() {
+            let m = &hit.mission;
+            out.push_str(&format!(
+                "- {} [{}, {}]: {}\n",
+                m.mission_id, m.template, m.status, m.title
+            ));
+            for s in m.task_summaries.iter().take(3) {
+                out.push_str(&format!("    * {}\n", truncate_chars(s, 180)));
+            }
+            if !m.files_touched.is_empty() {
+                let preview: Vec<&String> = m.files_touched.iter().take(5).collect();
+                out.push_str(&format!(
+                    "    files: {}\n",
+                    preview
+                        .iter()
+                        .map(|s| s.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ));
+            }
+        }
     }
 
     out.push_str("\nOperator request:\n");

@@ -12,6 +12,7 @@ pub mod gol_rules;
 pub mod io;
 pub mod lab;
 pub mod metabolism;
+pub mod mission_memory;
 pub mod mode;
 pub mod observers;
 pub mod pane;
@@ -74,6 +75,7 @@ pub use state::{
     VisualizerState, VisualizerSubView, YankKind, CONSOLE_SCROLL_BOTTOM,
 };
 pub use metabolism::{MetabolicTickOutcome, METABOLIC_TICK_INTERVAL};
+pub use mission_memory::{IndexedMission, MissionHit, MissionMemoryIndex};
 pub use observers::{ObservedEmission, Observer, OBSERVER_INITIAL_STRENGTH, REGISTERED_OBSERVERS};
 pub use substrate::{
     claims_conflict, targets_overlap, Assumption, AssumptionId, AssumptionTarget, Claim,

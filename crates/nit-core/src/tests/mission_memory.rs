@@ -1,0 +1,282 @@
+use super::*;
+use std::path::{Path, PathBuf};
+
+fn temp_workspace(label: &str) -> PathBuf {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let mut dir = std::env::temp_dir();
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    dir.push(format!("nit-test-{label}-{now}-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+fn write_fixture_mission(
+    root: &Path,
+    mission_id: &str,
+    title: &str,
+    template: &str,
+    file_paths: &[&str],
+    summaries: &[&str],
+) {
+    let mdir = root.join(".nit").join("swarm").join(mission_id);
+    std::fs::create_dir_all(&mdir).unwrap();
+    let run = serde_json::json!({
+        "id": mission_id,
+        "title": title,
+        "template": template,
+        "status": "DONE",
+        "updated_at": "t+0",
+        "tasks": [],
+    });
+    std::fs::write(mdir.join("run.json"), serde_json::to_string(&run).unwrap()).unwrap();
+    let summaries_arr: Vec<_> = summaries
+        .iter()
+        .enumerate()
+        .map(|(i, s)| serde_json::json!({"summary": s, "task_id": format!("t-{i:03}")}))
+        .collect();
+    let summary = serde_json::json!({
+        "mission_id": mission_id,
+        "summaries": summaries_arr,
+    });
+    std::fs::write(
+        mdir.join("summary.json"),
+        serde_json::to_string(&summary).unwrap(),
+    )
+    .unwrap();
+    let tdir = mdir.join("tasks").join("t-001");
+    std::fs::create_dir_all(&tdir).unwrap();
+    let files_arr: Vec<_> = file_paths
+        .iter()
+        .map(|p| serde_json::json!({"path": p}))
+        .collect();
+    let artifacts = serde_json::json!({ "files": files_arr });
+    std::fs::write(
+        tdir.join("artifacts.json"),
+        serde_json::to_string(&artifacts).unwrap(),
+    )
+    .unwrap();
+}
+
+#[test]
+fn tokenize_strips_stopwords_and_lowercases() {
+    let toks = tokenize("The Quick Brown Fox");
+    assert!(toks.contains(&"quick".to_string()));
+    assert!(toks.contains(&"brown".to_string()));
+    assert!(toks.contains(&"fox".to_string()));
+    assert!(!toks.contains(&"the".to_string()));
+}
+
+#[test]
+fn tokenize_splits_snake_case() {
+    let toks = tokenize("some_thing_here");
+    assert!(toks.contains(&"some".to_string()));
+    assert!(toks.contains(&"thing".to_string()));
+    assert!(toks.contains(&"here".to_string()));
+}
+
+#[test]
+fn path_tokens_splits_paths() {
+    let toks = path_tokens(&["crates/nit-gol/src/catalog.rs".to_string()]);
+    assert!(toks.contains(&"crates".to_string()));
+    assert!(toks.contains(&"nit-gol".to_string()));
+    assert!(toks.contains(&"src".to_string()));
+    assert!(toks.contains(&"catalog".to_string()));
+}
+
+#[test]
+fn build_index_from_corpus_fixture() {
+    let root = temp_workspace("mm-build");
+    write_fixture_mission(
+        &root,
+        "mis-001",
+        "refactor nit-gol module",
+        "parallel",
+        &["crates/nit-gol/src/catalog.rs"],
+        &["File-by-file refactor of nit-gol"],
+    );
+    write_fixture_mission(
+        &root,
+        "mis-002",
+        "audit orchestration docs",
+        "bulk",
+        &["docs/orchestration.md"],
+        &["Reviewed all orchestration documentation"],
+    );
+    let idx = build_index(&root);
+    assert_eq!(idx.missions.len(), 2);
+    let titles: Vec<&str> = idx.missions.iter().map(|m| m.title.as_str()).collect();
+    assert!(titles.contains(&"refactor nit-gol module"));
+    assert!(titles.contains(&"audit orchestration docs"));
+    for m in &idx.missions {
+        assert!(!m.tags.is_empty(), "mission {} has no tags", m.mission_id);
+    }
+}
+
+#[test]
+fn build_index_skips_empty_mission_dirs() {
+    let root = temp_workspace("mm-skip");
+    // Empty mission directory (no summary.json, no run.json, no tasks).
+    std::fs::create_dir_all(root.join(".nit").join("swarm").join("mis-099")).unwrap();
+    // Non-mission directory (doesn't start with mis-).
+    std::fs::create_dir_all(root.join(".nit").join("swarm").join("foo-abc")).unwrap();
+    // One valid fixture mission for comparison.
+    write_fixture_mission(
+        &root,
+        "mis-001",
+        "real mission",
+        "parallel",
+        &["src/lib.rs"],
+        &["did something"],
+    );
+    let idx = build_index(&root);
+    assert_eq!(idx.missions.len(), 1);
+    assert_eq!(idx.missions[0].mission_id, "mis-001");
+}
+
+#[test]
+fn retrieve_returns_expected_ordering() {
+    let root = temp_workspace("mm-order");
+    write_fixture_mission(
+        &root,
+        "mis-001",
+        "refactor catalog module",
+        "parallel",
+        &["crates/nit-gol/src/catalog.rs"],
+        &["Heavy catalog refactor with dedupe"],
+    );
+    write_fixture_mission(
+        &root,
+        "mis-002",
+        "audit docs",
+        "bulk",
+        &["docs/catalog.md"],
+        &["Touched docs only"],
+    );
+    write_fixture_mission(
+        &root,
+        "mis-003",
+        "completely unrelated frontend work",
+        "parallel",
+        &["ui/button.tsx"],
+        &["Button restyle"],
+    );
+    let idx = build_index(&root);
+    let hits = retrieve_similar(
+        &idx,
+        "refactor catalog module with dedupe",
+        &[],
+        &[],
+        5,
+    );
+    assert!(hits.len() >= 2);
+    assert_eq!(hits[0].mission.mission_id, "mis-001");
+    // Second hit should be the weakly-matching docs mission.
+    assert_eq!(hits[1].mission.mission_id, "mis-002");
+    // Unrelated mission should not appear.
+    assert!(hits.iter().all(|h| h.mission.mission_id != "mis-003"));
+}
+
+#[test]
+fn retrieve_empty_corpus_returns_empty() {
+    let idx = MissionMemoryIndex::default();
+    let hits = retrieve_similar(&idx, "anything", &[], &[], 5);
+    assert!(hits.is_empty());
+}
+
+#[test]
+fn retrieve_path_bonus_boosts_file_overlap() {
+    let root = temp_workspace("mm-path");
+    write_fixture_mission(
+        &root,
+        "mis-001",
+        "generic work",
+        "parallel",
+        &["crates/nit-gol/src/catalog.rs"],
+        &["refactor"],
+    );
+    write_fixture_mission(
+        &root,
+        "mis-002",
+        "generic work",
+        "parallel",
+        &["ui/button.tsx"],
+        &["refactor"],
+    );
+    let idx = build_index(&root);
+    let scope_tokens = path_tokens(&["crates/nit-gol/src/catalog.rs".to_string()]);
+    let hits = retrieve_similar(&idx, "refactor", &scope_tokens, &[], 5);
+    assert!(!hits.is_empty());
+    assert_eq!(hits[0].mission.mission_id, "mis-001");
+}
+
+#[test]
+fn retrieve_excludes_listed_missions() {
+    let root = temp_workspace("mm-exclude");
+    write_fixture_mission(
+        &root,
+        "mis-001",
+        "refactor catalog module",
+        "parallel",
+        &["crates/nit-gol/src/catalog.rs"],
+        &["Heavy catalog refactor"],
+    );
+    write_fixture_mission(
+        &root,
+        "mis-002",
+        "refactor catalog module again",
+        "parallel",
+        &["crates/nit-gol/src/catalog.rs"],
+        &["Another catalog refactor"],
+    );
+    let idx = build_index(&root);
+    let hits = retrieve_similar(&idx, "refactor catalog", &[], &["mis-001"], 5);
+    assert!(hits.iter().all(|h| h.mission.mission_id != "mis-001"));
+    assert!(hits.iter().any(|h| h.mission.mission_id == "mis-002"));
+}
+
+#[test]
+fn upsert_mission_dedupes_by_id() {
+    let root = temp_workspace("mm-upsert");
+    write_fixture_mission(
+        &root,
+        "mis-001",
+        "first",
+        "parallel",
+        &["a/b.rs"],
+        &["one"],
+    );
+    let idx1 = upsert_mission(&root, "mis-001").unwrap();
+    let idx2 = upsert_mission(&root, "mis-001").unwrap();
+    assert_eq!(idx1.missions.len(), 1);
+    assert_eq!(idx2.missions.len(), 1);
+}
+
+#[test]
+fn load_tolerates_corrupt_json() {
+    let root = temp_workspace("mm-corrupt");
+    let memdir = root.join(".nit").join("memory");
+    std::fs::create_dir_all(&memdir).unwrap();
+    std::fs::write(memdir.join("index.json"), b"{{{ not valid json").unwrap();
+    let idx = load_index(&root);
+    assert!(idx.missions.is_empty());
+}
+
+#[test]
+fn save_and_load_round_trip() {
+    let root = temp_workspace("mm-roundtrip");
+    write_fixture_mission(
+        &root,
+        "mis-001",
+        "roundtrip mission",
+        "parallel",
+        &["src/lib.rs"],
+        &["did work"],
+    );
+    let built = build_index(&root);
+    save_index(&root, &built).unwrap();
+    let loaded = load_index(&root);
+    assert_eq!(built, loaded);
+}

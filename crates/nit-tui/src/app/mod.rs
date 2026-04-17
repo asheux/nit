@@ -12292,6 +12292,13 @@ fn write_swarm_run_provenance(
         write_file_atomic(&run_dir.join("summary.json"), &summary_json)?;
     }
 
+    // Phase 8: index this mission for cross-mission retrieval. Best-effort —
+    // provenance writes must not be broken by memory-index failures.
+    let _ = nit_core::mission_memory::upsert_mission(
+        state.workspace_root.as_path(),
+        mission_id,
+    );
+
     if let Some(report) = view.gate_report.as_ref() {
         let report_json = serde_json::to_vec_pretty(report)
             .map_err(|err| io::Error::other(format!("serde gate report: {err}")))?;
