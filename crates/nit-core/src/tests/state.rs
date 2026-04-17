@@ -1359,3 +1359,25 @@ fn command_games_history_avoids_empty_error_when_capture_is_disabled() {
     assert!(state.games.match_history.open);
     assert!(state.games.match_history.last_error.is_none());
 }
+
+#[test]
+fn visualizer_toggle_sub_view_cycles_and_resets_scroll() {
+    let root = temp_dir("viz-toggle-sub-view");
+    let mut state = AppState::new(
+        root.clone(),
+        Buffer::empty("x", None),
+        Buffer::empty("n", None),
+    );
+    // Default is SubstrateSignals.
+    assert_eq!(state.visualizer_sub_view, VisualizerSubView::SubstrateSignals);
+    state.substrate_scroll = 17;
+
+    let _ = apply_action(&mut state, Action::VisualizerToggleSubView);
+    assert_eq!(state.visualizer_sub_view, VisualizerSubView::Visualizer);
+    assert_eq!(state.substrate_scroll, 0);
+
+    state.substrate_scroll = 42;
+    let _ = apply_action(&mut state, Action::VisualizerToggleSubView);
+    assert_eq!(state.visualizer_sub_view, VisualizerSubView::SubstrateSignals);
+    assert_eq!(state.substrate_scroll, 0);
+}

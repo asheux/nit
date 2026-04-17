@@ -235,3 +235,63 @@ fn next_signal_id_format_and_monotonic() {
     assert_eq!(second, "5-agent-a-1");
     assert_eq!(state.signal_counter, 2);
 }
+
+#[test]
+fn sorted_by_strength_empty() {
+    let state = SubstrateState::default();
+    assert!(state.signals_sorted_by_strength().is_empty());
+}
+
+#[test]
+fn sorted_by_strength_descending() {
+    let mut state = SubstrateState::new();
+    let mk = |id: &str, strength: f32| Signal {
+        id: id.into(),
+        kind: SignalKind::Warning,
+        posted_by: "agent-a".into(),
+        posted_at_gen: 0,
+        target: SignalTarget::Global,
+        initial_strength: strength,
+        payload: serde_json::Value::Null,
+    };
+    state.emit_signal(mk("mid", 0.5));
+    state.emit_signal(mk("high", 0.9));
+    state.emit_signal(mk("low", 0.1));
+
+    let sorted = state.signals_sorted_by_strength();
+    let ids: Vec<&str> = sorted.iter().map(|(s, _)| s.id.as_str()).collect();
+    assert_eq!(ids, vec!["high", "mid", "low"]);
+    // Strengths must be monotonically non-increasing.
+    for pair in sorted.windows(2) {
+        assert!(pair[0].1 >= pair[1].1);
+    }
+}
+
+#[test]
+fn sorted_by_strength_tiebreak_by_posted_gen() {
+    let mut state = SubstrateState::new();
+    let mk = |id: &str, posted: u64| Signal {
+        id: id.into(),
+        kind: SignalKind::DoneMarker,
+        posted_by: "agent-a".into(),
+        posted_at_gen: posted,
+        target: SignalTarget::Global,
+        initial_strength: 1.0,
+        payload: serde_json::Value::Null,
+    };
+    // Both signals emit at the same effective gen (0) so their effective
+    // strengths are identical; tiebreak must favour the newer posted_at_gen.
+    state.emit_signal(mk("old", 0));
+    state.emit_signal(mk("new", 3));
+    // Advance so both have decayed equally relative to posted_at_gen diff.
+    // Actually we want same effective strength: set generation == 3, so
+    // `old` decays by 3 ticks and `new` by 0. Instead we keep generation at 0
+    // (default), which means `new` hasn't been "posted in the future" — its
+    // effective strength equals initial. Test the tie at gen=0.
+    // With gen=0 both have initial_strength 1.0 (posted in the future for
+    // `new` is treated via saturating_sub → 0 delta → 1.0). Tie by posted_at
+    // → `new` (3) comes first.
+    let sorted = state.signals_sorted_by_strength();
+    assert_eq!(sorted[0].0.id, "new");
+    assert_eq!(sorted[1].0.id, "old");
+}

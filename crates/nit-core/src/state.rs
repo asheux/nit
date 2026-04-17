@@ -2034,6 +2034,16 @@ pub struct AppState {
     /// Active sub-view for the structural quality pane: Stats or FileScores.
     #[serde(skip)]
     pub gate_monitor_sub_view: GateMonitorSubView,
+    /// Active sub-view for the Visualizer pane: SubstrateSignals or Visualizer.
+    #[serde(skip)]
+    pub visualizer_sub_view: VisualizerSubView,
+    /// Scroll offset for the substrate-signals body (Visualizer pane).
+    #[serde(skip)]
+    pub substrate_scroll: usize,
+    /// Cached max_scroll for the substrate body, updated per render. Mirrors
+    /// `gate_monitor_last_max_scroll`'s "no render yet" sentinel semantics.
+    #[serde(skip, default = "gate_monitor_max_scroll_default")]
+    pub substrate_last_max_scroll: usize,
     #[serde(default)]
     pub substrate: crate::substrate::SubstrateState,
 }
@@ -2044,6 +2054,14 @@ pub enum GateMonitorSubView {
     #[default]
     Stats,
     FileScores,
+}
+
+/// Sub-view toggle for the Visualizer pane.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub enum VisualizerSubView {
+    #[default]
+    SubstrateSignals,
+    Visualizer,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Default)]
@@ -2252,6 +2270,9 @@ impl AppState {
             gate_monitor_scroll: 0,
             gate_monitor_last_max_scroll: usize::MAX,
             gate_monitor_sub_view: GateMonitorSubView::default(),
+            visualizer_sub_view: VisualizerSubView::default(),
+            substrate_scroll: 0,
+            substrate_last_max_scroll: usize::MAX,
             substrate: crate::substrate::SubstrateState::default(),
         }
     }
@@ -2880,6 +2901,13 @@ pub fn apply_action(state: &mut AppState, action: Action) -> ActionOutcome {
                 GateMonitorSubView::FileScores => GateMonitorSubView::Stats,
             };
             state.gate_monitor_scroll = 0;
+        }
+        Action::VisualizerToggleSubView => {
+            state.visualizer_sub_view = match state.visualizer_sub_view {
+                VisualizerSubView::SubstrateSignals => VisualizerSubView::Visualizer,
+                VisualizerSubView::Visualizer => VisualizerSubView::SubstrateSignals,
+            };
+            state.substrate_scroll = 0;
         }
         Action::VisualizerCycleSeedView => {
             state.visualizer.seed_view = state.visualizer.seed_view.next();

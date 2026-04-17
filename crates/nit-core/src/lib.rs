@@ -68,8 +68,8 @@ pub use state::{
     McpConnectionState, McpStatus, Metrics, MissionPhase, MissionRecord, PatchProposal,
     PatchStatus, QueuedClaudeTurn, QueuedCodexTurn, RosterTreeBranch, RosterTreeSelection,
     SavedRunHistoryFilter, SavedRunHistoryPendingAction, SyntaxDebugInfo, UiSelection,
-    UiSelectionPane, VisualizerMode, VisualizerRuleEntry, VisualizerState, YankKind,
-    CONSOLE_SCROLL_BOTTOM,
+    UiSelectionPane, VisualizerMode, VisualizerRuleEntry, VisualizerState, VisualizerSubView,
+    YankKind, CONSOLE_SCROLL_BOTTOM,
 };
 pub use substrate::{
     Signal, SignalId, SignalKind, SignalTarget, SubstrateError, SubstrateState,

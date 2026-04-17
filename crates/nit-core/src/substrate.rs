@@ -124,6 +124,18 @@ impl SubstrateState {
             .map(move |s| (s, s.effective_strength(gen)))
     }
 
+    /// Signals ordered by effective strength (descending) with a stable
+    /// tiebreak on `posted_at_gen` (newest first).
+    pub fn signals_sorted_by_strength(&self) -> Vec<(&Signal, f32)> {
+        let mut v: Vec<_> = self.signals_iter().collect();
+        v.sort_by(|a, b| {
+            b.1.partial_cmp(&a.1)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then(b.0.posted_at_gen.cmp(&a.0.posted_at_gen))
+        });
+        v
+    }
+
     pub fn signals_by_kind(&self, kind: SignalKind) -> impl Iterator<Item = (&Signal, f32)> + '_ {
         self.signals_iter().filter(move |(s, _)| s.kind == kind)
     }

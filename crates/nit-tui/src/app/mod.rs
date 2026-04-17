@@ -9175,7 +9175,9 @@ fn handle_mouse_down_with_swarm(
         let layout = layout::split(screen);
         if mouse.row == layout.visualizer.y {
             let col_in_rect = mouse.column.saturating_sub(layout.visualizer.x);
-            if let Some(action) = visualizer_view::title_button_hit(col_in_rect) {
+            if let Some(action) =
+                visualizer_view::title_button_hit(col_in_rect, state.visualizer_sub_view)
+            {
                 state.focus = PaneId::Visualizer;
                 apply_action(state, action);
                 return true;
