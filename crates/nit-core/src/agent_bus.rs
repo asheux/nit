@@ -350,6 +350,27 @@ impl AgentBusEvent {
                     at: at.clone(),
                 });
                 state.agents.console_scroll = CONSOLE_SCROLL_BOTTOM;
+
+                let current_gen = state.substrate.current_generation();
+                let id = state.substrate.next_signal_id(agent_id);
+                state.substrate.emit_signal(crate::substrate::Signal {
+                    id,
+                    kind: crate::substrate::SignalKind::Warning,
+                    posted_by: agent_id.clone(),
+                    posted_at_gen: current_gen,
+                    target: crate::substrate::SignalTarget::Agent {
+                        agent_id: agent_id.clone(),
+                    },
+                    initial_strength:
+                        crate::substrate::SubstrateState::DEFAULT_INITIAL_STRENGTH,
+                    payload: serde_json::json!({
+                        "message": &message,
+                        "thread_id": &thread_id,
+                        "mission_id": &mission_id,
+                    }),
+                });
+                let _ = state.substrate.save(&state.workspace_root);
+
                 state.status = Some(format!(
                     "{source_label} failed: {}",
                     summarize_agent_error(message)
@@ -460,6 +481,25 @@ impl AgentBusEvent {
                 // to background threads by the TUI event loop (genome_worker)
                 // to avoid blocking the main thread.
                 state.genome_turn_active.remove(agent_id);
+
+                let current_gen = state.substrate.current_generation();
+                let id = state.substrate.next_signal_id(agent_id);
+                state.substrate.emit_signal(crate::substrate::Signal {
+                    id,
+                    kind: crate::substrate::SignalKind::DoneMarker,
+                    posted_by: agent_id.clone(),
+                    posted_at_gen: current_gen,
+                    target: crate::substrate::SignalTarget::Agent {
+                        agent_id: agent_id.clone(),
+                    },
+                    initial_strength:
+                        crate::substrate::SubstrateState::DEFAULT_INITIAL_STRENGTH,
+                    payload: serde_json::json!({
+                        "message": &message,
+                        "thread_id": &thread_id,
+                        "mission_id": &mission_id,
+                    }),
+                });
 
                 state.substrate.advance_generation();
                 state

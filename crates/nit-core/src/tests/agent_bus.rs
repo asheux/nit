@@ -434,7 +434,12 @@ fn turn_completed_advances_substrate_generation() {
     event.apply(&mut state);
 
     assert_eq!(state.substrate.current_generation(), 1);
-    assert!(state.substrate.signals.is_empty());
+    // The weak pre-seeded signal was pruned at tick; the auto-emitted
+    // DoneMarker from TurnCompleted survives (posted_at_gen=0, effective=0.95).
+    assert_eq!(state.substrate.signals.len(), 1);
+    let remaining = state.substrate.signals.values().next().unwrap();
+    assert_eq!(remaining.kind, crate::substrate::SignalKind::DoneMarker);
+    assert_eq!(remaining.posted_by, "gpt-test");
 }
 
 #[test]
@@ -481,7 +486,88 @@ fn turn_completed_persists_substrate_to_disk() {
 
     let reloaded = crate::substrate::SubstrateState::load(&dir);
     assert_eq!(reloaded.current_generation(), 1);
-    assert_eq!(reloaded.signals.len(), 1);
+    // Two signals survive: the manually-emitted DoneMarker and the auto-emitted
+    // DoneMarker from TurnCompleted. Both posted at gen=0, pruned at gen=1
+    // (effective=0.95, above threshold).
+    assert_eq!(reloaded.signals.len(), 2);
     assert!(reloaded.signals.contains_key("0-agent-a-0"));
+    let auto_emitted: Vec<_> = reloaded
+        .signals
+        .values()
+        .filter(|s| s.posted_by == "gpt-test")
+        .collect();
+    assert_eq!(auto_emitted.len(), 1);
+    assert_eq!(
+        auto_emitted[0].kind,
+        crate::substrate::SignalKind::DoneMarker
+    );
+}
+
+#[test]
+fn turn_completed_emits_done_marker_signal() {
+    let mut state = test_state();
+    add_codex_agent(&mut state, "gpt-test");
+    assert_eq!(state.substrate.signals.len(), 0);
+
+    AgentBusEvent::TurnCompleted {
+        agent_id: "gpt-test".into(),
+        mission_id: Some("mis-001".into()),
+        thread_id: Some("thread-xyz".into()),
+        token_count: None,
+        message: "Done.".into(),
+    }
+    .apply(&mut state);
+
+    assert_eq!(state.substrate.signals.len(), 1);
+    let signal = state.substrate.signals.values().next().unwrap();
+    assert_eq!(signal.kind, crate::substrate::SignalKind::DoneMarker);
+    assert_eq!(signal.posted_by, "gpt-test");
+    // Signal is posted at the pre-advance generation (0), then the counter
+    // advances to 1 — so reading current_generation after apply returns 1.
+    assert_eq!(signal.posted_at_gen, 0);
+    match &signal.target {
+        crate::substrate::SignalTarget::Agent { agent_id } => {
+            assert_eq!(agent_id, "gpt-test");
+        }
+        other => panic!("expected Agent target, got {other:?}"),
+    }
+    assert_eq!(
+        signal.payload.get("message").and_then(|v| v.as_str()),
+        Some("Done.")
+    );
+    assert_eq!(state.substrate.current_generation(), 1);
+}
+
+#[test]
+fn turn_failed_emits_warning_signal() {
+    let mut state = test_state();
+    add_claude_agent(&mut state, "claude-opus");
+    let before_gen = state.substrate.current_generation();
+
+    AgentBusEvent::TurnFailed {
+        agent_id: "claude-opus".into(),
+        mission_id: None,
+        thread_id: None,
+        token_count: None,
+        message: "rate limited".into(),
+    }
+    .apply(&mut state);
+
+    assert_eq!(state.substrate.signals.len(), 1);
+    let signal = state.substrate.signals.values().next().unwrap();
+    assert_eq!(signal.kind, crate::substrate::SignalKind::Warning);
+    assert_eq!(signal.posted_by, "claude-opus");
+    match &signal.target {
+        crate::substrate::SignalTarget::Agent { agent_id } => {
+            assert_eq!(agent_id, "claude-opus");
+        }
+        other => panic!("expected Agent target, got {other:?}"),
+    }
+    assert_eq!(
+        signal.payload.get("message").and_then(|v| v.as_str()),
+        Some("rate limited")
+    );
+    // TurnFailed does NOT advance the generation.
+    assert_eq!(state.substrate.current_generation(), before_gen);
 }
 
