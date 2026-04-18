@@ -28,6 +28,14 @@ aliases = ["c"]
 favorite = true
 "#;
 
+const DUPLICATE_RULESTRING_OVERLAY: &str = r#"
+[[rules]]
+id = "clone"
+display_name = "Clone"
+rulestring = "B3/S23"
+description = "Same rulestring as 'base'"
+"#;
+
 fn catalog_from_toml(source: &str) -> RuleCatalog {
     let file: RuleFile = toml::from_str(source).expect("parse builtin toml");
     let entries = file
@@ -44,9 +52,8 @@ fn merge_overlay_toml(catalog: &mut RuleCatalog, source: &str, warnings: &mut Ve
     catalog.rebuild_indices(warnings);
 }
 
-/// Panics when `value` was already present in `seen`, tagging the failure
-/// with `field` and `rule_id` so the assertion message pinpoints the
-/// duplicate entry.
+/// Panics when `value` was already present; `field` and `rule_id`
+/// make the failure pinpoint the duplicate entry.
 fn insert_unique<T: std::hash::Hash + Eq + std::fmt::Debug>(
     seen: &mut HashSet<T>,
     value: T,
@@ -59,8 +66,7 @@ fn insert_unique<T: std::hash::Hash + Eq + std::fmt::Debug>(
     );
 }
 
-/// Every built-in rule has a unique (case-insensitive) id, a unique
-/// canonical rulestring, and round-trips cleanly through the parser.
+/// Every built-in has a unique id and rulestring and round-trips cleanly through the parser.
 #[test]
 fn builtins_unique_and_canonical() {
     let mut warnings = Vec::new();
@@ -95,7 +101,7 @@ fn builtins_unique_and_canonical() {
     }
 }
 
-/// Overlays merge into existing entries field-by-field and add brand-new
+/// Overlays merge into existing entries field-by-field and add new
 /// entries when their id is unknown to the catalog.
 #[test]
 fn overlay_merges_and_adds_rules() {
@@ -119,4 +125,23 @@ fn overlay_merges_and_adds_rules() {
         .expect("custom entry added by overlay");
     assert_eq!(added.rulestring, "B2/S", "custom rulestring");
     assert!(added.favorite, "overlay sets favorite = true");
+}
+
+/// A new-id overlay whose rulestring collides with an existing entry is
+/// rejected with a warning; accepting it would produce two catalog
+/// entries sharing the same `rule_key`, corrupting `find_by_rule`.
+#[test]
+fn overlay_rejects_duplicate_rulestring() {
+    let mut catalog = catalog_from_toml(BUILTIN_TOML);
+    let mut warnings = Vec::new();
+    merge_overlay_toml(&mut catalog, DUPLICATE_RULESTRING_OVERLAY, &mut warnings);
+
+    assert!(
+        catalog.find_by_id("clone").is_none(),
+        "duplicate-rulestring overlay must not be added as a new entry",
+    );
+    assert!(
+        warnings.iter().any(|w| w.contains("duplicates rulestring")),
+        "expected a duplicate-rulestring warning, got {warnings:?}",
+    );
 }

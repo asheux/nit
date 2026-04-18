@@ -65,7 +65,7 @@ impl Grid {
         if x >= self.width || y >= self.height {
             return false;
         }
-        self.cells[self.index(x, y)] != 0
+        self.cells[y * self.width + x] != 0
     }
 
     /// Out-of-bounds writes are silently ignored.
@@ -74,8 +74,7 @@ impl Grid {
         if x >= self.width || y >= self.height {
             return;
         }
-        let idx = self.index(x, y);
-        self.cells[idx] = u8::from(alive);
+        self.cells[y * self.width + x] = u8::from(alive);
     }
 
     pub fn clear(&mut self) {
@@ -105,7 +104,9 @@ impl Grid {
     ///
     /// Cells within the top-left overlapping region are preserved; cells
     /// outside that region in the new grid are dead. Shrinking truncates
-    /// from the bottom-right; growing pads with dead cells.
+    /// from the bottom-right; growing pads with dead cells. An early
+    /// return also guards against `chunks_exact(0)` when either the
+    /// source or destination width is zero.
     #[must_use]
     pub fn clone_with_size(&self, width: usize, height: usize) -> Grid {
         let mut resized = Grid::new(width, height);
@@ -120,10 +121,5 @@ impl Grid {
             dst[..overlap_width].copy_from_slice(&src[..overlap_width]);
         }
         resized
-    }
-
-    #[inline]
-    fn index(&self, x: usize, y: usize) -> usize {
-        y * self.width + x
     }
 }

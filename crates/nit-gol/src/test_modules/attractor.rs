@@ -4,7 +4,7 @@ use crate::{EdgeMode, Grid, Rule};
 
 const PROTOCOL_HASH: u64 = 0xabcd;
 
-/// Conway period-2 oscillator (blinker) centred on a 5x5 grid.
+/// Conway period-2 oscillator (vertical blinker) centred on a 5x5 grid.
 fn make_blinker() -> Grid {
     let mut grid = Grid::new(5, 5);
     for y in 1..=3 {
@@ -28,8 +28,8 @@ fn repeat_detector() -> AttractorDetector {
     })
 }
 
-/// Evolve `seed` forward `steps` generations under Conway's rules and
-/// return the chain `[seed, step¹, step², …]` of length `steps + 1`.
+/// Evolve `seed` forward `steps` generations; returns the full chain
+/// `[seed, step¹, step², …]` of length `steps + 1`.
 fn evolve_chain(seed: Grid, steps: usize, rule: Rule, edge: EdgeMode) -> Vec<Grid> {
     let mut chain = Vec::with_capacity(steps + 1);
     chain.push(seed);
@@ -40,9 +40,9 @@ fn evolve_chain(seed: Grid, steps: usize, rule: Rule, edge: EdgeMode) -> Vec<Gri
     chain
 }
 
-/// Protocol-aware detection only matches when grid state AND protocol
-/// phase align — identical grids observed in distinct phases must not
-/// be reported as a cycle.
+/// Protocol-aware detection only reports a cycle when grid state AND
+/// protocol phase align. Identical grids observed across distinct
+/// phases must not collapse into a spurious repeat.
 #[test]
 fn repeat_requires_matching_protocol_phase() {
     let rule = Rule::conway();
@@ -53,27 +53,27 @@ fn repeat_requires_matching_protocol_phase() {
     detector.seed_with_context(&chain[0], 0, rule, edge, phase_context(0));
 
     // Generations 1..=3 each visit a fresh (state, phase) pair.
-    for (pair, generation) in chain.windows(2).zip(1u64..).take(3) {
-        let phase = generation as u32;
+    for (pair, gen_idx) in chain.windows(2).zip(1u64..).take(3) {
+        let phase = gen_idx as u32;
         let event = detector.observe_with_context(
             &pair[0],
             &pair[1],
-            generation,
+            gen_idx,
             rule,
             edge,
             phase_context(phase),
         );
         assert!(
             event.is_none(),
-            "gen {generation} (phase {phase}) is a new (state, phase) pair, got {event:?}",
+            "gen {gen_idx} (phase {phase}) is a new (state, phase) pair, got {event:?}",
         );
     }
 
-    // Phase 0 returns: the blinker repeats with the original protocol context.
-    let event =
+    // Phase-0 return: the blinker repeats with the original protocol context.
+    let replay =
         detector.observe_with_context(&chain[3], &chain[4], 4, rule, edge, phase_context(0));
     assert!(
-        matches!(event, Some(AttractorEvent::Cycle { period, .. }) if period == 4),
-        "phase-0 return at gen 4 should report a period-4 cycle, got {event:?}",
+        matches!(replay, Some(AttractorEvent::Cycle { period, .. }) if period == 4),
+        "phase-0 return at gen 4 should report a period-4 cycle, got {replay:?}",
     );
 }

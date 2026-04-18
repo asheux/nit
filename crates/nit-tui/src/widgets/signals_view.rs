@@ -76,10 +76,10 @@ pub fn build_lines(state: &AppState, theme: &Theme, width: u16) -> Vec<Line<'sta
         let row = format_row(
             &format!("{strength:.2}"),
             kind_label(signal.kind),
-            &truncate(&signal.posted_by, 26),
+            &truncate(&compact_agent_id(&signal.posted_by), 26),
             &format_target(&signal.target),
             &format!("{age}g"),
-            &truncate(&signal.id, 24),
+            &truncate(&compact_agent_id(&signal.id), 48),
             width,
         );
         let style = style_for(signal.kind, strength, theme);
@@ -132,8 +132,15 @@ fn kind_label(kind: SignalKind) -> &'static str {
 fn format_target(t: &SignalTarget) -> String {
     match t {
         SignalTarget::Global => "Global".to_string(),
-        SignalTarget::Agent { agent_id } => format!("agent:{}", truncate(agent_id, 30)),
-        SignalTarget::File { path } => format!("file:{}", truncate(&path.to_string_lossy(), 30)),
+        SignalTarget::Agent { agent_id } => {
+            format!("agent:{}", truncate(&compact_agent_id(agent_id), 30))
+        }
+        SignalTarget::File { path } => {
+            format!(
+                "file:{}",
+                truncate(&compact_path(&path.to_string_lossy()), 30)
+            )
+        }
     }
 }
 
@@ -167,6 +174,45 @@ fn style_for(kind: SignalKind, strength: f32, theme: &Theme) -> Style {
         style = style.add_modifier(Modifier::DIM);
     }
     style
+}
+
+/// Strip absolute-path noise: if the path contains a `crates/` segment,
+/// show it rooted at `crates/` (workspace-relative). Otherwise show just
+/// the final filename.
+fn compact_path(p: &str) -> String {
+    if let Some(idx) = p.find("crates/") {
+        return p[idx..].to_string();
+    }
+    std::path::Path::new(p)
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| p.to_string())
+}
+
+/// Strip the swarm/mission middle segment from a clone agent id so the UI
+/// shows `claude-opus-4-7#clone-01` instead of
+/// `claude-opus-4-7#swarm-mis-001-clone-01`. Non-clone ids pass through.
+fn compact_agent_id(id: &str) -> String {
+    let Some((base, rest)) = id.split_once("#swarm-") else {
+        return id.to_string();
+    };
+    // rest looks like `mis-001-clone-01` — skip past the mission id (two
+    // dash-separated tokens: `mis`, `001`) and keep the remainder.
+    let first_dash = match rest.find('-') {
+        Some(i) => i,
+        None => return id.to_string(),
+    };
+    let after_first = &rest[first_dash + 1..];
+    let second_dash_rel = match after_first.find('-') {
+        Some(i) => i,
+        None => return id.to_string(),
+    };
+    let suffix = &after_first[second_dash_rel + 1..];
+    if suffix.is_empty() {
+        id.to_string()
+    } else {
+        format!("{base}#{suffix}")
+    }
 }
 
 fn truncate(s: &str, n: usize) -> String {

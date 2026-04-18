@@ -2239,8 +2239,7 @@ impl SwarmRuntime {
                                 .as_deref()
                                 .or(parsed.integrator_agent_id.as_deref()),
                         ));
-                        let deps_repairs =
-                            ensure_deps_resolve(&mut parsed.tasks, run.template);
+                        let deps_repairs = ensure_deps_resolve(&mut parsed.tasks, run.template);
                         if !deps_repairs.is_empty() {
                             for desc in &deps_repairs {
                                 parsed.warnings.push(format!("Plan safety net: {desc}"));
@@ -2728,8 +2727,7 @@ impl SwarmRuntime {
                                 .as_deref()
                                 .or(parsed.integrator_agent_id.as_deref()),
                         ));
-                        let deps_repairs =
-                            ensure_deps_resolve(&mut parsed.tasks, run.template);
+                        let deps_repairs = ensure_deps_resolve(&mut parsed.tasks, run.template);
                         if !deps_repairs.is_empty() {
                             for desc in &deps_repairs {
                                 parsed.warnings.push(format!("Plan safety net: {desc}"));
@@ -3487,10 +3485,7 @@ fn ensure_proposer_task(
 ///
 /// Returns a per-repair description string; the caller emits a substrate
 /// signal per entry for traceability.
-fn ensure_deps_resolve(
-    tasks: &mut [SwarmTask],
-    template: SwarmTemplate,
-) -> Vec<String> {
+fn ensure_deps_resolve(tasks: &mut [SwarmTask], template: SwarmTemplate) -> Vec<String> {
     if !matches!(template, SwarmTemplate::Parallel) {
         return Vec::new();
     }

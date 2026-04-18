@@ -9,7 +9,6 @@
 //! unknown id becomes a new user entry, provided its rulestring is valid
 //! and does not duplicate a rulestring already in the catalog.
 
-mod helpers;
 mod overlay;
 mod types;
 
@@ -18,7 +17,6 @@ use std::fs;
 
 use nit_utils::paths;
 
-use helpers::{build_search_haystack, normalize_key, rule_key};
 use overlay::{apply_overlays, build_entry_from_file, RuleFile, RuleOverlayFile};
 
 pub use types::{
@@ -28,6 +26,38 @@ pub use types::{
 use crate::Rule;
 
 const DEFAULT_RULES_TOML: &str = include_str!("../../assets/rules.toml");
+
+/// Compact `u32` key packing a rule's birth and survive masks (9 bits
+/// each) into one word. Used across `HashMap<u32, usize>` indices —
+/// do NOT change the packing or lookups silently break.
+pub(super) fn rule_key(rule: Rule) -> u32 {
+    (u32::from(rule.births_mask()) << 9) | u32::from(rule.survives_mask())
+}
+
+/// Trim and lowercase a string for case-insensitive lookup.
+fn normalize_key(text: &str) -> String {
+    text.trim().to_ascii_lowercase()
+}
+
+/// Concatenated searchable fields for case-insensitive substring filtering.
+fn build_search_haystack(entry: &RuleEntry) -> String {
+    let fixed = [
+        entry.id.as_str(),
+        entry.name.as_str(),
+        entry.rulestring.as_str(),
+        entry.description.as_str(),
+    ];
+    let extras = entry
+        .tags
+        .iter()
+        .chain(entry.aliases.iter())
+        .map(String::as_str);
+    fixed
+        .into_iter()
+        .chain(extras)
+        .collect::<Vec<_>>()
+        .join(" ")
+}
 
 /// Indexed collection of rule entries with lookup by id, rule, and alias.
 #[derive(Clone, Debug)]
@@ -62,12 +92,10 @@ impl RuleCatalog {
         (catalog, warnings)
     }
 
-    /// Number of visible (non-hidden) entries.
     pub fn len(&self) -> usize {
         self.visible_indices.len()
     }
 
-    /// True when the visible catalog has no entries.
     pub fn is_empty(&self) -> bool {
         self.visible_indices.is_empty()
     }
@@ -86,28 +114,28 @@ impl RuleCatalog {
             .filter_map(|idx| self.entries.get(*idx))
     }
 
-    /// Get a visible entry by position index.
+    /// Fetch a visible entry by its position in the visible list.
     pub fn get(&self, idx: usize) -> Option<&RuleEntry> {
         self.visible_indices
             .get(idx)
             .and_then(|idx| self.entries.get(*idx))
     }
 
-    /// Look up an entry by its canonical id (case-insensitive).
+    /// Look up an entry by its canonical id (case-insensitive). Aliases
+    /// are NOT consulted — use [`select`](Self::select) for that.
     pub fn find_by_id(&self, id: &str) -> Option<&RuleEntry> {
-        self.id_index
-            .get(&normalize_key(id))
-            .and_then(|idx| self.entries.get(*idx))
+        let idx = *self.id_index.get(&normalize_key(id))?;
+        self.entries.get(idx)
     }
 
     /// Look up an entry by its parsed rule value.
     pub fn find_by_rule(&self, rule: Rule) -> Option<&RuleEntry> {
-        self.rule_index
-            .get(&rule_key(rule))
-            .and_then(|idx| self.entries.get(*idx))
+        let idx = *self.rule_index.get(&rule_key(rule))?;
+        self.entries.get(idx)
     }
 
-    /// Find the visible-list position of a selected rule.
+    /// Find the visible-list position of a selected rule, preferring id
+    /// over rulestring match when both are known.
     pub fn index_of_selected(&self, selected: &SelectedRule) -> Option<usize> {
         let entry_idx = selected
             .id
@@ -150,13 +178,7 @@ impl RuleCatalog {
         if trimmed.is_empty() {
             return Err(RuleSelectError::UnknownId(selector.to_string()));
         }
-        let key = normalize_key(trimmed);
-        let named = self
-            .id_index
-            .get(&key)
-            .or_else(|| self.alias_index.get(&key))
-            .and_then(|idx| self.entries.get(*idx));
-        if let Some(entry) = named {
+        if let Some(entry) = self.find_by_id_or_alias(&normalize_key(trimmed)) {
             return Ok(SelectedRule::from_named(entry));
         }
         let rule = Rule::parse(trimmed).map_err(RuleSelectError::Parse)?;
@@ -174,6 +196,14 @@ impl RuleCatalog {
             Some(named) => format!("{} ({})", rule, named.name),
             None => rule.to_string(),
         }
+    }
+
+    fn find_by_id_or_alias(&self, normalized_key: &str) -> Option<&RuleEntry> {
+        let idx = *self
+            .id_index
+            .get(normalized_key)
+            .or_else(|| self.alias_index.get(normalized_key))?;
+        self.entries.get(idx)
     }
 
     fn load_builtin(warnings: &mut Vec<String>) -> Self {
@@ -209,8 +239,8 @@ impl RuleCatalog {
         }
     }
 
-    /// Applies overlays in-place and rebuilds derived indices. Exposed
-    /// for tests that mutate catalog state outside the `load` flow.
+    /// Apply overlays in-place and rebuild derived indices. Exposed for
+    /// tests that mutate catalog state outside the `load` flow.
     #[cfg(test)]
     fn apply_overlays(&mut self, overlays: &[RuleOverlay], warnings: &mut Vec<String>) {
         apply_overlays(&mut self.entries, overlays, warnings);

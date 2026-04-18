@@ -13,8 +13,13 @@ pub(super) const MIN_QUEUE_CAPACITY: usize = 1;
 pub(super) const SNAPSHOT_FILENAME_PREFIX: &str = "sim";
 
 /// Generous I/O-thread stack — large grid bitsets and serde buffers can
-/// push past the default 2 MiB on debug builds.
+/// push past the default 2 MiB on debug builds. Shrinking this has
+/// produced overflows in past snapshot-stress runs; treat 8 MiB as a
+/// load-bearing floor.
 pub(super) const IO_THREAD_STACK_BYTES: usize = 8 * 1024 * 1024;
+
+/// Env var read by [`snapshot_queue_capacity`] to override the default.
+const QUEUE_CAPACITY_ENV: &str = "NIT_SNAPSHOT_QUEUE";
 
 /// The kind of event that triggered a snapshot.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
@@ -73,9 +78,12 @@ impl SnapshotManagerConfig {
     }
 }
 
-/// Read the snapshot queue capacity from `NIT_SNAPSHOT_QUEUE` or use 64.
+/// Read the snapshot queue capacity from `NIT_SNAPSHOT_QUEUE` or fall back
+/// to [`DEFAULT_QUEUE_CAPACITY`]. The result is clamped to at least
+/// [`MIN_QUEUE_CAPACITY`] so `bounded(0)` — which would deadlock the
+/// worker — is never reachable.
 pub fn snapshot_queue_capacity() -> usize {
-    std::env::var("NIT_SNAPSHOT_QUEUE")
+    std::env::var(QUEUE_CAPACITY_ENV)
         .ok()
         .and_then(|value| value.parse::<usize>().ok())
         .unwrap_or(DEFAULT_QUEUE_CAPACITY)

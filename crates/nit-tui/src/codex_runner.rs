@@ -31,7 +31,7 @@ impl Default for CodexRunnerConfig {
         Self {
             sandbox: None,
             approval_policy: Some("never".into()),
-            max_parallel_turns: 2,
+            max_parallel_turns: 8,
             mcp_backchannel_socket: None,
         }
     }

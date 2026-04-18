@@ -1,10 +1,34 @@
 //! Overlay merge logic and TOML deserialization for catalog loading.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
-use super::helpers::{normalize_unique_lowercase, rule_key, trim_nonempty_lines};
+use super::rule_key;
 use super::types::{RuleDefaultParams, RuleEntry, RuleOverlay, RuleSource};
 use crate::{Rule, RuleParseError};
+
+/// Trim, lowercase, and deduplicate tag/alias strings, preserving first-occurrence order.
+fn normalize_unique_lowercase(items: Vec<String>) -> Vec<String> {
+    let mut seen: HashSet<String> = HashSet::new();
+    items
+        .into_iter()
+        .filter_map(|raw| {
+            let lowered = raw.trim().to_ascii_lowercase();
+            if lowered.is_empty() || !seen.insert(lowered.clone()) {
+                return None;
+            }
+            Some(lowered)
+        })
+        .collect()
+}
+
+/// Trim each line and drop empties; preserves order and original case.
+fn trim_nonempty_lines(items: Vec<String>) -> Vec<String> {
+    items
+        .into_iter()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect()
+}
 
 /// Root structure for the built-in rules TOML asset.
 #[derive(Clone, Debug, serde::Deserialize)]
@@ -13,7 +37,7 @@ pub(super) struct RuleFile {
     pub rules: Vec<RuleFileEntry>,
 }
 
-/// One entry inside the built-in rules TOML asset.
+/// One entry in the built-in rules TOML asset.
 #[derive(Clone, Debug, serde::Deserialize)]
 pub(super) struct RuleFileEntry {
     id: String,
@@ -32,7 +56,7 @@ pub(super) struct RuleFileEntry {
     provenance: Vec<String>,
 }
 
-/// Root structure for a user overlay TOML file.
+/// Root structure for a user-overlay TOML file.
 #[derive(Clone, Debug, serde::Deserialize)]
 pub(super) struct RuleOverlayFile {
     #[serde(default)]
@@ -43,15 +67,14 @@ pub(super) fn build_entry_from_file(
     raw: RuleFileEntry,
     source: RuleSource,
 ) -> Result<RuleEntry, RuleParseError> {
-    let raw_str = raw.rulestring.trim().to_string();
+    let raw_rulestring = raw.rulestring.trim().to_string();
     let rule = Rule::parse(&raw.rulestring)?;
-    let canonical = rule.to_string();
     Ok(RuleEntry {
         id: raw.id,
         name: raw.display_name,
         rule,
-        rulestring: canonical,
-        rulestring_raw: raw_str,
+        rulestring: rule.to_string(),
+        rulestring_raw: raw_rulestring,
         description: raw.description,
         tags: normalize_unique_lowercase(raw.tags),
         aliases: normalize_unique_lowercase(raw.aliases),
@@ -63,7 +86,8 @@ pub(super) fn build_entry_from_file(
     })
 }
 
-/// Apply a set of overlays: merge into existing entries or add new ones.
+/// Apply a set of overlays: merge into existing entries (matched by
+/// case-insensitive id) or add new user entries when the id is unknown.
 pub(super) fn apply_overlays(
     entries: &mut Vec<RuleEntry>,
     overlays: &[RuleOverlay],
@@ -73,23 +97,23 @@ pub(super) fn apply_overlays(
     for overlay in overlays {
         let id_key = overlay.id.to_ascii_lowercase();
         if let Some(&idx) = id_map.get(&id_key) {
-            let entry = &mut entries[idx];
-            try_update_rulestring(entry, overlay, warnings);
-            apply_optional_fields(entry, overlay);
+            try_update_rulestring(&mut entries[idx], overlay, warnings);
+            apply_optional_fields(&mut entries[idx], overlay);
             continue;
         }
-        if let Some(entry) = build_overlay_entry(overlay, &rule_map, entries, warnings) {
-            let idx = entries.len();
-            id_map.insert(id_key, idx);
-            rule_map.insert(rule_key(entry.rule), idx);
-            entries.push(entry);
-        }
+        let Some(entry) = build_overlay_entry(overlay, &rule_map, entries, warnings) else {
+            continue;
+        };
+        let idx = entries.len();
+        id_map.insert(id_key, idx);
+        rule_map.insert(rule_key(entry.rule), idx);
+        entries.push(entry);
     }
 }
 
 fn seed_lookup_maps(entries: &[RuleEntry]) -> (HashMap<String, usize>, HashMap<u32, usize>) {
-    let mut id_map = HashMap::new();
-    let mut rule_map = HashMap::new();
+    let mut id_map = HashMap::with_capacity(entries.len());
+    let mut rule_map = HashMap::with_capacity(entries.len());
     for (idx, entry) in entries.iter().enumerate() {
         id_map.insert(entry.id.to_ascii_lowercase(), idx);
         rule_map.insert(rule_key(entry.rule), idx);
@@ -97,12 +121,10 @@ fn seed_lookup_maps(entries: &[RuleEntry]) -> (HashMap<String, usize>, HashMap<u
     (id_map, rule_map)
 }
 
-/// Validate and apply a rulestring override from an overlay.
-///
-/// Rulestrings are only applied when they belong to the same rule
-/// family (same birth/survive digits); a mismatch is treated as user
-/// error and logged, because silently rewriting a builtin's behavior
-/// would be surprising.
+/// Apply an overlay's rulestring override only when it preserves the
+/// rule's birth/survive digits. A mismatched rulestring is rejected
+/// with a warning because silently rewriting a builtin's behavior via
+/// an overlay would be too surprising to justify.
 fn try_update_rulestring(entry: &mut RuleEntry, overlay: &RuleOverlay, warnings: &mut Vec<String>) {
     let Some(rulestring) = overlay.rulestring.as_deref() else {
         return;
@@ -122,7 +144,8 @@ fn try_update_rulestring(entry: &mut RuleEntry, overlay: &RuleOverlay, warnings:
     entry.rule = rule;
 }
 
-/// Copy non-rulestring optional fields from an overlay into an entry.
+/// Copy each optional overlay field onto `entry` when the overlay
+/// provides a value; `None` means "inherit the existing value".
 fn apply_optional_fields(entry: &mut RuleEntry, overlay: &RuleOverlay) {
     macro_rules! merge_ref {
         ($src:ident => $dst:ident) => {
@@ -153,10 +176,11 @@ fn apply_optional_fields(entry: &mut RuleEntry, overlay: &RuleOverlay) {
     merge_copy!(hidden);
 }
 
-/// Attempt to construct a new [`RuleEntry`] from an overlay definition.
+/// Construct a brand-new [`RuleEntry`] from an overlay definition.
 ///
-/// Returns `None` and pushes diagnostics if required fields are missing,
-/// the rulestring is invalid, or the rulestring duplicates an existing entry.
+/// Returns `None` and appends diagnostics when required fields are
+/// missing, the rulestring is invalid, or the rulestring duplicates an
+/// existing catalog entry (add it as an alias instead).
 fn build_overlay_entry(
     overlay: &RuleOverlay,
     rule_map: &HashMap<u32, usize>,

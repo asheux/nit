@@ -9,6 +9,7 @@ use crate::{
 // ── Fixture helpers ─────────────────────────────────────────────────
 
 /// Build a `width`x`height` grid with the listed coordinates turned on.
+#[track_caller]
 fn grid_with_cells(width: usize, height: usize, live_cells: &[(usize, usize)]) -> Grid {
     let mut grid = Grid::new(width, height);
     for &(x, y) in live_cells {
@@ -140,6 +141,14 @@ mod evolution {
 mod encoding {
     use super::*;
 
+    #[track_caller]
+    fn render_rle(grid: &Grid) -> String {
+        let mut buffer = Vec::new();
+        crate::snapshot::write_rle(&mut buffer, grid, Rule::conway())
+            .expect("write_rle should succeed on in-memory buffer");
+        String::from_utf8(buffer).expect("RLE output must be valid UTF-8")
+    }
+
     #[test]
     fn grid_hash_changes() {
         let blank = Grid::new(3, 3);
@@ -182,13 +191,6 @@ mod encoding {
             render_rle(&canvas),
             "x = 5, y = 5, rule = B3/S23\n5b$\n5b$\n2bo2b$\n5b$\n5b!",
         );
-    }
-
-    fn render_rle(grid: &Grid) -> String {
-        let mut buffer = Vec::new();
-        crate::snapshot::write_rle(&mut buffer, grid, Rule::conway())
-            .expect("write_rle should succeed on in-memory buffer");
-        String::from_utf8(buffer).expect("RLE output must be valid UTF-8")
     }
 }
 

@@ -23,6 +23,9 @@ const DROP_LOG_INTERVAL: Duration = Duration::from_secs(2);
 pub struct SnapshotManager {
     inner: Arc<SnapshotManagerInner>,
     handle: Option<JoinHandle<()>>,
+    // Keep the receiver alive during unit tests that exercise dispatch
+    // without spawning a worker; otherwise `tx.try_send` would see a
+    // disconnected channel and report an unrelated error.
     #[cfg(test)]
     #[allow(dead_code)]
     rx_guard: Option<Receiver<IoCommand>>,
@@ -42,7 +45,7 @@ pub(super) struct SnapshotManagerInner {
 
 impl SnapshotManager {
     pub fn new(config: SnapshotManagerConfig) -> Self {
-        let (inner, rx) = build_inner(&config);
+        let (inner, rx) = SnapshotManagerInner::build(&config);
         let handle = spawn_worker(rx, Arc::clone(&inner));
         Self {
             inner,
@@ -54,7 +57,7 @@ impl SnapshotManager {
 
     #[cfg(test)]
     pub(super) fn new_for_tests(config: SnapshotManagerConfig) -> Self {
-        let (inner, rx) = build_inner(&config);
+        let (inner, rx) = SnapshotManagerInner::build(&config);
         Self {
             inner,
             handle: None,
@@ -96,7 +99,7 @@ impl SnapshotManager {
         }
     }
 
-    /// Check dedup + cooldown rules; drop the request if rejected.
+    /// Check dedup + cooldown rules; count and reject the request if denied.
     fn admit(&self, key: &SnapshotKey, event: SnapshotEventKind, now: Instant) -> bool {
         let guard = self.inner.last_enqueued.lock().unwrap();
         if guard.allows(key, event, now, self.inner.min_interval) {
@@ -116,10 +119,7 @@ impl SnapshotManager {
                 true
             }
             Err(err) => {
-                self.inner.dropped.fetch_add(1, Ordering::Relaxed);
-                if matches!(err, TrySendError::Full(_)) {
-                    self.maybe_log_drop();
-                }
+                self.record_drop(matches!(err, TrySendError::Full(_)));
                 false
             }
         }
@@ -129,12 +129,19 @@ impl SnapshotManager {
         match self.inner.tx.try_send(cmd) {
             Ok(()) => true,
             Err(err) => {
-                self.inner.dropped.fetch_add(1, Ordering::Relaxed);
-                if matches!(err, TrySendError::Full(_)) {
-                    self.maybe_log_drop();
-                }
+                self.record_drop(matches!(err, TrySendError::Full(_)));
                 false
             }
+        }
+    }
+
+    /// Increment the drop counter and (rate-limited) log a warning when
+    /// the queue is full. `queue_full=false` paths are disconnect errors
+    /// that would have already produced louder signals elsewhere.
+    fn record_drop(&self, queue_full: bool) {
+        self.inner.dropped.fetch_add(1, Ordering::Relaxed);
+        if queue_full {
+            self.maybe_log_drop();
         }
     }
 
@@ -154,25 +161,28 @@ impl Drop for SnapshotManager {
     }
 }
 
-fn build_inner(config: &SnapshotManagerConfig) -> (Arc<SnapshotManagerInner>, Receiver<IoCommand>) {
-    let (tx, rx) = bounded(config.queue_capacity.max(MIN_QUEUE_CAPACITY));
-    let min_interval = Duration::from_millis(config.min_interval_ms.max(1));
-    let now = Instant::now();
-    let inner = Arc::new(SnapshotManagerInner {
-        tx,
-        last_enqueued: Mutex::new(LastSnapshotKey {
-            key: None,
-            last_at: saturating_past(now, min_interval),
-        }),
-        dropped: AtomicU64::new(0),
-        written: AtomicU64::new(0),
-        last_path: Mutex::new(None),
-        last_drop_log: Mutex::new(saturating_past(now, DROP_LOG_INTERVAL)),
-        min_interval,
-        dir: config.dir.clone(),
-        max_files: config.max_files,
-    });
-    (inner, rx)
+impl SnapshotManagerInner {
+    fn build(config: &SnapshotManagerConfig) -> (Arc<Self>, Receiver<IoCommand>) {
+        let capacity = config.queue_capacity.max(MIN_QUEUE_CAPACITY);
+        let (tx, rx) = bounded(capacity);
+        let min_interval = Duration::from_millis(config.min_interval_ms.max(1));
+        let now = Instant::now();
+        let inner = Arc::new(Self {
+            tx,
+            last_enqueued: Mutex::new(LastSnapshotKey {
+                key: None,
+                last_at: saturating_past(now, min_interval),
+            }),
+            dropped: AtomicU64::new(0),
+            written: AtomicU64::new(0),
+            last_path: Mutex::new(None),
+            last_drop_log: Mutex::new(saturating_past(now, DROP_LOG_INTERVAL)),
+            min_interval,
+            dir: config.dir.clone(),
+            max_files: config.max_files,
+        });
+        (inner, rx)
+    }
 }
 
 /// Shift `now` back by `back`, saturating at `now` when the subtraction

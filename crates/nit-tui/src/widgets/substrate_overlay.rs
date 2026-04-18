@@ -27,7 +27,7 @@ const TAB_LABELS: &[(SubstrateOverlayTab, &str)] = &[
 pub fn preferred_size(screen: Rect) -> Rect {
     let target_w = (screen.width.saturating_mul(75) / 100).max(96);
     let target_h = (screen.height.saturating_mul(55) / 100).max(18);
-    let w = target_w.min(140).min(screen.width.saturating_sub(4));
+    let w = target_w.min(160).min(screen.width.saturating_sub(4));
     let h = target_h.min(32).min(screen.height.saturating_sub(4));
     let w = w.max(60);
     let h = h.max(12);

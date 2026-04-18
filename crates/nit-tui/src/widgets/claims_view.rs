@@ -76,10 +76,10 @@ pub fn build_lines(state: &AppState, theme: &Theme, width: u16) -> Vec<Line<'sta
         let row = format_row(
             &format!("{remaining}g"),
             kind_label(claim.kind),
-            &truncate(&claim.claimed_by, 26),
+            &truncate(&compact_agent_id(&claim.claimed_by), 26),
             &format_target(&claim.target),
             &format!("{age}g"),
-            &truncate(&claim.id, 24),
+            &truncate(&compact_agent_id(&claim.id), 48),
             width,
         );
         let style = style_for(claim.kind, remaining, theme);
@@ -102,11 +102,11 @@ fn format_row(
     let show_id = width >= 90;
     let show_age = width >= 70;
     let mut row = format!(
-        "{:>4}  {:<14} {:<26} {:<36}",
+        "{:>4}  {:<14} {:<26} {:<50}",
         ttl,
         truncate(kind, 14),
         by,
-        truncate(target, 36)
+        truncate(target, 50)
     );
     if show_age {
         row.push_str(&format!(" {age:>5}"));
@@ -129,14 +129,19 @@ fn kind_label(kind: ClaimKind) -> &'static str {
 fn format_target(t: &ClaimTarget) -> String {
     match t {
         ClaimTarget::Global => "Global".to_string(),
-        ClaimTarget::File { path } => format!("file:{}", truncate(&path.to_string_lossy(), 30)),
+        ClaimTarget::File { path } => {
+            format!(
+                "file:{}",
+                truncate(&compact_path(&path.to_string_lossy()), 44)
+            )
+        }
         ClaimTarget::Region {
             path,
             start_line,
             end_line,
         } => format!(
             "region:{}#{}-{}",
-            truncate(&path.to_string_lossy(), 22),
+            truncate(&compact_path(&path.to_string_lossy()), 34),
             start_line,
             end_line
         ),
@@ -172,6 +177,44 @@ fn style_for(kind: ClaimKind, remaining: u64, theme: &Theme) -> Style {
         style = style.add_modifier(Modifier::DIM);
     }
     style
+}
+
+/// Strip absolute-path noise: if the path contains a `crates/` segment,
+/// show it rooted at `crates/` (workspace-relative). Otherwise show just
+/// the final filename. Keeps the common case (workspace edits) informative
+/// and the rare case (outside-workspace writes) compact.
+fn compact_path(p: &str) -> String {
+    if let Some(idx) = p.find("crates/") {
+        return p[idx..].to_string();
+    }
+    std::path::Path::new(p)
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| p.to_string())
+}
+
+/// Strip the swarm/mission middle segment from a clone agent id so the UI
+/// shows `claude-opus-4-7#clone-01` instead of
+/// `claude-opus-4-7#swarm-mis-001-clone-01`. Non-clone ids pass through.
+fn compact_agent_id(id: &str) -> String {
+    let Some((base, rest)) = id.split_once("#swarm-") else {
+        return id.to_string();
+    };
+    let first_dash = match rest.find('-') {
+        Some(i) => i,
+        None => return id.to_string(),
+    };
+    let after_first = &rest[first_dash + 1..];
+    let second_dash_rel = match after_first.find('-') {
+        Some(i) => i,
+        None => return id.to_string(),
+    };
+    let suffix = &after_first[second_dash_rel + 1..];
+    if suffix.is_empty() {
+        id.to_string()
+    } else {
+        format!("{base}#{suffix}")
+    }
 }
 
 fn truncate(s: &str, n: usize) -> String {

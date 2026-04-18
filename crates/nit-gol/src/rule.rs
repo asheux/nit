@@ -9,6 +9,7 @@ use std::fmt::{self, Write};
 use thiserror::Error;
 
 const MASK_9_BITS: u16 = 0x01ff;
+const MAX_NEIGHBORS: u8 = 8;
 
 /// A Life-like cellular automaton rule.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -57,13 +58,13 @@ impl Rule {
     /// neighborhoods; inside this crate `step` always stays in range.
     #[must_use]
     pub fn is_birth(&self, neighbors: u8) -> bool {
-        neighbors <= 8 && self.births_mask & (1u16 << neighbors) != 0
+        neighbors <= MAX_NEIGHBORS && self.births_mask & (1u16 << neighbors) != 0
     }
 
     /// Returns `true` if a live cell with `neighbors` live neighbors survives.
     #[must_use]
     pub fn is_survive(&self, neighbors: u8) -> bool {
-        neighbors <= 8 && self.survives_mask & (1u16 << neighbors) != 0
+        neighbors <= MAX_NEIGHBORS && self.survives_mask & (1u16 << neighbors) != 0
     }
 
     /// Parse a rule from `B.../S...` notation.
@@ -89,23 +90,7 @@ impl Rule {
         let mut survives = 0u16;
         let mut saw_prefix = false;
         for segment in [first_seg, second_seg] {
-            if segment.is_empty() {
-                continue;
-            }
-            let mut chars = segment.chars();
-            let prefix = chars.next().expect("segment is non-empty");
-            let target: &mut u16 = match prefix {
-                'B' | 'b' => &mut births,
-                'S' | 's' => &mut survives,
-                other => return Err(RuleParseError::InvalidChar(other)),
-            };
-            saw_prefix = true;
-            for symbol in chars {
-                match symbol {
-                    '0'..='8' => *target |= 1u16 << (symbol as u8 - b'0'),
-                    other => return Err(RuleParseError::InvalidChar(other)),
-                }
-            }
+            saw_prefix |= parse_segment(segment, &mut births, &mut survives)?;
         }
 
         if !saw_prefix || (births == 0 && survives == 0) {
@@ -115,22 +100,53 @@ impl Rule {
     }
 }
 
+/// Fold a single `B...` or `S...` segment into the running masks.
+///
+/// Returns `true` if the segment carried a recognised prefix. An empty
+/// segment is valid (the parser tolerates a trailing slash) and returns
+/// `false` without touching the masks.
+fn parse_segment(
+    segment: &str,
+    births: &mut u16,
+    survives: &mut u16,
+) -> Result<bool, RuleParseError> {
+    if segment.is_empty() {
+        return Ok(false);
+    }
+    let mut chars = segment.chars();
+    let prefix = chars.next().expect("segment is non-empty");
+    let target: &mut u16 = match prefix {
+        'B' | 'b' => births,
+        'S' | 's' => survives,
+        other => return Err(RuleParseError::InvalidChar(other)),
+    };
+    for symbol in chars {
+        match symbol {
+            '0'..='8' => *target |= 1u16 << (symbol as u8 - b'0'),
+            other => return Err(RuleParseError::InvalidChar(other)),
+        }
+    }
+    Ok(true)
+}
+
 impl fmt::Display for Rule {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_char('B')?;
-        for bit in 0..=8u8 {
-            if self.births_mask & (1u16 << bit) != 0 {
-                f.write_char((b'0' + bit) as char)?;
-            }
-        }
-        f.write_str("/S")?;
-        for bit in 0..=8u8 {
-            if self.survives_mask & (1u16 << bit) != 0 {
-                f.write_char((b'0' + bit) as char)?;
-            }
-        }
-        Ok(())
+        write_digit_mask(f, 'B', self.births_mask)?;
+        f.write_char('/')?;
+        write_digit_mask(f, 'S', self.survives_mask)
     }
+}
+
+/// Write `<prefix><digits>` where digits are the set bits of `mask` in
+/// ascending order (`0`..=`8`).
+fn write_digit_mask(f: &mut fmt::Formatter<'_>, prefix: char, mask: u16) -> fmt::Result {
+    f.write_char(prefix)?;
+    for bit in 0..=MAX_NEIGHBORS {
+        if mask & (1u16 << bit) != 0 {
+            f.write_char((b'0' + bit) as char)?;
+        }
+    }
+    Ok(())
 }
 
 /// Errors that can occur when parsing a rule string.

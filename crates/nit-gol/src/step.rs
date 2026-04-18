@@ -51,6 +51,7 @@ mod neighborhood {
         (1, 1),
     ];
 
+    #[inline]
     pub(super) fn count(grid: &Grid, x: usize, y: usize, edge: EdgeMode) -> u8 {
         let width = grid.width() as isize;
         let height = grid.height() as isize;
@@ -74,11 +75,18 @@ mod neighborhood {
     ) -> Option<(usize, usize)> {
         let nx = x as isize + dx;
         let ny = y as isize + dy;
-        let (rx, ry) = match edge {
-            EdgeMode::Toroid => (nx.rem_euclid(width), ny.rem_euclid(height)),
-            EdgeMode::Dead if nx < 0 || ny < 0 || nx >= width || ny >= height => return None,
-            EdgeMode::Dead => (nx, ny),
-        };
-        Some((rx as usize, ry as usize))
+        match edge {
+            EdgeMode::Toroid => Some((
+                nx.rem_euclid(width) as usize,
+                ny.rem_euclid(height) as usize,
+            )),
+            EdgeMode::Dead => {
+                if nx < 0 || ny < 0 || nx >= width || ny >= height {
+                    None
+                } else {
+                    Some((nx as usize, ny as usize))
+                }
+            }
+        }
     }
 }

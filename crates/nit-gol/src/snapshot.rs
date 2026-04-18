@@ -7,6 +7,7 @@
 use std::fs::{self, File};
 use std::io::{self, BufWriter, Write};
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 use std::time::SystemTime;
 
 use time::format_description::well_known::Rfc3339;
@@ -71,6 +72,15 @@ pub struct SnapshotPaths {
     pub json_path: PathBuf,
 }
 
+impl SnapshotPaths {
+    fn for_stem(dir: &Path, stem: &str) -> Self {
+        Self {
+            rle_path: dir.join(format!("{stem}.{RLE_EXT}")),
+            json_path: dir.join(format!("{stem}.{JSON_EXT}")),
+        }
+    }
+}
+
 /// Write a complete snapshot (RLE grid + JSON metadata) to `dir`.
 pub fn write_snapshot(
     dir: &Path,
@@ -80,10 +90,7 @@ pub fn write_snapshot(
     meta: &SnapshotMetadata,
 ) -> io::Result<SnapshotPaths> {
     ensure_dir(dir)?;
-    let paths = SnapshotPaths {
-        rle_path: dir.join(format!("{name_base}.{RLE_EXT}")),
-        json_path: dir.join(format!("{name_base}.{JSON_EXT}")),
-    };
+    let paths = SnapshotPaths::for_stem(dir, name_base);
     log_write_start(dir, name_base, grid, rule);
     write_atomic(&paths.rle_path, |sink| write_rle(sink, grid, rule))?;
     write_metadata_atomic(&paths.json_path, meta)?;
@@ -136,6 +143,7 @@ pub fn prune_oldest(dir: &Path, max_files: usize) -> io::Result<()> {
     if rle_files.len() <= max_files {
         return Ok(());
     }
+    // Ascending mtime: oldest first so `take(excess)` drops the stalest.
     rle_files.sort_by_key(|(mtime, _)| *mtime);
     let excess = rle_files.len().saturating_sub(max_files);
     for (_, stale) in rle_files.into_iter().take(excess) {
@@ -173,7 +181,6 @@ pub fn write_rle_bits_atomic(
     })
 }
 
-/// Atomically write JSON metadata to a sidecar file.
 pub(crate) fn write_metadata_atomic(path: &Path, meta: &SnapshotMetadata) -> io::Result<()> {
     write_atomic(path, |writer| {
         serde_json::to_writer(writer, meta).map_err(io::Error::other)
@@ -237,6 +244,9 @@ fn log_write_done(paths: &SnapshotPaths) {
     );
 }
 
+/// The env var is consulted only once per process — snapshots happen on
+/// hot paths and the OS lookup would otherwise run per write.
 fn debug_enabled() -> bool {
-    std::env::var_os(SNAPSHOT_DEBUG_ENV).is_some()
+    static CACHED: OnceLock<bool> = OnceLock::new();
+    *CACHED.get_or_init(|| std::env::var_os(SNAPSHOT_DEBUG_ENV).is_some())
 }

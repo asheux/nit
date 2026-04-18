@@ -21,7 +21,7 @@ pub struct ClaudeRunnerConfig {
 impl Default for ClaudeRunnerConfig {
     fn default() -> Self {
         Self {
-            max_parallel_turns: 2,
+            max_parallel_turns: 8,
             permission_mode: None,
         }
     }
@@ -43,9 +43,17 @@ pub enum ClaudeCommand {
         /// Restrict the turn to read-only tools (no Write/Edit/Bash). Used for
         /// shadow advisory agents that must not modify the workspace.
         read_only: bool,
+        /// Override for `--max-turns`. When `None` the runner uses
+        /// `DEFAULT_MAX_TURNS`. Integrator tasks run real verify loops
+        /// (clippy → test → fmt → fix → re-check) and routinely need more
+        /// than the default budget.
+        max_turns: Option<u32>,
     },
     Shutdown,
 }
+
+pub const DEFAULT_MAX_TURNS: u32 = 50;
+pub const INTEGRATOR_MAX_TURNS: u32 = 120;
 
 pub struct ClaudeRunner {
     cmd_tx: Sender<ClaudeCommand>,
@@ -182,6 +190,7 @@ fn runner_loop(
                     effort,
                     prompt,
                     read_only,
+                    max_turns,
                 } = cmd
                 else {
                     continue;
@@ -211,6 +220,7 @@ fn runner_loop(
                     effort,
                     prompt,
                     read_only,
+                    max_turns,
                     config.clone(),
                 ));
             }
@@ -256,6 +266,7 @@ fn spawn_turn_worker(
     effort: Option<String>,
     prompt: String,
     read_only: bool,
+    max_turns: Option<u32>,
     config: ClaudeRunnerConfig,
 ) -> ActiveTurn {
     let agent_id = model.clone();
@@ -277,6 +288,7 @@ fn spawn_turn_worker(
                 effort,
                 prompt,
                 read_only,
+                max_turns,
                 config,
                 cancel_worker,
             );
@@ -303,6 +315,7 @@ fn run_turn(
     effort: Option<String>,
     prompt: String,
     read_only: bool,
+    max_turns: Option<u32>,
     config: ClaudeRunnerConfig,
     cancel: Arc<AtomicBool>,
 ) {
@@ -318,6 +331,7 @@ fn run_turn(
         out_file.as_path(),
         resume_session_id.as_deref(),
         read_only,
+        max_turns,
         &config,
     ))
     .stdin(Stdio::piped())
@@ -492,13 +506,11 @@ fn run_turn(
                                     .and_then(|c| c.as_array())
                                 {
                                     for block in content {
-                                        let block_type =
-                                            block.get("type").and_then(|v| v.as_str());
+                                        let block_type = block.get("type").and_then(|v| v.as_str());
                                         if block_type != Some("tool_use") {
                                             continue;
                                         }
-                                        let tool_name =
-                                            block.get("name").and_then(|v| v.as_str());
+                                        let tool_name = block.get("name").and_then(|v| v.as_str());
                                         let is_write_tool = matches!(
                                             tool_name,
                                             Some("Write")
@@ -742,6 +754,7 @@ pub fn claude_model_slug_for_agent_id(agent_id: &str) -> &str {
         .unwrap_or(agent_id)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_claude_args(
     agent_id: &str,
     cwd: &Path,
@@ -750,6 +763,7 @@ fn build_claude_args(
     _out_file: &Path,
     resume_session_id: Option<&str>,
     read_only: bool,
+    max_turns: Option<u32>,
     config: &ClaudeRunnerConfig,
 ) -> Vec<String> {
     let model_slug = claude_model_slug_for_agent_id(agent_id);
@@ -802,9 +816,13 @@ fn build_claude_args(
         args.push("Read,Edit,Write,Bash,Glob,Grep,WebSearch,WebFetch".into());
     }
 
-    // Max turns to prevent runaway sessions.
+    // Max turns to prevent runaway sessions. Role-aware: integrators
+    // routinely need more budget because they run real verify loops
+    // (clippy → test → fmt → fix → re-check) and the default 50 is too
+    // tight for those (observed: task completed but hit --max-turns during
+    // cosmetic `cargo fmt` cleanup).
     args.push("--max-turns".into());
-    args.push("50".into());
+    args.push(max_turns.unwrap_or(DEFAULT_MAX_TURNS).to_string());
 
     // Read prompt from stdin (trailing `-`).
     args.push("-".into());

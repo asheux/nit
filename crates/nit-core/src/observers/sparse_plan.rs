@@ -31,11 +31,8 @@ fn observe(state: &AppState) -> Vec<ObservedEmission> {
         if !signal.posted_by.starts_with("planner:") {
             continue;
         }
-        let is_unresolved = signal
-            .payload
-            .get("reason")
-            .and_then(|v| v.as_str())
-            == Some("unresolved_dep");
+        let is_unresolved =
+            signal.payload.get("reason").and_then(|v| v.as_str()) == Some("unresolved_dep");
         if !is_unresolved {
             continue;
         }

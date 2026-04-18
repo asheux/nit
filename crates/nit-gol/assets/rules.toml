@@ -1,9 +1,11 @@
 # Built-in Game of Life rule catalog.
 #
-# Each entry is keyed by its `id` (lower-snake-case). User overlays
-# from the configuration directory match the id case-insensitively,
-# either merging field-by-field or adding new rules. Section headings
-# below group rules by theme; ordering is cosmetic only.
+# Each entry is keyed by its `id` (lower_snake_case) and must carry a
+# canonical `rulestring` in `B.../S...` notation. User overlays from the
+# configuration directory match the id case-insensitively and either
+# merge field-by-field or add new rules. Aliases are normalized to
+# lowercase and deduplicated at load time. Section headings below group
+# rules by theme; ordering is cosmetic only.
 
 # ── Classic rules ───────────────────────────────────────────────────
 

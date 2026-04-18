@@ -2,18 +2,17 @@
 
 use std::collections::{HashMap, VecDeque};
 
-use super::fingerprint::{self, Fingerprint};
-use super::{AttractorEvent, AttractorExtra, AutoStopPolicy};
+use super::{compute_fingerprint, AttractorEvent, AttractorExtra, AutoStopPolicy, Fingerprint};
 use crate::{EdgeMode, Grid, Rule};
 
-/// Configuration for the attractor detector.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct AttractorConfig {
-    /// Which events trigger an auto-stop.
     pub policy: AutoStopPolicy,
-    /// Maximum number of fingerprint entries kept in history.
+    /// Maximum number of fingerprint entries retained before FIFO eviction kicks in.
     pub max_history: usize,
-    /// Require a secondary hash match to confirm cycle detection.
+    /// When true, a primary-hash match must also agree on the secondary
+    /// FNV hash before a cycle is reported. Collision guard against
+    /// accidental blake3 prefix clashes masquerading as genuine repeats.
     pub confirm_on_repeat: bool,
 }
 
@@ -27,7 +26,6 @@ impl Default for AttractorConfig {
     }
 }
 
-/// Internal record of a previously observed fingerprint.
 #[derive(Clone, Debug)]
 struct SeenEntry {
     first_seen: u64,
@@ -37,8 +35,9 @@ struct SeenEntry {
 /// Stateful detector that tracks grid fingerprints across generations.
 ///
 /// Feed grids via [`seed`](Self::seed) and [`observe`](Self::observe);
-/// the detector returns an [`AttractorEvent`] when a fixed point or
-/// cycle is found.
+/// an [`AttractorEvent`] is returned when a fixed point or cycle is
+/// found. After emitting an event the detector latches into a
+/// `completed` state so callers can keep driving without double-firing.
 pub struct AttractorDetector {
     cfg: AttractorConfig,
     seen: HashMap<Fingerprint, Vec<SeenEntry>>,
@@ -74,7 +73,6 @@ impl AttractorDetector {
         self.cfg.policy = policy;
     }
 
-    /// Clear all history and reset to the initial state.
     pub fn reset(&mut self) {
         self.seen.clear();
         self.order.clear();
@@ -84,12 +82,10 @@ impl AttractorDetector {
         self.completed = false;
     }
 
-    /// Register the initial grid state before observation begins.
     pub fn seed(&mut self, grid: &Grid, gen: u64, rule: Rule, edge: EdgeMode) {
         self.seed_with_context(grid, gen, rule, edge, None);
     }
 
-    /// Observe a generation transition and check for attractors.
     pub fn observe(
         &mut self,
         current: &Grid,
@@ -101,9 +97,8 @@ impl AttractorDetector {
         self.observe_with_context(current, next, next_gen, rule, edge, None)
     }
 
-    /// Register the initial grid state with optional protocol context mixed
-    /// into the fingerprint. Use this when running a multi-phase protocol
-    /// so identical grids in different phases are not conflated.
+    /// Seed the detector with the initial grid, mixing optional protocol
+    /// context into the fingerprint so phase boundaries remain distinct.
     pub fn seed_with_context(
         &mut self,
         grid: &Grid,
@@ -112,25 +107,16 @@ impl AttractorDetector {
         edge: EdgeMode,
         extra: Option<AttractorExtra>,
     ) {
-        let (fp, secondary) = fingerprint::compute_with_secondary(
-            grid,
-            rule,
-            edge,
-            extra,
-            self.cfg.confirm_on_repeat,
-        );
+        let (fp, secondary) = self.compute_fingerprint(grid, rule, edge, extra);
         self.last = Some(fp);
         self.seeded = true;
         self.completed = false;
-        if self.cfg.max_history == 0 {
-            return;
-        }
         self.insert_entry(fp, gen, secondary);
     }
 
-    /// Observe a generation transition with optional protocol context;
-    /// the protocol fields are folded into the fingerprint so phase
-    /// boundaries do not masquerade as cycles.
+    /// Observe a transition with optional protocol context; see
+    /// [`seed_with_context`](Self::seed_with_context) for why the
+    /// context matters during multi-phase runs.
     pub fn observe_with_context(
         &mut self,
         current: &Grid,
@@ -147,42 +133,49 @@ impl AttractorDetector {
             let seed_gen = next_gen.saturating_sub(1);
             self.seed_with_context(current, seed_gen, rule, edge, extra);
         }
+        let (fp, secondary) = self.compute_fingerprint(next, rule, edge, extra);
+        self.observe_inner(current, next, next_gen, fp, secondary)
+    }
+
+    /// Core observation logic shared by the context and fingerprint paths.
+    ///
+    /// Callers are responsible for having already computed a fingerprint
+    /// that matches `next`; this routine performs only the detection
+    /// bookkeeping. Does NOT consult the `seeded` flag — public entry
+    /// points decide whether to auto-seed or short-circuit.
+    fn observe_inner(
+        &mut self,
+        current: &Grid,
+        next: &Grid,
+        next_gen: u64,
+        fp: Fingerprint,
+        secondary: Option<u64>,
+    ) -> Option<AttractorEvent> {
         if current == next {
-            return Some(self.finish_fixed_point(next, rule, edge, extra, next_gen));
+            self.last = Some(fp);
+            self.completed = true;
+            return Some(AttractorEvent::FixedPoint { gen: next_gen });
         }
+        self.last = Some(fp);
         if self.cfg.max_history == 0 {
-            self.last = Some(fingerprint::compute(next, rule, edge, extra));
             return None;
         }
-
-        let (fp, secondary) = fingerprint::compute_with_secondary(
-            next,
-            rule,
-            edge,
-            extra,
-            self.cfg.confirm_on_repeat,
-        );
         if let Some(event) = self.check_repeat(fp, secondary, next_gen) {
-            self.last = Some(fp);
             self.completed = true;
             return Some(event);
         }
         self.insert_entry(fp, next_gen, secondary);
-        self.last = Some(fp);
         None
     }
 
-    fn finish_fixed_point(
-        &mut self,
-        next: &Grid,
+    fn compute_fingerprint(
+        &self,
+        grid: &Grid,
         rule: Rule,
         edge: EdgeMode,
         extra: Option<AttractorExtra>,
-        next_gen: u64,
-    ) -> AttractorEvent {
-        self.last = Some(fingerprint::compute(next, rule, edge, extra));
-        self.completed = true;
-        AttractorEvent::FixedPoint { gen: next_gen }
+    ) -> (Fingerprint, Option<u64>) {
+        compute_fingerprint(grid, rule, edge, extra, self.cfg.confirm_on_repeat)
     }
 
     fn check_repeat(
@@ -220,7 +213,6 @@ impl AttractorDetector {
         self.evict_if_needed();
     }
 
-    /// Remove the oldest entries when the history exceeds `max_history`.
     fn evict_if_needed(&mut self) {
         if self.cfg.max_history == 0 {
             return;
@@ -229,16 +221,20 @@ impl AttractorDetector {
             let Some((fp, gen)) = self.order.pop_front() else {
                 break;
             };
-            let Some(entries) = self.seen.get_mut(&fp) else {
-                continue;
-            };
-            if let Some(pos) = entries.iter().position(|e| e.first_seen == gen) {
-                entries.remove(pos);
-                self.entry_count = self.entry_count.saturating_sub(1);
-            }
-            if entries.is_empty() {
-                self.seen.remove(&fp);
-            }
+            self.drop_stale_entry(fp, gen);
+        }
+    }
+
+    fn drop_stale_entry(&mut self, fp: Fingerprint, gen: u64) {
+        let Some(entries) = self.seen.get_mut(&fp) else {
+            return;
+        };
+        if let Some(pos) = entries.iter().position(|e| e.first_seen == gen) {
+            entries.remove(pos);
+            self.entry_count = self.entry_count.saturating_sub(1);
+        }
+        if entries.is_empty() {
+            self.seen.remove(&fp);
         }
     }
 }
@@ -254,9 +250,6 @@ impl AttractorDetector {
         self.seeded = true;
         self.last = Some(fp);
         self.completed = false;
-        if self.cfg.max_history == 0 {
-            return;
-        }
         self.insert_entry(fp, gen, secondary);
     }
 
@@ -268,30 +261,10 @@ impl AttractorDetector {
         fp: Fingerprint,
         secondary: Option<u64>,
     ) -> Option<AttractorEvent> {
-        if self.completed {
+        if self.completed || !self.seeded {
             return None;
         }
-        if !self.seeded {
-            return None;
-        }
-        if current == next {
-            let event = AttractorEvent::FixedPoint { gen: next_gen };
-            self.last = Some(fp);
-            self.completed = true;
-            return Some(event);
-        }
-        if self.cfg.max_history == 0 {
-            self.last = Some(fp);
-            return None;
-        }
-        if let Some(event) = self.check_repeat(fp, secondary, next_gen) {
-            self.last = Some(fp);
-            self.completed = true;
-            return Some(event);
-        }
-        self.insert_entry(fp, next_gen, secondary);
-        self.last = Some(fp);
-        None
+        self.observe_inner(current, next, next_gen, fp, secondary)
     }
 
     pub(crate) fn test_fingerprint(value: u128) -> Fingerprint {

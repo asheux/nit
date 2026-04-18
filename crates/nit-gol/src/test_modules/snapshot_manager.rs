@@ -115,6 +115,29 @@ fn cooldown_blocks_non_manual() {
     );
 }
 
+/// An empty gate (no prior key) admits the first request immediately,
+/// regardless of the cooldown window — seeding from `Instant::now()`
+/// minus the cooldown would otherwise leave the first caller starved.
+#[test]
+fn empty_gate_admits_first_request() {
+    let now = Instant::now();
+    let cooldown = Duration::from_millis(500);
+    let gate = LastSnapshotKey {
+        key: None,
+        last_at: now,
+    };
+
+    let key = fixture_key([1, 2], Some(2));
+    assert!(
+        gate.allows(&key, SnapshotEventKind::Cycle, now + cooldown, cooldown),
+        "first request after gate-anchor cooldown must be admitted",
+    );
+    assert!(
+        gate.allows(&key, SnapshotEventKind::Manual, now, cooldown),
+        "manual events must be admitted on an empty gate",
+    );
+}
+
 /// When the bounded channel is full, excess requests are dropped and
 /// the dropped counter increments by exactly one.
 #[test]

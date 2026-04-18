@@ -785,6 +785,18 @@ pub(super) fn maybe_dispatch_claude_turn(
         .unwrap_or_else(|| "high".into());
 
     let read_only = crate::shadow::parse_shadow_lane_id(&model).is_some();
+    // Role-aware turn budget: integrators run real verify loops
+    // (clippy → test → fmt → fix → re-check) and routinely exceed the
+    // default. Read the role already set by `apply_swarm_task_role`.
+    let max_turns = state
+        .agents
+        .agents
+        .iter()
+        .find(|a| a.id == model)
+        .and_then(|a| match a.role.to_ascii_lowercase().as_str() {
+            "integrate" | "integrator" => Some(crate::claude_runner::INTEGRATOR_MAX_TURNS),
+            _ => None,
+        });
     let ok = claude.send(ClaudeCommand::RunTurn {
         model: model.clone(),
         cwd: state.workspace_root.clone(),
@@ -794,6 +806,7 @@ pub(super) fn maybe_dispatch_claude_turn(
         effort: Some(effort),
         prompt,
         read_only,
+        max_turns,
     });
     if !ok {
         // Runner channel is dead -- clean up the optimistic state we just set.

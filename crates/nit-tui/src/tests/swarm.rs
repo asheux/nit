@@ -3312,10 +3312,20 @@ fn lab_ensure_deps_resolve_is_noop() {
             ..make_task("integrate", "a2", Some("integrate"), vec!["judge"])
         },
     ];
-    let before = tasks.iter().find(|t| t.id == "integrate").unwrap().deps.clone();
+    let before = tasks
+        .iter()
+        .find(|t| t.id == "integrate")
+        .unwrap()
+        .deps
+        .clone();
     let repairs = ensure_deps_resolve(&mut tasks, SwarmTemplate::Lab);
     assert!(repairs.is_empty());
-    let after = tasks.iter().find(|t| t.id == "integrate").unwrap().deps.clone();
+    let after = tasks
+        .iter()
+        .find(|t| t.id == "integrate")
+        .unwrap()
+        .deps
+        .clone();
     assert_eq!(before, after);
 }
 

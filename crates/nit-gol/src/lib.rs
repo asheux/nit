@@ -21,9 +21,10 @@ pub mod step;
 #[cfg(test)]
 mod tests;
 
+pub use grid::{EdgeMode, Grid};
+pub use rule::{Rule, RuleParseError};
+
 pub use attractor::{AttractorEvent, AttractorExtra, AutoStopPolicy};
 pub use catalog::{
     RuleCatalog, RuleDefaultParams, RuleEntry, RuleOverlay, RuleSelectError, SelectedRule,
 };
-pub use grid::{EdgeMode, Grid};
-pub use rule::{Rule, RuleParseError};

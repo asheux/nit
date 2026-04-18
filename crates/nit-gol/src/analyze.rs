@@ -55,45 +55,35 @@ pub struct RuleScore {
     pub alive_end: u32,
 }
 
-struct SimMetrics {
-    final_grid: Grid,
-    period: Option<u32>,
-    transient: u32,
-    avg_population: f32,
-    max_population: u32,
-    alive_end: u32,
-}
-
 /// Running totals for per-generation population statistics.
 struct PopulationTracker {
-    sum: u64,
-    max: u32,
-    last: u32,
-    samples: u32,
+    running_sum: u64,
+    peak_alive: u32,
+    most_recent: u32,
 }
 
 impl PopulationTracker {
     fn new() -> Self {
         Self {
-            sum: 0,
-            max: 0,
-            last: 0,
-            samples: 0,
+            running_sum: 0,
+            peak_alive: 0,
+            most_recent: 0,
         }
     }
 
     fn record(&mut self, alive: u32) {
-        self.sum += alive as u64;
-        self.max = self.max.max(alive);
-        self.last = alive;
-        self.samples = self.samples.saturating_add(1);
+        self.running_sum += u64::from(alive);
+        if alive > self.peak_alive {
+            self.peak_alive = alive;
+        }
+        self.most_recent = alive;
     }
 
-    fn average(&self, transient: u32) -> f32 {
-        if transient == 0 {
+    fn mean_over(&self, ticks: u32) -> f32 {
+        if ticks == 0 {
             return 0.0;
         }
-        self.sum as f32 / transient as f32
+        self.running_sum as f32 / ticks as f32
     }
 }
 
@@ -107,26 +97,35 @@ pub fn evaluate_rule(
     edge: EdgeMode,
     max_generations: u32,
 ) -> RuleEvaluation {
-    let metrics = simulate_with_cycle_detection(seed, rule, edge, max_generations);
+    let outcome = simulate(seed, rule, edge, max_generations);
+    let area = seed.width() * seed.height();
+    let avg = outcome.population.mean_over(outcome.transient);
     let score = score_rule(
-        seed.width() * seed.height(),
-        metrics.transient,
-        metrics.period,
-        metrics.avg_population,
-        metrics.max_population,
-        metrics.alive_end,
+        area,
+        outcome.transient,
+        outcome.period,
+        avg,
+        outcome.population.peak_alive,
+        outcome.population.most_recent,
     );
     RuleEvaluation {
         rule,
         score,
-        period: metrics.period,
-        transient: metrics.transient,
-        avg_population: metrics.avg_population,
-        max_population: metrics.max_population,
-        alive_end: metrics.alive_end,
-        steps: metrics.transient,
-        final_grid: metrics.final_grid,
+        period: outcome.period,
+        transient: outcome.transient,
+        avg_population: avg,
+        max_population: outcome.population.peak_alive,
+        alive_end: outcome.population.most_recent,
+        steps: outcome.transient,
+        final_grid: outcome.final_grid,
     }
+}
+
+struct SimOutcome {
+    final_grid: Grid,
+    period: Option<u32>,
+    transient: u32,
+    population: PopulationTracker,
 }
 
 /// Step the seed forward, tracking population stats and stopping on a
@@ -134,45 +133,40 @@ pub fn evaluate_rule(
 ///
 /// On cycle detection the final grid is the matched state (not stepped
 /// forward) so downstream callers can inspect the oscillator itself.
-fn simulate_with_cycle_detection(
-    seed: &Grid,
-    rule: Rule,
-    edge: EdgeMode,
-    max_generations: u32,
-) -> SimMetrics {
+fn simulate(seed: &Grid, rule: Rule, edge: EdgeMode, max_generations: u32) -> SimOutcome {
     let mut grid = seed.clone();
     let mut seen: HashMap<u64, u32> = HashMap::new();
     let mut population = PopulationTracker::new();
-    let mut period = None;
-    let mut transient = 0;
+    let mut transient = 0u32;
 
     for generation in 0..max_generations {
         let hash = grid.hash();
         if let Some(&prev) = seen.get(&hash) {
-            period = Some(generation.saturating_sub(prev));
-            transient = generation;
-            population.last = grid.alive_count() as u32;
-            break;
+            let alive_now = u32_alive(&grid);
+            population.most_recent = alive_now;
+            return SimOutcome {
+                final_grid: grid,
+                period: Some(generation.saturating_sub(prev)),
+                transient: generation,
+                population,
+            };
         }
         seen.insert(hash, generation);
 
-        let alive = grid.alive_count() as u32;
+        let alive = u32_alive(&grid);
         population.record(alive);
+        transient = generation + 1;
         if alive == 0 {
-            transient = generation + 1;
             break;
         }
         grid = step(&grid, rule, edge);
-        transient = generation + 1;
     }
 
-    SimMetrics {
-        avg_population: population.average(transient),
-        max_population: population.max,
-        alive_end: population.last,
+    SimOutcome {
         final_grid: grid,
-        period,
+        period: None,
         transient,
+        population,
     }
 }
 
@@ -195,16 +189,23 @@ pub(crate) fn score_rule(
     if alive_end == 0 {
         score -= SCORE_EXTINCTION_PENALTY;
     }
-    if is_saturated(grid_area, max_population) {
+    if saturated(grid_area, max_population) {
         score -= SCORE_SATURATION_PENALTY;
     }
     score
 }
 
-fn is_saturated(grid_area: usize, max_population: u32) -> bool {
+fn saturated(grid_area: usize, max_population: u32) -> bool {
     if grid_area == 0 {
         return false;
     }
     let cap = (grid_area as f32 * SATURATION_THRESHOLD) as usize;
     max_population as usize > cap
+}
+
+/// `Grid::alive_count` is `usize`; population stats use `u32` throughout
+/// the public API, so saturate rather than widening — any grid large
+/// enough to exceed `u32::MAX` cells is well beyond what we simulate.
+fn u32_alive(grid: &Grid) -> u32 {
+    u32::try_from(grid.alive_count()).unwrap_or(u32::MAX)
 }
