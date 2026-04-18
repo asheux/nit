@@ -836,3 +836,100 @@ fn next_assumption_id_format_and_monotonic() {
     assert_eq!(second, "5-a1-1");
     assert_eq!(state.assumption_counter, 2);
 }
+
+#[test]
+fn assumptions_sorted_by_remaining_ttl_empty() {
+    let state = SubstrateState::default();
+    assert!(state.assumptions_sorted_by_remaining_ttl().is_empty());
+}
+
+#[test]
+fn assumptions_sorted_by_remaining_ttl_descending_with_tiebreak() {
+    let mut state = SubstrateState::new();
+    state.generation = 5;
+    // Three assumptions, varying remaining TTL.
+    //  long   : posted_at=0, ttl=20 → expiry 20, remaining 15
+    //  mid_a  : posted_at=1, ttl=12 → expiry 13, remaining 8
+    //  mid_b  : posted_at=3, ttl=10 → expiry 13, remaining 8 (tiebreak — newer wins)
+    //  short  : posted_at=2, ttl=5  → expiry 7,  remaining 2
+    let long = mk_assumption(
+        "long",
+        AssumptionTarget::File {
+            path: PathBuf::from("a.rs"),
+        },
+        0,
+        20,
+        serde_json::json!({}),
+    );
+    let mid_a = mk_assumption(
+        "mid-a",
+        AssumptionTarget::File {
+            path: PathBuf::from("b.rs"),
+        },
+        1,
+        12,
+        serde_json::json!({}),
+    );
+    let mid_b = mk_assumption(
+        "mid-b",
+        AssumptionTarget::File {
+            path: PathBuf::from("c.rs"),
+        },
+        3,
+        10,
+        serde_json::json!({}),
+    );
+    let short = mk_assumption(
+        "short",
+        AssumptionTarget::File {
+            path: PathBuf::from("d.rs"),
+        },
+        2,
+        5,
+        serde_json::json!({}),
+    );
+    state.assert_assumption(long);
+    state.assert_assumption(mid_a);
+    state.assert_assumption(mid_b);
+    state.assert_assumption(short);
+    let sorted = state.assumptions_sorted_by_remaining_ttl();
+    let ids: Vec<&str> = sorted.iter().map(|(a, _)| a.id.as_str()).collect();
+    // long first, then mid_b (newer posted_at wins on tiebreak), mid_a, short.
+    assert_eq!(ids, vec!["long", "mid-b", "mid-a", "short"]);
+    // Remaining column must be monotonically non-increasing.
+    for pair in sorted.windows(2) {
+        assert!(pair[0].1 >= pair[1].1);
+    }
+}
+
+#[test]
+fn assumptions_sorted_by_remaining_ttl_filters_expired() {
+    let mut state = SubstrateState::new();
+    state.generation = 5;
+    // Live: posted_at=2, ttl=10 → expiry 12, remaining 7.
+    let live = mk_assumption(
+        "live",
+        AssumptionTarget::File {
+            path: PathBuf::from("a.rs"),
+        },
+        2,
+        10,
+        serde_json::json!({}),
+    );
+    // Expired: posted_at=0, ttl=3 → expiry 3, current 5 → past TTL.
+    let expired = mk_assumption(
+        "expired",
+        AssumptionTarget::File {
+            path: PathBuf::from("b.rs"),
+        },
+        0,
+        3,
+        serde_json::json!({}),
+    );
+    state.assert_assumption(live);
+    state.assert_assumption(expired);
+    let sorted = state.assumptions_sorted_by_remaining_ttl();
+    assert_eq!(sorted.len(), 1);
+    assert_eq!(sorted[0].0.id, "live");
+    assert_eq!(sorted[0].1, 7);
+}

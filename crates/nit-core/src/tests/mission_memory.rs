@@ -280,3 +280,69 @@ fn save_and_load_round_trip() {
     let loaded = load_index(&root);
     assert_eq!(built, loaded);
 }
+
+#[test]
+fn idf_weight_decreases_with_frequency() {
+    // Rare terms (df=1 of 4) get much more weight than ubiquitous ones
+    // (df=4 of 4).
+    let rare = idf_weight(1, 4);
+    let common = idf_weight(4, 4);
+    assert!(
+        rare > common,
+        "rare term should weigh more than common; rare={rare}, common={common}"
+    );
+    // Corner case: zero corpus returns the neutral weight of 1.0.
+    assert_eq!(idf_weight(0, 0), 1.0);
+    // A term not present in the corpus (df=0) also returns the neutral
+    // weight — retrieval never assigns negative weight.
+    assert_eq!(idf_weight(0, 10), 1.0);
+}
+
+#[test]
+fn idf_weight_prefers_rare_matches() {
+    // Build a corpus where "refactor" appears in every mission (df=3/3)
+    // while "lifehash" only appears in mis-001 (df=1/3). With plain
+    // Jaccard, a mission matching "refactor" against a common term would
+    // score similarly to one matching a rare term; with IDF weighting, the
+    // rare-term match is ranked strictly higher.
+    let root = temp_workspace("mm-idf-rare-wins");
+    write_fixture_mission(
+        &root,
+        "mis-001",
+        "refactor lifehash encoder",
+        "parallel",
+        &["crates/nit-core/src/lifehash.rs"],
+        &["restructured lifehash"],
+    );
+    write_fixture_mission(
+        &root,
+        "mis-002",
+        "refactor agent console",
+        "parallel",
+        &["crates/nit-tui/src/widgets/agent_console_view.rs"],
+        &["cleaned up console"],
+    );
+    write_fixture_mission(
+        &root,
+        "mis-003",
+        "refactor genome report",
+        "parallel",
+        &["crates/nit-core/src/genome_report.rs"],
+        &["tuned report"],
+    );
+    let idx = build_index(&root);
+    // Query carries the rare term: IDF should pull mis-001 to the top.
+    let hits = retrieve_similar(&idx, "lifehash refactor", &[], &[], 5);
+    assert!(!hits.is_empty());
+    assert_eq!(hits[0].mission.mission_id, "mis-001");
+    // And mis-001's margin over the others should be meaningful (>0.01).
+    if hits.len() >= 2 {
+        assert!(
+            hits[0].score > hits[1].score + 0.01,
+            "rare-term match should clearly outrank common-term matches; \
+             got {:?} vs {:?}",
+            hits[0].score,
+            hits[1].score,
+        );
+    }
+}

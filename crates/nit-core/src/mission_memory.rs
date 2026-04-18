@@ -4,7 +4,7 @@
 //! retrieves similar past missions at planner time. Pure keyword-based
 //! retrieval — no embeddings, no new deps.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -294,6 +294,31 @@ pub fn upsert_mission(workspace_root: &Path, mission_id: &str) -> io::Result<Mis
     Ok(index)
 }
 
+/// Smoothed inverse document frequency (IDF): `ln((N + 1) / (df + 1)) + 1`.
+/// Smoothing avoids `log(0)`/`log(inf)` singularities when `df` is 0 or
+/// matches the corpus size. The `+ 1` offset keeps weights strictly
+/// positive so matches always contribute.
+pub(crate) fn idf_weight(df: usize, total: usize) -> f32 {
+    if total == 0 || df == 0 {
+        return 1.0;
+    }
+    ((total as f32 + 1.0) / (df as f32 + 1.0)).ln() + 1.0
+}
+
+/// Count, for each unique term across all mission `tags`, how many
+/// missions contain it. Lazy per-query work — O(N * avg_tags) which is
+/// negligible at typical corpus sizes.
+fn document_frequencies(missions: &[IndexedMission]) -> HashMap<String, usize> {
+    let mut df: HashMap<String, usize> = HashMap::new();
+    for m in missions {
+        let seen: HashSet<&String> = m.tags.iter().collect();
+        for t in seen {
+            *df.entry(t.clone()).or_insert(0) += 1;
+        }
+    }
+    df
+}
+
 pub fn retrieve_similar(
     index: &MissionMemoryIndex,
     query: &str,
@@ -310,6 +335,12 @@ pub fn retrieve_similar(
     }
     let query_path_stems: HashSet<String> = scope_file_tokens.iter().cloned().collect();
 
+    // IDF-weighted Jaccard: rare terms count more than common ones. df is
+    // computed lazily per query over the full corpus (not just the filtered
+    // subset) so weights are stable across calls with different excludes.
+    let total = index.missions.len();
+    let df = document_frequencies(&index.missions);
+
     let mut hits: Vec<MissionHit> = index
         .missions
         .iter()
@@ -319,12 +350,24 @@ pub fn retrieve_similar(
             if mission_terms.is_empty() {
                 return None;
             }
-            let overlap = query_terms.intersection(&mission_terms).count();
-            if overlap == 0 {
+            let overlap_terms: Vec<&String> =
+                query_terms.intersection(&mission_terms).collect();
+            if overlap_terms.is_empty() {
                 return None;
             }
-            let union = query_terms.union(&mission_terms).count() as f32;
-            let jaccard = overlap as f32 / union.max(1.0);
+            let weighted_overlap: f32 = overlap_terms
+                .iter()
+                .map(|t| idf_weight(*df.get(*t).unwrap_or(&0), total))
+                .sum();
+            let weighted_union: f32 = query_terms
+                .union(&mission_terms)
+                .map(|t| idf_weight(*df.get(t).unwrap_or(&0), total))
+                .sum();
+            let jaccard = if weighted_union > 0.0 {
+                weighted_overlap / weighted_union
+            } else {
+                0.0
+            };
 
             let title_terms: HashSet<String> = tokenize(&m.title).into_iter().collect();
             let title_overlap = query_terms.intersection(&title_terms).count() as f32;

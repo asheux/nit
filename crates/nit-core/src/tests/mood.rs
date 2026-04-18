@@ -225,3 +225,120 @@ fn set_mood_event_applies_and_sets_override_lock() {
         Some("defensive")
     );
 }
+
+#[test]
+fn modulation_has_signal_decay_multiplier_per_mood() {
+    // Defensive preserves signals longer (<1.0), Exploration sheds them
+    // faster (>1.0), Consolidation is the baseline (==1.0).
+    let d = Mood::Defensive.modulation().signal_decay_multiplier;
+    let c = Mood::Consolidation.modulation().signal_decay_multiplier;
+    let e = Mood::Exploration.modulation().signal_decay_multiplier;
+    assert!(d < 1.0, "defensive multiplier should slow decay, got {d}");
+    assert_eq!(c, 1.0, "consolidation should be the baseline");
+    assert!(e > 1.0, "exploration should accelerate decay, got {e}");
+}
+
+#[test]
+fn modulation_has_claim_ttl_multiplier_per_mood() {
+    // Defensive holds claims longer (>1.0), Exploration cycles them faster
+    // (<1.0), Consolidation is the baseline (==1.0).
+    let d = Mood::Defensive.modulation().claim_ttl_multiplier;
+    let c = Mood::Consolidation.modulation().claim_ttl_multiplier;
+    let e = Mood::Exploration.modulation().claim_ttl_multiplier;
+    assert!(d > 1.0, "defensive multiplier should lengthen TTL, got {d}");
+    assert_eq!(c, 1.0, "consolidation should be the baseline");
+    assert!(e < 1.0, "exploration should shorten TTL, got {e}");
+}
+
+#[test]
+fn signal_decay_multiplier_affects_effective_strength() {
+    // Same signal (Warning, initial 1.0, posted at gen 0). Compare effective
+    // strength at gen 5 under Defensive (slower decay) vs Consolidation.
+    let signal = Signal {
+        id: "s1".into(),
+        kind: SignalKind::Warning,
+        posted_by: "a".into(),
+        posted_at_gen: 0,
+        target: SignalTarget::Global,
+        initial_strength: SubstrateState::DEFAULT_INITIAL_STRENGTH,
+        payload: serde_json::Value::Null,
+    };
+    let d_mul = Mood::Defensive.modulation().signal_decay_multiplier;
+    let c_mul = Mood::Consolidation.modulation().signal_decay_multiplier;
+    let under_defensive = signal.effective_strength_with_multiplier(5, d_mul);
+    let under_consolidation = signal.effective_strength_with_multiplier(5, c_mul);
+    assert!(
+        under_defensive > under_consolidation,
+        "defensive should preserve signals longer; got d={under_defensive} vs c={under_consolidation}"
+    );
+    // Sanity: with a neutral multiplier the new API matches the old one.
+    assert_eq!(
+        signal.effective_strength_with_multiplier(5, 1.0),
+        signal.effective_strength(5),
+    );
+}
+
+#[test]
+fn file_write_auto_claim_ttl_respects_mood() {
+    use crate::substrate::{Claim, ClaimKind, ClaimTarget};
+    use std::path::PathBuf;
+
+    fn first_claim_for(state: &crate::state::AppState, path: &PathBuf) -> Option<Claim> {
+        state
+            .substrate
+            .claims
+            .values()
+            .find(|c| {
+                matches!(
+                    &c.target,
+                    ClaimTarget::File { path: p } if p == path
+                ) && c.kind == ClaimKind::ExclusiveWrite
+            })
+            .cloned()
+    }
+
+    // Defensive → base 3 gens * 1.5 = 4 gens.
+    {
+        let mut state = test_state("mood-ttl-defensive");
+        state.substrate.mood = Mood::Defensive;
+        let path = PathBuf::from("x/y.rs");
+        let event = AgentBusEvent::FileWrite {
+            agent_id: "agent-d".into(),
+            mission_id: None,
+            path: path.clone(),
+        };
+        event.apply(&mut state);
+        let claim = first_claim_for(&state, &path).expect("defensive claim expected");
+        assert_eq!(claim.ttl_gens, 4);
+    }
+
+    // Exploration → base 3 gens * 0.75 = 2.25 → floored to 2.
+    {
+        let mut state = test_state("mood-ttl-exploration");
+        state.substrate.mood = Mood::Exploration;
+        let path = PathBuf::from("x/y.rs");
+        let event = AgentBusEvent::FileWrite {
+            agent_id: "agent-e".into(),
+            mission_id: None,
+            path: path.clone(),
+        };
+        event.apply(&mut state);
+        let claim = first_claim_for(&state, &path).expect("exploration claim expected");
+        assert_eq!(claim.ttl_gens, 2);
+    }
+
+    // Consolidation → base 3 gens * 1.0 = 3 gens (unchanged baseline).
+    {
+        let mut state = test_state("mood-ttl-consolidation");
+        state.substrate.mood = Mood::Consolidation;
+        let path = PathBuf::from("x/y.rs");
+        let event = AgentBusEvent::FileWrite {
+            agent_id: "agent-c".into(),
+            mission_id: None,
+            path: path.clone(),
+        };
+        event.apply(&mut state);
+        let claim = first_claim_for(&state, &path).expect("consolidation claim expected");
+        assert_eq!(claim.ttl_gens, 3);
+    }
+}

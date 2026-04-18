@@ -1361,7 +1361,7 @@ fn command_games_history_avoids_empty_error_when_capture_is_disabled() {
 }
 
 #[test]
-fn visualizer_toggle_sub_view_cycles_through_three_tabs() {
+fn visualizer_toggle_sub_view_cycles_through_four_tabs() {
     let root = temp_dir("viz-toggle-sub-view");
     let mut state = AppState::new(
         root.clone(),
@@ -1372,26 +1372,45 @@ fn visualizer_toggle_sub_view_cycles_through_three_tabs() {
     assert_eq!(state.visualizer_sub_view, VisualizerSubView::SubstrateSignals);
     state.substrate_scroll = 17;
     state.substrate_claims_scroll = 23;
+    state.substrate_assumptions_scroll = 5;
 
-    // Tick 1: SubstrateSignals → SubstrateClaims, both scrolls reset.
+    // Tick 1: SubstrateSignals → SubstrateClaims, all scrolls reset.
     let _ = apply_action(&mut state, Action::VisualizerToggleSubView);
     assert_eq!(state.visualizer_sub_view, VisualizerSubView::SubstrateClaims);
     assert_eq!(state.substrate_scroll, 0);
     assert_eq!(state.substrate_claims_scroll, 0);
+    assert_eq!(state.substrate_assumptions_scroll, 0);
 
     state.substrate_scroll = 11;
     state.substrate_claims_scroll = 42;
-    // Tick 2: SubstrateClaims → Visualizer, both scrolls reset.
+    state.substrate_assumptions_scroll = 13;
+    // Tick 2: SubstrateClaims → SubstrateAssumptions, all scrolls reset.
+    let _ = apply_action(&mut state, Action::VisualizerToggleSubView);
+    assert_eq!(
+        state.visualizer_sub_view,
+        VisualizerSubView::SubstrateAssumptions
+    );
+    assert_eq!(state.substrate_scroll, 0);
+    assert_eq!(state.substrate_claims_scroll, 0);
+    assert_eq!(state.substrate_assumptions_scroll, 0);
+
+    state.substrate_scroll = 3;
+    state.substrate_claims_scroll = 4;
+    state.substrate_assumptions_scroll = 9;
+    // Tick 3: SubstrateAssumptions → Visualizer, all scrolls reset.
     let _ = apply_action(&mut state, Action::VisualizerToggleSubView);
     assert_eq!(state.visualizer_sub_view, VisualizerSubView::Visualizer);
     assert_eq!(state.substrate_scroll, 0);
     assert_eq!(state.substrate_claims_scroll, 0);
+    assert_eq!(state.substrate_assumptions_scroll, 0);
 
     state.substrate_scroll = 7;
     state.substrate_claims_scroll = 9;
-    // Tick 3: Visualizer → SubstrateSignals, both scrolls reset (wraps).
+    state.substrate_assumptions_scroll = 11;
+    // Tick 4: Visualizer → SubstrateSignals, all scrolls reset (wraps).
     let _ = apply_action(&mut state, Action::VisualizerToggleSubView);
     assert_eq!(state.visualizer_sub_view, VisualizerSubView::SubstrateSignals);
     assert_eq!(state.substrate_scroll, 0);
     assert_eq!(state.substrate_claims_scroll, 0);
+    assert_eq!(state.substrate_assumptions_scroll, 0);
 }

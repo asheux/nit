@@ -2,6 +2,7 @@ pub mod agent_console_view;
 pub mod agent_ops_view;
 pub mod artifacts_history_popup;
 pub mod artifacts_popup;
+pub mod assumptions_view;
 pub mod bottom_bar;
 pub mod claims_view;
 pub mod editor_view;

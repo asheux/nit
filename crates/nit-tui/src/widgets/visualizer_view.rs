@@ -19,6 +19,7 @@ use crate::{
 const TITLE_PREFIX: &str = "VISUALIZER ";
 const BTN_SIGNALS_LABEL: &str = " SUBSTRATE SIGNALS ";
 const BTN_CLAIMS_LABEL: &str = " SUBSTRATE CLAIMS ";
+const BTN_ASSUMPTIONS_LABEL: &str = " SUBSTRATE ASSUMPTIONS ";
 const BTN_VIZ_LABEL: &str = " VISUALIZER ";
 // APPLY/SEED/SNAP/SEARCH only render on the Visualizer sub-view.
 const BTN_APPLY_LABEL: &str = " APPLY ";
@@ -34,15 +35,20 @@ pub fn title_button_hit(col_in_rect: u16, sub_view: VisualizerSubView) -> Option
     let col = col_in_rect.saturating_sub(1);
     let prefix_len = TITLE_PREFIX.len() as u16;
 
-    // Tab buttons: [" SUBSTRATE SIGNALS "] [sp] [" SUBSTRATE CLAIMS "] [sp] [" VISUALIZER "]
+    // Tab buttons:
+    //   [" SUBSTRATE SIGNALS "] [sp] [" SUBSTRATE CLAIMS "] [sp]
+    //   [" SUBSTRATE ASSUMPTIONS "] [sp] [" VISUALIZER "]
     let sig_start = prefix_len + 1; // single-space separator after prefix
     let sig_end = sig_start + BTN_SIGNALS_LABEL.len() as u16;
     let claims_start = sig_end + 1;
     let claims_end = claims_start + BTN_CLAIMS_LABEL.len() as u16;
-    let viz_start = claims_end + 1;
+    let assumptions_start = claims_end + 1;
+    let assumptions_end = assumptions_start + BTN_ASSUMPTIONS_LABEL.len() as u16;
+    let viz_start = assumptions_end + 1;
     let viz_end = viz_start + BTN_VIZ_LABEL.len() as u16;
     if (sig_start..sig_end).contains(&col)
         || (claims_start..claims_end).contains(&col)
+        || (assumptions_start..assumptions_end).contains(&col)
         || (viz_start..viz_end).contains(&col)
     {
         return Some(Action::VisualizerToggleSubView);
@@ -112,9 +118,11 @@ pub fn render(
     let sub_view = state.visualizer_sub_view;
     let is_signals = sub_view == VisualizerSubView::SubstrateSignals;
     let is_claims = sub_view == VisualizerSubView::SubstrateClaims;
+    let is_assumptions = sub_view == VisualizerSubView::SubstrateAssumptions;
     let is_visualizer = sub_view == VisualizerSubView::Visualizer;
     let signals_style = if is_signals { btn_active } else { btn_inactive };
     let claims_style = if is_claims { btn_active } else { btn_inactive };
+    let assumptions_style = if is_assumptions { btn_active } else { btn_inactive };
     let viz_style = if is_visualizer { btn_active } else { btn_inactive };
 
     let mut title_spans: Vec<Span<'static>> = vec![
@@ -123,6 +131,8 @@ pub fn render(
         Span::styled(BTN_SIGNALS_LABEL, signals_style),
         Span::styled(" ", sep_style),
         Span::styled(BTN_CLAIMS_LABEL, claims_style),
+        Span::styled(" ", sep_style),
+        Span::styled(BTN_ASSUMPTIONS_LABEL, assumptions_style),
         Span::styled(" ", sep_style),
         Span::styled(BTN_VIZ_LABEL, viz_style),
     ];
@@ -165,6 +175,10 @@ pub fn render(
         }
         VisualizerSubView::SubstrateClaims => {
             crate::widgets::claims_view::render_body(frame, inner, state, theme);
+            return;
+        }
+        VisualizerSubView::SubstrateAssumptions => {
+            crate::widgets::assumptions_view::render_body(frame, inner, state, theme);
             return;
         }
         VisualizerSubView::Visualizer => {

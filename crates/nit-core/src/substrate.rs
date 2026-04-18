@@ -55,9 +55,34 @@ pub struct Signal {
 }
 
 impl Signal {
+    /// Default effective-strength computation using the signal kind's
+    /// native decay rate — equivalent to `_with_multiplier(..., 1.0)`.
+    /// Kept for backward compatibility with callers that don't care about
+    /// the mood-adjusted rate.
     pub fn effective_strength(&self, current_gen: u64) -> f32 {
+        self.effective_strength_with_multiplier(current_gen, 1.0)
+    }
+
+    /// Mood-aware effective strength. `multiplier` scales how quickly the
+    /// signal fades: values >1 accelerate decay (fade faster), <1 slow
+    /// it (preserve longer). This maps the Mood semantics directly —
+    /// Exploration (1.1) forgets faster, Defensive (0.85) holds on longer.
+    ///
+    /// Internally, the kind's native decay rate is *divided* by the
+    /// multiplier so the per-generation retention ratio moves toward 1.0
+    /// as the multiplier shrinks. The result is clamped to (0.01, 0.999)
+    /// so decay remains well-defined regardless of how extreme the mood
+    /// modulation becomes.
+    pub fn effective_strength_with_multiplier(&self, current_gen: u64, multiplier: f32) -> f32 {
         let delta = current_gen.saturating_sub(self.posted_at_gen) as i32;
-        self.initial_strength * self.kind.decay_rate().powi(delta)
+        let safe_multiplier = if multiplier.abs() < f32::EPSILON {
+            1.0
+        } else {
+            multiplier
+        };
+        let effective_rate = self.kind.decay_rate() / safe_multiplier;
+        let clamped = effective_rate.clamp(0.01, 0.999);
+        self.initial_strength * clamped.powi(delta)
     }
 }
 
@@ -298,13 +323,16 @@ impl SubstrateState {
 
     pub fn signals_iter(&self) -> impl Iterator<Item = (&Signal, f32)> + '_ {
         let gen = self.generation;
+        let multiplier = self.mood.modulation().signal_decay_multiplier;
         self.signals
             .values()
-            .map(move |s| (s, s.effective_strength(gen)))
+            .map(move |s| (s, s.effective_strength_with_multiplier(gen, multiplier)))
     }
 
     /// Signals ordered by effective strength (descending) with a stable
-    /// tiebreak on `posted_at_gen` (newest first).
+    /// tiebreak on `posted_at_gen` (newest first). Reads the mood-adjusted
+    /// decay multiplier so Defensive preserves warnings longer and
+    /// Exploration forgets faster.
     pub fn signals_sorted_by_strength(&self) -> Vec<(&Signal, f32)> {
         let mut v: Vec<_> = self.signals_iter().collect();
         v.sort_by(|a, b| {
@@ -328,9 +356,10 @@ impl SubstrateState {
 
     pub fn prune_signals_below(&mut self, threshold: f32) -> usize {
         let gen = self.generation;
+        let multiplier = self.mood.modulation().signal_decay_multiplier;
         let before = self.signals.len();
         self.signals
-            .retain(|_, s| s.effective_strength(gen) >= threshold);
+            .retain(|_, s| s.effective_strength_with_multiplier(gen, multiplier) >= threshold);
         before - self.signals.len()
     }
 
@@ -438,6 +467,28 @@ impl SubstrateState {
     pub fn assumptions_iter(&self) -> impl Iterator<Item = &Assumption> + '_ {
         let gen = self.generation;
         self.assumptions.values().filter(move |a| !a.is_expired(gen))
+    }
+
+    /// Non-expired assumptions ordered by remaining generations until TTL
+    /// expiry (descending). Tiebreak on `posted_at_gen` (newest first).
+    /// Mirrors `claims_sorted_by_remaining_ttl` — same stable-sort contract.
+    pub fn assumptions_sorted_by_remaining_ttl(&self) -> Vec<(&Assumption, u64)> {
+        let current_gen = self.generation;
+        let mut v: Vec<_> = self
+            .assumptions
+            .values()
+            .filter(|a| !a.is_expired(current_gen))
+            .map(|a| {
+                let expiry_gen = a.posted_at_gen.saturating_add(a.ttl_gens);
+                let remaining = expiry_gen.saturating_sub(current_gen);
+                (a, remaining)
+            })
+            .collect();
+        v.sort_by(|a, b| {
+            b.1.cmp(&a.1)
+                .then(b.0.posted_at_gen.cmp(&a.0.posted_at_gen))
+        });
+        v
     }
 
     pub fn assumptions_for_path<'a>(

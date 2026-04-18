@@ -20,11 +20,19 @@ pub enum Mood {
 }
 
 /// Per-mood knob table read by the relevant primitives.
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[derive(Copy, Clone, Debug, PartialEq)]
 pub struct MoodModulation {
     pub metabolic_tick: Duration,
     pub arbiter_max_per_tick: usize,
     pub repeat_failure_threshold: usize,
+    /// Multiplier applied to `SignalKind::decay_rate()` when computing
+    /// effective strength. >1 fades signals faster (more forgetful),
+    /// <1 slows decay (preserves history). 1.0 = default (no change).
+    pub signal_decay_multiplier: f32,
+    /// Multiplier applied to the auto-claim TTL in the `FileWrite` arm.
+    /// >1 holds claims longer (defensive), <1 cycles them faster
+    /// (exploration). 1.0 = default.
+    pub claim_ttl_multiplier: f32,
 }
 
 impl Mood {
@@ -34,16 +42,26 @@ impl Mood {
                 metabolic_tick: Duration::from_secs(10),
                 arbiter_max_per_tick: 1,
                 repeat_failure_threshold: 3,
+                // Signals fade faster — forget and retry sooner.
+                signal_decay_multiplier: 1.1,
+                // Shorter TTLs — more turnover, more freedom to overwrite.
+                claim_ttl_multiplier: 0.75,
             },
             Mood::Consolidation => MoodModulation {
                 metabolic_tick: Duration::from_secs(5),
                 arbiter_max_per_tick: 2,
                 repeat_failure_threshold: 2,
+                signal_decay_multiplier: 1.0,
+                claim_ttl_multiplier: 1.0,
             },
             Mood::Defensive => MoodModulation {
                 metabolic_tick: Duration::from_secs(3),
                 arbiter_max_per_tick: 4,
                 repeat_failure_threshold: 1,
+                // Slower decay — preserve warnings longer.
+                signal_decay_multiplier: 0.85,
+                // Longer TTLs — hold resources tighter.
+                claim_ttl_multiplier: 1.5,
             },
         }
     }

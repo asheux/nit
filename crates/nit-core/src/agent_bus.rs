@@ -273,7 +273,16 @@ impl AgentBusEvent {
                 }
 
                 // Phase-3-lattice: auto-claim the written file as ExclusiveWrite.
+                // Mood v2: the base 3-gen TTL is scaled by the mood's claim TTL
+                // multiplier (Defensive 1.5x, Exploration 0.75x), clamped to a
+                // minimum of 1 gen so claims can't auto-expire the instant they
+                // are created.
+                const BASE_CLAIM_TTL_GENS: u64 = 3;
                 let current_gen = state.substrate.current_generation();
+                let ttl_multiplier =
+                    state.substrate.mood.modulation().claim_ttl_multiplier;
+                let ttl_gens =
+                    ((BASE_CLAIM_TTL_GENS as f32) * ttl_multiplier).max(1.0) as u64;
                 let claim_id = state.substrate.next_claim_id(agent_id);
                 let claim = crate::substrate::Claim {
                     id: claim_id,
@@ -281,7 +290,7 @@ impl AgentBusEvent {
                     target: crate::substrate::ClaimTarget::File { path: path.clone() },
                     claimed_by: agent_id.clone(),
                     claimed_at_gen: current_gen,
-                    ttl_gens: 3,
+                    ttl_gens,
                     rationale: "auto-claim from FileWrite".to_string(),
                 };
                 if let Err(conflict) = state.substrate.assert_claim(claim) {
