@@ -127,6 +127,7 @@ fn kind_label(kind: SignalKind) -> &'static str {
         SignalKind::HelpNeeded => "HelpNeeded",
         SignalKind::ClaimViolation => "ClaimViol",
         SignalKind::DoneMarker => "DoneMarker",
+        SignalKind::InterventionEmitted => "Intervent",
     }
 }
 
@@ -159,6 +160,7 @@ fn style_for(kind: SignalKind, strength: f32, theme: &Theme) -> Style {
         SignalKind::Lead => theme.accent,
         SignalKind::HelpNeeded => theme.title_focused,
         SignalKind::Deadend => theme.border,
+        SignalKind::InterventionEmitted => theme.error,
     };
     let mut style = Style::default().fg(color);
     if strength >= 0.7 {

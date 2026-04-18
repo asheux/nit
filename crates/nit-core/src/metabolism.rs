@@ -21,6 +21,7 @@ pub struct MetabolicTickOutcome {
     pub signals_pruned: usize,
     pub assumptions_expired: usize,
     pub observer_emissions: usize,
+    pub arbiter_interventions: usize,
     pub saved: bool,
 }
 
@@ -30,12 +31,14 @@ impl MetabolicTickOutcome {
             && self.signals_pruned == 0
             && self.assumptions_expired == 0
             && self.observer_emissions == 0
+            && self.arbiter_interventions == 0
             && !self.saved
     }
 }
 
 /// Wall-clock sweep: expire claims, prune signals, run observers,
-/// conditionally save.  Does NOT advance the generation counter.
+/// run arbiters, conditionally save.  Does NOT advance the generation
+/// counter.
 pub fn tick(state: &mut AppState) -> MetabolicTickOutcome {
     let current_gen = state.substrate.current_generation();
     let claims_expired = state.substrate.expire_claims(current_gen);
@@ -63,10 +66,20 @@ pub fn tick(state: &mut AppState) -> MetabolicTickOutcome {
         });
     }
 
+    // Phase 6: arbiters run AFTER observers. Same three-line block as
+    // `AgentBusEvent::TurnCompleted::apply`. `reduce_proposals` downgrades
+    // to `EmitSignalOnly` if the retry cap is reached.
+    let raw = crate::arbiters::run_all(state);
+    let reduced =
+        crate::arbiters::reduce_proposals(state, raw, crate::arbiters::ARBITER_RETRY_LIMIT);
+    let arbiter_interventions = reduced.len();
+    crate::arbiters::apply_interventions(state, reduced);
+
     let dirty = claims_expired > 0
         || signals_pruned > 0
         || assumptions_expired > 0
-        || observer_emissions > 0;
+        || observer_emissions > 0
+        || arbiter_interventions > 0;
     let saved = if dirty {
         state.substrate.save(&state.workspace_root).is_ok()
     } else {
@@ -78,6 +91,7 @@ pub fn tick(state: &mut AppState) -> MetabolicTickOutcome {
         signals_pruned,
         assumptions_expired,
         observer_emissions,
+        arbiter_interventions,
         saved,
     }
 }

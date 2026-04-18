@@ -624,6 +624,17 @@ impl AgentBusEvent {
                     });
                 }
 
+                // Phase 6: arbiters run AFTER observers. `reduce_proposals`
+                // downgrades to `EmitSignalOnly` if we're already at the
+                // retry cap. Mirror of nit-tui's GENOME_RETRY_LIMIT.
+                let raw = crate::arbiters::run_all(state);
+                let reduced = crate::arbiters::reduce_proposals(
+                    state,
+                    raw,
+                    crate::arbiters::ARBITER_RETRY_LIMIT,
+                );
+                crate::arbiters::apply_interventions(state, reduced);
+
                 let _ = state.substrate.save(&state.workspace_root);
             }
             AgentBusEvent::EmitSignal { signal } => {

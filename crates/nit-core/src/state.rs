@@ -1911,6 +1911,20 @@ pub struct ClaimRetryRequest {
     pub conflicting_rationale: String,
 }
 
+/// Queued arbiter intervention. Produced by `arbiters::apply_interventions`
+/// at tick boundaries (TurnCompleted, metabolism) and drained by the TUI
+/// after `pending_claim_retries` — claims-first so an already-retrying
+/// agent isn't doubly escalated. Shares `genome_retry_count` as its budget.
+#[derive(Clone, Debug)]
+pub struct Intervention {
+    pub arbiter_name: &'static str,
+    pub kind: crate::arbiters::InterventionKind,
+    pub target: crate::arbiters::InterventionTarget,
+    pub rationale: String,
+    pub payload: serde_json::Value,
+    pub decided_at_gen: u64,
+}
+
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct AppState {
     pub app_kind: AppKind,
@@ -2010,6 +2024,11 @@ pub struct AppState {
     /// each event-apply cycle; shares `genome_retry_count` as its budget.
     #[serde(skip)]
     pub pending_claim_retries: Vec<ClaimRetryRequest>,
+    /// Pending arbiter interventions produced at tick boundaries. Drained by
+    /// the TUI event loop after `pending_claim_retries`; shares
+    /// `genome_retry_count` as its budget.
+    #[serde(skip)]
+    pub pending_interventions: Vec<Intervention>,
     /// Rolling count of consecutive turns where quality met or exceeded the
     /// agent's adaptive min tier. Used for adaptive quality thresholds — agents
     /// that consistently hit their tier get pushed toward the next one, up to
@@ -2286,6 +2305,7 @@ impl AppState {
             genome_turn_active: HashSet::new(),
             genome_retry_count: 0,
             pending_claim_retries: Vec::new(),
+            pending_interventions: Vec::new(),
             genome_agent_streak: HashMap::new(),
             genome_agent_min_tier: HashMap::new(),
             genome_shadow_evals: HashMap::new(),

@@ -17,6 +17,7 @@ pub enum SignalKind {
     HelpNeeded,
     ClaimViolation,
     DoneMarker,
+    InterventionEmitted,
 }
 
 impl SignalKind {
@@ -27,6 +28,7 @@ impl SignalKind {
             SignalKind::Warning => 0.8,
             SignalKind::ClaimViolation => 0.85,
             SignalKind::Deadend => 0.9,
+            SignalKind::InterventionEmitted => 0.9,
             SignalKind::DoneMarker => 0.95,
         }
     }

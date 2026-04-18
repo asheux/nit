@@ -1070,6 +1070,7 @@ fn run_loop(
                 );
             }
             drain_pending_claim_retries(state, &mut vitals, &codex_runner, &claude_runner);
+            drain_pending_interventions(state, &mut vitals, &codex_runner, &claude_runner);
             let swarm_outcome = swarm.handle_event_outcome(state, &event);
             maybe_follow_swarm_artifact_in_popup(
                 state,
@@ -1164,6 +1165,7 @@ fn run_loop(
                 );
             }
             drain_pending_claim_retries(state, &mut vitals, &codex_runner, &claude_runner);
+            drain_pending_interventions(state, &mut vitals, &codex_runner, &claude_runner);
             let swarm_outcome = swarm.handle_event_outcome(state, &event);
             maybe_follow_swarm_artifact_in_popup(
                 state,
@@ -1703,6 +1705,57 @@ fn drain_pending_claim_retries(
             Some(codex),
             Some(claude),
             req.agent_id,
+            None,
+            prompt,
+        );
+    }
+}
+
+/// Drain `pending_interventions` by actuating each queued arbiter
+/// intervention. Modeled on `drain_pending_claim_retries`:
+/// - Shares `GENOME_RETRY_LIMIT` / `state.genome_retry_count` as the budget.
+/// - `EmitSignalOnly` interventions are consumed without dispatch — the
+///   signal was emitted by `apply_interventions` already.
+/// - `RedispatchWithEscalatedPrompt` dispatches to the chosen recipient:
+///   AgentPair -> `chosen_recipient` payload field (fallback: larger id);
+///   Agent     -> that agent_id;
+///   Mission / Global -> consumed without dispatch (no single recipient).
+fn drain_pending_interventions(
+    state: &mut AppState,
+    vitals: &mut VitalsState,
+    codex: &CodexRunner,
+    claude: &ClaudeRunner,
+) {
+    while let Some(iv) = state.pending_interventions.pop() {
+        let prompt = match iv.kind {
+            nit_core::InterventionKind::EmitSignalOnly => continue,
+            nit_core::InterventionKind::RedispatchWithEscalatedPrompt { prompt } => prompt,
+        };
+        let recipient = match &iv.target {
+            nit_core::InterventionTarget::Agent { agent_id } => Some(agent_id.clone()),
+            nit_core::InterventionTarget::AgentPair { a, b } => iv
+                .payload
+                .get("chosen_recipient")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+                .or_else(|| Some(if a > b { a.clone() } else { b.clone() })),
+            nit_core::InterventionTarget::Mission { .. } | nit_core::InterventionTarget::Global => {
+                None
+            }
+        };
+        let Some(agent_id) = recipient else {
+            continue;
+        };
+        if state.genome_retry_count >= GENOME_RETRY_LIMIT {
+            break;
+        }
+        state.genome_retry_count = state.genome_retry_count.saturating_add(1);
+        dispatch_agent_prompt(
+            state,
+            vitals,
+            Some(codex),
+            Some(claude),
+            agent_id,
             None,
             prompt,
         );

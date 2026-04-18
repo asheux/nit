@@ -4,6 +4,7 @@
 
 pub mod actions;
 pub mod agent_bus;
+pub mod arbiters;
 pub mod buffer;
 pub mod config;
 pub mod cursor;
@@ -27,6 +28,10 @@ pub mod viewport;
 
 pub use actions::Action;
 pub use agent_bus::{AgentBusEvent, AgentTokenCount};
+pub use arbiters::{
+    Arbiter, ArbiterFn, InterventionKind, InterventionProposal, InterventionTarget,
+    ARBITER_INITIAL_STRENGTH, ARBITER_RETRY_LIMIT, REGISTERED_ARBITERS,
+};
 pub use buffer::Buffer;
 pub use buffer::{BufferEdit, BufferPoint, LineDiffStatus};
 pub use config::{
@@ -68,7 +73,7 @@ pub use state::{
     GamesFamilyRunRequest, GamesReplayRequest, GamesReplayState, GamesRunBrowserState,
     GamesRunEntry, GamesRunOverride, GamesState, GamesStatus, GamesStrategyInspectState,
     GateMonitorSubView, GenomeShadowEval, GlobalArchiveEntry, GlobalArchiveSourceKind,
-    GolRenderMode, JobState, LogBuffer, McpConnectionState, McpStatus, Metrics, MissionPhase,
+    GolRenderMode, Intervention, JobState, LogBuffer, McpConnectionState, McpStatus, Metrics, MissionPhase,
     MissionRecord, PatchProposal, PatchStatus, QueuedClaudeTurn, QueuedCodexTurn,
     RosterTreeBranch, RosterTreeSelection, SavedRunHistoryFilter, SavedRunHistoryPendingAction,
     SyntaxDebugInfo, UiSelection, UiSelectionPane, VisualizerMode, VisualizerRuleEntry,
