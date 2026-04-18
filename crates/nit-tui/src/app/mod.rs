@@ -797,6 +797,12 @@ fn run_loop(
                             continue;
                         }
                     }
+                    if state.show_substrate_overlay {
+                        if handle_substrate_overlay_key(&key, state) {
+                            needs_redraw = true;
+                            continue;
+                        }
+                    }
                     if state.games.analysis.open {
                         let screen = terminal.size().unwrap_or_default();
                         if handle_analysis_popup_key(&key, state, screen, theme) {
@@ -11963,6 +11969,60 @@ fn handle_global_archive_key(
             recompute_global_archive_filter(state);
             true
         }
+        _ => true,
+    }
+}
+
+fn handle_substrate_overlay_key(key: &KeyEvent, state: &mut AppState) -> bool {
+    if !state.show_substrate_overlay {
+        return false;
+    }
+    if is_global_quit_key(key) {
+        return false;
+    }
+    let max_scroll = state.substrate_overlay_last_max_scroll;
+    let page_step: i32 = 10;
+
+    match key.code {
+        KeyCode::Esc | KeyCode::F(3) | KeyCode::Char('q') => {
+            state.show_substrate_overlay = false;
+            true
+        }
+        KeyCode::Tab => {
+            state.substrate_overlay_tab = match state.substrate_overlay_tab {
+                nit_core::SubstrateOverlayTab::Signals => nit_core::SubstrateOverlayTab::Claims,
+                nit_core::SubstrateOverlayTab::Claims => nit_core::SubstrateOverlayTab::Assumptions,
+                nit_core::SubstrateOverlayTab::Assumptions => nit_core::SubstrateOverlayTab::Signals,
+            };
+            state.substrate_overlay_scroll = 0;
+            true
+        }
+        KeyCode::Up | KeyCode::Char('k') => {
+            bump_scroll_clamped(&mut state.substrate_overlay_scroll, -1, max_scroll);
+            true
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            bump_scroll_clamped(&mut state.substrate_overlay_scroll, 1, max_scroll);
+            true
+        }
+        KeyCode::PageUp => {
+            bump_scroll_clamped(&mut state.substrate_overlay_scroll, -page_step, max_scroll);
+            true
+        }
+        KeyCode::PageDown => {
+            bump_scroll_clamped(&mut state.substrate_overlay_scroll, page_step, max_scroll);
+            true
+        }
+        KeyCode::Home => {
+            state.substrate_overlay_scroll = 0;
+            true
+        }
+        KeyCode::End => {
+            state.substrate_overlay_scroll = max_scroll;
+            true
+        }
+        // Any other key is consumed so it cannot leak into editor/nittree
+        // handlers while the overlay is open.
         _ => true,
     }
 }
