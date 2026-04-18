@@ -16,6 +16,7 @@ The substrate lives in `crates/nit-core/src/substrate.rs` and persists at `.nit/
 - **Generation counter** — advances on `TurnCompleted`, not wall-clock. Decay and expiry are generation-relative.
 - **Metabolism** — wall-clock tick every 5s (`crates/nit-core/src/metabolism.rs`). Expires past-TTL claims/assumptions, prunes decayed signals, runs observers and arbiters.
 - **Mission memory** — cross-mission retrieval (`crates/nit-core/src/mission_memory.rs`). Surfaces past similar missions to the planner.
+- **nit-mcp — deliberate agent agency** — `crates/nit-mcp/` exposes three MCP tools (`emit_signal`, `assert_claim`, `assert_assumption`) that let subprocess Codex agents write directly into the substrate. nit-tui binds a per-process UDS listener; `codex mcp-server` is launched with a `-c mcp_servers.nit=...` override so the model can discover the nit tool set. Requests arrive as `AgentBusEvent::*Request` variants whose ids are minted atomically on the main thread (external processes never touch the counters). Unix-only in v1.
 
 ---
 
@@ -41,7 +42,7 @@ The substrate lives in `crates/nit-core/src/substrate.rs` and persists at `.nit/
 **Substrate interactions:**
 - Signals: auto-emits `DoneMarker` on `TurnCompleted`, `Warning` on `TurnFailed` (via runtime derivation — see `crates/nit-core/src/agent_bus.rs`).
 - Claims: auto-asserts `ExclusiveWrite` on `FileWrite` (TTL 3 gens).
-- Assumptions: none auto-asserted today (agents would need an MCP tool to post them deliberately — deferred).
+- Assumptions / deliberate emission: available via `nit-mcp` — subprocess Codex agents can call `emit_signal`, `assert_claim`, and `assert_assumption` tools to interact with the substrate explicitly. See the *nit-mcp — deliberate agent agency* entry above under substrate primitives.
 
 ---
 

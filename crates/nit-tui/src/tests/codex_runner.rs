@@ -71,6 +71,7 @@ fn mcp_new_session_uses_base_model_slug_for_swarm_clone() {
         sandbox: Some("workspace-write".into()),
         approval_policy: Some("never".into()),
         max_parallel_turns: 2,
+        mcp_backchannel_socket: None,
     };
 
     let (tool_name, arguments) = build_codex_mcp_tool_call(
@@ -127,6 +128,7 @@ fn exec_args_use_base_model_slug_for_swarm_clone() {
         sandbox: Some("workspace-write".into()),
         approval_policy: Some("never".into()),
         max_parallel_turns: 2,
+        mcp_backchannel_socket: None,
     };
 
     let args = build_codex_exec_args(
@@ -206,6 +208,7 @@ fn read_only_shadow_turn_forces_read_only_sandbox_in_mcp_args() {
         sandbox: Some("workspace-write".into()),
         approval_policy: Some("never".into()),
         max_parallel_turns: 2,
+        mcp_backchannel_socket: None,
     };
 
     let (_, arguments) = build_codex_mcp_tool_call(
@@ -230,6 +233,7 @@ fn read_only_shadow_turn_forces_read_only_sandbox_in_exec_args() {
         sandbox: Some("workspace-write".into()),
         approval_policy: Some("never".into()),
         max_parallel_turns: 2,
+        mcp_backchannel_socket: None,
     };
 
     let args = build_codex_exec_args(

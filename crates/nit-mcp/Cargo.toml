@@ -1,0 +1,21 @@
+[package]
+name = "nit-mcp"
+version = "0.1.0"
+description = "MCP JSON-RPC 2.0 server (stdio) that lets subprocess Codex agents deliberately emit signals, claims, and assumptions into nit's substrate"
+edition = "2021"
+license = "MIT"
+rust-version.workspace = true
+
+[lib]
+name = "nit_mcp"
+path = "src/lib.rs"
+
+[[bin]]
+name = "nit-mcp-server"
+path = "src/main.rs"
+
+[dependencies]
+nit-core = { path = "../nit-core" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }

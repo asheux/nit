@@ -5,6 +5,7 @@ members = [
     "crates/nit-games",
     "crates/nit-metal",
     "crates/nit-gol",
+    "crates/nit-mcp",
     "crates/nit-syntax",
     "crates/nit-tui",
     "crates/nit-utils",

@@ -19,6 +19,11 @@ pub struct CodexRunnerConfig {
     /// - Exec runtime: caps concurrent `codex exec` child processes.
     /// - MCP runtime: caps in-flight `tools/call` requests multiplexed over the persistent server.
     pub max_parallel_turns: usize,
+    /// When set, Codex is launched with `-c mcp_servers.nit=...` so the model
+    /// can invoke the nit substrate tools (emit_signal / assert_claim /
+    /// assert_assumption) served by `nit-mcp-server`.  The string is the UDS
+    /// socket path the back-channel listener bound in nit-tui.
+    pub mcp_backchannel_socket: Option<String>,
 }
 
 impl Default for CodexRunnerConfig {
@@ -27,6 +32,7 @@ impl Default for CodexRunnerConfig {
             sandbox: None,
             approval_policy: Some("never".into()),
             max_parallel_turns: 2,
+            mcp_backchannel_socket: None,
         }
     }
 }
@@ -68,11 +74,19 @@ pub struct CodexRunner {
 }
 
 impl CodexRunner {
-    pub fn spawn(mode: CodexRuntimeMode, config: CodexRunnerConfig) -> Self {
+    pub fn spawn(
+        mode: CodexRuntimeMode,
+        config: CodexRunnerConfig,
+        mcp_backchannel_socket: Option<String>,
+    ) -> Self {
         let (cmd_tx, cmd_rx) = mpsc::channel();
         let (event_tx, event_rx) = mpsc::channel();
         let shutdown = Arc::new(AtomicBool::new(false));
         let shutdown_worker = Arc::clone(&shutdown);
+        let config = CodexRunnerConfig {
+            mcp_backchannel_socket,
+            ..config
+        };
         let handle = thread::Builder::new()
             .name("nit-codex".into())
             .spawn(move || runner_loop(mode, config, shutdown_worker, cmd_rx, event_tx))
@@ -279,8 +293,17 @@ struct McpServer {
 }
 
 impl McpServer {
-    fn start(shutdown: Arc<AtomicBool>) -> Result<Self, String> {
-        let mut child = Command::new("codex")
+    fn start(shutdown: Arc<AtomicBool>, config: &CodexRunnerConfig) -> Result<Self, String> {
+        let mut cmd = Command::new("codex");
+        // nit-mcp override: if the back-channel is live, tell `codex mcp-server`
+        // about the `nit` tool server so the model can discover our tools.
+        // Re-uses the same helper as per-turn `codex exec` for consistency.
+        let mut mcp_args: Vec<String> = Vec::new();
+        push_nit_mcp_config_args(&mut mcp_args, config, "codex-mcp-session");
+        for arg in &mcp_args {
+            cmd.arg(arg);
+        }
+        let mut child = cmd
             .arg("mcp-server")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -724,7 +747,7 @@ fn runner_loop_mcp(
                     last_error: None,
                 },
             });
-            match McpServer::start(Arc::clone(&shutdown)).and_then(|mut s| {
+            match McpServer::start(Arc::clone(&shutdown), &config).and_then(|mut s| {
                 s.initialize()?;
                 Ok(s)
             }) {
@@ -1902,6 +1925,9 @@ fn build_codex_exec_args(
             args.push("-c".into());
             args.push(format!("model_reasoning_effort={effort:?}"));
         }
+        // nit-mcp override (when a back-channel socket is set): register
+        // `nit-mcp-server` as a Codex-discoverable tool server.
+        push_nit_mcp_config_args(&mut args, config, agent_id);
         args.push("-o".into());
         args.push(out_file.to_string_lossy().to_string());
         // Positional SESSION_ID comes after options for `codex exec resume`.
@@ -1926,10 +1952,66 @@ fn build_codex_exec_args(
         args.push("-c".into());
         args.push(format!("model_reasoning_effort={effort:?}"));
     }
+    push_nit_mcp_config_args(&mut args, config, agent_id);
     args.push("-o".into());
     args.push(out_file.to_string_lossy().to_string());
     args.push("-".into());
     args
+}
+
+/// Push `-c mcp_servers.nit=...` args if the back-channel socket is set.
+/// Codex accepts TOML values for `-c`; we build an inline-table literal.
+/// Agent id propagates via env so signals/claims carry the right `posted_by`.
+///
+/// TODO: the exact TOML-inline-table escaping Codex expects for `-c`
+/// overrides hasn't been empirically verified — if Codex rejects this
+/// override at runtime, the in-process nit-mcp side still works; only
+/// the Codex-discoverable-tool bridge is affected.
+fn push_nit_mcp_config_args(args: &mut Vec<String>, config: &CodexRunnerConfig, agent_id: &str) {
+    let Some(socket_path) = config
+        .mcp_backchannel_socket
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    else {
+        return;
+    };
+    let Some(bin_path) = nit_mcp_server_binary_path() else {
+        return;
+    };
+    // Escape backslashes and double quotes so the TOML-string literals remain
+    // well-formed no matter what lives in $PATH.
+    let bin_esc = escape_toml_string(&bin_path);
+    let sock_esc = escape_toml_string(socket_path);
+    let agent_esc = escape_toml_string(agent_id);
+    let value = format!(
+        "{{ command = \"{bin_esc}\", args = [], env = {{ NIT_MCP_BACKCHANNEL_SOCKET = \"{sock_esc}\", NIT_MCP_AGENT_ID = \"{agent_esc}\" }} }}"
+    );
+    args.push("-c".into());
+    args.push(format!("mcp_servers.nit={value}"));
+}
+
+/// Discover the `nit-mcp-server` binary next to the current exe.  We install
+/// it alongside `nit` via cargo, so it lives in the same directory as the
+/// running TUI binary.  Returns None if discovery fails — callers skip the
+/// `-c` injection in that case.
+fn nit_mcp_server_binary_path() -> Option<String> {
+    let self_exe = std::env::current_exe().ok()?;
+    let dir = self_exe.parent()?;
+    let candidate = dir.join("nit-mcp-server");
+    Some(candidate.to_string_lossy().into_owned())
+}
+
+fn escape_toml_string(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for ch in s.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            _ => out.push(ch),
+        }
+    }
+    out
 }
 
 fn shorten_thread_id(thread_id: &str) -> String {

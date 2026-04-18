@@ -113,6 +113,37 @@ pub enum AgentBusEvent {
     AssertAssumption {
         assumption: crate::substrate::Assumption,
     },
+    /// Mint-on-apply signal emission: the substrate assigns the id
+    /// atomically during `apply()`. Used by the nit-mcp back-channel —
+    /// external processes can't safely mint substrate ids because the
+    /// counter is mutated only under the single-writer invariant.
+    EmitSignalRequest {
+        posted_by: String,
+        kind: crate::substrate::SignalKind,
+        target: crate::substrate::SignalTarget,
+        #[serde(default)]
+        payload: serde_json::Value,
+        initial_strength: Option<f32>,
+    },
+    /// Mint-on-apply claim assertion. Honors `mood.claim_ttl_multiplier`
+    /// the same way the `FileWrite` auto-claim does; conflicts emit
+    /// `ClaimViolation` signals targeted at the requester.
+    AssertClaimRequest {
+        claimed_by: String,
+        kind: crate::substrate::ClaimKind,
+        target: crate::substrate::ClaimTarget,
+        ttl_gens: u64,
+        rationale: String,
+    },
+    /// Mint-on-apply assumption assertion. Infallible.
+    AssertAssumptionRequest {
+        posted_by: String,
+        target: crate::substrate::AssumptionTarget,
+        #[serde(default)]
+        fact: serde_json::Value,
+        ttl_gens: u64,
+        rationale: String,
+    },
     /// Manually set the system mood. Locks auto-transitions for
     /// `MOOD_OVERRIDE_LOCK_GENS` generations.
     SetMood {
@@ -681,6 +712,97 @@ impl AgentBusEvent {
             }
             AgentBusEvent::AssertAssumption { assumption } => {
                 state.substrate.assert_assumption(assumption.clone());
+            }
+            AgentBusEvent::EmitSignalRequest {
+                posted_by,
+                kind,
+                target,
+                payload,
+                initial_strength,
+            } => {
+                // Mint-on-apply: ids belong to the single-writer substrate.
+                let id = state.substrate.next_signal_id(posted_by);
+                let posted_at_gen = state.substrate.current_generation();
+                state.substrate.emit_signal(crate::substrate::Signal {
+                    id,
+                    kind: *kind,
+                    posted_by: posted_by.clone(),
+                    posted_at_gen,
+                    target: target.clone(),
+                    initial_strength: initial_strength
+                        .unwrap_or(crate::substrate::SubstrateState::DEFAULT_INITIAL_STRENGTH),
+                    payload: payload.clone(),
+                });
+            }
+            AgentBusEvent::AssertClaimRequest {
+                claimed_by,
+                kind,
+                target,
+                ttl_gens,
+                rationale,
+            } => {
+                // Mirror `FileWrite` auto-claim: mood-scale the TTL, clamp to
+                // a minimum of 1 gen.
+                let ttl_multiplier = state.substrate.mood.modulation().claim_ttl_multiplier;
+                let adjusted_ttl =
+                    ((*ttl_gens as f32) * ttl_multiplier).max(1.0) as u64;
+                let id = state.substrate.next_claim_id(claimed_by);
+                let claimed_at_gen = state.substrate.current_generation();
+                let claim = crate::substrate::Claim {
+                    id,
+                    kind: *kind,
+                    target: target.clone(),
+                    claimed_by: claimed_by.clone(),
+                    claimed_at_gen,
+                    ttl_gens: adjusted_ttl,
+                    rationale: rationale.clone(),
+                };
+                if let Err(conflict) = state.substrate.assert_claim(claim) {
+                    // Mirror `FileWrite`'s conflict path: surface a
+                    // ClaimViolation signal per conflicting existing claim,
+                    // targeted at the requesting agent.
+                    for existing in &conflict.conflicts {
+                        let sid = state.substrate.next_signal_id(claimed_by);
+                        let posted_at_gen = state.substrate.current_generation();
+                        state.substrate.emit_signal(crate::substrate::Signal {
+                            id: sid,
+                            kind: crate::substrate::SignalKind::ClaimViolation,
+                            posted_by: claimed_by.clone(),
+                            posted_at_gen,
+                            target: crate::substrate::SignalTarget::Agent {
+                                agent_id: claimed_by.clone(),
+                            },
+                            initial_strength:
+                                crate::substrate::SubstrateState::DEFAULT_INITIAL_STRENGTH,
+                            payload: serde_json::json!({
+                                "reason": "assert_claim_request_conflict",
+                                "attempted_kind": format!("{:?}", kind),
+                                "conflicting_holder": existing.claimed_by,
+                                "conflicting_kind": format!("{:?}", existing.kind),
+                                "conflicting_rationale": existing.rationale,
+                            }),
+                        });
+                    }
+                }
+            }
+            AgentBusEvent::AssertAssumptionRequest {
+                posted_by,
+                target,
+                fact,
+                ttl_gens,
+                rationale,
+            } => {
+                let id = state.substrate.next_assumption_id(posted_by);
+                let posted_at_gen = state.substrate.current_generation();
+                state.substrate.assert_assumption(crate::substrate::Assumption {
+                    id,
+                    target: target.clone(),
+                    fact: fact.clone(),
+                    posted_by: posted_by.clone(),
+                    posted_at_gen,
+                    ttl_gens: *ttl_gens,
+                    rationale: rationale.clone(),
+                });
             }
             AgentBusEvent::SetMood { mood, source } => {
                 let from = state.substrate.mood;

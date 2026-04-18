@@ -18,6 +18,8 @@ pub mod games_runs;
 pub mod genome_worker;
 pub mod gol_render;
 pub mod layout;
+#[cfg(unix)]
+pub mod mcp_backchannel;
 pub mod petri_dish;
 pub mod seed_render;
 pub mod seed_runtime;

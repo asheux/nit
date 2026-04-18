@@ -41,6 +41,9 @@ fn main() -> anyhow::Result<()> {
         sandbox: cli.codex_sandbox.map(|s| s.as_str().to_string()),
         approval_policy: Some(cli.codex_approval_policy.as_str().to_string()),
         max_parallel_turns: max_turns,
+        // Filled in by nit-tui's app::run once the back-channel listener
+        // has bound its UDS path.
+        mcp_backchannel_socket: None,
     };
     let claude_runner_config = ClaudeRunnerConfig {
         max_parallel_turns: max_turns,

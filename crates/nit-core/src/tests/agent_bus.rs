@@ -951,3 +951,67 @@ fn set_mood_event_applies_and_sets_override_lock() {
     );
 }
 
+#[test]
+fn emit_signal_request_mints_id_and_writes_substrate() {
+    // The *Request variant delegates id minting to the substrate — callers
+    // (e.g. the nit-mcp back-channel) never see raw counter state.  We seed
+    // the substrate at a non-zero generation so the format is observable.
+    let mut state = test_state();
+    state.substrate.generation = 4;
+    let before = state.substrate.signal_counter;
+
+    let event = AgentBusEvent::EmitSignalRequest {
+        posted_by: "mcp-agent".into(),
+        kind: crate::substrate::SignalKind::Lead,
+        target: crate::substrate::SignalTarget::Global,
+        payload: serde_json::json!({"hint": "try this"}),
+        initial_strength: Some(0.9),
+    };
+    event.apply(&mut state);
+
+    assert_eq!(state.substrate.signals.len(), 1);
+    assert_eq!(state.substrate.signal_counter, before + 1);
+    let (id, signal) = state.substrate.signals.iter().next().unwrap();
+    assert!(id.starts_with("4-mcp-agent-"), "unexpected id: {id}");
+    assert_eq!(signal.kind, crate::substrate::SignalKind::Lead);
+    assert_eq!(signal.posted_by, "mcp-agent");
+    assert_eq!(signal.posted_at_gen, 4);
+    assert!((signal.initial_strength - 0.9).abs() < f32::EPSILON * 10.0);
+    assert_eq!(signal.payload["hint"], "try this");
+}
+
+#[test]
+fn assert_claim_request_mints_id_and_honors_mood_ttl() {
+    use crate::mood::Mood;
+
+    // Defensive mood has a 1.5x claim_ttl_multiplier — a 4-gen claim should
+    // be stretched to 6 on apply.  We bypass SetMood to skip the override
+    // lock and its synthetic mood_manual_override signal.
+    let mut state = test_state();
+    state.substrate.mood = Mood::Defensive;
+    assert!(
+        (state.substrate.mood.modulation().claim_ttl_multiplier - 1.5).abs() < f32::EPSILON
+    );
+
+    let before = state.substrate.claim_counter;
+    let event = AgentBusEvent::AssertClaimRequest {
+        claimed_by: "mcp-agent".into(),
+        kind: crate::substrate::ClaimKind::ExclusiveWrite,
+        target: crate::substrate::ClaimTarget::File {
+            path: std::path::PathBuf::from("/tmp/mcp-test.rs"),
+        },
+        ttl_gens: 4,
+        rationale: "integration-from-mcp".into(),
+    };
+    event.apply(&mut state);
+
+    assert_eq!(state.substrate.claims.len(), 1);
+    assert_eq!(state.substrate.claim_counter, before + 1);
+    let (id, claim) = state.substrate.claims.iter().next().unwrap();
+    assert!(id.starts_with("0-mcp-agent-"), "unexpected id: {id}");
+    assert_eq!(claim.ttl_gens, 6, "defensive mood should multiply 4 * 1.5");
+    assert_eq!(claim.rationale, "integration-from-mcp");
+    assert_eq!(claim.kind, crate::substrate::ClaimKind::ExclusiveWrite);
+    // No conflicts, so no ClaimViolation signals should have been emitted.
+    assert!(state.substrate.signals.is_empty());
+}

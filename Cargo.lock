@@ -959,6 +959,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "nit-mcp"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "nit-core",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "nit-metal"
 version = "0.1.0"
 dependencies = [
@@ -1002,6 +1012,7 @@ dependencies = [
  "nit-core",
  "nit-games",
  "nit-gol",
+ "nit-mcp",
  "nit-metal",
  "nit-syntax",
  "nit-utils",

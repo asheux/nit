@@ -232,7 +232,7 @@ fn codex_dispatch_marks_turn_waiting_until_backend_starts() {
     });
 
     let mut vitals = VitalsState::default();
-    let codex = CodexRunner::spawn(CodexRuntimeMode::Exec, CodexRunnerConfig::default());
+    let codex = CodexRunner::spawn(CodexRuntimeMode::Exec, CodexRunnerConfig::default(), None);
     // Don't shutdown: we only care about the immediate UI state set by the dispatch call.
     // The runner thread will receive the command but won't affect AppState before assertions run.
 
@@ -5041,7 +5041,7 @@ fn vitals_smoke_games_run_then_stall_hits_crit_boundary() {
 fn codex_dispatch_uses_stored_thread_id_for_context_continuity() {
     let mut state = state_for_test();
     let mut vitals = VitalsState::default();
-    let codex = CodexRunner::spawn(CodexRuntimeMode::Exec, CodexRunnerConfig::default());
+    let codex = CodexRunner::spawn(CodexRuntimeMode::Exec, CodexRunnerConfig::default(), None);
 
     // Create a Codex agent.
     state.agents.agents.push(nit_core::AgentLane {
@@ -5422,7 +5422,7 @@ fn artifact_popup_context_overrides_agent_and_mission() {
 fn artifact_popup_dispatches_idle_agent_even_when_other_agents_busy() {
     let mut state = state_for_test();
     let mut vitals = VitalsState::default();
-    let codex = CodexRunner::spawn(CodexRuntimeMode::Exec, CodexRunnerConfig::default());
+    let codex = CodexRunner::spawn(CodexRuntimeMode::Exec, CodexRunnerConfig::default(), None);
 
     // Agent A is busy (running a turn).
     state.agents.agents.push(nit_core::AgentLane {

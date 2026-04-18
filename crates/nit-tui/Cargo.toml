@@ -16,6 +16,7 @@ tracing = { workspace = true }
 crossbeam-channel = { workspace = true }
 nit-core = { path = "../nit-core" }
 nit-games = { path = "../nit-games" }
+nit-mcp = { path = "../nit-mcp" }
 nit-metal = { path = "../nit-metal" }
 nit-gol = { path = "../nit-gol" }
 nit-syntax = { path = "../nit-syntax" }

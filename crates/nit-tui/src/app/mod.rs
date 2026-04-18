@@ -532,9 +532,48 @@ fn run_loop(
         CodexRuntimeMode::Exec
     };
     state.agents.codex_max_parallel_turns = codex_config.max_parallel_turns;
-    let mut codex_runner = CodexRunner::spawn(codex_runtime, codex_config);
+    // nit-mcp back-channel: spawn the UDS listener before Codex so the
+    // socket is bound by the time Codex's first tool call arrives.
+    // Unix-only in v1; Windows builds skip this and lose deliberate-emit MCP.
+    #[cfg(unix)]
+    let (mcp_backchannel, mcp_event_rx): (
+        Option<crate::mcp_backchannel::McpBackchannel>,
+        Option<Receiver<AgentBusEvent>>,
+    ) = {
+        let (tx, rx) = mpsc::channel();
+        match crate::mcp_backchannel::McpBackchannel::spawn(tx) {
+            Ok(bc) => {
+                tracing::info!(
+                    "nit-mcp back-channel listening at {}",
+                    bc.socket_path
+                );
+                (Some(bc), Some(rx))
+            }
+            Err(err) => {
+                tracing::warn!("nit-mcp back-channel disabled: {err}");
+                (None, None)
+            }
+        }
+    };
+    #[cfg(not(unix))]
+    let mcp_event_rx: Option<Receiver<AgentBusEvent>> = None;
+    let mcp_backchannel_socket: Option<String> = {
+        #[cfg(unix)]
+        {
+            mcp_backchannel.as_ref().map(|bc| bc.socket_path.clone())
+        }
+        #[cfg(not(unix))]
+        {
+            None
+        }
+    };
+    let mut codex_runner =
+        CodexRunner::spawn(codex_runtime, codex_config, mcp_backchannel_socket.clone());
     state.agents.claude_max_parallel_turns = claude_config.max_parallel_turns;
     let mut claude_runner = ClaudeRunner::spawn(claude_config);
+    // Keep the MCP listener alive for the lifetime of the run loop.
+    #[cfg(unix)]
+    let _mcp_backchannel_keepalive = mcp_backchannel;
     let mut swarm = SwarmRuntime::default();
     let mut shadow = crate::shadow::ShadowRuntime::default();
     let mut fuzzy_runtime = FuzzySearchRuntime::new(theme, state.settings.highlight.clone());
@@ -1038,6 +1077,17 @@ fn run_loop(
         while let Ok(event) = fuzzy_runtime.preview.events.try_recv() {
             handle_fuzzy_preview_event(state, &mut fuzzy_runtime, event);
             needs_redraw = needs_redraw || state.fuzzy_search.open;
+        }
+
+        // nit-mcp back-channel events (*Request variants from subprocess
+        // Codex agents).  Mint-on-apply ids live on the main thread, so the
+        // listener is just a translator from socket bytes to AgentBusEvent.
+        if let Some(rx) = mcp_event_rx.as_ref() {
+            while let Ok(event) = rx.try_recv() {
+                record_agent_bus_vitals(&mut vitals, &event);
+                event.apply(state);
+                needs_redraw = true;
+            }
         }
 
         // codex runner events

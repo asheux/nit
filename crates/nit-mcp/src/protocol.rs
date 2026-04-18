@@ -1,0 +1,49 @@
+//! Wire types shared between the `nit-mcp-server` binary (spawned as a child
+//! of `codex mcp-server`) and the listener thread inside nit-tui.
+//!
+//! Uses nit-core substrate types directly — nit-core is already a dep, and
+//! reusing the Serde-derived enums means target/kind values cross the UDS
+//! boundary without a bespoke intermediate schema.
+
+use serde::{Deserialize, Serialize};
+
+use nit_core::substrate::{AssumptionTarget, ClaimKind, ClaimTarget, SignalKind, SignalTarget};
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag = "tool", rename_all = "snake_case")]
+pub enum BackchannelRequest {
+    EmitSignal {
+        request_id: u64,
+        agent_id: String,
+        kind: SignalKind,
+        target: SignalTarget,
+        #[serde(default)]
+        payload: serde_json::Value,
+        strength: Option<f32>,
+    },
+    AssertClaim {
+        request_id: u64,
+        agent_id: String,
+        kind: ClaimKind,
+        target: ClaimTarget,
+        ttl_gens: u64,
+        rationale: String,
+    },
+    AssertAssumption {
+        request_id: u64,
+        agent_id: String,
+        target: AssumptionTarget,
+        #[serde(default)]
+        fact: serde_json::Value,
+        ttl_gens: u64,
+        rationale: String,
+    },
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct BackchannelResponse {
+    pub request_id: u64,
+    pub ok: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
