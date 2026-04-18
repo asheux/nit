@@ -18,9 +18,9 @@ fn temp_dir(label: &str) -> PathBuf {
 fn default_state_has_zero_generation() {
     let state = SubstrateState::default();
     assert_eq!(state.current_generation(), 0);
-    assert!(state.signals().is_empty());
-    assert!(state.claims().is_empty());
-    assert!(state.observations().is_empty());
+    assert!(state.signals.is_empty());
+    assert!(state.claims.is_empty());
+    assert!(state.observations.is_empty());
 }
 
 #[test]
@@ -66,9 +66,9 @@ fn load_from_missing_dir_yields_default() {
     let root = temp_dir("substrate-missing");
     let loaded = SubstrateState::load(&root);
     assert_eq!(loaded.current_generation(), 0);
-    assert!(loaded.signals().is_empty());
-    assert!(loaded.claims().is_empty());
-    assert!(loaded.observations().is_empty());
+    assert!(loaded.signals.is_empty());
+    assert!(loaded.claims.is_empty());
+    assert!(loaded.observations.is_empty());
 }
 
 #[test]
@@ -80,9 +80,9 @@ fn load_from_corrupt_file_yields_default() {
 
     let loaded = SubstrateState::load(&root);
     assert_eq!(loaded.current_generation(), 0);
-    assert!(loaded.signals().is_empty());
-    assert!(loaded.claims().is_empty());
-    assert!(loaded.observations().is_empty());
+    assert!(loaded.signals.is_empty());
+    assert!(loaded.claims.is_empty());
+    assert!(loaded.observations.is_empty());
 }
 
 fn mk_signal(id: &str, kind: SignalKind, posted_at_gen: u64, target: SignalTarget) -> Signal {

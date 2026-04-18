@@ -311,16 +311,6 @@ impl SubstrateState {
         self.signals.insert(signal.id.clone(), signal);
     }
 
-    pub(crate) fn signals(&self) -> &HashMap<SignalId, Signal> {
-        &self.signals
-    }
-    pub(crate) fn claims(&self) -> &HashMap<ClaimId, Claim> {
-        &self.claims
-    }
-    pub(crate) fn observations(&self) -> &[serde_json::Value] {
-        &self.observations
-    }
-
     pub fn signals_iter(&self) -> impl Iterator<Item = (&Signal, f32)> + '_ {
         let gen = self.generation;
         let multiplier = self.mood.modulation().signal_decay_multiplier;
@@ -528,10 +518,6 @@ impl SubstrateState {
             .into_iter()
             .filter_map(|id| self.assumptions.remove(&id))
             .collect()
-    }
-
-    pub(crate) fn assumptions(&self) -> &HashMap<AssumptionId, Assumption> {
-        &self.assumptions
     }
 
     fn state_path(workspace_root: &Path) -> PathBuf {
