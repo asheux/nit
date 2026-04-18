@@ -476,27 +476,51 @@ fn run_turn(
                                     });
                                 }
                             }
-                            // Detect file writes for per-agent genome attribution.
-                            if matches!(kind, Some("tool_use") | Some("tool_result")) {
-                                for key in ["file_path", "path", "file"] {
-                                    if let Some(p) = value
-                                        .get("input")
-                                        .and_then(|v| v.get(key))
-                                        .and_then(|v| v.as_str())
-                                    {
-                                        let path = if std::path::Path::new(p).is_absolute() {
-                                            std::path::PathBuf::from(p)
-                                        } else {
-                                            cwd.join(p)
-                                        };
-                                        if path.exists() {
-                                            let _ = event_tx.send(AgentBusEvent::FileWrite {
-                                                agent_id: model.clone(),
-                                                mission_id: mission_id.clone(),
-                                                path,
-                                            });
+                            // Detect file writes for per-agent genome attribution
+                            // AND the substrate claim lattice. Claude stream-json
+                            // wraps tool_use inside `content_block_start` (the top-
+                            // level `type` is `content_block_start`, not `tool_use`).
+                            // Filter to write-capable tools so Read/Glob/Grep calls
+                            // don't spuriously emit FileWrite. Do NOT gate on
+                            // path.exists() — Write creating a new file legitimately
+                            // targets a path that doesn't exist yet.
+                            if kind == Some("content_block_start") {
+                                if let Some(cb) = value.get("content_block") {
+                                    let cb_type =
+                                        cb.get("type").and_then(|v| v.as_str());
+                                    let cb_name =
+                                        cb.get("name").and_then(|v| v.as_str());
+                                    let is_write_tool = matches!(
+                                        cb_name,
+                                        Some("Write")
+                                            | Some("Edit")
+                                            | Some("MultiEdit")
+                                            | Some("NotebookEdit")
+                                    );
+                                    if cb_type == Some("tool_use") && is_write_tool {
+                                        for key in ["file_path", "path", "file"] {
+                                            if let Some(p) = cb
+                                                .get("input")
+                                                .and_then(|v| v.get(key))
+                                                .and_then(|v| v.as_str())
+                                            {
+                                                let path = if std::path::Path::new(p)
+                                                    .is_absolute()
+                                                {
+                                                    std::path::PathBuf::from(p)
+                                                } else {
+                                                    cwd.join(p)
+                                                };
+                                                let _ = event_tx.send(
+                                                    AgentBusEvent::FileWrite {
+                                                        agent_id: model.clone(),
+                                                        mission_id: mission_id.clone(),
+                                                        path,
+                                                    },
+                                                );
+                                                break;
+                                            }
                                         }
-                                        break;
                                     }
                                 }
                             }
