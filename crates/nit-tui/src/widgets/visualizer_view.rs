@@ -1,5 +1,5 @@
 use nit_core::seed::SeedViewMode;
-use nit_core::{Action, AppState, PaneId, SeedEncoderId, VisualizerSubView};
+use nit_core::{Action, AppState, PaneId, SeedEncoderId};
 use ratatui::{
     buffer::Buffer,
     style::{Modifier, Style},
@@ -14,51 +14,33 @@ use crate::{
     theme::Theme,
 };
 
-// Tab-bar-in-title labels (rendered with a leading space separator, same as
-// gate_monitor_view.rs).
-const TITLE_PREFIX: &str = "VISUALIZER ";
-const BTN_SIGNALS_LABEL: &str = " SUBSTRATE SIGNALS ";
-const BTN_CLAIMS_LABEL: &str = " SUBSTRATE CLAIMS ";
-const BTN_ASSUMPTIONS_LABEL: &str = " SUBSTRATE ASSUMPTIONS ";
-const BTN_VIZ_LABEL: &str = " VISUALIZER ";
-// APPLY/SEED/SNAP/SEARCH only render on the Visualizer sub-view.
+// Title is " [M?] VISUALIZER " where [M?] is the 3-char mood glyph, followed
+// by APPLY / SEED / SNAP / SEARCH buttons. The leading space is the same
+// separator used by the block border, so title_button_hit subtracts 1.
+const MOOD_GLYPH_LEN: u16 = 4; // "[E·] " / "[C·] " / "[D!] "
+const TITLE_LABEL: &str = "VISUALIZER ";
 const BTN_APPLY_LABEL: &str = " APPLY ";
 const BTN_SEED_LABEL: &str = " SEED ";
 const BTN_SNAP_LABEL: &str = " SNAP ";
 const BTN_SEARCH_LABEL: &str = " SEARCH ";
 
+fn mood_glyph(state: &AppState) -> &'static str {
+    match state.substrate.mood {
+        nit_core::mood::Mood::Exploration => "[E.]",
+        nit_core::mood::Mood::Consolidation => "[C.]",
+        nit_core::mood::Mood::Defensive => "[D!]",
+    }
+}
+
 /// Returns an action if the click column (relative to the visualizer rect)
-/// hits a title button. `sub_view` gates the inner buttons (APPLY/SEED/…) so
-/// they are unresponsive on the substrate tabs where they aren't rendered.
-pub fn title_button_hit(col_in_rect: u16, sub_view: VisualizerSubView) -> Option<Action> {
-    // Title text starts 1 cell in from the left border.
+/// hits an APPLY / SEED / SNAP / SEARCH title button.
+pub fn title_button_hit(col_in_rect: u16) -> Option<Action> {
+    // Title text starts 1 cell in from the left border. The rendered prefix is
+    // "<mood_glyph> VISUALIZER " (MOOD_GLYPH_LEN + space + TITLE_LABEL len).
     let col = col_in_rect.saturating_sub(1);
-    let prefix_len = TITLE_PREFIX.len() as u16;
+    let prefix_len = MOOD_GLYPH_LEN + 1 + TITLE_LABEL.len() as u16;
 
-    // Tab buttons:
-    //   [" SUBSTRATE SIGNALS "] [sp] [" SUBSTRATE CLAIMS "] [sp]
-    //   [" SUBSTRATE ASSUMPTIONS "] [sp] [" VISUALIZER "]
-    let sig_start = prefix_len + 1; // single-space separator after prefix
-    let sig_end = sig_start + BTN_SIGNALS_LABEL.len() as u16;
-    let claims_start = sig_end + 1;
-    let claims_end = claims_start + BTN_CLAIMS_LABEL.len() as u16;
-    let assumptions_start = claims_end + 1;
-    let assumptions_end = assumptions_start + BTN_ASSUMPTIONS_LABEL.len() as u16;
-    let viz_start = assumptions_end + 1;
-    let viz_end = viz_start + BTN_VIZ_LABEL.len() as u16;
-    if (sig_start..sig_end).contains(&col)
-        || (claims_start..claims_end).contains(&col)
-        || (assumptions_start..assumptions_end).contains(&col)
-        || (viz_start..viz_end).contains(&col)
-    {
-        return Some(Action::VisualizerToggleSubView);
-    }
-
-    // Inner action buttons only exist on the Visualizer tab.
-    if sub_view != VisualizerSubView::Visualizer {
-        return None;
-    }
-    let apply_start = viz_end + 1;
+    let apply_start = prefix_len;
     let apply_end = apply_start + BTN_APPLY_LABEL.len() as u16;
     let seed_start = apply_end + 1;
     let seed_end = seed_start + BTN_SEED_LABEL.len() as u16;
@@ -112,48 +94,24 @@ pub fn render(
         .fg(theme.background)
         .bg(title_color)
         .add_modifier(Modifier::BOLD);
-    let btn_inactive = Style::default().fg(title_color).add_modifier(Modifier::DIM);
     let sep_style = Style::default().fg(title_color);
 
-    let sub_view = state.visualizer_sub_view;
-    let is_signals = sub_view == VisualizerSubView::SubstrateSignals;
-    let is_claims = sub_view == VisualizerSubView::SubstrateClaims;
-    let is_assumptions = sub_view == VisualizerSubView::SubstrateAssumptions;
-    let is_visualizer = sub_view == VisualizerSubView::Visualizer;
-    let signals_style = if is_signals { btn_active } else { btn_inactive };
-    let claims_style = if is_claims { btn_active } else { btn_inactive };
-    let assumptions_style = if is_assumptions { btn_active } else { btn_inactive };
-    let viz_style = if is_visualizer { btn_active } else { btn_inactive };
-
-    let mut title_spans: Vec<Span<'static>> = vec![
-        Span::styled(TITLE_PREFIX, title_style),
+    let glyph = mood_glyph(state);
+    let title_spans: Vec<Span<'static>> = vec![
+        Span::styled(glyph, title_style),
         Span::styled(" ", sep_style),
-        Span::styled(BTN_SIGNALS_LABEL, signals_style),
+        Span::styled(TITLE_LABEL, title_style),
+        Span::styled(BTN_APPLY_LABEL, btn_active),
         Span::styled(" ", sep_style),
-        Span::styled(BTN_CLAIMS_LABEL, claims_style),
+        Span::styled(BTN_SEED_LABEL, btn_active),
         Span::styled(" ", sep_style),
-        Span::styled(BTN_ASSUMPTIONS_LABEL, assumptions_style),
+        Span::styled(BTN_SNAP_LABEL, btn_active),
         Span::styled(" ", sep_style),
-        Span::styled(BTN_VIZ_LABEL, viz_style),
+        Span::styled(BTN_SEARCH_LABEL, btn_active),
     ];
-    // APPLY/SEED/SNAP/SEARCH only appear on the Visualizer tab.
-    if is_visualizer {
-        title_spans.extend([
-            Span::styled(" ", sep_style),
-            Span::styled(BTN_APPLY_LABEL, btn_active),
-            Span::styled(" ", sep_style),
-            Span::styled(BTN_SEED_LABEL, btn_active),
-            Span::styled(" ", sep_style),
-            Span::styled(BTN_SNAP_LABEL, btn_active),
-            Span::styled(" ", sep_style),
-            Span::styled(BTN_SEARCH_LABEL, btn_active),
-        ]);
-    }
     let title = Line::from(title_spans);
 
-    // Substrate tabs use the ordinary pane background; visualizer tab uses the
-    // seed palette background for the plate/genome canvas.
-    let body_bg = if is_visualizer { palette.bg } else { theme.background };
+    let body_bg = palette.bg;
 
     let block = Block::default()
         .borders(Borders::ALL)
@@ -166,24 +124,6 @@ pub fn render(
     frame.render_widget(block, area);
     if inner.width == 0 || inner.height == 0 {
         return;
-    }
-
-    match sub_view {
-        VisualizerSubView::SubstrateSignals => {
-            crate::widgets::signals_view::render_body(frame, inner, state, theme);
-            return;
-        }
-        VisualizerSubView::SubstrateClaims => {
-            crate::widgets::claims_view::render_body(frame, inner, state, theme);
-            return;
-        }
-        VisualizerSubView::SubstrateAssumptions => {
-            crate::widgets::assumptions_view::render_body(frame, inner, state, theme);
-            return;
-        }
-        VisualizerSubView::Visualizer => {
-            // Existing visualizer rendering continues below.
-        }
     }
 
     let hud_area = ratatui::layout::Rect {

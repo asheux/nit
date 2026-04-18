@@ -383,16 +383,25 @@ Defined in [`crates/nit-mcp/`](../crates/nit-mcp/). Unix-only in v1 (Windows com
 
 ## 10. TUI observability
 
-All substrate state is live-observable in the TUI. The Visualizer pane has a 4-tab title bar:
+The substrate is inspected via a popup overlay opened from anywhere in the TUI.
 
-1. `SUBSTRATE SIGNALS` (default) — live signal table with columns STR / KIND / BY / TARGET / AGE / ID, sorted by effective strength descending, color-coded by kind, width-adaptive.
-2. `SUBSTRATE CLAIMS` — live claim table with TTL / KIND / BY / TARGET / AGE / ID, sorted by remaining TTL descending.
-3. `SUBSTRATE ASSUMPTIONS` — live assumption table with TTL / BY / TARGET / AGE / RATIONALE / ID.
-4. `VISUALIZER` — the pre-existing seed visualizer (unchanged).
+**Open the overlay**:
+- Keybind: **F3**
+- Commands: `:substrate`, `:sub`, `:sig` (all open on Signals tab); `:claims`, `:assumptions`, `:asm` (open on the named tab)
 
-Mouse-clickable tabs cycle through all four. The Signals tab's summary header includes a 2-character **mood glyph** (`E·` / `C·` / `D!`) showing the current mood.
+The overlay has three internal sub-tabs:
 
-APPLY/SEED/SNAP/SEARCH title buttons only render on the Visualizer tab.
+1. `SIGNALS` — live signal table. Columns STR / KIND / BY / TARGET / AGE / ID, sorted by effective strength descending, color-coded by kind, width-adaptive.
+2. `CLAIMS` — live claim table. Columns TTL / KIND / BY / TARGET / AGE / ID, sorted by remaining TTL descending.
+3. `ASSUMPTIONS` — live assumption table. Columns TTL / BY / TARGET / AGE / RATIONALE / ID.
+
+**Tab switching inside overlay**: `Tab` key cycles; mouse-click on tab labels also cycles (clicking the active tab closes).
+**Scroll**: mouse wheel (shared across all three sub-tabs).
+**Close**: `F3` or `Esc`.
+
+The mood glyph (`[E.]` / `[C.]` / `[D!]`) is always visible in the Visualizer pane's title bar — no need to open the overlay to see the current mood.
+
+APPLY / SEED / SNAP / SEARCH buttons in the Visualizer title remain always-visible and clickable.
 
 ---
 
@@ -411,7 +420,8 @@ APPLY/SEED/SNAP/SEARCH title buttons only render on the Visualizer tab.
 | Signals tab widget           | `crates/nit-tui/src/widgets/signals_view.rs`                          |
 | Claims tab widget            | `crates/nit-tui/src/widgets/claims_view.rs`                           |
 | Assumptions tab widget       | `crates/nit-tui/src/widgets/assumptions_view.rs`                      |
-| Visualizer tab bar           | `crates/nit-tui/src/widgets/visualizer_view.rs`                       |
+| Visualizer pane              | `crates/nit-tui/src/widgets/visualizer_view.rs`                       |
+| Substrate overlay popup      | `crates/nit-tui/src/widgets/substrate_overlay.rs`                     |
 | Claim-retry drain            | `crates/nit-tui/src/app/mod.rs` (`drain_pending_claim_retries`)       |
 | Intervention drain           | `crates/nit-tui/src/app/mod.rs` (`drain_pending_interventions`)       |
 | Metabolism frame-time check  | `crates/nit-tui/src/app/mod.rs` (main loop)                           |

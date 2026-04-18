@@ -16,9 +16,9 @@ use crate::theme::Theme;
 pub fn render_body(frame: &mut Frame<'_>, inner: Rect, state: &mut AppState, theme: &Theme) {
     let lines = build_lines(state, theme, inner.width);
     let max_scroll = lines.len().saturating_sub(inner.height as usize);
-    state.substrate_claims_last_max_scroll = max_scroll;
-    let scroll = state.substrate_claims_scroll.min(max_scroll) as u16;
-    state.substrate_claims_scroll = scroll as usize;
+    state.substrate_overlay_last_max_scroll = max_scroll;
+    let scroll = state.substrate_overlay_scroll.min(max_scroll) as u16;
+    state.substrate_overlay_scroll = scroll as usize;
     frame.render_widget(
         Paragraph::new(lines)
             .style(Style::default().bg(theme.background).fg(theme.foreground))

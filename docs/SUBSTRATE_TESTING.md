@@ -42,10 +42,11 @@ All should be 0 failed. If anything red, the substrate layer has regressed — b
 | Mood enum + auto-transition + modulations | `mood`                      | `crates/nit-core/src/tests/mood.rs`                    |
 | Metabolism tick + no-gen-advance invariant | `metabolism` / `tick`      | `crates/nit-core/src/tests/metabolism.rs`              |
 | Cross-mission memory + IDF               | `mission_memory` / `idf`     | `crates/nit-core/src/tests/mission_memory.rs`          |
-| Visualizer 4-tab cycle                   | `visualizer_toggle`          | `crates/nit-core/src/tests/state.rs`                   |
-| Signals tab rendering                    | `signals_view`               | `crates/nit-tui/src/widgets/signals_view.rs`           |
-| Claims tab rendering                     | `claims_view`                | `crates/nit-tui/src/widgets/claims_view.rs`            |
-| Assumptions tab rendering                | `assumptions_view`           | `crates/nit-tui/src/widgets/assumptions_view.rs`       |
+| Substrate overlay tab cycle              | `substrate_overlay`          | `crates/nit-core/src/tests/state.rs`                   |
+| Signals body rendering                   | `signals_view`               | `crates/nit-tui/src/widgets/signals_view.rs`           |
+| Claims body rendering                    | `claims_view`                | `crates/nit-tui/src/widgets/claims_view.rs`            |
+| Assumptions body rendering               | `assumptions_view`           | `crates/nit-tui/src/widgets/assumptions_view.rs`       |
+| Substrate overlay popup                  | (manual)                     | `crates/nit-tui/src/widgets/substrate_overlay.rs`      |
 | MCP JSON-RPC protocol                    | (nit-mcp package only)       | `crates/nit-mcp/src/server.rs` inline tests            |
 
 ---
@@ -61,25 +62,31 @@ nit
 
 On startup, nit loads `.nit/substrate/state.json` (or initializes fresh if absent).
 
-### 3.1 Cycle the Visualizer pane tabs
+### 3.1 Open the substrate overlay
 
-The Visualizer pane's title bar has four clickable tabs:
+Substrate inspection lives in a popup overlay, not in the Visualizer pane itself.
+
+**Open**: press **F3**, or type `:substrate` / `:sub` / `:sig` / `:claims` / `:assumptions` / `:asm`.
+
+The overlay shows a three-tab inline title:
 
 ```
-VISUALIZER  [ SUBSTRATE SIGNALS ] [ SUBSTRATE CLAIMS ] [ SUBSTRATE ASSUMPTIONS ] [ VISUALIZER ]
+ SUBSTRATE   SIGNALS   CLAIMS   ASSUMPTIONS    F3/Esc close   Tab: switch   j/k: scroll
 ```
 
-Click any tab to switch. The default tab is `SUBSTRATE SIGNALS`. The Signals tab's summary header shows a mood glyph:
+Press `Tab` to cycle tabs; mouse-click on a tab label also cycles (clicking the active tab closes the overlay). `Esc` or `F3` closes it.
 
-- `E·` — Exploration
-- `C·` — Consolidation (default)
-- `D!` — Defensive
+The Visualizer pane's title is always prefixed by a 4-character mood glyph — visible even when the overlay is closed:
+
+- `[E.]` — Exploration
+- `[C.]` — Consolidation (default)
+- `[D!]` — Defensive
 
 ### 3.2 Observe a signal through its lifecycle
 
 Drive a turn in nit (any agent, any prompt).
 
-1. **Before turn completes**: the Signals tab may show old signals from prior turns (decaying).
+1. **Before turn completes**: the Signals sub-tab (F3 overlay) may show old signals from prior turns (decaying).
 2. **Turn completes**: a new `DoneMarker` signal appears at the top (highest strength: 1.0 × 0.95⁰ = 1.0). Note: the `gen` counter in the header advances by 1.
 3. **Subsequent turns**: the DoneMarker decays at rate 0.95/gen, dropping ~5% per turn.
 4. **~60 turns later**: the DoneMarker falls below 0.05 threshold and is pruned at the next `TurnCompleted`.
@@ -106,7 +113,7 @@ Expected: the test seeds a pre-existing ExclusiveWrite claim by agent A on path 
 - B's new claim is NOT inserted (conflict blocked it).
 
 In a live TUI session with an actual agent conflict, you'd see:
-- The `ClaimViolation` signal appear in the Signals tab with `posted_by = <violator>`, `target = agent:<violator>`.
+- The `ClaimViolation` signal appear in the Signals sub-tab (F3 overlay) with `posted_by = <violator>`, `target = agent:<violator>`.
 - The violating agent gets an auto-dispatched retry prompt: *"CLAIM VIOLATION: you wrote to X but Y holds an ExclusiveWrite claim. Rationale: …. Back off and coordinate — choose a different file or wait for the claim to expire."*
 
 ### 3.4 Watch a mood transition
@@ -121,7 +128,7 @@ cargo test -p nit-core auto_transition_c_to_defensive_on_pressure -- --nocapture
 
 In a live session, once 8 `ClaimViolation + Warning + HelpNeeded` signals accumulate within 10 generations, the next metabolic tick flips mood to Defensive. You'll see:
 
-- The mood glyph in the Signals header flips from `C·` to `D!`.
+- The mood glyph in the Visualizer pane title flips from `[C.]` to `[D!]`.
 - A new `Warning` signal appears on `Global` with payload `{"reason": "mood_auto_transition", "from": "consolidation", "to": "defensive", "pressure": N, "source": "auto"}`.
 - The metabolic tick interval shortens from 5s to 3s — sweeps happen faster.
 - The arbiter per-tick budget rises from 2 to 4.
@@ -210,7 +217,7 @@ When nit spawns Codex with the nit-mcp config injected, Codex exposes three tool
 }
 ```
 
-After apply, the substrate gains a Signal with `kind: Deadend`, `posted_by: "codex-session"` (or whatever `NIT_MCP_AGENT_ID` was set to at spawn), `initial_strength: 1.2`. The Signals tab shows it immediately; it decays at rate 0.9/gen.
+After apply, the substrate gains a Signal with `kind: Deadend`, `posted_by: "codex-session"` (or whatever `NIT_MCP_AGENT_ID` was set to at spawn), `initial_strength: 1.2`. The Signals sub-tab (F3 overlay) shows it immediately; it decays at rate 0.9/gen.
 
 ### 4.2 `assert_claim`
 
@@ -474,7 +481,7 @@ Force a visible tick by introducing substrate state that will change:
 jq '.claims["forced"] = {id: "forced", kind: "exclusive_write", target: {kind:"file", path:"nonexistent"},
     claimed_by:"test", claimed_at_gen: 0, ttl_gens: 1, rationale: "test"}' .nit/substrate/state.json > tmp.json
 mv tmp.json .nit/substrate/state.json
-# Restart nit and wait 5s — the "forced" claim should be gone from the Claims tab
+# Restart nit and wait 5s — the "forced" claim should be gone from the Claims sub-tab (F3 overlay)
 ```
 
 ### "MCP tool calls aren't reaching nit"

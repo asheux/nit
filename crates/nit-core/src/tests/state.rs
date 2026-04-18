@@ -1361,56 +1361,45 @@ fn command_games_history_avoids_empty_error_when_capture_is_disabled() {
 }
 
 #[test]
-fn visualizer_toggle_sub_view_cycles_through_four_tabs() {
-    let root = temp_dir("viz-toggle-sub-view");
+fn substrate_overlay_toggle_cycles_through_three_tabs() {
+    let root = temp_dir("substrate-overlay-toggle");
     let mut state = AppState::new(
         root.clone(),
         Buffer::empty("x", None),
         Buffer::empty("n", None),
     );
-    // Default is SubstrateSignals.
-    assert_eq!(state.visualizer_sub_view, VisualizerSubView::SubstrateSignals);
-    state.substrate_scroll = 17;
-    state.substrate_claims_scroll = 23;
-    state.substrate_assumptions_scroll = 5;
+    assert_eq!(state.substrate_overlay_tab, SubstrateOverlayTab::Signals);
+    let _ = apply_action(&mut state, Action::SubstrateOverlayToggleTab);
+    assert_eq!(state.substrate_overlay_tab, SubstrateOverlayTab::Claims);
+    let _ = apply_action(&mut state, Action::SubstrateOverlayToggleTab);
+    assert_eq!(state.substrate_overlay_tab, SubstrateOverlayTab::Assumptions);
+    let _ = apply_action(&mut state, Action::SubstrateOverlayToggleTab);
+    assert_eq!(state.substrate_overlay_tab, SubstrateOverlayTab::Signals);
+}
 
-    // Tick 1: SubstrateSignals → SubstrateClaims, all scrolls reset.
-    let _ = apply_action(&mut state, Action::VisualizerToggleSubView);
-    assert_eq!(state.visualizer_sub_view, VisualizerSubView::SubstrateClaims);
-    assert_eq!(state.substrate_scroll, 0);
-    assert_eq!(state.substrate_claims_scroll, 0);
-    assert_eq!(state.substrate_assumptions_scroll, 0);
-
-    state.substrate_scroll = 11;
-    state.substrate_claims_scroll = 42;
-    state.substrate_assumptions_scroll = 13;
-    // Tick 2: SubstrateClaims → SubstrateAssumptions, all scrolls reset.
-    let _ = apply_action(&mut state, Action::VisualizerToggleSubView);
-    assert_eq!(
-        state.visualizer_sub_view,
-        VisualizerSubView::SubstrateAssumptions
+#[test]
+fn show_substrate_opens_overlay_and_resets_scroll() {
+    let root = temp_dir("substrate-overlay-show");
+    let mut state = AppState::new(
+        root.clone(),
+        Buffer::empty("x", None),
+        Buffer::empty("n", None),
     );
-    assert_eq!(state.substrate_scroll, 0);
-    assert_eq!(state.substrate_claims_scroll, 0);
-    assert_eq!(state.substrate_assumptions_scroll, 0);
+    state.substrate_overlay_scroll = 42;
+    let _ = apply_action(&mut state, Action::ShowSubstrate);
+    assert!(state.show_substrate_overlay);
+    assert_eq!(state.substrate_overlay_scroll, 0);
+}
 
-    state.substrate_scroll = 3;
-    state.substrate_claims_scroll = 4;
-    state.substrate_assumptions_scroll = 9;
-    // Tick 3: SubstrateAssumptions → Visualizer, all scrolls reset.
-    let _ = apply_action(&mut state, Action::VisualizerToggleSubView);
-    assert_eq!(state.visualizer_sub_view, VisualizerSubView::Visualizer);
-    assert_eq!(state.substrate_scroll, 0);
-    assert_eq!(state.substrate_claims_scroll, 0);
-    assert_eq!(state.substrate_assumptions_scroll, 0);
-
-    state.substrate_scroll = 7;
-    state.substrate_claims_scroll = 9;
-    state.substrate_assumptions_scroll = 11;
-    // Tick 4: Visualizer → SubstrateSignals, all scrolls reset (wraps).
-    let _ = apply_action(&mut state, Action::VisualizerToggleSubView);
-    assert_eq!(state.visualizer_sub_view, VisualizerSubView::SubstrateSignals);
-    assert_eq!(state.substrate_scroll, 0);
-    assert_eq!(state.substrate_claims_scroll, 0);
-    assert_eq!(state.substrate_assumptions_scroll, 0);
+#[test]
+fn hide_substrate_closes_overlay() {
+    let root = temp_dir("substrate-overlay-hide");
+    let mut state = AppState::new(
+        root.clone(),
+        Buffer::empty("x", None),
+        Buffer::empty("n", None),
+    );
+    state.show_substrate_overlay = true;
+    let _ = apply_action(&mut state, Action::HideSubstrate);
+    assert!(!state.show_substrate_overlay);
 }

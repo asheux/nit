@@ -16,9 +16,9 @@ use crate::theme::Theme;
 pub fn render_body(frame: &mut Frame<'_>, inner: Rect, state: &mut AppState, theme: &Theme) {
     let lines = build_lines(state, theme, inner.width);
     let max_scroll = lines.len().saturating_sub(inner.height as usize);
-    state.substrate_last_max_scroll = max_scroll;
-    let scroll = state.substrate_scroll.min(max_scroll) as u16;
-    state.substrate_scroll = scroll as usize;
+    state.substrate_overlay_last_max_scroll = max_scroll;
+    let scroll = state.substrate_overlay_scroll.min(max_scroll) as u16;
+    state.substrate_overlay_scroll = scroll as usize;
     frame.render_widget(
         Paragraph::new(lines)
             .style(Style::default().bg(theme.background).fg(theme.foreground))
@@ -35,20 +35,11 @@ pub fn build_lines(state: &AppState, theme: &Theme, width: u16) -> Vec<Line<'sta
 
     // Summary header.
     let counts = count_by_kind(&sorted);
-    let mood_glyph = match state.substrate.mood {
-        nit_core::mood::Mood::Exploration => "E.",
-        nit_core::mood::Mood::Consolidation => "C.",
-        nit_core::mood::Mood::Defensive => "D!",
-    };
     let summary = if counts.is_empty() {
-        format!(
-            "{mood_glyph}  {} active   gen {}",
-            sorted.len(),
-            current_gen
-        )
+        format!("{} active   gen {}", sorted.len(), current_gen)
     } else {
         format!(
-            "{mood_glyph}  {} active   [{}]   gen {}",
+            "{} active   [{}]   gen {}",
             sorted.len(),
             counts,
             current_gen,

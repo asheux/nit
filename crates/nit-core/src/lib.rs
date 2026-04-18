@@ -77,8 +77,8 @@ pub use state::{
     GolRenderMode, Intervention, JobState, LogBuffer, McpConnectionState, McpStatus, Metrics, MissionPhase,
     MissionRecord, PatchProposal, PatchStatus, QueuedClaudeTurn, QueuedCodexTurn,
     RosterTreeBranch, RosterTreeSelection, SavedRunHistoryFilter, SavedRunHistoryPendingAction,
-    SyntaxDebugInfo, UiSelection, UiSelectionPane, VisualizerMode, VisualizerRuleEntry,
-    VisualizerState, VisualizerSubView, YankKind, CONSOLE_SCROLL_BOTTOM,
+    SubstrateOverlayTab, SyntaxDebugInfo, UiSelection, UiSelectionPane, VisualizerMode,
+    VisualizerRuleEntry, VisualizerState, YankKind, CONSOLE_SCROLL_BOTTOM,
 };
 pub use metabolism::{MetabolicTickOutcome, METABOLIC_TICK_INTERVAL};
 pub use mission_memory::{IndexedMission, MissionHit, MissionMemoryIndex};

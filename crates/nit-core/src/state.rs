@@ -2071,30 +2071,19 @@ pub struct AppState {
     /// Active sub-view for the structural quality pane: Stats or FileScores.
     #[serde(skip)]
     pub gate_monitor_sub_view: GateMonitorSubView,
-    /// Active sub-view for the Visualizer pane: SubstrateSignals or Visualizer.
+    /// Whether the substrate inspector popup overlay is open.
     #[serde(skip)]
-    pub visualizer_sub_view: VisualizerSubView,
-    /// Scroll offset for the substrate-signals body (Visualizer pane).
+    pub show_substrate_overlay: bool,
+    /// Active sub-tab inside the substrate overlay popup.
     #[serde(skip)]
-    pub substrate_scroll: usize,
-    /// Cached max_scroll for the substrate body, updated per render. Mirrors
-    /// `gate_monitor_last_max_scroll`'s "no render yet" sentinel semantics.
+    pub substrate_overlay_tab: SubstrateOverlayTab,
+    /// Shared scroll offset for the substrate overlay body (all three sub-tabs).
+    #[serde(skip)]
+    pub substrate_overlay_scroll: usize,
+    /// Cached max_scroll for the substrate overlay body, updated per render.
+    /// Mirrors `gate_monitor_last_max_scroll`'s "no render yet" sentinel semantics.
     #[serde(skip, default = "gate_monitor_max_scroll_default")]
-    pub substrate_last_max_scroll: usize,
-    /// Scroll offset for the substrate-claims body (Visualizer pane).
-    #[serde(skip)]
-    pub substrate_claims_scroll: usize,
-    /// Cached max_scroll for the substrate-claims body, updated per render.
-    /// Mirrors `substrate_last_max_scroll`'s "no render yet" sentinel semantics.
-    #[serde(skip, default = "gate_monitor_max_scroll_default")]
-    pub substrate_claims_last_max_scroll: usize,
-    /// Scroll offset for the substrate-assumptions body (Visualizer pane).
-    #[serde(skip)]
-    pub substrate_assumptions_scroll: usize,
-    /// Cached max_scroll for the substrate-assumptions body, updated per render.
-    /// Mirrors `substrate_last_max_scroll`'s "no render yet" sentinel semantics.
-    #[serde(skip, default = "gate_monitor_max_scroll_default")]
-    pub substrate_assumptions_last_max_scroll: usize,
+    pub substrate_overlay_last_max_scroll: usize,
     #[serde(default)]
     pub substrate: crate::substrate::SubstrateState,
 }
@@ -2107,14 +2096,13 @@ pub enum GateMonitorSubView {
     FileScores,
 }
 
-/// Sub-view toggle for the Visualizer pane.
+/// Sub-tab inside the substrate inspector popup overlay.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
-pub enum VisualizerSubView {
+pub enum SubstrateOverlayTab {
     #[default]
-    SubstrateSignals,
-    SubstrateClaims,
-    SubstrateAssumptions,
-    Visualizer,
+    Signals,
+    Claims,
+    Assumptions,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Default)]
@@ -2325,13 +2313,10 @@ impl AppState {
             gate_monitor_scroll: 0,
             gate_monitor_last_max_scroll: usize::MAX,
             gate_monitor_sub_view: GateMonitorSubView::default(),
-            visualizer_sub_view: VisualizerSubView::default(),
-            substrate_scroll: 0,
-            substrate_last_max_scroll: usize::MAX,
-            substrate_claims_scroll: 0,
-            substrate_claims_last_max_scroll: usize::MAX,
-            substrate_assumptions_scroll: 0,
-            substrate_assumptions_last_max_scroll: usize::MAX,
+            show_substrate_overlay: false,
+            substrate_overlay_tab: SubstrateOverlayTab::default(),
+            substrate_overlay_scroll: 0,
+            substrate_overlay_last_max_scroll: usize::MAX,
             substrate: crate::substrate::SubstrateState::default(),
         }
     }
@@ -2961,16 +2946,20 @@ pub fn apply_action(state: &mut AppState, action: Action) -> ActionOutcome {
             };
             state.gate_monitor_scroll = 0;
         }
-        Action::VisualizerToggleSubView => {
-            state.visualizer_sub_view = match state.visualizer_sub_view {
-                VisualizerSubView::SubstrateSignals => VisualizerSubView::SubstrateClaims,
-                VisualizerSubView::SubstrateClaims => VisualizerSubView::SubstrateAssumptions,
-                VisualizerSubView::SubstrateAssumptions => VisualizerSubView::Visualizer,
-                VisualizerSubView::Visualizer => VisualizerSubView::SubstrateSignals,
+        Action::ShowSubstrate => {
+            state.show_substrate_overlay = true;
+            state.substrate_overlay_scroll = 0;
+        }
+        Action::HideSubstrate => {
+            state.show_substrate_overlay = false;
+        }
+        Action::SubstrateOverlayToggleTab => {
+            state.substrate_overlay_tab = match state.substrate_overlay_tab {
+                SubstrateOverlayTab::Signals => SubstrateOverlayTab::Claims,
+                SubstrateOverlayTab::Claims => SubstrateOverlayTab::Assumptions,
+                SubstrateOverlayTab::Assumptions => SubstrateOverlayTab::Signals,
             };
-            state.substrate_scroll = 0;
-            state.substrate_claims_scroll = 0;
-            state.substrate_assumptions_scroll = 0;
+            state.substrate_overlay_scroll = 0;
         }
         Action::VisualizerCycleSeedView => {
             state.visualizer.seed_view = state.visualizer.seed_view.next();
@@ -3542,6 +3531,24 @@ fn handle_command_line(state: &mut AppState, input: &str) -> bool {
         return false;
     }
     match tokens.as_slice() {
+        ["substrate"] | ["sub"] | ["sig"] | ["signals"] => {
+            state.show_substrate_overlay = true;
+            state.substrate_overlay_tab = SubstrateOverlayTab::Signals;
+            state.substrate_overlay_scroll = 0;
+            false
+        }
+        ["claims"] => {
+            state.show_substrate_overlay = true;
+            state.substrate_overlay_tab = SubstrateOverlayTab::Claims;
+            state.substrate_overlay_scroll = 0;
+            false
+        }
+        ["assumptions"] | ["asm"] => {
+            state.show_substrate_overlay = true;
+            state.substrate_overlay_tab = SubstrateOverlayTab::Assumptions;
+            state.substrate_overlay_scroll = 0;
+            false
+        }
         ["q"] | ["quit"] | ["exit"] => {
             if state.has_unsaved_editor_buffers() {
                 state.prompt = Some(Prompt::ConfirmQuit);

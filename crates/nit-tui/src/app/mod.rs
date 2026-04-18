@@ -37,7 +37,7 @@ use crate::{
         editor_view, file_tree_view, fuzzy_search_popup, games_analysis_popup, games_ca_sim_popup,
         games_match_history_popup, games_replay_popup, games_run_browser_popup,
         games_strategy_popup, games_tm_sim_popup, games_visualizer_view, gate_monitor_view,
-        help_overlay, protocol_picker, rule_picker, top_bar, visualizer_view,
+        help_overlay, protocol_picker, rule_picker, substrate_overlay, top_bar, visualizer_view,
     },
 };
 use arboard::Clipboard;
@@ -2948,6 +2948,10 @@ fn draw(
             let area = dynamic_popup_rect(screen, help_overlay::preferred_size(screen));
             help_overlay::render(f, area, state, theme);
         }
+        if state.show_substrate_overlay {
+            let area = substrate_overlay::preferred_size(screen);
+            substrate_overlay::render(f, area, state, theme);
+        }
         if state.fuzzy_search.open {
             let area = dynamic_popup_rect(screen, fuzzy_popup_size(screen, state));
             fuzzy_search_popup::render(
@@ -5511,6 +5515,23 @@ fn map_key_to_action(key: KeyEvent, state: &AppState, input: &mut InputState) ->
             }
         }
         KeyEvent {
+            code: KeyCode::F(3),
+            ..
+        } if state.mode != Mode::Insert => Some(if state.show_substrate_overlay {
+            Action::HideSubstrate
+        } else {
+            Action::ShowSubstrate
+        }),
+        KeyEvent {
+            code: KeyCode::Tab,
+            modifiers: KeyModifiers::NONE,
+            ..
+        } if state.show_substrate_overlay => Some(Action::SubstrateOverlayToggleTab),
+        KeyEvent {
+            code: KeyCode::Esc,
+            ..
+        } if state.show_substrate_overlay => Some(Action::HideSubstrate),
+        KeyEvent {
             code: KeyCode::Char('S'),
             modifiers,
             ..
@@ -7066,6 +7087,20 @@ fn handle_mouse_event_with_swarm(
                 if point_in_rect(mouse.column, mouse.row, area) {
                     let max_scroll = help_popup_max_scroll(screen, theme);
                     bump_scroll_clamped(&mut state.help_scroll, delta, max_scroll);
+                }
+                return true;
+            }
+
+            if state.show_substrate_overlay {
+                let area = substrate_overlay::preferred_size(screen);
+                if point_in_rect(mouse.column, mouse.row, area) {
+                    let max_scroll = state.substrate_overlay_last_max_scroll;
+                    let max_scroll = if max_scroll == usize::MAX {
+                        usize::MAX
+                    } else {
+                        max_scroll
+                    };
+                    bump_scroll_clamped(&mut state.substrate_overlay_scroll, delta, max_scroll);
                 }
                 return true;
             }
@@ -9329,7 +9364,7 @@ fn handle_mouse_down_with_swarm(
         if mouse.row == layout.visualizer.y {
             let col_in_rect = mouse.column.saturating_sub(layout.visualizer.x);
             if let Some(action) =
-                visualizer_view::title_button_hit(col_in_rect, state.visualizer_sub_view)
+                visualizer_view::title_button_hit(col_in_rect)
             {
                 state.focus = PaneId::Visualizer;
                 apply_action(state, action);
