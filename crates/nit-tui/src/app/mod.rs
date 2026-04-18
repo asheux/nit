@@ -1923,10 +1923,9 @@ fn build_genome_retry_prompt(
         } else {
             // New file — include if below the *specific* agent's adaptive
             // quality threshold (not the global max across all agents).
-            let agent_id = state.genome_eval_agent_id.clone().unwrap_or_default();
             let min_tier = state
                 .genome_agent_min_tier
-                .get(&agent_id)
+                .get(agent_id)
                 .copied()
                 .unwrap_or(nit_core::GenomeTier::Spaceship);
             if report.tier < min_tier {
@@ -2043,10 +2042,9 @@ fn build_genome_retry_prompt(
         } else {
             // New file — no baseline, show threshold requirement using the
             // agent's adaptive min tier (not hardcoded).
-            let eid = state.genome_eval_agent_id.clone().unwrap_or_default();
             let min_t = state
                 .genome_agent_min_tier
-                .get(&eid)
+                .get(agent_id)
                 .copied()
                 .unwrap_or(nit_core::GenomeTier::Spaceship);
             prompt.push_str(&format!(
@@ -2094,10 +2092,9 @@ fn build_genome_retry_prompt(
     prompt.push_str("\n\n");
 
     // Retry instructions — use the agent's adaptive minimum tier, not a hardcoded value.
-    let agent_id = state.genome_eval_agent_id.clone().unwrap_or_default();
     let agent_min_tier = state
         .genome_agent_min_tier
-        .get(&agent_id)
+        .get(agent_id)
         .copied()
         .unwrap_or(nit_core::GenomeTier::Spaceship);
     let tier_target = format!(
@@ -2259,16 +2256,23 @@ fn dispatch_turn_genome_evals(
         return;
     }
 
-    state.genome_eval_pending = modified.len();
-    state.genome_eval_worst_delta = 0;
-    state.genome_eval_agent_id = Some(agent_id.to_string());
-    state.genome_eval_mission_id = mission_id.clone();
+    // Per-agent batch. Parallel swarm turns interleave, so one agent's
+    // batch must not clobber another's — keep the slot keyed by agent_id.
+    let batch = state
+        .genome_eval_batches
+        .entry(agent_id.to_string())
+        .or_default();
+    batch.pending = modified.len();
+    batch.worst_delta = 0;
+    batch.mission_id = mission_id.clone();
 
     for file_path in modified {
         // File read + genome computation happen on the worker thread —
         // no blocking I/O on the main thread.
-        if !genome.evaluate_from_disk(file_path) {
-            state.genome_eval_pending = state.genome_eval_pending.saturating_sub(1);
+        if !genome.evaluate_from_disk(file_path, agent_id.to_string()) {
+            if let Some(b) = state.genome_eval_batches.get_mut(agent_id) {
+                b.pending = b.pending.saturating_sub(1);
+            }
         }
     }
 }
@@ -2317,13 +2321,18 @@ fn drain_genome_results(
 ) {
     while let Ok(result) = genome.rx.try_recv() {
         let path = result.path;
+        let result_agent_id = result.agent_id.clone();
         let report = match result.report {
             Some(r) => r,
             None => {
                 // File could not be read (e.g. deleted). Still decrement
-                // pending counters so turn finalization is not stuck.
+                // the owning agent's batch so turn finalization is not stuck.
                 if !result.shadow && !result.save_eval {
-                    state.genome_eval_pending = state.genome_eval_pending.saturating_sub(1);
+                    if let Some(aid) = result_agent_id.as_deref() {
+                        if let Some(batch) = state.genome_eval_batches.get_mut(aid) {
+                            batch.pending = batch.pending.saturating_sub(1);
+                        }
+                    }
                 }
                 continue;
             }
@@ -2463,7 +2472,12 @@ fn drain_genome_results(
             state.genome_reports.insert(path, report);
         } else {
             // Authoritative turn evaluation — update reports, compute delta, persist.
-            let agent_id = state.genome_eval_agent_id.clone().unwrap_or_default();
+            // Drive off the result's own `agent_id` so parallel turns can't
+            // cross-contaminate each other's batch state.
+            let Some(agent_id) = result_agent_id else {
+                state.genome_reports.insert(path, report);
+                continue;
+            };
 
             let delta: i32 = if let Some(base) = state.genome_baselines.get(&path) {
                 // Tier comparison takes priority — tier reflects the weakest
@@ -2505,9 +2519,17 @@ fn drain_genome_results(
                 }
             };
 
-            if delta < state.genome_eval_worst_delta {
-                state.genome_eval_worst_delta = delta;
-            }
+            let batch_reached_zero = {
+                let batch = state
+                    .genome_eval_batches
+                    .entry(agent_id.clone())
+                    .or_default();
+                if delta < batch.worst_delta {
+                    batch.worst_delta = delta;
+                }
+                batch.pending = batch.pending.saturating_sub(1);
+                batch.pending == 0
+            };
 
             // Persist to disk on a background thread to avoid blocking the UI.
             {
@@ -2520,98 +2542,103 @@ fn drain_genome_results(
             }
             state.genome_reports.insert(path, report);
 
-            state.genome_eval_pending = state.genome_eval_pending.saturating_sub(1);
+            if !batch_reached_zero {
+                continue;
+            }
 
-            // All turn evaluations complete — finalize.
-            if state.genome_eval_pending == 0 {
-                let worst_delta = state.genome_eval_worst_delta;
-                state.genome_quality_delta = worst_delta;
+            // This agent's batch just finished — finalize for THIS agent only.
+            let (worst_delta, mission_id) = state
+                .genome_eval_batches
+                .remove(&agent_id)
+                .map(|b| (b.worst_delta, b.mission_id))
+                .unwrap_or((0, None));
+            state.genome_quality_delta = worst_delta;
 
-                // Adaptive quality thresholds: streak tracking.
-                let current_min = state
-                    .genome_agent_min_tier
-                    .get(&agent_id)
-                    .copied()
-                    .unwrap_or(nit_core::GenomeTier::Spaceship);
-                let modified: Vec<_> = state
-                    .genome_turn_modified
-                    .get(&agent_id)
-                    .map(|s| s.iter().cloned().collect())
-                    .unwrap_or_default();
-                let worst_tier = modified
-                    .iter()
-                    .filter_map(|p| state.genome_reports.get(p))
-                    .map(|r| r.tier)
-                    .min()
-                    .unwrap_or(nit_core::GenomeTier::StillLife);
-                if worst_tier >= current_min {
-                    let streak = state
-                        .genome_agent_streak
-                        .entry(agent_id.clone())
-                        .or_insert(0);
-                    *streak = streak.saturating_add(1);
-                    if *streak >= 5 {
-                        let next_tier = match current_min {
-                            nit_core::GenomeTier::StillLife | nit_core::GenomeTier::Oscillator => {
-                                nit_core::GenomeTier::Spaceship
-                            }
-                            nit_core::GenomeTier::Spaceship => nit_core::GenomeTier::Methuselah,
-                            nit_core::GenomeTier::Methuselah => nit_core::GenomeTier::Replicator,
-                            _ => current_min,
-                        };
-                        if next_tier > current_min {
-                            state
-                                .genome_agent_min_tier
-                                .insert(agent_id.clone(), next_tier);
-                            *streak = 0;
+            // Adaptive quality thresholds: streak tracking.
+            let current_min = state
+                .genome_agent_min_tier
+                .get(&agent_id)
+                .copied()
+                .unwrap_or(nit_core::GenomeTier::Spaceship);
+            let modified: Vec<_> = state
+                .genome_turn_modified
+                .get(&agent_id)
+                .map(|s| s.iter().cloned().collect())
+                .unwrap_or_default();
+            let worst_tier = modified
+                .iter()
+                .filter_map(|p| state.genome_reports.get(p))
+                .map(|r| r.tier)
+                .min()
+                .unwrap_or(nit_core::GenomeTier::StillLife);
+            if worst_tier >= current_min {
+                let streak = state
+                    .genome_agent_streak
+                    .entry(agent_id.clone())
+                    .or_insert(0);
+                *streak = streak.saturating_add(1);
+                if *streak >= 5 {
+                    let next_tier = match current_min {
+                        nit_core::GenomeTier::StillLife | nit_core::GenomeTier::Oscillator => {
+                            nit_core::GenomeTier::Spaceship
                         }
-                    }
-                } else {
-                    state.genome_agent_streak.insert(agent_id.clone(), 0);
-                }
-
-                // Build diff text for all modified files.
-                let mut all_diffs = String::new();
-                for file_path in &modified {
-                    if let (Some(rpt), Some(base)) = (
-                        state.genome_reports.get(file_path),
-                        state.genome_baselines.get(file_path),
-                    ) {
-                        let diff = nit_core::compute_genome_diff(base, rpt);
-                        all_diffs.push_str(&nit_core::format_genome_diff(&diff));
-                        all_diffs.push('\n');
-                    } else if let Some(rpt) = state.genome_reports.get(file_path) {
-                        all_diffs.push_str(&format!(
-                            "[new file] {} — {} (tier {}, c={:.2})\n",
-                            file_path.display(),
-                            rpt.quality_level(),
-                            rpt.tier.numeral(),
-                            rpt.cross_encoder_consistency,
-                        ));
+                        nit_core::GenomeTier::Spaceship => nit_core::GenomeTier::Methuselah,
+                        nit_core::GenomeTier::Methuselah => nit_core::GenomeTier::Replicator,
+                        _ => current_min,
+                    };
+                    if next_tier > current_min {
+                        state
+                            .genome_agent_min_tier
+                            .insert(agent_id.clone(), next_tier);
+                        *streak = 0;
                     }
                 }
-                state.last_genome_diff = if all_diffs.is_empty() {
-                    None
-                } else {
-                    Some(all_diffs)
-                };
+            } else {
+                state.genome_agent_streak.insert(agent_id.clone(), 0);
+            }
 
-                // Auto-retry on genome quality degradation.
-                if let Some((prompt, degraded_files)) = build_genome_retry_prompt(state, &agent_id)
-                {
-                    let attempt = state.genome_retry_count;
-                    let mission_id = state.genome_eval_mission_id.clone();
-                    push_genome_retry_message(state, &agent_id, attempt, &degraded_files);
-                    dispatch_agent_prompt(
-                        state,
-                        vitals,
-                        Some(codex_runner),
-                        Some(claude_runner),
-                        agent_id,
-                        mission_id,
-                        prompt,
-                    );
+            // Build diff text for all modified files.
+            let mut all_diffs = String::new();
+            for file_path in &modified {
+                if let (Some(rpt), Some(base)) = (
+                    state.genome_reports.get(file_path),
+                    state.genome_baselines.get(file_path),
+                ) {
+                    let diff = nit_core::compute_genome_diff(base, rpt);
+                    all_diffs.push_str(&nit_core::format_genome_diff(&diff));
+                    all_diffs.push('\n');
+                } else if let Some(rpt) = state.genome_reports.get(file_path) {
+                    all_diffs.push_str(&format!(
+                        "[new file] {} — {} (tier {}, c={:.2})\n",
+                        file_path.display(),
+                        rpt.quality_level(),
+                        rpt.tier.numeral(),
+                        rpt.cross_encoder_consistency,
+                    ));
                 }
+            }
+            state.last_genome_diff = if all_diffs.is_empty() {
+                None
+            } else {
+                Some(all_diffs)
+            };
+
+            // Auto-retry on genome quality degradation. Each agent's batch
+            // finalizes independently, so parallel agents each get their own
+            // targeted retry — not one aggregated retry sent to whichever
+            // agent happened to finalize last.
+            if let Some((prompt, degraded_files)) = build_genome_retry_prompt(state, &agent_id) {
+                let attempt = state.genome_retry_count;
+                push_genome_retry_message(state, &agent_id, attempt, &degraded_files);
+                dispatch_agent_prompt(
+                    state,
+                    vitals,
+                    Some(codex_runner),
+                    Some(claude_runner),
+                    agent_id,
+                    mission_id,
+                    prompt,
+                );
             }
         }
     }

@@ -5,21 +5,6 @@
 
 use crate::{grid::EdgeMode, Grid, Rule};
 
-/// Moore neighborhood offsets, excluding the center cell.
-///
-/// Fixed order keeps neighbor counting deterministic across builds so
-/// regression tests comparing generation-by-generation output are stable.
-const MOORE_OFFSETS: [(isize, isize); 8] = [
-    (-1, -1),
-    (0, -1),
-    (1, -1),
-    (-1, 0),
-    (1, 0),
-    (-1, 1),
-    (0, 1),
-    (1, 1),
-];
-
 /// Advance the grid by one generation under the given rule.
 #[must_use]
 pub fn step(grid: &Grid, rule: Rule, edge: EdgeMode) -> Grid {
@@ -31,7 +16,7 @@ pub fn step(grid: &Grid, rule: Rule, edge: EdgeMode) -> Grid {
     }
     for y in 0..height {
         for x in 0..width {
-            let neighbors = count_neighbors(grid, x, y, edge);
+            let neighbors = neighborhood::count(grid, x, y, edge);
             let alive = grid.get(x, y);
             next.set(x, y, next_cell(alive, neighbors, rule));
         }
@@ -52,40 +37,59 @@ fn next_cell(alive: bool, neighbors: u8, rule: Rule) -> bool {
     }
 }
 
-fn count_neighbors(grid: &Grid, x: usize, y: usize, edge: EdgeMode) -> u8 {
-    let width = grid.width() as isize;
-    let height = grid.height() as isize;
-    let mut count = 0u8;
-    for (dx, dy) in MOORE_OFFSETS {
-        if let Some((nx, ny)) = resolve_neighbor(x, y, dx, dy, width, height, edge) {
-            count += u8::from(grid.get(nx, ny));
-        }
-    }
-    count
-}
+mod neighborhood {
+    use crate::{grid::EdgeMode, Grid};
 
-fn resolve_neighbor(
-    x: usize,
-    y: usize,
-    dx: isize,
-    dy: isize,
-    width: isize,
-    height: isize,
-    edge: EdgeMode,
-) -> Option<(usize, usize)> {
-    let nx = x as isize + dx;
-    let ny = y as isize + dy;
-    match edge {
-        EdgeMode::Dead => {
-            if nx < 0 || ny < 0 || nx >= width || ny >= height {
-                return None;
+    /// Moore neighborhood offsets, excluding the center cell.
+    ///
+    /// Fixed order keeps neighbor counting deterministic across builds so
+    /// regression tests comparing generation-by-generation output are stable.
+    const MOORE_OFFSETS: [(isize, isize); 8] = [
+        (-1, -1),
+        (0, -1),
+        (1, -1),
+        (-1, 0),
+        (1, 0),
+        (-1, 1),
+        (0, 1),
+        (1, 1),
+    ];
+
+    pub(super) fn count(grid: &Grid, x: usize, y: usize, edge: EdgeMode) -> u8 {
+        let width = grid.width() as isize;
+        let height = grid.height() as isize;
+        let mut total = 0u8;
+        for (dx, dy) in MOORE_OFFSETS {
+            if let Some((nx, ny)) = resolve(x, y, dx, dy, width, height, edge) {
+                total += u8::from(grid.get(nx, ny));
             }
-            Some((nx as usize, ny as usize))
         }
-        EdgeMode::Toroid => {
-            let wx = ((nx % width) + width) % width;
-            let wy = ((ny % height) + height) % height;
-            Some((wx as usize, wy as usize))
+        total
+    }
+
+    fn resolve(
+        x: usize,
+        y: usize,
+        dx: isize,
+        dy: isize,
+        width: isize,
+        height: isize,
+        edge: EdgeMode,
+    ) -> Option<(usize, usize)> {
+        let nx = x as isize + dx;
+        let ny = y as isize + dy;
+        match edge {
+            EdgeMode::Dead => {
+                if nx < 0 || ny < 0 || nx >= width || ny >= height {
+                    None
+                } else {
+                    Some((nx as usize, ny as usize))
+                }
+            }
+            EdgeMode::Toroid => Some((
+                nx.rem_euclid(width) as usize,
+                ny.rem_euclid(height) as usize,
+            )),
         }
     }
 }

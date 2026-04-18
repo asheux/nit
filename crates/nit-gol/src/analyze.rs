@@ -7,6 +7,18 @@ use std::collections::HashMap;
 
 use crate::{step::step, EdgeMode, Grid, Rule};
 
+// Score weights used by `score_rule`; tuned empirically and frozen so
+// ranked-rule logs remain comparable across runs.
+const SCORE_TRANSIENT_WEIGHT: f32 = 2.0;
+const SCORE_PERIOD_LOG_WEIGHT: f32 = 8.0;
+const SCORE_AVG_POP_WEIGHT: f32 = 0.5;
+const SCORE_EXTINCTION_PENALTY: f32 = 12.0;
+const SCORE_SATURATION_PENALTY: f32 = 10.0;
+
+/// Alive-cell fraction above which a rule is treated as saturating and
+/// the score is docked — prevents runaway "all-on" rules from winning.
+const SATURATION_THRESHOLD: f32 = 0.92;
+
 /// Complete evaluation result for a single rule on a given seed.
 ///
 /// Carries both the scalar score and the supporting metrics
@@ -43,7 +55,6 @@ pub struct RuleScore {
     pub alive_end: u32,
 }
 
-/// Raw simulation output, pre-scoring.
 struct SimMetrics {
     final_grid: Grid,
     period: Option<u32>,
@@ -143,9 +154,7 @@ fn simulate_with_cycle_detection(
     }
 }
 
-/// Compute a composite score from simulation metrics.
-///
-/// Rewards longevity and periodic behavior while penalizing
+/// Composite score: rewards longevity and periodic behavior, penalizes
 /// extinction and near-total saturation of the grid.
 #[must_use]
 pub(crate) fn score_rule(
@@ -156,16 +165,17 @@ pub(crate) fn score_rule(
     max_population: u32,
     alive_end: u32,
 ) -> f32 {
-    let mut score = transient as f32 * 2.0;
+    let mut score = transient as f32 * SCORE_TRANSIENT_WEIGHT;
     if let Some(p) = period {
-        score += 8.0 * (1.0 + p as f32).log2();
+        score += SCORE_PERIOD_LOG_WEIGHT * (1.0 + p as f32).log2();
     }
-    score += 0.5 * avg_population;
+    score += SCORE_AVG_POP_WEIGHT * avg_population;
     if alive_end == 0 {
-        score -= 12.0;
+        score -= SCORE_EXTINCTION_PENALTY;
     }
-    if grid_area > 0 && max_population as usize > (grid_area as f32 * 0.92) as usize {
-        score -= 10.0;
+    let saturation_cap = (grid_area as f32 * SATURATION_THRESHOLD) as usize;
+    if grid_area > 0 && max_population as usize > saturation_cap {
+        score -= SCORE_SATURATION_PENALTY;
     }
     score
 }

@@ -118,19 +118,19 @@ impl Rule {
 impl fmt::Display for Rule {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_char('B')?;
-        for birth_digit in active_digits(self.births_mask) {
-            f.write_char((b'0' + birth_digit) as char)?;
+        for bit in 0..=8u8 {
+            if self.births_mask & (1u16 << bit) != 0 {
+                f.write_char((b'0' + bit) as char)?;
+            }
         }
         f.write_str("/S")?;
-        for survival_digit in active_digits(self.survives_mask) {
-            f.write_char((b'0' + survival_digit) as char)?;
+        for bit in 0..=8u8 {
+            if self.survives_mask & (1u16 << bit) != 0 {
+                f.write_char((b'0' + bit) as char)?;
+            }
         }
         Ok(())
     }
-}
-
-fn active_digits(mask: u16) -> impl Iterator<Item = u8> {
-    (0..=8u8).filter(move |bit| mask & (1u16 << bit) != 0)
 }
 
 /// Errors that can occur when parsing a rule string.

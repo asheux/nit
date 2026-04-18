@@ -19,6 +19,11 @@ pub struct GenomeEvalResult {
     pub shadow: bool,
     /// `true` when this evaluation was triggered by a manual file save.
     pub save_eval: bool,
+    /// Agent ID whose TurnCompleted triggered this authoritative evaluation.
+    /// `None` for shadow evals, save evals, and editor-opened computations.
+    /// Used to route results back to the correct in-flight batch so parallel
+    /// swarm turns finalize independently.
+    pub agent_id: Option<String>,
 }
 
 /// Handle held by the main thread. Send files for evaluation, drain results.
@@ -55,25 +60,27 @@ impl GenomeWorker {
         self.evaluate_inner(path, text, false, true);
     }
 
-    /// Like `evaluate`, but reads the file from disk on the worker thread
-    /// instead of requiring the caller to pass the text.  Returns `false` if
-    /// the thread could not be spawned (the caller should decrement pending
-    /// counts in that case).
-    /// Like `evaluate`, but reads the file from disk on the worker thread
-    /// instead of requiring the caller to pass the text.  Returns `false` if
-    /// the thread could not be spawned (the caller should decrement pending
-    /// counts in that case).  If the file read fails on the worker, a result
+    /// Authoritative turn-completion eval: reads the file from disk on the
+    /// worker thread and tags the result with `agent_id` so the main loop
+    /// can route it to the correct per-agent batch. Returns `false` if the
+    /// thread could not be spawned (the caller should decrement pending
+    /// counts in that case). If the file read fails on the worker, a result
     /// with `report: None` is sent so pending counts still decrement.
-    pub fn evaluate_from_disk(&self, path: PathBuf) -> bool {
-        self.evaluate_from_disk_inner(path, false)
+    pub fn evaluate_from_disk(&self, path: PathBuf, agent_id: String) -> bool {
+        self.evaluate_from_disk_inner(path, false, Some(agent_id))
     }
 
-    /// Shadow variant of `evaluate_from_disk`.
+    /// Shadow variant of `evaluate_from_disk`: no agent_id, no batch routing.
     pub fn evaluate_from_disk_shadow(&self, path: PathBuf) -> bool {
-        self.evaluate_from_disk_inner(path, true)
+        self.evaluate_from_disk_inner(path, true, None)
     }
 
-    fn evaluate_from_disk_inner(&self, path: PathBuf, shadow: bool) -> bool {
+    fn evaluate_from_disk_inner(
+        &self,
+        path: PathBuf,
+        shadow: bool,
+        agent_id: Option<String>,
+    ) -> bool {
         let tx = self.tx.clone();
         std::thread::Builder::new()
             .name("genome-eval".into())
@@ -87,6 +94,7 @@ impl GenomeWorker {
                     report,
                     shadow,
                     save_eval: false,
+                    agent_id,
                 });
             })
             .is_ok()
@@ -104,6 +112,7 @@ impl GenomeWorker {
                     report: Some(report),
                     shadow,
                     save_eval,
+                    agent_id: None,
                 });
             });
     }

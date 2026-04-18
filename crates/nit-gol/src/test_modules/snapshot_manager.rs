@@ -7,29 +7,14 @@ use crate::Rule;
 fn fixture_meta() -> SnapshotMetadata {
     SnapshotMetadata {
         timestamp: "2026-01-25T00:00:00Z".into(),
-        workspace_root: None,
-        file_path: None,
         seed_source: "test".into(),
         seed_hash: 1,
         rule: "B3/S23".into(),
-        rule_id: None,
-        protocol: None,
-        protocol_hash: None,
-        protocol_phase_idx: None,
-        protocol_step_in_phase: None,
         generation: 1,
         alive_count: 0,
-        period: None,
-        score: None,
         wrap_mode: "dead".into(),
         tick_ms: 1,
-        attractor: None,
-        encoder_id: None,
-        encoder_params: None,
-        params_fingerprint: None,
-        input_hash: None,
-        seed_density: None,
-        seed_components: None,
+        ..Default::default()
     }
 }
 

@@ -11,7 +11,6 @@
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::path::{Path, PathBuf};
 
 use crate::{Rule, RuleParseError};
 use nit_utils::paths;
@@ -113,6 +112,7 @@ pub struct RuleEntry {
 }
 
 impl RuleEntry {
+    /// Catalog-declared warning message for this rule, if any.
     pub fn warning(&self) -> Option<&str> {
         self.default_params.warning.as_deref()
     }
@@ -190,9 +190,15 @@ impl RuleCatalog {
     pub fn load() -> (Self, Vec<String>) {
         let mut warnings = Vec::new();
         let mut catalog = Self::load_builtin(&mut warnings);
-        if let Some(path) = default_overlay_path().filter(|p| p.exists()) {
-            match read_overlay_file(&path) {
-                Ok(overlays) => catalog.apply_overlays(&overlays, &mut warnings),
+        let overlay_path = paths::config_dir().map(|dir| dir.join("rules.toml"));
+        if let Some(path) = overlay_path.filter(|p| p.exists()) {
+            let parsed = fs::read_to_string(&path)
+                .map_err(|e| e.to_string())
+                .and_then(|text| {
+                    toml::from_str::<RuleOverlayFile>(&text).map_err(|e| e.to_string())
+                });
+            match parsed {
+                Ok(file) => catalog.apply_overlays(&file.rules, &mut warnings),
                 Err(err) => warnings.push(format!("Failed to parse rules overlay: {err}")),
             }
         }
@@ -213,6 +219,7 @@ impl RuleCatalog {
         self.visible_indices.len()
     }
 
+    /// True when the visible catalog has no entries.
     pub fn is_empty(&self) -> bool {
         self.visible_indices.is_empty()
     }
@@ -240,7 +247,9 @@ impl RuleCatalog {
 
     /// Look up an entry by its canonical id (case-insensitive).
     pub fn find_by_id(&self, id: &str) -> Option<&RuleEntry> {
-        self.lookup(&self.id_index, &normalize_key(id))
+        self.id_index
+            .get(&normalize_key(id))
+            .and_then(|idx| self.entries.get(*idx))
     }
 
     /// Look up an entry by its parsed rule value.
@@ -252,17 +261,11 @@ impl RuleCatalog {
 
     /// Find the visible-list position of a selected rule.
     pub fn index_of_selected(&self, selected: &SelectedRule) -> Option<usize> {
-        if let Some(id) = &selected.id {
-            if let Some(&idx) = self.id_index.get(&normalize_key(id)) {
-                return self.visible_position(idx);
-            }
-        }
-        self.rule_index
-            .get(&rule_key(selected.rule))
-            .and_then(|idx| self.visible_position(*idx))
-    }
-
-    fn visible_position(&self, entry_idx: usize) -> Option<usize> {
+        let entry_idx = selected
+            .id
+            .as_deref()
+            .and_then(|id| self.id_index.get(&normalize_key(id)).copied())
+            .or_else(|| self.rule_index.get(&rule_key(selected.rule)).copied())?;
         self.visible_indices.iter().position(|v| *v == entry_idx)
     }
 
@@ -299,17 +302,20 @@ impl RuleCatalog {
         if trimmed.is_empty() {
             return Err(RuleSelectError::UnknownId(selector.to_string()));
         }
-        if let Some(named) = self
-            .find_by_id(trimmed)
-            .or_else(|| self.find_by_alias(trimmed))
-        {
-            return Ok(SelectedRule::from_named(named));
+        let key = normalize_key(trimmed);
+        let named = self
+            .id_index
+            .get(&key)
+            .or_else(|| self.alias_index.get(&key))
+            .and_then(|idx| self.entries.get(*idx));
+        if let Some(entry) = named {
+            return Ok(SelectedRule::from_named(entry));
         }
         let rule = Rule::parse(trimmed).map_err(RuleSelectError::Parse)?;
         let mut selected = SelectedRule::from_rule(rule);
-        if let Some(named) = self.find_by_rule(rule) {
-            selected.id = Some(named.id.clone());
-            selected.name = Some(named.name.clone());
+        if let Some(entry) = self.find_by_rule(rule) {
+            selected.id = Some(entry.id.clone());
+            selected.name = Some(entry.name.clone());
         }
         Ok(selected)
     }
@@ -320,14 +326,6 @@ impl RuleCatalog {
             Some(named) => format!("{} ({})", rule, named.name),
             None => rule.to_string(),
         }
-    }
-
-    fn find_by_alias(&self, alias: &str) -> Option<&RuleEntry> {
-        self.lookup(&self.alias_index, &normalize_key(alias))
-    }
-
-    fn lookup<'a>(&'a self, index: &HashMap<String, usize>, key: &str) -> Option<&'a RuleEntry> {
-        index.get(key).and_then(|idx| self.entries.get(*idx))
     }
 
     fn load_builtin(warnings: &mut Vec<String>) -> Self {
@@ -365,7 +363,9 @@ impl RuleCatalog {
         for overlay in overlays {
             let id_key = overlay.id.to_ascii_lowercase();
             if let Some(&idx) = id_map.get(&id_key) {
-                merge_overlay_fields(&mut self.entries[idx], overlay, warnings);
+                let entry = &mut self.entries[idx];
+                try_update_rulestring(entry, overlay, warnings);
+                apply_optional_fields(entry, overlay);
                 continue;
             }
             if let Some(entry) = build_overlay_entry(overlay, &rule_map, &self.entries, warnings) {
@@ -431,7 +431,9 @@ impl Default for RuleCatalog {
 /// Error returned when a rule selector cannot be resolved.
 #[derive(Debug)]
 pub enum RuleSelectError {
+    /// Selector did not match any id or alias and was not a parseable rulestring.
     UnknownId(String),
+    /// Selector parsed as a rulestring candidate but the grammar rejected it.
     Parse(RuleParseError),
 }
 
@@ -447,12 +449,6 @@ impl std::fmt::Display for RuleSelectError {
 impl std::error::Error for RuleSelectError {}
 
 // ── Overlay helpers ─────────────────────────────────────────────────
-
-/// Apply field-level overrides from an overlay onto an existing entry.
-fn merge_overlay_fields(entry: &mut RuleEntry, overlay: &RuleOverlay, warnings: &mut Vec<String>) {
-    try_update_rulestring(entry, overlay, warnings);
-    apply_optional_fields(entry, overlay);
-}
 
 /// Validate and apply a rulestring override from an overlay.
 ///
@@ -488,16 +484,16 @@ fn apply_optional_fields(entry: &mut RuleEntry, overlay: &RuleOverlay) {
         entry.description = description.clone();
     }
     if let Some(tags) = &overlay.tags {
-        entry.tags = normalize_list(tags.clone());
+        entry.tags = normalize_unique_lowercase(tags.clone());
     }
     if let Some(aliases) = &overlay.aliases {
-        entry.aliases = normalize_list(aliases.clone());
+        entry.aliases = normalize_unique_lowercase(aliases.clone());
     }
     if let Some(params) = &overlay.default_params {
         entry.default_params = params.clone();
     }
     if let Some(provenance) = &overlay.provenance {
-        entry.provenance = normalize_lines(provenance.clone());
+        entry.provenance = trim_nonempty_lines(provenance.clone());
     }
     if let Some(favorite) = overlay.favorite {
         entry.favorite = favorite;
@@ -536,7 +532,11 @@ fn build_overlay_entry(
         warnings,
     )?;
     let (rule, canonical) = parse_overlay_rulestring(rulestring, overlay, warnings)?;
-    if let Some(existing_id) = existing_rulestring_owner(rule, rule_map, entries) {
+    if let Some(&existing_idx) = rule_map.get(&rule_key(rule)) {
+        let existing_id = entries
+            .get(existing_idx)
+            .map(|e| e.id.as_str())
+            .unwrap_or("unknown");
         warnings.push(format!(
             "Overlay rule '{}' duplicates rulestring '{}' (existing id '{}'); add as alias instead",
             overlay.id, canonical, existing_id
@@ -550,10 +550,10 @@ fn build_overlay_entry(
         rulestring: canonical,
         rulestring_raw: rulestring.trim().to_string(),
         description: description.to_string(),
-        tags: normalize_list(overlay.tags.clone().unwrap_or_default()),
-        aliases: normalize_list(overlay.aliases.clone().unwrap_or_default()),
+        tags: normalize_unique_lowercase(overlay.tags.clone().unwrap_or_default()),
+        aliases: normalize_unique_lowercase(overlay.aliases.clone().unwrap_or_default()),
         default_params: overlay.default_params.clone().unwrap_or_default(),
-        provenance: normalize_lines(overlay.provenance.clone().unwrap_or_default()),
+        provenance: trim_nonempty_lines(overlay.provenance.clone().unwrap_or_default()),
         favorite: overlay.favorite.unwrap_or(false),
         hidden: overlay.hidden.unwrap_or(false),
         source: RuleSource::User,
@@ -566,8 +566,11 @@ fn parse_overlay_rulestring(
     overlay: &RuleOverlay,
     warnings: &mut Vec<String>,
 ) -> Option<(Rule, String)> {
-    match normalize_rulestring(rulestring) {
-        Ok(pair) => Some(pair),
+    match Rule::parse(rulestring) {
+        Ok(rule) => {
+            let canonical = rule.to_string();
+            Some((rule, canonical))
+        }
         Err(err) => {
             warnings.push(format!(
                 "Invalid overlay rulestring '{}' for id '{}': {err}",
@@ -576,21 +579,6 @@ fn parse_overlay_rulestring(
             None
         }
     }
-}
-
-/// Return the id of the existing entry that owns `rule`, if any.
-fn existing_rulestring_owner<'a>(
-    rule: Rule,
-    rule_map: &HashMap<u32, usize>,
-    entries: &'a [RuleEntry],
-) -> Option<&'a str> {
-    let idx = rule_map.get(&rule_key(rule))?;
-    Some(
-        entries
-            .get(*idx)
-            .map(|e| e.id.as_str())
-            .unwrap_or("unknown"),
-    )
 }
 
 // ── Utility functions ───────────────────────────────────────────────
@@ -611,19 +599,13 @@ fn require_field<'a>(
     value
 }
 
-fn normalize_rulestring(text: &str) -> Result<(Rule, String), RuleParseError> {
-    let rule = Rule::parse(text)?;
-    let canonical = rule.to_string();
-    Ok((rule, canonical))
-}
-
 /// Normalize a string into a case-insensitive lookup key.
 fn normalize_key(text: &str) -> String {
     text.trim().to_ascii_lowercase()
 }
 
-/// Deduplicate and lowercase a list of tag/alias strings.
-fn normalize_list(items: Vec<String>) -> Vec<String> {
+/// Trim, lowercase, and deduplicate a list of tag/alias strings.
+fn normalize_unique_lowercase(items: Vec<String>) -> Vec<String> {
     let mut seen = HashSet::new();
     let mut out = Vec::new();
     for item in items {
@@ -639,8 +621,8 @@ fn normalize_list(items: Vec<String>) -> Vec<String> {
     out
 }
 
-/// Trim whitespace and drop empty strings from a provenance list.
-fn normalize_lines(items: Vec<String>) -> Vec<String> {
+/// Trim each line and drop empty entries; preserves order and case.
+fn trim_nonempty_lines(items: Vec<String>) -> Vec<String> {
     items
         .into_iter()
         .map(|s| s.trim().to_string())
@@ -662,7 +644,8 @@ fn build_entry_from_file(
     source: RuleSource,
 ) -> Result<RuleEntry, RuleParseError> {
     let raw_str = raw.rulestring.trim().to_string();
-    let (rule, canonical) = normalize_rulestring(&raw.rulestring)?;
+    let rule = Rule::parse(&raw.rulestring)?;
+    let canonical = rule.to_string();
     Ok(RuleEntry {
         id: raw.id,
         name: raw.display_name,
@@ -670,10 +653,10 @@ fn build_entry_from_file(
         rulestring: canonical,
         rulestring_raw: raw_str,
         description: raw.description,
-        tags: normalize_list(raw.tags),
-        aliases: normalize_list(raw.aliases),
+        tags: normalize_unique_lowercase(raw.tags),
+        aliases: normalize_unique_lowercase(raw.aliases),
         default_params: raw.default_params,
-        provenance: normalize_lines(raw.provenance),
+        provenance: trim_nonempty_lines(raw.provenance),
         favorite: false,
         hidden: false,
         source,
@@ -699,16 +682,6 @@ fn build_search_haystack(entry: &RuleEntry) -> String {
         hay.push_str(alias);
     }
     hay
-}
-
-fn default_overlay_path() -> Option<PathBuf> {
-    paths::config_dir().map(|dir| dir.join("rules.toml"))
-}
-
-fn read_overlay_file(path: &Path) -> Result<Vec<RuleOverlay>, String> {
-    let contents = fs::read_to_string(path).map_err(|e| e.to_string())?;
-    let file: RuleOverlayFile = toml::from_str(&contents).map_err(|e| e.to_string())?;
-    Ok(file.rules)
 }
 
 #[cfg(test)]

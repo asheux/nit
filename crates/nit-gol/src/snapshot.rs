@@ -17,7 +17,7 @@ use crate::{attractor::AttractorEvent, Grid, Rule};
 pub use crate::rle::{encode_rle, write_rle, write_rle_bits};
 
 /// Metadata written alongside each snapshot as a JSON sidecar file.
-#[derive(Clone, Debug, serde::Serialize)]
+#[derive(Clone, Debug, Default, serde::Serialize)]
 pub struct SnapshotMetadata {
     pub timestamp: String,
     pub workspace_root: Option<String>,

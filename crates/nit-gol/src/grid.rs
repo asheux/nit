@@ -49,7 +49,10 @@ impl Grid {
         self.height
     }
 
-    /// Raw cell storage (row-major, one byte per cell).
+    /// Raw cell storage (row-major, one byte per cell, `0` dead / `1` alive).
+    ///
+    /// [`Grid::set`] normalizes writes to `0`/`1`, so [`Grid::hash`] is
+    /// stable for any two grids that compare equal under [`PartialEq`].
     #[must_use]
     pub fn cells(&self) -> &[u8] {
         &self.cells
@@ -100,8 +103,9 @@ impl Grid {
 
     /// Copy this grid into a new grid of different dimensions.
     ///
-    /// Cells within the overlapping region (top-left anchored) are
-    /// preserved; cells outside that region in the new grid are dead.
+    /// Cells within the top-left overlapping region are preserved; cells
+    /// outside that region in the new grid are dead. Shrinking truncates
+    /// from the bottom-right; growing pads with dead cells.
     #[must_use]
     pub fn clone_with_size(&self, width: usize, height: usize) -> Grid {
         let mut new_grid = Grid::new(width, height);
@@ -110,11 +114,10 @@ impl Grid {
         if copy_w == 0 || copy_h == 0 {
             return new_grid;
         }
-        for y in 0..copy_h {
-            let src_start = y * self.width;
-            let dst_start = y * width;
-            new_grid.cells[dst_start..dst_start + copy_w]
-                .copy_from_slice(&self.cells[src_start..src_start + copy_w]);
+        let src_rows = self.cells.chunks_exact(self.width).take(copy_h);
+        let dst_rows = new_grid.cells.chunks_exact_mut(width).take(copy_h);
+        for (src, dst) in src_rows.zip(dst_rows) {
+            dst[..copy_w].copy_from_slice(&src[..copy_w]);
         }
         new_grid
     }

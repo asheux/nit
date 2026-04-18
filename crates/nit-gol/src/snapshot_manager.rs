@@ -383,9 +383,7 @@ fn record_write_success(inner: &SnapshotManagerInner, rle_path: PathBuf) {
 // ── Hashing helpers ─────────────────────────────────────────────────
 
 fn rule_hash(rule: &str) -> u64 {
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(rule.as_bytes());
-    blake3_u64(&hasher.finalize())
+    blake3_u64(&blake3::hash(rule.as_bytes()))
 }
 
 /// Two-word blake3 fingerprint of a grid's dimensions and cells.
@@ -457,10 +455,8 @@ impl RuleLogEntry {
 }
 
 fn append_rule_entry(entry: RuleLogEntry) -> io::Result<()> {
-    if let Some(parent) = entry.path.parent() {
-        if !parent.exists() {
-            fs::create_dir_all(parent)?;
-        }
+    if let Some(parent) = entry.path.parent().filter(|p| !p.exists()) {
+        fs::create_dir_all(parent)?;
     }
     let mut file = fs::OpenOptions::new()
         .create(true)

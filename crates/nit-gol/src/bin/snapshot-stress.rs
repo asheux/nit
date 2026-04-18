@@ -95,29 +95,14 @@ fn generate_seed_grid(width: usize, height: usize, seed: u64) -> Grid {
 fn build_meta(rule: Rule, grid: &Grid, seed: u64, iteration: usize) -> SnapshotMetadata {
     SnapshotMetadata {
         timestamp: now_iso8601(),
-        workspace_root: None,
-        file_path: None,
         seed_source: "stress".into(),
         seed_hash: seed,
         rule: rule.to_string(),
-        rule_id: None,
-        protocol: None,
-        protocol_hash: None,
-        protocol_phase_idx: None,
-        protocol_step_in_phase: None,
         generation: iteration as u64,
         alive_count: grid.alive_count(),
-        period: None,
-        score: None,
         wrap_mode: "dead".into(),
         tick_ms: 120,
-        attractor: None,
-        encoder_id: None,
-        encoder_params: None,
-        params_fingerprint: None,
-        input_hash: None,
-        seed_density: None,
-        seed_components: None,
+        ..Default::default()
     }
 }
 

@@ -5,6 +5,7 @@
 
 use crate::grid::EdgeMode;
 
+// Standard FNV-1a 64-bit basis and prime; do not alter.
 pub(crate) const FNV_OFFSET: u64 = 0xcbf29ce484222325;
 pub(crate) const FNV_PRIME: u64 = 0x100000001b3;
 
@@ -16,6 +17,8 @@ pub(crate) fn fnv1a(mut hash: u64, bytes: &[u8]) -> u64 {
     hash
 }
 
+/// Encode the edge-wrap policy as a single byte so it can be folded
+/// into a fingerprint without ambiguity between `Dead` and `Toroid`.
 pub(crate) fn edge_tag(edge: EdgeMode) -> u8 {
     match edge {
         EdgeMode::Dead => 0,

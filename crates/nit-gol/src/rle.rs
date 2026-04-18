@@ -104,16 +104,16 @@ fn write_row_separator<W: Write>(writer: &mut W, row: usize, total_rows: usize) 
 fn check_bitset_capacity(width: usize, height: usize, bits: &[u64]) -> io::Result<()> {
     let total = width.saturating_mul(height);
     let needed_words = total.div_ceil(64);
-    if bits.len() < needed_words {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!(
-                "grid bitset too small: need {needed_words} u64 words for {width}x{height}, got {}",
-                bits.len()
-            ),
-        ));
+    if bits.len() >= needed_words {
+        return Ok(());
     }
-    Ok(())
+    Err(io::Error::new(
+        io::ErrorKind::InvalidInput,
+        format!(
+            "grid bitset too small: need {needed_words} u64 words for {width}x{height}, got {}",
+            bits.len()
+        ),
+    ))
 }
 
 /// Run-length encode a single row by polling cells via a closure.

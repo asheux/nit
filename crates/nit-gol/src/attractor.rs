@@ -133,7 +133,7 @@ pub struct AttractorDetector {
     cfg: AttractorConfig,
     seen: HashMap<Fingerprint, Vec<SeenEntry>>,
     order: VecDeque<(Fingerprint, u64)>,
-    seen_entries: usize,
+    entry_count: usize,
     last: Option<Fingerprint>,
     seeded: bool,
     completed: bool,
@@ -145,7 +145,7 @@ impl AttractorDetector {
             cfg,
             seen: HashMap::new(),
             order: VecDeque::new(),
-            seen_entries: 0,
+            entry_count: 0,
             last: None,
             seeded: false,
             completed: false,
@@ -168,7 +168,7 @@ impl AttractorDetector {
     pub fn reset(&mut self) {
         self.seen.clear();
         self.order.clear();
-        self.seen_entries = 0;
+        self.entry_count = 0;
         self.last = None;
         self.seeded = false;
         self.completed = false;
@@ -191,7 +191,9 @@ impl AttractorDetector {
         self.observe_with_context(current, next, next_gen, rule, edge, None)
     }
 
-    /// Seed with protocol-aware extra context.
+    /// Register the initial grid state with optional protocol context mixed
+    /// into the fingerprint. Use this when running a multi-phase protocol
+    /// so identical grids in different phases are not conflated.
     pub fn seed_with_context(
         &mut self,
         grid: &Grid,
@@ -211,7 +213,9 @@ impl AttractorDetector {
         self.insert_entry(fp, gen, secondary);
     }
 
-    /// Observe with protocol-aware extra context.
+    /// Observe a generation transition with optional protocol context;
+    /// the protocol fields are folded into the fingerprint so phase
+    /// boundaries do not masquerade as cycles.
     pub fn observe_with_context(
         &mut self,
         current: &Grid,
@@ -299,7 +303,7 @@ impl AttractorDetector {
         };
         self.seen.entry(fp).or_default().push(entry);
         self.order.push_back((fp, gen));
-        self.seen_entries = self.seen_entries.saturating_add(1);
+        self.entry_count = self.entry_count.saturating_add(1);
         self.evict_if_needed();
     }
 
@@ -308,7 +312,7 @@ impl AttractorDetector {
         if self.cfg.max_history == 0 {
             return;
         }
-        while self.seen_entries > self.cfg.max_history {
+        while self.entry_count > self.cfg.max_history {
             let Some((fp, gen)) = self.order.pop_front() else {
                 break;
             };
@@ -317,7 +321,7 @@ impl AttractorDetector {
             };
             if let Some(pos) = entries.iter().position(|e| e.first_seen == gen) {
                 entries.remove(pos);
-                self.seen_entries = self.seen_entries.saturating_sub(1);
+                self.entry_count = self.entry_count.saturating_sub(1);
             }
             if entries.is_empty() {
                 self.seen.remove(&fp);

@@ -34,7 +34,7 @@ fn make_repeat_detector(max_history: usize) -> AttractorDetector {
     })
 }
 
-/// Encode one generation of Conway evolution under a dead-border edge.
+/// Advance one generation under Conway's rules with a dead border.
 fn conway_step(grid: &Grid) -> Grid {
     step(grid, Rule::conway(), EdgeMode::Dead)
 }
@@ -123,23 +123,20 @@ mod evolution {
     /// A glider translates one cell down-right every 4 generations.
     #[test]
     fn glider_moves_down_right() {
-        let mut arena = Grid::new(6, 6);
-        let seed_cells = [(1, 0), (2, 1), (0, 2), (1, 2), (2, 2)];
-        for (col, row) in seed_cells {
-            arena.set(col, row, true);
+        let mut state = Grid::new(6, 6);
+        for (col, row) in [(1, 0), (2, 1), (0, 2), (1, 2), (2, 2)] {
+            state.set(col, row, true);
         }
-        let mut advanced = arena;
         for generation in 1..=4u32 {
-            advanced = conway_step(&advanced);
+            state = conway_step(&state);
             assert!(
-                advanced.alive_count() > 0,
+                state.alive_count() > 0,
                 "glider should stay alive through gen {generation}"
             );
         }
-        let translated = [(2, 1), (3, 2), (1, 3), (2, 3), (3, 3)];
-        for (col, row) in translated {
+        for (col, row) in [(2, 1), (3, 2), (1, 3), (2, 3), (3, 3)] {
             assert!(
-                advanced.get(col, row),
+                state.get(col, row),
                 "glider missing live cell at ({col}, {row}) after 4 steps"
             );
         }
@@ -210,6 +207,16 @@ mod encoding {
 mod attractor_detection {
     use super::*;
 
+    /// Seed, advance one generation, and return the detector event.
+    fn run_single_step(grid: &Grid, max_history: usize) -> Option<AttractorEvent> {
+        let rule = Rule::conway();
+        let edge = EdgeMode::Dead;
+        let mut detector = make_repeat_detector(max_history);
+        detector.seed(grid, 0, rule, edge);
+        let next = conway_step(grid);
+        detector.observe(grid, &next, 1, rule, edge)
+    }
+
     /// A still-life block emits a FixedPoint event on the first observe.
     #[test]
     fn attractor_still_life_fixed_point() {
@@ -276,14 +283,5 @@ mod attractor_detection {
             event.is_none(),
             "differing secondary hashes must not trigger repeat"
         );
-    }
-
-    fn run_single_step(grid: &Grid, max_history: usize) -> Option<AttractorEvent> {
-        let rule = Rule::conway();
-        let edge = EdgeMode::Dead;
-        let mut detector = make_repeat_detector(max_history);
-        detector.seed(grid, 0, rule, edge);
-        let next = conway_step(grid);
-        detector.observe(grid, &next, 1, rule, edge)
     }
 }

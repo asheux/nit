@@ -713,6 +713,17 @@ pub struct GenomeShadowEval {
     pub at: Instant,
 }
 
+/// In-flight authoritative genome evaluation batch for a single agent's
+/// TurnCompleted. Holds the worker thread count, the worst delta seen so
+/// far, and the mission the turn belonged to. One batch per agent keeps
+/// parallel swarm turns from clobbering each other.
+#[derive(Clone, Debug, Default)]
+pub struct GenomeEvalBatch {
+    pub pending: usize,
+    pub worst_delta: i32,
+    pub mission_id: Option<String>,
+}
+
 #[derive(Clone, Debug)]
 pub struct QueuedCodexTurn {
     pub agent_id: String,
@@ -2042,19 +2053,15 @@ pub struct AppState {
     /// Populated by the file watcher as files change; cleared on TurnStarted.
     #[serde(skip)]
     pub genome_shadow_evals: HashMap<PathBuf, GenomeShadowEval>,
-    /// Number of authoritative genome evaluations still in flight (background threads).
-    /// When this reaches 0 after a TurnCompleted, the retry decision is made.
+    /// Per-agent in-flight genome evaluation batches. Each completed turn
+    /// opens a batch keyed by `agent_id`; results tagged with that id
+    /// decrement `pending` until it reaches 0, at which point the retry
+    /// decision is made for THAT agent. Keeping batches per-agent lets
+    /// parallel swarm turns finalize independently — without this, a later
+    /// turn's `dispatch_turn_genome_evals` would clobber an earlier agent's
+    /// slot and its retry would never fire.
     #[serde(skip)]
-    pub genome_eval_pending: usize,
-    /// Running worst delta across in-flight turn evaluations.
-    #[serde(skip)]
-    pub genome_eval_worst_delta: i32,
-    /// Agent ID for the in-flight turn evaluation batch (for retry dispatch).
-    #[serde(skip)]
-    pub genome_eval_agent_id: Option<String>,
-    /// Mission ID for the in-flight turn evaluation batch.
-    #[serde(skip)]
-    pub genome_eval_mission_id: Option<String>,
+    pub genome_eval_batches: HashMap<String, GenomeEvalBatch>,
     /// Set by `Action::Save` to request a background genome evaluation.
     /// The TUI layer drains this and dispatches to `GenomeWorker`.
     #[serde(skip)]
@@ -2305,10 +2312,7 @@ impl AppState {
             genome_agent_streak: HashMap::new(),
             genome_agent_min_tier: HashMap::new(),
             genome_shadow_evals: HashMap::new(),
-            genome_eval_pending: 0,
-            genome_eval_worst_delta: 0,
-            genome_eval_agent_id: None,
-            genome_eval_mission_id: None,
+            genome_eval_batches: HashMap::new(),
             genome_save_eval_pending: None,
             gate_monitor_scroll: 0,
             gate_monitor_last_max_scroll: usize::MAX,

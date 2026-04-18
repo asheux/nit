@@ -1,5 +1,33 @@
 use super::*;
 
+const BUILTIN_TOML: &str = r#"
+[[rules]]
+id = "base"
+display_name = "Base"
+rulestring = "B3/S23"
+description = "Base rule"
+tags = ["classic"]
+aliases = ["base"]
+"#;
+
+const OVERLAY_TOML: &str = r#"
+[[rules]]
+id = "base"
+description = "Override rule"
+tags = ["override"]
+aliases = ["override"]
+hidden = true
+
+[[rules]]
+id = "custom"
+display_name = "Custom"
+rulestring = "B2/S"
+description = "Custom rule"
+tags = ["custom"]
+aliases = ["c"]
+favorite = true
+"#;
+
 fn parse_builtin_toml(source: &str) -> RuleCatalog {
     let builtin: RuleFile = toml::from_str(source).expect("parse builtin toml");
     let entries = builtin
@@ -26,8 +54,9 @@ fn builtins_unique_and_canonical() {
         warnings.is_empty(),
         "built-in catalog loaded with warnings: {warnings:?}"
     );
+
     let mut seen_ids = HashSet::new();
-    let mut seen_rules = HashSet::new();
+    let mut seen_rule_keys = HashSet::new();
     for entry in &catalog.entries {
         assert!(
             seen_ids.insert(entry.id.to_ascii_lowercase()),
@@ -35,7 +64,7 @@ fn builtins_unique_and_canonical() {
             entry.id
         );
         assert!(
-            seen_rules.insert(rule_key(entry.rule)),
+            seen_rule_keys.insert(rule_key(entry.rule)),
             "duplicate rulestring for {}: {}",
             entry.id,
             entry.rulestring
@@ -54,35 +83,9 @@ fn builtins_unique_and_canonical() {
 /// rules (create), with correct field propagation.
 #[test]
 fn overlay_merges_and_adds_rules() {
-    let builtin_toml = r#"
-[[rules]]
-id = "base"
-display_name = "Base"
-rulestring = "B3/S23"
-description = "Base rule"
-tags = ["classic"]
-aliases = ["base"]
-"#;
-    let overlay_toml = r#"
-[[rules]]
-id = "base"
-description = "Override rule"
-tags = ["override"]
-aliases = ["override"]
-hidden = true
-
-[[rules]]
-id = "custom"
-display_name = "Custom"
-rulestring = "B2/S"
-description = "Custom rule"
-tags = ["custom"]
-aliases = ["c"]
-favorite = true
-"#;
-    let mut catalog = parse_builtin_toml(builtin_toml);
+    let mut catalog = parse_builtin_toml(BUILTIN_TOML);
     let mut warnings = Vec::new();
-    apply_overlay_toml(&mut catalog, overlay_toml, &mut warnings);
+    apply_overlay_toml(&mut catalog, OVERLAY_TOML, &mut warnings);
     assert!(
         warnings.is_empty(),
         "overlay application should not warn: {warnings:?}"

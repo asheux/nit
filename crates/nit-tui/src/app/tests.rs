@@ -5539,3 +5539,81 @@ fn artifact_popup_queues_when_artifact_agent_is_busy() {
     assert_eq!(state.agents.queued_codex_turns.len(), 1);
     assert_eq!(state.agents.queued_codex_turns[0].agent_id, "agent-b");
 }
+
+/// Regression: overlapping `TurnCompleted` events from parallel swarm agents
+/// must not clobber each other's genome-eval state. Before per-agent batches,
+/// a second `dispatch_turn_genome_evals` overwrote the single-slot pending
+/// counter and agent_id, silently dropping the first agent's retry.
+#[test]
+fn dispatch_turn_genome_evals_tracks_per_agent_batches_independently() {
+    let mut state = state_for_test_in_workspace("genome-batches");
+    state.settings.genome.genome_context_enabled = true;
+
+    let workspace = state.workspace_root.clone();
+    let file_a1 = workspace.join("a1.rs");
+    let file_a2 = workspace.join("a2.rs");
+    let file_b1 = workspace.join("b1.rs");
+    fs::write(&file_a1, "fn a1() {}\n").unwrap();
+    fs::write(&file_a2, "fn a2() {}\n").unwrap();
+    fs::write(&file_b1, "fn b1() {}\n").unwrap();
+
+    state.genome_turn_modified.insert(
+        "agent-A".into(),
+        [file_a1.clone(), file_a2.clone()].into_iter().collect(),
+    );
+    state
+        .genome_turn_modified
+        .insert("agent-B".into(), [file_b1.clone()].into_iter().collect());
+
+    let genome = crate::genome_worker::GenomeWorker::new();
+
+    // Interleave the dispatches the way parallel swarm would.
+    super::dispatch_turn_genome_evals(&mut state, &genome, "agent-A", &Some("mis-A".into()));
+    super::dispatch_turn_genome_evals(&mut state, &genome, "agent-B", &Some("mis-B".into()));
+
+    let batch_a = state
+        .genome_eval_batches
+        .get("agent-A")
+        .expect("agent-A batch present");
+    let batch_b = state
+        .genome_eval_batches
+        .get("agent-B")
+        .expect("agent-B batch present");
+    assert_eq!(batch_a.pending, 2, "A has 2 pending files");
+    assert_eq!(batch_b.pending, 1, "B has 1 pending file");
+    assert_eq!(batch_a.mission_id.as_deref(), Some("mis-A"));
+    assert_eq!(batch_b.mission_id.as_deref(), Some("mis-B"));
+}
+
+/// Each authoritative eval request must carry the dispatching agent_id all
+/// the way to the worker's output so `drain_genome_results` can route
+/// decrements to the right batch.
+#[test]
+fn genome_worker_evaluate_from_disk_tags_result_with_agent_id() {
+    let workspace = std::env::temp_dir().join(format!(
+        "nit-genome-tag-{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos(),
+    ));
+    fs::create_dir_all(&workspace).expect("create workspace");
+    let path = workspace.join("tagged.rs");
+    fs::write(&path, "fn main() {}\n").unwrap();
+
+    let genome = crate::genome_worker::GenomeWorker::new();
+    assert!(genome.evaluate_from_disk(path.clone(), "agent-X".into()));
+
+    let result = genome
+        .rx
+        .recv_timeout(std::time::Duration::from_secs(10))
+        .expect("eval result");
+    assert_eq!(result.agent_id.as_deref(), Some("agent-X"));
+    assert_eq!(result.path, path);
+    assert!(!result.shadow);
+    assert!(!result.save_eval);
+    assert!(result.report.is_some());
+
+    let _ = fs::remove_dir_all(&workspace);
+}
