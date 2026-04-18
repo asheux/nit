@@ -5528,6 +5528,19 @@ fn map_key_to_action(key: KeyEvent, state: &AppState, input: &mut InputState) ->
         } else {
             Action::ShowSubstrate
         }),
+        // Reliable non-F-key binding: Ctrl+Space. Useful on macOS where
+        // function keys often require `fn` or are captured by the OS.
+        KeyEvent {
+            code: KeyCode::Char(' '),
+            modifiers,
+            ..
+        } if modifiers.contains(KeyModifiers::CONTROL) && state.mode != Mode::Insert => {
+            Some(if state.show_substrate_overlay {
+                Action::HideSubstrate
+            } else {
+                Action::ShowSubstrate
+            })
+        }
         KeyEvent {
             code: KeyCode::Tab,
             modifiers: KeyModifiers::NONE,
@@ -11985,6 +11998,11 @@ fn handle_substrate_overlay_key(key: &KeyEvent, state: &mut AppState) -> bool {
 
     match key.code {
         KeyCode::Esc | KeyCode::F(3) | KeyCode::Char('q') => {
+            state.show_substrate_overlay = false;
+            true
+        }
+        // Ctrl+Space also toggles the overlay closed.
+        KeyCode::Char(' ') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             state.show_substrate_overlay = false;
             true
         }
