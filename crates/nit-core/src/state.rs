@@ -2028,8 +2028,22 @@ pub struct AppState {
     pub genome_computing: bool,
     /// Consecutive genome retry attempts for the current agent turn.
     /// Reset to 0 when quality improves or stays the same.
+    ///
+    /// NOTE: For parallel swarms, prefer `genome_retry_counts` (per-agent).
+    /// This scalar is kept for display and non-agent-scoped paths (manual
+    /// saves, shadow evals) where agent context is not available.
     #[serde(skip)]
     pub genome_retry_count: u8,
+    /// Per-agent retry counters. In parallel mode, retry budget is enforced
+    /// per-agent so a single noisy agent can't starve other agents' retries.
+    /// Key: agent_id. Missing entry is treated as 0.
+    #[serde(skip)]
+    pub genome_retry_counts: HashMap<String, u8>,
+    /// Per-agent quality delta from the last authoritative evaluation batch.
+    /// Used by `build_genome_retry_prompt` to decide whether to retry.
+    /// Key: agent_id. Missing entry is treated as 0 (no data, no retry).
+    #[serde(skip)]
+    pub genome_quality_deltas: HashMap<String, i32>,
     /// Pending claim-violation retry requests queued by `agent_bus` when a
     /// FileWrite auto-claim conflicts. Drained by the TUI event loop after
     /// each event-apply cycle; shares `genome_retry_count` as its budget.
@@ -2307,6 +2321,8 @@ impl AppState {
             genome_mission_modified: HashMap::new(),
             genome_turn_active: HashSet::new(),
             genome_retry_count: 0,
+            genome_retry_counts: HashMap::new(),
+            genome_quality_deltas: HashMap::new(),
             pending_claim_retries: Vec::new(),
             pending_interventions: Vec::new(),
             genome_agent_streak: HashMap::new(),

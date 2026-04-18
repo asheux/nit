@@ -99,8 +99,34 @@ pub fn reduce_proposals(
             continue;
         }
 
-        // Downgrade if retry budget exhausted.
-        let kind = if state.genome_retry_count >= genome_retry_limit {
+        // Downgrade if the recipient agent's retry budget is exhausted.
+        // Per-agent lookup — a single burnt-out agent must not silence
+        // interventions targeting other agents running in parallel.
+        let budget_exhausted = match &prop.target {
+            InterventionTarget::Agent { agent_id } => {
+                state
+                    .genome_retry_counts
+                    .get(agent_id)
+                    .copied()
+                    .unwrap_or(0)
+                    >= genome_retry_limit
+            }
+            InterventionTarget::AgentPair { a, b } => {
+                let ca = state.genome_retry_counts.get(a).copied().unwrap_or(0);
+                let cb = state.genome_retry_counts.get(b).copied().unwrap_or(0);
+                ca.min(cb) >= genome_retry_limit
+            }
+            InterventionTarget::Mission { .. } | InterventionTarget::Global => {
+                state
+                    .genome_retry_counts
+                    .values()
+                    .copied()
+                    .max()
+                    .unwrap_or(0)
+                    >= genome_retry_limit
+            }
+        };
+        let kind = if budget_exhausted {
             InterventionKind::EmitSignalOnly
         } else {
             prop.kind.clone()

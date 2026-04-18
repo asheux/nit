@@ -272,7 +272,14 @@ fn metabolism_tick_runs_arbiters() {
 #[test]
 fn intervention_downgrades_to_signal_only_when_retry_budget_exhausted() {
     let mut state = test_state();
-    state.genome_retry_count = ARBITER_RETRY_LIMIT;
+    // Per-agent budgets: both agents in the pair must be exhausted for the
+    // AgentPair intervention to downgrade.
+    state
+        .genome_retry_counts
+        .insert("a".to_string(), ARBITER_RETRY_LIMIT);
+    state
+        .genome_retry_counts
+        .insert("b".to_string(), ARBITER_RETRY_LIMIT);
     inject_claim_violation(&mut state, "a", "b", "foo.rs", 0, 0);
     inject_claim_violation(&mut state, "b", "a", "foo.rs", 0, 1);
     inject_claim_violation(&mut state, "a", "b", "bar.rs", 0, 2);

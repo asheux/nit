@@ -227,10 +227,24 @@ impl AgentBusEvent {
                 }
 
                 // Capture genome baselines and activate turn tracking.
-                // On a fresh turn (not a retry), reset baselines to current state.
-                // During retries (retry_count > 0), keep the original baselines.
-                if state.genome_retry_count == 0 {
-                    state.genome_baselines = state.genome_reports.clone();
+                // On a fresh turn for this agent (per-agent retry_count == 0),
+                // seed any missing baselines from current reports. We never
+                // overwrite existing baselines: in parallel mode another
+                // agent's in-flight retry may still compare against the
+                // original snapshot for that file.
+                let fresh_turn = state
+                    .genome_retry_counts
+                    .get(agent_id)
+                    .copied()
+                    .unwrap_or(0)
+                    == 0;
+                if fresh_turn {
+                    for (path, report) in state.genome_reports.iter() {
+                        state
+                            .genome_baselines
+                            .entry(path.clone())
+                            .or_insert_with(|| report.clone());
+                    }
                 }
                 // Per-agent turn tracking: init this agent's modified set and
                 // snapshot git dirty files so TurnCompleted can attribute changes.

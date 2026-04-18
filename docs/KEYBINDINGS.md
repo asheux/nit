@@ -72,6 +72,55 @@
 - Backspace / Delete: Delete
 - Esc: Switch to Normal mode
 
+### Vim-style motions (Normal + Visual mode)
+- w: Jump to the start of the next word (`alnum + _`, punctuation is a boundary)
+- Shift+W: Jump to the start of the next WORD (whitespace-separated)
+- Shift+B: Jump to the start of the previous WORD
+- Shift+E: Jump to the end of the current/next WORD
+- 0: Jump to the first column of the line
+- ^: Jump to the first non-blank character of the line
+- {: Jump to the previous blank-line paragraph boundary
+- }: Jump to the next blank-line paragraph boundary
+- Shift+H: Jump to the top of the visible viewport
+- Shift+M: Jump to the middle of the visible viewport
+- Shift+L: Jump to the bottom of the visible viewport
+
+### Vim-style operators (Normal mode)
+- x: Delete the character under the cursor
+- Shift+X: Delete the character before the cursor (backspace)
+- Shift+D: Delete from cursor to end of line
+- Shift+C: Change from cursor to end of line (delete + Insert mode)
+- s: Substitute character (delete char + Insert mode)
+- Shift+J: Join the next line onto the current line with a space separator
+- ~: Toggle the case of the character under the cursor (and advance)
+- Shift+Y: Yank the current line (same as `yy`)
+
+### Vim-style char search on the current line (Normal + Visual mode)
+- f<char>: Jump forward to the next occurrence of `<char>` on the line
+- Shift+F<char>: Jump backward to the previous occurrence of `<char>` on the line
+- t<char>: Jump forward to one before the next `<char>` (till)
+- Shift+T<char>: Jump backward to one after the previous `<char>` (till)
+- ;: Repeat the last f / F / t / T in the same direction
+- ,: Repeat the last f / F / t / T in the opposite direction
+
+### Vim-style replace chord (Normal mode)
+- r<char>: Replace the character under the cursor with `<char>` (does not enter Insert mode)
+
+### Vim-style viewport / scroll (Normal + Visual mode)
+- Ctrl+D: Scroll down half a page (cursor follows)
+- Ctrl+U: Scroll up half a page (cursor follows)
+- zz: Center the viewport on the cursor line
+- zt: Scroll so the cursor line is at the top of the viewport
+- zb: Scroll so the cursor line is at the bottom of the viewport
+
+### Vim-style in-buffer search (Normal + Visual mode)
+- *: Search forward for the whole word under the cursor; highlight every match
+- \# (Shift+3): Search backward for the whole word under the cursor; highlight every match
+- n: Jump to the next occurrence of the active search term (same direction as the last search)
+- Shift+N: Jump to the next occurrence in the opposite direction
+- /: Open the search prompt. Type a term and press Enter to jump to the next match; Esc cancels without applying.
+- Repeated `*` / `#` on an occurrence of the word scans through all matches in that direction (equivalent to pressing `n` / `N`).
+
 ## Agent Ops
 - Tab / Shift+Tab / Left/Right: Cycle Ops tabs (ROSTER / MISSIONS / DAG / ARTIFACTS / MCP / ALERTS / DIAG / SCRATCHPAD)
 - j/k or Up/Down: Move selection

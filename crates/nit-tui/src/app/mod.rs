@@ -1656,6 +1656,29 @@ const GENOME_RETRY_LIMIT: u8 = 3;
 const GENOME_RETRY_MIN_LINES: usize = 120;
 
 /// Push a visible message to the agent console and diagnostics when a genome retry fires.
+/// Log-friendly agent id: strip the `#swarm-<mission>-` segment so messages
+/// read as `claude-opus-4-7#clone-01` instead of
+/// `claude-opus-4-7#swarm-mis-001-clone-01`. Mirrors the compaction used in
+/// the signals/claims overlay.
+fn compact_agent_id_for_log(id: &str) -> String {
+    let Some((base, rest)) = id.split_once("#swarm-") else {
+        return id.to_string();
+    };
+    let Some(first_dash) = rest.find('-') else {
+        return id.to_string();
+    };
+    let after_first = &rest[first_dash + 1..];
+    let Some(second_dash_rel) = after_first.find('-') else {
+        return id.to_string();
+    };
+    let suffix = &after_first[second_dash_rel + 1..];
+    if suffix.is_empty() {
+        id.to_string()
+    } else {
+        format!("{base}#{suffix}")
+    }
+}
+
 fn push_genome_retry_message(
     state: &mut AppState,
     agent_id: &str,
@@ -1664,7 +1687,8 @@ fn push_genome_retry_message(
 ) {
     let mut lines = Vec::new();
     lines.push(format!(
-        "\u{21b3} genome retry {attempt}/{GENOME_RETRY_LIMIT}"
+        "\u{21b3} [{}] genome retry {attempt}/{GENOME_RETRY_LIMIT}",
+        compact_agent_id_for_log(agent_id)
     ));
 
     for path in degraded_files {
@@ -1745,10 +1769,36 @@ fn drain_pending_claim_retries(
     claude: &ClaudeRunner,
 ) {
     while let Some(req) = state.pending_claim_retries.pop() {
-        if state.genome_retry_count >= GENOME_RETRY_LIMIT {
-            break;
+        // Per-agent budget: only the violating agent's counter is checked
+        // and incremented. Another agent's exhausted budget must not block
+        // this agent's retry (the bug that made parallel swarms appear to
+        // retry sequentially).
+        let count = state
+            .genome_retry_counts
+            .get(&req.agent_id)
+            .copied()
+            .unwrap_or(0);
+        if count >= GENOME_RETRY_LIMIT {
+            continue;
         }
-        state.genome_retry_count = state.genome_retry_count.saturating_add(1);
+        let new_count = count.saturating_add(1);
+        state
+            .genome_retry_counts
+            .insert(req.agent_id.clone(), new_count);
+        state
+            .agents
+            .diag_events
+            .push(nit_core::AgentDiagnosticEvent {
+                severity: nit_core::AgentAlertSeverity::Warn,
+                source: "substrate".into(),
+                message: format!(
+                    "[{}] claim-retry {new_count}/{GENOME_RETRY_LIMIT} (wrote {}, blocked by {})",
+                    compact_agent_id_for_log(&req.agent_id),
+                    req.path.display(),
+                    compact_agent_id_for_log(&req.conflicting_holder),
+                ),
+                at: timestamp_label(state),
+            });
         let prompt = format!(
             "CLAIM VIOLATION: you wrote to {} but {} holds an {} claim. Rationale: {}. Back off and coordinate — choose a different file or wait for the claim to expire.",
             req.path.display(),
@@ -1803,10 +1853,33 @@ fn drain_pending_interventions(
         let Some(agent_id) = recipient else {
             continue;
         };
-        if state.genome_retry_count >= GENOME_RETRY_LIMIT {
-            break;
+        // Per-agent budget (parallel-safe): skip only this recipient's
+        // overflowing intervention, not every pending intervention.
+        let count = state
+            .genome_retry_counts
+            .get(&agent_id)
+            .copied()
+            .unwrap_or(0);
+        if count >= GENOME_RETRY_LIMIT {
+            continue;
         }
-        state.genome_retry_count = state.genome_retry_count.saturating_add(1);
+        let new_count = count.saturating_add(1);
+        state
+            .genome_retry_counts
+            .insert(agent_id.clone(), new_count);
+        state
+            .agents
+            .diag_events
+            .push(nit_core::AgentDiagnosticEvent {
+                severity: nit_core::AgentAlertSeverity::Warn,
+                source: "arbiter".into(),
+                message: format!(
+                    "[{}] intervention retry {new_count}/{GENOME_RETRY_LIMIT} — {}",
+                    compact_agent_id_for_log(&agent_id),
+                    iv.rationale,
+                ),
+                at: timestamp_label(state),
+            });
         dispatch_agent_prompt(
             state,
             vitals,
@@ -1823,6 +1896,21 @@ fn drain_pending_interventions(
 /// or tripped the parsimony detector. Returns `None` if neither condition
 /// applies or the retry limit is reached. Parsimony bloat is routed through
 /// this same path because only the writer can fix it.
+/// Remove baselines for files this agent touched, leaving other agents'
+/// baselines intact. Replaces the old global `genome_baselines.clear()` so a
+/// settling agent in a parallel swarm doesn't wipe the reference snapshot
+/// another still-running agent needs.
+fn clear_baselines_for_agent(state: &mut AppState, agent_id: &str) {
+    let paths: Vec<std::path::PathBuf> = state
+        .genome_turn_modified
+        .get(agent_id)
+        .map(|s| s.iter().cloned().collect())
+        .unwrap_or_default();
+    for path in paths {
+        state.genome_baselines.remove(&path);
+    }
+}
+
 fn build_genome_retry_prompt(
     state: &mut AppState,
     agent_id: &str,
@@ -1848,17 +1936,31 @@ fn build_genome_retry_prompt(
     });
 
     // Retry on degradation relative to baselines OR parsimony bloat.
-    if state.genome_quality_delta >= 0 && !any_bloat {
-        state.genome_retry_count = 0;
-        state.genome_baselines.clear();
+    // Read per-agent delta (falls back to 0 when no batch has reported yet).
+    let agent_delta = state
+        .genome_quality_deltas
+        .get(agent_id)
+        .copied()
+        .unwrap_or(0);
+    if agent_delta >= 0 && !any_bloat {
+        state.genome_retry_counts.remove(agent_id);
+        state.genome_quality_deltas.remove(agent_id);
+        clear_baselines_for_agent(state, agent_id);
         return None;
     }
-    if state.genome_retry_count >= GENOME_RETRY_LIMIT {
-        state.genome_baselines.clear();
+    let agent_retry_count = state
+        .genome_retry_counts
+        .get(agent_id)
+        .copied()
+        .unwrap_or(0);
+    if agent_retry_count >= GENOME_RETRY_LIMIT {
+        clear_baselines_for_agent(state, agent_id);
         return None;
     }
-    state.genome_retry_count += 1;
-    let attempt = state.genome_retry_count;
+    let attempt = agent_retry_count + 1;
+    state
+        .genome_retry_counts
+        .insert(agent_id.to_string(), attempt);
 
     // Collect files that degraded relative to their baseline, tripped
     // parsimony bloat, OR new files below the agent's quality threshold.
@@ -1938,8 +2040,9 @@ fn build_genome_retry_prompt(
         }
     }
     if degraded_files.is_empty() {
-        state.genome_retry_count = 0;
-        state.genome_baselines.clear();
+        state.genome_retry_counts.remove(agent_id);
+        state.genome_quality_deltas.remove(agent_id);
+        clear_baselines_for_agent(state, agent_id);
         return None;
     }
 
@@ -2552,6 +2655,11 @@ fn drain_genome_results(
                 .remove(&agent_id)
                 .map(|b| (b.worst_delta, b.mission_id))
                 .unwrap_or((0, None));
+            // Per-agent delta (parallel-safe); the scalar is also updated so
+            // display surfaces still reflect the latest batch outcome.
+            state
+                .genome_quality_deltas
+                .insert(agent_id.clone(), worst_delta);
             state.genome_quality_delta = worst_delta;
 
             // Adaptive quality thresholds: streak tracking.
@@ -2628,7 +2736,11 @@ fn drain_genome_results(
             // targeted retry — not one aggregated retry sent to whichever
             // agent happened to finalize last.
             if let Some((prompt, degraded_files)) = build_genome_retry_prompt(state, &agent_id) {
-                let attempt = state.genome_retry_count;
+                let attempt = state
+                    .genome_retry_counts
+                    .get(&agent_id)
+                    .copied()
+                    .unwrap_or(0);
                 push_genome_retry_message(state, &agent_id, attempt, &degraded_files);
                 dispatch_agent_prompt(
                     state,
