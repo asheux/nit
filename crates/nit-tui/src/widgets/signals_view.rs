@@ -104,11 +104,11 @@ fn format_row(
     let show_id = width >= 70;
     let show_age = width >= 50;
     let mut row = format!(
-        "{:>4}  {:<14} {:<10} {:<20}",
+        "{:>4}  {:<14} {:<16} {:<28}",
         strength,
         truncate(kind, 14),
         by,
-        truncate(target, 20)
+        truncate(target, 28)
     );
     if show_age {
         row.push_str(&format!(" {age:>5}"));
@@ -134,8 +134,8 @@ fn kind_label(kind: SignalKind) -> &'static str {
 fn format_target(t: &SignalTarget) -> String {
     match t {
         SignalTarget::Global => "Global".to_string(),
-        SignalTarget::Agent { agent_id } => format!("agent:{}", truncate(agent_id, 13)),
-        SignalTarget::File { path } => format!("file:{}", truncate(&path.to_string_lossy(), 14)),
+        SignalTarget::Agent { agent_id } => format!("agent:{}", truncate(agent_id, 22)),
+        SignalTarget::File { path } => format!("file:{}", truncate(&path.to_string_lossy(), 22)),
     }
 }
 

@@ -47,11 +47,34 @@ pub fn render(
         matches!(state.app_kind, nit_core::AppKind::Games) && state.games.running;
     let status_label = build_status_label(&status_text, compact_status_mode);
 
+    // Mood badge — living-system global modulator. Placed at top-left so it
+    // is always visible; color-coded per mood state.
+    let mood_label: &'static str = match state.substrate.mood {
+        nit_core::mood::Mood::Exploration => "EXPLORATION",
+        nit_core::mood::Mood::Consolidation => "CONSOLIDATION",
+        nit_core::mood::Mood::Defensive => "DEFENSIVE",
+    };
+    let mood_color = match state.substrate.mood {
+        nit_core::mood::Mood::Exploration => theme.success,
+        nit_core::mood::Mood::Consolidation => theme.accent,
+        nit_core::mood::Mood::Defensive => theme.warning,
+    };
+    let mood_segment = format!(" | {mood_label} ");
+
     let inner_width = area.width.saturating_sub(2) as usize;
-    let fixed_width = [" nit ", " | ", " | ", &mode, " | ", app_label, " | UTF-8 "]
-        .iter()
-        .map(|s| s.width())
-        .sum::<usize>();
+    let fixed_width = [
+        " nit ",
+        " | ",
+        " | ",
+        &mode,
+        " | ",
+        app_label,
+        " | UTF-8 ",
+        &mood_segment,
+    ]
+    .iter()
+    .map(|s| s.width())
+    .sum::<usize>();
     let min_vitals_width = 26usize;
     let left_budget = inner_width.saturating_sub(min_vitals_width + 1);
     let file_max = left_budget.saturating_sub(fixed_width);
@@ -100,7 +123,15 @@ pub fn render(
         Span::styled(mode, Style::default().fg(theme.title)),
         Span::styled(" | ", Style::default().fg(theme.border)),
         Span::styled(app_label, Style::default().fg(theme.title)),
-        Span::styled(" | UTF-8 ", Style::default().fg(theme.border)),
+        Span::styled(" | UTF-8", Style::default().fg(theme.border)),
+        Span::styled(" | ", Style::default().fg(theme.border)),
+        Span::styled(
+            mood_label,
+            Style::default()
+                .fg(mood_color)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(" ", Style::default().fg(theme.border)),
     ]);
 
     let left_width: usize = spans.iter().map(|s| s.content.as_ref().width()).sum();

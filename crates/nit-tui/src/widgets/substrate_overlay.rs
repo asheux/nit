@@ -21,12 +21,16 @@ const TAB_LABELS: &[(SubstrateOverlayTab, &str)] = &[
     (SubstrateOverlayTab::Assumptions, " ASSUMPTIONS "),
 ];
 
-/// Preferred popup rect — center ~85% of screen.
+/// Preferred popup rect — content-appropriate, not full-screen. The table
+/// needs ~105 cols to show every column; we cap width there, cap height at
+/// ~28 rows, and bias smaller when the screen is small.
 pub fn preferred_size(screen: Rect) -> Rect {
-    let w = screen.width.saturating_mul(85) / 100;
-    let h = screen.height.saturating_mul(80) / 100;
-    let w = w.clamp(60, screen.width.saturating_sub(4).max(60));
-    let h = h.clamp(20, screen.height.saturating_sub(4).max(20));
+    let target_w = (screen.width.saturating_mul(55) / 100).max(72);
+    let target_h = (screen.height.saturating_mul(50) / 100).max(16);
+    let w = target_w.min(110).min(screen.width.saturating_sub(4));
+    let h = target_h.min(28).min(screen.height.saturating_sub(4));
+    let w = w.max(60);
+    let h = h.max(12);
     let x = screen.x + (screen.width.saturating_sub(w)) / 2;
     let y = screen.y + (screen.height.saturating_sub(h)) / 2;
     Rect {

@@ -14,31 +14,23 @@ use crate::{
     theme::Theme,
 };
 
-// Title is " [M?] VISUALIZER " where [M?] is the 3-char mood glyph, followed
-// by APPLY / SEED / SNAP / SEARCH buttons. The leading space is the same
-// separator used by the block border, so title_button_hit subtracts 1.
-const MOOD_GLYPH_LEN: u16 = 4; // "[E·] " / "[C·] " / "[D!] "
+// Title is " VISUALIZER " followed by APPLY / SEED / SNAP / SEARCH buttons.
+// The leading space is the same separator used by the block border, so
+// title_button_hit subtracts 1. The mood indicator now lives in the top
+// status bar (see widgets/top_bar.rs).
 const TITLE_LABEL: &str = "VISUALIZER ";
 const BTN_APPLY_LABEL: &str = " APPLY ";
 const BTN_SEED_LABEL: &str = " SEED ";
 const BTN_SNAP_LABEL: &str = " SNAP ";
 const BTN_SEARCH_LABEL: &str = " SEARCH ";
 
-fn mood_glyph(state: &AppState) -> &'static str {
-    match state.substrate.mood {
-        nit_core::mood::Mood::Exploration => "[E.]",
-        nit_core::mood::Mood::Consolidation => "[C.]",
-        nit_core::mood::Mood::Defensive => "[D!]",
-    }
-}
-
 /// Returns an action if the click column (relative to the visualizer rect)
 /// hits an APPLY / SEED / SNAP / SEARCH title button.
 pub fn title_button_hit(col_in_rect: u16) -> Option<Action> {
-    // Title text starts 1 cell in from the left border. The rendered prefix is
-    // "<mood_glyph> VISUALIZER " (MOOD_GLYPH_LEN + space + TITLE_LABEL len).
+    // Title text starts 1 cell in from the left border. The rendered prefix
+    // is " VISUALIZER " (1 leading space + TITLE_LABEL len).
     let col = col_in_rect.saturating_sub(1);
-    let prefix_len = MOOD_GLYPH_LEN + 1 + TITLE_LABEL.len() as u16;
+    let prefix_len = 1 + TITLE_LABEL.len() as u16;
 
     let apply_start = prefix_len;
     let apply_end = apply_start + BTN_APPLY_LABEL.len() as u16;
@@ -96,9 +88,7 @@ pub fn render(
         .add_modifier(Modifier::BOLD);
     let sep_style = Style::default().fg(title_color);
 
-    let glyph = mood_glyph(state);
     let title_spans: Vec<Span<'static>> = vec![
-        Span::styled(glyph, title_style),
         Span::styled(" ", sep_style),
         Span::styled(TITLE_LABEL, title_style),
         Span::styled(BTN_APPLY_LABEL, btn_active),

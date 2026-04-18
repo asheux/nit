@@ -67,7 +67,7 @@ pub fn build_lines(state: &AppState, theme: &Theme, width: u16) -> Vec<Line<'sta
         let age = current_gen.saturating_sub(assumption.posted_at_gen);
         let row = format_row(
             &format!("{remaining}g"),
-            &truncate(&assumption.posted_by, 10),
+            &truncate(&assumption.posted_by, 16),
             &format_target(&assumption.target),
             &format!("{age}g"),
             &truncate(&assumption.rationale, 30),
@@ -97,10 +97,10 @@ fn format_row(
     let show_rationale = width >= 70;
     let show_age = width >= 50;
     let mut row = format!(
-        "{:>4}  {:<10} {:<20}",
+        "{:>4}  {:<16} {:<28}",
         ttl,
         by,
-        truncate(target, 20),
+        truncate(target, 28),
     );
     if show_age {
         row.push_str(&format!(" {age:>5}"));
@@ -118,7 +118,7 @@ fn format_target(t: &AssumptionTarget) -> String {
     match t {
         AssumptionTarget::Global => "Global".to_string(),
         AssumptionTarget::File { path } => {
-            format!("file:{}", truncate(&path.to_string_lossy(), 14))
+            format!("file:{}", truncate(&path.to_string_lossy(), 22))
         }
         AssumptionTarget::Region {
             path,
@@ -126,7 +126,7 @@ fn format_target(t: &AssumptionTarget) -> String {
             end_line,
         } => format!(
             "region:{}#{}-{}",
-            truncate(&path.to_string_lossy(), 10),
+            truncate(&path.to_string_lossy(), 16),
             start_line,
             end_line
         ),

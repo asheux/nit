@@ -78,7 +78,7 @@ pub fn build_lines(state: &AppState, theme: &Theme, width: u16) -> Vec<Line<'sta
         let row = format_row(
             &format!("{remaining}g"),
             kind_label(claim.kind),
-            &truncate(&claim.claimed_by, 10),
+            &truncate(&claim.claimed_by, 16),
             &format_target(&claim.target),
             &format!("{age}g"),
             &truncate(&claim.id, 24),
@@ -104,11 +104,11 @@ fn format_row(
     let show_id = width >= 70;
     let show_age = width >= 50;
     let mut row = format!(
-        "{:>4}  {:<14} {:<10} {:<20}",
+        "{:>4}  {:<14} {:<16} {:<28}",
         ttl,
         truncate(kind, 14),
         by,
-        truncate(target, 20)
+        truncate(target, 28)
     );
     if show_age {
         row.push_str(&format!(" {age:>5}"));
@@ -131,14 +131,14 @@ fn kind_label(kind: ClaimKind) -> &'static str {
 fn format_target(t: &ClaimTarget) -> String {
     match t {
         ClaimTarget::Global => "Global".to_string(),
-        ClaimTarget::File { path } => format!("file:{}", truncate(&path.to_string_lossy(), 14)),
+        ClaimTarget::File { path } => format!("file:{}", truncate(&path.to_string_lossy(), 22)),
         ClaimTarget::Region {
             path,
             start_line,
             end_line,
         } => format!(
             "region:{}#{}-{}",
-            truncate(&path.to_string_lossy(), 10),
+            truncate(&path.to_string_lossy(), 16),
             start_line,
             end_line
         ),

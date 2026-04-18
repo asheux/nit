@@ -10394,6 +10394,12 @@ fn handle_file_tree_key(
     if !state.file_tree.open {
         return false;
     }
+    // When the substrate overlay is open, all keys (including Esc) should
+    // route to the overlay handler, not to the file tree. Otherwise Esc
+    // would close the file tree instead of the overlay.
+    if state.show_substrate_overlay {
+        return false;
+    }
     if is_global_quit_key(key) {
         return false;
     }
