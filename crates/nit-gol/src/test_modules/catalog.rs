@@ -1,19 +1,52 @@
 use super::*;
 
+fn parse_builtin_toml(source: &str) -> RuleCatalog {
+    let builtin: RuleFile = toml::from_str(source).expect("parse builtin toml");
+    let entries = builtin
+        .rules
+        .into_iter()
+        .map(|raw| build_entry_from_file(raw, RuleSource::Builtin).expect("build entry"))
+        .collect();
+    RuleCatalog::from_entries(entries)
+}
+
+fn apply_overlay_toml(catalog: &mut RuleCatalog, source: &str, warnings: &mut Vec<String>) {
+    let overlay: RuleOverlayFile = toml::from_str(source).expect("parse overlay toml");
+    catalog.apply_overlays(&overlay.rules, warnings);
+    catalog.rebuild_indices(warnings);
+}
+
 /// Every built-in rule has a unique (case-insensitive) id, a unique
 /// canonical rulestring, and round-trips cleanly through the parser.
 #[test]
 fn builtins_unique_and_canonical() {
     let mut warnings = Vec::new();
     let catalog = RuleCatalog::load_builtin(&mut warnings);
-    assert!(warnings.is_empty());
+    assert!(
+        warnings.is_empty(),
+        "built-in catalog loaded with warnings: {warnings:?}"
+    );
     let mut seen_ids = HashSet::new();
     let mut seen_rules = HashSet::new();
     for entry in &catalog.entries {
-        assert!(seen_ids.insert(entry.id.to_ascii_lowercase()));
-        assert!(seen_rules.insert(rule_key(entry.rule)));
+        assert!(
+            seen_ids.insert(entry.id.to_ascii_lowercase()),
+            "duplicate built-in id: {}",
+            entry.id
+        );
+        assert!(
+            seen_rules.insert(rule_key(entry.rule)),
+            "duplicate rulestring for {}: {}",
+            entry.id,
+            entry.rulestring
+        );
         let parsed = Rule::parse(&entry.rulestring).expect("parse canonical");
-        assert_eq!(parsed.to_string(), entry.rulestring);
+        assert_eq!(
+            parsed.to_string(),
+            entry.rulestring,
+            "{} rulestring must round-trip through the parser",
+            entry.id
+        );
     }
 }
 
@@ -47,25 +80,24 @@ tags = ["custom"]
 aliases = ["c"]
 favorite = true
 "#;
-    let builtin: RuleFile = toml::from_str(builtin_toml).expect("builtin parse");
-    let mut entries = Vec::new();
-    for raw in builtin.rules {
-        entries.push(build_entry_from_file(raw, RuleSource::Builtin).unwrap());
-    }
-    let mut catalog = RuleCatalog::from_entries(entries);
-
-    let overlay: RuleOverlayFile = toml::from_str(overlay_toml).expect("overlay parse");
+    let mut catalog = parse_builtin_toml(builtin_toml);
     let mut warnings = Vec::new();
-    catalog.apply_overlays(&overlay.rules, &mut warnings);
-    catalog.rebuild_indices(&mut warnings);
-    assert!(warnings.is_empty());
+    apply_overlay_toml(&mut catalog, overlay_toml, &mut warnings);
+    assert!(
+        warnings.is_empty(),
+        "overlay application should not warn: {warnings:?}"
+    );
 
-    let base = catalog.find_by_id("base").expect("base present");
-    assert_eq!(base.description, "Override rule");
-    assert_eq!(base.tags, vec!["override"]);
-    assert!(base.hidden);
+    let base = catalog
+        .find_by_id("base")
+        .expect("base entry after overlay");
+    assert_eq!(base.description, "Override rule", "merged description");
+    assert_eq!(base.tags, vec!["override"], "merged tags");
+    assert!(base.hidden, "overlay sets hidden = true");
 
-    let custom = catalog.find_by_id("custom").expect("custom present");
-    assert_eq!(custom.rulestring, "B2/S");
-    assert!(custom.favorite);
+    let custom = catalog
+        .find_by_id("custom")
+        .expect("custom entry added by overlay");
+    assert_eq!(custom.rulestring, "B2/S", "custom rulestring");
+    assert!(custom.favorite, "overlay sets favorite = true");
 }

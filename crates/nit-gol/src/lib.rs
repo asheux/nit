@@ -1,7 +1,7 @@
 //! Game of Life simulation engine.
 //!
-//! Provides rule parsing, grid evolution, attractor detection,
-//! RLE snapshot encoding, and a scored rule evaluation framework.
+//! Covers rule parsing and evolution, attractor detection, RLE snapshot
+//! encoding, background snapshot management, and scored rule evaluation.
 
 #![forbid(unsafe_code)]
 

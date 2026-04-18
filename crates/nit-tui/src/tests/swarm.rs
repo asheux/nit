@@ -1327,12 +1327,7 @@ fn parallel_template_dispatches_multiple_writers_concurrently() {
         gate_bundle: None,
         gate_custom: None,
         gate_selection: "auto:none".into(),
-        agent_ids: vec![
-            "planner".into(),
-            "a1".into(),
-            "a2".into(),
-            "a3".into(),
-        ],
+        agent_ids: vec!["planner".into(), "a1".into(), "a2".into(), "a3".into()],
         stage: SwarmStage::Executing,
         tasks: vec![
             SwarmTask {
@@ -2536,7 +2531,10 @@ fn ensure_agent_coverage_injects_review_task_for_uncovered_general_agent() {
     assert_eq!(injected.agent_id, "agent-c");
     assert_eq!(injected.role.as_deref(), Some("review"));
     assert!(!injected.writes, "injected task must be read-only");
-    assert!(injected.deps.is_empty(), "injected task should not add deps");
+    assert!(
+        injected.deps.is_empty(),
+        "injected task should not add deps"
+    );
     assert!(
         warnings.iter().any(|w| w.contains("agent-c")),
         "warning should name the uncovered agent, got: {warnings:?}"
@@ -2545,12 +2543,7 @@ fn ensure_agent_coverage_injects_review_task_for_uncovered_general_agent() {
 
 #[test]
 fn ensure_agent_coverage_uses_research_role_for_research_missions() {
-    let mut tasks = vec![make_writer_task(
-        "t1",
-        "agent-a",
-        Some("research"),
-        false,
-    )];
+    let mut tasks = vec![make_writer_task("t1", "agent-a", Some("research"), false)];
     let available = vec!["agent-a".to_string(), "agent-b".to_string()];
     let _warnings = ensure_agent_coverage(
         &mut tasks,
@@ -2608,12 +2601,7 @@ fn ensure_agent_coverage_noop_when_all_agents_covered() {
 fn ensure_agent_coverage_noop_for_lab_template() {
     // Lab intentionally allows multiple tasks per agent and silent agents,
     // so the safety net should not fire.
-    let mut tasks = vec![make_writer_task(
-        "t1",
-        "agent-a",
-        Some("integrate"),
-        true,
-    )];
+    let mut tasks = vec![make_writer_task("t1", "agent-a", Some("integrate"), true)];
     let available = vec![
         "agent-a".to_string(),
         "agent-b".to_string(),
@@ -2626,7 +2614,10 @@ fn ensure_agent_coverage_noop_for_lab_template() {
         SwarmMissionKind::General,
         &available,
     );
-    assert!(warnings.is_empty(), "lab template opts out of coverage fill");
+    assert!(
+        warnings.is_empty(),
+        "lab template opts out of coverage fill"
+    );
     assert_eq!(task_fingerprint(&tasks), before);
 }
 
@@ -2652,7 +2643,10 @@ fn ensure_agent_coverage_noop_for_bulk_template() {
         SwarmMissionKind::General,
         &available,
     );
-    assert!(warnings.is_empty(), "bulk template opts out of coverage fill");
+    assert!(
+        warnings.is_empty(),
+        "bulk template opts out of coverage fill"
+    );
     assert_eq!(task_fingerprint(&tasks), before);
 }
 

@@ -13,6 +13,9 @@ use std::thread;
 use nit_gol::snapshot::{now_iso8601, prune_oldest, write_snapshot, SnapshotMetadata};
 use nit_gol::{Grid, Rule};
 
+const DEFAULT_STACK_MB: usize = 256;
+const MIN_STACK_MB: usize = 32;
+
 fn main() {
     let args: Vec<String> = env::args().skip(1).collect();
     let params = StressParams::from_args(&args);
@@ -53,6 +56,8 @@ impl Default for StressParams {
 }
 
 impl StressParams {
+    /// Parse positional CLI arguments, falling back to default values
+    /// for any that are missing or fail to parse.
     fn from_args(args: &[String]) -> Self {
         let d = Self::default();
         Self {
@@ -70,12 +75,18 @@ fn parse_arg<T: std::str::FromStr>(args: &[String], idx: usize) -> Option<T> {
     args.get(idx).and_then(|s| s.parse().ok())
 }
 
+/// Generate a deterministic alive/dead pattern from `(x, y, seed)`.
+///
+/// The mixing function is a cheap multiplicative hash — not
+/// cryptographic, but reproducible across runs with the same seed so
+/// that stress-test snapshots are byte-stable.
+#[must_use]
 fn generate_seed_grid(width: usize, height: usize, seed: u64) -> Grid {
     let mut grid = Grid::new(width, height);
     for y in 0..height {
         for x in 0..width {
-            let v = ((x as u64).wrapping_mul(31) ^ (y as u64).wrapping_mul(17) ^ seed) % 7;
-            grid.set(x, y, v < 2);
+            let mix = (x as u64).wrapping_mul(31) ^ (y as u64).wrapping_mul(17) ^ seed;
+            grid.set(x, y, mix % 7 < 2);
         }
     }
     grid
@@ -115,9 +126,9 @@ fn run_stress(params: &StressParams) -> std::io::Result<()> {
     let rule = Rule::conway();
     let grid = generate_seed_grid(params.width, params.height, params.seed);
 
-    for i in 0..params.iterations {
-        let name_base = format!("stress-{i:05}");
-        let meta = build_meta(rule, &grid, params.seed, i);
+    for iteration in 0..params.iterations {
+        let name_base = format!("stress-{iteration:05}");
+        let meta = build_meta(rule, &grid, params.seed, iteration);
         write_snapshot(&params.dir, &name_base, &grid, rule, &meta)?;
         if params.max_files > 0 {
             prune_oldest(&params.dir, params.max_files)?;
@@ -129,14 +140,13 @@ fn run_stress(params: &StressParams) -> std::io::Result<()> {
 /// Resolve the worker thread stack size from environment.
 ///
 /// Checks `NIT_GOL_IO_STACK_MB` first, falls back to `NIT_GOL_STACK_MB`,
-/// then defaults to 256 MB with a 32 MB minimum.
+/// then defaults to 256 MB with a 32 MB minimum so snapshot writes never
+/// starve for stack.
 fn resolve_stack_bytes() -> usize {
-    const DEFAULT_MB: usize = 256;
-    const MIN_MB: usize = 32;
     let from_env = env::var("NIT_GOL_IO_STACK_MB")
         .or_else(|_| env::var("NIT_GOL_STACK_MB"))
         .ok()
         .and_then(|value| value.parse::<usize>().ok());
-    let mb = from_env.unwrap_or(DEFAULT_MB).max(MIN_MB);
+    let mb = from_env.unwrap_or(DEFAULT_STACK_MB).max(MIN_STACK_MB);
     mb.saturating_mul(1024 * 1024)
 }

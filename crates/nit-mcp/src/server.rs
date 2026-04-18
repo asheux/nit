@@ -70,12 +70,7 @@ pub fn run<R: BufRead, W: Write, B: Backchannel>(
 /// Notifications (no `id`) still get a response written in the error path so
 /// operators never see silent drops — production MCP clients ignore spurious
 /// responses, and Codex in practice always sends an `id`.
-pub fn handle_line<B: Backchannel>(
-    raw: &str,
-    bc: &B,
-    agent_id: &str,
-    counter: &mut u64,
-) -> String {
+pub fn handle_line<B: Backchannel>(raw: &str, bc: &B, agent_id: &str, counter: &mut u64) -> String {
     let value: Value = match serde_json::from_str(raw) {
         Ok(v) => v,
         Err(err) => {
@@ -251,22 +246,21 @@ pub fn build_backchannel_request(
 ) -> Result<BackchannelRequest, JsonRpcError> {
     match tool {
         "emit_signal" => {
-            let kind = serde_json::from_value(
-                args.get("kind").cloned().unwrap_or(Value::Null),
-            )
-            .map_err(|e| JsonRpcError {
-                code: INVALID_PARAMS,
-                message: format!("invalid kind: {e}"),
-            })?;
-            let target = serde_json::from_value(
-                args.get("target").cloned().unwrap_or(Value::Null),
-            )
-            .map_err(|e| JsonRpcError {
-                code: INVALID_PARAMS,
-                message: format!("invalid target: {e}"),
-            })?;
+            let kind = serde_json::from_value(args.get("kind").cloned().unwrap_or(Value::Null))
+                .map_err(|e| JsonRpcError {
+                    code: INVALID_PARAMS,
+                    message: format!("invalid kind: {e}"),
+                })?;
+            let target = serde_json::from_value(args.get("target").cloned().unwrap_or(Value::Null))
+                .map_err(|e| JsonRpcError {
+                    code: INVALID_PARAMS,
+                    message: format!("invalid target: {e}"),
+                })?;
             let payload = args.get("payload").cloned().unwrap_or(Value::Null);
-            let strength = args.get("strength").and_then(|v| v.as_f64()).map(|f| f as f32);
+            let strength = args
+                .get("strength")
+                .and_then(|v| v.as_f64())
+                .map(|f| f as f32);
             Ok(BackchannelRequest::EmitSignal {
                 request_id,
                 agent_id: agent_id.to_string(),
@@ -277,20 +271,16 @@ pub fn build_backchannel_request(
             })
         }
         "assert_claim" => {
-            let kind = serde_json::from_value(
-                args.get("kind").cloned().unwrap_or(Value::Null),
-            )
-            .map_err(|e| JsonRpcError {
-                code: INVALID_PARAMS,
-                message: format!("invalid kind: {e}"),
-            })?;
-            let target = serde_json::from_value(
-                args.get("target").cloned().unwrap_or(Value::Null),
-            )
-            .map_err(|e| JsonRpcError {
-                code: INVALID_PARAMS,
-                message: format!("invalid target: {e}"),
-            })?;
+            let kind = serde_json::from_value(args.get("kind").cloned().unwrap_or(Value::Null))
+                .map_err(|e| JsonRpcError {
+                    code: INVALID_PARAMS,
+                    message: format!("invalid kind: {e}"),
+                })?;
+            let target = serde_json::from_value(args.get("target").cloned().unwrap_or(Value::Null))
+                .map_err(|e| JsonRpcError {
+                    code: INVALID_PARAMS,
+                    message: format!("invalid target: {e}"),
+                })?;
             let ttl_gens = args.get("ttl_gens").and_then(|v| v.as_u64()).unwrap_or(3);
             let rationale = args
                 .get("rationale")
@@ -307,13 +297,11 @@ pub fn build_backchannel_request(
             })
         }
         "assert_assumption" => {
-            let target = serde_json::from_value(
-                args.get("target").cloned().unwrap_or(Value::Null),
-            )
-            .map_err(|e| JsonRpcError {
-                code: INVALID_PARAMS,
-                message: format!("invalid target: {e}"),
-            })?;
+            let target = serde_json::from_value(args.get("target").cloned().unwrap_or(Value::Null))
+                .map_err(|e| JsonRpcError {
+                    code: INVALID_PARAMS,
+                    message: format!("invalid target: {e}"),
+                })?;
             let fact = args.get("fact").cloned().unwrap_or(Value::Null);
             let ttl_gens = args.get("ttl_gens").and_then(|v| v.as_u64()).unwrap_or(3);
             let rationale = args
@@ -404,10 +392,7 @@ mod tests {
         );
         let tools = resp["result"]["tools"].as_array().expect("tools array");
         assert_eq!(tools.len(), 3);
-        let names: Vec<&str> = tools
-            .iter()
-            .map(|t| t["name"].as_str().unwrap())
-            .collect();
+        let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
         assert!(names.contains(&"emit_signal"));
         assert!(names.contains(&"assert_claim"));
         assert!(names.contains(&"assert_assumption"));

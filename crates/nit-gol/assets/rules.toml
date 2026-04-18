@@ -1,3 +1,8 @@
+# Built-in Game of Life rule catalog.
+# Each entry is keyed by `id` (lower-snake-case, case-insensitive for overlays).
+# Overlays defined elsewhere merge into this table by matching `id`.
+# Sections below group rules by theme; ordering is cosmetic only.
+
 # ── Classic rules ────────────────────────────────────────────────────
 
 [[rules]]

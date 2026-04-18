@@ -45,11 +45,11 @@ pub struct MissionHit {
 
 pub(crate) const STOPWORDS: &[&str] = &[
     "the", "a", "an", "and", "or", "but", "of", "in", "to", "for", "with", "on", "at", "by",
-    "from", "as", "is", "are", "was", "were", "be", "been", "this", "that", "these", "those",
-    "it", "its", "not", "no", "i", "you", "we", "they", "he", "she", "do", "does", "did", "have",
-    "has", "had", "will", "would", "should", "could", "can", "may", "might", "must", "so", "if",
-    "then", "than", "also", "only", "just", "like", "into", "out", "up", "down", "over", "under",
-    "off", "per", "via",
+    "from", "as", "is", "are", "was", "were", "be", "been", "this", "that", "these", "those", "it",
+    "its", "not", "no", "i", "you", "we", "they", "he", "she", "do", "does", "did", "have", "has",
+    "had", "will", "would", "should", "could", "can", "may", "might", "must", "so", "if", "then",
+    "than", "also", "only", "just", "like", "into", "out", "up", "down", "over", "under", "off",
+    "per", "via",
 ];
 
 pub(crate) fn tokenize(text: &str) -> Vec<String> {
@@ -111,7 +111,10 @@ pub fn path_tokens(paths: &[String]) -> Vec<String> {
 }
 
 fn index_path(workspace_root: &Path) -> PathBuf {
-    workspace_root.join(".nit").join("memory").join("index.json")
+    workspace_root
+        .join(".nit")
+        .join("memory")
+        .join("index.json")
 }
 
 pub fn save_index(workspace_root: &Path, index: &MissionMemoryIndex) -> io::Result<()> {
@@ -120,8 +123,8 @@ pub fn save_index(workspace_root: &Path, index: &MissionMemoryIndex) -> io::Resu
         fs::create_dir_all(parent)?;
     }
     let tmp = path.with_extension("json.tmp");
-    let bytes = serde_json::to_vec_pretty(index)
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+    let bytes =
+        serde_json::to_vec_pretty(index).map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
     fs::write(&tmp, bytes)?;
     fs::rename(&tmp, &path)?;
     Ok(())
@@ -288,7 +291,9 @@ pub fn upsert_mission(workspace_root: &Path, mission_id: &str) -> io::Result<Mis
     if let Some(new_entry) = index_one_mission(&dir, mission_id) {
         index.missions.retain(|m| m.mission_id != mission_id);
         index.missions.push(new_entry);
-        index.missions.sort_by(|a, b| a.mission_id.cmp(&b.mission_id));
+        index
+            .missions
+            .sort_by(|a, b| a.mission_id.cmp(&b.mission_id));
     }
     save_index(workspace_root, &index)?;
     Ok(index)
@@ -350,8 +355,7 @@ pub fn retrieve_similar(
             if mission_terms.is_empty() {
                 return None;
             }
-            let overlap_terms: Vec<&String> =
-                query_terms.intersection(&mission_terms).collect();
+            let overlap_terms: Vec<&String> = query_terms.intersection(&mission_terms).collect();
             if overlap_terms.is_empty() {
                 return None;
             }

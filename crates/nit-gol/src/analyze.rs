@@ -13,6 +13,7 @@ use crate::{step::step, EdgeMode, Grid, Rule};
 /// (period, transient length, population statistics) that produced it,
 /// plus the final grid state for downstream inspection.
 #[derive(Clone, Debug)]
+#[must_use]
 pub struct RuleEvaluation {
     pub rule: Rule,
     /// Composite quality score — higher is better.
@@ -31,6 +32,7 @@ pub struct RuleEvaluation {
 
 /// Lightweight score summary used for ranking when the final grid is not needed.
 #[derive(Clone, Debug)]
+#[must_use]
 pub struct RuleScore {
     pub rule: Rule,
     pub score: f32,
@@ -41,19 +43,61 @@ pub struct RuleScore {
     pub alive_end: u32,
 }
 
+/// Raw simulation output, pre-scoring.
+struct SimMetrics {
+    final_grid: Grid,
+    period: Option<u32>,
+    transient: u32,
+    avg_population: f32,
+    max_population: u32,
+    alive_end: u32,
+}
+
 /// Simulate a rule on `seed` for up to `max_generations` and score it.
 ///
 /// The simulation halts early on extinction (zero alive cells) or when
 /// a previously seen grid hash is encountered (cycle detection). The
 /// returned [`RuleEvaluation`] carries both the score and supporting
 /// metrics.
-#[must_use]
 pub fn evaluate_rule(
     seed: &Grid,
     rule: Rule,
     edge: EdgeMode,
     max_generations: u32,
 ) -> RuleEvaluation {
+    let metrics = simulate_with_cycle_detection(seed, rule, edge, max_generations);
+    let score = score_rule(
+        seed.width() * seed.height(),
+        metrics.transient,
+        metrics.period,
+        metrics.avg_population,
+        metrics.max_population,
+        metrics.alive_end,
+    );
+    RuleEvaluation {
+        rule,
+        score,
+        period: metrics.period,
+        transient: metrics.transient,
+        avg_population: metrics.avg_population,
+        max_population: metrics.max_population,
+        alive_end: metrics.alive_end,
+        steps: metrics.transient,
+        final_grid: metrics.final_grid,
+    }
+}
+
+/// Step the seed forward, tracking population stats and stopping on a
+/// repeat hash (cycle) or extinction.
+///
+/// On cycle detection the final grid is the matched state (not stepped
+/// forward) so downstream callers can inspect the oscillator itself.
+fn simulate_with_cycle_detection(
+    seed: &Grid,
+    rule: Rule,
+    edge: EdgeMode,
+    max_generations: u32,
+) -> SimMetrics {
     let mut grid = seed.clone();
     let mut seen: HashMap<u64, u32> = HashMap::new();
     let mut sum_population: u64 = 0;
@@ -62,27 +106,25 @@ pub fn evaluate_rule(
     let mut transient = 0;
     let mut alive_end = 0;
 
-    for gen in 0..max_generations {
+    for generation in 0..max_generations {
         let hash = grid.hash();
         if let Some(prev) = seen.get(&hash) {
-            period = Some(gen.saturating_sub(*prev));
-            transient = gen;
+            period = Some(generation.saturating_sub(*prev));
+            transient = generation;
             alive_end = grid.alive_count() as u32;
             break;
         }
-        seen.insert(hash, gen);
+        seen.insert(hash, generation);
         let alive = grid.alive_count() as u32;
         sum_population += alive as u64;
-        if alive > max_population {
-            max_population = alive;
-        }
+        max_population = max_population.max(alive);
         alive_end = alive;
         if alive == 0 {
-            transient = gen + 1;
+            transient = generation + 1;
             break;
         }
         grid = step(&grid, rule, edge);
-        transient = gen + 1;
+        transient = generation + 1;
     }
 
     let avg_population = if transient > 0 {
@@ -90,25 +132,14 @@ pub fn evaluate_rule(
     } else {
         0.0
     };
-    let score = score_rule(
-        seed.width() * seed.height(),
-        transient,
-        period,
-        avg_population,
-        max_population,
-        alive_end,
-    );
 
-    RuleEvaluation {
-        rule,
-        score,
+    SimMetrics {
+        final_grid: grid,
         period,
         transient,
         avg_population,
         max_population,
         alive_end,
-        steps: transient,
-        final_grid: grid,
     }
 }
 

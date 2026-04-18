@@ -35,7 +35,9 @@ fn tick_expires_claims_past_ttl() {
     let claim = Claim {
         id: "c-seed-0".to_string(),
         kind: ClaimKind::ExclusiveWrite,
-        target: ClaimTarget::File { path: PathBuf::from("foo.rs") },
+        target: ClaimTarget::File {
+            path: PathBuf::from("foo.rs"),
+        },
         claimed_by: "seed".to_string(),
         claimed_at_gen: 0,
         ttl_gens: 2,
@@ -130,7 +132,9 @@ fn tick_saves_only_when_dirty() {
     let claim = Claim {
         id: "c-seed-0".to_string(),
         kind: ClaimKind::ExclusiveWrite,
-        target: ClaimTarget::File { path: PathBuf::from("foo.rs") },
+        target: ClaimTarget::File {
+            path: PathBuf::from("foo.rs"),
+        },
         claimed_by: "seed".to_string(),
         claimed_at_gen: 0,
         ttl_gens: 2,

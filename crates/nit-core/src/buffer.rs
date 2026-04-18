@@ -1410,7 +1410,10 @@ impl Buffer {
     /// vim `^`: move to the first non-blank character on the line.
     pub fn move_first_non_blank(&mut self) {
         self.end_edit_group();
-        let line = self.cursor.line.min(self.rope.len_lines().saturating_sub(1));
+        let line = self
+            .cursor
+            .line
+            .min(self.rope.len_lines().saturating_sub(1));
         let line_start = self.rope.line_to_char(line);
         let line_len = self.line_char_len(line);
         let mut col = 0;
@@ -1427,7 +1430,10 @@ impl Buffer {
     /// vim `g_`: move to the last non-blank character on the line.
     pub fn move_last_non_blank(&mut self) {
         self.end_edit_group();
-        let line = self.cursor.line.min(self.rope.len_lines().saturating_sub(1));
+        let line = self
+            .cursor
+            .line
+            .min(self.rope.len_lines().saturating_sub(1));
         let line_start = self.rope.line_to_char(line);
         let line_len = self.line_char_len(line);
         if line_len == 0 {
@@ -1517,7 +1523,10 @@ impl Buffer {
     /// vim `D`: delete from cursor to end of line.
     pub fn delete_to_end(&mut self) {
         self.end_edit_group();
-        let line = self.cursor.line.min(self.rope.len_lines().saturating_sub(1));
+        let line = self
+            .cursor
+            .line
+            .min(self.rope.len_lines().saturating_sub(1));
         let line_start = self.rope.line_to_char(line);
         let line_len = self.line_char_len(line);
         let col = self.cursor.col.min(line_len);
@@ -1537,7 +1546,10 @@ impl Buffer {
     /// Caller is expected to switch to insert mode afterwards.
     pub fn substitute_line(&mut self) {
         self.end_edit_group();
-        let line = self.cursor.line.min(self.rope.len_lines().saturating_sub(1));
+        let line = self
+            .cursor
+            .line
+            .min(self.rope.len_lines().saturating_sub(1));
         let line_start = self.rope.line_to_char(line);
         let line_len = self.line_char_len(line);
         let indent = self.line_indent(line);
@@ -1659,7 +1671,10 @@ impl Buffer {
     /// Returns `true` if the character was found and the cursor moved.
     pub fn find_char_in_line(&mut self, ch: char, forward: bool, till: bool) -> bool {
         self.end_edit_group();
-        let line = self.cursor.line.min(self.rope.len_lines().saturating_sub(1));
+        let line = self
+            .cursor
+            .line
+            .min(self.rope.len_lines().saturating_sub(1));
         let line_start = self.rope.line_to_char(line);
         let line_len = self.line_char_len(line);
         let cur_col = self.cursor.col.min(line_len);
@@ -1707,11 +1722,7 @@ impl Buffer {
         let half = (h / 2).max(1);
         let max_line = self.rope.len_lines().saturating_sub(1);
         self.cursor.line = (self.cursor.line + half).min(max_line);
-        self.viewport.offset_line = self
-            .viewport
-            .offset_line
-            .saturating_add(half)
-            .min(max_line);
+        self.viewport.offset_line = self.viewport.offset_line.saturating_add(half).min(max_line);
         self.clamp_col();
     }
 
@@ -1757,7 +1768,10 @@ impl Buffer {
         if len == 0 {
             return None;
         }
-        let line = self.cursor.line.min(self.rope.len_lines().saturating_sub(1));
+        let line = self
+            .cursor
+            .line
+            .min(self.rope.len_lines().saturating_sub(1));
         let line_start = self.rope.line_to_char(line);
         let line_len = self.line_char_len(line);
         let mut col = self.cursor.col.min(line_len);
@@ -1824,8 +1838,8 @@ impl Buffer {
             if matched {
                 if whole_word {
                     let before_ok = i == 0 || !is_word(self.rope.char(line_start + i - 1));
-                    let after_ok = i + tlen >= line_len
-                        || !is_word(self.rope.char(line_start + i + tlen));
+                    let after_ok =
+                        i + tlen >= line_len || !is_word(self.rope.char(line_start + i + tlen));
                     if before_ok && after_ok {
                         out.push((i, i + tlen));
                         i += tlen;

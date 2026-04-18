@@ -1372,7 +1372,10 @@ fn substrate_overlay_toggle_cycles_through_three_tabs() {
     let _ = apply_action(&mut state, Action::SubstrateOverlayToggleTab);
     assert_eq!(state.substrate_overlay_tab, SubstrateOverlayTab::Claims);
     let _ = apply_action(&mut state, Action::SubstrateOverlayToggleTab);
-    assert_eq!(state.substrate_overlay_tab, SubstrateOverlayTab::Assumptions);
+    assert_eq!(
+        state.substrate_overlay_tab,
+        SubstrateOverlayTab::Assumptions
+    );
     let _ = apply_action(&mut state, Action::SubstrateOverlayToggleTab);
     assert_eq!(state.substrate_overlay_tab, SubstrateOverlayTab::Signals);
 }

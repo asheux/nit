@@ -486,10 +486,8 @@ fn run_turn(
                             // targets a path that doesn't exist yet.
                             if kind == Some("content_block_start") {
                                 if let Some(cb) = value.get("content_block") {
-                                    let cb_type =
-                                        cb.get("type").and_then(|v| v.as_str());
-                                    let cb_name =
-                                        cb.get("name").and_then(|v| v.as_str());
+                                    let cb_type = cb.get("type").and_then(|v| v.as_str());
+                                    let cb_name = cb.get("name").and_then(|v| v.as_str());
                                     let is_write_tool = matches!(
                                         cb_name,
                                         Some("Write")
@@ -504,20 +502,17 @@ fn run_turn(
                                                 .and_then(|v| v.get(key))
                                                 .and_then(|v| v.as_str())
                                             {
-                                                let path = if std::path::Path::new(p)
-                                                    .is_absolute()
+                                                let path = if std::path::Path::new(p).is_absolute()
                                                 {
                                                     std::path::PathBuf::from(p)
                                                 } else {
                                                     cwd.join(p)
                                                 };
-                                                let _ = event_tx.send(
-                                                    AgentBusEvent::FileWrite {
-                                                        agent_id: model.clone(),
-                                                        mission_id: mission_id.clone(),
-                                                        path,
-                                                    },
-                                                );
+                                                let _ = event_tx.send(AgentBusEvent::FileWrite {
+                                                    agent_id: model.clone(),
+                                                    mission_id: mission_id.clone(),
+                                                    path,
+                                                });
                                                 break;
                                             }
                                         }

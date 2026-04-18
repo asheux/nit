@@ -135,8 +135,14 @@ pub enum ClaimKind {
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ClaimTarget {
-    File { path: PathBuf },
-    Region { path: PathBuf, start_line: u32, end_line: u32 },
+    File {
+        path: PathBuf,
+    },
+    Region {
+        path: PathBuf,
+        start_line: u32,
+        end_line: u32,
+    },
     Global,
 }
 
@@ -219,8 +225,14 @@ pub type AssumptionId = String;
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum AssumptionTarget {
-    File { path: PathBuf },
-    Region { path: PathBuf, start_line: u32, end_line: u32 },
+    File {
+        path: PathBuf,
+    },
+    Region {
+        path: PathBuf,
+        start_line: u32,
+        end_line: u32,
+    },
     Global,
 }
 
@@ -341,7 +353,8 @@ impl SubstrateState {
         &'a self,
         target: &'a SignalTarget,
     ) -> impl Iterator<Item = (&'a Signal, f32)> + 'a {
-        self.signals_iter().filter(move |(s, _)| &s.target == target)
+        self.signals_iter()
+            .filter(move |(s, _)| &s.target == target)
     }
 
     pub fn prune_signals_below(&mut self, threshold: f32) -> usize {
@@ -456,7 +469,9 @@ impl SubstrateState {
 
     pub fn assumptions_iter(&self) -> impl Iterator<Item = &Assumption> + '_ {
         let gen = self.generation;
-        self.assumptions.values().filter(move |a| !a.is_expired(gen))
+        self.assumptions
+            .values()
+            .filter(move |a| !a.is_expired(gen))
     }
 
     /// Non-expired assumptions ordered by remaining generations until TTL
@@ -494,8 +509,7 @@ impl SubstrateState {
 
     pub fn expire_assumptions(&mut self, current_gen: u64) -> usize {
         let before = self.assumptions.len();
-        self.assumptions
-            .retain(|_, a| !a.is_expired(current_gen));
+        self.assumptions.retain(|_, a| !a.is_expired(current_gen));
         before - self.assumptions.len()
     }
 
@@ -521,7 +535,10 @@ impl SubstrateState {
     }
 
     fn state_path(workspace_root: &Path) -> PathBuf {
-        workspace_root.join(".nit").join("substrate").join("state.json")
+        workspace_root
+            .join(".nit")
+            .join("substrate")
+            .join("state.json")
     }
 
     /// Tolerant load: missing or corrupt file returns `Default`.

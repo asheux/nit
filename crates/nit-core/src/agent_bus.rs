@@ -310,10 +310,8 @@ impl AgentBusEvent {
                 // are created.
                 const BASE_CLAIM_TTL_GENS: u64 = 3;
                 let current_gen = state.substrate.current_generation();
-                let ttl_multiplier =
-                    state.substrate.mood.modulation().claim_ttl_multiplier;
-                let ttl_gens =
-                    ((BASE_CLAIM_TTL_GENS as f32) * ttl_multiplier).max(1.0) as u64;
+                let ttl_multiplier = state.substrate.mood.modulation().claim_ttl_multiplier;
+                let ttl_gens = ((BASE_CLAIM_TTL_GENS as f32) * ttl_multiplier).max(1.0) as u64;
                 let claim_id = state.substrate.next_claim_id(agent_id);
                 let claim = crate::substrate::Claim {
                     id: claim_id,
@@ -370,8 +368,8 @@ impl AgentBusEvent {
                 for gone in invalidated {
                     let id = state.substrate.next_signal_id(agent_id);
                     let posted_at_gen = state.substrate.current_generation();
-                    let assumption_value = serde_json::to_value(&gone)
-                        .unwrap_or(serde_json::Value::Null);
+                    let assumption_value =
+                        serde_json::to_value(&gone).unwrap_or(serde_json::Value::Null);
                     state.substrate.emit_signal(crate::substrate::Signal {
                         id,
                         kind: crate::substrate::SignalKind::Warning,
@@ -496,8 +494,7 @@ impl AgentBusEvent {
                     target: crate::substrate::SignalTarget::Agent {
                         agent_id: agent_id.clone(),
                     },
-                    initial_strength:
-                        crate::substrate::SubstrateState::DEFAULT_INITIAL_STRENGTH,
+                    initial_strength: crate::substrate::SubstrateState::DEFAULT_INITIAL_STRENGTH,
                     payload: serde_json::json!({
                         "message": &message,
                         "thread_id": &thread_id,
@@ -634,8 +631,7 @@ impl AgentBusEvent {
                     target: crate::substrate::SignalTarget::Agent {
                         agent_id: agent_id.clone(),
                     },
-                    initial_strength:
-                        crate::substrate::SubstrateState::DEFAULT_INITIAL_STRENGTH,
+                    initial_strength: crate::substrate::SubstrateState::DEFAULT_INITIAL_STRENGTH,
                     payload: serde_json::json!({
                         "message": &message,
                         "thread_id": &thread_id,
@@ -744,8 +740,7 @@ impl AgentBusEvent {
                 // Mirror `FileWrite` auto-claim: mood-scale the TTL, clamp to
                 // a minimum of 1 gen.
                 let ttl_multiplier = state.substrate.mood.modulation().claim_ttl_multiplier;
-                let adjusted_ttl =
-                    ((*ttl_gens as f32) * ttl_multiplier).max(1.0) as u64;
+                let adjusted_ttl = ((*ttl_gens as f32) * ttl_multiplier).max(1.0) as u64;
                 let id = state.substrate.next_claim_id(claimed_by);
                 let claimed_at_gen = state.substrate.current_generation();
                 let claim = crate::substrate::Claim {
@@ -794,15 +789,17 @@ impl AgentBusEvent {
             } => {
                 let id = state.substrate.next_assumption_id(posted_by);
                 let posted_at_gen = state.substrate.current_generation();
-                state.substrate.assert_assumption(crate::substrate::Assumption {
-                    id,
-                    target: target.clone(),
-                    fact: fact.clone(),
-                    posted_by: posted_by.clone(),
-                    posted_at_gen,
-                    ttl_gens: *ttl_gens,
-                    rationale: rationale.clone(),
-                });
+                state
+                    .substrate
+                    .assert_assumption(crate::substrate::Assumption {
+                        id,
+                        target: target.clone(),
+                        fact: fact.clone(),
+                        posted_by: posted_by.clone(),
+                        posted_at_gen,
+                        ttl_gens: *ttl_gens,
+                        rationale: rationale.clone(),
+                    });
             }
             AgentBusEvent::SetMood { mood, source } => {
                 let from = state.substrate.mood;

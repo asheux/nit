@@ -49,7 +49,11 @@ pub use genome_report::{
 pub use gol_rules::{load_rule_catalog, NamedRule, RuleCatalog, RuleSelectError, SelectedRule};
 pub use io::{load_to_string, save_buffer};
 pub use lab::{AppKind, LabId, LabSpec};
+pub use metabolism::{MetabolicTickOutcome, METABOLIC_TICK_INTERVAL};
+pub use mission_memory::{IndexedMission, MissionHit, MissionMemoryIndex};
 pub use mode::Mode;
+pub use mood::{Mood, MoodModulation};
+pub use observers::{ObservedEmission, Observer, OBSERVER_INITIAL_STRENGTH, REGISTERED_OBSERVERS};
 pub use pane::PaneId;
 pub use prompt::Prompt;
 pub use rule_config::{load_rule_config, persist_rule_selection, RuleConfigLoad, RulePersistence};
@@ -74,16 +78,12 @@ pub use state::{
     GamesFamilyRunRequest, GamesReplayRequest, GamesReplayState, GamesRunBrowserState,
     GamesRunEntry, GamesRunOverride, GamesState, GamesStatus, GamesStrategyInspectState,
     GateMonitorSubView, GenomeShadowEval, GlobalArchiveEntry, GlobalArchiveSourceKind,
-    GolRenderMode, Intervention, JobState, LogBuffer, McpConnectionState, McpStatus, Metrics, MissionPhase,
-    MissionRecord, PatchProposal, PatchStatus, QueuedClaudeTurn, QueuedCodexTurn,
+    GolRenderMode, Intervention, JobState, LogBuffer, McpConnectionState, McpStatus, Metrics,
+    MissionPhase, MissionRecord, PatchProposal, PatchStatus, QueuedClaudeTurn, QueuedCodexTurn,
     RosterTreeBranch, RosterTreeSelection, SavedRunHistoryFilter, SavedRunHistoryPendingAction,
     SubstrateOverlayTab, SyntaxDebugInfo, UiSelection, UiSelectionPane, VisualizerMode,
     VisualizerRuleEntry, VisualizerState, YankKind, CONSOLE_SCROLL_BOTTOM,
 };
-pub use metabolism::{MetabolicTickOutcome, METABOLIC_TICK_INTERVAL};
-pub use mission_memory::{IndexedMission, MissionHit, MissionMemoryIndex};
-pub use mood::{Mood, MoodModulation};
-pub use observers::{ObservedEmission, Observer, OBSERVER_INITIAL_STRENGTH, REGISTERED_OBSERVERS};
 pub use substrate::{
     claims_conflict, targets_overlap, Assumption, AssumptionId, AssumptionTarget, Claim,
     ClaimConflict, ClaimId, ClaimKind, ClaimTarget, Signal, SignalId, SignalKind, SignalTarget,

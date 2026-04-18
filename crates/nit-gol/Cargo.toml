@@ -11,10 +11,11 @@ keywords = ["game-of-life", "cellular-automata", "simulation"]
 [dependencies]
 blake3 = { workspace = true }
 crossbeam-channel = { workspace = true }
-nit-utils = { path = "../nit-utils" }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 time = { workspace = true, features = ["formatting"] }
 toml = { workspace = true }
 tracing = { workspace = true }
+
+nit-utils = { path = "../nit-utils" }

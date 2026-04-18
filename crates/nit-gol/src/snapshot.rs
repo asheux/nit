@@ -7,6 +7,7 @@
 use std::fs::{self, File};
 use std::io::{self, BufWriter, Write};
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
@@ -70,41 +71,56 @@ pub fn write_snapshot(
     rule: Rule,
     meta: &SnapshotMetadata,
 ) -> io::Result<SnapshotPaths> {
-    snapshot_debug(|| {
-        format!(
-            "start name={} dir={} grid={}x{} rule={}",
-            name_base,
-            dir.display(),
-            grid.width(),
-            grid.height(),
-            rule
-        )
-    });
     ensure_dir(dir)?;
-    let rle_path = dir.join(format!("{name_base}.rle"));
-    let json_path = dir.join(format!("{name_base}.json"));
-    write_atomic(&rle_path, |writer| write_rle(writer, grid, rule))?;
-    write_metadata_atomic(&json_path, meta)?;
+    let paths = SnapshotPaths {
+        rle_path: dir.join(format!("{name_base}.rle")),
+        json_path: dir.join(format!("{name_base}.json")),
+    };
     snapshot_debug(|| {
+        let (cols, rows) = (grid.width(), grid.height());
         format!(
-            "done rle_path={} json_path={}",
-            rle_path.display(),
-            json_path.display()
+            "start name={name_base} dir={} geometry={cols}x{rows} rule={rule}",
+            dir.display()
         )
     });
-    Ok(SnapshotPaths {
-        rle_path,
-        json_path,
-    })
+    write_atomic(&paths.rle_path, |sink| write_rle(sink, grid, rule))?;
+    write_metadata_atomic(&paths.json_path, meta)?;
+    snapshot_debug(|| {
+        format!(
+            "done rle={} json={}",
+            paths.rle_path.display(),
+            paths.json_path.display()
+        )
+    });
+    Ok(paths)
 }
 
 /// Build a default snapshot file-name stem (timestamp + rule + generation + hash).
 pub fn default_name(rule: Rule, generation: u64, hash: u64) -> String {
-    let timestamp = now_iso8601().replace(':', "-");
-    format!(
-        "{timestamp}__rule-{}__gen-{generation:05}__hash-{hash:08x}",
-        rule.to_string().replace('/', "")
-    )
+    format_name_stem(None, &now_iso8601(), &rule.to_string(), generation, hash)
+}
+
+/// Shared filename-stem formatter for snapshot writes.
+///
+/// Colons in the timestamp are replaced with `-`, and rule slashes are
+/// stripped so the stem is safe on every common filesystem. The byte
+/// layout is part of the on-disk contract — older snapshots must still
+/// parse after any change here. The hash is formatted `:08x` so small
+/// values pad to 8 chars, while larger u64s naturally widen.
+pub(crate) fn format_name_stem(
+    prefix: Option<&str>,
+    timestamp: &str,
+    rule: &str,
+    generation: u64,
+    hash: u64,
+) -> String {
+    let timestamp = timestamp.replace(':', "-");
+    let rule_tag = rule.replace('/', "");
+    let tail = format!("{timestamp}__rule-{rule_tag}__gen-{generation:05}__hash-{hash:08x}");
+    match prefix {
+        Some(prefix) => format!("{prefix}__{tail}"),
+        None => tail,
+    }
 }
 
 /// Current UTC time as an ISO 8601 / RFC 3339 string.
@@ -120,27 +136,32 @@ pub fn prune_oldest(dir: &Path, max_files: usize) -> io::Result<()> {
     if max_files == 0 {
         return Ok(());
     }
-    let mut entries: Vec<_> = fs::read_dir(dir)?
-        .filter_map(|e| e.ok())
-        .filter_map(|e| {
-            let path = e.path();
-            if path.extension().and_then(|ext| ext.to_str()) != Some("rle") {
-                return None;
-            }
-            let modified = e.metadata().ok()?.modified().ok()?;
-            Some((modified, path))
-        })
-        .collect();
-    if entries.len() <= max_files {
+    let mut rle_files = rle_entries_by_mtime(dir)?;
+    if rle_files.len() <= max_files {
         return Ok(());
     }
-    entries.sort_by_key(|(time, _)| *time);
-    let remove_count = entries.len().saturating_sub(max_files);
-    for (_, path) in entries.into_iter().take(remove_count) {
-        let _ = fs::remove_file(&path);
-        let _ = fs::remove_file(path.with_extension("json"));
+    rle_files.sort_by_key(|(mtime, _)| *mtime);
+    let excess = rle_files.len().saturating_sub(max_files);
+    for (_, stale) in rle_files.into_iter().take(excess) {
+        let _ = fs::remove_file(&stale);
+        let _ = fs::remove_file(stale.with_extension("json"));
     }
     Ok(())
+}
+
+fn rle_entries_by_mtime(dir: &Path) -> io::Result<Vec<(SystemTime, PathBuf)>> {
+    let listing = fs::read_dir(dir)?
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            let candidate = entry.path();
+            if candidate.extension().and_then(|ext| ext.to_str()) != Some("rle") {
+                return None;
+            }
+            let mtime = entry.metadata().ok()?.modified().ok()?;
+            Some((mtime, candidate))
+        })
+        .collect();
+    Ok(listing)
 }
 
 /// Atomically write an RLE file from a packed grid bitset.
@@ -166,13 +187,14 @@ pub(crate) fn write_metadata_atomic(path: &Path, meta: &SnapshotMetadata) -> io:
 /// Ensure `dir` exists; reject symlinks so a hostile or stale link
 /// cannot redirect snapshot writes outside the intended directory.
 pub(crate) fn ensure_dir(dir: &Path) -> io::Result<()> {
-    if let Ok(meta) = fs::symlink_metadata(dir) {
-        if meta.file_type().is_symlink() {
-            return Err(io::Error::other("snapshot dir is a symlink"));
-        }
-        if meta.is_dir() {
-            return Ok(());
-        }
+    let Ok(existing) = fs::symlink_metadata(dir) else {
+        return fs::create_dir_all(dir);
+    };
+    if existing.file_type().is_symlink() {
+        return Err(io::Error::other("snapshot dir is a symlink"));
+    }
+    if existing.is_dir() {
+        return Ok(());
     }
     fs::create_dir_all(dir)
 }

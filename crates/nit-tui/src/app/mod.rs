@@ -543,10 +543,7 @@ fn run_loop(
         let (tx, rx) = mpsc::channel();
         match crate::mcp_backchannel::McpBackchannel::spawn(tx) {
             Ok(bc) => {
-                tracing::info!(
-                    "nit-mcp back-channel listening at {}",
-                    bc.socket_path
-                );
+                tracing::info!("nit-mcp back-channel listening at {}", bc.socket_path);
                 (Some(bc), Some(rx))
             }
             Err(err) => {
@@ -5547,8 +5544,7 @@ fn map_key_to_action(key: KeyEvent, state: &AppState, input: &mut InputState) ->
             ..
         } if state.show_substrate_overlay => Some(Action::SubstrateOverlayToggleTab),
         KeyEvent {
-            code: KeyCode::Esc,
-            ..
+            code: KeyCode::Esc, ..
         } if state.show_substrate_overlay => Some(Action::HideSubstrate),
         KeyEvent {
             code: KeyCode::Char('S'),
@@ -9382,9 +9378,7 @@ fn handle_mouse_down_with_swarm(
         let layout = layout::split(screen);
         if mouse.row == layout.visualizer.y {
             let col_in_rect = mouse.column.saturating_sub(layout.visualizer.x);
-            if let Some(action) =
-                visualizer_view::title_button_hit(col_in_rect)
-            {
+            if let Some(action) = visualizer_view::title_button_hit(col_in_rect) {
                 state.focus = PaneId::Visualizer;
                 apply_action(state, action);
                 return true;
@@ -12010,7 +12004,9 @@ fn handle_substrate_overlay_key(key: &KeyEvent, state: &mut AppState) -> bool {
             state.substrate_overlay_tab = match state.substrate_overlay_tab {
                 nit_core::SubstrateOverlayTab::Signals => nit_core::SubstrateOverlayTab::Claims,
                 nit_core::SubstrateOverlayTab::Claims => nit_core::SubstrateOverlayTab::Assumptions,
-                nit_core::SubstrateOverlayTab::Assumptions => nit_core::SubstrateOverlayTab::Signals,
+                nit_core::SubstrateOverlayTab::Assumptions => {
+                    nit_core::SubstrateOverlayTab::Signals
+                }
             };
             state.substrate_overlay_scroll = 0;
             true
@@ -12520,10 +12516,7 @@ fn write_swarm_run_provenance(
 
     // Phase 8: index this mission for cross-mission retrieval. Best-effort —
     // provenance writes must not be broken by memory-index failures.
-    let _ = nit_core::mission_memory::upsert_mission(
-        state.workspace_root.as_path(),
-        mission_id,
-    );
+    let _ = nit_core::mission_memory::upsert_mission(state.workspace_root.as_path(), mission_id);
 
     if let Some(report) = view.gate_report.as_ref() {
         let report_json = serde_json::to_vec_pretty(report)

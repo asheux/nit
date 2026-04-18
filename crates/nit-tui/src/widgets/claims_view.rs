@@ -57,9 +57,7 @@ pub fn build_lines(state: &AppState, theme: &Theme, width: u16) -> Vec<Line<'sta
     let col_header = format_row("TTL", "KIND", "BY", "TARGET", "AGE", "ID", width);
     lines.push(Line::from(Span::styled(
         col_header,
-        Style::default()
-            .fg(theme.title)
-            .add_modifier(Modifier::DIM),
+        Style::default().fg(theme.title).add_modifier(Modifier::DIM),
     )));
 
     if sorted.is_empty() {
@@ -202,8 +200,7 @@ mod tests {
                 .as_nanos()
         ));
         std::fs::create_dir_all(&root).unwrap();
-        let mut state =
-            AppState::new(root, Buffer::empty("x", None), Buffer::empty("n", None));
+        let mut state = AppState::new(root, Buffer::empty("x", None), Buffer::empty("n", None));
         let mut substrate = SubstrateState::default();
         for c in claims {
             substrate.claims.insert(c.id.clone(), c);

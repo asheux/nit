@@ -174,18 +174,16 @@ fn signals_iter_yields_effective_strength() {
     state.advance_generation();
     state.advance_generation();
     let (found, strength) = state.signals_iter().next().unwrap();
-    assert_eq!(strength, found.effective_strength(state.current_generation()));
+    assert_eq!(
+        strength,
+        found.effective_strength(state.current_generation())
+    );
 }
 
 #[test]
 fn signals_by_kind_filter() {
     let mut state = SubstrateState::new();
-    state.emit_signal(mk_signal(
-        "w",
-        SignalKind::Warning,
-        0,
-        SignalTarget::Global,
-    ));
+    state.emit_signal(mk_signal("w", SignalKind::Warning, 0, SignalTarget::Global));
     state.emit_signal(mk_signal("l", SignalKind::Lead, 0, SignalTarget::Global));
     let warnings: Vec<_> = state.signals_by_kind(SignalKind::Warning).collect();
     assert_eq!(warnings.len(), 1);
@@ -318,13 +316,7 @@ fn claim_compat_exclusive_x_shared_conflict() {
         0,
         5,
     );
-    let b = mk_claim(
-        "b",
-        ClaimKind::SharedRead,
-        ClaimTarget::File { path },
-        0,
-        5,
-    );
+    let b = mk_claim("b", ClaimKind::SharedRead, ClaimTarget::File { path }, 0, 5);
     assert!(claims_conflict(&a, &b));
     assert!(claims_conflict(&b, &a));
 }
@@ -339,13 +331,7 @@ fn claim_compat_shared_x_shared_ok() {
         0,
         5,
     );
-    let b = mk_claim(
-        "b",
-        ClaimKind::SharedRead,
-        ClaimTarget::File { path },
-        0,
-        5,
-    );
+    let b = mk_claim("b", ClaimKind::SharedRead, ClaimTarget::File { path }, 0, 5);
     assert!(!claims_conflict(&a, &b));
 }
 
@@ -359,13 +345,7 @@ fn claim_compat_append_x_append_ok() {
         0,
         5,
     );
-    let b = mk_claim(
-        "b",
-        ClaimKind::AppendOnly,
-        ClaimTarget::File { path },
-        0,
-        5,
-    );
+    let b = mk_claim("b", ClaimKind::AppendOnly, ClaimTarget::File { path }, 0, 5);
     assert!(!claims_conflict(&a, &b));
 }
 
@@ -710,13 +690,21 @@ fn assumption_targets_overlap_matches_claims_geometry() {
 
     // File+File same path
     assert!(assumption_targets_overlap(
-        &AssumptionTarget::File { path: path_a.clone() },
-        &AssumptionTarget::File { path: path_a.clone() },
+        &AssumptionTarget::File {
+            path: path_a.clone()
+        },
+        &AssumptionTarget::File {
+            path: path_a.clone()
+        },
     ));
     // File+File different paths
     assert!(!assumption_targets_overlap(
-        &AssumptionTarget::File { path: path_a.clone() },
-        &AssumptionTarget::File { path: path_b.clone() },
+        &AssumptionTarget::File {
+            path: path_a.clone()
+        },
+        &AssumptionTarget::File {
+            path: path_b.clone()
+        },
     ));
     // Region+Region overlapping lines
     assert!(assumption_targets_overlap(
@@ -747,7 +735,9 @@ fn assumption_targets_overlap_matches_claims_geometry() {
     // Global + anything
     assert!(assumption_targets_overlap(
         &AssumptionTarget::Global,
-        &AssumptionTarget::File { path: path_a.clone() },
+        &AssumptionTarget::File {
+            path: path_a.clone()
+        },
     ));
     assert!(assumption_targets_overlap(
         &AssumptionTarget::File { path: path_a },

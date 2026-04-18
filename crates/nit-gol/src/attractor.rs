@@ -2,11 +2,20 @@
 //!
 //! Detects fixed points and periodic cycles during grid evolution by
 //! maintaining a fingerprint history of observed states. Supports both
-//! simple and protocol-aware (multi-phase) observation
+//! simple and protocol-aware (multi-phase) observation.
 use std::collections::{HashMap, VecDeque};
 
 use crate::hash::{blake3_u64_pair, edge_tag, fnv1a, FNV_OFFSET};
 use crate::{EdgeMode, Grid, Rule};
+
+/// Blake3 domain tag for grid fingerprinting.
+///
+/// Embedded in on-disk fingerprints and attractor history. Changing this
+/// invalidates persisted snapshots and any running attractor detector.
+const FINGERPRINT_DOMAIN: &[u8] = b"nit-gol-attractor-v1";
+
+/// Tag marking the start of the protocol-context section in the hash payload.
+const PROTOCOL_TAG: &[u8] = b"proto";
 
 /// Additional context for protocol-aware attractor detection.
 ///
@@ -19,7 +28,7 @@ pub struct AttractorExtra {
     pub protocol_hash: u64,
     /// Zero-based index of the active phase within the protocol.
     pub phase_idx: u32,
-    /// Generations elapsed since this phase began.
+    /// Generations elapsed since this phase began; reset to zero when a new phase starts.
     pub step_in_phase: u32,
 }
 
@@ -221,10 +230,7 @@ impl AttractorDetector {
         }
 
         if current == next {
-            let event = AttractorEvent::FixedPoint { gen: next_gen };
-            self.last = Some(compute_fingerprint(next, rule, edge, extra));
-            self.completed = true;
-            return Some(event);
+            return Some(self.finish_fixed_point(next, rule, edge, extra, next_gen));
         }
 
         if self.cfg.max_history == 0 {
@@ -243,6 +249,20 @@ impl AttractorDetector {
         self.insert_entry(fp, next_gen, secondary);
         self.last = Some(fp);
         None
+    }
+
+    /// Mark the detector completed on a fixed-point and return the event.
+    fn finish_fixed_point(
+        &mut self,
+        next: &Grid,
+        rule: Rule,
+        edge: EdgeMode,
+        extra: Option<AttractorExtra>,
+        next_gen: u64,
+    ) -> AttractorEvent {
+        self.last = Some(compute_fingerprint(next, rule, edge, extra));
+        self.completed = true;
+        AttractorEvent::FixedPoint { gen: next_gen }
     }
 
     /// Check whether `fingerprint` matches a previously seen entry.
@@ -328,43 +348,48 @@ fn fingerprint_with_secondary(
     include_secondary: bool,
 ) -> (Fingerprint, Option<u64>) {
     let mut hasher = blake3::Hasher::new();
-    hasher.update(b"nit-gol-attractor-v1");
-    hasher.update(&grid.width().to_le_bytes());
-    hasher.update(&grid.height().to_le_bytes());
-    hasher.update(&rule.births_mask().to_le_bytes());
-    hasher.update(&rule.survives_mask().to_le_bytes());
-    hasher.update(&[edge_tag(edge)]);
-    if let Some(extra) = extra {
-        hasher.update(b"proto");
-        hasher.update(&extra.protocol_hash.to_le_bytes());
-        hasher.update(&extra.phase_idx.to_le_bytes());
-        hasher.update(&extra.step_in_phase.to_le_bytes());
-    }
-    hasher.update(grid.cells());
+    hasher.update(FINGERPRINT_DOMAIN);
+    feed_fingerprint_bytes(grid, rule, edge, extra, |bytes| {
+        hasher.update(bytes);
+    });
     let fp = Fingerprint(blake3_u64_pair(&hasher.finalize()));
-    let secondary = if include_secondary {
-        Some(secondary_hash(grid, rule, edge, extra))
-    } else {
-        None
-    };
+    let secondary = include_secondary.then(|| secondary_hash(grid, rule, edge, extra));
     (fp, secondary)
 }
 
 /// FNV-1a secondary hash for double-checking blake3 fingerprint matches.
 fn secondary_hash(grid: &Grid, rule: Rule, edge: EdgeMode, extra: Option<AttractorExtra>) -> u64 {
     let mut hash = FNV_OFFSET;
-    hash = fnv1a(hash, &grid.width().to_le_bytes());
-    hash = fnv1a(hash, &grid.height().to_le_bytes());
-    hash = fnv1a(hash, &rule.births_mask().to_le_bytes());
-    hash = fnv1a(hash, &rule.survives_mask().to_le_bytes());
-    hash = fnv1a(hash, &[edge_tag(edge)]);
+    feed_fingerprint_bytes(grid, rule, edge, extra, |bytes| {
+        hash = fnv1a(hash, bytes);
+    });
+    hash
+}
+
+/// Emit the canonical payload bytes for both primary and secondary hashes.
+///
+/// Stability-critical: the byte order here is part of the on-disk
+/// fingerprint contract. Any reordering or field addition invalidates
+/// persisted attractor history and snapshot dedup keys.
+fn feed_fingerprint_bytes(
+    grid: &Grid,
+    rule: Rule,
+    edge: EdgeMode,
+    extra: Option<AttractorExtra>,
+    mut push: impl FnMut(&[u8]),
+) {
+    push(&grid.width().to_le_bytes());
+    push(&grid.height().to_le_bytes());
+    push(&rule.births_mask().to_le_bytes());
+    push(&rule.survives_mask().to_le_bytes());
+    push(&[edge_tag(edge)]);
     if let Some(extra) = extra {
-        hash = fnv1a(hash, b"proto");
-        hash = fnv1a(hash, &extra.protocol_hash.to_le_bytes());
-        hash = fnv1a(hash, &extra.phase_idx.to_le_bytes());
-        hash = fnv1a(hash, &extra.step_in_phase.to_le_bytes());
+        push(PROTOCOL_TAG);
+        push(&extra.protocol_hash.to_le_bytes());
+        push(&extra.phase_idx.to_le_bytes());
+        push(&extra.step_in_phase.to_le_bytes());
     }
-    fnv1a(hash, grid.cells())
+    push(grid.cells());
 }
 
 // ── Test helpers ────────────────────────────────────────────────────

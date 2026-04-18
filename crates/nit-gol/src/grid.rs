@@ -16,6 +16,8 @@ pub enum EdgeMode {
 }
 
 /// A two-dimensional grid of alive/dead cells.
+///
+/// Storage is row-major: cell `(x, y)` lives at index `y * width + x`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Grid {
     width: usize,
@@ -35,11 +37,13 @@ impl Grid {
         }
     }
 
+    #[inline]
     #[must_use]
     pub fn width(&self) -> usize {
         self.width
     }
 
+    #[inline]
     #[must_use]
     pub fn height(&self) -> usize {
         self.height
@@ -52,6 +56,7 @@ impl Grid {
     }
 
     /// Read the cell at `(x, y)`. Out-of-bounds coordinates read as dead.
+    #[inline]
     #[must_use]
     pub fn get(&self, x: usize, y: usize) -> bool {
         if x >= self.width || y >= self.height {
@@ -61,6 +66,7 @@ impl Grid {
     }
 
     /// Write the cell at `(x, y)`. Out-of-bounds writes are silently ignored.
+    #[inline]
     pub fn set(&mut self, x: usize, y: usize, alive: bool) {
         if x >= self.width || y >= self.height {
             return;
@@ -69,21 +75,21 @@ impl Grid {
         self.cells[idx] = u8::from(alive);
     }
 
-    /// Reset all cells to dead.
     pub fn clear(&mut self) {
         self.cells.fill(0);
     }
 
-    /// Number of live cells in the grid.
     #[must_use]
     pub fn alive_count(&self) -> usize {
-        self.cells.iter().map(|v| *v as usize).sum()
+        self.cells.iter().filter(|&&c| c != 0).count()
     }
 
     /// 64-bit FNV-1a hash over dimensions and cell data.
     ///
     /// Deterministic across versions; used as a fast identity key for
-    /// attractor detection and snapshot deduplication.
+    /// attractor detection and snapshot deduplication. Width and height
+    /// are folded in first so two grids with the same cell pattern but
+    /// different shapes hash differently.
     #[must_use]
     pub fn hash(&self) -> u64 {
         let mut h = hash::FNV_OFFSET;
@@ -94,21 +100,26 @@ impl Grid {
 
     /// Copy this grid into a new grid of different dimensions.
     ///
-    /// Cells within the overlapping region are preserved; new cells are
-    /// initialized to dead.
+    /// Cells within the overlapping region (top-left anchored) are
+    /// preserved; cells outside that region in the new grid are dead.
     #[must_use]
     pub fn clone_with_size(&self, width: usize, height: usize) -> Grid {
         let mut new_grid = Grid::new(width, height);
         let copy_w = width.min(self.width);
         let copy_h = height.min(self.height);
+        if copy_w == 0 || copy_h == 0 {
+            return new_grid;
+        }
         for y in 0..copy_h {
-            for x in 0..copy_w {
-                new_grid.set(x, y, self.get(x, y));
-            }
+            let src_start = y * self.width;
+            let dst_start = y * width;
+            new_grid.cells[dst_start..dst_start + copy_w]
+                .copy_from_slice(&self.cells[src_start..src_start + copy_w]);
         }
         new_grid
     }
 
+    #[inline]
     fn index(&self, x: usize, y: usize) -> usize {
         y * self.width + x
     }

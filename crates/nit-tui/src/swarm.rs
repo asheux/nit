@@ -1653,11 +1653,9 @@ impl SwarmRuntime {
             }
         }
         // Phase 8: also inject cross-mission memory into follow-up prompts.
-        let memory_scope_files =
-            enumerate_scope_files(state.workspace_root.as_path(), user_prompt);
+        let memory_scope_files = enumerate_scope_files(state.workspace_root.as_path(), user_prompt);
         let memory_scope_tokens = nit_core::mission_memory::path_tokens(&memory_scope_files);
-        let memory_index =
-            nit_core::mission_memory::load_or_build(state.workspace_root.as_path());
+        let memory_index = nit_core::mission_memory::load_or_build(state.workspace_root.as_path());
         let memory_exclude: Vec<&str> = vec![mission_id];
         let memory_hits = nit_core::mission_memory::retrieve_similar(
             &memory_index,
@@ -2015,8 +2013,7 @@ impl SwarmRuntime {
         let memory_scope_files =
             enumerate_scope_files(state.workspace_root.as_path(), &root_prompt);
         let memory_scope_tokens = nit_core::mission_memory::path_tokens(&memory_scope_files);
-        let memory_index =
-            nit_core::mission_memory::load_or_build(state.workspace_root.as_path());
+        let memory_index = nit_core::mission_memory::load_or_build(state.workspace_root.as_path());
         let memory_exclude: Vec<&str> = vec![mission_id.as_str()];
         let memory_hits = nit_core::mission_memory::retrieve_similar(
             &memory_index,

@@ -941,8 +941,7 @@ fn set_mood_event_applies_and_sets_override_lock() {
         .values()
         .find(|s| {
             s.posted_by == "mood"
-                && s.payload.get("reason").and_then(|v| v.as_str())
-                    == Some("mood_manual_override")
+                && s.payload.get("reason").and_then(|v| v.as_str()) == Some("mood_manual_override")
         })
         .expect("expected mood_manual_override signal");
     assert_eq!(
@@ -989,9 +988,7 @@ fn assert_claim_request_mints_id_and_honors_mood_ttl() {
     // lock and its synthetic mood_manual_override signal.
     let mut state = test_state();
     state.substrate.mood = Mood::Defensive;
-    assert!(
-        (state.substrate.mood.modulation().claim_ttl_multiplier - 1.5).abs() < f32::EPSILON
-    );
+    assert!((state.substrate.mood.modulation().claim_ttl_multiplier - 1.5).abs() < f32::EPSILON);
 
     let before = state.substrate.claim_counter;
     let event = AgentBusEvent::AssertClaimRequest {

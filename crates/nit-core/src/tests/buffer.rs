@@ -826,7 +826,7 @@ fn repeated_hash_scans_through_matches_backward() {
     let mut buf = Buffer::from_str("t", "foo foo foo\n", None);
     buf.cursor.line = 0;
     buf.cursor.col = 8; // on third "foo"
-    // First `#` from inside a match → go to previous match.
+                        // First `#` from inside a match → go to previous match.
     assert!(buf.search_prev_match("foo", true));
     assert_eq!(buf.cursor.col, 4);
     // Next call → first match.

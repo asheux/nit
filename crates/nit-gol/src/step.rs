@@ -5,6 +5,21 @@
 
 use crate::{grid::EdgeMode, Grid, Rule};
 
+/// Moore neighborhood offsets, excluding the center cell.
+///
+/// Fixed order keeps neighbor counting deterministic across builds so
+/// regression tests comparing generation-by-generation output are stable.
+const MOORE_OFFSETS: [(isize, isize); 8] = [
+    (-1, -1),
+    (0, -1),
+    (1, -1),
+    (-1, 0),
+    (1, 0),
+    (-1, 1),
+    (0, 1),
+    (1, 1),
+];
+
 /// Advance the grid by one generation under the given rule.
 #[must_use]
 pub fn step(grid: &Grid, rule: Rule, edge: EdgeMode) -> Grid {
@@ -18,29 +33,32 @@ pub fn step(grid: &Grid, rule: Rule, edge: EdgeMode) -> Grid {
         for x in 0..width {
             let neighbors = count_neighbors(grid, x, y, edge);
             let alive = grid.get(x, y);
-            let survives = if alive {
-                rule.is_survive(neighbors)
-            } else {
-                rule.is_birth(neighbors)
-            };
-            next.set(x, y, survives);
+            next.set(x, y, next_cell(alive, neighbors, rule));
         }
     }
     next
+}
+
+/// Decide the next state of a cell from its current state and neighbor count.
+///
+/// Birth and survival are the only two transitions: a dead cell applies the
+/// birth rule, a live cell applies the survival rule.
+#[inline]
+fn next_cell(alive: bool, neighbors: u8, rule: Rule) -> bool {
+    if alive {
+        rule.is_survive(neighbors)
+    } else {
+        rule.is_birth(neighbors)
+    }
 }
 
 fn count_neighbors(grid: &Grid, x: usize, y: usize, edge: EdgeMode) -> u8 {
     let width = grid.width() as isize;
     let height = grid.height() as isize;
     let mut count = 0u8;
-    for dy in -1..=1isize {
-        for dx in -1..=1isize {
-            if dx == 0 && dy == 0 {
-                continue;
-            }
-            if let Some((nx, ny)) = resolve_neighbor(x, y, dx, dy, width, height, edge) {
-                count += u8::from(grid.get(nx, ny));
-            }
+    for (dx, dy) in MOORE_OFFSETS {
+        if let Some((nx, ny)) = resolve_neighbor(x, y, dx, dy, width, height, edge) {
+            count += u8::from(grid.get(nx, ny));
         }
     }
     count

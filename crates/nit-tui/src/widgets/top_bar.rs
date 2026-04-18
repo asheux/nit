@@ -127,9 +127,7 @@ pub fn render(
         Span::styled(" | ", Style::default().fg(theme.border)),
         Span::styled(
             mood_label,
-            Style::default()
-                .fg(mood_color)
-                .add_modifier(Modifier::BOLD),
+            Style::default().fg(mood_color).add_modifier(Modifier::BOLD),
         ),
         Span::styled(" ", Style::default().fg(theme.border)),
     ]);

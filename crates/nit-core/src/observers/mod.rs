@@ -35,10 +35,7 @@ pub struct Observer {
     pub run: ObserverFn,
 }
 
-pub const REGISTERED_OBSERVERS: &[Observer] = &[
-    repeat_failure::OBSERVER,
-    global_heat::OBSERVER,
-];
+pub const REGISTERED_OBSERVERS: &[Observer] = &[repeat_failure::OBSERVER, global_heat::OBSERVER];
 
 /// Runs every registered observer and collects their emissions.
 /// Observer ordering within this function is the REGISTERED_OBSERVERS

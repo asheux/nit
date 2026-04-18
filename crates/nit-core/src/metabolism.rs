@@ -64,8 +64,7 @@ pub fn tick(state: &mut AppState) -> MetabolicTickOutcome {
 
     // Quiet-streak tracking — ticks with low pressure increment, otherwise reset.
     if pressure <= crate::mood::MOOD_QUIET_PRESSURE_MAX {
-        state.substrate.mood_quiet_streak =
-            state.substrate.mood_quiet_streak.saturating_add(1);
+        state.substrate.mood_quiet_streak = state.substrate.mood_quiet_streak.saturating_add(1);
     } else {
         state.substrate.mood_quiet_streak = 0;
     }

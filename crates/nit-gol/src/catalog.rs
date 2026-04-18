@@ -3,6 +3,11 @@
 //! Loads the bundled `rules.toml` catalog at compile time and optionally
 //! merges user-defined overlays from the configuration directory. The
 //! catalog provides lookup by id, rulestring, alias, and free-text filter.
+//!
+//! Overlays are keyed by id (case-insensitive). An overlay whose id
+//! matches an existing entry merges field-by-field; an overlay with an
+//! unknown id becomes a new user entry, provided its rulestring is valid
+//! and does not duplicate a rulestring already in the catalog.
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -108,7 +113,6 @@ pub struct RuleEntry {
 }
 
 impl RuleEntry {
-    /// Returns the warning string, if any, from the default parameters.
     pub fn warning(&self) -> Option<&str> {
         self.default_params.warning.as_deref()
     }
@@ -236,31 +240,25 @@ impl RuleCatalog {
 
     /// Look up an entry by its canonical id (case-insensitive).
     pub fn find_by_id(&self, id: &str) -> Option<&RuleEntry> {
-        let key = id.trim().to_ascii_lowercase();
-        self.id_index
-            .get(&key)
-            .and_then(|idx| self.entries.get(*idx))
+        self.lookup(&self.id_index, &normalize_key(id))
     }
 
     /// Look up an entry by its parsed rule value.
     pub fn find_by_rule(&self, rule: Rule) -> Option<&RuleEntry> {
-        let key = rule_key(rule);
         self.rule_index
-            .get(&key)
+            .get(&rule_key(rule))
             .and_then(|idx| self.entries.get(*idx))
     }
 
     /// Find the visible-list position of a selected rule.
     pub fn index_of_selected(&self, selected: &SelectedRule) -> Option<usize> {
         if let Some(id) = &selected.id {
-            let key = id.to_ascii_lowercase();
-            if let Some(&idx) = self.id_index.get(&key) {
+            if let Some(&idx) = self.id_index.get(&normalize_key(id)) {
                 return self.visible_position(idx);
             }
         }
-        let key = rule_key(selected.rule);
         self.rule_index
-            .get(&key)
+            .get(&rule_key(selected.rule))
             .and_then(|idx| self.visible_position(*idx))
     }
 
@@ -269,6 +267,10 @@ impl RuleCatalog {
     }
 
     /// Return visible-list positions matching a free-text query.
+    ///
+    /// The query is matched case-insensitively against id, name,
+    /// rulestring, description, tags, and aliases. An empty query
+    /// returns every visible entry in catalog order.
     pub fn filter_indices(&self, query: &str) -> Vec<usize> {
         let needle = query.trim().to_ascii_lowercase();
         if needle.is_empty() {
@@ -279,26 +281,28 @@ impl RuleCatalog {
             .enumerate()
             .filter_map(|(pos, idx)| {
                 let entry = self.entries.get(*idx)?;
-                let haystack = build_search_haystack(entry);
-                if haystack.to_ascii_lowercase().contains(&needle) {
-                    Some(pos)
-                } else {
-                    None
-                }
+                build_search_haystack(entry)
+                    .to_ascii_lowercase()
+                    .contains(&needle)
+                    .then_some(pos)
             })
             .collect()
     }
 
     /// Resolve a user-provided selector string to a [`SelectedRule`].
+    ///
+    /// Tries, in order: exact id, alias, and finally a raw rulestring
+    /// parse. A successful rulestring parse is enriched with catalog
+    /// metadata when the rule has a known entry.
     pub fn select(&self, selector: &str) -> Result<SelectedRule, RuleSelectError> {
         let trimmed = selector.trim();
         if trimmed.is_empty() {
             return Err(RuleSelectError::UnknownId(selector.to_string()));
         }
-        if let Some(named) = self.find_by_id(trimmed) {
-            return Ok(SelectedRule::from_named(named));
-        }
-        if let Some(named) = self.find_by_alias(trimmed) {
+        if let Some(named) = self
+            .find_by_id(trimmed)
+            .or_else(|| self.find_by_alias(trimmed))
+        {
             return Ok(SelectedRule::from_named(named));
         }
         let rule = Rule::parse(trimmed).map_err(RuleSelectError::Parse)?;
@@ -319,10 +323,11 @@ impl RuleCatalog {
     }
 
     fn find_by_alias(&self, alias: &str) -> Option<&RuleEntry> {
-        let key = alias.trim().to_ascii_lowercase();
-        self.alias_index
-            .get(&key)
-            .and_then(|idx| self.entries.get(*idx))
+        self.lookup(&self.alias_index, &normalize_key(alias))
+    }
+
+    fn lookup<'a>(&'a self, index: &HashMap<String, usize>, key: &str) -> Option<&'a RuleEntry> {
+        index.get(key).and_then(|idx| self.entries.get(*idx))
     }
 
     fn load_builtin(warnings: &mut Vec<String>) -> Self {
@@ -336,12 +341,10 @@ impl RuleCatalog {
                 Ok(entry) => entry,
                 Err(err) => panic!("builtin rule load failed: {err}"),
             };
-            let id_key = built.id.to_ascii_lowercase();
-            if !ids.insert(id_key) {
+            if !ids.insert(built.id.to_ascii_lowercase()) {
                 panic!("duplicate builtin rule id '{}'", built.id);
             }
-            let key = rule_key(built.rule);
-            if !rules.insert(key) {
+            if !rules.insert(rule_key(built.rule)) {
                 panic!("duplicate builtin rulestring '{}'", built.rulestring);
             }
             entries.push(built);
@@ -353,8 +356,8 @@ impl RuleCatalog {
 
     /// Apply a set of overlays: merge into existing entries or add new ones.
     fn apply_overlays(&mut self, overlays: &[RuleOverlay], warnings: &mut Vec<String>) {
-        let mut id_map: HashMap<String, usize> = HashMap::new();
-        let mut rule_map: HashMap<u32, usize> = HashMap::new();
+        let mut id_map = HashMap::new();
+        let mut rule_map = HashMap::new();
         for (idx, entry) in self.entries.iter().enumerate() {
             id_map.insert(entry.id.to_ascii_lowercase(), idx);
             rule_map.insert(rule_key(entry.rule), idx);
@@ -381,20 +384,23 @@ impl RuleCatalog {
         self.rule_index.clear();
         self.alias_index.clear();
         for (idx, entry) in self.entries.iter().enumerate() {
-            let id_key = entry.id.to_ascii_lowercase();
-            if self.id_index.insert(id_key, idx).is_some() {
+            if self
+                .id_index
+                .insert(entry.id.to_ascii_lowercase(), idx)
+                .is_some()
+            {
                 warnings.push(format!("Duplicate rule id '{}'", entry.id));
             }
-            let key = rule_key(entry.rule);
-            if self.rule_index.insert(key, idx).is_some() {
+            if self.rule_index.insert(rule_key(entry.rule), idx).is_some() {
                 warnings.push(format!(
                     "Duplicate rulestring for rule '{}': {}",
                     entry.id, entry.rulestring
                 ));
             }
             for alias in &entry.aliases {
-                let alias_key = alias.to_ascii_lowercase();
-                self.alias_index.entry(alias_key).or_insert(idx);
+                self.alias_index
+                    .entry(alias.to_ascii_lowercase())
+                    .or_insert(idx);
             }
             if !entry.hidden {
                 self.visible_indices.push(idx);
@@ -450,30 +456,27 @@ fn merge_overlay_fields(entry: &mut RuleEntry, overlay: &RuleOverlay, warnings: 
 
 /// Validate and apply a rulestring override from an overlay.
 ///
-/// Logs a warning and skips the update if the rulestring is invalid
-/// or belongs to a different rule family than the existing entry.
+/// Rulestrings are only applied when they belong to the same rule
+/// family (same birth/survive digits); a mismatch is treated as user
+/// error and logged, because silently rewriting a builtin's behavior
+/// would be surprising.
 fn try_update_rulestring(entry: &mut RuleEntry, overlay: &RuleOverlay, warnings: &mut Vec<String>) {
     let Some(rulestring) = overlay.rulestring.as_deref() else {
         return;
     };
-    match normalize_rulestring(rulestring) {
-        Ok((rule, canonical)) => {
-            if rule_key(rule) != rule_key(entry.rule) {
-                warnings.push(format!(
-                    "Overlay rule '{}' rulestring '{}' does not match builtin '{}'; ignoring rulestring",
-                    overlay.id, rulestring, entry.rulestring
-                ));
-            } else {
-                entry.rulestring = canonical;
-                entry.rulestring_raw = rulestring.trim().to_string();
-                entry.rule = rule;
-            }
-        }
-        Err(err) => warnings.push(format!(
-            "Invalid overlay rulestring '{}' for id '{}': {err}",
-            rulestring, overlay.id
-        )),
+    let Some((rule, canonical)) = parse_overlay_rulestring(rulestring, overlay, warnings) else {
+        return;
+    };
+    if rule_key(rule) != rule_key(entry.rule) {
+        warnings.push(format!(
+            "Overlay rule '{}' rulestring '{}' does not match builtin '{}'; ignoring rulestring",
+            overlay.id, rulestring, entry.rulestring
+        ));
+        return;
     }
+    entry.rulestring = canonical;
+    entry.rulestring_raw = rulestring.trim().to_string();
+    entry.rule = rule;
 }
 
 /// Copy non-rulestring optional fields from an overlay into an entry.
@@ -514,7 +517,12 @@ fn build_overlay_entry(
     entries: &[RuleEntry],
     warnings: &mut Vec<String>,
 ) -> Option<RuleEntry> {
-    let rulestring = require_field(overlay.rulestring.as_deref(), "rulestring", overlay, warnings)?;
+    let rulestring = require_field(
+        overlay.rulestring.as_deref(),
+        "rulestring",
+        overlay,
+        warnings,
+    )?;
     let name = require_field(
         overlay.display_name.as_deref(),
         "display_name",
@@ -527,22 +535,8 @@ fn build_overlay_entry(
         overlay,
         warnings,
     )?;
-    let (rule, canonical) = match normalize_rulestring(rulestring) {
-        Ok(pair) => pair,
-        Err(err) => {
-            warnings.push(format!(
-                "Invalid overlay rulestring '{}' for id '{}': {err}",
-                rulestring, overlay.id
-            ));
-            return None;
-        }
-    };
-    let key = rule_key(rule);
-    if let Some(existing_idx) = rule_map.get(&key) {
-        let existing_id = entries
-            .get(*existing_idx)
-            .map(|e| e.id.as_str())
-            .unwrap_or("unknown");
+    let (rule, canonical) = parse_overlay_rulestring(rulestring, overlay, warnings)?;
+    if let Some(existing_id) = existing_rulestring_owner(rule, rule_map, entries) {
         warnings.push(format!(
             "Overlay rule '{}' duplicates rulestring '{}' (existing id '{}'); add as alias instead",
             overlay.id, canonical, existing_id
@@ -564,6 +558,39 @@ fn build_overlay_entry(
         hidden: overlay.hidden.unwrap_or(false),
         source: RuleSource::User,
     })
+}
+
+/// Parse an overlay rulestring, logging a diagnostic on failure.
+fn parse_overlay_rulestring(
+    rulestring: &str,
+    overlay: &RuleOverlay,
+    warnings: &mut Vec<String>,
+) -> Option<(Rule, String)> {
+    match normalize_rulestring(rulestring) {
+        Ok(pair) => Some(pair),
+        Err(err) => {
+            warnings.push(format!(
+                "Invalid overlay rulestring '{}' for id '{}': {err}",
+                rulestring, overlay.id
+            ));
+            None
+        }
+    }
+}
+
+/// Return the id of the existing entry that owns `rule`, if any.
+fn existing_rulestring_owner<'a>(
+    rule: Rule,
+    rule_map: &HashMap<u32, usize>,
+    entries: &'a [RuleEntry],
+) -> Option<&'a str> {
+    let idx = rule_map.get(&rule_key(rule))?;
+    Some(
+        entries
+            .get(*idx)
+            .map(|e| e.id.as_str())
+            .unwrap_or("unknown"),
+    )
 }
 
 // ── Utility functions ───────────────────────────────────────────────
@@ -588,6 +615,11 @@ fn normalize_rulestring(text: &str) -> Result<(Rule, String), RuleParseError> {
     let rule = Rule::parse(text)?;
     let canonical = rule.to_string();
     Ok((rule, canonical))
+}
+
+/// Normalize a string into a case-insensitive lookup key.
+fn normalize_key(text: &str) -> String {
+    text.trim().to_ascii_lowercase()
 }
 
 /// Deduplicate and lowercase a list of tag/alias strings.

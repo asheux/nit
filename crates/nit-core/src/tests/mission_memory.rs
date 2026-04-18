@@ -164,13 +164,7 @@ fn retrieve_returns_expected_ordering() {
         &["Button restyle"],
     );
     let idx = build_index(&root);
-    let hits = retrieve_similar(
-        &idx,
-        "refactor catalog module with dedupe",
-        &[],
-        &[],
-        5,
-    );
+    let hits = retrieve_similar(&idx, "refactor catalog module with dedupe", &[], &[], 5);
     assert!(hits.len() >= 2);
     assert_eq!(hits[0].mission.mission_id, "mis-001");
     // Second hit should be the weakly-matching docs mission.
@@ -240,14 +234,7 @@ fn retrieve_excludes_listed_missions() {
 #[test]
 fn upsert_mission_dedupes_by_id() {
     let root = temp_workspace("mm-upsert");
-    write_fixture_mission(
-        &root,
-        "mis-001",
-        "first",
-        "parallel",
-        &["a/b.rs"],
-        &["one"],
-    );
+    write_fixture_mission(&root, "mis-001", "first", "parallel", &["a/b.rs"], &["one"]);
     let idx1 = upsert_mission(&root, "mis-001").unwrap();
     let idx2 = upsert_mission(&root, "mis-001").unwrap();
     assert_eq!(idx1.missions.len(), 1);

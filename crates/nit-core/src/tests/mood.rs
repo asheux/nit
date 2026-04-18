@@ -212,8 +212,7 @@ fn set_mood_event_applies_and_sets_override_lock() {
         .values()
         .find(|s| {
             s.posted_by == "mood"
-                && s.payload.get("reason").and_then(|v| v.as_str())
-                    == Some("mood_manual_override")
+                && s.payload.get("reason").and_then(|v| v.as_str()) == Some("mood_manual_override")
         })
         .expect("expected mood_manual_override signal");
     assert_eq!(
