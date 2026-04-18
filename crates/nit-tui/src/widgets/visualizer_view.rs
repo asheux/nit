@@ -335,39 +335,26 @@ fn draw_loading_bar(frame: &mut Frame, area: ratatui::layout::Rect, palette: &Se
 }
 
 fn draw_genome_placeholder(buf: &mut Buffer, area: ratatui::layout::Rect, palette: &SeedPalette) {
-    if area.width < 4 || area.height < 3 {
+    if area.width < 4 || area.height < 1 {
         return;
     }
-    let msg = " Open file in editor to view code genome ";
-    let msg_len = msg.len() as u16;
-    let bar_w = msg_len;
-    let bar_h = 3u16;
-    let bar_x = area.x + area.width.saturating_sub(bar_w) / 2;
-    let bar_y = area.y + area.height.saturating_sub(bar_h) / 2;
-
-    let cyan = ratatui::style::Color::Rgb(0, 215, 215);
-    let bar_style = Style::default().bg(cyan);
-    let text_style = Style::default()
-        .fg(palette.bg)
-        .bg(cyan)
-        .add_modifier(Modifier::BOLD);
-
-    // Fill the 3-row bar with background color.
-    for row in 0..bar_h {
-        for dx in 0..bar_w {
-            let cell = buf.get_mut(bar_x + dx, bar_y + row);
-            cell.set_char(' ');
-            cell.set_style(bar_style);
-        }
+    let msg = "Open a file in the editor to view its code genome";
+    let msg_len = msg.chars().count() as u16;
+    if msg_len > area.width.saturating_sub(2) {
+        return;
     }
-    // Draw centered text on the middle row.
-    let text_y = bar_y + 1;
+    let text_x = area.x + area.width.saturating_sub(msg_len) / 2;
+    let text_y = area.y + area.height / 2;
+    let style = Style::default()
+        .fg(palette.hud_dim)
+        .bg(palette.bg)
+        .add_modifier(Modifier::DIM);
     for (i, ch) in msg.chars().enumerate() {
-        let cx = bar_x + i as u16;
-        if cx < bar_x + bar_w {
+        let cx = text_x + i as u16;
+        if cx < area.x + area.width {
             let cell = buf.get_mut(cx, text_y);
             cell.set_char(ch);
-            cell.set_style(text_style);
+            cell.set_style(style);
         }
     }
 }
