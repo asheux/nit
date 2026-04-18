@@ -3257,3 +3257,93 @@ fn gate_pass_does_not_retry() {
     assert!(matches!(run.stage, SwarmStage::Synthesizing));
     assert_eq!(run.gate_retry_count, 0);
 }
+
+fn make_run_with_tasks(template: SwarmTemplate, tasks: Vec<SwarmTask>) -> SwarmRun {
+    SwarmRun {
+        mission_id: "mis-test".into(),
+        root_prompt: "root".into(),
+        template,
+        mission_kind: SwarmMissionKind::General,
+        planner_agent_id: "planner".into(),
+        integrator_agent_id: None,
+        integrator_locked: false,
+        verifier_agent_id: None,
+        gate_bundle: None,
+        gate_custom: None,
+        gate_selection: "auto:none".into(),
+        agent_ids: Vec::new(),
+        stage: SwarmStage::Executing,
+        tasks,
+        synthesis_prompt: None,
+        gate_output: None,
+        gate_report: None,
+        genome_gate_results: None,
+        genome_gate_pending: None,
+        genome_review_pending: None,
+        report_status: None,
+        report_output: None,
+        scope_files: Vec::new(),
+        initial_genome_baselines: std::collections::HashMap::new(),
+        gate_retry_count: 0,
+    }
+}
+
+#[test]
+fn parallel_ensure_deps_resolve_redirects_unresolved_integrator_to_proposers() {
+    let mut tasks = vec![
+        make_task("propose-survey", "a1", Some("propose"), vec![]),
+        SwarmTask {
+            writes: true,
+            ..make_task("integrate", "a2", Some("integrate"), vec!["judge"])
+        },
+    ];
+    let repairs = ensure_deps_resolve(&mut tasks, SwarmTemplate::Parallel);
+    assert_eq!(repairs.len(), 1);
+    let integrate = tasks.iter().find(|t| t.id == "integrate").unwrap();
+    assert_eq!(integrate.deps, vec!["propose-survey".to_string()]);
+}
+
+#[test]
+fn lab_ensure_deps_resolve_is_noop() {
+    let mut tasks = vec![
+        make_task("propose-survey", "a1", Some("propose"), vec![]),
+        SwarmTask {
+            writes: true,
+            ..make_task("integrate", "a2", Some("integrate"), vec!["judge"])
+        },
+    ];
+    let before = tasks.iter().find(|t| t.id == "integrate").unwrap().deps.clone();
+    let repairs = ensure_deps_resolve(&mut tasks, SwarmTemplate::Lab);
+    assert!(repairs.is_empty());
+    let after = tasks.iter().find(|t| t.id == "integrate").unwrap().deps.clone();
+    assert_eq!(before, after);
+}
+
+#[test]
+fn collect_unresolved_deps_walks_all_tasks() {
+    let tasks = vec![
+        make_task("a", "ag", Some("propose"), vec![]),
+        make_task("b", "ag", Some("integrate"), vec!["missing-1", "a"]),
+        make_task("c", "ag", Some("integrate"), vec!["missing-2"]),
+    ];
+    let run = make_run_with_tasks(SwarmTemplate::Parallel, tasks);
+    let unresolved = collect_unresolved_deps(&run);
+    assert_eq!(unresolved.len(), 2);
+    let pairs: Vec<(String, String)> = unresolved
+        .iter()
+        .map(|u| (u.task_id.clone(), u.missing_dep.clone()))
+        .collect();
+    assert!(pairs.contains(&("b".to_string(), "missing-1".to_string())));
+    assert!(pairs.contains(&("c".to_string(), "missing-2".to_string())));
+}
+
+#[test]
+fn collect_unresolved_deps_empty_when_all_resolve() {
+    let tasks = vec![
+        make_task("a", "ag", Some("propose"), vec![]),
+        make_task("b", "ag", Some("integrate"), vec!["a"]),
+        make_task("c", "ag", Some("integrate"), vec!["a", "b"]),
+    ];
+    let run = make_run_with_tasks(SwarmTemplate::Parallel, tasks);
+    assert!(collect_unresolved_deps(&run).is_empty());
+}

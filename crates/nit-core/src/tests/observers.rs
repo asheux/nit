@@ -155,3 +155,79 @@ fn turn_completed_integration_runs_observers_and_persists() {
     assert_eq!(obs.kind, SignalKind::HelpNeeded);
     assert_eq!(obs.posted_at_gen, reloaded.current_generation());
 }
+
+fn inject_unresolved_dep_warning(
+    state: &mut AppState,
+    planner_agent: &str,
+    missing_dep: &str,
+    posted_at_gen: u64,
+    counter: u64,
+) {
+    let posted_by = format!("planner:{planner_agent}");
+    let id = format!("{posted_at_gen}-{posted_by}-{counter}");
+    state.substrate.emit_signal(Signal {
+        id,
+        kind: SignalKind::Warning,
+        posted_by: posted_by.clone(),
+        posted_at_gen,
+        target: SignalTarget::Agent {
+            agent_id: planner_agent.into(),
+        },
+        initial_strength: SubstrateState::DEFAULT_INITIAL_STRENGTH,
+        payload: serde_json::json!({
+            "reason": "unresolved_dep",
+            "task_id": "integrate",
+            "missing_dep": missing_dep,
+        }),
+    });
+}
+
+#[test]
+fn sparse_plan_silent_below_threshold() {
+    let mut state = test_state();
+    inject_unresolved_dep_warning(&mut state, "alice", "judge", 0, 0);
+    inject_unresolved_dep_warning(&mut state, "alice", "judge", 0, 1);
+    let emissions = (sparse_plan::OBSERVER.run)(&state);
+    assert!(emissions.is_empty());
+}
+
+#[test]
+fn sparse_plan_emits_help_needed_at_threshold() {
+    let mut state = test_state();
+    inject_unresolved_dep_warning(&mut state, "alice", "judge", 0, 0);
+    inject_unresolved_dep_warning(&mut state, "alice", "judge", 0, 1);
+    inject_unresolved_dep_warning(&mut state, "alice", "review", 0, 2);
+    let emissions = (sparse_plan::OBSERVER.run)(&state);
+    assert_eq!(emissions.len(), 1);
+    let em = &emissions[0];
+    assert_eq!(em.kind, SignalKind::HelpNeeded);
+    match &em.target {
+        SignalTarget::Agent { agent_id } => assert_eq!(agent_id, "alice"),
+        other => panic!("expected Agent target, got {other:?}"),
+    }
+    assert_eq!(
+        em.payload.get("reason").and_then(|v| v.as_str()),
+        Some("sparse_plan")
+    );
+}
+
+#[test]
+fn sparse_plan_self_silences_on_recent_help_needed() {
+    let mut state = test_state();
+    for i in 0..5 {
+        inject_unresolved_dep_warning(&mut state, "alice", "judge", 0, i);
+    }
+    state.substrate.emit_signal(Signal {
+        id: "0-observer:sparse_plan-0".into(),
+        kind: SignalKind::HelpNeeded,
+        posted_by: "observer:sparse_plan".into(),
+        posted_at_gen: 0,
+        target: SignalTarget::Agent {
+            agent_id: "alice".into(),
+        },
+        initial_strength: OBSERVER_INITIAL_STRENGTH,
+        payload: serde_json::Value::Null,
+    });
+    let emissions = (sparse_plan::OBSERVER.run)(&state);
+    assert!(emissions.is_empty());
+}

@@ -286,3 +286,47 @@ fn intervention_downgrades_to_signal_only_when_retry_budget_exhausted() {
         other => panic!("expected EmitSignalOnly, got {other:?}"),
     }
 }
+
+#[test]
+fn sparse_plan_arbiter_escalates_on_help_needed() {
+    use crate::arbiters::sparse_plan_arbiter;
+    let mut state = test_state();
+    state.substrate.emit_signal(Signal {
+        id: "0-observer:sparse_plan-0".into(),
+        kind: SignalKind::HelpNeeded,
+        posted_by: "observer:sparse_plan".into(),
+        posted_at_gen: 0,
+        target: SignalTarget::Agent {
+            agent_id: "alice".into(),
+        },
+        initial_strength: SubstrateState::DEFAULT_INITIAL_STRENGTH,
+        payload: serde_json::json!({
+            "reason": "sparse_plan",
+            "planner": "alice",
+            "unresolved_count": 3,
+            "missing_deps_sample": ["judge", "review"],
+        }),
+    });
+    let proposals = (sparse_plan_arbiter::ARBITER.run)(&state);
+    assert_eq!(proposals.len(), 1);
+    let p = &proposals[0];
+    match &p.target {
+        InterventionTarget::Agent { agent_id } => assert_eq!(agent_id, "alice"),
+        other => panic!("expected Agent target, got {other:?}"),
+    }
+    match &p.kind {
+        InterventionKind::RedispatchWithEscalatedPrompt { prompt } => {
+            assert!(prompt.contains("ARBITER"));
+            assert!(prompt.contains("judge"));
+        }
+        other => panic!("expected RedispatchWithEscalatedPrompt, got {other:?}"),
+    }
+}
+
+#[test]
+fn sparse_plan_arbiter_silent_without_help_needed() {
+    use crate::arbiters::sparse_plan_arbiter;
+    let state = test_state();
+    let proposals = (sparse_plan_arbiter::ARBITER.run)(&state);
+    assert!(proposals.is_empty());
+}

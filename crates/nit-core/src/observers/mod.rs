@@ -13,6 +13,7 @@ use crate::substrate::{SignalKind, SignalTarget};
 
 pub mod global_heat;
 pub mod repeat_failure;
+pub mod sparse_plan;
 
 /// Initial strength for observer-emitted signals — higher than the worker
 /// default (1.0) so structural facts outlast worker-emitted transients.
@@ -35,7 +36,11 @@ pub struct Observer {
     pub run: ObserverFn,
 }
 
-pub const REGISTERED_OBSERVERS: &[Observer] = &[repeat_failure::OBSERVER, global_heat::OBSERVER];
+pub const REGISTERED_OBSERVERS: &[Observer] = &[
+    repeat_failure::OBSERVER,
+    global_heat::OBSERVER,
+    sparse_plan::OBSERVER,
+];
 
 /// Runs every registered observer and collects their emissions.
 /// Observer ordering within this function is the REGISTERED_OBSERVERS

@@ -2230,6 +2230,20 @@ impl SwarmRuntime {
                                 .as_deref()
                                 .or(parsed.integrator_agent_id.as_deref()),
                         ));
+                        let deps_repairs =
+                            ensure_deps_resolve(&mut parsed.tasks, run.template);
+                        if !deps_repairs.is_empty() {
+                            for desc in &deps_repairs {
+                                parsed.warnings.push(format!("Plan safety net: {desc}"));
+                            }
+                            emit_parallel_deps_auto_repair_signals(
+                                state,
+                                &run.planner_agent_id,
+                                &run.mission_id,
+                                run.template.label(),
+                                &deps_repairs,
+                            );
+                        }
                         parsed.warnings.extend(ensure_agent_coverage(
                             &mut parsed.tasks,
                             run.template,
@@ -2389,6 +2403,7 @@ impl SwarmRuntime {
                         run.stage = SwarmStage::Executing;
                         update_mission_phase(state, &run.mission_id, MissionPhase::Execute);
                         refresh_task_readiness(&mut run);
+                        emit_unresolved_dep_signals(state, &run);
                         dispatches.extend(dispatch_ready_tasks(&mut run));
                         if let Some(deadlock) = maybe_resolve_deadlock(&mut run) {
                             push_system_message_to_mission(
@@ -2494,6 +2509,7 @@ impl SwarmRuntime {
                             }
                         }
                         refresh_task_readiness(&mut run);
+                        emit_unresolved_dep_signals(state, &run);
                         dispatches.extend(dispatch_ready_tasks(&mut run));
                         if let Some(deadlock) = maybe_resolve_deadlock(&mut run) {
                             push_system_message_to_mission(
@@ -2703,6 +2719,20 @@ impl SwarmRuntime {
                                 .as_deref()
                                 .or(parsed.integrator_agent_id.as_deref()),
                         ));
+                        let deps_repairs =
+                            ensure_deps_resolve(&mut parsed.tasks, run.template);
+                        if !deps_repairs.is_empty() {
+                            for desc in &deps_repairs {
+                                parsed.warnings.push(format!("Plan safety net: {desc}"));
+                            }
+                            emit_parallel_deps_auto_repair_signals(
+                                state,
+                                &run.planner_agent_id,
+                                &run.mission_id,
+                                run.template.label(),
+                                &deps_repairs,
+                            );
+                        }
                         parsed.warnings.extend(ensure_agent_coverage(
                             &mut parsed.tasks,
                             run.template,
@@ -2862,6 +2892,7 @@ impl SwarmRuntime {
                         update_mission_phase(state, &run.mission_id, MissionPhase::Execute);
                         initialize_task_graph(&mut run);
                         refresh_task_readiness(&mut run);
+                        emit_unresolved_dep_signals(state, &run);
                         dispatches.extend(dispatch_ready_tasks(&mut run));
                         if let Some(deadlock) = maybe_resolve_deadlock(&mut run) {
                             push_system_message_to_mission(
@@ -2968,6 +2999,7 @@ impl SwarmRuntime {
 
                         if retried {
                             refresh_task_readiness(&mut run);
+                            emit_unresolved_dep_signals(state, &run);
                             dispatches.extend(dispatch_ready_tasks(&mut run));
                             self.runs.insert(mid.clone(), run);
                         } else {
@@ -3008,6 +3040,7 @@ impl SwarmRuntime {
                             // queue_len doesn't leak.
                             drain_queued_turns_for_agent(state, agent_id);
                             refresh_task_readiness(&mut run);
+                            emit_unresolved_dep_signals(state, &run);
                             dispatches.extend(dispatch_ready_tasks(&mut run));
                             if let Some(deadlock) = maybe_resolve_deadlock(&mut run) {
                                 push_system_message_to_mission(
@@ -3434,6 +3467,61 @@ fn ensure_proposer_task(
         "Plan safety net: demoted task '{demoted_id}' (agent '{demoted_agent}') to role=propose because the parallel template plan had no proposer/recon lane.",
     ));
     warnings
+}
+
+/// Parallel-only auto-repair: when a writer task has unresolved dep ids
+/// AND zero resolved deps, redirect its deps to all propose/research
+/// tasks. Recovers the common failure mode where the planner writes
+/// `integrate.deps = ["judge"]` against a parallel template that has no
+/// judge phase. Non-writer tasks, or writers with any resolved dep, are
+/// left alone — they surface via the Layer 1 warning path instead.
+///
+/// Returns a per-repair description string; the caller emits a substrate
+/// signal per entry for traceability.
+fn ensure_deps_resolve(
+    tasks: &mut [SwarmTask],
+    template: SwarmTemplate,
+) -> Vec<String> {
+    if !matches!(template, SwarmTemplate::Parallel) {
+        return Vec::new();
+    }
+    let task_ids: HashSet<String> = tasks.iter().map(|t| t.id.clone()).collect();
+    let propose_ids: Vec<String> = tasks
+        .iter()
+        .filter(|t| {
+            t.role
+                .as_deref()
+                .and_then(normalize_role_label)
+                .map(|r| {
+                    matches!(
+                        r.as_str(),
+                        "propose" | "research" | COMPUTATIONAL_RESEARCH_ROLE
+                    )
+                })
+                .unwrap_or(false)
+        })
+        .map(|t| t.id.clone())
+        .collect();
+    if propose_ids.is_empty() {
+        return Vec::new();
+    }
+    let mut repairs = Vec::new();
+    for task in tasks.iter_mut() {
+        if !task.writes || task.deps.is_empty() {
+            continue;
+        }
+        let has_resolved = task.deps.iter().any(|d| task_ids.contains(d.as_str()));
+        if has_resolved {
+            continue;
+        }
+        let original_deps = task.deps.join(",");
+        task.deps = propose_ids.clone();
+        repairs.push(format!(
+            "parallel auto-repair: {} deps [{}] unresolved -> redirected to propose tasks {:?}",
+            task.id, original_deps, propose_ids
+        ));
+    }
+    repairs
 }
 
 /// Safety net for the parallel template: synthesize a read-only task for
@@ -5858,6 +5946,116 @@ fn select_dispatchable_ready_task_indices(run: &SwarmRun) -> Vec<usize> {
         indices.push(idx);
     }
     indices
+}
+
+#[derive(Clone, Debug)]
+struct UnresolvedDep {
+    task_id: String,
+    task_role: Option<String>,
+    missing_dep: String,
+}
+
+/// Walks all tasks in the run and returns every dep id that doesn't
+/// resolve to another task in the same run. Used by the dispatcher to
+/// surface malformed plans via substrate Warning signals (Layer 1).
+fn collect_unresolved_deps(run: &SwarmRun) -> Vec<UnresolvedDep> {
+    let task_ids: HashSet<&str> = run.tasks.iter().map(|t| t.id.as_str()).collect();
+    let mut out = Vec::new();
+    for task in &run.tasks {
+        for dep in &task.deps {
+            if !task_ids.contains(dep.as_str()) {
+                out.push(UnresolvedDep {
+                    task_id: task.id.clone(),
+                    task_role: task.role.clone(),
+                    missing_dep: dep.clone(),
+                });
+            }
+        }
+    }
+    out
+}
+
+/// Emit a Warning signal per unresolved dep (dedup against the last 5
+/// generations of matching signals). posted_by encodes the planner agent
+/// id so the sparse_plan observer can group by planner.
+fn emit_unresolved_dep_signals(state: &mut AppState, run: &SwarmRun) {
+    let unresolved = collect_unresolved_deps(run);
+    if unresolved.is_empty() {
+        return;
+    }
+    let posted_by = format!("planner:{}", run.planner_agent_id);
+    let current_gen = state.substrate.current_generation();
+    let window_start = current_gen.saturating_sub(5);
+    for dep in unresolved {
+        let already_emitted = state.substrate.signals.values().any(|s| {
+            s.kind == nit_core::substrate::SignalKind::Warning
+                && s.posted_by == posted_by
+                && s.posted_at_gen >= window_start
+                && s.payload.get("reason").and_then(|v| v.as_str()) == Some("unresolved_dep")
+                && s.payload.get("task_id").and_then(|v| v.as_str()) == Some(dep.task_id.as_str())
+                && s.payload.get("missing_dep").and_then(|v| v.as_str())
+                    == Some(dep.missing_dep.as_str())
+        });
+        if already_emitted {
+            continue;
+        }
+        let id = state.substrate.next_signal_id(&posted_by);
+        let posted_at_gen = state.substrate.current_generation();
+        state.substrate.emit_signal(nit_core::substrate::Signal {
+            id,
+            kind: nit_core::substrate::SignalKind::Warning,
+            posted_by: posted_by.clone(),
+            posted_at_gen,
+            target: nit_core::substrate::SignalTarget::Agent {
+                agent_id: run.planner_agent_id.clone(),
+            },
+            initial_strength: nit_core::substrate::SubstrateState::DEFAULT_INITIAL_STRENGTH,
+            payload: serde_json::json!({
+                "reason": "unresolved_dep",
+                "task_id": dep.task_id,
+                "task_role": dep.task_role,
+                "missing_dep": dep.missing_dep,
+                "mission_id": run.mission_id,
+                "template": run.template.label(),
+            }),
+        });
+    }
+}
+
+/// Emit a Warning signal per auto-repair description produced by
+/// `ensure_deps_resolve`. Lower initial strength (0.8) so the repair
+/// trace fades faster than the raw unresolved-dep warnings it stems from.
+fn emit_parallel_deps_auto_repair_signals(
+    state: &mut AppState,
+    planner_agent_id: &str,
+    mission_id: &str,
+    template_label: &str,
+    repairs: &[String],
+) {
+    if repairs.is_empty() {
+        return;
+    }
+    let posted_by = format!("planner:{planner_agent_id}");
+    for desc in repairs {
+        let id = state.substrate.next_signal_id(&posted_by);
+        let posted_at_gen = state.substrate.current_generation();
+        state.substrate.emit_signal(nit_core::substrate::Signal {
+            id,
+            kind: nit_core::substrate::SignalKind::Warning,
+            posted_by: posted_by.clone(),
+            posted_at_gen,
+            target: nit_core::substrate::SignalTarget::Agent {
+                agent_id: planner_agent_id.to_string(),
+            },
+            initial_strength: 0.8,
+            payload: serde_json::json!({
+                "reason": "parallel_deps_auto_repaired",
+                "description": desc,
+                "mission_id": mission_id,
+                "template": template_label,
+            }),
+        });
+    }
 }
 
 fn collect_dependency_payload(run: &SwarmRun, task: &SwarmTask) -> Vec<(String, String)> {
