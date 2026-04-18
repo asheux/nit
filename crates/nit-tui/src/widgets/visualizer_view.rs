@@ -88,6 +88,10 @@ pub fn render(
         .add_modifier(Modifier::BOLD);
     let sep_style = Style::default().fg(title_color);
 
+    let hint_style = Style::default()
+        .fg(theme.border)
+        .add_modifier(Modifier::DIM);
+
     let title_spans: Vec<Span<'static>> = vec![
         Span::styled(" ", sep_style),
         Span::styled(TITLE_LABEL, title_style),
@@ -98,6 +102,7 @@ pub fn render(
         Span::styled(BTN_SNAP_LABEL, btn_active),
         Span::styled(" ", sep_style),
         Span::styled(BTN_SEARCH_LABEL, btn_active),
+        Span::styled("   [Ctrl+Enter] run ", hint_style),
     ];
     let title = Line::from(title_spans);
 
