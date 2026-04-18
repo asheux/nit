@@ -5831,19 +5831,28 @@ fn dispatch_ready_tasks(run: &mut SwarmRun) -> Vec<SwarmDispatch> {
 }
 
 fn select_dispatchable_ready_task_indices(run: &SwarmRun) -> Vec<usize> {
-    let mut writer_taken = run.tasks.iter().any(|task| {
-        task.writes
-            && matches!(
-                task.state,
-                SwarmTaskState::Dispatched | SwarmTaskState::Running
-            )
-    });
+    // Lab and Bulk templates rely on a global single-writer invariant — only
+    // one task with writes=true can be Dispatched/Running at a time, with
+    // other writer tasks queued behind it. Parallel explicitly allows write
+    // fan-out: multiple integrate tasks can execute concurrently (their work
+    // regions are expected to be disjoint per the planner prompt, and the
+    // substrate's claim lattice surfaces any conflicts that do arise via
+    // ClaimViolation signals + auto-retries).
+    let enforce_single_writer = !matches!(run.template, SwarmTemplate::Parallel);
+    let mut writer_taken = enforce_single_writer
+        && run.tasks.iter().any(|task| {
+            task.writes
+                && matches!(
+                    task.state,
+                    SwarmTaskState::Dispatched | SwarmTaskState::Running
+                )
+        });
     let mut indices = Vec::new();
     for (idx, task) in run.tasks.iter().enumerate() {
         if !matches!(task.state, SwarmTaskState::Ready) {
             continue;
         }
-        if task.writes {
+        if task.writes && enforce_single_writer {
             if writer_taken {
                 continue;
             }

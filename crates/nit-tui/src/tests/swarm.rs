@@ -1310,6 +1310,111 @@ fn single_writer_limits_concurrent_write_tasks() {
 }
 
 #[test]
+fn parallel_template_dispatches_multiple_writers_concurrently() {
+    // The Parallel template exists to exercise write fan-out: integrate
+    // tasks with disjoint work regions (enforced only by the planner
+    // prompt, not the dispatcher) should all execute at once. Lab / Bulk
+    // enforce global single-writer; Parallel does not.
+    let mut run = SwarmRun {
+        mission_id: "mis-parallel".into(),
+        root_prompt: "root".into(),
+        template: SwarmTemplate::Parallel,
+        mission_kind: SwarmMissionKind::General,
+        planner_agent_id: "planner".into(),
+        integrator_agent_id: Some("a1".into()),
+        integrator_locked: false,
+        verifier_agent_id: None,
+        gate_bundle: None,
+        gate_custom: None,
+        gate_selection: "auto:none".into(),
+        agent_ids: vec![
+            "planner".into(),
+            "a1".into(),
+            "a2".into(),
+            "a3".into(),
+        ],
+        stage: SwarmStage::Executing,
+        tasks: vec![
+            SwarmTask {
+                id: "w1".into(),
+                agent_id: "a1".into(),
+                role: Some("integrate".into()),
+                title: "Write 1".into(),
+                task_prompt: "w1".into(),
+                deps: Vec::new(),
+                writes: true,
+                artifacts: Vec::new(),
+                done_when: None,
+                state: SwarmTaskState::Pending,
+                output: None,
+                parsed_artifacts: None,
+                expected_artifacts_missing: false,
+                failed: false,
+                retries: 0,
+            },
+            SwarmTask {
+                id: "w2".into(),
+                agent_id: "a2".into(),
+                role: Some("integrate".into()),
+                title: "Write 2".into(),
+                task_prompt: "w2".into(),
+                deps: Vec::new(),
+                writes: true,
+                artifacts: Vec::new(),
+                done_when: None,
+                state: SwarmTaskState::Pending,
+                output: None,
+                parsed_artifacts: None,
+                expected_artifacts_missing: false,
+                failed: false,
+                retries: 0,
+            },
+            SwarmTask {
+                id: "w3".into(),
+                agent_id: "a3".into(),
+                role: Some("integrate".into()),
+                title: "Write 3".into(),
+                task_prompt: "w3".into(),
+                deps: Vec::new(),
+                writes: true,
+                artifacts: Vec::new(),
+                done_when: None,
+                state: SwarmTaskState::Pending,
+                output: None,
+                parsed_artifacts: None,
+                expected_artifacts_missing: false,
+                failed: false,
+                retries: 0,
+            },
+        ],
+        synthesis_prompt: None,
+        gate_output: None,
+        gate_report: None,
+        genome_gate_results: None,
+        genome_gate_pending: None,
+        genome_review_pending: None,
+        report_status: None,
+        report_output: None,
+        scope_files: Vec::new(),
+        initial_genome_baselines: std::collections::HashMap::new(),
+        gate_retry_count: 0,
+    };
+
+    initialize_task_graph(&mut run);
+    refresh_task_readiness(&mut run);
+
+    let dispatches = dispatch_ready_tasks(&mut run);
+    assert_eq!(
+        dispatches.len(),
+        3,
+        "parallel template should fan out all three writer tasks at once; got {dispatches:?}"
+    );
+    assert!(dispatches.iter().any(|d| d.prompt.contains("Write 1 (w1)")));
+    assert!(dispatches.iter().any(|d| d.prompt.contains("Write 2 (w2)")));
+    assert!(dispatches.iter().any(|d| d.prompt.contains("Write 3 (w3)")));
+}
+
+#[test]
 fn task_prompt_includes_role_contract_guidance() {
     let task = make_task("judge", "a1", Some("judge"), vec!["propose-01"]);
     let prompt = wrap_task_prompt("root", SwarmMissionKind::General, &task, None, &[]);
