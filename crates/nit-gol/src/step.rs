@@ -24,10 +24,6 @@ pub fn step(grid: &Grid, rule: Rule, edge: EdgeMode) -> Grid {
     next
 }
 
-/// Decide the next state of a cell from its current state and neighbor count.
-///
-/// Birth and survival are the only two transitions: a dead cell applies the
-/// birth rule, a live cell applies the survival rule.
 #[inline]
 fn next_cell(alive: bool, neighbors: u8, rule: Rule) -> bool {
     if alive {
@@ -78,18 +74,11 @@ mod neighborhood {
     ) -> Option<(usize, usize)> {
         let nx = x as isize + dx;
         let ny = y as isize + dy;
-        match edge {
-            EdgeMode::Dead => {
-                if nx < 0 || ny < 0 || nx >= width || ny >= height {
-                    None
-                } else {
-                    Some((nx as usize, ny as usize))
-                }
-            }
-            EdgeMode::Toroid => Some((
-                nx.rem_euclid(width) as usize,
-                ny.rem_euclid(height) as usize,
-            )),
-        }
+        let (rx, ry) = match edge {
+            EdgeMode::Toroid => (nx.rem_euclid(width), ny.rem_euclid(height)),
+            EdgeMode::Dead if nx < 0 || ny < 0 || nx >= width || ny >= height => return None,
+            EdgeMode::Dead => (nx, ny),
+        };
+        Some((rx as usize, ry as usize))
     }
 }

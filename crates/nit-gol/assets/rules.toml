@@ -1,9 +1,11 @@
 # Built-in Game of Life rule catalog.
-# Each entry is keyed by `id` (lower-snake-case, case-insensitive for overlays).
-# Overlays defined elsewhere merge into this table by matching `id`.
-# Sections below group rules by theme; ordering is cosmetic only.
+#
+# Each entry is keyed by its `id` (lower-snake-case). User overlays
+# from the configuration directory match the id case-insensitively,
+# either merging field-by-field or adding new rules. Section headings
+# below group rules by theme; ordering is cosmetic only.
 
-# ── Classic rules ────────────────────────────────────────────────────
+# ── Classic rules ───────────────────────────────────────────────────
 
 [[rules]]
 id = "conway"
@@ -37,7 +39,7 @@ description = "No survival — only births produce expanding spark patterns."
 tags = ["explosive", "sparks", "no-survival"]
 aliases = ["seeds", "b2/s"]
 
-# ── Classic-ish variants ─────────────────────────────────────────────
+# ── Classic-ish variants ────────────────────────────────────────────
 
 [[rules]]
 id = "life34"
@@ -47,7 +49,7 @@ description = "Symmetric birth/survival at 3 and 4 neighbors."
 tags = ["classic-ish", "oscillators"]
 aliases = ["34life", "b34/s34"]
 
-# ── Morphology and growth ────────────────────────────────────────────
+# ── Morphology and growth ───────────────────────────────────────────
 
 [[rules]]
 id = "diamoeba"
@@ -165,7 +167,7 @@ description = "Compartmental growth forming fortified wall-like structures."
 tags = ["morphology", "walls", "cities"]
 aliases = ["b45678/s2345", "walled"]
 
-# ── Life variants ────────────────────────────────────────────────────
+# ── Life variants ───────────────────────────────────────────────────
 
 [[rules]]
 id = "dot_life"
@@ -211,7 +213,7 @@ description = "Majority-vote smoothing useful as a morphological filter."
 tags = ["smoothing", "morphology", "majority"]
 aliases = ["majority", "b5678/s45678"]
 
-# ── Complexity-studied rules ─────────────────────────────────────────
+# ── Complexity-studied rules ────────────────────────────────────────
 
 [[rules]]
 id = "eight_life"

@@ -15,14 +15,15 @@ use nit_gol::{Grid, Rule};
 
 const DEFAULT_STACK_MB: usize = 256;
 const MIN_STACK_MB: usize = 32;
+const STACK_ENV_PRIMARY: &str = "NIT_GOL_IO_STACK_MB";
+const STACK_ENV_FALLBACK: &str = "NIT_GOL_STACK_MB";
+const WORKER_THREAD_NAME: &str = "snapshot-stress";
 
 fn main() {
-    let args: Vec<String> = env::args().skip(1).collect();
-    let params = StressParams::from_args(&args);
-
+    let params = StressParams::from_args(&env::args().skip(1).collect::<Vec<_>>());
     let stack_bytes = resolve_stack_bytes();
     let handle = thread::Builder::new()
-        .name("snapshot-stress".into())
+        .name(WORKER_THREAD_NAME.into())
         .stack_size(stack_bytes)
         .spawn(move || run_stress(&params))
         .expect("spawn snapshot stress thread");
@@ -33,6 +34,8 @@ fn main() {
     }
 }
 
+/// Positional CLI arguments, preserved in the order documented in the
+/// crate-level docstring: `width height iterations dir max_files seed`.
 struct StressParams {
     width: usize,
     height: usize,
@@ -59,19 +62,19 @@ impl StressParams {
     /// Parse positional CLI arguments, falling back to default values
     /// for any that are missing or fail to parse.
     fn from_args(args: &[String]) -> Self {
-        let d = Self::default();
+        let defaults = Self::default();
         Self {
-            width: parse_arg(args, 0).unwrap_or(d.width),
-            height: parse_arg(args, 1).unwrap_or(d.height),
-            iterations: parse_arg(args, 2).unwrap_or(d.iterations),
-            dir: args.get(3).map(PathBuf::from).unwrap_or(d.dir),
-            max_files: parse_arg(args, 4).unwrap_or(d.max_files),
-            seed: parse_arg(args, 5).unwrap_or(d.seed),
+            width: parse_positional(args, 0).unwrap_or(defaults.width),
+            height: parse_positional(args, 1).unwrap_or(defaults.height),
+            iterations: parse_positional(args, 2).unwrap_or(defaults.iterations),
+            dir: args.get(3).map(PathBuf::from).unwrap_or(defaults.dir),
+            max_files: parse_positional(args, 4).unwrap_or(defaults.max_files),
+            seed: parse_positional(args, 5).unwrap_or(defaults.seed),
         }
     }
 }
 
-fn parse_arg<T: std::str::FromStr>(args: &[String], idx: usize) -> Option<T> {
+fn parse_positional<T: std::str::FromStr>(args: &[String], idx: usize) -> Option<T> {
     args.get(idx).and_then(|s| s.parse().ok())
 }
 
@@ -128,10 +131,10 @@ fn run_stress(params: &StressParams) -> std::io::Result<()> {
 /// then defaults to 256 MB with a 32 MB minimum so snapshot writes never
 /// starve for stack.
 fn resolve_stack_bytes() -> usize {
-    let from_env = env::var("NIT_GOL_IO_STACK_MB")
-        .or_else(|_| env::var("NIT_GOL_STACK_MB"))
+    let configured = env::var(STACK_ENV_PRIMARY)
+        .or_else(|_| env::var(STACK_ENV_FALLBACK))
         .ok()
         .and_then(|value| value.parse::<usize>().ok());
-    let mb = from_env.unwrap_or(DEFAULT_STACK_MB).max(MIN_STACK_MB);
+    let mb = configured.unwrap_or(DEFAULT_STACK_MB).max(MIN_STACK_MB);
     mb.saturating_mul(1024 * 1024)
 }

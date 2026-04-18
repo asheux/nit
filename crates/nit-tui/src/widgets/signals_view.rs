@@ -76,7 +76,7 @@ pub fn build_lines(state: &AppState, theme: &Theme, width: u16) -> Vec<Line<'sta
         let row = format_row(
             &format!("{strength:.2}"),
             kind_label(signal.kind),
-            &truncate(&signal.posted_by, 16),
+            &truncate(&signal.posted_by, 26),
             &format_target(&signal.target),
             &format!("{age}g"),
             &truncate(&signal.id, 24),
@@ -98,15 +98,15 @@ fn format_row(
     id: &str,
     width: u16,
 ) -> String {
-    // Width-adaptive: drop ID below 70; drop AGE below 50.
-    let show_id = width >= 70;
-    let show_age = width >= 50;
+    // Width-adaptive: drop ID below 90; drop AGE below 70.
+    let show_id = width >= 90;
+    let show_age = width >= 70;
     let mut row = format!(
-        "{:>4}  {:<14} {:<16} {:<28}",
+        "{:>4}  {:<14} {:<26} {:<36}",
         strength,
         truncate(kind, 14),
         by,
-        truncate(target, 28)
+        truncate(target, 36)
     );
     if show_age {
         row.push_str(&format!(" {age:>5}"));
@@ -132,8 +132,8 @@ fn kind_label(kind: SignalKind) -> &'static str {
 fn format_target(t: &SignalTarget) -> String {
     match t {
         SignalTarget::Global => "Global".to_string(),
-        SignalTarget::Agent { agent_id } => format!("agent:{}", truncate(agent_id, 22)),
-        SignalTarget::File { path } => format!("file:{}", truncate(&path.to_string_lossy(), 22)),
+        SignalTarget::Agent { agent_id } => format!("agent:{}", truncate(agent_id, 30)),
+        SignalTarget::File { path } => format!("file:{}", truncate(&path.to_string_lossy(), 30)),
     }
 }
 

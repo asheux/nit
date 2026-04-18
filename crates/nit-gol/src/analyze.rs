@@ -64,12 +64,43 @@ struct SimMetrics {
     alive_end: u32,
 }
 
+/// Running totals for per-generation population statistics.
+struct PopulationTracker {
+    sum: u64,
+    max: u32,
+    last: u32,
+    samples: u32,
+}
+
+impl PopulationTracker {
+    fn new() -> Self {
+        Self {
+            sum: 0,
+            max: 0,
+            last: 0,
+            samples: 0,
+        }
+    }
+
+    fn record(&mut self, alive: u32) {
+        self.sum += alive as u64;
+        self.max = self.max.max(alive);
+        self.last = alive;
+        self.samples = self.samples.saturating_add(1);
+    }
+
+    fn average(&self, transient: u32) -> f32 {
+        if transient == 0 {
+            return 0.0;
+        }
+        self.sum as f32 / transient as f32
+    }
+}
+
 /// Simulate a rule on `seed` for up to `max_generations` and score it.
 ///
 /// The simulation halts early on extinction (zero alive cells) or when
-/// a previously seen grid hash is encountered (cycle detection). The
-/// returned [`RuleEvaluation`] carries both the score and supporting
-/// metrics.
+/// a previously seen grid hash is encountered (cycle detection).
 pub fn evaluate_rule(
     seed: &Grid,
     rule: Rule,
@@ -111,25 +142,22 @@ fn simulate_with_cycle_detection(
 ) -> SimMetrics {
     let mut grid = seed.clone();
     let mut seen: HashMap<u64, u32> = HashMap::new();
-    let mut sum_population: u64 = 0;
-    let mut max_population: u32 = 0;
+    let mut population = PopulationTracker::new();
     let mut period = None;
     let mut transient = 0;
-    let mut alive_end = 0;
 
     for generation in 0..max_generations {
         let hash = grid.hash();
-        if let Some(prev) = seen.get(&hash) {
-            period = Some(generation.saturating_sub(*prev));
+        if let Some(&prev) = seen.get(&hash) {
+            period = Some(generation.saturating_sub(prev));
             transient = generation;
-            alive_end = grid.alive_count() as u32;
+            population.last = grid.alive_count() as u32;
             break;
         }
         seen.insert(hash, generation);
+
         let alive = grid.alive_count() as u32;
-        sum_population += alive as u64;
-        max_population = max_population.max(alive);
-        alive_end = alive;
+        population.record(alive);
         if alive == 0 {
             transient = generation + 1;
             break;
@@ -138,19 +166,13 @@ fn simulate_with_cycle_detection(
         transient = generation + 1;
     }
 
-    let avg_population = if transient > 0 {
-        sum_population as f32 / transient as f32
-    } else {
-        0.0
-    };
-
     SimMetrics {
+        avg_population: population.average(transient),
+        max_population: population.max,
+        alive_end: population.last,
         final_grid: grid,
         period,
         transient,
-        avg_population,
-        max_population,
-        alive_end,
     }
 }
 
@@ -173,9 +195,16 @@ pub(crate) fn score_rule(
     if alive_end == 0 {
         score -= SCORE_EXTINCTION_PENALTY;
     }
-    let saturation_cap = (grid_area as f32 * SATURATION_THRESHOLD) as usize;
-    if grid_area > 0 && max_population as usize > saturation_cap {
+    if is_saturated(grid_area, max_population) {
         score -= SCORE_SATURATION_PENALTY;
     }
     score
+}
+
+fn is_saturated(grid_area: usize, max_population: u32) -> bool {
+    if grid_area == 0 {
+        return false;
+    }
+    let cap = (grid_area as f32 * SATURATION_THRESHOLD) as usize;
+    max_population as usize > cap
 }

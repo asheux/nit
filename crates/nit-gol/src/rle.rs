@@ -1,12 +1,13 @@
-//! Run-length encoding (RLE) for Game of Life grids.
+//! Run-length encoding for Game of Life grids.
 //!
-//! Implements the standard `.rle` file format used by the Life community
-//! for pattern interchange. Supports encoding from both [`Grid`] cell
-//! arrays and packed `u64` bitset representations.
+//! Implements the standard `.rle` interchange format used by the Life
+//! community. Encoding accepts either a [`Grid`] or a packed bitset;
+//! both inputs produce byte-identical output.
 //!
-//! The RLE format encodes each row as a sequence of run-length pairs
-//! (`<count><tag>` where `o` = alive, `b` = dead), rows separated by
-//! `$`, and the pattern terminated by `!`.
+//! Each row is emitted as a sequence of `<count><tag>` runs (`o` =
+//! alive, `b` = dead), rows are separated by `$`, and the document
+//! terminates with `!`. These tag bytes are part of the published
+//! format spec and must remain stable.
 
 use std::io::{self, Write};
 
@@ -16,11 +17,9 @@ const ALIVE_TAG: u8 = b'o';
 const DEAD_TAG: u8 = b'b';
 const ROW_SEPARATOR: &[u8] = b"$\n";
 const TERMINATOR: &[u8] = b"!";
+const BITS_PER_WORD: usize = u64::BITS as usize;
 
-/// Encode a grid as a complete RLE string.
-///
-/// Returns the full `.rle` content including the header line with
-/// dimensions and rule, followed by run-length encoded cell data.
+/// Encode a grid as a complete RLE document, header included.
 #[must_use]
 pub fn encode_rle(grid: &Grid, rule: Rule) -> String {
     let mut buf = Vec::new();
@@ -28,12 +27,9 @@ pub fn encode_rle(grid: &Grid, rule: Rule) -> String {
     String::from_utf8(buf).expect("RLE output is always ASCII")
 }
 
-/// Write RLE-encoded grid data to a generic writer.
-///
-/// Outputs the standard header (`x = W, y = H, rule = R`) followed
-/// by run-length encoded rows separated by `$` and terminated with `!`.
+/// Stream RLE bytes for `grid` into `writer`.
 pub fn write_rle<W: Write>(writer: &mut W, grid: &Grid, rule: Rule) -> io::Result<()> {
-    write_grid_body(
+    write_rle_document(
         writer,
         grid.width(),
         grid.height(),
@@ -42,12 +38,11 @@ pub fn write_rle<W: Write>(writer: &mut W, grid: &Grid, rule: Rule) -> io::Resul
     )
 }
 
-/// Write RLE from a packed bitset representation.
+/// Stream RLE bytes from a packed bitset. Bit `y * width + x` is
+/// LSB-first within each `u64` word.
 ///
-/// Accepts grid dimensions and a `u64`-packed bitset where bit `i`
-/// of word `i/64` (LSB-first within the word) corresponds to cell
-/// index `i = y * width + x`. Returns an error if the bitset is too
-/// small for the given dimensions.
+/// Returns `InvalidInput` when `bits` is too short for the dimensions,
+/// so callers never read past the slice.
 pub fn write_rle_bits<W: Write>(
     writer: &mut W,
     width: u16,
@@ -55,55 +50,41 @@ pub fn write_rle_bits<W: Write>(
     rule: &str,
     bits: &[u64],
 ) -> io::Result<()> {
-    let w = width as usize;
-    let h = height as usize;
-    check_bitset_capacity(w, h, bits)?;
-    write_grid_body(writer, w, h, rule, |x, y| bit_at(bits, y * w + x))
+    let cols = width as usize;
+    let rows = height as usize;
+    ensure_bitset_fits(cols, rows, bits)?;
+    write_rle_document(writer, cols, rows, rule, |x, y| bit_at(bits, y * cols + x))
 }
 
-/// Emit the RLE header, per-row runs, and terminator for any cell accessor.
-fn write_grid_body<W, F>(
+fn write_rle_document<W, F>(
     writer: &mut W,
     width: usize,
     height: usize,
     rule: &str,
-    mut get: F,
+    mut cell_alive: F,
 ) -> io::Result<()>
 where
     W: Write,
     F: FnMut(usize, usize) -> bool,
 {
-    write_rle_header(writer, width, height, rule)?;
+    writeln!(writer, "x = {width}, y = {height}, rule = {rule}")?;
+    // Degenerate grids have no rows to emit; skip the loop so we never
+    // write a stray separator between non-existent rows.
     if width == 0 || height == 0 {
         return writer.write_all(TERMINATOR);
     }
     for y in 0..height {
-        encode_row(writer, width, |x| get(x, y))?;
-        write_row_separator(writer, y, height)?;
+        write_row_runs(writer, width, |x| cell_alive(x, y))?;
+        if y + 1 < height {
+            writer.write_all(ROW_SEPARATOR)?;
+        }
     }
     writer.write_all(TERMINATOR)
 }
 
-fn write_rle_header<W: Write>(
-    writer: &mut W,
-    width: usize,
-    height: usize,
-    rule: &str,
-) -> io::Result<()> {
-    writeln!(writer, "x = {width}, y = {height}, rule = {rule}")
-}
-
-fn write_row_separator<W: Write>(writer: &mut W, row: usize, total_rows: usize) -> io::Result<()> {
-    if row + 1 < total_rows {
-        writer.write_all(ROW_SEPARATOR)
-    } else {
-        Ok(())
-    }
-}
-
-fn check_bitset_capacity(width: usize, height: usize, bits: &[u64]) -> io::Result<()> {
-    let total = width.saturating_mul(height);
-    let needed_words = total.div_ceil(64);
+fn ensure_bitset_fits(width: usize, height: usize, bits: &[u64]) -> io::Result<()> {
+    let total_cells = width.saturating_mul(height);
+    let needed_words = total_cells.div_ceil(BITS_PER_WORD);
     if bits.len() >= needed_words {
         return Ok(());
     }
@@ -116,16 +97,15 @@ fn check_bitset_capacity(width: usize, height: usize, bits: &[u64]) -> io::Resul
     ))
 }
 
-/// Run-length encode a single row by polling cells via a closure.
-fn encode_row<W, F>(writer: &mut W, width: usize, mut get: F) -> io::Result<()>
+fn write_row_runs<W, F>(writer: &mut W, width: usize, mut cell_alive: F) -> io::Result<()>
 where
     W: Write,
     F: FnMut(usize) -> bool,
 {
-    let mut run_tag = cell_tag(get(0));
+    let mut run_tag = tag_for(cell_alive(0));
     let mut run_len: usize = 1;
     for x in 1..width {
-        let tag = cell_tag(get(x));
+        let tag = tag_for(cell_alive(x));
         if tag == run_tag {
             run_len += 1;
             continue;
@@ -138,7 +118,7 @@ where
 }
 
 #[inline]
-const fn cell_tag(alive: bool) -> u8 {
+const fn tag_for(alive: bool) -> u8 {
     if alive {
         ALIVE_TAG
     } else {
@@ -146,8 +126,8 @@ const fn cell_tag(alive: bool) -> u8 {
     }
 }
 
-/// Emit a single run-length pair: `<count><tag>` for runs longer than
-/// one, or just `<tag>` for singletons, per the `.rle` specification.
+/// Emit a single `<count><tag>` run. The count is omitted for
+/// singletons, as the `.rle` spec prescribes.
 fn write_run<W: Write>(writer: &mut W, len: usize, tag: u8) -> io::Result<()> {
     if len > 1 {
         write!(writer, "{len}")?;
@@ -157,7 +137,7 @@ fn write_run<W: Write>(writer: &mut W, len: usize, tag: u8) -> io::Result<()> {
 
 #[inline]
 fn bit_at(bits: &[u64], idx: usize) -> bool {
-    let word = bits[idx / 64];
-    let mask = 1u64 << (idx % 64);
+    let word = bits[idx / BITS_PER_WORD];
+    let mask = 1u64 << (idx % BITS_PER_WORD);
     (word & mask) != 0
 }

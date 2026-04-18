@@ -28,9 +28,9 @@ aliases = ["c"]
 favorite = true
 "#;
 
-fn parse_builtin_toml(source: &str) -> RuleCatalog {
-    let builtin: RuleFile = toml::from_str(source).expect("parse builtin toml");
-    let entries = builtin
+fn catalog_from_toml(source: &str) -> RuleCatalog {
+    let file: RuleFile = toml::from_str(source).expect("parse builtin toml");
+    let entries = file
         .rules
         .into_iter()
         .map(|raw| build_entry_from_file(raw, RuleSource::Builtin).expect("build entry"))
@@ -38,10 +38,25 @@ fn parse_builtin_toml(source: &str) -> RuleCatalog {
     RuleCatalog::from_entries(entries)
 }
 
-fn apply_overlay_toml(catalog: &mut RuleCatalog, source: &str, warnings: &mut Vec<String>) {
+fn merge_overlay_toml(catalog: &mut RuleCatalog, source: &str, warnings: &mut Vec<String>) {
     let overlay: RuleOverlayFile = toml::from_str(source).expect("parse overlay toml");
     catalog.apply_overlays(&overlay.rules, warnings);
     catalog.rebuild_indices(warnings);
+}
+
+/// Panics when `value` was already present in `seen`, tagging the failure
+/// with `field` and `rule_id` so the assertion message pinpoints the
+/// duplicate entry.
+fn insert_unique<T: std::hash::Hash + Eq + std::fmt::Debug>(
+    seen: &mut HashSet<T>,
+    value: T,
+    field: &str,
+    rule_id: &str,
+) {
+    assert!(
+        seen.insert(value),
+        "duplicate {field} for builtin id {rule_id}",
+    );
 }
 
 /// Every built-in rule has a unique (case-insensitive) id, a unique
@@ -52,55 +67,56 @@ fn builtins_unique_and_canonical() {
     let catalog = RuleCatalog::load_builtin(&mut warnings);
     assert!(
         warnings.is_empty(),
-        "built-in catalog loaded with warnings: {warnings:?}"
+        "built-in catalog loaded with warnings: {warnings:?}",
     );
 
-    let mut seen_ids = HashSet::new();
-    let mut seen_rule_keys = HashSet::new();
+    let mut seen_ids: HashSet<String> = HashSet::new();
+    let mut seen_rule_keys: HashSet<u32> = HashSet::new();
     for entry in &catalog.entries {
-        assert!(
-            seen_ids.insert(entry.id.to_ascii_lowercase()),
-            "duplicate built-in id: {}",
-            entry.id
+        insert_unique(
+            &mut seen_ids,
+            entry.id.to_ascii_lowercase(),
+            "id",
+            &entry.id,
         );
-        assert!(
-            seen_rule_keys.insert(rule_key(entry.rule)),
-            "duplicate rulestring for {}: {}",
-            entry.id,
-            entry.rulestring
+        insert_unique(
+            &mut seen_rule_keys,
+            rule_key(entry.rule),
+            "rulestring",
+            &entry.id,
         );
         let parsed = Rule::parse(&entry.rulestring).expect("parse canonical");
         assert_eq!(
             parsed.to_string(),
             entry.rulestring,
             "{} rulestring must round-trip through the parser",
-            entry.id
+            entry.id,
         );
     }
 }
 
-/// Overlays both modify existing entries (merge) and add entirely new
-/// rules (create), with correct field propagation.
+/// Overlays merge into existing entries field-by-field and add brand-new
+/// entries when their id is unknown to the catalog.
 #[test]
 fn overlay_merges_and_adds_rules() {
-    let mut catalog = parse_builtin_toml(BUILTIN_TOML);
+    let mut catalog = catalog_from_toml(BUILTIN_TOML);
     let mut warnings = Vec::new();
-    apply_overlay_toml(&mut catalog, OVERLAY_TOML, &mut warnings);
+    merge_overlay_toml(&mut catalog, OVERLAY_TOML, &mut warnings);
     assert!(
         warnings.is_empty(),
-        "overlay application should not warn: {warnings:?}"
+        "overlay application should not warn: {warnings:?}",
     );
 
-    let base = catalog
+    let merged = catalog
         .find_by_id("base")
         .expect("base entry after overlay");
-    assert_eq!(base.description, "Override rule", "merged description");
-    assert_eq!(base.tags, vec!["override"], "merged tags");
-    assert!(base.hidden, "overlay sets hidden = true");
+    assert_eq!(merged.description, "Override rule", "merged description");
+    assert_eq!(merged.tags, vec!["override"], "merged tags");
+    assert!(merged.hidden, "overlay sets hidden = true");
 
-    let custom = catalog
+    let added = catalog
         .find_by_id("custom")
         .expect("custom entry added by overlay");
-    assert_eq!(custom.rulestring, "B2/S", "custom rulestring");
-    assert!(custom.favorite, "overlay sets favorite = true");
+    assert_eq!(added.rulestring, "B2/S", "custom rulestring");
+    assert!(added.favorite, "overlay sets favorite = true");
 }

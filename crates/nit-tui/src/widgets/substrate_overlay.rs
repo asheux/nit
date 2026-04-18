@@ -25,10 +25,10 @@ const TAB_LABELS: &[(SubstrateOverlayTab, &str)] = &[
 /// needs ~105 cols to show every column; we cap width there, cap height at
 /// ~28 rows, and bias smaller when the screen is small.
 pub fn preferred_size(screen: Rect) -> Rect {
-    let target_w = (screen.width.saturating_mul(55) / 100).max(72);
-    let target_h = (screen.height.saturating_mul(50) / 100).max(16);
-    let w = target_w.min(110).min(screen.width.saturating_sub(4));
-    let h = target_h.min(28).min(screen.height.saturating_sub(4));
+    let target_w = (screen.width.saturating_mul(75) / 100).max(96);
+    let target_h = (screen.height.saturating_mul(55) / 100).max(18);
+    let w = target_w.min(140).min(screen.width.saturating_sub(4));
+    let h = target_h.min(32).min(screen.height.saturating_sub(4));
     let w = w.max(60);
     let h = h.max(12);
     let x = screen.x + (screen.width.saturating_sub(w)) / 2;

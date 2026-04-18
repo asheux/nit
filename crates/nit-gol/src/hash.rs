@@ -35,9 +35,9 @@ pub(crate) fn blake3_u64(hash: &blake3::Hash) -> u64 {
     read_u64_le(hash.as_bytes(), 0)
 }
 
-fn read_u64_le(bytes: &[u8], offset: usize) -> u64 {
-    let slice: [u8; 8] = bytes[offset..offset + 8]
+fn read_u64_le(bytes: &[u8; 32], offset: usize) -> u64 {
+    let chunk: [u8; 8] = bytes[offset..offset + 8]
         .try_into()
-        .expect("blake3 hash always has 32 bytes");
-    u64::from_le_bytes(slice)
+        .expect("offset + 8 within 32-byte hash");
+    u64::from_le_bytes(chunk)
 }

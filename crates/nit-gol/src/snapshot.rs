@@ -16,7 +16,15 @@ use crate::{attractor::AttractorEvent, Grid, Rule};
 
 pub use crate::rle::{encode_rle, write_rle, write_rle_bits};
 
+const SNAPSHOT_DEBUG_ENV: &str = "NIT_SNAPSHOT_DEBUG";
+const TEMP_FILE_EXT: &str = "tmp";
+const RLE_EXT: &str = "rle";
+const JSON_EXT: &str = "json";
+
 /// Metadata written alongside each snapshot as a JSON sidecar file.
+///
+/// Field order and serde attributes are part of the on-disk JSON
+/// sidecar contract — do not reorder or regroup.
 #[derive(Clone, Debug, Default, serde::Serialize)]
 pub struct SnapshotMetadata {
     pub timestamp: String,
@@ -73,25 +81,13 @@ pub fn write_snapshot(
 ) -> io::Result<SnapshotPaths> {
     ensure_dir(dir)?;
     let paths = SnapshotPaths {
-        rle_path: dir.join(format!("{name_base}.rle")),
-        json_path: dir.join(format!("{name_base}.json")),
+        rle_path: dir.join(format!("{name_base}.{RLE_EXT}")),
+        json_path: dir.join(format!("{name_base}.{JSON_EXT}")),
     };
-    snapshot_debug(|| {
-        let (cols, rows) = (grid.width(), grid.height());
-        format!(
-            "start name={name_base} dir={} geometry={cols}x{rows} rule={rule}",
-            dir.display()
-        )
-    });
+    log_write_start(dir, name_base, grid, rule);
     write_atomic(&paths.rle_path, |sink| write_rle(sink, grid, rule))?;
     write_metadata_atomic(&paths.json_path, meta)?;
-    snapshot_debug(|| {
-        format!(
-            "done rle={} json={}",
-            paths.rle_path.display(),
-            paths.json_path.display()
-        )
-    });
+    log_write_done(&paths);
     Ok(paths)
 }
 
@@ -144,7 +140,7 @@ pub fn prune_oldest(dir: &Path, max_files: usize) -> io::Result<()> {
     let excess = rle_files.len().saturating_sub(max_files);
     for (_, stale) in rle_files.into_iter().take(excess) {
         let _ = fs::remove_file(&stale);
-        let _ = fs::remove_file(stale.with_extension("json"));
+        let _ = fs::remove_file(stale.with_extension(JSON_EXT));
     }
     Ok(())
 }
@@ -154,7 +150,7 @@ fn rle_entries_by_mtime(dir: &Path) -> io::Result<Vec<(SystemTime, PathBuf)>> {
         .filter_map(Result::ok)
         .filter_map(|entry| {
             let candidate = entry.path();
-            if candidate.extension().and_then(|ext| ext.to_str()) != Some("rle") {
+            if candidate.extension().and_then(|ext| ext.to_str()) != Some(RLE_EXT) {
                 return None;
             }
             let mtime = entry.metadata().ok()?.modified().ok()?;
@@ -209,7 +205,7 @@ fn write_atomic<F>(path: &Path, write_fn: F) -> io::Result<()>
 where
     F: FnOnce(&mut BufWriter<File>) -> io::Result<()>,
 {
-    let tmp_path = path.with_extension("tmp");
+    let tmp_path = path.with_extension(TEMP_FILE_EXT);
     let file = File::create(&tmp_path)?;
     let mut writer = BufWriter::new(file);
     write_fn(&mut writer)?;
@@ -219,12 +215,28 @@ where
     Ok(())
 }
 
-fn snapshot_debug<F>(msg: F)
-where
-    F: FnOnce() -> String,
-{
-    if std::env::var_os("NIT_SNAPSHOT_DEBUG").is_none() {
+fn log_write_start(dir: &Path, name_base: &str, grid: &Grid, rule: Rule) {
+    if !debug_enabled() {
         return;
     }
-    eprintln!("[nit snapshot] {}", msg());
+    let (cols, rows) = (grid.width(), grid.height());
+    eprintln!(
+        "[nit snapshot] start name={name_base} dir={} geometry={cols}x{rows} rule={rule}",
+        dir.display()
+    );
+}
+
+fn log_write_done(paths: &SnapshotPaths) {
+    if !debug_enabled() {
+        return;
+    }
+    eprintln!(
+        "[nit snapshot] done rle={} json={}",
+        paths.rle_path.display(),
+        paths.json_path.display()
+    );
+}
+
+fn debug_enabled() -> bool {
+    std::env::var_os(SNAPSHOT_DEBUG_ENV).is_some()
 }

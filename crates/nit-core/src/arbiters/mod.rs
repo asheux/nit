@@ -12,6 +12,7 @@
 use crate::state::{AppState, Intervention};
 use crate::substrate::{SignalKind, SignalTarget};
 
+pub mod help_needed;
 pub mod persistent_conflict;
 pub mod sparse_plan_arbiter;
 
@@ -55,8 +56,11 @@ pub struct Arbiter {
     pub run: ArbiterFn,
 }
 
-pub const REGISTERED_ARBITERS: &[Arbiter] =
-    &[persistent_conflict::ARBITER, sparse_plan_arbiter::ARBITER];
+pub const REGISTERED_ARBITERS: &[Arbiter] = &[
+    persistent_conflict::ARBITER,
+    sparse_plan_arbiter::ARBITER,
+    help_needed::ARBITER,
+];
 
 pub fn run_all(state: &AppState) -> Vec<(&'static str, InterventionProposal)> {
     let mut out = Vec::new();

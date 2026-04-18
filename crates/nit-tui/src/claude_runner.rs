@@ -477,27 +477,40 @@ fn run_turn(
                                 }
                             }
                             // Detect file writes for per-agent genome attribution
-                            // AND the substrate claim lattice. Claude stream-json
-                            // wraps tool_use inside `content_block_start` (the top-
-                            // level `type` is `content_block_start`, not `tool_use`).
-                            // Filter to write-capable tools so Read/Glob/Grep calls
-                            // don't spuriously emit FileWrite. Do NOT gate on
-                            // path.exists() — Write creating a new file legitimately
-                            // targets a path that doesn't exist yet.
-                            if kind == Some("content_block_start") {
-                                if let Some(cb) = value.get("content_block") {
-                                    let cb_type = cb.get("type").and_then(|v| v.as_str());
-                                    let cb_name = cb.get("name").and_then(|v| v.as_str());
-                                    let is_write_tool = matches!(
-                                        cb_name,
-                                        Some("Write")
-                                            | Some("Edit")
-                                            | Some("MultiEdit")
-                                            | Some("NotebookEdit")
-                                    );
-                                    if cb_type == Some("tool_use") && is_write_tool {
+                            // AND the substrate claim lattice. Claude CLI
+                            // stream-json nests tool_use blocks inside
+                            // `assistant.message.content[]` — there is no
+                            // top-level `content_block_start` event. Filter to
+                            // write-capable tools so Read/Glob/Grep don't
+                            // spuriously emit FileWrite. Do NOT gate on
+                            // path.exists() — Write creating a new file
+                            // legitimately targets a path that doesn't exist yet.
+                            if kind == Some("assistant") {
+                                if let Some(content) = value
+                                    .get("message")
+                                    .and_then(|m| m.get("content"))
+                                    .and_then(|c| c.as_array())
+                                {
+                                    for block in content {
+                                        let block_type =
+                                            block.get("type").and_then(|v| v.as_str());
+                                        if block_type != Some("tool_use") {
+                                            continue;
+                                        }
+                                        let tool_name =
+                                            block.get("name").and_then(|v| v.as_str());
+                                        let is_write_tool = matches!(
+                                            tool_name,
+                                            Some("Write")
+                                                | Some("Edit")
+                                                | Some("MultiEdit")
+                                                | Some("NotebookEdit")
+                                        );
+                                        if !is_write_tool {
+                                            continue;
+                                        }
                                         for key in ["file_path", "path", "file"] {
-                                            if let Some(p) = cb
+                                            if let Some(p) = block
                                                 .get("input")
                                                 .and_then(|v| v.get(key))
                                                 .and_then(|v| v.as_str())
@@ -597,13 +610,39 @@ fn run_turn(
     }
 
     if !status.success() {
-        let message = if !json_errors.is_empty() {
+        // Persist raw stdout + stderr to a debug log so the failure can be
+        // inspected even when the subprocess dies without emitting any JSON
+        // error events or stderr text (e.g. fast-exit rate limit / resource
+        // failures). Include the log path in the TurnFailed message.
+        let log_path = std::env::temp_dir().join(format!(
+            "nit-claude-crash-{}-{seq}.log",
+            mission_id.as_deref().unwrap_or("no-mission")
+        ));
+        let log_written = {
+            let header = format!(
+                "exit: {status}\nagent: {model}\nmission: {}\nelapsed_ms: {}\n--- stdout ---\n",
+                mission_id.as_deref().unwrap_or("(none)"),
+                started_at.elapsed().as_millis(),
+            );
+            let mut body = header.into_bytes();
+            body.extend_from_slice(&stdout);
+            body.extend_from_slice(b"\n--- stderr ---\n");
+            body.extend_from_slice(&stderr);
+            std::fs::write(&log_path, &body).is_ok()
+        };
+        let log_suffix = if log_written {
+            format!(" (log: {})", log_path.display())
+        } else {
+            String::new()
+        };
+        let base = if !json_errors.is_empty() {
             json_errors.join(" | ")
         } else if !stderr_text.trim().is_empty() {
             stderr_text.trim().to_string()
         } else {
             format!("Claude exited with {status}")
         };
+        let message = format!("{base}{log_suffix}");
         let latency_ms = started_at.elapsed().as_millis().min(u64::MAX as u128) as u64;
         let _ = event_tx.send(AgentBusEvent::McpStatus {
             status: McpStatus {

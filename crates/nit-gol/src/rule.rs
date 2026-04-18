@@ -93,8 +93,8 @@ impl Rule {
                 continue;
             }
             let mut chars = segment.chars();
-            let prefix = chars.next().unwrap();
-            let target = match prefix {
+            let prefix = chars.next().expect("segment is non-empty");
+            let target: &mut u16 = match prefix {
                 'B' | 'b' => &mut births,
                 'S' | 's' => &mut survives,
                 other => return Err(RuleParseError::InvalidChar(other)),

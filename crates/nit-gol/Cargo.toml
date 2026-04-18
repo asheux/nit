@@ -6,7 +6,7 @@ edition = "2021"
 license = "MIT"
 rust-version.workspace = true
 categories = ["simulation", "science"]
-keywords = ["game-of-life", "cellular-automata", "simulation"]
+keywords = ["cellular-automata", "game-of-life", "simulation"]
 
 [dependencies]
 blake3 = { workspace = true }

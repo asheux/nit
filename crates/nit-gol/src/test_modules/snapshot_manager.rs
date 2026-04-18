@@ -2,11 +2,15 @@ use super::*;
 use crate::snapshot::SnapshotMetadata;
 use crate::Rule;
 
-/// Stable metadata fixture; field values do not drift with wall clock
-/// so filename / blob assertions remain reproducible.
+const FIXED_TIMESTAMP: &str = "2026-01-25T00:00:00Z";
+const FIXED_SEED_HASH: u64 = 42;
+const FIXED_RULE_HASH: u64 = 1;
+
+/// Metadata fixture with stable fields so filename/blob assertions do
+/// not drift with the wall clock.
 fn fixture_meta() -> SnapshotMetadata {
     SnapshotMetadata {
-        timestamp: "2026-01-25T00:00:00Z".into(),
+        timestamp: FIXED_TIMESTAMP.into(),
         seed_source: "test".into(),
         seed_hash: 1,
         rule: "B3/S23".into(),
@@ -31,7 +35,7 @@ fn fixture_request(
         width: 2,
         height: 2,
         wrap: EdgeMode::Dead,
-        seed_hash: 42,
+        seed_hash: FIXED_SEED_HASH,
         grid_hash,
         grid_bits: vec![0],
         period,
@@ -44,76 +48,93 @@ fn fixture_request(
 fn fixture_key(grid_hash: [u64; 2], period: Option<u64>) -> SnapshotKey {
     SnapshotKey {
         event_kind: SnapshotEventKind::Cycle,
-        rule_hash: 1,
+        rule_hash: FIXED_RULE_HASH,
         seed_hash: 1,
         grid_hash,
         period,
     }
 }
 
-/// Two requests with identical content produce equal dedup keys; one
-/// with a different grid hash does not.
+fn gate_holding(key: SnapshotKey, last_at: Instant) -> LastSnapshotKey {
+    LastSnapshotKey {
+        key: Some(key),
+        last_at,
+    }
+}
+
+/// Two requests with identical content collapse to the same dedup key;
+/// changing the grid_hash alone breaks the equivalence.
 #[test]
 fn snapshot_key_dedupes() {
-    let req1 = fixture_request(SnapshotEventKind::Cycle, [1, 2], Some(2));
-    let req2 = fixture_request(SnapshotEventKind::Cycle, [1, 2], Some(2));
-    let req3 = fixture_request(SnapshotEventKind::Cycle, [1, 3], Some(2));
+    let baseline = fixture_request(SnapshotEventKind::Cycle, [1, 2], Some(2));
+    let identical = fixture_request(SnapshotEventKind::Cycle, [1, 2], Some(2));
+    let differing_grid = fixture_request(SnapshotEventKind::Cycle, [1, 3], Some(2));
+
     assert_eq!(
-        SnapshotKey::from_request(&req1),
-        SnapshotKey::from_request(&req2),
-        "identical content must dedupe"
+        SnapshotKey::from_request(&baseline),
+        SnapshotKey::from_request(&identical),
+        "identical content must dedupe",
     );
     assert_ne!(
-        SnapshotKey::from_request(&req1),
-        SnapshotKey::from_request(&req3),
-        "differing grid_hash must not dedupe"
+        SnapshotKey::from_request(&baseline),
+        SnapshotKey::from_request(&differing_grid),
+        "differing grid_hash must not dedupe",
     );
 }
 
-/// Non-manual events inside the cooldown window are blocked, but a
-/// manual event with a different key still passes.
+/// Inside the cooldown window, repeat keys are blocked unless the
+/// caller marks the event as a Manual capture.
 #[test]
 fn cooldown_blocks_non_manual() {
-    let now = Instant::now();
-    let key = fixture_key([1, 2], Some(2));
-    let gate = LastSnapshotKey {
-        key: Some(key.clone()),
-        last_at: now,
-    };
+    let gate_anchor = Instant::now();
     let cooldown = Duration::from_millis(500);
-    let later = now + Duration::from_millis(10);
+    let inside_window = gate_anchor + Duration::from_millis(10);
+
+    let recent_key = fixture_key([1, 2], Some(2));
+    let gate = gate_holding(recent_key.clone(), gate_anchor);
 
     assert!(
-        !gate.allows(&key, SnapshotEventKind::Cycle, later, cooldown),
-        "cycle inside cooldown must be blocked"
+        !gate.allows(
+            &recent_key,
+            SnapshotEventKind::Cycle,
+            inside_window,
+            cooldown
+        ),
+        "cycle inside cooldown must be blocked",
     );
 
-    let other_key = fixture_key([3, 4], Some(2));
+    let unrelated_key = fixture_key([3, 4], Some(2));
     assert!(
-        gate.allows(&other_key, SnapshotEventKind::Manual, later, cooldown),
-        "manual events bypass the cooldown for a distinct key"
+        gate.allows(
+            &unrelated_key,
+            SnapshotEventKind::Manual,
+            inside_window,
+            cooldown
+        ),
+        "manual events bypass the cooldown for a distinct key",
     );
 }
 
 /// When the bounded channel is full, excess requests are dropped and
-/// the dropped counter increments.
+/// the dropped counter increments by exactly one.
 #[test]
 fn bounded_queue_drops_when_full() {
     let dir = std::env::temp_dir().join("nit-snapshot-test");
-    let config = SnapshotManagerConfig {
+    let manager = SnapshotManager::new_for_tests(SnapshotManagerConfig {
         dir,
         max_files: 0,
         min_interval_ms: 0,
         queue_capacity: 1,
-    };
-    let manager = SnapshotManager::new_for_tests(config);
-    let req1 = fixture_request(SnapshotEventKind::Manual, [1, 2], None);
-    let req2 = fixture_request(SnapshotEventKind::Manual, [3, 4], None);
-    assert!(manager.enqueue(req1), "first request fills the queue");
+    });
+    let first = fixture_request(SnapshotEventKind::Manual, [1, 2], None);
+    let overflow = fixture_request(SnapshotEventKind::Manual, [3, 4], None);
+
+    assert!(manager.enqueue(first), "first request fills the queue");
     assert!(
-        !manager.enqueue(req2),
-        "second request must be dropped when the queue is full"
+        !manager.enqueue(overflow),
+        "second request must be dropped when the queue is full",
     );
+
     let stats = manager.stats();
     assert_eq!(stats.dropped, 1, "exactly one drop recorded");
     assert_eq!(stats.queue_len, 1, "queue still holds the first request");

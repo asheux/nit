@@ -76,7 +76,7 @@ pub fn build_lines(state: &AppState, theme: &Theme, width: u16) -> Vec<Line<'sta
         let row = format_row(
             &format!("{remaining}g"),
             kind_label(claim.kind),
-            &truncate(&claim.claimed_by, 16),
+            &truncate(&claim.claimed_by, 26),
             &format_target(&claim.target),
             &format!("{age}g"),
             &truncate(&claim.id, 24),
@@ -98,15 +98,15 @@ fn format_row(
     id: &str,
     width: u16,
 ) -> String {
-    // Width-adaptive: drop ID below 70; drop AGE below 50.
-    let show_id = width >= 70;
-    let show_age = width >= 50;
+    // Width-adaptive: drop ID below 90; drop AGE below 70.
+    let show_id = width >= 90;
+    let show_age = width >= 70;
     let mut row = format!(
-        "{:>4}  {:<14} {:<16} {:<28}",
+        "{:>4}  {:<14} {:<26} {:<36}",
         ttl,
         truncate(kind, 14),
         by,
-        truncate(target, 28)
+        truncate(target, 36)
     );
     if show_age {
         row.push_str(&format!(" {age:>5}"));
@@ -129,14 +129,14 @@ fn kind_label(kind: ClaimKind) -> &'static str {
 fn format_target(t: &ClaimTarget) -> String {
     match t {
         ClaimTarget::Global => "Global".to_string(),
-        ClaimTarget::File { path } => format!("file:{}", truncate(&path.to_string_lossy(), 22)),
+        ClaimTarget::File { path } => format!("file:{}", truncate(&path.to_string_lossy(), 30)),
         ClaimTarget::Region {
             path,
             start_line,
             end_line,
         } => format!(
             "region:{}#{}-{}",
-            truncate(&path.to_string_lossy(), 16),
+            truncate(&path.to_string_lossy(), 22),
             start_line,
             end_line
         ),

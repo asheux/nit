@@ -11,10 +11,19 @@ const DEFAULT_SWARM_SIZE: usize = 4;
 const MAX_SWARM_SIZE: usize = 16;
 const SWARM_VERIFY_MAX_CHARS: usize = 12_000;
 const SWARM_DEP_OUTPUT_MAX_CHARS: usize = 8_000;
-/// Limit for roles that need full dependency output (judge, integrate, and any
-/// write-role task).  Set high enough to avoid truncating detailed proposals —
-/// a comprehensive multi-file refactoring proposal can reach 20-30K chars.
-const SWARM_DEP_OUTPUT_MAX_CHARS_FULL: usize = 32_000;
+/// Per-dep ceiling for roles that need full dependency output (judge,
+/// integrate, any write-role task). A single comprehensive multi-file
+/// refactoring proposal can reach 20–30K chars; giving the downstream agent
+/// the full reasoning chain materially improves decisions. Biased toward
+/// preserving information.
+const SWARM_DEP_OUTPUT_MAX_CHARS_FULL: usize = 48_000;
+/// Total budget across ALL deps for full-output roles. Sized against Claude's
+/// 200K-token context (~800K chars) minus ~100K chars of system scaffolding
+/// and a safety margin for turn-time tool_use/tool_result accumulation (which
+/// was the observed overflow path for clone-04/05). The cap only bites when
+/// fan-in is large (7+ deps); for typical 2–6-proposer swarms every dep still
+/// gets its full 48K per-dep ceiling.
+const SWARM_DEP_OUTPUT_TOTAL_MAX_CHARS_FULL: usize = 240_000;
 const COMPUTATIONAL_RESEARCH_ROLE: &str = "computational-research";
 const COMPUTATIONAL_RESEARCH_ROLE_LEGACY: &str = "computational research";
 
@@ -5739,9 +5748,25 @@ fn mark_task_finished(
             task.output = Some(message);
         }
     } else {
-        task.output = Some(message);
-        task.failed = failed;
-        task.state = if failed {
+        // Reporting-failure rescue: if the subprocess exited non-zero but the
+        // task is a write-role task AND FileWrite events fired for this agent,
+        // the work likely landed on disk and the crash was in the agent's
+        // final summary step (classic end-of-turn context overflow). Downgrade
+        // to Done so the swarm doesn't discard a completed refactor. The
+        // original failure message is kept in `output` for inspection.
+        let reporting_failure_rescue = failed && task.writes && agent_has_file_writes;
+        let effective_failed = failed && !reporting_failure_rescue;
+        task.output = Some(if reporting_failure_rescue {
+            format!(
+                "(rescue) subprocess reported failure but FileWrite events fired for this agent — \
+treating as success. Inspect on-disk artifacts to confirm.\n\n\
+original failure message:\n{message}"
+            )
+        } else {
+            message
+        });
+        task.failed = effective_failed;
+        task.state = if effective_failed {
             SwarmTaskState::Failed
         } else {
             SwarmTaskState::Done
@@ -6067,11 +6092,18 @@ fn collect_dependency_payload(run: &SwarmRun, task: &SwarmTask) -> Vec<(String, 
     // Full output for: judge (comparing proposals), integrate (implementing),
     // and any task with `writes: true` (custom write-role tasks from planner).
     let needs_full_output = matches!(role.as_deref(), Some("judge" | "integrate")) || task.writes;
-    let max_chars = if needs_full_output {
-        SWARM_DEP_OUTPUT_MAX_CHARS_FULL
+
+    // Full-output roles share a total budget across deps so a fan-in from
+    // many proposers can't blow past the downstream model's context window.
+    // Non-full roles keep the per-dep cap (their payloads are already
+    // compact artifact summaries).
+    let dep_count = task.deps.len().max(1);
+    let per_dep_cap = if needs_full_output {
+        (SWARM_DEP_OUTPUT_TOTAL_MAX_CHARS_FULL / dep_count).min(SWARM_DEP_OUTPUT_MAX_CHARS_FULL)
     } else {
         SWARM_DEP_OUTPUT_MAX_CHARS
     };
+
     let mut out = Vec::new();
     for dep_id in task.deps.iter() {
         let Some(dep) = run.tasks.iter().find(|t| t.id == *dep_id) else {
@@ -6089,7 +6121,7 @@ fn collect_dependency_payload(run: &SwarmRun, task: &SwarmTask) -> Vec<(String, 
         } else {
             dependency_payload_text(run, dep)
         };
-        out.push((label, truncate_chars(&text, max_chars)));
+        out.push((label, truncate_chars(&text, per_dep_cap)));
     }
     out
 }

@@ -8,22 +8,23 @@ use crate::{
 
 // ── Fixture helpers ─────────────────────────────────────────────────
 
-/// Conway period-1 still life: a 2x2 block in the top-left quadrant.
-fn make_block() -> Grid {
-    let mut grid = Grid::new(4, 4);
-    for (x, y) in [(1, 1), (1, 2), (2, 1), (2, 2)] {
+/// Build a `width`x`height` grid with the listed coordinates turned on.
+fn grid_with_cells(width: usize, height: usize, live_cells: &[(usize, usize)]) -> Grid {
+    let mut grid = Grid::new(width, height);
+    for &(x, y) in live_cells {
         grid.set(x, y, true);
     }
     grid
 }
 
-/// Conway period-2 oscillator: a vertical 3-cell line centered on (2, 2).
+/// Conway period-1 still life: a 2x2 block in the top-left quadrant.
+fn make_block() -> Grid {
+    grid_with_cells(4, 4, &[(1, 1), (1, 2), (2, 1), (2, 2)])
+}
+
+/// Conway period-2 oscillator: a vertical 3-cell line centred on (2, 2).
 fn make_blinker() -> Grid {
-    let mut grid = Grid::new(5, 5);
-    for y in 1..=3 {
-        grid.set(2, y, true);
-    }
-    grid
+    grid_with_cells(5, 5, &[(2, 1), (2, 2), (2, 3)])
 }
 
 fn make_repeat_detector(max_history: usize) -> AttractorDetector {
@@ -42,7 +43,6 @@ fn conway_step(grid: &Grid) -> Grid {
 mod parsing {
     use super::*;
 
-    /// Parse B36/S23 and verify the canonical round-trip.
     #[test]
     fn parse_rule_roundtrip() {
         let rule = Rule::parse("B36/S23").expect("parse B36/S23");
@@ -57,7 +57,7 @@ mod parsing {
         assert_eq!(
             rule.survives_mask(),
             (1 << 2) | (1 << 3),
-            "survives mask matches digits 2 and 3"
+            "survives mask matches digits 2 and 3",
         );
     }
 
@@ -69,14 +69,12 @@ mod parsing {
         assert_eq!(rule.survives_mask(), 0, "no survive digits = empty mask");
     }
 
-    /// Malformed rule strings all fail to parse.
     #[test]
     fn parse_rule_invalid_cases() {
-        let rejects = ["B9/S23", "B3/S2x", "B3//S23", "B3/23", "B/S"];
-        for candidate in rejects {
+        for candidate in ["B9/S23", "B3/S2x", "B3//S23", "B3/23", "B/S"] {
             assert!(
                 Rule::parse(candidate).is_err(),
-                "expected parse error for {candidate:?}"
+                "expected parse error for {candidate:?}",
             );
         }
     }
@@ -101,17 +99,16 @@ mod evolution {
         for column in 1..=3 {
             assert!(
                 horizontal.get(column, 2),
-                "blinker row should have cell at ({column}, 2)"
+                "blinker row should have cell at ({column}, 2)",
             );
         }
         let resettled = conway_step(&horizontal);
         assert_eq!(
             vertical, resettled,
-            "blinker returns to original after 2 steps"
+            "blinker returns to original after 2 steps",
         );
     }
 
-    /// The rule evaluator should detect the blinker's period-2 cycle.
     #[test]
     fn evaluate_rule_detects_period() {
         let seed = make_blinker();
@@ -123,21 +120,18 @@ mod evolution {
     /// A glider translates one cell down-right every 4 generations.
     #[test]
     fn glider_moves_down_right() {
-        let mut state = Grid::new(6, 6);
-        for (col, row) in [(1, 0), (2, 1), (0, 2), (1, 2), (2, 2)] {
-            state.set(col, row, true);
-        }
+        let mut state = grid_with_cells(6, 6, &[(1, 0), (2, 1), (0, 2), (1, 2), (2, 2)]);
         for generation in 1..=4u32 {
             state = conway_step(&state);
             assert!(
                 state.alive_count() > 0,
-                "glider should stay alive through gen {generation}"
+                "glider should stay alive through gen {generation}",
             );
         }
-        for (col, row) in [(2, 1), (3, 2), (1, 3), (2, 3), (3, 3)] {
+        for (x, y) in [(2, 1), (3, 2), (1, 3), (2, 3), (3, 3)] {
             assert!(
-                state.get(col, row),
-                "glider missing live cell at ({col}, {row}) after 4 steps"
+                state.get(x, y),
+                "glider missing live cell at ({x}, {y}) after 4 steps",
             );
         }
     }
@@ -146,53 +140,47 @@ mod evolution {
 mod encoding {
     use super::*;
 
-    /// Flipping a cell changes the grid hash.
     #[test]
     fn grid_hash_changes() {
-        let mut canvas = Grid::new(3, 3);
-        let blank_hash = canvas.hash();
-        canvas.set(1, 1, true);
-        let lit_hash = canvas.hash();
-        assert_ne!(blank_hash, lit_hash, "hash must change when a cell flips");
+        let blank = Grid::new(3, 3);
+        let lit = grid_with_cells(3, 3, &[(1, 1)]);
+        assert_ne!(
+            blank.hash(),
+            lit.hash(),
+            "hash must change when a cell flips",
+        );
     }
 
-    /// Header fields present and terminator correct.
+    /// Every required header field and the terminator byte land in the output.
     #[test]
     fn rle_basic_sanity() {
-        let mut canvas = Grid::new(3, 3);
-        canvas.set(1, 1, true);
+        let canvas = grid_with_cells(3, 3, &[(1, 1)]);
         let rendered = crate::snapshot::encode_rle(&canvas, Rule::conway());
         for needle in ["x = 3", "y = 3", "rule = B3/S23"] {
             assert!(
                 rendered.contains(needle),
-                "RLE header must contain {needle:?}"
+                "RLE header must contain {needle:?}",
             );
         }
         assert!(rendered.ends_with('!'), "RLE must end with '!'");
         assert!(
             rendered.contains('o'),
-            "RLE must encode the live cell as 'o'"
+            "RLE must encode the live cell as 'o'",
         );
     }
 
-    /// Exact byte-level RLE output for a 2x2 grid.
     #[test]
     fn rle_2x2_exact() {
-        let mut canvas = Grid::new(2, 2);
-        for (x, y) in [(0, 0), (1, 0), (1, 1)] {
-            canvas.set(x, y, true);
-        }
+        let canvas = grid_with_cells(2, 2, &[(0, 0), (1, 0), (1, 1)]);
         assert_eq!(render_rle(&canvas), "x = 2, y = 2, rule = B3/S23\n2o$\nbo!");
     }
 
-    /// Exact byte-level RLE output for a sparse 5x5 grid.
     #[test]
     fn rle_5x5_exact() {
-        let mut canvas = Grid::new(5, 5);
-        canvas.set(2, 2, true);
+        let canvas = grid_with_cells(5, 5, &[(2, 2)]);
         assert_eq!(
             render_rle(&canvas),
-            "x = 5, y = 5, rule = B3/S23\n5b$\n5b$\n2bo2b$\n5b$\n5b!"
+            "x = 5, y = 5, rule = B3/S23\n5b$\n5b$\n2bo2b$\n5b$\n5b!",
         );
     }
 
@@ -208,27 +196,27 @@ mod attractor_detection {
     use super::*;
 
     /// Seed, advance one generation, and return the detector event.
-    fn run_single_step(grid: &Grid, max_history: usize) -> Option<AttractorEvent> {
+    fn first_event_after_step(seed: &Grid, max_history: usize) -> Option<AttractorEvent> {
         let rule = Rule::conway();
         let edge = EdgeMode::Dead;
         let mut detector = make_repeat_detector(max_history);
-        detector.seed(grid, 0, rule, edge);
-        let next = conway_step(grid);
-        detector.observe(grid, &next, 1, rule, edge)
+        detector.seed(seed, 0, rule, edge);
+        let next = conway_step(seed);
+        detector.observe(seed, &next, 1, rule, edge)
     }
 
     /// A still-life block emits a FixedPoint event on the first observe.
     #[test]
     fn attractor_still_life_fixed_point() {
-        let event = run_single_step(&make_block(), 128);
+        let event = first_event_after_step(&make_block(), 128);
         assert_eq!(
             event,
             Some(AttractorEvent::FixedPoint { gen: 1 }),
-            "block is a fixed point at gen 1"
+            "block is a fixed point at gen 1",
         );
     }
 
-    /// A blinker emits a Cycle event with period 2.
+    /// A blinker emits a Cycle event with period 2 on the second observe.
     #[test]
     fn attractor_blinker_cycle() {
         let seed = make_blinker();
@@ -237,51 +225,50 @@ mod attractor_detection {
         let mut detector = make_repeat_detector(128);
         detector.seed(&seed, 0, rule, edge);
 
-        let g1 = conway_step(&seed);
-        let first = detector.observe(&seed, &g1, 1, rule, edge);
-        assert!(first.is_none(), "gen 1 is a new state, not a repeat");
+        let step1 = conway_step(&seed);
+        let first_event = detector.observe(&seed, &step1, 1, rule, edge);
+        assert!(first_event.is_none(), "gen 1 is a new state, not a repeat");
 
-        let g2 = conway_step(&g1);
-        let repeat = detector.observe(&g1, &g2, 2, rule, edge);
+        let step2 = conway_step(&step1);
+        let cycle_event = detector.observe(&step1, &step2, 2, rule, edge);
         assert_eq!(
-            repeat,
+            cycle_event,
             Some(AttractorEvent::Cycle {
                 gen: 2,
                 first_seen: 0,
                 period: 2,
                 transient: 0,
             }),
-            "blinker cycle detected at gen 2 with period 2"
+            "blinker cycle detected at gen 2 with period 2",
         );
     }
 
     /// An empty grid is a fixed point — Conway has no spontaneous births.
     #[test]
     fn attractor_empty_grid_fixed_point() {
-        let event = run_single_step(&Grid::new(3, 3), 64);
+        let event = first_event_after_step(&Grid::new(3, 3), 64);
         assert_eq!(
             event,
             Some(AttractorEvent::FixedPoint { gen: 1 }),
-            "empty grid is a fixed point at gen 1"
+            "empty grid is a fixed point at gen 1",
         );
     }
 
-    /// Two grids with the same fingerprint but different secondary hashes
-    /// are not treated as a cycle (collision guard).
+    /// Two grids with the same primary fingerprint but different secondary
+    /// hashes must not be reported as a cycle (collision guard).
     #[test]
     fn attractor_hash_collision_guard() {
-        let mut first = Grid::new(2, 2);
-        first.set(0, 0, true);
-        let mut second = Grid::new(2, 2);
-        second.set(1, 1, true);
+        let first = grid_with_cells(2, 2, &[(0, 0)]);
+        let second = grid_with_cells(2, 2, &[(1, 1)]);
 
         let mut detector = make_repeat_detector(64);
-        let fp = AttractorDetector::test_fingerprint(0xdead_beef_dead_beef_dead_beef_dead_beef);
-        detector.seed_with_fingerprint(0, fp, Some(1));
-        let event = detector.observe_with_fingerprint(&first, &second, 1, fp, Some(2));
+        let fingerprint =
+            AttractorDetector::test_fingerprint(0xdead_beef_dead_beef_dead_beef_dead_beef);
+        detector.seed_with_fingerprint(0, fingerprint, Some(1));
+        let event = detector.observe_with_fingerprint(&first, &second, 1, fingerprint, Some(2));
         assert!(
             event.is_none(),
-            "differing secondary hashes must not trigger repeat"
+            "differing secondary hashes must not trigger repeat",
         );
     }
 }
