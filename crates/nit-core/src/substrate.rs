@@ -78,6 +78,12 @@ pub struct SubstrateState {
     pub assumptions: HashMap<AssumptionId, Assumption>,
     #[serde(default)]
     pub assumption_counter: u64,
+    #[serde(default)]
+    pub mood: crate::mood::Mood,
+    #[serde(default)]
+    pub mood_override_until_gen: u64,
+    #[serde(default)]
+    pub mood_quiet_streak: u32,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -326,6 +332,23 @@ impl SubstrateState {
         self.signals
             .retain(|_, s| s.effective_strength(gen) >= threshold);
         before - self.signals.len()
+    }
+
+    /// Count of `ClaimViolation` + `Warning` + `HelpNeeded` signals posted
+    /// within the last `gens` generations.  Used by mood auto-transition.
+    pub fn pressure_in_window(&self, gens: u64) -> usize {
+        let current_gen = self.generation;
+        let window_start = current_gen.saturating_sub(gens);
+        self.signals
+            .values()
+            .filter(|s| s.posted_at_gen >= window_start)
+            .filter(|s| {
+                matches!(
+                    s.kind,
+                    SignalKind::ClaimViolation | SignalKind::Warning | SignalKind::HelpNeeded
+                )
+            })
+            .count()
     }
 
     pub fn next_claim_id(&mut self, claimed_by: &str) -> ClaimId {

@@ -918,3 +918,36 @@ fn file_write_global_assumption_invalidated_by_any_path() {
     }
 }
 
+#[test]
+fn set_mood_event_applies_and_sets_override_lock() {
+    use crate::mood::Mood;
+
+    let mut state = test_state();
+    state.substrate.generation = 5;
+    assert_eq!(state.substrate.mood, Mood::Consolidation);
+
+    let event = AgentBusEvent::SetMood {
+        mood: Mood::Defensive,
+        source: "user".into(),
+    };
+    event.apply(&mut state);
+
+    assert_eq!(state.substrate.mood, Mood::Defensive);
+    assert!(state.substrate.mood_override_until_gen > 0);
+
+    let shift_signal = state
+        .substrate
+        .signals
+        .values()
+        .find(|s| {
+            s.posted_by == "mood"
+                && s.payload.get("reason").and_then(|v| v.as_str())
+                    == Some("mood_manual_override")
+        })
+        .expect("expected mood_manual_override signal");
+    assert_eq!(
+        shift_signal.payload.get("source").and_then(|v| v.as_str()),
+        Some("user")
+    );
+}
+

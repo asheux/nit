@@ -14,6 +14,8 @@ pub const OBSERVER: Observer = Observer {
 };
 
 const WINDOW_GENS: u64 = 5;
+/// Consolidation-mood default for reference only; actual threshold is
+/// read from `state.substrate.mood.modulation().repeat_failure_threshold`.
 const THRESHOLD: usize = 2;
 
 fn observe(state: &AppState) -> Vec<ObservedEmission> {
@@ -43,9 +45,12 @@ fn observe(state: &AppState) -> Vec<ObservedEmission> {
         }
     }
 
+    let threshold = sub.mood.modulation().repeat_failure_threshold;
+    let _ = THRESHOLD; // retained for backward-compat reference only.
+
     let mut emissions = Vec::new();
     for (agent_id, count) in warnings_by_agent {
-        if count < THRESHOLD {
+        if count < threshold {
             continue;
         }
         if recent_helps.contains(&agent_id) {

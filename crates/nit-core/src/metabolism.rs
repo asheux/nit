@@ -15,6 +15,13 @@ use crate::substrate::{Signal, SubstrateState};
 
 pub const METABOLIC_TICK_INTERVAL: Duration = Duration::from_secs(5);
 
+/// Mood-adjusted tick interval. Callers in the TUI frame-time check read
+/// this instead of the bare `METABOLIC_TICK_INTERVAL` const so the wall
+/// clock breathes with the system's mood.
+pub fn tick_interval_for(mood: crate::mood::Mood) -> Duration {
+    mood.modulation().metabolic_tick
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct MetabolicTickOutcome {
     pub claims_expired: usize,
@@ -22,6 +29,7 @@ pub struct MetabolicTickOutcome {
     pub assumptions_expired: usize,
     pub observer_emissions: usize,
     pub arbiter_interventions: usize,
+    pub mood_transitioned: bool,
     pub saved: bool,
 }
 
@@ -32,6 +40,7 @@ impl MetabolicTickOutcome {
             && self.assumptions_expired == 0
             && self.observer_emissions == 0
             && self.arbiter_interventions == 0
+            && !self.mood_transitioned
             && !self.saved
     }
 }
@@ -46,6 +55,55 @@ pub fn tick(state: &mut AppState) -> MetabolicTickOutcome {
     let signals_pruned = state
         .substrate
         .prune_signals_below(SubstrateState::DEFAULT_PRUNE_THRESHOLD);
+
+    // Phase 9: evaluate mood auto-transition (once per metabolic tick).
+    let override_active = state.substrate.mood_override_until_gen > current_gen;
+    let pressure = state
+        .substrate
+        .pressure_in_window(crate::mood::MOOD_PRESSURE_WINDOW_GENS);
+
+    // Quiet-streak tracking — ticks with low pressure increment, otherwise reset.
+    if pressure <= crate::mood::MOOD_QUIET_PRESSURE_MAX {
+        state.substrate.mood_quiet_streak =
+            state.substrate.mood_quiet_streak.saturating_add(1);
+    } else {
+        state.substrate.mood_quiet_streak = 0;
+    }
+
+    let mood_transitioned = if !override_active {
+        if let Some(new_mood) = crate::mood::auto_transition(
+            state.substrate.mood,
+            pressure,
+            state.substrate.mood_quiet_streak,
+        ) {
+            let from = state.substrate.mood;
+            state.substrate.mood = new_mood;
+            // Emit a mood-shift signal so operators can see the transition.
+            let posted_by = "mood".to_string();
+            let id = state.substrate.next_signal_id(&posted_by);
+            let posted_at_gen = state.substrate.current_generation();
+            state.substrate.emit_signal(crate::substrate::Signal {
+                id,
+                kind: crate::substrate::SignalKind::Warning,
+                posted_by,
+                posted_at_gen,
+                target: crate::substrate::SignalTarget::Global,
+                initial_strength: crate::substrate::SubstrateState::DEFAULT_INITIAL_STRENGTH,
+                payload: serde_json::json!({
+                    "reason": "mood_auto_transition",
+                    "from": format!("{from:?}").to_lowercase(),
+                    "to": format!("{new_mood:?}").to_lowercase(),
+                    "pressure": pressure,
+                    "source": "auto",
+                }),
+            });
+            true
+        } else {
+            false
+        }
+    } else {
+        false
+    };
 
     // Observer pass — mirrors the emission loop in
     // `AgentBusEvent::TurnCompleted::apply` around agent_bus.rs:577-591.
@@ -79,7 +137,8 @@ pub fn tick(state: &mut AppState) -> MetabolicTickOutcome {
         || signals_pruned > 0
         || assumptions_expired > 0
         || observer_emissions > 0
-        || arbiter_interventions > 0;
+        || arbiter_interventions > 0
+        || mood_transitioned;
     let saved = if dirty {
         state.substrate.save(&state.workspace_root).is_ok()
     } else {
@@ -92,6 +151,7 @@ pub fn tick(state: &mut AppState) -> MetabolicTickOutcome {
         assumptions_expired,
         observer_emissions,
         arbiter_interventions,
+        mood_transitioned,
         saved,
     }
 }

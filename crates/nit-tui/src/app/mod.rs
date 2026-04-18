@@ -980,8 +980,12 @@ fn run_loop(
             needs_redraw = true;
         }
 
-        // metabolic tick — wall-clock substrate sweep, no gen advance
-        if last_metabolism.elapsed() >= nit_core::metabolism::METABOLIC_TICK_INTERVAL {
+        // metabolic tick — wall-clock substrate sweep, no gen advance.
+        // Phase 9: interval breathes with mood (Exploration 10s, Consolidation
+        // 5s, Defensive 3s).
+        if last_metabolism.elapsed()
+            >= nit_core::metabolism::tick_interval_for(state.substrate.mood)
+        {
             let outcome = nit_core::metabolism::tick(state);
             if !outcome.is_noop() {
                 needs_redraw = true;

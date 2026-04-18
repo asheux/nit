@@ -1,0 +1,95 @@
+//! Mood — system-wide global modulator over the living-system substrate.
+//!
+//! Three states (Exploration / Consolidation / Defensive) bias how
+//! aggressive or tolerant the primitives are. Mood changes auto-transition
+//! based on recent substrate pressure (ClaimViolation + Warning +
+//! HelpNeeded density in the last N generations) with hysteresis, and
+//! can be manually set via AgentBusEvent::SetMood.
+
+use std::time::Duration;
+
+use serde::{Deserialize, Serialize};
+
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Mood {
+    Exploration,
+    #[default]
+    Consolidation,
+    Defensive,
+}
+
+/// Per-mood knob table read by the relevant primitives.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct MoodModulation {
+    pub metabolic_tick: Duration,
+    pub arbiter_max_per_tick: usize,
+    pub repeat_failure_threshold: usize,
+}
+
+impl Mood {
+    pub const fn modulation(self) -> MoodModulation {
+        match self {
+            Mood::Exploration => MoodModulation {
+                metabolic_tick: Duration::from_secs(10),
+                arbiter_max_per_tick: 1,
+                repeat_failure_threshold: 3,
+            },
+            Mood::Consolidation => MoodModulation {
+                metabolic_tick: Duration::from_secs(5),
+                arbiter_max_per_tick: 2,
+                repeat_failure_threshold: 2,
+            },
+            Mood::Defensive => MoodModulation {
+                metabolic_tick: Duration::from_secs(3),
+                arbiter_max_per_tick: 4,
+                repeat_failure_threshold: 1,
+            },
+        }
+    }
+}
+
+/// Auto-transition decision. Returns `Some(new_mood)` if mood should change,
+/// else `None`. Caller applies the transition and emits a mood-shift signal.
+///
+/// Inputs:
+///   - `current`: current mood
+///   - `pressure`: count of ClaimViolation + Warning + HelpNeeded signals in the
+///     pressure window (10 gens by convention)
+///   - `quiet_streak`: consecutive ticks where pressure has been low;
+///     required to enter Exploration
+pub fn auto_transition(current: Mood, pressure: usize, quiet_streak: u32) -> Option<Mood> {
+    match current {
+        Mood::Consolidation => {
+            if pressure >= 8 {
+                Some(Mood::Defensive)
+            } else if pressure <= 1 && quiet_streak >= 3 {
+                Some(Mood::Exploration)
+            } else {
+                None
+            }
+        }
+        Mood::Defensive => {
+            if pressure <= 4 {
+                Some(Mood::Consolidation)
+            } else {
+                None
+            }
+        }
+        Mood::Exploration => {
+            if pressure >= 3 {
+                Some(Mood::Consolidation)
+            } else {
+                None
+            }
+        }
+    }
+}
+
+pub const MOOD_PRESSURE_WINDOW_GENS: u64 = 10;
+pub const MOOD_OVERRIDE_LOCK_GENS: u64 = 20;
+pub const MOOD_QUIET_PRESSURE_MAX: usize = 1;
+
+#[cfg(test)]
+#[path = "tests/mood.rs"]
+mod tests;

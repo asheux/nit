@@ -113,6 +113,12 @@ pub enum AgentBusEvent {
     AssertAssumption {
         assumption: crate::substrate::Assumption,
     },
+    /// Manually set the system mood. Locks auto-transitions for
+    /// `MOOD_OVERRIDE_LOCK_GENS` generations.
+    SetMood {
+        mood: crate::mood::Mood,
+        source: String,
+    },
 }
 
 impl AgentBusEvent {
@@ -666,6 +672,33 @@ impl AgentBusEvent {
             }
             AgentBusEvent::AssertAssumption { assumption } => {
                 state.substrate.assert_assumption(assumption.clone());
+            }
+            AgentBusEvent::SetMood { mood, source } => {
+                let from = state.substrate.mood;
+                let current_gen = state.substrate.current_generation();
+                state.substrate.mood = *mood;
+                state.substrate.mood_override_until_gen =
+                    current_gen.saturating_add(crate::mood::MOOD_OVERRIDE_LOCK_GENS);
+
+                let posted_by = "mood".to_string();
+                let id = state.substrate.next_signal_id(&posted_by);
+                let posted_at_gen = state.substrate.current_generation();
+                state.substrate.emit_signal(crate::substrate::Signal {
+                    id,
+                    kind: crate::substrate::SignalKind::Warning,
+                    posted_by,
+                    posted_at_gen,
+                    target: crate::substrate::SignalTarget::Global,
+                    initial_strength: crate::substrate::SubstrateState::DEFAULT_INITIAL_STRENGTH,
+                    payload: serde_json::json!({
+                        "reason": "mood_manual_override",
+                        "from": format!("{from:?}").to_lowercase(),
+                        "to": format!("{mood:?}").to_lowercase(),
+                        "source": source,
+                        "lock_until_gen": state.substrate.mood_override_until_gen,
+                    }),
+                });
+                let _ = state.substrate.save(&state.workspace_root);
             }
         }
 

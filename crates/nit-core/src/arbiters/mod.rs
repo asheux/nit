@@ -77,6 +77,7 @@ pub fn reduce_proposals(
 ) -> Vec<Intervention> {
     let current_gen = state.substrate.current_generation();
     let cooldown_start = current_gen.saturating_sub(ARBITER_COOLDOWN_GENS);
+    let max_per_tick = state.substrate.mood.modulation().arbiter_max_per_tick;
 
     let mut reduced: Vec<Intervention> = Vec::new();
     for (name, prop) in raw {
@@ -108,7 +109,7 @@ pub fn reduce_proposals(
             decided_at_gen: current_gen,
         });
 
-        if reduced.len() >= ARBITER_MAX_PER_TICK {
+        if reduced.len() >= max_per_tick {
             break;
         }
     }

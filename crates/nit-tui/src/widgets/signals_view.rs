@@ -35,11 +35,20 @@ pub fn build_lines(state: &AppState, theme: &Theme, width: u16) -> Vec<Line<'sta
 
     // Summary header.
     let counts = count_by_kind(&sorted);
+    let mood_glyph = match state.substrate.mood {
+        nit_core::mood::Mood::Exploration => "E.",
+        nit_core::mood::Mood::Consolidation => "C.",
+        nit_core::mood::Mood::Defensive => "D!",
+    };
     let summary = if counts.is_empty() {
-        format!("{} active   gen {}", sorted.len(), current_gen)
+        format!(
+            "{mood_glyph}  {} active   gen {}",
+            sorted.len(),
+            current_gen
+        )
     } else {
         format!(
-            "{} active   [{}]   gen {}",
+            "{mood_glyph}  {} active   [{}]   gen {}",
             sorted.len(),
             counts,
             current_gen,
