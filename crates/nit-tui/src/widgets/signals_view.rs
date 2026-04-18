@@ -78,7 +78,7 @@ pub fn build_lines(state: &AppState, theme: &Theme, width: u16) -> Vec<Line<'sta
         let row = format_row(
             &format!("{strength:.2}"),
             kind_label(signal.kind),
-            &truncate(&signal.posted_by, 10),
+            &truncate(&signal.posted_by, 16),
             &format_target(&signal.target),
             &format!("{age}g"),
             &truncate(&signal.id, 24),
