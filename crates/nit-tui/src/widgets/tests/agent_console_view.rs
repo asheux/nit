@@ -5,10 +5,11 @@
 
 use super::{
     artifact_message_index_for_line, chat_input_scroll_metrics, chat_input_text_area,
-    ecg_indicator, format_message_rows, map_chat_input_point_to_cursor, thread_lines, thread_rows,
-    user_prompt_bg, wrap_input_with_cursor, wrap_visual_line, ThreadRow, ThreadRowKind,
+    ecg_indicator, format_message_rows, map_chat_input_point_to_cursor, swarm_exec_label,
+    thread_lines, thread_rows, user_prompt_bg, wrap_input_with_cursor, wrap_visual_line, ThreadRow,
+    ThreadRowKind,
 };
-use crate::swarm::{SwarmRuntime, SwarmSize};
+use crate::swarm::{test_runtime_with_running_tasks, SwarmRuntime, SwarmSize};
 use crate::theme::Theme;
 use nit_core::{
     AgentBusEvent, AgentChannel, AgentLane, AgentLaneKind, AgentMessage, AgentStatus, AppState,
@@ -1337,4 +1338,106 @@ fn artifact_link_rows_use_user_prompt_bg() {
                 && span.style.bg == Some(theme.title_focused)),
         "expected ARTIFACTS badge to keep its focused accent background"
     );
+}
+
+fn state_with_active_clones(clone_ids: &[&str]) -> AppState {
+    let mut state = test_state();
+    state.agents.agents.clear();
+    state.agents.active_turns.clear();
+    let now = Instant::now();
+    for id in clone_ids {
+        state.agents.agents.push(make_lane(
+            id,
+            "(clone 02)",
+            "swarm clone",
+            AgentLaneKind::Mock,
+            AgentStatus::Running,
+        ));
+        state.agents.active_turns.insert(
+            (*id).into(),
+            nit_core::state::AgentTurnState {
+                started_at: now,
+                last_heartbeat_at: now,
+                last_output_at: now,
+                stage: Some("starting".into()),
+            },
+        );
+    }
+    state
+}
+
+#[test]
+fn swarm_exec_label_uses_task_role_for_swarm_clones() {
+    // Two swarm clones running propose tasks. Their lane `role` is the
+    // generic "(clone NN)" placeholder, but the swarm DAG knows they're
+    // proposers — the breather should reflect that.
+    let clone_a = "claude-opus-4-7#swarm-mis-001-clone-02".to_string();
+    let clone_b = "claude-opus-4-7#swarm-mis-001-clone-04".to_string();
+    let state = state_with_active_clones(&[clone_a.as_str(), clone_b.as_str()]);
+    let runtime = test_runtime_with_running_tasks(
+        "mis-001",
+        &[
+            (clone_a.as_str(), "propose"),
+            (clone_b.as_str(), "propose"),
+        ],
+    );
+
+    let label = swarm_exec_label(
+        &state,
+        &[clone_a.clone(), clone_b.clone()],
+        Some(&runtime),
+    );
+    assert_eq!(label, "Proposing ...");
+}
+
+#[test]
+fn swarm_exec_label_falls_back_to_executing_when_runtime_missing() {
+    // Without a swarm runtime the lookup falls through to `agent.role` —
+    // for swarm clones that's "(clone NN)" which doesn't match any keyword,
+    // so the generic "Executing ..." label is correct.
+    let clone_a = "claude-opus-4-7#swarm-mis-001-clone-02".to_string();
+    let state = state_with_active_clones(&[clone_a.as_str()]);
+
+    let label = swarm_exec_label(&state, &[clone_a.clone()], None);
+    assert_eq!(label, "Executing ...");
+}
+
+#[test]
+fn swarm_exec_label_returns_executing_for_mixed_running_roles() {
+    // Different running roles (e.g. propose + integrate) should not collapse
+    // to either-or — the breather falls back to the generic label.
+    let clone_a = "claude-opus-4-7#swarm-mis-001-clone-02".to_string();
+    let clone_b = "claude-opus-4-7#swarm-mis-001-clone-03".to_string();
+    let state = state_with_active_clones(&[clone_a.as_str(), clone_b.as_str()]);
+    let runtime = test_runtime_with_running_tasks(
+        "mis-001",
+        &[
+            (clone_a.as_str(), "propose"),
+            (clone_b.as_str(), "integrate"),
+        ],
+    );
+
+    let label = swarm_exec_label(
+        &state,
+        &[clone_a.clone(), clone_b.clone()],
+        Some(&runtime),
+    );
+    assert_eq!(label, "Executing ...");
+}
+
+#[test]
+fn swarm_exec_label_resolves_role_via_clones_own_mission_id() {
+    // Even if the caller's selected mission isn't the same as the clone's
+    // mission, role resolution should still work because we extract the
+    // mission_id from the clone's agent ID directly. This mirrors
+    // `agent_ops_view::swarm_clone_label_parts`.
+    let clone_a = "claude-opus-4-7#swarm-mis-007-clone-02".to_string();
+    let state = state_with_active_clones(&[clone_a.as_str()]);
+    let runtime = test_runtime_with_running_tasks(
+        "mis-007",
+        &[(clone_a.as_str(), "propose")],
+    );
+
+    let label = swarm_exec_label(&state, &[clone_a.clone()], Some(&runtime));
+    assert_eq!(label, "Proposing ...");
 }

@@ -2098,6 +2098,26 @@ fn swarm_clone_source_label(agent_id: &str) -> Option<String> {
     Some(format!("{base}#{suffix}"))
 }
 
+// Extract the mission_id from a swarm clone agent ID. Mirrors
+// `agent_ops_view::swarm_clone_label_parts` so the breather and the roster
+// panel resolve roles via the same lookup path.
+fn swarm_clone_mission_id(agent_id: &str) -> Option<&str> {
+    let (_base, rest) = agent_id.split_once("#swarm-")?;
+    let rest = rest.trim();
+    if rest.is_empty() {
+        return None;
+    }
+    let first_dash = rest.find('-')?;
+    let second_dash_rel = rest[first_dash.saturating_add(1)..].find('-')?;
+    let second_dash = first_dash.saturating_add(1).saturating_add(second_dash_rel);
+    let mission_id = rest[..second_dash].trim();
+    if mission_id.is_empty() {
+        None
+    } else {
+        Some(mission_id)
+    }
+}
+
 fn agent_roster_label(agent: &AgentLane) -> String {
     let id_full = agent.id.trim();
     if let Some(label) = swarm_clone_source_label(id_full) {
@@ -2387,8 +2407,14 @@ fn breather_rows_for_user_prompt(
             Some("VERIFY") => "Verifying ...".into(),
             Some("SYNTH") => "Synthesizing ...".into(),
             Some("EXEC") if prescan_active => "Proposing (Genome check) ...".into(),
-            Some("EXEC") => swarm_exec_label(state, &ordered_ids).into(),
-            _ if is_swarm && any_active => "Executing ...".into(),
+            Some("EXEC") => swarm_exec_label(state, &ordered_ids, swarm).into(),
+            // Catchall: even when the run isn't reachable via the selected
+            // mission (unknown stage, moved to `completed_runs`, etc.) we
+            // still want to surface role-specific labels by looking up each
+            // active clone's dashboard via its own mission_id.
+            _ if is_swarm && any_active => {
+                swarm_exec_label(state, &ordered_ids, swarm).into()
+            }
             _ if any_active => "Working ...".into(),
             _ => "Queued ...".into(),
         }
@@ -3294,48 +3320,147 @@ fn pad_to_width(input: &str, width: usize) -> String {
 }
 
 // EXEC-phase label reflects the active roles (Coding/Reviewing/Integrating); mixed/absent → "Executing ...".
-fn swarm_exec_label<'a>(state: &nit_core::AppState, ordered_ids: &[String]) -> &'a str {
-    let mut roles: Vec<&str> = Vec::new();
+fn swarm_exec_label<'a>(
+    state: &nit_core::AppState,
+    ordered_ids: &[String],
+    swarm: Option<&SwarmRuntime>,
+) -> &'a str {
+    // Resolve dashboards per-clone using the mission_id encoded in the
+    // clone's agent ID, mirroring `agent_ops_view::swarm_clone_label_parts`.
+    // This avoids relying on the caller's `selected_context_mission` matching
+    // the clone's mission and makes the lookup work even when the swarm run
+    // has been moved to `completed_runs` for a different selected mission.
+    let mut dash_by_mission: std::collections::HashMap<
+        String,
+        Option<crate::swarm::SwarmDashboardView>,
+    > = std::collections::HashMap::new();
+
+    let mut roles: Vec<String> = Vec::new();
+    let mut debug_lines: Vec<String> = Vec::new();
+    debug_lines.push(format!(
+        "swarm_exec_label called: ordered_ids.len()={}, swarm.is_some()={}",
+        ordered_ids.len(),
+        swarm.is_some()
+    ));
     for id in ordered_ids {
-        if !state.agents.active_turns.contains_key(id.as_str()) {
+        let in_active = state.agents.active_turns.contains_key(id.as_str());
+        debug_lines.push(format!("  id={id} in_active={in_active}"));
+        if !in_active {
+            continue;
+        }
+        // Swarm clone lanes carry "(clone NN)" in `agent.role`; the meaningful
+        // role ("propose", "integrate", ...) lives on the agent's swarm task
+        // in the DAG. Prefer the task role so the breather label reflects
+        // what the active clones are actually doing. Don't filter by task
+        // state: the agent ops panel intentionally shows the assigned role
+        // regardless of state (see `swarm_assigned_roles_for_agent`); the
+        // breather should match.
+        let mut from_task = false;
+        let mid_opt = swarm_clone_mission_id(id);
+        debug_lines.push(format!("    swarm_clone_mission_id={mid_opt:?}"));
+        if let Some(swarm) = swarm {
+            if let Some(mid) = mid_opt {
+                let dash = dash_by_mission
+                    .entry(mid.to_string())
+                    .or_insert_with(|| swarm.swarm_dashboard(mid))
+                    .clone();
+                debug_lines.push(format!(
+                    "    dashboard for mid={mid} is_some={}",
+                    dash.is_some()
+                ));
+                if let Some(dash) = dash {
+                    let matching: Vec<_> = dash
+                        .tasks
+                        .iter()
+                        .filter(|t| t.agent_id == *id)
+                        .collect();
+                    debug_lines.push(format!(
+                        "    matching tasks for {id}: {} (total dash tasks: {})",
+                        matching.len(),
+                        dash.tasks.len()
+                    ));
+                    for task in matching.iter() {
+                        debug_lines.push(format!(
+                            "      task id={} role={:?} state={}",
+                            task.id, task.role, task.state
+                        ));
+                        if let Some(role) = task.role.as_deref().map(str::trim) {
+                            if !role.is_empty() {
+                                roles.push(role.to_string());
+                                from_task = true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if from_task {
             continue;
         }
         if let Some(agent) = state.agents.agents.iter().find(|a| a.id == *id) {
             let r = agent.role.trim();
+            debug_lines.push(format!("    fallback agent.role={r:?}"));
             if !r.is_empty() {
-                roles.push(r);
+                roles.push(r.to_string());
             }
         }
     }
 
-    if roles.is_empty() {
-        return "Executing ...";
+    let result: &'static str = if roles.is_empty() {
+        "Executing ..."
+    } else {
+        let first = roles[0].as_str();
+        let uniform = roles.iter().all(|r| r.eq_ignore_ascii_case(first));
+        if uniform {
+            let lower = first.to_ascii_lowercase();
+            match lower.as_str() {
+                "code" | "coding" | "implement" => "Coding ...",
+                "review" | "reviewer" => "Reviewing ...",
+                "test" | "testing" | "tester" => "Testing ...",
+                "integrate" | "integrator" | "integration" => "Integrating ...",
+                "judge" | "judging" => "Judging ...",
+                "research" | "researcher" => "Researching ...",
+                "computational-research" | "computational research" => "Researching ...",
+                "propose" | "proposer" => "Proposing ...",
+                "design" | "designer" => "Designing ...",
+                "recon" | "reconnaissance" | "scout" => "Scouting ...",
+                "refactor" | "refactoring" => "Refactoring ...",
+                "fix" | "fixer" | "bugfix" => "Fixing ...",
+                "document" | "docs" | "documentation" => "Documenting ...",
+                _ => "Executing ...",
+            }
+        } else {
+            "Executing ..."
+        }
+    };
+    debug_lines.push(format!("  roles={roles:?} -> result={result:?}"));
+
+    // Diagnostic: when the result falls through to "Executing ..." in a
+    // swarm context, dump the lookup trace so we can see what the breather
+    // actually saw. Strip this once the root cause is identified.
+    if result == "Executing ..." {
+        use std::io::Write;
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open("/tmp/nit-breather-debug.log")
+        {
+            let _ = writeln!(f, "--- {} ---", chrono_like_now());
+            for line in &debug_lines {
+                let _ = writeln!(f, "{line}");
+            }
+        }
     }
 
-    // If all active agents share the same role, use a specific label.
-    let first = roles[0];
-    let uniform = roles.iter().all(|r| r.eq_ignore_ascii_case(first));
-    if uniform {
-        let lower = first.to_ascii_lowercase();
-        return match lower.as_str() {
-            "code" | "coding" | "implement" => "Coding ...",
-            "review" | "reviewer" => "Reviewing ...",
-            "test" | "testing" | "tester" => "Testing ...",
-            "integrate" | "integrator" | "integration" => "Integrating ...",
-            "judge" | "judging" => "Judging ...",
-            "research" | "researcher" => "Researching ...",
-            "computational-research" | "computational research" => "Researching ...",
-            "propose" | "proposer" => "Proposing ...",
-            "design" | "designer" => "Designing ...",
-            "recon" | "reconnaissance" | "scout" => "Scouting ...",
-            "refactor" | "refactoring" => "Refactoring ...",
-            "fix" | "fixer" | "bugfix" => "Fixing ...",
-            "document" | "docs" | "documentation" => "Documenting ...",
-            _ => "Executing ...",
-        };
-    }
+    result
+}
 
-    "Executing ..."
+fn chrono_like_now() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| format!("t+{}.{:03}s", d.as_secs(), d.subsec_millis()))
+        .unwrap_or_else(|_| "t?".into())
 }
 
 fn ecg_indicator(
