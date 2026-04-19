@@ -1,41 +1,38 @@
-//! Background genome evaluation worker.
-//!
-//! Moves all `compute_genome_report` calls off the main thread so the UI
-//! never blocks on GoL simulation. Files are evaluated on short-lived
-//! threads; results stream back through a channel that the main loop drains.
+//! Runs `compute_genome_report` on short-lived worker threads so the UI
+//! never blocks on tree-sitter parsing or GoL simulation.
 
 use nit_core::genome_report::GenomeReport;
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, Sender};
 
-/// Result of a background genome evaluation.
 pub struct GenomeEvalResult {
     pub path: PathBuf,
-    /// `None` when the file could not be read (e.g. deleted before the worker
-    /// ran).  The main loop should still decrement pending counters.
+    /// `None` when the file read failed (e.g. deleted before the worker ran).
+    /// The main loop must still decrement pending counters in that case.
     pub report: Option<GenomeReport>,
-    /// `true` for shadow evaluations (during a turn), `false` for
-    /// authoritative turn-completion evaluations.
+    /// `true` for shadow evaluations during a turn; `false` for authoritative
+    /// turn-completion evaluations.
     pub shadow: bool,
-    /// `true` when this evaluation was triggered by a manual file save.
     pub save_eval: bool,
-    /// Agent ID whose TurnCompleted triggered this authoritative evaluation.
-    /// `None` for shadow evals, save evals, and editor-opened computations.
-    /// Used to route results back to the correct in-flight batch so parallel
-    /// swarm turns finalize independently.
+    /// Proposer pre-scan: populates `genome_reports` for scope files before
+    /// propose-role dispatch, so the proposer sees a real landscape instead
+    /// of empty data on fresh workspaces. Not tied to any agent or batch.
+    pub prescan: bool,
+    /// Routes authoritative results back to the correct in-flight batch so
+    /// parallel swarm turns finalize independently. `None` for shadow/save/
+    /// editor-opened evals.
     pub agent_id: Option<String>,
 }
 
-/// Handle held by the main thread. Send files for evaluation, drain results.
 pub struct GenomeWorker {
     tx: Sender<GenomeEvalResult>,
-    /// Results channel — drain this every frame with `try_recv`.
     pub rx: Receiver<GenomeEvalResult>,
 }
 
-/// Stack size for genome evaluation threads (2 MB — sufficient for
-/// tree-sitter parsing + GoL simulation, avoids 8 MB default waste).
+// 2 MB matches tree-sitter + GoL worst case; the 8 MB default wastes address
+// space when many evals are in flight at once.
 const EVAL_STACK_SIZE: usize = 2 * 1024 * 1024;
+const THREAD_NAME: &str = "genome-eval";
 
 impl Default for GenomeWorker {
     fn default() -> Self {
@@ -49,42 +46,42 @@ impl GenomeWorker {
         Self { tx, rx }
     }
 
-    /// Spawn a background thread to evaluate a single file.
-    /// The result is sent to `self.rx` when ready.
     pub fn evaluate(&self, path: PathBuf, text: String, shadow: bool) {
         self.evaluate_inner(path, text, shadow, false);
     }
 
-    /// Like `evaluate`, but marks the result as originating from a manual save.
     pub fn evaluate_save(&self, path: PathBuf, text: String) {
         self.evaluate_inner(path, text, false, true);
     }
 
-    /// Authoritative turn-completion eval: reads the file from disk on the
-    /// worker thread and tags the result with `agent_id` so the main loop
-    /// can route it to the correct per-agent batch. Returns `false` if the
-    /// thread could not be spawned (the caller should decrement pending
-    /// counts in that case). If the file read fails on the worker, a result
-    /// with `report: None` is sent so pending counts still decrement.
+    /// Authoritative turn-completion eval: the worker reads the file itself so
+    /// the caller does not have to buffer the contents. Returns `false` when
+    /// the thread could not be spawned; the caller must then decrement
+    /// pending counters manually.
     pub fn evaluate_from_disk(&self, path: PathBuf, agent_id: String) -> bool {
-        self.evaluate_from_disk_inner(path, false, Some(agent_id))
+        self.evaluate_from_disk_inner(path, false, false, Some(agent_id))
     }
 
-    /// Shadow variant of `evaluate_from_disk`: no agent_id, no batch routing.
     pub fn evaluate_from_disk_shadow(&self, path: PathBuf) -> bool {
-        self.evaluate_from_disk_inner(path, true, None)
+        self.evaluate_from_disk_inner(path, true, false, None)
+    }
+
+    /// Proposer pre-scan eval: inserts into `state.genome_reports` without
+    /// the shadow/batch bookkeeping so a follow-up propose-role dispatch
+    /// sees real landscape data even on a fresh workspace.
+    pub fn evaluate_from_disk_prescan(&self, path: PathBuf) -> bool {
+        self.evaluate_from_disk_inner(path, false, true, None)
     }
 
     fn evaluate_from_disk_inner(
         &self,
         path: PathBuf,
         shadow: bool,
+        prescan: bool,
         agent_id: Option<String>,
     ) -> bool {
         let tx = self.tx.clone();
-        std::thread::Builder::new()
-            .name("genome-eval".into())
-            .stack_size(EVAL_STACK_SIZE)
+        eval_thread()
             .spawn(move || {
                 let report = std::fs::read_to_string(&path)
                     .ok()
@@ -94,6 +91,7 @@ impl GenomeWorker {
                     report,
                     shadow,
                     save_eval: false,
+                    prescan,
                     agent_id,
                 });
             })
@@ -102,18 +100,22 @@ impl GenomeWorker {
 
     fn evaluate_inner(&self, path: PathBuf, text: String, shadow: bool, save_eval: bool) {
         let tx = self.tx.clone();
-        let _ = std::thread::Builder::new()
-            .name("genome-eval".into())
-            .stack_size(EVAL_STACK_SIZE)
-            .spawn(move || {
-                let report = nit_core::compute_genome_report(&text, &path);
-                let _ = tx.send(GenomeEvalResult {
-                    path,
-                    report: Some(report),
-                    shadow,
-                    save_eval,
-                    agent_id: None,
-                });
+        let _ = eval_thread().spawn(move || {
+            let report = nit_core::compute_genome_report(&text, &path);
+            let _ = tx.send(GenomeEvalResult {
+                path,
+                report: Some(report),
+                shadow,
+                save_eval,
+                prescan: false,
+                agent_id: None,
             });
+        });
     }
+}
+
+fn eval_thread() -> std::thread::Builder {
+    std::thread::Builder::new()
+        .name(THREAD_NAME.into())
+        .stack_size(EVAL_STACK_SIZE)
 }

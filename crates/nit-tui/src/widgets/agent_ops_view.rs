@@ -128,34 +128,14 @@ const ROSTER_ROLE_OPTIONS: [&str; 8] = [
     "test",
 ];
 
-pub fn roster_swarm_template_hit(col: usize) -> Option<&'static str> {
-    for label in ["lab", "parallel", "bulk"] {
-        let needle = match label {
-            "lab" => " lab ",
-            "parallel" => " parallel ",
-            "bulk" => " bulk ",
-            _ => continue,
-        };
-        let Some(start) = ROSTER_SWARM_TEMPLATE_LINE.find(needle) else {
-            continue;
-        };
-        let end = start.saturating_add(needle.len());
-        if col >= start && col < end {
-            return Some(label);
-        }
-    }
-    None
-}
-
-pub fn roster_swarm_mission_hit(col: usize) -> Option<&'static str> {
-    for (label, value) in [
-        ("auto", "auto"),
-        ("general", "general"),
-        ("research", "research"),
-        ("computational", "computational-research"),
-    ] {
+fn roster_line_word_hit(
+    line: &'static str,
+    col: usize,
+    words: &[(&'static str, &'static str)],
+) -> Option<&'static str> {
+    for &(label, value) in words {
         let needle = format!(" {label} ");
-        let Some(start) = ROSTER_SWARM_MISSION_LINE.find(needle.as_str()) else {
+        let Some(start) = line.find(needle.as_str()) else {
             continue;
         };
         let end = start.saturating_add(needle.len());
@@ -164,6 +144,21 @@ pub fn roster_swarm_mission_hit(col: usize) -> Option<&'static str> {
         }
     }
     None
+}
+
+pub fn roster_swarm_template_hit(col: usize) -> Option<&'static str> {
+    const WORDS: &[(&str, &str)] = &[("lab", "lab"), ("parallel", "parallel"), ("bulk", "bulk")];
+    roster_line_word_hit(ROSTER_SWARM_TEMPLATE_LINE, col, WORDS)
+}
+
+pub fn roster_swarm_mission_hit(col: usize) -> Option<&'static str> {
+    const WORDS: &[(&str, &str)] = &[
+        ("auto", "auto"),
+        ("general", "general"),
+        ("research", "research"),
+        ("computational", "computational-research"),
+    ];
+    roster_line_word_hit(ROSTER_SWARM_MISSION_LINE, col, WORDS)
 }
 
 pub fn roster_role_cell_hit(col: usize, width: usize) -> bool {
@@ -634,9 +629,8 @@ pub fn render(
         .border_style(border_style)
         .border_type(border_type)
         .style(Style::default().bg(theme.background));
-    frame.render_widget(block.clone(), area);
-
     let inner = block.inner(area);
+    frame.render_widget(block, area);
     if inner.width < 4 || inner.height < 3 {
         return;
     }

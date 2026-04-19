@@ -1,3 +1,8 @@
+//! Games visualizer pane — shows the current games config summary on the
+//! left and the last-run panel on the right (or inline when the terminal is
+//! too narrow for a side panel). Also owns the ASCII payoff-matrix rendering
+//! and the strategy/last-run summary tables.
+
 use nit_core::{AppState, GamesStatus, PaneId, UiSelectionPane};
 use nit_games::config::StrategySpecKind;
 use nit_games::strategy::InputMode;
@@ -12,9 +17,22 @@ use unicode_width::UnicodeWidthChar;
 
 use crate::theme::Theme;
 use crate::widgets::text_selection::apply_ui_selection;
+use crate::widgets::text_utils::truncate_text;
 
 const LAST_RUN_PANEL_TARGET_WIDTH: usize = 34;
 const LAST_RUN_PANEL_EXTRA_WIDTH: usize = 6;
+/// Main (left-hand) column must keep at least this many cells; below this
+/// the last-run side panel collapses and renders inline instead.
+const MAIN_COLUMN_MIN_WIDTH: usize = 32;
+const SIDE_PANEL_BORDER_PADDING: usize = 2;
+/// Top N rankings shown in the last-run table.
+const LAST_RUN_TABLE_ROWS: usize = 5;
+/// Number of config-error lines to show before eliding.
+const CONFIG_ERROR_LIMIT: usize = 6;
+const STRATEGY_ID_COL_MAX: usize = 18;
+const STRATEGY_TYPE_COL_MAX: usize = 6;
+const STRATEGY_SUMMARY_COL_MIN: usize = 18;
+const TAB_STOP: usize = 4;
 
 pub struct VisualizerLayout {
     pub main: Rect,
@@ -22,45 +40,49 @@ pub struct VisualizerLayout {
     pub show_payoff_side: bool,
 }
 
+/// Split the visualizer inner area into a main (left) pane and an optional
+/// last-run side panel (right). The side panel shows only when a parsed
+/// config exists and the terminal has room for both columns; otherwise the
+/// last-run block is rendered inline at the top of the main pane.
 pub fn layout_for_config(
     inner: Rect,
     _state: &AppState,
     config: Option<&nit_games::config::NormalizedConfig>,
 ) -> VisualizerLayout {
-    let mut show_payoff_side = false;
-    let (main_area, right_area) = if let Some(config) = config {
-        let desired = payoff_panel_width(&config.payoff)
-            .max(LAST_RUN_PANEL_TARGET_WIDTH)
-            .saturating_add(2 + LAST_RUN_PANEL_EXTRA_WIDTH);
-        let min_main = 32usize;
-        if inner.width as usize >= min_main + desired {
-            show_payoff_side = true;
-            let cols = Layout::default()
-                .direction(Direction::Horizontal)
-                .constraints([
-                    Constraint::Min(min_main as u16),
-                    Constraint::Length(desired as u16),
-                ])
-                .split(inner);
-            (cols[0], cols[1])
-        } else {
-            (inner, Rect::default())
-        }
-    } else {
-        (inner, Rect::default())
+    let Some(config) = config else {
+        return VisualizerLayout {
+            main: inner,
+            side: None,
+            show_payoff_side: false,
+        };
     };
-    let side = if show_payoff_side {
-        Some(right_area)
-    } else {
-        None
-    };
+    let desired = payoff_panel_width(&config.payoff)
+        .max(LAST_RUN_PANEL_TARGET_WIDTH)
+        .saturating_add(SIDE_PANEL_BORDER_PADDING + LAST_RUN_PANEL_EXTRA_WIDTH);
+    if (inner.width as usize) < MAIN_COLUMN_MIN_WIDTH + desired {
+        return VisualizerLayout {
+            main: inner,
+            side: None,
+            show_payoff_side: false,
+        };
+    }
+    let cols = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Min(MAIN_COLUMN_MIN_WIDTH as u16),
+            Constraint::Length(desired as u16),
+        ])
+        .split(inner);
     VisualizerLayout {
-        main: main_area,
-        side,
-        show_payoff_side,
+        main: cols[0],
+        side: Some(cols[1]),
+        show_payoff_side: true,
     }
 }
 
+/// Build the left-pane line buffer: status line, optional inline last-run
+/// block (when the side panel is collapsed), and config summary + strategy
+/// table. `width` controls the strategy table column squeeze.
 pub fn build_main_lines(
     state: &AppState,
     theme: &Theme,
@@ -189,7 +211,7 @@ pub fn build_main_lines(
                 "Config error:",
                 Style::default().fg(theme.warning),
             )]));
-            for msg in err.errors.iter().take(6) {
+            for msg in err.errors.iter().take(CONFIG_ERROR_LIMIT) {
                 lines.push(Line::from(vec![
                     Span::styled("- ", dim_style),
                     Span::styled(msg.clone(), value_style),
@@ -212,6 +234,8 @@ pub fn build_main_lines(
     lines
 }
 
+/// Build the right-pane line buffer (last-run panel). Only called when
+/// `layout_for_config` yields a side rect.
 pub fn build_side_lines(state: &AppState, theme: &Theme, width: usize) -> Vec<Line<'static>> {
     let title_color = if state.focus == PaneId::Visualizer {
         theme.title_focused
@@ -244,6 +268,9 @@ pub fn build_side_lines(state: &AppState, theme: &Theme, width: usize) -> Vec<Li
     )
 }
 
+/// Render the full Visualizer pane: outer border, main pane, and optional
+/// last-run side panel. Selection state is applied separately to each pane so
+/// the drag-select highlight stays within the pane it originated in.
 pub fn render(
     frame: &mut Frame,
     area: Rect,
@@ -337,18 +364,21 @@ fn status_label(status: GamesStatus) -> &'static str {
     }
 }
 
+/// Human-readable strategy name: prefer the user-supplied `name` from config,
+/// otherwise synthesize one from the strategy kind (e.g. `FSM (s=4, k=2)`).
 pub fn strategy_display_name(strategy: &nit_games::config::StrategySpec) -> String {
-    if let Some(name) = strategy.name.as_ref() {
-        return name.clone();
-    }
-    strategy_display_name_from_kind(&strategy.kind)
+    strategy
+        .name
+        .clone()
+        .unwrap_or_else(|| strategy_display_name_from_kind(&strategy.kind))
 }
 
+/// Same as [`strategy_display_name`] but reads from a run-output definition
+/// (used by the last-run table where specs are flattened into definitions).
 pub fn strategy_display_name_from_def(def: &nit_games::output::StrategyDefinition) -> String {
-    if let Some(name) = def.name.as_ref() {
-        return name.clone();
-    }
-    strategy_display_name_from_kind(&def.kind)
+    def.name
+        .clone()
+        .unwrap_or_else(|| strategy_display_name_from_kind(&def.kind))
 }
 
 fn strategy_kind_label(kind: &StrategySpecKind) -> &'static str {
@@ -409,14 +439,14 @@ fn render_strategy_table(
         .max()
         .unwrap_or(id_header.len())
         .max(id_header.len())
-        .min(18);
+        .min(STRATEGY_ID_COL_MAX);
     let mut type_w = strategies
         .iter()
         .map(|strategy| strategy_kind_label(&strategy.kind).len())
         .max()
         .unwrap_or(type_header.len())
         .max(type_header.len())
-        .min(6);
+        .min(STRATEGY_TYPE_COL_MAX);
     let columns = 3usize;
     let overhead = (columns + 1) + (2 * columns);
     let available = width.saturating_sub(overhead);
@@ -426,7 +456,7 @@ fn render_strategy_table(
         .max()
         .unwrap_or(summary_header.len())
         .max(summary_header.len())
-        .max(18);
+        .max(STRATEGY_SUMMARY_COL_MIN);
 
     let total = id_w + type_w + summary_w;
     if total > available {
@@ -742,7 +772,9 @@ fn wrap_visual_line(text: &str, width: usize) -> Vec<String> {
                 );
             }
             '\t' => {
-                let tab_width = (4 - (current_width % 4)).max(1).min(width);
+                let tab_width = (TAB_STOP - (current_width % TAB_STOP))
+                    .max(1)
+                    .min(width);
                 for _ in 0..tab_width {
                     push_char(
                         &mut lines,
@@ -826,7 +858,7 @@ fn render_last_run_table(
     let mut score_w = score_header.len();
     let mut total_w = total_header.len();
 
-    for (idx, entry) in run.results.ranking.iter().take(5).enumerate() {
+    for (idx, entry) in run.results.ranking.iter().take(LAST_RUN_TABLE_ROWS).enumerate() {
         rank_w = rank_w.max((idx + 1).to_string().len());
         id_w = id_w.max(entry.id.len());
         score_w = score_w.max(
@@ -880,7 +912,7 @@ fn render_last_run_table(
     ]));
     lines.push(Line::from(Span::styled(sep.clone(), dim_style)));
 
-    for (idx, entry) in run.results.ranking.iter().take(5).enumerate() {
+    for (idx, entry) in run.results.ranking.iter().take(LAST_RUN_TABLE_ROWS).enumerate() {
         let rank = (idx + 1).to_string();
         let id = truncate_text(&entry.id, id_w);
         let score = entry.formatted_score(
@@ -1007,22 +1039,6 @@ fn center_text(text: &str, width: usize) -> String {
     let pad_left = pad_total / 2;
     let pad_right = pad_total - pad_left;
     format!("{}{}{}", " ".repeat(pad_left), text, " ".repeat(pad_right))
-}
-
-fn truncate_text(text: &str, width: usize) -> String {
-    if width == 0 {
-        return String::new();
-    }
-    let len = text.chars().count();
-    if len <= width {
-        return text.to_string();
-    }
-    if width <= 3 {
-        return text.chars().take(width).collect();
-    }
-    let mut out: String = text.chars().take(width - 3).collect();
-    out.push_str("...");
-    out
 }
 
 fn centered_line(line: &str, width: usize, style: Style) -> Line<'static> {

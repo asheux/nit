@@ -7,6 +7,13 @@ use std::{
 
 use nit_core::{AgentBusEvent, AgentMessage, AgentStatus, AppState, MissionPhase, MissionRecord};
 
+/// Maximum concurrent proposer pre-scan eval threads across all active
+/// swarms. Each eval does tree-sitter parsing + GoL simulation and saturates
+/// a core while it runs; without a cap a large scope_files list would spawn
+/// hundreds of threads in parallel and freeze the UI. Tuned low so nit stays
+/// responsive even while the scan churns through a whole crate.
+const PRESCAN_MAX_IN_FLIGHT: usize = 3;
+
 const DEFAULT_SWARM_SIZE: usize = 4;
 const MAX_SWARM_SIZE: usize = 16;
 const SWARM_VERIFY_MAX_CHARS: usize = 12_000;
@@ -66,6 +73,9 @@ fn is_swarm_clone_for_mission(agent_id: &str, mission_id: &str) -> bool {
         .is_some_and(|suffix| suffix.starts_with('-'))
 }
 
+/// Propagate Codex runtime metadata (context window, reasoning efforts) from
+/// the base agent lane to a swarm/chat clone lane so the clone inherits the
+/// same token accounting and selected-effort UX without an extra probe.
 pub(crate) fn copy_codex_runtime_metadata(state: &mut AppState, base_id: &str, clone_id: &str) {
     if let Some(tokens) = state
         .agents
@@ -113,6 +123,9 @@ pub(crate) fn copy_codex_runtime_metadata(state: &mut AppState, base_id: &str, c
     }
 }
 
+/// Propagate Claude runtime metadata (context window, effort selection) from
+/// the base agent lane to a swarm/chat clone lane so the clone inherits the
+/// same token accounting and selected-effort UX without an extra probe.
 pub(crate) fn copy_claude_runtime_metadata(state: &mut AppState, base_id: &str, clone_id: &str) {
     if let Some(tokens) = state
         .agents
@@ -1426,6 +1439,27 @@ struct SwarmRun {
     /// `settings.swarm.gate_retry_limit` (default 3). Each increment
     /// dispatches a fix task to the integrator and re-enters `Verifying`.
     gate_retry_count: u8,
+    /// Proposer genome pre-scan: scope-file paths still being evaluated by
+    /// the genome worker. Populated on Executing transition; drained by
+    /// `note_genome_prescan_result`. While non-empty, propose-role tasks
+    /// are held at Ready without being dispatched — proposers wait until
+    /// genome reports exist so their landscape-aware prompt is grounded in
+    /// real data. Empty when the pre-scan is complete or was skipped (e.g.
+    /// no scope files, genome context disabled).
+    prescan_pending: HashSet<std::path::PathBuf>,
+    /// Paths already handed to the genome worker. A path is in
+    /// `prescan_dispatched` from the moment we spawn its eval thread until
+    /// the result lands (at which point both sets drop it). Without this
+    /// guard the dispatcher re-queues the same paths every main-loop tick
+    /// and floods the worker with thousands of threads.
+    prescan_dispatched: HashSet<std::path::PathBuf>,
+    /// Whether the pre-scan pending set has been seeded from scope_files.
+    /// Separate from `prescan_message_pushed` so we don't re-seed after the
+    /// scan completes and empties the set.
+    prescan_seeded: bool,
+    /// Whether a "proposer genome pre-scan" status message has been pushed
+    /// for this run, so we don't spam the mission transcript.
+    prescan_message_pushed: bool,
 }
 
 /// Configuration from a previous swarm run, used to re-launch follow-up prompts
@@ -1478,6 +1512,142 @@ pub fn ensure_swarm_agents_for_followup(
 }
 
 impl SwarmRuntime {
+    /// Look up the scope files for a running mission. Used by the TUI
+    /// dispatch layer to inject role-specific context (e.g. the genome
+    /// landscape appended to propose-role prompts) without threading the
+    /// scope through every SwarmDispatch.
+    pub fn scope_files_for_mission(&self, mission_id: &str) -> Option<&[String]> {
+        self.runs
+            .get(mission_id)
+            .map(|run| run.scope_files.as_slice())
+    }
+
+    /// Collect a bounded batch of scope-file paths the pre-scan should
+    /// dispatch next. Each returned path is marked `prescan_dispatched` so
+    /// subsequent calls don't re-queue the same eval — the previous
+    /// implementation flooded the genome worker with thousands of threads
+    /// because it returned every pending path every main-loop tick.
+    ///
+    /// Global in-flight cap: `PRESCAN_MAX_IN_FLIGHT`. When the worker is
+    /// full, this function returns an empty vec and the dispatcher waits
+    /// for results to drain. Seeding the pending set is also bounded — we
+    /// walk `scope_files` once, filter to files without reports, and stop.
+    pub fn take_pending_prescan_paths(
+        &mut self,
+        state: &AppState,
+        workspace_root: &std::path::Path,
+    ) -> Vec<std::path::PathBuf> {
+        // Seed pending sets once per run (not every tick). Skip files that
+        // already have reports so we don't rescan the workspace each run.
+        for run in self.runs.values_mut() {
+            if run.prescan_seeded {
+                continue;
+            }
+            if run.stage != SwarmStage::Executing || run.scope_files.is_empty() {
+                continue;
+            }
+            for rel in run.scope_files.iter() {
+                let abs = workspace_root.join(rel);
+                if !state.genome_reports.contains_key(&abs) && abs.is_file() {
+                    run.prescan_pending.insert(abs);
+                }
+            }
+            run.prescan_seeded = true;
+        }
+
+        // Count paths currently in flight across all runs (dispatched but
+        // result not yet returned). Cap the new batch so we never have
+        // more than PRESCAN_MAX_IN_FLIGHT eval threads alive at once.
+        let in_flight: usize = self
+            .runs
+            .values()
+            .map(|run| run.prescan_dispatched.len())
+            .sum();
+        let budget = PRESCAN_MAX_IN_FLIGHT.saturating_sub(in_flight);
+        if budget == 0 {
+            return Vec::new();
+        }
+
+        // Pick up to `budget` undispatched pending paths. Dedup across runs
+        // so two missions targeting the same file share one eval.
+        let mut out = Vec::new();
+        let mut picked: HashSet<std::path::PathBuf> = HashSet::new();
+        for run in self.runs.values_mut() {
+            if out.len() >= budget {
+                break;
+            }
+            let mut claims: Vec<std::path::PathBuf> = Vec::new();
+            for path in run.prescan_pending.iter() {
+                if out.len() + claims.len() >= budget {
+                    break;
+                }
+                if run.prescan_dispatched.contains(path) || picked.contains(path) {
+                    continue;
+                }
+                claims.push(path.clone());
+            }
+            for path in claims {
+                run.prescan_dispatched.insert(path.clone());
+                picked.insert(path.clone());
+                out.push(path);
+            }
+        }
+        out
+    }
+
+    /// Invoked by the TUI when a prescan genome result lands. Removes the
+    /// path from every run's pending set and, for runs whose set just went
+    /// empty, refreshes readiness and returns any newly-dispatchable
+    /// proposer tasks. All work is O(runs × pending), no I/O.
+    pub fn note_prescan_result(&mut self, path: &std::path::Path) -> Vec<SwarmDispatch> {
+        let mut dispatches = Vec::new();
+        let mut completed_missions: Vec<String> = Vec::new();
+        for run in self.runs.values_mut() {
+            run.prescan_dispatched.remove(path);
+            if run.prescan_pending.remove(path) && run.prescan_pending.is_empty() {
+                completed_missions.push(run.mission_id.clone());
+            }
+        }
+        for mid in completed_missions {
+            if let Some(run) = self.runs.get_mut(&mid) {
+                refresh_task_readiness(run);
+                dispatches.extend(dispatch_ready_tasks(run));
+            }
+        }
+        dispatches
+    }
+
+    /// Whether the proposer pre-scan is still running for the given
+    /// mission. Used by the agent-console stage label to render
+    /// "Proposing (Genome check) ..." while the scan is in flight.
+    pub fn is_prescan_active(&self, mission_id: &str) -> bool {
+        self.runs
+            .get(mission_id)
+            .map(|run| !run.prescan_pending.is_empty())
+            .unwrap_or(false)
+    }
+
+    /// One-shot-per-run announcement of the pre-scan start. Returns
+    /// `(mission_id, file_count)` for every run that has pending pre-scan
+    /// paths and hasn't had its status message pushed yet; flags each run
+    /// as announced so subsequent dispatch batches don't re-emit the same
+    /// mission message on every main-loop tick.
+    pub fn announce_prescan_start(&mut self) -> Vec<(String, usize)> {
+        let mut out = Vec::new();
+        for run in self.runs.values_mut() {
+            if run.prescan_message_pushed {
+                continue;
+            }
+            if run.prescan_pending.is_empty() {
+                continue;
+            }
+            let total = run.prescan_pending.len() + run.prescan_dispatched.len();
+            out.push((run.mission_id.clone(), total));
+            run.prescan_message_pushed = true;
+        }
+        out
+    }
+
     /// Poll all pending genome gate evaluations.  When a background thread
     /// finishes, store the result in the run and return a `SwarmDispatch` so
     /// the main loop can kick off the verifier agent — without ever blocking.
@@ -2134,6 +2304,10 @@ impl SwarmRuntime {
                 scope_files,
                 initial_genome_baselines: state.genome_reports.clone(),
                 gate_retry_count: 0,
+                prescan_pending: HashSet::new(),
+                prescan_dispatched: HashSet::new(),
+                prescan_seeded: false,
+                prescan_message_pushed: false,
             },
         );
 
@@ -2521,6 +2695,51 @@ impl SwarmRuntime {
                                         completed.task_id
                                     ),
                                 );
+                            }
+                            // Structural compliance: did the integrator touch
+                            // every file the proposer declared?
+                            let missing =
+                                structural_compliance_missing_files(&run, &completed.task_id, state);
+                            if !missing.is_empty() {
+                                let preview: Vec<String> =
+                                    missing.iter().take(8).cloned().collect();
+                                let more = if missing.len() > preview.len() {
+                                    format!(" (+{} more)", missing.len() - preview.len())
+                                } else {
+                                    String::new()
+                                };
+                                push_system_message_to_mission(
+                                    state,
+                                    &run.mission_id,
+                                    format!(
+                                        "STRUCTURAL COMPLIANCE: task '{}' finished but {} proposer-declared file(s) were not modified: {}{more}. \
+                                         Silent divergence — integrator skipped part of the plan.",
+                                        completed.task_id,
+                                        missing.len(),
+                                        preview.join(", "),
+                                    ),
+                                );
+                                // Also emit a substrate Warning signal so
+                                // observers/arbiters can react.
+                                let id = state
+                                    .substrate
+                                    .next_signal_id(&completed.task_id);
+                                let posted_at_gen = state.substrate.current_generation();
+                                state.substrate.emit_signal(nit_core::substrate::Signal {
+                                    id,
+                                    kind: nit_core::substrate::SignalKind::Warning,
+                                    posted_by: format!("swarm:compliance:{}", completed.task_id),
+                                    posted_at_gen,
+                                    target: nit_core::substrate::SignalTarget::Global,
+                                    initial_strength:
+                                        nit_core::substrate::SubstrateState::DEFAULT_INITIAL_STRENGTH,
+                                    payload: serde_json::json!({
+                                        "reason": "structural_compliance_missing_files",
+                                        "task_id": completed.task_id,
+                                        "missing_files": missing,
+                                        "mission_id": run.mission_id,
+                                    }),
+                                });
                             }
                         }
                         refresh_task_readiness(&mut run);
@@ -2993,9 +3212,24 @@ impl SwarmRuntime {
                                     SwarmTaskState::Running | SwarmTaskState::Dispatched
                                 )
                         });
+                        // Rate-limit check: if the failure was a 429 from
+                        // the provider, retrying immediately just burns the
+                        // retry budget on an exhausted quota. Skip the retry
+                        // and surface a clear message so the operator knows
+                        // why the task stalled.
+                        let rate_limited = is_provider_rate_limit_failure(message);
                         if let Some(idx) = task_idx {
                             let task = &mut run.tasks[idx];
-                            if task.writes && task.retries < 1 {
+                            if rate_limited {
+                                push_system_message_to_mission(
+                                    state,
+                                    &run.mission_id,
+                                    format!(
+                                        "Task '{}' failed: provider rate-limited (429). Not retrying — wait for the quota window to reset.",
+                                        task.id,
+                                    ),
+                                );
+                            } else if task.writes && task.retries < 1 {
                                 task.retries += 1;
                                 task.state = SwarmTaskState::Ready;
                                 task.output = None;
@@ -5704,6 +5938,67 @@ struct TaskCompletion {
     writes_detected: bool,
 }
 
+/// Post-integrate structural compliance: walks the integrator's proposer/
+/// judge dependencies, collects declared file paths from their parsed
+/// artifacts, and returns any that the integrator did not actually touch
+/// (not on disk, or not in `genome_mission_modified`). Empty return means
+/// the integrator honored the declared file outputs; non-empty means the
+/// proposer plan specified files the writer silently skipped.
+fn structural_compliance_missing_files(
+    run: &SwarmRun,
+    integrator_task_id: &str,
+    state: &AppState,
+) -> Vec<String> {
+    let Some(task) = run.tasks.iter().find(|t| t.id == integrator_task_id) else {
+        return Vec::new();
+    };
+    if !task.writes {
+        return Vec::new();
+    }
+    let mission_writes: Option<&HashSet<std::path::PathBuf>> =
+        state.genome_mission_modified.get(&run.mission_id);
+    let workspace = state.workspace_root.as_path();
+    let mut missing: Vec<String> = Vec::new();
+    let mut declared_count = 0usize;
+    for dep_id in task.deps.iter() {
+        let Some(dep) = run.tasks.iter().find(|t| &t.id == dep_id) else {
+            continue;
+        };
+        let role = dep.role.as_deref().and_then(normalize_role_label);
+        if !matches!(role.as_deref(), Some("propose") | Some("judge")) {
+            continue;
+        }
+        let Some(artifacts) = dep.parsed_artifacts.as_ref() else {
+            continue;
+        };
+        for entry in artifacts.files.iter() {
+            let rel = entry.path.trim();
+            if rel.is_empty() {
+                continue;
+            }
+            declared_count += 1;
+            let abs = if std::path::Path::new(rel).is_absolute() {
+                std::path::PathBuf::from(rel)
+            } else {
+                workspace.join(rel)
+            };
+            let touched = mission_writes
+                .map(|set| set.contains(&abs))
+                .unwrap_or(false);
+            if !touched {
+                missing.push(rel.to_string());
+            }
+        }
+    }
+    // If there were no declarations at all, don't flag — proposers aren't
+    // required to enumerate every file they recommend (it's stronger when
+    // they do, but absence isn't non-compliance).
+    if declared_count == 0 {
+        return Vec::new();
+    }
+    missing
+}
+
 fn mark_task_finished(
     run: &mut SwarmRun,
     agent_id: &str,
@@ -5961,10 +6256,33 @@ fn select_dispatchable_ready_task_indices(run: &SwarmRun) -> Vec<usize> {
                     SwarmTaskState::Dispatched | SwarmTaskState::Running
                 )
         });
+    // Proposer pre-scan gate: hold propose-role dispatches until the genome
+    // worker has produced baseline reports for scope files. Without this,
+    // proposers see an empty GENOME LANDSCAPE section (no reports exist
+    // yet on fresh workspaces) and fall back to surface-level advice.
+    let prescan_active = !run.prescan_pending.is_empty();
+
     let mut indices = Vec::new();
     for (idx, task) in run.tasks.iter().enumerate() {
         if !matches!(task.state, SwarmTaskState::Ready) {
             continue;
+        }
+        if prescan_active {
+            // Hold any role that consumes the genome landscape (propose +
+            // integrate + judge) until the pre-scan produces reports for
+            // scope files. Applies across every template — parallel, lab,
+            // bulk — because each of these roles reads the landscape from
+            // its augmented prompt.
+            let role_wants_landscape = matches!(
+                task.role
+                    .as_deref()
+                    .and_then(normalize_role_label)
+                    .as_deref(),
+                Some("propose") | Some("integrate") | Some("judge")
+            );
+            if role_wants_landscape {
+                continue;
+            }
         }
         if task.writes && enforce_single_writer {
             if writer_taken {
@@ -7244,6 +7562,8 @@ fn role_contract_lines(role: &str) -> &'static [&'static str] {
             "Do not judge between candidates or claim final implementation ownership.",
             "Be specific about files, commands, and risks.",
             "ROLE DISCIPLINE: You are read-only and propose-only. Do NOT run tests, builds, type-checkers, lints, formatters, CI pipelines, or any other verification commands in this project — whatever toolchain it uses. Suggest commands as text only; running them is the integrate/test/review agent's job. Do NOT redo investigation that an upstream task already covered; build on dependency outputs instead of repeating them.",
+            "GENOME-AWARE PROPOSAL — STRICT: a GENOME LANDSCAPE section may be attached below with current tier/consistency/generations/parsimony for every scope file. When it is present, you MUST ground your proposal in those numbers. For every recommendation, name the file, the current metric, the target metric, and the direction — e.g. \"split swarm.rs: 8500 lines / structural density 0.13 → aim 6 submodules each ≤1500 lines, density ≥0.25\", \"inline vitals.rs trivial predicates: parsimony-bloat cap at tier IV → consolidate 13 single-line fns into 3 compound checks to unlock higher tier\", \"kill shadow.rs lines 444-600 (entropy 0.0) → replace with single templated helper\". Do NOT emit surface-level advice (\"rename x to y\", \"extract helper\") without tying it to a concrete encoder metric it is meant to move. If the landscape shows mega-files (>2000 lines), low structural density (≤0.10), zero-entropy blocks, parsimony bloat, or cross-encoder consistency spread >0.3, those are the highest-leverage fixes — name them explicitly.",
+            "RECOMMENDATION COVERAGE: Do not stop at one suggestion per file. Scan the whole landscape and recommend every class of fix the integrator could apply: structural splits, entropy elimination, cyclomatic-complexity reduction (target ≤8 per fn), AST component fan-out (target ≥5), identifier uniqueness (≥65%), comment-to-code ratio, consolidation of parsimony-capped files. The integrator only writes what you surface — missing a whole category means it never gets fixed.",
             "GENOME: nit measures the integrator's code across four encoders: token_spectrum (token role balance), ast_structure (tree shape variety, >= 5 components), complexity_field (cyclomatic complexity <= 8, identifier uniqueness >= 65%), structural (token-role diversity, AST depth variation, role n-gram uniqueness). See the full ENCODER GUIDE and TARGETS in the genome instructions attached to this prompt. Help the integrator score well — suggest function decomposition, varied patterns, and low-complexity approaches that target these encoders.",
         ],
         "research" => &[
@@ -7270,7 +7590,7 @@ fn role_contract_lines(role: &str) -> &'static [&'static str] {
             "Do not restart broad ideation; focus on carrying the selected approach through.",
             "If a FILE CHECKLIST is provided above, you MUST modify every listed file — process them in order, one by one. A file left unchanged means your task is incomplete.",
             "Report exact files changed and validation results.",
-            "VERIFY-LOOP BUDGET — STRICT: you may run each verify gate (e.g. `cargo test`, `cargo clippy`, `cargo fmt --check`, `cargo check`, equivalent pytest/go/npm commands) AT MOST TWICE. If issues remain after the second pass — clippy still warning, tests still failing, fmt still diffing — STOP iterating, report the remaining issues as a short bullet list in your final message, and finish the turn. The review and test agents downstream, and the post-execution gate verifier, will handle residual cleanup. Endless iterate-fix-iterate cycles waste the turn budget and cost real money; a half-clean workspace with a clear residuals list is more useful than a timeout at turn 120 with perfect cosmetics unreported.",
+            "PROPOSER-PLAN BINDING — STRICT: any upstream propose/judge task output in the Dependency outputs section below is BINDING, not informational. You MUST implement the proposer's specific choices — file paths, identifiers, constants, architectural decisions, ordering — exactly as specified. Do NOT substitute your own design, invent new files the proposer didn't mention, or skip files the proposer listed. You MAY deviate only when (a) the proposer's recommendation directly contradicts the operator's original request above, or (b) the recommendation is technically impossible (names a non-existent type, breaks a guaranteed invariant). In those two cases, pick the minimum viable alternative and say in your final message exactly what you deviated from and why. Silent divergence is a task failure even if the code you wrote is defensible on its own — the proposer's output is part of the contract, not a starting point for re-design.",
             "TEST DISCIPLINE — STRICT: Workspace-wide / repo-wide test commands (`cargo test --all` / `--workspace`, `go test ./...`, `pytest` from the repo root, `npm test --workspaces`, `just test`, `just ci`, full lint/type-check sweeps, etc.) are ONLY allowed when the OPERATOR explicitly asked for them in the request above (look for phrases like \"run full CI\", \"verify the whole workspace\", \"run all tests\"). Otherwise you MUST NOT run a workspace-wide command — broad verification is the review/test agent's job and the post-execution gate verifier's job. DEFAULT: run only targeted tests for the files you actually changed, using whatever scoping flag the project's toolchain provides (e.g. `cargo test -p <affected-crate>`, `pytest path/to/affected/dir`, `go test ./path/to/affected/...`). MULTI-MODULE CHANGES: combine targeted flags (`cargo test -p crate1 -p crate2`) or run one targeted command per module — do NOT widen to workspace-wide. Infer the appropriate command from the project layout; do not assume any specific language or tooling.",
             "CODE CONVENTION: Do NOT add inline test modules (`#[cfg(test)] mod tests { ... }`) inside source files. Tests must live in a dedicated tests directory or test file, not inline. If you encounter an existing inline test module during a refactor, move it to the appropriate test file/directory. Do NOT pad small files (lib.rs, mod.rs, re-export files) with unnecessary code to boost genome scores — trivially small files are auto-passed by the genome system. COMMENTS: Trim doc comments that restate the type/function name, echo visible type signatures, or describe obvious behavior. Keep comments that explain WHY, document non-obvious constraints, safety invariants, or algorithmic choices.",
             "GENOME QUALITY OBLIGATION: You are the sole writer. Your code is measured by nit's genome system across four encoders. See the full ENCODER GUIDE and TARGETS in the genome instructions attached to this prompt. Maintain or improve genome scores on every file you touch. Aim for Tier III+ (Spaceship) minimum, aspire to Tier V (Replicator). Do NOT call [evaluate_genome] — nit evaluates automatically after your changes are written to disk.",
@@ -7314,6 +7634,24 @@ fn role_response_format_lines(role: &str) -> Option<&'static [&'static str]> {
         ]),
         _ => None,
     }
+}
+
+/// Detect a provider 429 rate-limit failure from the TurnFailed message.
+/// Claude CLI surfaces these as "api_error_status:429" alongside prose like
+/// "You've hit your limit · resets ...". Codex uses similar wording. When
+/// the quota is exhausted, retrying in-window just burns the task retry
+/// budget on calls that will fail immediately — so the swarm should stop.
+fn is_provider_rate_limit_failure(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    lower.contains("api_error_status\":429")
+        || lower.contains("api_error_status: 429")
+        || lower.contains("status: 429")
+        || lower.contains("status 429")
+        || lower.contains("you've hit your limit")
+        || lower.contains("rate limit")
+        || lower.contains("rate-limited")
+        || lower.contains("rate_limit")
+        || lower.contains("429 too many requests")
 }
 
 /// Extract cargo crate names from `crates/<name>/...` paths. Returns a sorted
@@ -7492,17 +7830,27 @@ fn wrap_task_prompt(
 
     if let Some(deps) = deps {
         if !deps.is_empty() {
-            let is_judge = task
-                .role
-                .as_deref()
-                .and_then(normalize_role_label)
-                .as_deref()
-                == Some("judge");
+            let normalized_role = task.role.as_deref().and_then(normalize_role_label);
+            let role_kind = normalized_role.as_deref();
+            let is_judge = role_kind == Some("judge");
+            let is_integrate = role_kind == Some("integrate");
+            // Header phrasing signals how the integrator should treat the
+            // payload. "Dependency outputs" reads as informational; for
+            // integrate we escalate to "IMPLEMENTATION PLAN (BINDING)" so
+            // the writer knows the proposer choices aren't suggestions.
             if is_judge {
                 out.push_str(&format!(
                     "\nDependency outputs ({} proposals to evaluate — read ALL of them carefully before choosing):\n",
                     deps.len()
                 ));
+            } else if is_integrate {
+                out.push_str(
+                    "\n## IMPLEMENTATION PLAN (BINDING — follow verbatim)\n\
+                     The proposer/judge output(s) below are the authoritative plan for this task. \
+                     Treat specific file paths, identifiers, constants, and ordering as fixed \
+                     requirements, not suggestions. See PROPOSER-PLAN BINDING in your ROLE \
+                     CONTRACT above for when a deviation is allowed and how to report it.\n",
+                );
             } else {
                 out.push_str("\nDependency outputs:\n");
             }
@@ -8135,6 +8483,31 @@ fn try_dispatch_gate_retry(run: &mut SwarmRun, state: &mut AppState) -> Option<S
         return None;
     }
     let integrator = run.integrator_agent_id.clone()?;
+
+    // Advisory-gate carve-out: if the only failing gate is genome-quality,
+    // stop retrying. Genome is a structural-quality signal, not a
+    // correctness gate; repeated "try harder" dispatches waste budget and
+    // risk the writer reverting real work to pass it vacuously. Accept the
+    // degraded score and move on.
+    let failing: Vec<&GateReportGate> = report
+        .gates
+        .iter()
+        .filter(|gate| gate.ui_status() == "FAIL")
+        .collect();
+    let only_genome_failing = !failing.is_empty()
+        && failing.iter().all(|gate| {
+            gate.name.eq_ignore_ascii_case("genome-quality")
+                || gate.name.eq_ignore_ascii_case("genome")
+        });
+    if only_genome_failing {
+        push_system_message_to_mission(
+            state,
+            &run.mission_id,
+            "Swarm verify: only genome-quality is failing (advisory). Not retrying — accepting the code as-is and proceeding.".into(),
+        );
+        return None;
+    }
+
     if run.gate_retry_count >= limit {
         push_system_message_to_mission(
             state,
@@ -8218,6 +8591,12 @@ fn build_gate_retry_prompt(run: &SwarmRun, report: &GateReport, attempt: u8, lim
     );
     out.push_str(
         "- Do NOT run the verify commands yourself — the verifier agent will re-run them.\n",
+    );
+    out.push_str(
+        "- Don't revert real work just to pass a gate vacuously. Reverting your own BAD code (broken logic, compile errors, failing tests) is fine — that's how you fix things. Rolling back a working refactor because genome-quality dropped a tier is not — passing a gate by throwing away the intended change is worse than failing it. If you can't improve the gate further through real edits, say so and stop; leave the mission's actual changes on disk.\n",
+    );
+    out.push_str(
+        "- ADVISORY GATES (genome-quality): treat as best-effort. If you've made reasonable improvements and hit diminishing returns, STOP and report \"no further improvements possible\". Do NOT contort the code to chase a metric; the score is a signal, not a requirement.\n",
     );
     out.push_str(
         "- If a gate's failure cannot be fixed in code (e.g. missing tool, env issue), say so explicitly in your reply so the verifier can mark it SKIP.\n",

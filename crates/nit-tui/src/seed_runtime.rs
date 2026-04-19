@@ -90,18 +90,23 @@ impl SeedRuntime {
         }
         self.size = (width, height);
         self.render_state.resize(width, height);
-        self.pending_recompute = true;
-        self.last_edit = Instant::now();
+        self.mark_dirty();
         state.visualizer.pending_reseed = true;
     }
 
     pub fn tick(&mut self, state: &mut AppState) {
         self.handle_compute_results(state);
         self.handle_search_events(state);
-        self.apply_state_changes(state);
+        self.detect_input_changes(state);
+        self.handle_pending_triggers(state);
         self.recompute_if_due(state);
         self.tick_scanline(state);
         self.sync_snapshot_stats(state);
+    }
+
+    fn mark_dirty(&mut self) {
+        self.pending_recompute = true;
+        self.last_edit = Instant::now();
     }
 
     pub fn encoded(&self) -> Option<&EncodedSeed> {
@@ -145,12 +150,11 @@ impl SeedRuntime {
         self.queue_snapshot(state, seed);
     }
 
-    fn apply_state_changes(&mut self, state: &mut AppState) {
+    fn detect_input_changes(&mut self, state: &mut AppState) {
         if state.visualizer.seed_source != self.last_seed_source {
             self.last_seed_source = state.visualizer.seed_source;
             self.refresh_input(state);
-            self.pending_recompute = true;
-            self.last_edit = Instant::now();
+            self.mark_dirty();
         }
 
         if state.visualizer.seed_encoder != self.last_encoder
@@ -158,8 +162,7 @@ impl SeedRuntime {
         {
             self.last_encoder = state.visualizer.seed_encoder;
             self.last_params = state.visualizer.seed_params.clone();
-            self.pending_recompute = true;
-            self.last_edit = Instant::now();
+            self.mark_dirty();
         }
 
         if state.visualizer.variant != self.last_variant
@@ -167,39 +170,36 @@ impl SeedRuntime {
         {
             self.last_variant = state.visualizer.variant;
             self.last_seed_nonce = state.visualizer.seed;
-            self.pending_recompute = true;
-            self.last_edit = Instant::now();
+            self.mark_dirty();
         }
 
         if state.visualizer.pending_reseed {
             state.visualizer.pending_reseed = false;
             self.input = SeedInputOwned::from_state(state);
             self.last_buffer_id = state.active_editor_buffer_id;
-            self.pending_recompute = true;
-            self.last_edit = Instant::now();
+            self.mark_dirty();
         }
 
         if state.active_editor_buffer_id != self.last_buffer_id {
             self.last_buffer_id = state.active_editor_buffer_id;
             self.input = SeedInputOwned::from_state(state);
-            self.pending_recompute = true;
-            self.last_edit = Instant::now();
+            self.mark_dirty();
         }
 
         let version = self.current_version(state);
         if version != self.input.version {
             self.refresh_input(state);
-            self.pending_recompute = true;
-            self.last_edit = Instant::now();
+            self.mark_dirty();
         }
+    }
 
+    fn handle_pending_triggers(&mut self, state: &mut AppState) {
         if state.visualizer.pending_apply {
             state.visualizer.pending_apply = false;
             if let Some(best) = self.search_best.take() {
                 state.visualizer.seed_params = best.params.clone();
                 self.last_params = state.visualizer.seed_params.clone();
-                self.pending_recompute = true;
-                self.last_edit = Instant::now();
+                self.mark_dirty();
                 state.status = Some(format!("Applied seed params (score {:.2})", best.score));
             } else {
                 state.status = Some("No seed proposal".into());
@@ -211,8 +211,7 @@ impl SeedRuntime {
             if let Some(seed) = self.encoded.clone() {
                 self.queue_snapshot(state, &seed);
             } else {
-                self.pending_recompute = true;
-                self.last_edit = Instant::now();
+                self.mark_dirty();
             }
         }
 

@@ -12,13 +12,22 @@ use ratatui::{
 
 use crate::theme::Theme;
 use crate::widgets::text_selection::apply_ui_selection;
+use crate::widgets::text_utils::trim_to_width;
 
 const MIN_WIDTH: u16 = 72;
+const MAX_WIDTH: u16 = 118;
 const MIN_HEIGHT: u16 = 16;
+const MAX_HEIGHT: u16 = 32;
+
+// Minimum usable widths for the two-column layout (left shows run details,
+// right shows the evolution grid). Below this, we fall back to single column.
+const MIN_LEFT_INNER: u16 = 32;
+const MIN_RIGHT_INNER: u16 = 24;
+const COLUMN_GAP: usize = 2;
 
 pub fn preferred_size(screen: Rect) -> (u16, u16) {
-    let width = screen.width.clamp(MIN_WIDTH, 118);
-    let height = screen.height.clamp(MIN_HEIGHT, 32);
+    let width = screen.width.clamp(MIN_WIDTH, MAX_WIDTH);
+    let height = screen.height.clamp(MIN_HEIGHT, MAX_HEIGHT);
     (width, height)
 }
 
@@ -351,22 +360,23 @@ pub fn render(frame: &mut Frame, area: Rect, state: &mut AppState, theme: &Theme
 }
 
 pub fn layout_for_ca_sim(inner: Rect) -> (Rect, Option<Rect>) {
-    let min_left = 32u16;
-    let min_right_inner = 24u16;
+    // The right column is rendered inside its own block, so we add 2 cols for
+    // its left+right borders to convert inner→outer widths.
+    const RIGHT_BLOCK_BORDERS: u16 = 2;
     let total = inner.width;
-    if total < min_left + min_right_inner + 2 {
+    if total < MIN_LEFT_INNER + MIN_RIGHT_INNER + RIGHT_BLOCK_BORDERS {
         return (inner, None);
     }
-    let mut right_inner = (total / 2).max(min_right_inner);
-    if total < min_left + right_inner + 2 {
-        right_inner = total.saturating_sub(min_left + 2);
+    let mut right_inner = (total / 2).max(MIN_RIGHT_INNER);
+    if total < MIN_LEFT_INNER + right_inner + RIGHT_BLOCK_BORDERS {
+        right_inner = total.saturating_sub(MIN_LEFT_INNER + RIGHT_BLOCK_BORDERS);
     }
-    if right_inner < min_right_inner {
+    if right_inner < MIN_RIGHT_INNER {
         return (inner, None);
     }
-    let right_total = right_inner + 2;
+    let right_total = right_inner + RIGHT_BLOCK_BORDERS;
     let left_total = total.saturating_sub(right_total);
-    if left_total < min_left {
+    if left_total < MIN_LEFT_INNER {
         return (inner, None);
     }
     let cols = Layout::default()
@@ -380,18 +390,17 @@ pub fn layout_for_ca_sim(inner: Rect) -> (Rect, Option<Rect>) {
 }
 
 fn split_columns(total_width: usize) -> (usize, usize, usize) {
-    let gap = 2usize;
-    let min_right = 24usize;
-    let min_left = 32usize;
-    if total_width < min_left + min_right + gap {
+    let min_left = MIN_LEFT_INNER as usize;
+    let min_right = MIN_RIGHT_INNER as usize;
+    if total_width < min_left + min_right + COLUMN_GAP {
         return (total_width, 0, 0);
     }
     let right = (total_width / 2).max(min_right);
-    let left = total_width.saturating_sub(right + gap);
+    let left = total_width.saturating_sub(right + COLUMN_GAP);
     if left < min_left {
         (total_width, 0, 0)
     } else {
-        (left, right, gap)
+        (left, right, COLUMN_GAP)
     }
 }
 
@@ -646,17 +655,6 @@ fn pow_u128_checked(base: u128, exp: u32) -> Option<u128> {
         value = value.checked_mul(base)?;
     }
     Some(value)
-}
-
-fn trim_to_width(text: &str, max_width: usize) -> String {
-    if max_width == 0 {
-        return String::new();
-    }
-    let mut out = String::new();
-    for ch in text.chars().take(max_width) {
-        out.push(ch);
-    }
-    out
 }
 
 #[cfg(test)]

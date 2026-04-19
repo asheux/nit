@@ -1,3 +1,8 @@
+//! Popup showing a one-sided Turing machine simulation: rule table, per-step
+//! trace, and a tape evolution grid. Heavy work (running the TM) is dispatched
+//! to a background thread via `TM_SIM_CACHE`; the popup shows "computing..."
+//! until the thread deposits a result keyed by `(def_hash, input, step_limit)`.
+
 use nit_core::{AppState, UiSelectionPane};
 use nit_games::config::StrategySpecKind;
 use nit_games::game::Action;
@@ -16,10 +21,25 @@ use std::thread;
 
 use crate::theme::Theme;
 use crate::widgets::text_selection::apply_ui_selection;
+use crate::widgets::text_utils::trim_to_width;
 
 const MIN_WIDTH: u16 = 80;
 const MIN_HEIGHT: u16 = 20;
+const MAX_WIDTH: u16 = 140;
+const MAX_HEIGHT: u16 = 45;
 const HEAD_DOT: char = '●';
+/// Column gap rendered between merged left/right columns.
+const COLUMN_GAP: usize = 2;
+/// Minimum usable width for the left (status/log) column.
+const MIN_LEFT_COLUMN: usize = 32;
+/// Minimum usable width for the right (rules/evolution) column.
+const MIN_RIGHT_COLUMN: usize = 24;
+/// Border overhead for the right side panel (two vertical borders).
+const RIGHT_BLOCK_BORDER: u16 = 2;
+/// Skip rendering the rule table above this many transition entries.
+const RULE_TABLE_MAX_ENTRIES: usize = 32;
+/// Minimum visible width before the tape column is dropped in step tables.
+const TAPE_COLUMN_MIN_WIDTH: usize = 6;
 static TM_SIM_CACHE: OnceLock<Mutex<Option<SimCache>>> = OnceLock::new();
 static TM_SIM_PENDING: OnceLock<Arc<SimResult>> = OnceLock::new();
 
@@ -59,12 +79,15 @@ enum SimCacheState {
     Ready(Arc<SimResult>),
 }
 
+/// Clamp a screen rect to the popup's configured min/max size.
 pub fn preferred_size(screen: Rect) -> (u16, u16) {
-    let width = screen.width.clamp(MIN_WIDTH, 140);
-    let height = screen.height.clamp(MIN_HEIGHT, 45);
+    let width = screen.width.clamp(MIN_WIDTH, MAX_WIDTH);
+    let height = screen.height.clamp(MIN_HEIGHT, MAX_HEIGHT);
     (width, height)
 }
 
+/// Render the popup as a single merged line list (used when tests or callers
+/// want a flat view without the two-column split).
 pub fn build_lines(state: &AppState, theme: &Theme, inner_width: u16) -> Vec<Line<'static>> {
     let max_width = inner_width.max(1) as usize;
     let (left_width, right_width, gap) = split_columns(max_width);
@@ -72,6 +95,9 @@ pub fn build_lines(state: &AppState, theme: &Theme, inner_width: u16) -> Vec<Lin
     merge_columns(left_lines, right_lines, left_width, right_width, gap)
 }
 
+/// Build left/right column line lists from `AppState`. Triggers the cached TM
+/// simulation; returns immediately with a pending placeholder when the
+/// background thread hasn't produced a result yet.
 pub fn build_columns(
     state: &AppState,
     theme: &Theme,
@@ -807,36 +833,35 @@ fn pow_u128_checked(base: u128, exp: u32) -> Option<u128> {
 }
 
 fn split_columns(total_width: usize) -> (usize, usize, usize) {
-    let gap = 2usize;
-    let min_right = 24usize;
-    let min_left = 32usize;
-    if total_width < min_left + min_right + gap {
+    if total_width < MIN_LEFT_COLUMN + MIN_RIGHT_COLUMN + COLUMN_GAP {
         return (total_width, 0, 0);
     }
-    let right = (total_width / 2).max(min_right);
-    let left = total_width.saturating_sub(right + gap);
-    if left < min_left {
+    let right = (total_width / 2).max(MIN_RIGHT_COLUMN);
+    let left = total_width.saturating_sub(right + COLUMN_GAP);
+    if left < MIN_LEFT_COLUMN {
         (total_width, 0, 0)
     } else {
-        (left, right, gap)
+        (left, right, COLUMN_GAP)
     }
 }
 
+/// Split the popup inner rect into a left panel and an optional right panel.
+/// Returns `(inner, None)` when the area is too narrow to host both.
 pub fn layout_for_tm_sim(inner: Rect) -> (Rect, Option<Rect>) {
-    let min_left = 32u16;
-    let min_right_inner = 24u16;
+    let min_left = MIN_LEFT_COLUMN as u16;
+    let min_right_inner = MIN_RIGHT_COLUMN as u16;
     let total = inner.width;
-    if total < min_left + min_right_inner + 2 {
+    if total < min_left + min_right_inner + RIGHT_BLOCK_BORDER {
         return (inner, None);
     }
     let mut right_inner = (total / 2).max(min_right_inner);
-    if total < min_left + right_inner + 2 {
-        right_inner = total.saturating_sub(min_left + 2);
+    if total < min_left + right_inner + RIGHT_BLOCK_BORDER {
+        right_inner = total.saturating_sub(min_left + RIGHT_BLOCK_BORDER);
     }
     if right_inner < min_right_inner {
         return (inner, None);
     }
-    let right_total = right_inner + 2;
+    let right_total = right_inner + RIGHT_BLOCK_BORDER;
     let left_total = total.saturating_sub(right_total);
     if left_total < min_left {
         return (inner, None);
@@ -1004,8 +1029,7 @@ fn build_rule_table_lines(
         return Vec::new();
     }
     let total = transitions.len();
-    let max_entries = 32usize;
-    if total > max_entries {
+    if total > RULE_TABLE_MAX_ENTRIES {
         let message = format!("table omitted ({total} entries)");
         let mut widths = vec![message.len().max(8)];
         shrink_widths_to_fit(&mut widths, max_width);
@@ -1114,10 +1138,10 @@ fn build_step_table_lines(
 
     let base_table_width = table_total_width(&widths);
     let available_for_tape = max_width.saturating_sub(base_table_width.saturating_add(3));
-    let mut show_tape = available_for_tape >= 6;
+    let mut show_tape = available_for_tape >= TAPE_COLUMN_MIN_WIDTH;
     let mut tape_width = 0usize;
     if show_tape {
-        tape_width = available_for_tape.max(6);
+        tape_width = available_for_tape.max(TAPE_COLUMN_MIN_WIDTH);
         widths.push(tape_width);
     }
     let mut min_widths = vec![
@@ -1130,7 +1154,7 @@ fn build_step_table_lines(
         "move".len(),
     ];
     if show_tape {
-        min_widths.push("tape".len().max(6));
+        min_widths.push("tape".len().max(TAPE_COLUMN_MIN_WIDTH));
     }
     if show_tape && table_total_width(&min_widths) > max_width {
         show_tape = false;
@@ -1424,17 +1448,6 @@ fn halt_styles(_theme: &Theme) -> (Style, Style) {
         .fg(Color::Black)
         .add_modifier(Modifier::BOLD);
     (halt, halt_hit)
-}
-
-fn trim_to_width(text: &str, max_width: usize) -> String {
-    if max_width == 0 {
-        return String::new();
-    }
-    let mut out = String::new();
-    for ch in text.chars().take(max_width) {
-        out.push(ch);
-    }
-    out
 }
 
 #[cfg(test)]

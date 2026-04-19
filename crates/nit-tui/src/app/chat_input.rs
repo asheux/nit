@@ -44,6 +44,23 @@ pub(super) struct ChatInputEditResult {
 // handle_chat_input_editing_key
 // ---------------------------------------------------------------------------
 
+fn reset_chat_input_and_history_nav(state: &mut AppState) {
+    state.agents.chat_input.clear();
+    state.agents.chat_input_cursor = 0;
+    state.agents.chat_input_selection_anchor = None;
+    super::chat_history_reset_nav(state);
+}
+
+fn update_chat_selection_anchor(state: &mut AppState, selecting: bool, cursor: usize) {
+    if selecting {
+        if state.agents.chat_input_selection_anchor.is_none() {
+            state.agents.chat_input_selection_anchor = Some(cursor);
+        }
+    } else {
+        state.agents.chat_input_selection_anchor = None;
+    }
+}
+
 /// Reusable text-editing key handler for the chat input box.
 /// Handles all text manipulation keys (characters, backspace, delete, cursor movement,
 /// selection, copy/paste, etc.) but NOT Enter-submit, Esc, or Up/Down arrow keys.
@@ -178,10 +195,7 @@ pub(super) fn handle_chat_input_editing_key(
         } if modifiers.contains(KeyModifiers::CONTROL) => {
             handled = true;
             if !state.agents.chat_input.is_empty() {
-                state.agents.chat_input.clear();
-                state.agents.chat_input_cursor = 0;
-                state.agents.chat_input_selection_anchor = None;
-                super::chat_history_reset_nav(state);
+                reset_chat_input_and_history_nav(state);
                 changed = true;
                 follow_cursor = true;
             }
@@ -195,10 +209,7 @@ pub(super) fn handle_chat_input_editing_key(
             if copy_chat_input_selection(state, clipboard) {
                 // Copied.
             } else if !state.agents.chat_input.is_empty() {
-                state.agents.chat_input.clear();
-                state.agents.chat_input_cursor = 0;
-                state.agents.chat_input_selection_anchor = None;
-                super::chat_history_reset_nav(state);
+                reset_chat_input_and_history_nav(state);
                 changed = true;
                 follow_cursor = true;
             }
@@ -212,10 +223,7 @@ pub(super) fn handle_chat_input_editing_key(
             if copy_chat_input_selection(state, clipboard) {
                 // Copied.
             } else if !state.agents.chat_input.is_empty() {
-                state.agents.chat_input.clear();
-                state.agents.chat_input_cursor = 0;
-                state.agents.chat_input_selection_anchor = None;
-                super::chat_history_reset_nav(state);
+                reset_chat_input_and_history_nav(state);
                 changed = true;
                 follow_cursor = true;
             }
@@ -323,13 +331,7 @@ pub(super) fn handle_chat_input_editing_key(
             let total_chars = state.agents.chat_input.chars().count();
             let cursor = state.agents.chat_input_cursor.min(total_chars);
             let selecting = modifiers.contains(KeyModifiers::SHIFT);
-            if selecting {
-                if state.agents.chat_input_selection_anchor.is_none() {
-                    state.agents.chat_input_selection_anchor = Some(cursor);
-                }
-            } else {
-                state.agents.chat_input_selection_anchor = None;
-            }
+            update_chat_selection_anchor(state, selecting, cursor);
             let new_cursor = if modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) {
                 chat_cursor_move_word_left(&state.agents.chat_input, cursor)
             } else {
@@ -353,13 +355,7 @@ pub(super) fn handle_chat_input_editing_key(
             let max = state.agents.chat_input.chars().count();
             let cursor = state.agents.chat_input_cursor.min(max);
             let selecting = modifiers.contains(KeyModifiers::SHIFT);
-            if selecting {
-                if state.agents.chat_input_selection_anchor.is_none() {
-                    state.agents.chat_input_selection_anchor = Some(cursor);
-                }
-            } else {
-                state.agents.chat_input_selection_anchor = None;
-            }
+            update_chat_selection_anchor(state, selecting, cursor);
             let new_cursor = if modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) {
                 chat_cursor_move_word_right(&state.agents.chat_input, cursor)
             } else {
@@ -383,13 +379,7 @@ pub(super) fn handle_chat_input_editing_key(
             let total_chars = state.agents.chat_input.chars().count();
             let cursor = state.agents.chat_input_cursor.min(total_chars);
             let selecting = modifiers.contains(KeyModifiers::SHIFT);
-            if selecting {
-                if state.agents.chat_input_selection_anchor.is_none() {
-                    state.agents.chat_input_selection_anchor = Some(cursor);
-                }
-            } else {
-                state.agents.chat_input_selection_anchor = None;
-            }
+            update_chat_selection_anchor(state, selecting, cursor);
             let (line_start, _line_end) =
                 super::chat_current_line_bounds(&state.agents.chat_input, cursor);
             let new_cursor = if modifiers.contains(KeyModifiers::CONTROL) {
@@ -415,13 +405,7 @@ pub(super) fn handle_chat_input_editing_key(
             let max = state.agents.chat_input.chars().count();
             let cursor = state.agents.chat_input_cursor.min(max);
             let selecting = modifiers.contains(KeyModifiers::SHIFT);
-            if selecting {
-                if state.agents.chat_input_selection_anchor.is_none() {
-                    state.agents.chat_input_selection_anchor = Some(cursor);
-                }
-            } else {
-                state.agents.chat_input_selection_anchor = None;
-            }
+            update_chat_selection_anchor(state, selecting, cursor);
             let (_line_start, line_end) =
                 super::chat_current_line_bounds(&state.agents.chat_input, cursor);
             let new_cursor = if modifiers.contains(KeyModifiers::CONTROL) {

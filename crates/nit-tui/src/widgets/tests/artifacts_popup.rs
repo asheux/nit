@@ -1,9 +1,16 @@
+//! Tests for the artifacts popup markdown renderer and swarm task line
+//! builder. Each test asserts against the stringified spans emitted for
+//! markdown, JSON, or equation fixtures so styling regressions are easy to
+//! isolate from content regressions.
+
 use super::{build_swarm_task_lines, render_markdown_document};
 use crate::swarm::{SwarmPersistenceView, SwarmTaskArtifacts, SwarmTaskPersistenceView};
 use crate::theme::Theme;
 use nit_syntax::HighlightGroup;
 use ratatui::text::Line;
 
+/// Concatenate all span contents of a rendered line into a plain string.
+/// Used for `contains()` / `any()` assertions against the rendered output.
 fn line_text(line: &Line<'_>) -> String {
     line.spans
         .iter()

@@ -3,9 +3,13 @@ use super::{
     normalize_chunk_steps, requested_steps_per_tick, start_run, steps_for_tick,
     uses_match_step_units, RunRequest, StepUnit,
 };
-use nit_games::{EngineMode, GamesConfig};
+use nit_games::{EngineMode, GamesConfig, NormalizedConfig};
 use std::sync::mpsc;
 use std::time::Duration;
+
+fn parse_config(toml: &str) -> NormalizedConfig {
+    GamesConfig::from_toml(toml).expect("parse config")
+}
 
 #[test]
 fn dephase_steps_breaks_round_alignment() {
@@ -42,7 +46,7 @@ fn interactive_match_steps_skip_dephase() {
 
 #[test]
 fn interactive_match_step_units_require_full_match_fast_forward() {
-    let config = GamesConfig::from_toml(
+    let config = parse_config(
         r#"
 schema_version = 1
 game = "ipd"
@@ -76,8 +80,7 @@ index = 1
 num_states = 1
 k = 2
 "#,
-    )
-    .expect("parse config");
+    );
 
     assert!(uses_match_step_units(&config, false, false, false));
     assert!(!uses_match_step_units(&config, false, false, true));
@@ -186,7 +189,7 @@ fn whole_match_chunks_floor_at_one_match() {
 
 #[test]
 fn finalize_run_keeps_paths_empty_for_ephemeral_runs() {
-    let config = GamesConfig::from_toml(
+    let config = parse_config(
         r#"
 schema_version = 1
 game = "ipd"
@@ -214,8 +217,7 @@ index = 0
 num_states = 1
 k = 2
 "#,
-    )
-    .expect("parse config");
+    );
     let (event_tx, _event_rx) = mpsc::channel();
     let request = RunRequest {
         config,

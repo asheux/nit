@@ -1,3 +1,7 @@
+//! Gate Monitor pane — dual-mode widget that shows either the code-genome
+//! structural-quality dashboard (editor apps) or a per-file score table
+//! (FILESCORES sub-view), plus a compact status view in Games mode.
+
 use nit_core::genome_report::GenomeReport;
 use nit_core::seed::SeedEncoderId;
 use nit_core::{
@@ -12,13 +16,31 @@ use ratatui::{
 
 use crate::theme::Theme;
 use crate::widgets::text_selection::apply_ui_selection;
+use crate::widgets::text_utils::truncate_with_ellipsis;
 
 // Title button column ranges (relative to rect start + 1 for border).
 // " CODE STRUCTURAL QUALITY [NxN] " then " STATS " then " FILESCORES "
 const BTN_STATS_LABEL: &str = " STATS ";
 const BTN_FILESCORES_LABEL: &str = " FILESCORES ";
 
-/// Returns an action if the click column hits a title button.
+/// Width of the left-hand label column in the genome stats view.
+const STATS_LABEL_WIDTH: usize = 12;
+const STATS_GAUGE_LABEL_WIDTH: usize = 14;
+/// Reference generation count for encoder-bar normalization — above this the
+/// bar reads as "fully healthy" (Tier V endurance).
+const ENCODER_GEN_SATURATION: f32 = 3000.0;
+const DENSITY_WARN: f32 = 0.35;
+const DENSITY_OVER: f32 = 0.45;
+const GAUGE_ACCENT_THRESHOLD: f32 = 0.6;
+const GAUGE_MID_THRESHOLD: f32 = 0.3;
+const TIER_LEVELS: usize = 5;
+/// Loading bar period in milliseconds for the indeterminate animation.
+const LOADING_PERIOD_MS: f64 = 1600.0;
+
+/// Mouse hit-test for the title button row: returns the
+/// `GateMonitorToggleSubView` action if the click column falls on either
+/// `STATS` or `FILESCORES`. `title_prefix_len` is the byte length of the
+/// dynamic prefix (which varies based on whether a grid size is shown).
 pub fn title_button_hit(col_in_rect: u16, title_prefix_len: u16) -> Option<Action> {
     let col = col_in_rect.saturating_sub(1); // border offset
     let stats_start = title_prefix_len + 1; // space separator
@@ -32,6 +54,8 @@ pub fn title_button_hit(col_in_rect: u16, title_prefix_len: u16) -> Option<Actio
     }
 }
 
+/// Render the Gate Monitor pane. Dispatches to `render_games` in Games mode;
+/// otherwise renders the Stats/FileScores sub-views with cached scroll clamp.
 pub fn render(frame: &mut Frame, area: ratatui::layout::Rect, state: &mut AppState, theme: &Theme) {
     if state.app_kind == AppKind::Games {
         // Games variant has no scroll state to cache.
@@ -138,6 +162,9 @@ pub fn render(frame: &mut Frame, area: ratatui::layout::Rect, state: &mut AppSta
     frame.render_widget(para, inner);
 }
 
+/// Build the full styled line buffer for whichever sub-view is active, for
+/// tests and scroll-clamp callers that need the total line count without
+/// rendering to a frame.
 pub fn build_lines(state: &AppState, theme: &Theme, width: usize) -> Vec<Line<'static>> {
     if state.app_kind == AppKind::Games {
         build_lines_games(state, theme, width)
@@ -189,33 +216,7 @@ fn build_lines_genome(
             .fg(theme.accent)
             .add_modifier(Modifier::BOLD),
     )];
-    // Derive quality delta directly from current report vs baseline.
-    // This is always correct regardless of async eval timing.
-    let display_delta = if let Some(file_path) = state.editor_buffer().path() {
-        if let Some(base) = state.genome_baselines.get(file_path) {
-            if report.tier > base.tier {
-                1
-            } else if report.tier < base.tier {
-                -1
-            } else {
-                let gen_base: i32 = base
-                    .encoder_scores
-                    .iter()
-                    .map(|s| s.generations_survived as i32)
-                    .sum();
-                let gen_now: i32 = report
-                    .encoder_scores
-                    .iter()
-                    .map(|s| s.generations_survived as i32)
-                    .sum();
-                gen_now.cmp(&gen_base) as i32
-            }
-        } else {
-            state.genome_quality_delta
-        }
-    } else {
-        state.genome_quality_delta
-    };
+    let display_delta = display_quality_delta(state, report);
     match display_delta {
         d if d > 0 => {
             tier_spans.push(Span::styled(
@@ -456,13 +457,44 @@ fn build_lines_genome(
     lines
 }
 
+/// Compute the quality delta shown next to TIER: compares the current report
+/// against the session baseline for this file. Returns the state-level delta
+/// when no baseline exists (e.g. first-ever evaluation). Derivation is direct
+/// from current report data so it stays correct regardless of async eval
+/// timing.
+fn display_quality_delta(state: &AppState, report: &GenomeReport) -> i32 {
+    let Some(file_path) = state.editor_buffer().path() else {
+        return state.genome_quality_delta;
+    };
+    let Some(base) = state.genome_baselines.get(file_path) else {
+        return state.genome_quality_delta;
+    };
+    if report.tier > base.tier {
+        return 1;
+    }
+    if report.tier < base.tier {
+        return -1;
+    }
+    let gen_base: i32 = base
+        .encoder_scores
+        .iter()
+        .map(|s| s.generations_survived as i32)
+        .sum();
+    let gen_now: i32 = report
+        .encoder_scores
+        .iter()
+        .map(|s| s.generations_survived as i32)
+        .sum();
+    gen_now.cmp(&gen_base) as i32
+}
+
 /// Build a horizontal bar representing the tier level (I-V), full width.
 fn build_tier_bar(tier: nit_core::GenomeTier, width: usize, theme: &Theme) -> Line<'static> {
-    if width < 5 {
+    if width < TIER_LEVELS {
         return Line::from("");
     }
     let tier_val = tier as u32; // 0..4
-    let filled = ((tier_val + 1) as usize * width) / 5;
+    let filled = ((tier_val + 1) as usize * width) / TIER_LEVELS;
     let empty = width.saturating_sub(filled);
     let bar_color = tier_color(tier, theme);
 
@@ -479,18 +511,17 @@ fn build_tier_bar(tier: nit_core::GenomeTier, width: usize, theme: &Theme) -> Li
 
 /// Build a gauge line filling the full width: "Label  ▓▓▓▓░░░░░░░░  0.23"
 fn build_gauge_line(label: &str, value: f32, width: usize, theme: &Theme) -> Line<'static> {
-    let label_w = 14;
     let num_str = format!("{value:.2}");
     let num_w = num_str.len() + 1;
-    let bar_w = width.saturating_sub(label_w + num_w + 1);
+    let bar_w = width.saturating_sub(STATS_GAUGE_LABEL_WIDTH + num_w + 1);
 
     let clamped = value.clamp(0.0, 1.0);
     let filled = (clamped * bar_w as f32).round() as usize;
     let empty = bar_w.saturating_sub(filled);
 
-    let bar_color = if clamped >= 0.6 {
+    let bar_color = if clamped >= GAUGE_ACCENT_THRESHOLD {
         theme.accent
-    } else if clamped >= 0.3 {
+    } else if clamped >= GAUGE_MID_THRESHOLD {
         theme.title_focused
     } else {
         theme.title
@@ -498,7 +529,7 @@ fn build_gauge_line(label: &str, value: f32, width: usize, theme: &Theme) -> Lin
 
     Line::from(vec![
         Span::styled(
-            pad_to_width(label, label_w),
+            pad_to_width(label, STATS_GAUGE_LABEL_WIDTH),
             Style::default().fg(theme.title).add_modifier(Modifier::DIM),
         ),
         Span::styled("▓".repeat(filled), Style::default().fg(bar_color)),
@@ -520,17 +551,16 @@ fn build_encoder_line(
     is_ast: bool,
 ) -> Line<'static> {
     let name = encoder_short_name(score.encoder);
-    let name_w = 12;
     let gen = score.generations_survived;
     let gen_str = format!("{gen}");
     let stats_str = format!(
         " density={:.2} components={}",
         score.density, score.components
     );
-    let fixed_w = name_w + gen_str.len() + stats_str.len() + 2;
+    let fixed_w = STATS_LABEL_WIDTH + gen_str.len() + stats_str.len() + 2;
     let bar_w = width.saturating_sub(fixed_w);
 
-    let ratio = (gen as f32 / 3000.0).clamp(0.0, 1.0);
+    let ratio = (gen as f32 / ENCODER_GEN_SATURATION).clamp(0.0, 1.0);
     let filled = (ratio * bar_w as f32).round() as usize;
     let empty = bar_w.saturating_sub(filled);
     let bar_color = gen_color(gen, theme);
@@ -542,7 +572,7 @@ fn build_encoder_line(
     };
 
     Line::from(vec![
-        Span::styled(pad_to_width(name, name_w), name_style),
+        Span::styled(pad_to_width(name, STATS_LABEL_WIDTH), name_style),
         Span::styled("▓".repeat(filled), Style::default().fg(bar_color)),
         Span::styled(
             "░".repeat(empty),
@@ -565,19 +595,18 @@ fn build_density_line(
     theme: &Theme,
 ) -> Line<'static> {
     let name = encoder_short_name(score.encoder);
-    let name_w = 12;
     let val_str = format!("{:.2}", score.density);
-    let fixed_w = name_w + val_str.len() + 2;
+    let fixed_w = STATS_LABEL_WIDTH + val_str.len() + 2;
     let bar_w = width.saturating_sub(fixed_w);
 
     let clamped = score.density.clamp(0.0, 1.0);
     let filled = (clamped * bar_w as f32).round() as usize;
     let empty = bar_w.saturating_sub(filled);
 
-    let over_threshold = score.density > 0.45;
+    let over_threshold = score.density > DENSITY_OVER;
     let bar_color = if over_threshold {
         theme.foreground
-    } else if score.density > 0.35 {
+    } else if score.density > DENSITY_WARN {
         theme.title
     } else {
         theme.title_focused
@@ -585,7 +614,7 @@ fn build_density_line(
 
     let mut spans = vec![
         Span::styled(
-            pad_to_width(name, name_w),
+            pad_to_width(name, STATS_LABEL_WIDTH),
             Style::default().fg(theme.title).add_modifier(Modifier::DIM),
         ),
         Span::styled("▓".repeat(filled), Style::default().fg(bar_color)),
@@ -622,7 +651,6 @@ fn build_sim_detail_line(
     theme: &Theme,
 ) -> Line<'static> {
     let name = encoder_short_name(score.encoder);
-    let name_w = 12;
     let gen_color = gen_color(score.generations_survived, theme);
     let dim = Style::default()
         .fg(theme.border)
@@ -637,12 +665,12 @@ fn build_sim_detail_line(
         "generations={:<5} peak={:<5} growth={:<10} cycle={}",
         score.generations_survived, score.peak_population, growth_str, cycle_str
     );
-    let used = name_w + detail.len();
+    let used = STATS_LABEL_WIDTH + detail.len();
     let pad = width.saturating_sub(used);
 
     Line::from(vec![
         Span::styled(
-            pad_to_width(name, name_w),
+            pad_to_width(name, STATS_LABEL_WIDTH),
             Style::default().fg(theme.title).add_modifier(Modifier::DIM),
         ),
         Span::styled(
@@ -762,8 +790,7 @@ fn loading_ratio() -> f64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default();
     let millis = now.as_millis() as f64;
-    let period = 1600.0;
-    let phase = (millis % period) / period;
+    let phase = (millis % LOADING_PERIOD_MS) / LOADING_PERIOD_MS;
     let tri = if phase <= 0.5 {
         phase * 2.0
     } else {
@@ -1282,7 +1309,7 @@ fn build_lines_filescores(state: &AppState, theme: &Theme, width: usize) -> Vec<
             _ => theme.error,
         };
         let live_marker = if row.is_shadow { "\u{25cf}" } else { " " };
-        let display_name = truncate_str(&row.name, name_w.saturating_sub(1));
+        let display_name = truncate_with_ellipsis(&row.name, name_w.saturating_sub(1));
 
         lines.push(Line::from(vec![
             Span::styled(
@@ -1404,12 +1431,3 @@ fn relative_file_path(path: &std::path::Path, workspace: &std::path::Path) -> St
     path_s.to_string()
 }
 
-fn truncate_str(s: &str, max: usize) -> String {
-    if s.len() <= max {
-        s.to_string()
-    } else if max > 2 {
-        format!("{}\u{2026}", &s[..max - 1])
-    } else {
-        s[..max].to_string()
-    }
-}

@@ -63,19 +63,13 @@ pub fn parse_shadow_command(raw: &str) -> Option<ShadowCommand> {
     Some(ShadowCommand { prompt })
 }
 
-/// Heuristic: a prompt is "heavy" enough to benefit from shadow deliberation.
+/// Heuristic: is this prompt "heavy" enough to warrant shadow deliberation?
 ///
-/// We trigger auto-shadows when:
-///   * the prompt is long (> 500 chars), or
-///   * it contains any of a small set of change-implying keywords.
-///
-/// The keyword list is intentionally conservative — we don't want questions
-/// like "what does this do?" to spawn four extra agents.
+/// Triggers on long prompts (> 500 chars) OR a small, intentionally
+/// conservative set of change-implying keywords. A question like "what does
+/// this do?" should never spawn four extra agents.
 pub fn should_auto_enable_shadows(prompt: &str) -> bool {
-    if prompt.chars().count() > 500 {
-        return true;
-    }
-    let lower = prompt.to_ascii_lowercase();
+    const AUTO_SHADOW_MIN_CHARS: usize = 500;
     const KEYWORDS: &[&str] = &[
         "refactor",
         "migrate",
@@ -84,6 +78,10 @@ pub fn should_auto_enable_shadows(prompt: &str) -> bool {
         "overhaul",
         "restructure",
     ];
+    if prompt.chars().count() > AUTO_SHADOW_MIN_CHARS {
+        return true;
+    }
+    let lower = prompt.to_ascii_lowercase();
     KEYWORDS.iter().any(|kw| lower.contains(kw))
 }
 
@@ -346,12 +344,10 @@ impl ShadowRuntime {
         if self.runs.contains_key(agent_id) {
             return Some(agent_id.to_string());
         }
-        for (main_id, run) in self.runs.iter() {
-            if run.lanes.values().any(|id| id == agent_id) {
-                return Some(main_id.clone());
-            }
-        }
-        None
+        self.runs
+            .iter()
+            .find(|(_, run)| run.lanes.values().any(|id| id == agent_id))
+            .map(|(main_id, _)| main_id.clone())
     }
 }
 
@@ -727,73 +723,6 @@ impl ShadowRuntime {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
-
 #[cfg(test)]
 #[path = "tests/shadow.rs"]
-mod integration_tests;
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn parse_shadow_command_accepts_explicit_prefix() {
-        let cmd = parse_shadow_command("@shadow refactor core").unwrap();
-        assert_eq!(cmd.prompt, "refactor core");
-    }
-
-    #[test]
-    fn parse_shadow_command_rejects_embedded_prefix() {
-        assert!(parse_shadow_command("please @shadow foo").is_none());
-        assert!(parse_shadow_command("@shadows foo").is_none());
-        assert!(parse_shadow_command("@shadow").is_none());
-    }
-
-    #[test]
-    fn parse_shadow_command_tolerates_leading_whitespace() {
-        let cmd = parse_shadow_command("  @shadow do it").unwrap();
-        assert_eq!(cmd.prompt, "do it");
-    }
-
-    #[test]
-    fn should_auto_enable_shadows_triggers_on_keyword() {
-        assert!(should_auto_enable_shadows("Refactor the widget module"));
-        assert!(should_auto_enable_shadows("rewrite this function please"));
-        assert!(should_auto_enable_shadows("Implement SSE streaming"));
-    }
-
-    #[test]
-    fn should_auto_enable_shadows_triggers_on_length() {
-        let long = "a".repeat(501);
-        assert!(should_auto_enable_shadows(&long));
-    }
-
-    #[test]
-    fn should_auto_enable_shadows_is_quiet_for_short_questions() {
-        assert!(!should_auto_enable_shadows("what does this do?"));
-        assert!(!should_auto_enable_shadows("fix typo"));
-        assert!(!should_auto_enable_shadows("why is the test flaky?"));
-    }
-
-    #[test]
-    fn shadow_lane_id_roundtrip() {
-        let id = shadow_lane_id("codex", "01", "propose-a");
-        assert_eq!(id, "codex#shadow-01-propose-a");
-        let (base, run_id, role) = parse_shadow_lane_id(&id).unwrap();
-        assert_eq!(base, "codex");
-        assert_eq!(run_id, "01");
-        assert_eq!(role, "propose-a");
-    }
-
-    #[test]
-    fn parse_shadow_lane_id_handles_roles_with_dashes() {
-        let id = "claude-main#shadow-07-propose-b";
-        let (base, run_id, role) = parse_shadow_lane_id(id).unwrap();
-        assert_eq!(base, "claude-main");
-        assert_eq!(run_id, "07");
-        assert_eq!(role, "propose-b");
-    }
-}
+mod tests;

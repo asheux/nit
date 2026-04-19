@@ -196,24 +196,21 @@ impl VisualizerRuntime {
             }
         }
 
-        if state.visualizer.pending_reseed {
-            if self.size.0 > 0 && self.size.1 > 0 {
-                state.visualizer.pending_reseed = false;
-                let ok = self.reseed(state);
-                if !ok {
-                    state.status = Some("Seed source failed".into());
-                }
-                if ok && state.visualizer.paused_by_attractor {
-                    state.visualizer.paused_by_attractor = false;
-                    state.visualizer.paused = false;
-                    state.status = Some("Visualizer resumed (reseed)".into());
-                }
-                if state.visualizer.mode == VisualizerMode::Search {
-                    if self.search_paused_for_stability {
-                        self.start_search(state);
-                    } else {
-                        self.update_search_seed(state);
-                    }
+        if state.visualizer.pending_reseed && self.size.0 > 0 && self.size.1 > 0 {
+            state.visualizer.pending_reseed = false;
+            let ok = self.reseed(state);
+            if !ok {
+                state.status = Some("Seed source failed".into());
+            } else if state.visualizer.paused_by_attractor {
+                state.visualizer.paused_by_attractor = false;
+                state.visualizer.paused = false;
+                state.status = Some("Visualizer resumed (reseed)".into());
+            }
+            if state.visualizer.mode == VisualizerMode::Search {
+                if self.search_paused_for_stability {
+                    self.start_search(state);
+                } else {
+                    self.update_search_seed(state);
                 }
             }
         }
@@ -235,20 +232,20 @@ impl VisualizerRuntime {
 
         if state.visualizer.pending_snapshot {
             state.visualizer.pending_snapshot = false;
-                self.queue_snapshot(
-                    state,
-                    SnapshotTrigger::Manual,
-                    self.grid.clone(),
-                    self.rule,
-                    self.generation,
-                    self.period.map(|value| value as u64),
-                    self.alive,
-                    None,
-                    None,
-                    false,
-                    None,
-                );
-            }
+            self.queue_snapshot(
+                state,
+                SnapshotTrigger::Manual,
+                self.grid.clone(),
+                self.rule,
+                self.generation,
+                self.period.map(|value| value as u64),
+                self.alive,
+                None,
+                None,
+                false,
+                None,
+            );
+        }
     }
 
     fn step_if_due(&mut self, state: &mut AppState) {
@@ -315,11 +312,7 @@ impl VisualizerRuntime {
     }
 
     fn reseed(&mut self, state: &AppState) -> bool {
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            build_seed_grid(state, self.size.0, self.size.1, state.visualizer.seed)
-        }));
-        let Ok((seed_hash, grid)) = result else {
-            warn!("Seed build panic; keeping previous grid");
+        let Some((seed_hash, grid)) = self.try_build_seed(state, "keeping previous grid") else {
             return false;
         };
         self.rule_mode = state.visualizer.rule_mode.clone();
@@ -330,6 +323,14 @@ impl VisualizerRuntime {
         self.reset_simulation(self.current_edge(state));
         self.alive = self.render_state.seed_from_grid(&self.grid);
         true
+    }
+
+    fn try_build_seed(&self, state: &AppState, panic_recovery: &str) -> Option<(u64, Grid)> {
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            build_seed_grid(state, self.size.0, self.size.1, state.visualizer.seed)
+        }))
+        .inspect_err(|_| warn!("Seed build panic; {panic_recovery}"))
+        .ok()
     }
 
     fn reset_simulation(&mut self, edge: EdgeMode) {
@@ -362,11 +363,7 @@ impl VisualizerRuntime {
     }
 
     fn current_edge(&self, state: &AppState) -> EdgeMode {
-        if state.visualizer.wrap {
-            EdgeMode::Toroid
-        } else {
-            EdgeMode::Dead
-        }
+        edge_mode_from_wrap(state.visualizer.wrap)
     }
 
     fn handle_attractor_event(&mut self, state: &mut AppState, event: AttractorEvent) {
@@ -394,45 +391,7 @@ impl VisualizerRuntime {
         if should_pause {
             state.visualizer.paused = true;
             state.visualizer.paused_by_attractor = true;
-            let protocol_phase = match &self.rule_mode {
-                RuleMode::Protocol(protocol) => {
-                    let phase_label = protocol
-                        .current_phase()
-                        .label
-                        .clone()
-                        .unwrap_or_else(|| "Phase".into());
-                    Some(format!(
-                        "phase {}/{} \"{}\" t={}/{}",
-                        protocol.phase_idx + 1,
-                        protocol.phase_count(),
-                        phase_label,
-                        protocol.step_in_phase + 1,
-                        protocol.current_phase().steps.max(1)
-                    ))
-                }
-                _ => None,
-            };
-            state.status = Some(match &event {
-                AttractorEvent::FixedPoint { gen } => match protocol_phase {
-                    Some(phase) => {
-                        format!("Visualizer paused (fixed point at gen={gen}, {phase})")
-                    }
-                    None => format!("Visualizer paused (fixed point at gen={gen})"),
-                },
-                AttractorEvent::Cycle {
-                    period,
-                    transient,
-                    gen,
-                    ..
-                } => match protocol_phase {
-                    Some(phase) => format!(
-                        "Visualizer paused (cycle p={period} t={transient} gen={gen}, includes protocol phase; {phase})"
-                    ),
-                    None => format!(
-                        "Visualizer paused (cycle p={period} t={transient} gen={gen})"
-                    ),
-                },
-            });
+            state.status = Some(pause_status_message(&event, protocol_phase_label(&self.rule_mode)));
         }
 
         let grid_hash = grid_fingerprint(&self.grid);
@@ -478,11 +437,7 @@ impl VisualizerRuntime {
         let config = SearchConfig::from_settings(&state.settings.gol.search, state.visualizer.wrap);
         self.search_rps = config.rules_per_second;
         self.leaderboard_limit = config.leaderboard_size;
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            build_seed_grid(state, self.size.0, self.size.1, state.visualizer.seed)
-        }));
-        let Ok((seed_hash, seed)) = result else {
-            warn!("Seed build panic; search not started");
+        let Some((seed_hash, seed)) = self.try_build_seed(state, "search not started") else {
             return;
         };
         self.last_seed_hash = seed_hash;
@@ -501,11 +456,7 @@ impl VisualizerRuntime {
     }
 
     fn update_search_seed(&mut self, state: &AppState) {
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            build_seed_grid(state, self.size.0, self.size.1, state.visualizer.seed)
-        }));
-        let Ok((seed_hash, seed)) = result else {
-            warn!("Seed build panic for search update");
+        let Some((seed_hash, seed)) = self.try_build_seed(state, "search seed unchanged") else {
             return;
         };
         self.last_seed_hash = seed_hash;
@@ -679,11 +630,7 @@ impl VisualizerRuntime {
             alive_count: alive,
             period,
             score,
-            wrap_mode: if state.visualizer.wrap {
-                "toroid".into()
-            } else {
-                "dead".into()
-            },
+            wrap_mode: wrap_mode_label(state.visualizer.wrap).into(),
             tick_ms: state.visualizer.tick_ms,
             attractor,
         };
@@ -694,11 +641,7 @@ impl VisualizerRuntime {
             rule: rule.to_string(),
             width: grid.width() as u16,
             height: grid.height() as u16,
-            wrap: if state.visualizer.wrap {
-                EdgeMode::Toroid
-            } else {
-                EdgeMode::Dead
-            },
+            wrap: edge_mode_from_wrap(state.visualizer.wrap),
             seed_hash: self.last_seed_hash,
             grid_hash,
             grid_bits,
@@ -740,6 +683,63 @@ fn build_title(out: &mut String, mode: GolRenderMode) {
     out.push_str("VISUALIZER (");
     out.push_str(mode.label());
     out.push_str(")  [ RUN ] [ ASCII ] [ APPLY ] [ SEED ] [ SNAP ] [ SEARCH ]");
+}
+
+const fn edge_mode_from_wrap(wrap: bool) -> EdgeMode {
+    if wrap {
+        EdgeMode::Toroid
+    } else {
+        EdgeMode::Dead
+    }
+}
+
+const fn wrap_mode_label(wrap: bool) -> &'static str {
+    if wrap {
+        "toroid"
+    } else {
+        "dead"
+    }
+}
+
+fn protocol_phase_label(rule_mode: &RuleMode) -> Option<String> {
+    let RuleMode::Protocol(protocol) = rule_mode else {
+        return None;
+    };
+    let phase_label = protocol
+        .current_phase()
+        .label
+        .clone()
+        .unwrap_or_else(|| "Phase".into());
+    Some(format!(
+        "phase {}/{} \"{}\" t={}/{}",
+        protocol.phase_idx + 1,
+        protocol.phase_count(),
+        phase_label,
+        protocol.step_in_phase + 1,
+        protocol.current_phase().steps.max(1)
+    ))
+}
+
+fn pause_status_message(event: &AttractorEvent, protocol_phase: Option<String>) -> String {
+    match event {
+        AttractorEvent::FixedPoint { gen } => match protocol_phase {
+            Some(phase) => format!("Visualizer paused (fixed point at gen={gen}, {phase})"),
+            None => format!("Visualizer paused (fixed point at gen={gen})"),
+        },
+        AttractorEvent::Cycle {
+            period,
+            transient,
+            gen,
+            ..
+        } => match protocol_phase {
+            Some(phase) => format!(
+                "Visualizer paused (cycle p={period} t={transient} gen={gen}, includes protocol phase; {phase})"
+            ),
+            None => format!(
+                "Visualizer paused (cycle p={period} t={transient} gen={gen})"
+            ),
+        },
+    }
 }
 
 fn protocol_extra(rule_mode: &RuleMode) -> Option<AttractorExtra> {
@@ -1118,11 +1118,7 @@ fn search_worker_loop(cmd_rx: Receiver<SearchCommand>, event_tx: Sender<WorkerEv
             let eval = evaluate_rule(
                 &seed,
                 rule,
-                if config.wrap {
-                    EdgeMode::Toroid
-                } else {
-                    EdgeMode::Dead
-                },
+                edge_mode_from_wrap(config.wrap),
                 config.max_generations,
             );
             evaluated += 1;

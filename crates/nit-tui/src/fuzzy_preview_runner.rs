@@ -114,6 +114,59 @@ struct PreviewKey {
     query: String,
 }
 
+struct PendingRequest {
+    generation: u64,
+    mode: SearchMode,
+    path: PathBuf,
+    line_hint: Option<usize>,
+    query: String,
+}
+
+struct PreviewCache {
+    entries: HashMap<PreviewKey, PreviewModel>,
+    order: VecDeque<PreviewKey>,
+}
+
+impl PreviewCache {
+    fn new() -> Self {
+        Self {
+            entries: HashMap::new(),
+            order: VecDeque::new(),
+        }
+    }
+
+    fn clear(&mut self) {
+        self.entries.clear();
+        self.order.clear();
+    }
+
+    fn get_and_touch(&mut self, key: &PreviewKey) -> Option<PreviewModel> {
+        let model = self.entries.get(key).cloned()?;
+        if let Some(pos) = self.order.iter().position(|k| k == key) {
+            if let Some(item) = self.order.remove(pos) {
+                self.order.push_back(item);
+            }
+        }
+        Some(model)
+    }
+
+    fn insert(&mut self, key: PreviewKey, model: PreviewModel) {
+        self.entries.insert(key.clone(), model);
+        self.order.push_back(key);
+        while self.order.len() > PREVIEW_CACHE_CAP {
+            if let Some(old) = self.order.pop_front() {
+                self.entries.remove(&old);
+            }
+        }
+    }
+}
+
+enum ApplyOutcome {
+    Request(PendingRequest),
+    Configured,
+    Shutdown,
+}
+
 fn preview_loop(
     cmd_rx: Receiver<PreviewCommand>,
     event_tx: Sender<PreviewEvent>,
@@ -123,110 +176,137 @@ fn preview_loop(
     let mut config = initial_config;
     let mut manager = SyntaxManager::new(to_syntax_config(config.clone()));
     let mut version = 0u64;
-
-    let mut cache: HashMap<PreviewKey, PreviewModel> = HashMap::new();
-    let mut order: VecDeque<PreviewKey> = VecDeque::new();
+    let mut cache = PreviewCache::new();
 
     while let Ok(cmd) = cmd_rx.recv() {
-        let mut request = match cmd {
-            PreviewCommand::Request {
-                generation,
-                mode,
-                path,
-                line_hint,
-                query,
-            } => Some((generation, mode, path, line_hint, query)),
-            PreviewCommand::UpdateConfig { config: cfg } => {
-                config = cfg;
-                manager.update_config(to_syntax_config(config.clone()));
-                cache.clear();
-                order.clear();
-                None
-            }
-            PreviewCommand::Shutdown => break,
-        };
-
-        while let Ok(next) = cmd_rx.try_recv() {
-            match next {
-                PreviewCommand::Request {
-                    generation,
-                    mode,
-                    path,
-                    line_hint,
-                    query,
-                } => {
-                    request = Some((generation, mode, path, line_hint, query));
-                }
-                PreviewCommand::UpdateConfig { config: cfg } => {
-                    config = cfg;
-                    manager.update_config(to_syntax_config(config.clone()));
-                    cache.clear();
-                    order.clear();
-                }
-                PreviewCommand::Shutdown => return,
-            }
+        match coalesce_pending(cmd, &cmd_rx, &mut config, &mut manager, &mut cache) {
+            ApplyOutcome::Request(request) => serve_request(
+                request,
+                &theme,
+                &mut manager,
+                &mut version,
+                &mut cache,
+                config.enabled,
+                &event_tx,
+            ),
+            ApplyOutcome::Configured => {}
+            ApplyOutcome::Shutdown => return,
         }
-
-        let Some((generation, mode, path, line_hint, query)) = request else {
-            continue;
-        };
-        let key = PreviewKey {
-            path: path.clone(),
-            mode,
-            line_hint: line_hint.unwrap_or(0),
-            query: if matches!(mode, SearchMode::Content) {
-                query.clone()
-            } else {
-                String::new()
-            },
-        };
-        if let Some(model) = cache.get(&key).cloned() {
-            touch_lru(&mut order, &key);
-            let _ = event_tx.send(PreviewEvent::Ready { generation, model });
-            continue;
-        }
-
-        let model = match build_preview(
-            &path,
-            mode,
-            line_hint,
-            if matches!(mode, SearchMode::Content) {
-                query.as_str()
-            } else {
-                ""
-            },
-            &theme,
-            &mut manager,
-            &mut version,
-            config.enabled,
-        ) {
-            Ok(model) => model,
-            Err(err) => {
-                let _ = event_tx.send(PreviewEvent::Error {
-                    generation,
-                    message: err,
-                });
-                continue;
-            }
-        };
-
-        cache.insert(key.clone(), model.clone());
-        order.push_back(key);
-        while order.len() > PREVIEW_CACHE_CAP {
-            if let Some(old) = order.pop_front() {
-                cache.remove(&old);
-            }
-        }
-
-        let _ = event_tx.send(PreviewEvent::Ready { generation, model });
     }
 }
 
-fn touch_lru(order: &mut VecDeque<PreviewKey>, key: &PreviewKey) {
-    if let Some(pos) = order.iter().position(|k| k == key) {
-        if let Some(item) = order.remove(pos) {
-            order.push_back(item);
+fn serve_request(
+    request: PendingRequest,
+    theme: &Theme,
+    manager: &mut SyntaxManager,
+    version: &mut u64,
+    cache: &mut PreviewCache,
+    highlight_enabled: bool,
+    event_tx: &Sender<PreviewEvent>,
+) {
+    let key = preview_key_for(&request);
+    if let Some(model) = cache.get_and_touch(&key) {
+        let _ = event_tx.send(PreviewEvent::Ready {
+            generation: request.generation,
+            model,
+        });
+        return;
+    }
+
+    let query_for_build = if matches!(request.mode, SearchMode::Content) {
+        request.query.as_str()
+    } else {
+        ""
+    };
+    match build_preview(
+        &request.path,
+        request.mode,
+        request.line_hint,
+        query_for_build,
+        theme,
+        manager,
+        version,
+        highlight_enabled,
+    ) {
+        Ok(model) => {
+            cache.insert(key, model.clone());
+            let _ = event_tx.send(PreviewEvent::Ready {
+                generation: request.generation,
+                model,
+            });
         }
+        Err(err) => {
+            let _ = event_tx.send(PreviewEvent::Error {
+                generation: request.generation,
+                message: err,
+            });
+        }
+    }
+}
+
+/// Drain queued commands, keeping the most-recent request and short-circuiting
+/// on shutdown. Config updates are applied in place.
+fn coalesce_pending(
+    initial: PreviewCommand,
+    cmd_rx: &Receiver<PreviewCommand>,
+    config: &mut HighlightConfig,
+    manager: &mut SyntaxManager,
+    cache: &mut PreviewCache,
+) -> ApplyOutcome {
+    let mut latest = apply_command(initial, config, manager, cache);
+    if matches!(latest, ApplyOutcome::Shutdown) {
+        return latest;
+    }
+    while let Ok(next) = cmd_rx.try_recv() {
+        match apply_command(next, config, manager, cache) {
+            ApplyOutcome::Shutdown => return ApplyOutcome::Shutdown,
+            ApplyOutcome::Request(req) => latest = ApplyOutcome::Request(req),
+            ApplyOutcome::Configured => {}
+        }
+    }
+    latest
+}
+
+fn apply_command(
+    cmd: PreviewCommand,
+    config: &mut HighlightConfig,
+    manager: &mut SyntaxManager,
+    cache: &mut PreviewCache,
+) -> ApplyOutcome {
+    match cmd {
+        PreviewCommand::Request {
+            generation,
+            mode,
+            path,
+            line_hint,
+            query,
+        } => ApplyOutcome::Request(PendingRequest {
+            generation,
+            mode,
+            path,
+            line_hint,
+            query,
+        }),
+        PreviewCommand::UpdateConfig { config: cfg } => {
+            *config = cfg;
+            manager.update_config(to_syntax_config(config.clone()));
+            cache.clear();
+            ApplyOutcome::Configured
+        }
+        PreviewCommand::Shutdown => ApplyOutcome::Shutdown,
+    }
+}
+
+fn preview_key_for(req: &PendingRequest) -> PreviewKey {
+    PreviewKey {
+        path: req.path.clone(),
+        mode: req.mode,
+        line_hint: req.line_hint.unwrap_or(0),
+        query: if matches!(req.mode, SearchMode::Content) {
+            req.query.clone()
+        } else {
+            String::new()
+        },
     }
 }
 
@@ -241,40 +321,66 @@ fn build_preview(
     version: &mut u64,
     highlight_enabled: bool,
 ) -> Result<PreviewModel, String> {
-    let (start_line, anchor_line) = match mode {
-        SearchMode::Files => (1usize, 0usize),
+    let (start_line, anchor_line) = preview_window_anchors(mode, line_hint);
+    let (lines, truncated) = read_window(path, start_line, PREVIEW_LINES)?;
+    let snapshot = highlight_enabled
+        .then(|| highlight_snapshot(path, &lines, manager, version))
+        .flatten();
+
+    let styled_lines = stylize_lines(&lines, snapshot.as_ref(), mode, query, theme);
+
+    Ok(PreviewModel {
+        path: path.to_path_buf(),
+        start_line,
+        anchor_line: anchor_line.min(styled_lines.len().saturating_sub(1)),
+        truncated,
+        lines: styled_lines,
+    })
+}
+
+fn preview_window_anchors(mode: SearchMode, line_hint: Option<usize>) -> (usize, usize) {
+    match mode {
+        SearchMode::Files => (1, 0),
         SearchMode::Content => {
             let hint = line_hint.unwrap_or(1).max(1);
             let start = hint.saturating_sub(PREVIEW_CONTEXT_BEFORE).max(1);
             (start, hint.saturating_sub(start))
         }
-    };
+    }
+}
 
-    let (lines, truncated) = read_window(path, start_line, PREVIEW_LINES)?;
-    let text = lines.join("\n");
-    let snapshot = if highlight_enabled {
-        *version = version.wrapping_add(1);
-        let language = manager.detect_language(Some(path), lines.first().map(|s| s.as_str()), None);
-        let request = HighlightRequest {
-            buffer_id: 0,
-            version: *version,
-            language,
-            text: text.clone(),
-            edits: Vec::new(),
-            full_reparse: true,
-            max_spans_per_line: manager.config().max_spans_per_line,
-            viewport: None,
-        };
-        manager.schedule_rehighlight(request);
-        wait_for_snapshot(manager, 0, *version, HIGHLIGHT_WAIT)
-    } else {
-        None
+fn highlight_snapshot(
+    path: &Path,
+    lines: &[String],
+    manager: &mut SyntaxManager,
+    version: &mut u64,
+) -> Option<HighlightSnapshot> {
+    *version = version.wrapping_add(1);
+    let language = manager.detect_language(Some(path), lines.first().map(String::as_str), None);
+    let request = HighlightRequest {
+        buffer_id: 0,
+        version: *version,
+        language,
+        text: lines.join("\n"),
+        edits: Vec::new(),
+        full_reparse: true,
+        max_spans_per_line: manager.config().max_spans_per_line,
+        viewport: None,
     };
+    manager.schedule_rehighlight(request);
+    wait_for_snapshot(manager, 0, *version, HIGHLIGHT_WAIT)
+}
 
+fn stylize_lines(
+    lines: &[String],
+    snapshot: Option<&HighlightSnapshot>,
+    mode: SearchMode,
+    query: &str,
+    theme: &Theme,
+) -> Vec<Line<'static>> {
     let mut styled_lines: Vec<Line<'static>> = Vec::with_capacity(lines.len().max(1));
     for (idx, line) in lines.iter().enumerate() {
         let mapped = snapshot
-            .as_ref()
             .and_then(|snap| snap.per_line.get(idx))
             .and_then(|segs| map_line_segments_to_chars(line, segs).ok());
 
@@ -292,14 +398,7 @@ fn build_preview(
             Style::default().fg(theme.foreground).bg(theme.background),
         )));
     }
-
-    Ok(PreviewModel {
-        path: path.to_path_buf(),
-        start_line,
-        anchor_line: anchor_line.min(styled_lines.len().saturating_sub(1)),
-        truncated,
-        lines: styled_lines,
-    })
+    styled_lines
 }
 
 fn wait_for_snapshot(
@@ -343,12 +442,7 @@ fn read_window(
         if current < start_line {
             continue;
         }
-        if buf.ends_with('\n') {
-            buf.pop();
-            if buf.ends_with('\r') {
-                buf.pop();
-            }
-        }
+        strip_trailing_newline(&mut buf);
         if buf.len() > PREVIEW_MAX_LINE_BYTES {
             buf.truncate(PREVIEW_MAX_LINE_BYTES);
             truncated = true;
@@ -361,6 +455,15 @@ fn read_window(
         out.push(buf.clone());
     }
     Ok((out, truncated))
+}
+
+fn strip_trailing_newline(buf: &mut String) {
+    if buf.ends_with('\n') {
+        buf.pop();
+        if buf.ends_with('\r') {
+            buf.pop();
+        }
+    }
 }
 
 fn find_matches(line: &str, query: &str) -> Vec<(usize, usize)> {
@@ -386,27 +489,42 @@ fn styled_line(
 
     let chars: Vec<char> = line.chars().collect();
     let mut styles = vec![default_style; chars.len()];
-    if let Some(segments) = mapped {
-        for seg in segments {
-            let seg_style = theme.highlight_style(seg.group).bg(theme.background);
-            let end = seg.end.min(styles.len());
-            for s in styles.iter_mut().take(end).skip(seg.start) {
-                *s = seg_style;
-            }
-        }
-    }
-    if !overlay.is_empty() {
-        for (start, end) in overlay {
-            let start = (*start).min(styles.len());
-            let end = (*end).min(styles.len());
-            for s in styles.iter_mut().take(end).skip(start) {
-                *s = s
-                    .bg(theme.selection_bg)
-                    .add_modifier(Modifier::UNDERLINED | Modifier::BOLD);
-            }
-        }
-    }
+    apply_syntax_styles(&mut styles, mapped, theme);
+    apply_overlay_styles(&mut styles, overlay, theme);
+    flatten_runs(chars, styles)
+}
 
+fn apply_syntax_styles(
+    styles: &mut [Style],
+    mapped: Option<&[nit_syntax::MappedLineSegment]>,
+    theme: &Theme,
+) {
+    let Some(segments) = mapped else { return };
+    for seg in segments {
+        let seg_style = theme.highlight_style(seg.group).bg(theme.background);
+        let end = seg.end.min(styles.len());
+        for s in styles.iter_mut().take(end).skip(seg.start) {
+            *s = seg_style;
+        }
+    }
+}
+
+fn apply_overlay_styles(styles: &mut [Style], overlay: &[(usize, usize)], theme: &Theme) {
+    if overlay.is_empty() {
+        return;
+    }
+    for (start, end) in overlay {
+        let start = (*start).min(styles.len());
+        let end = (*end).min(styles.len());
+        for s in styles.iter_mut().take(end).skip(start) {
+            *s = s
+                .bg(theme.selection_bg)
+                .add_modifier(Modifier::UNDERLINED | Modifier::BOLD);
+        }
+    }
+}
+
+fn flatten_runs(chars: Vec<char>, styles: Vec<Style>) -> Line<'static> {
     let mut spans: Vec<Span<'static>> = Vec::new();
     let mut current_style = styles[0];
     let mut buf = String::new();

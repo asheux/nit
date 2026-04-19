@@ -44,37 +44,12 @@ pub fn preferred_size(screen: Rect, _tab: SubstrateOverlayTab) -> Rect {
 pub fn render(frame: &mut Frame<'_>, area: Rect, state: &mut AppState, theme: &Theme) {
     frame.render_widget(Clear, area);
 
-    let mut title_spans: Vec<Span<'static>> = vec![Span::styled(
-        TITLE_PREFIX,
-        Style::default()
-            .fg(theme.title_focused)
-            .add_modifier(Modifier::BOLD),
-    )];
-    for (tab, label) in TAB_LABELS {
-        let active = *tab == state.substrate_overlay_tab;
-        let style = if active {
-            Style::default()
-                .fg(theme.background)
-                .bg(theme.title_focused)
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default()
-                .fg(theme.title_focused)
-                .add_modifier(Modifier::DIM)
-        };
-        title_spans.push(Span::styled(label.to_string(), style));
-    }
-    title_spans.push(Span::styled(
-        "   F3/Esc close   Tab: switch   j/k: scroll",
-        Style::default().add_modifier(Modifier::DIM),
-    ));
-
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(theme.border_focused))
         .style(Style::default().bg(theme.background).fg(theme.foreground))
-        .title(Line::from(title_spans));
+        .title(Line::from(build_title_spans(state.substrate_overlay_tab, theme)));
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -89,6 +64,36 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, state: &mut AppState, theme: &T
             assumptions_view::render_body(frame, inner, state, theme)
         }
     }
+}
+
+fn build_title_spans(active_tab: SubstrateOverlayTab, theme: &Theme) -> Vec<Span<'static>> {
+    let active_style = Style::default()
+        .fg(theme.background)
+        .bg(theme.title_focused)
+        .add_modifier(Modifier::BOLD);
+    let inactive_style = Style::default()
+        .fg(theme.title_focused)
+        .add_modifier(Modifier::DIM);
+
+    let mut spans: Vec<Span<'static>> = vec![Span::styled(
+        TITLE_PREFIX,
+        Style::default()
+            .fg(theme.title_focused)
+            .add_modifier(Modifier::BOLD),
+    )];
+    for (tab, label) in TAB_LABELS {
+        let style = if *tab == active_tab {
+            active_style
+        } else {
+            inactive_style
+        };
+        spans.push(Span::styled(label.to_string(), style));
+    }
+    spans.push(Span::styled(
+        "   F3/Esc close   Tab: switch   j/k: scroll",
+        Style::default().add_modifier(Modifier::DIM),
+    ));
+    spans
 }
 
 /// Mouse hit-test for the tab bar. Returns the Action to dispatch if a tab

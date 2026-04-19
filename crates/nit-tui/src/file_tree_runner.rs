@@ -68,14 +68,13 @@ fn runner_loop(cmd_rx: Receiver<FileTreeCommand>, event_tx: Sender<FileTreeEvent
                 dir,
                 show_hidden,
                 show_ignored,
-            } => match list_dir(&dir, show_hidden, show_ignored) {
-                Ok(entries) => {
-                    let _ = event_tx.send(FileTreeEvent::DirListed { dir, entries });
-                }
-                Err(message) => {
-                    let _ = event_tx.send(FileTreeEvent::Error { dir, message });
-                }
-            },
+            } => {
+                let event = match list_dir(&dir, show_hidden, show_ignored) {
+                    Ok(entries) => FileTreeEvent::DirListed { dir, entries },
+                    Err(message) => FileTreeEvent::Error { dir, message },
+                };
+                let _ = event_tx.send(event);
+            }
             FileTreeCommand::Shutdown => break,
         }
     }
@@ -86,58 +85,45 @@ fn list_dir(
     show_hidden: bool,
     show_ignored: bool,
 ) -> Result<Vec<DirEntryModel>, String> {
-    let mut entries = Vec::new();
-    let mut candidates_for_git = Vec::new(); // (input bytes, name for filtering)
-
-    let read_dir =
-        fs::read_dir(dir).map_err(|e| format!("Failed to read {}: {e}", dir.display()))?;
-    for entry in read_dir {
-        let entry = entry.map_err(|e| e.to_string())?;
-        let file_name = entry.file_name();
-        let name = file_name.to_string_lossy().into_owned();
-        if name == ".git" {
-            continue;
-        }
-        if !show_hidden && name.starts_with('.') {
-            continue;
-        }
-
-        let file_type = entry.file_type().map_err(|e| e.to_string())?;
-        let is_dir = file_type.is_dir();
-        let is_symlink = file_type.is_symlink();
-        let path = entry.path();
-
-        entries.push(DirEntryModel {
-            name: name.clone(),
-            path,
-            is_dir,
-            is_symlink,
-        });
-
-        if !show_ignored {
-            let mut bytes = name.into_bytes();
-            if is_dir {
-                bytes.push(b'/');
-            }
-            candidates_for_git.push(bytes);
-        }
-    }
-
+    let mut entries = collect_dir_entries(dir, show_hidden)?;
     if !show_ignored && !entries.is_empty() {
-        let ignored = git_check_ignore(dir, &candidates_for_git).unwrap_or_default();
+        let keys: Vec<Vec<u8>> = entries.iter().map(git_check_key).collect();
+        let ignored = git_check_ignore(dir, &keys).unwrap_or_default();
         if !ignored.is_empty() {
-            entries.retain(|e| {
-                let mut key = e.name.clone();
-                if e.is_dir {
-                    key.push('/');
-                }
-                !ignored.contains(key.as_bytes())
-            });
+            entries.retain(|e| !ignored.contains(&git_check_key(e)));
         }
     }
-
     entries.sort_by_cached_key(|e| (!e.is_dir, e.name.to_ascii_lowercase()));
     Ok(entries)
+}
+
+fn collect_dir_entries(dir: &Path, show_hidden: bool) -> Result<Vec<DirEntryModel>, String> {
+    let read_dir =
+        fs::read_dir(dir).map_err(|e| format!("Failed to read {}: {e}", dir.display()))?;
+    let mut entries = Vec::new();
+    for entry in read_dir {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name == ".git" || (!show_hidden && name.starts_with('.')) {
+            continue;
+        }
+        let file_type = entry.file_type().map_err(|e| e.to_string())?;
+        entries.push(DirEntryModel {
+            name,
+            path: entry.path(),
+            is_dir: file_type.is_dir(),
+            is_symlink: file_type.is_symlink(),
+        });
+    }
+    Ok(entries)
+}
+
+fn git_check_key(entry: &DirEntryModel) -> Vec<u8> {
+    let mut key = entry.name.as_bytes().to_vec();
+    if entry.is_dir {
+        key.push(b'/');
+    }
+    key
 }
 
 fn git_check_ignore(dir: &Path, paths: &[Vec<u8>]) -> Result<HashSet<Vec<u8>>, String> {
@@ -170,18 +156,16 @@ fn git_check_ignore(dir: &Path, paths: &[Vec<u8>]) -> Result<HashSet<Vec<u8>>, S
         .wait_with_output()
         .map_err(|e| format!("git check-ignore wait failed: {e}"))?;
 
-    match output.status.code() {
-        // 0: at least one path is ignored; 1: none are ignored; 128: not a git repo / error.
-        Some(0) | Some(1) => {}
-        _ => return Ok(HashSet::new()),
+    // Exit code 0 = ignored matches present; 1 = none ignored; 128 = not a git repo.
+    // Anything else (including signals) returns an empty set rather than an error.
+    if !matches!(output.status.code(), Some(0) | Some(1)) {
+        return Ok(HashSet::new());
     }
 
-    let mut ignored = HashSet::new();
-    for part in output.stdout.split(|b| *b == 0) {
-        if part.is_empty() {
-            continue;
-        }
-        ignored.insert(part.to_vec());
-    }
-    Ok(ignored)
+    Ok(output
+        .stdout
+        .split(|b| *b == 0)
+        .filter(|part| !part.is_empty())
+        .map(<[u8]>::to_vec)
+        .collect())
 }

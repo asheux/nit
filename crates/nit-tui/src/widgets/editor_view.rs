@@ -12,9 +12,22 @@ use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use unicode_width::UnicodeWidthChar;
 
+const EDITOR_TITLE: &str = "EDITOR  [ SAVE ]";
+const DEFAULT_LINE_NUM_WIDTH: usize = 3;
+const GUTTER_PAD_CHARS: usize = 4;
+
 pub struct CursorPlacement {
     pub x: u16,
     pub y: u16,
+}
+
+struct LineData {
+    content: String,
+    chars: Vec<char>,
+    base_style: Style,
+    is_cursor_line: bool,
+    mapped_segments: Option<Vec<nit_syntax::MappedLineSegment>>,
+    diff_status: LineDiffStatus,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -37,7 +50,7 @@ pub fn render_editor(
         line_map,
         PaneId::Editor,
         focus,
-        "EDITOR  [ SAVE ]",
+        EDITOR_TITLE,
         theme,
         tab_width,
         true,
@@ -46,9 +59,8 @@ pub fn render_editor(
     )
 }
 
-/// Same as `render_editor` but overlays a search highlight on occurrences of
-/// `term` (respecting `whole_word`). Call this variant when a vim `/`, `*` or
-/// `#` search is active.
+/// Overlay a search highlight for `term` (respecting `whole_word`) on top of
+/// the normal editor render. Used while a vim `/`, `*`, or `#` search is active.
 #[allow(clippy::too_many_arguments)]
 pub fn render_editor_with_search(
     frame: &mut Frame,
@@ -70,7 +82,7 @@ pub fn render_editor_with_search(
         line_map,
         PaneId::Editor,
         focus,
-        "EDITOR  [ SAVE ]",
+        EDITOR_TITLE,
         theme,
         tab_width,
         true,
@@ -97,144 +109,33 @@ pub fn render_buffer(
 ) -> Option<CursorPlacement> {
     let focused = focus == pane_id;
     let content_bg = buffer_input_bg(theme, focused);
-    let border_style = if focused {
-        Style::default().fg(theme.border_focused)
-    } else {
-        Style::default().fg(theme.border)
-    };
-    let border_type = if focused {
-        BorderType::Thick
-    } else {
-        BorderType::Plain
-    };
-    let title_color = if focused {
-        theme.title_focused
-    } else {
-        theme.title
-    };
-
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(border_style)
-        .border_type(border_type)
-        .style(Style::default().bg(theme.background))
-        .title(Span::styled(
-            title,
-            Style::default()
-                .fg(title_color)
-                .add_modifier(Modifier::BOLD),
-        ));
+    let block = build_editor_block(theme, focused, title);
 
     let actual_lines = buffer.lines_len();
     let total_lines = actual_lines.max(1);
-    let line_num_width = total_lines.to_string().len().max(3);
-    let gutter_width = line_num_width + 4;
+    let line_num_width = total_lines.to_string().len().max(DEFAULT_LINE_NUM_WIDTH);
+    let gutter_width = line_num_width + GUTTER_PAD_CHARS;
     let start = buffer.viewport.offset_line;
     let height = buffer.viewport.height.max(1);
     let content_width = buffer.viewport.width.max(1);
 
     let selection = buffer.selection_range();
     let selection_active = mode == Mode::Visual && selection.is_some();
-    let mut lines: Vec<Line> = Vec::with_capacity(height);
-    struct LineData {
-        content: String,
-        chars: Vec<char>,
-        base_style: Style,
-        is_cursor_line: bool,
-        mapped_segments: Option<Vec<nit_syntax::MappedLineSegment>>,
-        diff_status: LineDiffStatus,
-    }
-
-    let mut line_data: Vec<LineData> = Vec::with_capacity(height);
-    let highlight_enabled = snapshot.is_some();
-    let mut highlight_error: Option<SegmentMapError> = None;
     let diff_statuses = buffer.diff_statuses();
-    for row in 0..height {
-        let line_idx = start + row;
-        let mut content = if line_idx < total_lines {
-            buffer.line_as_string(line_idx).replace('\r', "")
-        } else {
-            String::new()
-        };
-        if content.ends_with('\n') {
-            content.pop();
-        }
-        let is_cursor_line = line_idx == buffer.cursor.line;
-        let mut base_style = Style::default().fg(theme.foreground).bg(content_bg);
-        if is_cursor_line && !selection_active {
-            base_style = base_style
-                .bg(theme.cursor_line_bg)
-                .add_modifier(Modifier::UNDERLINED);
-        }
-        let chars: Vec<char> = content.chars().collect();
-        let diff_status = diff_statuses
-            .get(line_idx)
-            .copied()
-            .unwrap_or(LineDiffStatus::Unchanged);
 
-        let mapped_segments = if highlight_enabled {
-            if let Some(snapshot) = snapshot {
-                let mut snapshot_line = if let Some(map) = line_map {
-                    map.get(line_idx).copied().flatten()
-                } else {
-                    Some(line_idx)
-                };
-                let mut current_hash: Option<u64> = None;
-                if snapshot_line.is_none() {
-                    if let Some(hash) = snapshot.line_hashes.get(line_idx) {
-                        let hash_now = hash_line_bytes(content.as_bytes());
-                        current_hash = Some(hash_now);
-                        if *hash == hash_now {
-                            snapshot_line = Some(line_idx);
-                        }
-                    }
-                }
-                if let Some(snapshot_line) = snapshot_line {
-                    if let Some(hash) = snapshot.line_hashes.get(snapshot_line) {
-                        let hash_now =
-                            current_hash.unwrap_or_else(|| hash_line_bytes(content.as_bytes()));
-                        if *hash != hash_now {
-                            line_data.push(LineData {
-                                content,
-                                chars,
-                                base_style,
-                                is_cursor_line,
-                                mapped_segments: None,
-                                diff_status,
-                            });
-                            continue;
-                        }
-                    }
-                    if let Some(segments) = snapshot.per_line.get(snapshot_line) {
-                        match map_line_segments_to_chars(&content, segments) {
-                            Ok(mapped) => Some(mapped),
-                            Err(err) => {
-                                highlight_error = Some(err);
-                                None
-                            }
-                        }
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                }
-            } else {
-                None
-            }
-        } else {
-            None
-        };
+    let (line_data, highlight_error) = collect_line_data(
+        buffer,
+        snapshot,
+        line_map,
+        theme,
+        content_bg,
+        start,
+        height,
+        total_lines,
+        diff_statuses,
+        selection_active,
+    );
 
-        line_data.push(LineData {
-            content,
-            chars,
-            base_style,
-            is_cursor_line,
-            mapped_segments,
-            diff_status,
-        });
-    }
     if let Some(err) = highlight_error {
         log_rate_limited(&HIGHLIGHT_INVALID_SPAN_LOG, Duration::from_secs(1), || {
             tracing::warn!(
@@ -246,104 +147,209 @@ pub fn render_buffer(
         });
     }
 
+    let lines = render_lines(
+        buffer,
+        theme,
+        content_bg,
+        &line_data,
+        start,
+        total_lines,
+        actual_lines,
+        line_num_width,
+        content_width,
+        tab_width,
+        selection,
+        search,
+    );
+
+    let paragraph = Paragraph::new(lines)
+        .style(Style::default().bg(content_bg).fg(theme.foreground))
+        .block(block);
+    frame.render_widget(paragraph, area);
+
+    if show_cursor && focused {
+        Some(cursor_placement(
+            buffer,
+            area,
+            start,
+            gutter_width,
+            tab_width,
+        ))
+    } else {
+        None
+    }
+}
+
+fn build_editor_block<'a>(theme: &Theme, focused: bool, title: &'a str) -> Block<'a> {
+    let (border_color, border_type, title_color) = if focused {
+        (theme.border_focused, BorderType::Thick, theme.title_focused)
+    } else {
+        (theme.border, BorderType::Plain, theme.title)
+    };
+    Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(border_color))
+        .border_type(border_type)
+        .style(Style::default().bg(theme.background))
+        .title(Span::styled(
+            title,
+            Style::default()
+                .fg(title_color)
+                .add_modifier(Modifier::BOLD),
+        ))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn collect_line_data(
+    buffer: &Buffer,
+    snapshot: Option<&HighlightSnapshot>,
+    line_map: Option<&[Option<usize>]>,
+    theme: &Theme,
+    content_bg: Color,
+    start: usize,
+    height: usize,
+    total_lines: usize,
+    diff_statuses: &[LineDiffStatus],
+    selection_active: bool,
+) -> (Vec<LineData>, Option<SegmentMapError>) {
+    let mut line_data: Vec<LineData> = Vec::with_capacity(height);
+    let mut highlight_error: Option<SegmentMapError> = None;
+
+    for row in 0..height {
+        let line_idx = start + row;
+        let content = line_text_at(buffer, line_idx, total_lines);
+        let is_cursor_line = line_idx == buffer.cursor.line;
+        let base_style = base_line_style(theme, content_bg, is_cursor_line, selection_active);
+        let chars: Vec<char> = content.chars().collect();
+        let diff_status = diff_statuses
+            .get(line_idx)
+            .copied()
+            .unwrap_or(LineDiffStatus::Unchanged);
+
+        let mapped_segments = snapshot.and_then(|snap| {
+            map_snapshot_for_line(snap, line_map, line_idx, &content, &mut highlight_error)
+        });
+
+        line_data.push(LineData {
+            content,
+            chars,
+            base_style,
+            is_cursor_line,
+            mapped_segments,
+            diff_status,
+        });
+    }
+
+    (line_data, highlight_error)
+}
+
+fn line_text_at(buffer: &Buffer, line_idx: usize, total_lines: usize) -> String {
+    if line_idx >= total_lines {
+        return String::new();
+    }
+    let mut content = buffer.line_as_string(line_idx).replace('\r', "");
+    if content.ends_with('\n') {
+        content.pop();
+    }
+    content
+}
+
+fn base_line_style(
+    theme: &Theme,
+    content_bg: Color,
+    is_cursor_line: bool,
+    selection_active: bool,
+) -> Style {
+    let mut style = Style::default().fg(theme.foreground).bg(content_bg);
+    if is_cursor_line && !selection_active {
+        style = style
+            .bg(theme.cursor_line_bg)
+            .add_modifier(Modifier::UNDERLINED);
+    }
+    style
+}
+
+fn map_snapshot_for_line(
+    snapshot: &HighlightSnapshot,
+    line_map: Option<&[Option<usize>]>,
+    line_idx: usize,
+    content: &str,
+    highlight_error: &mut Option<SegmentMapError>,
+) -> Option<Vec<nit_syntax::MappedLineSegment>> {
+    let mut snapshot_line = match line_map {
+        Some(map) => map.get(line_idx).copied().flatten(),
+        None => Some(line_idx),
+    };
+    let mut current_hash: Option<u64> = None;
+    if snapshot_line.is_none() {
+        if let Some(hash) = snapshot.line_hashes.get(line_idx) {
+            let hash_now = hash_line_bytes(content.as_bytes());
+            current_hash = Some(hash_now);
+            if *hash == hash_now {
+                snapshot_line = Some(line_idx);
+            }
+        }
+    }
+    let snapshot_line = snapshot_line?;
+    if let Some(hash) = snapshot.line_hashes.get(snapshot_line) {
+        let hash_now = current_hash.unwrap_or_else(|| hash_line_bytes(content.as_bytes()));
+        if *hash != hash_now {
+            return None;
+        }
+    }
+    let segments = snapshot.per_line.get(snapshot_line)?;
+    match map_line_segments_to_chars(content, segments) {
+        Ok(mapped) => Some(mapped),
+        Err(err) => {
+            *highlight_error = Some(err);
+            None
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_lines<'a>(
+    buffer: &Buffer,
+    theme: &Theme,
+    content_bg: Color,
+    line_data: &'a [LineData],
+    start: usize,
+    total_lines: usize,
+    actual_lines: usize,
+    line_num_width: usize,
+    content_width: usize,
+    tab_width: usize,
+    selection: Option<(usize, usize)>,
+    search: Option<(&str, bool)>,
+) -> Vec<Line<'a>> {
+    let mut lines: Vec<Line> = Vec::with_capacity(line_data.len());
     for (row, data) in line_data.iter().enumerate() {
         let line_idx = start + row;
         let mut styles = vec![data.base_style; data.chars.len()];
         if let Some(mapped) = data.mapped_segments.as_ref() {
             apply_syntax_spans(mapped, &mut styles, theme);
         }
+        apply_search_highlights(
+            &mut styles,
+            buffer,
+            line_idx,
+            actual_lines,
+            theme,
+            search,
+        );
+        apply_selection_highlight(
+            &mut styles,
+            buffer,
+            line_idx,
+            actual_lines,
+            selection,
+            data.chars.len(),
+            theme,
+        );
 
-        if let Some((term, whole_word)) = search {
-            if !term.is_empty() && line_idx < actual_lines {
-                let matches = buffer.search_line_matches(line_idx, term, whole_word);
-                for (m_start, m_end) in matches {
-                    for idx in m_start..m_end.min(styles.len()) {
-                        styles[idx] = styles[idx]
-                            .bg(theme.selection_bg)
-                            .add_modifier(Modifier::BOLD);
-                    }
-                }
-            }
-        }
-
-        if line_idx < actual_lines {
-            if let Some((sel_start, sel_end)) = selection.and_then(|(start, end)| {
-                let line_start = buffer.line_char_start(line_idx);
-                let line_end = buffer.line_char_end(line_idx);
-                if end <= line_start || start >= line_end {
-                    return None;
-                }
-                let mut sel_start = start.saturating_sub(line_start);
-                let mut sel_end = end.saturating_sub(line_start);
-                if sel_start > data.chars.len() {
-                    sel_start = data.chars.len();
-                }
-                if sel_end > data.chars.len() {
-                    sel_end = data.chars.len();
-                }
-                if sel_end <= sel_start {
-                    None
-                } else {
-                    Some((sel_start, sel_end))
-                }
-            }) {
-                for idx in sel_start..sel_end.min(styles.len()) {
-                    styles[idx] = styles[idx].bg(theme.selection_bg);
-                }
-            }
-        }
-
-        let (ln_text, ln_style, sep_style) = if line_idx < total_lines {
-            let ln = format!("{:>width$}", line_idx + 1, width = line_num_width);
-            let gutter_bg = if data.is_cursor_line {
-                Style::default().bg(theme.cursor_line_bg)
-            } else {
-                Style::default().bg(content_bg)
-            };
-            let ln_style = if data.is_cursor_line {
-                Style::default()
-                    .fg(theme.border_focused)
-                    .add_modifier(Modifier::BOLD)
-                    .patch(gutter_bg)
-            } else {
-                Style::default().fg(theme.border).patch(gutter_bg)
-            };
-            let sep_style = if data.is_cursor_line {
-                Style::default().fg(theme.border_focused).patch(gutter_bg)
-            } else {
-                Style::default().fg(theme.border).patch(gutter_bg)
-            };
-            (format!(" {ln} "), ln_style, sep_style)
-        } else {
-            let gutter_bg = if data.is_cursor_line {
-                Style::default().bg(theme.cursor_line_bg)
-            } else {
-                Style::default().bg(content_bg)
-            };
-            let ln_blank = " ".repeat(line_num_width);
-            let ln_style = if data.is_cursor_line {
-                Style::default()
-                    .fg(theme.border_focused)
-                    .add_modifier(Modifier::BOLD)
-                    .patch(gutter_bg)
-            } else {
-                Style::default().fg(theme.border).patch(gutter_bg)
-            };
-            let sep_style = if data.is_cursor_line {
-                Style::default().fg(theme.border_focused).patch(gutter_bg)
-            } else {
-                Style::default().fg(theme.border).patch(gutter_bg)
-            };
-            (format!(" {ln_blank} "), ln_style, sep_style)
-        };
-
-        // Color the gutter separator based on diff status
-        let diff_sep_style = match data.diff_status {
-            LineDiffStatus::Added => sep_style.fg(theme.diff_added),
-            LineDiffStatus::Modified => sep_style.fg(theme.diff_modified),
-            LineDiffStatus::DeletedAbove => sep_style.fg(theme.diff_deleted),
-            LineDiffStatus::Unchanged => sep_style,
-        };
+        let (ln_text, ln_style, sep_style) =
+            gutter_styles(theme, content_bg, data, line_idx, total_lines, line_num_width);
+        let diff_sep_style = diff_sep_style(sep_style, data.diff_status, theme);
         let diff_indicator = match data.diff_status {
             LineDiffStatus::DeletedAbove => "▔",
             _ => "│",
@@ -366,39 +372,133 @@ pub fn render_buffer(
         ));
         lines.push(Line::from(spans));
     }
+    lines
+}
 
-    let paragraph = Paragraph::new(lines)
-        .style(Style::default().bg(content_bg).fg(theme.foreground))
-        .block(block);
-
-    frame.render_widget(paragraph, area);
-
-    if show_cursor && focused {
-        let cursor_line = buffer.cursor.line.saturating_sub(start);
-        let cursor_line_index = buffer.cursor.line.min(buffer.lines_len().saturating_sub(1));
-        let line_str = buffer.line_as_string(cursor_line_index);
-        let mut line = line_str.as_str();
-        if line.ends_with('\n') {
-            line = &line[..line.len().saturating_sub(1)];
-        }
-        let cursor_display_col = display_col_for_char_idx(line, buffer.cursor.col, tab_width);
-        let offset_display = display_col_for_char_idx(line, buffer.viewport.offset_col, tab_width);
-        let x = area.x
-            + 1
-            + gutter_width as u16
-            + cursor_display_col.saturating_sub(offset_display) as u16;
-        let y = area.y + 1 + cursor_line as u16;
-        return Some(CursorPlacement { x, y });
+fn apply_search_highlights(
+    styles: &mut [Style],
+    buffer: &Buffer,
+    line_idx: usize,
+    actual_lines: usize,
+    theme: &Theme,
+    search: Option<(&str, bool)>,
+) {
+    let Some((term, whole_word)) = search else {
+        return;
+    };
+    if term.is_empty() || line_idx >= actual_lines {
+        return;
     }
-    None
+    let matches = buffer.search_line_matches(line_idx, term, whole_word);
+    for (m_start, m_end) in matches {
+        for idx in m_start..m_end.min(styles.len()) {
+            styles[idx] = styles[idx]
+                .bg(theme.selection_bg)
+                .add_modifier(Modifier::BOLD);
+        }
+    }
+}
+
+fn apply_selection_highlight(
+    styles: &mut [Style],
+    buffer: &Buffer,
+    line_idx: usize,
+    actual_lines: usize,
+    selection: Option<(usize, usize)>,
+    char_count: usize,
+    theme: &Theme,
+) {
+    if line_idx >= actual_lines {
+        return;
+    }
+    let Some((start, end)) = selection else {
+        return;
+    };
+    let line_start = buffer.line_char_start(line_idx);
+    let line_end = buffer.line_char_end(line_idx);
+    if end <= line_start || start >= line_end {
+        return;
+    }
+    let sel_start = start.saturating_sub(line_start).min(char_count);
+    let sel_end = end.saturating_sub(line_start).min(char_count);
+    if sel_end <= sel_start {
+        return;
+    }
+    for idx in sel_start..sel_end.min(styles.len()) {
+        styles[idx] = styles[idx].bg(theme.selection_bg);
+    }
+}
+
+fn gutter_styles(
+    theme: &Theme,
+    content_bg: Color,
+    data: &LineData,
+    line_idx: usize,
+    total_lines: usize,
+    line_num_width: usize,
+) -> (String, Style, Style) {
+    let gutter_bg = if data.is_cursor_line {
+        Style::default().bg(theme.cursor_line_bg)
+    } else {
+        Style::default().bg(content_bg)
+    };
+    let ln_style = if data.is_cursor_line {
+        Style::default()
+            .fg(theme.border_focused)
+            .add_modifier(Modifier::BOLD)
+            .patch(gutter_bg)
+    } else {
+        Style::default().fg(theme.border).patch(gutter_bg)
+    };
+    let sep_style = if data.is_cursor_line {
+        Style::default().fg(theme.border_focused).patch(gutter_bg)
+    } else {
+        Style::default().fg(theme.border).patch(gutter_bg)
+    };
+    let ln_text = if line_idx < total_lines {
+        let ln = format!("{:>width$}", line_idx + 1, width = line_num_width);
+        format!(" {ln} ")
+    } else {
+        let ln_blank = " ".repeat(line_num_width);
+        format!(" {ln_blank} ")
+    };
+    (ln_text, ln_style, sep_style)
+}
+
+fn diff_sep_style(sep_style: Style, status: LineDiffStatus, theme: &Theme) -> Style {
+    match status {
+        LineDiffStatus::Added => sep_style.fg(theme.diff_added),
+        LineDiffStatus::Modified => sep_style.fg(theme.diff_modified),
+        LineDiffStatus::DeletedAbove => sep_style.fg(theme.diff_deleted),
+        LineDiffStatus::Unchanged => sep_style,
+    }
+}
+
+fn cursor_placement(
+    buffer: &Buffer,
+    area: Rect,
+    start: usize,
+    gutter_width: usize,
+    tab_width: usize,
+) -> CursorPlacement {
+    let cursor_line = buffer.cursor.line.saturating_sub(start);
+    let cursor_line_index = buffer.cursor.line.min(buffer.lines_len().saturating_sub(1));
+    let line_str = buffer.line_as_string(cursor_line_index);
+    let mut line = line_str.as_str();
+    if line.ends_with('\n') {
+        line = &line[..line.len().saturating_sub(1)];
+    }
+    let cursor_display_col = display_col_for_char_idx(line, buffer.cursor.col, tab_width);
+    let offset_display = display_col_for_char_idx(line, buffer.viewport.offset_col, tab_width);
+    let x =
+        area.x + 1 + gutter_width as u16 + cursor_display_col.saturating_sub(offset_display) as u16;
+    let y = area.y + 1 + cursor_line as u16;
+    CursorPlacement { x, y }
 }
 
 fn buffer_input_bg(theme: &Theme, focused: bool) -> Color {
-    let mut bg = dim_bg_towards(
-        theme.cursor_line_bg,
-        theme.background,
-        if focused { 78 } else { 88 },
-    );
+    let dim_pct = if focused { 78 } else { 88 };
+    let mut bg = dim_bg_towards(theme.cursor_line_bg, theme.background, dim_pct);
     if bg == theme.selection_bg {
         bg = theme.background;
     }

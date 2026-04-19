@@ -21,7 +21,7 @@ pub struct ClaudeRunnerConfig {
 impl Default for ClaudeRunnerConfig {
     fn default() -> Self {
         Self {
-            max_parallel_turns: 8,
+            max_parallel_turns: usize::MAX,
             permission_mode: None,
         }
     }
@@ -53,7 +53,7 @@ pub enum ClaudeCommand {
 }
 
 pub const DEFAULT_MAX_TURNS: u32 = 50;
-pub const INTEGRATOR_MAX_TURNS: u32 = 70;
+pub const INTEGRATOR_MAX_TURNS: u32 = 500;
 
 pub struct ClaudeRunner {
     cmd_tx: Sender<ClaudeCommand>,

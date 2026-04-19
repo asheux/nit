@@ -493,17 +493,12 @@ impl Default for HighlightTheme {
 }
 
 fn color_or_default(value: Option<String>, default: Color) -> Color {
-    value
-        .as_deref()
-        .and_then(parse_hex_color)
-        .unwrap_or(default)
+    value.as_deref().and_then(parse_color).unwrap_or(default)
 }
 
-fn parse_color(value: &str) -> Option<Color> {
-    parse_hex_color(value)
-}
-
-fn parse_hex_color(s: &str) -> Option<Color> {
+// Accepts `#RRGGBB` and `RRGGBB`. Any other form (shorthand, alpha, named
+// colors) is rejected — palettes are explicit so mistakes are obvious.
+fn parse_color(s: &str) -> Option<Color> {
     let s = s.trim_start_matches('#');
     if s.len() != 6 {
         return None;

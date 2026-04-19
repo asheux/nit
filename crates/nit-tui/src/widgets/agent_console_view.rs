@@ -49,6 +49,76 @@ struct ConsoleLayout {
     input_window_start: usize,
 }
 
+fn lane_kind_for(state: &AppState, agent_id: &str) -> Option<AgentLaneKind> {
+    state
+        .agents
+        .agents
+        .iter()
+        .find(|lane| lane.id == agent_id)
+        .map(|lane| lane.kind)
+}
+
+fn resolve_context_pct(state: &AppState, agent_id: &str, mission: Option<&str>) -> Option<u32> {
+    let pct = match lane_kind_for(state, agent_id)? {
+        AgentLaneKind::Codex => match mission {
+            Some(m) => state
+                .agents
+                .codex_mission_context_remaining_pct
+                .get(m)
+                .and_then(|map| map.get(agent_id))
+                .copied(),
+            None => state.agents.codex_context_remaining_pct.get(agent_id).copied(),
+        },
+        AgentLaneKind::Claude => match mission {
+            Some(m) => state
+                .agents
+                .claude_mission_context_remaining_pct
+                .get(m)
+                .and_then(|map| map.get(agent_id))
+                .copied(),
+            None => state.agents.claude_context_remaining_pct.get(agent_id).copied(),
+        },
+        _ => return None,
+    };
+    Some(pct.unwrap_or(100).into())
+}
+
+fn format_context_text(pct: Option<u32>, used: Option<u32>, max: Option<u32>) -> String {
+    let short = format_token_count_short;
+    match (pct, used, max) {
+        (Some(p), Some(u), Some(m)) => format!("{p}% {}/{}", short(u), short(m)),
+        (Some(p), _, Some(m)) => format!("{p}%/{}", short(m)),
+        (Some(p), _, None) => format!("{p}%"),
+        (None, Some(u), Some(m)) => format!("{}/{}", short(u), short(m)),
+        (None, _, Some(m)) => short(m),
+        (None, _, None) => "--".to_string(),
+    }
+}
+
+fn resolve_context_used(state: &AppState, agent_id: &str, mission: Option<&str>) -> Option<u32> {
+    match lane_kind_for(state, agent_id)? {
+        AgentLaneKind::Codex => match mission {
+            Some(m) => state
+                .agents
+                .codex_mission_used_tokens
+                .get(m)
+                .and_then(|map| map.get(agent_id))
+                .copied(),
+            None => state.agents.codex_used_tokens.get(agent_id).copied(),
+        },
+        AgentLaneKind::Claude => match mission {
+            Some(m) => state
+                .agents
+                .claude_mission_used_tokens
+                .get(m)
+                .and_then(|map| map.get(agent_id))
+                .copied(),
+            None => state.agents.claude_used_tokens.get(agent_id).copied(),
+        },
+        _ => None,
+    }
+}
+
 pub fn render(
     frame: &mut Frame,
     area: Rect,
@@ -83,10 +153,10 @@ pub fn render(
         .border_style(border_style)
         .border_type(border_type)
         .style(Style::default().bg(theme.background));
-    frame.render_widget(block.clone(), area);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
 
     let layout = compute_console_layout(area, state)?;
-    let inner = block.inner(area);
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -98,86 +168,8 @@ pub fn render(
 
     let mission = state.agents.selected_context_mission();
     let agent = state.agents.selected_context_agent();
-    let codex_ctx_pct = agent.and_then(|agent_id| {
-        let lane_kind = state
-            .agents
-            .agents
-            .iter()
-            .find(|lane| lane.id == agent_id)
-            .map(|lane| lane.kind);
-        match lane_kind {
-            Some(AgentLaneKind::Codex) => {
-                let pct = if let Some(mission_id) = mission {
-                    state
-                        .agents
-                        .codex_mission_context_remaining_pct
-                        .get(mission_id)
-                        .and_then(|m| m.get(agent_id))
-                        .copied()
-                } else {
-                    state
-                        .agents
-                        .codex_context_remaining_pct
-                        .get(agent_id)
-                        .copied()
-                };
-                Some(pct.unwrap_or(100))
-            }
-            Some(AgentLaneKind::Claude) => {
-                let pct = if let Some(mission_id) = mission {
-                    state
-                        .agents
-                        .claude_mission_context_remaining_pct
-                        .get(mission_id)
-                        .and_then(|m| m.get(agent_id))
-                        .copied()
-                } else {
-                    state
-                        .agents
-                        .claude_context_remaining_pct
-                        .get(agent_id)
-                        .copied()
-                };
-                Some(pct.unwrap_or(100))
-            }
-            _ => None,
-        }
-    });
-    let codex_ctx_used = agent.and_then(|agent_id| {
-        let lane_kind = state
-            .agents
-            .agents
-            .iter()
-            .find(|lane| lane.id == agent_id)
-            .map(|lane| lane.kind);
-        match lane_kind {
-            Some(AgentLaneKind::Codex) => {
-                if let Some(mission_id) = mission {
-                    state
-                        .agents
-                        .codex_mission_used_tokens
-                        .get(mission_id)
-                        .and_then(|m| m.get(agent_id))
-                        .copied()
-                } else {
-                    state.agents.codex_used_tokens.get(agent_id).copied()
-                }
-            }
-            Some(AgentLaneKind::Claude) => {
-                if let Some(mission_id) = mission {
-                    state
-                        .agents
-                        .claude_mission_used_tokens
-                        .get(mission_id)
-                        .and_then(|m| m.get(agent_id))
-                        .copied()
-                } else {
-                    state.agents.claude_used_tokens.get(agent_id).copied()
-                }
-            }
-            _ => None,
-        }
-    });
+    let codex_ctx_pct = agent.and_then(|id| resolve_context_pct(state, id, mission));
+    let codex_ctx_used = agent.and_then(|id| resolve_context_used(state, id, mission));
     let codex_ctx_max = agent.and_then(|agent_id| {
         state
             .agents
@@ -201,43 +193,21 @@ pub fn render(
     } else {
         label_style
     };
+    let ctx_text = format_context_text(codex_ctx_pct, codex_ctx_used, codex_ctx_max);
+    let ctx_any = codex_ctx_pct.is_some() || codex_ctx_used.is_some() || codex_ctx_max.is_some();
+    let ctx_style = if ctx_any {
+        Style::default()
+            .fg(theme.accent)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        label_style
+    };
     let context_line = Line::from(vec![
         Span::styled("mission=", label_style),
         Span::styled(mission.unwrap_or("--"), mission_style),
         Span::styled("     ", label_style),
         Span::styled("ctx=", label_style),
-        Span::styled(
-            if let Some(pct) = codex_ctx_pct {
-                if let (Some(used), Some(max)) = (codex_ctx_used, codex_ctx_max) {
-                    format!(
-                        "{pct}% {}/{}",
-                        format_token_count_short(used),
-                        format_token_count_short(max)
-                    )
-                } else if let Some(max) = codex_ctx_max {
-                    format!("{pct}%/{}", format_token_count_short(max))
-                } else {
-                    format!("{pct}%")
-                }
-            } else if let (Some(used), Some(max)) = (codex_ctx_used, codex_ctx_max) {
-                format!(
-                    "{}/{}",
-                    format_token_count_short(used),
-                    format_token_count_short(max)
-                )
-            } else if let Some(max) = codex_ctx_max {
-                format_token_count_short(max)
-            } else {
-                "--".to_string()
-            },
-            if codex_ctx_pct.is_some() || codex_ctx_max.is_some() || codex_ctx_used.is_some() {
-                Style::default()
-                    .fg(theme.accent)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                label_style
-            },
-        ),
+        Span::styled(ctx_text, ctx_style),
     ]);
     frame.render_widget(Paragraph::new(context_line), chunks[0]);
 
@@ -2398,6 +2368,9 @@ fn breather_rows_for_user_prompt(
     let working = any_active || any_queued;
     let swarm_phase = swarm_mission_id.and_then(|mid| swarm.and_then(|s| s.swarm_stage_label(mid)));
     let swarm_hint = swarm_mission_id.and_then(|mid| swarm.and_then(|s| s.swarm_stage_hint(mid)));
+    let prescan_active = swarm_mission_id
+        .and_then(|mid| swarm.map(|s| s.is_prescan_active(mid)))
+        .unwrap_or(false);
     let is_swarm = swarm_mission_id.is_some();
     let shadow_stage = crate::shadow::shadow_stage_label_from_state(state, agent_ctx);
     let base_label: std::borrow::Cow<'_, str> = if !is_swarm && shadow_stage.is_some() {
@@ -2409,11 +2382,17 @@ fn breather_rows_for_user_prompt(
             Some("PLAN") => "Planning ...".into(),
             Some("VERIFY") => "Verifying ...".into(),
             Some("SYNTH") => "Synthesizing ...".into(),
+            Some("EXEC") if prescan_active => "Proposing (Genome check) ...".into(),
             Some("EXEC") => swarm_exec_label(state, &ordered_ids).into(),
             _ if is_swarm && any_active => "Executing ...".into(),
             _ if any_active => "Working ...".into(),
             _ => "Queued ...".into(),
         }
+    } else if is_swarm && prescan_active {
+        // Pre-scan is in flight but no proposer has been dispatched yet —
+        // surface the Genome check so the user knows what's causing the
+        // delay before "Proposing ..." kicks in.
+        "Proposing (Genome check) ...".into()
     } else if is_swarm && swarm_hint.is_some() {
         // Background genome work is running but no agent is active yet. Use
         // the stage + hint instead of a generic "Waiting" so the user knows

@@ -66,6 +66,10 @@ pub struct SyntaxRuntime {
 
 const INITIAL_HIGHLIGHT_WAIT_MS: u64 = 1000;
 const SCROLL_DEBOUNCE_MS: u64 = 20;
+// Cap line-map computation on buffers above these thresholds; big files keep
+// rendering with the latest snapshot and skip the diff-and-map step.
+const LARGE_MAP_BYTES: usize = 600_000;
+const LARGE_MAP_LINES: usize = 15_000;
 
 impl SyntaxRuntime {
     pub fn new(config: HighlightConfig) -> Self {
@@ -435,9 +439,9 @@ impl SyntaxRuntime {
             };
         }
 
-        // For large buffers, keep rendering the latest snapshot without computing a full line-map.
-        const LARGE_MAP_BYTES: usize = 600_000;
-        const LARGE_MAP_LINES: usize = 15_000;
+        // Large buffers skip the line-map diff — the diff cost dominates the
+        // perceived highlighting latency, so they keep rendering the latest
+        // snapshot even if it lags the current version.
         let large = buffer.bytes_len() >= LARGE_MAP_BYTES || current_lines >= LARGE_MAP_LINES;
         if large {
             self.render_cache.remove(&buffer_id);
@@ -573,11 +577,11 @@ impl SyntaxRuntime {
 
     fn line_hashes_for(&mut self, buffer_id: usize, buffer: &Buffer) -> Arc<[u64]> {
         let version = buffer.version();
-        let needs_rebuild = match self.line_hash_cache.get(&buffer_id) {
-            Some(cache) => cache.version != version,
-            None => true,
-        };
-        if needs_rebuild {
+        let stale = self
+            .line_hash_cache
+            .get(&buffer_id)
+            .is_none_or(|cache| cache.version != version);
+        if stale {
             let hashes = compute_buffer_line_hashes(buffer);
             self.line_hash_cache.insert(
                 buffer_id,

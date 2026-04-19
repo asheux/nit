@@ -1,14 +1,11 @@
-//! Listener thread that terminates the UDS connection from the
-//! `nit-mcp-server` child process.  Converts each `BackchannelRequest`
-//! into a mint-on-apply `AgentBusEvent::*Request` and pushes it onto
-//! the shared event channel that the main loop drains with the other
-//! runner events.
+//! UDS listener that terminates connections from the `nit-mcp-server` child
+//! process. Each `BackchannelRequest` is converted into a mint-on-apply
+//! `AgentBusEvent::*Request` and forwarded to the main loop's shared event
+//! channel, where it's drained alongside runner events.
 //!
-//! Unix-only in v1 — Windows callers can opt-in later via a TCP
-//! fallback; the whole module is gated with `#[cfg(unix)]` so
-//! non-Unix builds keep compiling with MCP disabled.
-
-#![cfg(unix)]
+//! Unix-only in v1 — Windows callers can opt into a TCP fallback later; the
+//! whole module is gated with `#[cfg(unix)]` so non-Unix builds keep
+//! compiling with MCP disabled.
 
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -24,14 +21,14 @@ pub struct McpBackchannel {
 }
 
 impl McpBackchannel {
-    /// Bind a per-process UDS under `/tmp` and spawn an accept loop.  Each
-    /// incoming connection is handled on its own thread so slow clients
-    /// can't block new `tools/call` requests from arriving.
+    /// Bind a per-process UDS under `/tmp` and spawn an accept loop. Each
+    /// incoming connection is handled on its own thread so slow clients can't
+    /// block new `tools/call` requests from arriving.
     pub fn spawn(event_tx: Sender<AgentBusEvent>) -> std::io::Result<Self> {
         let pid = std::process::id();
         let socket_path = format!("/tmp/nit-mcp-{pid}.sock");
         // Clean up a stale socket from a previous run with the same pid
-        // wraparound — rare, but the bind would otherwise fail with EADDRINUSE.
+        // (possible on wraparound) — `bind` would otherwise fail EADDRINUSE.
         let _ = std::fs::remove_file(&socket_path);
         let listener = UnixListener::bind(&socket_path)?;
         let path_for_return = socket_path.clone();
@@ -47,40 +44,29 @@ impl McpBackchannel {
 
 impl Drop for McpBackchannel {
     fn drop(&mut self) {
-        // Best-effort cleanup; if the file is already gone, the error is
-        // harmless.  We don't join the listener thread — it'll fall out
-        // when the Sender half of the event channel is dropped.
+        // Best-effort cleanup. The listener thread is not joined; it falls
+        // out naturally when the Sender half of the event channel drops.
         let _ = std::fs::remove_file(&self.socket_path);
     }
 }
 
 fn accept_loop(listener: UnixListener, event_tx: Sender<AgentBusEvent>) {
     for conn in listener.incoming() {
-        match conn {
-            Ok(stream) => {
-                let tx = event_tx.clone();
-                let _ = thread::Builder::new()
-                    .name("nit-mcp-conn".into())
-                    .spawn(move || handle_connection(stream, tx));
-            }
-            Err(_) => {
-                // Transient accept errors shouldn't kill the listener;
-                // just keep looping.
-                continue;
-            }
-        }
+        let Ok(stream) = conn else {
+            // Transient accept errors shouldn't kill the listener.
+            continue;
+        };
+        let tx = event_tx.clone();
+        let _ = thread::Builder::new()
+            .name("nit-mcp-conn".into())
+            .spawn(move || handle_connection(stream, tx));
     }
 }
 
 fn handle_connection(stream: UnixStream, event_tx: Sender<AgentBusEvent>) {
-    // Split the stream so we can read the request line before echoing
-    // the response back on the same socket.
-    let reader_stream = match stream.try_clone() {
-        Ok(s) => s,
-        Err(_) => return,
+    let Some((mut reader, mut writer)) = split_stream(stream) else {
+        return;
     };
-    let mut reader = BufReader::new(reader_stream);
-    let mut writer = stream;
     let mut line = String::new();
     if reader.read_line(&mut line).is_err() {
         return;
@@ -115,9 +101,17 @@ fn handle_connection(stream: UnixStream, event_tx: Sender<AgentBusEvent>) {
     let _ = write_response(&mut writer, &resp);
 }
 
+/// Duplicate the stream handle so the reader can own a `BufReader` while the
+/// writer keeps the original stream for the response. Returns `None` when the
+/// clone fails (rare; typically means the peer closed the socket already).
+fn split_stream(stream: UnixStream) -> Option<(BufReader<UnixStream>, UnixStream)> {
+    let reader_stream = stream.try_clone().ok()?;
+    Some((BufReader::new(reader_stream), stream))
+}
+
 fn write_response<W: Write>(w: &mut W, resp: &BackchannelResponse) -> std::io::Result<()> {
     let line = serde_json::to_string(resp).unwrap_or_else(|_| "{}".into());
-    writeln!(w, "{}", line)?;
+    writeln!(w, "{line}")?;
     w.flush()
 }
 
@@ -178,59 +172,5 @@ pub(crate) fn backchannel_to_event(req: BackchannelRequest) -> (u64, AgentBusEve
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use std::sync::mpsc;
-
-    #[test]
-    fn backchannel_to_event_maps_emit_signal() {
-        let req = BackchannelRequest::EmitSignal {
-            request_id: 42,
-            agent_id: "agent-x".into(),
-            kind: nit_core::substrate::SignalKind::Warning,
-            target: nit_core::substrate::SignalTarget::Global,
-            payload: serde_json::json!({"k":"v"}),
-            strength: Some(0.7),
-        };
-        let (id, event) = backchannel_to_event(req);
-        assert_eq!(id, 42);
-        match event {
-            AgentBusEvent::EmitSignalRequest {
-                posted_by,
-                initial_strength,
-                ..
-            } => {
-                assert_eq!(posted_by, "agent-x");
-                assert!((initial_strength.unwrap() - 0.7).abs() < f32::EPSILON * 10.0);
-            }
-            other => panic!("expected EmitSignalRequest, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn backchannel_to_event_maps_assert_claim() {
-        let req = BackchannelRequest::AssertClaim {
-            request_id: 9,
-            agent_id: "agent-y".into(),
-            kind: nit_core::substrate::ClaimKind::Soft,
-            target: nit_core::substrate::ClaimTarget::Global,
-            ttl_gens: 2,
-            rationale: "r".into(),
-        };
-        let (id, event) = backchannel_to_event(req);
-        assert_eq!(id, 9);
-        assert!(matches!(event, AgentBusEvent::AssertClaimRequest { .. }));
-    }
-
-    #[test]
-    fn spawn_and_drop_removes_socket() {
-        let (tx, _rx) = mpsc::channel();
-        let bc = McpBackchannel::spawn(tx).expect("spawn");
-        let path = bc.socket_path.clone();
-        assert!(std::path::Path::new(&path).exists());
-        drop(bc);
-        // Give the listener a moment to unblock; Drop cleans up the file.
-        std::thread::sleep(std::time::Duration::from_millis(50));
-        assert!(!std::path::Path::new(&path).exists());
-    }
-}
+#[path = "tests/mcp_backchannel.rs"]
+mod tests;

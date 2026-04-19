@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::time::Instant;
 
 use nit_core::{AgentAlertSeverity, AgentBusEvent, AgentDiagnosticEvent, AgentStatus, AppState};
@@ -10,6 +11,19 @@ use crate::vitals::VitalsState;
 // ---------------------------------------------------------------------------
 // Codex thread-context helpers (Block 1)
 // ---------------------------------------------------------------------------
+
+fn remove_from_mission_map<V>(
+    maps: &mut HashMap<String, HashMap<String, V>>,
+    mission_id: &str,
+    agent_id: &str,
+) {
+    if let Some(inner) = maps.get_mut(mission_id) {
+        inner.remove(agent_id);
+        if inner.is_empty() {
+            maps.remove(mission_id);
+        }
+    }
+}
 
 pub(super) fn codex_thread_context_not_found(message: &str) -> bool {
     let lowered = message.to_ascii_lowercase();
@@ -31,31 +45,21 @@ pub(super) fn clear_codex_thread_context_for_agent(
     mission_id: Option<&str>,
 ) {
     if let Some(mission_id) = mission_id {
-        if let Some(map) = state.agents.codex_mission_thread_ids.get_mut(mission_id) {
-            map.remove(agent_id);
-            if map.is_empty() {
-                state.agents.codex_mission_thread_ids.remove(mission_id);
-            }
-        }
-        if let Some(map) = state.agents.codex_mission_used_tokens.get_mut(mission_id) {
-            map.remove(agent_id);
-            if map.is_empty() {
-                state.agents.codex_mission_used_tokens.remove(mission_id);
-            }
-        }
-        if let Some(map) = state
-            .agents
-            .codex_mission_context_remaining_pct
-            .get_mut(mission_id)
-        {
-            map.remove(agent_id);
-            if map.is_empty() {
-                state
-                    .agents
-                    .codex_mission_context_remaining_pct
-                    .remove(mission_id);
-            }
-        }
+        remove_from_mission_map(
+            &mut state.agents.codex_mission_thread_ids,
+            mission_id,
+            agent_id,
+        );
+        remove_from_mission_map(
+            &mut state.agents.codex_mission_used_tokens,
+            mission_id,
+            agent_id,
+        );
+        remove_from_mission_map(
+            &mut state.agents.codex_mission_context_remaining_pct,
+            mission_id,
+            agent_id,
+        );
     } else {
         state.agents.codex_thread_ids.remove(agent_id);
         state.agents.codex_used_tokens.remove(agent_id);
@@ -856,6 +860,145 @@ pub(super) fn estimate_claude_context_tokens_for_mission(
         .claude_estimated_tokens_used_by_mission
         .insert(mission_id.to_string(), tokens);
     tokens
+}
+
+/// Append a GENOME LANDSCAPE section to a propose-role prompt so proposers
+/// can recommend structural changes with concrete numbers (tier, consistency,
+/// density) instead of surface-level refactors. Proposers currently describe
+/// "what to refactor" without the genome signal that the synthesizer sees at
+/// end of mission — this closes the gap by surfacing the data upfront.
+///
+/// Returns `None` when no scope files have genome reports yet; callers
+/// should leave the prompt untouched in that case.
+pub(super) fn build_propose_genome_landscape(
+    state: &AppState,
+    scope_files: &[String],
+    role: Option<&str>,
+) -> Option<String> {
+    use nit_core::GenomeTier;
+    let workspace = state.workspace_root.as_path();
+    let mut rows: Vec<(String, &nit_core::GenomeReport)> = Vec::new();
+    for rel in scope_files {
+        let abs = workspace.join(rel);
+        if let Some(report) = state.genome_reports.get(&abs) {
+            rows.push((rel.clone(), report));
+        }
+    }
+    if rows.is_empty() {
+        return None;
+    }
+    // Sort worst-first: lowest tier, then lowest consistency.
+    rows.sort_by(|a, b| {
+        let ta = a.1.tier as u8;
+        let tb = b.1.tier as u8;
+        ta.cmp(&tb).then(
+            a.1.cross_encoder_consistency
+                .partial_cmp(&b.1.cross_encoder_consistency)
+                .unwrap_or(std::cmp::Ordering::Equal),
+        )
+    });
+
+    let mut out = String::new();
+    let (header, framing) = match role {
+        Some("integrate") => (
+            "\n## GENOME LANDSCAPE (current state — target these metrics with your edits)\n",
+            "Lower tier or consistency means worse structural quality. Cross-check proposer \
+             recommendations against these numbers. When you edit a file, target a concrete \
+             encoder move (e.g. raise structural density, unlock a parsimony-capped tier, \
+             eliminate a zero-entropy block). Report per-file before/after expectations in \
+             your final message so reviewers and the genome gate can verify direction.\n\n",
+        ),
+        Some("judge") => (
+            "\n## GENOME LANDSCAPE (current state — weigh proposals against this)\n",
+            "Lower tier or consistency means worse structural quality. Prefer proposals that \
+             target the worst-scoring files first and cite concrete metric moves. Reject \
+             proposals that recommend changes uncorrelated with the landscape (e.g. \
+             cosmetic renames on already-tier-IV files while tier-I/II files go untouched).\n\n",
+        ),
+        _ => (
+            "\n## GENOME LANDSCAPE (current state — use this to ground your proposal)\n",
+            "Lower tier or consistency means worse structural quality. Propose fixes that move \
+             lowest-scoring files up first; cite the metric (tier, consistency, parsimony) when \
+             you recommend a refactor so the integrator knows what the change is supposed to move.\n\n",
+        ),
+    };
+    out.push_str(header);
+    out.push_str(framing);
+    out.push_str("Per-file (worst first):\n");
+    for (path, report) in &rows {
+        let gen_sum: u32 = report
+            .encoder_scores
+            .iter()
+            .map(|s| s.generations_survived)
+            .sum();
+        let bloat_tag = if report.parsimony.bloat_detected {
+            " [parsimony-bloat]"
+        } else {
+            ""
+        };
+        out.push_str(&format!(
+            "- {path}: tier {} ({}), consistency {:.2}, gen-sum {gen_sum}{bloat_tag}\n",
+            report.tier.numeral(),
+            report.tier,
+            report.cross_encoder_consistency,
+        ));
+    }
+
+    // Workspace-wide tier counts for context.
+    let mut counts = [0usize; 5];
+    for report in state.genome_reports.values() {
+        let idx = report.tier as usize;
+        if idx < counts.len() {
+            counts[idx] = counts[idx].saturating_add(1);
+        }
+    }
+    let total: usize = counts.iter().sum();
+    if total > 0 {
+        out.push_str(&format!(
+            "\nWorkspace tier distribution ({total} files): I={} II={} III={} IV={} V={}\n",
+            counts[GenomeTier::StillLife as usize],
+            counts[GenomeTier::Oscillator as usize],
+            counts[GenomeTier::Spaceship as usize],
+            counts[GenomeTier::Methuselah as usize],
+            counts[GenomeTier::Replicator as usize],
+        ));
+    }
+
+    out.push_str(
+        "\nRECOMMENDATION FORMAT: when proposing a change, name the target metric and expected direction — \
+         e.g. \"split swarm.rs: structural density 0.13 → aim ≥0.25 by per-concern submodules\", \
+         \"inline vitals.rs trivial predicates: parsimony-bloat cap → tier IV unlock\".\n",
+    );
+    Some(out)
+}
+
+/// Append the genome landscape to any dispatch whose role benefits from it:
+///   - propose: so recommendations cite concrete metrics.
+///   - integrate: so the writer can verify the proposer's recommendations
+///     against the actual current state, and target changes that move
+///     specific encoders rather than trusting proposer text blindly.
+///   - judge: so the decision step weighs proposals against the same
+///     landscape the proposers were grounded in.
+///
+/// Covers every template (parallel / lab / bulk) because the injection
+/// hangs off `task_role`, which is template-agnostic.
+pub(super) fn augment_dispatch_prompt_with_landscape(
+    state: &AppState,
+    swarm: &crate::swarm::SwarmRuntime,
+    dispatch: &mut SwarmDispatch,
+) {
+    let role = dispatch.task_role.as_deref();
+    let wants_landscape = matches!(role, Some("propose") | Some("integrate") | Some("judge"));
+    if !wants_landscape {
+        return;
+    }
+    let Some(scope_files) = swarm.scope_files_for_mission(&dispatch.mission_id) else {
+        return;
+    };
+    let Some(section) = build_propose_genome_landscape(state, scope_files, role) else {
+        return;
+    };
+    dispatch.prompt.push_str(&section);
 }
 
 /// Apply the swarm task role to the agent lane so the UI shows the correct role

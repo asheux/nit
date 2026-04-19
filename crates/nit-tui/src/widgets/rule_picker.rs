@@ -1,3 +1,7 @@
+//! Popup picker for Substrate rule catalog entries with fuzzy filter. Opened
+//! via the Substrate menu; Esc cancels, Enter applies. Typed characters live
+//! in `rule_picker.query` and feed `rule_catalog.filter_indices`.
+
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use nit_core::{actions::Action, AppState};
 use ratatui::{
@@ -9,95 +13,67 @@ use ratatui::{
 };
 
 use crate::theme::Theme;
+use crate::widgets::picker_utils::{centered_rect_px, truncate_text, wrap_text};
 
+const POPUP_MAX_WIDTH: u16 = 101;
+const POPUP_MAX_HEIGHT: u16 = 32;
+const PAGE_JUMP: usize = 6;
+/// Rows reserved outside the matches list: filter row + detail row + footer.
+const RESERVED_CHROME_ROWS: u16 = 3;
+const MIN_INNER_HEIGHT: u16 = 4;
+/// Minimum width for the ASCII-bordered rule card. Below this the box frame
+/// would not fit, so `format_rule_box_lines` falls back to a single line.
+const BOX_MIN_WIDTH: usize = 4;
+
+/// Handle a key event for the rule picker. Returns true if the event was
+/// consumed (typed characters mutate `rule_picker.query` and reset selection).
 pub fn handle_key(key: &KeyEvent, state: &mut AppState) -> bool {
+    let len = filtered_len(state);
+    let cur = state.rule_picker.selected;
     match key.code {
         KeyCode::Esc => {
             let _ = nit_core::apply_action(state, Action::CloseModal);
-            true
         }
         KeyCode::Enter => {
             let _ = nit_core::apply_action(state, Action::ApplySelectedRuleFromPicker);
-            true
         }
         KeyCode::Backspace => {
             state.rule_picker.query.pop();
             state.rule_picker.selected = 0;
-            true
         }
-        KeyCode::Up => {
-            let len = state
-                .rule_catalog
-                .filter_indices(&state.rule_picker.query)
-                .len();
-            if len > 0 {
-                if state.rule_picker.selected == 0 {
-                    state.rule_picker.selected = len - 1;
-                } else {
-                    state.rule_picker.selected -= 1;
-                }
-            }
-            true
+        KeyCode::Up if len > 0 => {
+            state.rule_picker.selected = if cur == 0 { len - 1 } else { cur - 1 };
         }
-        KeyCode::Down => {
-            let len = state
-                .rule_catalog
-                .filter_indices(&state.rule_picker.query)
-                .len();
-            if len > 0 {
-                state.rule_picker.selected = (state.rule_picker.selected + 1) % len;
-            }
-            true
+        KeyCode::Down if len > 0 => state.rule_picker.selected = (cur + 1) % len,
+        KeyCode::PageUp if len > 0 => state.rule_picker.selected = cur.saturating_sub(PAGE_JUMP),
+        KeyCode::PageDown if len > 0 => {
+            state.rule_picker.selected = (cur + PAGE_JUMP).min(len - 1);
         }
-        KeyCode::PageUp => {
-            let len = state
-                .rule_catalog
-                .filter_indices(&state.rule_picker.query)
-                .len();
-            if len > 0 {
-                state.rule_picker.selected = state.rule_picker.selected.saturating_sub(6);
-            }
-            true
-        }
-        KeyCode::PageDown => {
-            let len = state
-                .rule_catalog
-                .filter_indices(&state.rule_picker.query)
-                .len();
-            if len > 0 {
-                state.rule_picker.selected = (state.rule_picker.selected + 6).min(len - 1);
-            }
-            true
-        }
-        KeyCode::Home => {
+        KeyCode::Home => state.rule_picker.selected = 0,
+        KeyCode::End if len > 0 => state.rule_picker.selected = len - 1,
+        KeyCode::Char(ch) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+            state.rule_picker.query.push(ch);
             state.rule_picker.selected = 0;
-            true
         }
-        KeyCode::End => {
-            let len = state
-                .rule_catalog
-                .filter_indices(&state.rule_picker.query)
-                .len();
-            if len > 0 {
-                state.rule_picker.selected = len - 1;
-            }
-            true
-        }
-        KeyCode::Char(ch) => {
-            if !key.modifiers.contains(KeyModifiers::CONTROL) {
-                state.rule_picker.query.push(ch);
-                state.rule_picker.selected = 0;
-                return true;
-            }
-            false
-        }
-        _ => false,
+        KeyCode::Up | KeyCode::Down | KeyCode::PageUp | KeyCode::PageDown | KeyCode::End => {}
+        _ => return false,
     }
+    true
 }
 
+fn filtered_len(state: &AppState) -> usize {
+    state
+        .rule_catalog
+        .filter_indices(&state.rule_picker.query)
+        .len()
+}
+
+/// Render the rule picker popup. Centers over `screen`, clamps to
+/// `POPUP_MAX_WIDTH`/`POPUP_MAX_HEIGHT`, and bails on too-small inner areas so
+/// callers get no partial frame.
 pub fn render(frame: &mut Frame, screen: Rect, state: &AppState, theme: &Theme) {
     let matches = state.rule_catalog.filter_indices(&state.rule_picker.query);
-    let area = fixed_rect(screen);
+    let area = popup_rect(screen);
     if area.width == 0 || area.height == 0 {
         return;
     }
@@ -114,14 +90,11 @@ pub fn render(frame: &mut Frame, screen: Rect, state: &AppState, theme: &Theme) 
         ))
         .style(Style::default().bg(popup_bg));
     let inner = block.inner(area);
-    if inner.height < 3 {
+    if inner.height < MIN_INNER_HEIGHT {
         return;
     }
     frame.render_widget(block, area);
-    if inner.height < 4 {
-        return;
-    }
-    let list_height = inner.height.saturating_sub(3);
+    let list_height = inner.height.saturating_sub(RESERVED_CHROME_ROWS);
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -132,6 +105,19 @@ pub fn render(frame: &mut Frame, screen: Rect, state: &AppState, theme: &Theme) 
         ])
         .split(inner);
 
+    render_filter(frame, chunks[0], state, theme, popup_bg);
+    render_matches(frame, chunks[1], &matches, state, theme, popup_bg);
+    render_detail(frame, chunks[2], &matches, state, theme, popup_bg);
+    render_footer(frame, chunks[3], theme, popup_bg);
+}
+
+fn render_filter(
+    frame: &mut Frame,
+    area: Rect,
+    state: &AppState,
+    theme: &Theme,
+    popup_bg: ratatui::style::Color,
+) {
     let label_style = Style::default()
         .fg(theme.title)
         .bg(popup_bg)
@@ -141,46 +127,62 @@ pub fn render(frame: &mut Frame, screen: Rect, state: &AppState, theme: &Theme) 
         Span::styled("Filter: ", label_style),
         Span::styled(state.rule_picker.query.clone(), value_style),
     ]);
-    let filter = Paragraph::new(filter_line).style(Style::default().bg(popup_bg));
-    frame.render_widget(filter, chunks[0]);
+    frame.render_widget(
+        Paragraph::new(filter_line).style(Style::default().bg(popup_bg)),
+        area,
+    );
+}
 
+fn render_matches(
+    frame: &mut Frame,
+    area: Rect,
+    matches: &[usize],
+    state: &AppState,
+    theme: &Theme,
+    popup_bg: ratatui::style::Color,
+) {
     if matches.is_empty() {
         let empty = Paragraph::new("No matching rules")
             .style(Style::default().fg(theme.warning).bg(popup_bg));
-        frame.render_widget(empty, chunks[1]);
-    } else {
-        let mut items = Vec::with_capacity(matches.len());
-        let max_width = chunks[1].width as usize;
-        let max_item_width = max_width;
-        for idx in matches.iter() {
-            if let Some(rule) = state.rule_catalog.get(*idx) {
-                let lines = format_rule_box_lines(rule, max_item_width);
-                items.push(ListItem::new(lines));
-            }
-        }
-        let mut list_state = ListState::default();
-        let selected = state
-            .rule_picker
-            .selected
-            .min(items.len().saturating_sub(1));
-        list_state.select(Some(selected));
-        let item_style = Style::default()
-            .fg(ratatui::style::Color::Gray)
-            .bg(popup_bg);
-        let list = List::new(items)
-            .style(item_style)
-            .highlight_style(
-                Style::default()
-                    .fg(theme.foreground)
-                    .bg(theme.selection_bg)
-                    .add_modifier(Modifier::BOLD),
-            )
-            .highlight_symbol("");
-        frame.render_stateful_widget(list, chunks[1], &mut list_state);
+        frame.render_widget(empty, area);
+        return;
     }
+    let max_item_width = area.width as usize;
+    let items: Vec<ListItem<'static>> = matches
+        .iter()
+        .filter_map(|idx| state.rule_catalog.get(*idx))
+        .map(|rule| ListItem::new(format_rule_box_lines(rule, max_item_width)))
+        .collect();
+    let mut list_state = ListState::default();
+    let selected = state
+        .rule_picker
+        .selected
+        .min(items.len().saturating_sub(1));
+    list_state.select(Some(selected));
+    let item_style = Style::default()
+        .fg(ratatui::style::Color::Gray)
+        .bg(popup_bg);
+    let list = List::new(items)
+        .style(item_style)
+        .highlight_style(
+            Style::default()
+                .fg(theme.foreground)
+                .bg(theme.selection_bg)
+                .add_modifier(Modifier::BOLD),
+        )
+        .highlight_symbol("");
+    frame.render_stateful_widget(list, area, &mut list_state);
+}
 
-    let detail_text = selected_rule_detail(&matches, state);
-    let detail_width = chunks[2].width as usize;
+fn render_detail(
+    frame: &mut Frame,
+    area: Rect,
+    matches: &[usize],
+    state: &AppState,
+    theme: &Theme,
+    popup_bg: ratatui::style::Color,
+) {
+    let detail_text = selected_rule_detail(matches, state);
     let detail_style = if detail_text.warning.is_some() {
         Style::default().fg(theme.warning).bg(popup_bg)
     } else {
@@ -191,77 +193,45 @@ pub fn render(frame: &mut Frame, screen: Rect, state: &AppState, theme: &Theme) 
     };
     let detail_line = detail_text
         .line
-        .map(|line| truncate_text(&line, detail_width.saturating_sub(1)))
+        .map(|line| truncate_text(&line, (area.width as usize).saturating_sub(1)))
         .unwrap_or_else(|| "No rule selected".to_string());
-    let detail = Paragraph::new(detail_line).style(detail_style);
-    frame.render_widget(detail, chunks[2]);
+    frame.render_widget(Paragraph::new(detail_line).style(detail_style), area);
+}
 
+fn render_footer(frame: &mut Frame, area: Rect, theme: &Theme, popup_bg: ratatui::style::Color) {
+    let accent_dim = Style::default()
+        .fg(theme.accent)
+        .add_modifier(Modifier::DIM);
+    let border_dim = Style::default()
+        .fg(theme.border)
+        .add_modifier(Modifier::DIM);
     let footer_line = Line::from(vec![
-        Span::styled(
-            "Enter apply",
-            Style::default()
-                .fg(theme.accent)
-                .add_modifier(Modifier::DIM),
-        ),
-        Span::styled(
-            " | ",
-            Style::default()
-                .fg(theme.border)
-                .add_modifier(Modifier::DIM),
-        ),
-        Span::styled(
-            "Esc cancel",
-            Style::default()
-                .fg(theme.accent)
-                .add_modifier(Modifier::DIM),
-        ),
-        Span::styled(
-            " | ",
-            Style::default()
-                .fg(theme.border)
-                .add_modifier(Modifier::DIM),
-        ),
-        Span::styled(
-            "Type to filter",
-            Style::default()
-                .fg(theme.border)
-                .add_modifier(Modifier::DIM),
-        ),
+        Span::styled("Enter apply", accent_dim),
+        Span::styled(" | ", border_dim),
+        Span::styled("Esc cancel", accent_dim),
+        Span::styled(" | ", border_dim),
+        Span::styled("Type to filter", border_dim),
     ]);
-    let footer = Paragraph::new(footer_line).style(Style::default().bg(popup_bg));
-    frame.render_widget(footer, chunks[3]);
+    frame.render_widget(
+        Paragraph::new(footer_line).style(Style::default().bg(popup_bg)),
+        area,
+    );
 }
 
-fn centered_rect_px(screen: Rect, width: u16, height: u16) -> Rect {
-    let w = width.min(screen.width);
-    let h = height.min(screen.height);
-    let x = screen.x + screen.width.saturating_sub(w) / 2;
-    let y = screen.y + screen.height.saturating_sub(h) / 2;
-    Rect {
-        x,
-        y,
-        width: w,
-        height: h,
-    }
-}
-
-fn fixed_rect(screen: Rect) -> Rect {
+fn popup_rect(screen: Rect) -> Rect {
     let max_w = screen.width.saturating_sub(4).max(10);
     let max_h = screen.height.saturating_sub(4).max(6);
-    let width = 101u16.min(max_w);
-    let height = 32u16.min(max_h);
-    centered_rect_px(screen, width, height)
+    centered_rect_px(screen, POPUP_MAX_WIDTH.min(max_w), POPUP_MAX_HEIGHT.min(max_h))
 }
 
 fn format_rule_box_lines(rule: &nit_core::NamedRule, width: usize) -> Vec<Line<'static>> {
-    if width < 4 {
-        let raw = format!("{} | {} | {}", rule.id, rule.name, rule.rulestring);
-        return vec![Line::from(truncate_text(&raw, width))];
-    }
-    let inner = width.saturating_sub(4);
-    let mut lines = Vec::new();
-    lines.push(Line::from(box_border_line(width)));
     let rule_text = format!("{} | {} | {}", rule.id, rule.name, rule.rulestring);
+    if width < BOX_MIN_WIDTH {
+        return vec![Line::from(truncate_text(&rule_text, width))];
+    }
+    let inner = width.saturating_sub(BOX_MIN_WIDTH);
+    let mut lines = Vec::with_capacity(4);
+    lines.push(Line::from(box_border_line(width)));
     for line in wrap_text(&rule_text, inner) {
         lines.push(Line::from(box_content_line(&line, width)));
     }
@@ -282,10 +252,10 @@ fn box_border_line(width: usize) -> String {
 }
 
 fn box_content_line(text: &str, width: usize) -> String {
-    if width < 4 {
+    if width < BOX_MIN_WIDTH {
         return truncate_text(text, width);
     }
-    let inner = width.saturating_sub(4);
+    let inner = width.saturating_sub(BOX_MIN_WIDTH);
     let trimmed = truncate_text(text, inner);
     let padding = inner.saturating_sub(trimmed.chars().count());
     let mut line = String::with_capacity(width);
@@ -298,54 +268,6 @@ fn box_content_line(text: &str, width: usize) -> String {
     line.push(' ');
     line.push('|');
     line
-}
-
-fn wrap_text(text: &str, width: usize) -> Vec<String> {
-    let trimmed = text.trim();
-    if trimmed.is_empty() {
-        return vec![String::new()];
-    }
-    if width == 0 {
-        return vec![String::new()];
-    }
-    let mut lines = Vec::new();
-    let mut current = String::new();
-    for word in trimmed.split_whitespace() {
-        let word_len = word.chars().count();
-        if word_len > width {
-            if !current.is_empty() {
-                lines.push(current);
-                current = String::new();
-            }
-            let mut chunk = String::new();
-            for ch in word.chars() {
-                chunk.push(ch);
-                if chunk.chars().count() == width {
-                    lines.push(chunk);
-                    chunk = String::new();
-                }
-            }
-            if !chunk.is_empty() {
-                current = chunk;
-            }
-            continue;
-        }
-        let needs_space = !current.is_empty();
-        let next_len = current.chars().count() + if needs_space { 1 } else { 0 } + word_len;
-        if next_len <= width {
-            if needs_space {
-                current.push(' ');
-            }
-            current.push_str(word);
-        } else {
-            lines.push(current);
-            current = word.to_string();
-        }
-    }
-    if !current.is_empty() {
-        lines.push(current);
-    }
-    lines
 }
 
 struct RuleDetailLine {
@@ -370,8 +292,7 @@ fn selected_rule_detail(matches: &[usize], state: &AppState) -> RuleDetailLine {
             warning: None,
         };
     };
-    let mut parts = Vec::new();
-    parts.push(rule.rulestring.clone());
+    let mut parts = vec![rule.rulestring.clone()];
     if !rule.description.is_empty() {
         parts.push(rule.description.clone());
     }
@@ -388,22 +309,4 @@ fn selected_rule_detail(matches: &[usize], state: &AppState) -> RuleDetailLine {
         line: Some(line),
         warning,
     }
-}
-
-fn truncate_text(text: &str, max: usize) -> String {
-    if max == 0 {
-        return String::new();
-    }
-    let mut out = String::new();
-    for (count, ch) in text.chars().enumerate() {
-        if count >= max {
-            break;
-        }
-        out.push(ch);
-    }
-    if text.chars().count() > max && max > 3 {
-        let trimmed: String = out.chars().take(max - 3).collect();
-        return format!("{trimmed}...");
-    }
-    out
 }

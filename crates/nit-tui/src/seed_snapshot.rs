@@ -259,13 +259,22 @@ fn handle_seed_snapshot(
     ensure_dir(&inner.dir)?;
     let rle_path = inner.dir.join(format!("{}.rle", req.name_base));
     let json_path = inner.dir.join(format!("{}.json", req.name_base));
-    let rule = Rule::conway().to_string();
-    write_rle_bits_atomic(&rle_path, req.width, req.height, &rule, &req.grid_bits)?;
+    write_rle_bits_atomic(
+        &rle_path,
+        req.width,
+        req.height,
+        &Rule::conway().to_string(),
+        &req.grid_bits,
+    )?;
     write_seed_metadata_atomic(&json_path, &req.meta)?;
-    inner.written.fetch_add(1, Ordering::Relaxed);
-    *inner.last_path.lock().unwrap() = Some(rle_path);
+    record_write(inner, rle_path);
     let _ = prune_oldest_seed(&inner.dir, inner.max_files);
     Ok(())
+}
+
+fn record_write(inner: &SeedSnapshotInner, rle_path: PathBuf) {
+    inner.written.fetch_add(1, Ordering::Relaxed);
+    *inner.last_path.lock().unwrap() = Some(rle_path);
 }
 
 fn ensure_dir(dir: &Path) -> std::io::Result<()> {

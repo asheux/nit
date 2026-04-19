@@ -1,3 +1,8 @@
+//! Tests for the agent ops view: DAG dashboard lines, artifacts history,
+//! roster styling, and saved-run metadata. Tests use `SwarmDashboardView`/
+//! `SwarmPersistenceView` fixtures wired up through `AppState` and assert
+//! against the rendered lines and spans emitted by the ops view helpers.
+
 use super::{
     append_swarm_artifact_lines, arrow_glyph, artifacts_history_entries,
     artifacts_history_visible_entries, current_lines_for_width, cursor_glyph,

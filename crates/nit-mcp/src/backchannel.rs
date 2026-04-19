@@ -64,7 +64,7 @@ impl Backchannel for BackchannelClient {
         // Writing and reading use two halves of the same stream; keep a
         // mutable handle for the write then wrap the read side in a BufReader.
         let mut write_half = stream.try_clone()?;
-        writeln!(write_half, "{}", line)?;
+        writeln!(write_half, "{line}")?;
         write_half.flush()?;
         drop(write_half);
         let mut reader = BufReader::new(stream);

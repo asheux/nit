@@ -59,7 +59,7 @@ pub fn run<R: BufRead, W: Write, B: Backchannel>(
         let response = handle_line(raw, bc, agent_id, &mut counter);
         // Avoid panicking the server on a closed stdout — the parent may have
         // exited mid-conversation; just return cleanly.
-        if writeln!(writer, "{}", response).is_err() {
+        if writeln!(writer, "{response}").is_err() {
             return Ok(());
         }
         let _ = writer.flush();

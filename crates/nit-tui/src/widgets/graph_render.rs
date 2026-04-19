@@ -1,3 +1,7 @@
+//! ASCII circuit-style graph renderer used by the Visualizer and strategy
+//! inspector popups. Lays out nodes on BFS layers, routes edges with A*, and
+//! caches the rasterized output per (graph hash, area size, style version).
+
 use crate::theme::Theme;
 use ratatui::{
     buffer::Buffer,
@@ -12,9 +16,14 @@ use std::{
     sync::{Arc, Mutex, OnceLock},
 };
 
-// Circuit renderer version for cache invalidation.
+/// Bump when styling constants change so cached graphs re-render with the
+/// new theme-dependent layout. The cache key includes this so older entries
+/// are invalidated automatically.
 const STYLE_VERSION: u64 = 5;
 
+/// Layout direction for the rendered graph — callers pick the orientation
+/// that best fits their pane (Visualizer uses LeftToRight, strategy popup
+/// uses TopToBottom).
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub enum GraphFlow {
     LeftToRight,
@@ -53,6 +62,8 @@ const MARGIN_Y: u16 = 1;
 const COST_STEP: u32 = 10;
 const COST_WIRE_OVERLAP: u32 = 35;
 
+/// Input to [`render`]: the graph topology plus render-time options. All
+/// geometry is recomputed from this spec and the target area.
 #[derive(Clone, Debug)]
 pub struct GraphSpec {
     pub nodes: Vec<GraphNode>,
@@ -270,6 +281,9 @@ impl Widget for CircuitWidget<'_> {
     }
 }
 
+/// Render the graph into `area`. Layout is cached per (graph, area size),
+/// so repeated calls with the same spec are cheap — cache lookup happens
+/// before any layout or routing work.
 pub fn render(frame: &mut Frame, area: Rect, theme: &Theme, graph: &GraphSpec) {
     let graph_hash = graph_hash(graph);
     let key = CacheKey {
@@ -671,70 +685,61 @@ fn compute_circuit_graph(graph: &GraphSpec, area: Rect, _graph_hash: u64) -> Cac
         None
     };
 
-    // Label the entry point so the initial state is unambiguous.
-    if graph.show_edge_labels {
-        if let Some(a) = start_arrow {
-            let text = "[start]";
-            let chip_w = text.chars().count() as u16;
-            if chip_w + 2 < width {
-                let mut x = a.x.saturating_add(2);
-                if x + chip_w > width {
-                    x = a.x.saturating_sub(chip_w.saturating_add(2));
-                }
-                x = x.min(width.saturating_sub(chip_w));
-                labels_out.push(CachedLabel {
-                    x,
-                    y: a.y,
-                    text: text.to_string(),
-                    color_kind: COLOR_ACCENT,
-                });
+    // Label the entry point so the initial state is unambiguous, and draw a
+    // stub wire from the pane edge up to the arrow so the signal origin is
+    // visible instead of appearing to float.
+    if let (true, Some(a)) = (graph.show_edge_labels, start_arrow) {
+        let text = "[start]";
+        let chip_w = text.chars().count() as u16;
+        if chip_w + 2 < width {
+            let mut x = a.x.saturating_add(2);
+            if x + chip_w > width {
+                x = a.x.saturating_sub(chip_w.saturating_add(2));
             }
+            x = x.min(width.saturating_sub(chip_w));
+            labels_out.push(CachedLabel {
+                x,
+                y: a.y,
+                text: text.to_string(),
+                color_kind: COLOR_ACCENT,
+            });
         }
-    }
-    if graph.show_edge_labels {
-        if let Some(a) = start_arrow {
-            match flow {
-                FlowDir::LeftToRight => {
-                    // Wire stub from the left edge to the start arrow.
-                    if a.y < height {
-                        for x in 0..=a.x.min(width.saturating_sub(1)) {
-                            let idx = grid_idx(width, x, a.y);
-                            wire_used[idx] = wire_used[idx].saturating_add(1);
-                            if wire_color[idx] == 0 {
-                                wire_color[idx] = COLOR_ACCENT;
-                            } else if wire_color[idx] != COLOR_ACCENT {
-                                wire_color[idx] = COLOR_JUNCTION;
-                            }
-                        }
-                        for x in 0..a.x.min(width.saturating_sub(1)) {
-                            let a_idx = grid_idx(width, x, a.y);
-                            let b_idx = grid_idx(width, x + 1, a.y);
-                            wire_mask[a_idx] |= BIT_R;
-                            wire_mask[b_idx] |= BIT_L;
-                        }
+        match flow {
+            FlowDir::LeftToRight if a.y < height => {
+                for x in 0..=a.x.min(width.saturating_sub(1)) {
+                    let idx = grid_idx(width, x, a.y);
+                    wire_used[idx] = wire_used[idx].saturating_add(1);
+                    if wire_color[idx] == 0 {
+                        wire_color[idx] = COLOR_ACCENT;
+                    } else if wire_color[idx] != COLOR_ACCENT {
+                        wire_color[idx] = COLOR_JUNCTION;
                     }
                 }
-                FlowDir::TopToBottom => {
-                    // Wire stub from the top edge to the start arrow.
-                    if a.x < width {
-                        for y in 0..=a.y.min(height.saturating_sub(1)) {
-                            let idx = grid_idx(width, a.x, y);
-                            wire_used[idx] = wire_used[idx].saturating_add(1);
-                            if wire_color[idx] == 0 {
-                                wire_color[idx] = COLOR_ACCENT;
-                            } else if wire_color[idx] != COLOR_ACCENT {
-                                wire_color[idx] = COLOR_JUNCTION;
-                            }
-                        }
-                        for y in 0..a.y.min(height.saturating_sub(1)) {
-                            let a_idx = grid_idx(width, a.x, y);
-                            let b_idx = grid_idx(width, a.x, y + 1);
-                            wire_mask[a_idx] |= BIT_D;
-                            wire_mask[b_idx] |= BIT_U;
-                        }
-                    }
+                for x in 0..a.x.min(width.saturating_sub(1)) {
+                    let a_idx = grid_idx(width, x, a.y);
+                    let b_idx = grid_idx(width, x + 1, a.y);
+                    wire_mask[a_idx] |= BIT_R;
+                    wire_mask[b_idx] |= BIT_L;
                 }
             }
+            FlowDir::TopToBottom if a.x < width => {
+                for y in 0..=a.y.min(height.saturating_sub(1)) {
+                    let idx = grid_idx(width, a.x, y);
+                    wire_used[idx] = wire_used[idx].saturating_add(1);
+                    if wire_color[idx] == 0 {
+                        wire_color[idx] = COLOR_ACCENT;
+                    } else if wire_color[idx] != COLOR_ACCENT {
+                        wire_color[idx] = COLOR_JUNCTION;
+                    }
+                }
+                for y in 0..a.y.min(height.saturating_sub(1)) {
+                    let a_idx = grid_idx(width, a.x, y);
+                    let b_idx = grid_idx(width, a.x, y + 1);
+                    wire_mask[a_idx] |= BIT_D;
+                    wire_mask[b_idx] |= BIT_U;
+                }
+            }
+            _ => {}
         }
     }
 

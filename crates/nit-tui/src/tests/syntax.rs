@@ -12,22 +12,26 @@ fn default_config() -> HighlightConfig {
     }
 }
 
-#[test]
-fn render_snapshot_maps_unchanged_lines() {
+fn setup_runtime(buffer_id: usize) -> (Buffer, SyntaxRuntime) {
     let mut buffer = Buffer::empty("test", None);
     buffer.insert_str("a\nb\nc\n");
     buffer.take_pending_edits();
-    let version = buffer.version();
     let mut runtime = SyntaxRuntime::new(default_config());
     let snapshot = HighlightSnapshot::plain(
-        1,
-        version,
+        buffer_id,
+        buffer.version(),
         LanguageId::PlainText,
         EngineKind::Plain,
         SyntaxStatus::Ok(EngineKind::Plain),
         &buffer.content_as_string(),
     );
-    runtime.snapshots.insert(1, snapshot);
+    runtime.snapshots.insert(buffer_id, snapshot);
+    (buffer, runtime)
+}
+
+#[test]
+fn render_snapshot_maps_unchanged_lines() {
+    let (mut buffer, mut runtime) = setup_runtime(1);
 
     buffer.cursor.line = 1;
     buffer.cursor.col = 1;
@@ -45,20 +49,7 @@ fn render_snapshot_maps_unchanged_lines() {
 
 #[test]
 fn render_snapshot_maps_shifted_lines() {
-    let mut buffer = Buffer::empty("test", None);
-    buffer.insert_str("a\nb\nc\n");
-    buffer.take_pending_edits();
-    let version = buffer.version();
-    let mut runtime = SyntaxRuntime::new(default_config());
-    let snapshot = HighlightSnapshot::plain(
-        2,
-        version,
-        LanguageId::PlainText,
-        EngineKind::Plain,
-        SyntaxStatus::Ok(EngineKind::Plain),
-        &buffer.content_as_string(),
-    );
-    runtime.snapshots.insert(2, snapshot);
+    let (mut buffer, mut runtime) = setup_runtime(2);
 
     buffer.cursor.line = 0;
     buffer.cursor.col = 0;
@@ -77,20 +68,7 @@ fn render_snapshot_maps_shifted_lines() {
 
 #[test]
 fn render_snapshot_allows_reuse_during_full_reparse() {
-    let mut buffer = Buffer::empty("test", None);
-    buffer.insert_str("a\nb\nc\n");
-    buffer.take_pending_edits();
-    let version = buffer.version();
-    let mut runtime = SyntaxRuntime::new(default_config());
-    let snapshot = HighlightSnapshot::plain(
-        3,
-        version,
-        LanguageId::PlainText,
-        EngineKind::Plain,
-        SyntaxStatus::Ok(EngineKind::Plain),
-        &buffer.content_as_string(),
-    );
-    runtime.snapshots.insert(3, snapshot);
+    let (buffer, mut runtime) = setup_runtime(3);
 
     runtime.full_reparse_pending.insert(3, true);
     let view = runtime.render_snapshot_for(3, &buffer);
@@ -99,20 +77,7 @@ fn render_snapshot_allows_reuse_during_full_reparse() {
 
 #[test]
 fn render_snapshot_reuses_shifted_lines_on_full_reparse() {
-    let mut buffer = Buffer::empty("test", None);
-    buffer.insert_str("a\nb\nc\n");
-    buffer.take_pending_edits();
-    let version = buffer.version();
-    let mut runtime = SyntaxRuntime::new(default_config());
-    let snapshot = HighlightSnapshot::plain(
-        4,
-        version,
-        LanguageId::PlainText,
-        EngineKind::Plain,
-        SyntaxStatus::Ok(EngineKind::Plain),
-        &buffer.content_as_string(),
-    );
-    runtime.snapshots.insert(4, snapshot);
+    let (mut buffer, mut runtime) = setup_runtime(4);
 
     buffer.cursor.line = 0;
     buffer.cursor.col = 0;

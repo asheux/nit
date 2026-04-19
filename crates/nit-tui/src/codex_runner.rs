@@ -31,7 +31,7 @@ impl Default for CodexRunnerConfig {
         Self {
             sandbox: None,
             approval_policy: Some("never".into()),
-            max_parallel_turns: 8,
+            max_parallel_turns: usize::MAX,
             mcp_backchannel_socket: None,
         }
     }
@@ -39,7 +39,9 @@ impl Default for CodexRunnerConfig {
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum CodexRuntimeMode {
+    /// Spawn a fresh `codex exec` child process per turn.
     Exec,
+    /// Keep a persistent `codex mcp-server` process and multiplex turns as `tools/call` requests.
     Mcp,
 }
 
@@ -1803,18 +1805,17 @@ fn codex_exec_endpoint_label(agent_id: &str, resume_thread_id: Option<&str>) -> 
 }
 
 fn codex_model_slug_for_agent_id(agent_id: &str) -> &str {
-    agent_id
-        .split_once("#swarm-")
-        .or_else(|| agent_id.split_once("#chat-clone-"))
-        .or_else(|| agent_id.split_once("#shadow-"))
-        .map(|(base, _)| {
-            if base.trim().is_empty() {
+    const CLONE_SUFFIXES: &[&str] = &["#swarm-", "#chat-clone-", "#shadow-"];
+    for suffix in CLONE_SUFFIXES {
+        if let Some((base, _)) = agent_id.split_once(suffix) {
+            return if base.trim().is_empty() {
                 agent_id
             } else {
                 base
-            }
-        })
-        .unwrap_or(agent_id)
+            };
+        }
+    }
+    agent_id
 }
 
 fn build_codex_mcp_tool_call(
@@ -1880,6 +1881,7 @@ fn build_codex_mcp_tool_call(
     ("codex", serde_json::Value::Object(args))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_codex_exec_args(
     agent_id: &str,
     cwd: &Path,
@@ -2015,12 +2017,12 @@ fn escape_toml_string(s: &str) -> String {
 }
 
 fn shorten_thread_id(thread_id: &str) -> String {
-    let id = thread_id.trim();
     const MAX_CHARS: usize = 8;
-    let Some((idx, _)) = id.char_indices().nth(MAX_CHARS) else {
-        return id.to_string();
-    };
-    format!("{}…", &id[..idx])
+    let id = thread_id.trim();
+    match id.char_indices().nth(MAX_CHARS) {
+        Some((idx, _)) => format!("{}…", &id[..idx]),
+        None => id.to_string(),
+    }
 }
 
 fn extract_thread_id_from_jsonl(stdout: &[u8]) -> Option<String> {

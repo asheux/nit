@@ -794,11 +794,11 @@ fn run_loop(
                             continue;
                         }
                     }
-                    if state.show_substrate_overlay {
-                        if handle_substrate_overlay_key(&key, state) {
-                            needs_redraw = true;
-                            continue;
-                        }
+                    if state.show_substrate_overlay
+                        && handle_substrate_overlay_key(&key, state)
+                    {
+                        needs_redraw = true;
+                        continue;
                     }
                     if state.games.analysis.open {
                         let screen = terminal.size().unwrap_or_default();
@@ -1134,7 +1134,8 @@ fn run_loop(
                 &swarm,
                 swarm_outcome.artifact_focus.as_ref(),
             );
-            for dispatch in swarm_outcome.dispatches {
+            for mut dispatch in swarm_outcome.dispatches {
+                augment_dispatch_prompt_with_landscape(state, &swarm, &mut dispatch);
                 apply_swarm_task_role(state, &dispatch);
                 dispatch_agent_prompt(
                     state,
@@ -1247,7 +1248,8 @@ fn run_loop(
                 &swarm,
                 swarm_outcome.artifact_focus.as_ref(),
             );
-            for dispatch in swarm_outcome.dispatches {
+            for mut dispatch in swarm_outcome.dispatches {
+                augment_dispatch_prompt_with_landscape(state, &swarm, &mut dispatch);
                 apply_swarm_task_role(state, &dispatch);
                 dispatch_agent_prompt(
                     state,
@@ -1499,13 +1501,55 @@ fn run_loop(
 
             // Drain file watcher notifications — reload any open buffers that changed on disk.
             drain_file_watcher(state, syntax, &file_watcher, &genome_worker);
-            drain_genome_results(
+            let prescan_completed = drain_genome_results(
                 state,
                 &genome_worker,
                 &mut vitals,
                 &codex_runner,
                 &claude_runner,
             );
+            // Proposer pre-scan bookkeeping.
+            // (a) Let the swarm know which scope files just got reports so it
+            //     can release blocked propose tasks.
+            for path in &prescan_completed {
+                let dispatches = swarm.note_prescan_result(path);
+                for mut dispatch in dispatches {
+                    augment_dispatch_prompt_with_landscape(state, &swarm, &mut dispatch);
+                    apply_swarm_task_role(state, &dispatch);
+                    dispatch_agent_prompt(
+                        state,
+                        &mut vitals,
+                        Some(&codex_runner),
+                        Some(&claude_runner),
+                        dispatch.agent_id,
+                        Some(dispatch.mission_id),
+                        dispatch.prompt,
+                    );
+                }
+            }
+            // (b) Kick off any outstanding prescan evals non-blocking. Each
+            //     path spawns a short-lived worker thread; main loop never
+            //     waits. Only enabled when genome_context is on — otherwise
+            //     there's no point populating reports that no one reads.
+            if state.settings.genome.genome_context_enabled {
+                let workspace_root = state.workspace_root.clone();
+                let paths = swarm.take_pending_prescan_paths(state, &workspace_root);
+                if !paths.is_empty() {
+                    // One-shot status per mission (not per batch), so the
+                    // rate-limited dispatch loop doesn't spam the transcript.
+                    let announce = swarm.announce_prescan_start();
+                    for (mid, total) in announce {
+                        crate::swarm::push_system_message_to_mission(
+                            state,
+                            &mid,
+                            format!("Proposer (Genome check): evaluating {total} file(s)"),
+                        );
+                    }
+                    for path in paths {
+                        genome_worker.evaluate_from_disk_prescan(path);
+                    }
+                }
+            }
 
             // Dispatch save-triggered genome evaluation to background worker.
             if let Some(path) = state.genome_save_eval_pending.take() {
@@ -1518,7 +1562,8 @@ fn run_loop(
 
             // Poll background genome gate evaluations — dispatches the
             // verifier agent once results arrive (never blocks).
-            for dispatch in swarm.poll_genome_gates(state) {
+            for mut dispatch in swarm.poll_genome_gates(state) {
+                augment_dispatch_prompt_with_landscape(state, &swarm, &mut dispatch);
                 apply_swarm_task_role(state, &dispatch);
                 dispatch_agent_prompt(
                     state,
@@ -1534,7 +1579,8 @@ fn run_loop(
             // Poll background genome review prompt builds — dispatches the
             // genome reviewer agent once the per-file genome reports finish
             // computing (never blocks the main loop on the GoL sim).
-            for dispatch in swarm.poll_genome_reviews(state) {
+            for mut dispatch in swarm.poll_genome_reviews(state) {
+                augment_dispatch_prompt_with_landscape(state, &swarm, &mut dispatch);
                 apply_swarm_task_role(state, &dispatch);
                 dispatch_agent_prompt(
                     state,
@@ -1785,14 +1831,14 @@ fn push_genome_retry_message(
     } else {
         compact_agent_id_for_log(&header_writer)
     };
-    if writer_display == reporter {
-        lines.push(format!(
-            "\u{21b3} [{writer_display}] genome retry {attempt}/{GENOME_RETRY_LIMIT}"
-        ));
-    } else {
-        lines.push(format!(
-            "\u{21b3} [{writer_display}] genome retry {attempt}/{GENOME_RETRY_LIMIT} (reported by {reporter})"
-        ));
+    // Keep the header on a single line short enough to fit narrow chat panes.
+    // When reporter differs from writer, split onto a second indented line
+    // instead of extending the header with a parenthetical.
+    lines.push(format!(
+        "\u{21b3} [{writer_display}] genome retry {attempt}/{GENOME_RETRY_LIMIT}"
+    ));
+    if writer_display != reporter {
+        lines.push(format!("    reported by {reporter}"));
     }
 
     for path in degraded_files {
@@ -2164,6 +2210,7 @@ fn build_genome_retry_prompt(
          disregard any scores you computed or estimated yourself.\n\n",
     );
 
+
     // Categorise files for the header summary.
     let new_below_threshold = degraded_files
         .iter()
@@ -2343,9 +2390,11 @@ fn build_genome_retry_prompt(
          that you did not touch. Leave all other code exactly as it was.\n\n\
          Exception: if the operator's original prompt explicitly asked you to refactor the \
          entire file, you may do so. Otherwise, constrain your fixes to your own changes.\n\n\
-         Your goal is to IMPROVE structural quality above the baselines. If improvement \
-         is not possible given the functional requirements, you MUST NOT degrade below \
-         baseline. At minimum, restore quality to the baseline level for every file.\n\n",
+         Your goal is to IMPROVE structural quality on the files you changed. If improvement \
+         is not possible given the functional requirements, STOP and say so in your reply — \
+         do NOT revert or restore baseline versions of your edits to make the score go up. \
+         Real work with a slightly lower score is strictly better than no work with a \
+         baseline score. The score is a signal, not a contract.\n\n",
     ));
     if bloated_count > 0 {
         prompt.push_str(
@@ -2394,13 +2443,53 @@ fn maybe_compute_genome_report(state: &mut AppState, genome: &crate::genome_work
 /// `prompt_msg_idx` so the main agent's final response is still anchored to
 /// the user's original prompt in the chat view. `dispatch_agent_prompt` drops
 /// the index, so we stash it in the right backend map ahead of the call.
+/// Append the genome landscape section to shadow-agent dispatches (single-
+/// agent mode) that play the propose / judge / review role. Uses the
+/// currently-focused editor buffer path as scope since shadow has no
+/// declared scope_files like swarm missions do.
+fn augment_shadow_prompt_with_landscape(
+    state: &AppState,
+    dispatch: &mut crate::shadow::ShadowDispatch,
+) {
+    let Some((_, _, role)) = crate::shadow::parse_shadow_lane_id(&dispatch.agent_id) else {
+        return;
+    };
+    // Map shadow roles to the landscape-framing roles used for swarm.
+    let landscape_role = match role {
+        "propose-a" | "propose-b" => "propose",
+        "judge" => "judge",
+        "review" => "integrate",
+        _ => return,
+    };
+    let Some(path) = state.editor_buffer().path() else {
+        return;
+    };
+    let rel = path
+        .strip_prefix(&state.workspace_root)
+        .unwrap_or(path)
+        .to_string_lossy()
+        .into_owned();
+    let scope: Vec<String> = vec![rel];
+    let Some(section) =
+        crate::app::dispatch::build_propose_genome_landscape(state, &scope, Some(landscape_role))
+    else {
+        return;
+    };
+    dispatch.prompt.push_str(&section);
+}
+
 fn dispatch_shadow_outcome(
     state: &mut AppState,
     vitals: &mut VitalsState,
     codex: &CodexRunner,
     claude: &ClaudeRunner,
-    dispatch: crate::shadow::ShadowDispatch,
+    mut dispatch: crate::shadow::ShadowDispatch,
 ) {
+    // Shadow (single-agent) mode mirrors the swarm propose/judge/review
+    // landscape injection. Scope is the currently-focused editor buffer —
+    // shadow has no declared scope_files like swarm missions do. Silent
+    // no-op when the editor buffer has no path or no genome report exists.
+    augment_shadow_prompt_with_landscape(state, &mut dispatch);
     if let Some(idx) = dispatch.prompt_msg_idx {
         let is_claude = state
             .agents
@@ -2531,25 +2620,39 @@ fn drain_genome_results(
     vitals: &mut crate::vitals::VitalsState,
     codex_runner: &crate::codex_runner::CodexRunner,
     claude_runner: &crate::claude_runner::ClaudeRunner,
-) {
+) -> Vec<std::path::PathBuf> {
+    let mut prescan_completed_paths: Vec<std::path::PathBuf> = Vec::new();
     while let Ok(result) = genome.rx.try_recv() {
         let path = result.path;
         let result_agent_id = result.agent_id.clone();
+        let is_prescan = result.prescan;
         let report = match result.report {
             Some(r) => r,
             None => {
                 // File could not be read (e.g. deleted). Still decrement
                 // the owning agent's batch so turn finalization is not stuck.
-                if !result.shadow && !result.save_eval {
+                if !result.shadow && !result.save_eval && !is_prescan {
                     if let Some(aid) = result_agent_id.as_deref() {
                         if let Some(batch) = state.genome_eval_batches.get_mut(aid) {
                             batch.pending = batch.pending.saturating_sub(1);
                         }
                     }
                 }
+                if is_prescan {
+                    // Unblock proposers even if the file could not be read —
+                    // staying stuck on a missing file is worse than proceeding
+                    // without a report for it. Flagged for the post-loop
+                    // dispatch handler to process (can't borrow swarm here).
+                    prescan_completed_paths.push(path.clone());
+                }
                 continue;
             }
         };
+        if is_prescan {
+            state.genome_reports.insert(path.clone(), report);
+            prescan_completed_paths.push(path);
+            continue;
+        }
 
         // Clear genome_computing flag when result arrives for the current editor buffer.
         if state.genome_computing && state.editor_buffer().path() == Some(&path) {
@@ -2864,6 +2967,7 @@ fn drain_genome_results(
             }
         }
     }
+    prescan_completed_paths
 }
 
 fn tick_agent_turn_liveness(state: &mut AppState) {

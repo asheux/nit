@@ -1,5 +1,6 @@
-//! TUI application: event loop, widgets, agent runners (Claude/Codex), swarm orchestration,
-//! and game simulation UI.
+//! TUI crate: event loop, widgets, agent runners (Claude/Codex), swarm
+//! orchestration, and game/seed simulation UIs. Safe-only — no `unsafe` is
+//! permitted anywhere in this crate.
 
 #![forbid(unsafe_code)]
 

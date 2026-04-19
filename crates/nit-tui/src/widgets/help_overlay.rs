@@ -1,8 +1,12 @@
+//! Keybinding reference popup (F1 / ?). The section list, key labels, and
+//! descriptions are load-bearing for tests and user docs — preserve their
+//! exact text. This module only handles layout, styling, and scrolling.
+
 use std::sync::OnceLock;
 
 use nit_core::AppState;
 use ratatui::{
-    layout::{Constraint, Direction, Layout, Rect},
+    layout::Rect,
     style::{Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Clear, Paragraph},
@@ -13,630 +17,306 @@ use crate::theme::Theme;
 use crate::widgets::text_selection::apply_ui_selection;
 use nit_core::UiSelectionPane;
 
+type Section = (&'static str, &'static [(&'static str, &'static str)]);
+
+/// Border padding applied by the outer frame — width/height are computed from
+/// the screen size minus this amount before clamping.
+const FRAME_PADDING: u16 = 4;
+const WIDTH_MIN: u16 = 30;
+const WIDTH_MAX: u16 = 110;
+const HEIGHT_MIN: u16 = 12;
+const HEIGHT_MAX: u16 = 36;
+
+/// Compute the preferred popup dimensions from the host `screen`: shrinks
+/// for small terminals and clamps to the width/height bounds above.
 pub fn preferred_size(screen: Rect) -> (u16, u16) {
-    let width = (screen.width.saturating_sub(4)).clamp(30, 110);
-    let height = (screen.height.saturating_sub(4)).clamp(12, 36);
+    let width = (screen.width.saturating_sub(FRAME_PADDING)).clamp(WIDTH_MIN, WIDTH_MAX);
+    let height = (screen.height.saturating_sub(FRAME_PADDING)).clamp(HEIGHT_MIN, HEIGHT_MAX);
     (width, height)
 }
 
-/// Memoized line count for the help overlay. The overlay content is static
-/// (theme only affects styling, not line structure), so we can compute it
-/// once on first access and reuse forever. Used by the scroll hot path so
-/// wheel ticks don't rebuild the full ~600-line styled help buffer just to
+/// The overlay content is static — theme only affects styling, not line
+/// structure — so we can compute the row count once. Used by the scroll
+/// hot path so wheel ticks don't rebuild the full styled buffer just to
 /// clamp `max_scroll`.
 pub fn line_count() -> usize {
     static CACHED: OnceLock<usize> = OnceLock::new();
-    *CACHED.get_or_init(|| {
-        // Count with a dummy theme — only structure matters, not colors.
-        build_lines(&Theme::default()).len()
-    })
+    *CACHED.get_or_init(|| build_lines(&Theme::default()).len())
 }
 
+fn row(key: &'static str, desc: &'static str, theme: &Theme) -> Line<'static> {
+    Line::from(vec![
+        Span::styled(key, Style::default().fg(theme.accent)),
+        Span::raw(desc),
+    ])
+}
+
+/// Build the full styled line buffer for the help popup. Section headers use
+/// the focused-title style, key labels are accent-colored, and descriptions
+/// render in the default foreground.
 pub fn build_lines(theme: &Theme) -> Vec<Line<'static>> {
     let heading_style = Style::default()
         .fg(theme.title_focused)
         .add_modifier(Modifier::BOLD);
-    let mut lines = Vec::with_capacity(256);
 
-    lines.push(Line::from(vec![Span::styled("GLOBAL", heading_style)]));
-    lines.push(Line::from(vec![
-        Span::styled("Ctrl+Q", Style::default().fg(theme.accent)),
-        Span::raw(" quit (confirm if dirty)"),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled("Ctrl+S", Style::default().fg(theme.accent)),
-        Span::raw(" save"),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled("Ctrl+T", Style::default().fg(theme.accent)),
-        Span::raw(" toggle NITTree (file tree)"),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled("Ctrl+P", Style::default().fg(theme.accent)),
-        Span::raw(" fuzzy file search"),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled("Ctrl+F", Style::default().fg(theme.accent)),
-        Span::raw(" content search"),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled("F1 / ?", Style::default().fg(theme.accent)),
-        Span::raw(" toggle help"),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled("Tab/Shift+Tab", Style::default().fg(theme.accent)),
-        Span::raw(" focus panes"),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled("Ctrl+1/2/3", Style::default().fg(theme.accent)),
-        Span::raw(" focus Editor / Agent Ops / Agent Chat"),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled("Ctrl+H/J/K/L", Style::default().fg(theme.accent)),
-        Span::raw(" focus panes (left/down/up/right; not in Visualizer)"),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled("Ctrl+B", Style::default().fg(theme.accent)),
-        Span::raw(" toggle debug mode (non-Visualizer focus)"),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled("Ctrl+Enter", Style::default().fg(theme.accent)),
-        Span::raw(" run Petri Dish (active app)"),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled("Ctrl+^ / Ctrl+6", Style::default().fg(theme.accent)),
-        Span::raw(" show hidden Petri Dish"),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled(":", Style::default().fg(theme.accent)),
-        Span::raw(" command prompt (Normal mode)"),
-    ]));
+    let sections: &[Section] = &[
+        (
+            "GLOBAL",
+            &[
+                ("Ctrl+Q", " quit (confirm if dirty)"),
+                ("Ctrl+S", " save"),
+                ("Ctrl+T", " toggle NITTree (file tree)"),
+                ("Ctrl+P", " fuzzy file search"),
+                ("Ctrl+F", " content search"),
+                ("F1 / ?", " toggle help"),
+                ("Tab/Shift+Tab", " focus panes"),
+                ("Ctrl+1/2/3", " focus Editor / Agent Ops / Agent Chat"),
+                (
+                    "Ctrl+H/J/K/L",
+                    " focus panes (left/down/up/right; not in Visualizer)",
+                ),
+                ("Ctrl+B", " toggle debug mode (non-Visualizer focus)"),
+                ("Ctrl+Enter", " run Petri Dish (active app)"),
+                ("Ctrl+^ / Ctrl+6", " show hidden Petri Dish"),
+                (":", " command prompt (Normal mode)"),
+            ],
+        ),
+        (
+            "NITTREE (EDITOR OVERLAY)",
+            &[
+                ("Esc / q", " close tree"),
+                ("j/k / Up/Down", " move selection"),
+                ("PageUp/PageDown", " jump by page"),
+                ("Home/End", " jump to top/bottom"),
+                ("Enter", " open file (closes tree)"),
+                ("r", " refresh tree"),
+                (".", " toggle hidden files"),
+                ("i", " toggle ignored files"),
+            ],
+        ),
+        (
+            "COMMANDS (:)",
+            &[
+                (":q", " quit (confirm if dirty)"),
+                (":help / :commands", " open this help overlay"),
+                (":run", " run active app"),
+                (":tree / :nittree / :explore", " toggle NITTree"),
+                (":find / :ff", " open fuzzy file search"),
+                (":grep / :rg / :search", " open content search"),
+                (
+                    ":gol run|hide|show|stop",
+                    " GoL Petri Dish controls (alias: :life ...)",
+                ),
+                (
+                    ":petri hide|show",
+                    " GoL Petri Dish visibility (alias for :gol hide|show)",
+                ),
+                (":gol rule [id|B/S]", " set rule / show current"),
+                (":gol rules", " list GoL rules"),
+                (
+                    ":gol seed | :gol encoder",
+                    " cycle seed view/encoder (aliases: :seed view|encoder)",
+                ),
+                (
+                    ":games run|hide|show|stop|status|export",
+                    " games controls",
+                ),
+                (
+                    ":games run [force] <fsm|ca|tm> {…} [tm_steps]",
+                    " run family tournament; use force to bypass speed caps",
+                ),
+                (":games runs", " browse saved runs"),
+                (
+                    ":games replay",
+                    " open replay selector (requires loaded run)",
+                ),
+                (
+                    ":games history | :history",
+                    " open match history plot popup",
+                ),
+                (
+                    ":games strategy [run]",
+                    " open strategy inspector for loaded run",
+                ),
+                (
+                    ":games strategies all|config",
+                    " open strategy inspector from config",
+                ),
+                (":games inspect <id>", " introspect a strategy by id"),
+                (
+                    ":games inspect <fsm_index>",
+                    " inspect FSM notebook index (defaults to {index,2,2})",
+                ),
+                (
+                    ":games inspect <id> {rule,states,symbols}",
+                    " inspect TM tuple; use id=fsm for FSM {index,states,k}",
+                ),
+                (
+                    ":games inspect {rule,states,symbols}",
+                    " inspect a one-sided TM rule tuple",
+                ),
+                (
+                    ":games tm [run|config] <input> [steps] [id]",
+                    " simulate one-sided TM on integer input",
+                ),
+                (
+                    ":games tm {rule,states,symbols} <input> [steps]",
+                    " simulate a rule-code TM without config",
+                ),
+                (
+                    ":games ca [run|config] <input> [steps] [id]",
+                    " simulate shrinking CA on integer input",
+                ),
+                (
+                    ":games ca {n,k,r} <input> [steps]",
+                    " simulate a CA rule tuple (t defaults to 10)",
+                ),
+                (
+                    ":games analyze[se] [path] [tail=N] [samples=N]",
+                    " analyze last/specified history log",
+                ),
+            ],
+        ),
+        (
+            "GAMES PETRI DISH (POPUP)",
+            &[
+                ("Esc", " close tournament"),
+                ("Space", " pause / resume"),
+                ("Enter", " step (when paused)"),
+                ("+ / -", " speed up / down"),
+                ("Tab", " toggle tournament / inspector"),
+                ("← / →", " adjust inspector window"),
+                ("H", " hide (continues running)"),
+            ],
+        ),
+        (
+            "EDITOR (FOCUSED)",
+            &[
+                ("Ctrl/Cmd+A", " select all (also Scratchpad)"),
+                ("Ctrl/Cmd+C", " copy selection (also Scratchpad)"),
+                ("Ctrl/Cmd+X", " cut selection (also Scratchpad)"),
+                (
+                    "Ctrl/Cmd+V",
+                    " paste (replaces selection; also Scratchpad)",
+                ),
+                ("Ctrl/Alt+←/→", " move by word (also Scratchpad)"),
+                (
+                    "Ctrl/Alt+Backspace/Delete",
+                    " delete word (also Scratchpad)",
+                ),
+                ("Enter", " newline (preserves indentation)"),
+                ("Esc", " switch to Normal mode"),
+                ("H/J/K/L", " move in Normal mode"),
+                ("I", " enter Insert mode"),
+                ("a", " append + Insert (Normal mode)"),
+                ("v", " Visual mode (Normal mode)"),
+                ("o", " open line below + Insert (Normal mode)"),
+                ("Shift+O", " open line above + Insert (Normal mode)"),
+                ("JJ", " save + Normal (Insert mode)"),
+                ("Shift+S", " toggle syntax highlight (Editor focus)"),
+                ("GG / Shift+G", " top / bottom"),
+                ("u / Ctrl/Cmd+Z", " undo"),
+                ("Shift+R / Ctrl+Y / Ctrl/Cmd+Shift+Z", " redo"),
+                ("e / b", " word end / word back (Normal mode)"),
+                ("y", " yank selection (Visual mode)"),
+                ("yy", " yank line (Normal mode)"),
+                ("d", " delete selection (Visual mode)"),
+                ("p", " paste (Normal mode)"),
+                ("Shift+P", " paste above (Normal mode)"),
+                ("dd", " delete line (Normal mode)"),
+                ("$ / %", " end / start of line"),
+            ],
+        ),
+        (
+            "AGENT OPS (FOCUSED)",
+            &[
+                ("Tab / Shift+Tab / ←/→", " cycle Ops tabs"),
+                ("j/k or ↑/↓", " move selection"),
+                ("Enter", " focus Agent Chat with current context"),
+                ("n", " create new mission (mock runner)"),
+                ("r / s / x", " MCP reconnect / start / stop (MCP tab)"),
+            ],
+        ),
+        (
+            "AGENT CHAT (FOCUSED)",
+            &[
+                ("Enter", " send message (@all <msg> broadcasts)"),
+                ("Shift+Enter", " newline (preserves indentation)"),
+                ("Tab", " insert tab"),
+                ("Ctrl/Cmd+A", " select all"),
+                ("Cmd+C / Ctrl+Shift+C", " copy selection"),
+                ("Cmd+X / Ctrl+Shift+X", " cut selection"),
+                ("Ctrl/Cmd+V", " paste"),
+                ("Ctrl+U", " clear input"),
+                ("Ctrl+C", " clear input (copies if selection)"),
+                ("Esc", " clear selection / thread selection"),
+                (
+                    "←/→ / Home/End",
+                    " move cursor (Shift selects; Ctrl/Alt moves by word)",
+                ),
+                ("↑/↓", " move cursor / prompt history"),
+                ("Ctrl+↑/↓", " scroll chat thread"),
+            ],
+        ),
+        (
+            "VISUALIZER (FOCUSED)",
+            &[
+                ("Ctrl+E", " cycle encoder"),
+                ("Ctrl+V", " toggle view (GENOME ↔ PLATE)"),
+                ("Ctrl+R", " cycle seed view (genome/plate/map/stats)"),
+                (
+                    "Ctrl+M",
+                    " cycle plate render (solid/half/braille/tissue/heat)",
+                ),
+                ("Ctrl+Y", " toggle seed source"),
+                ("Ctrl+A", " apply seed proposal"),
+                ("Ctrl+G", " toggle seed search"),
+                ("Ctrl+N", " snapshot seed"),
+                ("Ctrl+Shift+V", " cycle seed overlays"),
+                (
+                    "Arrows / HJKL",
+                    " move genome inspector (Visualizer focus)",
+                ),
+                ("Home / End", " inspector jump to edges"),
+                ("0 / $", " inspector jump to edges (fallback)"),
+                ("G + digits + Enter", " jump to genome index"),
+                ("C", " center inspector"),
+                ("I", " toggle inspector"),
+            ],
+        ),
+        (
+            "PETRI DISH (POPUP)",
+            &[
+                ("Esc", " close popup"),
+                ("Space", " pause/resume"),
+                ("Enter", " step one generation"),
+                ("+ / -", " speed up/down"),
+                ("S", " snapshot sim"),
+                ("Ctrl+R", " reseed from current code"),
+                ("T", " toggle wrap mode"),
+                ("O", " cycle auto-stop"),
+                ("G", " toggle rule search"),
+                ("A", " apply best rule"),
+                ("H", " hide popup (sim keeps running)"),
+            ],
+        ),
+    ];
 
-    lines.push(Line::from(vec![Span::styled(
-        "NITTREE (EDITOR OVERLAY)",
-        heading_style,
-    )]));
-    lines.push(Line::from(vec![
-        Span::styled("Esc / q", Style::default().fg(theme.accent)),
-        Span::raw(" close tree"),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled("j/k / Up/Down", Style::default().fg(theme.accent)),
-        Span::raw(" move selection"),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled("PageUp/PageDown", Style::default().fg(theme.accent)),
-        Span::raw(" jump by page"),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled("Home/End", Style::default().fg(theme.accent)),
-        Span::raw(" jump to top/bottom"),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled("Enter", Style::default().fg(theme.accent)),
-        Span::raw(" open file (closes tree)"),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled("r", Style::default().fg(theme.accent)),
-        Span::raw(" refresh tree"),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled(".", Style::default().fg(theme.accent)),
-        Span::raw(" toggle hidden files"),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled("i", Style::default().fg(theme.accent)),
-        Span::raw(" toggle ignored files"),
-    ]));
-    lines.push(Line::from(vec![Span::styled(
-        "COMMANDS (:)",
-        heading_style,
-    )]));
-    lines.push(Line::from(vec![
-        Span::styled(":q", Style::default().fg(theme.accent)),
-        Span::raw(" quit (confirm if dirty)"),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled(":help / :commands", Style::default().fg(theme.accent)),
-        Span::raw(" open this help overlay"),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled(":run", Style::default().fg(theme.accent)),
-        Span::raw(" run active app"),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled(
-            ":tree / :nittree / :explore",
-            Style::default().fg(theme.accent),
-        ),
-        Span::raw(" toggle NITTree"),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled(":find / :ff", Style::default().fg(theme.accent)),
-        Span::raw(" open fuzzy file search"),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled(":grep / :rg / :search", Style::default().fg(theme.accent)),
-        Span::raw(" open content search"),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled(":gol run|hide|show|stop", Style::default().fg(theme.accent)),
-        Span::raw(" GoL Petri Dish controls (alias: :life ...)"),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled(":petri hide|show", Style::default().fg(theme.accent)),
-        Span::raw(" GoL Petri Dish visibility (alias for :gol hide|show)"),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled(":gol rule [id|B/S]", Style::default().fg(theme.accent)),
-        Span::raw(" set rule / show current"),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled(":gol rules", Style::default().fg(theme.accent)),
-        Span::raw(" list GoL rules"),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled(
-            ":gol seed | :gol encoder",
-            Style::default().fg(theme.accent),
-        ),
-        Span::raw(" cycle seed view/encoder (aliases: :seed view|encoder)"),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled(
-            ":games run|hide|show|stop|status|export",
-            Style::default().fg(theme.accent),
-        ),
-        Span::raw(" games controls"),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled(
-            ":games run [force] <fsm|ca|tm> {…} [tm_steps]",
-            Style::default().fg(theme.accent),
-        ),
-        Span::raw(" run family tournament; use force to bypass speed caps"),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled(":games runs", Style::default().fg(theme.accent)),
-        Span::raw(" browse saved runs"),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled(":games replay", Style::default().fg(theme.accent)),
-        Span::raw(" open replay selector (requires loaded run)"),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled(
-            ":games history | :history",
-            Style::default().fg(theme.accent),
-        ),
-        Span::raw(" open match history plot popup"),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled(":games strategy [run]", Style::default().fg(theme.accent)),
-        Span::raw(" open strategy inspector for loaded run"),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled(
-            ":games strategies all|config",
-            Style::default().fg(theme.accent),
-        ),
-        Span::raw(" open strategy inspector from config"),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled(":games inspect <id>", Style::default().fg(theme.accent)),
-        Span::raw(" introspect a strategy by id"),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled(
-            ":games inspect <fsm_index>",
-            Style::default().fg(theme.accent),
-        ),
-        Span::raw(" inspect FSM notebook index (defaults to {index,2,2})"),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled(
-            ":games inspect <id> {rule,states,symbols}",
-            Style::default().fg(theme.accent),
-        ),
-        Span::raw(" inspect TM tuple; use id=fsm for FSM {index,states,k}"),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled(
-            ":games inspect {rule,states,symbols}",
-            Style::default().fg(theme.accent),
-        ),
-        Span::raw(" inspect a one-sided TM rule tuple"),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled(
-            ":games tm [run|config] <input> [steps] [id]",
-            Style::default().fg(theme.accent),
-        ),
-        Span::raw(" simulate one-sided TM on integer input"),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled(
-            ":games tm {rule,states,symbols} <input> [steps]",
-            Style::default().fg(theme.accent),
-        ),
-        Span::raw(" simulate a rule-code TM without config"),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled(
-            ":games ca [run|config] <input> [steps] [id]",
-            Style::default().fg(theme.accent),
-        ),
-        Span::raw(" simulate shrinking CA on integer input"),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled(
-            ":games ca {n,k,r} <input> [steps]",
-            Style::default().fg(theme.accent),
-        ),
-        Span::raw(" simulate a CA rule tuple (t defaults to 10)"),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled(
-            ":games analyze[se] [path] [tail=N] [samples=N]",
-            Style::default().fg(theme.accent),
-        ),
-        Span::raw(" analyze last/specified history log"),
-    ]));
-
-    lines.push(Line::from(vec![Span::styled(
-        "GAMES PETRI DISH (POPUP)",
-        heading_style,
-    )]));
-    lines.push(Line::from(vec![
-        Span::styled("Esc", Style::default().fg(theme.accent)),
-        Span::raw(" close tournament"),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled("Space", Style::default().fg(theme.accent)),
-        Span::raw(" pause / resume"),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled("Enter", Style::default().fg(theme.accent)),
-        Span::raw(" step (when paused)"),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled("+ / -", Style::default().fg(theme.accent)),
-        Span::raw(" speed up / down"),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled("Tab", Style::default().fg(theme.accent)),
-        Span::raw(" toggle tournament / inspector"),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled("← / →", Style::default().fg(theme.accent)),
-        Span::raw(" adjust inspector window"),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled("H", Style::default().fg(theme.accent)),
-        Span::raw(" hide (continues running)"),
-    ]));
-
-    lines.push(Line::from(vec![Span::styled(
-        "EDITOR (FOCUSED)",
-        heading_style,
-    )]));
-    lines.push(Line::from(vec![
-        Span::styled("Ctrl/Cmd+A", Style::default().fg(theme.accent)),
-        Span::raw(" select all (also Scratchpad)"),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled("Ctrl/Cmd+C", Style::default().fg(theme.accent)),
-        Span::raw(" copy selection (also Scratchpad)"),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled("Ctrl/Cmd+X", Style::default().fg(theme.accent)),
-        Span::raw(" cut selection (also Scratchpad)"),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled("Ctrl/Cmd+V", Style::default().fg(theme.accent)),
-        Span::raw(" paste (replaces selection; also Scratchpad)"),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled("Ctrl/Alt+←/→", Style::default().fg(theme.accent)),
-        Span::raw(" move by word (also Scratchpad)"),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled(
-            "Ctrl/Alt+Backspace/Delete",
-            Style::default().fg(theme.accent),
-        ),
-        Span::raw(" delete word (also Scratchpad)"),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled("Enter", Style::default().fg(theme.accent)),
-        Span::raw(" newline (preserves indentation)"),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled("Esc", Style::default().fg(theme.accent)),
-        Span::raw(" switch to Normal mode"),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled("H/J/K/L", Style::default().fg(theme.accent)),
-        Span::raw(" move in Normal mode"),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled("I", Style::default().fg(theme.accent)),
-        Span::raw(" enter Insert mode"),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled("a", Style::default().fg(theme.accent)),
-        Span::raw(" append + Insert (Normal mode)"),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled("v", Style::default().fg(theme.accent)),
-        Span::raw(" Visual mode (Normal mode)"),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled("o", Style::default().fg(theme.accent)),
-        Span::raw(" open line below + Insert (Normal mode)"),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled("Shift+O", Style::default().fg(theme.accent)),
-        Span::raw(" open line above + Insert (Normal mode)"),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled("JJ", Style::default().fg(theme.accent)),
-        Span::raw(" save + Normal (Insert mode)"),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled("Shift+S", Style::default().fg(theme.accent)),
-        Span::raw(" toggle syntax highlight (Editor focus)"),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled("GG / Shift+G", Style::default().fg(theme.accent)),
-        Span::raw(" top / bottom"),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled("u / Ctrl/Cmd+Z", Style::default().fg(theme.accent)),
-        Span::raw(" undo"),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled(
-            "Shift+R / Ctrl+Y / Ctrl/Cmd+Shift+Z",
-            Style::default().fg(theme.accent),
-        ),
-        Span::raw(" redo"),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled("e / b", Style::default().fg(theme.accent)),
-        Span::raw(" word end / word back (Normal mode)"),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled("y", Style::default().fg(theme.accent)),
-        Span::raw(" yank selection (Visual mode)"),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled("yy", Style::default().fg(theme.accent)),
-        Span::raw(" yank line (Normal mode)"),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled("d", Style::default().fg(theme.accent)),
-        Span::raw(" delete selection (Visual mode)"),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled("p", Style::default().fg(theme.accent)),
-        Span::raw(" paste (Normal mode)"),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled("Shift+P", Style::default().fg(theme.accent)),
-        Span::raw(" paste above (Normal mode)"),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled("dd", Style::default().fg(theme.accent)),
-        Span::raw(" delete line (Normal mode)"),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled("$ / %", Style::default().fg(theme.accent)),
-        Span::raw(" end / start of line"),
-    ]));
-
-    lines.push(Line::from(vec![Span::styled(
-        "AGENT OPS (FOCUSED)",
-        heading_style,
-    )]));
-    lines.push(Line::from(vec![
-        Span::styled("Tab / Shift+Tab / ←/→", Style::default().fg(theme.accent)),
-        Span::raw(" cycle Ops tabs"),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled("j/k or ↑/↓", Style::default().fg(theme.accent)),
-        Span::raw(" move selection"),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled("Enter", Style::default().fg(theme.accent)),
-        Span::raw(" focus Agent Chat with current context"),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled("n", Style::default().fg(theme.accent)),
-        Span::raw(" create new mission (mock runner)"),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled("r / s / x", Style::default().fg(theme.accent)),
-        Span::raw(" MCP reconnect / start / stop (MCP tab)"),
-    ]));
-
-    lines.push(Line::from(vec![Span::styled(
-        "AGENT CHAT (FOCUSED)",
-        heading_style,
-    )]));
-    lines.push(Line::from(vec![
-        Span::styled("Enter", Style::default().fg(theme.accent)),
-        Span::raw(" send message (@all <msg> broadcasts)"),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled("Shift+Enter", Style::default().fg(theme.accent)),
-        Span::raw(" newline (preserves indentation)"),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled("Tab", Style::default().fg(theme.accent)),
-        Span::raw(" insert tab"),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled("Ctrl/Cmd+A", Style::default().fg(theme.accent)),
-        Span::raw(" select all"),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled("Cmd+C / Ctrl+Shift+C", Style::default().fg(theme.accent)),
-        Span::raw(" copy selection"),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled("Cmd+X / Ctrl+Shift+X", Style::default().fg(theme.accent)),
-        Span::raw(" cut selection"),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled("Ctrl/Cmd+V", Style::default().fg(theme.accent)),
-        Span::raw(" paste"),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled("Ctrl+U", Style::default().fg(theme.accent)),
-        Span::raw(" clear input"),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled("Ctrl+C", Style::default().fg(theme.accent)),
-        Span::raw(" clear input (copies if selection)"),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled("Esc", Style::default().fg(theme.accent)),
-        Span::raw(" clear selection / thread selection"),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled("←/→ / Home/End", Style::default().fg(theme.accent)),
-        Span::raw(" move cursor (Shift selects; Ctrl/Alt moves by word)"),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled("↑/↓", Style::default().fg(theme.accent)),
-        Span::raw(" move cursor / prompt history"),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled("Ctrl+↑/↓", Style::default().fg(theme.accent)),
-        Span::raw(" scroll chat thread"),
-    ]));
-
-    lines.push(Line::from(vec![Span::styled(
-        "VISUALIZER (FOCUSED)",
-        heading_style,
-    )]));
-    lines.push(Line::from(vec![
-        Span::styled("Ctrl+E", Style::default().fg(theme.accent)),
-        Span::raw(" cycle encoder"),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled("Ctrl+V", Style::default().fg(theme.accent)),
-        Span::raw(" toggle view (GENOME ↔ PLATE)"),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled("Ctrl+R", Style::default().fg(theme.accent)),
-        Span::raw(" cycle seed view (genome/plate/map/stats)"),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled("Ctrl+M", Style::default().fg(theme.accent)),
-        Span::raw(" cycle plate render (solid/half/braille/tissue/heat)"),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled("Ctrl+Y", Style::default().fg(theme.accent)),
-        Span::raw(" toggle seed source"),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled("Ctrl+A", Style::default().fg(theme.accent)),
-        Span::raw(" apply seed proposal"),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled("Ctrl+G", Style::default().fg(theme.accent)),
-        Span::raw(" toggle seed search"),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled("Ctrl+N", Style::default().fg(theme.accent)),
-        Span::raw(" snapshot seed"),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled("Ctrl+Shift+V", Style::default().fg(theme.accent)),
-        Span::raw(" cycle seed overlays"),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled("Arrows / HJKL", Style::default().fg(theme.accent)),
-        Span::raw(" move genome inspector (Visualizer focus)"),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled("Home / End", Style::default().fg(theme.accent)),
-        Span::raw(" inspector jump to edges"),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled("0 / $", Style::default().fg(theme.accent)),
-        Span::raw(" inspector jump to edges (fallback)"),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled("G + digits + Enter", Style::default().fg(theme.accent)),
-        Span::raw(" jump to genome index"),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled("C", Style::default().fg(theme.accent)),
-        Span::raw(" center inspector"),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled("I", Style::default().fg(theme.accent)),
-        Span::raw(" toggle inspector"),
-    ]));
-
-    lines.push(Line::from(vec![Span::styled(
-        "PETRI DISH (POPUP)",
-        heading_style,
-    )]));
-    lines.push(Line::from(vec![
-        Span::styled("Esc", Style::default().fg(theme.accent)),
-        Span::raw(" close popup"),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled("Space", Style::default().fg(theme.accent)),
-        Span::raw(" pause/resume"),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled("Enter", Style::default().fg(theme.accent)),
-        Span::raw(" step one generation"),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled("+ / -", Style::default().fg(theme.accent)),
-        Span::raw(" speed up/down"),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled("S", Style::default().fg(theme.accent)),
-        Span::raw(" snapshot sim"),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled("Ctrl+R", Style::default().fg(theme.accent)),
-        Span::raw(" reseed from current code"),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled("T", Style::default().fg(theme.accent)),
-        Span::raw(" toggle wrap mode"),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled("O", Style::default().fg(theme.accent)),
-        Span::raw(" cycle auto-stop"),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled("G", Style::default().fg(theme.accent)),
-        Span::raw(" toggle rule search"),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled("A", Style::default().fg(theme.accent)),
-        Span::raw(" apply best rule"),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled("H", Style::default().fg(theme.accent)),
-        Span::raw(" hide popup (sim keeps running)"),
-    ]));
+    let total: usize = sections.iter().map(|(_, rows)| rows.len() + 1).sum();
+    let mut lines = Vec::with_capacity(total);
+    for (title, rows) in sections {
+        lines.push(Line::from(Span::styled(*title, heading_style)));
+        lines.extend(rows.iter().map(|(key, desc)| row(key, desc, theme)));
+    }
     lines
 }
 
+/// Render the help overlay inside `area`. Scroll offset is clamped against
+/// the total line count; only the viewport window is walked through the
+/// selection pipeline so mouse-selection stays O(viewport_rows).
 pub fn render(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
-    let lines = build_lines(theme);
-
-    let block = Block::default()
+    let panel_style = Style::default().bg(theme.selection_bg).fg(theme.foreground);
+    let outer_frame = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme.border_focused))
         .title(Span::styled(
@@ -645,28 +325,23 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
                 .fg(theme.title_focused)
                 .add_modifier(Modifier::BOLD),
         ))
-        .style(Style::default().bg(theme.selection_bg).fg(theme.foreground));
+        .style(panel_style);
+    let content_area = outer_frame.inner(area);
 
-    let inner = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Min(1)])
-        .split(block.inner(area))[0];
-
-    let height = inner.height as usize;
-    let max_scroll = lines.len().saturating_sub(height);
-    let scroll = state.help_scroll.min(max_scroll);
-    let visible: Vec<Line> = lines.into_iter().skip(scroll).take(height).collect();
-    let visible = apply_ui_selection(
-        visible,
+    let all_lines = build_lines(theme);
+    let viewport_rows = content_area.height as usize;
+    let max_offset = all_lines.len().saturating_sub(viewport_rows);
+    let offset = state.help_scroll.min(max_offset);
+    let window: Vec<_> = all_lines.into_iter().skip(offset).take(viewport_rows).collect();
+    let with_selection = apply_ui_selection(
+        window,
         state.ui_selection.as_ref(),
         UiSelectionPane::HelpPopup,
         theme.cursor_line_bg,
-        scroll,
+        offset,
     );
-    let para =
-        Paragraph::new(visible).style(Style::default().bg(theme.selection_bg).fg(theme.foreground));
 
     frame.render_widget(Clear, area);
-    frame.render_widget(block, area);
-    frame.render_widget(para, inner);
+    frame.render_widget(outer_frame, area);
+    frame.render_widget(Paragraph::new(with_selection).style(panel_style), content_area);
 }

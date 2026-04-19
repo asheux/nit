@@ -10,150 +10,99 @@ use ratatui::{
 use crate::theme::Theme;
 use crate::widgets::agent_ops_view;
 use crate::widgets::text_selection::apply_ui_selection;
+use crate::widgets::text_utils::truncate_text as trim_to_width;
 
 const MIN_WIDTH: u16 = 80;
+const MAX_WIDTH: u16 = 140;
 const MIN_HEIGHT: u16 = 14;
+const MAX_HEIGHT: u16 = 36;
+const WIDTH_PCT: u16 = 80;
+const HEIGHT_PCT: u16 = 65;
 
-/// Number of header lines before the scrollable entry list begins.
+// Header rows (search, status, blank, column header) shown before the entry list.
 const HEADER_LINES: usize = 4;
+// Column widths for the entry table.
+const KIND_W: usize = 9;
+const OWNER_W: usize = 30;
+const TIME_W: usize = 14;
 
 pub fn preferred_size(screen: Rect) -> (u16, u16) {
-    let width = (screen.width.saturating_mul(80) / 100)
-        .clamp(MIN_WIDTH, 140)
+    let width = (screen.width.saturating_mul(WIDTH_PCT) / 100)
+        .clamp(MIN_WIDTH, MAX_WIDTH)
         .min(screen.width);
     // Compact height: enough for search bar + header + entries + footer.
-    let height = (screen.height.saturating_mul(65) / 100)
-        .clamp(MIN_HEIGHT, 36)
+    let height = (screen.height.saturating_mul(HEIGHT_PCT) / 100)
+        .clamp(MIN_HEIGHT, MAX_HEIGHT)
         .min(screen.height);
     (width, height)
 }
 
-fn trim_to_width(text: &str, max_width: usize) -> String {
-    if max_width == 0 {
-        return String::new();
-    }
-    if text.chars().count() <= max_width {
-        return text.to_string();
-    }
-    let mut out = text
-        .chars()
-        .take(max_width.saturating_sub(3))
-        .collect::<String>();
-    out.push_str("...");
-    out
-}
-
 pub fn entry_index_for_line(state: &AppState, line_idx: usize) -> Option<usize> {
-    // Entries start right after HEADER_LINES (search, status, blank, column header).
-    // Each entry is exactly one line with no separators.
-    if line_idx < HEADER_LINES {
-        return None;
-    }
-    let entry_idx = line_idx - HEADER_LINES;
+    // Each entry is exactly one line with no separators, starting after HEADER_LINES.
+    let entry_idx = line_idx.checked_sub(HEADER_LINES)?;
     let count = state.agents.global_archive_filtered.len();
     (entry_idx < count).then_some(entry_idx)
 }
 
-fn kind_color(kind: &str, theme: &Theme) -> Color {
+fn kind_label_and_color(kind: &str, theme: &Theme) -> (&'static str, Color) {
     match kind {
-        "REPLY" => theme.success,
-        "SYNTH" => theme.accent,
-        "PLAN" => theme.title,
-        "PATCH" => theme.warning,
-        "EVIDENCE" => theme.title_focused,
-        _ => theme.border, // PROMPT
+        "PROMPT" => ("PROMPT  ", theme.border),
+        "REPLY" => ("REPLY   ", theme.success),
+        "SYNTH" => ("SYNTH   ", theme.accent),
+        "PLAN" => ("PLAN    ", theme.title),
+        "PATCH" => ("PATCH   ", theme.warning),
+        "EVIDENCE" => ("EVIDENCE", theme.title_focused),
+        _ => ("OTHER   ", theme.border),
     }
 }
 
-/// Count rendered lines without building any styled `Line`/`Span` vectors.
-/// Used by the scroll hot path so wheel ticks don't re-iterate filtered
-/// entries + allocate styled spans just to compute `max_scroll`. Must stay
-/// in lock-step with `build_lines` below.
+// Count rendered lines without building any styled line/span vectors. Called on the
+// scroll hot path so wheel ticks don't re-iterate filtered entries + allocate styled
+// spans just to compute `max_scroll`. Must stay in lock-step with `build_lines`.
 pub fn line_count(state: &AppState) -> usize {
     let filtered = &state.agents.global_archive_filtered;
-    let mut count = HEADER_LINES;
-    count += filtered.len();
+    let mut count = HEADER_LINES + filtered.len();
     if filtered.is_empty() {
         // blank separator + "no results" message
         count += 2;
     }
     // footer blank + footer text
-    count += 2;
-    count
+    count + 2
 }
 
 pub fn build_lines(state: &AppState, theme: &Theme, inner_width: u16) -> Vec<Line<'static>> {
-    let label_style = Style::default().fg(theme.title).add_modifier(Modifier::DIM);
-    let value_style = Style::default().fg(theme.foreground);
-    let dim_style = Style::default()
-        .fg(theme.border)
-        .add_modifier(Modifier::DIM);
-    let selected_style = Style::default()
-        .fg(theme.foreground)
-        .bg(theme.selection_bg)
-        .add_modifier(Modifier::BOLD);
-
+    let styles = PopupStyles::from_theme(theme);
     let max_width = inner_width.max(1) as usize;
     let index = &state.agents.global_archive_index;
     let filtered = &state.agents.global_archive_filtered;
-    let total_count = index.len();
-    let matching_count = filtered.len();
     let query = &state.agents.global_archive_query;
     let filter_label =
         agent_ops_view::saved_run_history_filter_label(state.agents.global_archive_filter);
     let selected = state
         .agents
         .global_archive_selected
-        .min(matching_count.saturating_sub(1));
+        .min(filtered.len().saturating_sub(1));
 
     let mut lines = Vec::new();
-
-    // Line 0: search bar with visible block cursor.
-    let cursor_style = Style::default().fg(theme.background).bg(theme.foreground);
-    let prompt_style = Style::default()
-        .fg(theme.title_focused)
-        .add_modifier(Modifier::BOLD);
-    if query.is_empty() {
-        lines.push(Line::from(vec![
-            Span::styled(" / ", prompt_style),
-            Span::styled(" ", cursor_style),
-            Span::styled(" type to search...", dim_style),
-        ]));
-    } else {
-        lines.push(Line::from(vec![
-            Span::styled(" / ", prompt_style),
-            Span::styled(query.clone(), value_style),
-            Span::styled(" ", cursor_style),
-        ]));
-    }
-
-    // Line 1: status bar.
-    lines.push(Line::from(vec![
-        Span::styled("filter: ", label_style),
-        Span::styled(filter_label, value_style),
-        Span::styled("  |  ", dim_style),
-        Span::styled(format!("{total_count} artifacts"), value_style),
-        Span::styled("  |  ", dim_style),
-        Span::styled(format!("{matching_count} matching"), value_style),
-    ]));
-
-    // Line 2: blank separator.
+    lines.push(search_bar_line(query, &styles));
+    lines.push(status_line(
+        filter_label,
+        index.len(),
+        filtered.len(),
+        &styles,
+    ));
     lines.push(Line::from(""));
 
-    // Line 3: column header.
-    let time_w = 14;
-    let kind_w = 9;
-    let owner_w = 30;
     // indent col = 3 chars for "↳ " or "  ", prefix = 2
-    let fixed = 2 + 3 + kind_w + 1 + owner_w + 1 + time_w + 1;
+    let fixed = 2 + 3 + KIND_W + 1 + OWNER_W + 1 + TIME_W + 1;
     let preview_w = max_width.saturating_sub(fixed);
     let header = format!(
-        "     {:<kind_w$} {:<owner_w$} {:<time_w$} PREVIEW",
+        "     {:<KIND_W$} {:<OWNER_W$} {:<TIME_W$} PREVIEW",
         "KIND", "OWNER", "TIME",
     );
     lines.push(Line::from(Span::styled(
         trim_to_width(&header, max_width),
-        dim_style,
+        styles.dim,
     )));
 
     // Entries — prompts are top-level, replies/patches/evidence show with ↳.
@@ -161,66 +110,13 @@ pub fn build_lines(state: &AppState, theme: &Theme, inner_width: u16) -> Vec<Lin
         let Some(entry) = index.get(entry_idx) else {
             continue;
         };
-        let is_selected = display_idx == selected;
-        let base_style = if is_selected {
-            selected_style
-        } else {
-            value_style
-        };
-
-        let is_child = entry.kind != "PROMPT";
-        let prefix = if is_selected { "> " } else { "  " };
-        let indent = if is_child { "↳ " } else { "  " };
-
-        let kind_label = match entry.kind {
-            "PROMPT" => "PROMPT  ",
-            "REPLY" => "REPLY   ",
-            "SYNTH" => "SYNTH   ",
-            "PLAN" => "PLAN    ",
-            "PATCH" => "PATCH   ",
-            "EVIDENCE" => "EVIDENCE",
-            other => other,
-        };
-        let kind_span = Span::styled(
-            kind_label.to_string(),
-            if is_selected {
-                selected_style
-            } else {
-                Style::default().fg(kind_color(entry.kind, theme))
-            },
-        );
-        let owner_span = Span::styled(
-            format!(" {:<owner_w$}", trim_to_width(&entry.owner, owner_w)),
-            base_style,
-        );
-        let time_span = Span::styled(
-            format!(" {:<time_w$}", trim_to_width(&entry.time_label, time_w)),
-            if is_selected {
-                selected_style
-            } else {
-                dim_style
-            },
-        );
-        let preview_span = Span::styled(
-            format!(" {}", trim_to_width(&entry.preview, preview_w)),
-            base_style,
-        );
-
-        lines.push(Line::from(vec![
-            Span::styled(prefix, base_style),
-            Span::styled(
-                indent,
-                if is_selected {
-                    selected_style
-                } else {
-                    dim_style
-                },
-            ),
-            kind_span,
-            owner_span,
-            time_span,
-            preview_span,
-        ]));
+        lines.push(entry_line(
+            entry,
+            display_idx == selected,
+            preview_w,
+            theme,
+            &styles,
+        ));
     }
 
     if filtered.is_empty() {
@@ -230,21 +126,111 @@ pub fn build_lines(state: &AppState, theme: &Theme, inner_width: u16) -> Vec<Lin
             "No artifacts match your search."
         };
         lines.push(Line::from(""));
-        lines.push(Line::from(Span::styled(msg, dim_style)));
+        lines.push(Line::from(Span::styled(msg, styles.dim)));
     }
 
-    // Footer.
     lines.push(Line::from(""));
     let footer = if query.is_empty() {
         "Enter open | A all | D 24h | W 7d | M 30d | type to search | Esc close"
     } else {
         "Enter open | Backspace delete char | Ctrl+U clear | Esc clear/close"
     };
-    lines.push(Line::from(Span::styled(footer, dim_style)));
+    lines.push(Line::from(Span::styled(footer, styles.dim)));
 
     lines
 }
 
+struct PopupStyles {
+    label: Style,
+    value: Style,
+    dim: Style,
+    selected: Style,
+    prompt: Style,
+    cursor: Style,
+}
+
+impl PopupStyles {
+    fn from_theme(theme: &Theme) -> Self {
+        Self {
+            label: Style::default().fg(theme.title).add_modifier(Modifier::DIM),
+            value: Style::default().fg(theme.foreground),
+            dim: Style::default()
+                .fg(theme.border)
+                .add_modifier(Modifier::DIM),
+            selected: Style::default()
+                .fg(theme.foreground)
+                .bg(theme.selection_bg)
+                .add_modifier(Modifier::BOLD),
+            prompt: Style::default()
+                .fg(theme.title_focused)
+                .add_modifier(Modifier::BOLD),
+            cursor: Style::default().fg(theme.background).bg(theme.foreground),
+        }
+    }
+}
+
+fn search_bar_line(query: &str, styles: &PopupStyles) -> Line<'static> {
+    if query.is_empty() {
+        Line::from(vec![
+            Span::styled(" / ", styles.prompt),
+            Span::styled(" ", styles.cursor),
+            Span::styled(" type to search...", styles.dim),
+        ])
+    } else {
+        Line::from(vec![
+            Span::styled(" / ", styles.prompt),
+            Span::styled(query.to_string(), styles.value),
+            Span::styled(" ", styles.cursor),
+        ])
+    }
+}
+
+fn status_line(filter: &str, total: usize, matching: usize, styles: &PopupStyles) -> Line<'static> {
+    Line::from(vec![
+        Span::styled("filter: ", styles.label),
+        Span::styled(filter.to_string(), styles.value),
+        Span::styled("  |  ", styles.dim),
+        Span::styled(format!("{total} artifacts"), styles.value),
+        Span::styled("  |  ", styles.dim),
+        Span::styled(format!("{matching} matching"), styles.value),
+    ])
+}
+
+fn entry_line(
+    entry: &nit_core::state::GlobalArchiveEntry,
+    is_selected: bool,
+    preview_w: usize,
+    theme: &Theme,
+    styles: &PopupStyles,
+) -> Line<'static> {
+    let base = if is_selected { styles.selected } else { styles.value };
+    let tag = if is_selected { styles.selected } else { styles.dim };
+    let prefix = if is_selected { "> " } else { "  " };
+    let indent = if entry.kind == "PROMPT" { "  " } else { "↳ " };
+
+    let (kind_label, kind_color) = kind_label_and_color(entry.kind, theme);
+    let kind_style = if is_selected {
+        styles.selected
+    } else {
+        Style::default().fg(kind_color)
+    };
+
+    Line::from(vec![
+        Span::styled(prefix, base),
+        Span::styled(indent, tag),
+        Span::styled(kind_label, kind_style),
+        Span::styled(padded_cell(&entry.owner, OWNER_W), base),
+        Span::styled(padded_cell(&entry.time_label, TIME_W), tag),
+        Span::styled(format!(" {}", trim_to_width(&entry.preview, preview_w)), base),
+    ])
+}
+
+fn padded_cell(text: &str, width: usize) -> String {
+    format!(" {:<width$}", trim_to_width(text, width))
+}
+
+/// Render the global artifacts archive popup, applying any active UI selection
+/// so mouse-drag highlights line up with the scrolled viewport.
 pub fn render(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
     frame.render_widget(Clear, area);
     let block = Block::default()

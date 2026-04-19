@@ -10,6 +10,17 @@ use ratatui::{
 
 use crate::theme::Theme;
 
+// Width breakpoints for the row formatter — drop ID below WIDTH_SHOW_ID,
+// drop AGE below WIDTH_SHOW_AGE. Keeping the thresholds named lets the
+// column layout in `format_row` track the header in `build_lines`.
+const WIDTH_SHOW_ID: u16 = 90;
+const WIDTH_SHOW_AGE: u16 = 70;
+const COL_KIND_W: usize = 14;
+const COL_BY_W: usize = 26;
+const COL_TARGET_W: usize = 36;
+const STRONG_BOLD: f32 = 0.7;
+const STRONG_DIM: f32 = 0.3;
+
 /// Render the Substrate Signals body into `inner`, caching max_scroll so the
 /// scroll handlers can skip a rebuild on every wheel tick — same pattern as
 /// `gate_monitor_view::render`.
@@ -98,16 +109,12 @@ fn format_row(
     id: &str,
     width: u16,
 ) -> String {
-    // Width-adaptive: drop ID below 90; drop AGE below 70.
-    let show_id = width >= 90;
-    let show_age = width >= 70;
-    let mut row = format!(
-        "{:>4}  {:<14} {:<26} {:<36}",
-        strength,
-        truncate(kind, 14),
-        by,
-        truncate(target, 36)
-    );
+    let show_id = width >= WIDTH_SHOW_ID;
+    let show_age = width >= WIDTH_SHOW_AGE;
+    let kind_col = pad_right(&truncate(kind, COL_KIND_W), COL_KIND_W);
+    let by_col = pad_right(by, COL_BY_W);
+    let target_col = pad_right(&truncate(target, COL_TARGET_W), COL_TARGET_W);
+    let mut row = format!("{strength:>4}  {kind_col} {by_col} {target_col}");
     if show_age {
         row.push_str(&format!(" {age:>5}"));
     }
@@ -115,6 +122,19 @@ fn format_row(
         row.push_str(&format!("  {id}"));
     }
     row
+}
+
+fn pad_right(text: &str, width: usize) -> String {
+    let count = text.chars().count();
+    if count >= width {
+        return text.to_string();
+    }
+    let mut out = String::with_capacity(text.len() + width - count);
+    out.push_str(text);
+    for _ in count..width {
+        out.push(' ');
+    }
+    out
 }
 
 fn kind_label(kind: SignalKind) -> &'static str {
@@ -157,20 +177,18 @@ fn count_by_kind(signals: &[(&Signal, f32)]) -> String {
 }
 
 fn style_for(kind: SignalKind, strength: f32, theme: &Theme) -> Style {
-    // Base color by kind; intensity modulated by strength.
     let color = match kind {
         SignalKind::Warning => theme.warning,
-        SignalKind::ClaimViolation => theme.error,
+        SignalKind::ClaimViolation | SignalKind::InterventionEmitted => theme.error,
         SignalKind::DoneMarker => theme.success,
         SignalKind::Lead => theme.accent,
         SignalKind::HelpNeeded => theme.title_focused,
         SignalKind::Deadend => theme.border,
-        SignalKind::InterventionEmitted => theme.error,
     };
     let mut style = Style::default().fg(color);
-    if strength >= 0.7 {
+    if strength >= STRONG_BOLD {
         style = style.add_modifier(Modifier::BOLD);
-    } else if strength < 0.3 {
+    } else if strength < STRONG_DIM {
         style = style.add_modifier(Modifier::DIM);
     }
     style
@@ -193,26 +211,16 @@ fn compact_path(p: &str) -> String {
 /// shows `claude-opus-4-7#clone-01` instead of
 /// `claude-opus-4-7#swarm-mis-001-clone-01`. Non-clone ids pass through.
 fn compact_agent_id(id: &str) -> String {
-    let Some((base, rest)) = id.split_once("#swarm-") else {
-        return id.to_string();
-    };
-    // rest looks like `mis-001-clone-01` — skip past the mission id (two
-    // dash-separated tokens: `mis`, `001`) and keep the remainder.
-    let first_dash = match rest.find('-') {
-        Some(i) => i,
-        None => return id.to_string(),
-    };
-    let after_first = &rest[first_dash + 1..];
-    let second_dash_rel = match after_first.find('-') {
-        Some(i) => i,
-        None => return id.to_string(),
-    };
-    let suffix = &after_first[second_dash_rel + 1..];
-    if suffix.is_empty() {
-        id.to_string()
-    } else {
-        format!("{base}#{suffix}")
+    match parse_swarm_clone_id(id) {
+        Some((base, suffix)) => format!("{base}#{suffix}"),
+        None => id.to_string(),
     }
+}
+
+fn parse_swarm_clone_id(id: &str) -> Option<(&str, &str)> {
+    let (base, rest) = id.split_once("#swarm-")?;
+    let suffix = rest.splitn(3, '-').nth(2).filter(|s| !s.is_empty())?;
+    Some((base, suffix))
 }
 
 fn truncate(s: &str, n: usize) -> String {
@@ -226,61 +234,5 @@ fn truncate(s: &str, n: usize) -> String {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use nit_core::substrate::{Signal, SignalKind, SignalTarget, SubstrateState};
-    use std::path::PathBuf;
-
-    fn mk_state_with_signals(signals: Vec<Signal>) -> AppState {
-        use nit_core::buffer::Buffer;
-        let root = std::env::temp_dir().join(format!(
-            "nit-signals-view-{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&root).unwrap();
-        let mut state = AppState::new(root, Buffer::empty("x", None), Buffer::empty("n", None));
-        let mut substrate = SubstrateState::default();
-        for s in signals {
-            substrate.emit_signal(s);
-        }
-        state.substrate = substrate;
-        state
-    }
-
-    fn mk_signal(id: &str, kind: SignalKind, initial: f32, posted_at: u64) -> Signal {
-        Signal {
-            id: id.into(),
-            kind,
-            posted_by: "agent-a".into(),
-            posted_at_gen: posted_at,
-            target: SignalTarget::Global,
-            initial_strength: initial,
-            payload: serde_json::Value::Null,
-        }
-    }
-
-    #[test]
-    fn build_lines_empty_has_header_and_hint() {
-        let state = mk_state_with_signals(vec![]);
-        let theme = Theme::default();
-        let lines = build_lines(&state, &theme, 100);
-        // summary + blank + column header + blank + empty hint = 5 lines
-        assert_eq!(lines.len(), 5);
-    }
-
-    #[test]
-    fn build_lines_with_two_signals_emits_rows() {
-        let signals = vec![
-            mk_signal("s1", SignalKind::Warning, 0.9, 0),
-            mk_signal("s2", SignalKind::Lead, 0.4, 0),
-        ];
-        let state = mk_state_with_signals(signals);
-        let theme = Theme::default();
-        let lines = build_lines(&state, &theme, 100);
-        // summary + blank + column header + 2 rows = 5 lines
-        assert_eq!(lines.len(), 5);
-    }
-}
+#[path = "tests/signals_view.rs"]
+mod tests;

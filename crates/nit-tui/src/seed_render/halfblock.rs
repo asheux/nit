@@ -1,11 +1,12 @@
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
-use ratatui::style::Style;
+use ratatui::style::{Color, Style};
 
 use nit_core::EncodedSeed;
 
+use super::paint::{halo_bg_at, write_glyph};
 use super::palette::SeedPalette;
-use super::renderer::{halo_color, live_color, SeedRenderCache, SeedRenderConfig};
+use super::renderer::{SeedRenderCache, SeedRenderConfig, live_color};
 
 pub fn render(
     area: Rect,
@@ -20,60 +21,68 @@ pub fn render(
     if grid_w == 0 || grid_h == 0 {
         return;
     }
-    let max_w = area.width as usize;
-    let max_h = area.height as usize;
-    let cell_w = grid_w.min(max_w);
-    let cell_h = grid_h.div_ceil(2);
-    let h = cell_h.min(max_h);
+    let cell_w = grid_w.min(area.width as usize);
+    let cell_h = grid_h.div_ceil(2).min(area.height as usize);
 
-    for y in 0..h {
+    for y in 0..cell_h {
         let top_y = y * 2;
         let bot_y = top_y + 1;
         for x in 0..cell_w {
-            let top_alive = top_y < grid_h && seed.grid.get(x, top_y);
-            let bot_alive = bot_y < grid_h && seed.grid.get(x, bot_y);
-
-            let mut top_bg = palette.bg;
-            let mut bot_bg = palette.bg;
-            if top_alive {
-                top_bg = live_color(x, top_y, seed, cfg, cache, palette);
-            } else if cfg.show_halo {
-                if let Some(halo) = &cache.halo_mask {
-                    let idx = top_y * grid_w + x;
-                    if idx < halo.len() && halo[idx] > 0 {
-                        top_bg = halo_color(halo[idx], palette);
-                    }
-                }
-            }
-            if bot_alive {
-                bot_bg = live_color(x, bot_y, seed, cfg, cache, palette);
-            } else if cfg.show_halo {
-                if let Some(halo) = &cache.halo_mask {
-                    if bot_y < grid_h {
-                        let idx = bot_y * grid_w + x;
-                        if idx < halo.len() && halo[idx] > 0 {
-                            bot_bg = halo_color(halo[idx], palette);
-                        }
-                    }
-                }
-            }
-
-            let (ch, fg, bg) = match (top_alive, bot_alive) {
-                (true, true) => {
-                    if top_bg == bot_bg {
-                        ('█', top_bg, top_bg)
-                    } else {
-                        ('▀', top_bg, bot_bg)
-                    }
-                }
-                (true, false) => ('▀', top_bg, bot_bg),
-                (false, true) => ('▄', bot_bg, top_bg),
-                (false, false) => (' ', palette.bg, palette.bg),
-            };
-
-            let cell = buf.get_mut(area.x + x as u16, area.y + y as u16);
-            cell.set_char(ch);
-            cell.set_style(Style::default().fg(fg).bg(bg));
+            let top = sample_row(x, top_y, grid_w, grid_h, seed, cfg, cache, palette);
+            let bot = sample_row(x, bot_y, grid_w, grid_h, seed, cfg, cache, palette);
+            let (ch, fg, bg) = compose(top, bot, palette.bg);
+            write_glyph(
+                buf,
+                area.x + x as u16,
+                area.y + y as u16,
+                ch,
+                Style::default().fg(fg).bg(bg),
+            );
         }
+    }
+}
+
+struct RowSample {
+    alive: bool,
+    bg: Color,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn sample_row(
+    x: usize,
+    y: usize,
+    grid_w: usize,
+    grid_h: usize,
+    seed: &EncodedSeed,
+    cfg: &SeedRenderConfig,
+    cache: &SeedRenderCache,
+    palette: &SeedPalette,
+) -> RowSample {
+    if y >= grid_h {
+        return RowSample {
+            alive: false,
+            bg: palette.bg,
+        };
+    }
+    if seed.grid.get(x, y) {
+        return RowSample {
+            alive: true,
+            bg: live_color(x, y, seed, cfg, cache, palette),
+        };
+    }
+    let bg = if cfg.show_halo {
+        halo_bg_at(x, y, grid_w, cache, palette)
+    } else {
+        palette.bg
+    };
+    RowSample { alive: false, bg }
+}
+
+fn compose(top: RowSample, bot: RowSample, empty_bg: Color) -> (char, Color, Color) {
+    match (top.alive, bot.alive) {
+        (true, true) if top.bg == bot.bg => ('█', top.bg, top.bg),
+        (true, true) | (true, false) => ('▀', top.bg, bot.bg),
+        (false, true) => ('▄', bot.bg, top.bg),
+        (false, false) => (' ', empty_bg, empty_bg),
     }
 }

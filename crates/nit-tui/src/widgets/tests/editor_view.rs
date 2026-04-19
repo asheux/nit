@@ -1,7 +1,11 @@
+//! Tests for the editor view span builder: trailing-space padding, tab
+//! expansion style propagation, and highlight snapshot versioning.
+
 use super::*;
 use nit_syntax::{EngineKind, HighlightSnapshot, LanguageId, SyntaxStatus};
 use ratatui::style::Color;
 
+/// Concatenate span contents into a plain string for visible-range assertions.
 fn spans_to_string(spans: &[Span<'_>]) -> String {
     spans
         .iter()

@@ -69,6 +69,22 @@ fn popup_chat_selection_range(state: &AppState) -> Option<(usize, usize)> {
     Some((anchor.min(cursor), anchor.max(cursor)))
 }
 
+fn reset_popup_chat_input(state: &mut AppState) {
+    state.agents.artifacts_popup_chat_input.clear();
+    state.agents.artifacts_popup_chat_cursor = 0;
+    state.agents.artifacts_popup_chat_selection_anchor = None;
+}
+
+fn update_popup_selection_anchor(state: &mut AppState, selecting: bool, cursor: usize) {
+    if selecting {
+        if state.agents.artifacts_popup_chat_selection_anchor.is_none() {
+            state.agents.artifacts_popup_chat_selection_anchor = Some(cursor);
+        }
+    } else {
+        state.agents.artifacts_popup_chat_selection_anchor = None;
+    }
+}
+
 pub(super) fn delete_popup_chat_selection(state: &mut AppState) -> bool {
     let Some((start, end)) = popup_chat_selection_range(state) else {
         return false;
@@ -250,9 +266,7 @@ pub(super) fn handle_artifacts_popup_chat_key(
         } if modifiers.contains(KeyModifiers::CONTROL) => {
             handled = true;
             if !state.agents.artifacts_popup_chat_input.is_empty() {
-                state.agents.artifacts_popup_chat_input.clear();
-                state.agents.artifacts_popup_chat_cursor = 0;
-                state.agents.artifacts_popup_chat_selection_anchor = None;
+                reset_popup_chat_input(state);
                 changed = true;
                 follow_cursor = true;
             }
@@ -267,9 +281,7 @@ pub(super) fn handle_artifacts_popup_chat_key(
             if !copy_popup_chat_input_selection(state, clipboard)
                 && !state.agents.artifacts_popup_chat_input.is_empty()
             {
-                state.agents.artifacts_popup_chat_input.clear();
-                state.agents.artifacts_popup_chat_cursor = 0;
-                state.agents.artifacts_popup_chat_selection_anchor = None;
+                reset_popup_chat_input(state);
                 changed = true;
                 follow_cursor = true;
             }
@@ -284,9 +296,7 @@ pub(super) fn handle_artifacts_popup_chat_key(
             if !copy_popup_chat_input_selection(state, clipboard)
                 && !state.agents.artifacts_popup_chat_input.is_empty()
             {
-                state.agents.artifacts_popup_chat_input.clear();
-                state.agents.artifacts_popup_chat_cursor = 0;
-                state.agents.artifacts_popup_chat_selection_anchor = None;
+                reset_popup_chat_input(state);
                 changed = true;
                 follow_cursor = true;
             }
@@ -419,13 +429,7 @@ pub(super) fn handle_artifacts_popup_chat_key(
             let total_chars = state.agents.artifacts_popup_chat_input.chars().count();
             let cursor = state.agents.artifacts_popup_chat_cursor.min(total_chars);
             let selecting = modifiers.contains(KeyModifiers::SHIFT);
-            if selecting {
-                if state.agents.artifacts_popup_chat_selection_anchor.is_none() {
-                    state.agents.artifacts_popup_chat_selection_anchor = Some(cursor);
-                }
-            } else {
-                state.agents.artifacts_popup_chat_selection_anchor = None;
-            }
+            update_popup_selection_anchor(state, selecting, cursor);
             let new_cursor = if modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) {
                 chat_cursor_move_word_left(&state.agents.artifacts_popup_chat_input, cursor)
             } else {
@@ -450,13 +454,7 @@ pub(super) fn handle_artifacts_popup_chat_key(
             let max = state.agents.artifacts_popup_chat_input.chars().count();
             let cursor = state.agents.artifacts_popup_chat_cursor.min(max);
             let selecting = modifiers.contains(KeyModifiers::SHIFT);
-            if selecting {
-                if state.agents.artifacts_popup_chat_selection_anchor.is_none() {
-                    state.agents.artifacts_popup_chat_selection_anchor = Some(cursor);
-                }
-            } else {
-                state.agents.artifacts_popup_chat_selection_anchor = None;
-            }
+            update_popup_selection_anchor(state, selecting, cursor);
             let new_cursor = if modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) {
                 chat_cursor_move_word_right(&state.agents.artifacts_popup_chat_input, cursor)
             } else {
@@ -481,13 +479,7 @@ pub(super) fn handle_artifacts_popup_chat_key(
             let total_chars = state.agents.artifacts_popup_chat_input.chars().count();
             let cursor = state.agents.artifacts_popup_chat_cursor.min(total_chars);
             let selecting = modifiers.contains(KeyModifiers::SHIFT);
-            if selecting {
-                if state.agents.artifacts_popup_chat_selection_anchor.is_none() {
-                    state.agents.artifacts_popup_chat_selection_anchor = Some(cursor);
-                }
-            } else {
-                state.agents.artifacts_popup_chat_selection_anchor = None;
-            }
+            update_popup_selection_anchor(state, selecting, cursor);
             let (line_start, _) =
                 chat_current_line_bounds(&state.agents.artifacts_popup_chat_input, cursor);
             let new_cursor = if modifiers.contains(KeyModifiers::CONTROL) {
@@ -514,13 +506,7 @@ pub(super) fn handle_artifacts_popup_chat_key(
             let max = state.agents.artifacts_popup_chat_input.chars().count();
             let cursor = state.agents.artifacts_popup_chat_cursor.min(max);
             let selecting = modifiers.contains(KeyModifiers::SHIFT);
-            if selecting {
-                if state.agents.artifacts_popup_chat_selection_anchor.is_none() {
-                    state.agents.artifacts_popup_chat_selection_anchor = Some(cursor);
-                }
-            } else {
-                state.agents.artifacts_popup_chat_selection_anchor = None;
-            }
+            update_popup_selection_anchor(state, selecting, cursor);
             let (_, line_end) =
                 chat_current_line_bounds(&state.agents.artifacts_popup_chat_input, cursor);
             let new_cursor = if modifiers.contains(KeyModifiers::CONTROL) {
@@ -549,13 +535,7 @@ pub(super) fn handle_artifacts_popup_chat_key(
             let moved =
                 chat_cursor_move_vertical(&state.agents.artifacts_popup_chat_input, cursor, -1);
             if moved != cursor {
-                if selecting {
-                    if state.agents.artifacts_popup_chat_selection_anchor.is_none() {
-                        state.agents.artifacts_popup_chat_selection_anchor = Some(cursor);
-                    }
-                } else {
-                    state.agents.artifacts_popup_chat_selection_anchor = None;
-                }
+                update_popup_selection_anchor(state, selecting, cursor);
                 state.agents.artifacts_popup_chat_cursor = moved;
                 changed = true;
                 follow_cursor = true;
@@ -576,13 +556,7 @@ pub(super) fn handle_artifacts_popup_chat_key(
             let moved =
                 chat_cursor_move_vertical(&state.agents.artifacts_popup_chat_input, cursor, 1);
             if moved != cursor {
-                if selecting {
-                    if state.agents.artifacts_popup_chat_selection_anchor.is_none() {
-                        state.agents.artifacts_popup_chat_selection_anchor = Some(cursor);
-                    }
-                } else {
-                    state.agents.artifacts_popup_chat_selection_anchor = None;
-                }
+                update_popup_selection_anchor(state, selecting, cursor);
                 state.agents.artifacts_popup_chat_cursor = moved;
                 changed = true;
                 follow_cursor = true;

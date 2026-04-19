@@ -1,3 +1,7 @@
+//! Popup picker for Substrate protocol presets (plus a "Custom..." slot that
+//! parses a free-form spec via `nit_core::parse_protocol_spec`). Opened via
+//! the Substrate menu; Esc cancels, Enter applies.
+
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use nit_core::{actions::Action, AppState};
 use ratatui::{
@@ -9,85 +13,73 @@ use ratatui::{
 };
 
 use crate::theme::Theme;
+use crate::widgets::picker_utils::{centered_rect_px, truncate_text};
 
+const POPUP_MAX_WIDTH: u16 = 96;
+const POPUP_MAX_HEIGHT: u16 = 24;
+const PAGE_JUMP: usize = 6;
+/// Rows reserved below the preset list for the detail line, the custom input
+/// row, and the footer shortcuts row.
+const RESERVED_DETAIL_ROWS: u16 = 3;
+const MIN_INNER_HEIGHT: u16 = 4;
+
+/// Handle a key event for the protocol picker. Returns true if the event was
+/// consumed (including typed characters that mutate the custom-input buffer).
 pub fn handle_key(key: &KeyEvent, state: &mut AppState) -> bool {
-    let presets = nit_core::builtin_protocols(&state.rule_catalog);
-    let total = presets.len().saturating_add(1);
-    let custom_idx = presets.len();
+    let custom_slot = nit_core::builtin_protocols(&state.rule_catalog).len();
+    let option_count = custom_slot + 1;
+    let last_idx = option_count.saturating_sub(1);
+    let cursor = state.protocol_picker.selected;
     match key.code {
         KeyCode::Esc => {
             let _ = nit_core::apply_action(state, Action::CloseModal);
-            true
         }
         KeyCode::Enter => {
             let _ = nit_core::apply_action(state, Action::ApplySelectedProtocolFromPicker);
-            true
         }
-        KeyCode::Up => {
-            if total > 0 {
-                if state.protocol_picker.selected == 0 {
-                    state.protocol_picker.selected = total - 1;
-                } else {
-                    state.protocol_picker.selected -= 1;
-                }
-            }
-            true
-        }
-        KeyCode::Down => {
-            if total > 0 {
-                state.protocol_picker.selected = (state.protocol_picker.selected + 1) % total;
-            }
-            true
-        }
-        KeyCode::PageUp => {
-            if total > 0 {
-                state.protocol_picker.selected = state.protocol_picker.selected.saturating_sub(6);
-            }
-            true
-        }
-        KeyCode::PageDown => {
-            if total > 0 {
-                state.protocol_picker.selected =
-                    (state.protocol_picker.selected + 6).min(total - 1);
-            }
-            true
-        }
-        KeyCode::Home => {
-            state.protocol_picker.selected = 0;
-            true
-        }
-        KeyCode::End => {
-            if total > 0 {
-                state.protocol_picker.selected = total - 1;
-            }
-            true
-        }
+        KeyCode::Up => state.protocol_picker.selected = step_up(cursor, option_count),
+        KeyCode::Down => state.protocol_picker.selected = step_down(cursor, option_count),
+        KeyCode::PageUp => state.protocol_picker.selected = cursor.saturating_sub(PAGE_JUMP),
+        KeyCode::PageDown => state.protocol_picker.selected = (cursor + PAGE_JUMP).min(last_idx),
+        KeyCode::Home => state.protocol_picker.selected = 0,
+        KeyCode::End => state.protocol_picker.selected = last_idx,
         KeyCode::Backspace => {
-            state.protocol_picker.selected = custom_idx;
+            state.protocol_picker.selected = custom_slot;
             state.protocol_picker.custom_input.pop();
             update_custom_preview(state);
-            true
         }
-        KeyCode::Char(ch) => {
-            if !key.modifiers.contains(KeyModifiers::CONTROL) {
-                state.protocol_picker.selected = custom_idx;
-                state.protocol_picker.custom_input.push(ch);
-                update_custom_preview(state);
-                return true;
-            }
-            false
+        KeyCode::Char(ch) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+            state.protocol_picker.selected = custom_slot;
+            state.protocol_picker.custom_input.push(ch);
+            update_custom_preview(state);
         }
-        _ => false,
+        _ => return false,
     }
+    true
 }
 
+fn step_up(cursor: usize, total: usize) -> usize {
+    if total == 0 {
+        return 0;
+    }
+    cursor.checked_sub(1).unwrap_or(total - 1)
+}
+
+fn step_down(cursor: usize, total: usize) -> usize {
+    if total == 0 {
+        return 0;
+    }
+    (cursor + 1) % total
+}
+
+/// Render the protocol picker popup over `screen`. The popup auto-centers and
+/// clamps to `POPUP_MAX_WIDTH`/`POPUP_MAX_HEIGHT`; too-small terminals bail
+/// early so the caller sees nothing drawn rather than a clipped frame.
 pub fn render(frame: &mut Frame, screen: Rect, state: &AppState, theme: &Theme) {
-    let presets = nit_core::builtin_protocols(&state.rule_catalog);
-    let area = fixed_rect(screen);
+    let area = popup_rect(screen);
     if area.width == 0 || area.height == 0 {
         return;
     }
-    frame.render_widget(Clear, area);
     let popup_bg = theme.selection_bg;
     let block = Block::default()
         .borders(Borders::ALL)
@@ -100,11 +92,13 @@ pub fn render(frame: &mut Frame, screen: Rect, state: &AppState, theme: &Theme) 
         ))
         .style(Style::default().bg(popup_bg));
     let inner = block.inner(area);
-    if inner.height < 4 {
+    if inner.height < MIN_INNER_HEIGHT {
         return;
     }
+    frame.render_widget(Clear, area);
     frame.render_widget(block, area);
-    let list_height = inner.height.saturating_sub(3);
+
+    let list_height = inner.height.saturating_sub(RESERVED_DETAIL_ROWS);
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -115,27 +109,28 @@ pub fn render(frame: &mut Frame, screen: Rect, state: &AppState, theme: &Theme) 
         ])
         .split(inner);
 
+    let presets = nit_core::builtin_protocols(&state.rule_catalog);
     let list_width = chunks[0].width as usize;
-    let mut items = Vec::with_capacity(presets.len().saturating_add(1));
-    for preset in presets.iter() {
-        let line = format!("{} - {}", preset.name, preset.description);
-        items.push(ListItem::new(Line::from(truncate_text(&line, list_width))));
-    }
-    items.push(ListItem::new(Line::from(truncate_text(
-        "Custom...",
-        list_width,
-    ))));
-    let mut list_state = ListState::default();
+    let items: Vec<ListItem<'static>> = presets
+        .iter()
+        .map(|preset| {
+            let line = format!("{} - {}", preset.name, preset.description);
+            ListItem::new(Line::from(truncate_text(&line, list_width)))
+        })
+        .chain(std::iter::once(ListItem::new(Line::from(truncate_text(
+            "Custom...",
+            list_width,
+        )))))
+        .collect();
+
     let selected = state
         .protocol_picker
         .selected
         .min(items.len().saturating_sub(1));
+    let mut list_state = ListState::default();
     list_state.select(Some(selected));
-    let item_style = Style::default()
-        .fg(ratatui::style::Color::Gray)
-        .bg(popup_bg);
     let list = List::new(items)
-        .style(item_style)
+        .style(Style::default().fg(ratatui::style::Color::Gray).bg(popup_bg))
         .highlight_style(
             Style::default()
                 .fg(theme.foreground)
@@ -145,8 +140,28 @@ pub fn render(frame: &mut Frame, screen: Rect, state: &AppState, theme: &Theme) 
         .highlight_symbol("");
     frame.render_stateful_widget(list, chunks[0], &mut list_state);
 
-    let detail_width = chunks[1].width as usize;
-    let detail = protocol_detail_line(&presets, state, selected);
+    render_detail(frame, chunks[1], &presets, state, theme, popup_bg, selected);
+    render_custom_input(
+        frame,
+        chunks[2],
+        state,
+        theme,
+        popup_bg,
+        selected >= presets.len(),
+    );
+    render_footer(frame, chunks[3], theme, popup_bg);
+}
+
+fn render_detail(
+    frame: &mut Frame,
+    area: Rect,
+    presets: &[nit_core::ProtocolPreset],
+    state: &AppState,
+    theme: &Theme,
+    popup_bg: ratatui::style::Color,
+    selected: usize,
+) {
+    let detail = protocol_detail_line(presets, state, selected);
     let detail_style = match detail.kind {
         DetailKind::Warn => Style::default().fg(theme.warning).bg(popup_bg),
         DetailKind::Dim => Style::default()
@@ -154,63 +169,59 @@ pub fn render(frame: &mut Frame, screen: Rect, state: &AppState, theme: &Theme) 
             .bg(popup_bg)
             .add_modifier(Modifier::DIM),
     };
+    let detail_width = area.width as usize;
     let detail_text = truncate_text(&detail.text, detail_width.saturating_sub(1));
-    frame.render_widget(Paragraph::new(detail_text).style(detail_style), chunks[1]);
+    frame.render_widget(Paragraph::new(detail_text).style(detail_style), area);
+}
 
+fn render_custom_input(
+    frame: &mut Frame,
+    area: Rect,
+    state: &AppState,
+    theme: &Theme,
+    popup_bg: ratatui::style::Color,
+    is_custom_selected: bool,
+) {
     let input_label = Style::default()
         .fg(theme.title)
         .bg(popup_bg)
         .add_modifier(Modifier::DIM);
-    let input_value = if selected >= presets.len() {
+    let input_value = if is_custom_selected {
         Style::default().fg(theme.foreground).bg(popup_bg)
     } else {
         Style::default().fg(theme.border).bg(popup_bg)
     };
     let prefix = "Custom: ";
-    let input_width = chunks[2].width as usize;
-    let value_width = input_width.saturating_sub(prefix.chars().count());
+    let value_width = (area.width as usize).saturating_sub(prefix.chars().count());
     let value_text = truncate_text(&state.protocol_picker.custom_input, value_width);
     let input_line = Line::from(vec![
         Span::styled(prefix, input_label),
         Span::styled(value_text, input_value),
     ]);
-    let input = Paragraph::new(input_line).style(Style::default().bg(popup_bg));
-    frame.render_widget(input, chunks[2]);
+    frame.render_widget(
+        Paragraph::new(input_line).style(Style::default().bg(popup_bg)),
+        area,
+    );
+}
 
+fn render_footer(frame: &mut Frame, area: Rect, theme: &Theme, popup_bg: ratatui::style::Color) {
+    let accent_dim = Style::default()
+        .fg(theme.accent)
+        .add_modifier(Modifier::DIM);
+    let border_dim = Style::default()
+        .fg(theme.border)
+        .add_modifier(Modifier::DIM);
     let footer_line = Line::from(vec![
-        Span::styled(
-            "Enter apply",
-            Style::default()
-                .fg(theme.accent)
-                .add_modifier(Modifier::DIM),
-        ),
-        Span::styled(
-            " | ",
-            Style::default()
-                .fg(theme.border)
-                .add_modifier(Modifier::DIM),
-        ),
-        Span::styled(
-            "Esc cancel",
-            Style::default()
-                .fg(theme.accent)
-                .add_modifier(Modifier::DIM),
-        ),
-        Span::styled(
-            " | ",
-            Style::default()
-                .fg(theme.border)
-                .add_modifier(Modifier::DIM),
-        ),
-        Span::styled(
-            "Type to edit custom",
-            Style::default()
-                .fg(theme.border)
-                .add_modifier(Modifier::DIM),
-        ),
+        Span::styled("Enter apply", accent_dim),
+        Span::styled(" | ", border_dim),
+        Span::styled("Esc cancel", accent_dim),
+        Span::styled(" | ", border_dim),
+        Span::styled("Type to edit custom", border_dim),
     ]);
-    let footer = Paragraph::new(footer_line).style(Style::default().bg(popup_bg));
-    frame.render_widget(footer, chunks[3]);
+    frame.render_widget(
+        Paragraph::new(footer_line).style(Style::default().bg(popup_bg)),
+        area,
+    );
 }
 
 fn update_custom_preview(state: &mut AppState) {
@@ -232,25 +243,10 @@ fn update_custom_preview(state: &mut AppState) {
     }
 }
 
-fn centered_rect_px(screen: Rect, width: u16, height: u16) -> Rect {
-    let w = width.min(screen.width);
-    let h = height.min(screen.height);
-    let x = screen.x + screen.width.saturating_sub(w) / 2;
-    let y = screen.y + screen.height.saturating_sub(h) / 2;
-    Rect {
-        x,
-        y,
-        width: w,
-        height: h,
-    }
-}
-
-fn fixed_rect(screen: Rect) -> Rect {
+fn popup_rect(screen: Rect) -> Rect {
     let max_w = screen.width.saturating_sub(4).max(10);
     let max_h = screen.height.saturating_sub(4).max(6);
-    let width = 96u16.min(max_w);
-    let height = 24u16.min(max_h);
-    centered_rect_px(screen, width, height)
+    centered_rect_px(screen, POPUP_MAX_WIDTH.min(max_w), POPUP_MAX_HEIGHT.min(max_h))
 }
 
 struct DetailLine {
@@ -270,13 +266,12 @@ fn protocol_detail_line(
 ) -> DetailLine {
     if selected < presets.len() {
         let preset = &presets[selected];
-        let text = format!(
-            "{} - {}",
-            preset.mode.canonical_string(),
-            preset.description
-        );
         return DetailLine {
-            text,
+            text: format!(
+                "{} - {}",
+                preset.mode.canonical_string(),
+                preset.description
+            ),
             kind: DetailKind::Dim,
         };
     }
@@ -296,22 +291,4 @@ fn protocol_detail_line(
         text: "Custom protocol: type rule schedule".into(),
         kind: DetailKind::Dim,
     }
-}
-
-fn truncate_text(text: &str, max: usize) -> String {
-    if max == 0 {
-        return String::new();
-    }
-    let mut out = String::new();
-    for (count, ch) in text.chars().enumerate() {
-        if count >= max {
-            break;
-        }
-        out.push(ch);
-    }
-    if text.chars().count() > max && max > 3 {
-        let trimmed: String = out.chars().take(max - 3).collect();
-        return format!("{trimmed}...");
-    }
-    out
 }

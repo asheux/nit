@@ -25,6 +25,7 @@ enum StepUnit {
     Matches,
 }
 
+/// Parameters for starting a tournament run plus the paths where outputs will be written.
 #[derive(Clone)]
 pub struct RunRequest {
     pub config: NormalizedConfig,
@@ -43,6 +44,7 @@ pub struct RunRequest {
     pub steps_per_tick: u32,
 }
 
+/// Control messages sent from the UI thread into the tournament runner.
 pub enum RunnerCommand {
     StartRun(Box<RunRequest>),
     Pause,
@@ -53,6 +55,7 @@ pub enum RunnerCommand {
     Shutdown,
 }
 
+/// Progress and result notifications emitted by the tournament runner.
 pub enum RunnerEvent {
     StartupStage(String),
     Definitions(Vec<StrategyDefinition>),
@@ -65,6 +68,7 @@ pub enum RunnerEvent {
     Error(String),
 }
 
+/// Background worker that drives a `TournamentRunner`, forwarding progress to the UI.
 pub struct GamesRunner {
     cmd_tx: Sender<RunnerCommand>,
     pub events: Receiver<RunnerEvent>,
@@ -118,6 +122,47 @@ struct RunState {
     step_unit: StepUnit,
 }
 
+enum DrainOutcome {
+    Continue { step_once: bool },
+    Shutdown,
+}
+
+fn drain_commands(
+    cmd_rx: &Receiver<RunnerCommand>,
+    state: &mut Option<RunState>,
+    paused: &mut bool,
+    event_tx: &Sender<RunnerEvent>,
+) -> DrainOutcome {
+    let mut step_once = false;
+    while let Ok(cmd) = cmd_rx.try_recv() {
+        match cmd {
+            RunnerCommand::Pause => *paused = true,
+            RunnerCommand::Resume => *paused = false,
+            RunnerCommand::StepOnce => step_once = true,
+            RunnerCommand::Cancel => {
+                if let Some(run_state) = state.take() {
+                    finalize_cancel(run_state);
+                }
+                let _ = event_tx.send(RunnerEvent::Cancelled);
+                *paused = false;
+            }
+            RunnerCommand::UpdateSpeed(steps) => {
+                if let Some(run_state) = state.as_mut() {
+                    run_state.steps_per_tick = steps.max(1);
+                }
+            }
+            RunnerCommand::Shutdown => {
+                if let Some(run_state) = state.take() {
+                    finalize_cancel(run_state);
+                }
+                return DrainOutcome::Shutdown;
+            }
+            RunnerCommand::StartRun(_) => {}
+        }
+    }
+    DrainOutcome::Continue { step_once }
+}
+
 fn runner_loop(cmd_rx: Receiver<RunnerCommand>, event_tx: Sender<RunnerEvent>) {
     let mut state: Option<RunState> = None;
     let mut paused = false;
@@ -140,33 +185,10 @@ fn runner_loop(cmd_rx: Receiver<RunnerCommand>, event_tx: Sender<RunnerEvent>) {
             continue;
         }
 
-        let mut step_once = false;
-        while let Ok(cmd) = cmd_rx.try_recv() {
-            match cmd {
-                RunnerCommand::Pause => paused = true,
-                RunnerCommand::Resume => paused = false,
-                RunnerCommand::StepOnce => step_once = true,
-                RunnerCommand::Cancel => {
-                    if let Some(run_state) = state.take() {
-                        finalize_cancel(run_state);
-                    }
-                    let _ = event_tx.send(RunnerEvent::Cancelled);
-                    paused = false;
-                }
-                RunnerCommand::UpdateSpeed(steps) => {
-                    if let Some(run_state) = state.as_mut() {
-                        run_state.steps_per_tick = steps.max(1);
-                    }
-                }
-                RunnerCommand::Shutdown => {
-                    if let Some(run_state) = state.take() {
-                        finalize_cancel(run_state);
-                    }
-                    return;
-                }
-                RunnerCommand::StartRun(_) => {}
-            }
-        }
+        let step_once = match drain_commands(&cmd_rx, &mut state, &mut paused, &event_tx) {
+            DrainOutcome::Continue { step_once } => step_once,
+            DrainOutcome::Shutdown => return,
+        };
 
         if state.is_none() {
             continue;
@@ -470,30 +492,12 @@ fn finalize_run(state: RunState) -> Result<RunSummary, String> {
         state.config_text.clone(),
     );
     summary.schema_version = RUN_SUMMARY_SCHEMA_VERSION;
-    summary.paths.summary = state
-        .summary_path
-        .as_ref()
-        .map(|path| path.display().to_string());
-    summary.paths.definitions = state
-        .definitions_path
-        .as_ref()
-        .map(|path| path.display().to_string());
-    summary.paths.results = state
-        .results_path
-        .as_ref()
-        .map(|path| path.display().to_string());
-    summary.paths.config = state
-        .config_path
-        .as_ref()
-        .map(|path| path.display().to_string());
-    summary.paths.analysis_dir = state
-        .analysis_dir
-        .as_ref()
-        .map(|path| path.display().to_string());
-    summary.run_dir = state
-        .run_dir
-        .as_ref()
-        .map(|path| path.display().to_string());
+    summary.paths.summary = display_path(&state.summary_path);
+    summary.paths.definitions = display_path(&state.definitions_path);
+    summary.paths.results = display_path(&state.results_path);
+    summary.paths.config = display_path(&state.config_path);
+    summary.paths.analysis_dir = display_path(&state.analysis_dir);
+    summary.run_dir = display_path(&state.run_dir);
     summary.event_log = summary.paths.events.clone();
     summary.history_log = summary.paths.history.clone();
 
@@ -521,6 +525,10 @@ fn finalize_cancel(state: RunState) {
     let _ = state
         .runner
         .finish(state.timestamp, state.run_id, state.config_text);
+}
+
+fn display_path(path: &Option<PathBuf>) -> Option<String> {
+    path.as_ref().map(|p| p.display().to_string())
 }
 
 fn dephase_steps_per_tick(steps_per_tick: u32, rounds_per_match: u32) -> u32 {

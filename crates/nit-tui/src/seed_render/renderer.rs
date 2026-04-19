@@ -1,13 +1,16 @@
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
-use ratatui::style::Style;
 
 use nit_core::seed::SeedBits;
 use nit_core::{EncodedSeed, SeedEncoderId, SeedPreviewMode};
 use nit_gol::Grid;
 
+use super::hilbert;
 use super::palette::SeedPalette;
 use super::{braille, halfblock, heatmap, overlays, solid, tissue};
+
+const DEFAULT_DENSITY_BLOCK: usize = 4;
+const HILBERT_INSET_SIZE: usize = 16;
 
 #[derive(Clone, Debug)]
 pub struct SeedRenderConfig {
@@ -70,7 +73,7 @@ impl Default for SeedRenderCache {
             component_bboxes: Vec::new(),
             local_density: None,
             density_stride: 0,
-            density_block: 4,
+            density_block: DEFAULT_DENSITY_BLOCK,
             halo_mask: None,
             inset_16x16: None,
             hilbert_stream: None,
@@ -84,18 +87,21 @@ impl Default for SeedRenderCache {
 
 impl SeedRenderCache {
     pub fn update(&mut self, seed: &EncodedSeed) {
-        let w = seed.grid.width();
-        let h = seed.grid.height();
-        if self.seed_hash == seed.seed_hash && self.grid_width == w && self.grid_height == h {
+        let grid_w = seed.grid.width();
+        let grid_h = seed.grid.height();
+        if self.seed_hash == seed.seed_hash
+            && self.grid_width == grid_w
+            && self.grid_height == grid_h
+        {
             return;
         }
         self.seed_hash = seed.seed_hash;
-        self.grid_width = w;
-        self.grid_height = h;
+        self.grid_width = grid_w;
+        self.grid_height = grid_h;
 
-        let (component_map, mut bboxes) = compute_components(&seed.grid);
+        let (map, mut bboxes) = compute_components(&seed.grid);
         bboxes.sort_by(|a, b| b.cells.cmp(&a.cells));
-        self.component_map = component_map;
+        self.component_map = map;
         self.component_bboxes = bboxes;
 
         let (density, stride, block) = compute_density(&seed.grid, self.density_block.max(2));
@@ -105,62 +111,48 @@ impl SeedRenderCache {
 
         self.halo_mask = compute_halo(&seed.grid);
 
-        self.inset_16x16 = if seed.encoder_id.as_str() == "lifehash16"
+        let is_lifehash_inset = seed.encoder_id.as_str() == "lifehash16"
             && seed.base_bits_raw.width() == 16
-            && seed.base_bits_raw.height() == 16
-        {
-            Some(seed.base_bits_raw.clone())
-        } else {
-            None
-        };
+            && seed.base_bits_raw.height() == 16;
+        self.inset_16x16 = is_lifehash_inset.then(|| seed.base_bits_raw.clone());
 
+        self.populate_hilbert(seed);
+        self.populate_genome_stats(&seed.base_bits_raw);
+        self.populate_ascii_stats(seed);
+    }
+
+    fn populate_hilbert(&mut self, seed: &EncodedSeed) {
         self.hilbert_stream = None;
         self.hilbert_index_by_xy = None;
         self.hilbert_path_inset = None;
         self.hilbert_order = 0;
-        if seed.encoder_id == SeedEncoderId::HilbertBits {
-            let w = seed.base_bits.width().max(1);
-            let h = seed.base_bits.height().max(1);
-            let total = w.saturating_mul(h);
-            let mut order = 0u32;
-            let mut size = 1usize;
-            while size < w {
-                size <<= 1;
-                order += 1;
-            }
-            let mut stream = vec![0u8; total];
-            let mut index_by_xy = vec![0u32; total];
-            let mut inset = vec![0u8; 16 * 16];
-            let denom = total.saturating_sub(1).max(1) as u32;
-            for (idx, cell) in stream.iter_mut().enumerate() {
-                let idx = idx as u32;
-                let (x, y) = hilbert_index_to_xy(order, idx);
-                let xi = x as usize;
-                let yi = y as usize;
-                if xi < w && yi < h {
-                    *cell = u8::from(seed.base_bits.get(xi, yi));
-                    index_by_xy[yi * w + xi] = idx;
-                    let ix = xi.saturating_mul(16) / w;
-                    let iy = yi.saturating_mul(16) / h;
-                    let v = (idx.saturating_mul(255) / denom) as u8;
-                    let inset_idx = iy.saturating_mul(16) + ix;
-                    if inset_idx < inset.len() && v > inset[inset_idx] {
-                        inset[inset_idx] = v;
-                    }
-                }
-            }
-            self.hilbert_stream = Some(stream);
-            self.hilbert_index_by_xy = Some(index_by_xy);
-            self.hilbert_path_inset = Some(inset);
-            self.hilbert_order = order;
+        if seed.encoder_id != SeedEncoderId::HilbertBits {
+            return;
         }
+        let w = seed.base_bits.width().max(1);
+        let h = seed.base_bits.height().max(1);
+        let total = w.saturating_mul(h);
+        if total == 0 {
+            return;
+        }
+        let order = hilbert::order_for_width(w);
+        let HilbertBuffers {
+            stream,
+            index_by_xy,
+            path_inset,
+        } = build_hilbert_buffers(seed, w, h, total, order);
+        self.hilbert_stream = Some(stream);
+        self.hilbert_index_by_xy = Some(index_by_xy);
+        self.hilbert_path_inset = Some(path_inset);
+        self.hilbert_order = order;
+    }
 
+    fn populate_genome_stats(&mut self, bits: &SeedBits) {
+        let total = bits.width().saturating_mul(bits.height());
         let mut live = 0usize;
-        let mut total = 0usize;
-        for y in 0..seed.base_bits_raw.height() {
-            for x in 0..seed.base_bits_raw.width() {
-                total += 1;
-                if seed.base_bits_raw.get(x, y) {
+        for gy in 0..bits.height() {
+            for gx in 0..bits.width() {
+                if bits.get(gx, gy) {
                     live += 1;
                 }
             }
@@ -168,13 +160,15 @@ impl SeedRenderCache {
         self.genome_live = live;
         self.genome_total = total.max(1);
         self.genome_density = live as f32 / self.genome_total as f32;
+    }
 
+    fn populate_ascii_stats(&mut self, seed: &EncodedSeed) {
+        let values = &seed.base_values;
         let mut printable = 0usize;
         let mut nonprintable = 0usize;
-        for y in 0..seed.base_values.height() {
-            for x in 0..seed.base_values.width() {
-                let v = seed.base_values.get(x, y);
-                if (0x20u8..=0x7eu8).contains(&v) {
+        for vy in 0..values.height() {
+            for vx in 0..values.width() {
+                if (0x20u8..=0x7eu8).contains(&values.get(vx, vy)) {
                     printable += 1;
                 } else {
                     nonprintable += 1;
@@ -186,32 +180,47 @@ impl SeedRenderCache {
     }
 }
 
-fn hilbert_index_to_xy(order: u32, index: u32) -> (u32, u32) {
-    let mut x = 0u32;
-    let mut y = 0u32;
-    let mut t = index;
-    let mut s = 1u32;
-    let n = 1u32 << order;
-    while s < n {
-        let rx = (t / 2) & 1;
-        let ry = (t ^ rx) & 1;
-        let (nx, ny) = rot(s, x, y, rx, ry);
-        x = nx + s * rx;
-        y = ny + s * ry;
-        t /= 4;
-        s *= 2;
-    }
-    (x, y)
+struct HilbertBuffers {
+    stream: Vec<u8>,
+    index_by_xy: Vec<u32>,
+    path_inset: Vec<u8>,
 }
 
-fn rot(n: u32, x: u32, y: u32, rx: u32, ry: u32) -> (u32, u32) {
-    if ry == 0 {
-        if rx == 1 {
-            return (n - 1 - x, n - 1 - y);
+fn build_hilbert_buffers(
+    seed: &EncodedSeed,
+    w: usize,
+    h: usize,
+    total: usize,
+    order: u32,
+) -> HilbertBuffers {
+    let inset = HILBERT_INSET_SIZE;
+    let mut stream = vec![0u8; total];
+    let mut index_by_xy = vec![0u32; total];
+    let mut path_inset = vec![0u8; inset * inset];
+    let denom = total.saturating_sub(1).max(1) as u32;
+    for (idx, cell) in stream.iter_mut().enumerate() {
+        let idx_u32 = idx as u32;
+        let (x, y) = hilbert::index_to_xy(order, idx_u32);
+        let xi = x as usize;
+        let yi = y as usize;
+        if xi >= w || yi >= h {
+            continue;
         }
-        return (y, x);
+        *cell = u8::from(seed.base_bits.get(xi, yi));
+        index_by_xy[yi * w + xi] = idx_u32;
+        let ix = xi.saturating_mul(inset) / w;
+        let iy = yi.saturating_mul(inset) / h;
+        let intensity = (idx_u32.saturating_mul(255) / denom) as u8;
+        let inset_idx = iy.saturating_mul(inset) + ix;
+        if inset_idx < path_inset.len() && intensity > path_inset[inset_idx] {
+            path_inset[inset_idx] = intensity;
+        }
     }
-    (x, y)
+    HilbertBuffers {
+        stream,
+        index_by_xy,
+        path_inset,
+    }
 }
 
 pub fn grid_size_for_mode(width: usize, height: usize, mode: SeedPreviewMode) -> (usize, usize) {
@@ -236,27 +245,16 @@ pub fn render_seed(
         return;
     }
     match cfg.mode {
-        SeedPreviewMode::Solid => {
-            solid::render(area, buf, seed, cfg, cache, palette);
-        }
-        SeedPreviewMode::HalfBlock => {
-            halfblock::render(area, buf, seed, cfg, cache, palette);
-        }
-        SeedPreviewMode::Braille => {
-            braille::render(area, buf, seed, cfg, cache, palette);
-        }
-        SeedPreviewMode::Tissue => {
-            tissue::render(area, buf, seed, cfg, cache, palette);
-        }
-        SeedPreviewMode::Heatmap => {
-            heatmap::render(area, buf, seed, cfg, cache, palette);
-        }
+        SeedPreviewMode::Solid => solid::render(area, buf, seed, cfg, cache, palette),
+        SeedPreviewMode::HalfBlock => halfblock::render(area, buf, seed, cfg, cache, palette),
+        SeedPreviewMode::Braille => braille::render(area, buf, seed, cfg, cache, palette),
+        SeedPreviewMode::Tissue => tissue::render(area, buf, seed, cfg, cache, palette),
+        SeedPreviewMode::Heatmap => heatmap::render(area, buf, seed, cfg, cache, palette),
     }
-
     overlays::render_overlays(area, buf, seed, cfg, cache, palette);
 }
 
-pub fn live_color(
+pub(super) fn live_color(
     x: usize,
     y: usize,
     seed: &EncodedSeed,
@@ -264,20 +262,24 @@ pub fn live_color(
     cache: &SeedRenderCache,
     palette: &SeedPalette,
 ) -> ratatui::style::Color {
-    if cfg.show_components {
-        if let Some(map) = &cache.component_map {
-            let idx = y * seed.grid.width() + x;
-            if idx < map.len() {
-                let id = map[idx];
-                if id != u16::MAX {
-                    if let Some(color) = palette.tissue.get(id as usize % palette.tissue.len()) {
-                        return *color;
-                    }
-                }
-            }
-        }
+    if !cfg.show_components {
+        return palette.live;
     }
-    palette.live
+    let Some(map) = cache.component_map.as_ref() else {
+        return palette.live;
+    };
+    let idx = y * seed.grid.width() + x;
+    let Some(&id) = map.get(idx) else {
+        return palette.live;
+    };
+    if id == u16::MAX {
+        return palette.live;
+    }
+    palette
+        .tissue
+        .get(id as usize % palette.tissue.len())
+        .copied()
+        .unwrap_or(palette.live)
 }
 
 fn compute_components(grid: &Grid) -> (Option<Vec<u16>>, Vec<BBox>) {
@@ -300,39 +302,7 @@ fn compute_components(grid: &Grid) -> (Option<Vec<u16>>, Vec<BBox>) {
             if next_id == u16::MAX {
                 break;
             }
-            let mut bbox = BBox {
-                id: next_id,
-                min_x: x,
-                min_y: y,
-                max_x: x,
-                max_y: y,
-                cells: 0,
-            };
-            map[idx] = next_id;
-            stack.push((x, y));
-            while let Some((cx, cy)) = stack.pop() {
-                bbox.cells = bbox.cells.saturating_add(1);
-                bbox.min_x = bbox.min_x.min(cx);
-                bbox.min_y = bbox.min_y.min(cy);
-                bbox.max_x = bbox.max_x.max(cx);
-                bbox.max_y = bbox.max_y.max(cy);
-                let x0 = cx.saturating_sub(1);
-                let x1 = (cx + 1).min(w - 1);
-                let y0 = cy.saturating_sub(1);
-                let y1 = (cy + 1).min(h - 1);
-                for ny in y0..=y1 {
-                    for nx in x0..=x1 {
-                        let nidx = ny * w + nx;
-                        if grid.cells()[nidx] == 0 {
-                            continue;
-                        }
-                        if map[nidx] == u16::MAX {
-                            map[nidx] = next_id;
-                            stack.push((nx, ny));
-                        }
-                    }
-                }
-            }
+            let bbox = flood_fill(grid, &mut map, &mut stack, next_id, x, y);
             bboxes.push(bbox);
             next_id = next_id.wrapping_add(1);
         }
@@ -342,6 +312,64 @@ fn compute_components(grid: &Grid) -> (Option<Vec<u16>>, Vec<BBox>) {
         (None, Vec::new())
     } else {
         (Some(map), bboxes)
+    }
+}
+
+fn flood_fill(
+    grid: &Grid,
+    map: &mut [u16],
+    stack: &mut Vec<(usize, usize)>,
+    id: u16,
+    sx: usize,
+    sy: usize,
+) -> BBox {
+    let w = grid.width();
+    let h = grid.height();
+    let mut bbox = BBox {
+        id,
+        min_x: sx,
+        min_y: sy,
+        max_x: sx,
+        max_y: sy,
+        cells: 0,
+    };
+    map[sy * w + sx] = id;
+    stack.push((sx, sy));
+    while let Some((cx, cy)) = stack.pop() {
+        bbox.cells = bbox.cells.saturating_add(1);
+        bbox.min_x = bbox.min_x.min(cx);
+        bbox.min_y = bbox.min_y.min(cy);
+        bbox.max_x = bbox.max_x.max(cx);
+        bbox.max_y = bbox.max_y.max(cy);
+        enqueue_live_neighbors(grid, map, stack, id, cx, cy, w, h);
+    }
+    bbox
+}
+
+#[allow(clippy::too_many_arguments)]
+fn enqueue_live_neighbors(
+    grid: &Grid,
+    map: &mut [u16],
+    stack: &mut Vec<(usize, usize)>,
+    id: u16,
+    cx: usize,
+    cy: usize,
+    w: usize,
+    h: usize,
+) {
+    let x0 = cx.saturating_sub(1);
+    let x1 = (cx + 1).min(w - 1);
+    let y0 = cy.saturating_sub(1);
+    let y1 = (cy + 1).min(h - 1);
+    for ny in y0..=y1 {
+        for nx in x0..=x1 {
+            let nidx = ny * w + nx;
+            if grid.cells()[nidx] == 0 || map[nidx] != u16::MAX {
+                continue;
+            }
+            map[nidx] = id;
+            stack.push((nx, ny));
+        }
     }
 }
 
@@ -377,38 +405,33 @@ fn compute_halo(grid: &Grid) -> Option<Vec<u8>> {
     let mut halo = vec![0u8; w * h];
     for y in 0..h {
         for x in 0..w {
-            if !grid.get(x, y) {
-                continue;
-            }
-            let x0 = x.saturating_sub(1);
-            let x1 = (x + 1).min(w - 1);
-            let y0 = y.saturating_sub(1);
-            let y1 = (y + 1).min(h - 1);
-            for ny in y0..=y1 {
-                for nx in x0..=x1 {
-                    if nx == x && ny == y {
-                        continue;
-                    }
-                    if grid.get(nx, ny) {
-                        continue;
-                    }
-                    let idx = ny * w + nx;
-                    halo[idx] = halo[idx].saturating_add(1);
-                }
+            if grid.get(x, y) {
+                bump_halo_neighbors(&mut halo, grid, x, y, w, h);
             }
         }
     }
     Some(halo)
 }
 
-pub fn halo_color(intensity: u8, palette: &SeedPalette) -> ratatui::style::Color {
-    if intensity >= 3 {
-        palette.halo_2
-    } else {
-        palette.halo_1
+fn bump_halo_neighbors(
+    halo: &mut [u8],
+    grid: &Grid,
+    cx: usize,
+    cy: usize,
+    w: usize,
+    h: usize,
+) {
+    let x0 = cx.saturating_sub(1);
+    let x1 = (cx + 1).min(w - 1);
+    let y0 = cy.saturating_sub(1);
+    let y1 = (cy + 1).min(h - 1);
+    for ny in y0..=y1 {
+        for nx in x0..=x1 {
+            if (nx == cx && ny == cy) || grid.get(nx, ny) {
+                continue;
+            }
+            let idx = ny * w + nx;
+            halo[idx] = halo[idx].saturating_add(1);
+        }
     }
-}
-
-pub fn base_style(bg: ratatui::style::Color) -> Style {
-    Style::default().bg(bg)
 }

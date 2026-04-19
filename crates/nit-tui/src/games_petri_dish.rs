@@ -66,6 +66,7 @@ enum PetriView {
     Cache,
 }
 
+/// UI-side coordinator that owns the background game runners and the games petri-dish popup state.
 pub struct GamesPetriDishRuntime {
     runner: GamesRunner,
     analysis_runner: GamesAnalysisRunner,

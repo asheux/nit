@@ -1,11 +1,15 @@
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
-use ratatui::style::Style;
+use ratatui::style::{Color, Style};
 
 use nit_core::EncodedSeed;
 
+use super::paint::{halo_color, write_glyph};
 use super::palette::SeedPalette;
-use super::renderer::{halo_color, live_color, SeedRenderCache, SeedRenderConfig};
+use super::renderer::{SeedRenderCache, SeedRenderConfig, live_color};
+
+const CELL_W_PX: usize = 2;
+const CELL_H_PX: usize = 4;
 
 pub fn render(
     area: Rect,
@@ -20,101 +24,128 @@ pub fn render(
     if grid_w == 0 || grid_h == 0 {
         return;
     }
-    let max_w = area.width as usize;
-    let max_h = area.height as usize;
-    let cell_w = grid_w.div_ceil(2);
-    let cell_h = grid_h.div_ceil(4);
-    let w = cell_w.min(max_w);
-    let h = cell_h.min(max_h);
+    let cell_cols = grid_w.div_ceil(CELL_W_PX).min(area.width as usize);
+    let cell_rows = grid_h.div_ceil(CELL_H_PX).min(area.height as usize);
 
-    for y in 0..h {
-        for x in 0..w {
-            let mut top_alive = false;
-            let mut bottom_alive = false;
-            let mut top_color = palette.live;
-            let mut bottom_color = palette.live;
-            let mut top_color_set = false;
-            let mut bottom_color_set = false;
-            let mut top_halo = 0u8;
-            let mut bottom_halo = 0u8;
+    for cell_y in 0..cell_rows {
+        for cell_x in 0..cell_cols {
+            let sample = sample_cell(cell_x, cell_y, seed, cfg, cache, palette);
+            let (ch, fg, bg) = compose_glyph(&sample, cfg.show_halo, palette);
+            write_glyph(
+                buf,
+                area.x + cell_x as u16,
+                area.y + cell_y as u16,
+                ch,
+                Style::default().fg(fg).bg(bg),
+            );
+        }
+    }
+}
 
-            for dy in 0..4 {
-                let gy = y * 4 + dy;
-                if gy >= grid_h {
-                    continue;
+struct HalfSample {
+    alive: bool,
+    color: Color,
+    color_set: bool,
+    halo: u8,
+}
+
+impl HalfSample {
+    fn bg(&self, show_halo: bool, palette: &SeedPalette) -> Color {
+        if self.alive {
+            self.color
+        } else if show_halo && self.halo > 0 {
+            halo_color(self.halo, palette)
+        } else {
+            palette.bg
+        }
+    }
+}
+
+struct CellHalves {
+    top: HalfSample,
+    bottom: HalfSample,
+}
+
+fn sample_cell(
+    cell_x: usize,
+    cell_y: usize,
+    seed: &EncodedSeed,
+    cfg: &SeedRenderConfig,
+    cache: &SeedRenderCache,
+    palette: &SeedPalette,
+) -> CellHalves {
+    let grid_w = seed.grid.width();
+    let grid_h = seed.grid.height();
+    let mut top = HalfSample {
+        alive: false,
+        color: palette.live,
+        color_set: false,
+        halo: 0,
+    };
+    let mut bottom = HalfSample {
+        alive: false,
+        color: palette.live,
+        color_set: false,
+        halo: 0,
+    };
+    let halo_mask = cache.halo_mask.as_deref();
+
+    for dy in 0..CELL_H_PX {
+        let gy = cell_y * CELL_H_PX + dy;
+        if gy >= grid_h {
+            continue;
+        }
+        let half = if dy < CELL_H_PX / 2 {
+            &mut top
+        } else {
+            &mut bottom
+        };
+        for dx in 0..CELL_W_PX {
+            let gx = cell_x * CELL_W_PX + dx;
+            if gx >= grid_w {
+                continue;
+            }
+            if seed.grid.get(gx, gy) {
+                half.alive = true;
+                if !half.color_set {
+                    half.color = live_color(gx, gy, seed, cfg, cache, palette);
+                    half.color_set = true;
                 }
-                for dx in 0..2 {
-                    let gx = x * 2 + dx;
-                    if gx >= grid_w {
-                        continue;
-                    }
-                    if seed.grid.get(gx, gy) {
-                        if dy < 2 {
-                            top_alive = true;
-                            if !top_color_set {
-                                top_color = live_color(gx, gy, seed, cfg, cache, palette);
-                                top_color_set = true;
-                            }
-                        } else {
-                            bottom_alive = true;
-                            if !bottom_color_set {
-                                bottom_color = live_color(gx, gy, seed, cfg, cache, palette);
-                                bottom_color_set = true;
-                            }
-                        }
-                    } else if cfg.show_halo {
-                        if let Some(halo) = &cache.halo_mask {
-                            let idx = gy * grid_w + gx;
-                            if idx < halo.len() {
-                                if dy < 2 {
-                                    top_halo = top_halo.max(halo[idx]);
-                                } else {
-                                    bottom_halo = bottom_halo.max(halo[idx]);
-                                }
-                            }
-                        }
-                    }
+                continue;
+            }
+            if !cfg.show_halo {
+                continue;
+            }
+            if let Some(mask) = halo_mask {
+                if let Some(&v) = mask.get(gy * grid_w + gx) {
+                    half.halo = half.halo.max(v);
                 }
             }
+        }
+    }
 
-            let top_bg = if top_alive {
-                top_color
-            } else if cfg.show_halo && top_halo > 0 {
-                halo_color(top_halo, palette)
+    CellHalves { top, bottom }
+}
+
+fn compose_glyph(
+    sample: &CellHalves,
+    show_halo: bool,
+    palette: &SeedPalette,
+) -> (char, Color, Color) {
+    let top_bg = sample.top.bg(show_halo, palette);
+    let bot_bg = sample.bottom.bg(show_halo, palette);
+    match (sample.top.alive, sample.bottom.alive) {
+        (true, true) if top_bg == bot_bg => ('█', top_bg, top_bg),
+        (true, true) | (true, false) => ('▀', top_bg, bot_bg),
+        (false, true) => ('▄', bot_bg, top_bg),
+        (false, false) => {
+            let halo = sample.top.halo.max(sample.bottom.halo);
+            let bg = if show_halo && halo > 0 {
+                halo_color(halo, palette)
             } else {
                 palette.bg
             };
-            let bottom_bg = if bottom_alive {
-                bottom_color
-            } else if cfg.show_halo && bottom_halo > 0 {
-                halo_color(bottom_halo, palette)
-            } else {
-                palette.bg
-            };
-
-            let (ch, fg, bg) = match (top_alive, bottom_alive) {
-                (true, true) => {
-                    if top_bg == bottom_bg {
-                        ('█', top_bg, top_bg)
-                    } else {
-                        ('▀', top_bg, bottom_bg)
-                    }
-                }
-                (true, false) => ('▀', top_bg, bottom_bg),
-                (false, true) => ('▄', bottom_bg, top_bg),
-                (false, false) => {
-                    let halo = top_halo.max(bottom_halo);
-                    let bg = if cfg.show_halo && halo > 0 {
-                        halo_color(halo, palette)
-                    } else {
-                        palette.bg
-                    };
-                    (' ', palette.bg, bg)
-                }
-            };
-            let cell = buf.get_mut(area.x + x as u16, area.y + y as u16);
-            cell.set_char(ch);
-            cell.set_style(Style::default().fg(fg).bg(bg));
+            (' ', palette.bg, bg)
         }
     }
 }

@@ -9,6 +9,7 @@ use ratatui::{
 
 use crate::theme::Theme;
 use crate::widgets::text_selection::apply_ui_selection;
+use crate::widgets::text_utils::truncate_text;
 use std::collections::{HashMap, HashSet};
 
 const MIN_WIDTH: u16 = 70;
@@ -521,22 +522,6 @@ fn pad_to_width(text: &str, width: usize) -> String {
     if len < width {
         out.push_str(&" ".repeat(width - len));
     }
-    out
-}
-
-fn truncate_text(text: &str, width: usize) -> String {
-    if width == 0 {
-        return String::new();
-    }
-    let len = text.chars().count();
-    if len <= width {
-        return text.to_string();
-    }
-    if width <= 3 {
-        return text.chars().take(width).collect();
-    }
-    let mut out: String = text.chars().take(width - 3).collect();
-    out.push_str("...");
     out
 }
 

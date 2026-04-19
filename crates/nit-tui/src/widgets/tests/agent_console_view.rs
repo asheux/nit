@@ -1,3 +1,8 @@
+//! Tests for the agent console view (thread rendering, chat input metrics,
+//! breather rows, styled spans). Each test constructs a minimal `AppState`
+//! fixture and asserts against the row stream produced by `thread_rows` or
+//! `format_message_rows`.
+
 use super::{
     artifact_message_index_for_line, chat_input_scroll_metrics, chat_input_text_area,
     ecg_indicator, format_message_rows, map_chat_input_point_to_cursor, thread_lines, thread_rows,

@@ -10,6 +10,7 @@ use nit_games::history_log::MatchHistory;
 use nit_games::CycleMetadata;
 use nit_games::RunSummary;
 
+/// Rendered lines for a single replayed match plus optional cycle metadata.
 #[derive(Clone, Debug)]
 pub struct ReplayData {
     pub title: String,
@@ -40,6 +41,7 @@ pub enum RunsEvent {
     Error(String),
 }
 
+/// Background thread that walks the runs directory and loads summary/replay JSON off the UI loop.
 pub struct GamesRunsRunner {
     cmd_tx: Sender<RunsCommand>,
     pub events: Receiver<RunsEvent>,
@@ -74,94 +76,33 @@ impl GamesRunsRunner {
 }
 
 fn runner_loop(cmd_rx: Receiver<RunsCommand>, event_tx: Sender<RunsEvent>) {
-    loop {
-        match cmd_rx.recv() {
-            Ok(RunsCommand::Refresh { base_dir }) => match scan_runs(&base_dir) {
-                Ok(entries) => {
-                    let _ = event_tx.send(RunsEvent::RunsLoaded(entries));
-                }
-                Err(err) => {
-                    let _ = event_tx.send(RunsEvent::Error(err));
-                }
-            },
-            Ok(RunsCommand::LoadSummary { summary_path }) => match load_summary(&summary_path) {
-                Ok(summary) => {
-                    let _ = event_tx.send(RunsEvent::SummaryLoaded(Box::new(summary)));
-                }
-                Err(err) => {
-                    let _ = event_tx.send(RunsEvent::Error(err));
-                }
-            },
-            Ok(RunsCommand::LoadReplay {
+    while let Ok(command) = cmd_rx.recv() {
+        let event = match command {
+            RunsCommand::Refresh { base_dir } => scan_runs(&base_dir)
+                .map(RunsEvent::RunsLoaded)
+                .unwrap_or_else(RunsEvent::Error),
+            RunsCommand::LoadSummary { summary_path } => load_summary(&summary_path)
+                .map(|summary| RunsEvent::SummaryLoaded(Box::new(summary)))
+                .unwrap_or_else(RunsEvent::Error),
+            RunsCommand::LoadReplay {
                 history_path,
                 a_id,
                 b_id,
                 payoff,
-            }) => match load_replay(&history_path, &a_id, &b_id, payoff) {
-                Ok(replay) => {
-                    let _ = event_tx.send(RunsEvent::ReplayLoaded(replay));
-                }
-                Err(err) => {
-                    let _ = event_tx.send(RunsEvent::Error(err));
-                }
-            },
-            Ok(RunsCommand::Shutdown) | Err(_) => break,
-        }
+            } => load_replay(&history_path, &a_id, &b_id, payoff)
+                .map(RunsEvent::ReplayLoaded)
+                .unwrap_or_else(RunsEvent::Error),
+            RunsCommand::Shutdown => break,
+        };
+        let _ = event_tx.send(event);
     }
 }
 
 fn scan_runs(base_dir: &Path) -> Result<Vec<GamesRunEntry>, String> {
     let mut summaries = Vec::new();
-    let runs_root = base_dir.join("runs").join("games");
-    if runs_root.exists() {
-        for entry in fs::read_dir(&runs_root).map_err(|e| e.to_string())? {
-            let entry = entry.map_err(|e| e.to_string())?;
-            let path = entry.path();
-            if !path.is_dir() {
-                continue;
-            }
-            if path.file_name().and_then(|n| n.to_str()) == Some("sweeps") {
-                if let Ok(sweeps) = fs::read_dir(&path) {
-                    for sweep in sweeps.flatten() {
-                        let sweep_path = sweep.path();
-                        let cells = sweep_path.join("cells");
-                        if let Ok(cell_dirs) = fs::read_dir(&cells) {
-                            for cell in cell_dirs.flatten() {
-                                let summary_path = cell.path().join("run_summary.json");
-                                if summary_path.exists() {
-                                    summaries.push(summary_path);
-                                }
-                            }
-                        }
-                    }
-                }
-                continue;
-            }
-            let summary_path = path.join("run_summary.json");
-            if summary_path.exists() {
-                summaries.push(summary_path);
-            }
-        }
-    }
-
-    for legacy_dir in [base_dir.join("games-runs"), base_dir.join("output")] {
-        if !legacy_dir.exists() {
-            continue;
-        }
-        for entry in fs::read_dir(&legacy_dir).map_err(|e| e.to_string())? {
-            let entry = entry.map_err(|e| e.to_string())?;
-            let path = entry.path();
-            if path.is_file() {
-                let name = path
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or_default();
-                if name.starts_with("run__") && name.ends_with(".json") {
-                    summaries.push(path);
-                }
-            }
-        }
-    }
+    collect_canonical_summaries(&base_dir.join("runs").join("games"), &mut summaries)?;
+    collect_legacy_summaries(&base_dir.join("games-runs"), &mut summaries)?;
+    collect_legacy_summaries(&base_dir.join("output"), &mut summaries)?;
 
     let mut entries = Vec::new();
     for summary_path in summaries {
@@ -171,6 +112,70 @@ fn scan_runs(base_dir: &Path) -> Result<Vec<GamesRunEntry>, String> {
     }
     entries.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
     Ok(entries)
+}
+
+fn collect_canonical_summaries(
+    runs_root: &Path,
+    summaries: &mut Vec<PathBuf>,
+) -> Result<(), String> {
+    if !runs_root.exists() {
+        return Ok(());
+    }
+    for entry in fs::read_dir(runs_root).map_err(|e| e.to_string())? {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        if path.file_name().and_then(|n| n.to_str()) == Some("sweeps") {
+            collect_sweep_summaries(&path, summaries);
+            continue;
+        }
+        push_if_summary(path.join("run_summary.json"), summaries);
+    }
+    Ok(())
+}
+
+fn collect_sweep_summaries(sweeps_dir: &Path, summaries: &mut Vec<PathBuf>) {
+    let Ok(sweeps) = fs::read_dir(sweeps_dir) else {
+        return;
+    };
+    for sweep in sweeps.flatten() {
+        let cells = sweep.path().join("cells");
+        let Ok(cell_dirs) = fs::read_dir(&cells) else {
+            continue;
+        };
+        for cell in cell_dirs.flatten() {
+            push_if_summary(cell.path().join("run_summary.json"), summaries);
+        }
+    }
+}
+
+fn collect_legacy_summaries(dir: &Path, summaries: &mut Vec<PathBuf>) -> Result<(), String> {
+    if !dir.exists() {
+        return Ok(());
+    }
+    for entry in fs::read_dir(dir).map_err(|e| e.to_string())? {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or_default();
+        if name.starts_with("run__") && name.ends_with(".json") {
+            summaries.push(path);
+        }
+    }
+    Ok(())
+}
+
+fn push_if_summary(path: PathBuf, summaries: &mut Vec<PathBuf>) {
+    if path.exists() {
+        summaries.push(path);
+    }
 }
 
 fn load_summary(path: &Path) -> Result<RunSummary, String> {
@@ -288,10 +293,6 @@ fn actions_from_outcome(ch: char) -> Option<(Action, Action)> {
     }
 }
 
-#[cfg(test)]
-#[path = "tests/games_runs.rs"]
-mod tests;
-
 fn outcome_label(ch: char) -> &'static str {
     match ch {
         '0' => "CC",
@@ -301,3 +302,7 @@ fn outcome_label(ch: char) -> &'static str {
         _ => "--",
     }
 }
+
+#[cfg(test)]
+#[path = "tests/games_runs.rs"]
+mod tests;

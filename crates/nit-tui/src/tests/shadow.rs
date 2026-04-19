@@ -1,8 +1,9 @@
-//! Integration tests for the single-agent shadow pipeline.
+//! Tests for the single-agent shadow pipeline.
 //!
-//! These tests drive the full DAG: start → propose-a + propose-b → judge →
-//! review → main agent, cleaning up along the way. They use `AppState` plus a
-//! minimal mock roster so they don't depend on any runner.
+//! Parser/helper checks are lightweight unit tests. The DAG tests drive the
+//! full pipeline — start → propose-a + propose-b → judge → review → main —
+//! using an `AppState` plus a minimal mock roster so they don't depend on
+//! any runner.
 
 use nit_core::state::AgentTurnState;
 use nit_core::{AgentBusEvent, AgentLane, AgentLaneKind, AgentStatus, AppState, Buffer};
@@ -10,9 +11,67 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 use crate::shadow::{
-    parse_shadow_lane_id, shadow_lane_id, shadow_stage_label_from_state, ShadowRuntime,
-    SHADOW_ROLES,
+    parse_shadow_command, parse_shadow_lane_id, shadow_lane_id, shadow_stage_label_from_state,
+    should_auto_enable_shadows, ShadowRuntime, SHADOW_ROLES,
 };
+
+#[test]
+fn parse_shadow_command_accepts_explicit_prefix() {
+    let cmd = parse_shadow_command("@shadow refactor core").unwrap();
+    assert_eq!(cmd.prompt, "refactor core");
+}
+
+#[test]
+fn parse_shadow_command_rejects_embedded_prefix() {
+    assert!(parse_shadow_command("please @shadow foo").is_none());
+    assert!(parse_shadow_command("@shadows foo").is_none());
+    assert!(parse_shadow_command("@shadow").is_none());
+}
+
+#[test]
+fn parse_shadow_command_tolerates_leading_whitespace() {
+    let cmd = parse_shadow_command("  @shadow do it").unwrap();
+    assert_eq!(cmd.prompt, "do it");
+}
+
+#[test]
+fn should_auto_enable_shadows_triggers_on_keyword() {
+    assert!(should_auto_enable_shadows("Refactor the widget module"));
+    assert!(should_auto_enable_shadows("rewrite this function please"));
+    assert!(should_auto_enable_shadows("Implement SSE streaming"));
+}
+
+#[test]
+fn should_auto_enable_shadows_triggers_on_length() {
+    let long = "a".repeat(501);
+    assert!(should_auto_enable_shadows(&long));
+}
+
+#[test]
+fn should_auto_enable_shadows_is_quiet_for_short_questions() {
+    assert!(!should_auto_enable_shadows("what does this do?"));
+    assert!(!should_auto_enable_shadows("fix typo"));
+    assert!(!should_auto_enable_shadows("why is the test flaky?"));
+}
+
+#[test]
+fn shadow_lane_id_roundtrip() {
+    let id = shadow_lane_id("codex", "01", "propose-a");
+    assert_eq!(id, "codex#shadow-01-propose-a");
+    let (base, run_id, role) = parse_shadow_lane_id(&id).unwrap();
+    assert_eq!(base, "codex");
+    assert_eq!(run_id, "01");
+    assert_eq!(role, "propose-a");
+}
+
+#[test]
+fn parse_shadow_lane_id_handles_roles_with_dashes() {
+    let id = "claude-main#shadow-07-propose-b";
+    let (base, run_id, role) = parse_shadow_lane_id(id).unwrap();
+    assert_eq!(base, "claude-main");
+    assert_eq!(run_id, "07");
+    assert_eq!(role, "propose-b");
+}
 
 fn make_state_with_main_agent(id: &str) -> AppState {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));

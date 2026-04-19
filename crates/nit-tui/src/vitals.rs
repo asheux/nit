@@ -349,42 +349,38 @@ impl VitalsState {
 }
 
 pub(crate) fn severity_scaled_samples(samples: &[u64], level: LabCriticality) -> Vec<u64> {
-    let (floor, scale) = match level {
-        LabCriticality::Idle | LabCriticality::Ok => (0u64, 1.0f64),
-        LabCriticality::Warn => (16u64, 1.15f64),
-        LabCriticality::Hot => (30u64, 1.35f64),
-        LabCriticality::Crit => (45u64, 1.60f64),
+    let (floor, gain) = match level {
+        LabCriticality::Idle | LabCriticality::Ok => (0_u64, 1.0_f64),
+        LabCriticality::Warn => (16, 1.15),
+        LabCriticality::Hot => (30, 1.35),
+        LabCriticality::Crit => (45, 1.60),
     };
     samples
         .iter()
-        .map(|sample| {
-            let amplified = ((*sample as f64) * scale).round() as u64;
-            amplified.max(floor).min(100)
-        })
+        .map(|raw| (((*raw as f64) * gain).round() as u64).clamp(floor, 100))
         .collect()
 }
 
+const SPARKLINE_BLOCKS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+
 pub fn sparkline_from_samples(samples: &[u64], width: usize) -> String {
-    const BLOCKS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
     if width == 0 {
         return String::new();
     }
     if samples.is_empty() {
         return "▁".repeat(width);
     }
-    let mut out = String::with_capacity(width);
-    let sample_len = samples.len();
-    for i in 0..width {
-        let idx = if width == 1 || sample_len == 1 {
-            sample_len.saturating_sub(1)
-        } else {
-            i.saturating_mul(sample_len.saturating_sub(1)) / (width.saturating_sub(1))
-        };
-        let sample = samples.get(idx).copied().unwrap_or(0).min(100);
-        let level = (sample as usize * (BLOCKS.len() - 1) + 50) / 100;
-        out.push(BLOCKS[level]);
-    }
-    out
+    let tail = samples.len() - 1;
+    let span = width.saturating_sub(1).max(1);
+    let top = SPARKLINE_BLOCKS.len() - 1;
+    let pinned = width == 1 || tail == 0;
+    (0..width)
+        .map(|col| {
+            let pick = if pinned { tail } else { col.saturating_mul(tail) / span };
+            let amp = samples.get(pick).copied().unwrap_or(0).min(100) as usize;
+            SPARKLINE_BLOCKS[(amp * top + 50) / 100]
+        })
+        .collect()
 }
 
 #[cfg(test)]

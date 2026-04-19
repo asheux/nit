@@ -9,13 +9,16 @@ use ratatui::{
 
 use crate::theme::Theme;
 use crate::widgets::text_selection::apply_ui_selection;
+use crate::widgets::text_utils::trim_to_width;
 
 const MIN_WIDTH: u16 = 70;
+const MAX_WIDTH: u16 = 120;
 const MIN_HEIGHT: u16 = 20;
+const MAX_HEIGHT: u16 = 40;
 
 pub fn preferred_size(screen: Rect) -> (u16, u16) {
-    let width = screen.width.clamp(MIN_WIDTH, 120);
-    let height = screen.height.clamp(MIN_HEIGHT, 40);
+    let width = screen.width.clamp(MIN_WIDTH, MAX_WIDTH);
+    let height = screen.height.clamp(MIN_HEIGHT, MAX_HEIGHT);
     (width, height)
 }
 
@@ -60,13 +63,6 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
         .wrap(Wrap { trim: false })
         .scroll((scroll as u16, 0));
     frame.render_widget(paragraph, inner);
-}
-
-fn trim_to_width(text: &str, max_width: usize) -> String {
-    if max_width == 0 {
-        return String::new();
-    }
-    text.chars().take(max_width).collect()
 }
 
 /// Count the rendered lines without actually building them. Used by the
@@ -235,16 +231,9 @@ fn build_lines_window(
             let slice_end = end.saturating_sub(pairs_start).min(pairs.len());
             for (offset, (a, b)) in pairs[slice_start..slice_end].iter().enumerate() {
                 let pair_idx = slice_start + offset;
-                let style = if pair_idx == state.games.replay.selected_index {
-                    selected_style
-                } else {
-                    value_style
-                };
-                let prefix = if pair_idx == state.games.replay.selected_index {
-                    "›"
-                } else {
-                    " "
-                };
+                let is_selected = pair_idx == state.games.replay.selected_index;
+                let style = if is_selected { selected_style } else { value_style };
+                let prefix = if is_selected { "›" } else { " " };
                 let text = format!("{prefix} {a} vs {b}");
                 push(
                     Line::from(Span::styled(trim_to_width(&text, max_width), style)),

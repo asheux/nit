@@ -254,10 +254,8 @@ fn run_git_ls_files(root: &Path, args: &[&str]) -> Result<Option<Vec<String>>, S
         .output()
         .map_err(|e| format!("git spawn failed: {e}"))?;
 
-    match output.status.code() {
-        Some(0) => {}
-        Some(128) => return Ok(None),
-        _ => return Ok(None),
+    if output.status.code() != Some(0) {
+        return Ok(None);
     }
 
     let mut files = Vec::new();
@@ -412,182 +410,202 @@ impl PartialOrd for Candidate {
     }
 }
 
-fn fuzzy_loop(cmd_rx: Receiver<FuzzyCommand>, event_tx: Sender<FuzzyEvent>) {
-    let mut root = PathBuf::new();
-    let mut index_generation = 0u64;
-    let mut index: Vec<IndexedFile> = Vec::new();
+#[derive(Default)]
+struct FuzzyState {
+    root: PathBuf,
+    index_generation: u64,
+    index: Vec<IndexedFile>,
+    query_generation: u64,
+    query: String,
+    streamed: usize,
+}
 
-    let mut query_generation = 0u64;
-    let mut query = String::new();
-    let mut streamed = 0usize;
+#[derive(Default)]
+struct TickFlags {
+    recompute: bool,
+    index_changed: bool,
+}
+
+enum FuzzyDispatch {
+    Continue,
+    Shutdown,
+}
+
+fn fuzzy_loop(cmd_rx: Receiver<FuzzyCommand>, event_tx: Sender<FuzzyEvent>) {
+    let mut state = FuzzyState::default();
 
     while let Ok(cmd) = cmd_rx.recv() {
-        let mut recompute = false;
-        let mut index_changed = false;
-        match cmd {
-            FuzzyCommand::ResetIndex {
-                generation,
-                root: r,
-            } => {
-                index_generation = generation;
-                root = r;
-                index.clear();
-                query.clear();
-                query_generation = generation;
-                streamed = 0;
-                recompute = true;
-            }
-            FuzzyCommand::IndexBatch { generation, files } => {
-                if generation == index_generation {
-                    index.extend(files);
-                    index_changed = true;
-                }
-            }
-            FuzzyCommand::IndexDone { .. } => {}
-            FuzzyCommand::Query {
-                generation,
-                query: q,
-            } => {
-                query_generation = generation;
-                query = q;
-                recompute = true;
-            }
-            FuzzyCommand::Shutdown => break,
+        let mut flags = TickFlags::default();
+        if matches!(apply_fuzzy_command(cmd, &mut state, &mut flags), FuzzyDispatch::Shutdown) {
+            return;
         }
-
         // Coalesce bursts.
-        while let Ok(cmd) = cmd_rx.try_recv() {
-            match cmd {
-                FuzzyCommand::ResetIndex {
-                    generation,
-                    root: r,
-                } => {
-                    index_generation = generation;
-                    root = r;
-                    index.clear();
-                    query.clear();
-                    query_generation = generation;
-                    streamed = 0;
-                    recompute = true;
-                }
-                FuzzyCommand::IndexBatch { generation, files } => {
-                    if generation == index_generation {
-                        index.extend(files);
-                        index_changed = true;
-                    }
-                }
-                FuzzyCommand::IndexDone { .. } => {}
-                FuzzyCommand::Query {
-                    generation,
-                    query: q,
-                } => {
-                    query_generation = generation;
-                    query = q;
-                    recompute = true;
-                }
-                FuzzyCommand::Shutdown => return,
+        while let Ok(next) = cmd_rx.try_recv() {
+            if matches!(
+                apply_fuzzy_command(next, &mut state, &mut flags),
+                FuzzyDispatch::Shutdown
+            ) {
+                return;
             }
         }
 
-        if query.is_empty() && index_changed && streamed < MAX_FILE_RESULTS && query_generation != 0
+        if state.query.is_empty()
+            && flags.index_changed
+            && state.streamed < MAX_FILE_RESULTS
+            && state.query_generation != 0
         {
-            let end = index.len().min(MAX_FILE_RESULTS);
-            if end > streamed {
-                let mut results = Vec::with_capacity(end - streamed);
-                for item in &index[streamed..end] {
-                    results.push(SearchResultFile {
-                        rel_path: item.rel_path.clone(),
-                        abs_path: root.join(&item.rel_path),
-                        score: 0,
-                        matched_indices: Vec::new(),
-                    });
-                }
-                streamed = end;
-                let _ = event_tx.send(FuzzyEvent::ResultsAppend {
-                    generation: query_generation,
-                    results,
-                    total_indexed: index.len(),
-                });
-            }
+            stream_unmatched_tail(&mut state, &event_tx);
         }
 
-        if !recompute {
+        if !flags.recompute {
             continue;
         }
 
         let start = Instant::now();
-        if query.is_empty() {
-            let end = index.len().min(MAX_FILE_RESULTS);
-            let mut results = Vec::with_capacity(end);
-            for item in &index[0..end] {
-                results.push(SearchResultFile {
-                    rel_path: item.rel_path.clone(),
-                    abs_path: root.join(&item.rel_path),
-                    score: 0,
-                    matched_indices: Vec::new(),
-                });
-            }
-            streamed = end;
-            let _ = event_tx.send(FuzzyEvent::ResultsReplace {
-                generation: query_generation,
-                results,
-                total_indexed: index.len(),
-                total_matches: index.len(),
-                duration_ms: start.elapsed().as_millis(),
-            });
+        if state.query.is_empty() {
+            replace_with_index_window(&mut state, &event_tx, start);
             continue;
         }
 
-        let query_lc = query.to_ascii_lowercase();
-        let mut total_matches = 0usize;
-        let mut heap: BinaryHeap<std::cmp::Reverse<Candidate>> = BinaryHeap::new();
-        for (idx, item) in index.iter().enumerate() {
-            if let Some((score, indices)) =
-                fuzzy_score_bytes(item.rel_lower.as_bytes(), query_lc.as_bytes())
-            {
-                total_matches += 1;
-                let cand = Candidate {
-                    score,
-                    idx,
-                    matched_indices: indices,
-                };
-                if heap.len() < MAX_FILE_RESULTS {
-                    heap.push(std::cmp::Reverse(cand));
-                    continue;
-                }
-                let Some(worst) = heap.peek().map(|r| &r.0) else {
-                    continue;
-                };
-                if cand.score > worst.score {
-                    let _ = heap.pop();
-                    heap.push(std::cmp::Reverse(cand));
-                }
+        replace_with_fuzzy_matches(&state, &event_tx, start);
+    }
+}
+
+fn stream_unmatched_tail(state: &mut FuzzyState, event_tx: &Sender<FuzzyEvent>) {
+    let end = state.index.len().min(MAX_FILE_RESULTS);
+    if end <= state.streamed {
+        return;
+    }
+    let results = build_unmatched_results(&state.index[state.streamed..end], &state.root);
+    state.streamed = end;
+    let _ = event_tx.send(FuzzyEvent::ResultsAppend {
+        generation: state.query_generation,
+        results,
+        total_indexed: state.index.len(),
+    });
+}
+
+fn replace_with_index_window(state: &mut FuzzyState, event_tx: &Sender<FuzzyEvent>, start: Instant) {
+    let end = state.index.len().min(MAX_FILE_RESULTS);
+    let results = build_unmatched_results(&state.index[..end], &state.root);
+    state.streamed = end;
+    let _ = event_tx.send(FuzzyEvent::ResultsReplace {
+        generation: state.query_generation,
+        results,
+        total_indexed: state.index.len(),
+        total_matches: state.index.len(),
+        duration_ms: start.elapsed().as_millis(),
+    });
+}
+
+fn replace_with_fuzzy_matches(state: &FuzzyState, event_tx: &Sender<FuzzyEvent>, start: Instant) {
+    let query_lc = state.query.to_ascii_lowercase();
+    let (heap, total_matches) = score_candidates(&state.index, query_lc.as_bytes());
+    let candidates = sort_candidates(heap, &state.index);
+    let results = candidates
+        .into_iter()
+        .map(|cand| SearchResultFile {
+            rel_path: state.index[cand.idx].rel_path.clone(),
+            abs_path: state.root.join(&state.index[cand.idx].rel_path),
+            score: cand.score,
+            matched_indices: cand.matched_indices,
+        })
+        .collect();
+    let _ = event_tx.send(FuzzyEvent::ResultsReplace {
+        generation: state.query_generation,
+        results,
+        total_indexed: state.index.len(),
+        total_matches,
+        duration_ms: start.elapsed().as_millis(),
+    });
+}
+
+fn build_unmatched_results(items: &[IndexedFile], root: &Path) -> Vec<SearchResultFile> {
+    items
+        .iter()
+        .map(|item| SearchResultFile {
+            rel_path: item.rel_path.clone(),
+            abs_path: root.join(&item.rel_path),
+            score: 0,
+            matched_indices: Vec::new(),
+        })
+        .collect()
+}
+
+fn score_candidates(
+    index: &[IndexedFile],
+    needle_lc: &[u8],
+) -> (BinaryHeap<std::cmp::Reverse<Candidate>>, usize) {
+    let mut total_matches = 0usize;
+    let mut heap: BinaryHeap<std::cmp::Reverse<Candidate>> = BinaryHeap::new();
+    for (idx, item) in index.iter().enumerate() {
+        let Some((score, indices)) = fuzzy_score_bytes(item.rel_lower.as_bytes(), needle_lc) else {
+            continue;
+        };
+        total_matches += 1;
+        let cand = Candidate {
+            score,
+            idx,
+            matched_indices: indices,
+        };
+        if heap.len() < MAX_FILE_RESULTS {
+            heap.push(std::cmp::Reverse(cand));
+            continue;
+        }
+        let Some(worst_score) = heap.peek().map(|r| r.0.score) else {
+            continue;
+        };
+        if cand.score > worst_score {
+            let _ = heap.pop();
+            heap.push(std::cmp::Reverse(cand));
+        }
+    }
+    (heap, total_matches)
+}
+
+fn sort_candidates(
+    heap: BinaryHeap<std::cmp::Reverse<Candidate>>,
+    index: &[IndexedFile],
+) -> Vec<Candidate> {
+    let mut candidates: Vec<Candidate> = heap.into_iter().map(|r| r.0).collect();
+    candidates.sort_by(|a, b| {
+        b.score
+            .cmp(&a.score)
+            .then_with(|| index[a.idx].rel_lower.cmp(&index[b.idx].rel_lower))
+    });
+    candidates
+}
+
+fn apply_fuzzy_command(
+    cmd: FuzzyCommand,
+    state: &mut FuzzyState,
+    flags: &mut TickFlags,
+) -> FuzzyDispatch {
+    match cmd {
+        FuzzyCommand::ResetIndex { generation, root } => {
+            state.index_generation = generation;
+            state.root = root;
+            state.index.clear();
+            state.query.clear();
+            state.query_generation = generation;
+            state.streamed = 0;
+            flags.recompute = true;
+        }
+        FuzzyCommand::IndexBatch { generation, files } => {
+            if generation == state.index_generation {
+                state.index.extend(files);
+                flags.index_changed = true;
             }
         }
-        let mut candidates: Vec<Candidate> = heap.into_iter().map(|r| r.0).collect();
-        candidates.sort_by(|a, b| {
-            b.score
-                .cmp(&a.score)
-                .then_with(|| index[a.idx].rel_lower.cmp(&index[b.idx].rel_lower))
-        });
-        let mut results = Vec::with_capacity(candidates.len());
-        for cand in candidates {
-            let item = &index[cand.idx];
-            results.push(SearchResultFile {
-                rel_path: item.rel_path.clone(),
-                abs_path: root.join(&item.rel_path),
-                score: cand.score,
-                matched_indices: cand.matched_indices,
-            });
+        FuzzyCommand::IndexDone { .. } => {}
+        FuzzyCommand::Query { generation, query } => {
+            state.query_generation = generation;
+            state.query = query;
+            flags.recompute = true;
         }
-        let _ = event_tx.send(FuzzyEvent::ResultsReplace {
-            generation: query_generation,
-            results,
-            total_indexed: index.len(),
-            total_matches,
-            duration_ms: start.elapsed().as_millis(),
-        });
+        FuzzyCommand::Shutdown => return FuzzyDispatch::Shutdown,
     }
+    FuzzyDispatch::Continue
 }
 
 pub(crate) fn fuzzy_score_bytes(hay: &[u8], needle: &[u8]) -> Option<(i64, Vec<usize>)> {
@@ -795,17 +813,11 @@ fn run_content_worker(
             break;
         }
         let path = root.join(&rel_path);
-        if let Ok(meta) = fs::metadata(&path) {
-            if meta.len() > MAX_SEARCH_FILE_BYTES {
-                continue;
-            }
-        }
-        if is_probably_binary(&path) {
+        if file_is_skippable(&path) {
             continue;
         }
-        let file = match fs::File::open(&path) {
-            Ok(f) => f,
-            Err(_) => continue,
+        let Ok(file) = fs::File::open(&path) else {
+            continue;
         };
         let mut reader = std::io::BufReader::new(file);
         let mut line = String::new();
@@ -815,21 +827,12 @@ fn run_content_worker(
                 break;
             }
             line.clear();
-            let n = match std::io::BufRead::read_line(&mut reader, &mut line) {
-                Ok(0) => break,
-                Ok(n) => n,
-                Err(_) => break,
-            };
-            if n == 0 {
-                break;
+            match std::io::BufRead::read_line(&mut reader, &mut line) {
+                Ok(0) | Err(_) => break,
+                Ok(_) => {}
             }
             line_no += 1;
-            if line.ends_with('\n') {
-                line.pop();
-                if line.ends_with('\r') {
-                    line.pop();
-                }
-            }
+            strip_trailing_newline(&mut line);
             let Some(byte_idx) = line.find(&needle) else {
                 continue;
             };
@@ -850,12 +853,11 @@ fn run_content_worker(
                 break;
             }
             if batch.len() >= MATCH_BATCH_SIZE {
-                let out = std::mem::take(&mut batch);
                 let _ = event_tx.send(ContentEvent::MatchBatch {
                     generation,
-                    results: out,
+                    results: std::mem::take(&mut batch),
                 });
-                batch = Vec::with_capacity(MATCH_BATCH_SIZE);
+                batch.reserve(MATCH_BATCH_SIZE);
             }
         }
         if total_matches >= MAX_MATCH_RESULTS {
@@ -876,18 +878,32 @@ fn run_content_worker(
     });
 }
 
+fn file_is_skippable(path: &Path) -> bool {
+    if fs::metadata(path).is_ok_and(|meta| meta.len() > MAX_SEARCH_FILE_BYTES) {
+        return true;
+    }
+    is_probably_binary(path)
+}
+
 fn is_probably_binary(path: &Path) -> bool {
-    let file = match fs::File::open(path) {
-        Ok(f) => f,
-        Err(_) => return false,
+    let Ok(file) = fs::File::open(path) else {
+        return false;
     };
     let mut reader = std::io::BufReader::new(file);
     let mut buf = vec![0u8; BINARY_SNIFF_BYTES];
-    let n = match std::io::Read::read(&mut reader, &mut buf) {
-        Ok(n) => n,
-        Err(_) => return false,
+    let Ok(n) = std::io::Read::read(&mut reader, &mut buf) else {
+        return false;
     };
     buf[..n].contains(&0)
+}
+
+fn strip_trailing_newline(line: &mut String) {
+    if line.ends_with('\n') {
+        line.pop();
+        if line.ends_with('\r') {
+            line.pop();
+        }
+    }
 }
 
 fn build_snippet(line: &str, match_start: usize, match_len: usize) -> (String, usize) {

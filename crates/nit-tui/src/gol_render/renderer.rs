@@ -1,5 +1,5 @@
 use ratatui::{
-    buffer::Buffer,
+    buffer::{Buffer, Cell},
     layout::Rect,
     style::{Color, Modifier, Style},
 };
@@ -11,13 +11,20 @@ use super::{
     braille::BrailleRenderer,
     geometry::{RenderGeometry, RenderMode},
     halfblock::HalfBlockRenderer,
-    palette::GolPalette,
+    palette::{darken, GolPalette},
     solid::SolidRenderer,
 };
 
 pub const MAX_AGE: u8 = 12;
 pub const MAX_DECAY: u8 = 10;
 pub const HUD_HISTORY_LEN: usize = 32;
+
+// Grid overlay darkens the cell bg at minor/major gridlines; strong for
+// intersections or major-only, soft for single minor lines.
+const GRID_DARKEN_STRONG: f32 = 0.82;
+const GRID_DARKEN_SOFT: f32 = 0.9;
+const DEBUG_CROSSHAIRS: [(i32, i32); 2] = [(0, 0), (16, 16)];
+const DEBUG_AXIS_STOPS: [i32; 3] = [0, 16, 32];
 
 #[derive(Clone, Copy, Debug)]
 pub struct GolRenderConfig {
@@ -419,17 +426,6 @@ pub(crate) fn row_bg(row: usize, cfg: &GolRenderConfig, palette: &GolPalette) ->
     }
 }
 
-fn darken_color(color: Color, factor: f32) -> Color {
-    match color {
-        Color::Rgb(r, g, b) => Color::Rgb(
-            ((r as f32) * factor) as u8,
-            ((g as f32) * factor) as u8,
-            ((b as f32) * factor) as u8,
-        ),
-        other => other,
-    }
-}
-
 fn spans_gridline(start: i32, count: u16, spacing: u16) -> bool {
     if spacing == 0 {
         return false;
@@ -502,8 +498,12 @@ pub(crate) fn cell_bg(
         return base;
     }
     let strong = major_v || major_h || (v && h);
-    let factor = if strong { 0.82 } else { 0.9 };
-    darken_color(base, factor)
+    let factor = if strong {
+        GRID_DARKEN_STRONG
+    } else {
+        GRID_DARKEN_SOFT
+    };
+    darken(base, factor)
 }
 
 pub(crate) fn cell_bg_halves(
@@ -567,29 +567,47 @@ pub(crate) fn maybe_draw_debug_overlay(
     if !cfg.debug_overlay || grid_area.width == 0 || grid_area.height == 0 {
         return;
     }
+    draw_debug_crosshairs(grid_area, buf, geom, palette);
+    draw_debug_axis_labels(grid_area, buf, geom, palette);
+    draw_grid_intersection_marks(grid_area, buf, geom, cfg, palette);
+}
 
-    let crosshair_style = Style::default()
+fn draw_debug_crosshairs(
+    grid_area: Rect,
+    buf: &mut Buffer,
+    geom: &RenderGeometry,
+    palette: &GolPalette,
+) {
+    let style = Style::default()
         .fg(palette.hud_text)
         .add_modifier(Modifier::DIM);
-    let crosshairs = [(0i32, 0i32), (16i32, 16i32)];
-    for (gx, gy) in crosshairs {
-        if let Some((tx, ty)) = geom.gol_to_term(gx, gy) {
-            let x = grid_area.x.saturating_add(tx);
-            let y = grid_area.y.saturating_add(ty);
-            if x < grid_area.x.saturating_add(grid_area.width)
-                && y < grid_area.y.saturating_add(grid_area.height)
-            {
-                let cell = buf.get_mut(x, y);
-                let keep_bg = cell.bg;
-                cell.set_char('+');
-                cell.set_style(crosshair_style);
-                cell.set_bg(keep_bg);
-            }
+    let bound_x = grid_area.x.saturating_add(grid_area.width);
+    let bound_y = grid_area.y.saturating_add(grid_area.height);
+    for (gx, gy) in DEBUG_CROSSHAIRS {
+        let Some((tx, ty)) = geom.gol_to_term(gx, gy) else {
+            continue;
+        };
+        let x = grid_area.x.saturating_add(tx);
+        let y = grid_area.y.saturating_add(ty);
+        if x >= bound_x || y >= bound_y {
+            continue;
         }
+        let cell = buf.get_mut(x, y);
+        let keep_bg = cell.bg;
+        cell.set_char('+');
+        cell.set_style(style);
+        cell.set_bg(keep_bg);
     }
+}
 
+fn draw_debug_axis_labels(
+    grid_area: Rect,
+    buf: &mut Buffer,
+    geom: &RenderGeometry,
+    palette: &GolPalette,
+) {
     let max_x = grid_area.x.saturating_add(grid_area.width);
-    let label_style = Style::default()
+    let style = Style::default()
         .fg(palette.hud_dim)
         .add_modifier(Modifier::DIM);
     let y0 = grid_area
@@ -598,33 +616,36 @@ pub(crate) fn maybe_draw_debug_overlay(
     let y1 = grid_area
         .y
         .saturating_add(grid_area.height.saturating_sub(1));
-    let mut x = grid_area.x;
-    x = write_str(buf, x, y0, max_x, label_style, "GX:");
-    for gx in [0i32, 16, 32] {
-        x = write_str(buf, x, y0, max_x, label_style, " ");
-        x = write_u32(buf, x, y0, max_x, label_style, gx as u32, 0);
-        x = write_str(buf, x, y0, max_x, label_style, "->");
-        if let Some((tx, _)) = geom.gol_to_term(gx, geom.gol_origin_y) {
-            x = write_u32(buf, x, y0, max_x, label_style, tx as u32, 0);
-        } else {
-            x = write_str(buf, x, y0, max_x, label_style, "--");
-        }
+    let mut x = write_str(buf, grid_area.x, y0, max_x, style, "GX:");
+    for gx in DEBUG_AXIS_STOPS {
+        x = write_axis_entry(buf, x, y0, max_x, style, gx, |g| {
+            geom.gol_to_term(g, geom.gol_origin_y).map(|(tx, _)| tx)
+        });
     }
-
-    let mut x = grid_area.x;
-    x = write_str(buf, x, y1, max_x, label_style, "GY:");
-    for gy in [0i32, 16, 32] {
-        x = write_str(buf, x, y1, max_x, label_style, " ");
-        x = write_u32(buf, x, y1, max_x, label_style, gy as u32, 0);
-        x = write_str(buf, x, y1, max_x, label_style, "->");
-        if let Some((_, ty)) = geom.gol_to_term(geom.gol_origin_x, gy) {
-            x = write_u32(buf, x, y1, max_x, label_style, ty as u32, 0);
-        } else {
-            x = write_str(buf, x, y1, max_x, label_style, "--");
-        }
+    let mut x = write_str(buf, grid_area.x, y1, max_x, style, "GY:");
+    for gy in DEBUG_AXIS_STOPS {
+        x = write_axis_entry(buf, x, y1, max_x, style, gy, |g| {
+            geom.gol_to_term(geom.gol_origin_x, g).map(|(_, ty)| ty)
+        });
     }
+}
 
-    draw_grid_intersection_marks(grid_area, buf, geom, cfg, palette);
+fn write_axis_entry(
+    buf: &mut Buffer,
+    x: u16,
+    y: u16,
+    max_x: u16,
+    style: Style,
+    value: i32,
+    project: impl FnOnce(i32) -> Option<u16>,
+) -> u16 {
+    let mut x = write_str(buf, x, y, max_x, style, " ");
+    x = write_u32(buf, x, y, max_x, style, value as u32, 0);
+    x = write_str(buf, x, y, max_x, style, "->");
+    match project(value) {
+        Some(t) => write_u32(buf, x, y, max_x, style, t as u32, 0),
+        None => write_str(buf, x, y, max_x, style, "--"),
+    }
 }
 
 fn draw_grid_intersection_marks(
@@ -666,6 +687,123 @@ fn draw_grid_intersection_marks(
                 cell.set_bg(keep_bg);
             }
         }
+    }
+}
+
+pub(crate) fn grid_area_below_hud(area: Rect) -> Rect {
+    Rect {
+        x: area.x,
+        y: area.y.saturating_add(1),
+        width: area.width,
+        height: area.height.saturating_sub(1),
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct BboxBounds {
+    pub min_x: i32,
+    pub min_y: i32,
+    pub max_x: i32,
+    pub max_y: i32,
+    pub any: bool,
+}
+
+impl BboxBounds {
+    pub fn empty() -> Self {
+        Self {
+            min_x: i32::MAX,
+            min_y: i32::MAX,
+            max_x: i32::MIN,
+            max_y: i32::MIN,
+            any: false,
+        }
+    }
+
+    pub fn include(&mut self, gx: i32, gy: i32) {
+        self.min_x = self.min_x.min(gx);
+        self.min_y = self.min_y.min(gy);
+        self.max_x = self.max_x.max(gx);
+        self.max_y = self.max_y.max(gy);
+        self.any = true;
+    }
+}
+
+pub(crate) fn draw_bbox_if_any(
+    grid_area: Rect,
+    buf: &mut Buffer,
+    geom: &RenderGeometry,
+    bbox: &BboxBounds,
+    cfg: &GolRenderConfig,
+    palette: &GolPalette,
+) {
+    if !cfg.overlay_bbox || !bbox.any {
+        return;
+    }
+    let Some((left, top)) = geom.gol_to_term(bbox.min_x, bbox.min_y) else {
+        return;
+    };
+    let Some((right, bottom)) = geom.gol_to_term(bbox.max_x, bbox.max_y) else {
+        return;
+    };
+    draw_bbox(
+        grid_area,
+        buf,
+        left as usize,
+        top as usize,
+        right as usize,
+        bottom as usize,
+        cfg,
+        palette,
+    );
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum HalfFill {
+    Top,
+    Bottom,
+    Both,
+}
+
+impl HalfFill {
+    pub fn from_pair(top: bool, bottom: bool) -> Option<Self> {
+        match (top, bottom) {
+            (true, true) => Some(Self::Both),
+            (true, false) => Some(Self::Top),
+            (false, true) => Some(Self::Bottom),
+            (false, false) => None,
+        }
+    }
+
+    pub fn glyph(self) -> char {
+        match self {
+            Self::Both => '█',
+            Self::Top => '▀',
+            Self::Bottom => '▄',
+        }
+    }
+
+    pub fn bg(self, bg_top: Color, bg_bottom: Color) -> Color {
+        match self {
+            Self::Both | Self::Top => bg_bottom,
+            Self::Bottom => bg_top,
+        }
+    }
+}
+
+pub(crate) fn draw_checker_or_empty(
+    cell: &mut Cell,
+    bg_top: Color,
+    bg_bottom: Color,
+    use_checker: bool,
+) {
+    if use_checker {
+        cell.set_char('▀');
+        cell.set_fg(bg_top);
+        cell.set_bg(bg_bottom);
+    } else {
+        cell.set_char(' ');
+        cell.set_fg(bg_bottom);
+        cell.set_bg(bg_bottom);
     }
 }
 

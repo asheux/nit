@@ -1,3 +1,4 @@
+pub mod ascii_seed;
 pub mod braille;
 pub mod geometry;
 pub mod halfblock;
@@ -25,10 +26,9 @@ pub struct GolWidget<'a> {
     pub hud: GolHudState<'a>,
 }
 
-impl<'a> Widget for GolWidget<'a> {
+impl Widget for GolWidget<'_> {
     fn render(self, area: Rect, buf: &mut Buffer) {
-        let mut pipeline = GolRenderPipeline::default();
-        pipeline.render(
+        GolRenderPipeline::default().render(
             area,
             buf,
             self.grid,
@@ -39,4 +39,3 @@ impl<'a> Widget for GolWidget<'a> {
         );
     }
 }
-pub mod ascii_seed;

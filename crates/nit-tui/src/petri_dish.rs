@@ -36,6 +36,7 @@ use crate::widgets::{protocol_picker, rule_picker};
 const MIN_WIDTH: u16 = 100;
 const MIN_HEIGHT: u16 = 30;
 
+/// UI-side coordinator for the Game of Life petri-dish popup, search worker, and snapshot manager.
 pub struct PetriDishRuntime {
     session: Option<SimSession>,
     render_state: crate::gol_render::GolRenderState,
@@ -59,6 +60,7 @@ pub struct PetriDishRuntime {
     hidden: bool,
 }
 
+/// Live simulation state for a single Game of Life run, including rule, grid, and attractor tracker.
 pub struct SimSession {
     pub seed_hash: u64,
     pub encoder_id: String,
@@ -591,42 +593,27 @@ impl PetriDishRuntime {
     }
 
     fn step_if_due(&mut self, state: &mut AppState) {
-        let edge = self.current_edge(state);
-        let Some(session) = self.session.as_mut() else {
+        if self.session.as_ref().is_none_or(|s| s.paused) {
             return;
-        };
-        if session.paused || self.size.0 == 0 || self.size.1 == 0 {
+        }
+        if self.size.0 == 0 || self.size.1 == 0 {
             return;
         }
         let interval = Duration::from_millis(state.visualizer.tick_ms.max(10));
         if self.last_step.elapsed() < interval {
             return;
         }
-        let current_rule = session.rule_mode.current_rule().rule;
-        let next = step(&session.grid, current_rule, edge);
-        let next_gen = session.gen.saturating_add(1);
-        session.rule_mode.advance_one_gen();
-        let next_rule = session.rule_mode.current_rule().rule;
-        let event = session.detector.observe_with_context(
-            &session.grid,
-            &next,
-            next_gen,
-            next_rule,
-            edge,
-            Self::protocol_extra(&session.rule_mode),
-        );
-        let (alive, _) = self.render_state.update_from_step(&session.grid, &next);
-        session.grid = next;
-        session.gen = next_gen;
-        session.alive = alive;
-        session.rule = next_rule;
-        if let Some(event) = event {
-            self.handle_attractor_event(state, event);
-        }
-        self.last_step = Instant::now();
+        self.do_simulation_step(state);
     }
 
     fn step_once(&mut self, state: &mut AppState) {
+        if self.session.is_none() {
+            return;
+        }
+        self.do_simulation_step(state);
+    }
+
+    fn do_simulation_step(&mut self, state: &mut AppState) {
         let edge = self.current_edge(state);
         let Some(session) = self.session.as_mut() else {
             return;

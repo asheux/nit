@@ -9,6 +9,10 @@ use ratatui::{
 };
 
 use crate::theme::Theme;
+use crate::widgets::text_utils::truncate_with_ellipsis as truncate;
+
+const AGE_COL_MIN_WIDTH: u16 = 70;
+const ID_COL_MIN_WIDTH: u16 = 90;
 
 /// Render the Substrate Claims body into `inner`, caching max_scroll so the
 /// scroll handlers can skip a rebuild on every wheel tick — same pattern as
@@ -33,17 +37,12 @@ pub fn build_lines(state: &AppState, theme: &Theme, width: u16) -> Vec<Line<'sta
 
     let mut lines: Vec<Line<'static>> = Vec::new();
 
-    // Summary header.
     let counts = count_by_kind(&sorted);
+    let active = sorted.len();
     let summary = if counts.is_empty() {
-        format!("{} active   gen {}", sorted.len(), current_gen)
+        format!("{active} active   gen {current_gen}")
     } else {
-        format!(
-            "{} active   [{}]   gen {}",
-            sorted.len(),
-            counts,
-            current_gen,
-        )
+        format!("{active} active   [{counts}]   gen {current_gen}")
     };
     lines.push(Line::from(Span::styled(
         summary,
@@ -98,20 +97,14 @@ fn format_row(
     id: &str,
     width: u16,
 ) -> String {
-    // Width-adaptive: drop ID below 90; drop AGE below 70.
-    let show_id = width >= 90;
-    let show_age = width >= 70;
-    let mut row = format!(
-        "{:>4}  {:<14} {:<26} {:<48}",
-        ttl,
-        truncate(kind, 14),
-        by,
-        truncate(target, 48)
-    );
-    if show_age {
+    // Width-adaptive: drop ID below ID_COL_MIN_WIDTH; drop AGE below AGE_COL_MIN_WIDTH.
+    let kind = truncate(kind, 14);
+    let target = truncate(target, 48);
+    let mut row = format!("{ttl:>4}  {kind:<14} {by:<26} {target:<48}");
+    if width >= AGE_COL_MIN_WIDTH {
         row.push_str(&format!(" {age:>5}"));
     }
-    if show_id {
+    if width >= ID_COL_MIN_WIDTH {
         row.push_str(&format!("  {id}"));
     }
     row
@@ -200,30 +193,18 @@ fn compact_agent_id(id: &str) -> String {
     let Some((base, rest)) = id.split_once("#swarm-") else {
         return id.to_string();
     };
-    let first_dash = match rest.find('-') {
-        Some(i) => i,
-        None => return id.to_string(),
+    let Some(first_dash) = rest.find('-') else {
+        return id.to_string();
     };
     let after_first = &rest[first_dash + 1..];
-    let second_dash_rel = match after_first.find('-') {
-        Some(i) => i,
-        None => return id.to_string(),
+    let Some(second_dash_rel) = after_first.find('-') else {
+        return id.to_string();
     };
     let suffix = &after_first[second_dash_rel + 1..];
     if suffix.is_empty() {
         id.to_string()
     } else {
         format!("{base}#{suffix}")
-    }
-}
-
-fn truncate(s: &str, n: usize) -> String {
-    if s.chars().count() <= n {
-        s.to_string()
-    } else {
-        let mut t: String = s.chars().take(n.saturating_sub(1)).collect();
-        t.push('\u{2026}');
-        t
     }
 }
 

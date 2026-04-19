@@ -123,8 +123,8 @@ pub fn preferred_size(screen: Rect) -> (u16, u16) {
     (width, height)
 }
 
-/// Returns the content area height after deducting the chat input box from the popup.
-/// Prompts do not have a chat input box, so they use the full height.
+// Content area height excludes the chat input box. Prompts have no chat input and use the
+// full inner height.
 pub fn content_area_height(
     state: &AppState,
     swarm: &crate::swarm::SwarmRuntime,
@@ -288,13 +288,9 @@ pub fn build_lines(
         .collect()
 }
 
-/// Maximum inner lines for the chat input box inside the artifacts popup.
-/// The box auto-grows as the user types and shrinks back when text is removed,
-/// capped at this limit so the content area stays usable.
+// Chat input auto-grows with input length, capped so the content area stays usable.
 const POPUP_CHAT_INPUT_MAX_INNER_LINES: usize = 6;
 
-/// Returns the absolute screen rect of the chat input's inner area (excluding
-/// its border), or `None` when the popup shows a prompt-only artifact.
 pub fn chat_input_rect(state: &AppState, swarm: &SwarmRuntime, popup_area: Rect) -> Option<Rect> {
     let is_prompt =
         agent_ops_view::is_selected_artifact_prompt(state, swarm, popup_area.width.max(1) as usize);
@@ -766,19 +762,23 @@ fn build_persisted_patch_lines(
         out.push(Line::from(Span::styled(" (no diff content)", label_style)));
     } else {
         for line in diff_text.lines() {
-            let style = if line.starts_with('+') && !line.starts_with("+++") {
-                Style::default().fg(theme.success)
-            } else if line.starts_with('-') && !line.starts_with("---") {
-                Style::default().fg(theme.error)
-            } else if line.starts_with("@@") {
-                Style::default().fg(theme.title_focused)
-            } else {
-                value_style
-            };
+            let style = diff_line_style(line, theme, value_style);
             out.push(Line::from(Span::styled(format!(" {line}"), style)));
         }
     }
     out
+}
+
+fn diff_line_style(line: &str, theme: &Theme, fallback: Style) -> Style {
+    if line.starts_with('+') && !line.starts_with("+++") {
+        Style::default().fg(theme.success)
+    } else if line.starts_with('-') && !line.starts_with("---") {
+        Style::default().fg(theme.error)
+    } else if line.starts_with("@@") {
+        Style::default().fg(theme.title_focused)
+    } else {
+        fallback
+    }
 }
 
 fn build_persisted_evidence_lines(
@@ -1433,13 +1433,13 @@ fn render_markdown_table(lines: &[String], theme: &Theme, width: usize) -> Vec<L
     }
 
     let border = format_table_border(widths.as_slice());
+    let border_style = Style::default()
+        .fg(theme.border)
+        .add_modifier(Modifier::DIM);
+    let border_line = || Line::from(Span::styled(border.clone(), border_style));
+
     let mut out = Vec::new();
-    out.push(Line::from(Span::styled(
-        border.clone(),
-        Style::default()
-            .fg(theme.border)
-            .add_modifier(Modifier::DIM),
-    )));
+    out.push(border_line());
     out.push(table_row_line(
         headers.as_slice(),
         widths.as_slice(),
@@ -1448,12 +1448,7 @@ fn render_markdown_table(lines: &[String], theme: &Theme, width: usize) -> Vec<L
             .add_modifier(Modifier::BOLD),
         theme,
     ));
-    out.push(Line::from(Span::styled(
-        border.clone(),
-        Style::default()
-            .fg(theme.border)
-            .add_modifier(Modifier::DIM),
-    )));
+    out.push(border_line());
     for row in body.iter() {
         out.push(table_row_line(
             row.as_slice(),
@@ -1462,12 +1457,7 @@ fn render_markdown_table(lines: &[String], theme: &Theme, width: usize) -> Vec<L
             theme,
         ));
     }
-    out.push(Line::from(Span::styled(
-        border,
-        Style::default()
-            .fg(theme.border)
-            .add_modifier(Modifier::DIM),
-    )));
+    out.push(border_line());
     out
 }
 

@@ -20,20 +20,20 @@ pub struct SeedPalette {
 
 impl SeedPalette {
     pub fn from_theme(theme: &Theme) -> Self {
-        let seed = &theme.seed;
+        let s = &theme.seed;
         Self {
-            bg: seed.bg,
-            live: seed.live,
-            live_dim: seed.live_dim,
-            halo_1: seed.halo_1,
-            halo_2: seed.halo_2,
-            grid: seed.grid,
-            bbox: seed.bbox,
-            hud_text: seed.hud_text,
-            hud_dim: seed.hud_dim,
-            accent: seed.accent,
-            accent_2: seed.accent_2,
-            tissue: seed.tissue_palette.clone(),
+            bg: s.bg,
+            live: s.live,
+            live_dim: s.live_dim,
+            halo_1: s.halo_1,
+            halo_2: s.halo_2,
+            grid: s.grid,
+            bbox: s.bbox,
+            hud_text: s.hud_text,
+            hud_dim: s.hud_dim,
+            accent: s.accent,
+            accent_2: s.accent_2,
+            tissue: s.tissue_palette.clone(),
         }
     }
 }

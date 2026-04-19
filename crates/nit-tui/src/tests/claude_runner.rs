@@ -1,27 +1,21 @@
 use super::*;
 
+fn has_arg(args: &[String], expected: &str) -> bool {
+    args.iter().any(|a| a == expected)
+}
+
 #[test]
 fn test_claude_model_slug_for_agent_id() {
-    assert_eq!(
-        claude_model_slug_for_agent_id("claude-opus-4-6"),
-        "claude-opus-4-6"
-    );
-    assert_eq!(
-        claude_model_slug_for_agent_id("claude-opus-4-6#swarm-mis-001-clone-01"),
-        "claude-opus-4-6"
-    );
-    assert_eq!(
-        claude_model_slug_for_agent_id("claude-sonnet-4-6#chat-clone-02"),
-        "claude-sonnet-4-6"
-    );
-    assert_eq!(
-        claude_model_slug_for_agent_id("claude-opus-4-6#shadow-01-propose-a"),
-        "claude-opus-4-6"
-    );
-    assert_eq!(
-        claude_model_slug_for_agent_id("claude-sonnet-4-6#shadow-07-judge"),
-        "claude-sonnet-4-6"
-    );
+    let cases = [
+        ("claude-opus-4-6", "claude-opus-4-6"),
+        ("claude-opus-4-6#swarm-mis-001-clone-01", "claude-opus-4-6"),
+        ("claude-sonnet-4-6#chat-clone-02", "claude-sonnet-4-6"),
+        ("claude-opus-4-6#shadow-01-propose-a", "claude-opus-4-6"),
+        ("claude-sonnet-4-6#shadow-07-judge", "claude-sonnet-4-6"),
+    ];
+    for (input, expected) in cases {
+        assert_eq!(claude_model_slug_for_agent_id(input), expected);
+    }
 }
 
 #[test]
@@ -93,14 +87,18 @@ fn test_build_claude_args_basic() {
         Path::new("/tmp/out.txt"),
         None,
         false,
+        None,
         &config,
     );
-    assert!(args.contains(&"-p".to_string()));
-    assert!(args.contains(&"stream-json".to_string()));
-    assert!(args.contains(&"claude-opus-4-6".to_string()));
-    assert!(args.contains(&"high".to_string()));
-    assert!(!args.contains(&"--no-session-persistence".to_string()));
-    assert!(args.contains(&"Read,Edit,Write,Bash,Glob,Grep,WebSearch,WebFetch".to_string()));
+    assert!(has_arg(&args, "-p"));
+    assert!(has_arg(&args, "stream-json"));
+    assert!(has_arg(&args, "claude-opus-4-6"));
+    assert!(has_arg(&args, "high"));
+    assert!(!has_arg(&args, "--no-session-persistence"));
+    assert!(has_arg(
+        &args,
+        "Read,Edit,Write,Bash,Glob,Grep,WebSearch,WebFetch"
+    ));
 }
 
 #[test]
@@ -114,11 +112,12 @@ fn test_build_claude_args_resume() {
         Path::new("/tmp/out.txt"),
         Some("session-abc-123"),
         false,
+        None,
         &config,
     );
-    assert!(args.contains(&"--resume".to_string()));
-    assert!(args.contains(&"session-abc-123".to_string()));
-    assert!(args.contains(&"--no-session-persistence".to_string()));
+    assert!(has_arg(&args, "--resume"));
+    assert!(has_arg(&args, "session-abc-123"));
+    assert!(has_arg(&args, "--no-session-persistence"));
 }
 
 #[test]
@@ -132,6 +131,7 @@ fn test_build_claude_args_read_only_for_shadow_turns() {
         Path::new("/tmp/out.txt"),
         None,
         true,
+        None,
         &config,
     );
     // Read-only turns get a narrow tool allow-list with no Write/Edit/Bash.

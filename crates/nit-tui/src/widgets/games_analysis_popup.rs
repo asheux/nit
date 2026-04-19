@@ -11,48 +11,47 @@ use ratatui::{
 
 use crate::theme::Theme;
 use crate::widgets::text_selection::apply_ui_selection;
+use crate::widgets::text_utils::trim_to_width;
 use nit_core::UiSelectionPane;
 
 const MIN_WIDTH: u16 = 64;
+const MAX_WIDTH: u16 = 96;
 const MIN_HEIGHT: u16 = 18;
+const MAX_HEIGHT: u16 = 32;
 
+/// Desired `(width, height)` for the analysis popup, clamped to
+/// MIN/MAX_* and never exceeding the screen.
 pub fn preferred_size(screen: Rect) -> (u16, u16) {
-    let width = screen.width.clamp(MIN_WIDTH, 96);
-    let height = screen.height.clamp(MIN_HEIGHT, 32);
+    let width = screen.width.clamp(MIN_WIDTH, MAX_WIDTH);
+    let height = screen.height.clamp(MIN_HEIGHT, MAX_HEIGHT);
     (width, height)
 }
 
-/// Count the rendered lines without building any `Line`/`Span` structures.
-/// Used by the scroll hot path so wheel ticks don't rebuild sparklines,
-/// strategy tables, or styled spans just to figure out `max_scroll`. Must
-/// stay in lock-step with `build_lines` below.
+/// Count rendered lines without allocating any `Line`/`Span` — the scroll
+/// hot path uses this so wheel ticks don't rebuild sparklines or strategy
+/// tables just to compute `max_scroll`. Must mirror `build_lines`.
 pub fn line_count(state: &AppState) -> usize {
-    // status line
-    let mut count = 1usize;
-    if state.games.analysis.source_path.is_some() {
+    let a = &state.games.analysis;
+    let mut count = 1usize; // status line
+    if a.source_path.is_some() {
         count += 1;
     }
-    if state.games.analysis.last_error.is_some() {
+    if a.last_error.is_some() {
         count += 1;
     }
-    if state.games.analysis.running && state.games.analysis.summary.is_none() {
+    if a.running && a.summary.is_none() {
         count += 2;
     }
-    if let Some(summary) = state.games.analysis.summary.as_ref() {
-        // blank + matches/rounds + rounds/match samples
-        count += 3;
-        // blank + "Outputs" header + 4 path rows
-        count += 6;
-        // blank + "Strategy cooperation" header
-        count += 2;
+    if let Some(summary) = a.summary.as_ref() {
+        count += 3; // blank + matches/rounds + samples
+        count += 6; // blank + "Outputs" header + 4 path rows
+        count += 2; // blank + "Strategy cooperation" header
         count += summary.strategies.len();
-        if let Some(preview) = state.games.analysis.preview.as_ref() {
-            // blank + "Random match trajectories" header
-            count += 2;
+        if let Some(preview) = a.preview.as_ref() {
+            count += 2; // blank + "Random match trajectories" header
             if preview.trajectories.is_empty() {
                 count += 1;
             } else {
-                // title + A: + B: per trajectory
                 count += preview.trajectories.len() * 3;
             }
         }
@@ -60,189 +59,205 @@ pub fn line_count(state: &AppState) -> usize {
     count
 }
 
-pub fn build_lines(state: &AppState, theme: &Theme, inner_width: u16) -> Vec<Line<'static>> {
-    let header_style = Style::default()
-        .fg(theme.title)
-        .add_modifier(Modifier::BOLD);
-    let label_style = Style::default().fg(theme.title).add_modifier(Modifier::DIM);
-    let value_style = Style::default().fg(theme.foreground);
-    let dim_style = Style::default()
-        .fg(theme.border)
-        .add_modifier(Modifier::DIM);
-    let number_style = Style::default()
-        .fg(theme.accent)
-        .add_modifier(Modifier::BOLD);
-    let warn_style = Style::default()
-        .fg(theme.warning)
-        .add_modifier(Modifier::BOLD);
+struct Styles {
+    header: Style,
+    label: Style,
+    value: Style,
+    dim: Style,
+    number: Style,
+    warn: Style,
+}
 
+impl Styles {
+    fn new(theme: &Theme) -> Self {
+        Self {
+            header: Style::default()
+                .fg(theme.title)
+                .add_modifier(Modifier::BOLD),
+            label: Style::default().fg(theme.title).add_modifier(Modifier::DIM),
+            value: Style::default().fg(theme.foreground),
+            dim: Style::default()
+                .fg(theme.border)
+                .add_modifier(Modifier::DIM),
+            number: Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
+            warn: Style::default()
+                .fg(theme.warning)
+                .add_modifier(Modifier::BOLD),
+        }
+    }
+}
+
+pub fn build_lines(state: &AppState, theme: &Theme, inner_width: u16) -> Vec<Line<'static>> {
+    let styles = Styles::new(theme);
     let max_width = inner_width.max(1) as usize;
+    let a = &state.games.analysis;
     let mut lines: Vec<Line<'static>> = Vec::new();
 
-    // Title is already in the popup border; avoid duplicate header line.
-    lines.push(Line::from(vec![
-        Span::styled("status: ", label_style),
-        Span::styled(
-            if state.games.analysis.running {
-                "RUNNING"
-            } else if state.games.analysis.last_error.is_some() {
-                "ERROR"
-            } else if state.games.analysis.summary.is_some() {
-                "DONE"
-            } else {
-                "IDLE"
-            },
-            if state.games.analysis.last_error.is_some() {
-                warn_style
-            } else {
-                number_style
-            },
-        ),
-    ]));
+    lines.push(status_line(a, &styles));
 
-    if let Some(path) = state.games.analysis.source_path.as_deref() {
+    if let Some(path) = a.source_path.as_deref() {
+        lines.push(kv_line("source: ", &short_path(path, max_width), &styles));
+    }
+    if let Some(err) = a.last_error.as_ref() {
         lines.push(Line::from(vec![
-            Span::styled("source: ", label_style),
-            Span::styled(short_path(path, max_width), value_style),
+            Span::styled("error: ", styles.warn),
+            Span::styled(trim_to_width(err, max_width), styles.value),
         ]));
     }
-
-    if let Some(err) = state.games.analysis.last_error.as_ref() {
-        lines.push(Line::from(vec![
-            Span::styled("error: ", warn_style),
-            Span::styled(trim_to_width(err, max_width), value_style),
-        ]));
-    }
-
-    if state.games.analysis.running && state.games.analysis.summary.is_none() {
+    if a.running && a.summary.is_none() {
         lines.push(Line::from(""));
         lines.push(Line::from(vec![
             Span::styled(
                 trim_to_width("Analyzing history log...", max_width),
-                value_style,
+                styles.value,
             ),
-            Span::styled(" (Esc to close)", dim_style),
+            Span::styled(" (Esc to close)", styles.dim),
         ]));
     }
 
-    if let Some(summary) = state.games.analysis.summary.as_ref() {
-        lines.push(Line::from(""));
-        lines.push(Line::from(vec![
-            Span::styled("matches: ", label_style),
-            Span::styled(summary.total_matches.to_string(), number_style),
-            Span::styled("  rounds: ", label_style),
-            Span::styled(summary.total_rounds.to_string(), number_style),
-            Span::styled("  tail: ", label_style),
-            Span::styled(summary.tail_rounds.to_string(), number_style),
-        ]));
-        lines.push(Line::from(vec![
-            Span::styled("rounds/match: ", label_style),
-            Span::styled(summary.min_rounds.to_string(), number_style),
-            Span::styled("..", dim_style),
-            Span::styled(summary.max_rounds.to_string(), number_style),
-            Span::styled("  samples: ", label_style),
-            Span::styled(summary.trajectory_samples.to_string(), number_style),
-        ]));
-
-        lines.push(Line::from(""));
-        lines.push(Line::from(Span::styled("Outputs", header_style)));
-        lines.push(Line::from(vec![
-            Span::styled("summary: ", label_style),
-            Span::styled(short_path(&summary.paths.summary, max_width), value_style),
-        ]));
-        lines.push(Line::from(vec![
-            Span::styled("matches: ", label_style),
-            Span::styled(
-                short_path(&summary.paths.matches_csv, max_width),
-                value_style,
-            ),
-        ]));
-        lines.push(Line::from(vec![
-            Span::styled("strategies: ", label_style),
-            Span::styled(
-                short_path(&summary.paths.strategies_csv, max_width),
-                value_style,
-            ),
-        ]));
-        lines.push(Line::from(vec![
-            Span::styled("trajectories: ", label_style),
-            Span::styled(
-                short_path(&summary.paths.trajectories_csv, max_width),
-                value_style,
-            ),
-        ]));
-
-        lines.push(Line::from(""));
-        lines.push(Line::from(Span::styled(
-            "Strategy cooperation (overall / tail)",
-            header_style,
-        )));
-        let id_width = 14usize.min(max_width / 3).max(6);
-        for (idx, strat) in summary.strategies.iter().enumerate() {
-            let id = trim_to_width(&strat.id, id_width);
-            let coop = strat.coop_rate * 100.0;
-            let tail = strat.tail_coop_rate * 100.0;
-            let rounds = strat.rounds;
-            lines.push(Line::from(vec![
-                Span::styled(format!("{:>2} ", idx + 1), dim_style),
-                Span::styled(format!("{id:<id_width$}"), value_style),
-                Span::styled(" ", dim_style),
-                Span::styled(format!("{coop:>6.2}%"), number_style),
-                Span::styled(" / ", dim_style),
-                Span::styled(format!("{tail:>6.2}%"), number_style),
-                Span::styled("  r=", dim_style),
-                Span::styled(rounds.to_string(), value_style),
-            ]));
-        }
-
-        if let Some(preview) = state.games.analysis.preview.as_ref() {
-            lines.push(Line::from(""));
-            lines.push(Line::from(Span::styled(
-                "Random match trajectories",
-                header_style,
-            )));
-            if preview.trajectories.is_empty() {
-                lines.push(Line::from(Span::styled(
-                    "No random matchups detected.",
-                    dim_style,
-                )));
-            } else {
-                let plot_width = max_width.saturating_sub(12).max(1);
-                for traj in preview.trajectories.iter() {
-                    let title = format!("{} vs {}", traj.a, traj.b);
-                    lines.push(Line::from(Span::styled(
-                        trim_to_width(&title, max_width),
-                        value_style,
-                    )));
-                    let a_plot = sparkline(&traj.a_rates, plot_width);
-                    let b_plot = sparkline(&traj.b_rates, plot_width);
-                    lines.push(Line::from(vec![
-                        Span::styled("A: ", label_style),
-                        Span::styled(a_plot, number_style),
-                    ]));
-                    lines.push(Line::from(vec![
-                        Span::styled("B: ", label_style),
-                        Span::styled(b_plot, number_style),
-                    ]));
-                }
-            }
+    if let Some(summary) = a.summary.as_ref() {
+        append_summary_section(&mut lines, summary, &styles, max_width);
+        if let Some(preview) = a.preview.as_ref() {
+            append_preview_section(&mut lines, preview, &styles, max_width);
         }
     }
 
     lines
 }
 
+fn status_line(a: &nit_core::GamesAnalysisState, styles: &Styles) -> Line<'static> {
+    let (text, style) = status_label(a, styles);
+    Line::from(vec![
+        Span::styled("status: ", styles.label),
+        Span::styled(text, style),
+    ])
+}
+
+fn status_label(a: &nit_core::GamesAnalysisState, styles: &Styles) -> (&'static str, Style) {
+    if a.running {
+        ("RUNNING", styles.number)
+    } else if a.last_error.is_some() {
+        ("ERROR", styles.warn)
+    } else if a.summary.is_some() {
+        ("DONE", styles.number)
+    } else {
+        ("IDLE", styles.number)
+    }
+}
+
+fn kv_line(label: &'static str, value: &str, styles: &Styles) -> Line<'static> {
+    Line::from(vec![
+        Span::styled(label, styles.label),
+        Span::styled(value.to_string(), styles.value),
+    ])
+}
+
+fn append_summary_section(
+    lines: &mut Vec<Line<'static>>,
+    summary: &nit_games::analysis::HistoryAnalysisSummary,
+    styles: &Styles,
+    max_width: usize,
+) {
+    lines.push(Line::from(""));
+    lines.push(Line::from(vec![
+        Span::styled("matches: ", styles.label),
+        Span::styled(summary.total_matches.to_string(), styles.number),
+        Span::styled("  rounds: ", styles.label),
+        Span::styled(summary.total_rounds.to_string(), styles.number),
+        Span::styled("  tail: ", styles.label),
+        Span::styled(summary.tail_rounds.to_string(), styles.number),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("rounds/match: ", styles.label),
+        Span::styled(summary.min_rounds.to_string(), styles.number),
+        Span::styled("..", styles.dim),
+        Span::styled(summary.max_rounds.to_string(), styles.number),
+        Span::styled("  samples: ", styles.label),
+        Span::styled(summary.trajectory_samples.to_string(), styles.number),
+    ]));
+
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled("Outputs", styles.header)));
+    for (label, path) in [
+        ("summary: ", &summary.paths.summary),
+        ("matches: ", &summary.paths.matches_csv),
+        ("strategies: ", &summary.paths.strategies_csv),
+        ("trajectories: ", &summary.paths.trajectories_csv),
+    ] {
+        lines.push(kv_line(label, &short_path(path, max_width), styles));
+    }
+
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "Strategy cooperation (overall / tail)",
+        styles.header,
+    )));
+    let id_width = 14usize.min(max_width / 3).max(6);
+    for (idx, strat) in summary.strategies.iter().enumerate() {
+        let id = trim_to_width(&strat.id, id_width);
+        let coop = strat.coop_rate * 100.0;
+        let tail = strat.tail_coop_rate * 100.0;
+        lines.push(Line::from(vec![
+            Span::styled(format!("{:>2} ", idx + 1), styles.dim),
+            Span::styled(format!("{id:<id_width$}"), styles.value),
+            Span::styled(" ", styles.dim),
+            Span::styled(format!("{coop:>6.2}%"), styles.number),
+            Span::styled(" / ", styles.dim),
+            Span::styled(format!("{tail:>6.2}%"), styles.number),
+            Span::styled("  r=", styles.dim),
+            Span::styled(strat.rounds.to_string(), styles.value),
+        ]));
+    }
+}
+
+fn append_preview_section(
+    lines: &mut Vec<Line<'static>>,
+    preview: &nit_games::analysis::HistoryAnalysisPreview,
+    styles: &Styles,
+    max_width: usize,
+) {
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "Random match trajectories",
+        styles.header,
+    )));
+    if preview.trajectories.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "No random matchups detected.",
+            styles.dim,
+        )));
+        return;
+    }
+    let plot_width = max_width.saturating_sub(12).max(1);
+    for traj in preview.trajectories.iter() {
+        let title = format!("{} vs {}", traj.a, traj.b);
+        lines.push(Line::from(Span::styled(
+            trim_to_width(&title, max_width),
+            styles.value,
+        )));
+        lines.push(Line::from(vec![
+            Span::styled("A: ", styles.label),
+            Span::styled(sparkline(&traj.a_rates, plot_width), styles.number),
+        ]));
+        lines.push(Line::from(vec![
+            Span::styled("B: ", styles.label),
+            Span::styled(sparkline(&traj.b_rates, plot_width), styles.number),
+        ]));
+    }
+}
+
+/// Paint the analysis popup; no-op when `state.games.analysis.open` is false.
 pub fn render(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
     if !state.games.analysis.open {
         return;
     }
-
     frame.render_widget(Clear, area);
 
-    let border_style = Style::default().fg(theme.border_focused);
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(border_style)
+        .border_style(Style::default().fg(theme.border_focused))
         .style(Style::default().bg(theme.background))
         .title(Span::styled(
             " GAMES ANALYSIS ",
@@ -277,17 +292,6 @@ fn short_path(path: &str, max_width: usize) -> String {
         .and_then(|s| s.to_str())
         .unwrap_or(path);
     trim_to_width(name, max_width)
-}
-
-fn trim_to_width(text: &str, max_width: usize) -> String {
-    if max_width == 0 {
-        return String::new();
-    }
-    let mut out = String::new();
-    for ch in text.chars().take(max_width) {
-        out.push(ch);
-    }
-    out
 }
 
 fn sparkline(values: &[f64], width: usize) -> String {

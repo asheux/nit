@@ -45,22 +45,41 @@ k = 2
     .expect("parse config")
 }
 
-fn cache_test_runtime() -> (GamesPetriDishRuntime, AppState) {
-    let mut state = AppState::new(
+fn new_app_state() -> AppState {
+    AppState::new(
         std::env::temp_dir(),
         nit_core::Buffer::empty("x", None),
         nit_core::Buffer::empty("n", None),
-    );
-    let mut runtime = GamesPetriDishRuntime::new(&state);
-    runtime.session = Some(GameSession {
+    )
+}
+
+fn new_game_session(finished_elapsed: Option<Duration>) -> GameSession {
+    GameSession {
         config: sample_config(),
         progress: None,
         snapshot: None,
         results: TournamentResults::empty(),
         definitions: Vec::new(),
         started_at: Instant::now(),
-        finished_elapsed: None,
-    });
+        finished_elapsed,
+    }
+}
+
+#[allow(unused_macros)]
+macro_rules! assert_has_line {
+    ($lines:expr, $text:expr) => {
+        assert!(
+            $lines.iter().any(|line| line_text(line).contains($text)),
+            "expected line containing {:?}",
+            $text
+        );
+    };
+}
+
+fn cache_test_runtime() -> (GamesPetriDishRuntime, AppState) {
+    let mut state = new_app_state();
+    let mut runtime = GamesPetriDishRuntime::new(&state);
+    runtime.session = Some(new_game_session(None));
     runtime.view = PetriView::Cache;
     runtime.cache_snapshot = nit_metal::BatchPolicyCacheSnapshot {
         root: Some("/tmp/metal-policy".into()),
@@ -314,11 +333,7 @@ fn tm_family_prep_summary_reports_cpu_fallback_reason() {
 
 #[test]
 fn family_build_result_loading_message_includes_tm_prep_summary() {
-    let mut state = AppState::new(
-        std::env::temp_dir(),
-        nit_core::Buffer::empty("x", None),
-        nit_core::Buffer::empty("n", None),
-    );
+    let mut state = new_app_state();
     let mut runtime = GamesPetriDishRuntime::new(&state);
     state.games.family_building = true;
 
@@ -378,15 +393,8 @@ fn format_tournament_elapsed_uses_readable_units() {
 #[test]
 fn finished_session_elapsed_stays_frozen() {
     let frozen = Duration::from_millis(12_345);
-    let session = GameSession {
-        config: sample_config(),
-        progress: None,
-        snapshot: None,
-        results: TournamentResults::empty(),
-        definitions: Vec::new(),
-        started_at: Instant::now() - Duration::from_secs(90),
-        finished_elapsed: Some(frozen),
-    };
+    let mut session = new_game_session(Some(frozen));
+    session.started_at = Instant::now() - Duration::from_secs(90);
 
     assert_eq!(
         session.elapsed_at(Instant::now() + Duration::from_secs(30)),
@@ -484,11 +492,7 @@ fn tournament_progress_percent_uses_overall_progress() {
 
 #[test]
 fn render_progress_labels_completed_batch_snapshot_without_round_counter() {
-    let mut state = AppState::new(
-        std::env::temp_dir(),
-        nit_core::Buffer::empty("x", None),
-        nit_core::Buffer::empty("n", None),
-    );
+    let mut state = new_app_state();
     state.games.status = GamesStatus::Running;
     let progress = TournamentProgress {
         match_index: 345,
@@ -546,11 +550,7 @@ fn render_progress_labels_completed_batch_snapshot_without_round_counter() {
 
 #[test]
 fn family_mode_disables_history_to_preserve_metal_batching() {
-    let mut state = AppState::new(
-        std::env::temp_dir(),
-        nit_core::Buffer::empty("x", None),
-        nit_core::Buffer::empty("n", None),
-    );
+    let mut state = new_app_state();
     let mut runtime = GamesPetriDishRuntime::new(&state);
     state.games.pending_run_override = Some(nit_core::GamesRunOverride {
         config: sample_config(),
@@ -574,21 +574,9 @@ fn family_mode_disables_history_to_preserve_metal_batching() {
 
 #[test]
 fn finished_hidden_session_reopens_games_petri_dish() {
-    let mut state = AppState::new(
-        std::env::temp_dir(),
-        nit_core::Buffer::empty("x", None),
-        nit_core::Buffer::empty("n", None),
-    );
+    let mut state = new_app_state();
     let mut runtime = GamesPetriDishRuntime::new(&state);
-    runtime.session = Some(GameSession {
-        config: sample_config(),
-        progress: None,
-        snapshot: None,
-        results: TournamentResults::empty(),
-        definitions: Vec::new(),
-        started_at: Instant::now(),
-        finished_elapsed: None,
-    });
+    runtime.session = Some(new_game_session(None));
     runtime.hidden = true;
     state.games.running = true;
     state.games.status = GamesStatus::Running;
@@ -629,23 +617,7 @@ fn finished_hidden_session_reopens_games_petri_dish() {
 
 #[test]
 fn top_table_shows_aggregate_payoff_column_in_mean_mode() {
-    let config = nit_games::GamesConfig::from_toml(
-        r#"
-schema_version = 1
-game = "ipd"
-rounds = 2
-repetitions = 1
-self_play = true
-
-[[strategy]]
-id = "all_c"
-type = "fsm"
-index = 1
-num_states = 1
-k = 2
-"#,
-    )
-    .expect("parse config");
+    let config = sample_config();
     let kernel = nit_games::TournamentKernel::new(config.clone());
     let results = nit_games::output::TournamentResults {
         ranking: vec![nit_games::output::StrategyResult {

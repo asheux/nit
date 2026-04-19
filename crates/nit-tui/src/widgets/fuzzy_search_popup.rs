@@ -1,7 +1,7 @@
 use nit_core::{AppState, SearchMode, SearchResultFile, SearchResultMatch};
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
-    style::{Modifier, Style},
+    style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Clear, Paragraph},
     Frame,
@@ -12,13 +12,19 @@ use crate::theme::Theme;
 
 const MIN_WIDTH: u16 = 68;
 const MIN_HEIGHT: u16 = 22;
+const POPUP_WIDTH_PCT: u16 = 80;
+const POPUP_HEIGHT_PCT: u16 = 76;
+const PREVIEW_ANCHOR_DIVISOR: usize = 3;
 
 pub fn preferred_size(screen: Rect) -> (u16, u16) {
-    let width = (screen.width.saturating_mul(80) / 100).max(MIN_WIDTH);
-    let height = (screen.height.saturating_mul(76) / 100).max(MIN_HEIGHT);
+    let width = (screen.width.saturating_mul(POPUP_WIDTH_PCT) / 100).max(MIN_WIDTH);
+    let height = (screen.height.saturating_mul(POPUP_HEIGHT_PCT) / 100).max(MIN_HEIGHT);
     (width.min(screen.width), height.min(screen.height))
 }
 
+/// Render the fuzzy search popup with header / results / preview / footer.
+/// `preview_scroll_delta` is clamped in place so reverse scrolling at the edges
+/// does not accumulate phantom overshoot.
 pub fn render(
     frame: &mut Frame,
     area: Rect,
@@ -28,17 +34,7 @@ pub fn render(
     preview_scroll_delta: &mut i32,
 ) {
     frame.render_widget(Clear, area);
-    let title = " NIT FUZZY SEARCH ";
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(Span::styled(
-            title,
-            Style::default()
-                .fg(theme.title_focused)
-                .add_modifier(Modifier::BOLD),
-        ))
-        .border_style(Style::default().fg(theme.border))
-        .style(Style::default().bg(theme.background));
+    let block = popup_block(theme, " NIT FUZZY SEARCH ");
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -62,18 +58,24 @@ pub fn render(
     render_footer(frame, layout[2], theme);
 }
 
+fn popup_block(theme: &Theme, title: &str) -> Block<'static> {
+    Block::default()
+        .borders(Borders::ALL)
+        .title(Span::styled(
+            title.to_string(),
+            Style::default()
+                .fg(theme.title_focused)
+                .add_modifier(Modifier::BOLD),
+        ))
+        .border_style(Style::default().fg(theme.border))
+        .style(Style::default().bg(theme.background))
+}
+
 fn render_header(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
-    let mode = match state.fuzzy_search.mode {
+    let mode_label = match state.fuzzy_search.mode {
         SearchMode::Files => "[FILES]",
         SearchMode::Content => "[CONTENT]",
     };
-    let mode_style = Style::default()
-        .fg(theme.title)
-        .add_modifier(Modifier::BOLD);
-    let query_style = Style::default().fg(theme.foreground);
-    let dim_style = Style::default()
-        .fg(theme.border)
-        .add_modifier(Modifier::DIM);
     let status_style = if state.fuzzy_search.indexing || state.fuzzy_search.searching {
         Style::default()
             .fg(theme.warning)
@@ -82,34 +84,30 @@ fn render_header(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme)
         Style::default().fg(theme.foreground)
     };
 
-    let hidden = if state.fuzzy_search.show_hidden {
-        "ON"
-    } else {
-        "OFF"
-    };
-    let ignored = if state.fuzzy_search.show_ignored {
-        "ON"
-    } else {
-        "OFF"
-    };
-
     let results = match state.fuzzy_search.mode {
         SearchMode::Files => state.fuzzy_search.file_results.len(),
         SearchMode::Content => state.fuzzy_search.match_results.len(),
     };
-    let mut status = if !state.fuzzy_search.status_msg.is_empty() {
-        state.fuzzy_search.status_msg.clone()
-    } else {
+    let status = if state.fuzzy_search.status_msg.is_empty() {
         format!("{results} results")
+    } else {
+        state.fuzzy_search.status_msg.clone()
     };
-    if status.is_empty() {
-        status = format!("{results} results");
-    }
+    let hidden = on_off(state.fuzzy_search.show_hidden);
+    let ignored = on_off(state.fuzzy_search.show_ignored);
 
     let line = Line::from(vec![
-        Span::styled(mode.to_string(), mode_style),
-        Span::styled("  > ", dim_style),
-        Span::styled(state.fuzzy_search.query.clone(), query_style),
+        Span::styled(
+            mode_label.to_string(),
+            Style::default()
+                .fg(theme.title)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("  > ", dim_style(theme)),
+        Span::styled(
+            state.fuzzy_search.query.clone(),
+            Style::default().fg(theme.foreground),
+        ),
         Span::styled(
             format!("  {status}  hidden:{hidden} ignored:{ignored}"),
             status_style,
@@ -138,12 +136,9 @@ fn render_body(
 }
 
 fn render_footer(frame: &mut Frame, area: Rect, theme: &Theme) {
-    let dim_style = Style::default()
-        .fg(theme.border)
-        .add_modifier(Modifier::DIM);
     let hint =
         "Enter open  Esc close  Tab mode  ↑↓ list  Ctrl+J/K list  Ctrl+↑/↓ preview  F2 hidden  F3 ignored  F5 refresh";
-    let line = Line::from(Span::styled(hint, dim_style));
+    let line = Line::from(Span::styled(hint, dim_style(theme)));
     frame.render_widget(
         Paragraph::new(vec![line]).style(Style::default().bg(theme.background)),
         area,
@@ -151,12 +146,14 @@ fn render_footer(frame: &mut Frame, area: Rect, theme: &Theme) {
 }
 
 fn render_results(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
-    let title_style = Style::default()
-        .fg(theme.title)
-        .add_modifier(Modifier::BOLD);
     let block = Block::default()
         .borders(Borders::ALL)
-        .title(Span::styled(" RESULTS ", title_style))
+        .title(Span::styled(
+            " RESULTS ",
+            Style::default()
+                .fg(theme.title)
+                .add_modifier(Modifier::BOLD),
+        ))
         .border_style(Style::default().fg(theme.border))
         .style(Style::default().bg(theme.background));
     let inner = block.inner(area);
@@ -167,58 +164,49 @@ fn render_results(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme
         return;
     }
 
-    let dim_style = Style::default()
-        .fg(theme.border)
-        .add_modifier(Modifier::DIM);
+    let lines = match state.fuzzy_search.mode {
+        SearchMode::Files => results_lines(
+            &state.fuzzy_search.file_results,
+            state.fuzzy_search.scroll_offset,
+            state.fuzzy_search.selected,
+            height,
+            theme,
+            render_file_row,
+        ),
+        SearchMode::Content => results_lines(
+            &state.fuzzy_search.match_results,
+            state.fuzzy_search.scroll_offset,
+            state.fuzzy_search.selected,
+            height,
+            theme,
+            render_match_row,
+        ),
+    };
+    let paragraph = Paragraph::new(lines)
+        .style(Style::default().bg(theme.background))
+        .scroll((0, 0));
+    frame.render_widget(paragraph, inner);
+}
 
-    match state.fuzzy_search.mode {
-        SearchMode::Files => {
-            let rows = &state.fuzzy_search.file_results;
-            let (scroll, selected) = scroll_state(
-                rows.len(),
-                state.fuzzy_search.scroll_offset,
-                state.fuzzy_search.selected,
-                height,
-            );
-            let end = (scroll + height).min(rows.len());
-            let mut lines: Vec<Line<'static>> = Vec::with_capacity(height);
-            if rows.is_empty() {
-                lines.push(Line::from(Span::styled("No matches.", dim_style)));
-            } else {
-                for (idx, item) in rows.iter().enumerate().take(end).skip(scroll) {
-                    let selected_row = idx == selected;
-                    lines.push(render_file_row(item, selected_row, theme));
-                }
-            }
-            let paragraph = Paragraph::new(lines)
-                .style(Style::default().bg(theme.background))
-                .scroll((0, 0));
-            frame.render_widget(paragraph, inner);
-        }
-        SearchMode::Content => {
-            let rows = &state.fuzzy_search.match_results;
-            let (scroll, selected) = scroll_state(
-                rows.len(),
-                state.fuzzy_search.scroll_offset,
-                state.fuzzy_search.selected,
-                height,
-            );
-            let end = (scroll + height).min(rows.len());
-            let mut lines: Vec<Line<'static>> = Vec::with_capacity(height);
-            if rows.is_empty() {
-                lines.push(Line::from(Span::styled("No matches.", dim_style)));
-            } else {
-                for (idx, item) in rows.iter().enumerate().take(end).skip(scroll) {
-                    let selected_row = idx == selected;
-                    lines.push(render_match_row(item, selected_row, theme));
-                }
-            }
-            let paragraph = Paragraph::new(lines)
-                .style(Style::default().bg(theme.background))
-                .scroll((0, 0));
-            frame.render_widget(paragraph, inner);
-        }
+fn results_lines<T>(
+    rows: &[T],
+    scroll: usize,
+    selected: usize,
+    height: usize,
+    theme: &Theme,
+    render_row: fn(&T, bool, &Theme) -> Line<'static>,
+) -> Vec<Line<'static>> {
+    if rows.is_empty() {
+        return vec![Line::from(Span::styled("No matches.", dim_style(theme)))];
     }
+    let (scroll, selected) = scroll_state(rows.len(), scroll, selected, height);
+    let end = (scroll + height).min(rows.len());
+    rows.iter()
+        .enumerate()
+        .take(end)
+        .skip(scroll)
+        .map(|(idx, item)| render_row(item, idx == selected, theme))
+        .collect()
 }
 
 fn render_preview(
@@ -228,34 +216,29 @@ fn render_preview(
     preview: Option<&PreviewModel>,
     preview_scroll_delta: &mut i32,
 ) {
-    let mut title = " PREVIEW ".to_string();
-    let mut truncated = false;
-    if let Some(p) = preview {
-        truncated = p.truncated;
-    }
-    if truncated {
-        title.push_str("[truncated] ");
-    }
-
-    let title_style = Style::default()
-        .fg(theme.title)
-        .add_modifier(Modifier::BOLD);
+    let truncated = preview.map(|p| p.truncated).unwrap_or(false);
+    let title = if truncated {
+        " PREVIEW [truncated] ".to_string()
+    } else {
+        " PREVIEW ".to_string()
+    };
     let block = Block::default()
         .borders(Borders::ALL)
-        .title(Span::styled(title, title_style))
+        .title(Span::styled(
+            title,
+            Style::default()
+                .fg(theme.title)
+                .add_modifier(Modifier::BOLD),
+        ))
         .border_style(Style::default().fg(theme.border))
         .style(Style::default().bg(theme.background));
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    let dim_style = Style::default()
-        .fg(theme.border)
-        .add_modifier(Modifier::DIM);
-
     let Some(model) = preview else {
         let paragraph = Paragraph::new(vec![Line::from(Span::styled(
             "Loading preview...",
-            dim_style,
+            dim_style(theme),
         ))])
         .style(Style::default().bg(theme.background));
         frame.render_widget(paragraph, inner);
@@ -264,12 +247,11 @@ fn render_preview(
 
     let height = inner.height as usize;
     let max_scroll = model.lines.len().saturating_sub(height.max(1));
-    let desired = model.anchor_line.saturating_sub(height / 3);
+    let desired = model.anchor_line.saturating_sub(height / PREVIEW_ANCHOR_DIVISOR);
     let base = desired.min(max_scroll) as i32;
     let scroll = (base + *preview_scroll_delta).clamp(0, max_scroll as i32);
-    // Snap the accumulator back to the clamped effective offset so repeated
-    // scroll events at the edge don't overshoot — otherwise reverse scrolls
-    // first have to "work off" the accumulated overshoot before taking effect.
+    // Snap back to the clamped offset so edge scrolls don't accumulate overshoot:
+    // without this, reverse scrolling first has to work off the overshoot.
     *preview_scroll_delta = scroll - base;
 
     let paragraph = Paragraph::new(model.lines.clone())
@@ -279,25 +261,14 @@ fn render_preview(
 }
 
 fn render_file_row(item: &SearchResultFile, selected: bool, theme: &Theme) -> Line<'static> {
-    let base_style = Style::default().fg(theme.foreground).bg(theme.background);
-    let selected_style = base_style
-        .bg(theme.selection_bg)
-        .add_modifier(Modifier::BOLD);
+    let row_style = row_style(theme, selected);
+    let hi_bg = highlight_bg(theme, selected);
     let match_style = Style::default()
         .fg(theme.accent)
-        .bg(if selected {
-            theme.selection_bg
-        } else {
-            theme.background
-        })
+        .bg(hi_bg)
         .add_modifier(Modifier::BOLD);
 
-    let row_style = if selected { selected_style } else { base_style };
-    let prefix = if selected { "› " } else { "  " };
-
-    let mut spans: Vec<Span<'static>> = Vec::new();
-    spans.push(Span::styled(prefix.to_string(), row_style));
-
+    let mut spans: Vec<Span<'static>> = vec![Span::styled(prefix(selected).to_string(), row_style)];
     if item.matched_indices.is_empty() {
         spans.push(Span::styled(item.rel_path.clone(), row_style));
         return Line::from(spans);
@@ -315,10 +286,10 @@ fn render_file_row(item: &SearchResultFile, selected: bool, theme: &Theme) -> Li
             hi_pos += 1;
         }
         let next_style = if is_hit { match_style } else { row_style };
-        if next_style != cur_style && !buf.is_empty() {
-            spans.push(Span::styled(std::mem::take(&mut buf), cur_style));
-            cur_style = next_style;
-        } else if next_style != cur_style {
+        if next_style != cur_style {
+            if !buf.is_empty() {
+                spans.push(Span::styled(std::mem::take(&mut buf), cur_style));
+            }
             cur_style = next_style;
         }
         buf.push(ch);
@@ -330,36 +301,24 @@ fn render_file_row(item: &SearchResultFile, selected: bool, theme: &Theme) -> Li
 }
 
 fn render_match_row(item: &SearchResultMatch, selected: bool, theme: &Theme) -> Line<'static> {
-    let base_style = Style::default().fg(theme.foreground).bg(theme.background);
-    let selected_style = base_style
-        .bg(theme.selection_bg)
-        .add_modifier(Modifier::BOLD);
-    let dim_style = Style::default()
+    let row_style = row_style(theme, selected);
+    let hi_bg = highlight_bg(theme, selected);
+    let dim = Style::default()
         .fg(theme.border)
-        .bg(if selected {
-            theme.selection_bg
-        } else {
-            theme.background
-        })
+        .bg(hi_bg)
         .add_modifier(Modifier::DIM);
     let match_style = Style::default()
         .fg(theme.accent)
-        .bg(if selected {
-            theme.selection_bg
-        } else {
-            theme.background
-        })
+        .bg(hi_bg)
         .add_modifier(Modifier::BOLD | Modifier::UNDERLINED);
 
-    let row_style = if selected { selected_style } else { base_style };
-    let prefix = if selected { "› " } else { "  " };
-
-    let mut spans: Vec<Span<'static>> = Vec::new();
-    spans.push(Span::styled(prefix.to_string(), row_style));
-    spans.push(Span::styled(
-        format!("{}:{}:{}  ", item.rel_path, item.line, item.col),
-        dim_style,
-    ));
+    let rel_path = &item.rel_path;
+    let line = item.line;
+    let col = item.col;
+    let mut spans: Vec<Span<'static>> = vec![
+        Span::styled(prefix(selected).to_string(), row_style),
+        Span::styled(format!("{rel_path}:{line}:{col}  "), dim),
+    ];
 
     let snippet_len = item.snippet.chars().count();
     let start = item.match_start.min(snippet_len);
@@ -372,6 +331,45 @@ fn render_match_row(item: &SearchResultMatch, selected: bool, theme: &Theme) -> 
         match_style,
     ));
     Line::from(spans)
+}
+
+fn row_style(theme: &Theme, selected: bool) -> Style {
+    let base = Style::default().fg(theme.foreground).bg(theme.background);
+    if selected {
+        base.bg(theme.selection_bg).add_modifier(Modifier::BOLD)
+    } else {
+        base
+    }
+}
+
+fn highlight_bg(theme: &Theme, selected: bool) -> Color {
+    if selected {
+        theme.selection_bg
+    } else {
+        theme.background
+    }
+}
+
+fn dim_style(theme: &Theme) -> Style {
+    Style::default()
+        .fg(theme.border)
+        .add_modifier(Modifier::DIM)
+}
+
+fn prefix(selected: bool) -> &'static str {
+    if selected {
+        "› "
+    } else {
+        "  "
+    }
+}
+
+fn on_off(flag: bool) -> &'static str {
+    if flag {
+        "ON"
+    } else {
+        "OFF"
+    }
 }
 
 fn split_snippet_spans(
