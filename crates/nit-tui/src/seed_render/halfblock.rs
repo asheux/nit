@@ -4,40 +4,46 @@ use ratatui::style::{Color, Style};
 
 use nit_core::EncodedSeed;
 
+use super::cache_compute::SeedRenderCache;
 use super::paint::{halo_bg_at, write_glyph};
 use super::palette::SeedPalette;
-use super::renderer::{SeedRenderCache, SeedRenderConfig, live_color};
+use super::renderer::{live_color, SeedRenderConfig, SeedRenderer};
 
-pub fn render(
-    area: Rect,
-    buf: &mut Buffer,
-    seed: &EncodedSeed,
-    cfg: &SeedRenderConfig,
-    cache: &SeedRenderCache,
-    palette: &SeedPalette,
-) {
-    let grid_w = seed.grid.width();
-    let grid_h = seed.grid.height();
-    if grid_w == 0 || grid_h == 0 {
-        return;
-    }
-    let cell_w = grid_w.min(area.width as usize);
-    let cell_h = grid_h.div_ceil(2).min(area.height as usize);
+pub(super) struct HalfBlockSeedRenderer;
 
-    for y in 0..cell_h {
-        let top_y = y * 2;
-        let bot_y = top_y + 1;
-        for x in 0..cell_w {
-            let top = sample_row(x, top_y, grid_w, grid_h, seed, cfg, cache, palette);
-            let bot = sample_row(x, bot_y, grid_w, grid_h, seed, cfg, cache, palette);
-            let (ch, fg, bg) = compose(top, bot, palette.bg);
-            write_glyph(
-                buf,
-                area.x + x as u16,
-                area.y + y as u16,
-                ch,
-                Style::default().fg(fg).bg(bg),
-            );
+impl SeedRenderer for HalfBlockSeedRenderer {
+    fn render(
+        &self,
+        area: Rect,
+        buf: &mut Buffer,
+        seed: &EncodedSeed,
+        cfg: &SeedRenderConfig,
+        cache: &SeedRenderCache,
+        palette: &SeedPalette,
+    ) {
+        let grid_w = seed.grid.width();
+        let grid_h = seed.grid.height();
+        if grid_w == 0 || grid_h == 0 {
+            return;
+        }
+        let cell_w = grid_w.min(area.width as usize);
+        let cell_h = grid_h.div_ceil(2).min(area.height as usize);
+
+        for y in 0..cell_h {
+            let top_y = y * 2;
+            let bot_y = top_y + 1;
+            for x in 0..cell_w {
+                let top = sample_row(x, top_y, grid_w, grid_h, seed, cfg, cache, palette);
+                let bot = sample_row(x, bot_y, grid_w, grid_h, seed, cfg, cache, palette);
+                let (ch, fg, bg) = compose(top, bot, palette.bg);
+                write_glyph(
+                    buf,
+                    area.x + x as u16,
+                    area.y + y as u16,
+                    ch,
+                    Style::default().fg(fg).bg(bg),
+                );
+            }
         }
     }
 }

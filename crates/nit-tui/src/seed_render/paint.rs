@@ -1,9 +1,11 @@
 use ratatui::buffer::Buffer;
 use ratatui::style::{Color, Modifier, Style};
 
+use super::cache_compute::SeedRenderCache;
 use super::palette::SeedPalette;
-use super::renderer::SeedRenderCache;
 
+// Two-step halo: dense neighborhoods (>= 3 neighbors) use the stronger tone so
+// clusters visually "pop" against lighter single-neighbor edges.
 pub(super) fn halo_color(intensity: u8, palette: &SeedPalette) -> Color {
     if intensity >= 3 {
         palette.halo_2
@@ -38,6 +40,8 @@ pub(super) fn write_glyph(buf: &mut Buffer, x: u16, y: u16, ch: char, style: Sty
     cell.set_style(style);
 }
 
+// Paint only when the cell is still the default space, so overlays never clobber a
+// base-mode glyph that already landed at this position.
 pub(super) fn mark_blank_glyph(buf: &mut Buffer, x: u16, y: u16, ch: char, style: Style) {
     let cell = buf.get_mut(x, y);
     if cell.symbol() == " " {

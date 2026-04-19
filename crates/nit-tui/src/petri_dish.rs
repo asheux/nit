@@ -305,7 +305,7 @@ impl PetriDishRuntime {
 
         let palette = GolPalette::from_theme(theme);
         let rule_label = state.rule_catalog.label_for_rule(session.rule);
-        let hud_metrics = self.render_state.hud_metrics();
+        let hud_metrics = &self.render_state.hud;
         let hud = GolHudState {
             rule: &rule_label,
             generation: session.gen,
@@ -313,8 +313,8 @@ impl PetriDishRuntime {
             period: session.period,
             mode: state.visualizer.mode,
             paused: session.paused,
-            delta: hud_metrics.delta(),
-            history: hud_metrics.history(),
+            delta: hud_metrics.delta,
+            history: &hud_metrics.history,
         };
         let cfg = GolRenderConfig {
             mode: state.visualizer.render_mode,

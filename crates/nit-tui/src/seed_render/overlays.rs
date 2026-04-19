@@ -4,14 +4,18 @@ use ratatui::style::{Modifier, Style};
 
 use nit_core::{EncodedSeed, SeedPreviewMode};
 
+use super::cache_compute::{BBox, SeedRenderCache};
 use super::paint::{bg_style, draw_frame, draw_inset_label, halo_color, mark_blank_glyph};
 use super::palette::SeedPalette;
-use super::renderer::{BBox, SeedRenderCache, SeedRenderConfig};
+use super::renderer::SeedRenderConfig;
 
 const GRID_TICK_STEP: usize = 4;
 const INSET_SIZE: u16 = 16;
 const BBOX_OVERLAY_LIMIT: usize = 4;
 
+// Post-pass drawn on top of the mode renderer so overlay glyphs land in the final
+// frame regardless of which mode painted the base layer. Order mirrors the HUD's
+// visual stacking: grid → bboxes → inset → scanline (last wins on overlap).
 pub fn render_overlays(
     area: Rect,
     buf: &mut Buffer,
@@ -37,6 +41,9 @@ pub fn render_overlays(
     }
 }
 
+// Mode-dependent pixel-to-terminal scale: bbox coordinates live in the raw grid
+// while we paint in terminal cells, so boxes must shrink when a mode packs
+// multiple pixels per glyph.
 fn scale_for_mode(mode: SeedPreviewMode) -> (usize, usize) {
     match mode {
         SeedPreviewMode::HalfBlock => (1, 2),
@@ -51,15 +58,19 @@ fn draw_grid(area: Rect, buf: &mut Buffer, cfg: &SeedRenderConfig, palette: &See
         .fg(palette.grid)
         .add_modifier(Modifier::DIM);
     for y in 0..area.height as usize {
-        let y_line = y.saturating_mul(sy) % GRID_TICK_STEP == 0;
         for x in 0..area.width as usize {
-            let x_line = x.saturating_mul(sx) % GRID_TICK_STEP == 0;
-            if !y_line && !x_line {
+            if !is_grid_tick(x, y, sx, sy) {
                 continue;
             }
             mark_blank_glyph(buf, area.x + x as u16, area.y + y as u16, '·', style);
         }
     }
+}
+
+// A cell is a grid tick when it lines up with either the horizontal or vertical tick
+// stride (converted from pixel space to cell space via the mode's packing factor).
+fn is_grid_tick(x: usize, y: usize, sx: usize, sy: usize) -> bool {
+    y.saturating_mul(sy) % GRID_TICK_STEP == 0 || x.saturating_mul(sx) % GRID_TICK_STEP == 0
 }
 
 fn draw_bboxes(
@@ -109,14 +120,7 @@ fn draw_inset(area: Rect, buf: &mut Buffer, cache: &SeedRenderCache, palette: &S
     }
     let start_x = area.x + 1;
     let start_y = area.y + 1;
-    for y in 0..INSET_SIZE as usize {
-        for x in 0..INSET_SIZE as usize {
-            let fill = if bits.get(x, y) { palette.live } else { palette.bg };
-            let cell = buf.get_mut(start_x + x as u16, start_y + y as u16);
-            cell.set_char(' ');
-            cell.set_style(bg_style(fill));
-        }
-    }
+    paint_inset_cells(buf, bits, start_x, start_y, palette);
     draw_inset_label(buf, start_x, start_y, palette);
     let frame_style = Style::default()
         .fg(palette.grid)
@@ -129,6 +133,27 @@ fn draw_inset(area: Rect, buf: &mut Buffer, cache: &SeedRenderCache, palette: &S
         start_y + INSET_SIZE,
         frame_style,
     );
+}
+
+fn paint_inset_cells(
+    buf: &mut Buffer,
+    bits: &nit_core::seed::SeedBits,
+    start_x: u16,
+    start_y: u16,
+    palette: &SeedPalette,
+) {
+    for y in 0..INSET_SIZE as usize {
+        for x in 0..INSET_SIZE as usize {
+            let fill = if bits.get(x, y) {
+                palette.live
+            } else {
+                palette.bg
+            };
+            let cell = buf.get_mut(start_x + x as u16, start_y + y as u16);
+            cell.set_char(' ');
+            cell.set_style(bg_style(fill));
+        }
+    }
 }
 
 fn draw_scanline(area: Rect, buf: &mut Buffer, cache: &SeedRenderCache, palette: &SeedPalette) {

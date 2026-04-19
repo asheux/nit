@@ -1,3 +1,5 @@
+//! Widget layer: ratatui renderers for the main panes and popup overlays.
+
 pub mod agent_console_view;
 pub mod agent_ops_view;
 pub mod artifacts_history_popup;

@@ -25,7 +25,7 @@ const MIN_INNER_HEIGHT: u16 = 4;
 
 /// Handle a key event for the protocol picker. Returns true if the event was
 /// consumed (including typed characters that mutate the custom-input buffer).
-pub fn handle_key(key: &KeyEvent, state: &mut AppState) -> bool {
+pub(crate) fn handle_key(key: &KeyEvent, state: &mut AppState) -> bool {
     let custom_slot = nit_core::builtin_protocols(&state.rule_catalog).len();
     let option_count = custom_slot + 1;
     let last_idx = option_count.saturating_sub(1);
@@ -75,7 +75,7 @@ fn step_down(cursor: usize, total: usize) -> usize {
 /// Render the protocol picker popup over `screen`. The popup auto-centers and
 /// clamps to `POPUP_MAX_WIDTH`/`POPUP_MAX_HEIGHT`; too-small terminals bail
 /// early so the caller sees nothing drawn rather than a clipped frame.
-pub fn render(frame: &mut Frame, screen: Rect, state: &AppState, theme: &Theme) {
+pub(crate) fn render(frame: &mut Frame, screen: Rect, state: &AppState, theme: &Theme) {
     let area = popup_rect(screen);
     if area.width == 0 || area.height == 0 {
         return;
@@ -130,7 +130,11 @@ pub fn render(frame: &mut Frame, screen: Rect, state: &AppState, theme: &Theme) 
     let mut list_state = ListState::default();
     list_state.select(Some(selected));
     let list = List::new(items)
-        .style(Style::default().fg(ratatui::style::Color::Gray).bg(popup_bg))
+        .style(
+            Style::default()
+                .fg(ratatui::style::Color::Gray)
+                .bg(popup_bg),
+        )
         .highlight_style(
             Style::default()
                 .fg(theme.foreground)
@@ -246,7 +250,11 @@ fn update_custom_preview(state: &mut AppState) {
 fn popup_rect(screen: Rect) -> Rect {
     let max_w = screen.width.saturating_sub(4).max(10);
     let max_h = screen.height.saturating_sub(4).max(6);
-    centered_rect_px(screen, POPUP_MAX_WIDTH.min(max_w), POPUP_MAX_HEIGHT.min(max_h))
+    centered_rect_px(
+        screen,
+        POPUP_MAX_WIDTH.min(max_w),
+        POPUP_MAX_HEIGHT.min(max_h),
+    )
 }
 
 struct DetailLine {

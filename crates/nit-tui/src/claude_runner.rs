@@ -12,9 +12,8 @@ use nit_core::{AgentBusEvent, AgentTokenCount, McpConnectionState, McpStatus};
 
 #[derive(Clone, Debug)]
 pub struct ClaudeRunnerConfig {
-    /// Maximum number of Claude turns to run concurrently.
     pub max_parallel_turns: usize,
-    /// Permission mode for Claude CLI (e.g. "dangerously-skip-permissions" for headless).
+    /// Claude CLI `--permission-mode` value (e.g. `"dangerously-skip-permissions"` for headless).
     pub permission_mode: Option<String>,
 }
 
@@ -80,8 +79,7 @@ impl ClaudeRunner {
         }
     }
 
-    /// Send a command to the runner. Returns `true` if the command was accepted,
-    /// `false` if the runner's channel is disconnected (runner shut down or crashed).
+    // Returns `false` when the runner channel is disconnected (shut down or crashed).
     pub fn send(&self, command: ClaudeCommand) -> bool {
         self.cmd_tx.send(command).is_ok()
     }
@@ -839,8 +837,9 @@ fn shorten_id(id: &str) -> String {
     format!("{}…", &id[..idx])
 }
 
-/// Extract the Claude session ID from the stream-json NDJSON output.
-/// Claude emits `{"type":"system","subtype":"init","session_id":"..."}` at the start.
+// Claude emits `{"type":"system","subtype":"init","session_id":"..."}` at the
+// start of each turn. Any event carrying a non-empty `session_id` works as a
+// fallback in case the init line was dropped by a truncated stream.
 fn extract_session_id_from_jsonl(stdout: &[u8]) -> Option<String> {
     let text = String::from_utf8_lossy(stdout);
     for raw in text.lines() {
@@ -861,14 +860,11 @@ fn extract_session_id_from_jsonl(stdout: &[u8]) -> Option<String> {
     None
 }
 
-/// Extract the final result text from Claude stream-json output.
-/// Claude emits `{"type":"result","result":"..."}` at the end.
-///
-/// When Claude uses tools during a turn, the stream contains multiple
-/// `assistant` events (text before tool use, text after). We collect all
-/// of them so intermediate output (e.g. test results) is not lost. The
-/// final `result` event replaces the last assistant text to avoid
-/// duplication.
+// When Claude uses tools during a turn, the stream contains multiple
+// `assistant` events (text before tool use, text after). We collect every one
+// so intermediate output (e.g. test results) isn't lost, and replace the last
+// assistant chunk with the authoritative `result` event when both are present
+// — the two normally duplicate each other.
 fn extract_result_text_from_jsonl(stdout: &[u8]) -> Option<String> {
     let text = String::from_utf8_lossy(stdout);
     let mut assistant_texts: Vec<String> = Vec::new();
@@ -940,8 +936,6 @@ fn extract_result_text_from_jsonl(stdout: &[u8]) -> Option<String> {
     }
 }
 
-/// Extract token count from Claude stream-json output.
-/// Claude emits usage info in `result` events: `{"type":"result","usage":{"input_tokens":...,"output_tokens":...}}`.
 fn extract_token_count_from_jsonl(stdout: &[u8]) -> Option<AgentTokenCount> {
     let text = String::from_utf8_lossy(stdout);
     let mut last: Option<AgentTokenCount> = None;
@@ -960,11 +954,9 @@ fn extract_token_count_from_jsonl(stdout: &[u8]) -> Option<AgentTokenCount> {
     last
 }
 
-/// Parse token usage from a Claude stream-json event value.
-///
-/// Claude stream-json events:
-/// - `assistant`: usage at `value.message.usage`
-/// - `result`: usage at `value.usage`, context window at `value.modelUsage.<model>.contextWindow`
+// Token usage lives in different places depending on event kind:
+// - `assistant` events → `value.message.usage`
+// - `result` events    → `value.usage`, plus `value.modelUsage.<model>.contextWindow`
 fn claude_token_count_from_value(value: &serde_json::Value) -> Option<AgentTokenCount> {
     let kind = value.get("type").and_then(|v| v.as_str());
 

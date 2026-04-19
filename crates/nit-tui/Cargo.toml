@@ -7,13 +7,21 @@ license = "MIT"
 rust-version.workspace = true
 
 [dependencies]
+# Terminal + rendering
 ratatui = { workspace = true }
 crossterm = { workspace = true }
+unicode-width = { workspace = true }
+
+# Serialization, logging, channels
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 toml = { workspace = true }
 tracing = { workspace = true }
 crossbeam-channel = { workspace = true }
+time = { workspace = true }
+sysinfo = { workspace = true }
+
+# Internal crates
 nit-core = { path = "../nit-core" }
 nit-games = { path = "../nit-games" }
 nit-mcp = { path = "../nit-mcp" }
@@ -21,11 +29,10 @@ nit-metal = { path = "../nit-metal" }
 nit-gol = { path = "../nit-gol" }
 nit-syntax = { path = "../nit-syntax" }
 nit-utils = { path = "../nit-utils" }
-unicode-width = { workspace = true }
-sysinfo = { workspace = true }
+
+# Platform / misc (kept outside workspace pins intentionally)
 arboard = "3.2"
 ctrlc = "3.4"
-time = { workspace = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 metal = "0.27.0"

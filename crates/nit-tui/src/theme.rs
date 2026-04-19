@@ -177,47 +177,58 @@ pub struct HighlightTheme {
 
 impl Theme {
     pub fn load(path: Option<&Path>) -> Self {
-        if let Some(path) = path {
-            if let Ok(contents) = fs::read_to_string(path) {
-                if let Ok(cfg) = toml::from_str::<ThemeFile>(&contents) {
-                    return Theme {
-                        background: color_or_default(cfg.background, Color::Rgb(8, 19, 31)),
-                        foreground: color_or_default(cfg.foreground, Color::Rgb(215, 229, 255)),
-                        border: color_or_default(cfg.border, Color::Rgb(42, 143, 156)),
-                        border_focused: color_or_default(
-                            cfg.border_focused,
-                            Color::Rgb(109, 238, 252),
-                        ),
-                        title: color_or_default(cfg.title, Color::Rgb(78, 208, 208)),
-                        title_focused: color_or_default(
-                            cfg.title_focused,
-                            Color::Rgb(127, 252, 255),
-                        ),
-                        cursor: color_or_default(cfg.cursor, Color::Rgb(255, 209, 102)),
-                        cursor_line_bg: color_or_default(
-                            cfg.cursor_line_bg,
-                            Color::Rgb(20, 52, 77),
-                        ),
-                        selection_bg: color_or_default(cfg.selection_bg, Color::Rgb(27, 63, 92)),
-                        warning: color_or_default(cfg.warning, Color::Rgb(242, 165, 65)),
-                        success: color_or_default(cfg.success, Color::Rgb(154, 216, 143)),
-                        error: color_or_default(cfg.error, Color::Rgb(242, 95, 92)),
-                        accent: color_or_default(cfg.accent, Color::Rgb(255, 209, 102)),
-                        hl: HighlightTheme::from_file(cfg.hl, Color::Rgb(215, 229, 255)),
-                        gol: GolTheme::from_file(cfg.gol),
-                        seed: SeedTheme::from_file(cfg.seed),
-                        diff_added: Color::Rgb(154, 216, 143),
-                        diff_modified: Color::Rgb(242, 165, 65),
-                        diff_deleted: Color::Rgb(242, 95, 92),
-                    };
-                }
-            }
+        let Some(path) = path else {
+            return Theme::default();
+        };
+        let Ok(contents) = fs::read_to_string(path) else {
+            return Theme::default();
+        };
+        let Ok(cfg) = toml::from_str::<ThemeFile>(&contents) else {
+            return Theme::default();
+        };
+        let mut theme = Theme::default();
+        overlay(&mut theme.background, cfg.background.as_deref());
+        overlay(&mut theme.foreground, cfg.foreground.as_deref());
+        overlay(&mut theme.border, cfg.border.as_deref());
+        overlay(&mut theme.border_focused, cfg.border_focused.as_deref());
+        overlay(&mut theme.title, cfg.title.as_deref());
+        overlay(&mut theme.title_focused, cfg.title_focused.as_deref());
+        overlay(&mut theme.cursor, cfg.cursor.as_deref());
+        overlay(&mut theme.cursor_line_bg, cfg.cursor_line_bg.as_deref());
+        overlay(&mut theme.selection_bg, cfg.selection_bg.as_deref());
+        overlay(&mut theme.warning, cfg.warning.as_deref());
+        overlay(&mut theme.success, cfg.success.as_deref());
+        overlay(&mut theme.error, cfg.error.as_deref());
+        overlay(&mut theme.accent, cfg.accent.as_deref());
+        if let Some(hl) = cfg.hl {
+            apply_highlight_overlay(&mut theme.hl, &hl);
         }
-        Theme::default()
+        if let Some(gol) = cfg.gol {
+            apply_gol_overlay(&mut theme.gol, &gol);
+        }
+        if let Some(seed) = cfg.seed {
+            apply_seed_overlay(&mut theme.seed, &seed);
+        }
+        theme
     }
 
     pub fn highlight_style(&self, group: HighlightGroup) -> Style {
-        let color = match group {
+        let color = self.highlight_color(group);
+        let mut style = Style::default().fg(color);
+        if matches!(group, HighlightGroup::Comment | HighlightGroup::DocComment) {
+            style = style.add_modifier(Modifier::DIM);
+        }
+        if matches!(group, HighlightGroup::Emphasis) {
+            style = style.add_modifier(Modifier::ITALIC);
+        }
+        if matches!(group, HighlightGroup::Heading) {
+            style = style.add_modifier(Modifier::BOLD);
+        }
+        style
+    }
+
+    fn highlight_color(&self, group: HighlightGroup) -> Color {
+        match group {
             HighlightGroup::Comment => self.hl.comment,
             HighlightGroup::DocComment => self.hl.doc_comment,
             HighlightGroup::String => self.hl.string,
@@ -249,18 +260,7 @@ impl Theme {
             HighlightGroup::DiffAdd | HighlightGroup::DiffRemove | HighlightGroup::Normal => {
                 self.foreground
             }
-        };
-        let mut style = Style::default().fg(color);
-        if matches!(group, HighlightGroup::Comment | HighlightGroup::DocComment) {
-            style = style.add_modifier(Modifier::DIM);
         }
-        if matches!(group, HighlightGroup::Emphasis) {
-            style = style.add_modifier(Modifier::ITALIC);
-        }
-        if matches!(group, HighlightGroup::Heading) {
-            style = style.add_modifier(Modifier::BOLD);
-        }
-        style
     }
 
     pub fn status_idle_style(&self) -> Style {
@@ -319,59 +319,20 @@ impl Default for Theme {
     }
 }
 
-impl GolTheme {
-    fn from_file(file: Option<GolThemeFile>) -> Self {
-        let Some(file) = file else {
-            return GolTheme::default();
-        };
+impl Default for GolTheme {
+    fn default() -> Self {
         GolTheme {
-            bg: color_or_default(file.bg, Color::Rgb(7, 20, 32)),
-            live_new: color_or_default(file.live_new, Color::Rgb(168, 255, 247)),
-            live: color_or_default(file.live, Color::Rgb(0, 246, 255)),
-            live_old: color_or_default(file.live_old, Color::Rgb(0, 179, 192)),
-            trail_1: color_or_default(file.trail_1, Color::Rgb(10, 74, 87)),
-            trail_2: color_or_default(file.trail_2, Color::Rgb(8, 56, 69)),
-            trail_3: color_or_default(file.trail_3, Color::Rgb(6, 39, 52)),
-            bbox: color_or_default(file.bbox, Color::Rgb(26, 214, 214)),
-            hud_dim: color_or_default(file.hud_dim, Color::Rgb(58, 169, 179)),
-            hud_text: color_or_default(file.hud_text, Color::Rgb(127, 252, 255)),
-            hud_spark: color_or_default(file.hud_spark, Color::Rgb(255, 209, 102)),
-        }
-    }
-}
-
-impl SeedTheme {
-    fn from_file(file: Option<SeedThemeFile>) -> Self {
-        let Some(file) = file else {
-            return SeedTheme::default();
-        };
-        let palette = file
-            .tissue_palette
-            .as_ref()
-            .map(|values| {
-                values
-                    .iter()
-                    .filter_map(|value| parse_color(value))
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
-        SeedTheme {
-            bg: color_or_default(file.bg, Color::Rgb(7, 20, 32)),
-            live: color_or_default(file.live, Color::Rgb(0, 246, 255)),
-            live_dim: color_or_default(file.live_dim, Color::Rgb(0, 179, 192)),
-            halo_1: color_or_default(file.halo_1, Color::Rgb(6, 48, 64)),
-            halo_2: color_or_default(file.halo_2, Color::Rgb(8, 69, 90)),
-            grid: color_or_default(file.grid, Color::Rgb(11, 47, 61)),
-            bbox: color_or_default(file.bbox, Color::Rgb(26, 214, 214)),
-            hud_text: color_or_default(file.hud_text, Color::Rgb(127, 252, 255)),
-            hud_dim: color_or_default(file.hud_dim, Color::Rgb(58, 169, 179)),
-            accent: color_or_default(file.accent, Color::Rgb(255, 209, 102)),
-            accent_2: color_or_default(file.accent_2, Color::Rgb(179, 136, 255)),
-            tissue_palette: if palette.is_empty() {
-                SeedTheme::default().tissue_palette
-            } else {
-                palette
-            },
+            bg: Color::Rgb(7, 20, 32),
+            live_new: Color::Rgb(168, 255, 247),
+            live: Color::Rgb(0, 246, 255),
+            live_old: Color::Rgb(0, 179, 192),
+            trail_1: Color::Rgb(10, 74, 87),
+            trail_2: Color::Rgb(8, 56, 69),
+            trail_3: Color::Rgb(6, 39, 52),
+            bbox: Color::Rgb(26, 214, 214),
+            hud_dim: Color::Rgb(58, 169, 179),
+            hud_text: Color::Rgb(127, 252, 255),
+            hud_spark: Color::Rgb(255, 209, 102),
         }
     }
 }
@@ -397,62 +358,6 @@ impl Default for SeedTheme {
                 Color::Rgb(26, 214, 214),
                 Color::Rgb(42, 176, 255),
             ],
-        }
-    }
-}
-
-impl Default for GolTheme {
-    fn default() -> Self {
-        GolTheme {
-            bg: Color::Rgb(7, 20, 32),
-            live_new: Color::Rgb(168, 255, 247),
-            live: Color::Rgb(0, 246, 255),
-            live_old: Color::Rgb(0, 179, 192),
-            trail_1: Color::Rgb(10, 74, 87),
-            trail_2: Color::Rgb(8, 56, 69),
-            trail_3: Color::Rgb(6, 39, 52),
-            bbox: Color::Rgb(26, 214, 214),
-            hud_dim: Color::Rgb(58, 169, 179),
-            hud_text: Color::Rgb(127, 252, 255),
-            hud_spark: Color::Rgb(255, 209, 102),
-        }
-    }
-}
-
-impl HighlightTheme {
-    fn from_file(file: Option<HighlightThemeFile>, foreground: Color) -> Self {
-        let Some(file) = file else {
-            return HighlightTheme::default();
-        };
-        HighlightTheme {
-            comment: color_or_default(file.comment, Color::Rgb(84, 117, 150)),
-            doc_comment: color_or_default(file.doc_comment, Color::Rgb(122, 193, 255)),
-            string: color_or_default(file.string, Color::Rgb(154, 216, 143)),
-            char: color_or_default(file.char, Color::Rgb(177, 235, 143)),
-            number: color_or_default(file.number, Color::Rgb(242, 165, 65)),
-            boolean: color_or_default(file.boolean, Color::Rgb(245, 201, 111)),
-            keyword: color_or_default(file.keyword, Color::Rgb(127, 252, 255)),
-            keyword_control: color_or_default(file.keyword_control, Color::Rgb(255, 159, 28)),
-            keyword_operator: color_or_default(file.keyword_operator, Color::Rgb(255, 209, 102)),
-            r#type: color_or_default(file.r#type, Color::Rgb(122, 201, 255)),
-            type_builtin: color_or_default(file.type_builtin, Color::Rgb(78, 208, 208)),
-            function: color_or_default(file.function, Color::Rgb(255, 209, 102)),
-            method: color_or_default(file.method, Color::Rgb(255, 204, 140)),
-            macro_token: color_or_default(file.macro_token, Color::Rgb(210, 155, 255)),
-            attribute: color_or_default(file.attribute, Color::Rgb(160, 196, 255)),
-            namespace: color_or_default(file.namespace, Color::Rgb(109, 238, 252)),
-            variable: color_or_default(file.variable, foreground),
-            parameter: color_or_default(file.parameter, Color::Rgb(255, 217, 102)),
-            property: color_or_default(file.property, Color::Rgb(78, 208, 208)),
-            constant: color_or_default(file.constant, Color::Rgb(255, 118, 118)),
-            operator: color_or_default(file.operator, Color::Rgb(196, 210, 223)),
-            punctuation: color_or_default(file.punctuation, Color::Rgb(108, 147, 177)),
-            tag: color_or_default(file.tag, Color::Rgb(78, 208, 208)),
-            heading: color_or_default(file.heading, Color::Rgb(127, 252, 255)),
-            emphasis: color_or_default(file.emphasis, Color::Rgb(255, 209, 102)),
-            link: color_or_default(file.link, Color::Rgb(87, 199, 255)),
-            error: color_or_default(file.error, Color::Rgb(242, 95, 92)),
-            warning: color_or_default(file.warning, Color::Rgb(242, 165, 65)),
         }
     }
 }
@@ -492,8 +397,75 @@ impl Default for HighlightTheme {
     }
 }
 
-fn color_or_default(value: Option<String>, default: Color) -> Color {
-    value.as_deref().and_then(parse_color).unwrap_or(default)
+fn overlay(target: &mut Color, raw: Option<&str>) {
+    if let Some(value) = raw.and_then(parse_color) {
+        *target = value;
+    }
+}
+
+fn apply_highlight_overlay(dst: &mut HighlightTheme, src: &HighlightThemeFile) {
+    overlay(&mut dst.comment, src.comment.as_deref());
+    overlay(&mut dst.doc_comment, src.doc_comment.as_deref());
+    overlay(&mut dst.string, src.string.as_deref());
+    overlay(&mut dst.char, src.char.as_deref());
+    overlay(&mut dst.number, src.number.as_deref());
+    overlay(&mut dst.boolean, src.boolean.as_deref());
+    overlay(&mut dst.keyword, src.keyword.as_deref());
+    overlay(&mut dst.keyword_control, src.keyword_control.as_deref());
+    overlay(&mut dst.keyword_operator, src.keyword_operator.as_deref());
+    overlay(&mut dst.r#type, src.r#type.as_deref());
+    overlay(&mut dst.type_builtin, src.type_builtin.as_deref());
+    overlay(&mut dst.function, src.function.as_deref());
+    overlay(&mut dst.method, src.method.as_deref());
+    overlay(&mut dst.macro_token, src.macro_token.as_deref());
+    overlay(&mut dst.attribute, src.attribute.as_deref());
+    overlay(&mut dst.namespace, src.namespace.as_deref());
+    overlay(&mut dst.variable, src.variable.as_deref());
+    overlay(&mut dst.parameter, src.parameter.as_deref());
+    overlay(&mut dst.property, src.property.as_deref());
+    overlay(&mut dst.constant, src.constant.as_deref());
+    overlay(&mut dst.operator, src.operator.as_deref());
+    overlay(&mut dst.punctuation, src.punctuation.as_deref());
+    overlay(&mut dst.tag, src.tag.as_deref());
+    overlay(&mut dst.heading, src.heading.as_deref());
+    overlay(&mut dst.emphasis, src.emphasis.as_deref());
+    overlay(&mut dst.link, src.link.as_deref());
+    overlay(&mut dst.error, src.error.as_deref());
+    overlay(&mut dst.warning, src.warning.as_deref());
+}
+
+fn apply_gol_overlay(dst: &mut GolTheme, src: &GolThemeFile) {
+    overlay(&mut dst.bg, src.bg.as_deref());
+    overlay(&mut dst.live_new, src.live_new.as_deref());
+    overlay(&mut dst.live, src.live.as_deref());
+    overlay(&mut dst.live_old, src.live_old.as_deref());
+    overlay(&mut dst.trail_1, src.trail_1.as_deref());
+    overlay(&mut dst.trail_2, src.trail_2.as_deref());
+    overlay(&mut dst.trail_3, src.trail_3.as_deref());
+    overlay(&mut dst.bbox, src.bbox.as_deref());
+    overlay(&mut dst.hud_dim, src.hud_dim.as_deref());
+    overlay(&mut dst.hud_text, src.hud_text.as_deref());
+    overlay(&mut dst.hud_spark, src.hud_spark.as_deref());
+}
+
+fn apply_seed_overlay(dst: &mut SeedTheme, src: &SeedThemeFile) {
+    overlay(&mut dst.bg, src.bg.as_deref());
+    overlay(&mut dst.live, src.live.as_deref());
+    overlay(&mut dst.live_dim, src.live_dim.as_deref());
+    overlay(&mut dst.halo_1, src.halo_1.as_deref());
+    overlay(&mut dst.halo_2, src.halo_2.as_deref());
+    overlay(&mut dst.grid, src.grid.as_deref());
+    overlay(&mut dst.bbox, src.bbox.as_deref());
+    overlay(&mut dst.hud_text, src.hud_text.as_deref());
+    overlay(&mut dst.hud_dim, src.hud_dim.as_deref());
+    overlay(&mut dst.accent, src.accent.as_deref());
+    overlay(&mut dst.accent_2, src.accent_2.as_deref());
+    if let Some(raw) = src.tissue_palette.as_ref() {
+        let palette: Vec<Color> = raw.iter().filter_map(|s| parse_color(s)).collect();
+        if !palette.is_empty() {
+            dst.tissue_palette = palette;
+        }
+    }
 }
 
 // Accepts `#RRGGBB` and `RRGGBB`. Any other form (shorthand, alpha, named

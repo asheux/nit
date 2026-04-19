@@ -2197,9 +2197,7 @@ where
     entries
 }
 
-/// When no archived snapshots exist, surface the current `run.json` (written
-/// continuously by the flush loop) so the history popup is never empty while
-/// the user has active data.
+// Surface the live run.json when no archived snapshots exist so the history popup isn't empty.
 fn current_run_as_history_entry<F>(
     run_path: &Path,
     make_detail: F,
@@ -2403,7 +2401,7 @@ pub fn artifacts_history_summary_label(state: &AppState) -> String {
 // ---------------------------------------------------------------------------
 
 const GLOBAL_ARCHIVE_PREVIEW_CHARS: usize = 120;
-/// Full-text chunk size for BM25 indexing (RAG best practice: 200-1000 tokens).
+// BM25 chunk size; RAG best practice is 200-1000 tokens (~2000 chars at English avg length).
 const GLOBAL_ARCHIVE_FULLTEXT_CHARS: usize = 2000;
 
 struct ArchiveSourceCtx<'a> {
@@ -2412,7 +2410,6 @@ struct ArchiveSourceCtx<'a> {
     source_kind: GlobalArchiveSourceKind,
 }
 
-/// Tokenize text into lowercased words for BM25 scoring.
 fn tokenize_for_bm25(text: &str) -> Vec<String> {
     text.split(|ch: char| !ch.is_alphanumeric() && ch != '_' && ch != '-')
         .filter(|w| w.len() >= 2)
@@ -2420,7 +2417,6 @@ fn tokenize_for_bm25(text: &str) -> Vec<String> {
         .collect()
 }
 
-/// Build the search haystack from full content (for fuzzy) and extract tokens (for BM25).
 fn build_search_fields(
     kind: &str,
     owner: &str,
@@ -2573,7 +2569,6 @@ fn extract_run_entries(
     }
 }
 
-/// Return file mtime as microseconds since epoch, or `None` if unavailable.
 fn file_mtime_micros(path: &Path) -> Option<u128> {
     fs::metadata(path)
         .ok()
@@ -2582,7 +2577,6 @@ fn file_mtime_micros(path: &Path) -> Option<u128> {
         .map(|d| d.as_micros())
 }
 
-/// Collect all run.json paths with their mtimes from the agents directory.
 fn discover_run_files(agents_root: &Path) -> Vec<(PathBuf, Option<u128>)> {
     let mut files = Vec::new();
 
@@ -2649,11 +2643,8 @@ fn discover_run_files(agents_root: &Path) -> Vec<(PathBuf, Option<u128>)> {
     files
 }
 
-/// Build the global archive index with incremental update support.
-///
-/// If `prev_index` is non-empty, entries from unchanged run.json files (same
-/// path and mtime) are carried forward without re-parsing.  Only new or
-/// modified files trigger JSON deserialization.
+// Incremental: cached entries from unchanged run.json files (same path+mtime) are
+// reused without re-parsing. Only new/modified files trigger JSON deserialization.
 pub fn build_global_archive_index(state: &AppState) -> Vec<GlobalArchiveEntry> {
     let now_micros = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -2730,7 +2721,6 @@ pub fn build_global_archive_index(state: &AppState) -> Vec<GlobalArchiveEntry> {
     entries
 }
 
-/// Resolve source metadata from a run.json path.
 fn resolve_run_source(
     state: &AppState,
     run_path: &Path,
@@ -2785,10 +2775,7 @@ fn resolve_run_source(
     )
 }
 
-/// Compute BM25 score for a single document against query terms.
-///
-/// BM25 parameters: k1 controls term frequency saturation, b controls
-/// document length normalization. Standard defaults: k1=1.2, b=0.75.
+// BM25 with standard defaults: K1=1.2 (term-frequency saturation), B=0.75 (doc-length normalization).
 fn bm25_score(
     doc_tokens: &[String],
     query_terms: &[String],
@@ -2833,7 +2820,6 @@ fn bm25_score(
     score
 }
 
-/// Build IDF (Inverse Document Frequency) map for query terms across the corpus.
 fn build_idf_map(
     index: &[GlobalArchiveEntry],
     query_terms: &[String],
@@ -2974,7 +2960,6 @@ pub fn artifact_list_widths(width: usize) -> Vec<usize> {
     allocate_columns(cols_total, &[6, 6, 8, 12], &[8, 8, 10, 50], 3)
 }
 
-/// Root prompt glyph.
 const PROMPT_GLYPH: char = '→';
 
 fn artifact_card_row(
@@ -3012,13 +2997,7 @@ fn artifact_card_row(
     }
 }
 
-/// Group reply indices under their correct prompt index.
-///
-/// For replies that have a `prompt_msg_idx` set (explicit parent tracking), the reply is
-/// placed under that prompt. For replies without it, falls back to the nearest preceding
-/// prompt by index (binary search).
-///
-/// Returns a list of `(Option<prompt_idx>, Vec<reply_indices>)` groups.
+// Without explicit `prompt_msg_idx`, fall back to nearest-preceding-prompt by index.
 fn group_replies_under_prompts(
     prompt_indices: &[usize],
     reply_indices: &[usize],
@@ -3026,9 +3005,7 @@ fn group_replies_under_prompts(
     group_replies_under_prompts_with_hints(prompt_indices, reply_indices, &[])
 }
 
-/// Like `group_replies_under_prompts` but accepts explicit parent hints.
-/// `parent_hints` is parallel to `reply_indices`; each entry is `Some(prompt_msg_idx)` if the
-/// reply explicitly knows its parent prompt, or `None` to fall back to positional grouping.
+// `parent_hints` is parallel to `reply_indices`; `None` entries fall back to positional grouping.
 fn group_replies_under_prompts_with_hints(
     prompt_indices: &[usize],
     reply_indices: &[usize],
@@ -4786,9 +4763,7 @@ fn artifacts_lines(state: &AppState, swarm: Option<&SwarmRuntime>, width: usize)
     out
 }
 
-/// Check if a line is an artifact card row.
-/// Root format: `{' '|'>'}{→|➜|>}{' '}...`
-/// Child format: `{' '|'>'}{' '}{' '}{↳|➜}{' '}...`
+// Root: `{' '|'>'}{→|➜|>}{' '}...`. Child: `{' '|'>'}{' '}{' '}{↳|➜}{' '}...`.
 fn is_artifacts_card_row(line: &str) -> bool {
     is_artifacts_root_card_row(line) || is_artifacts_child_card_row(line)
 }
@@ -4957,8 +4932,7 @@ pub fn artifacts_popup_ref(
     }
 }
 
-/// Returns the agent_id that produced the currently selected artifact, if any.
-/// This is used to dispatch from the artifacts popup chat to the correct agent context.
+// Drives artifacts-popup chat dispatch to the correct agent context.
 pub fn selected_artifact_agent_id(
     state: &AppState,
     swarm: &SwarmRuntime,
@@ -5007,7 +4981,6 @@ pub fn selected_artifact_agent_id(
     }
 }
 
-/// Returns the mission_id associated with the currently selected artifact, if any.
 pub fn selected_artifact_mission_id(
     state: &AppState,
     swarm: &SwarmRuntime,
@@ -5044,7 +5017,6 @@ pub fn selected_artifact_mission_id(
     }
 }
 
-/// Returns `true` if the currently selected artifact is a user prompt (not an agent reply).
 pub fn is_selected_artifact_prompt(state: &AppState, swarm: &SwarmRuntime, width: usize) -> bool {
     let width = width.max(32);
     let widths = artifact_list_widths(width);

@@ -160,9 +160,8 @@ pub fn content_area_height(
     inner.height.saturating_sub(input_box_height)
 }
 
-/// Load artifact content directly from a run.json using the archive entry's
-/// `run_path` and `artifact_index`.  This avoids card-index mismatches that
-/// caused the wrong artifact (e.g. a prompt instead of a reply) to be shown.
+// Source content from run.json via (run_path, artifact_index). Card-index
+// lookups previously showed the wrong artifact (prompt vs reply).
 fn build_lines_from_archive_entry(
     state: &AppState,
     entry: &GlobalArchiveEntry,
@@ -333,7 +332,6 @@ pub fn chat_input_rect(state: &AppState, swarm: &SwarmRuntime, popup_area: Rect)
     Some(input_block.inner(input_chunk))
 }
 
-/// Map a screen position inside the popup's chat input to a character index.
 pub fn map_chat_input_point_to_cursor(
     state: &AppState,
     swarm: &SwarmRuntime,
@@ -607,7 +605,7 @@ pub fn render(
     None
 }
 
-/// Render the popup with content only (no chat input box). Used for prompt artifacts.
+// Prompt artifacts: render content without the chat input box.
 fn render_content_only(
     frame: &mut Frame,
     area: Rect,

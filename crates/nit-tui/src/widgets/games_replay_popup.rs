@@ -232,7 +232,11 @@ fn build_lines_window(
             for (offset, (a, b)) in pairs[slice_start..slice_end].iter().enumerate() {
                 let pair_idx = slice_start + offset;
                 let is_selected = pair_idx == state.games.replay.selected_index;
-                let style = if is_selected { selected_style } else { value_style };
+                let style = if is_selected {
+                    selected_style
+                } else {
+                    value_style
+                };
                 let prefix = if is_selected { "›" } else { " " };
                 let text = format!("{prefix} {a} vs {b}");
                 push(

@@ -1,10 +1,11 @@
+use nit_core::{GolRenderMode, VisualizerMode};
+use nit_gol::Grid;
+use ratatui::{buffer::Buffer, layout::Rect};
+
 use super::BrailleRenderer;
 use crate::gol_render::renderer::GolRenderer;
 use crate::gol_render::{GolHudMetrics, GolHudState, GolPalette, GolRenderConfig, GolRenderState};
 use crate::theme::Theme;
-use nit_core::{GolRenderMode, VisualizerMode};
-use nit_gol::Grid;
-use ratatui::{buffer::Buffer, layout::Rect};
 
 fn default_cfg(trails: bool) -> GolRenderConfig {
     GolRenderConfig {
@@ -37,7 +38,7 @@ fn hud_state<'a>(
         mode: VisualizerMode::SimOnly,
         paused: false,
         delta,
-        history: metrics.history(),
+        history: &metrics.history,
     }
 }
 

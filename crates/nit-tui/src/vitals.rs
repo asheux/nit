@@ -376,7 +376,11 @@ pub fn sparkline_from_samples(samples: &[u64], width: usize) -> String {
     let pinned = width == 1 || tail == 0;
     (0..width)
         .map(|col| {
-            let pick = if pinned { tail } else { col.saturating_mul(tail) / span };
+            let pick = if pinned {
+                tail
+            } else {
+                col.saturating_mul(tail) / span
+            };
             let amp = samples.get(pick).copied().unwrap_or(0).min(100) as usize;
             SPARKLINE_BLOCKS[(amp * top + 50) / 100]
         })

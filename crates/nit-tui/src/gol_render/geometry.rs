@@ -60,8 +60,8 @@ impl RenderGeometry {
     pub fn gol_to_term(&self, gx: i32, gy: i32) -> Option<(u16, u16)> {
         let rel_x = gx - self.gol_origin_x;
         let rel_y = gy - self.gol_origin_y;
-        let in_range = (0..self.gol_w as i32).contains(&rel_x)
-            && (0..self.gol_h as i32).contains(&rel_y);
+        let in_range =
+            (0..self.gol_w as i32).contains(&rel_x) && (0..self.gol_h as i32).contains(&rel_y);
         if !in_range {
             return None;
         }

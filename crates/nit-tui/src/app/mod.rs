@@ -794,9 +794,7 @@ fn run_loop(
                             continue;
                         }
                     }
-                    if state.show_substrate_overlay
-                        && handle_substrate_overlay_key(&key, state)
-                    {
+                    if state.show_substrate_overlay && handle_substrate_overlay_key(&key, state) {
                         needs_redraw = true;
                         continue;
                     }
@@ -1723,25 +1721,21 @@ fn record_agent_bus_vitals(vitals: &mut VitalsState, event: &AgentBusEvent) {
     }
 }
 
-/// Compute the genome report for the active editor buffer if one doesn't exist yet.
-/// This runs synchronously (~50-100ms) and only triggers once per file path.
-/// Maximum number of automatic genome-improvement retries per agent turn.
-/// Kept low (3) to avoid retry spirals that incentivise over-engineering.
-/// If the agent can't restore quality in 3 focused attempts, further retries
-/// are unlikely to help and risk triggering parsimony bloat detection.
+/// Maximum automatic genome-improvement retries per agent turn. Kept low (3)
+/// because further retries start incentivising over-engineering — if the
+/// agent can't restore quality in three focused attempts, the parsimony
+/// detector is likely to fire on the next one.
 const GENOME_RETRY_LIMIT: u8 = 3;
 
-/// Minimum file line count for genome retry eligibility.  Files smaller than
-/// this are skipped during retry collection — retrying on small files pushes
-/// agents to over-engineer trivial code.  Larger files have enough structure
-/// that a focused retry is worthwhile.
+/// Minimum file line count for genome retry eligibility. Files smaller than
+/// this are skipped so agents aren't pushed to over-engineer trivial code —
+/// below the threshold, any structural change looks like a quality swing.
 const GENOME_RETRY_MIN_LINES: usize = 120;
 
-/// Push a visible message to the agent console and diagnostics when a genome retry fires.
-/// Log-friendly agent id: strip the `#swarm-<mission>-` segment so messages
-/// read as `claude-opus-4-7#clone-01` instead of
-/// `claude-opus-4-7#swarm-mis-001-clone-01`. Mirrors the compaction used in
-/// the signals/claims overlay.
+// Strip the `#swarm-<mission>-` segment so log output reads as
+// `claude-opus-4-7#clone-01` instead of
+// `claude-opus-4-7#swarm-mis-001-clone-01`. Mirrors the compaction used in
+// the signals/claims overlay.
 fn compact_agent_id_for_log(id: &str) -> String {
     let Some((base, rest)) = id.split_once("#swarm-") else {
         return id.to_string();
@@ -2048,14 +2042,10 @@ fn drain_pending_interventions(
     }
 }
 
-/// Build a follow-up prompt if the agent's last turn degraded genome quality
-/// or tripped the parsimony detector. Returns `None` if neither condition
-/// applies or the retry limit is reached. Parsimony bloat is routed through
-/// this same path because only the writer can fix it.
-/// Remove baselines for files this agent touched, leaving other agents'
-/// baselines intact. Replaces the old global `genome_baselines.clear()` so a
-/// settling agent in a parallel swarm doesn't wipe the reference snapshot
-/// another still-running agent needs.
+// Forget baselines for files this agent touched, leaving other agents' baselines
+// intact. Replaces the old global `genome_baselines.clear()` — a settling
+// agent in a parallel swarm must not wipe the reference snapshot another
+// still-running agent needs.
 fn clear_baselines_for_agent(state: &mut AppState, agent_id: &str) {
     let paths: Vec<std::path::PathBuf> = state
         .genome_turn_modified
@@ -2209,7 +2199,6 @@ fn build_genome_retry_prompt(
          system after your changes were applied to disk. These are authoritative \u{2014} \
          disregard any scores you computed or estimated yourself.\n\n",
     );
-
 
     // Categorise files for the header summary.
     let new_below_threshold = degraded_files
@@ -2440,14 +2429,10 @@ fn maybe_compute_genome_report(state: &mut AppState, genome: &crate::genome_work
     genome.evaluate(file_path, text, true);
 }
 
-/// Route a shadow-runtime dispatch back into the main dispatcher, preserving
-/// `prompt_msg_idx` so the main agent's final response is still anchored to
-/// the user's original prompt in the chat view. `dispatch_agent_prompt` drops
-/// the index, so we stash it in the right backend map ahead of the call.
-/// Append the genome landscape section to shadow-agent dispatches (single-
-/// agent mode) that play the propose / judge / review role. Uses the
-/// currently-focused editor buffer path as scope since shadow has no
-/// declared scope_files like swarm missions do.
+// Append the genome landscape to shadow-agent dispatches (single-agent mode)
+// that play the propose / judge / review role. Scope falls back to the
+// currently-focused editor buffer path, since shadow has no declared
+// `scope_files` like swarm missions do.
 fn augment_shadow_prompt_with_landscape(
     state: &AppState,
     dispatch: &mut crate::shadow::ShadowDispatch,
@@ -13237,7 +13222,10 @@ fn install_terminal_panic_hook(state: Weak<Mutex<TerminalState>>) {
     }));
 }
 
-/// Get the git HEAD version of a file for diff base.
+// Shells out to `git show HEAD:<relpath>` so the diff overlay can compare the
+// on-disk buffer against the committed version. Returns `None` whenever the
+// file isn't tracked, git is missing, or the resolution fails for any reason —
+// callers just fall back to "no diff".
 fn git_head_content(path: &Path) -> Option<String> {
     use std::process::Command;
     let dir = path.parent()?;

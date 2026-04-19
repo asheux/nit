@@ -37,8 +37,8 @@ pub fn preferred_size(screen: Rect) -> (u16, u16) {
     (width, height)
 }
 
+// Entries are one line each with no separators, starting after HEADER_LINES.
 pub fn entry_index_for_line(state: &AppState, line_idx: usize) -> Option<usize> {
-    // Each entry is exactly one line with no separators, starting after HEADER_LINES.
     let entry_idx = line_idx.checked_sub(HEADER_LINES)?;
     let count = state.agents.global_archive_filtered.len();
     (entry_idx < count).then_some(entry_idx)
@@ -56,9 +56,8 @@ fn kind_label_and_color(kind: &str, theme: &Theme) -> (&'static str, Color) {
     }
 }
 
-// Count rendered lines without building any styled line/span vectors. Called on the
-// scroll hot path so wheel ticks don't re-iterate filtered entries + allocate styled
-// spans just to compute `max_scroll`. Must stay in lock-step with `build_lines`.
+// Hot path: scroll handlers need `max_scroll` per wheel tick without
+// allocating styled spans. Must stay in lock-step with `build_lines`.
 pub fn line_count(state: &AppState) -> usize {
     let filtered = &state.agents.global_archive_filtered;
     let mut count = HEADER_LINES + filtered.len();
@@ -203,8 +202,16 @@ fn entry_line(
     theme: &Theme,
     styles: &PopupStyles,
 ) -> Line<'static> {
-    let base = if is_selected { styles.selected } else { styles.value };
-    let tag = if is_selected { styles.selected } else { styles.dim };
+    let base = if is_selected {
+        styles.selected
+    } else {
+        styles.value
+    };
+    let tag = if is_selected {
+        styles.selected
+    } else {
+        styles.dim
+    };
     let prefix = if is_selected { "> " } else { "  " };
     let indent = if entry.kind == "PROMPT" { "  " } else { "↳ " };
 
@@ -221,7 +228,10 @@ fn entry_line(
         Span::styled(kind_label, kind_style),
         Span::styled(padded_cell(&entry.owner, OWNER_W), base),
         Span::styled(padded_cell(&entry.time_label, TIME_W), tag),
-        Span::styled(format!(" {}", trim_to_width(&entry.preview, preview_w)), base),
+        Span::styled(
+            format!(" {}", trim_to_width(&entry.preview, preview_w)),
+            base,
+        ),
     ])
 }
 
@@ -229,8 +239,6 @@ fn padded_cell(text: &str, width: usize) -> String {
     format!(" {:<width$}", trim_to_width(text, width))
 }
 
-/// Render the global artifacts archive popup, applying any active UI selection
-/// so mouse-drag highlights line up with the scrolled viewport.
 pub fn render(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
     frame.render_widget(Clear, area);
     let block = Block::default()

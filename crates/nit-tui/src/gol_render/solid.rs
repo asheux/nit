@@ -2,13 +2,13 @@ use ratatui::{buffer::Buffer, layout::Rect};
 
 use nit_gol::Grid;
 
+use super::color::{live_color, trail_color};
 use super::geometry::{RenderGeometry, RenderMode};
+use super::hud::render_hud_line;
+use super::overlay::{cell_bg_halves, draw_bbox_if_any, maybe_draw_debug_overlay, BboxBounds};
 use super::palette::GolPalette;
-use super::renderer::{
-    cell_bg_halves, draw_bbox_if_any, draw_checker_or_empty, grid_area_below_hud, live_color,
-    maybe_draw_debug_overlay, neighbor_count, render_hud_line, trail_color, BboxBounds,
-    GolHudState, GolRenderConfig, GolRenderState, GolRenderer,
-};
+use super::renderer::{draw_checker_or_empty, grid_area_below_hud, neighbor_count, GolRenderer};
+use super::state::{GolHudState, GolRenderConfig, GolRenderState};
 
 #[derive(Default)]
 pub struct SolidRenderer;
@@ -39,8 +39,8 @@ impl GolRenderer for SolidRenderer {
         let grid_w = grid.width();
         let grid_h = grid.height();
         let cells = grid.cells();
-        let age_buf = state.age();
-        let decay_buf = state.decay();
+        let age_buf = &state.age;
+        let decay_buf = &state.decay;
         let use_checker = cfg.grid_minor == Some(1);
         let mut bbox = BboxBounds::empty();
 

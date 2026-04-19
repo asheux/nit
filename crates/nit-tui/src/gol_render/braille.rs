@@ -2,13 +2,15 @@ use ratatui::{buffer::Buffer, layout::Rect};
 
 use nit_gol::Grid;
 
+use super::color::{live_color, trail_color};
 use super::geometry::{RenderGeometry, RenderMode};
+use super::hud::render_hud_line;
+use super::overlay::{cell_bg_halves, draw_bbox_if_any, maybe_draw_debug_overlay, BboxBounds};
 use super::palette::GolPalette;
 use super::renderer::{
-    cell_bg_halves, draw_bbox_if_any, draw_checker_or_empty, grid_area_below_hud, live_color,
-    maybe_draw_debug_overlay, neighbor_count, render_hud_line, trail_color, BboxBounds, HalfFill,
-    GolHudState, GolRenderConfig, GolRenderState, GolRenderer,
+    draw_checker_or_empty, grid_area_below_hud, neighbor_count, GolRenderer, HalfFill,
 };
+use super::state::{GolHudState, GolRenderConfig, GolRenderState};
 
 const BRAILLE_TOP_ROWS: i32 = 2;
 
@@ -44,7 +46,16 @@ impl GolRenderer for BrailleRenderer {
         for ty in 0..grid_area.height {
             for tx in 0..grid_area.width {
                 draw_braille_cell(
-                    buf, grid, state, &geom, tx, ty, grid_area, cfg, palette, use_checker,
+                    buf,
+                    grid,
+                    state,
+                    &geom,
+                    tx,
+                    ty,
+                    grid_area,
+                    cfg,
+                    palette,
+                    use_checker,
                     &mut bbox,
                 );
             }
@@ -123,8 +134,8 @@ fn sample_braille_block(
     let grid_w = grid.width();
     let grid_h = grid.height();
     let cells = grid.cells();
-    let age = state.age();
-    let decay = state.decay();
+    let age = &state.age;
+    let decay = &state.decay;
 
     let mut block = BrailleBlock::default();
     for gy in gy0..gy1 {

@@ -201,8 +201,7 @@ impl PollLoop {
     }
 
     fn emit_workspace_discoveries(&mut self, root: &Path) {
-        let new_files =
-            discover_source_files(root, &mut self.tracked_files, &self.gitignored_dirs);
+        let new_files = discover_source_files(root, &mut self.tracked_files, &self.gitignored_dirs);
         for path in new_files {
             let _ = self.change_emitter.send(path);
         }

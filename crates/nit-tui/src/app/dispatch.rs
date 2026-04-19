@@ -8,10 +8,6 @@ use crate::codex_runner::{CodexCommand, CodexRunner};
 use crate::swarm::{is_agent_busy, SwarmDispatch};
 use crate::vitals::VitalsState;
 
-// ---------------------------------------------------------------------------
-// Codex thread-context helpers (Block 1)
-// ---------------------------------------------------------------------------
-
 fn remove_from_mission_map<V>(
     maps: &mut HashMap<String, HashMap<String, V>>,
     mission_id: &str,
@@ -73,10 +69,6 @@ pub(super) fn clear_codex_thread_context_for_agent(
         at: super::timestamp_label(state),
     });
 }
-
-// ---------------------------------------------------------------------------
-// Codex dispatch pipeline (Block 2)
-// ---------------------------------------------------------------------------
 
 pub(super) fn dispatch_codex_prompt(
     state: &mut AppState,
@@ -191,12 +183,7 @@ pub(super) fn maybe_dispatch_next_queued_codex_turn(
             .find(|lane| lane.id.as_str() == model.as_str())
             .is_some_and(|lane| lane.is_codex());
         if !is_codex {
-            if let Some(agent) = state.agents.agents.iter_mut().find(|a| a.id == model) {
-                agent.queue_len = agent.queue_len.saturating_sub(1);
-                if agent.queue_len == 0 && matches!(agent.status, AgentStatus::Waiting) {
-                    agent.status = AgentStatus::Idle;
-                }
-            }
+            release_queued_slot(state, &model);
             continue;
         }
 
@@ -347,7 +334,14 @@ pub(super) fn maybe_dispatch_codex_turn(
     // The Codex runner may still be at its global parallel cap, so treat the turn as queued
     // until we receive `TurnStarted` from the backend. This keeps the roster HB column from
     // flagging queued turns as stalled (no heartbeats yet).
-    agent.status = AgentStatus::Waiting;
+    //
+    // Do NOT flip Running → Waiting: when a prior turn is still in flight for
+    // this agent, overwriting status to Waiting causes the ROSTER to show
+    // "WAITING" while the AGENT panel still shows live ELAP/HB/OUT counters
+    // (because active_turns[agent] is unchanged). Preserve Running and Error.
+    if !matches!(agent.status, AgentStatus::Running | AgentStatus::Error) {
+        agent.status = AgentStatus::Waiting;
+    }
     if count_new_turn {
         agent.queue_len = agent.queue_len.saturating_add(1).max(1);
     } else {
@@ -401,14 +395,7 @@ pub(super) fn maybe_dispatch_codex_turn(
     if !ok {
         // Runner channel is dead -- clean up the optimistic state we just set.
         state.agents.active_turns.remove(&model);
-        if let Some(agent) = state.agents.agents.iter_mut().find(|a| a.id == model) {
-            agent.queue_len = agent.queue_len.saturating_sub(1);
-            agent.status = if agent.queue_len > 0 {
-                AgentStatus::Waiting
-            } else {
-                AgentStatus::Idle
-            };
-        }
+        release_queued_slot(state, &model);
         state
             .agents
             .diag_events
@@ -458,9 +445,7 @@ pub(super) fn estimate_codex_context_tokens_for_mission(
     tokens
 }
 
-// ---------------------------------------------------------------------------
-// Claude dispatch functions (mirrors the Codex dispatch pipeline).
-// ---------------------------------------------------------------------------
+// Claude dispatch — mirrors the Codex pipeline above.
 
 pub(super) fn dispatch_claude_prompt(
     state: &mut AppState,
@@ -571,12 +556,7 @@ pub(super) fn maybe_dispatch_next_queued_claude_turn(
             .find(|lane| lane.id.as_str() == model.as_str())
             .is_some_and(|lane| lane.is_claude());
         if !is_claude {
-            if let Some(agent) = state.agents.agents.iter_mut().find(|a| a.id == model) {
-                agent.queue_len = agent.queue_len.saturating_sub(1);
-                if agent.queue_len == 0 && matches!(agent.status, AgentStatus::Waiting) {
-                    agent.status = AgentStatus::Idle;
-                }
-            }
+            release_queued_slot(state, &model);
             continue;
         }
 
@@ -599,39 +579,30 @@ pub(super) fn maybe_dispatch_next_queued_claude_turn(
     }
 }
 
-/// Drain all queued Codex turns when the runner is unavailable, resetting queue_len
-/// so the UI doesn't show permanently "Waiting" agents.
-fn drain_orphaned_codex_queue(state: &mut AppState) {
-    while let Some(queued) = state.agents.queued_codex_turns.pop_front() {
-        if let Some(agent) = state
-            .agents
-            .agents
-            .iter_mut()
-            .find(|a| a.id == queued.agent_id)
-        {
-            agent.queue_len = agent.queue_len.saturating_sub(1);
-            if agent.queue_len == 0 && matches!(agent.status, AgentStatus::Waiting) {
-                agent.status = AgentStatus::Idle;
-            }
-        }
+// Decrement an agent's queue_len after a queued turn has been dropped or
+// dequeued, flipping Waiting → Idle when the queue empties. Separated so the
+// drain paths stay identical across Codex and Claude.
+fn release_queued_slot(state: &mut AppState, agent_id: &str) {
+    let Some(agent) = state.agents.agents.iter_mut().find(|a| a.id == agent_id) else {
+        return;
+    };
+    agent.queue_len = agent.queue_len.saturating_sub(1);
+    if agent.queue_len == 0 && matches!(agent.status, AgentStatus::Waiting) {
+        agent.status = AgentStatus::Idle;
     }
 }
 
-/// Drain all queued Claude turns when the runner is unavailable, resetting queue_len
-/// so the UI doesn't show permanently "Waiting" agents.
+// Drain all queued turns when the runner is unavailable so queue_len doesn't
+// leave lanes stuck in "Waiting" forever.
+fn drain_orphaned_codex_queue(state: &mut AppState) {
+    while let Some(queued) = state.agents.queued_codex_turns.pop_front() {
+        release_queued_slot(state, &queued.agent_id);
+    }
+}
+
 fn drain_orphaned_claude_queue(state: &mut AppState) {
     while let Some(queued) = state.agents.queued_claude_turns.pop_front() {
-        if let Some(agent) = state
-            .agents
-            .agents
-            .iter_mut()
-            .find(|a| a.id == queued.agent_id)
-        {
-            agent.queue_len = agent.queue_len.saturating_sub(1);
-            if agent.queue_len == 0 && matches!(agent.status, AgentStatus::Waiting) {
-                agent.status = AgentStatus::Idle;
-            }
-        }
+        release_queued_slot(state, &queued.agent_id);
     }
 }
 
@@ -755,7 +726,11 @@ pub(super) fn maybe_dispatch_claude_turn(
     let Some(agent) = state.agents.agents.iter_mut().find(|a| a.id == model) else {
         return;
     };
-    agent.status = AgentStatus::Waiting;
+    // Preserve Running/Error — see the matching guard in maybe_dispatch_codex_turn
+    // for why flipping Running → Waiting desyncs the ROSTER vs AGENT panel.
+    if !matches!(agent.status, AgentStatus::Running | AgentStatus::Error) {
+        agent.status = AgentStatus::Waiting;
+    }
     if count_new_turn {
         agent.queue_len = agent.queue_len.saturating_add(1).max(1);
     } else {
@@ -815,14 +790,7 @@ pub(super) fn maybe_dispatch_claude_turn(
     if !ok {
         // Runner channel is dead -- clean up the optimistic state we just set.
         state.agents.active_turns.remove(&model);
-        if let Some(agent) = state.agents.agents.iter_mut().find(|a| a.id == model) {
-            agent.queue_len = agent.queue_len.saturating_sub(1);
-            agent.status = if agent.queue_len > 0 {
-                AgentStatus::Waiting
-            } else {
-                AgentStatus::Idle
-            };
-        }
+        release_queued_slot(state, &model);
         state
             .agents
             .diag_events
@@ -862,14 +830,9 @@ pub(super) fn estimate_claude_context_tokens_for_mission(
     tokens
 }
 
-/// Append a GENOME LANDSCAPE section to a propose-role prompt so proposers
-/// can recommend structural changes with concrete numbers (tier, consistency,
-/// density) instead of surface-level refactors. Proposers currently describe
-/// "what to refactor" without the genome signal that the synthesizer sees at
-/// end of mission — this closes the gap by surfacing the data upfront.
-///
-/// Returns `None` when no scope files have genome reports yet; callers
-/// should leave the prompt untouched in that case.
+// Build a GENOME LANDSCAPE section for propose/integrate/judge roles so they
+// cite concrete numbers (tier, consistency, density) instead of trading
+// surface-level opinions. Returns `None` when no scope files have reports yet.
 pub(super) fn build_propose_genome_landscape(
     state: &AppState,
     scope_files: &[String],
@@ -1018,16 +981,8 @@ pub(super) fn build_propose_genome_landscape(
     Some(out)
 }
 
-/// Append the genome landscape to any dispatch whose role benefits from it:
-///   - propose: so recommendations cite concrete metrics.
-///   - integrate: so the writer can verify the proposer's recommendations
-///     against the actual current state, and target changes that move
-///     specific encoders rather than trusting proposer text blindly.
-///   - judge: so the decision step weighs proposals against the same
-///     landscape the proposers were grounded in.
-///
-/// Covers every template (parallel / lab / bulk) because the injection
-/// hangs off `task_role`, which is template-agnostic.
+// Append the genome landscape to propose/integrate/judge dispatches. Hangs off
+// `task_role` so it applies to every template (parallel / lab / bulk).
 pub(super) fn augment_dispatch_prompt_with_landscape(
     state: &AppState,
     swarm: &crate::swarm::SwarmRuntime,
@@ -1047,9 +1002,8 @@ pub(super) fn augment_dispatch_prompt_with_landscape(
     dispatch.prompt.push_str(&section);
 }
 
-/// Apply the swarm task role to the agent lane so the UI shows the correct role
-/// during execution.  Only swarm clone agents get their role overwritten — the
-/// original roster agents keep their display name intact.
+// Mirror the swarm task role onto the clone's lane for the UI. Original roster
+// agents keep their display name — only clones get their role overwritten.
 pub(super) fn apply_swarm_task_role(state: &mut AppState, dispatch: &SwarmDispatch) {
     let Some(role) = dispatch.task_role.as_deref() else {
         return;
@@ -1083,7 +1037,6 @@ fn titlecase_role(role: &str) -> String {
     }
 }
 
-/// Append genome metrics for a single file to the context string.
 fn append_file_genome_context(
     ctx: &mut String,
     file_path: &std::path::Path,
@@ -1170,8 +1123,8 @@ fn append_file_genome_context(
     }
 }
 
-/// Build the genome context string to prepend to agent prompts.
-/// Only includes files modified by the SPECIFIC agent, not other agents' files.
+// Build the genome context string prepended to a dispatched prompt. Scoped to
+// files this specific agent touched so agents don't see each other's turns.
 fn build_genome_context(state: &AppState, agent_id: &str) -> Option<String> {
     if !state.settings.genome.genome_context_enabled {
         return None;
@@ -1270,7 +1223,6 @@ fn build_genome_context(state: &AppState, agent_id: &str) -> Option<String> {
     Some(ctx)
 }
 
-/// Unified dispatch router: routes to Codex or Claude based on agent lane kind.
 pub(super) fn dispatch_agent_prompt(
     state: &mut AppState,
     vitals: &mut VitalsState,
@@ -1305,8 +1257,9 @@ pub(super) fn dispatch_agent_prompt(
     }
 }
 
-/// Apply a Claude bus event to state. Re-uses the generic event.apply() but also stores
-/// Claude-specific session IDs (the equivalent of Codex thread IDs).
+// Apply a Claude bus event, delegating state mutation to the generic
+// `event.apply()` and then capturing the Claude session id (the moral
+// equivalent of Codex thread id) from `TurnCompleted`.
 pub(super) fn apply_claude_event(state: &mut AppState, event: &AgentBusEvent) {
     // First, apply the generic state mutation (status, messages, tokens, etc.).
     event.apply(state);

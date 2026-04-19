@@ -1,14 +1,16 @@
-use ratatui::{buffer::Buffer, layout::Rect};
+use ratatui::{buffer::Buffer, layout::Rect, style::Color};
 
 use nit_gol::Grid;
 
+use super::color::{live_color, trail_color};
 use super::geometry::{RenderGeometry, RenderMode};
+use super::hud::render_hud_line;
+use super::overlay::{cell_bg_halves, draw_bbox_if_any, maybe_draw_debug_overlay, BboxBounds};
 use super::palette::GolPalette;
 use super::renderer::{
-    cell_bg_halves, draw_bbox_if_any, draw_checker_or_empty, grid_area_below_hud, live_color,
-    maybe_draw_debug_overlay, neighbor_count, render_hud_line, trail_color, BboxBounds, HalfFill,
-    GolHudState, GolRenderConfig, GolRenderState, GolRenderer,
+    draw_checker_or_empty, grid_area_below_hud, neighbor_count, GolRenderer, HalfFill,
 };
+use super::state::{GolHudState, GolRenderConfig, GolRenderState};
 
 #[derive(Default)]
 pub struct HalfBlockRenderer;
@@ -42,7 +44,16 @@ impl GolRenderer for HalfBlockRenderer {
         for ty in 0..grid_area.height {
             for tx in 0..grid_area.width {
                 draw_halfblock_cell(
-                    buf, grid, state, &geom, tx, ty, grid_area, cfg, palette, use_checker,
+                    buf,
+                    grid,
+                    state,
+                    &geom,
+                    tx,
+                    ty,
+                    grid_area,
+                    cfg,
+                    palette,
+                    use_checker,
                     &mut bbox,
                 );
             }
@@ -79,18 +90,33 @@ fn draw_halfblock_cell(
     }
 
     let cell = buf.get_mut(grid_area.x + tx, grid_area.y + ty);
+    let Some((glyph, fg, bg)) = decide_paint(&sample, cfg, palette, bg_top, bg_bottom) else {
+        draw_checker_or_empty(cell, bg_top, bg_bottom, use_checker);
+        return;
+    };
+    cell.set_char(glyph);
+    cell.set_fg(fg);
+    cell.set_bg(bg);
+}
+
+fn decide_paint(
+    sample: &HalfSample,
+    cfg: &GolRenderConfig,
+    palette: &GolPalette,
+    bg_top: Color,
+    bg_bottom: Color,
+) -> Option<(char, Color, Color)> {
     if let Some(fill) = HalfFill::from_pair(sample.top.alive, sample.bottom.alive) {
         let (age, neighbors) = sample.live_color_inputs(fill);
-        cell.set_char(fill.glyph());
-        cell.set_fg(live_color(age, neighbors, cfg, palette));
-        cell.set_bg(fill.bg(bg_top, bg_bottom));
-    } else if let Some((fill, decay)) = sample.trail_dispatch(cfg.trails) {
-        cell.set_char(fill.glyph());
-        cell.set_fg(trail_color(decay, palette));
-        cell.set_bg(fill.bg(bg_top, bg_bottom));
-    } else {
-        draw_checker_or_empty(cell, bg_top, bg_bottom, use_checker);
+        let fg = live_color(age, neighbors, cfg, palette);
+        return Some((fill.glyph(), fg, fill.bg(bg_top, bg_bottom)));
     }
+    let (fill, decay) = sample.trail_dispatch(cfg.trails)?;
+    Some((
+        fill.glyph(),
+        trail_color(decay, palette),
+        fill.bg(bg_top, bg_bottom),
+    ))
 }
 
 #[derive(Default)]
@@ -148,7 +174,15 @@ fn sample_halfblock(
     let grid_w = grid.width();
     let grid_h = grid.height();
     let top = sample_half(grid, state, gx_local, top_y, grid_w, grid_h, overlay_heat);
-    let bottom = sample_half(grid, state, gx_local, bottom_y, grid_w, grid_h, overlay_heat);
+    let bottom = sample_half(
+        grid,
+        state,
+        gx_local,
+        bottom_y,
+        grid_w,
+        grid_h,
+        overlay_heat,
+    );
     HalfSample { top, bottom }
 }
 
@@ -179,8 +213,8 @@ fn sample_half(
     };
     HalfCell {
         alive,
-        age: state.age()[idx],
-        decay: state.decay()[idx],
+        age: state.age[idx],
+        decay: state.decay[idx],
         neighbors,
     }
 }

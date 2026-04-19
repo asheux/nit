@@ -1298,9 +1298,9 @@ fn handle_codex_mcp_notification(
     true
 }
 
-/// Extract file paths from a tool_use/item event that indicate file writes.
-/// Searches multiple levels of JSON nesting and common field names used by
-/// Codex, Claude, and other agent tool formats.
+// Scan a tool_use/item event for filesystem write targets. Handles Codex,
+// Claude, and generic agent formats by checking several nested locations and
+// common path field aliases, deduplicating overlapping matches.
 fn extract_file_write_paths(
     item: &serde_json::Value,
     cwd: &std::path::Path,
@@ -1961,14 +1961,14 @@ fn build_codex_exec_args(
     args
 }
 
-/// Push `-c mcp_servers.nit=...` args if the back-channel socket is set.
-/// Codex accepts TOML values for `-c`; we build an inline-table literal.
-/// Agent id propagates via env so signals/claims carry the right `posted_by`.
-///
-/// TODO: the exact TOML-inline-table escaping Codex expects for `-c`
-/// overrides hasn't been empirically verified — if Codex rejects this
-/// override at runtime, the in-process nit-mcp side still works; only
-/// the Codex-discoverable-tool bridge is affected.
+// Push `-c mcp_servers.nit=...` overrides so the child Codex process can
+// discover the back-channel MCP server via a TOML inline table. The agent id
+// propagates via env so signals/claims carry the right `posted_by`.
+//
+// TODO: the exact TOML-inline-table escaping Codex expects for `-c` overrides
+// hasn't been empirically verified — if Codex rejects this override at
+// runtime the in-process nit-mcp side still works; only the Codex-discoverable
+// tool bridge is affected.
 fn push_nit_mcp_config_args(args: &mut Vec<String>, config: &CodexRunnerConfig, agent_id: &str) {
     let Some(socket_path) = config
         .mcp_backchannel_socket
@@ -1993,10 +1993,9 @@ fn push_nit_mcp_config_args(args: &mut Vec<String>, config: &CodexRunnerConfig, 
     args.push(format!("mcp_servers.nit={value}"));
 }
 
-/// Discover the `nit-mcp-server` binary next to the current exe.  We install
-/// it alongside `nit` via cargo, so it lives in the same directory as the
-/// running TUI binary.  Returns None if discovery fails — callers skip the
-/// `-c` injection in that case.
+// Locate `nit-mcp-server` next to the running binary. `cargo install` lays it
+// down alongside `nit`; development builds land it in the same `target/debug`.
+// Returns `None` when discovery fails so callers can skip the `-c` injection.
 fn nit_mcp_server_binary_path() -> Option<String> {
     let self_exe = std::env::current_exe().ok()?;
     let dir = self_exe.parent()?;
@@ -2141,11 +2140,9 @@ fn extract_total_tokens(info: &serde_json::Value) -> Option<u64> {
         .or_else(|| info.get("used_tokens").and_then(|v| v.as_u64()))
 }
 
-// ---------------------------------------------------------------------------
-// Genome evaluation tool (Phase 5: MCP tool exposure)
-// ---------------------------------------------------------------------------
-
-/// The evaluate_genome tool definition for inclusion in agent prompts.
+// Evaluate-genome tool — injected into every agent prompt so agents know nit
+// measures their output automatically. They don't call the tool; the runner
+// watches for the marker in case an agent explicitly requests a report.
 pub const EVALUATE_GENOME_TOOL_DESCRIPTION: &str = r#"
 [nit tool: evaluate_genome]
 nit evaluates genome quality automatically in real time as you write files.
@@ -2158,8 +2155,8 @@ nit handles the measurement.
 [/nit tool]
 "#;
 
-/// Handle an evaluate_genome request from an agent's output.
-/// Returns a formatted genome report if a request pattern is found.
+// Looks for `[evaluate_genome:<path>]` in agent output and returns a formatted
+// genome report when the path resolves to a readable file.
 pub fn handle_evaluate_genome_request(workspace_root: &Path, message: &str) -> Option<String> {
     let marker = "[evaluate_genome:";
     let start = message.find(marker)?;

@@ -18,29 +18,22 @@ use crate::theme::Theme;
 use crate::widgets::text_selection::apply_ui_selection;
 use crate::widgets::text_utils::truncate_with_ellipsis;
 
-// Title button column ranges (relative to rect start + 1 for border).
-// " CODE STRUCTURAL QUALITY [NxN] " then " STATS " then " FILESCORES "
+// Title layout: " CODE STRUCTURAL QUALITY [NxN] " ++ " STATS " ++ " FILESCORES "
 const BTN_STATS_LABEL: &str = " STATS ";
 const BTN_FILESCORES_LABEL: &str = " FILESCORES ";
 
-/// Width of the left-hand label column in the genome stats view.
 const STATS_LABEL_WIDTH: usize = 12;
 const STATS_GAUGE_LABEL_WIDTH: usize = 14;
-/// Reference generation count for encoder-bar normalization — above this the
-/// bar reads as "fully healthy" (Tier V endurance).
+// Above this generation count the encoder bar reads as "fully healthy" (Tier V endurance).
 const ENCODER_GEN_SATURATION: f32 = 3000.0;
 const DENSITY_WARN: f32 = 0.35;
 const DENSITY_OVER: f32 = 0.45;
 const GAUGE_ACCENT_THRESHOLD: f32 = 0.6;
 const GAUGE_MID_THRESHOLD: f32 = 0.3;
 const TIER_LEVELS: usize = 5;
-/// Loading bar period in milliseconds for the indeterminate animation.
 const LOADING_PERIOD_MS: f64 = 1600.0;
 
-/// Mouse hit-test for the title button row: returns the
-/// `GateMonitorToggleSubView` action if the click column falls on either
-/// `STATS` or `FILESCORES`. `title_prefix_len` is the byte length of the
-/// dynamic prefix (which varies based on whether a grid size is shown).
+// `title_prefix_len` is the byte length of the dynamic prefix (varies with grid size).
 pub fn title_button_hit(col_in_rect: u16, title_prefix_len: u16) -> Option<Action> {
     let col = col_in_rect.saturating_sub(1); // border offset
     let stats_start = title_prefix_len + 1; // space separator
@@ -54,8 +47,6 @@ pub fn title_button_hit(col_in_rect: u16, title_prefix_len: u16) -> Option<Actio
     }
 }
 
-/// Render the Gate Monitor pane. Dispatches to `render_games` in Games mode;
-/// otherwise renders the Stats/FileScores sub-views with cached scroll clamp.
 pub fn render(frame: &mut Frame, area: ratatui::layout::Rect, state: &mut AppState, theme: &Theme) {
     if state.app_kind == AppKind::Games {
         // Games variant has no scroll state to cache.
@@ -78,7 +69,6 @@ pub fn render(frame: &mut Frame, area: ratatui::layout::Rect, state: &mut AppSta
         theme.title
     };
 
-    // Determine the genome report for the active editor buffer.
     let genome_report = state
         .editor_buffer()
         .path()
@@ -123,13 +113,11 @@ pub fn render(frame: &mut Frame, area: ratatui::layout::Rect, state: &mut AppSta
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    // Show loading bar while genome is being computed.
     if genome_report.is_none() && state.genome_computing {
         draw_loading_bar(frame, inner, theme);
         return;
     }
 
-    // Show centered placeholder when no file is open (Stats view only).
     if genome_report.is_none() && state.gate_monitor_sub_view == GateMonitorSubView::Stats {
         draw_no_file_placeholder(frame, inner, theme);
         return;
@@ -150,10 +138,10 @@ pub fn render(frame: &mut Frame, area: ratatui::layout::Rect, state: &mut AppSta
         theme.selection_bg,
         0,
     );
-    let max_scroll = lines.len().saturating_sub(inner.height as usize);
-    let scroll = state.gate_monitor_scroll.min(max_scroll);
     // Cache max_scroll + clamp stored offset so scroll handlers can skip
     // rebuilding the genome report on every wheel tick.
+    let max_scroll = lines.len().saturating_sub(inner.height as usize);
+    let scroll = state.gate_monitor_scroll.min(max_scroll);
     state.gate_monitor_last_max_scroll = max_scroll;
     state.gate_monitor_scroll = scroll;
     let para = Paragraph::new(lines)
@@ -162,9 +150,7 @@ pub fn render(frame: &mut Frame, area: ratatui::layout::Rect, state: &mut AppSta
     frame.render_widget(para, inner);
 }
 
-/// Build the full styled line buffer for whichever sub-view is active, for
-/// tests and scroll-clamp callers that need the total line count without
-/// rendering to a frame.
+// Used by tests and scroll-clamp callers that need the line count without a frame.
 pub fn build_lines(state: &AppState, theme: &Theme, width: usize) -> Vec<Line<'static>> {
     if state.app_kind == AppKind::Games {
         build_lines_games(state, theme, width)
@@ -263,7 +249,6 @@ fn build_lines_genome(
         SeedEncoderId::Structural,
     ];
     for &enc_id in &quality_encoders {
-        // AST encoders determine tier; Structural is hybrid.
         let is_ast = matches!(
             enc_id,
             SeedEncoderId::TokenSpectrum
@@ -457,11 +442,9 @@ fn build_lines_genome(
     lines
 }
 
-/// Compute the quality delta shown next to TIER: compares the current report
-/// against the session baseline for this file. Returns the state-level delta
-/// when no baseline exists (e.g. first-ever evaluation). Derivation is direct
-/// from current report data so it stays correct regardless of async eval
-/// timing.
+// Compares against the session baseline for this file; falls back to the
+// state-level delta when no baseline exists (first-ever evaluation).
+// Derived from current report data so async eval timing can't desync it.
 fn display_quality_delta(state: &AppState, report: &GenomeReport) -> i32 {
     let Some(file_path) = state.editor_buffer().path() else {
         return state.genome_quality_delta;
@@ -488,7 +471,6 @@ fn display_quality_delta(state: &AppState, report: &GenomeReport) -> i32 {
     gen_now.cmp(&gen_base) as i32
 }
 
-/// Build a horizontal bar representing the tier level (I-V), full width.
 fn build_tier_bar(tier: nit_core::GenomeTier, width: usize, theme: &Theme) -> Line<'static> {
     if width < TIER_LEVELS {
         return Line::from("");
@@ -509,7 +491,7 @@ fn build_tier_bar(tier: nit_core::GenomeTier, width: usize, theme: &Theme) -> Li
     ])
 }
 
-/// Build a gauge line filling the full width: "Label  ▓▓▓▓░░░░░░░░  0.23"
+// Renders: "Label  ▓▓▓▓░░░░░░░░  0.23"
 fn build_gauge_line(label: &str, value: f32, width: usize, theme: &Theme) -> Line<'static> {
     let num_str = format!("{value:.2}");
     let num_w = num_str.len() + 1;
@@ -543,7 +525,6 @@ fn build_gauge_line(label: &str, value: f32, width: usize, theme: &Theme) -> Lin
     ])
 }
 
-/// Build an encoder line with a bar filling all space between name and stats.
 fn build_encoder_line(
     score: &nit_core::EncoderScore,
     width: usize,
@@ -588,7 +569,6 @@ fn build_encoder_line(
     ])
 }
 
-/// Build a density bar for an AST encoder, full width with threshold marker.
 fn build_density_line(
     score: &nit_core::EncoderScore,
     width: usize,
@@ -644,7 +624,6 @@ fn build_density_line(
     Line::from(spans)
 }
 
-/// Build a compact simulation detail line for one encoder.
 fn build_sim_detail_line(
     score: &nit_core::EncoderScore,
     width: usize,
@@ -709,8 +688,6 @@ fn tier_color(tier: nit_core::GenomeTier, theme: &Theme) -> ratatui::style::Colo
     }
 }
 
-/// Animated indeterminate loading bar centered vertically in the given area.
-/// Centered placeholder bar matching the visualizer's "Open file" style.
 fn draw_no_file_placeholder(frame: &mut Frame, area: ratatui::layout::Rect, theme: &Theme) {
     if area.width < 4 || area.height < 1 {
         return;
@@ -783,7 +760,7 @@ fn draw_loading_bar(frame: &mut Frame, area: ratatui::layout::Rect, theme: &Them
     }
 }
 
-/// Triangular wave oscillating 0..1..0 over 1600ms, driven by system clock.
+// Triangular wave 0→1→0 over LOADING_PERIOD_MS, driven by wall clock.
 fn loading_ratio() -> f64 {
     use std::time::{SystemTime, UNIX_EPOCH};
     let now = SystemTime::now()
@@ -1356,8 +1333,7 @@ struct FileScoreRow {
     is_shadow: bool,
 }
 
-/// Format quality level with reason when it doesn't match what the tier suggests.
-/// e.g. Tier IV + low consistency → "Failing (c)"
+// Surface the *why* when quality trails the tier (e.g. Tier IV + low consistency → "Failing (c)").
 fn quality_with_reason(report: &GenomeReport) -> String {
     let level = report.quality_level();
     match report.quality_reason() {
@@ -1366,7 +1342,7 @@ fn quality_with_reason(report: &GenomeReport) -> String {
     }
 }
 
-/// Format consistency as "actual/target" so the operator sees the gap at a glance.
+// "actual/target" form surfaces the tier gap at a glance.
 fn cons_with_target(tier: nit_core::GenomeTier, consistency: f32) -> String {
     let target = match tier {
         nit_core::GenomeTier::Replicator => 0.85,
@@ -1378,7 +1354,7 @@ fn cons_with_target(tier: nit_core::GenomeTier, consistency: f32) -> String {
     format!("{consistency:.2}/{target:.2}")
 }
 
-/// Same as quality_with_reason but for shadow evals (which only have tier + consistency).
+// Shadow evals only expose tier+consistency, so derive the reason locally.
 fn shadow_quality_with_reason(
     quality: &str,
     tier: nit_core::GenomeTier,
@@ -1399,17 +1375,14 @@ fn shadow_quality_with_reason(
     }
 }
 
-/// Get a display-friendly relative path from workspace root.
-/// Tries multiple approaches to handle canonicalization mismatches on macOS.
+// macOS canonicalizes /var → /private/var, so strip_prefix alone isn't enough.
 fn relative_file_path(path: &std::path::Path, workspace: &std::path::Path) -> String {
-    // 1. Direct strip_prefix.
     if let Ok(rel) = path.strip_prefix(workspace) {
         let s = rel.to_string_lossy();
         if !s.is_empty() {
             return s.to_string();
         }
     }
-    // 2. Canonicalize both to resolve symlinks (e.g., /var vs /private/var on macOS).
     if let (Ok(canon_path), Ok(canon_ws)) = (path.canonicalize(), workspace.canonicalize()) {
         if let Ok(rel) = canon_path.strip_prefix(&canon_ws) {
             let s = rel.to_string_lossy();
@@ -1418,7 +1391,6 @@ fn relative_file_path(path: &std::path::Path, workspace: &std::path::Path) -> St
             }
         }
     }
-    // 3. String-based stripping as last structured attempt.
     let path_s = path.to_string_lossy();
     let ws_s = workspace.to_string_lossy();
     if let Some(rest) = path_s.strip_prefix(ws_s.as_ref()) {
@@ -1427,7 +1399,5 @@ fn relative_file_path(path: &std::path::Path, workspace: &std::path::Path) -> St
             return rest.to_string();
         }
     }
-    // 4. Full path.
     path_s.to_string()
 }
-

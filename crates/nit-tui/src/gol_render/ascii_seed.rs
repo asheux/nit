@@ -7,6 +7,7 @@ use ratatui::{
 
 use nit_core::Buffer as TextBuffer;
 
+use super::hud::write_str;
 use super::palette::GolPalette;
 
 pub struct AsciiSeedWidget<'a> {
@@ -53,16 +54,10 @@ impl AsciiSeedWidget<'_> {
             .fg(self.palette.hud_text)
             .bg(self.palette.bg)
             .add_modifier(Modifier::DIM);
-        write_str(buf, area.x, area.y, max_x, style, self.header);
+        let _ = write_str(buf, area.x, area.y, max_x, style, self.header);
     }
 
-    fn write_content(
-        &self,
-        buf: &mut FrameBuffer,
-        area: Rect,
-        max_x: u16,
-        content_height: usize,
-    ) {
+    fn write_content(&self, buf: &mut FrameBuffer, area: Rect, max_x: u16, content_height: usize) {
         let bg = self.palette.bg;
         let styles = DigitStyles {
             text: Style::default().fg(self.palette.hud_text).bg(bg),
@@ -150,16 +145,4 @@ fn write_digit_triplet(
         x = x.saturating_add(1);
     }
     x
-}
-
-fn write_str(buf: &mut FrameBuffer, mut x: u16, y: u16, max_x: u16, style: Style, text: &str) {
-    for ch in text.chars() {
-        if x >= max_x {
-            break;
-        }
-        let cell = buf.get_mut(x, y);
-        cell.set_char(ch);
-        cell.set_style(style);
-        x = x.saturating_add(1);
-    }
 }

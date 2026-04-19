@@ -10,10 +10,6 @@ use crate::{
 const NOTES_TITLE: &str = "NOTES  [ SCRATCH ]";
 const SHOW_CURSOR: bool = true;
 
-/// Render the Notes/Scratch pane by delegating to `editor_view::render_buffer`
-/// with the fixed Notes title and `PaneId::Notes` focus token. Returns cursor
-/// placement when the Notes pane owns focus so the caller can position the
-/// terminal cursor.
 #[allow(clippy::too_many_arguments)]
 pub fn render_notes(
     frame: &mut Frame,

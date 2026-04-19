@@ -14,9 +14,8 @@ use crate::widgets::text_utils::truncate_with_ellipsis as truncate;
 const AGE_COL_MIN_WIDTH: u16 = 70;
 const ID_COL_MIN_WIDTH: u16 = 90;
 
-/// Render the Substrate Claims body into `inner`, caching max_scroll so the
-/// scroll handlers can skip a rebuild on every wheel tick — same pattern as
-/// `signals_view::render_body`.
+// Caches `max_scroll` on `state` so scroll handlers can skip a rebuild on every wheel
+// tick — same pattern as `signals_view::render_body`.
 pub fn render_body(frame: &mut Frame<'_>, inner: Rect, state: &mut AppState, theme: &Theme) {
     let lines = build_lines(state, theme, inner.width);
     let max_scroll = lines.len().saturating_sub(inner.height as usize);
@@ -172,10 +171,8 @@ fn style_for(kind: ClaimKind, remaining: u64, theme: &Theme) -> Style {
     style
 }
 
-/// Strip absolute-path noise: if the path contains a `crates/` segment,
-/// show it rooted at `crates/` (workspace-relative). Otherwise show just
-/// the final filename. Keeps the common case (workspace edits) informative
-/// and the rare case (outside-workspace writes) compact.
+// Anchor workspace paths at `crates/` (keeps common edits informative), fall back
+// to the file name for paths outside the workspace.
 fn compact_path(p: &str) -> String {
     if let Some(idx) = p.find("crates/") {
         return p[idx..].to_string();
@@ -186,9 +183,8 @@ fn compact_path(p: &str) -> String {
         .unwrap_or_else(|| p.to_string())
 }
 
-/// Strip the swarm/mission middle segment from a clone agent id so the UI
-/// shows `claude-opus-4-7#clone-01` instead of
-/// `claude-opus-4-7#swarm-mis-001-clone-01`. Non-clone ids pass through.
+// Drop the mission middle segment from clone ids:
+// `claude-opus-4-7#swarm-mis-001-clone-01` → `claude-opus-4-7#clone-01`.
 fn compact_agent_id(id: &str) -> String {
     let Some((base, rest)) = id.split_once("#swarm-") else {
         return id.to_string();
@@ -209,63 +205,5 @@ fn compact_agent_id(id: &str) -> String {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use nit_core::substrate::{Claim, ClaimKind, ClaimTarget, SubstrateState};
-    use std::path::PathBuf;
-
-    fn mk_state_with_claims(claims: Vec<Claim>) -> AppState {
-        use nit_core::buffer::Buffer;
-        let root = std::env::temp_dir().join(format!(
-            "nit-claims-view-{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&root).unwrap();
-        let mut state = AppState::new(root, Buffer::empty("x", None), Buffer::empty("n", None));
-        let mut substrate = SubstrateState::default();
-        for c in claims {
-            substrate.claims.insert(c.id.clone(), c);
-        }
-        state.substrate = substrate;
-        state
-    }
-
-    fn mk_claim(id: &str, kind: ClaimKind, gen: u64, ttl: u64) -> Claim {
-        Claim {
-            id: id.into(),
-            kind,
-            target: ClaimTarget::File {
-                path: PathBuf::from("a.rs"),
-            },
-            claimed_by: "agent-a".into(),
-            claimed_at_gen: gen,
-            ttl_gens: ttl,
-            rationale: "test".into(),
-        }
-    }
-
-    #[test]
-    fn build_lines_empty_has_header_and_hint() {
-        let state = mk_state_with_claims(vec![]);
-        let theme = Theme::default();
-        let lines = build_lines(&state, &theme, 100);
-        // summary + blank + column header + blank + empty hint = 5 lines
-        assert_eq!(lines.len(), 5);
-    }
-
-    #[test]
-    fn build_lines_with_two_claims_emits_rows() {
-        let claims = vec![
-            mk_claim("c1", ClaimKind::ExclusiveWrite, 0, 5),
-            mk_claim("c2", ClaimKind::SharedRead, 0, 3),
-        ];
-        let state = mk_state_with_claims(claims);
-        let theme = Theme::default();
-        let lines = build_lines(&state, &theme, 100);
-        // summary + blank + column header + 2 rows = 5 lines
-        assert_eq!(lines.len(), 5);
-    }
-}
+#[path = "tests/claims_view.rs"]
+mod tests;

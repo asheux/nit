@@ -109,7 +109,11 @@ pub fn build_lines(state: &AppState, theme: &Theme, inner_width: u16) -> Vec<Lin
         let selected_idx = state.games.run_browser.selected;
         for (idx, entry) in state.games.run_browser.entries.iter().enumerate() {
             let is_selected = idx == selected_idx;
-            let style = if is_selected { selected_style } else { value_style };
+            let style = if is_selected {
+                selected_style
+            } else {
+                value_style
+            };
             let prefix = if is_selected { "›" } else { " " };
             let label = trim_to_width(&entry.label, max_width.saturating_sub(2));
             let text = format!("{prefix} {label}");

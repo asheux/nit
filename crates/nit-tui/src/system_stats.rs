@@ -164,10 +164,13 @@ fn query_gpu_info() -> Option<GpuInfo> {
 fn query_gpu_info() -> Option<GpuInfo> {
     use std::fs;
 
-    let device_root = fs::read_dir("/sys/class/drm").ok()?.flatten().find(|node| {
-        let stem = node.file_name().to_string_lossy().to_string();
-        stem.starts_with("card") && !stem.contains('-')
-    })?;
+    let device_root = fs::read_dir("/sys/class/drm")
+        .ok()?
+        .flatten()
+        .find(|node| {
+            let stem = node.file_name().to_string_lossy().to_string();
+            stem.starts_with("card") && !stem.contains('-')
+        })?;
     let card_label = device_root.file_name().to_string_lossy().to_string();
     let probe = device_root.path().join("device");
     let driver_id = fs::read_to_string(probe.join("uevent"))

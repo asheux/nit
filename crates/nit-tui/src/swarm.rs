@@ -25,19 +25,17 @@ const SWARM_DEP_OUTPUT_MAX_CHARS: usize = 8_000;
 /// preserving information.
 const SWARM_DEP_OUTPUT_MAX_CHARS_FULL: usize = 48_000;
 
-// ---------------------------------------------------------------------------
-// Shared role-contract clauses
+// Shared role-contract clauses.
 //
 // These constants keep three classes of rule single-source across the
 // propose/integrate/judge/review/test role contracts AND the retry prompts
 // (gate retry, genome retry). Previous drafts drifted — e.g. "NO REVERT"
 // wording differed between gate-retry and genome-retry, "don't pad small
 // files" was written three different ways. Route every copy through these.
-// ---------------------------------------------------------------------------
 
-/// Targeted-vs-workspace-wide test/verify command rule. Integrator/review/
-/// test all need this — every copy must be byte-for-byte identical, so the
-/// role contracts reference this constant instead of inlining the text.
+/// Targeted-vs-workspace-wide test/verify command rule. Every copy must be
+/// byte-for-byte identical, so the role contracts reference this constant
+/// instead of inlining the text.
 pub(crate) const TEST_DISCIPLINE_CLAUSE: &str =
     "TEST DISCIPLINE — STRICT: Workspace-wide / repo-wide commands \
      (`cargo test --all` / `--workspace`, `cargo clippy --workspace`, \
@@ -2765,8 +2763,11 @@ impl SwarmRuntime {
                             }
                             // Structural compliance: did the integrator touch
                             // every file the proposer declared?
-                            let missing =
-                                structural_compliance_missing_files(&run, &completed.task_id, state);
+                            let missing = structural_compliance_missing_files(
+                                &run,
+                                &completed.task_id,
+                                state,
+                            );
                             if !missing.is_empty() {
                                 let preview: Vec<String> =
                                     missing.iter().take(8).cloned().collect();
@@ -2788,9 +2789,7 @@ impl SwarmRuntime {
                                 );
                                 // Also emit a substrate Warning signal so
                                 // observers/arbiters can react.
-                                let id = state
-                                    .substrate
-                                    .next_signal_id(&completed.task_id);
+                                let id = state.substrate.next_signal_id(&completed.task_id);
                                 let posted_at_gen = state.substrate.current_generation();
                                 state.substrate.emit_signal(nit_core::substrate::Signal {
                                     id,
@@ -3786,15 +3785,13 @@ fn ensure_proposer_task(
     warnings
 }
 
-/// Parallel-only auto-repair: when a writer task has unresolved dep ids
-/// AND zero resolved deps, redirect its deps to all propose/research
-/// tasks. Recovers the common failure mode where the planner writes
-/// `integrate.deps = ["judge"]` against a parallel template that has no
-/// judge phase. Non-writer tasks, or writers with any resolved dep, are
-/// left alone — they surface via the Layer 1 warning path instead.
-///
-/// Returns a per-repair description string; the caller emits a substrate
-/// signal per entry for traceability.
+// Parallel-only auto-repair: when a writer task has unresolved dep ids AND
+// zero resolved deps, redirect its deps to every propose/research task.
+// Recovers the common failure mode where the planner writes
+// `integrate.deps = ["judge"]` against a parallel template that has no judge
+// phase. Non-writer tasks, and writers with any resolved dep, are left alone —
+// they surface through the Layer 1 warning path instead. Returns a per-repair
+// description; the caller emits one substrate signal per entry for traceability.
 fn ensure_deps_resolve(tasks: &mut [SwarmTask], template: SwarmTemplate) -> Vec<String> {
     if !matches!(template, SwarmTemplate::Parallel) {
         return Vec::new();
@@ -7072,9 +7069,9 @@ fn stage_label(stage: SwarmStage) -> &'static str {
     }
 }
 
-/// Returns the display label for the gates configured on this run. Prefers
-/// the custom-gates source ("custom") over the detected language bundle
-/// ("rust-ci", "node-ci", etc.). Returns `None` when no gates are configured.
+// Prefers the `"custom"` label when custom gates are configured; falls back to
+// the detected language bundle (`"rust-ci"` / `"node-ci"` / …). `None` means
+// no gates are active.
 fn run_gates_label(run: &SwarmRun) -> Option<String> {
     if run.gate_custom.is_some() {
         Some("custom".to_string())
@@ -7658,7 +7655,7 @@ fn role_contract_lines(role: &str) -> &'static [&'static str] {
             "Do not restart broad ideation; focus on carrying the selected approach through.",
             "If a FILE CHECKLIST is provided above, you MUST modify every listed file — process them in order, one by one. A file left unchanged means your task is incomplete.",
             "Report exact files changed and validation results.",
-            "PROPOSER-PLAN BINDING — STRICT: any upstream propose/judge task output in the Dependency outputs section below is BINDING, not informational. You MUST implement the proposer's specific choices — file paths, identifiers, constants, architectural decisions, ordering — exactly as specified. Do NOT substitute your own design, invent new files the proposer didn't mention, or skip files the proposer listed. You MAY deviate only when (a) the proposer's recommendation directly contradicts the operator's original request above, or (b) the recommendation is technically impossible (names a non-existent type, breaks a guaranteed invariant). In those two cases, pick the minimum viable alternative and say in your final message exactly what you deviated from and why. Silent divergence is a task failure even if the code you wrote is defensible on its own — the proposer's output is part of the contract, not a starting point for re-design.",
+            "PROPOSER-PLAN BINDING — STRICT: any upstream propose/judge task output in the Dependency outputs section below is BINDING, not informational. You MUST implement the proposer's specific choices — file paths, identifiers, constants, architectural decisions, ordering — exactly as specified. Do NOT substitute your own design, invent new files the proposer didn't mention, or skip files the proposer listed. You MAY deviate only when (a) the proposer's recommendation directly contradicts the operator's original request above, or (b) the recommendation is genuinely technically impossible — meaning it names a non-existent type, breaks a hard compile invariant, or requires a feature the toolchain doesn't support. \"It might break tests\", \"it's risky\", \"it's too ambitious for one turn\", \"I'll do a safer subset\", \"full splits are too aggressive\", \"aggressive splits would almost certainly break imports\" are NOT valid deviations — they're excuses for doing less work. The correct response to a risky split is to execute it in atomic compilation-preserving steps (move one submodule at a time, re-run the build after each, fix imports as you go), NOT to substitute cosmetic cleanups (trim comments, flatten nesting, extract a helper) for the declared structural plan. If you genuinely cannot execute the plan after attempting it, STOP, leave partial progress on disk, and in your final message list exactly which files you moved, which remain, and the specific compile/test failure blocking further progress. Substituting your own smaller-scoped refactor for the declared structural plan is a task failure — the proposer, not you, decided what this task is. \"Do not break functionality\" is a constraint on HOW you execute the plan (atomic steps), not a license to SKIP the plan.",
             TEST_DISCIPLINE_CLAUSE,
             NO_PADDING_CLAUSE,
             "GENOME QUALITY OBLIGATION: You are the sole writer. Your code is measured by nit's genome system across four encoders. See the full ENCODER GUIDE and TARGETS in the genome instructions attached to this prompt. Maintain or improve genome scores on every file you touch. Aim for Tier III+ (Spaceship) minimum, aspire to Tier V (Replicator). Do NOT call [evaluate_genome] — nit evaluates automatically after your changes are written to disk.",
@@ -7936,7 +7933,10 @@ fn wrap_task_prompt(
     // writes). Other read-only roles get the block only when the planner
     // explicitly requested it via task.artifacts.
     let always_emit_artifacts_for_role = matches!(
-        task.role.as_deref().and_then(normalize_role_label).as_deref(),
+        task.role
+            .as_deref()
+            .and_then(normalize_role_label)
+            .as_deref(),
         Some("propose") | Some("judge"),
     );
     if !task.artifacts.is_empty() || always_emit_artifacts_for_role {
@@ -8950,7 +8950,7 @@ pub fn resolve_base_agent_id(agent_id: &str) -> &str {
         .unwrap_or(agent_id)
 }
 
-/// Returns true if the base agent **or** any of its clones is busy.
+// True if the base agent **or** any of its clones is busy.
 pub fn is_agent_family_busy(state: &AppState, agent_id: &str) -> bool {
     let base = resolve_base_agent_id(agent_id);
     for lane in &state.agents.agents {

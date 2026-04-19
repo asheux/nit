@@ -14,7 +14,6 @@ const ARROW_CHARS: usize = 2;
 const FILE_FG_BLEND: f32 = 0.28;
 const BLOCK_BORDER_ROWS: u16 = 2;
 
-/// Paint the file tree pane into `area`, highlighting the selected row.
 pub fn render(f: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
     let focused = state.focus == PaneId::Editor;
     let commands = header_commands(state);

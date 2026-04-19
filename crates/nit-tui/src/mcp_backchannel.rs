@@ -1,11 +1,11 @@
 //! UDS listener that terminates connections from the `nit-mcp-server` child
-//! process. Each `BackchannelRequest` is converted into a mint-on-apply
+//! process. Each `BackchannelRequest` is translated into a mint-on-apply
 //! `AgentBusEvent::*Request` and forwarded to the main loop's shared event
-//! channel, where it's drained alongside runner events.
+//! channel, where it drains alongside runner events.
 //!
 //! Unix-only in v1 — Windows callers can opt into a TCP fallback later; the
-//! whole module is gated with `#[cfg(unix)]` so non-Unix builds keep
-//! compiling with MCP disabled.
+//! whole module is gated with `#[cfg(unix)]` so non-Unix builds keep compiling
+//! with MCP disabled.
 
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -22,13 +22,12 @@ pub struct McpBackchannel {
 
 impl McpBackchannel {
     /// Bind a per-process UDS under `/tmp` and spawn an accept loop. Each
-    /// incoming connection is handled on its own thread so slow clients can't
+    /// incoming connection is handled on its own thread so a slow client cannot
     /// block new `tools/call` requests from arriving.
     pub fn spawn(event_tx: Sender<AgentBusEvent>) -> std::io::Result<Self> {
-        let pid = std::process::id();
-        let socket_path = format!("/tmp/nit-mcp-{pid}.sock");
-        // Clean up a stale socket from a previous run with the same pid
-        // (possible on wraparound) — `bind` would otherwise fail EADDRINUSE.
+        let socket_path = format!("/tmp/nit-mcp-{}.sock", std::process::id());
+        // Stale socket from a prior run with the same pid (possible on
+        // wraparound) would cause `bind` to fail EADDRINUSE.
         let _ = std::fs::remove_file(&socket_path);
         let listener = UnixListener::bind(&socket_path)?;
         let path_for_return = socket_path.clone();
@@ -44,8 +43,8 @@ impl McpBackchannel {
 
 impl Drop for McpBackchannel {
     fn drop(&mut self) {
-        // Best-effort cleanup. The listener thread is not joined; it falls
-        // out naturally when the Sender half of the event channel drops.
+        // Best-effort cleanup. The listener thread is not joined; it exits
+        // naturally when the Sender half of the event channel drops.
         let _ = std::fs::remove_file(&self.socket_path);
     }
 }
@@ -53,7 +52,7 @@ impl Drop for McpBackchannel {
 fn accept_loop(listener: UnixListener, event_tx: Sender<AgentBusEvent>) {
     for conn in listener.incoming() {
         let Ok(stream) = conn else {
-            // Transient accept errors shouldn't kill the listener.
+            // Transient accept errors must not kill the listener.
             continue;
         };
         let tx = event_tx.clone();
@@ -78,12 +77,14 @@ fn handle_connection(stream: UnixStream, event_tx: Sender<AgentBusEvent>) {
     let req: BackchannelRequest = match serde_json::from_str(raw) {
         Ok(r) => r,
         Err(err) => {
-            let resp = BackchannelResponse {
-                request_id: 0,
-                ok: false,
-                error: Some(format!("parse error: {err}")),
-            };
-            let _ = write_response(&mut writer, &resp);
+            let _ = write_response(
+                &mut writer,
+                &BackchannelResponse {
+                    request_id: 0,
+                    ok: false,
+                    error: Some(format!("parse error: {err}")),
+                },
+            );
             return;
         }
     };
@@ -92,18 +93,14 @@ fn handle_connection(stream: UnixStream, event_tx: Sender<AgentBusEvent>) {
     let resp = BackchannelResponse {
         request_id,
         ok: send_ok,
-        error: if send_ok {
-            None
-        } else {
-            Some("nit event channel closed".into())
-        },
+        error: (!send_ok).then(|| "nit event channel closed".to_string()),
     };
     let _ = write_response(&mut writer, &resp);
 }
 
-/// Duplicate the stream handle so the reader can own a `BufReader` while the
-/// writer keeps the original stream for the response. Returns `None` when the
-/// clone fails (rare; typically means the peer closed the socket already).
+// Clone the stream handle so the reader can own a `BufReader` while the writer
+// keeps the original stream for the response. Returns `None` when the clone
+// fails (rare; usually means the peer already closed the socket).
 fn split_stream(stream: UnixStream) -> Option<(BufReader<UnixStream>, UnixStream)> {
     let reader_stream = stream.try_clone().ok()?;
     Some((BufReader::new(reader_stream), stream))

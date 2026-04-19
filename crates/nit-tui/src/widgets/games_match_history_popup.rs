@@ -253,14 +253,18 @@ pub fn build_lines(state: &AppState, theme: &Theme, inner: Rect) -> Vec<Line<'st
             spans.push(Span::styled(format!("{:>3} ", round_idx + 1), dim_style));
             let (a_bit, b_bit) =
                 decode_outcome(entry.preview_outcomes().as_bytes().get(round_idx).copied());
-            spans.push(Span::styled(
-                history_cell_text(a_bit),
-                history_cell_style(a_bit, zero_style, one_style, empty_cell_style),
+            spans.push(history_cell_span(
+                a_bit,
+                zero_style,
+                one_style,
+                empty_cell_style,
             ));
             spans.push(Span::raw(" "));
-            spans.push(Span::styled(
-                history_cell_text(b_bit),
-                history_cell_style(b_bit, zero_style, one_style, empty_cell_style),
+            spans.push(history_cell_span(
+                b_bit,
+                zero_style,
+                one_style,
+                empty_cell_style,
             ));
             let consumed = 4 + 2 + 1 + 2;
             let pad = PANEL_WIDTH.saturating_sub(consumed);
@@ -514,6 +518,13 @@ fn history_cell_style(bit: Option<u8>, zero: Style, one: Style, empty: Style) ->
         Some(1) => one,
         _ => empty,
     }
+}
+
+fn history_cell_span(bit: Option<u8>, zero: Style, one: Style, empty: Style) -> Span<'static> {
+    Span::styled(
+        history_cell_text(bit),
+        history_cell_style(bit, zero, one, empty),
+    )
 }
 
 fn pad_to_width(text: &str, width: usize) -> String {

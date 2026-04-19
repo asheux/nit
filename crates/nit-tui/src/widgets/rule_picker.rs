@@ -221,7 +221,11 @@ fn render_footer(frame: &mut Frame, area: Rect, theme: &Theme, popup_bg: ratatui
 fn popup_rect(screen: Rect) -> Rect {
     let max_w = screen.width.saturating_sub(4).max(10);
     let max_h = screen.height.saturating_sub(4).max(6);
-    centered_rect_px(screen, POPUP_MAX_WIDTH.min(max_w), POPUP_MAX_HEIGHT.min(max_h))
+    centered_rect_px(
+        screen,
+        POPUP_MAX_WIDTH.min(max_w),
+        POPUP_MAX_HEIGHT.min(max_h),
+    )
 }
 
 fn format_rule_box_lines(rule: &nit_core::NamedRule, width: usize) -> Vec<Line<'static>> {

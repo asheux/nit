@@ -59,8 +59,8 @@ pub fn render_editor(
     )
 }
 
-/// Overlay a search highlight for `term` (respecting `whole_word`) on top of
-/// the normal editor render. Used while a vim `/`, `*`, or `#` search is active.
+// Overlay a search highlight for `term` while a vim `/`, `*`, or `#` search
+// is active; `whole_word` gates the vim `*`/`#` behaviour.
 #[allow(clippy::too_many_arguments)]
 pub fn render_editor_with_search(
     frame: &mut Frame,
@@ -329,14 +329,7 @@ fn render_lines<'a>(
         if let Some(mapped) = data.mapped_segments.as_ref() {
             apply_syntax_spans(mapped, &mut styles, theme);
         }
-        apply_search_highlights(
-            &mut styles,
-            buffer,
-            line_idx,
-            actual_lines,
-            theme,
-            search,
-        );
+        apply_search_highlights(&mut styles, buffer, line_idx, actual_lines, theme, search);
         apply_selection_highlight(
             &mut styles,
             buffer,
@@ -347,8 +340,14 @@ fn render_lines<'a>(
             theme,
         );
 
-        let (ln_text, ln_style, sep_style) =
-            gutter_styles(theme, content_bg, data, line_idx, total_lines, line_num_width);
+        let (ln_text, ln_style, sep_style) = gutter_styles(
+            theme,
+            content_bg,
+            data,
+            line_idx,
+            total_lines,
+            line_num_width,
+        );
         let diff_sep_style = diff_sep_style(sep_style, data.diff_status, theme);
         let diff_indicator = match data.diff_status {
             LineDiffStatus::DeletedAbove => "▔",

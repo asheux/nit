@@ -436,7 +436,10 @@ fn fuzzy_loop(cmd_rx: Receiver<FuzzyCommand>, event_tx: Sender<FuzzyEvent>) {
 
     while let Ok(cmd) = cmd_rx.recv() {
         let mut flags = TickFlags::default();
-        if matches!(apply_fuzzy_command(cmd, &mut state, &mut flags), FuzzyDispatch::Shutdown) {
+        if matches!(
+            apply_fuzzy_command(cmd, &mut state, &mut flags),
+            FuzzyDispatch::Shutdown
+        ) {
             return;
         }
         // Coalesce bursts.
@@ -485,7 +488,11 @@ fn stream_unmatched_tail(state: &mut FuzzyState, event_tx: &Sender<FuzzyEvent>) 
     });
 }
 
-fn replace_with_index_window(state: &mut FuzzyState, event_tx: &Sender<FuzzyEvent>, start: Instant) {
+fn replace_with_index_window(
+    state: &mut FuzzyState,
+    event_tx: &Sender<FuzzyEvent>,
+    start: Instant,
+) {
     let end = state.index.len().min(MAX_FILE_RESULTS);
     let results = build_unmatched_results(&state.index[..end], &state.root);
     state.streamed = end;

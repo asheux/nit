@@ -11,8 +11,8 @@ use super::{
 use crate::swarm::{SwarmRuntime, SwarmSize};
 use crate::theme::Theme;
 use nit_core::{
-    AgentBusEvent, AgentChannel, AgentLane, AgentMessage, AgentStatus, AppState, Buffer,
-    MissionPhase, MissionRecord, QueuedCodexTurn,
+    AgentBusEvent, AgentChannel, AgentLane, AgentLaneKind, AgentMessage, AgentStatus, AppState,
+    Buffer, MissionPhase, MissionRecord, QueuedCodexTurn,
 };
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier};
@@ -26,6 +26,30 @@ fn test_state() -> AppState {
         Buffer::empty("editor", None),
         Buffer::empty("notes", None),
     )
+}
+
+/// Baseline `AgentLane` with zeroed counters and empty strings. Tests layer
+/// test-specific values on top via `..make_lane(...)` so only the fields the
+/// assertion cares about stay at the call site.
+fn make_lane(
+    id: &str,
+    role: &str,
+    lane: &str,
+    kind: AgentLaneKind,
+    status: AgentStatus,
+) -> AgentLane {
+    AgentLane {
+        id: id.into(),
+        role: role.into(),
+        lane: lane.into(),
+        kind,
+        status,
+        heartbeat_age_secs: 0,
+        queue_len: 0,
+        current_mission: None,
+        shadow: false,
+        last_message: String::new(),
+    }
 }
 
 #[test]
@@ -85,16 +109,16 @@ fn ecg_indicator_freezes_when_agent_not_running() {
 fn agent_messages_use_stable_badge_header() {
     let mut state = test_state();
     state.agents.agents.push(AgentLane {
-        id: "coder".into(),
-        role: "Coder".into(),
-        lane: "Lane B".into(),
-        kind: nit_core::AgentLaneKind::Mock,
-        status: AgentStatus::Running,
         heartbeat_age_secs: 1,
         queue_len: 1,
-        current_mission: None,
-        shadow: false,
         last_message: "active".into(),
+        ..make_lane(
+            "coder",
+            "Coder",
+            "Lane B",
+            AgentLaneKind::Mock,
+            AgentStatus::Running,
+        )
     });
     let msg = AgentMessage {
         at: "10:00:00".into(),
@@ -135,16 +159,15 @@ fn agent_messages_use_stable_badge_header() {
 fn clone_identity_badge_uses_compact_label() {
     let mut state = test_state();
     state.agents.agents.push(AgentLane {
-        id: "planner#swarm-mis-001-clone-01".into(),
-        role: "Planner (clone 01)".into(),
-        lane: "Lane A".into(),
-        kind: nit_core::AgentLaneKind::Mock,
-        status: AgentStatus::Running,
-        heartbeat_age_secs: 0,
         queue_len: 1,
         current_mission: Some("mis-001".into()),
-        shadow: false,
-        last_message: String::new(),
+        ..make_lane(
+            "planner#swarm-mis-001-clone-01",
+            "Planner (clone 01)",
+            "Lane A",
+            AgentLaneKind::Mock,
+            AgentStatus::Running,
+        )
     });
 
     assert_eq!(
@@ -156,16 +179,14 @@ fn clone_identity_badge_uses_compact_label() {
 #[test]
 fn clone_roster_label_shows_base_model_and_clone_suffix() {
     let agent = AgentLane {
-        id: "planner#swarm-mis-001-clone-01".into(),
-        role: "Planner (clone 01)".into(),
-        lane: "Lane A".into(),
-        kind: nit_core::AgentLaneKind::Mock,
-        status: AgentStatus::Idle,
-        heartbeat_age_secs: 0,
-        queue_len: 0,
         current_mission: Some("mis-001".into()),
-        shadow: false,
-        last_message: String::new(),
+        ..make_lane(
+            "planner#swarm-mis-001-clone-01",
+            "Planner (clone 01)",
+            "Lane A",
+            AgentLaneKind::Mock,
+            AgentStatus::Idle,
+        )
     };
 
     assert_eq!(super::agent_roster_label(&agent), "planner#clone-01");
@@ -194,16 +215,16 @@ fn breather_rows_show_clone_source_model_name() {
     state.agents.selected_agent = Some(clone_id.into());
 
     state.agents.agents.push(AgentLane {
-        id: clone_id.into(),
-        role: "GPT-5.4 (clone 01)".into(),
-        lane: "Codex".into(),
-        kind: nit_core::AgentLaneKind::Codex,
-        status: AgentStatus::Running,
-        heartbeat_age_secs: 0,
         queue_len: 1,
         current_mission: Some("mis-001".into()),
-        shadow: false,
         last_message: "active".into(),
+        ..make_lane(
+            clone_id,
+            "GPT-5.4 (clone 01)",
+            "Codex",
+            AgentLaneKind::Codex,
+            AgentStatus::Running,
+        )
     });
 
     let now = Instant::now();
@@ -240,16 +261,15 @@ fn agent_badge_shown_when_single_agent_context_selected() {
     state.agents.selected_mission = None;
     state.agents.selected_agent = Some("coder".into());
     state.agents.agents.push(AgentLane {
-        id: "coder".into(),
-        role: "Coder".into(),
-        lane: "Lane B".into(),
-        kind: nit_core::AgentLaneKind::Mock,
-        status: AgentStatus::Idle,
         heartbeat_age_secs: 1,
-        queue_len: 0,
-        current_mission: None,
-        shadow: false,
         last_message: "idle".into(),
+        ..make_lane(
+            "coder",
+            "Coder",
+            "Lane B",
+            AgentLaneKind::Mock,
+            AgentStatus::Idle,
+        )
     });
     let msg = AgentMessage {
         at: "10:00:00".into(),
@@ -279,18 +299,13 @@ fn agent_badge_shown_when_single_agent_context_selected() {
 fn artifact_message_index_for_line_maps_transcript_artifact_row() {
     let mut state = test_state();
     state.agents.selected_agent = Some("coder".into());
-    state.agents.agents.push(AgentLane {
-        id: "coder".into(),
-        role: "Coder".into(),
-        lane: "Lane B".into(),
-        kind: nit_core::AgentLaneKind::Mock,
-        status: AgentStatus::Idle,
-        heartbeat_age_secs: 0,
-        queue_len: 0,
-        current_mission: None,
-        shadow: false,
-        last_message: String::new(),
-    });
+    state.agents.agents.push(make_lane(
+        "coder",
+        "Coder",
+        "Lane B",
+        AgentLaneKind::Mock,
+        AgentStatus::Idle,
+    ));
     state.agents.messages.push(AgentMessage {
         at: "10:00:00".into(),
         channel: AgentChannel::Agent,
@@ -316,18 +331,13 @@ fn swarm_planning_message_stays_plain_done_when_no_artifact_exists() {
     state.agents.messages.clear();
     state.agents.missions.clear();
     state.agents.agents.clear();
-    state.agents.agents.push(AgentLane {
-        id: "planner".into(),
-        role: "Planner".into(),
-        lane: "Codex".into(),
-        kind: nit_core::AgentLaneKind::Codex,
-        status: AgentStatus::Idle,
-        heartbeat_age_secs: 0,
-        queue_len: 0,
-        current_mission: None,
-        shadow: false,
-        last_message: String::new(),
-    });
+    state.agents.agents.push(make_lane(
+        "planner",
+        "Planner",
+        "Codex",
+        AgentLaneKind::Codex,
+        AgentStatus::Idle,
+    ));
 
     let mut swarm = SwarmRuntime::default();
     let (mission_id, _dispatches) = swarm
@@ -387,18 +397,13 @@ fn swarm_report_message_renders_artifact_link() {
     state.agents.messages.clear();
     state.agents.missions.clear();
     state.agents.agents.clear();
-    state.agents.agents.push(AgentLane {
-        id: "planner".into(),
-        role: "Planner".into(),
-        lane: "Codex".into(),
-        kind: nit_core::AgentLaneKind::Codex,
-        status: AgentStatus::Idle,
-        heartbeat_age_secs: 0,
-        queue_len: 0,
-        current_mission: None,
-        shadow: false,
-        last_message: String::new(),
-    });
+    state.agents.agents.push(make_lane(
+        "planner",
+        "Planner",
+        "Codex",
+        AgentLaneKind::Codex,
+        AgentStatus::Idle,
+    ));
 
     let mut swarm = SwarmRuntime::default();
     let (mission_id, _dispatches) = swarm
@@ -483,16 +488,15 @@ fn agent_header_includes_truncated_role_badge() {
     let mut state = test_state();
     state.agents.selected_agent = Some("planner".into());
     state.agents.agents.push(AgentLane {
-        id: "reviewer".into(),
-        role: "UltraLongReviewerRoleName".into(),
-        lane: "Lane C".into(),
-        kind: nit_core::AgentLaneKind::Mock,
-        status: AgentStatus::Running,
         heartbeat_age_secs: 1,
-        queue_len: 0,
-        current_mission: None,
-        shadow: false,
         last_message: "active".into(),
+        ..make_lane(
+            "reviewer",
+            "UltraLongReviewerRoleName",
+            "Lane C",
+            AgentLaneKind::Mock,
+            AgentStatus::Running,
+        )
     });
     let msg = AgentMessage {
         at: "10:00:00".into(),
@@ -698,16 +702,15 @@ fn breather_row_renders_below_user_prompt_when_agent_running() {
     state.agents.messages.clear();
     state.agents.agents.clear();
     state.agents.agents.push(AgentLane {
-        id: "planner".into(),
-        role: "Planner".into(),
-        lane: "Lane A".into(),
-        kind: nit_core::AgentLaneKind::Mock,
-        status: AgentStatus::Running,
-        heartbeat_age_secs: 0,
         queue_len: 1,
-        current_mission: None,
-        shadow: false,
         last_message: "active".into(),
+        ..make_lane(
+            "planner",
+            "Planner",
+            "Lane A",
+            AgentLaneKind::Mock,
+            AgentStatus::Running,
+        )
     });
     let now = Instant::now();
     state.agents.active_turns.insert(
@@ -748,16 +751,15 @@ fn breather_row_hidden_when_latest_message_is_agent() {
     state.agents.messages.clear();
     state.agents.agents.clear();
     state.agents.agents.push(AgentLane {
-        id: "planner".into(),
-        role: "Planner".into(),
-        lane: "Lane A".into(),
-        kind: nit_core::AgentLaneKind::Mock,
-        status: AgentStatus::Idle,
-        heartbeat_age_secs: 0,
         queue_len: 1,
-        current_mission: None,
-        shadow: false,
         last_message: "active".into(),
+        ..make_lane(
+            "planner",
+            "Planner",
+            "Lane A",
+            AgentLaneKind::Mock,
+            AgentStatus::Idle,
+        )
     });
     state.agents.messages.push(AgentMessage {
         at: "10:00:01".into(),
@@ -792,28 +794,26 @@ fn breather_rows_include_multiple_running_agents() {
     state.agents.messages.clear();
     state.agents.agents.clear();
     state.agents.agents.push(AgentLane {
-        id: "planner".into(),
-        role: "Planner".into(),
-        lane: "Lane A".into(),
-        kind: nit_core::AgentLaneKind::Mock,
-        status: AgentStatus::Running,
-        heartbeat_age_secs: 0,
         queue_len: 1,
-        current_mission: None,
-        shadow: false,
         last_message: "active".into(),
+        ..make_lane(
+            "planner",
+            "Planner",
+            "Lane A",
+            AgentLaneKind::Mock,
+            AgentStatus::Running,
+        )
     });
     state.agents.agents.push(AgentLane {
-        id: "coder".into(),
-        role: "Coder".into(),
-        lane: "Lane B".into(),
-        kind: nit_core::AgentLaneKind::Mock,
-        status: AgentStatus::Running,
-        heartbeat_age_secs: 0,
         queue_len: 1,
-        current_mission: None,
-        shadow: false,
         last_message: "active".into(),
+        ..make_lane(
+            "coder",
+            "Coder",
+            "Lane B",
+            AgentLaneKind::Mock,
+            AgentStatus::Running,
+        )
     });
 
     let now = Instant::now();
@@ -864,16 +864,15 @@ fn breather_rows_hide_stage_column_and_show_stage_subrow() {
     state.agents.messages.clear();
     state.agents.agents.clear();
     state.agents.agents.push(AgentLane {
-        id: "planner".into(),
-        role: "Planner".into(),
-        lane: "Lane A".into(),
-        kind: nit_core::AgentLaneKind::Codex,
-        status: AgentStatus::Running,
-        heartbeat_age_secs: 0,
         queue_len: 1,
-        current_mission: None,
-        shadow: false,
         last_message: "active".into(),
+        ..make_lane(
+            "planner",
+            "Planner",
+            "Lane A",
+            AgentLaneKind::Codex,
+            AgentStatus::Running,
+        )
     });
 
     let now = Instant::now();
@@ -919,16 +918,15 @@ fn breather_rows_show_when_prompt_queued_but_not_yet_started() {
     state.agents.messages.clear();
     state.agents.agents.clear();
     state.agents.agents.push(AgentLane {
-        id: "planner".into(),
-        role: "Planner".into(),
-        lane: "Lane A".into(),
-        kind: nit_core::AgentLaneKind::Mock,
-        status: AgentStatus::Waiting,
-        heartbeat_age_secs: 0,
         queue_len: 1,
-        current_mission: None,
-        shadow: false,
         last_message: "queued".into(),
+        ..make_lane(
+            "planner",
+            "Planner",
+            "Lane A",
+            AgentLaneKind::Mock,
+            AgentStatus::Waiting,
+        )
     });
     state.agents.queued_codex_turns.push_back(QueuedCodexTurn {
         agent_id: "planner".into(),
@@ -960,16 +958,15 @@ fn breather_rows_suppress_turn_metrics_when_queued_in_wide_layout() {
     state.agents.messages.clear();
     state.agents.agents.clear();
     state.agents.agents.push(AgentLane {
-        id: "planner".into(),
-        role: "Planner".into(),
-        lane: "Lane A".into(),
-        kind: nit_core::AgentLaneKind::Mock,
-        status: AgentStatus::Waiting,
-        heartbeat_age_secs: 0,
         queue_len: 1,
-        current_mission: None,
-        shadow: false,
         last_message: "queued".into(),
+        ..make_lane(
+            "planner",
+            "Planner",
+            "Lane A",
+            AgentLaneKind::Mock,
+            AgentStatus::Waiting,
+        )
     });
     let now = Instant::now();
     state.agents.active_turns.insert(
@@ -1000,16 +997,9 @@ fn breather_rows_suppress_turn_metrics_when_queued_in_narrow_layout() {
     state.agents.messages.clear();
     state.agents.agents.clear();
     state.agents.agents.push(AgentLane {
-        id: "a".into(),
-        role: "".into(),
-        lane: "Lane A".into(),
-        kind: nit_core::AgentLaneKind::Mock,
-        status: AgentStatus::Waiting,
-        heartbeat_age_secs: 0,
         queue_len: 1,
-        current_mission: None,
-        shadow: false,
         last_message: "queued".into(),
+        ..make_lane("a", "", "Lane A", AgentLaneKind::Mock, AgentStatus::Waiting)
     });
     state.agents.queued_codex_turns.push_back(QueuedCodexTurn {
         agent_id: "a".into(),
@@ -1068,28 +1058,27 @@ fn breather_rows_include_swarm_assigned_agents_even_when_idle() {
     state.agents.selected_agent = Some("planner".into());
 
     state.agents.agents.push(AgentLane {
-        id: "planner".into(),
-        role: "Planner".into(),
-        lane: "Lane A".into(),
-        kind: nit_core::AgentLaneKind::Mock,
-        status: AgentStatus::Running,
-        heartbeat_age_secs: 0,
         queue_len: 1,
         current_mission: Some("mis-001".into()),
-        shadow: false,
         last_message: "active".into(),
+        ..make_lane(
+            "planner",
+            "Planner",
+            "Lane A",
+            AgentLaneKind::Mock,
+            AgentStatus::Running,
+        )
     });
     state.agents.agents.push(AgentLane {
-        id: "coder".into(),
-        role: "Coder".into(),
-        lane: "Lane B".into(),
-        kind: nit_core::AgentLaneKind::Mock,
-        status: AgentStatus::Idle,
-        heartbeat_age_secs: 0,
-        queue_len: 0,
         current_mission: Some("mis-001".into()),
-        shadow: false,
         last_message: "idle".into(),
+        ..make_lane(
+            "coder",
+            "Coder",
+            "Lane B",
+            AgentLaneKind::Mock,
+            AgentStatus::Idle,
+        )
     });
 
     let now = Instant::now();
@@ -1170,28 +1159,26 @@ fn breather_rows_show_done_when_swarm_idle_and_all_assigned_reported() {
     state.agents.selected_agent = Some("planner".into());
 
     state.agents.agents.push(AgentLane {
-        id: "planner".into(),
-        role: "Planner".into(),
-        lane: "Lane A".into(),
-        kind: nit_core::AgentLaneKind::Mock,
-        status: AgentStatus::Idle,
-        heartbeat_age_secs: 0,
-        queue_len: 0,
         current_mission: Some("mis-001".into()),
-        shadow: false,
         last_message: "done".into(),
+        ..make_lane(
+            "planner",
+            "Planner",
+            "Lane A",
+            AgentLaneKind::Mock,
+            AgentStatus::Idle,
+        )
     });
     state.agents.agents.push(AgentLane {
-        id: "coder".into(),
-        role: "Coder".into(),
-        lane: "Lane B".into(),
-        kind: nit_core::AgentLaneKind::Mock,
-        status: AgentStatus::Idle,
-        heartbeat_age_secs: 0,
-        queue_len: 0,
         current_mission: Some("mis-001".into()),
-        shadow: false,
         last_message: "done".into(),
+        ..make_lane(
+            "coder",
+            "Coder",
+            "Lane B",
+            AgentLaneKind::Mock,
+            AgentStatus::Idle,
+        )
     });
 
     state.agents.messages.push(AgentMessage {

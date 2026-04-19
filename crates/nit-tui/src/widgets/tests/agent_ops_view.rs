@@ -19,14 +19,33 @@ use crate::swarm::{
 };
 use crate::theme::Theme;
 use nit_core::{
-    AgentAlertSeverity, AgentChannel, AgentMessage, AgentOpsTab, AgentStatus, AppKind, AppState,
-    Buffer, MissionPhase, MissionRecord, PatchProposal, PatchStatus, SavedRunHistoryFilter,
+    AgentAlertSeverity, AgentChannel, AgentLane, AgentLaneKind, AgentMessage, AgentOpsTab,
+    AgentStatus, AppKind, AppState, Buffer, MissionPhase, MissionRecord, PatchProposal,
+    PatchStatus, SavedRunHistoryFilter,
 };
 use ratatui::style::Modifier;
 use std::{
     fs,
     time::{SystemTime, UNIX_EPOCH},
 };
+
+/// Baseline `AgentLane` for roster-rendering tests: idle, zeroed counters,
+/// no mission. All idle-roster assertions are insensitive to those fields —
+/// only id/role/lane/kind vary between rows.
+fn idle_lane(id: &str, lane: &str, kind: AgentLaneKind) -> AgentLane {
+    AgentLane {
+        id: id.into(),
+        role: id.into(),
+        lane: lane.into(),
+        kind,
+        status: AgentStatus::Idle,
+        heartbeat_age_secs: 0,
+        queue_len: 0,
+        current_mission: None,
+        shadow: false,
+        last_message: String::new(),
+    }
+}
 
 fn unique_test_workspace(label: &str) -> std::path::PathBuf {
     let nanos = SystemTime::now()
@@ -535,18 +554,10 @@ fn roster_backend_group_rows_render_plain_backend_labels() {
     );
     state.agents.dock_tab = AgentOpsTab::Roster;
     state.agents.codex_cli_available = true;
-    state.agents.agents.push(nit_core::AgentLane {
-        id: "gpt-5.4".into(),
-        role: "gpt-5.4".into(),
-        lane: "Codex".into(),
-        kind: nit_core::AgentLaneKind::Codex,
-        status: AgentStatus::Idle,
-        heartbeat_age_secs: 0,
-        queue_len: 0,
-        current_mission: None,
-        shadow: false,
-        last_message: String::new(),
-    });
+    state
+        .agents
+        .agents
+        .push(idle_lane("gpt-5.4", "Codex", AgentLaneKind::Codex));
 
     let lines = current_lines_for_width(&state, 96);
 
@@ -567,18 +578,10 @@ fn roster_backend_rows_expand_and_collapse_model_lists() {
         Buffer::empty("n", None),
     );
     state.agents.dock_tab = AgentOpsTab::Roster;
-    state.agents.agents.push(nit_core::AgentLane {
-        id: "gpt-5.4".into(),
-        role: "gpt-5.4".into(),
-        lane: "Codex".into(),
-        kind: nit_core::AgentLaneKind::Codex,
-        status: AgentStatus::Idle,
-        heartbeat_age_secs: 0,
-        queue_len: 0,
-        current_mission: None,
-        shadow: false,
-        last_message: String::new(),
-    });
+    state
+        .agents
+        .agents
+        .push(idle_lane("gpt-5.4", "Codex", AgentLaneKind::Codex));
 
     let collapsed = current_lines_for_width(&state, 96);
     assert!(collapsed
@@ -606,18 +609,10 @@ fn roster_selected_backend_row_shows_cursor_marker() {
         Buffer::empty("n", None),
     );
     state.agents.dock_tab = AgentOpsTab::Roster;
-    state.agents.agents.push(nit_core::AgentLane {
-        id: "gpt-5.4".into(),
-        role: "gpt-5.4".into(),
-        lane: "Codex".into(),
-        kind: nit_core::AgentLaneKind::Codex,
-        status: AgentStatus::Idle,
-        heartbeat_age_secs: 0,
-        queue_len: 0,
-        current_mission: None,
-        shadow: false,
-        last_message: String::new(),
-    });
+    state
+        .agents
+        .agents
+        .push(idle_lane("gpt-5.4", "Codex", AgentLaneKind::Codex));
 
     let lines = current_lines_for_width(&state, 96);
 
@@ -646,30 +641,15 @@ fn roster_lists_discovered_claude_and_gemini_models_as_rows() {
         .agents
         .roster_expanded_backend_kinds
         .insert(nit_core::AgentLaneKind::Gemini);
-    state.agents.agents.push(nit_core::AgentLane {
-        id: "claude-sonnet-4".into(),
-        role: "claude-sonnet-4".into(),
-        lane: "Claude".into(),
-        kind: nit_core::AgentLaneKind::Claude,
-        status: nit_core::AgentStatus::Idle,
-        heartbeat_age_secs: 0,
-        queue_len: 0,
-        current_mission: None,
-        shadow: false,
-        last_message: String::new(),
-    });
-    state.agents.agents.push(nit_core::AgentLane {
-        id: "gemini-2.5-pro".into(),
-        role: "gemini-2.5-pro".into(),
-        lane: "Gemini".into(),
-        kind: nit_core::AgentLaneKind::Gemini,
-        status: nit_core::AgentStatus::Idle,
-        heartbeat_age_secs: 0,
-        queue_len: 0,
-        current_mission: None,
-        shadow: false,
-        last_message: String::new(),
-    });
+    state.agents.agents.push(idle_lane(
+        "claude-sonnet-4",
+        "Claude",
+        AgentLaneKind::Claude,
+    ));
+    state
+        .agents
+        .agents
+        .push(idle_lane("gemini-2.5-pro", "Gemini", AgentLaneKind::Gemini));
 
     let lines = current_lines_for_width(&state, 96);
 
@@ -706,42 +686,19 @@ fn roster_shows_priority_checkbox_for_supported_backend_models() {
         .agents
         .roster_expanded_backend_kinds
         .insert(nit_core::AgentLaneKind::Gemini);
-    state.agents.agents.push(nit_core::AgentLane {
-        id: "gpt-5.4".into(),
-        role: "gpt-5.4".into(),
-        lane: "Codex".into(),
-        kind: nit_core::AgentLaneKind::Codex,
-        status: nit_core::AgentStatus::Idle,
-        heartbeat_age_secs: 0,
-        queue_len: 0,
-        current_mission: None,
-        shadow: false,
-        last_message: String::new(),
-    });
-    state.agents.agents.push(nit_core::AgentLane {
-        id: "claude-sonnet-4".into(),
-        role: "claude-sonnet-4".into(),
-        lane: "Claude".into(),
-        kind: nit_core::AgentLaneKind::Claude,
-        status: nit_core::AgentStatus::Idle,
-        heartbeat_age_secs: 0,
-        queue_len: 0,
-        current_mission: None,
-        shadow: false,
-        last_message: String::new(),
-    });
-    state.agents.agents.push(nit_core::AgentLane {
-        id: "gemini-2.5-pro".into(),
-        role: "gemini-2.5-pro".into(),
-        lane: "Gemini".into(),
-        kind: nit_core::AgentLaneKind::Gemini,
-        status: nit_core::AgentStatus::Idle,
-        heartbeat_age_secs: 0,
-        queue_len: 0,
-        current_mission: None,
-        shadow: false,
-        last_message: String::new(),
-    });
+    state
+        .agents
+        .agents
+        .push(idle_lane("gpt-5.4", "Codex", AgentLaneKind::Codex));
+    state.agents.agents.push(idle_lane(
+        "claude-sonnet-4",
+        "Claude",
+        AgentLaneKind::Claude,
+    ));
+    state
+        .agents
+        .agents
+        .push(idle_lane("gemini-2.5-pro", "Gemini", AgentLaneKind::Gemini));
 
     let lines = current_lines_for_width(&state, 120);
 

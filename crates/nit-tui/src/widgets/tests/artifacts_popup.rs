@@ -19,15 +19,23 @@ fn line_text(line: &Line<'_>) -> String {
         .join("")
 }
 
+/// Render a markdown fragment at `width` and flatten each line to a plain
+/// string — the shape every `render_markdown_document_*` test asserts against.
+fn rendered_text(source: &str, theme: &Theme, width: usize) -> Vec<String> {
+    render_markdown_document(source, theme, width)
+        .iter()
+        .map(line_text)
+        .collect()
+}
+
 #[test]
 fn render_markdown_document_formats_headings_lists_code_and_tables() {
     let theme = Theme::default();
-    let rendered = render_markdown_document(
+    let text = rendered_text(
         "# Findings\n**Risks**\n- first item\n1. second item\n> quoted text\n```rust\nlet total = 42;\n```\n| Name | Value |\n| --- | --- |\n| path | docs/ANTIGRAVITY.md |\n",
         &theme,
         80,
     );
-    let text = rendered.iter().map(line_text).collect::<Vec<_>>();
 
     assert!(
         text.iter().any(|line| line.contains("§ Findings")),
@@ -65,12 +73,11 @@ fn render_markdown_document_formats_headings_lists_code_and_tables() {
 #[test]
 fn render_markdown_document_formats_json_and_math() {
     let theme = Theme::default();
-    let rendered = render_markdown_document(
+    let text = rendered_text(
         "Inline math $E = mc^2$ stays visible.\n```json\n{\"enabled\":true,\"count\":2,\"items\":[1,2]}\n```\n$$\n\\int_0^1 x^2 dx = 1/3\n$$\n",
         &theme,
         80,
     );
-    let text = rendered.iter().map(line_text).collect::<Vec<_>>();
 
     assert!(
         text.iter().any(|line| line.contains("code block (json)")),
@@ -103,8 +110,7 @@ fn render_markdown_document_formats_json_and_math() {
 #[test]
 fn render_markdown_document_formats_raw_json_document() {
     let theme = Theme::default();
-    let rendered = render_markdown_document("{\"name\":\"nit\",\"ok\":true}", &theme, 80);
-    let text = rendered.iter().map(line_text).collect::<Vec<_>>();
+    let text = rendered_text("{\"name\":\"nit\",\"ok\":true}", &theme, 80);
 
     assert!(
         text.iter().any(|line| line.contains("json document")),

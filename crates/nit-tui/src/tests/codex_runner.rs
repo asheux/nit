@@ -12,6 +12,17 @@ use std::path::Path;
 use std::sync::mpsc;
 use std::time::Instant;
 
+/// `CodexRunnerConfig` with an explicit sandbox + approval policy — the
+/// shape every swarm/shadow test uses to exercise arg-building code paths.
+fn custom_config() -> CodexRunnerConfig {
+    CodexRunnerConfig {
+        sandbox: Some("workspace-write".into()),
+        approval_policy: Some("never".into()),
+        max_parallel_turns: 2,
+        mcp_backchannel_socket: None,
+    }
+}
+
 #[test]
 fn extracts_thread_id_from_event_stream() {
     let jsonl = br#"{"type":"thread.started","thread_id":"019ca7c5-536f-7f81-82a7-7a38fa483cb2"}
@@ -65,12 +76,7 @@ fn shadow_clone_agent_ids_resolve_to_base_model_slug() {
 
 #[test]
 fn mcp_new_session_uses_base_model_slug_for_swarm_clone() {
-    let config = CodexRunnerConfig {
-        sandbox: Some("workspace-write".into()),
-        approval_policy: Some("never".into()),
-        max_parallel_turns: 2,
-        mcp_backchannel_socket: None,
-    };
+    let config = custom_config();
 
     let (tool_name, arguments) = build_codex_mcp_tool_call(
         "gpt-5.2#swarm-mis-001-clone-01",
@@ -122,12 +128,7 @@ fn mcp_resume_uses_codex_reply_without_model_lookup() {
 
 #[test]
 fn exec_args_use_base_model_slug_for_swarm_clone() {
-    let config = CodexRunnerConfig {
-        sandbox: Some("workspace-write".into()),
-        approval_policy: Some("never".into()),
-        max_parallel_turns: 2,
-        mcp_backchannel_socket: None,
-    };
+    let config = custom_config();
 
     let args = build_codex_exec_args(
         "gpt-5.2#swarm-mis-001-clone-01",
@@ -202,12 +203,7 @@ fn exec_resume_args_use_base_model_slug_for_swarm_clone() {
 
 #[test]
 fn read_only_shadow_turn_forces_read_only_sandbox_in_mcp_args() {
-    let config = CodexRunnerConfig {
-        sandbox: Some("workspace-write".into()),
-        approval_policy: Some("never".into()),
-        max_parallel_turns: 2,
-        mcp_backchannel_socket: None,
-    };
+    let config = custom_config();
 
     let (_, arguments) = build_codex_mcp_tool_call(
         "gpt-5.2#shadow-01-propose-a",
@@ -227,12 +223,7 @@ fn read_only_shadow_turn_forces_read_only_sandbox_in_mcp_args() {
 
 #[test]
 fn read_only_shadow_turn_forces_read_only_sandbox_in_exec_args() {
-    let config = CodexRunnerConfig {
-        sandbox: Some("workspace-write".into()),
-        approval_policy: Some("never".into()),
-        max_parallel_turns: 2,
-        mcp_backchannel_socket: None,
-    };
+    let config = custom_config();
 
     let args = build_codex_exec_args(
         "gpt-5.2#shadow-01-judge",

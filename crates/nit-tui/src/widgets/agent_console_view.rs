@@ -67,7 +67,11 @@ fn resolve_context_pct(state: &AppState, agent_id: &str, mission: Option<&str>) 
                 .get(m)
                 .and_then(|map| map.get(agent_id))
                 .copied(),
-            None => state.agents.codex_context_remaining_pct.get(agent_id).copied(),
+            None => state
+                .agents
+                .codex_context_remaining_pct
+                .get(agent_id)
+                .copied(),
         },
         AgentLaneKind::Claude => match mission {
             Some(m) => state
@@ -76,7 +80,11 @@ fn resolve_context_pct(state: &AppState, agent_id: &str, mission: Option<&str>) 
                 .get(m)
                 .and_then(|map| map.get(agent_id))
                 .copied(),
-            None => state.agents.claude_context_remaining_pct.get(agent_id).copied(),
+            None => state
+                .agents
+                .claude_context_remaining_pct
+                .get(agent_id)
+                .copied(),
         },
         _ => return None,
     };
@@ -1804,8 +1812,7 @@ fn thread_rows(
     rows
 }
 
-/// Move any ArtifactLink / StatusSubRow / Agent-done rows that appear after
-/// the last breather block to just before the breather.
+// Callouts that land after the last breather visually orphan the block; hoist them above it.
 fn hoist_stale_callouts_above_breather(rows: &mut Vec<ThreadRow>) {
     // Find the start of the last breather block (StatusHeader row).
     let breather_start = rows
@@ -1842,9 +1849,7 @@ fn hoist_stale_callouts_above_breather(rows: &mut Vec<ThreadRow>) {
     }
 }
 
-/// Returns visible messages in grouped order: each user prompt is immediately
-/// followed by any agent responses whose `prompt_msg_idx` points to it.
-/// Responses without a matching visible parent appear in their chronological position.
+// Group responses under their prompt via `prompt_msg_idx`; orphaned replies keep their place.
 fn visible_messages_grouped<'a>(
     state: &'a AppState,
     mission: Option<&str>,
@@ -2120,7 +2125,6 @@ fn agent_roster_label(agent: &AgentLane) -> String {
     format!("{role_full}/{id_full}")
 }
 
-/// Compact inline working indicator for specific agents, shown right after their user prompt.
 fn inline_breather_rows(
     state: &AppState,
     agent_ids: &[String],
@@ -2768,9 +2772,7 @@ impl SwarmFooterMeta {
     }
 }
 
-/// Push one footer line with wrapping if it overflows the inner width.
-/// `header` rows use the `StatusHeader` kind (so the theme can render them
-/// with the footer-title color); continuation lines use `StatusSubRow`.
+// Header rows are `StatusHeader` (footer-title color); continuations use `StatusSubRow`.
 fn append_swarm_footer_line(
     rows: &mut Vec<ThreadRow>,
     indent_str: &str,
@@ -3058,8 +3060,6 @@ fn format_token_count_stage(state: &AppState, agent: &AgentLane) -> String {
     }
 }
 
-/// Compact token usage suffix for inline display next to a stage label.
-/// Returns `None` when no token data is available yet.
 fn format_token_count_suffix(state: &AppState, agent: &AgentLane) -> Option<String> {
     let agent_id = agent.id.as_str();
     let mission_id = agent
@@ -3293,12 +3293,8 @@ fn pad_to_width(input: &str, width: usize) -> String {
     out
 }
 
-/// Derive a human-readable label for the EXEC phase based on the roles of the
-/// currently active swarm agents (e.g. "Coding ...", "Reviewing ...",
-/// "Integrating ...").  Falls back to "Executing ..." when roles are mixed or
-/// absent.
+// EXEC-phase label reflects the active roles (Coding/Reviewing/Integrating); mixed/absent → "Executing ...".
 fn swarm_exec_label<'a>(state: &nit_core::AppState, ordered_ids: &[String]) -> &'a str {
-    // Collect the normalised roles of all currently active agents.
     let mut roles: Vec<&str> = Vec::new();
     for id in ordered_ids {
         if !state.agents.active_turns.contains_key(id.as_str()) {

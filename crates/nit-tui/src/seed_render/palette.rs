@@ -2,6 +2,8 @@ use ratatui::style::Color;
 
 use crate::theme::Theme;
 
+// Flattened snapshot of the theme's seed-visualizer colors. Holds owned values so
+// render code can read without re-borrowing the theme on every frame.
 #[derive(Clone, Debug)]
 pub struct SeedPalette {
     pub bg: Color,

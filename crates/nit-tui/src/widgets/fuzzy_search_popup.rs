@@ -22,9 +22,8 @@ pub fn preferred_size(screen: Rect) -> (u16, u16) {
     (width.min(screen.width), height.min(screen.height))
 }
 
-/// Render the fuzzy search popup with header / results / preview / footer.
-/// `preview_scroll_delta` is clamped in place so reverse scrolling at the edges
-/// does not accumulate phantom overshoot.
+// `preview_scroll_delta` is clamped in place so reverse scrolling at edges
+// doesn't accumulate phantom overshoot.
 pub fn render(
     frame: &mut Frame,
     area: Rect,
@@ -247,7 +246,9 @@ fn render_preview(
 
     let height = inner.height as usize;
     let max_scroll = model.lines.len().saturating_sub(height.max(1));
-    let desired = model.anchor_line.saturating_sub(height / PREVIEW_ANCHOR_DIVISOR);
+    let desired = model
+        .anchor_line
+        .saturating_sub(height / PREVIEW_ANCHOR_DIVISOR);
     let base = desired.min(max_scroll) as i32;
     let scroll = (base + *preview_scroll_delta).clamp(0, max_scroll as i32);
     // Snap back to the clamped offset so edge scrolls don't accumulate overshoot:

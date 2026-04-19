@@ -1,5 +1,6 @@
 use super::SolidRenderer;
-use crate::gol_render::renderer::{cell_bg, GolRenderer};
+use crate::gol_render::overlay::cell_bg;
+use crate::gol_render::renderer::GolRenderer;
 use crate::gol_render::{
     GolHudMetrics, GolHudState, GolPalette, GolRenderConfig, GolRenderState, RenderGeometry,
     RenderMode,
@@ -40,7 +41,7 @@ fn hud_state<'a>(
         mode: VisualizerMode::SimOnly,
         paused: false,
         delta,
-        history: metrics.history(),
+        history: &metrics.history,
     }
 }
 

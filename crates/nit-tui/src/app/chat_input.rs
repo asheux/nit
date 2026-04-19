@@ -29,26 +29,21 @@ use super::{
 
 const CHAT_PROMPT_HISTORY_MAX: usize = 200;
 
-// ---------------------------------------------------------------------------
-// ChatInputEditResult
-// ---------------------------------------------------------------------------
-
-/// Result from `handle_chat_input_editing_key` indicating what happened.
 pub(super) struct ChatInputEditResult {
     pub(super) handled: bool,
     pub(super) changed: bool,
     pub(super) follow_cursor: bool,
 }
 
-// ---------------------------------------------------------------------------
-// handle_chat_input_editing_key
-// ---------------------------------------------------------------------------
-
 fn reset_chat_input_and_history_nav(state: &mut AppState) {
     state.agents.chat_input.clear();
     state.agents.chat_input_cursor = 0;
     state.agents.chat_input_selection_anchor = None;
     super::chat_history_reset_nav(state);
+}
+
+fn sync_cursor_to_input_end(state: &mut AppState) {
+    state.agents.chat_input_cursor = state.agents.chat_input.chars().count();
 }
 
 fn update_chat_selection_anchor(state: &mut AppState, selecting: bool, cursor: usize) {
@@ -61,10 +56,9 @@ fn update_chat_selection_anchor(state: &mut AppState, selecting: bool, cursor: u
     }
 }
 
-/// Reusable text-editing key handler for the chat input box.
-/// Handles all text manipulation keys (characters, backspace, delete, cursor movement,
-/// selection, copy/paste, etc.) but NOT Enter-submit, Esc, or Up/Down arrow keys.
-/// Those are left to the caller so each context can provide its own behavior.
+// Handles text manipulation keys (characters, backspace, delete, cursor movement,
+// selection, clipboard). Does NOT handle Enter-submit, Esc, or Up/Down — those are
+// context-specific and left to the caller.
 pub(super) fn handle_chat_input_editing_key(
     key: &KeyEvent,
     state: &mut AppState,
@@ -462,12 +456,8 @@ pub(super) fn handle_chat_input_editing_key(
     }
 }
 
-// ---------------------------------------------------------------------------
-// submit_chat_input_and_dispatch
-// ---------------------------------------------------------------------------
-
-/// Submit the chat input, dispatch to agents, and return whether a prompt was sent.
-/// Shared between the main Agent Chat Enter handler and the Artifacts popup input.
+// Submit the chat input, dispatch to agents, and return whether a prompt was sent.
+// Shared between the main Agent Chat Enter handler and the Artifacts popup input.
 pub(super) fn submit_chat_input_and_dispatch(
     state: &mut AppState,
     vitals: &mut VitalsState,
@@ -481,13 +471,12 @@ pub(super) fn submit_chat_input_and_dispatch(
         return false;
     }
     // `@shadow <prompt>` — explicit opt-in to the single-agent shadow pipeline.
-    // Strip the prefix from `chat_input` before falling through so the rest of
-    // the flow (including `push_chat_message`) sees just the user's text.
+    // Strip the prefix so `push_chat_message` sees just the user's text.
     let shadow_explicit = parse_shadow_command(&raw).is_some();
     if shadow_explicit {
         let stripped = raw.trim_start().strip_prefix("@shadow").unwrap_or(&raw);
         state.agents.chat_input = stripped.trim_start().to_string();
-        state.agents.chat_input_cursor = state.agents.chat_input.chars().count();
+        sync_cursor_to_input_end(state);
     }
     let mut swarm_handled = false;
     // When `@shadow` was given explicitly, do NOT also try to interpret the
@@ -548,7 +537,7 @@ pub(super) fn submit_chat_input_and_dispatch(
                     state.agents.dock_tab = nit_core::AgentOpsTab::Dag;
                 }
                 state.agents.chat_input = cmd.prompt.clone();
-                state.agents.chat_input_cursor = state.agents.chat_input.chars().count();
+                sync_cursor_to_input_end(state);
                 let _ = push_chat_message(state);
                 for dispatch in dispatches {
                     apply_swarm_task_role(state, &dispatch);
@@ -567,7 +556,7 @@ pub(super) fn submit_chat_input_and_dispatch(
                 swarm_handled = true;
             } else {
                 state.agents.chat_input = cmd.prompt.clone();
-                state.agents.chat_input_cursor = state.agents.chat_input.chars().count();
+                sync_cursor_to_input_end(state);
             }
         } else {
             state.status = Some("@swarm requires at least one Codex or Claude agent".into());
@@ -589,13 +578,13 @@ pub(super) fn submit_chat_input_and_dispatch(
 
         if force_new {
             state.agents.chat_input = raw[4..].trim_start().to_string();
-            state.agents.chat_input_cursor = state.agents.chat_input.chars().count();
+            sync_cursor_to_input_end(state);
         } else if legacy_queue {
             let stripped = raw
                 .strip_prefix("@queue")
                 .unwrap_or_else(|| raw.strip_prefix("@q").unwrap_or(&raw));
             state.agents.chat_input = stripped.trim_start().to_string();
-            state.agents.chat_input_cursor = state.agents.chat_input.chars().count();
+            sync_cursor_to_input_end(state);
         }
         let mission_id = state
             .agents
@@ -607,41 +596,7 @@ pub(super) fn submit_chat_input_and_dispatch(
             .map(ToString::to_string);
         let sent = push_chat_message(state);
         if let Some((channel, prompt)) = sent {
-            // Augment single-agent prompts with a file checklist when the
-            // prompt references a module/directory so the agent covers every
-            // file during refactors.
-            let prompt = {
-                let scope =
-                    crate::swarm::enumerate_scope_files(state.workspace_root.as_path(), &prompt);
-                if scope.is_empty() {
-                    prompt
-                } else {
-                    let mut augmented = prompt.clone();
-                    augmented.push_str("\n\n## FILE CHECKLIST (non-negotiable)\n");
-                    augmented.push_str("\"Refactor module\" = refactor EVERY file below. No exceptions, no skipping.\n");
-                    augmented.push_str("Process this checklist in order. Open each file, read it, refactor it, then move to the next.\n");
-                    augmented.push_str("Even if a file looks clean, improve naming, docs, structure, or consistency.\n");
-                    augmented.push_str("Do NOT add inline test modules (`#[cfg(test)] mod tests { ... }`) inside source files. Tests must live in a dedicated tests directory or test file.\n");
-                    augmented.push_str(
-                        "COMMENTS: Trim doc comments that restate the type/function name, \
-                         echo visible type signatures, or describe obvious behavior (e.g. \
-                         \"/// Returns the value\" on fn value()). Keep comments that explain \
-                         WHY something is done, document non-obvious constraints, safety \
-                         invariants, or algorithmic choices. A comment worth keeping tells \
-                         the reader something the code alone cannot.\n",
-                    );
-                    augmented.push_str(
-                        "Your task is NOT complete until every file has been modified.\n\n",
-                    );
-                    for (i, path) in scope.iter().enumerate() {
-                        augmented.push_str(&format!("{}. {path}\n", i + 1));
-                    }
-                    augmented.push_str(
-                        "\nAfter finishing, list every file and what you changed in each.\n",
-                    );
-                    augmented
-                }
-            };
+            let prompt = augment_with_module_file_checklist(state, prompt);
             // Index of the user prompt message just pushed — used to link agent
             // responses back to the correct prompt in the chat view.
             let prompt_msg_idx = state.agents.messages.len().saturating_sub(1);
@@ -880,9 +835,39 @@ pub(super) fn submit_chat_input_and_dispatch(
     true
 }
 
-// ---------------------------------------------------------------------------
-// chat_history_remember
-// ---------------------------------------------------------------------------
+// When the prompt names a module or directory, append a non-negotiable per-file
+// checklist so a single-agent refactor covers every file rather than
+// cherry-picking. Returns the prompt unchanged when no scope is detected.
+fn augment_with_module_file_checklist(state: &AppState, prompt: String) -> String {
+    let scope = crate::swarm::enumerate_scope_files(state.workspace_root.as_path(), &prompt);
+    if scope.is_empty() {
+        return prompt;
+    }
+    let mut out = prompt;
+    out.push_str("\n\n## FILE CHECKLIST (non-negotiable)\n");
+    out.push_str("\"Refactor module\" = refactor EVERY file below. No exceptions, no skipping.\n");
+    out.push_str(
+        "Process this checklist in order. Open each file, read it, refactor it, then move to the next.\n",
+    );
+    out.push_str("Even if a file looks clean, improve naming, docs, structure, or consistency.\n");
+    out.push_str(
+        "Do NOT add inline test modules (`#[cfg(test)] mod tests { ... }`) inside source files. Tests must live in a dedicated tests directory or test file.\n",
+    );
+    out.push_str(
+        "COMMENTS: Trim doc comments that restate the type/function name, \
+         echo visible type signatures, or describe obvious behavior (e.g. \
+         \"/// Returns the value\" on fn value()). Keep comments that explain \
+         WHY something is done, document non-obvious constraints, safety \
+         invariants, or algorithmic choices. A comment worth keeping tells \
+         the reader something the code alone cannot.\n",
+    );
+    out.push_str("Your task is NOT complete until every file has been modified.\n\n");
+    for (i, path) in scope.iter().enumerate() {
+        out.push_str(&format!("{}. {path}\n", i + 1));
+    }
+    out.push_str("\nAfter finishing, list every file and what you changed in each.\n");
+    out
+}
 
 pub(super) fn chat_history_remember(state: &mut AppState, raw: &str) {
     super::chat_history_reset_nav(state);
@@ -904,10 +889,6 @@ pub(super) fn chat_history_remember(state: &mut AppState, raw: &str) {
     }
 }
 
-// ---------------------------------------------------------------------------
-// chat_input_byte_index
-// ---------------------------------------------------------------------------
-
 pub(super) fn chat_input_byte_index(input: &str, char_idx: usize) -> usize {
     if char_idx == 0 {
         return 0;
@@ -918,10 +899,6 @@ pub(super) fn chat_input_byte_index(input: &str, char_idx: usize) -> usize {
         .map(|(idx, _)| idx)
         .unwrap_or(input.len())
 }
-
-// ---------------------------------------------------------------------------
-// broadcast_target_agents
-// ---------------------------------------------------------------------------
 
 pub(super) fn broadcast_target_agents(state: &AppState, mission_id: Option<&str>) -> Vec<String> {
     if let Some(mission_id) = mission_id {
@@ -962,10 +939,6 @@ pub(super) fn broadcast_target_agents(state: &AppState, mission_id: Option<&str>
         .collect()
 }
 
-// ---------------------------------------------------------------------------
-// parse_chat_input_channel
-// ---------------------------------------------------------------------------
-
 pub(super) fn parse_chat_input_channel(raw: &str) -> (AgentChannel, String) {
     if let Some(after) = raw.strip_prefix("@all") {
         if after.is_empty() || after.starts_with(char::is_whitespace) {
@@ -974,10 +947,6 @@ pub(super) fn parse_chat_input_channel(raw: &str) -> (AgentChannel, String) {
     }
     (AgentChannel::Agent, raw.to_string())
 }
-
-// ---------------------------------------------------------------------------
-// push_chat_message
-// ---------------------------------------------------------------------------
 
 pub(super) fn push_chat_message(state: &mut AppState) -> Option<(AgentChannel, String)> {
     let raw = state.agents.chat_input.clone();
@@ -1028,10 +997,6 @@ pub(super) fn push_chat_message(state: &mut AppState) -> Option<(AgentChannel, S
     Some((channel, text))
 }
 
-// ---------------------------------------------------------------------------
-// slice_by_char
-// ---------------------------------------------------------------------------
-
 pub(super) fn slice_by_char(input: &str, start: usize, end: usize) -> String {
     if start >= end {
         return String::new();
@@ -1051,10 +1016,6 @@ pub(super) fn slice_by_char(input: &str, start: usize, end: usize) -> String {
     let end_byte = end_byte.unwrap_or(input.len());
     input[start_byte..end_byte].to_string()
 }
-
-// ---------------------------------------------------------------------------
-// Private helpers (only used by functions in this module)
-// ---------------------------------------------------------------------------
 
 fn detect_swarm_template_from_prompt(raw: &str) -> Option<String> {
     for line in raw.lines() {

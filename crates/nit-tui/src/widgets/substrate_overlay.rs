@@ -49,7 +49,10 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, state: &mut AppState, theme: &T
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(theme.border_focused))
         .style(Style::default().bg(theme.background).fg(theme.foreground))
-        .title(Line::from(build_title_spans(state.substrate_overlay_tab, theme)));
+        .title(Line::from(build_title_spans(
+            state.substrate_overlay_tab,
+            theme,
+        )));
     let inner = block.inner(area);
     frame.render_widget(block, area);
 

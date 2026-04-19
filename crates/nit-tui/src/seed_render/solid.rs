@@ -4,24 +4,29 @@ use ratatui::style::{Color, Style};
 
 use nit_core::EncodedSeed;
 
+use super::cache_compute::SeedRenderCache;
 use super::paint::{bg_style, halo_bg_at};
 use super::palette::SeedPalette;
-use super::renderer::{SeedRenderCache, SeedRenderConfig, live_color};
+use super::renderer::{live_color, SeedRenderConfig, SeedRenderer};
 
-pub fn render(
-    area: Rect,
-    buf: &mut Buffer,
-    seed: &EncodedSeed,
-    cfg: &SeedRenderConfig,
-    cache: &SeedRenderCache,
-    palette: &SeedPalette,
-) {
-    render_cell_grid(area, buf, seed, cfg, cache, palette);
+pub(super) struct SolidSeedRenderer;
+
+impl SeedRenderer for SolidSeedRenderer {
+    fn render(
+        &self,
+        area: Rect,
+        buf: &mut Buffer,
+        seed: &EncodedSeed,
+        cfg: &SeedRenderConfig,
+        cache: &SeedRenderCache,
+        palette: &SeedPalette,
+    ) {
+        render_cell_grid(area, buf, seed, cfg, cache, palette);
+    }
 }
 
-// Shared cell-grid renderer used by Solid and Tissue preview modes. Tissue dispatches a
-// per-component palette through `live_color` when `cfg.show_components` is set, so this
-// function handles both modes with identical pixel geometry.
+// Tissue mode shares the pixel geometry of Solid but dispatches a per-component palette
+// via `live_color`, so the core loop is factored out here and reused from `tissue.rs`.
 pub(super) fn render_cell_grid(
     area: Rect,
     buf: &mut Buffer,

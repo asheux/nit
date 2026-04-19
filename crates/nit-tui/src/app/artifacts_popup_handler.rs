@@ -614,14 +614,13 @@ pub(super) fn handle_artifacts_popup_chat_key(
     }
 }
 
-/// Compute `(max_scroll, content_height)` for the artifacts popup by actually
-/// rebuilding the rendered markdown via `build_lines`. This is expensive, so
-/// the hot scroll paths (wheel / keyboard) prefer the cached
-/// `state.agents.artifacts_popup_last_max_scroll` updated on each render and
-/// only fall back to this function when the cache is still `usize::MAX`
-/// (i.e. before the first render after the popup opened — guarantees that
-/// forward-at-max clamping works on the very first scroll event, so reverse
-/// scroll is never blocked by an inflated over-scrolled state).
+// Rebuild the rendered markdown via `build_lines` to recover
+// `(max_scroll, content_height)`. Expensive — the hot scroll paths (wheel /
+// keyboard) prefer the cached `state.agents.artifacts_popup_last_max_scroll`
+// updated on each render and only fall back here when the cache is still
+// `usize::MAX` (i.e. before the first render after the popup opened), which
+// guarantees that forward-at-max clamping works on the very first scroll
+// event so reverse scroll is never blocked by an inflated scroll offset.
 pub(super) fn artifacts_popup_scroll_metrics(
     state: &AppState,
     swarm: &SwarmRuntime,
@@ -641,9 +640,8 @@ pub(super) fn artifacts_popup_scroll_metrics(
 pub(super) fn close_artifacts_popup(state: &mut AppState) {
     state.agents.artifacts_popup_open = false;
     state.agents.artifacts_popup_scroll = 0;
-    // Reset the cached max_scroll so the next popup open starts with a clean
-    // slate — the sentinel triggers the fallback-compute path on the first
-    // scroll event if no render has happened yet.
+    // Sentinel triggers the fallback-compute path on the first scroll event if
+    // no render has happened yet.
     state.agents.artifacts_popup_last_max_scroll = usize::MAX;
     state.agents.global_archive_opened_entry = None;
     state.agents.artifacts_popup_chat_input.clear();
@@ -657,9 +655,10 @@ pub(super) fn close_artifacts_popup(state: &mut AppState) {
     }
 }
 
-/// Temporarily swap the artifacts popup chat fields into the main `chat_input` fields
-/// so that shared helper functions (`handle_chat_input_editing_key`,
-/// `submit_chat_input_and_dispatch`, etc.) operate on the popup's own state.
+// Swap the popup chat fields into the main `chat_input` fields so that shared
+// helpers (`handle_chat_input_editing_key`, `submit_chat_input_and_dispatch`,
+// etc.) operate on the popup's own state. Swap is symmetric — call again to
+// restore the main-pane values.
 pub(super) fn swap_in_artifacts_popup_chat(state: &mut AppState) {
     std::mem::swap(
         &mut state.agents.chat_input,
@@ -679,10 +678,7 @@ pub(super) fn swap_in_artifacts_popup_chat(state: &mut AppState) {
     );
 }
 
-/// Swap the popup chat fields back out of the main `chat_input` fields.
-/// Must be called after every `swap_in_artifacts_popup_chat`.
 pub(super) fn swap_out_artifacts_popup_chat(state: &mut AppState) {
-    // Same operation — swap is symmetric.
     swap_in_artifacts_popup_chat(state);
 }
 

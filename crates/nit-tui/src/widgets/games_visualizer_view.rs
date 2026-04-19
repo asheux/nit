@@ -772,9 +772,7 @@ fn wrap_visual_line(text: &str, width: usize) -> Vec<String> {
                 );
             }
             '\t' => {
-                let tab_width = (TAB_STOP - (current_width % TAB_STOP))
-                    .max(1)
-                    .min(width);
+                let tab_width = (TAB_STOP - (current_width % TAB_STOP)).max(1).min(width);
                 for _ in 0..tab_width {
                     push_char(
                         &mut lines,
@@ -858,7 +856,13 @@ fn render_last_run_table(
     let mut score_w = score_header.len();
     let mut total_w = total_header.len();
 
-    for (idx, entry) in run.results.ranking.iter().take(LAST_RUN_TABLE_ROWS).enumerate() {
+    for (idx, entry) in run
+        .results
+        .ranking
+        .iter()
+        .take(LAST_RUN_TABLE_ROWS)
+        .enumerate()
+    {
         rank_w = rank_w.max((idx + 1).to_string().len());
         id_w = id_w.max(entry.id.len());
         score_w = score_w.max(
@@ -912,7 +916,13 @@ fn render_last_run_table(
     ]));
     lines.push(Line::from(Span::styled(sep.clone(), dim_style)));
 
-    for (idx, entry) in run.results.ranking.iter().take(LAST_RUN_TABLE_ROWS).enumerate() {
+    for (idx, entry) in run
+        .results
+        .ranking
+        .iter()
+        .take(LAST_RUN_TABLE_ROWS)
+        .enumerate()
+    {
         let rank = (idx + 1).to_string();
         let id = truncate_text(&entry.id, id_w);
         let score = entry.formatted_score(

@@ -141,7 +141,9 @@ fn format_tree_item_label(
         (true, false) => "/",
         _ => "",
     };
-    let mut text = String::with_capacity(depth * INDENT_PER_LEVEL.len() + arrow.len() + name.len() + suffix.len());
+    let mut text = String::with_capacity(
+        depth * INDENT_PER_LEVEL.len() + arrow.len() + name.len() + suffix.len(),
+    );
     for _ in 0..depth {
         text.push_str(INDENT_PER_LEVEL);
     }

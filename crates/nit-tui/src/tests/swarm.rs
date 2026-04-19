@@ -2,6 +2,16 @@ use super::*;
 use nit_core::{AgentLane, AgentLaneKind, Buffer};
 use std::path::PathBuf;
 
+/// Build an empty `AppState` rooted at the crate's manifest dir with the two
+/// default buffers the app expects. Tests that only need a fresh state to
+/// seed lanes/missions/tasks call this instead of repeating the boilerplate.
+fn new_state() -> AppState {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let editor = Buffer::empty("editor", None);
+    let notes = Buffer::empty("notes", None);
+    AppState::new(root, editor, notes)
+}
+
 #[test]
 fn parse_swarm_requires_whitespace_after_prefix() {
     assert!(parse_swarm_command("@swarmies hello").is_none());
@@ -103,10 +113,7 @@ fn make_lane(id: &str, role: &str) -> AgentLane {
 
 #[test]
 fn swarm_clones_do_not_count_towards_swarm_size() {
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let editor = Buffer::empty("editor", None);
-    let notes = Buffer::empty("notes", None);
-    let mut state = AppState::new(root, editor, notes);
+    let mut state = new_state();
     state.agents.messages.clear();
     state.agents.agents.clear();
 
@@ -147,10 +154,7 @@ fn swarm_clones_do_not_count_towards_swarm_size() {
 
 #[test]
 fn role_all_is_no_constraint_and_does_not_spawn_extra_agents() {
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let editor = Buffer::empty("editor", None);
-    let notes = Buffer::empty("notes", None);
-    let mut state = AppState::new(root, editor, notes);
+    let mut state = new_state();
     state.agents.messages.clear();
     state.agents.missions.clear();
     state.agents.agents.clear();
@@ -187,10 +191,7 @@ fn role_all_is_no_constraint_and_does_not_spawn_extra_agents() {
 
 #[test]
 fn parallel_without_priorities_returns_planner_only() {
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let editor = Buffer::empty("editor", None);
-    let notes = Buffer::empty("notes", None);
-    let mut state = AppState::new(root, editor, notes);
+    let mut state = new_state();
     state.agents.agents.clear();
 
     state.agents.agents.push(make_lane("planner", "planner"));
@@ -204,10 +205,7 @@ fn parallel_without_priorities_returns_planner_only() {
 
 #[test]
 fn parallel_without_priorities_clones_planner_to_swarm_size() {
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let editor = Buffer::empty("editor", None);
-    let notes = Buffer::empty("notes", None);
-    let mut state = AppState::new(root, editor, notes);
+    let mut state = new_state();
     state.agents.messages.clear();
     state.agents.missions.clear();
     state.agents.agents.clear();
@@ -247,10 +245,7 @@ fn parallel_without_priorities_clones_planner_to_swarm_size() {
 
 #[test]
 fn completed_swarm_cleans_up_mission_clone_lanes_from_roster() {
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let editor = Buffer::empty("editor", None);
-    let notes = Buffer::empty("notes", None);
-    let mut state = AppState::new(root, editor, notes);
+    let mut state = new_state();
     state.agents.messages.clear();
     state.agents.missions.clear();
     state.agents.agents.clear();
@@ -387,10 +382,7 @@ fn completed_swarm_cleans_up_mission_clone_lanes_from_roster() {
 
 #[test]
 fn parallel_priority_selection_clones_from_planner() {
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let editor = Buffer::empty("editor", None);
-    let notes = Buffer::empty("notes", None);
-    let mut state = AppState::new(root, editor, notes);
+    let mut state = new_state();
     state.agents.messages.clear();
     state.agents.missions.clear();
     state.agents.agents.clear();
@@ -431,10 +423,7 @@ fn parallel_priority_selection_clones_from_planner() {
 
 #[test]
 fn parallel_priority_agents_ranked_before_non_priority() {
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let editor = Buffer::empty("editor", None);
-    let notes = Buffer::empty("notes", None);
-    let mut state = AppState::new(root, editor, notes);
+    let mut state = new_state();
     state.agents.messages.clear();
     state.agents.agents.clear();
 
@@ -454,10 +443,7 @@ fn parallel_priority_agents_ranked_before_non_priority() {
 
 #[test]
 fn parallel_priority_ties_keep_priority_order() {
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let editor = Buffer::empty("editor", None);
-    let notes = Buffer::empty("notes", None);
-    let mut state = AppState::new(root, editor, notes);
+    let mut state = new_state();
     state.agents.agents.clear();
 
     for id in ["planner", "a", "b", "c"] {
@@ -477,10 +463,7 @@ fn parallel_priority_ties_keep_priority_order() {
 
 #[test]
 fn parallel_priority_overrides_role_hints() {
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let editor = Buffer::empty("editor", None);
-    let notes = Buffer::empty("notes", None);
-    let mut state = AppState::new(root, editor, notes);
+    let mut state = new_state();
     state.agents.agents.clear();
 
     state.agents.agents.push(make_lane("planner", "planner"));
@@ -500,10 +483,7 @@ fn parallel_priority_overrides_role_hints() {
 
 #[test]
 fn parallel_tracks_single_integrator_hint_without_cloning_it() {
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let editor = Buffer::empty("editor", None);
-    let notes = Buffer::empty("notes", None);
-    let mut state = AppState::new(root, editor, notes);
+    let mut state = new_state();
     state.agents.messages.clear();
     state.agents.missions.clear();
     state.agents.agents.clear();
@@ -537,10 +517,7 @@ fn parallel_tracks_single_integrator_hint_without_cloning_it() {
 
 #[test]
 fn bulk_integrator_prefers_priority_agents() {
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let editor = Buffer::empty("editor", None);
-    let notes = Buffer::empty("notes", None);
-    let mut state = AppState::new(root, editor, notes);
+    let mut state = new_state();
     state.agents.messages.clear();
     state.agents.missions.clear();
     state.agents.agents.clear();
@@ -575,10 +552,7 @@ fn bulk_integrator_prefers_priority_agents() {
 
 #[test]
 fn bulk_priority_respects_role_hints() {
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let editor = Buffer::empty("editor", None);
-    let notes = Buffer::empty("notes", None);
-    let mut state = AppState::new(root, editor, notes);
+    let mut state = new_state();
     state.agents.agents.clear();
 
     state.agents.agents.push(make_lane("planner", "planner"));
@@ -614,10 +588,7 @@ fn bulk_priority_respects_role_hints() {
 
 #[test]
 fn bulk_priority_agents_ranked_before_non_priority() {
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let editor = Buffer::empty("editor", None);
-    let notes = Buffer::empty("notes", None);
-    let mut state = AppState::new(root, editor, notes);
+    let mut state = new_state();
     state.agents.agents.clear();
 
     state.agents.agents.push(make_lane("planner", "planner"));
@@ -1589,10 +1560,7 @@ fn deadlock_detection_skips_pending_tasks() {
 
 #[test]
 fn strict_dag_validation_aborts_before_execute() {
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let editor = Buffer::empty("editor", None);
-    let notes = Buffer::empty("notes", None);
-    let mut state = AppState::new(root, editor, notes);
+    let mut state = new_state();
     state.agents.messages.clear();
     state.agents.missions.clear();
     state.agents.agents.clear();
@@ -1694,10 +1662,7 @@ Plan:
 
 #[test]
 fn strict_dag_abort_cleans_up_mission_clone_lanes_from_roster() {
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let editor = Buffer::empty("editor", None);
-    let notes = Buffer::empty("notes", None);
-    let mut state = AppState::new(root, editor, notes);
+    let mut state = new_state();
     state.agents.messages.clear();
     state.agents.missions.clear();
     state.agents.agents.clear();
@@ -1978,10 +1943,7 @@ fn is_chat_clone_agent_id_detection() {
 
 #[test]
 fn create_chat_clone_basic() {
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let editor = Buffer::empty("editor", None);
-    let notes = Buffer::empty("notes", None);
-    let mut state = AppState::new(root, editor, notes);
+    let mut state = new_state();
     state.agents.messages.clear();
     state.agents.agents.clear();
 
@@ -2018,10 +1980,7 @@ fn create_chat_clone_basic() {
 
 #[test]
 fn create_chat_clone_sequential_numbering() {
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let editor = Buffer::empty("editor", None);
-    let notes = Buffer::empty("notes", None);
-    let mut state = AppState::new(root, editor, notes);
+    let mut state = new_state();
     state.agents.messages.clear();
     state.agents.agents.clear();
 
@@ -2036,10 +1995,7 @@ fn create_chat_clone_sequential_numbering() {
 
 #[test]
 fn create_chat_clone_from_clone_resolves_base() {
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let editor = Buffer::empty("editor", None);
-    let notes = Buffer::empty("notes", None);
-    let mut state = AppState::new(root, editor, notes);
+    let mut state = new_state();
     state.agents.messages.clear();
     state.agents.agents.clear();
 
@@ -2053,10 +2009,7 @@ fn create_chat_clone_from_clone_resolves_base() {
 
 #[test]
 fn chat_clones_excluded_from_select_swarm_agents() {
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let editor = Buffer::empty("editor", None);
-    let notes = Buffer::empty("notes", None);
-    let mut state = AppState::new(root, editor, notes);
+    let mut state = new_state();
     state.agents.messages.clear();
     state.agents.agents.clear();
 
@@ -2707,10 +2660,7 @@ fn ensure_agent_coverage_avoids_id_collision_with_existing_tasks() {
 /// Build a fresh AppState with the given lanes and role hints already set up.
 /// Used by the clone-coverage tests below.
 fn make_coverage_state(lanes: &[(&str, &str)], role_hints: &[(&str, &str)]) -> AppState {
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let editor = Buffer::empty("editor", None);
-    let notes = Buffer::empty("notes", None);
-    let mut state = AppState::new(root, editor, notes);
+    let mut state = new_state();
     state.agents.messages.clear();
     state.agents.missions.clear();
     state.agents.agents.clear();

@@ -59,9 +59,9 @@ pub fn build_lines(state: &AppState, theme: &Theme, width: u16) -> Vec<Line<'sta
     }
 
     lines.extend(
-        sorted
-            .into_iter()
-            .map(|(assumption, remaining)| row_line(assumption, remaining, current_gen, width, theme)),
+        sorted.into_iter().map(|(assumption, remaining)| {
+            row_line(assumption, remaining, current_gen, width, theme)
+        }),
     );
     lines
 }
@@ -95,8 +95,8 @@ fn header_line(summary: &str, theme: &Theme) -> Line<'static> {
     ))
 }
 
-// Width-adaptive: drop ID below 90; drop RATIONALE below 70; drop AGE below 50.
-// Rationale is the widest diagnostic column so it goes first when space tightens.
+// Width-adaptive: drop ID < 90, RATIONALE < 70, AGE < 50. Rationale is the
+// widest diagnostic column so it goes first when space tightens.
 fn format_row(
     ttl: &str,
     by: &str,
@@ -140,8 +140,8 @@ fn format_target(t: &AssumptionTarget) -> String {
     }
 }
 
-// Assumptions have no kind axis, so we encode closeness-to-expiry with a single
-// accent color whose intensity tracks remaining TTL.
+// Single accent color whose intensity tracks remaining TTL (assumptions have
+// no kind axis to distinguish, unlike claims).
 fn style_for(remaining: u64, theme: &Theme) -> Style {
     let style = Style::default().fg(theme.accent);
     if remaining >= 2 {

@@ -10,28 +10,29 @@ pub struct MainLayout {
     pub gate: Rect,
 }
 
-// Column widths sum to 100 and editor gets the widest slice because that's
-// where the user types; visualiser (right) gets more vertical space than the
-// gate monitor below it for the same reason.
+// Column percentages sum to 100. The editor gets the widest slice because that
+// is where the user types; on the right, the visualiser gets more vertical
+// space than the gate monitor for the same reason.
 const COL_LEFT_PCT: u16 = 25;
 const COL_EDITOR_PCT: u16 = 40;
 const COL_RIGHT_PCT: u16 = 35;
 const RIGHT_VISUALIZER_PCT: u16 = 55;
 const RIGHT_GATE_PCT: u16 = 45;
 
+const TOP_BAR_ROWS: u16 = 3;
+const BOTTOM_BAR_ROWS: u16 = 2;
+const CENTER_MIN_ROWS: u16 = 5;
+
 pub fn split(frame: Rect) -> MainLayout {
-    let vertical = Layout::default()
+    let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3),
-            Constraint::Min(5),
-            Constraint::Length(2),
+            Constraint::Length(TOP_BAR_ROWS),
+            Constraint::Min(CENTER_MIN_ROWS),
+            Constraint::Length(BOTTOM_BAR_ROWS),
         ])
         .split(frame);
-
-    let top = vertical[0];
-    let center = vertical[1];
-    let bottom = vertical[2];
+    let [top, center, bottom] = [rows[0], rows[1], rows[2]];
 
     let columns = Layout::default()
         .direction(Direction::Horizontal)

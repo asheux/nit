@@ -59,7 +59,11 @@ fn build_block(focused: bool, theme: &Theme) -> Block<'static> {
 }
 
 fn build_gauge<'a>(state: &AppState, theme: &'a Theme) -> Gauge<'a> {
-    let label = if state.job.paused { "PAUSED" } else { "RUNNING" };
+    let label = if state.job.paused {
+        "PAUSED"
+    } else {
+        "RUNNING"
+    };
     Gauge::default()
         .block(Block::default().style(Style::default().bg(theme.background)))
         .gauge_style(
@@ -69,10 +73,7 @@ fn build_gauge<'a>(state: &AppState, theme: &'a Theme) -> Gauge<'a> {
                 .add_modifier(Modifier::BOLD),
         )
         .ratio(state.job.progress as f64)
-        .label(Span::styled(
-            label,
-            Style::default().fg(theme.foreground),
-        ))
+        .label(Span::styled(label, Style::default().fg(theme.foreground)))
 }
 
 fn render_logs(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {

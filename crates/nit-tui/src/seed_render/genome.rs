@@ -5,9 +5,9 @@ use ratatui::style::{Color, Modifier, Style};
 use nit_core::seed::SeedBits;
 use nit_core::{EncodedSeed, SeedEncoderId, SeedSymmetry};
 
+use super::cache_compute::SeedRenderCache;
 use super::paint::{bg_style, draw_inset_label, mark_blank_glyph, write_glyph};
 use super::palette::SeedPalette;
-use super::renderer::SeedRenderCache;
 
 const INSET_SIZE: u16 = 16;
 const VALUE_TIER_HIGH: u16 = 200;
@@ -188,7 +188,13 @@ fn render_bitgrid_bits(area: Rect, buf: &mut Buffer, bits: &SeedBits, on: Color,
         for x in 0..out_w {
             let sx = x.saturating_mul(src_w) / out_w;
             let fill = if bits.get(sx, sy) { on } else { off };
-            write_glyph(buf, area.x + x as u16, area.y + y as u16, ' ', bg_style(fill));
+            write_glyph(
+                buf,
+                area.x + x as u16,
+                area.y + y as u16,
+                ' ',
+                bg_style(fill),
+            );
         }
     }
 }

@@ -414,15 +414,12 @@ impl SyntaxRuntime {
     pub fn render_snapshot_for(&mut self, buffer_id: usize, buffer: &Buffer) -> RenderSnapshot<'_> {
         let buffer_version = buffer.version();
         let current_lines = buffer.lines_len();
-        let snapshot_version = match self.snapshots.get(&buffer_id) {
-            Some(snapshot) => snapshot.version,
-            None => {
-                self.render_cache.remove(&buffer_id);
-                return RenderSnapshot {
-                    snapshot: None,
-                    line_map: None,
-                };
-            }
+        let Some(snapshot_version) = self.snapshots.get(&buffer_id).map(|s| s.version) else {
+            self.render_cache.remove(&buffer_id);
+            return RenderSnapshot {
+                snapshot: None,
+                line_map: None,
+            };
         };
         if snapshot_version == buffer_version {
             self.render_cache.remove(&buffer_id);
@@ -450,83 +447,28 @@ impl SyntaxRuntime {
                 line_map: None,
             };
         }
-        let cache_hit = self
-            .render_cache
-            .get(&buffer_id)
-            .map(|cache| {
-                cache.buffer_version == buffer_version && cache.snapshot_version == snapshot_version
-            })
-            .unwrap_or(false);
+
+        let cache_hit = self.render_cache.get(&buffer_id).is_some_and(|cache| {
+            cache.buffer_version == buffer_version && cache.snapshot_version == snapshot_version
+        });
         if !cache_hit {
-            let line_map = if self
-                .full_reparse_pending
-                .get(&buffer_id)
-                .copied()
-                .unwrap_or(false)
-            {
-                let current_hashes = self.line_hashes_for(buffer_id, buffer);
-                let line_map = {
-                    let snapshot = self.snapshots.get(&buffer_id).expect("snapshot");
-                    build_line_map_by_hash(&snapshot.line_hashes, current_hashes.as_ref())
-                };
-                Some(line_map)
-            } else {
-                let edits = self
-                    .edits_since_snapshot
-                    .get(&buffer_id)
-                    .map(|edits| {
-                        edits
-                            .iter()
-                            .filter(|e| e.version > snapshot_version)
-                            .map(|e| e.edit.clone())
-                            .collect::<Vec<_>>()
-                    })
-                    .unwrap_or_default();
-                if edits.is_empty() {
-                    let current_hashes = self.line_hashes_for(buffer_id, buffer);
-                    if current_hashes.is_empty() {
-                        None
-                    } else {
-                        let line_map = {
-                            let snapshot = self.snapshots.get(&buffer_id).expect("snapshot");
-                            build_line_map_by_hash(&snapshot.line_hashes, current_hashes.as_ref())
-                        };
-                        Some(line_map)
-                    }
-                } else {
-                    let old_lines = self
-                        .snapshots
-                        .get(&buffer_id)
-                        .map(|snap| snap.per_line.len())
-                        .unwrap_or(0);
-                    let line_map = build_line_map(old_lines, &edits);
-                    let mut current_to_snapshot = vec![None; current_lines];
-                    for (old_idx, new_idx) in line_map.into_iter().enumerate() {
-                        if let Some(new_idx) = new_idx {
-                            if new_idx < current_to_snapshot.len() {
-                                current_to_snapshot[new_idx] = Some(old_idx);
-                            }
-                        }
-                    }
-                    Some(current_to_snapshot)
-                }
-            };
-            if let Some(line_map) = line_map {
-                self.render_cache.insert(
-                    buffer_id,
-                    RenderCache {
-                        buffer_version,
-                        snapshot_version,
-                        line_map: Some(line_map),
-                    },
-                );
-            } else {
+            let Some(line_map) =
+                self.compute_line_map(buffer_id, buffer, snapshot_version, current_lines)
+            else {
                 self.render_cache.remove(&buffer_id);
                 return RenderSnapshot {
                     snapshot: self.snapshots.get(&buffer_id),
                     line_map: None,
                 };
-            }
+            };
+            self.render_cache.insert(
+                buffer_id,
+                RenderCache {
+                    buffer_version,
+                    snapshot_version,
+                    line_map: Some(line_map),
+                },
+            );
         }
         let snapshot = self.snapshots.get(&buffer_id);
         let line_map = self
@@ -534,6 +476,67 @@ impl SyntaxRuntime {
             .get(&buffer_id)
             .and_then(|cache| cache.line_map.as_deref());
         RenderSnapshot { snapshot, line_map }
+    }
+
+    fn compute_line_map(
+        &mut self,
+        buffer_id: usize,
+        buffer: &Buffer,
+        snapshot_version: u64,
+        current_lines: usize,
+    ) -> Option<Vec<Option<usize>>> {
+        let full_reparse = self
+            .full_reparse_pending
+            .get(&buffer_id)
+            .copied()
+            .unwrap_or(false);
+        if full_reparse {
+            return Some(self.line_map_by_hash(buffer_id, buffer));
+        }
+        let edits: Vec<BufferEdit> = self
+            .edits_since_snapshot
+            .get(&buffer_id)
+            .map(|edits| {
+                edits
+                    .iter()
+                    .filter(|e| e.version > snapshot_version)
+                    .map(|e| e.edit.clone())
+                    .collect()
+            })
+            .unwrap_or_default();
+        if edits.is_empty() {
+            let current_hashes = self.line_hashes_for(buffer_id, buffer);
+            if current_hashes.is_empty() {
+                return None;
+            }
+            let snapshot = self.snapshots.get(&buffer_id).expect("snapshot");
+            return Some(build_line_map_by_hash(
+                &snapshot.line_hashes,
+                current_hashes.as_ref(),
+            ));
+        }
+        let old_lines = self
+            .snapshots
+            .get(&buffer_id)
+            .map(|snap| snap.per_line.len())
+            .unwrap_or(0);
+        let line_map = build_line_map(old_lines, &edits);
+        let mut current_to_snapshot = vec![None; current_lines];
+        for (old_idx, new_idx) in line_map.into_iter().enumerate() {
+            let Some(new_idx) = new_idx else {
+                continue;
+            };
+            if new_idx < current_to_snapshot.len() {
+                current_to_snapshot[new_idx] = Some(old_idx);
+            }
+        }
+        Some(current_to_snapshot)
+    }
+
+    fn line_map_by_hash(&mut self, buffer_id: usize, buffer: &Buffer) -> Vec<Option<usize>> {
+        let current_hashes = self.line_hashes_for(buffer_id, buffer);
+        let snapshot = self.snapshots.get(&buffer_id).expect("snapshot");
+        build_line_map_by_hash(&snapshot.line_hashes, current_hashes.as_ref())
     }
 
     pub fn status_label_for(&self, buffer_id: usize, buffer_version: u64) -> String {

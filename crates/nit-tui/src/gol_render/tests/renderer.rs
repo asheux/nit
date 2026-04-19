@@ -1,4 +1,6 @@
-use super::{cell_bg_halves, gridline_flags, GolRenderConfig, RenderGeometry, RenderMode};
+use crate::gol_render::geometry::{RenderGeometry, RenderMode};
+use crate::gol_render::overlay::{cell_bg_halves, gridline_flags};
+use crate::gol_render::state::GolRenderConfig;
 use crate::gol_render::GolPalette;
 use nit_core::GolRenderMode;
 use ratatui::layout::Rect;

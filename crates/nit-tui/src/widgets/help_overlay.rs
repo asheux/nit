@@ -117,10 +117,7 @@ pub fn build_lines(theme: &Theme) -> Vec<Line<'static>> {
                     ":gol seed | :gol encoder",
                     " cycle seed view/encoder (aliases: :seed view|encoder)",
                 ),
-                (
-                    ":games run|hide|show|stop|status|export",
-                    " games controls",
-                ),
+                (":games run|hide|show|stop|status|export", " games controls"),
                 (
                     ":games run [force] <fsm|ca|tm> {…} [tm_steps]",
                     " run family tournament; use force to bypass speed caps",
@@ -195,10 +192,7 @@ pub fn build_lines(theme: &Theme) -> Vec<Line<'static>> {
                 ("Ctrl/Cmd+A", " select all (also Scratchpad)"),
                 ("Ctrl/Cmd+C", " copy selection (also Scratchpad)"),
                 ("Ctrl/Cmd+X", " cut selection (also Scratchpad)"),
-                (
-                    "Ctrl/Cmd+V",
-                    " paste (replaces selection; also Scratchpad)",
-                ),
+                ("Ctrl/Cmd+V", " paste (replaces selection; also Scratchpad)"),
                 ("Ctrl/Alt+←/→", " move by word (also Scratchpad)"),
                 (
                     "Ctrl/Alt+Backspace/Delete",
@@ -273,10 +267,7 @@ pub fn build_lines(theme: &Theme) -> Vec<Line<'static>> {
                 ("Ctrl+G", " toggle seed search"),
                 ("Ctrl+N", " snapshot seed"),
                 ("Ctrl+Shift+V", " cycle seed overlays"),
-                (
-                    "Arrows / HJKL",
-                    " move genome inspector (Visualizer focus)",
-                ),
+                ("Arrows / HJKL", " move genome inspector (Visualizer focus)"),
                 ("Home / End", " inspector jump to edges"),
                 ("0 / $", " inspector jump to edges (fallback)"),
                 ("G + digits + Enter", " jump to genome index"),
@@ -332,7 +323,11 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
     let viewport_rows = content_area.height as usize;
     let max_offset = all_lines.len().saturating_sub(viewport_rows);
     let offset = state.help_scroll.min(max_offset);
-    let window: Vec<_> = all_lines.into_iter().skip(offset).take(viewport_rows).collect();
+    let window: Vec<_> = all_lines
+        .into_iter()
+        .skip(offset)
+        .take(viewport_rows)
+        .collect();
     let with_selection = apply_ui_selection(
         window,
         state.ui_selection.as_ref(),
@@ -343,5 +338,8 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
 
     frame.render_widget(Clear, area);
     frame.render_widget(outer_frame, area);
-    frame.render_widget(Paragraph::new(with_selection).style(panel_style), content_area);
+    frame.render_widget(
+        Paragraph::new(with_selection).style(panel_style),
+        content_area,
+    );
 }

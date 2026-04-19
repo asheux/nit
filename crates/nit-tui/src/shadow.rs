@@ -254,23 +254,19 @@ impl ShadowRuntime {
             run.outputs.insert(role.clone(), message.to_string());
         }
 
+        let output =
+            |role: &str| -> &str { run.outputs.get(role).map(String::as_str).unwrap_or("") };
         match run.stage {
             ShadowStage::Proposing => {
                 if run.outputs.contains_key("propose-a") && run.outputs.contains_key("propose-b") {
-                    run.stage = ShadowStage::Judging;
-                    let judge_id = run.lanes["judge"].clone();
                     let prompt = build_judge_prompt(
                         &run.main_prompt,
-                        run.outputs
-                            .get("propose-a")
-                            .map(String::as_str)
-                            .unwrap_or(""),
-                        run.outputs
-                            .get("propose-b")
-                            .map(String::as_str)
-                            .unwrap_or(""),
+                        output("propose-a"),
+                        output("propose-b"),
                     );
+                    let judge_id = run.lanes["judge"].clone();
                     let mission_id = run.mission_id.clone();
+                    run.stage = ShadowStage::Judging;
                     return vec![ShadowDispatch {
                         agent_id: judge_id,
                         prompt,
@@ -281,13 +277,10 @@ impl ShadowRuntime {
             }
             ShadowStage::Judging => {
                 if run.outputs.contains_key("judge") {
-                    run.stage = ShadowStage::Reviewing;
+                    let prompt = build_review_prompt(&run.main_prompt, output("judge"));
                     let review_id = run.lanes["review"].clone();
-                    let prompt = build_review_prompt(
-                        &run.main_prompt,
-                        run.outputs.get("judge").map(String::as_str).unwrap_or(""),
-                    );
                     let mission_id = run.mission_id.clone();
+                    run.stage = ShadowStage::Reviewing;
                     return vec![ShadowDispatch {
                         agent_id: review_id,
                         prompt,
@@ -298,11 +291,11 @@ impl ShadowRuntime {
             }
             ShadowStage::Reviewing => {
                 if run.outputs.contains_key("review") {
-                    run.stage = ShadowStage::Finalizing;
-                    let main_id = run.main_agent_id.clone();
                     let prompt = build_final_prompt(run);
+                    let main_id = run.main_agent_id.clone();
                     let mission_id = run.mission_id.clone();
                     let prompt_msg_idx = run.prompt_msg_idx;
+                    run.stage = ShadowStage::Finalizing;
                     return vec![ShadowDispatch {
                         agent_id: main_id,
                         prompt,
@@ -539,11 +532,20 @@ fn shadow_readonly_clause() -> &'static str {
      re-investigating is budget lost from the main agent's actual work."
 }
 
+// Every shadow agent sees the same awareness + read-only clause block because
+// each shadow runs in its own isolated context and would not otherwise inherit
+// nit's genome rules or the advisory-only posture.
+fn shadow_preamble() -> String {
+    format!(
+        "{awareness}\n\n{readonly}\n\n",
+        awareness = nit_system_awareness(),
+        readonly = shadow_readonly_clause(),
+    )
+}
+
 fn build_propose_prompt(variant: &str, user_prompt: &str) -> String {
     format!(
-        "{awareness}\n\n\
-         {readonly}\n\n\
-         ## YOUR ROLE\n\
+        "{preamble}## YOUR ROLE\n\
          You are Shadow-Proposer-{variant}, a hidden support agent drafting \
          one candidate approach for the following user request. Work \
          independently; do NOT coordinate with other proposers. Be concrete \
@@ -553,16 +555,13 @@ fn build_propose_prompt(variant: &str, user_prompt: &str) -> String {
          2. Step-by-step plan, naming concrete file paths where possible.\n\
          3. Key tradeoffs or risks, including any tier/parsimony concerns.\n\n\
          User request:\n{user_prompt}",
-        awareness = nit_system_awareness(),
-        readonly = shadow_readonly_clause(),
+        preamble = shadow_preamble(),
     )
 }
 
 fn build_judge_prompt(user_prompt: &str, proposal_a: &str, proposal_b: &str) -> String {
     format!(
-        "{awareness}\n\n\
-         {readonly}\n\n\
-         ## YOUR ROLE\n\
+        "{preamble}## YOUR ROLE\n\
          You are Shadow-Judge, a hidden support agent. Two proposers drafted \
          independent approaches to the user's request. Compare them, pick \
          the stronger one (or synthesise a better hybrid), and produce a \
@@ -576,16 +575,13 @@ fn build_judge_prompt(user_prompt: &str, proposal_a: &str, proposal_b: &str) -> 
          User request:\n{user_prompt}\n\n\
          Proposal A:\n{proposal_a}\n\n\
          Proposal B:\n{proposal_b}",
-        awareness = nit_system_awareness(),
-        readonly = shadow_readonly_clause(),
+        preamble = shadow_preamble(),
     )
 }
 
 fn build_review_prompt(user_prompt: &str, judged_plan: &str) -> String {
     format!(
-        "{awareness}\n\n\
-         {readonly}\n\n\
-         ## YOUR ROLE\n\
+        "{preamble}## YOUR ROLE\n\
          You are Shadow-Reviewer, a hidden support agent. Stress-test the \
          judged plan below: look for missed edge cases, broken assumptions, \
          unstated dependencies, and concrete file paths the plan should \
@@ -598,8 +594,7 @@ fn build_review_prompt(user_prompt: &str, judged_plan: &str) -> String {
          parsimony reminders.\n\n\
          User request:\n{user_prompt}\n\n\
          Judged plan:\n{judged_plan}",
-        awareness = nit_system_awareness(),
-        readonly = shadow_readonly_clause(),
+        preamble = shadow_preamble(),
     )
 }
 
