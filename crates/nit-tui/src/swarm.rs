@@ -9117,6 +9117,45 @@ fn tag_last_agent_message_kind(state: &mut AppState, agent_id: &str, mission_id:
     }
 }
 
+/// Test helper: build a `SwarmRuntime` fixture with one Running task per
+/// `(agent_id, role)` pair *and* one Dispatched (dashboard label "Queued")
+/// task per entry in `queued`. Used by the breather regression test that
+/// reproduces a queued task poisoning the role-uniformity check.
+#[cfg(test)]
+pub(crate) fn test_runtime_with_running_and_queued_tasks(
+    mission_id: &str,
+    running: &[(&str, &str)],
+    queued: &[(&str, &str)],
+) -> SwarmRuntime {
+    let mut runtime = test_runtime_with_running_tasks(mission_id, running);
+    if let Some(run) = runtime.runs.get_mut(mission_id) {
+        let base = run.tasks.len();
+        for (idx, (agent_id, role)) in queued.iter().enumerate() {
+            run.tasks.push(SwarmTask {
+                id: format!("queued-{:02}", base + idx),
+                agent_id: agent_id.to_string(),
+                role: Some(role.to_string()),
+                title: format!("{role} task (queued)"),
+                task_prompt: String::new(),
+                deps: Vec::new(),
+                writes: false,
+                artifacts: Vec::new(),
+                done_when: None,
+                state: SwarmTaskState::Dispatched,
+                output: None,
+                parsed_artifacts: None,
+                expected_artifacts_missing: false,
+                failed: false,
+                retries: 0,
+            });
+            if !run.agent_ids.iter().any(|id| id == agent_id) {
+                run.agent_ids.push(agent_id.to_string());
+            }
+        }
+    }
+    runtime
+}
+
 /// Test helper: build a `SwarmRuntime` fixture with one running task per
 /// `(agent_id, role)` pair. Used by `agent_console_view` breather tests to
 /// exercise role-aware labels without going through the full planner flow.

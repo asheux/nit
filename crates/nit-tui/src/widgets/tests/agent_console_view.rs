@@ -1441,3 +1441,37 @@ fn swarm_exec_label_resolves_role_via_clones_own_mission_id() {
     let label = swarm_exec_label(&state, &[clone_a.clone()], Some(&runtime));
     assert_eq!(label, "Proposing ...");
 }
+
+#[test]
+fn swarm_exec_label_ignores_queued_tasks_for_active_agents() {
+    // Regression: a parallel swarm with two Running proposers and a third
+    // active clone whose ONLY matching task is "Queued" (Ready/Dispatched).
+    // The Queued task's role must not be added to the role list, otherwise
+    // the breather flips from "Proposing ..." to "Executing ..." (mixed
+    // roles). Reproduces the production scenario where clone-05's queued
+    // "test" task poisoned the uniformity check.
+    use crate::swarm::test_runtime_with_running_and_queued_tasks;
+    let clone_propose_a = "claude-opus-4-7#swarm-mis-001-clone-02".to_string();
+    let clone_propose_b = "claude-opus-4-7#swarm-mis-001-clone-04".to_string();
+    let clone_test = "claude-opus-4-7#swarm-mis-001-clone-05".to_string();
+    let state = state_with_active_clones(&[
+        clone_propose_a.as_str(),
+        clone_propose_b.as_str(),
+        clone_test.as_str(),
+    ]);
+    let runtime = test_runtime_with_running_and_queued_tasks(
+        "mis-001",
+        &[
+            (clone_propose_a.as_str(), "propose"),
+            (clone_propose_b.as_str(), "propose"),
+        ],
+        &[(clone_test.as_str(), "test")],
+    );
+
+    let label = swarm_exec_label(
+        &state,
+        &[clone_propose_a, clone_propose_b, clone_test],
+        Some(&runtime),
+    );
+    assert_eq!(label, "Proposing ...");
+}

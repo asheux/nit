@@ -3336,16 +3336,8 @@ fn swarm_exec_label<'a>(
     > = std::collections::HashMap::new();
 
     let mut roles: Vec<String> = Vec::new();
-    let mut debug_lines: Vec<String> = Vec::new();
-    debug_lines.push(format!(
-        "swarm_exec_label called: ordered_ids.len()={}, swarm.is_some()={}",
-        ordered_ids.len(),
-        swarm.is_some()
-    ));
     for id in ordered_ids {
-        let in_active = state.agents.active_turns.contains_key(id.as_str());
-        debug_lines.push(format!("  id={id} in_active={in_active}"));
-        if !in_active {
+        if !state.agents.active_turns.contains_key(id.as_str()) {
             continue;
         }
         // Swarm clone lanes carry "(clone NN)" in `agent.role`; the meaningful
@@ -3355,112 +3347,76 @@ fn swarm_exec_label<'a>(
         // state: the agent ops panel intentionally shows the assigned role
         // regardless of state (see `swarm_assigned_roles_for_agent`); the
         // breather should match.
+        // Only include tasks the agent is actively running (state="Running").
+        // "Queued" tasks (Ready/Dispatched in the DAG) are next-up but not
+        // in-flight — including them poisons the uniformity check (e.g. a
+        // proposer with a queued downstream test task would add "test" to
+        // the role list and flip the breather from "Proposing ..." to
+        // "Executing ..."). Pending/Done tasks are similarly irrelevant.
         let mut from_task = false;
-        let mid_opt = swarm_clone_mission_id(id);
-        debug_lines.push(format!("    swarm_clone_mission_id={mid_opt:?}"));
-        if let Some(swarm) = swarm {
-            if let Some(mid) = mid_opt {
-                let dash = dash_by_mission
-                    .entry(mid.to_string())
-                    .or_insert_with(|| swarm.swarm_dashboard(mid))
-                    .clone();
-                debug_lines.push(format!(
-                    "    dashboard for mid={mid} is_some={}",
-                    dash.is_some()
-                ));
-                if let Some(dash) = dash {
-                    let matching: Vec<_> = dash
-                        .tasks
-                        .iter()
-                        .filter(|t| t.agent_id == *id)
-                        .collect();
-                    debug_lines.push(format!(
-                        "    matching tasks for {id}: {} (total dash tasks: {})",
-                        matching.len(),
-                        dash.tasks.len()
-                    ));
-                    for task in matching.iter() {
-                        debug_lines.push(format!(
-                            "      task id={} role={:?} state={}",
-                            task.id, task.role, task.state
-                        ));
-                        if let Some(role) = task.role.as_deref().map(str::trim) {
-                            if !role.is_empty() {
-                                roles.push(role.to_string());
-                                from_task = true;
-                            }
+        let is_clone = swarm_clone_mission_id(id).is_some();
+        if let (Some(swarm), Some(mid)) = (swarm, swarm_clone_mission_id(id)) {
+            let dash = dash_by_mission
+                .entry(mid.to_string())
+                .or_insert_with(|| swarm.swarm_dashboard(mid))
+                .clone();
+            if let Some(dash) = dash {
+                for task in dash
+                    .tasks
+                    .iter()
+                    .filter(|t| t.agent_id == *id && t.state == "Running")
+                {
+                    if let Some(role) = task.role.as_deref().map(str::trim) {
+                        if !role.is_empty() {
+                            roles.push(role.to_string());
+                            from_task = true;
                         }
                     }
                 }
             }
         }
-        if from_task {
+        if from_task || is_clone {
+            // For swarm clones whose dashboard didn't yield a Running task,
+            // skip the `agent.role` fallback entirely — the clone's lane
+            // role is the placeholder "(clone NN)", which differs per clone
+            // and would break the uniformity check below.
             continue;
         }
         if let Some(agent) = state.agents.agents.iter().find(|a| a.id == *id) {
             let r = agent.role.trim();
-            debug_lines.push(format!("    fallback agent.role={r:?}"));
             if !r.is_empty() {
                 roles.push(r.to_string());
             }
         }
     }
 
-    let result: &'static str = if roles.is_empty() {
-        "Executing ..."
-    } else {
-        let first = roles[0].as_str();
-        let uniform = roles.iter().all(|r| r.eq_ignore_ascii_case(first));
-        if uniform {
-            let lower = first.to_ascii_lowercase();
-            match lower.as_str() {
-                "code" | "coding" | "implement" => "Coding ...",
-                "review" | "reviewer" => "Reviewing ...",
-                "test" | "testing" | "tester" => "Testing ...",
-                "integrate" | "integrator" | "integration" => "Integrating ...",
-                "judge" | "judging" => "Judging ...",
-                "research" | "researcher" => "Researching ...",
-                "computational-research" | "computational research" => "Researching ...",
-                "propose" | "proposer" => "Proposing ...",
-                "design" | "designer" => "Designing ...",
-                "recon" | "reconnaissance" | "scout" => "Scouting ...",
-                "refactor" | "refactoring" => "Refactoring ...",
-                "fix" | "fixer" | "bugfix" => "Fixing ...",
-                "document" | "docs" | "documentation" => "Documenting ...",
-                _ => "Executing ...",
-            }
-        } else {
-            "Executing ..."
-        }
-    };
-    debug_lines.push(format!("  roles={roles:?} -> result={result:?}"));
-
-    // Diagnostic: when the result falls through to "Executing ..." in a
-    // swarm context, dump the lookup trace so we can see what the breather
-    // actually saw. Strip this once the root cause is identified.
-    if result == "Executing ..." {
-        use std::io::Write;
-        if let Ok(mut f) = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open("/tmp/nit-breather-debug.log")
-        {
-            let _ = writeln!(f, "--- {} ---", chrono_like_now());
-            for line in &debug_lines {
-                let _ = writeln!(f, "{line}");
-            }
-        }
+    if roles.is_empty() {
+        return "Executing ...";
     }
 
-    result
-}
+    let first = roles[0].as_str();
+    let uniform = roles.iter().all(|r| r.eq_ignore_ascii_case(first));
+    if uniform {
+        let lower = first.to_ascii_lowercase();
+        return match lower.as_str() {
+            "code" | "coding" | "implement" => "Coding ...",
+            "review" | "reviewer" => "Reviewing ...",
+            "test" | "testing" | "tester" => "Testing ...",
+            "integrate" | "integrator" | "integration" => "Integrating ...",
+            "judge" | "judging" => "Judging ...",
+            "research" | "researcher" => "Researching ...",
+            "computational-research" | "computational research" => "Researching ...",
+            "propose" | "proposer" => "Proposing ...",
+            "design" | "designer" => "Designing ...",
+            "recon" | "reconnaissance" | "scout" => "Scouting ...",
+            "refactor" | "refactoring" => "Refactoring ...",
+            "fix" | "fixer" | "bugfix" => "Fixing ...",
+            "document" | "docs" | "documentation" => "Documenting ...",
+            _ => "Executing ...",
+        };
+    }
 
-fn chrono_like_now() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| format!("t+{}.{:03}s", d.as_secs(), d.subsec_millis()))
-        .unwrap_or_else(|_| "t?".into())
+    "Executing ..."
 }
 
 fn ecg_indicator(
