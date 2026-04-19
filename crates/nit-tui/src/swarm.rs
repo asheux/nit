@@ -3737,15 +3737,12 @@ fn ensure_judge_task_for_multi_proposer(
         return warnings;
     }
 
-    // Match on any token so combined roles (e.g. `review+judge`) count as
-    // both `review` AND `judge` — otherwise the literal string doesn't hit
-    // any branch and a duplicate judge task gets synthesized onto the same
-    // agent, stalling dispatch.
     let is_role = |task: &SwarmTask, want: &str| -> bool {
         task.role
             .as_deref()
-            .map(|raw| role_has_token(raw, want))
-            .unwrap_or(false)
+            .and_then(normalize_role_label)
+            .as_deref()
+            == Some(want)
     };
 
     // If a judge already exists, nothing to do.
@@ -4145,37 +4142,6 @@ pub(crate) fn normalize_role_label(raw: &str) -> Option<String> {
         return Some(COMPUTATIONAL_RESEARCH_ROLE.into());
     }
     Some(role)
-}
-
-/// Split a role string on `+ , /` and return every token as a normalized
-/// role label. Enables planners to emit combined roles (e.g.
-/// `review+judge`) without breaking the role-matching logic, which would
-/// otherwise see the literal `review+judge` as a distinct, unrecognized
-/// role and synthesize duplicate tasks or fail to wire deps.
-pub(crate) fn normalize_role_labels(raw: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    for token in raw.split(|c: char| matches!(c, '+' | ',' | '/')) {
-        let token = token.trim().to_ascii_lowercase();
-        if token.is_empty() || token.eq_ignore_ascii_case("all") {
-            continue;
-        }
-        let normalized = if token.eq_ignore_ascii_case(COMPUTATIONAL_RESEARCH_ROLE_LEGACY) {
-            COMPUTATIONAL_RESEARCH_ROLE.to_string()
-        } else {
-            token
-        };
-        if !out.iter().any(|existing: &String| existing == &normalized) {
-            out.push(normalized);
-        }
-    }
-    out
-}
-
-/// True when any token in a role string normalizes to `want`.
-pub(crate) fn role_has_token(raw: &str, want: &str) -> bool {
-    normalize_role_labels(raw)
-        .iter()
-        .any(|token| token == want)
 }
 
 fn role_is_singleton(role: &str) -> bool {
@@ -6476,24 +6442,6 @@ fn select_dispatchable_ready_task_indices(run: &SwarmRun) -> Vec<usize> {
     // yet on fresh workspaces) and fall back to surface-level advice.
     let prescan_active = !run.prescan_pending.is_empty();
 
-    // Post-writer gate: test/review are downstream roles that validate the
-    // integrator's work. They MUST NOT dispatch while any integrate task is
-    // still active or pending — otherwise they run against pre-integration
-    // state and produce meaningless reports (observed: clone [test] RUNNING
-    // while clone [integrate] was still IDLE). This is a defensive backstop
-    // for cases where `apply_role_dependency_ordering` didn't wire the
-    // test→integrate / review→integrate dep (e.g. planner-labeled role
-    // variants that normalize_role_label missed, or integrate tasks added
-    // after role-deps ran).
-    let integrate_not_terminal = run.tasks.iter().any(|task| {
-        task.role
-            .as_deref()
-            .and_then(normalize_role_label)
-            .as_deref()
-            == Some("integrate")
-            && !task.state.is_terminal()
-    });
-
     let mut indices = Vec::new();
     for (idx, task) in run.tasks.iter().enumerate() {
         if !matches!(task.state, SwarmTaskState::Ready) {
@@ -6513,19 +6461,6 @@ fn select_dispatchable_ready_task_indices(run: &SwarmRun) -> Vec<usize> {
                 Some("propose") | Some("integrate") | Some("judge")
             );
             if role_wants_landscape {
-                continue;
-            }
-        }
-        // Post-writer roles wait for every integrator to finish.
-        if integrate_not_terminal {
-            let is_post_writer = matches!(
-                task.role
-                    .as_deref()
-                    .and_then(normalize_role_label)
-                    .as_deref(),
-                Some("test") | Some("review")
-            );
-            if is_post_writer {
                 continue;
             }
         }
