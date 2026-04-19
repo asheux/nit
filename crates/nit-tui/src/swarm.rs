@@ -24,6 +24,73 @@ const SWARM_DEP_OUTPUT_MAX_CHARS: usize = 8_000;
 /// the full reasoning chain materially improves decisions. Biased toward
 /// preserving information.
 const SWARM_DEP_OUTPUT_MAX_CHARS_FULL: usize = 48_000;
+
+// ---------------------------------------------------------------------------
+// Shared role-contract clauses
+//
+// These constants keep three classes of rule single-source across the
+// propose/integrate/judge/review/test role contracts AND the retry prompts
+// (gate retry, genome retry). Previous drafts drifted — e.g. "NO REVERT"
+// wording differed between gate-retry and genome-retry, "don't pad small
+// files" was written three different ways. Route every copy through these.
+// ---------------------------------------------------------------------------
+
+/// Targeted-vs-workspace-wide test/verify command rule. Integrator/review/
+/// test all need this — every copy must be byte-for-byte identical, so the
+/// role contracts reference this constant instead of inlining the text.
+pub(crate) const TEST_DISCIPLINE_CLAUSE: &str =
+    "TEST DISCIPLINE — STRICT: Workspace-wide / repo-wide commands \
+     (`cargo test --all` / `--workspace`, `cargo clippy --workspace`, \
+     `cargo fmt --all`, `go test ./...`, `pytest` from the repo root, \
+     `npm test --workspaces`, `just test`, `just ci`, full lint/type-check \
+     sweeps, etc.) are ONLY allowed when the OPERATOR explicitly asked for \
+     them in the request above (phrases like \"run full CI\", \"verify the \
+     whole workspace\", \"run all tests\", \"make sure nothing else broke\"). \
+     If the operator did not, you MUST NOT run a workspace-wide command — \
+     not as a confirmation pass after a targeted run, not to be thorough, \
+     not \"just to be safe\", not even when a targeted run fails (in that \
+     case, report the failure and let the operator decide whether to widen). \
+     DEFAULT: run only targeted commands scoped to the modules/packages/files \
+     the swarm actually touched (e.g. `cargo test -p <affected-crate>`, \
+     `pytest path/to/affected/dir`, `go test ./path/to/affected/...`, \
+     `npm test --workspace=<pkg>`). MULTI-MODULE CHANGES: combine targeted \
+     flags (`cargo test -p crate1 -p crate2`) or run one targeted command \
+     per module. Do NOT widen to workspace-wide. EXAMPLE OF WRONG BEHAVIOUR: \
+     running `cargo test -p nit-gol` (passes) AND THEN running \
+     `cargo test --all` to \"verify the full results\" — exactly the \
+     duplication the rule forbids. The post-execution gate verifier handles \
+     workspace-wide gates as the next swarm stage.";
+
+/// Don't-pad-small-files + inline-test-module + comment-hygiene clause.
+/// Referenced by the integrate role contract and the genome-retry prompt
+/// so both say the same thing word-for-word.
+pub(crate) const NO_PADDING_CLAUSE: &str =
+    "CODE SHAPE: Do NOT add inline test modules (`#[cfg(test)] mod tests \
+     { ... }`) inside source files — tests live in a dedicated tests \
+     directory or test file. If you encounter an existing inline test \
+     module during a refactor, move it to the appropriate test file. Do \
+     NOT pad small files (lib.rs, mod.rs, re-export files) with \
+     unnecessary code to boost genome scores — trivially small files are \
+     auto-passed. Do NOT over-engineer trivial logic to hit a metric. \
+     COMMENTS: trim doc comments that restate type/function names, echo \
+     visible type signatures, or describe obvious behavior. Keep comments \
+     that explain WHY, document non-obvious constraints, safety \
+     invariants, or algorithmic choices.";
+
+/// Non-revert rule for any retry prompt (gate retry, per-agent genome
+/// retry). Reverting your own BROKEN code is fine — that's how you fix
+/// things. Rolling back WORKING real work to satisfy a metric is not.
+pub(crate) const NO_REVERT_CLAUSE: &str =
+    "REVERT POLICY: reverting your own BROKEN code (compile errors, failing \
+     tests, broken logic) is fine — that's how you fix things. Rolling back \
+     WORKING edits just to make a gate or metric pass vacuously (e.g. `git \
+     restore` on a real refactor because genome-quality dropped a tier, \
+     deleting a new file the proposer asked for, restoring the pre-refactor \
+     body of a function) is a task failure, not a fix. Passing a gate by \
+     throwing away real work is strictly worse than failing the gate with \
+     the work intact. If you genuinely can't improve the metric further \
+     through real edits, say so in your reply and STOP — leave the mission's \
+     actual changes on disk.";
 /// Total budget across ALL deps for full-output roles. Sized against Claude's
 /// 200K-token context (~800K chars) minus ~100K chars of system scaffolding
 /// and a safety margin for turn-time tool_use/tool_result accumulation (which
@@ -7562,9 +7629,9 @@ fn role_contract_lines(role: &str) -> &'static [&'static str] {
             "Do not judge between candidates or claim final implementation ownership.",
             "Be specific about files, commands, and risks.",
             "ROLE DISCIPLINE: You are read-only and propose-only. Do NOT run tests, builds, type-checkers, lints, formatters, CI pipelines, or any other verification commands in this project — whatever toolchain it uses. Suggest commands as text only; running them is the integrate/test/review agent's job. Do NOT redo investigation that an upstream task already covered; build on dependency outputs instead of repeating them.",
-            "GENOME-AWARE PROPOSAL — STRICT: a GENOME LANDSCAPE section may be attached below with current tier/consistency/generations/parsimony for every scope file. When it is present, you MUST ground your proposal in those numbers. For every recommendation, name the file, the current metric, the target metric, and the direction — e.g. \"split swarm.rs: 8500 lines / structural density 0.13 → aim 6 submodules each ≤1500 lines, density ≥0.25\", \"inline vitals.rs trivial predicates: parsimony-bloat cap at tier IV → consolidate 13 single-line fns into 3 compound checks to unlock higher tier\", \"kill shadow.rs lines 444-600 (entropy 0.0) → replace with single templated helper\". Do NOT emit surface-level advice (\"rename x to y\", \"extract helper\") without tying it to a concrete encoder metric it is meant to move. If the landscape shows mega-files (>2000 lines), low structural density (≤0.10), zero-entropy blocks, parsimony bloat, or cross-encoder consistency spread >0.3, those are the highest-leverage fixes — name them explicitly.",
+            "GENOME-AWARE PROPOSAL — STRICT: a GENOME LANDSCAPE section may be attached below with current tier/consistency/generations/parsimony for every scope file. When it is present, you MUST ground your proposal in those numbers. For every recommendation, name the file, the current metric, the target metric, and the direction — e.g. \"split <mega-file>: current <N> lines / structural density <x> → aim <M> submodules each ≤1500 lines, density ≥0.25\", \"inline <bloated-file> trivial predicates: parsimony-bloat cap at tier IV → consolidate single-line fns into compound checks to unlock higher tier\", \"kill <file> lines A-B (entropy 0.0) → replace with a single templated helper\". Do NOT emit surface-level advice (\"rename x to y\", \"extract helper\") without tying it to a concrete encoder metric it is meant to move. If the landscape shows mega-files (>2000 lines), low structural density (≤0.10), zero-entropy blocks, parsimony bloat, or cross-encoder consistency spread >0.3, those are the highest-leverage fixes — name them explicitly.",
             "RECOMMENDATION COVERAGE: Do not stop at one suggestion per file. Scan the whole landscape and recommend every class of fix the integrator could apply: structural splits, entropy elimination, cyclomatic-complexity reduction (target ≤8 per fn), AST component fan-out (target ≥5), identifier uniqueness (≥65%), comment-to-code ratio, consolidation of parsimony-capped files. The integrator only writes what you surface — missing a whole category means it never gets fixed.",
-            "GENOME: nit measures the integrator's code across four encoders: token_spectrum (token role balance), ast_structure (tree shape variety, >= 5 components), complexity_field (cyclomatic complexity <= 8, identifier uniqueness >= 65%), structural (token-role diversity, AST depth variation, role n-gram uniqueness). See the full ENCODER GUIDE and TARGETS in the genome instructions attached to this prompt. Help the integrator score well — suggest function decomposition, varied patterns, and low-complexity approaches that target these encoders.",
+            "MANDATORY STRUCTURAL SPLITS — STRICT: for EVERY scope file over 2000 lines, tier I/II, or with a density ≤0.10, your proposal MUST contain a concrete split plan: name the new submodule files you want created, assign specific functions/types to each, and list the files by path in your `swarm_artifacts.files` array so the integrator has an explicit target list. Same rule for any file with parsimony bloat (consolidation plan) or zero-entropy blocks (deduplication plan). Silence on a file that breaches these thresholds is a proposal failure, even if the rest of your proposal is excellent. If the landscape below includes a THRESHOLDS BREACHED section, every listed file must appear in your recommendations with a specific structural action.",
         ],
         "research" => &[
             "Explore the topic through papers, docs, web resources, and related references when available.",
@@ -7582,7 +7649,8 @@ fn role_contract_lines(role: &str) -> &'static [&'static str] {
             "Compare the dependency outputs and choose the best path forward.",
             "Produce a decisive recommendation, acceptance criteria, and verification steps.",
             "Do not edit the workspace or perform the final implementation.",
-            "ROLE DISCIPLINE: Pure decision step. Do NOT run tests, builds, lints, or any verification commands — list them as recommendations for the integrator/reviewer. Do NOT re-explore the problem space that the proposers already covered; just compare and decide.",
+            "ROLE DISCIPLINE: Pure decision step. Do NOT run tests, builds, lints, formatters, or any verification commands — text analysis only, based on the proposals and (if present) the GENOME LANDSCAPE below. List any commands you'd recommend as suggestions for the integrator/reviewer, not actions you take yourself. Do NOT re-explore the problem space that the proposers already covered; just compare and decide.",
+            "LANDSCAPE-AWARE JUDGING: if a GENOME LANDSCAPE or THRESHOLDS BREACHED section is attached below, your decision MUST be grounded in it. Prefer proposals whose recommendations target the lowest-tier / highest-leverage files (mega-files, parsimony-capped, low-density). Reject or downgrade proposals that recommend changes uncorrelated with the landscape (e.g. cosmetic tweaks on tier-IV files while tier-I/II files go untouched). Name the specific landscape metrics in your verdict.",
             "GENOME: nit measures code across four encoders: token_spectrum, ast_structure, complexity_field, structural. See the full ENCODER GUIDE and TARGETS in the genome instructions attached to this prompt. Prefer proposals that enable varied AST node types, low per-function complexity (<= 8), diverse token-role sequences, and >= 5 structural components. Flag proposals that would force monolithic functions or repetitive patterns.",
         ],
         "integrate" => &[
@@ -7591,22 +7659,22 @@ fn role_contract_lines(role: &str) -> &'static [&'static str] {
             "If a FILE CHECKLIST is provided above, you MUST modify every listed file — process them in order, one by one. A file left unchanged means your task is incomplete.",
             "Report exact files changed and validation results.",
             "PROPOSER-PLAN BINDING — STRICT: any upstream propose/judge task output in the Dependency outputs section below is BINDING, not informational. You MUST implement the proposer's specific choices — file paths, identifiers, constants, architectural decisions, ordering — exactly as specified. Do NOT substitute your own design, invent new files the proposer didn't mention, or skip files the proposer listed. You MAY deviate only when (a) the proposer's recommendation directly contradicts the operator's original request above, or (b) the recommendation is technically impossible (names a non-existent type, breaks a guaranteed invariant). In those two cases, pick the minimum viable alternative and say in your final message exactly what you deviated from and why. Silent divergence is a task failure even if the code you wrote is defensible on its own — the proposer's output is part of the contract, not a starting point for re-design.",
-            "TEST DISCIPLINE — STRICT: Workspace-wide / repo-wide test commands (`cargo test --all` / `--workspace`, `go test ./...`, `pytest` from the repo root, `npm test --workspaces`, `just test`, `just ci`, full lint/type-check sweeps, etc.) are ONLY allowed when the OPERATOR explicitly asked for them in the request above (look for phrases like \"run full CI\", \"verify the whole workspace\", \"run all tests\"). Otherwise you MUST NOT run a workspace-wide command — broad verification is the review/test agent's job and the post-execution gate verifier's job. DEFAULT: run only targeted tests for the files you actually changed, using whatever scoping flag the project's toolchain provides (e.g. `cargo test -p <affected-crate>`, `pytest path/to/affected/dir`, `go test ./path/to/affected/...`). MULTI-MODULE CHANGES: combine targeted flags (`cargo test -p crate1 -p crate2`) or run one targeted command per module — do NOT widen to workspace-wide. Infer the appropriate command from the project layout; do not assume any specific language or tooling.",
-            "CODE CONVENTION: Do NOT add inline test modules (`#[cfg(test)] mod tests { ... }`) inside source files. Tests must live in a dedicated tests directory or test file, not inline. If you encounter an existing inline test module during a refactor, move it to the appropriate test file/directory. Do NOT pad small files (lib.rs, mod.rs, re-export files) with unnecessary code to boost genome scores — trivially small files are auto-passed by the genome system. COMMENTS: Trim doc comments that restate the type/function name, echo visible type signatures, or describe obvious behavior. Keep comments that explain WHY, document non-obvious constraints, safety invariants, or algorithmic choices.",
+            TEST_DISCIPLINE_CLAUSE,
+            NO_PADDING_CLAUSE,
             "GENOME QUALITY OBLIGATION: You are the sole writer. Your code is measured by nit's genome system across four encoders. See the full ENCODER GUIDE and TARGETS in the genome instructions attached to this prompt. Maintain or improve genome scores on every file you touch. Aim for Tier III+ (Spaceship) minimum, aspire to Tier V (Replicator). Do NOT call [evaluate_genome] — nit evaluates automatically after your changes are written to disk.",
         ],
         "review" => &[
             "Critique the current output or diff for correctness, UX, and maintainability.",
             "Call out risks, regressions, and missing tests.",
             "Do not edit the workspace; suggest follow-ups as text only.",
-            "VERIFICATION DISCIPLINE — STRICT: Workspace-wide / repo-wide verification commands (`cargo test --all` / `--workspace`, `cargo clippy --workspace`, `cargo fmt --all`, `go test ./...`, `pytest` from the repo root, `npm test --workspaces`, `just ci`, etc.) are ONLY allowed when the OPERATOR explicitly asked for them in the request above (e.g. \"run full CI\", \"verify the whole workspace\", \"run all tests\"). If the operator's request does not contain such an instruction, you MUST NOT run any workspace-wide command — not as a confirmation pass after a targeted run, not to be thorough, not even \"just to be safe\". DEFAULT: run only targeted commands scoped to the modules/packages/files the swarm actually touched (e.g. `cargo test -p <crate>`, `cargo clippy -p <crate>`, `pytest path/to/changed/dir`, `go test ./path/to/changed/...`, `npm test --workspace=<pkg>`). MULTI-MODULE CHANGES: when more than one module was touched, either combine them as multiple targeted flags (`cargo test -p crate1 -p crate2`) or run one targeted command per file/module. Do NOT widen to workspace-wide. The post-execution gate verifier handles workspace-wide gates as the next swarm stage — running them here just duplicates the work.",
+            TEST_DISCIPLINE_CLAUSE,
             "GENOME: nit measures code across four encoders. See the full ENCODER GUIDE and TARGETS in the genome instructions attached to this prompt. Name the affected encoder when flagging issues — e.g., 'complexity 12 in parse_config (complexity_field: target <= 8)', 'only 2 node types (ast_structure: need >= 5 components)', 'repeated role sequence across match arms (structural: role n-gram uniqueness)', 'comment-to-code ratio too low (token_spectrum)'. Suggest concrete refactoring the integrator can apply.",
         ],
         "test" => &[
             "Focus on validation commands, expected results, and edge cases.",
             "Differentiate confirmed results from unrun suggestions.",
             "Do not redesign the solution unless a test failure makes it necessary.",
-            "TEST DISCIPLINE — STRICT: Workspace-wide / repo-wide test commands (`cargo test --all` / `--workspace`, `go test ./...`, `pytest` from the repo root, `npm test --workspaces`, `just test`, `just ci`, etc.) are ONLY allowed when the OPERATOR explicitly asked for them in the request above (look for phrases like \"run full CI\", \"verify the whole workspace\", \"run all tests\", \"make sure nothing else broke\"). If the operator did not say so, you MUST NOT run a workspace-wide command — not as a confirmation pass after a targeted run passes, not to be thorough, not even when a targeted test fails (in that case, report the failure and let the operator decide whether to widen). DEFAULT: run only targeted tests scoped to the modules/packages/files the swarm actually touched (e.g. `cargo test -p <affected-crate>`, `pytest path/to/affected/dir`, `go test ./path/to/affected/...`, `npm test --workspace=<pkg>`). MULTI-MODULE CHANGES: when more than one module was touched, either combine them as multiple targeted flags (`cargo test -p crate1 -p crate2 -p crate3`) or run one targeted command per affected module/file. Do NOT widen to workspace-wide. EXAMPLE OF WRONG BEHAVIOUR: running `cargo test -p nit-games` (passes) AND THEN running `cargo test --all` to \"verify the full results\" — that is exactly the duplication the rule forbids. Report exact commands, outputs, and pass/fail counts verbatim. The post-execution gate verifier handles workspace-wide gates as the next swarm stage — running them here just duplicates the work and wastes minutes.",
+            TEST_DISCIPLINE_CLAUSE,
         ],
         "genome-reviewer" => &[
             "Evaluate the structural quality of code changes using the genome reports provided.",
@@ -7619,7 +7687,7 @@ fn role_contract_lines(role: &str) -> &'static [&'static str] {
         _ => &[
             "Stay within the assigned task scope.",
             "Do not silently switch into a different swarm role.",
-            "Do not run tests, builds, lints, or other verification commands unless your role explicitly assigns that work to you.",
+            "UNKNOWN ROLE: the orchestrator didn't recognise your role name, so the strict role contract didn't apply. Default to read-only behaviour: do NOT edit the workspace, do NOT run tests/builds/lints/formatters/CI commands, and do NOT run workspace-wide commands under any circumstance. Produce text output only. If your task actually needs write access or verification, that's a plan bug — surface it in your reply so the operator can fix the role assignment.",
         ],
     }
 }
@@ -7862,7 +7930,16 @@ fn wrap_task_prompt(
         }
     }
 
-    if !task.artifacts.is_empty() {
+    // Propose/judge tasks must always emit the structured-artifacts block
+    // so downstream integrators can parse the declared `files` array (the
+    // substrate's structural-compliance check diffs this against on-disk
+    // writes). Other read-only roles get the block only when the planner
+    // explicitly requested it via task.artifacts.
+    let always_emit_artifacts_for_role = matches!(
+        task.role.as_deref().and_then(normalize_role_label).as_deref(),
+        Some("propose") | Some("judge"),
+    );
+    if !task.artifacts.is_empty() || always_emit_artifacts_for_role {
         out.push_str("\n## STRUCTURED ARTIFACTS (REQUIRED)\n");
         out.push_str("You MUST include a ```json code block at the END of your response with this exact structure:\n");
         out.push_str("```\n");
@@ -7900,7 +7977,12 @@ fn build_synthesis_prompt(run: &SwarmRun) -> String {
     let has_reviewer = run.tasks.iter().any(|t| {
         t.role
             .as_deref()
-            .map(|r| matches!(r.trim(), "review" | "test" | "genome-reviewer"))
+            .map(|r| {
+                let r = r.trim();
+                r.eq_ignore_ascii_case("review")
+                    || r.eq_ignore_ascii_case("test")
+                    || r.eq_ignore_ascii_case("genome-reviewer")
+            })
             .unwrap_or(false)
     });
     let mut out = String::new();
@@ -8592,9 +8674,9 @@ fn build_gate_retry_prompt(run: &SwarmRun, report: &GateReport, attempt: u8, lim
     out.push_str(
         "- Do NOT run the verify commands yourself — the verifier agent will re-run them.\n",
     );
-    out.push_str(
-        "- Don't revert real work just to pass a gate vacuously. Reverting your own BAD code (broken logic, compile errors, failing tests) is fine — that's how you fix things. Rolling back a working refactor because genome-quality dropped a tier is not — passing a gate by throwing away the intended change is worse than failing it. If you can't improve the gate further through real edits, say so and stop; leave the mission's actual changes on disk.\n",
-    );
+    out.push_str("- ");
+    out.push_str(NO_REVERT_CLAUSE);
+    out.push('\n');
     out.push_str(
         "- ADVISORY GATES (genome-quality): treat as best-effort. If you've made reasonable improvements and hit diminishing returns, STOP and report \"no further improvements possible\". Do NOT contort the code to chase a metric; the score is a signal, not a requirement.\n",
     );

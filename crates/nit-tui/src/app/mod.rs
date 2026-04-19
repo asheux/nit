@@ -2385,16 +2385,17 @@ fn build_genome_retry_prompt(
          Only fix the files listed above \u{2014} do not touch files that maintained or \
          improved quality. The ACTUAL results were measured by nit AFTER your changes \
          were written to disk. Do NOT call [evaluate_genome]; nit measures automatically.\n\n\
-         SCOPE CONSTRAINT: You may ONLY modify code that YOU added or changed during \
-         this session. Do NOT refactor, rename, restructure, or rewrite pre-existing code \
-         that you did not touch. Leave all other code exactly as it was.\n\n\
-         Exception: if the operator's original prompt explicitly asked you to refactor the \
-         entire file, you may do so. Otherwise, constrain your fixes to your own changes.\n\n\
-         Your goal is to IMPROVE structural quality on the files you changed. If improvement \
-         is not possible given the functional requirements, STOP and say so in your reply — \
-         do NOT revert or restore baseline versions of your edits to make the score go up. \
-         Real work with a slightly lower score is strictly better than no work with a \
-         baseline score. The score is a signal, not a contract.\n\n",
+         SCOPE CONSTRAINT: You may modify code that YOU added or changed during this \
+         session. Do NOT refactor, rename, or rewrite unrelated pre-existing code. \
+         Exception: if one of your edits perturbed a neighbouring function or block — \
+         and that perturbation is the cause of the degradation — you may touch the \
+         directly-affected surrounding context to restore or improve quality. Leave \
+         everything else exactly as it was.\n\n\
+         Second exception: if the operator's original prompt explicitly asked you to \
+         refactor the entire file, you may do so.\n\n\
+         Your goal is to IMPROVE structural quality on the files you changed.\n\n\
+         {no_revert_clause}\n\n",
+        no_revert_clause = crate::swarm::NO_REVERT_CLAUSE,
     ));
     if bloated_count > 0 {
         prompt.push_str(

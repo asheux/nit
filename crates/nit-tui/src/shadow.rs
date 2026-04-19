@@ -531,7 +531,12 @@ fn shadow_readonly_clause() -> &'static str {
      - You MAY read files and search code strictly to inform your text \
      response, but keep tool usage minimal.\n\
      - Reply with a short text deliverable only. A different agent will \
-     execute the actual work."
+     execute the actual work.\n\
+     - INVESTIGATION BUDGET: keep code-reading minimal. Do NOT re-explore \
+     territory an upstream shadow agent already covered — if you're the \
+     judge, read the proposals, not the repo; if you're the reviewer, \
+     read the judged plan, not every file it mentions. Time spent \
+     re-investigating is budget lost from the main agent's actual work."
 }
 
 fn build_propose_prompt(variant: &str, user_prompt: &str) -> String {
@@ -608,10 +613,13 @@ fn build_final_prompt(run: &ShadowRun) -> String {
         "## SHADOW CONTEXT (hidden support agents)\n\
          The following analysis was produced by four hidden support agents \
          (propose-a, propose-b, judge, review) to help you answer the user. \
-         Treat it as advisory context — override any suggestion you disagree \
-         with, and cite the risks the reviewer surfaced when relevant. The \
-         shadows have already been briefed on nit's tier ladder and \
-         parsimony detector, so their plans should be quality-aware.\n\n\
+         Treat it as advisory context — you may override any suggestion you \
+         disagree with, but when you do, briefly say *which* recommendation \
+         you overrode and *why* in your reply so the user can evaluate the \
+         call. Silent override defeats the point of having the shadows. \
+         Cite the risks the reviewer surfaced when relevant. The shadows \
+         have already been briefed on nit's tier ladder and parsimony \
+         detector, so their plans should be quality-aware.\n\n\
          ### Proposal A\n{propose_a}\n\n\
          ### Proposal B\n{propose_b}\n\n\
          ### Judge's recommended plan\n{judge}\n\n\

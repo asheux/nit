@@ -924,6 +924,52 @@ pub(super) fn build_propose_genome_landscape(
     };
     out.push_str(header);
     out.push_str(framing);
+    // THRESHOLDS BREACHED — files that the role contract requires an
+    // explicit structural recommendation for. Keeps proposers from silently
+    // skipping mega-files when the rest of the landscape looks healthy.
+    let workspace = state.workspace_root.as_path();
+    let mut breached: Vec<(String, &nit_core::GenomeReport, u64, Vec<&'static str>)> = Vec::new();
+    for (path, report) in &rows {
+        let abs = workspace.join(path);
+        let line_count = std::fs::read_to_string(&abs)
+            .map(|s| s.lines().count() as u64)
+            .unwrap_or(0);
+        let mut reasons: Vec<&'static str> = Vec::new();
+        if line_count > 2000 {
+            reasons.push(">2000 lines");
+        }
+        if report.tier <= GenomeTier::Oscillator {
+            reasons.push("tier I/II");
+        }
+        if report.parsimony.bloat_detected {
+            reasons.push("parsimony-bloat");
+        }
+        if report.cross_encoder_consistency < 0.30 {
+            reasons.push("low consistency");
+        }
+        if !reasons.is_empty() {
+            breached.push((path.clone(), *report, line_count, reasons));
+        }
+    }
+    if !breached.is_empty() {
+        out.push_str("\n## THRESHOLDS BREACHED (MANDATORY recommendations)\n");
+        out.push_str(
+            "Every file below MUST appear in your proposal with a concrete structural action \
+             (split into named submodules, consolidate bloat, replace zero-entropy block with \
+             a templated helper, etc.). Omitting a listed file is a proposal failure.\n",
+        );
+        for (path, report, lines, reasons) in &breached {
+            out.push_str(&format!(
+                "- {path}: {} lines, tier {}, consistency {:.2} — {}\n",
+                lines,
+                report.tier.numeral(),
+                report.cross_encoder_consistency,
+                reasons.join(" + "),
+            ));
+        }
+        out.push('\n');
+    }
+
     out.push_str("Per-file (worst first):\n");
     for (path, report) in &rows {
         let gen_sum: u32 = report
