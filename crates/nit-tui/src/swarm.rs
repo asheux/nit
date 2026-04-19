@@ -2477,6 +2477,16 @@ impl SwarmRuntime {
                                 .as_deref()
                                 .or(parsed.integrator_agent_id.as_deref()),
                         ));
+                        parsed
+                            .warnings
+                            .extend(ensure_judge_task_for_multi_proposer(
+                                &mut parsed.tasks,
+                                run.template,
+                                &available,
+                                run.integrator_agent_id
+                                    .as_deref()
+                                    .or(parsed.integrator_agent_id.as_deref()),
+                            ));
                         parsed.warnings.extend(apply_role_dependency_ordering(
                             state.workspace_root.as_path(),
                             &state.agents.swarm_role_by_agent_id,
@@ -3013,6 +3023,16 @@ impl SwarmRuntime {
                                 .as_deref()
                                 .or(parsed.integrator_agent_id.as_deref()),
                         ));
+                        parsed
+                            .warnings
+                            .extend(ensure_judge_task_for_multi_proposer(
+                                &mut parsed.tasks,
+                                run.template,
+                                &available,
+                                run.integrator_agent_id
+                                    .as_deref()
+                                    .or(parsed.integrator_agent_id.as_deref()),
+                            ));
                         parsed.warnings.extend(apply_role_dependency_ordering(
                             state.workspace_root.as_path(),
                             &state.agents.swarm_role_by_agent_id,
@@ -3696,6 +3716,105 @@ fn ensure_integrate_task(
 /// Mutates tasks in place — never pushes or removes — so the slice is passed
 /// as `&mut [SwarmTask]`, distinct from `ensure_integrate_task` which may
 /// inject a new task.
+/// Insert a judge-role task for parallel missions that have ≥2 proposers
+/// but no judge. Without a judge, every integrator receives every proposer
+/// output concatenated and must silently reconcile potentially contradictory
+/// plans — exactly the decision a judge role was designed to handle.
+///
+/// The inserted judge runs after both proposers (role-deps wires this via
+/// `default_role_deps`), consolidates into a single plan, and the integrator
+/// depends on the judge. The agent assigned to the judge is picked from the
+/// roster, preferring an agent that is NOT already running a propose or
+/// integrate task.
+fn ensure_judge_task_for_multi_proposer(
+    tasks: &mut Vec<SwarmTask>,
+    template: SwarmTemplate,
+    available_agents: &[String],
+    integrator_agent_id: Option<&str>,
+) -> Vec<String> {
+    let mut warnings = Vec::new();
+    if !matches!(template, SwarmTemplate::Parallel) {
+        return warnings;
+    }
+
+    // Match on any token so combined roles (e.g. `review+judge`) count as
+    // both `review` AND `judge` — otherwise the literal string doesn't hit
+    // any branch and a duplicate judge task gets synthesized onto the same
+    // agent, stalling dispatch.
+    let is_role = |task: &SwarmTask, want: &str| -> bool {
+        task.role
+            .as_deref()
+            .map(|raw| role_has_token(raw, want))
+            .unwrap_or(false)
+    };
+
+    // If a judge already exists, nothing to do.
+    if tasks.iter().any(|t| is_role(t, "judge")) {
+        return warnings;
+    }
+
+    let proposer_ids: Vec<String> = tasks
+        .iter()
+        .filter(|t| is_role(t, "propose"))
+        .map(|t| t.id.clone())
+        .collect();
+    if proposer_ids.len() < 2 {
+        return warnings;
+    }
+
+    // Pick an agent not already tied to a propose/integrate task. Fall back
+    // to the integrator, then to any roster agent that isn't a proposer.
+    let busy: std::collections::HashSet<&str> = tasks
+        .iter()
+        .filter(|t| is_role(t, "propose") || is_role(t, "integrate"))
+        .map(|t| t.agent_id.as_str())
+        .collect();
+    let judge_agent = available_agents
+        .iter()
+        .find(|id| !busy.contains(id.as_str()))
+        .cloned()
+        .or_else(|| integrator_agent_id.map(|s| s.to_string()))
+        .or_else(|| available_agents.first().cloned());
+    let Some(judge_agent) = judge_agent else {
+        return warnings;
+    };
+
+    let task_id = "judge-merge-proposals".to_string();
+    let judge_task = SwarmTask {
+        id: task_id.clone(),
+        agent_id: judge_agent.clone(),
+        role: Some("judge".into()),
+        title: "Reconcile parallel proposer plans".into(),
+        task_prompt: "Two or more proposers drafted independent plans for this mission. \
+             Compare them, pick the stronger one (or synthesize a better hybrid), and \
+             produce a SINGLE reconciled implementation plan for the integrator(s) to \
+             follow verbatim. Be decisive: list exact file paths, identifiers, and ordering \
+             the integrator must apply. Flag any proposer recommendation you rejected and \
+             why. Do NOT edit the workspace; this is a text-only decision step."
+            .into(),
+        deps: proposer_ids.clone(),
+        writes: false,
+        artifacts: vec!["files".into(), "plan".into(), "rejections".into()],
+        done_when: Some(
+            "Single reconciled plan produced; proposer conflicts explicitly resolved.".into(),
+        ),
+        state: SwarmTaskState::Pending,
+        output: None,
+        parsed_artifacts: None,
+        expected_artifacts_missing: false,
+        failed: false,
+        retries: 0,
+    };
+    tasks.push(judge_task);
+    warnings.push(format!(
+        "Parallel judge auto-inserted: {} proposers detected (no judge in plan) → judge '{}' on agent '{}' wired between proposers and integrator(s).",
+        proposer_ids.len(),
+        task_id,
+        judge_agent,
+    ));
+    warnings
+}
+
 fn ensure_proposer_task(
     tasks: &mut [SwarmTask],
     template: SwarmTemplate,
@@ -4026,6 +4145,37 @@ pub(crate) fn normalize_role_label(raw: &str) -> Option<String> {
         return Some(COMPUTATIONAL_RESEARCH_ROLE.into());
     }
     Some(role)
+}
+
+/// Split a role string on `+ , /` and return every token as a normalized
+/// role label. Enables planners to emit combined roles (e.g.
+/// `review+judge`) without breaking the role-matching logic, which would
+/// otherwise see the literal `review+judge` as a distinct, unrecognized
+/// role and synthesize duplicate tasks or fail to wire deps.
+pub(crate) fn normalize_role_labels(raw: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for token in raw.split(|c: char| matches!(c, '+' | ',' | '/')) {
+        let token = token.trim().to_ascii_lowercase();
+        if token.is_empty() || token.eq_ignore_ascii_case("all") {
+            continue;
+        }
+        let normalized = if token.eq_ignore_ascii_case(COMPUTATIONAL_RESEARCH_ROLE_LEGACY) {
+            COMPUTATIONAL_RESEARCH_ROLE.to_string()
+        } else {
+            token
+        };
+        if !out.iter().any(|existing: &String| existing == &normalized) {
+            out.push(normalized);
+        }
+    }
+    out
+}
+
+/// True when any token in a role string normalizes to `want`.
+pub(crate) fn role_has_token(raw: &str, want: &str) -> bool {
+    normalize_role_labels(raw)
+        .iter()
+        .any(|token| token == want)
 }
 
 fn role_is_singleton(role: &str) -> bool {
@@ -6326,6 +6476,24 @@ fn select_dispatchable_ready_task_indices(run: &SwarmRun) -> Vec<usize> {
     // yet on fresh workspaces) and fall back to surface-level advice.
     let prescan_active = !run.prescan_pending.is_empty();
 
+    // Post-writer gate: test/review are downstream roles that validate the
+    // integrator's work. They MUST NOT dispatch while any integrate task is
+    // still active or pending — otherwise they run against pre-integration
+    // state and produce meaningless reports (observed: clone [test] RUNNING
+    // while clone [integrate] was still IDLE). This is a defensive backstop
+    // for cases where `apply_role_dependency_ordering` didn't wire the
+    // test→integrate / review→integrate dep (e.g. planner-labeled role
+    // variants that normalize_role_label missed, or integrate tasks added
+    // after role-deps ran).
+    let integrate_not_terminal = run.tasks.iter().any(|task| {
+        task.role
+            .as_deref()
+            .and_then(normalize_role_label)
+            .as_deref()
+            == Some("integrate")
+            && !task.state.is_terminal()
+    });
+
     let mut indices = Vec::new();
     for (idx, task) in run.tasks.iter().enumerate() {
         if !matches!(task.state, SwarmTaskState::Ready) {
@@ -6345,6 +6513,19 @@ fn select_dispatchable_ready_task_indices(run: &SwarmRun) -> Vec<usize> {
                 Some("propose") | Some("integrate") | Some("judge")
             );
             if role_wants_landscape {
+                continue;
+            }
+        }
+        // Post-writer roles wait for every integrator to finish.
+        if integrate_not_terminal {
+            let is_post_writer = matches!(
+                task.role
+                    .as_deref()
+                    .and_then(normalize_role_label)
+                    .as_deref(),
+                Some("test") | Some("review")
+            );
+            if is_post_writer {
                 continue;
             }
         }
