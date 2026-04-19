@@ -4,8 +4,6 @@ use std::cmp::Ordering;
 
 use crate::registry::LanguageId;
 
-// ── Highlight groups ────────────────────────────────────────────────────────
-
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Hash)]
 pub enum HighlightGroup {
     #[default]
@@ -42,8 +40,6 @@ pub enum HighlightGroup {
     DiffRemove,
 }
 
-// ── Engine identification ───────────────────────────────────────────────────
-
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub enum EngineKind {
     TreeSitter,
@@ -68,8 +64,6 @@ impl SyntaxStatus {
         }
     }
 }
-
-// ── Span and segment types ──────────────────────────────────────────────────
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HighlightSpan {
@@ -101,8 +95,6 @@ pub struct SegmentMapError {
     pub line_len: usize,
 }
 
-// ── Snapshot ────────────────────────────────────────────────────────────────
-
 #[derive(Clone, Debug)]
 pub struct HighlightSnapshot {
     pub buffer_id: usize,
@@ -114,7 +106,8 @@ pub struct HighlightSnapshot {
     pub line_start_bytes: Vec<usize>,
     pub line_hashes: Vec<u64>,
     pub per_line: Vec<Vec<LineSegment>>,
-    /// `Some((start, end))` for viewport-scoped; `None` for full-file.
+    /// `Some((start, end))` for viewport-scoped partial coverage; `None` once
+    /// progressive fill completes and the whole buffer is highlighted.
     pub highlighted_range: Option<(usize, usize)>,
 }
 
@@ -158,9 +151,8 @@ impl HighlightSnapshot {
         sort_spans(&mut spans);
 
         let offsets = compute_line_starts(text);
-        let mut lines = vec![Vec::new(); offsets.len().saturating_sub(1)];
-
-        distribute_spans_to_lines(&spans, &offsets, &mut lines, max_per_line, |_| true);
+        let mut per_line = vec![Vec::new(); offsets.len().saturating_sub(1)];
+        distribute_spans_to_lines(&spans, &offsets, &mut per_line, max_per_line, |_| true);
 
         let hashes = compute_line_hashes(text, &offsets);
 
@@ -173,17 +165,16 @@ impl HighlightSnapshot {
             duration_ms: 0,
             line_start_bytes: offsets,
             line_hashes: hashes,
-            per_line: lines,
+            per_line,
             highlighted_range: None,
         }
     }
 }
 
-// ── Line offset index ───────────────────────────────────────────────────────
-
+/// Returns line-start byte offsets with a trailing sentinel at `text.len()`
+/// so every line index `i` maps to the half-open range `[offsets[i], offsets[i + 1])`.
 pub(crate) fn compute_line_starts(text: &str) -> Vec<usize> {
     let mut offsets = vec![0usize];
-
     offsets.extend(
         text.bytes()
             .enumerate()
@@ -194,7 +185,6 @@ pub(crate) fn compute_line_starts(text: &str) -> Vec<usize> {
     if last != text.len() {
         offsets.push(text.len());
     }
-
     offsets
 }
 
@@ -204,17 +194,14 @@ pub(crate) fn find_line(offsets: &[usize], target_byte: usize) -> usize {
         .saturating_sub(1)
 }
 
-// ── Span sorting ────────────────────────────────────────────────────────────
-
-/// `start_byte` ascending, `priority` descending for ties.
+/// Sort by `start_byte` ascending; break ties by `priority` descending so
+/// higher-priority spans land first on the line.
 pub(crate) fn sort_spans(spans: &mut [HighlightSpan]) {
     spans.sort_unstable_by(|a, b| match a.start_byte.cmp(&b.start_byte) {
         Ordering::Equal => b.priority.cmp(&a.priority),
         ord => ord,
     });
 }
-
-// ── Span→line distribution ──────────────────────────────────────────────────
 
 pub(crate) fn distribute_spans_to_lines(
     spans: &[HighlightSpan],
@@ -267,9 +254,8 @@ fn assign_span_to_lines(
     }
 }
 
-// ── FNV-1a line hashing ─────────────────────────────────────────────────────
-
-/// Line-ending-agnostic FNV-1a: strips trailing `\n`, ignores `\r`.
+/// Line-ending-agnostic FNV-1a: strips a trailing `\n` and skips `\r`, so
+/// `"a\n"`, `"a\r\n"`, and `"a"` all hash identically.
 #[must_use]
 pub fn hash_line_bytes(raw: &[u8]) -> u64 {
     const BASIS: u64 = 14695981039346656037;
@@ -307,8 +293,9 @@ fn compute_line_hashes(text: &str, offsets: &[usize]) -> Vec<u64> {
         .collect()
 }
 
-// ── Byte→char segment mapping ───────────────────────────────────────────────
-
+// Translates a byte-indexed segment to char indices using a precomputed
+// table of char-boundary offsets; rejects segments whose bounds fall
+// mid-UTF-8, since those cannot map to a whole number of chars.
 fn resolve_segment_chars(
     seg: &LineSegment,
     byte_len: usize,

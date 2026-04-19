@@ -2216,14 +2216,13 @@ impl SwarmRuntime {
                             run.integrator_locked,
                             multi_integrator,
                         );
-                        parsed.warnings.extend(apply_role_dependency_ordering(
-                            state.workspace_root.as_path(),
-                            &state.agents.swarm_role_by_agent_id,
-                            run.mission_kind,
-                            run.integrator_agent_id.as_deref(),
-                            parsed.tasks.as_mut_slice(),
-                            multi_integrator,
-                        ));
+                        // Synthesize missing critical tasks (integrate,
+                        // proposer) BEFORE role-dep ordering so downstream
+                        // roles (test, review) see them as producers and get
+                        // the correct deps wired. Previously the synthesis
+                        // ran after role-deps, so test/review had no
+                        // integrate dep when the planner omitted the task and
+                        // dispatched in parallel with proposers.
                         parsed.warnings.extend(ensure_integrate_task(
                             &mut parsed.tasks,
                             run.mission_kind,
@@ -2238,6 +2237,14 @@ impl SwarmRuntime {
                             run.integrator_agent_id
                                 .as_deref()
                                 .or(parsed.integrator_agent_id.as_deref()),
+                        ));
+                        parsed.warnings.extend(apply_role_dependency_ordering(
+                            state.workspace_root.as_path(),
+                            &state.agents.swarm_role_by_agent_id,
+                            run.mission_kind,
+                            run.integrator_agent_id.as_deref(),
+                            parsed.tasks.as_mut_slice(),
+                            multi_integrator,
                         ));
                         let deps_repairs = ensure_deps_resolve(&mut parsed.tasks, run.template);
                         if !deps_repairs.is_empty() {
@@ -2704,14 +2711,8 @@ impl SwarmRuntime {
                             Some(message),
                             run.integrator_agent_id.as_deref(),
                         );
-                        parsed.warnings.extend(apply_role_dependency_ordering(
-                            state.workspace_root.as_path(),
-                            &state.agents.swarm_role_by_agent_id,
-                            run.mission_kind,
-                            run.integrator_agent_id.as_deref(),
-                            parsed.tasks.as_mut_slice(),
-                            run.scope_files.len() > 15,
-                        ));
+                        // Synthesize critical tasks BEFORE role-dep ordering
+                        // (see matching block above for why).
                         parsed.warnings.extend(ensure_integrate_task(
                             &mut parsed.tasks,
                             run.mission_kind,
@@ -2726,6 +2727,14 @@ impl SwarmRuntime {
                             run.integrator_agent_id
                                 .as_deref()
                                 .or(parsed.integrator_agent_id.as_deref()),
+                        ));
+                        parsed.warnings.extend(apply_role_dependency_ordering(
+                            state.workspace_root.as_path(),
+                            &state.agents.swarm_role_by_agent_id,
+                            run.mission_kind,
+                            run.integrator_agent_id.as_deref(),
+                            parsed.tasks.as_mut_slice(),
+                            run.scope_files.len() > 15,
                         ));
                         let deps_repairs = ensure_deps_resolve(&mut parsed.tasks, run.template);
                         if !deps_repairs.is_empty() {

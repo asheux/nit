@@ -1685,11 +1685,79 @@ fn push_genome_retry_message(
     attempt: u8,
     degraded_files: &[std::path::PathBuf],
 ) {
+    // Identify the actual writer(s) of the degraded files. The agent whose
+    // batch is firing may be an evaluator/reviewer rather than the writer
+    // — users want the retry attributed to whoever produced the code.
+    // Fall back to the batch agent when no writer can be resolved.
+    let writer_for_path = |path: &std::path::Path| -> String {
+        // Primary: substrate claim lattice. Every FileWrite auto-asserts an
+        // ExclusiveWrite claim `(claimed_by = writer, target = File { path })`.
+        // The substrate's per-file ledger survives turn boundaries (within
+        // the claim's TTL window), so it's the authoritative "who wrote this"
+        // source even after `genome_turn_modified` has been cleared by a
+        // subsequent TurnStarted.
+        let latest_writer = state
+            .substrate
+            .claims
+            .values()
+            .filter(|c| {
+                matches!(c.kind, nit_core::substrate::ClaimKind::ExclusiveWrite)
+                    && matches!(
+                        &c.target,
+                        nit_core::substrate::ClaimTarget::File { path: p } if p == path
+                    )
+            })
+            .max_by_key(|c| c.claimed_at_gen)
+            .map(|c| c.claimed_by.clone());
+        if let Some(aid) = latest_writer {
+            return aid;
+        }
+        // Fallback: per-turn attribution (in case the claim expired or
+        // never landed — shouldn't happen for recent writes, but defensive).
+        for (aid, paths) in state.genome_turn_modified.iter() {
+            if paths.contains(path) {
+                return aid.clone();
+            }
+        }
+        // Last resort: attribute to the batch owner (the reporter).
+        agent_id.to_string()
+    };
+
+    let writers: std::collections::BTreeSet<String> = degraded_files
+        .iter()
+        .map(|p| writer_for_path(p.as_path()))
+        .collect();
+    let header_writer = if writers.is_empty() {
+        agent_id.to_string()
+    } else if writers.len() == 1 {
+        writers
+            .into_iter()
+            .next()
+            .unwrap_or_else(|| agent_id.to_string())
+    } else {
+        writers
+            .iter()
+            .map(|a| compact_agent_id_for_log(a))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+
     let mut lines = Vec::new();
-    lines.push(format!(
-        "\u{21b3} [{}] genome retry {attempt}/{GENOME_RETRY_LIMIT}",
-        compact_agent_id_for_log(agent_id)
-    ));
+    let reporter = compact_agent_id_for_log(agent_id);
+    let writer_display = if header_writer.contains(',') {
+        header_writer.clone()
+    } else {
+        compact_agent_id_for_log(&header_writer)
+    };
+    if writer_display == reporter {
+        lines.push(format!(
+            "\u{21b3} [{writer_display}] genome retry {attempt}/{GENOME_RETRY_LIMIT}"
+        ));
+    } else {
+        lines.push(format!(
+            "\u{21b3} [{writer_display}] genome retry {attempt}/{GENOME_RETRY_LIMIT} (reported by {reporter})"
+        ));
+    }
 
     for path in degraded_files {
         let report = match state.genome_reports.get(path) {
@@ -1713,8 +1781,14 @@ fn push_genome_retry_message(
         } else {
             ""
         };
+        let writer = writer_for_path(path.as_path());
+        let writer_tag = if writer != agent_id {
+            format!(" by {}", compact_agent_id_for_log(&writer))
+        } else {
+            String::new()
+        };
         lines.push(format!(
-            "  {delta} {file_name} {} {} c={:.2}{bloat_tag}",
+            "  {delta} {file_name} {} {} c={:.2}{bloat_tag}{writer_tag}",
             report.tier.numeral(),
             report.quality_level(),
             report.cross_encoder_consistency,
@@ -3091,7 +3165,7 @@ fn draw(
             help_overlay::render(f, area, state, theme);
         }
         if state.show_substrate_overlay {
-            let area = substrate_overlay::preferred_size(screen);
+            let area = substrate_overlay::preferred_size(screen, state.substrate_overlay_tab);
             substrate_overlay::render(f, area, state, theme);
         }
         if state.fuzzy_search.open {
@@ -7246,7 +7320,7 @@ fn handle_mouse_event_with_swarm(
             }
 
             if state.show_substrate_overlay {
-                let area = substrate_overlay::preferred_size(screen);
+                let area = substrate_overlay::preferred_size(screen, state.substrate_overlay_tab);
                 if point_in_rect(mouse.column, mouse.row, area) {
                     let max_scroll = state.substrate_overlay_last_max_scroll;
                     let max_scroll = if max_scroll == usize::MAX {

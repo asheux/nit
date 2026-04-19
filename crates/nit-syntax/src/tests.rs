@@ -12,6 +12,11 @@ use crate::registry::LanguageId;
 use crate::tree_sitter_engine::TreeSitterEngine;
 use crate::{FileClassification, HighlightOutcome, MAX_HIGHLIGHT_BYTES};
 
+const DEFAULT_TIMEOUT: Duration = Duration::from_secs(2);
+const DEFAULT_POLL: Duration = Duration::from_millis(10);
+const LONG_TIMEOUT: Duration = Duration::from_secs(5);
+const LONG_POLL: Duration = Duration::from_millis(50);
+
 fn make_request(buffer_id: usize, version: u64, lang: LanguageId, text: &str) -> HighlightRequest {
     HighlightRequest {
         buffer_id,
@@ -59,13 +64,7 @@ fn poll_snapshot(
 }
 
 fn wait_for(engine: &mut TreeSitterEngine, buffer_id: usize, version: u64) -> HighlightSnapshot {
-    poll_snapshot(
-        engine,
-        buffer_id,
-        version,
-        Duration::from_secs(2),
-        Duration::from_millis(10),
-    )
+    poll_snapshot(engine, buffer_id, version, DEFAULT_TIMEOUT, DEFAULT_POLL)
 }
 
 fn wait_for_long(
@@ -73,20 +72,7 @@ fn wait_for_long(
     buffer_id: usize,
     version: u64,
 ) -> HighlightSnapshot {
-    poll_snapshot(
-        engine,
-        buffer_id,
-        version,
-        Duration::from_secs(5),
-        Duration::from_millis(50),
-    )
-}
-
-fn has_group(snapshot: &HighlightSnapshot, line: usize, group: HighlightGroup) -> bool {
-    snapshot
-        .per_line
-        .get(line)
-        .is_some_and(|segs| segs.iter().any(|s| s.group == group))
+    poll_snapshot(engine, buffer_id, version, LONG_TIMEOUT, LONG_POLL)
 }
 
 fn poll_until(
@@ -108,8 +94,15 @@ fn poll_until(
             Instant::now() < deadline,
             "timed out waiting for predicate ({timeout:?})"
         );
-        std::thread::sleep(Duration::from_millis(50));
+        std::thread::sleep(LONG_POLL);
     }
+}
+
+fn has_group(snapshot: &HighlightSnapshot, line: usize, group: HighlightGroup) -> bool {
+    snapshot
+        .per_line
+        .get(line)
+        .is_some_and(|segs| segs.iter().any(|s| s.group == group))
 }
 
 #[test]
@@ -238,7 +231,7 @@ fn viewport_scoped_highlight_produces_spans_for_visible_range() {
     engine.schedule_rehighlight(req);
     let snap = wait_for(&mut engine, 10, 1);
 
-    // None means progressive fill already completed (entire file covered)
+    // None means progressive fill already completed (entire file covered).
     if let Some((hl_start, hl_end)) = snap.highlighted_range {
         assert!(hl_start <= 100, "hl_start={hl_start}");
         assert!(hl_end >= 320, "hl_end={hl_end}");
@@ -312,7 +305,7 @@ fn progressive_fill_covers_full_file() {
         30,
         1,
         |s| s.highlighted_range.is_none(),
-        Duration::from_secs(5),
+        LONG_TIMEOUT,
     );
     assert!(
         !snap.per_line[350].is_empty(),

@@ -1,9 +1,13 @@
 //! Language identification and tree-sitter grammar registry.
+//!
+//! To add a new language: append a variant to [`LanguageId`] and
+//! [`LanguageId::ALL`], then extend [`LanguageRegistry::detect_from_path`],
+//! [`LanguageRegistry::tree_sitter_language`],
+//! [`LanguageRegistry::highlights_query`], and — if the language appears in
+//! Markdown/HTML fenced blocks — [`LanguageRegistry::from_injection_name`].
 
 use std::fmt;
 use std::path::Path;
-
-// ── Language identifier ────────────────────────────────────────────────────
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub enum LanguageId {
@@ -21,8 +25,8 @@ pub enum LanguageId {
     PlainText,
 }
 
-/// Does not include `PlainText` (no grammar).
 impl LanguageId {
+    /// Every language that ships a grammar (excludes [`Self::PlainText`]).
     pub const ALL: [LanguageId; 11] = [
         Self::Rust,
         Self::Python,
@@ -57,13 +61,10 @@ impl fmt::Display for LanguageId {
     }
 }
 
-// ── Registry ───────────────────────────────────────────────────────────────
-
 pub struct LanguageRegistry;
 
-// ── Detection ──────────────────────────────────────────────────────────────
-
 impl LanguageRegistry {
+    /// Precedence: explicit override → shebang → path → `PlainText`.
     #[must_use]
     pub fn detect(
         file_path: Option<&Path>,
@@ -90,12 +91,11 @@ impl LanguageRegistry {
             }
         }
 
-        let extension = match file_path.extension().and_then(|os| os.to_str()) {
-            Some(ext) => ext.to_lowercase(),
-            None => return LanguageId::PlainText,
+        let Some(extension) = file_path.extension().and_then(|os| os.to_str()) else {
+            return LanguageId::PlainText;
         };
 
-        match extension.as_str() {
+        match extension.to_lowercase().as_str() {
             "rs" => LanguageId::Rust,
             "py" => LanguageId::Python,
             "js" | "mjs" | "cjs" | "jsx" => LanguageId::JavaScript,
@@ -112,18 +112,17 @@ impl LanguageRegistry {
     }
 
     fn detect_shebang(first_line: &str) -> Option<LanguageId> {
-        let shebang_line = first_line.trim();
-        if !shebang_line.starts_with("#!") {
-            return None;
-        }
+        let line = first_line.trim();
+        let after_hash = line.strip_prefix("#!")?;
 
-        let after_hash = &shebang_line[2..];
+        // Use the last whitespace-separated word so `/usr/bin/env python3`
+        // resolves to `python3` rather than `env`.
         let interpreter = after_hash
-            .rsplit('/')
-            .next()
-            .unwrap_or(after_hash)
             .split_whitespace()
             .last()
+            .unwrap_or("")
+            .rsplit('/')
+            .next()
             .unwrap_or("")
             .to_lowercase();
 
@@ -134,11 +133,7 @@ impl LanguageRegistry {
             _ => None,
         }
     }
-}
 
-// ── Grammar and query lookup ───────────────────────────────────────────────
-
-impl LanguageRegistry {
     #[must_use]
     pub fn tree_sitter_language(language_id: LanguageId) -> Option<tree_sitter::Language> {
         match language_id {
@@ -184,6 +179,8 @@ impl LanguageRegistry {
         }
     }
 
+    /// Used for Markdown/HTML fenced blocks: accepts aliases like
+    /// `js`, `ts`, `md`, `yml`, `sh` that the path detector does not.
     #[must_use]
     pub fn from_injection_name(injection_name: &str) -> Option<LanguageId> {
         let token = injection_name

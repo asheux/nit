@@ -8,18 +8,16 @@ publish = false
 rust-version.workspace = true
 
 [dependencies]
-# Workspace
 anyhow = { workspace = true }
 tracing = { workspace = true }
 
-# Local
 nit-core = { path = "../nit-core" }
 
 # Tree-sitter runtime
 tree-sitter = "0.20.10"
 tree-sitter-highlight = "0.20.1"
 
-# Tree-sitter grammars
+# Language grammars — each enum variant in LanguageId has a matching entry
 tree-sitter-bash = "0.20.3"
 tree-sitter-css = "0.20.0"
 tree-sitter-html = "0.19.0"

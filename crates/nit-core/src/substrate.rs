@@ -389,6 +389,7 @@ impl SubstrateState {
         id
     }
 
+    #[allow(clippy::result_large_err)]
     pub fn assert_claim(&mut self, claim: Claim) -> Result<(), ClaimConflict> {
         let current_gen = self.generation;
         let conflicts: Vec<Claim> = self

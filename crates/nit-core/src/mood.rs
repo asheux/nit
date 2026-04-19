@@ -30,8 +30,8 @@ pub struct MoodModulation {
     /// <1 slows decay (preserves history). 1.0 = default (no change).
     pub signal_decay_multiplier: f32,
     /// Multiplier applied to the auto-claim TTL in the `FileWrite` arm.
-    /// >1 holds claims longer (defensive), <1 cycles them faster
-    /// (exploration). 1.0 = default.
+    /// Values above 1 hold claims longer (defensive); below 1 cycles them
+    /// faster (exploration). 1.0 = default.
     pub claim_ttl_multiplier: f32,
 }
 

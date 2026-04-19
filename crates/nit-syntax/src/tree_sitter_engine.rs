@@ -1,3 +1,7 @@
+//! Background-threaded tree-sitter worker: accepts [`HighlightRequest`]s,
+//! produces [`HighlightSnapshot`]s, and progressively fills viewport-scoped
+//! jobs once the visible region is ready.
+
 use std::cmp;
 use std::collections::HashMap;
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -18,7 +22,13 @@ use crate::highlight::{
 };
 use crate::registry::{LanguageId, LanguageRegistry};
 
-// ── Public engine ─────────────────────────────────────────────────────────
+// Amount by which viewport-scoped highlights extend beyond the visible range,
+// so small scroll jitter doesn't immediately require a re-request.
+const VIEWPORT_MARGIN_LINES: usize = 100;
+// Chunk size for progressive fill beyond the initial viewport window.
+const FILL_CHUNK_LINES: usize = 500;
+// Worker wakes up to drive progressive fill even when no request arrives.
+const FILL_IDLE_TIMEOUT: Duration = Duration::from_millis(10);
 
 pub struct TreeSitterEngine {
     req_tx: Sender<HighlightRequest>,
@@ -77,8 +87,6 @@ impl SyntaxEngine for TreeSitterEngine {
     }
 }
 
-// ── Worker thread ─────────────────────────────────────────────────────────
-
 struct BufferState {
     language: LanguageId,
     parser: Parser,
@@ -87,6 +95,8 @@ struct BufferState {
     cursor: QueryCursor,
 }
 
+/// Outstanding progressive-fill work for a viewport-scoped job: expands
+/// below the initial range first, then above, chunk by chunk.
 struct ProgressiveFill {
     buffer_id: usize,
     version: u64,
@@ -117,25 +127,17 @@ fn worker_loop(rx: Receiver<HighlightRequest>, res_tx: Sender<HighlightResult>) 
     let mut fills: HashMap<usize, ProgressiveFill> = HashMap::new();
 
     loop {
-        let initial = if fills.is_empty() {
-            match rx.recv() {
-                Ok(req) => Some(req),
-                Err(_) => break,
-            }
-        } else {
-            match rx.recv_timeout(Duration::from_millis(10)) {
-                Ok(req) => Some(req),
-                Err(mpsc::RecvTimeoutError::Timeout) => None,
-                Err(mpsc::RecvTimeoutError::Disconnected) => break,
-            }
+        let initial = match next_request(&rx, !fills.is_empty()) {
+            RequestPoll::Got(req) => Some(req),
+            RequestPoll::Idle => None,
+            RequestPoll::Disconnected => break,
         };
 
-        if let Some(initial) = initial {
-            let jobs = drain_pending(initial, &rx);
+        if let Some(first) = initial {
+            let jobs = drain_pending(first, &rx);
 
             for job in &jobs {
                 fills.remove(&job.buffer_id);
-
                 let snapshot = run_highlight_job(job, &mut state);
 
                 if let Some(fill) = make_progressive_fill(job, &snapshot) {
@@ -149,18 +151,49 @@ fn worker_loop(rx: Receiver<HighlightRequest>, res_tx: Sender<HighlightResult>) 
             }
         }
 
-        let ids: Vec<usize> = fills.keys().copied().collect();
-        for id in ids {
-            let fill = fills.get_mut(&id).unwrap();
-            if process_fill_chunk(fill, &mut state.buffers, &state.query_configs, &res_tx) {
-                fills.remove(&id);
-            }
+        step_progressive_fills(&mut fills, &mut state, &res_tx);
+    }
+}
+
+enum RequestPoll {
+    Got(HighlightRequest),
+    Idle,
+    Disconnected,
+}
+
+fn next_request(rx: &Receiver<HighlightRequest>, has_pending_fills: bool) -> RequestPoll {
+    if has_pending_fills {
+        match rx.recv_timeout(FILL_IDLE_TIMEOUT) {
+            Ok(req) => RequestPoll::Got(req),
+            Err(mpsc::RecvTimeoutError::Timeout) => RequestPoll::Idle,
+            Err(mpsc::RecvTimeoutError::Disconnected) => RequestPoll::Disconnected,
+        }
+    } else {
+        match rx.recv() {
+            Ok(req) => RequestPoll::Got(req),
+            Err(_) => RequestPoll::Disconnected,
         }
     }
 }
 
-/// Batch-drain all pending requests, keeping only the latest per buffer.
-/// Prioritizes full_reparse requests.
+fn step_progressive_fills(
+    fills: &mut HashMap<usize, ProgressiveFill>,
+    state: &mut WorkerState,
+    res_tx: &Sender<HighlightResult>,
+) {
+    let ids: Vec<usize> = fills.keys().copied().collect();
+    for id in ids {
+        let Some(fill) = fills.get_mut(&id) else {
+            continue;
+        };
+        if process_fill_chunk(fill, &mut state.buffers, &state.query_configs, res_tx) {
+            fills.remove(&id);
+        }
+    }
+}
+
+/// Batch-drain all queued requests, keeping only the latest per buffer, and
+/// return them sorted so `full_reparse` jobs run before incremental ones.
 fn drain_pending(
     first: HighlightRequest,
     rx: &Receiver<HighlightRequest>,
@@ -171,7 +204,7 @@ fn drain_pending(
         pending.insert(job.buffer_id, job);
     }
     let mut jobs: Vec<HighlightRequest> = pending.into_values().collect();
-    jobs.sort_by_key(|j| u8::from(!j.full_reparse));
+    jobs.sort_by_key(|j| if j.full_reparse { 0u8 } else { 1 });
     jobs
 }
 
@@ -184,21 +217,18 @@ fn run_highlight_job(job: &HighlightRequest, state: &mut WorkerState) -> Highlig
         highlighter,
     } = state;
 
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         highlight_job(buffers, hl_configs, query_configs, highlighter, job)
     }));
 
-    match result {
-        Ok(Ok(mut snap)) => {
-            snap.duration_ms = start.elapsed().as_millis();
+    let mut snapshot = match outcome {
+        Ok(Ok(snap)) => {
             log_completion(job.buffer_id, job.version, &snap);
             snap
         }
         Ok(Err(err)) => {
             log_error(job.buffer_id, job.version, &err);
-            let mut snap = plain_ts_snapshot(job, SyntaxStatus::Error(err.to_string()));
-            snap.duration_ms = start.elapsed().as_millis();
-            snap
+            fallback_snapshot(job, SyntaxStatus::Error(err.to_string()))
         }
         Err(panic_info) => {
             let msg = extract_panic_message(&panic_info);
@@ -208,15 +238,13 @@ fn run_highlight_job(job: &HighlightRequest, state: &mut WorkerState) -> Highlig
                 "syntax worker panic: {msg}"
             );
             buffers.remove(&job.buffer_id);
-            let mut snap =
-                plain_ts_snapshot(job, SyntaxStatus::Error(format!("worker panic: {msg}")));
-            snap.duration_ms = start.elapsed().as_millis();
-            snap
+            fallback_snapshot(job, SyntaxStatus::Error(format!("worker panic: {msg}")))
         }
-    }
+    };
+    snapshot.duration_ms = start.elapsed().as_millis();
+    snapshot
 }
 
-/// Set up progressive fill state if the snapshot only covers a partial range.
 fn make_progressive_fill(
     job: &HighlightRequest,
     snapshot: &HighlightSnapshot,
@@ -236,13 +264,16 @@ fn make_progressive_fill(
         line_start_bytes: snapshot.line_start_bytes.clone(),
         next_below: (hl_end + 1 < total).then_some(hl_end + 1),
         next_above: (hl_start > 0).then_some(hl_start),
-        chunk_size: 500,
+        chunk_size: FILL_CHUNK_LINES,
         total_lines: total,
         max_spans_per_line: job.max_spans_per_line,
     })
 }
 
-fn plain_ts_snapshot(job: &HighlightRequest, status: SyntaxStatus) -> HighlightSnapshot {
+// Produces a no-span plain snapshot but stamps `EngineKind::TreeSitter` so the
+// UI still reflects the engine that *attempted* the job. Used as an error or
+// misconfiguration fallback.
+fn fallback_snapshot(job: &HighlightRequest, status: SyntaxStatus) -> HighlightSnapshot {
     HighlightSnapshot::plain(
         job.buffer_id,
         job.version,
@@ -252,8 +283,6 @@ fn plain_ts_snapshot(job: &HighlightRequest, status: SyntaxStatus) -> HighlightS
         &job.text,
     )
 }
-
-// ── Core highlight logic ──────────────────────────────────────────────────
 
 fn highlight_job(
     buffers: &mut HashMap<usize, BufferState>,
@@ -266,7 +295,7 @@ fn highlight_job(
 
     let Some(config) = hl_configs.get(&lang) else {
         debug!("no highlight config for {lang:?}");
-        return Ok(plain_ts_snapshot(
+        return Ok(fallback_snapshot(
             job,
             SyntaxStatus::Error("no highlight config".into()),
         ));
@@ -280,7 +309,6 @@ fn highlight_job(
         cursor: QueryCursor::new(),
     });
 
-    // Invalidate cache on language change
     if state.language != lang {
         state.language = lang;
         state.tree = None;
@@ -291,25 +319,9 @@ fn highlight_job(
         state.parser.set_language(ts_lang)?;
     }
 
-    let mut edited_old = None;
-    let tree = if job.full_reparse || state.tree.is_none() {
-        state.parser.parse(job.text.as_bytes(), None)
-    } else if job.edits.is_empty() {
-        state.tree.take()
-    } else {
-        let mut existing = state.tree.take().unwrap();
-        for edit in &job.edits {
-            existing.edit(&to_input_edit(edit));
-        }
-        edited_old = Some(existing.clone());
-        state
-            .parser
-            .parse(job.text.as_bytes(), Some(&existing))
-            .or(Some(existing))
-    };
-
+    let (tree, edited_old) = parse_job_tree(state, job);
     let Some(tree) = tree else {
-        return Ok(plain_ts_snapshot(
+        return Ok(fallback_snapshot(
             job,
             SyntaxStatus::Error("parse failed".into()),
         ));
@@ -339,7 +351,31 @@ fn highlight_job(
     Ok(snapshot)
 }
 
-// ── Highlight strategies ──────────────────────────────────────────────────
+/// Parses `job.text` using the appropriate strategy:
+/// - full reparse (or first parse) => fresh tree
+/// - incremental without edits => reuse existing tree
+/// - incremental with edits => apply each edit to a clone, reparse against it,
+///   and return both the new tree and the pre-parse edited tree for the
+///   incremental highlight phase's `changed_ranges` computation.
+fn parse_job_tree(state: &mut BufferState, job: &HighlightRequest) -> (Option<Tree>, Option<Tree>) {
+    if job.full_reparse || state.tree.is_none() {
+        return (state.parser.parse(job.text.as_bytes(), None), None);
+    }
+    if job.edits.is_empty() {
+        return (state.tree.take(), None);
+    }
+
+    let mut existing = state.tree.take().unwrap();
+    for edit in &job.edits {
+        existing.edit(&to_input_edit(edit));
+    }
+    let edited_old = existing.clone();
+    let tree = state
+        .parser
+        .parse(job.text.as_bytes(), Some(&existing))
+        .or(Some(existing));
+    (tree, Some(edited_old))
+}
 
 fn viewport_highlight(
     query_configs: &HashMap<LanguageId, QueryConfig>,
@@ -351,15 +387,14 @@ fn viewport_highlight(
     let offsets = compute_line_starts(&job.text);
     let total = offsets.len().saturating_sub(1);
 
-    let margin = 100;
-    let start_line = viewport.first_line.saturating_sub(margin);
-    let end_line = (viewport.last_line + margin).min(total.saturating_sub(1));
+    let start_line = viewport.first_line.saturating_sub(VIEWPORT_MARGIN_LINES);
+    let end_line = (viewport.last_line + VIEWPORT_MARGIN_LINES).min(total.saturating_sub(1));
 
     let start_byte = offsets[start_line];
     let end_byte = offsets.get(end_line + 1).copied().unwrap_or(job.text.len());
 
     let Some(cfg) = query_configs.get(&job.language) else {
-        return Ok(plain_ts_snapshot(
+        return Ok(fallback_snapshot(
             job,
             SyntaxStatus::Error("no query config".into()),
         ));
@@ -457,7 +492,10 @@ fn should_incremental_update(state: &BufferState, job: &HighlightRequest) -> boo
     !job.full_reparse && !job.edits.is_empty() && state.snapshot.is_some() && state.tree.is_some()
 }
 
-/// Re-highlight only the lines affected by edits, reusing the rest.
+/// Re-highlight only the lines affected by edits, reusing the rest of the
+/// previous snapshot. Flow: carry forward unchanged lines from `prev`, mark
+/// lines touched by `changed_ranges` plus any that couldn't be mapped as
+/// dirty, then re-collect spans and hashes for just those dirty lines.
 fn incremental_highlight(
     prev: &HighlightSnapshot,
     edited_old: Option<&Tree>,
@@ -468,76 +506,21 @@ fn incremental_highlight(
 ) -> HighlightSnapshot {
     let offsets = compute_line_starts(&job.text);
     let line_count = offsets.len().saturating_sub(1);
-    let mut per_line = vec![Vec::new(); line_count];
-    let mut line_hashes = vec![0u64; line_count];
-    let mut copied = vec![false; line_count];
 
-    // Map old line indices to new, carrying forward segments and hashes.
-    let line_map = build_line_map(prev.per_line.len(), &job.edits);
-    for (old_i, new_i) in line_map.into_iter().enumerate() {
-        if let Some(new_i) = new_i {
-            if new_i < line_count {
-                per_line[new_i] = prev.per_line[old_i].clone();
-                if let Some(&hash) = prev.line_hashes.get(old_i) {
-                    line_hashes[new_i] = hash;
-                }
-                copied[new_i] = true;
-            }
-        }
-    }
+    let (mut per_line, mut line_hashes, copied) = carry_forward_lines(prev, &job.edits, line_count);
 
-    // Mark lines touched by tree-sitter's changed-ranges as dirty.
-    let mut dirty = vec![false; line_count];
-    if let Some(old_tree) = edited_old {
-        for range in old_tree.changed_ranges(tree) {
-            if range.end_byte == 0 || line_count == 0 {
-                continue;
-            }
-            let start = find_line(&offsets, range.start_byte).saturating_sub(1);
-            let end = cmp::min(
-                find_line(&offsets, range.end_byte.saturating_sub(1)).saturating_add(1),
-                line_count.saturating_sub(1),
-            );
-            let bound = end.saturating_add(1).min(dirty.len());
-            for slot in dirty.iter_mut().take(bound).skip(start) {
-                *slot = true;
-            }
-        }
-    }
-
-    // Lines that couldn't be mapped are also dirty.
-    for (i, &was_copied) in copied.iter().enumerate() {
-        if !was_copied {
-            dirty[i] = true;
-        }
-    }
+    let dirty = compute_dirty_lines(&copied, edited_old, tree, &offsets, line_count);
 
     if dirty.contains(&true) {
-        for (i, &is_dirty) in dirty.iter().enumerate() {
-            if is_dirty {
-                per_line[i].clear();
-            }
-        }
-
-        if let Some(cfg) = query_configs.get(&job.language) {
-            let mut spans = Vec::new();
-            let ranges = dirty_byte_ranges(&dirty, &offsets);
-            collect_spans(cfg, tree, job.text.as_bytes(), &ranges, &mut spans, cursor);
-            sort_spans(&mut spans);
-            distribute_spans_to_lines(
-                &spans,
-                &offsets,
-                &mut per_line,
-                job.max_spans_per_line,
-                |line| dirty[line],
-            );
-        }
-
-        recompute_line_hashes(
-            job.text.as_bytes(),
+        rehighlight_dirty(
+            &dirty,
             &offsets,
+            &mut per_line,
             &mut line_hashes,
-            dirty.iter().enumerate().filter(|(_, &d)| d).map(|(i, _)| i),
+            query_configs,
+            tree,
+            cursor,
+            job,
         );
     }
 
@@ -555,7 +538,106 @@ fn incremental_highlight(
     }
 }
 
-// ── Progressive fill ──────────────────────────────────────────────────────
+/// Clone each old line's segments/hash into the new layout via the edit-shifted
+/// line map. Returns `(per_line, line_hashes, copied)`, where `copied[i]` is
+/// true iff line `i` received content from the previous snapshot.
+fn carry_forward_lines(
+    prev: &HighlightSnapshot,
+    edits: &[BufferEdit],
+    line_count: usize,
+) -> (Vec<Vec<crate::highlight::LineSegment>>, Vec<u64>, Vec<bool>) {
+    let mut per_line = vec![Vec::new(); line_count];
+    let mut line_hashes = vec![0u64; line_count];
+    let mut copied = vec![false; line_count];
+
+    let line_map = build_line_map(prev.per_line.len(), edits);
+    for (old_i, new_i) in line_map.into_iter().enumerate() {
+        let Some(new_i) = new_i else { continue };
+        if new_i >= line_count {
+            continue;
+        }
+        per_line[new_i] = prev.per_line[old_i].clone();
+        if let Some(&hash) = prev.line_hashes.get(old_i) {
+            line_hashes[new_i] = hash;
+        }
+        copied[new_i] = true;
+    }
+
+    (per_line, line_hashes, copied)
+}
+
+/// Mark a line as dirty when either: tree-sitter's `changed_ranges` report
+/// touches it (with a one-line bleed on each side to cover multi-line tokens),
+/// or when no previous content could be carried forward to it.
+fn compute_dirty_lines(
+    copied: &[bool],
+    edited_old: Option<&Tree>,
+    tree: &Tree,
+    offsets: &[usize],
+    line_count: usize,
+) -> Vec<bool> {
+    let mut dirty = vec![false; line_count];
+
+    if let Some(old_tree) = edited_old {
+        for range in old_tree.changed_ranges(tree) {
+            if range.end_byte == 0 || line_count == 0 {
+                continue;
+            }
+            let start = find_line(offsets, range.start_byte).saturating_sub(1);
+            let end = cmp::min(
+                find_line(offsets, range.end_byte.saturating_sub(1)).saturating_add(1),
+                line_count.saturating_sub(1),
+            );
+            let bound = end.saturating_add(1).min(dirty.len());
+            for slot in dirty.iter_mut().take(bound).skip(start) {
+                *slot = true;
+            }
+        }
+    }
+
+    for (i, &was_copied) in copied.iter().enumerate() {
+        if !was_copied {
+            dirty[i] = true;
+        }
+    }
+
+    dirty
+}
+
+#[allow(clippy::too_many_arguments)]
+fn rehighlight_dirty(
+    dirty: &[bool],
+    offsets: &[usize],
+    per_line: &mut [Vec<crate::highlight::LineSegment>],
+    line_hashes: &mut [u64],
+    query_configs: &HashMap<LanguageId, QueryConfig>,
+    tree: &Tree,
+    cursor: &mut QueryCursor,
+    job: &HighlightRequest,
+) {
+    for (i, &is_dirty) in dirty.iter().enumerate() {
+        if is_dirty {
+            per_line[i].clear();
+        }
+    }
+
+    if let Some(cfg) = query_configs.get(&job.language) {
+        let mut spans = Vec::new();
+        let ranges = dirty_byte_ranges(dirty, offsets);
+        collect_spans(cfg, tree, job.text.as_bytes(), &ranges, &mut spans, cursor);
+        sort_spans(&mut spans);
+        distribute_spans_to_lines(&spans, offsets, per_line, job.max_spans_per_line, |line| {
+            dirty[line]
+        });
+    }
+
+    recompute_line_hashes(
+        job.text.as_bytes(),
+        offsets,
+        line_hashes,
+        dirty.iter().enumerate().filter(|(_, &d)| d).map(|(i, _)| i),
+    );
+}
 
 fn process_fill_chunk(
     fill: &mut ProgressiveFill,
@@ -563,17 +645,9 @@ fn process_fill_chunk(
     query_configs: &HashMap<LanguageId, QueryConfig>,
     res_tx: &Sender<HighlightResult>,
 ) -> bool {
-    // Determine chunk range: fill below first, then above
-    let (start_line, end_line) = if let Some(next) = fill.next_below {
-        let end = (next + fill.chunk_size).min(fill.total_lines);
-        fill.next_below = (end < fill.total_lines).then_some(end);
-        (next, end.saturating_sub(1))
-    } else if let Some(above_end) = fill.next_above {
-        let start = above_end.saturating_sub(fill.chunk_size);
-        fill.next_above = (start > 0).then_some(start);
-        (start, above_end.saturating_sub(1))
-    } else {
-        return true;
+    let (start_line, end_line) = match next_fill_chunk(fill) {
+        Some(range) => range,
+        None => return true,
     };
 
     let Some(cfg) = query_configs.get(&fill.language) else {
@@ -625,19 +699,7 @@ fn process_fill_chunk(
         start_line..=end_line,
     );
 
-    // Expand highlighted_range
-    let (prev_start, prev_end) = snapshot
-        .highlighted_range
-        .unwrap_or((0, fill.total_lines.saturating_sub(1)));
-    let new_start = prev_start.min(start_line);
-    let new_end = prev_end.max(end_line);
-
-    snapshot.highlighted_range = if new_start == 0 && new_end >= fill.total_lines.saturating_sub(1)
-    {
-        None // fully covered
-    } else {
-        Some((new_start, new_end))
-    };
+    expand_highlighted_range(snapshot, fill, start_line, end_line);
 
     let _ = res_tx.send(HighlightResult {
         buffer_id: fill.buffer_id,
@@ -647,7 +709,42 @@ fn process_fill_chunk(
     fill.next_below.is_none() && fill.next_above.is_none()
 }
 
-// ── Helpers ───────────────────────────────────────────────────────────────
+// Advance the fill cursor, filling downward first and then upward. The
+// `next_below`/`next_above` options are updated so that subsequent calls
+// pick up where this one left off.
+fn next_fill_chunk(fill: &mut ProgressiveFill) -> Option<(usize, usize)> {
+    if let Some(next) = fill.next_below {
+        let end = (next + fill.chunk_size).min(fill.total_lines);
+        fill.next_below = (end < fill.total_lines).then_some(end);
+        return Some((next, end.saturating_sub(1)));
+    }
+    if let Some(above_end) = fill.next_above {
+        let start = above_end.saturating_sub(fill.chunk_size);
+        fill.next_above = (start > 0).then_some(start);
+        return Some((start, above_end.saturating_sub(1)));
+    }
+    None
+}
+
+fn expand_highlighted_range(
+    snapshot: &mut HighlightSnapshot,
+    fill: &ProgressiveFill,
+    start_line: usize,
+    end_line: usize,
+) {
+    let (prev_start, prev_end) = snapshot
+        .highlighted_range
+        .unwrap_or((0, fill.total_lines.saturating_sub(1)));
+    let new_start = prev_start.min(start_line);
+    let new_end = prev_end.max(end_line);
+
+    let fully_covered = new_start == 0 && new_end >= fill.total_lines.saturating_sub(1);
+    snapshot.highlighted_range = if fully_covered {
+        None
+    } else {
+        Some((new_start, new_end))
+    };
+}
 
 fn collect_spans(
     cfg: &QueryConfig,
@@ -751,8 +848,9 @@ fn extract_panic_message(info: &(dyn std::any::Any + Send)) -> String {
         .unwrap_or_else(|| "unknown panic".to_string())
 }
 
-// ── Rate-limited logging ──────────────────────────────────────────────────
-
+/// Single-slot throttle: `f` runs at most once per `interval`. Seeded so the
+/// first call always fires, even before `interval` has elapsed at process
+/// start.
 struct RateLimiter {
     state: OnceLock<Mutex<Instant>>,
     interval: Duration,

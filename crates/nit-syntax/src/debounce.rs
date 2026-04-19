@@ -22,12 +22,13 @@ impl fmt::Display for DebouncerPhase {
     }
 }
 
-/// Collapses rapid events and fires once a quiet period elapses.
-/// Transitions: Idle → (mark) → Pending → (elapsed) → Ready → (clear) → Idle.
+/// Collapses bursts of events, firing once no mark has arrived for
+/// `quiet_period`. Transitions:
+/// `Idle → mark → Pending → elapsed → Ready → clear → Idle`.
 #[derive(Debug, Clone)]
 pub struct Debouncer {
     quiet_period: Duration,
-    last_event_at: Option<Instant>,
+    last_mark: Option<Instant>,
 }
 
 impl Default for Debouncer {
@@ -41,21 +42,21 @@ impl Debouncer {
     pub const fn new(quiet_period_ms: u64) -> Self {
         Self {
             quiet_period: Duration::from_millis(quiet_period_ms),
-            last_event_at: None,
+            last_mark: None,
         }
     }
 
     pub fn mark(&mut self) {
-        self.last_event_at = Some(Instant::now());
+        self.last_mark = Some(Instant::now());
     }
 
     pub fn clear(&mut self) {
-        self.last_event_at = None;
+        self.last_mark = None;
     }
 
     #[must_use]
     pub fn phase(&self) -> DebouncerPhase {
-        match self.last_event_at {
+        match self.last_mark {
             None => DebouncerPhase::Idle,
             Some(ts) if ts.elapsed() >= self.quiet_period => DebouncerPhase::Ready,
             Some(_) => DebouncerPhase::Pending,
@@ -73,7 +74,7 @@ impl Debouncer {
     }
 
     #[must_use]
-    pub fn delay(&self) -> Duration {
+    pub const fn delay(&self) -> Duration {
         self.quiet_period
     }
 }

@@ -87,7 +87,7 @@ pub(crate) fn tokenize(text: &str) -> Vec<String> {
 fn tokens_from_paths(paths: &[String]) -> Vec<String> {
     let mut out = Vec::new();
     for p in paths {
-        for part in p.split(|c: char| c == '/' || c == '\\' || c == '.') {
+        for part in p.split(['/', '\\', '.']) {
             if part.is_empty() {
                 continue;
             }
@@ -123,8 +123,7 @@ pub fn save_index(workspace_root: &Path, index: &MissionMemoryIndex) -> io::Resu
         fs::create_dir_all(parent)?;
     }
     let tmp = path.with_extension("json.tmp");
-    let bytes =
-        serde_json::to_vec_pretty(index).map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+    let bytes = serde_json::to_vec_pretty(index).map_err(io::Error::other)?;
     fs::write(&tmp, bytes)?;
     fs::rename(&tmp, &path)?;
     Ok(())

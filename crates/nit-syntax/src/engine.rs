@@ -1,4 +1,5 @@
-//! Syntax engine trait, configuration, and manager.
+//! Syntax engine trait, configuration, and manager that multiplexes
+//! between the plain-text fallback and the tree-sitter worker.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -8,8 +9,6 @@ use nit_core::BufferEdit;
 use crate::highlight::{EngineKind, HighlightSnapshot, SyntaxStatus};
 use crate::registry::{LanguageId, LanguageRegistry};
 use crate::tree_sitter_engine::TreeSitterEngine;
-
-// ── Configuration ─────────────────────────────────────────────────────────
 
 #[derive(Clone, Debug)]
 pub struct SyntaxConfig {
@@ -32,16 +31,12 @@ impl Default for SyntaxConfig {
     }
 }
 
-// ── Viewport ──────────────────────────────────────────────────────────────
-
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct ViewportRange {
     pub first_line: usize,
     pub last_line: usize,
     pub total_lines: usize,
 }
-
-// ── Highlight request ─────────────────────────────────────────────────────
 
 #[derive(Clone, Debug)]
 pub struct HighlightRequest {
@@ -54,8 +49,6 @@ pub struct HighlightRequest {
     pub max_spans_per_line: usize,
     pub viewport: Option<ViewportRange>,
 }
-
-// ── Engine trait ──────────────────────────────────────────────────────────
 
 pub trait SyntaxEngine {
     fn detect_language(
@@ -72,8 +65,6 @@ pub trait SyntaxEngine {
     fn try_get_highlights(&mut self, buffer_id: usize, version: u64) -> Option<HighlightSnapshot>;
 }
 
-// ── Plain-text fallback engine ────────────────────────────────────────────
-
 #[derive(Default)]
 pub struct PlainTextEngine {
     snapshots: HashMap<usize, HighlightSnapshot>,
@@ -88,7 +79,7 @@ impl PlainTextEngine {
 
 impl SyntaxEngine for PlainTextEngine {
     fn schedule_rehighlight(&mut self, request: HighlightRequest) {
-        let snap = HighlightSnapshot::plain(
+        let snapshot = HighlightSnapshot::plain(
             request.buffer_id,
             request.version,
             request.language,
@@ -96,7 +87,7 @@ impl SyntaxEngine for PlainTextEngine {
             SyntaxStatus::Ok(EngineKind::Plain),
             &request.text,
         );
-        self.snapshots.insert(request.buffer_id, snap);
+        self.snapshots.insert(request.buffer_id, snapshot);
     }
 
     fn try_get_highlights(&mut self, buffer_id: usize, version: u64) -> Option<HighlightSnapshot> {
@@ -106,8 +97,6 @@ impl SyntaxEngine for PlainTextEngine {
             .cloned()
     }
 }
-
-// ── Manager (multiplexer) ─────────────────────────────────────────────────
 
 struct BufferMeta {
     engine: EngineKind,
@@ -153,7 +142,7 @@ impl SyntaxManager {
         self.buffers
             .get(&buffer_id)
             .map(|m| m.status.clone())
-            .unwrap_or(SyntaxStatus::Ok(self.config.engine))
+            .unwrap_or_else(|| SyntaxStatus::Ok(self.config.engine))
     }
 
     fn set_buffer_meta(&mut self, buffer_id: usize, engine: EngineKind, status: SyntaxStatus) {
@@ -185,13 +174,14 @@ impl SyntaxEngine for SyntaxManager {
     }
 
     fn try_get_highlights(&mut self, buffer_id: usize, version: u64) -> Option<HighlightSnapshot> {
-        let snap = match self.engine_for(buffer_id) {
+        let snapshot = match self.engine_for(buffer_id) {
             EngineKind::TreeSitter => self.tree_engine.try_get_highlights(buffer_id, version),
             EngineKind::Plain => self.plain_engine.try_get_highlights(buffer_id, version),
         };
-        if let (Some(s), Some(meta)) = (&snap, self.buffers.get_mut(&buffer_id)) {
+        // Keep the buffer's public status in sync with whatever the engine just produced.
+        if let (Some(s), Some(meta)) = (&snapshot, self.buffers.get_mut(&buffer_id)) {
             meta.status = s.status.clone();
         }
-        snap
+        snapshot
     }
 }
