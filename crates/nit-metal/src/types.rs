@@ -1,43 +1,43 @@
 //! Public types shared across the Metal GPU acceleration crate.
 
-/// A pair of strategy indices to be evaluated head-to-head on the GPU.
 #[derive(Clone, Debug)]
 pub struct MatchPair {
     pub a_idx: u32,
     pub b_idx: u32,
 }
 
-/// Maximum cellular-automaton window size compiled into the default Metal kernel.
+/// Default CA window compiled into the Metal kernel. The macOS backend may
+/// compile specialized pipelines with a wider window at runtime.
 pub const CA_MAX_WINDOW: u32 = 1024;
 
-/// Default scratch width for the Metal TM kernel; the macOS backend may compile
-/// specialized pipelines for larger widths at runtime.
+/// Default TM scratch width compiled into the Metal kernel. Wider tapes force
+/// runtime recompilation of a specialized pipeline.
 pub const TM_MAX_WIDTH: u32 = 1024;
 
-/// Default FSM state count for cycle detection in the Metal FSM kernel.
-/// The macOS backend compiles specialized pipelines with the exact state count.
+/// Default FSM state count compiled into the Metal kernel. Larger state
+/// machines trigger runtime recompilation of a specialized pipeline.
 pub const FSM_MAX_STATES: u32 = 4;
 
-/// Accumulated scores from a single match-pair evaluation.
 #[derive(Clone, Debug)]
 pub struct ScorePair {
     pub a_total: i64,
     pub b_total: i64,
 }
 
-/// Halting status for both sides of a Turing machine match pair.
-///
-/// Only meaningful for TM payloads; FSM and CA evaluations do not
-/// produce halting information.
+/// Halting flags for both strategies of a TM match. Only meaningful for TM
+/// payloads; FSM and CA evaluations do not produce halting information.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct TmHaltingPair {
     pub a_all_halted: bool,
     pub b_all_halted: bool,
 }
 
-/// Parameters common to every batch evaluation request.
+/// Evaluation configuration shared across every pair in a batch.
+///
+/// Intentionally excludes the match-pair list so a prepared batch can be
+/// reused across multiple pair sets without re-uploading payload buffers.
 #[derive(Clone, Debug)]
-pub struct EvalCommon {
+pub struct BatchEvalConfig {
     pub rounds: u32,
     /// `payoff[action_a][action_b][player]`.
     pub payoff: [[[i32; 2]; 2]; 2],
@@ -45,23 +45,8 @@ pub struct EvalCommon {
     pub timeout_lose: i32,
     /// Score assigned to the opponent when a player times out.
     pub timeout_win: i32,
-    pub pairs: Vec<MatchPair>,
 }
 
-/// Evaluation configuration without match pairs.
-///
-/// Extracted from [`EvalCommon`] so that prepared batches can be
-/// configured once and reused across multiple sets of pairs.
-#[derive(Clone, Debug)]
-pub struct BatchEvalConfig {
-    pub rounds: u32,
-    /// `payoff[action_a][action_b][player]`.
-    pub payoff: [[[i32; 2]; 2]; 2],
-    pub timeout_lose: i32,
-    pub timeout_win: i32,
-}
-
-/// Finite state machine batch payload.
 #[derive(Clone, Debug)]
 pub struct FsmBatch {
     pub states: u32,
@@ -73,7 +58,7 @@ pub struct FsmBatch {
     pub transitions: Vec<u32>,
 }
 
-/// Cellular automaton batch payload (1-D totalistic).
+/// 1-D totalistic cellular automaton batch payload.
 #[derive(Clone, Debug)]
 pub struct CaBatch {
     pub symbols: u32,
@@ -84,7 +69,7 @@ pub struct CaBatch {
     pub rule_tables: Vec<u32>,
 }
 
-/// A single Turing machine transition packed for GPU upload.
+/// A single TM transition packed with explicit fields for GPU upload.
 #[derive(Clone, Debug)]
 pub struct TmTransitionPacked {
     pub write: u32,
@@ -93,7 +78,6 @@ pub struct TmTransitionPacked {
     pub next: u32,
 }
 
-/// Turing machine batch payload.
 #[derive(Clone, Debug)]
 pub struct TmBatch {
     pub states: u32,
@@ -105,19 +89,12 @@ pub struct TmBatch {
     pub transitions: Vec<TmTransitionPacked>,
 }
 
-/// A batch evaluation payload — one of the three supported kernel types.
+/// One of the three supported kernel payloads.
 #[derive(Clone, Debug)]
 pub enum BatchPayload {
     Fsm(FsmBatch),
     Ca(CaBatch),
     Tm(TmBatch),
-}
-
-/// A complete batch evaluation request ready for GPU dispatch.
-#[derive(Clone, Debug)]
-pub struct BatchRequest {
-    pub common: EvalCommon,
-    pub payload: BatchPayload,
 }
 
 /// How a [`RecommendedBatchPolicy`] was determined.
@@ -136,7 +113,7 @@ pub struct BatchExecutionPolicy {
     pub inflight_batches: usize,
 }
 
-/// The result of policy resolution: a concrete policy plus its provenance.
+/// A resolved policy with its provenance and on-disk cache coordinates.
 #[derive(Clone, Debug)]
 pub struct RecommendedBatchPolicy {
     pub policy: BatchExecutionPolicy,
@@ -145,7 +122,6 @@ pub struct RecommendedBatchPolicy {
     pub cache_path: Option<String>,
 }
 
-/// Metadata for a single entry in the batch policy cache.
 #[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct BatchPolicyCacheEntryInfo {
     pub key: String,
@@ -156,7 +132,6 @@ pub struct BatchPolicyCacheEntryInfo {
     pub inflight_batches: usize,
 }
 
-/// A snapshot of all entries currently in the batch policy cache.
 #[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct BatchPolicyCacheSnapshot {
     pub root: Option<String>,
@@ -164,7 +139,7 @@ pub struct BatchPolicyCacheSnapshot {
 }
 
 impl BatchPayload {
-    /// Kernel variant name used in logging and cache key prefixes.
+    /// Short label used in logging and cache key prefixes.
     pub fn variant_name(&self) -> &'static str {
         match self {
             Self::Fsm(_) => "fsm",
@@ -173,7 +148,10 @@ impl BatchPayload {
         }
     }
 
-    /// Number of individual strategies (automata) encoded in this payload.
+    /// Number of strategies encoded in this payload.
+    ///
+    /// Returns 0 for a CA payload with `rule_table_len == 0`; callers that
+    /// divide by this value must guard against the zero case.
     pub fn population_count(&self) -> usize {
         match self {
             Self::Fsm(fsm) => fsm.starts.len(),
@@ -195,16 +173,6 @@ impl BatchPayload {
             Self::Ca(ca) => ca.symbols,
             Self::Tm(tm) => tm.states,
         }
-    }
-}
-
-impl BatchRequest {
-    pub fn pair_count(&self) -> usize {
-        self.common.pairs.len()
-    }
-
-    pub fn kernel_variant(&self) -> &'static str {
-        self.payload.variant_name()
     }
 }
 

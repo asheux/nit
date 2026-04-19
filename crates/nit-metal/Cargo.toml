@@ -10,7 +10,7 @@ rust-version.workspace = true
 [dependencies]
 nit-utils = { path = "../nit-utils" }
 serde = { workspace = true, features = ["derive"] }
-serde_json = { workspace = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 metal = "0.27.0"
+serde_json = { workspace = true }

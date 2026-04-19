@@ -59,7 +59,7 @@ pub fn render(
         nit_core::mood::Mood::Consolidation => theme.accent,
         nit_core::mood::Mood::Defensive => theme.warning,
     };
-    let mood_segment = format!(" | {mood_label} ");
+    let mood_segment = format!(" | MOOD: {mood_label} ");
 
     let inner_width = area.width.saturating_sub(2) as usize;
     let fixed_width = [
@@ -125,6 +125,7 @@ pub fn render(
         Span::styled(app_label, Style::default().fg(theme.title)),
         Span::styled(" | UTF-8", Style::default().fg(theme.border)),
         Span::styled(" | ", Style::default().fg(theme.border)),
+        Span::styled("MOOD: ", Style::default().fg(theme.border)),
         Span::styled(
             mood_label,
             Style::default().fg(mood_color).add_modifier(Modifier::BOLD),

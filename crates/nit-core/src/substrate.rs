@@ -192,6 +192,12 @@ pub fn claims_conflict(a: &Claim, b: &Claim) -> bool {
     if !targets_overlap(&a.target, &b.target) {
         return false;
     }
+    // An agent cannot conflict with itself. Re-asserting or refreshing a
+    // claim on a file you already hold is a no-op in the coordination
+    // model — contention only exists between different agents.
+    if a.claimed_by == b.claimed_by {
+        return false;
+    }
     use ClaimKind::*;
     match (a.kind, b.kind) {
         (Soft, _) | (_, Soft) => false,
@@ -406,6 +412,14 @@ impl SubstrateState {
                 conflicts,
             });
         }
+        // Refresh-on-reassert: drop any stale same-owner claims on the same
+        // target+kind so repeated FileWrites don't fan out into a growing
+        // pile of near-duplicate claims. The new claim carries a fresh TTL.
+        self.claims.retain(|_, existing| {
+            !(existing.claimed_by == claim.claimed_by
+                && existing.kind == claim.kind
+                && targets_overlap(&existing.target, &claim.target))
+        });
         self.claims.insert(claim.id.clone(), claim);
         Ok(())
     }

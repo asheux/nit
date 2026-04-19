@@ -7270,6 +7270,7 @@ fn role_contract_lines(role: &str) -> &'static [&'static str] {
             "Do not restart broad ideation; focus on carrying the selected approach through.",
             "If a FILE CHECKLIST is provided above, you MUST modify every listed file — process them in order, one by one. A file left unchanged means your task is incomplete.",
             "Report exact files changed and validation results.",
+            "VERIFY-LOOP BUDGET — STRICT: you may run each verify gate (e.g. `cargo test`, `cargo clippy`, `cargo fmt --check`, `cargo check`, equivalent pytest/go/npm commands) AT MOST TWICE. If issues remain after the second pass — clippy still warning, tests still failing, fmt still diffing — STOP iterating, report the remaining issues as a short bullet list in your final message, and finish the turn. The review and test agents downstream, and the post-execution gate verifier, will handle residual cleanup. Endless iterate-fix-iterate cycles waste the turn budget and cost real money; a half-clean workspace with a clear residuals list is more useful than a timeout at turn 120 with perfect cosmetics unreported.",
             "TEST DISCIPLINE — STRICT: Workspace-wide / repo-wide test commands (`cargo test --all` / `--workspace`, `go test ./...`, `pytest` from the repo root, `npm test --workspaces`, `just test`, `just ci`, full lint/type-check sweeps, etc.) are ONLY allowed when the OPERATOR explicitly asked for them in the request above (look for phrases like \"run full CI\", \"verify the whole workspace\", \"run all tests\"). Otherwise you MUST NOT run a workspace-wide command — broad verification is the review/test agent's job and the post-execution gate verifier's job. DEFAULT: run only targeted tests for the files you actually changed, using whatever scoping flag the project's toolchain provides (e.g. `cargo test -p <affected-crate>`, `pytest path/to/affected/dir`, `go test ./path/to/affected/...`). MULTI-MODULE CHANGES: combine targeted flags (`cargo test -p crate1 -p crate2`) or run one targeted command per module — do NOT widen to workspace-wide. Infer the appropriate command from the project layout; do not assume any specific language or tooling.",
             "CODE CONVENTION: Do NOT add inline test modules (`#[cfg(test)] mod tests { ... }`) inside source files. Tests must live in a dedicated tests directory or test file, not inline. If you encounter an existing inline test module during a refactor, move it to the appropriate test file/directory. Do NOT pad small files (lib.rs, mod.rs, re-export files) with unnecessary code to boost genome scores — trivially small files are auto-passed by the genome system. COMMENTS: Trim doc comments that restate the type/function name, echo visible type signatures, or describe obvious behavior. Keep comments that explain WHY, document non-obvious constraints, safety invariants, or algorithmic choices.",
             "GENOME QUALITY OBLIGATION: You are the sole writer. Your code is measured by nit's genome system across four encoders. See the full ENCODER GUIDE and TARGETS in the genome instructions attached to this prompt. Maintain or improve genome scores on every file you touch. Aim for Tier III+ (Spaceship) minimum, aspire to Tier V (Replicator). Do NOT call [evaluate_genome] — nit evaluates automatically after your changes are written to disk.",
@@ -7313,6 +7314,28 @@ fn role_response_format_lines(role: &str) -> Option<&'static [&'static str]> {
         ]),
         _ => None,
     }
+}
+
+/// Extract cargo crate names from `crates/<name>/...` paths. Returns a sorted
+/// de-duplicated list. Non-crates paths are ignored. Used to scope test/review
+/// agents to only the packages the swarm actually touched.
+fn crate_names_from_paths(paths: &[String]) -> Vec<String> {
+    use std::collections::BTreeSet;
+    let mut set: BTreeSet<String> = BTreeSet::new();
+    for p in paths {
+        let p = p.trim();
+        let p = p.strip_prefix("./").unwrap_or(p);
+        let Some(rest) = p.strip_prefix("crates/") else {
+            continue;
+        };
+        let Some(name) = rest.split('/').next() else {
+            continue;
+        };
+        if !name.is_empty() {
+            set.insert(name.to_string());
+        }
+    }
+    set.into_iter().collect()
 }
 
 fn wrap_task_prompt(
@@ -7421,6 +7444,44 @@ fn wrap_task_prompt(
             out.push_str("Your proposal must cover ALL of these files (no exceptions):\n");
             for (i, path) in scope_files.iter().enumerate() {
                 out.push_str(&format!("{}. {path}\n", i + 1));
+            }
+        } else {
+            // Test / review / judge / other read-only roles: inject the exact
+            // crate scope derived from the scope files so the agent can't
+            // drift into `cargo test --all`. Agents have ignored the
+            // prose-only discipline rules repeatedly; giving them the
+            // concrete command leaves no room to improvise.
+            let role = task.role.as_deref().and_then(normalize_role_label);
+            let is_test = role.as_deref() == Some("test");
+            let is_review = role.as_deref() == Some("review");
+            if is_test || is_review {
+                let crates = crate_names_from_paths(scope_files);
+                if !crates.is_empty() {
+                    out.push_str("\n## SCOPE — crates touched by this mission\n");
+                    out.push_str(
+                        "These are the ONLY crates you may exercise. Do NOT widen to workspace-wide (`--all` / `--workspace`) under any circumstance, even \"just to be safe\".\n",
+                    );
+                    for c in &crates {
+                        out.push_str(&format!("- {c}\n"));
+                    }
+                    out.push_str("\nREQUIRED COMMANDS (use exactly these; do not add `--all` or `--workspace`):\n");
+                    let pkg_flags: String = crates.iter().map(|c| format!(" -p {c}")).collect();
+                    if is_test {
+                        out.push_str(&format!(
+                            "- `cargo test{pkg_flags}` — run the scoped test suite.\n"
+                        ));
+                    } else {
+                        out.push_str(&format!(
+                            "- `cargo test{pkg_flags}` — if you need to confirm tests still pass.\n"
+                        ));
+                        out.push_str(&format!(
+                            "- `cargo clippy{pkg_flags} --all-targets -- -D warnings` — lint only the touched crates.\n"
+                        ));
+                    }
+                    out.push_str(
+                        "If a targeted command fails, report the failure and STOP — do not broaden the scope to diagnose.\n",
+                    );
+                }
             }
         }
     }

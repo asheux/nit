@@ -53,7 +53,7 @@ pub enum ClaudeCommand {
 }
 
 pub const DEFAULT_MAX_TURNS: u32 = 50;
-pub const INTEGRATOR_MAX_TURNS: u32 = 120;
+pub const INTEGRATOR_MAX_TURNS: u32 = 70;
 
 pub struct ClaudeRunner {
     cmd_tx: Sender<ClaudeCommand>,

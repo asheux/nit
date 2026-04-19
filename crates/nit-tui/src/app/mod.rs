@@ -1166,13 +1166,31 @@ fn run_loop(
                     crate::swarm::cleanup_idle_chat_clone(state, agent_id);
                 }
                 // Dispatch genome evaluations to background threads.
-                if let AgentBusEvent::TurnCompleted {
-                    agent_id,
-                    mission_id,
-                    ..
-                } = &event
-                {
-                    dispatch_turn_genome_evals(state, &genome_worker, agent_id, mission_id);
+                // Also fires on TurnFailed when the agent wrote files
+                // before crashing: integrators often hit max-turns or exit
+                // non-zero during cosmetic cleanup after the real work is
+                // already on disk. Without this, failed-but-wrote runs
+                // silently skip the entire genome retry pipeline.
+                match &event {
+                    AgentBusEvent::TurnCompleted {
+                        agent_id,
+                        mission_id,
+                        ..
+                    } => {
+                        dispatch_turn_genome_evals(state, &genome_worker, agent_id, mission_id);
+                    }
+                    AgentBusEvent::TurnFailed {
+                        agent_id,
+                        mission_id,
+                        ..
+                    } if state
+                        .genome_turn_modified
+                        .get(agent_id)
+                        .is_some_and(|s| !s.is_empty()) =>
+                    {
+                        dispatch_turn_genome_evals(state, &genome_worker, agent_id, mission_id);
+                    }
+                    _ => {}
                 }
             }
             // Re-resolve the pinned artifact so the popup stays on the
@@ -1260,13 +1278,31 @@ fn run_loop(
                     crate::swarm::cleanup_idle_chat_clone(state, agent_id);
                 }
                 // Dispatch genome evaluations to background threads.
-                if let AgentBusEvent::TurnCompleted {
-                    agent_id,
-                    mission_id,
-                    ..
-                } = &event
-                {
-                    dispatch_turn_genome_evals(state, &genome_worker, agent_id, mission_id);
+                // Also fires on TurnFailed when the agent wrote files
+                // before crashing: integrators often hit max-turns or exit
+                // non-zero during cosmetic cleanup after the real work is
+                // already on disk. Without this, failed-but-wrote runs
+                // silently skip the entire genome retry pipeline.
+                match &event {
+                    AgentBusEvent::TurnCompleted {
+                        agent_id,
+                        mission_id,
+                        ..
+                    } => {
+                        dispatch_turn_genome_evals(state, &genome_worker, agent_id, mission_id);
+                    }
+                    AgentBusEvent::TurnFailed {
+                        agent_id,
+                        mission_id,
+                        ..
+                    } if state
+                        .genome_turn_modified
+                        .get(agent_id)
+                        .is_some_and(|s| !s.is_empty()) =>
+                    {
+                        dispatch_turn_genome_evals(state, &genome_worker, agent_id, mission_id);
+                    }
+                    _ => {}
                 }
             }
             if let Some(ref pinned) = pinned_popup_ref {
@@ -1690,12 +1726,19 @@ fn push_genome_retry_message(
     // — users want the retry attributed to whoever produced the code.
     // Fall back to the batch agent when no writer can be resolved.
     let writer_for_path = |path: &std::path::Path| -> String {
-        // Primary: substrate claim lattice. Every FileWrite auto-asserts an
-        // ExclusiveWrite claim `(claimed_by = writer, target = File { path })`.
-        // The substrate's per-file ledger survives turn boundaries (within
-        // the claim's TTL window), so it's the authoritative "who wrote this"
-        // source even after `genome_turn_modified` has been cleared by a
-        // subsequent TurnStarted.
+        // Primary: per-turn attribution. `genome_turn_modified` is reset on
+        // each TurnStarted, so it only covers recent writes — sufficient
+        // for the retry message which fires shortly after a turn finalizes.
+        for (aid, paths) in state.genome_turn_modified.iter() {
+            if paths.contains(path) {
+                return aid.clone();
+            }
+        }
+        // Fallback: substrate claim lattice. ExclusiveWrite claims auto-
+        // asserted by FileWrite carry the writer across turn boundaries
+        // within the claim's TTL, covering cases where the per-turn map
+        // was cleared by a subsequent TurnStarted before the retry message
+        // was built. Pick the most recently claimed entry on the path.
         let latest_writer = state
             .substrate
             .claims
@@ -1711,13 +1754,6 @@ fn push_genome_retry_message(
             .map(|c| c.claimed_by.clone());
         if let Some(aid) = latest_writer {
             return aid;
-        }
-        // Fallback: per-turn attribution (in case the claim expired or
-        // never landed — shouldn't happen for recent writes, but defensive).
-        for (aid, paths) in state.genome_turn_modified.iter() {
-            if paths.contains(path) {
-                return aid.clone();
-            }
         }
         // Last resort: attribute to the batch owner (the reporter).
         agent_id.to_string()

@@ -1,6 +1,32 @@
-//! Metal GPU device introspection.
+//! Metal GPU device introspection and Apple Silicon tier detection.
 
-/// Runtime capabilities of the Metal GPU backend on this machine.
+/// Apple Silicon performance tier inferred from the device name.
+///
+/// Shared by policy tuning and [`MetalBackendInfo`] so a single source of
+/// truth drives batch-size / queue-depth heuristics.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub(crate) enum AppleTier {
+    Base,
+    Pro,
+    Max,
+    Ultra,
+}
+
+/// Ordered by specificity: every Ultra also contains "Max" historically, so
+/// Ultra must be matched first.
+pub(crate) fn apple_tier(device_name: &str) -> AppleTier {
+    if device_name.contains("Ultra") {
+        return AppleTier::Ultra;
+    }
+    if device_name.contains("Max") {
+        return AppleTier::Max;
+    }
+    if device_name.contains("Pro") {
+        return AppleTier::Pro;
+    }
+    AppleTier::Base
+}
+
 #[derive(Debug, Clone)]
 pub struct MetalBackendInfo {
     pub device_name: String,
@@ -16,20 +42,17 @@ impl MetalBackendInfo {
         })
     }
 
-    /// High-core-count Apple Silicon (Pro, Max, Ultra) benefits from deeper
+    /// Any non-base Apple Silicon tier (Pro/Max/Ultra) benefits from deeper
     /// dispatch queues and larger batch sizes.
     pub fn is_high_performance(&self) -> bool {
-        const HIGH_PERF_TIERS: &[&str] = &["Pro", "Max", "Ultra"];
-        HIGH_PERF_TIERS
-            .iter()
-            .any(|tier| self.device_name.contains(tier))
+        !matches!(apple_tier(&self.device_name), AppleTier::Base)
     }
 
     pub fn working_set_mib(&self) -> u64 {
         self.working_set_bytes / (1024 * 1024)
     }
 
-    /// Format: `metal-macos/<device_name>/<working_set>MiB`
+    /// Format: `metal-macos/<device_name>/<working_set>MiB`.
     pub fn diagnostic_label(&self) -> String {
         format!(
             "metal-macos/{}/{}MiB",
@@ -48,9 +71,4 @@ impl std::fmt::Display for MetalBackendInfo {
             self.working_set_mib()
         )
     }
-}
-
-pub fn gpu_device_name() -> Option<String> {
-    let device = metal::Device::system_default()?;
-    Some(device.name().to_string())
 }

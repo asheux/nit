@@ -295,11 +295,14 @@ fn sorted_by_strength_tiebreak_by_posted_gen() {
 }
 
 fn mk_claim(id: &str, kind: ClaimKind, target: ClaimTarget, gen: u64, ttl: u64) -> Claim {
+    // Use the id as the owner so each test claim belongs to a distinct
+    // agent — matches the conflict-test scenarios (cross-owner contention).
+    // Same-owner re-assertion is explicitly a no-op in `claims_conflict`.
     Claim {
         id: id.into(),
         kind,
         target,
-        claimed_by: "agent-a".into(),
+        claimed_by: id.into(),
         claimed_at_gen: gen,
         ttl_gens: ttl,
         rationale: "test".into(),
