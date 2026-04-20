@@ -458,10 +458,8 @@ impl SwarmRuntime {
                             // Ready so the next `dispatch_ready_tasks` cycle
                             // re-dispatches it with a continuation prompt.
                             if let Some(reason) = detect_incomplete_signoff(message) {
-                                if let Some(task) = run
-                                    .tasks
-                                    .iter_mut()
-                                    .find(|t| t.id == completed.task_id)
+                                if let Some(task) =
+                                    run.tasks.iter_mut().find(|t| t.id == completed.task_id)
                                 {
                                     if task.retries < MAX_CONTINUATION_RETRIES {
                                         task.retries = task.retries.saturating_add(1);

@@ -3338,7 +3338,8 @@ fn collect_unresolved_deps_empty_when_all_resolve() {
 
 #[test]
 fn detect_incomplete_signoff_accepts_output_with_sentinel() {
-    let message = "Did the work.\n\n```json\n{\"type\":\"swarm_artifacts\"}\n```\n\n<SWARM_TASK_COMPLETE>\n";
+    let message =
+        "Did the work.\n\n```json\n{\"type\":\"swarm_artifacts\"}\n```\n\n<SWARM_TASK_COMPLETE>\n";
     assert!(detect_incomplete_signoff(message).is_none());
 }
 
