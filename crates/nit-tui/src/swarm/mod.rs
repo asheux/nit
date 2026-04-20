@@ -133,7 +133,8 @@ pub(crate) use plan_parser::{detect_swarm_mission_kind_from_prompt, normalize_ro
 #[cfg(test)]
 use prompts::role_contract_lines;
 use prompts::{
-    build_planner_prompt, build_synthesis_prompt, is_provider_rate_limit_failure, wrap_task_prompt,
+    build_planner_prompt, build_synthesis_prompt, detect_incomplete_signoff,
+    is_provider_rate_limit_failure, wrap_task_prompt,
 };
 pub(crate) use scope::enumerate_scope_files;
 use scope::sanitize_for_filename;

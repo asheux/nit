@@ -3,19 +3,24 @@ use nit_core::{AgentBusEvent, AppState, MissionPhase};
 use super::{
     abort_swarm_plan_preflight, analyze_swarm_dag, apply_role_dependency_ordering,
     build_synthesis_prompt, build_verify_prompt, cleanup_swarm_clones_for_mission,
-    dispatch_ready_tasks, drain_queued_turns_for_agent, emit_parallel_deps_auto_repair_signals,
-    emit_unresolved_dep_signals, ensure_agent_coverage, ensure_deps_resolve, ensure_integrate_task,
-    ensure_judge_task_for_multi_proposer, ensure_proposer_task, fallback_tasks, gate_bundle_label,
-    initialize_task_graph, is_chat_clone_agent_id, is_provider_rate_limit_failure,
-    mark_task_finished, mark_task_running, maybe_resolve_deadlock, maybe_spawn_genome_review,
-    parse_gate_report, parse_plan_from_planner, push_system_message_to_mission,
-    read_workspace_dag_validation_mode, refresh_task_readiness, repair_swarm_dag, run_gates_label,
-    spawn_genome_gate_eval, structural_compliance_missing_files, tag_last_agent_message_kind,
-    tasks_terminal_count, try_dispatch_gate_retry, update_mission_final, update_mission_phase,
-    update_mission_status, GenomeGatePending, SwarmArtifactFocus, SwarmDagValidationMode,
-    SwarmDispatch, SwarmEventOutcome, SwarmRuntime, SwarmStage, SwarmTaskState,
-    DEFAULT_DAG_VALIDATION_MODE,
+    detect_incomplete_signoff, dispatch_ready_tasks, drain_queued_turns_for_agent,
+    emit_parallel_deps_auto_repair_signals, emit_unresolved_dep_signals, ensure_agent_coverage,
+    ensure_deps_resolve, ensure_integrate_task, ensure_judge_task_for_multi_proposer,
+    ensure_proposer_task, fallback_tasks, gate_bundle_label, initialize_task_graph,
+    is_chat_clone_agent_id, is_provider_rate_limit_failure, mark_task_finished, mark_task_running,
+    maybe_resolve_deadlock, maybe_spawn_genome_review, parse_gate_report, parse_plan_from_planner,
+    push_system_message_to_mission, read_workspace_dag_validation_mode, refresh_task_readiness,
+    repair_swarm_dag, run_gates_label, spawn_genome_gate_eval, structural_compliance_missing_files,
+    tag_last_agent_message_kind, tasks_terminal_count, try_dispatch_gate_retry,
+    update_mission_final, update_mission_phase, update_mission_status, GenomeGatePending,
+    SwarmArtifactFocus, SwarmDagValidationMode, SwarmDispatch, SwarmEventOutcome, SwarmRuntime,
+    SwarmStage, SwarmTaskState, DEFAULT_DAG_VALIDATION_MODE,
 };
+
+/// Max number of times a task can be re-dispatched because its output failed
+/// the completion sign-off check. After this many attempts we accept whatever
+/// the agent produced and move on.
+const MAX_CONTINUATION_RETRIES: u8 = 2;
 
 impl SwarmRuntime {
     pub fn handle_event(
@@ -445,6 +450,44 @@ impl SwarmRuntime {
                                         "mission_id": run.mission_id,
                                     }),
                                 });
+                            }
+                            // Completion sign-off check: if the agent's output
+                            // looks like an early exit (no sentinel, or ends
+                            // with an "shall I proceed?" style question) and
+                            // we still have retry budget, revert the task to
+                            // Ready so the next `dispatch_ready_tasks` cycle
+                            // re-dispatches it with a continuation prompt.
+                            if let Some(reason) = detect_incomplete_signoff(message) {
+                                if let Some(task) = run
+                                    .tasks
+                                    .iter_mut()
+                                    .find(|t| t.id == completed.task_id)
+                                {
+                                    if task.retries < MAX_CONTINUATION_RETRIES {
+                                        task.retries = task.retries.saturating_add(1);
+                                        task.state = SwarmTaskState::Ready;
+                                        task.failed = false;
+                                        task.expected_artifacts_missing = false;
+                                        let attempt = task.retries;
+                                        let task_id = task.id.clone();
+                                        push_system_message_to_mission(
+                                            state,
+                                            &run.mission_id,
+                                            format!(
+                                                "SIGN-OFF: task '{task_id}' output flagged as incomplete ({reason}). Re-dispatching with continuation (attempt {attempt}/{MAX_CONTINUATION_RETRIES})."
+                                            ),
+                                        );
+                                    } else {
+                                        push_system_message_to_mission(
+                                            state,
+                                            &run.mission_id,
+                                            format!(
+                                                "SIGN-OFF: task '{}' output flagged as incomplete ({reason}), retry budget exhausted — accepting partial result.",
+                                                completed.task_id
+                                            ),
+                                        );
+                                    }
+                                }
                             }
                         }
                         refresh_task_readiness(&mut run);

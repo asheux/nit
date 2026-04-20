@@ -2709,7 +2709,7 @@ fn swarm_artifacts_popup_follows_completed_clone_task() {
         mission_id: Some(mission_id.clone()),
         thread_id: Some("thr-clone".into()),
         token_count: None,
-        message: "clone output".into(),
+        message: "clone output\n<SWARM_TASK_COMPLETE>".into(),
     };
     clone_event.apply(&mut state);
     let clone_outcome = swarm.handle_event_outcome(&mut state, &clone_event);
@@ -2795,7 +2795,7 @@ fn swarm_artifacts_popup_follows_final_report() {
         mission_id: Some(mission_id.clone()),
         thread_id: Some("thr-clone".into()),
         token_count: None,
-        message: "clone output".into(),
+        message: "clone output\n<SWARM_TASK_COMPLETE>".into(),
     };
     clone_event.apply(&mut state);
     let clone_outcome = swarm.handle_event_outcome(&mut state, &clone_event);
@@ -2814,7 +2814,7 @@ fn swarm_artifacts_popup_follows_final_report() {
         mission_id: Some(mission_id.clone()),
         thread_id: Some("thr-verify".into()),
         token_count: None,
-        message: "verify output".into(),
+        message: "verify output\n<SWARM_TASK_COMPLETE>".into(),
     };
     verify_event.apply(&mut state);
     let verify_outcome = swarm.handle_event_outcome(&mut state, &verify_event);
@@ -2909,7 +2909,7 @@ fn write_swarm_run_provenance_persists_final_report_markdown() {
         mission_id: Some(mission_id.clone()),
         thread_id: Some("thr-clone".into()),
         token_count: None,
-        message: "clone output".into(),
+        message: "clone output\n<SWARM_TASK_COMPLETE>".into(),
     };
     clone_event.apply(&mut state);
     let _ = swarm.handle_event_outcome(&mut state, &clone_event);
@@ -2919,7 +2919,7 @@ fn write_swarm_run_provenance_persists_final_report_markdown() {
         mission_id: Some(mission_id.clone()),
         thread_id: Some("thr-verify".into()),
         token_count: None,
-        message: "verify output".into(),
+        message: "verify output\n<SWARM_TASK_COMPLETE>".into(),
     };
     verify_event.apply(&mut state);
     let _ = swarm.handle_event_outcome(&mut state, &verify_event);
@@ -3017,7 +3017,7 @@ fn clicking_swarm_clone_artifact_row_opens_matching_task_card() {
         mission_id: Some(mission_id.clone()),
         thread_id: Some("thr-clone".into()),
         token_count: None,
-        message: "clone output".into(),
+        message: "clone output\n<SWARM_TASK_COMPLETE>".into(),
     };
     clone_event.apply(&mut state);
     let _ = swarm.handle_event_outcome(&mut state, &clone_event);

@@ -328,7 +328,7 @@ fn completed_swarm_cleans_up_mission_clone_lanes_from_roster() {
         mission_id: Some(mission_id.clone()),
         thread_id: Some("thr-clone".into()),
         token_count: None,
-        message: "done".into(),
+        message: "done\n<SWARM_TASK_COMPLETE>".into(),
     };
     clone_event.apply(&mut state);
     let dispatches = swarm.handle_event(&mut state, &clone_event);
@@ -3334,4 +3334,50 @@ fn collect_unresolved_deps_empty_when_all_resolve() {
     ];
     let run = make_run_with_tasks(SwarmTemplate::Parallel, tasks);
     assert!(collect_unresolved_deps(&run).is_empty());
+}
+
+#[test]
+fn detect_incomplete_signoff_accepts_output_with_sentinel() {
+    let message = "Did the work.\n\n```json\n{\"type\":\"swarm_artifacts\"}\n```\n\n<SWARM_TASK_COMPLETE>\n";
+    assert!(detect_incomplete_signoff(message).is_none());
+}
+
+#[test]
+fn detect_incomplete_signoff_flags_output_without_sentinel() {
+    let message = "Did the work.\n\n```json\n{\"type\":\"swarm_artifacts\"}\n```\n";
+    let reason = detect_incomplete_signoff(message).expect("flagged");
+    assert!(reason.contains("sentinel") || reason.contains("approval"));
+}
+
+#[test]
+fn detect_incomplete_signoff_flags_ask_for_approval_style_ending() {
+    // Pre-sentinel deployment: no sentinel + human-style question tail.
+    let message = "Completed swarm.rs refactor. 441 tests pass.\n\n\
+                   Remaining: app/mod.rs. Want me to proceed, or pause here so you can review?";
+    let reason = detect_incomplete_signoff(message).expect("flagged");
+    assert!(reason.contains("approval") || reason.contains("sentinel"));
+}
+
+#[test]
+fn detect_incomplete_signoff_flags_trailing_question_mark() {
+    let message = "Here's what I found. Should I continue?";
+    assert!(detect_incomplete_signoff(message).is_some());
+}
+
+#[test]
+fn detect_incomplete_signoff_flags_empty_output() {
+    assert!(detect_incomplete_signoff("").is_some());
+    assert!(detect_incomplete_signoff("   \n\n").is_some());
+}
+
+#[test]
+fn detect_incomplete_signoff_ignores_early_interrogatives_in_body() {
+    // A proposer legitimately discussing "should we do X" in the middle of a
+    // long output should NOT trip the detector — only tail prose matters.
+    let mut message = String::from("Exploring options. Should we split this file?\n");
+    for _ in 0..30 {
+        message.push_str("Body content that doesn't ask anything.\n");
+    }
+    message.push_str("\n```json\n{\"type\":\"swarm_artifacts\"}\n```\n<SWARM_TASK_COMPLETE>\n");
+    assert!(detect_incomplete_signoff(&message).is_none());
 }

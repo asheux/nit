@@ -7,6 +7,83 @@ use super::{
     SWARM_VERIFY_MAX_CHARS, TEST_DISCIPLINE_CLAUSE,
 };
 
+/// Machine-checked sign-off sentinel. Swarm agents must emit this line exactly
+/// once at the very end of a successfully completed task (after the structured
+/// artifacts JSON block). Missing sentinel means the orchestrator treats the
+/// output as incomplete and re-dispatches a continuation.
+pub(super) const TASK_COMPLETE_SENTINEL: &str = "<SWARM_TASK_COMPLETE>";
+
+/// Returns `Some(reason)` when an agent's output looks like an early exit /
+/// human-style "should I proceed?" stop rather than a real task completion.
+/// Returns `None` when the output passes the sign-off check. Reasons are
+/// short tags used in continuation prompts + system messages.
+pub(super) fn detect_incomplete_signoff(message: &str) -> Option<&'static str> {
+    let trimmed = message.trim();
+    if trimmed.is_empty() {
+        return Some("empty output");
+    }
+    if !trimmed.contains(TASK_COMPLETE_SENTINEL) {
+        // Fallback heuristic: catch pre-sentinel deployments + agents that
+        // strip it. Look for interrogatives in the tail of the output.
+        let tail = tail_without_json_block(trimmed);
+        if tail_contains_interactive_prose(tail) {
+            return Some("asking for approval / offering options");
+        }
+        return Some("missing TASK_COMPLETE sentinel");
+    }
+    None
+}
+
+fn tail_without_json_block(text: &str) -> &str {
+    if let Some(idx) = text.rfind("```") {
+        if let Some(prev_fence) = text[..idx].rfind("```") {
+            return text[..prev_fence].trim_end();
+        }
+    }
+    text
+}
+
+fn tail_contains_interactive_prose(tail: &str) -> bool {
+    // Only scan the last ~15 non-empty lines; early-exit prose lives at the
+    // end, never at the start. Matching anywhere in a long output produces
+    // false positives (proposers legitimately discuss "should we X" in prose).
+    let tail_lines: Vec<&str> = tail
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect();
+    let window_start = tail_lines.len().saturating_sub(15);
+    let window = &tail_lines[window_start..];
+    const NEEDLES: &[&str] = &[
+        "shall i",
+        "should i proceed",
+        "should i continue",
+        "want me to",
+        "would you like me",
+        "let me know",
+        "pause here",
+        "if you want me",
+        "awaiting your",
+        "awaiting approval",
+        "ready for your review",
+        "ready for review — shall",
+    ];
+    for line in window {
+        let lower = line.to_ascii_lowercase();
+        for needle in NEEDLES {
+            if lower.contains(needle) {
+                return true;
+            }
+        }
+        // Trailing question mark on the very last non-empty line is a strong
+        // signal (integrators don't ask rhetorical questions).
+        if Some(*line) == window.last().copied() && line.ends_with('?') {
+            return true;
+        }
+    }
+    false
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn build_planner_prompt(
     root_prompt: &str,
@@ -397,6 +474,29 @@ pub(super) fn wrap_task_prompt(
     scope_files: &[String],
 ) -> String {
     let mut out = String::new();
+    // Continuation preamble: when a task has been re-dispatched because its
+    // prior output failed the sign-off check, surface the partial output and
+    // tell the agent to pick up where it left off instead of restarting.
+    if task.retries > 0 {
+        out.push_str(&format!(
+            "## CONTINUATION (attempt {})\n\
+             Your previous attempt on this task did NOT complete the sign-off check — either the {TASK_COMPLETE_SENTINEL} sentinel was missing, or your output ended by asking for approval / offering options. That is a task failure, not a valid stopping point.\n\
+             - Treat this turn as a CONTINUATION of your prior work, not a fresh start.\n\
+             - Pick up where you left off and finish the ENTIRE scope.\n\
+             - Do not re-plan, do not summarize what you already did, do not ask what to do next. Just do the remaining work.\n\
+             - End your response with the {TASK_COMPLETE_SENTINEL} sentinel (see SIGN-OFF at the bottom).\n",
+            task.retries + 1
+        ));
+        if let Some(prior) = task.output.as_deref() {
+            let prior = prior.trim();
+            if !prior.is_empty() {
+                out.push_str("\nYour previous partial output (for context):\n");
+                out.push_str("```\n");
+                out.push_str(&truncate_chars(prior, 4000));
+                out.push_str("\n```\n\n");
+            }
+        }
+    }
     out.push_str(&format!(
         "SWARM TASK: {} ({})\n",
         task.title.trim(),
@@ -407,6 +507,18 @@ pub(super) fn wrap_task_prompt(
             out.push_str(&format!("ROLE: {}\n", role.trim()));
         }
     }
+    // NON-INTERACTIVE contract: this runs in an autonomous swarm. Agents that
+    // pause to ask for approval will stall the pipeline (there is no human in
+    // the loop to answer). The sentinel below is how the orchestrator detects
+    // completion; missing it triggers an automatic continuation turn.
+    out.push_str(
+        "EXECUTION MODE: non-interactive (autonomous swarm — no human reviewer between turns).\n\
+         - Complete the ENTIRE scope described below before returning; do not stop halfway.\n\
+         - Never ask for approval, never offer options, never request permission to proceed.\n\
+         - When the request is ambiguous, pick the safer option (narrower scope, smaller diff) and proceed; note the choice in your summary.\n\
+         - \"Want me to proceed?\", \"Shall I continue?\", \"Should I do X or Y?\", \"Pause here for review?\" are all task failures.\n\
+         - The orchestrator parses your output for a machine-checked completion sentinel (see SIGN-OFF section at the end). Missing the sentinel is treated as an incomplete task and you will be re-dispatched with your partial output as context.\n",
+    );
     if task.writes {
         out.push_str("MODE: single-writer integrator (workspace writes allowed)\n");
     } else {
@@ -617,6 +729,17 @@ pub(super) fn wrap_task_prompt(
     out.push('\n');
     out.push_str(nit_core::GENOME_AGENT_INSTRUCTIONS);
     out.push('\n');
+
+    // Machine-checked sign-off. Every successfully completed task must end
+    // with this exact line. Orchestrator scans for it on TurnCompleted and
+    // auto-retries tasks that omit it. Kept verbatim — do not paraphrase,
+    // quote, or wrap in backticks.
+    out.push_str(&format!(
+        "\n## SIGN-OFF (REQUIRED)\n\
+         After the structured artifacts JSON block above, on its own final line, emit the literal sentinel:\n\
+         {TASK_COMPLETE_SENTINEL}\n\
+         Do not paraphrase it, do not wrap it in code fences, do not comment on it. Its presence is how the orchestrator knows you are done. Its absence triggers an automatic continuation turn with your partial output.\n"
+    ));
 
     out
 }
