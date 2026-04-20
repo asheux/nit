@@ -1376,17 +1376,10 @@ fn swarm_exec_label_uses_task_role_for_swarm_clones() {
     let state = state_with_active_clones(&[clone_a.as_str(), clone_b.as_str()]);
     let runtime = test_runtime_with_running_tasks(
         "mis-001",
-        &[
-            (clone_a.as_str(), "propose"),
-            (clone_b.as_str(), "propose"),
-        ],
+        &[(clone_a.as_str(), "propose"), (clone_b.as_str(), "propose")],
     );
 
-    let label = swarm_exec_label(
-        &state,
-        &[clone_a.clone(), clone_b.clone()],
-        Some(&runtime),
-    );
+    let label = swarm_exec_label(&state, &[clone_a.clone(), clone_b.clone()], Some(&runtime));
     assert_eq!(label, "Proposing ...");
 }
 
@@ -1417,11 +1410,7 @@ fn swarm_exec_label_returns_executing_for_mixed_running_roles() {
         ],
     );
 
-    let label = swarm_exec_label(
-        &state,
-        &[clone_a.clone(), clone_b.clone()],
-        Some(&runtime),
-    );
+    let label = swarm_exec_label(&state, &[clone_a.clone(), clone_b.clone()], Some(&runtime));
     assert_eq!(label, "Executing ...");
 }
 
@@ -1433,10 +1422,7 @@ fn swarm_exec_label_resolves_role_via_clones_own_mission_id() {
     // `agent_ops_view::swarm_clone_label_parts`.
     let clone_a = "claude-opus-4-7#swarm-mis-007-clone-02".to_string();
     let state = state_with_active_clones(&[clone_a.as_str()]);
-    let runtime = test_runtime_with_running_tasks(
-        "mis-007",
-        &[(clone_a.as_str(), "propose")],
-    );
+    let runtime = test_runtime_with_running_tasks("mis-007", &[(clone_a.as_str(), "propose")]);
 
     let label = swarm_exec_label(&state, &[clone_a.clone()], Some(&runtime));
     assert_eq!(label, "Proposing ...");

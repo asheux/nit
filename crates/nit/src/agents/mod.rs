@@ -47,8 +47,8 @@ pub(crate) fn sync_backend_model_lanes(roster: &mut AgentsState, selection: Agen
     let prior_selection = roster.selected_agent.clone();
 
     roster.agents.retain(|lane| {
-        !(expand_claude && matches!(lane.kind, AgentLaneKind::Claude))
-            && !(expand_gemini && matches!(lane.kind, AgentLaneKind::Gemini))
+        !((expand_claude && matches!(lane.kind, AgentLaneKind::Claude))
+            || (expand_gemini && matches!(lane.kind, AgentLaneKind::Gemini)))
     });
 
     if expand_claude {

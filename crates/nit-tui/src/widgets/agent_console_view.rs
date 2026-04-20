@@ -2412,9 +2412,7 @@ fn breather_rows_for_user_prompt(
             // mission (unknown stage, moved to `completed_runs`, etc.) we
             // still want to surface role-specific labels by looking up each
             // active clone's dashboard via its own mission_id.
-            _ if is_swarm && any_active => {
-                swarm_exec_label(state, &ordered_ids, swarm).into()
-            }
+            _ if is_swarm && any_active => swarm_exec_label(state, &ordered_ids, swarm).into(),
             _ if any_active => "Working ...".into(),
             _ => "Queued ...".into(),
         }
