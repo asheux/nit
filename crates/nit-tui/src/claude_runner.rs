@@ -52,6 +52,16 @@ pub enum ClaudeCommand {
 }
 
 pub const DEFAULT_MAX_TURNS: u32 = 50;
+/// Budget for swarm support roles (proposer, judge, review, test, research).
+/// These roles are read-only but perform deep recon — reading many files,
+/// greping for symbols, collecting evidence — before producing a substantial
+/// proposal/critique. The plain-chat default of 50 gets exhausted quickly on
+/// non-trivial scopes (e.g. proposing a refactor plan for a 13k-line module
+/// routinely needs 100+ read/grep turns).
+pub const SWARM_SUPPORT_MAX_TURNS: u32 = 200;
+/// Budget for the integrator — the single writer. Runs verify loops
+/// (clippy → test → fmt → fix → re-check) on top of the actual edits, so the
+/// envelope has to be large enough for the whole write/verify cycle.
 pub const INTEGRATOR_MAX_TURNS: u32 = 500;
 
 pub struct ClaudeRunner {

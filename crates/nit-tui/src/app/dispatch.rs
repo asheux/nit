@@ -764,17 +764,44 @@ pub(super) fn maybe_dispatch_claude_turn(
         .unwrap_or_else(|| "high".into());
 
     let read_only = crate::shadow::parse_shadow_lane_id(&model).is_some();
-    // Role-aware turn budget: integrators run real verify loops
-    // (clippy → test → fmt → fix → re-check) and routinely exceed the
-    // default. Read the role already set by `apply_swarm_task_role`.
+    // Role-aware turn budget:
+    // - Integrators run real verify loops (clippy → test → fmt → fix → re-check)
+    //   on top of the write work and need the largest envelope.
+    // - Every other swarm clone is read-only but still performs deep recon
+    //   across the scope — reads, greps, and evidence collection add up. The
+    //   plain-chat default of 50 runs out mid-recon on non-trivial scopes
+    //   (observed: proposer hitting error_max_turns after 51 turns while
+    //   analysing a 13k-line module).
+    // - Non-clone agents (regular chat lanes) keep the plain-chat default.
+    //
+    // Role is set by `apply_swarm_task_role` before dispatch; treat any
+    // swarm-clone agent with a non-empty role as at least support-tier so
+    // novel planner-generated roles (recon, design, plan, genome-reviewer,
+    // etc.) also get the larger envelope without having to enumerate them.
     let max_turns = state
         .agents
         .agents
         .iter()
         .find(|a| a.id == model)
-        .and_then(|a| match a.role.to_ascii_lowercase().as_str() {
-            "integrate" | "integrator" => Some(crate::claude_runner::INTEGRATOR_MAX_TURNS),
-            _ => None,
+        .and_then(|a| {
+            let role = a.role.to_ascii_lowercase();
+            match role.as_str() {
+                "integrate" | "integrator" | "integration" | "code" | "coding" | "implement"
+                | "refactor" | "refactoring" | "fix" | "fixer" | "bugfix" => {
+                    Some(crate::claude_runner::INTEGRATOR_MAX_TURNS)
+                }
+                _ => {
+                    // Fallback: any other non-empty role on a swarm clone is
+                    // a support/research role that deserves the bigger budget.
+                    let is_clone = crate::swarm::is_any_clone_agent_id(&a.id);
+                    let has_role = !a.role.trim().is_empty();
+                    if is_clone && has_role {
+                        Some(crate::claude_runner::SWARM_SUPPORT_MAX_TURNS)
+                    } else {
+                        None
+                    }
+                }
+            }
         });
     let ok = claude.send(ClaudeCommand::RunTurn {
         model: model.clone(),
