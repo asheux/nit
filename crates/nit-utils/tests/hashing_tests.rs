@@ -69,7 +69,13 @@ fn rng_f32_in_unit_interval() {
 
 #[test]
 fn rng_iterator_yields_distinct_values() {
+    use std::collections::HashSet;
     let rng = SplitMix64::new(77);
     let vals: Vec<u64> = rng.take(5).collect();
-    assert_ne!(vals[0], vals[1]);
+    let unique: HashSet<u64> = vals.iter().copied().collect();
+    assert_eq!(
+        unique.len(),
+        vals.len(),
+        "expected 5 distinct draws: {vals:?}"
+    );
 }

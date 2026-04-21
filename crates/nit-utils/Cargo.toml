@@ -3,7 +3,7 @@ name = "nit-utils"
 version = "0.1.0"
 edition = "2021"
 rust-version.workspace = true
-description = "Shared utilities for the nit workspace"
+description = "Atomic filesystem writes, stable hashing, and project paths for the nit workspace"
 license = "MIT"
 publish = false
 

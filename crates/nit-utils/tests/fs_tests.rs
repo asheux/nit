@@ -24,6 +24,13 @@ impl Drop for ScratchDir {
     }
 }
 
+fn has_tmp_residue(dir: &Path) -> bool {
+    std::fs::read_dir(dir)
+        .expect("read_dir")
+        .flatten()
+        .any(|entry| entry.file_name().to_string_lossy().contains(".tmp."))
+}
+
 #[test]
 fn write_atomic_creates_file() {
     let dir = ScratchDir::new("fs_create");
@@ -32,10 +39,7 @@ fn write_atomic_creates_file() {
     nit_utils::write_atomic(&target, |w| w.write_all(b"hello")).expect("write_atomic failed");
 
     assert_eq!(std::fs::read_to_string(&target).unwrap(), "hello");
-    assert!(
-        !dir.join("out.tmp").exists(),
-        "temp file should be cleaned up"
-    );
+    assert!(!has_tmp_residue(&dir), "temp file should be cleaned up");
 }
 
 #[test]
@@ -62,9 +66,23 @@ fn write_atomic_cleans_up_on_failure() {
         "destination should not exist after failure"
     );
     assert!(
-        !dir.join("fail.tmp").exists(),
+        !has_tmp_residue(&dir),
         "temp file should be removed on failure"
     );
+}
+
+// Regression test for the old `path.with_extension("tmp")` behavior, which
+// collapsed `foo.txt` and `foo.json` onto the same sibling path.
+#[test]
+fn write_atomic_preserves_unrelated_tmp_sibling() {
+    let dir = ScratchDir::new("fs_sibling");
+    let target = dir.join("out.txt");
+    let bystander = dir.join("out.tmp");
+    std::fs::write(&bystander, b"sentinel").unwrap();
+
+    nit_utils::write_atomic(&target, |w| w.write_all(b"hello")).expect("write_atomic failed");
+
+    assert_eq!(std::fs::read_to_string(&bystander).unwrap(), "sentinel");
 }
 
 #[test]

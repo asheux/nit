@@ -27,9 +27,16 @@ fn state_dir_platform_dependent() {
 
 #[test]
 fn all_dirs_contain_app_name() {
-    for dir in [paths::config_dir(), paths::data_dir(), paths::cache_dir()] {
-        let path = dir.expect("directory should resolve");
-        let s = path.to_string_lossy();
-        assert!(s.contains("nit"), "expected 'nit' in path: {s}");
+    for (name, dir) in [
+        ("config", paths::config_dir()),
+        ("data", paths::data_dir()),
+        ("cache", paths::cache_dir()),
+    ] {
+        let path = dir.unwrap_or_else(|| panic!("{name} dir should resolve"));
+        let display = path.to_string_lossy();
+        assert!(
+            display.contains("nit"),
+            "expected 'nit' in {name} path: {display}"
+        );
     }
 }
