@@ -1161,8 +1161,8 @@ pub(super) fn run_loop(
                 &claude_runner,
             );
             // Proposer pre-scan bookkeeping.
-            // (a) Let the swarm know which scope files just got reports so it
-            //     can release blocked propose tasks.
+            // (a) Let the swarm AND shadow runtime know which scope files just
+            //     got reports so they can release blocked propose tasks.
             for path in &prescan_completed {
                 let dispatches = swarm.note_prescan_result(path);
                 for mut dispatch in dispatches {
@@ -1175,6 +1175,18 @@ pub(super) fn run_loop(
                         Some(&claude_runner),
                         dispatch.agent_id,
                         Some(dispatch.mission_id),
+                        dispatch.prompt,
+                    );
+                }
+                for mut dispatch in shadow.note_prescan_result(path) {
+                    augment_shadow_prompt_with_landscape(state, &mut dispatch);
+                    dispatch_agent_prompt(
+                        state,
+                        &mut vitals,
+                        Some(&codex_runner),
+                        Some(&claude_runner),
+                        dispatch.agent_id,
+                        dispatch.mission_id,
                         dispatch.prompt,
                     );
                 }
@@ -1200,6 +1212,9 @@ pub(super) fn run_loop(
                     for path in paths {
                         genome_worker.evaluate_from_disk_prescan(path);
                     }
+                }
+                for path in shadow.take_pending_prescan_paths() {
+                    genome_worker.evaluate_from_disk_prescan(path);
                 }
             }
 

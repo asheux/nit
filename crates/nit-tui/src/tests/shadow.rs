@@ -7,6 +7,7 @@
 
 use nit_core::state::AgentTurnState;
 use nit_core::{AgentBusEvent, AgentLane, AgentLaneKind, AgentStatus, AppState, Buffer};
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::time::Instant;
 
@@ -128,6 +129,7 @@ fn start_creates_four_shadow_clones_and_returns_two_proposers() {
             "refactor everything".into(),
             None,
             Some(0),
+            HashSet::new(),
         )
         .expect("start succeeds");
 
@@ -157,8 +159,15 @@ fn start_creates_four_shadow_clones_and_returns_two_proposers() {
 fn start_rejects_duplicate_run_for_same_agent() {
     let mut state = make_state_with_main_agent("codex-main");
     let mut rt = ShadowRuntime::new();
-    rt.start(&mut state, "codex-main".into(), "prompt".into(), None, None)
-        .expect("first start");
+    rt.start(
+        &mut state,
+        "codex-main".into(),
+        "prompt".into(),
+        None,
+        None,
+        HashSet::new(),
+    )
+    .expect("first start");
     assert!(rt
         .start(
             &mut state,
@@ -166,6 +175,7 @@ fn start_rejects_duplicate_run_for_same_agent() {
             "prompt 2".into(),
             None,
             None,
+            HashSet::new(),
         )
         .is_none());
 }
@@ -177,11 +187,25 @@ fn start_rejects_unknown_or_non_dispatchable_main_agent() {
     state.agents.agents[0].kind = AgentLaneKind::Mock;
     let mut rt = ShadowRuntime::new();
     assert!(rt
-        .start(&mut state, "codex-main".into(), "p".into(), None, None,)
+        .start(
+            &mut state,
+            "codex-main".into(),
+            "p".into(),
+            None,
+            None,
+            HashSet::new(),
+        )
         .is_none());
 
     assert!(rt
-        .start(&mut state, "does-not-exist".into(), "p".into(), None, None,)
+        .start(
+            &mut state,
+            "does-not-exist".into(),
+            "p".into(),
+            None,
+            None,
+            HashSet::new(),
+        )
         .is_none());
 }
 
@@ -195,6 +219,7 @@ fn full_dag_proposers_then_judge_then_review_then_main() {
         "implement feature".into(),
         None,
         Some(42),
+        HashSet::new(),
     )
     .unwrap();
 
@@ -267,6 +292,7 @@ fn shadow_failure_falls_back_to_unaugmented_main_dispatch() {
         "do the thing".into(),
         None,
         Some(7),
+        HashSet::new(),
     )
     .unwrap();
 
@@ -302,6 +328,7 @@ fn stage_label_reflects_current_active_shadow() {
         "implement feature".into(),
         None,
         None,
+        HashSet::new(),
     )
     .unwrap();
 
@@ -372,6 +399,7 @@ fn reviewer_completion_defers_when_main_is_busy() {
         "implement feature".into(),
         None,
         Some(5),
+        HashSet::new(),
     )
     .unwrap();
 
@@ -430,6 +458,77 @@ fn reviewer_completion_defers_when_main_is_busy() {
     }
 }
 
+// Passing prescan_paths to start parks the proposer dispatches until the
+// genome reports land. Caller gets empty dispatches back; after all pending
+// paths clear via note_prescan_result, the proposers are released.
+#[test]
+fn start_with_prescan_paths_parks_proposers() {
+    let mut state = make_state_with_main_agent("codex-main");
+    let mut rt = ShadowRuntime::new();
+
+    let scope = PathBuf::from("/tmp/fake-scope.rs");
+    let mut prescan = HashSet::new();
+    prescan.insert(scope.clone());
+
+    let dispatches = rt
+        .start(
+            &mut state,
+            "codex-main".into(),
+            "refactor it".into(),
+            None,
+            Some(0),
+            prescan,
+        )
+        .expect("start succeeds");
+    assert!(
+        dispatches.is_empty(),
+        "proposers must be parked when prescan is pending"
+    );
+    assert!(rt.has_run_for("codex-main"));
+
+    // Runtime hands out the path once for worker dispatch, not repeatedly.
+    let first = rt.take_pending_prescan_paths();
+    assert_eq!(first, vec![scope.clone()]);
+    let second = rt.take_pending_prescan_paths();
+    assert!(
+        second.is_empty(),
+        "already-dispatched paths must not re-emit"
+    );
+
+    // Result arrives → proposers released.
+    let released = rt.note_prescan_result(&scope);
+    assert_eq!(released.len(), 2, "both proposers must be released");
+    assert!(released.iter().any(|d| d.agent_id.contains("propose-a")));
+    assert!(released.iter().any(|d| d.agent_id.contains("propose-b")));
+
+    // Subsequent completion events should drive the rest of the pipeline
+    // as normal (proposers → judge → review → main).
+    let ev = completed_event(&shadow_lane_id("codex-main", "01", "propose-a"), "plan A");
+    let _ = rt.handle_event_outcome(&mut state, &ev);
+    let ev = completed_event(&shadow_lane_id("codex-main", "01", "propose-b"), "plan B");
+    let out = rt.handle_event_outcome(&mut state, &ev);
+    assert_eq!(out.dispatches.len(), 1, "judge should dispatch");
+    assert!(out.dispatches[0].agent_id.contains("judge"));
+}
+
+#[test]
+fn empty_prescan_paths_returns_proposers_immediately() {
+    let mut state = make_state_with_main_agent("codex-main");
+    let mut rt = ShadowRuntime::new();
+    let dispatches = rt
+        .start(
+            &mut state,
+            "codex-main".into(),
+            "do it".into(),
+            None,
+            None,
+            HashSet::new(),
+        )
+        .expect("start succeeds");
+    assert_eq!(dispatches.len(), 2);
+    assert!(rt.take_pending_prescan_paths().is_empty());
+}
+
 // Main completing an unrelated turn during Proposing/Judging/Reviewing stages
 // must NOT trigger cleanup and must NOT be mistaken for the shadow turn.
 #[test]
@@ -442,6 +541,7 @@ fn main_completion_during_proposing_does_not_clean_up() {
         "implement feature".into(),
         None,
         Some(3),
+        HashSet::new(),
     )
     .unwrap();
 
