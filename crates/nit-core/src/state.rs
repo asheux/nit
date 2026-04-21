@@ -987,6 +987,13 @@ pub struct AgentsState {
     /// Runtime-only.
     #[serde(skip)]
     pub queued_codex_turns: VecDeque<QueuedCodexTurn>,
+    /// Workspace-wide genome scan progress: `Some((done, total))` while the
+    /// scan is in flight, `None` when idle. Updated from the runtime each
+    /// main-loop tick; read by the agent-console breather to render the
+    /// "Evaluating genome: X/Y files" indicator.
+    /// Runtime-only.
+    #[serde(skip)]
+    pub workspace_scan_progress: Option<(usize, usize)>,
     /// Whether the `codex` CLI is available in PATH (used for backend inventory in the roster UI).
     /// Runtime-only.
     #[serde(skip)]
@@ -1272,6 +1279,7 @@ impl AgentsState {
             codex_mission_thread_ids: HashMap::new(),
             active_turns: HashMap::new(),
             queued_codex_turns: VecDeque::new(),
+            workspace_scan_progress: None,
             codex_cli_available: false,
             claude_cli_available: false,
             gemini_cli_available: false,
@@ -1406,6 +1414,7 @@ impl Default for AgentsState {
             codex_mission_thread_ids: HashMap::new(),
             active_turns: HashMap::new(),
             queued_codex_turns: VecDeque::new(),
+            workspace_scan_progress: None,
             codex_cli_available: false,
             claude_cli_available: false,
             gemini_cli_available: false,

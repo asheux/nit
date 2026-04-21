@@ -382,33 +382,11 @@ fn select_dispatchable_ready_task_indices(run: &SwarmRun) -> Vec<usize> {
                     SwarmTaskState::Dispatched | SwarmTaskState::Running
                 )
         });
-    // Proposer pre-scan gate: hold propose-role dispatches until the genome
-    // worker has produced baseline reports for scope files. Without this,
-    // proposers see an empty GENOME LANDSCAPE section (no reports exist
-    // yet on fresh workspaces) and fall back to surface-level advice.
-    let prescan_active = !run.prescan_pending.is_empty();
 
     let mut indices = Vec::new();
     for (idx, task) in run.tasks.iter().enumerate() {
         if !matches!(task.state, SwarmTaskState::Ready) {
             continue;
-        }
-        if prescan_active {
-            // Hold any role that consumes the genome landscape (propose +
-            // integrate + judge) until the pre-scan produces reports for
-            // scope files. Applies across every template — parallel, lab,
-            // bulk — because each of these roles reads the landscape from
-            // its augmented prompt.
-            let role_wants_landscape = matches!(
-                task.role
-                    .as_deref()
-                    .and_then(normalize_role_label)
-                    .as_deref(),
-                Some("propose") | Some("integrate") | Some("judge")
-            );
-            if role_wants_landscape {
-                continue;
-            }
         }
         if task.writes && enforce_single_writer {
             if writer_taken {

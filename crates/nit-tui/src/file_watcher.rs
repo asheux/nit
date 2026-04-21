@@ -11,9 +11,9 @@ const POLL_INTERVAL: Duration = Duration::from_millis(200);
 const RESCAN_INTERVAL: Duration = Duration::from_secs(2);
 const INITIAL_TRACKING_CAPACITY: usize = 256;
 
-const IGNORED_DIRS: &[&str] = &["target", "node_modules", "__pycache__", "vendor", ".git"];
+pub const IGNORED_DIRS: &[&str] = &["target", "node_modules", "__pycache__", "vendor", ".git"];
 
-const SOURCE_EXTENSIONS: &[&str] = &[
+pub const SOURCE_EXTENSIONS: &[&str] = &[
     "rs", "c", "cpp", "h", "hpp", "go", "swift", "java", "kt", "scala", "cs", "py", "rb", "sh",
     "bash", "zsh", "js", "jsx", "ts", "tsx", "html", "css", "toml", "yaml", "yml", "json", "sql",
     "md", "txt",
@@ -246,17 +246,24 @@ fn discover_source_files(
     new_paths
 }
 
-fn is_trackable_source(filepath: &Path) -> bool {
+pub fn is_trackable_source(filepath: &Path) -> bool {
     filepath
         .extension()
         .and_then(|raw| raw.to_str())
         .is_some_and(|ext| SOURCE_EXTENSIONS.contains(&ext))
 }
 
-fn is_excluded_directory(dir_component: &str, gitignored: &[String]) -> bool {
+pub fn is_excluded_directory(dir_component: &str, gitignored: &[String]) -> bool {
     dir_component.starts_with('.')
         || IGNORED_DIRS.contains(&dir_component)
         || gitignored.iter().any(|g| g == dir_component)
+}
+
+/// Walk every source file under `root`, skipping gitignored and
+/// `IGNORED_DIRS` directories. Used by the workspace-wide genome scan at
+/// launch and by tests that need a deterministic fixture walk.
+pub fn walk_source_files(root: &Path, gitignored: &[String]) -> Vec<PathBuf> {
+    SourceTreeWalker::rooted_at(root, gitignored.to_vec()).collect()
 }
 
 /// Parse `.gitignore` at `workspace_root` and return simple directory names.

@@ -1,18 +1,17 @@
-use std::{collections::HashSet, sync::mpsc};
+use std::sync::mpsc;
 
 use nit_core::{AppState, MissionPhase, MissionRecord};
 
 use super::{
     assign_clone_roles_for_parallel_coverage, blocked_on, build_planner_prompt,
     build_verify_prompt, classify_swarm_mission_kind, dashboard_gate_rows,
-    deduplicate_inherited_role_hints, direct_role_hint_for_agent, dispatch_ready_tasks,
-    ensure_size_clones, enumerate_scope_files, gate_bundle_label, is_priority_agent,
-    next_mission_id, planner_role_hint_for_agent, push_system_message_to_mission,
-    read_workspace_custom_gates, refresh_task_readiness, run_gates_label, stage_label,
-    swarm_mission_title, task_state_dashboard_label, timestamp_label, GateBundle,
-    SwarmDashboardView, SwarmDispatch, SwarmMissionKind, SwarmPersistenceView, SwarmRun,
-    SwarmRuntime, SwarmSessionConfig, SwarmSize, SwarmStage, SwarmTaskDashboardRow,
-    SwarmTaskPersistenceView, SwarmTaskState, SwarmTemplate, PRESCAN_MAX_IN_FLIGHT,
+    deduplicate_inherited_role_hints, direct_role_hint_for_agent, ensure_size_clones,
+    enumerate_scope_files, gate_bundle_label, is_priority_agent, next_mission_id,
+    planner_role_hint_for_agent, push_system_message_to_mission, read_workspace_custom_gates,
+    run_gates_label, stage_label, swarm_mission_title, task_state_dashboard_label, timestamp_label,
+    GateBundle, SwarmDashboardView, SwarmDispatch, SwarmMissionKind, SwarmPersistenceView,
+    SwarmRun, SwarmRuntime, SwarmSessionConfig, SwarmSize, SwarmStage, SwarmTaskDashboardRow,
+    SwarmTaskPersistenceView, SwarmTaskState, SwarmTemplate,
 };
 
 impl SwarmRuntime {
@@ -24,132 +23,6 @@ impl SwarmRuntime {
         self.runs
             .get(mission_id)
             .map(|run| run.scope_files.as_slice())
-    }
-
-    /// Collect a bounded batch of scope-file paths the pre-scan should
-    /// dispatch next. Each returned path is marked `prescan_dispatched` so
-    /// subsequent calls don't re-queue the same eval — the previous
-    /// implementation flooded the genome worker with thousands of threads
-    /// because it returned every pending path every main-loop tick.
-    ///
-    /// Global in-flight cap: `PRESCAN_MAX_IN_FLIGHT`. When the worker is
-    /// full, this function returns an empty vec and the dispatcher waits
-    /// for results to drain. Seeding the pending set is also bounded — we
-    /// walk `scope_files` once, filter to files without reports, and stop.
-    pub fn take_pending_prescan_paths(
-        &mut self,
-        state: &AppState,
-        workspace_root: &std::path::Path,
-    ) -> Vec<std::path::PathBuf> {
-        // Seed pending sets once per run (not every tick). Skip files that
-        // already have reports so we don't rescan the workspace each run.
-        for run in self.runs.values_mut() {
-            if run.prescan_seeded {
-                continue;
-            }
-            if run.stage != SwarmStage::Executing || run.scope_files.is_empty() {
-                continue;
-            }
-            for rel in run.scope_files.iter() {
-                let abs = workspace_root.join(rel);
-                if !state.genome_reports.contains_key(&abs) && abs.is_file() {
-                    run.prescan_pending.insert(abs);
-                }
-            }
-            run.prescan_seeded = true;
-        }
-
-        // Count paths currently in flight across all runs (dispatched but
-        // result not yet returned). Cap the new batch so we never have
-        // more than PRESCAN_MAX_IN_FLIGHT eval threads alive at once.
-        let in_flight: usize = self
-            .runs
-            .values()
-            .map(|run| run.prescan_dispatched.len())
-            .sum();
-        let budget = PRESCAN_MAX_IN_FLIGHT.saturating_sub(in_flight);
-        if budget == 0 {
-            return Vec::new();
-        }
-
-        // Pick up to `budget` undispatched pending paths. Dedup across runs
-        // so two missions targeting the same file share one eval.
-        let mut out = Vec::new();
-        let mut picked: HashSet<std::path::PathBuf> = HashSet::new();
-        for run in self.runs.values_mut() {
-            if out.len() >= budget {
-                break;
-            }
-            let mut claims: Vec<std::path::PathBuf> = Vec::new();
-            for path in run.prescan_pending.iter() {
-                if out.len() + claims.len() >= budget {
-                    break;
-                }
-                if run.prescan_dispatched.contains(path) || picked.contains(path) {
-                    continue;
-                }
-                claims.push(path.clone());
-            }
-            for path in claims {
-                run.prescan_dispatched.insert(path.clone());
-                picked.insert(path.clone());
-                out.push(path);
-            }
-        }
-        out
-    }
-
-    /// Invoked by the TUI when a prescan genome result lands. Removes the
-    /// path from every run's pending set and, for runs whose set just went
-    /// empty, refreshes readiness and returns any newly-dispatchable
-    /// proposer tasks. All work is O(runs × pending), no I/O.
-    pub fn note_prescan_result(&mut self, path: &std::path::Path) -> Vec<SwarmDispatch> {
-        let mut dispatches = Vec::new();
-        let mut completed_missions: Vec<String> = Vec::new();
-        for run in self.runs.values_mut() {
-            run.prescan_dispatched.remove(path);
-            if run.prescan_pending.remove(path) && run.prescan_pending.is_empty() {
-                completed_missions.push(run.mission_id.clone());
-            }
-        }
-        for mid in completed_missions {
-            if let Some(run) = self.runs.get_mut(&mid) {
-                refresh_task_readiness(run);
-                dispatches.extend(dispatch_ready_tasks(run));
-            }
-        }
-        dispatches
-    }
-
-    /// Whether the proposer pre-scan is still running for the given
-    /// mission. Used by the agent-console stage label to render
-    /// "Proposing (Genome check) ..." while the scan is in flight.
-    pub fn is_prescan_active(&self, mission_id: &str) -> bool {
-        self.runs
-            .get(mission_id)
-            .map(|run| !run.prescan_pending.is_empty())
-            .unwrap_or(false)
-    }
-
-    /// One-shot-per-run announcement of the pre-scan start. Returns
-    /// `(mission_id, file_count)` for every run that has pending pre-scan
-    /// paths and hasn't had its status message pushed yet; flags each run
-    /// as announced so subsequent dispatch batches don't re-emit the same
-    /// mission message on every main-loop tick.
-    pub fn announce_prescan_start(&mut self) -> Vec<(String, usize)> {
-        let mut out = Vec::new();
-        for run in self.runs.values_mut() {
-            if run.prescan_message_pushed {
-                continue;
-            }
-            if run.prescan_pending.is_empty() {
-                continue;
-            }
-            let total = run.prescan_pending.len() + run.prescan_dispatched.len();
-            out.push((run.mission_id.clone(), total));
-            run.prescan_message_pushed = true;
-        }
-        out
     }
 
     /// Poll all pending genome gate evaluations.  When a background thread
@@ -808,10 +681,6 @@ impl SwarmRuntime {
                 scope_files,
                 initial_genome_baselines: state.genome_reports.clone(),
                 gate_retry_count: 0,
-                prescan_pending: HashSet::new(),
-                prescan_dispatched: HashSet::new(),
-                prescan_seeded: false,
-                prescan_message_pushed: false,
             },
         );
 

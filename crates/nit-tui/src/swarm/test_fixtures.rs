@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use super::{
     SwarmMissionKind, SwarmRun, SwarmRuntime, SwarmStage, SwarmTask, SwarmTaskState, SwarmTemplate,
@@ -100,10 +100,6 @@ pub(crate) fn test_runtime_with_running_tasks(
         report_status: None,
         report_output: None,
         scope_files: Vec::new(),
-        prescan_pending: HashSet::new(),
-        prescan_dispatched: HashSet::new(),
-        prescan_seeded: false,
-        prescan_message_pushed: false,
         initial_genome_baselines: HashMap::new(),
         gate_retry_count: 0,
     };

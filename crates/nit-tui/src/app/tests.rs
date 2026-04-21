@@ -5617,3 +5617,198 @@ fn genome_worker_evaluate_from_disk_tags_result_with_agent_id() {
 
     let _ = fs::remove_dir_all(&workspace);
 }
+
+// ---------------------------------------------------------------------------
+// Proposer landscape regression tests
+// ---------------------------------------------------------------------------
+//
+// These pin the contract that swarm and shadow proposers see the genome
+// landscape (populated by the workspace scan at launch) in their augmented
+// prompt. If `state.genome_reports` has a report for a scope file, the
+// proposer prompt must carry "GENOME LANDSCAPE" + the file's tier/consistency
+// numbers — agents otherwise trade surface-level opinions with no data.
+
+fn seeded_genome_report(
+    path: std::path::PathBuf,
+    tier: nit_core::GenomeTier,
+) -> nit_core::GenomeReport {
+    nit_core::GenomeReport {
+        file_path: path,
+        encoder_scores: Vec::new(),
+        cross_encoder_consistency: 0.42,
+        tier,
+        recommendations: Vec::new(),
+        timestamp_ms: 1,
+        grid_size: 32,
+        parsimony: Default::default(),
+    }
+}
+
+#[test]
+fn propose_dispatch_receives_genome_landscape_from_cached_reports() {
+    // Setup: workspace with one scope file, `state.genome_reports` has its
+    // report (as would be the case after `WorkspaceScanRuntime::hydrate`
+    // loaded it from `.nit/genome/`). The propose-role augment must pull
+    // that report into the dispatch prompt.
+    let mut state = state_for_test_in_workspace("propose-landscape");
+    let rel = "src/lib.rs".to_string();
+    let abs = state.workspace_root.join(&rel);
+    fs::create_dir_all(abs.parent().unwrap()).unwrap();
+    fs::write(&abs, "fn main() {}\n").unwrap();
+    state.genome_reports.insert(
+        abs.clone(),
+        seeded_genome_report(abs.clone(), nit_core::GenomeTier::Oscillator),
+    );
+
+    // Drive the core landscape builder — this is what both swarm and shadow
+    // paths ultimately call.
+    let section = super::dispatch::build_propose_genome_landscape(
+        &state,
+        std::slice::from_ref(&rel),
+        Some("propose"),
+    )
+    .expect("landscape section should be produced when reports exist");
+    assert!(section.contains("GENOME LANDSCAPE"));
+    assert!(section.contains("src/lib.rs"));
+    assert!(section.contains("tier II"));
+    assert!(section.contains("0.42"));
+}
+
+#[test]
+fn propose_dispatch_has_no_landscape_when_reports_are_empty() {
+    // Cold cache: no reports loaded yet. Builder returns None and the
+    // proposer dispatches without a landscape section (acceptable per the
+    // design — don't block the agent on scan completion).
+    let state = state_for_test_in_workspace("propose-no-landscape");
+    let rel = "src/lib.rs".to_string();
+    let section = super::dispatch::build_propose_genome_landscape(
+        &state,
+        std::slice::from_ref(&rel),
+        Some("propose"),
+    );
+    assert!(section.is_none());
+}
+
+#[test]
+fn shadow_proposer_prompt_receives_genome_landscape() {
+    // Shadow proposer augmentation uses the active editor buffer's path as
+    // the scope. Seed a report for that path; augment; assert the prompt
+    // carries the landscape block.
+    let mut state = state_for_test_in_workspace("shadow-landscape");
+    let file = state.workspace_root.join("main.rs");
+    fs::write(&file, "fn main() {}\n").unwrap();
+    // Rebind the active editor buffer to the scope file so the shadow
+    // augmenter derives its path from `state.editor_buffer()`.
+    let text = std::fs::read_to_string(&file).unwrap();
+    let buf = nit_core::Buffer::from_str("editor", &text, Some(file.clone()));
+    let buf_id = state.active_editor_buffer_id;
+    state.buffers[buf_id] = buf;
+
+    state.genome_reports.insert(
+        file.clone(),
+        seeded_genome_report(file.clone(), nit_core::GenomeTier::StillLife),
+    );
+
+    let mut dispatch = crate::shadow::ShadowDispatch {
+        // Shadow lane id format: <base>#shadow-<run>-<role>
+        agent_id: "codex-main#shadow-01-propose-a".into(),
+        prompt: String::from("original prompt body"),
+        mission_id: None,
+        prompt_msg_idx: None,
+    };
+    super::augment_shadow_prompt_with_landscape(&state, &mut dispatch);
+
+    assert!(dispatch.prompt.contains("original prompt body"));
+    assert!(
+        dispatch.prompt.contains("GENOME LANDSCAPE"),
+        "prompt was: {}",
+        dispatch.prompt
+    );
+    assert!(dispatch.prompt.contains("main.rs"));
+    assert!(dispatch.prompt.contains("tier I"));
+}
+
+#[test]
+fn shadow_judge_role_receives_judge_framing_not_propose_framing() {
+    // The landscape framing differs by role (propose / judge / integrate).
+    // Shadow's "judge" lane maps to the "judge" framing — verify the
+    // judge-specific wording appears.
+    let mut state = state_for_test_in_workspace("shadow-judge-landscape");
+    let file = state.workspace_root.join("main.rs");
+    fs::write(&file, "fn main() {}\n").unwrap();
+    let text = std::fs::read_to_string(&file).unwrap();
+    let buf = nit_core::Buffer::from_str("editor", &text, Some(file.clone()));
+    let buf_id = state.active_editor_buffer_id;
+    state.buffers[buf_id] = buf;
+
+    state.genome_reports.insert(
+        file.clone(),
+        seeded_genome_report(file.clone(), nit_core::GenomeTier::Oscillator),
+    );
+
+    let mut dispatch = crate::shadow::ShadowDispatch {
+        agent_id: "codex-main#shadow-01-judge".into(),
+        prompt: String::new(),
+        mission_id: None,
+        prompt_msg_idx: None,
+    };
+    super::augment_shadow_prompt_with_landscape(&state, &mut dispatch);
+    // Judge framing includes the phrase "weigh proposals against this".
+    assert!(
+        dispatch.prompt.contains("weigh proposals against this"),
+        "judge framing missing; prompt was: {}",
+        dispatch.prompt
+    );
+}
+
+#[test]
+fn shadow_review_role_uses_integrate_framing() {
+    // Shadow's "review" role maps to the landscape's "integrate" framing
+    // (target these metrics with your edits).
+    let mut state = state_for_test_in_workspace("shadow-review-landscape");
+    let file = state.workspace_root.join("main.rs");
+    fs::write(&file, "fn main() {}\n").unwrap();
+    let text = std::fs::read_to_string(&file).unwrap();
+    let buf = nit_core::Buffer::from_str("editor", &text, Some(file.clone()));
+    let buf_id = state.active_editor_buffer_id;
+    state.buffers[buf_id] = buf;
+
+    state.genome_reports.insert(
+        file.clone(),
+        seeded_genome_report(file.clone(), nit_core::GenomeTier::Spaceship),
+    );
+
+    let mut dispatch = crate::shadow::ShadowDispatch {
+        agent_id: "codex-main#shadow-01-review".into(),
+        prompt: String::new(),
+        mission_id: None,
+        prompt_msg_idx: None,
+    };
+    super::augment_shadow_prompt_with_landscape(&state, &mut dispatch);
+    assert!(
+        dispatch
+            .prompt
+            .contains("target these metrics with your edits"),
+        "integrate framing missing; prompt was: {}",
+        dispatch.prompt
+    );
+}
+
+#[test]
+fn swarm_dispatch_augment_gates_on_propose_integrate_judge_roles_only() {
+    // Non-landscape roles (e.g. "research", "test") must NOT receive a
+    // landscape section — only propose/integrate/judge. This prevents the
+    // planner's raw DAG prompt from being bloated with genome metrics it
+    // isn't supposed to act on.
+    let state = state_for_test_in_workspace("swarm-role-gate");
+    let swarm = crate::swarm::SwarmRuntime::default();
+    let mut dispatch = crate::swarm::SwarmDispatch {
+        agent_id: "clone-research".into(),
+        mission_id: "mission-xyz".into(),
+        prompt: "research prompt".into(),
+        task_role: Some("research".into()),
+    };
+    super::augment_dispatch_prompt_with_landscape(&state, &swarm, &mut dispatch);
+    assert_eq!(dispatch.prompt, "research prompt");
+    assert!(!dispatch.prompt.contains("GENOME LANDSCAPE"));
+}

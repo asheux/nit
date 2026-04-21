@@ -1,10 +1,3 @@
-/// Maximum concurrent proposer pre-scan eval threads across all active
-/// swarms. Each eval does tree-sitter parsing + GoL simulation and saturates
-/// a core while it runs; without a cap a large scope_files list would spawn
-/// hundreds of threads in parallel and freeze the UI. Tuned low so nit stays
-/// responsive even while the scan churns through a whole crate.
-pub(super) const PRESCAN_MAX_IN_FLIGHT: usize = 3;
-
 pub(super) const DEFAULT_SWARM_SIZE: usize = 4;
 pub(super) const MAX_SWARM_SIZE: usize = 16;
 pub(super) const SWARM_VERIFY_MAX_CHARS: usize = 12_000;

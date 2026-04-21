@@ -1,8 +1,4 @@
-use std::{
-    collections::{HashMap, HashSet},
-    path::PathBuf,
-    sync::mpsc,
-};
+use std::{collections::HashMap, path::PathBuf, sync::mpsc};
 
 use nit_core::{AppState, GenomeReport};
 
@@ -707,25 +703,4 @@ pub(super) struct SwarmRun {
     /// `settings.swarm.gate_retry_limit` (default 3). Each increment
     /// dispatches a fix task to the integrator and re-enters `Verifying`.
     pub(super) gate_retry_count: u8,
-    /// Proposer genome pre-scan: scope-file paths still being evaluated by
-    /// the genome worker. Populated on Executing transition; drained by
-    /// `note_genome_prescan_result`. While non-empty, propose-role tasks
-    /// are held at Ready without being dispatched — proposers wait until
-    /// genome reports exist so their landscape-aware prompt is grounded in
-    /// real data. Empty when the pre-scan is complete or was skipped (e.g.
-    /// no scope files, genome context disabled).
-    pub(super) prescan_pending: HashSet<PathBuf>,
-    /// Paths already handed to the genome worker. A path is in
-    /// `prescan_dispatched` from the moment we spawn its eval thread until
-    /// the result lands (at which point both sets drop it). Without this
-    /// guard the dispatcher re-queues the same paths every main-loop tick
-    /// and floods the worker with thousands of threads.
-    pub(super) prescan_dispatched: HashSet<PathBuf>,
-    /// Whether the pre-scan pending set has been seeded from scope_files.
-    /// Separate from `prescan_message_pushed` so we don't re-seed after the
-    /// scan completes and empties the set.
-    pub(super) prescan_seeded: bool,
-    /// Whether a "proposer genome pre-scan" status message has been pushed
-    /// for this run, so we don't spam the mission transcript.
-    pub(super) prescan_message_pushed: bool,
 }

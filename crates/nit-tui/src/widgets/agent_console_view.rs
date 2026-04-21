@@ -325,6 +325,19 @@ pub fn render(
         ));
     }
 
+    // Workspace-wide genome scan indicator. Renders one row at the bottom of
+    // the console whenever the background scan has evaluations in flight
+    // (pending or dispatched). Total=0 is treated as idle so the indicator
+    // never flickers on workspaces with no source files.
+    if let Some((done, total)) = state.agents.workspace_scan_progress {
+        if total > 0 {
+            combined_rows.push(ThreadRow {
+                text: format!("Evaluating genome: {done}/{total} files"),
+                kind: ThreadRowKind::Breather,
+            });
+        }
+    }
+
     let total_rows = combined_rows.len();
     let max_scroll = total_rows.saturating_sub(thread_height);
     state.agents.console_max_scroll = max_scroll;
@@ -2392,9 +2405,6 @@ fn breather_rows_for_user_prompt(
     let working = any_active || any_queued;
     let swarm_phase = swarm_mission_id.and_then(|mid| swarm.and_then(|s| s.swarm_stage_label(mid)));
     let swarm_hint = swarm_mission_id.and_then(|mid| swarm.and_then(|s| s.swarm_stage_hint(mid)));
-    let prescan_active = swarm_mission_id
-        .and_then(|mid| swarm.map(|s| s.is_prescan_active(mid)))
-        .unwrap_or(false);
     let is_swarm = swarm_mission_id.is_some();
     let shadow_stage = crate::shadow::shadow_stage_label_from_state(state, agent_ctx);
     let base_label: std::borrow::Cow<'_, str> = if !is_swarm && shadow_stage.is_some() {
@@ -2406,7 +2416,6 @@ fn breather_rows_for_user_prompt(
             Some("PLAN") => "Planning ...".into(),
             Some("VERIFY") => "Verifying ...".into(),
             Some("SYNTH") => "Synthesizing ...".into(),
-            Some("EXEC") if prescan_active => "Proposing (Genome check) ...".into(),
             Some("EXEC") => swarm_exec_label(state, &ordered_ids, swarm).into(),
             // Catchall: even when the run isn't reachable via the selected
             // mission (unknown stage, moved to `completed_runs`, etc.) we
@@ -2416,11 +2425,6 @@ fn breather_rows_for_user_prompt(
             _ if any_active => "Working ...".into(),
             _ => "Queued ...".into(),
         }
-    } else if is_swarm && prescan_active {
-        // Pre-scan is in flight but no proposer has been dispatched yet —
-        // surface the Genome check so the user knows what's causing the
-        // delay before "Proposing ..." kicks in.
-        "Proposing (Genome check) ...".into()
     } else if is_swarm && swarm_hint.is_some() {
         // Background genome work is running but no agent is active yet. Use
         // the stage + hint instead of a generic "Waiting" so the user knows

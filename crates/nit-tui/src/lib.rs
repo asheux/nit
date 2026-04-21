@@ -36,6 +36,7 @@ pub mod seed_snapshot;
 pub mod genome_worker;
 pub mod system_stats;
 pub mod vitals;
+pub mod workspace_scan;
 
 #[cfg(unix)]
 pub mod mcp_backchannel;

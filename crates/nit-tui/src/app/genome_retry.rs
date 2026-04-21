@@ -749,6 +749,12 @@ pub(super) fn maybe_compute_genome_report(
         Some(p) => p,
         None => return,
     };
+    // Genome metrics are only meaningful for code. Skip markdown, config,
+    // and plaintext so the editor buffer eval doesn't repopulate the cache
+    // with files the workspace scan deliberately excluded.
+    if !crate::workspace_scan::is_code_file(&file_path) {
+        return;
+    }
     if state.genome_reports.contains_key(&file_path) {
         return;
     }
@@ -900,6 +906,12 @@ pub(super) fn dispatch_turn_genome_evals(
             .insert(agent_id.to_string(), modified.iter().cloned().collect());
     }
 
+    // Genome metrics only apply to code. Filter docs/config out so agent
+    // turns that touch markdown alongside code don't pollute the cache —
+    // the retry prompt builder already skips non-code, so evaluating them
+    // is pure waste.
+    modified.retain(|path| crate::workspace_scan::is_code_file(path));
+
     if modified.is_empty() {
         return;
     }
@@ -925,13 +937,15 @@ pub(super) fn dispatch_turn_genome_evals(
     }
 }
 
-/// Drain file-watcher events: reload buffers whose files changed on disk.
-/// Genome evaluation is dispatched to the background worker — never blocks.
+/// Drain file-watcher events: reload buffers whose files changed on disk
+/// and feed every change into the workspace-scan runtime for genome cache
+/// invalidation. The scan driver handles scope checks (workspace root,
+/// gitignore, IGNORED_DIRS) and enqueueing re-evals via `GenomeWorker`.
 pub(super) fn drain_file_watcher(
     state: &mut AppState,
     syntax: &mut SyntaxRuntime,
     watcher: &FileWatcher,
-    genome: &crate::genome_worker::GenomeWorker,
+    workspace_scan: &mut crate::workspace_scan::WorkspaceScanRuntime,
 ) {
     while let Ok(changed_path) = watcher.events.try_recv() {
         // NOTE: we do NOT attribute file changes to agents here.
@@ -950,11 +964,10 @@ pub(super) fn drain_file_watcher(
             }
         }
 
-        // Dispatch shadow genome evaluation — file read happens on the
-        // worker thread to avoid blocking the main loop.
-        if !state.genome_turn_active.is_empty() && state.settings.genome.genome_context_enabled {
-            genome.evaluate_from_disk_shadow(changed_path);
-        }
+        // Route every change through the workspace-scan runtime — unconditional.
+        // Agent-turn guards were removed so external editor writes also keep
+        // the cached genome landscape fresh.
+        workspace_scan.note_change(state, changed_path);
     }
 }
 
@@ -963,40 +976,48 @@ pub(super) fn drain_file_watcher(
 pub(super) fn drain_genome_results(
     state: &mut AppState,
     genome: &crate::genome_worker::GenomeWorker,
+    workspace_scan: &mut crate::workspace_scan::WorkspaceScanRuntime,
     vitals: &mut crate::vitals::VitalsState,
     codex_runner: &crate::codex_runner::CodexRunner,
     claude_runner: &crate::claude_runner::ClaudeRunner,
-) -> Vec<std::path::PathBuf> {
-    let mut prescan_completed_paths: Vec<std::path::PathBuf> = Vec::new();
+) {
     while let Ok(result) = genome.rx.try_recv() {
         let path = result.path;
         let result_agent_id = result.agent_id.clone();
-        let is_prescan = result.prescan;
+        let is_workspace_scan = result.workspace_scan;
         let report = match result.report {
             Some(r) => r,
             None => {
                 // File could not be read (e.g. deleted). Still decrement
                 // the owning agent's batch so turn finalization is not stuck.
-                if !result.shadow && !result.save_eval && !is_prescan {
+                if !result.shadow && !result.save_eval && !is_workspace_scan {
                     if let Some(aid) = result_agent_id.as_deref() {
                         if let Some(batch) = state.genome_eval_batches.get_mut(aid) {
                             batch.pending = batch.pending.saturating_sub(1);
                         }
                     }
                 }
-                if is_prescan {
-                    // Unblock proposers even if the file could not be read —
-                    // staying stuck on a missing file is worse than proceeding
-                    // without a report for it. Flagged for the post-loop
-                    // dispatch handler to process (can't borrow swarm here).
-                    prescan_completed_paths.push(path.clone());
+                if is_workspace_scan {
+                    // Keep `done` counter moving even on read failure so the
+                    // progress indicator eventually clears.
+                    workspace_scan.note_completed(&path);
                 }
                 continue;
             }
         };
-        if is_prescan {
+        if is_workspace_scan {
+            // Persist to disk on a background thread so the main loop is
+            // never blocked on I/O. Cache stays consistent with state.
+            {
+                let ws = state.workspace_root.clone();
+                let r = report.clone();
+                std::thread::Builder::new()
+                    .name("genome-persist".into())
+                    .spawn(move || nit_core::agent_bus::persist_genome_report(&ws, &r))
+                    .ok();
+            }
             state.genome_reports.insert(path.clone(), report);
-            prescan_completed_paths.push(path);
+            workspace_scan.note_completed(&path);
             continue;
         }
 
@@ -1313,5 +1334,4 @@ pub(super) fn drain_genome_results(
             }
         }
     }
-    prescan_completed_paths
 }

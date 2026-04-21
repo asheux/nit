@@ -14,10 +14,10 @@ pub struct GenomeEvalResult {
     /// turn-completion evaluations.
     pub shadow: bool,
     pub save_eval: bool,
-    /// Proposer pre-scan: populates `genome_reports` for scope files before
-    /// propose-role dispatch, so the proposer sees a real landscape instead
-    /// of empty data on fresh workspaces. Not tied to any agent or batch.
-    pub prescan: bool,
+    /// Launch / file-watcher triggered background scan: populates
+    /// `genome_reports` for every source file in the workspace without being
+    /// tied to an agent or turn. Set by `evaluate_from_disk_workspace_scan`.
+    pub workspace_scan: bool,
     /// Routes authoritative results back to the correct in-flight batch so
     /// parallel swarm turns finalize independently. `None` for shadow/save/
     /// editor-opened evals.
@@ -66,10 +66,11 @@ impl GenomeWorker {
         self.evaluate_from_disk_inner(path, true, false, None)
     }
 
-    /// Proposer pre-scan eval: inserts into `state.genome_reports` without
-    /// the shadow/batch bookkeeping so a follow-up propose-role dispatch
-    /// sees real landscape data even on a fresh workspace.
-    pub fn evaluate_from_disk_prescan(&self, path: PathBuf) -> bool {
+    /// Background workspace-scan eval: inserts into `state.genome_reports`
+    /// without any shadow/batch/agent bookkeeping. Used by the launch scan
+    /// and the file-watcher invalidation path so every source file has a
+    /// report ready the moment an agent needs the landscape.
+    pub fn evaluate_from_disk_workspace_scan(&self, path: PathBuf) -> bool {
         self.evaluate_from_disk_inner(path, false, true, None)
     }
 
@@ -77,7 +78,7 @@ impl GenomeWorker {
         &self,
         path: PathBuf,
         shadow: bool,
-        prescan: bool,
+        workspace_scan: bool,
         agent_id: Option<String>,
     ) -> bool {
         let tx = self.tx.clone();
@@ -91,7 +92,7 @@ impl GenomeWorker {
                     report,
                     shadow,
                     save_eval: false,
-                    prescan,
+                    workspace_scan,
                     agent_id,
                 });
             })
@@ -107,7 +108,7 @@ impl GenomeWorker {
                 report: Some(report),
                 shadow,
                 save_eval,
-                prescan: false,
+                workspace_scan: false,
                 agent_id: None,
             });
         });

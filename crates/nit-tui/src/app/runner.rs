@@ -171,8 +171,14 @@ pub(super) fn run_loop(
     let mut file_tree_runner = FileTreeRunner::spawn();
     let mut file_watcher = FileWatcher::spawn();
     let genome_worker = crate::genome_worker::GenomeWorker::new();
+    let mut workspace_scan = crate::workspace_scan::WorkspaceScanRuntime::new();
     // Parse .gitignore for directory exclusions (shared with file watcher and FILESCORES view).
     state.gitignored_dirs = crate::file_watcher::parse_gitignore_dirs(&state.workspace_root);
+    // Hydrate genome report cache from disk and seed the workspace scan
+    // before the UI loop starts. The walk itself is synchronous (bounded by
+    // the file count) but each eval runs on a short-lived thread via
+    // `GenomeWorker`, so hydration never blocks on tree-sitter or GoL.
+    workspace_scan.hydrate(state);
     // Watch the entire workspace for agent-created/modified files.
     file_watcher.watch_workspace(state.workspace_root.clone());
     let mut last_watched_path = state.editor_buffer().path().cloned();
@@ -1151,77 +1157,40 @@ pub(super) fn run_loop(
                 last_watched_path = current_path;
             }
 
-            // Drain file watcher notifications — reload any open buffers that changed on disk.
-            drain_file_watcher(state, syntax, &file_watcher, &genome_worker);
-            let prescan_completed = drain_genome_results(
+            // Drain file watcher notifications — reload any open buffers
+            // that changed on disk and route every event through the
+            // workspace-scan runtime for genome cache invalidation.
+            drain_file_watcher(state, syntax, &file_watcher, &mut workspace_scan);
+            drain_genome_results(
                 state,
                 &genome_worker,
+                &mut workspace_scan,
                 &mut vitals,
                 &codex_runner,
                 &claude_runner,
             );
-            // Proposer pre-scan bookkeeping.
-            // (a) Let the swarm AND shadow runtime know which scope files just
-            //     got reports so they can release blocked propose tasks.
-            for path in &prescan_completed {
-                let dispatches = swarm.note_prescan_result(path);
-                for mut dispatch in dispatches {
-                    augment_dispatch_prompt_with_landscape(state, &swarm, &mut dispatch);
-                    apply_swarm_task_role(state, &dispatch);
-                    dispatch_agent_prompt(
-                        state,
-                        &mut vitals,
-                        Some(&codex_runner),
-                        Some(&claude_runner),
-                        dispatch.agent_id,
-                        Some(dispatch.mission_id),
-                        dispatch.prompt,
-                    );
-                }
-                for mut dispatch in shadow.note_prescan_result(path) {
-                    augment_shadow_prompt_with_landscape(state, &mut dispatch);
-                    dispatch_agent_prompt(
-                        state,
-                        &mut vitals,
-                        Some(&codex_runner),
-                        Some(&claude_runner),
-                        dispatch.agent_id,
-                        dispatch.mission_id,
-                        dispatch.prompt,
-                    );
-                }
-            }
-            // (b) Kick off any outstanding prescan evals non-blocking. Each
-            //     path spawns a short-lived worker thread; main loop never
-            //     waits. Only enabled when genome_context is on — otherwise
-            //     there's no point populating reports that no one reads.
-            if state.settings.genome.genome_context_enabled {
-                let workspace_root = state.workspace_root.clone();
-                let paths = swarm.take_pending_prescan_paths(state, &workspace_root);
-                if !paths.is_empty() {
-                    // One-shot status per mission (not per batch), so the
-                    // rate-limited dispatch loop doesn't spam the transcript.
-                    let announce = swarm.announce_prescan_start();
-                    for (mid, total) in announce {
-                        crate::swarm::push_system_message_to_mission(
-                            state,
-                            &mid,
-                            format!("Proposer (Genome check): evaluating {total} file(s)"),
-                        );
-                    }
-                    for path in paths {
-                        genome_worker.evaluate_from_disk_prescan(path);
-                    }
-                }
-                for path in shadow.take_pending_prescan_paths() {
-                    genome_worker.evaluate_from_disk_prescan(path);
-                }
-            }
+            // Non-blocking background scan: refill in-flight eval slots
+            // from the pending queue. The runtime's cap adapts to
+            // `available_parallelism()` so the scan uses idle cores
+            // without starving the UI.
+            workspace_scan.drive(&genome_worker);
+            // Surface progress to the agent-console breather. None when
+            // idle so the indicator auto-hides on completion.
+            state.agents.workspace_scan_progress = if workspace_scan.is_scanning() {
+                Some(workspace_scan.progress())
+            } else {
+                None
+            };
 
             // Dispatch save-triggered genome evaluation to background worker.
+            // Non-code files (markdown, config, plaintext) skip evaluation —
+            // the metric is only meaningful for code, and computing it for
+            // a README just to throw the report away is waste.
             if let Some(path) = state.genome_save_eval_pending.take() {
-                let text = state.editor_buffer().content_as_string();
-                genome_worker.evaluate_save(path, text);
+                if crate::workspace_scan::is_code_file(&path) {
+                    let text = state.editor_buffer().content_as_string();
+                    genome_worker.evaluate_save(path, text);
+                }
             }
 
             // Auto-compute genome report for the active editor buffer if missing.

@@ -676,19 +676,17 @@ pub(super) fn submit_chat_input_and_dispatch(
                         .find(|lane| &lane.id == main_agent_id)
                         .is_some_and(|lane| lane.is_codex() || lane.is_claude());
                     if dispatchable && !shadow.has_run_for(main_agent_id) {
-                        let prescan_paths = shadow_prescan_paths(state);
                         if let Some(dispatches) = shadow.start(
                             state,
                             main_agent_id.clone(),
                             prompt.clone(),
                             mission_id.clone(),
                             Some(prompt_msg_idx),
-                            prescan_paths,
                         ) {
-                            // `dispatches` is empty when start() parked proposers
-                            // behind a pending prescan — the runner loop will
-                            // drive the evaluation and release them via
-                            // shadow.note_prescan_result.
+                            // Proposers dispatch immediately — the workspace-
+                            // scan runtime keeps `state.genome_reports`
+                            // populated so the augmented landscape is ready
+                            // without per-dispatch prescan.
                             for mut d in dispatches {
                                 super::augment_shadow_prompt_with_landscape(state, &mut d);
                                 dispatch_agent_prompt(
@@ -840,23 +838,6 @@ pub(super) fn submit_chat_input_and_dispatch(
     }
     state.agents.chat_input_scroll = usize::MAX;
     true
-}
-
-// Paths the shadow landscape is derived from (currently: the focused editor
-// buffer). Returns only paths that don't already have a genome report, so the
-// proposer prescan skips work when the landscape is already populated. Empty
-// when the genome context is disabled — there's no landscape to seed.
-fn shadow_prescan_paths(state: &AppState) -> std::collections::HashSet<std::path::PathBuf> {
-    let mut out = std::collections::HashSet::new();
-    if !state.settings.genome.genome_context_enabled {
-        return out;
-    }
-    if let Some(path) = state.editor_buffer().path() {
-        if path.is_file() && !state.genome_reports.contains_key(path) {
-            out.insert(path.to_path_buf());
-        }
-    }
-    out
 }
 
 // When the prompt names a module or directory, append a non-negotiable per-file

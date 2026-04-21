@@ -1163,6 +1163,15 @@ pub fn persist_genome_report(
     }
 }
 
+/// Best-effort delete of the persisted genome report for `file_path`. Silent
+/// on missing file or I/O error — the caller is invalidating state that's
+/// already gone.
+pub fn delete_genome_report(workspace_root: &std::path::Path, file_path: &std::path::Path) {
+    let dir = genome_dir(workspace_root);
+    let filename = genome_report_filename(file_path);
+    let _ = std::fs::remove_file(dir.join(filename));
+}
+
 /// Load previously persisted genome reports from `.nit/genome/`.
 pub fn load_genome_reports(
     workspace_root: &std::path::Path,

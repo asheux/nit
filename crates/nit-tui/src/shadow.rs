@@ -16,8 +16,7 @@
 //! stage ("Proposing...", "Judging...", "Reviewing...", "Finalizing...") so the
 //! user has some feedback while the pipeline runs.
 
-use std::collections::{HashMap, HashSet};
-use std::path::{Path, PathBuf};
+use std::collections::HashMap;
 
 use nit_core::{AgentBusEvent, AgentStatus, AppState};
 
@@ -120,12 +119,6 @@ struct ShadowRun {
     lanes: HashMap<String, String>,
     /// role → captured output
     outputs: HashMap<String, String>,
-    /// Scope paths awaiting a genome report before proposers can dispatch.
-    prescan_pending: HashSet<PathBuf>,
-    /// Subset of `prescan_pending` already sent to the genome worker.
-    prescan_dispatched: HashSet<PathBuf>,
-    /// Proposer dispatches held until `prescan_pending` drains to empty.
-    parked_proposer_dispatches: Vec<ShadowDispatch>,
 }
 
 #[derive(Default)]
@@ -152,49 +145,13 @@ impl ShadowRuntime {
             .any(|run| run.lanes.values().any(|id| id == agent_id))
     }
 
-    /// Return prescan scope paths that haven't been dispatched to the genome
-    /// worker yet. Marks them as dispatched so the same path isn't sent
-    /// multiple times across ticks. The caller is expected to forward each
-    /// path to `GenomeWorker::evaluate_from_disk_prescan`.
-    pub fn take_pending_prescan_paths(&mut self) -> Vec<PathBuf> {
-        let mut out = Vec::new();
-        for run in self.runs.values_mut() {
-            let claims: Vec<PathBuf> = run
-                .prescan_pending
-                .iter()
-                .filter(|p| !run.prescan_dispatched.contains(*p))
-                .cloned()
-                .collect();
-            for path in claims {
-                run.prescan_dispatched.insert(path.clone());
-                out.push(path);
-            }
-        }
-        out
-    }
-
-    /// Notify the runtime that a genome prescan result landed for `path`.
-    /// Returns any proposer dispatches that are now unblocked (if a run's
-    /// pending set just went empty).
-    pub fn note_prescan_result(&mut self, path: &Path) -> Vec<ShadowDispatch> {
-        let mut released = Vec::new();
-        for run in self.runs.values_mut() {
-            run.prescan_dispatched.remove(path);
-            if run.prescan_pending.remove(path) && run.prescan_pending.is_empty() {
-                released.extend(std::mem::take(&mut run.parked_proposer_dispatches));
-            }
-        }
-        released
-    }
-
     /// Kick off a new shadow run for `main_agent_id`.
     ///
     /// Creates four hidden clones (propose-a, propose-b, judge, review) and
-    /// returns the initial proposer dispatches. When `prescan_paths` is
-    /// non-empty, the proposers are parked internally until
-    /// `note_prescan_result` clears them — the returned `Vec` is empty in
-    /// that case and the caller drives the prescan via
-    /// `take_pending_prescan_paths`.
+    /// returns the two proposer dispatches. The caller is responsible for
+    /// augmenting each prompt with the genome landscape and dispatching —
+    /// the workspace-scan runtime keeps `state.genome_reports` populated so
+    /// proposers never need to wait for a per-dispatch prescan.
     pub fn start(
         &mut self,
         state: &mut AppState,
@@ -202,7 +159,6 @@ impl ShadowRuntime {
         main_prompt: String,
         mission_id: Option<String>,
         prompt_msg_idx: Option<usize>,
-        prescan_paths: HashSet<PathBuf>,
     ) -> Option<Vec<ShadowDispatch>> {
         if self.runs.contains_key(&main_agent_id) {
             return None;
@@ -241,13 +197,6 @@ impl ShadowRuntime {
             },
         ];
 
-        let park_proposers = !prescan_paths.is_empty();
-        let (parked, released): (Vec<_>, Vec<_>) = if park_proposers {
-            (proposer_dispatches, Vec::new())
-        } else {
-            (Vec::new(), proposer_dispatches)
-        };
-
         let run = ShadowRun {
             run_id: run_id.clone(),
             main_agent_id: main_agent_id.clone(),
@@ -257,13 +206,10 @@ impl ShadowRuntime {
             stage: ShadowStage::Proposing,
             lanes,
             outputs: HashMap::new(),
-            prescan_pending: prescan_paths,
-            prescan_dispatched: HashSet::new(),
-            parked_proposer_dispatches: parked,
         };
 
         self.runs.insert(main_agent_id, run);
-        Some(released)
+        Some(proposer_dispatches)
     }
 
     /// Process a `TurnCompleted` event. Returns dispatches to perform next.
