@@ -357,3 +357,99 @@ fn shadow_lane_id_parses_back_correctly_for_all_roles() {
         assert_eq!(&parsed_role, role);
     }
 }
+
+// Reviewer finishing while the main agent is still mid-turn must defer the
+// shadow-augmented dispatch. Otherwise the dispatch gets queued and the next
+// unrelated TurnCompleted on main fires premature cleanup (and misattributes
+// responses via turn_prompt_idx).
+#[test]
+fn reviewer_completion_defers_when_main_is_busy() {
+    let mut state = make_state_with_main_agent("codex-main");
+    let mut rt = ShadowRuntime::new();
+    rt.start(
+        &mut state,
+        "codex-main".into(),
+        "implement feature".into(),
+        None,
+        Some(5),
+    )
+    .unwrap();
+
+    let a_id = shadow_lane_id("codex-main", "01", "propose-a");
+    let b_id = shadow_lane_id("codex-main", "01", "propose-b");
+    let j_id = shadow_lane_id("codex-main", "01", "judge");
+    let r_id = shadow_lane_id("codex-main", "01", "review");
+
+    let _ = rt.handle_event_outcome(&mut state, &completed_event(&a_id, "plan A"));
+    let _ = rt.handle_event_outcome(&mut state, &completed_event(&b_id, "plan B"));
+    let _ = rt.handle_event_outcome(&mut state, &completed_event(&j_id, "judged"));
+
+    // Main has an in-flight turn unrelated to shadows.
+    state
+        .agents
+        .active_turns
+        .insert("codex-main".into(), active_turn_state());
+
+    // Reviewer finishing does NOT dispatch the main agent yet — it parks.
+    let out = rt.handle_event_outcome(&mut state, &completed_event(&r_id, "reviewed"));
+    assert!(
+        out.dispatches.is_empty(),
+        "reviewer completion must defer when main is busy"
+    );
+    assert!(rt.has_run_for("codex-main"), "run must still be alive");
+    // Shadow lanes are still present.
+    for role in SHADOW_ROLES {
+        let id = shadow_lane_id("codex-main", "01", role);
+        assert!(state.agents.agents.iter().any(|l| l.id == id));
+    }
+
+    // Prior turn clears → main idle → deferred dispatch fires now.
+    state.agents.active_turns.remove("codex-main");
+    let out = rt.handle_event_outcome(&mut state, &completed_event("codex-main", "Y1 reply"));
+    assert_eq!(out.dispatches.len(), 1);
+    let d = &out.dispatches[0];
+    assert_eq!(d.agent_id, "codex-main");
+    assert!(d.prompt.contains("SHADOW CONTEXT"));
+    assert!(d.prompt.contains("plan A"));
+    assert!(d.prompt.contains("plan B"));
+    assert!(d.prompt.contains("judged"));
+    assert!(d.prompt.contains("reviewed"));
+    assert!(d.prompt.contains("implement feature"));
+    assert_eq!(d.prompt_msg_idx, Some(5));
+
+    // Shadow-augmented turn completes → cleanup, NOT on the prior Y1 completion.
+    let out = rt.handle_event_outcome(&mut state, &completed_event("codex-main", "final"));
+    assert!(out.dispatches.is_empty());
+    assert!(!rt.has_run_for("codex-main"));
+    for role in SHADOW_ROLES {
+        let id = shadow_lane_id("codex-main", "01", role);
+        assert!(
+            state.agents.agents.iter().all(|l| l.id != id),
+            "shadow lane '{role}' not cleaned up"
+        );
+    }
+}
+
+// Main completing an unrelated turn during Proposing/Judging/Reviewing stages
+// must NOT trigger cleanup and must NOT be mistaken for the shadow turn.
+#[test]
+fn main_completion_during_proposing_does_not_clean_up() {
+    let mut state = make_state_with_main_agent("codex-main");
+    let mut rt = ShadowRuntime::new();
+    rt.start(
+        &mut state,
+        "codex-main".into(),
+        "implement feature".into(),
+        None,
+        Some(3),
+    )
+    .unwrap();
+
+    let out = rt.handle_event_outcome(&mut state, &completed_event("codex-main", "unrelated Y1"));
+    assert!(out.dispatches.is_empty());
+    assert!(rt.has_run_for("codex-main"), "run must survive");
+    for role in SHADOW_ROLES {
+        let id = shadow_lane_id("codex-main", "01", role);
+        assert!(state.agents.agents.iter().any(|l| l.id == id));
+    }
+}

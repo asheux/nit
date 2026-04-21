@@ -100,18 +100,11 @@ enum ShadowStage {
     Proposing,
     Judging,
     Reviewing,
+    /// Reviewer done, but main is mid-turn — defer the shadow dispatch so it
+    /// isn't queued behind unrelated work (which would misattribute responses
+    /// and trigger premature cleanup).
+    AwaitingMainIdle,
     Finalizing,
-}
-
-impl ShadowStage {
-    fn label(self) -> &'static str {
-        match self {
-            ShadowStage::Proposing => "Proposing",
-            ShadowStage::Judging => "Judging",
-            ShadowStage::Reviewing => "Reviewing",
-            ShadowStage::Finalizing => "Finalizing",
-        }
-    }
 }
 
 struct ShadowRun {
@@ -143,11 +136,6 @@ impl ShadowRuntime {
     /// Is there an active shadow run for this main agent?
     pub fn has_run_for(&self, main_agent_id: &str) -> bool {
         self.runs.contains_key(main_agent_id)
-    }
-
-    /// Return the user-visible stage hint for a main agent, if any.
-    pub fn stage_hint_for_agent(&self, main_agent_id: &str) -> Option<&'static str> {
-        self.runs.get(main_agent_id).map(|r| r.stage.label())
     }
 
     /// True if `agent_id` is one of the shadow clones currently tracked.
@@ -238,12 +226,22 @@ impl ShadowRuntime {
             return Vec::new();
         };
 
-        // Main agent finished → clean up shadow lanes and remove the run.
+        // Main agent finished.
         if event_agent_id == run.main_agent_id {
-            if matches!(run.stage, ShadowStage::Finalizing) {
-                let lane_ids: Vec<String> = run.lanes.values().cloned().collect();
-                self.runs.remove(&main_agent_id);
-                cleanup_shadow_lanes(state, &lane_ids);
+            match run.stage {
+                ShadowStage::AwaitingMainIdle => {
+                    // Prior turn just cleared — dispatch the deferred shadow prompt now.
+                    return finalize_main_dispatch(run);
+                }
+                ShadowStage::Finalizing => {
+                    // Shadow-augmented turn completed → tear down.
+                    let lane_ids: Vec<String> = run.lanes.values().cloned().collect();
+                    self.runs.remove(&main_agent_id);
+                    cleanup_shadow_lanes(state, &lane_ids);
+                }
+                _ => {
+                    // Unrelated prior-turn completion during Proposing/Judging/Reviewing.
+                }
             }
             return Vec::new();
         }
@@ -291,20 +289,14 @@ impl ShadowRuntime {
             }
             ShadowStage::Reviewing => {
                 if run.outputs.contains_key("review") {
-                    let prompt = build_final_prompt(run);
-                    let main_id = run.main_agent_id.clone();
-                    let mission_id = run.mission_id.clone();
-                    let prompt_msg_idx = run.prompt_msg_idx;
-                    run.stage = ShadowStage::Finalizing;
-                    return vec![ShadowDispatch {
-                        agent_id: main_id,
-                        prompt,
-                        mission_id,
-                        prompt_msg_idx,
-                    }];
+                    if crate::swarm::is_agent_busy(state, &run.main_agent_id) {
+                        run.stage = ShadowStage::AwaitingMainIdle;
+                        return Vec::new();
+                    }
+                    return finalize_main_dispatch(run);
                 }
             }
-            ShadowStage::Finalizing => {}
+            ShadowStage::AwaitingMainIdle | ShadowStage::Finalizing => {}
         }
 
         Vec::new()
@@ -349,6 +341,20 @@ fn role_of(run: &ShadowRun, agent_id: &str) -> Option<String> {
         .iter()
         .find(|(_, id)| id.as_str() == agent_id)
         .map(|(role, _)| role.clone())
+}
+
+fn finalize_main_dispatch(run: &mut ShadowRun) -> Vec<ShadowDispatch> {
+    let prompt = build_final_prompt(run);
+    let agent_id = run.main_agent_id.clone();
+    let mission_id = run.mission_id.clone();
+    let prompt_msg_idx = run.prompt_msg_idx;
+    run.stage = ShadowStage::Finalizing;
+    vec![ShadowDispatch {
+        agent_id,
+        prompt,
+        mission_id,
+        prompt_msg_idx,
+    }]
 }
 
 // ---------------------------------------------------------------------------

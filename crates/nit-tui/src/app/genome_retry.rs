@@ -807,13 +807,42 @@ pub(super) fn dispatch_shadow_outcome(
     // shadow has no declared scope_files like swarm missions do. Silent
     // no-op when the editor buffer has no path or no genome report exists.
     augment_shadow_prompt_with_landscape(state, &mut dispatch);
+
+    let is_claude = state
+        .agents
+        .agents
+        .iter()
+        .find(|lane| lane.id == dispatch.agent_id)
+        .is_some_and(|lane| lane.is_claude());
+
+    // Bypass dispatch_agent_prompt when the target is busy: its enqueue path
+    // drops prompt_msg_idx, which would misattribute the next completing turn
+    // to the shadow prompt. Route through enqueue_*_turn directly so the idx
+    // rides on the queue entry and is applied when the turn actually starts.
+    if crate::swarm::is_agent_busy(state, &dispatch.agent_id) {
+        if is_claude {
+            enqueue_claude_turn(
+                state,
+                vitals,
+                Some(dispatch.agent_id),
+                dispatch.mission_id,
+                dispatch.prompt,
+                dispatch.prompt_msg_idx,
+            );
+        } else {
+            enqueue_codex_turn(
+                state,
+                vitals,
+                Some(dispatch.agent_id),
+                dispatch.mission_id,
+                dispatch.prompt,
+                dispatch.prompt_msg_idx,
+            );
+        }
+        return;
+    }
+
     if let Some(idx) = dispatch.prompt_msg_idx {
-        let is_claude = state
-            .agents
-            .agents
-            .iter()
-            .find(|lane| lane.id == dispatch.agent_id)
-            .is_some_and(|lane| lane.is_claude());
         if is_claude {
             state
                 .agents
