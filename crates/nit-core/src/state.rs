@@ -2123,7 +2123,12 @@ pub struct AppState {
 pub enum GateMonitorSubView {
     #[default]
     Stats,
+    /// Persisted reports from `.nit/genome/` — the whole workspace.
     FileScores,
+    /// Files the workspace-wide scan is currently evaluating or has
+    /// queued after a file-watcher invalidation. Session-local, shrinks
+    /// to empty as the scan drains.
+    Live,
 }
 
 /// Sub-tab inside the substrate inspector popup overlay.
@@ -2971,7 +2976,8 @@ pub fn apply_action(state: &mut AppState, action: Action) -> ActionOutcome {
         Action::GateMonitorToggleSubView => {
             state.gate_monitor_sub_view = match state.gate_monitor_sub_view {
                 GateMonitorSubView::Stats => GateMonitorSubView::FileScores,
-                GateMonitorSubView::FileScores => GateMonitorSubView::Stats,
+                GateMonitorSubView::FileScores => GateMonitorSubView::Live,
+                GateMonitorSubView::Live => GateMonitorSubView::Stats,
             };
             state.gate_monitor_scroll = 0;
         }

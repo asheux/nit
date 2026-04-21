@@ -729,7 +729,7 @@ pub(super) fn map_gate_monitor_mouse(
     if !point_in_rect(mouse.column, mouse.row, inner) && !clamp {
         return None;
     }
-    let lines = gate_monitor_view::build_lines(state, theme, inner.width as usize);
+    let lines = gate_monitor_view::build_lines(state, None, theme, inner.width as usize);
     let text_lines = lines_to_strings(&lines);
     if text_lines.is_empty() {
         return None;

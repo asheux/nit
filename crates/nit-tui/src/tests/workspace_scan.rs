@@ -776,3 +776,99 @@ fn persist_then_delete_round_trip() {
 fn sanity_hashset_compiles() {
     let _s: HashSet<PathBuf> = HashSet::new();
 }
+
+#[test]
+fn in_flight_snapshot_separates_evaluating_from_queued() {
+    use crate::workspace_scan::WorkspaceScanItemState;
+
+    let root = temp_workspace();
+    // Seed enough files to push some into pending and some into dispatched.
+    for idx in 0..6 {
+        write_file(
+            &root,
+            &format!("src/f{idx}.rs"),
+            &format!("fn f{idx}() {{}}\n"),
+        );
+    }
+
+    let mut state = make_state(root.clone());
+    // Cap at 2 so we know exactly how many end up in dispatched after one drive.
+    let mut scan = WorkspaceScanRuntime::with_max_in_flight(2);
+    let worker = GenomeWorker::new();
+
+    scan.hydrate(&mut state);
+    assert_eq!(scan.pending_count(), 6);
+
+    scan.drive(&worker);
+    let snapshot = scan.in_flight_snapshot();
+    assert_eq!(
+        snapshot.len(),
+        6,
+        "every pending or dispatched file should appear"
+    );
+    let eval_count = snapshot
+        .iter()
+        .filter(|(_, s)| matches!(s, WorkspaceScanItemState::Evaluating))
+        .count();
+    let queued_count = snapshot
+        .iter()
+        .filter(|(_, s)| matches!(s, WorkspaceScanItemState::Queued))
+        .count();
+    assert_eq!(eval_count, 2, "drive should fill up to the cap");
+    assert_eq!(queued_count, 4);
+
+    drain_until_idle(&mut state, &mut scan, &worker, Duration::from_secs(30));
+    assert!(scan.in_flight_snapshot().is_empty(), "drains to empty");
+
+    cleanup(&root);
+}
+
+#[test]
+fn in_flight_snapshot_is_empty_when_idle() {
+    let root = temp_workspace();
+    let state = make_state(root.clone());
+    let scan = WorkspaceScanRuntime::new();
+    let _ = state;
+    assert!(scan.in_flight_snapshot().is_empty());
+    cleanup(&root);
+}
+
+#[test]
+fn in_flight_snapshot_orders_evaluating_first() {
+    use crate::workspace_scan::WorkspaceScanItemState;
+
+    let root = temp_workspace();
+    for idx in 0..4 {
+        write_file(
+            &root,
+            &format!("src/f{idx}.rs"),
+            &format!("fn f{idx}() {{}}\n"),
+        );
+    }
+
+    let mut state = make_state(root.clone());
+    let mut scan = WorkspaceScanRuntime::with_max_in_flight(2);
+    let worker = GenomeWorker::new();
+
+    scan.hydrate(&mut state);
+    scan.drive(&worker);
+
+    let snapshot = scan.in_flight_snapshot();
+    // All Evaluating entries must precede all Queued ones so the LIVE view
+    // renders active work at the top of the list.
+    let mut saw_queued = false;
+    for (_, state) in &snapshot {
+        match state {
+            WorkspaceScanItemState::Queued => saw_queued = true,
+            WorkspaceScanItemState::Evaluating => {
+                assert!(
+                    !saw_queued,
+                    "Evaluating entry appeared after a Queued entry"
+                );
+            }
+        }
+    }
+
+    drain_until_idle(&mut state, &mut scan, &worker, Duration::from_secs(30));
+    cleanup(&root);
+}

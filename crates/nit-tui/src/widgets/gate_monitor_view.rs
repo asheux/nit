@@ -17,10 +17,12 @@ use ratatui::{
 use crate::theme::Theme;
 use crate::widgets::text_selection::apply_ui_selection;
 use crate::widgets::text_utils::truncate_with_ellipsis;
+use crate::workspace_scan::{WorkspaceScanItemState, WorkspaceScanRuntime};
 
-// Title layout: " CODE STRUCTURAL QUALITY [NxN] " ++ " STATS " ++ " FILESCORES "
+// Title layout: " CODE STRUCTURAL QUALITY [NxN] " ++ " STATS " ++ " FILESCORES " ++ " LIVE "
 const BTN_STATS_LABEL: &str = " STATS ";
 const BTN_FILESCORES_LABEL: &str = " FILESCORES ";
+const BTN_LIVE_LABEL: &str = " LIVE ";
 
 const STATS_LABEL_WIDTH: usize = 12;
 const STATS_GAUGE_LABEL_WIDTH: usize = 14;
@@ -40,14 +42,25 @@ pub fn title_button_hit(col_in_rect: u16, title_prefix_len: u16) -> Option<Actio
     let stats_end = stats_start + BTN_STATS_LABEL.len() as u16;
     let fs_start = stats_end + 1;
     let fs_end = fs_start + BTN_FILESCORES_LABEL.len() as u16;
-    if (stats_start..stats_end).contains(&col) || (fs_start..fs_end).contains(&col) {
+    let live_start = fs_end + 1;
+    let live_end = live_start + BTN_LIVE_LABEL.len() as u16;
+    if (stats_start..stats_end).contains(&col)
+        || (fs_start..fs_end).contains(&col)
+        || (live_start..live_end).contains(&col)
+    {
         Some(Action::GateMonitorToggleSubView)
     } else {
         None
     }
 }
 
-pub fn render(frame: &mut Frame, area: ratatui::layout::Rect, state: &mut AppState, theme: &Theme) {
+pub fn render(
+    frame: &mut Frame,
+    area: ratatui::layout::Rect,
+    state: &mut AppState,
+    workspace_scan: &WorkspaceScanRuntime,
+    theme: &Theme,
+) {
     if state.app_kind == AppKind::Games {
         // Games variant has no scroll state to cache.
         return render_games(frame, area, state, theme);
@@ -92,9 +105,22 @@ pub fn render(frame: &mut Frame, area: ratatui::layout::Rect, state: &mut AppSta
     let btn_inactive = Style::default().fg(title_color).add_modifier(Modifier::DIM);
     let sep_style = Style::default().fg(title_color);
 
-    let is_stats = state.gate_monitor_sub_view == GateMonitorSubView::Stats;
-    let stats_style = if is_stats { btn_active } else { btn_inactive };
-    let fs_style = if is_stats { btn_inactive } else { btn_active };
+    let sub_view = state.gate_monitor_sub_view;
+    let stats_style = if sub_view == GateMonitorSubView::Stats {
+        btn_active
+    } else {
+        btn_inactive
+    };
+    let fs_style = if sub_view == GateMonitorSubView::FileScores {
+        btn_active
+    } else {
+        btn_inactive
+    };
+    let live_style = if sub_view == GateMonitorSubView::Live {
+        btn_active
+    } else {
+        btn_inactive
+    };
 
     let title = Line::from(vec![
         Span::styled(title_prefix, title_style),
@@ -102,6 +128,8 @@ pub fn render(frame: &mut Frame, area: ratatui::layout::Rect, state: &mut AppSta
         Span::styled(BTN_STATS_LABEL, stats_style),
         Span::styled(" ", sep_style),
         Span::styled(BTN_FILESCORES_LABEL, fs_style),
+        Span::styled(" ", sep_style),
+        Span::styled(BTN_LIVE_LABEL, live_style),
     ]);
 
     let block = Block::default()
@@ -130,6 +158,9 @@ pub fn render(frame: &mut Frame, area: ratatui::layout::Rect, state: &mut AppSta
         GateMonitorSubView::FileScores => {
             build_lines_filescores(state, theme, inner.width as usize)
         }
+        GateMonitorSubView::Live => {
+            build_lines_live(state, workspace_scan, theme, inner.width as usize)
+        }
     };
     let lines = apply_ui_selection(
         lines,
@@ -150,8 +181,17 @@ pub fn render(frame: &mut Frame, area: ratatui::layout::Rect, state: &mut AppSta
     frame.render_widget(para, inner);
 }
 
-// Used by tests and scroll-clamp callers that need the line count without a frame.
-pub fn build_lines(state: &AppState, theme: &Theme, width: usize) -> Vec<Line<'static>> {
+// Used by tests and scroll-clamp callers that need the line count without a
+// frame. `workspace_scan` is optional because some callers (mouse handlers
+// doing pre-render scroll clamp math) don't thread it — the Live sub-view
+// falls back to an empty result in that case and the cached max_scroll
+// catches up on the next render.
+pub fn build_lines(
+    state: &AppState,
+    workspace_scan: Option<&WorkspaceScanRuntime>,
+    theme: &Theme,
+    width: usize,
+) -> Vec<Line<'static>> {
     if state.app_kind == AppKind::Games {
         build_lines_games(state, theme, width)
     } else {
@@ -164,6 +204,10 @@ pub fn build_lines(state: &AppState, theme: &Theme, width: usize) -> Vec<Line<'s
                 build_lines_genome(state, report, theme, width)
             }
             GateMonitorSubView::FileScores => build_lines_filescores(state, theme, width),
+            GateMonitorSubView::Live => match workspace_scan {
+                Some(ws) => build_lines_live(state, ws, theme, width),
+                None => Vec::new(),
+            },
         }
     }
 }
@@ -1400,4 +1444,119 @@ fn relative_file_path(path: &std::path::Path, workspace: &std::path::Path) -> St
         }
     }
     path_s.to_string()
+}
+
+// ---------------------------------------------------------------------------
+// LIVE sub-view: workspace-scan queue (evaluating + queued, session-local)
+// ---------------------------------------------------------------------------
+
+fn build_lines_live(
+    state: &AppState,
+    workspace_scan: &WorkspaceScanRuntime,
+    theme: &Theme,
+    width: usize,
+) -> Vec<Line<'static>> {
+    let label_style = Style::default().fg(theme.title).add_modifier(Modifier::DIM);
+    let dim_style = Style::default()
+        .fg(theme.border)
+        .add_modifier(Modifier::DIM);
+    let header_style = Style::default()
+        .fg(theme.title)
+        .add_modifier(Modifier::BOLD);
+
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    let items = workspace_scan.in_flight_snapshot();
+
+    if items.is_empty() {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "No files are being evaluated",
+            Style::default().fg(theme.border),
+        )));
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "Files will appear here in real time as the workspace scan",
+            dim_style,
+        )));
+        lines.push(Line::from(Span::styled(
+            "picks up new edits from the file watcher.",
+            dim_style,
+        )));
+        return lines;
+    }
+
+    let (done, total) = workspace_scan.progress();
+    let evaluating_count = items
+        .iter()
+        .filter(|(_, s)| matches!(s, WorkspaceScanItemState::Evaluating))
+        .count();
+    let queued_count = items.len().saturating_sub(evaluating_count);
+
+    let header_text = format!(
+        "Live Scan ({evaluating_count} evaluating, {queued_count} queued — {done}/{total} done) "
+    );
+    lines.push(Line::from(vec![
+        Span::styled(header_text.clone(), label_style),
+        Span::styled(
+            "\u{2500}".repeat(width.saturating_sub(header_text.len())),
+            dim_style,
+        ),
+    ]));
+
+    // Columns: FILE | STATUS | PREVIOUS TIER (if any cached report existed).
+    let status_w = 12;
+    let prev_w = 12;
+    let data_w = status_w + prev_w + 2;
+    let name_w = width.saturating_sub(data_w).max(8);
+
+    lines.push(Line::from(vec![
+        Span::styled(
+            format!(" {:<width$}", "FILE", width = name_w - 1),
+            header_style,
+        ),
+        Span::styled(format!("{:<status_w$}", "STATUS"), header_style),
+        Span::styled(format!("{:<prev_w$}", "PREV TIER"), header_style),
+    ]));
+    lines.push(Line::from(Span::styled(
+        "\u{2500}".repeat(width),
+        dim_style,
+    )));
+
+    for (path, item_state) in &items {
+        let rel = relative_file_path(path, &state.workspace_root);
+        let display_name = truncate_with_ellipsis(&rel, name_w.saturating_sub(2));
+        let marker = match item_state {
+            WorkspaceScanItemState::Evaluating => "\u{25cf}", // ●
+            WorkspaceScanItemState::Queued => "\u{25cb}",     // ○
+        };
+        let status_color = match item_state {
+            WorkspaceScanItemState::Evaluating => theme.accent,
+            WorkspaceScanItemState::Queued => theme.title,
+        };
+        // The cache was invalidated before the eval dispatched, so state
+        // won't have a current report. Fall back to the session baseline
+        // so the operator can see what tier the file WAS at.
+        let prev_tier = state
+            .genome_baselines
+            .get(path)
+            .map(|r| format!("tier {}", r.tier.numeral()))
+            .unwrap_or_else(|| "\u{2014}".to_string()); // —
+
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!("{marker} {display_name:<width$}", width = name_w - 2),
+                Style::default().fg(theme.foreground),
+            ),
+            Span::styled(
+                format!("{:<status_w$}", item_state.label()),
+                Style::default().fg(status_color),
+            ),
+            Span::styled(
+                format!("{prev_tier:<prev_w$}"),
+                Style::default().fg(theme.border),
+            ),
+        ]));
+    }
+
+    lines
 }

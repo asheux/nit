@@ -77,6 +77,7 @@ pub(super) fn draw(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     state: &mut AppState,
     swarm: &SwarmRuntime,
+    workspace_scan: &crate::workspace_scan::WorkspaceScanRuntime,
     theme: &Theme,
     syntax: &mut SyntaxRuntime,
     system_stats: &SystemStats,
@@ -256,7 +257,7 @@ pub(super) fn draw(
         };
         state.syntax_status = syntax_status.clone();
         state.syntax_debug = Some(syntax_debug.clone());
-        gate_monitor_view::render(f, layout.gate, state, theme);
+        gate_monitor_view::render(f, layout.gate, state, workspace_scan, theme);
         bottom_bar::render(f, layout.bottom, state, theme, system_stats);
 
         match state.app_kind {

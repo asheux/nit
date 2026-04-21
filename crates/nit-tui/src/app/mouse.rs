@@ -346,7 +346,8 @@ pub(super) fn handle_mouse_event_with_swarm(
                 let mut max_scroll = state.gate_monitor_last_max_scroll;
                 if max_scroll == usize::MAX {
                     let inner = Block::default().borders(Borders::ALL).inner(layout.gate);
-                    let lines = gate_monitor_view::build_lines(state, theme, inner.width as usize);
+                    let lines =
+                        gate_monitor_view::build_lines(state, None, theme, inner.width as usize);
                     max_scroll = lines.len().saturating_sub(inner.height as usize);
                     state.gate_monitor_last_max_scroll = max_scroll;
                 }

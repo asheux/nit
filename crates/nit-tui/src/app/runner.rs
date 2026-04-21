@@ -1233,6 +1233,7 @@ pub(super) fn run_loop(
                 terminal,
                 state,
                 &swarm,
+                &workspace_scan,
                 theme,
                 syntax,
                 &system_stats,

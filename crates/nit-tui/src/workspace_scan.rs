@@ -62,6 +62,26 @@ pub fn is_code_file(path: &Path) -> bool {
         .is_some_and(|ext| CODE_EXTENSIONS.contains(&ext))
 }
 
+/// State of a file in the workspace-scan pipeline. Surfaces in the LIVE
+/// sub-view of the gate monitor so the operator can see what's being
+/// evaluated right now vs what's queued.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum WorkspaceScanItemState {
+    /// File sits in `pending`, waiting for an in-flight slot.
+    Queued,
+    /// A worker thread is currently computing the report for this file.
+    Evaluating,
+}
+
+impl WorkspaceScanItemState {
+    pub fn label(self) -> &'static str {
+        match self {
+            WorkspaceScanItemState::Queued => "queued",
+            WorkspaceScanItemState::Evaluating => "evaluating",
+        }
+    }
+}
+
 /// Driver for the background genome scan. One instance lives in `run_loop`
 /// alongside `GenomeWorker`; the main loop calls `hydrate` once at startup,
 /// `drive` every tick, and `note_completed` when a workspace-scan result
@@ -290,6 +310,28 @@ impl WorkspaceScanRuntime {
     /// `total` grows when file-watcher events enqueue more work.
     pub fn progress(&self) -> (usize, usize) {
         (self.done, self.total)
+    }
+
+    /// Snapshot of every file currently queued or in-flight. Dispatched
+    /// (Evaluating) paths come first so the LIVE tab shows them at the top,
+    /// then queued (Queued) paths in FIFO order. The returned list is
+    /// session-local — it drains to empty as results land.
+    pub fn in_flight_snapshot(&self) -> Vec<(PathBuf, WorkspaceScanItemState)> {
+        let mut out: Vec<(PathBuf, WorkspaceScanItemState)> = self
+            .dispatched
+            .iter()
+            .map(|p| (p.clone(), WorkspaceScanItemState::Evaluating))
+            .collect();
+        // Stable ordering for the dispatched half — HashSet iteration is
+        // non-deterministic and reshuffling rows every tick makes the LIVE
+        // view hard to read.
+        out.sort_by(|a, b| a.0.cmp(&b.0));
+        out.extend(
+            self.pending
+                .iter()
+                .map(|p| (p.clone(), WorkspaceScanItemState::Queued)),
+        );
+        out
     }
 
     #[cfg(test)]
