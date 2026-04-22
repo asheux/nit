@@ -244,7 +244,16 @@ pub(super) fn build_planner_prompt(
                 "- Use read-only proposal/review tasks for codebase work; use research roles only when external/topic research is part of the mission.\n",
             );
             out.push_str(
-                "- PROPOSER DISCIPLINE (lab): prefer ONE focused propose task feeding the integrator, optionally with review/test tasks downstream. Do NOT assign multiple propose tasks against the same scope — lab has no distinct-lens machinery, so N identical proposers produce correlated output and the judge has nothing to distinguish between them. If you want multi-proposer fan-in with distinct lenses, the operator must re-run with `template: bulk` (which enforces one-proposer-per-agent with explicit distinct lenses feeding a judge). This is a lab-vs-bulk boundary, not a preference.\n",
+                "- PROPOSER PARALLELISM (lab): if you assign multiple propose tasks, they MUST have empty `deps` and run concurrently. Do NOT chain them (propose-02 depending on propose-01 etc.) — proposers are independent investigators, not a pipeline. A judge task then fans in via `deps = [propose-01, propose-02, ...]` and waits for all of them in parallel, not serially. Sequential proposers just waste wall-clock time; the judge has to wait for the last one regardless.\n",
+            );
+            out.push_str(
+                "- PROPOSER LENSES (lab): if you assign multiple propose tasks, each one's `task_prompt` MUST open with a distinct LENS framing so the proposers diverge on a real optimisation axis instead of producing three samples of the same prompt. Without distinct lenses, correlated output gives the judge nothing to choose between. Use one of these framings per proposer (pick the ones that fit the request, or invent a sharper axis for the specific scope):\n\
+                 -   LENS A (minimal-diff, focused): favor the smallest change that solves the request. Avoid new abstractions, new modules, new types, new dependencies unless strictly required. Blast radius as small as possible.\n\
+                 -   LENS B (architectural coherence): if the shape of the code is what's causing the problem, propose the consolidation, split, or abstraction the system is asking for. Larger diff fine when it lands on a better overall shape.\n\
+                 -   LENS C (incremental/staged): prefer a multi-step plan that converts the current shape into the target shape through atomic, reversible steps. Optimise for safety and roll-back at each step.\n\
+                 -   LENS D (performance/genome-first): target the files the GENOME LANDSCAPE flags as lowest-tier or highest-leverage. Accept more invasive changes when they unlock a tier jump or eliminate parsimony bloat.\n\
+                 -   LENS E (safety/invariants): prioritise invariants, error handling, edge cases the tests don't cover. Be defensive about assumptions; flag anything the current tests don't exercise.\n\
+                 Bake the lens name AND a one-line restatement of its axis into the first paragraph of the task's `task_prompt`. The judge and integrator need to see the axis the proposer was optimising for so they can weigh tradeoffs.\n",
             );
         }
         SwarmTemplate::Bulk => {

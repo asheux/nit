@@ -76,6 +76,153 @@ fn bulk_is_integrate(task: &SwarmTask) -> bool {
     task_role_is(task, "integrate") || task.id.eq_ignore_ascii_case("integrate")
 }
 
+/// Defensive repair for lab plans that contain multiple propose tasks.
+/// The lab planner guide tells the LLM to prefer ONE focused proposer and,
+/// if it assigns multiple, to run them in parallel — but planners drift.
+/// If the produced plan chains propose-02 behind propose-01, the judge
+/// ends up waiting serially for each proposer, burning wall-clock time
+/// for no benefit (proposers are independent investigators, not a
+/// pipeline). This pass:
+///   1. Strips proposer-to-proposer deps so they can run concurrently.
+///   2. Emits warnings listing every dep it removed so the operator can
+///      see what was repaired and file a planner-drift bug if needed.
+///
+/// Intentionally does NOT touch proposer→judge or proposer→integrate
+/// deps — the judge fanning in over all proposers is the correct shape,
+/// and lab's integrator may legitimately depend on a propose task
+/// directly (the "one focused proposer" case).
+pub(super) fn normalize_lab_plan(tasks: &mut [SwarmTask]) -> Vec<String> {
+    let mut warnings = Vec::new();
+    let proposer_ids: std::collections::HashSet<String> = tasks
+        .iter()
+        .filter(|task| bulk_is_proposer(task))
+        .map(|task| task.id.clone())
+        .collect();
+
+    if proposer_ids.len() < 2 {
+        // Single or zero proposers — no mutual deps to strip.
+        return warnings;
+    }
+
+    for task in tasks.iter_mut() {
+        if !bulk_is_proposer(task) {
+            continue;
+        }
+        let my_id = task.id.clone();
+        let before = task.deps.len();
+        task.deps.retain(|dep| {
+            let drop = proposer_ids.contains(dep) && dep != &my_id;
+            if drop {
+                warnings.push(format!(
+                    "Lab plan: stripped proposer-to-proposer dep '{my_id}' -> '{dep}' so proposers can run in parallel."
+                ));
+            }
+            !drop
+        });
+        // `retain` emits one warning per dropped dep via the closure
+        // side-effect above; nothing else to do here, but reference
+        // `before` to quiet dead-store warnings.
+        let _ = before;
+    }
+
+    warnings
+}
+
+/// Default lens framings for lab's multi-proposer fallback. Indexed
+/// modulo 5 so plans with >5 proposers cycle back to LENS A rather than
+/// silently dropping divergence. The five axes are chosen to be
+/// genuinely different optimisation targets — minimal-diff vs
+/// architectural vs incremental vs performance vs safety — so even two
+/// proposers under the fallback produce meaningfully different output.
+const LAB_DEFAULT_LENSES: &[&str] = &[
+    "LENS A (minimal-diff, focused): favor the smallest change that solves \
+     the request. Avoid new abstractions, new modules, new types, new \
+     dependencies unless strictly required. Blast radius as small as possible.",
+    "LENS B (architectural coherence): if the shape of the code is what's \
+     causing the problem, propose the consolidation, split, or abstraction \
+     the system is asking for. Larger diff fine when it lands on a better \
+     overall shape.",
+    "LENS C (incremental/staged): prefer a multi-step plan that converts \
+     the current shape into the target shape through atomic, reversible \
+     steps. Optimise for safety and roll-back at each step.",
+    "LENS D (performance/genome-first): target the files the GENOME \
+     LANDSCAPE flags as lowest-tier or highest-leverage. Accept more \
+     invasive changes when they unlock a tier jump or eliminate parsimony \
+     bloat.",
+    "LENS E (safety/invariants): prioritise invariants, error handling, \
+     edge cases the tests don't cover. Be defensive about assumptions; \
+     flag anything the current tests don't exercise.",
+];
+
+/// Detect whether the planner already baked a LENS framing into any of
+/// the proposer prompts. Case-insensitive substring match on "LENS "
+/// followed by A-E — matches the default lens template above and also
+/// any planner-authored lens using the same convention.
+fn proposer_has_lens_marker(prompt: &str) -> bool {
+    let upper = prompt.to_ascii_uppercase();
+    ["LENS A", "LENS B", "LENS C", "LENS D", "LENS E"]
+        .iter()
+        .any(|marker| upper.contains(marker))
+}
+
+/// Defensive repair: when lab's planner assigned multiple propose tasks
+/// without distinct-lens framings in their `task_prompt`, inject default
+/// lenses so proposers diverge on real optimisation axes instead of
+/// producing correlated samples of the same prompt. Paired with the
+/// `PROPOSER LENSES (lab)` bullet in the lab planner prompt — the bullet
+/// steers compliant planners; this pass catches drift.
+///
+/// Policy:
+/// - No-op when fewer than 2 proposer tasks (single-proposer lab plans
+///   don't need lens divergence).
+/// - No-op when ANY proposer already has a lens marker. Trust the
+///   planner if it at least partially followed the prompt guidance —
+///   mixing planner-supplied and injected lenses would be confusing.
+/// - Otherwise, inject `LAB_DEFAULT_LENSES[i % 5]` as the first
+///   paragraph of each proposer's `task_prompt`, cycling for plans
+///   with >5 proposers.
+///
+/// Emits one warning per injection listing the proposer id and the lens
+/// label so the operator can see what was repaired.
+pub(super) fn apply_lab_lenses(tasks: &mut [SwarmTask]) -> Vec<String> {
+    let mut warnings = Vec::new();
+    let proposer_indices: Vec<usize> = tasks
+        .iter()
+        .enumerate()
+        .filter(|(_, t)| bulk_is_proposer(t))
+        .map(|(i, _)| i)
+        .collect();
+
+    if proposer_indices.len() < 2 {
+        return warnings;
+    }
+
+    let any_lens = proposer_indices
+        .iter()
+        .any(|&i| proposer_has_lens_marker(&tasks[i].task_prompt));
+    if any_lens {
+        return warnings;
+    }
+
+    for (nth, &idx) in proposer_indices.iter().enumerate() {
+        let lens = LAB_DEFAULT_LENSES[nth % LAB_DEFAULT_LENSES.len()];
+        let task = &mut tasks[idx];
+        let label = lens.split(':').next().unwrap_or("LENS");
+        let existing = task.task_prompt.trim();
+        task.task_prompt = if existing.is_empty() {
+            lens.to_string()
+        } else {
+            format!("{lens}\n\n{existing}")
+        };
+        warnings.push(format!(
+            "Lab plan: injected {label} on proposer '{}' — planner omitted distinct lens framings on a multi-proposer plan.",
+            task.id,
+        ));
+    }
+
+    warnings
+}
+
 pub(super) fn normalize_bulk_plan(
     tasks: &mut [SwarmTask],
     integrator_agent_id: Option<&str>,

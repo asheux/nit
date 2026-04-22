@@ -1465,48 +1465,8 @@ fn planner_prompt_describes_computational_research_mission_shape() {
     assert!(prompt.contains("Prefer read-only investigation and synthesis tasks"));
 }
 
-// Lab's planner guide must explicitly steer multi-proposer fan-in toward
-// the bulk template. Without distinct-lens machinery, N lab proposers
-// against the same scope produce correlated output and waste turns — the
-// user's observed "swarm 6 / lab / 3 proposers" plan was valid per the
-// old guide but suboptimal. The new guidance names the bulk-vs-lab
-// boundary and tells the planner to prefer one focused proposer.
-#[test]
-fn lab_planner_prompt_discourages_multi_proposer_fanin() {
-    let prompt = build_planner_prompt(
-        "root",
-        SwarmTemplate::Lab,
-        SwarmMissionKind::General,
-        "planner",
-        &["planner".into(), "a1".into(), "a2".into(), "a3".into()],
-        Some("a1"),
-        &[],
-        &[],
-        std::path::Path::new("."),
-        &[],
-    );
-
-    assert!(
-        prompt.contains("PROPOSER DISCIPLINE (lab)"),
-        "lab planner must surface the proposer-discipline rule"
-    );
-    assert!(
-        prompt.contains("prefer ONE focused propose task"),
-        "lab planner must tell the LLM to prefer a single proposer"
-    );
-    assert!(
-        prompt.contains("lab has no distinct-lens machinery"),
-        "lab planner must explain why multi-proposer is wasteful in this template"
-    );
-    assert!(
-        prompt.contains("template: bulk"),
-        "lab planner must name bulk as the multi-proposer route"
-    );
-}
-
-// Complement: the bulk planner prompt must keep its existing "distinct
-// lens" guidance so operators who actually want fan-in get the stronger
-// template. This is the other half of the lab/bulk boundary.
+// Bulk planner prompt must keep its existing "distinct lens" guidance —
+// that's the defining discipline that distinguishes bulk from lab.
 #[test]
 fn bulk_planner_prompt_keeps_distinct_lens_guidance() {
     let prompt = build_planner_prompt(
@@ -1532,12 +1492,13 @@ fn bulk_planner_prompt_keeps_distinct_lens_guidance() {
     );
 }
 
-// Parallel planner guide should NOT inherit the lab-specific proposer
-// discipline (it has its own "reserve at least ONE propose lane" rule).
-// If the rule bleeds across templates the planner gets contradictory
-// instructions.
+// The parallelism guidance is lab-specific — parallel and bulk each have
+// their own proposer orchestration rules (parallel: "reserve at least
+// ONE propose lane"; bulk: "distinct lens per proposer + judge fan-in").
+// Lab's "PROPOSER PARALLELISM" text must not leak into either — duplicated
+// guidance across templates gives the planner contradictory instructions.
 #[test]
-fn parallel_planner_prompt_does_not_use_lab_proposer_discipline() {
+fn parallel_planner_prompt_does_not_use_lab_parallelism_text() {
     let prompt = build_planner_prompt(
         "root",
         SwarmTemplate::Parallel,
@@ -1552,13 +1513,496 @@ fn parallel_planner_prompt_does_not_use_lab_proposer_discipline() {
     );
 
     assert!(
-        !prompt.contains("PROPOSER DISCIPLINE (lab)"),
-        "parallel planner must not inherit lab-specific guidance"
+        !prompt.contains("PROPOSER PARALLELISM (lab)"),
+        "parallel planner must not inherit lab-specific parallelism text"
+    );
+}
+
+// The lab planner guide must tell the LLM that when multiple proposers
+// are assigned, they run in parallel (empty deps) — not in a chain.
+// Sequential proposers (propose-02 depending on propose-01) waste
+// wall-clock time because the judge has to wait for the last one anyway.
+#[test]
+fn lab_planner_prompt_tells_proposers_to_run_in_parallel() {
+    let prompt = build_planner_prompt(
+        "root",
+        SwarmTemplate::Lab,
+        SwarmMissionKind::General,
+        "planner",
+        &["planner".into(), "a1".into(), "a2".into(), "a3".into()],
+        Some("a1"),
+        &[],
+        &[],
+        std::path::Path::new("."),
+        &[],
+    );
+
+    assert!(
+        prompt.contains("PROPOSER PARALLELISM (lab)"),
+        "lab planner must surface the proposer-parallelism rule"
     );
     assert!(
-        !prompt.contains("lab has no distinct-lens machinery"),
-        "parallel planner must not carry the lab boundary text"
+        prompt.contains("empty `deps`"),
+        "lab planner must tell the LLM to use empty deps on proposers"
     );
+    assert!(
+        prompt.contains("Do NOT chain them"),
+        "lab planner must explicitly forbid chaining proposers"
+    );
+}
+
+// Lab's planner must teach the LLM how to diverge multi-proposer plans
+// on real optimisation axes, not just variant labels. The bullet lists
+// five concrete lenses (minimal-diff / architectural / incremental /
+// performance / safety) and tells the planner to bake them into each
+// proposer's `task_prompt`.
+#[test]
+fn lab_planner_prompt_teaches_distinct_lenses() {
+    let prompt = build_planner_prompt(
+        "root",
+        SwarmTemplate::Lab,
+        SwarmMissionKind::General,
+        "planner",
+        &["planner".into(), "a1".into(), "a2".into(), "a3".into()],
+        Some("a1"),
+        &[],
+        &[],
+        std::path::Path::new("."),
+        &[],
+    );
+
+    assert!(
+        prompt.contains("PROPOSER LENSES (lab)"),
+        "lab planner must surface the lens-diversification rule"
+    );
+    // At least three concrete lenses named — the planner needs a menu,
+    // not abstract advice.
+    for lens in ["LENS A", "LENS B", "LENS C"] {
+        assert!(
+            prompt.contains(lens),
+            "lab planner must enumerate {lens} as a concrete option"
+        );
+    }
+    // Axes named plainly so the planner can map the request to a lens.
+    assert!(prompt.contains("minimal-diff"));
+    assert!(prompt.contains("architectural coherence"));
+    // Instruction to actually embed the lens in task_prompt, not just
+    // mention it in free-form planning text.
+    assert!(prompt.contains("task_prompt"));
+}
+
+// Defensive repair: when the planner assigns multiple proposers without
+// lens markers in any of their task_prompts, `apply_lab_lenses` injects
+// default lenses (LENS A / LENS B / ... cycled mod 5) into each so the
+// proposers actually diverge. The injection goes at the head of the
+// existing task_prompt, preserving whatever the planner wrote.
+#[test]
+fn apply_lab_lenses_injects_defaults_when_planner_omits() {
+    use super::{apply_lab_lenses, SwarmTask};
+
+    let mk = |id: &str, role: &str, prompt: &str| SwarmTask {
+        id: id.into(),
+        agent_id: "a1".into(),
+        role: Some(role.into()),
+        title: format!("{role} task"),
+        task_prompt: prompt.into(),
+        deps: Vec::new(),
+        writes: false,
+        artifacts: Vec::new(),
+        done_when: None,
+        state: SwarmTaskState::Pending,
+        output: None,
+        parsed_artifacts: None,
+        expected_artifacts_missing: false,
+        failed: false,
+        retries: 0,
+    };
+
+    let mut tasks = vec![
+        mk(
+            "propose-01",
+            "propose",
+            "Survey nit-syntax and recommend fixes.",
+        ),
+        mk(
+            "propose-02",
+            "propose",
+            "Survey nit-syntax and recommend fixes.",
+        ),
+        mk(
+            "propose-03",
+            "propose",
+            "Survey nit-syntax and recommend fixes.",
+        ),
+        mk("judge", "judge", "Pick the strongest proposal."),
+    ];
+
+    let warnings = apply_lab_lenses(&mut tasks);
+
+    // Each proposer got a distinct lens injected.
+    let p01 = tasks.iter().find(|t| t.id == "propose-01").unwrap();
+    let p02 = tasks.iter().find(|t| t.id == "propose-02").unwrap();
+    let p03 = tasks.iter().find(|t| t.id == "propose-03").unwrap();
+
+    assert!(p01.task_prompt.contains("LENS A"));
+    assert!(p02.task_prompt.contains("LENS B"));
+    assert!(p03.task_prompt.contains("LENS C"));
+
+    // Original body preserved after the injected lens.
+    for t in [p01, p02, p03] {
+        assert!(
+            t.task_prompt.contains("Survey nit-syntax"),
+            "original prompt body must be preserved after lens injection"
+        );
+    }
+
+    // Judge untouched.
+    let judge = tasks.iter().find(|t| t.id == "judge").unwrap();
+    assert_eq!(judge.task_prompt, "Pick the strongest proposal.");
+
+    // Warning per injection with proposer id + lens label.
+    assert_eq!(warnings.len(), 3);
+    assert!(warnings
+        .iter()
+        .any(|w| w.contains("propose-01") && w.contains("LENS A")));
+    assert!(warnings
+        .iter()
+        .any(|w| w.contains("propose-02") && w.contains("LENS B")));
+    assert!(warnings
+        .iter()
+        .any(|w| w.contains("propose-03") && w.contains("LENS C")));
+}
+
+// Trust the planner when it did bake lenses into any proposer prompt —
+// mixing planner-supplied and injected lenses would confuse the agents.
+// Partial lens coverage is drift the operator can see via the mission
+// log; we don't try to repair it automatically.
+#[test]
+fn apply_lab_lenses_preserves_planner_supplied_lenses() {
+    use super::{apply_lab_lenses, SwarmTask};
+
+    let mk = |id: &str, prompt: &str| SwarmTask {
+        id: id.into(),
+        agent_id: "a1".into(),
+        role: Some("propose".into()),
+        title: "propose task".into(),
+        task_prompt: prompt.into(),
+        deps: Vec::new(),
+        writes: false,
+        artifacts: Vec::new(),
+        done_when: None,
+        state: SwarmTaskState::Pending,
+        output: None,
+        parsed_artifacts: None,
+        expected_artifacts_missing: false,
+        failed: false,
+        retries: 0,
+    };
+
+    let p01_original = "LENS A (minimal-diff): smallest fix. Survey the module.";
+    let p02_original = "LENS D (performance): target the hot paths. Survey the module.";
+    let mut tasks = vec![
+        mk("propose-01", p01_original),
+        mk("propose-02", p02_original),
+    ];
+
+    let warnings = apply_lab_lenses(&mut tasks);
+
+    assert!(
+        warnings.is_empty(),
+        "no injection when planner supplied lenses"
+    );
+    assert_eq!(
+        tasks
+            .iter()
+            .find(|t| t.id == "propose-01")
+            .unwrap()
+            .task_prompt,
+        p01_original
+    );
+    assert_eq!(
+        tasks
+            .iter()
+            .find(|t| t.id == "propose-02")
+            .unwrap()
+            .task_prompt,
+        p02_original
+    );
+}
+
+// No injection when only one proposer exists — lens divergence is
+// meaningless with a single investigator.
+#[test]
+fn apply_lab_lenses_is_noop_for_single_proposer() {
+    use super::{apply_lab_lenses, SwarmTask};
+
+    let mut tasks = vec![SwarmTask {
+        id: "propose".into(),
+        agent_id: "a1".into(),
+        role: Some("propose".into()),
+        title: "propose task".into(),
+        task_prompt: "Survey the module.".into(),
+        deps: Vec::new(),
+        writes: false,
+        artifacts: Vec::new(),
+        done_when: None,
+        state: SwarmTaskState::Pending,
+        output: None,
+        parsed_artifacts: None,
+        expected_artifacts_missing: false,
+        failed: false,
+        retries: 0,
+    }];
+
+    let warnings = apply_lab_lenses(&mut tasks);
+
+    assert!(warnings.is_empty());
+    assert_eq!(
+        tasks[0].task_prompt, "Survey the module.",
+        "single-proposer lab plan should pass through untouched"
+    );
+}
+
+// Plans with >5 proposers cycle the lens pool rather than silently
+// dropping divergence on proposers 6+. Degenerate but defensible
+// behaviour.
+#[test]
+fn apply_lab_lenses_cycles_when_proposer_count_exceeds_pool() {
+    use super::{apply_lab_lenses, SwarmTask};
+
+    let mk = |id: &str| SwarmTask {
+        id: id.into(),
+        agent_id: "a1".into(),
+        role: Some("propose".into()),
+        title: "propose task".into(),
+        task_prompt: String::new(),
+        deps: Vec::new(),
+        writes: false,
+        artifacts: Vec::new(),
+        done_when: None,
+        state: SwarmTaskState::Pending,
+        output: None,
+        parsed_artifacts: None,
+        expected_artifacts_missing: false,
+        failed: false,
+        retries: 0,
+    };
+
+    let mut tasks: Vec<SwarmTask> = (0..7).map(|i| mk(&format!("propose-{i:02}"))).collect();
+    let warnings = apply_lab_lenses(&mut tasks);
+    assert_eq!(warnings.len(), 7);
+
+    // Positions 0..5 get A/B/C/D/E, then 5 and 6 cycle back to A and B.
+    for (nth, expected) in [
+        (0, "A"),
+        (1, "B"),
+        (2, "C"),
+        (3, "D"),
+        (4, "E"),
+        (5, "A"),
+        (6, "B"),
+    ] {
+        let id = format!("propose-{nth:02}");
+        let t = tasks.iter().find(|t| t.id == id).unwrap();
+        assert!(
+            t.task_prompt.contains(&format!("LENS {expected}")),
+            "proposer {id} should carry LENS {expected}"
+        );
+    }
+}
+
+// Defensive repair: even if the planner ignores the parallelism guidance
+// and emits a chained proposer plan, `normalize_lab_plan` strips
+// proposer-to-proposer deps so execution ends up parallel anyway. The
+// repair MUST leave proposer→judge and proposer→integrate deps alone.
+#[test]
+fn normalize_lab_plan_strips_proposer_to_proposer_deps() {
+    use super::{normalize_lab_plan, SwarmTask};
+
+    // Build a chained-proposer plan + a judge that waits on all of them.
+    let mk = |id: &str, role: &str, deps: &[&str]| SwarmTask {
+        id: id.into(),
+        agent_id: "a1".into(),
+        role: Some(role.into()),
+        title: format!("{role} task"),
+        task_prompt: String::new(),
+        deps: deps.iter().map(|s| s.to_string()).collect(),
+        writes: false,
+        artifacts: Vec::new(),
+        done_when: None,
+        state: SwarmTaskState::Pending,
+        output: None,
+        parsed_artifacts: None,
+        expected_artifacts_missing: false,
+        failed: false,
+        retries: 0,
+    };
+
+    let mut tasks = vec![
+        mk("propose-01", "propose", &[]),
+        mk("propose-02", "propose", &["propose-01"]), // chained — should be stripped
+        mk("propose-03", "propose", &["propose-02"]), // chained — should be stripped
+        mk(
+            "judge",
+            "judge",
+            &["propose-01", "propose-02", "propose-03"],
+        ),
+        mk("integrate", "integrate", &["judge"]),
+    ];
+
+    let warnings = normalize_lab_plan(&mut tasks);
+
+    // propose-02's dep on propose-01 — stripped.
+    assert!(
+        tasks
+            .iter()
+            .find(|t| t.id == "propose-02")
+            .unwrap()
+            .deps
+            .is_empty(),
+        "propose-02 must have empty deps after normalization"
+    );
+    // propose-03's dep on propose-02 — stripped.
+    assert!(
+        tasks
+            .iter()
+            .find(|t| t.id == "propose-03")
+            .unwrap()
+            .deps
+            .is_empty(),
+        "propose-03 must have empty deps after normalization"
+    );
+    // Judge's deps on ALL proposers — preserved.
+    let judge_deps = tasks.iter().find(|t| t.id == "judge").unwrap().deps.clone();
+    assert_eq!(judge_deps.len(), 3);
+    for p in ["propose-01", "propose-02", "propose-03"] {
+        assert!(
+            judge_deps.iter().any(|d| d == p),
+            "judge dep on {p} must be preserved"
+        );
+    }
+    // Integrate's dep on judge — preserved.
+    assert_eq!(
+        tasks.iter().find(|t| t.id == "integrate").unwrap().deps,
+        vec!["judge".to_string()]
+    );
+    // Warnings must enumerate every dep stripped.
+    assert!(warnings
+        .iter()
+        .any(|w| w.contains("propose-02") && w.contains("propose-01")));
+    assert!(warnings
+        .iter()
+        .any(|w| w.contains("propose-03") && w.contains("propose-02")));
+}
+
+// Single-proposer lab plans must not trigger the repair — the helper is
+// a no-op when fewer than two proposers are present, otherwise it would
+// emit spurious warnings on normal lab plans.
+#[test]
+fn normalize_lab_plan_is_noop_for_single_proposer() {
+    use super::{normalize_lab_plan, SwarmTask};
+
+    let mk = |id: &str, role: &str, deps: &[&str]| SwarmTask {
+        id: id.into(),
+        agent_id: "a1".into(),
+        role: Some(role.into()),
+        title: format!("{role} task"),
+        task_prompt: String::new(),
+        deps: deps.iter().map(|s| s.to_string()).collect(),
+        writes: false,
+        artifacts: Vec::new(),
+        done_when: None,
+        state: SwarmTaskState::Pending,
+        output: None,
+        parsed_artifacts: None,
+        expected_artifacts_missing: false,
+        failed: false,
+        retries: 0,
+    };
+
+    let mut tasks = vec![
+        mk("propose", "propose", &[]),
+        mk("review", "review", &["propose"]),
+        mk("integrate", "integrate", &["review"]),
+    ];
+    let warnings = normalize_lab_plan(&mut tasks);
+
+    assert!(warnings.is_empty(), "single-proposer plan needs no repair");
+    assert_eq!(
+        tasks.iter().find(|t| t.id == "review").unwrap().deps,
+        vec!["propose".to_string()],
+        "review's dep on propose is preserved"
+    );
+}
+
+// Lab-specific "PROPOSER PARALLELISM" text must not leak into bulk —
+// bulk has its own orchestration rules (distinct lens + judge fan-in).
+#[test]
+fn bulk_planner_prompt_does_not_use_lab_parallelism_text() {
+    let prompt = build_planner_prompt(
+        "root",
+        SwarmTemplate::Bulk,
+        SwarmMissionKind::General,
+        "planner",
+        &["planner".into(), "a1".into(), "a2".into(), "a3".into()],
+        Some("a1"),
+        &[],
+        &[],
+        std::path::Path::new("."),
+        &[],
+    );
+
+    assert!(
+        !prompt.contains("PROPOSER PARALLELISM (lab)"),
+        "bulk planner must not inherit lab-specific parallelism text"
+    );
+}
+
+// Shadow prompts (single-agent pipeline) have no planner and share no
+// builder code with the swarm planner. Lab-specific parallelism guidance
+// must NOT leak into any shadow role prompt.
+#[test]
+fn shadow_prompts_do_not_inherit_lab_parallelism_text() {
+    use crate::shadow::ShadowRuntime;
+    use nit_core::state::AgentTurnState as _AgentTurnState; // force runtime-state linkage
+    use nit_core::{AgentLane, AgentLaneKind, AgentStatus, AppState, Buffer};
+    let _: &dyn std::any::Any = &std::marker::PhantomData::<_AgentTurnState>;
+
+    let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let editor = Buffer::empty("editor", None);
+    let notes = Buffer::empty("notes", None);
+    let mut state = AppState::new(root, editor, notes);
+    state.agents.agents.clear();
+    state.agents.agents.push(AgentLane {
+        id: "codex-main".into(),
+        role: "coder".into(),
+        lane: "Codex".into(),
+        kind: AgentLaneKind::Codex,
+        status: AgentStatus::Idle,
+        heartbeat_age_secs: 0,
+        queue_len: 0,
+        current_mission: None,
+        last_message: String::new(),
+        shadow: false,
+    });
+
+    let mut rt = ShadowRuntime::new();
+    let dispatches = rt
+        .start(
+            &mut state,
+            "codex-main".into(),
+            "refactor crates/nit-syntax module".into(),
+            None,
+            Some(0),
+        )
+        .expect("shadow start");
+
+    for d in &dispatches {
+        assert!(
+            !d.prompt.contains("PROPOSER PARALLELISM (lab)"),
+            "shadow proposer prompt must not inherit lab planner text"
+        );
+    }
 }
 
 #[test]

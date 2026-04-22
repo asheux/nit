@@ -5,11 +5,11 @@ use std::path::Path;
 use nit_core::AppState;
 
 use super::{
-    chat_clone_base_id, explicit_swarm_mission_kind_from_prompt, extract_json_code_block,
-    fallback_tasks, is_swarm_clone_agent_id, normalize_bulk_plan, parse_swarm_template,
-    swarm_clone_base_id, validate_bulk_plan, ParsedSwarmPlan, SwarmMissionKind, SwarmPlanTaskV2,
-    SwarmPlanV1, SwarmPlanV2, SwarmTask, SwarmTaskState, SwarmTemplate,
-    COMPUTATIONAL_RESEARCH_ROLE, COMPUTATIONAL_RESEARCH_ROLE_LEGACY,
+    apply_lab_lenses, chat_clone_base_id, explicit_swarm_mission_kind_from_prompt,
+    extract_json_code_block, fallback_tasks, is_swarm_clone_agent_id, normalize_bulk_plan,
+    normalize_lab_plan, parse_swarm_template, swarm_clone_base_id, validate_bulk_plan,
+    ParsedSwarmPlan, SwarmMissionKind, SwarmPlanTaskV2, SwarmPlanV1, SwarmPlanV2, SwarmTask,
+    SwarmTaskState, SwarmTemplate, COMPUTATIONAL_RESEARCH_ROLE, COMPUTATIONAL_RESEARCH_ROLE_LEGACY,
 };
 
 #[derive(Copy, Clone, Debug, Default)]
@@ -880,6 +880,20 @@ pub(super) fn parse_plan_from_planner(
                     ));
                     return fallback;
                 }
+            }
+            // Lab-specific repairs: first strip proposer-to-proposer deps
+            // (sequential proposers waste wall-clock time; the judge has
+            // to wait for the last one regardless), then inject distinct
+            // lens framings when the planner assigned multiple proposers
+            // without them (N identical proposer prompts produce
+            // correlated output; lens diversification forces divergent
+            // outputs the judge can actually weigh). The planner guide
+            // steers compliant planners; these repairs catch drift.
+            if matches!(template, SwarmTemplate::Lab) {
+                let mut dep_warnings = normalize_lab_plan(&mut parsed.tasks);
+                parsed.warnings.append(&mut dep_warnings);
+                let mut lens_warnings = apply_lab_lenses(&mut parsed.tasks);
+                parsed.warnings.append(&mut lens_warnings);
             }
             return parsed;
         }

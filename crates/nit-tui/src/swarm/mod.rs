@@ -86,9 +86,10 @@ use artifacts::{
     parse_task_artifacts, task_artifacts_summary_for_prompt,
 };
 use bulk_plan::{
-    ensure_agent_coverage, ensure_integrate_task, ensure_judge_task_for_multi_proposer,
-    ensure_proposer_task, normalize_bulk_plan, validate_bulk_plan, ParsedSwarmPlan,
-    SwarmPlanTaskV2, SwarmPlanV1, SwarmPlanV2,
+    apply_lab_lenses, ensure_agent_coverage, ensure_integrate_task,
+    ensure_judge_task_for_multi_proposer, ensure_proposer_task, normalize_bulk_plan,
+    normalize_lab_plan, validate_bulk_plan, ParsedSwarmPlan, SwarmPlanTaskV2, SwarmPlanV1,
+    SwarmPlanV2,
 };
 pub use clones::{
     chat_clone_base_id, cleanup_idle_chat_clone, compact_agent_display_id, create_chat_clone,
