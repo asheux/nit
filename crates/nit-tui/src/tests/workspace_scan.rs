@@ -190,29 +190,36 @@ fn non_source_extensions_are_skipped() {
 }
 
 #[test]
-fn file_change_invalidates_cache_and_requeues() {
+fn external_file_change_does_not_trigger_reeval() {
+    // By design, edits that originate outside nit (external editor, git
+    // pull, terminal commands) must not invalidate the cached report or
+    // queue a new eval. Nit-internal writes (save, agent turn) have their
+    // own eval paths; the file watcher is purely a buffer-reload signal.
     let root = temp_workspace();
     let file = write_file(&root, "src/lib.rs", "fn main() {}\n");
-    // Seed with a timestamp firmly in the past so the file's (now) mtime
-    // beats it — simulating a real edit since the cache was last written.
     let mut report = nit_core::compute_genome_report("fn main() {}\n", &file);
     report.timestamp_ms = 0;
     nit_core::agent_bus::persist_genome_report(&root, &report);
 
     let mut state = make_state(root.clone());
-    state.genome_reports.insert(file.clone(), report);
+    state.genome_reports.insert(file.clone(), report.clone());
 
     let mut scan = WorkspaceScanRuntime::new();
     scan.note_change(&mut state, file.clone());
 
     assert!(
-        !state.genome_reports.contains_key(&file),
-        "change event should invalidate the cached report"
+        state.genome_reports.contains_key(&file),
+        "external change must leave the cached report intact"
     );
     assert_eq!(
         scan.pending_count(),
-        1,
-        "change event should enqueue a re-eval"
+        0,
+        "external change must not enqueue a re-eval"
+    );
+    assert_eq!(
+        scan.dispatched_count(),
+        0,
+        "external change must not start an in-flight eval"
     );
 
     cleanup(&root);
@@ -484,77 +491,63 @@ fn is_code_file_predicate_covers_expected_languages() {
 }
 
 #[test]
-fn note_change_skips_discovery_when_cache_is_fresh() {
-    // File watcher emits a "discovered" event for every source file on
-    // startup — not just real mtime changes. A fresh cache entry (report
-    // timestamp > file mtime) must not be invalidated by this event, or
-    // the scan re-runs from scratch on every launch.
+fn external_change_leaves_cache_unchanged_regardless_of_mtime_skew() {
+    // Whether the file's mtime is older or newer than the cached report,
+    // an external change event must NOT touch the cache or enqueue a
+    // re-eval. Nit-sanctioned edits (save / agent turn) run their own eval
+    // paths; the file watcher is a display signal only.
     let root = temp_workspace();
     let file = write_file(&root, "src/lib.rs", "fn main() {}\n");
 
-    let mut state = make_state(root.clone());
+    // Case 1: cached report is newer than the file's mtime (pre-existing
+    // fresh cache).
+    {
+        let mut state = make_state(root.clone());
+        let report = GenomeReport {
+            file_path: file.clone(),
+            encoder_scores: Vec::new(),
+            cross_encoder_consistency: 0.0,
+            tier: nit_core::GenomeTier::StillLife,
+            recommendations: Vec::new(),
+            timestamp_ms: u64::MAX,
+            grid_size: 32,
+            parsimony: Default::default(),
+        };
+        state.genome_reports.insert(file.clone(), report);
 
-    // Seed a report with a timestamp well into the future so it's
-    // guaranteed newer than the file's mtime.
-    let report = GenomeReport {
-        file_path: file.clone(),
-        encoder_scores: Vec::new(),
-        cross_encoder_consistency: 0.0,
-        tier: nit_core::GenomeTier::StillLife,
-        recommendations: Vec::new(),
-        timestamp_ms: u64::MAX,
-        grid_size: 32,
-        parsimony: Default::default(),
-    };
-    state.genome_reports.insert(file.clone(), report);
+        let mut scan = WorkspaceScanRuntime::new();
+        scan.note_change(&mut state, file.clone());
 
-    let mut scan = WorkspaceScanRuntime::new();
-    scan.note_change(&mut state, file.clone());
+        assert_eq!(scan.pending_count(), 0);
+        assert!(state.genome_reports.contains_key(&file));
+    }
 
-    assert_eq!(
-        scan.pending_count(),
-        0,
-        "fresh cache entry must not be invalidated by a discovery event"
-    );
-    assert!(
-        state.genome_reports.contains_key(&file),
-        "cached report must still be present"
-    );
+    // Case 2: cached report is stale vs the file's mtime (simulates a
+    // file edited externally between sessions). Still no re-queue during
+    // the live session — only hydrate backfills these.
+    {
+        let mut state = make_state(root.clone());
+        let report = GenomeReport {
+            file_path: file.clone(),
+            encoder_scores: Vec::new(),
+            cross_encoder_consistency: 0.0,
+            tier: nit_core::GenomeTier::StillLife,
+            recommendations: Vec::new(),
+            timestamp_ms: 0,
+            grid_size: 32,
+            parsimony: Default::default(),
+        };
+        state.genome_reports.insert(file.clone(), report.clone());
 
-    cleanup(&root);
-}
+        let mut scan = WorkspaceScanRuntime::new();
+        scan.note_change(&mut state, file.clone());
 
-#[test]
-fn note_change_requeues_when_file_is_actually_newer() {
-    // Complement to the fresh-cache test: when the file mtime moves past
-    // the report timestamp, the change event IS a real edit and must
-    // invalidate + enqueue.
-    let root = temp_workspace();
-    let file = write_file(&root, "src/lib.rs", "fn main() {}\n");
-
-    let mut state = make_state(root.clone());
-
-    // Seed with timestamp = 0 so the file mtime beats it.
-    let report = GenomeReport {
-        file_path: file.clone(),
-        encoder_scores: Vec::new(),
-        cross_encoder_consistency: 0.0,
-        tier: nit_core::GenomeTier::StillLife,
-        recommendations: Vec::new(),
-        timestamp_ms: 0,
-        grid_size: 32,
-        parsimony: Default::default(),
-    };
-    state.genome_reports.insert(file.clone(), report);
-
-    let mut scan = WorkspaceScanRuntime::new();
-    scan.note_change(&mut state, file.clone());
-
-    assert_eq!(
-        scan.pending_count(),
-        1,
-        "stale cache entry with newer file mtime must be re-queued"
-    );
+        assert_eq!(scan.pending_count(), 0);
+        assert!(
+            state.genome_reports.contains_key(&file),
+            "stale cache stays until nit-sanctioned eval replaces it"
+        );
+    }
 
     cleanup(&root);
 }
@@ -619,21 +612,26 @@ fn note_change_with_unknown_extension_is_noop() {
 }
 
 #[test]
-fn note_change_dedups_in_flight_path() {
+fn repeated_note_change_never_queues_existing_files() {
+    // The file-watcher can emit dozens of events for the same path during
+    // an active edit burst. None of them should queue the file — edits
+    // from outside nit don't trigger evaluation by design.
     let root = temp_workspace();
     let file = write_file(&root, "src/lib.rs", "fn main() {}\n");
 
     let mut state = make_state(root.clone());
     let mut scan = WorkspaceScanRuntime::new();
 
-    scan.note_change(&mut state, file.clone());
-    scan.note_change(&mut state, file.clone());
+    for _ in 0..5 {
+        scan.note_change(&mut state, file.clone());
+    }
 
     assert_eq!(
         scan.pending_count(),
-        1,
-        "two identical change events must not double-queue"
+        0,
+        "repeated external change events must never enqueue"
     );
+    assert_eq!(scan.dispatched_count(), 0);
 
     cleanup(&root);
 }
@@ -775,6 +773,73 @@ fn persist_then_delete_round_trip() {
 #[test]
 fn sanity_hashset_compiles() {
     let _s: HashSet<PathBuf> = HashSet::new();
+}
+
+// Design rule: edits that originate outside nit (external editor, git
+// pull, terminal commands) must not trigger a genome re-eval, even when
+// they land during an in-flight hydrate eval on the same path. The
+// in-flight eval completes normally, and no stale-to-fresh follow-up is
+// scheduled — nit-internal eval paths (save, agent turn) are the only
+// sanctioned way to replace a cached report.
+#[test]
+fn external_edit_during_in_flight_eval_is_silent_no_op() {
+    let root = temp_workspace();
+    let file = write_file(&root, "src/lib.rs", "fn main() {}\n");
+
+    let mut state = make_state(root.clone());
+    let mut scan = WorkspaceScanRuntime::with_max_in_flight(1);
+    let worker = GenomeWorker::new();
+
+    // Hydrate queues the file, drive() dispatches it.
+    scan.hydrate(&mut state);
+    scan.drive(&worker);
+    assert_eq!(scan.dispatched_count(), 1);
+
+    // External edit lands while the thread is running.
+    scan.note_change(&mut state, file.clone());
+
+    // note_change must NOT touch the queue. pending stays empty.
+    assert_eq!(scan.pending_count(), 0);
+
+    // Drain the original eval. The scan is idle afterwards with no
+    // follow-up queued, even though an external edit happened mid-flight.
+    drain_until_idle(&mut state, &mut scan, &worker, Duration::from_secs(30));
+    assert!(!scan.is_scanning());
+    assert_eq!(
+        scan.pending_count(),
+        0,
+        "external edit must not schedule a re-eval after the in-flight eval completes"
+    );
+
+    cleanup(&root);
+}
+
+// Deletion is not an edit — a file that no longer exists on disk can't
+// have a meaningful cached report. External deletions must still purge
+// the cache (and any queue entries) so FILESCORES doesn't show a tier for
+// a path that's gone.
+#[test]
+fn external_deletion_purges_cache_and_queue() {
+    let root = temp_workspace();
+    let file = write_file(&root, "src/lib.rs", "fn main() {}\n");
+
+    let mut state = make_state(root.clone());
+    let report = nit_core::compute_genome_report("fn main() {}\n", &file);
+    state.genome_reports.insert(file.clone(), report);
+
+    let mut scan = WorkspaceScanRuntime::with_max_in_flight(1);
+    // Drop the file on disk and fire the delete event.
+    fs::remove_file(&file).unwrap();
+    scan.note_change(&mut state, file.clone());
+
+    assert!(
+        !state.genome_reports.contains_key(&file),
+        "deleted file must be purged from the cache"
+    );
+    assert_eq!(scan.pending_count(), 0);
+    assert_eq!(scan.dispatched_count(), 0);
+
+    cleanup(&root);
 }
 
 #[test]
@@ -937,10 +1002,10 @@ fn session_touched_persists_after_completion() {
 }
 
 #[test]
-fn note_change_of_new_file_is_tracked_in_session() {
-    // A mid-session file edit (no cache, or stale cache) must enter
-    // session_touched so the operator sees it in LIVE even after its
-    // eval completes.
+fn note_change_never_touches_session_log_for_existing_files() {
+    // LIVE's session log (session_touched) records what nit EVALUATED
+    // this session. External edit events don't trigger evaluation, so
+    // they shouldn't appear in the session log either.
     let root = temp_workspace();
     let file = write_file(&root, "src/lib.rs", "fn main() {}\n");
 
@@ -948,46 +1013,9 @@ fn note_change_of_new_file_is_tracked_in_session() {
     let mut scan = WorkspaceScanRuntime::new();
     scan.note_change(&mut state, file.clone());
 
-    assert!(scan.session_touched().contains(&file));
-
-    cleanup(&root);
-}
-
-#[test]
-fn note_change_skip_path_does_not_touch_session() {
-    // When a fresh cache and a pre-session mtime combine to skip
-    // invalidation (the discovery-burst case), the path should NOT be
-    // recorded as session-touched — nothing actually got queued.
-    let root = temp_workspace();
-    let file = write_file(&root, "src/lib.rs", "fn main() {}\n");
-
-    let mut state = make_state(root.clone());
-    let report = GenomeReport {
-        file_path: file.clone(),
-        encoder_scores: Vec::new(),
-        cross_encoder_consistency: 0.0,
-        tier: nit_core::GenomeTier::StillLife,
-        recommendations: Vec::new(),
-        // `u64::MAX` forces the mtime-vs-cache check to favor the cache,
-        // AND the file mtime is well below session_start_ms since the
-        // test created the file before the scan's construction.
-        timestamp_ms: u64::MAX,
-        grid_size: 32,
-        parsimony: Default::default(),
-    };
-    state.genome_reports.insert(file.clone(), report);
-
-    // Sleep briefly before constructing so session_start_ms is strictly
-    // after the file mtime — the skip path is only taken when
-    // `mtime < session_start_ms`.
-    std::thread::sleep(std::time::Duration::from_millis(20));
-    let mut scan = WorkspaceScanRuntime::new();
-    scan.note_change(&mut state, file.clone());
-
-    assert_eq!(scan.pending_count(), 0);
     assert!(
         !scan.session_touched().contains(&file),
-        "skipped discovery events must not bloat session log"
+        "external change events must not appear in the session log"
     );
 
     cleanup(&root);

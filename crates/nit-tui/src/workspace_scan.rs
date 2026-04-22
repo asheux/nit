@@ -92,24 +92,19 @@ pub struct WorkspaceScanRuntime {
     /// a `drive` tick never re-dispatches the same path while its thread is
     /// still running).
     dispatched: HashSet<PathBuf>,
-    /// Total files the scan has ever queued (initial seed + file-watcher
-    /// invalidations). Used as the denominator in the UI progress line.
+    /// Total files the scan has ever queued (hydrate seed + deletions that
+    /// happen to need re-queue of nothing). Used as the denominator in the
+    /// UI progress line.
     total: usize,
     /// Files whose result has landed. Resets to zero when a new scan is
     /// seeded (e.g. initial hydration); incremented on every `note_completed`.
     done: usize,
-    /// Guards against re-running the launch walk. File-watcher invalidations
-    /// still enqueue after hydration.
+    /// Guards against re-running the launch walk. Session-lifetime flag —
+    /// once hydrated, we don't re-walk the workspace.
     hydrated: bool,
     /// Max concurrent eval threads — computed once at construction so tests
     /// can override via `with_max_in_flight` without touching globals.
     max_in_flight: usize,
-    /// Unix-ms at construction time. Splits file-watcher events into
-    /// "discovery" (file mtime < session_start_ms, pre-existing file just
-    /// getting tracked) vs "genuine change" (mtime >= session_start_ms,
-    /// edited in this session). Discovery events may skip invalidation
-    /// when the cache is fresh; genuine changes must always invalidate.
-    session_start_ms: u64,
     /// Every path that's been queued, dispatched, or completed in this
     /// session. Persists through `note_completed` so the LIVE view can show
     /// a running log of what was evaluated — entries change from
@@ -127,17 +122,9 @@ impl Default for WorkspaceScanRuntime {
             done: 0,
             hydrated: false,
             max_in_flight: workspace_scan_max_in_flight(),
-            session_start_ms: now_ms(),
             session_touched: HashSet::new(),
         }
     }
-}
-
-fn now_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
 }
 
 impl WorkspaceScanRuntime {
@@ -262,13 +249,17 @@ impl WorkspaceScanRuntime {
         }
     }
 
-    /// File watcher event: the file at `path` changed, was created, or was
-    /// deleted. Invalidates the cached report and enqueues a fresh eval —
-    /// unless the path is outside the workspace scope (gitignored,
-    /// IGNORED_DIRS, non-source extension, missing on disk).
+    /// File-watcher event. By design, edits that originate OUTSIDE nit do
+    /// not trigger a genome re-evaluation — nit-internal edits (save,
+    /// agent FileWrite events) have their own eval paths (`evaluate_save`,
+    /// `dispatch_turn_genome_evals`) that keep the cache authoritative.
+    /// Routing external edits through the scan queue would pollute FILESCORES
+    /// with metrics from changes nit didn't sanction.
     ///
-    /// For deletions the state and cache file are dropped and no eval is
-    /// enqueued (the walker-discovery path handles recreation).
+    /// The one case we still act on is file deletion: if the file is gone
+    /// on disk, its cached report is a ghost entry and must be purged so
+    /// FILESCORES stops showing tiers for files that no longer exist. A
+    /// deletion is a structural fact about the workspace, not an edit.
     pub fn note_change(&mut self, state: &mut AppState, path: PathBuf) {
         if !state.settings.genome.genome_context_enabled {
             return;
@@ -277,53 +268,25 @@ impl WorkspaceScanRuntime {
             return;
         }
 
-        if !path.exists() {
-            // File deleted or moved. Drop the cached report + on-disk JSON.
-            let workspace_root = state.workspace_root.clone();
-            if state.genome_reports.remove(&path).is_some() {
-                nit_core::agent_bus::delete_genome_report(&workspace_root, &path);
-            }
-            // Also drop from the scan's queues so `total`/`done` stay
-            // consistent.
-            self.pending.retain(|p| p != &path);
-            if self.dispatched.remove(&path) {
-                self.done = self.done.saturating_add(1);
-            }
+        if path.exists() {
+            // Existing-file change event: silent no-op. The file's cached
+            // report stays as-is until a nit-sanctioned eval path (save or
+            // agent turn) replaces it. FILESCORES may show stale metrics
+            // until then — that's the intended behaviour: nit only scores
+            // code it knows it wrote.
             return;
         }
 
-        if !is_code_file(&path) {
-            return;
+        // File deleted or moved. Drop the cached report + on-disk JSON.
+        let workspace_root = state.workspace_root.clone();
+        if state.genome_reports.remove(&path).is_some() {
+            nit_core::agent_bus::delete_genome_report(&workspace_root, &path);
         }
-
-        // Discovery vs real change: `file_watcher::emit_workspace_discoveries`
-        // fires for every source file on startup (and on its 2s rescan). A
-        // discovery event for a file whose cached report is newer than its
-        // mtime is not a real change — treating it as one invalidates the
-        // cache and forces a full rescan on every launch. Only skip when
-        // the file hasn't been touched in this session (mtime < session
-        // start); mid-session edits always advance mtime past session_start,
-        // so they fall through and invalidate normally even if the authoritative
-        // agent-turn eval already repopulated the cache in the race window.
-        if let Some(report) = state.genome_reports.get(&path) {
-            let mtime = file_mtime_ms(&path).unwrap_or(0);
-            if mtime < self.session_start_ms && mtime <= report.timestamp_ms {
-                return;
-            }
+        // Also drop from the scan's queues so `total`/`done` stay consistent.
+        self.pending.retain(|p| p != &path);
+        if self.dispatched.remove(&path) {
+            self.done = self.done.saturating_add(1);
         }
-
-        // Invalidate the existing report so stale landscape isn't served to
-        // agents while the eval is in flight.
-        state.genome_reports.remove(&path);
-
-        // Dedup: if the path is already pending or in-flight, let the
-        // existing entry finish; a subsequent change event will re-eval.
-        if self.dispatched.contains(&path) || self.pending.contains(&path) {
-            return;
-        }
-        self.session_touched.insert(path.clone());
-        self.pending.push_back(path);
-        self.total = self.total.saturating_add(1);
     }
 
     /// True while there are pending or in-flight evals. The UI indicator
