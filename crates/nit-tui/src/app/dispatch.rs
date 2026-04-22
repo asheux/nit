@@ -905,6 +905,17 @@ pub(crate) fn build_propose_genome_landscape(
              proposals that recommend changes uncorrelated with the landscape (e.g. \
              cosmetic renames on already-tier-IV files while tier-I/II files go untouched).\n\n",
         ),
+        Some("review") => (
+            "\n## GENOME LANDSCAPE (current state — cite these metrics when flagging issues)\n",
+            "Lower tier or consistency means worse structural quality. Ground every critique \
+             in a specific encoder (complexity_field, ast_structure, structural, token_spectrum): \
+             `parse_config complexity 12, complexity_field target \u{2264}8` is a useful review \
+             note; \"this function is too complex\" isn't. Prefer flags tied to the lowest-tier, \
+             parsimony-bloated, or low-density files in the landscape below \u{2014} cosmetic \
+             nits on already-healthy files aren't useful at this stage. Low-consistency files \
+             (cross-encoder consistency < 0.30) usually indicate one encoder is dragging the \
+             overall tier down; call out which.\n\n",
+        ),
         _ => (
             "\n## GENOME LANDSCAPE (current state — use this to ground your proposal)\n",
             "Lower tier or consistency means worse structural quality. Propose fixes that move \
@@ -1008,15 +1019,22 @@ pub(crate) fn build_propose_genome_landscape(
     Some(out)
 }
 
-// Append the genome landscape to propose/integrate/judge dispatches. Hangs off
-// `task_role` so it applies to every template (parallel / lab / bulk).
-pub(super) fn augment_dispatch_prompt_with_landscape(
+// Append the genome landscape to propose/integrate/judge/review dispatches.
+// Hangs off `task_role` so it applies to every template (parallel / lab /
+// bulk). Review is included because reviewer role contracts already require
+// citing encoders for each flagged issue — without landscape numbers the
+// reviewer can only gesture at the encoder names, not ground critiques in
+// real per-file targets.
+pub(crate) fn augment_dispatch_prompt_with_landscape(
     state: &AppState,
     swarm: &crate::swarm::SwarmRuntime,
     dispatch: &mut SwarmDispatch,
 ) {
     let role = dispatch.task_role.as_deref();
-    let wants_landscape = matches!(role, Some("propose") | Some("integrate") | Some("judge"));
+    let wants_landscape = matches!(
+        role,
+        Some("propose") | Some("integrate") | Some("judge") | Some("review")
+    );
     if !wants_landscape {
         return;
     }

@@ -5795,20 +5795,101 @@ fn shadow_review_role_uses_integrate_framing() {
 }
 
 #[test]
-fn swarm_dispatch_augment_gates_on_propose_integrate_judge_roles_only() {
-    // Non-landscape roles (e.g. "research", "test") must NOT receive a
-    // landscape section — only propose/integrate/judge. This prevents the
-    // planner's raw DAG prompt from being bloated with genome metrics it
-    // isn't supposed to act on.
+fn swarm_dispatch_augment_gates_non_landscape_roles() {
+    // research / test / planner must NOT receive a landscape section —
+    // they either operate on external sources or run verification commands,
+    // neither of which wants per-file tier numbers bloating the prompt.
     let state = state_for_test_in_workspace("swarm-role-gate");
     let swarm = crate::swarm::SwarmRuntime::default();
+    for role in ["research", "test", "planner", "computational-research"] {
+        let mut dispatch = crate::swarm::SwarmDispatch {
+            agent_id: format!("clone-{role}"),
+            mission_id: "mission-xyz".into(),
+            prompt: format!("{role} prompt"),
+            task_role: Some(role.into()),
+        };
+        let original = dispatch.prompt.clone();
+        super::augment_dispatch_prompt_with_landscape(&state, &swarm, &mut dispatch);
+        assert_eq!(
+            dispatch.prompt, original,
+            "role '{role}' must not receive landscape"
+        );
+        assert!(
+            !dispatch.prompt.contains("GENOME LANDSCAPE"),
+            "role '{role}' prompt leaked a GENOME LANDSCAPE section"
+        );
+    }
+}
+
+// Regression: swarm's review role used to be the only read-only role that
+// didn't receive the landscape augment, even though its role contract
+// requires citing encoders. `augment_dispatch_prompt_with_landscape` now
+// includes "review" in the landscape-eligible set and
+// `build_propose_genome_landscape` emits a review-specific framing ("cite
+// these metrics when flagging issues") instead of falling through to the
+// propose framing.
+#[test]
+fn swarm_review_role_receives_genome_landscape() {
+    use crate::swarm::SwarmRuntime;
+
+    // Seed the scope and a cached report so the landscape builder has
+    // content. Use the same `state_for_test_in_workspace` scaffold as the
+    // propose-landscape tests for consistency.
+    let mut state = state_for_test_in_workspace("swarm-review-landscape");
+    let rel = "src/lib.rs".to_string();
+    let abs = state.workspace_root.join(&rel);
+    fs::create_dir_all(abs.parent().unwrap()).unwrap();
+    fs::write(&abs, "fn main() {}\n").unwrap();
+    state.genome_reports.insert(
+        abs.clone(),
+        seeded_genome_report(abs.clone(), nit_core::GenomeTier::Oscillator),
+    );
+
+    // Exercise the landscape builder directly with the review role: the
+    // framing must mention citing encoders when flagging issues.
+    let section = super::dispatch::build_propose_genome_landscape(
+        &state,
+        std::slice::from_ref(&rel),
+        Some("review"),
+    )
+    .expect("review framing should produce a landscape section");
+    assert!(section.contains("GENOME LANDSCAPE"));
+    assert!(section.contains("cite these metrics when flagging issues"));
+    assert!(
+        section.contains("complexity_field"),
+        "review framing should name concrete encoders"
+    );
+    assert!(section.contains("src/lib.rs"));
+    assert!(section.contains("tier II"));
+
+    // And the runtime-wide augment helper must now include review in its
+    // eligible-role set. Build a SwarmRuntime with a run that has
+    // `scope_files = [rel]` via the existing fixture.
+    let mut runtime: SwarmRuntime =
+        crate::swarm::test_runtime_with_running_tasks("mission-review", &[("clone-1", "review")]);
+    // Point the run's scope_files at our seeded file so the augment helper
+    // can resolve it. `scope_files_for_mission` is public; we mutate via a
+    // test-only fixture accessor below.
+    runtime.set_scope_files_for_test("mission-review", vec![rel.clone()]);
+
     let mut dispatch = crate::swarm::SwarmDispatch {
-        agent_id: "clone-research".into(),
-        mission_id: "mission-xyz".into(),
-        prompt: "research prompt".into(),
-        task_role: Some("research".into()),
+        agent_id: "clone-1".into(),
+        mission_id: "mission-review".into(),
+        prompt: "review task body".into(),
+        task_role: Some("review".into()),
     };
-    super::augment_dispatch_prompt_with_landscape(&state, &swarm, &mut dispatch);
-    assert_eq!(dispatch.prompt, "research prompt");
-    assert!(!dispatch.prompt.contains("GENOME LANDSCAPE"));
+    super::augment_dispatch_prompt_with_landscape(&state, &runtime, &mut dispatch);
+
+    assert!(
+        dispatch.prompt.contains("review task body"),
+        "original body preserved"
+    );
+    assert!(
+        dispatch.prompt.contains("GENOME LANDSCAPE"),
+        "review dispatch must receive the landscape section"
+    );
+    assert!(dispatch
+        .prompt
+        .contains("cite these metrics when flagging issues"));
+    assert!(dispatch.prompt.contains("tier II"));
 }

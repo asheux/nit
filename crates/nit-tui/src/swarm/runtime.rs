@@ -25,6 +25,16 @@ impl SwarmRuntime {
             .map(|run| run.scope_files.as_slice())
     }
 
+    /// Test-only helper: overwrite the `scope_files` of an active run so
+    /// landscape-augmentation tests don't have to drive the full planner
+    /// flow. No-op when the mission id is unknown.
+    #[cfg(test)]
+    pub(crate) fn set_scope_files_for_test(&mut self, mission_id: &str, scope: Vec<String>) {
+        if let Some(run) = self.runs.get_mut(mission_id) {
+            run.scope_files = scope;
+        }
+    }
+
     /// Poll all pending genome gate evaluations.  When a background thread
     /// finishes, store the result in the run and return a `SwarmDispatch` so
     /// the main loop can kick off the verifier agent — without ever blocking.
