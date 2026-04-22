@@ -49,7 +49,17 @@ pub(crate) fn test_runtime_with_running_tasks(
     mission_id: &str,
     tasks: &[(&str, &str)],
 ) -> SwarmRuntime {
-    let template = SwarmTemplate::Parallel;
+    test_runtime_with_running_tasks_and_template(mission_id, tasks, SwarmTemplate::Parallel)
+}
+
+/// Same as `test_runtime_with_running_tasks` but lets callers pin the
+/// template explicitly — needed for tests that verify prompt parity across
+/// parallel vs lab vs bulk templates.
+pub(crate) fn test_runtime_with_running_tasks_and_template(
+    mission_id: &str,
+    tasks: &[(&str, &str)],
+    template: SwarmTemplate,
+) -> SwarmRuntime {
     let mut runtime = SwarmRuntime::default();
     let agent_ids: Vec<String> = tasks.iter().map(|(id, _)| id.to_string()).collect();
     let swarm_tasks: Vec<SwarmTask> = tasks

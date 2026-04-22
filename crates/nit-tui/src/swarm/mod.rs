@@ -173,7 +173,10 @@ mod test_fixtures;
 #[cfg(test)]
 pub(crate) use test_fixtures::{
     test_runtime_with_running_and_queued_tasks, test_runtime_with_running_tasks,
+    test_runtime_with_running_tasks_and_template,
 };
+#[cfg(test)]
+pub(crate) use types::SwarmTemplate as SwarmTemplateForTests;
 
 #[cfg(test)]
 #[path = "../tests/swarm.rs"]

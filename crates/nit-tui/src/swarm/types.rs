@@ -12,7 +12,7 @@ pub enum SwarmSize {
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub(super) enum SwarmTemplate {
+pub(crate) enum SwarmTemplate {
     /// Parallel task splitting (v1-style): keep tasks independent and preferably one per agent.
     Parallel,
     /// "Lab" workflow: read-only analysis/proposal/review feeding a single-writer integrator.

@@ -5952,6 +5952,138 @@ fn swarm_dispatch_augment_gates_non_landscape_roles() {
     }
 }
 
+// Task-level prompts (what each agent actually receives) must be identical
+// across swarm templates for the same role. Template only affects the
+// PLANNER prompt and DAG scheduling (single-writer invariant, concurrent
+// integrate fan-out, DAG shape) — it does NOT affect what a dispatched
+// propose/judge/integrate/review role sees. `wrap_task_prompt` takes no
+// template argument, so the output is necessarily template-agnostic, but
+// this test catches any future drift and proves the landscape augment
+// produces byte-identical output for lab vs parallel dispatches of the
+// same role.
+#[test]
+fn lab_and_parallel_templates_produce_equivalent_propose_prompts() {
+    use crate::swarm::{
+        test_runtime_with_running_tasks_and_template, SwarmDispatch, SwarmTemplateForTests,
+    };
+
+    let mut state = state_for_test_in_workspace("swarm-template-parity");
+    let rel = "src/lib.rs".to_string();
+    let abs = state.workspace_root.join(&rel);
+    fs::create_dir_all(abs.parent().unwrap()).unwrap();
+    fs::write(&abs, "fn main() {}\n").unwrap();
+    state.genome_reports.insert(
+        abs.clone(),
+        seeded_genome_report(abs.clone(), nit_core::GenomeTier::Oscillator),
+    );
+
+    let mut parallel_runtime = test_runtime_with_running_tasks_and_template(
+        "mission-parallel",
+        &[("clone-1", "propose")],
+        SwarmTemplateForTests::Parallel,
+    );
+    parallel_runtime.set_scope_files_for_test("mission-parallel", vec![rel.clone()]);
+
+    let mut lab_runtime = test_runtime_with_running_tasks_and_template(
+        "mission-lab",
+        &[("clone-1", "propose")],
+        SwarmTemplateForTests::Lab,
+    );
+    lab_runtime.set_scope_files_for_test("mission-lab", vec![rel.clone()]);
+
+    let make_dispatch = |mission: &str| SwarmDispatch {
+        agent_id: "clone-1".into(),
+        mission_id: mission.into(),
+        prompt: "propose task body".into(),
+        task_role: Some("propose".into()),
+    };
+
+    let mut parallel_dispatch = make_dispatch("mission-parallel");
+    super::augment_dispatch_prompt_with_landscape(
+        &state,
+        &parallel_runtime,
+        &mut parallel_dispatch,
+    );
+
+    let mut lab_dispatch = make_dispatch("mission-lab");
+    super::augment_dispatch_prompt_with_landscape(&state, &lab_runtime, &mut lab_dispatch);
+
+    let parallel_landscape = parallel_dispatch
+        .prompt
+        .split_once("## GENOME LANDSCAPE")
+        .map(|(_, rest)| rest)
+        .expect("parallel dispatch missing landscape");
+    let lab_landscape = lab_dispatch
+        .prompt
+        .split_once("## GENOME LANDSCAPE")
+        .map(|(_, rest)| rest)
+        .expect("lab dispatch missing landscape");
+    assert_eq!(
+        parallel_landscape, lab_landscape,
+        "landscape content must be template-agnostic"
+    );
+
+    for expected in [
+        "GENOME LANDSCAPE",
+        "use this to ground your proposal",
+        "tier II",
+        "0.42",
+        "src/lib.rs",
+    ] {
+        assert!(
+            parallel_dispatch.prompt.contains(expected),
+            "parallel prompt missing: {expected}"
+        );
+        assert!(
+            lab_dispatch.prompt.contains(expected),
+            "lab prompt missing: {expected}"
+        );
+    }
+}
+
+// Landscape augment fires for every landscape-eligible role under the
+// lab template — proves the strong clauses aren't gated on parallel.
+#[test]
+fn lab_template_augments_all_landscape_roles() {
+    use crate::swarm::{test_runtime_with_running_tasks_and_template, SwarmTemplateForTests};
+
+    let mut state = state_for_test_in_workspace("swarm-lab-role-coverage");
+    let rel = "src/lib.rs".to_string();
+    let abs = state.workspace_root.join(&rel);
+    fs::create_dir_all(abs.parent().unwrap()).unwrap();
+    fs::write(&abs, "fn main() {}\n").unwrap();
+    state.genome_reports.insert(
+        abs.clone(),
+        seeded_genome_report(abs.clone(), nit_core::GenomeTier::Oscillator),
+    );
+
+    for role in ["propose", "integrate", "judge", "review"] {
+        let mut rt = test_runtime_with_running_tasks_and_template(
+            &format!("mission-{role}"),
+            &[("clone-1", role)],
+            SwarmTemplateForTests::Lab,
+        );
+        rt.set_scope_files_for_test(&format!("mission-{role}"), vec![rel.clone()]);
+
+        let mut dispatch = crate::swarm::SwarmDispatch {
+            agent_id: "clone-1".into(),
+            mission_id: format!("mission-{role}"),
+            prompt: format!("{role} task body"),
+            task_role: Some(role.into()),
+        };
+        super::augment_dispatch_prompt_with_landscape(&state, &rt, &mut dispatch);
+
+        assert!(
+            dispatch.prompt.contains("GENOME LANDSCAPE"),
+            "lab-template {role} dispatch missing landscape"
+        );
+        assert!(
+            dispatch.prompt.contains("tier II"),
+            "lab-template {role} dispatch missing landscape numbers"
+        );
+    }
+}
+
 // Regression: swarm's review role used to be the only read-only role that
 // didn't receive the landscape augment, even though its role contract
 // requires citing encoders. `augment_dispatch_prompt_with_landscape` now
