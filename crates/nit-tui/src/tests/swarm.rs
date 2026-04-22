@@ -1465,6 +1465,102 @@ fn planner_prompt_describes_computational_research_mission_shape() {
     assert!(prompt.contains("Prefer read-only investigation and synthesis tasks"));
 }
 
+// Lab's planner guide must explicitly steer multi-proposer fan-in toward
+// the bulk template. Without distinct-lens machinery, N lab proposers
+// against the same scope produce correlated output and waste turns — the
+// user's observed "swarm 6 / lab / 3 proposers" plan was valid per the
+// old guide but suboptimal. The new guidance names the bulk-vs-lab
+// boundary and tells the planner to prefer one focused proposer.
+#[test]
+fn lab_planner_prompt_discourages_multi_proposer_fanin() {
+    let prompt = build_planner_prompt(
+        "root",
+        SwarmTemplate::Lab,
+        SwarmMissionKind::General,
+        "planner",
+        &["planner".into(), "a1".into(), "a2".into(), "a3".into()],
+        Some("a1"),
+        &[],
+        &[],
+        std::path::Path::new("."),
+        &[],
+    );
+
+    assert!(
+        prompt.contains("PROPOSER DISCIPLINE (lab)"),
+        "lab planner must surface the proposer-discipline rule"
+    );
+    assert!(
+        prompt.contains("prefer ONE focused propose task"),
+        "lab planner must tell the LLM to prefer a single proposer"
+    );
+    assert!(
+        prompt.contains("lab has no distinct-lens machinery"),
+        "lab planner must explain why multi-proposer is wasteful in this template"
+    );
+    assert!(
+        prompt.contains("template: bulk"),
+        "lab planner must name bulk as the multi-proposer route"
+    );
+}
+
+// Complement: the bulk planner prompt must keep its existing "distinct
+// lens" guidance so operators who actually want fan-in get the stronger
+// template. This is the other half of the lab/bulk boundary.
+#[test]
+fn bulk_planner_prompt_keeps_distinct_lens_guidance() {
+    let prompt = build_planner_prompt(
+        "root",
+        SwarmTemplate::Bulk,
+        SwarmMissionKind::General,
+        "planner",
+        &["planner".into(), "a1".into(), "a2".into(), "a3".into()],
+        Some("a1"),
+        &[],
+        &[],
+        std::path::Path::new("."),
+        &[],
+    );
+
+    assert!(
+        prompt.contains("distinct lens"),
+        "bulk planner must still enforce distinct lenses per proposer"
+    );
+    assert!(
+        prompt.contains("judge task that depends on ALL proposer tasks"),
+        "bulk planner must still require judge fan-in"
+    );
+}
+
+// Parallel planner guide should NOT inherit the lab-specific proposer
+// discipline (it has its own "reserve at least ONE propose lane" rule).
+// If the rule bleeds across templates the planner gets contradictory
+// instructions.
+#[test]
+fn parallel_planner_prompt_does_not_use_lab_proposer_discipline() {
+    let prompt = build_planner_prompt(
+        "root",
+        SwarmTemplate::Parallel,
+        SwarmMissionKind::General,
+        "planner",
+        &["planner".into(), "a1".into(), "a2".into(), "a3".into()],
+        Some("a1"),
+        &[],
+        &[],
+        std::path::Path::new("."),
+        &[],
+    );
+
+    assert!(
+        !prompt.contains("PROPOSER DISCIPLINE (lab)"),
+        "parallel planner must not inherit lab-specific guidance"
+    );
+    assert!(
+        !prompt.contains("lab has no distinct-lens machinery"),
+        "parallel planner must not carry the lab boundary text"
+    );
+}
+
 #[test]
 fn deadlock_detection_skips_pending_tasks() {
     let mut run = SwarmRun {

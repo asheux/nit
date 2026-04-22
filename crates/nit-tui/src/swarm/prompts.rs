@@ -243,6 +243,9 @@ pub(super) fn build_planner_prompt(
             out.push_str(
                 "- Use read-only proposal/review tasks for codebase work; use research roles only when external/topic research is part of the mission.\n",
             );
+            out.push_str(
+                "- PROPOSER DISCIPLINE (lab): prefer ONE focused propose task feeding the integrator, optionally with review/test tasks downstream. Do NOT assign multiple propose tasks against the same scope — lab has no distinct-lens machinery, so N identical proposers produce correlated output and the judge has nothing to distinguish between them. If you want multi-proposer fan-in with distinct lenses, the operator must re-run with `template: bulk` (which enforces one-proposer-per-agent with explicit distinct lenses feeding a judge). This is a lab-vs-bulk boundary, not a preference.\n",
+            );
         }
         SwarmTemplate::Bulk => {
             out.push_str(
