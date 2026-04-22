@@ -130,8 +130,7 @@ use plan_parser::{
     parse_plan_from_planner, planner_role_hint_for_agent,
 };
 pub(crate) use plan_parser::{detect_swarm_mission_kind_from_prompt, normalize_role_label};
-#[cfg(test)]
-use prompts::role_contract_lines;
+pub(crate) use prompts::role_contract_lines;
 use prompts::{
     build_planner_prompt, build_synthesis_prompt, detect_incomplete_signoff,
     is_provider_rate_limit_failure, wrap_task_prompt,

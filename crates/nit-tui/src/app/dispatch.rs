@@ -860,7 +860,7 @@ pub(super) fn estimate_claude_context_tokens_for_mission(
 // Build a GENOME LANDSCAPE section for propose/integrate/judge roles so they
 // cite concrete numbers (tier, consistency, density) instead of trading
 // surface-level opinions. Returns `None` when no scope files have reports yet.
-pub(super) fn build_propose_genome_landscape(
+pub(crate) fn build_propose_genome_landscape(
     state: &AppState,
     scope_files: &[String],
     role: Option<&str>,

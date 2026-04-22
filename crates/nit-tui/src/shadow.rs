@@ -234,7 +234,7 @@ impl ShadowRuntime {
             match run.stage {
                 ShadowStage::AwaitingMainIdle => {
                     // Prior turn just cleared — dispatch the deferred shadow prompt now.
-                    return finalize_main_dispatch(run);
+                    return finalize_main_dispatch(run, state);
                 }
                 ShadowStage::Finalizing => {
                     // Shadow-augmented turn completed → tear down.
@@ -296,7 +296,7 @@ impl ShadowRuntime {
                         run.stage = ShadowStage::AwaitingMainIdle;
                         return Vec::new();
                     }
-                    return finalize_main_dispatch(run);
+                    return finalize_main_dispatch(run, state);
                 }
             }
             ShadowStage::AwaitingMainIdle | ShadowStage::Finalizing => {}
@@ -346,8 +346,15 @@ fn role_of(run: &ShadowRun, agent_id: &str) -> Option<String> {
         .map(|(role, _)| role.clone())
 }
 
-fn finalize_main_dispatch(run: &mut ShadowRun) -> Vec<ShadowDispatch> {
-    let prompt = build_final_prompt(run);
+fn finalize_main_dispatch(run: &mut ShadowRun, state: &AppState) -> Vec<ShadowDispatch> {
+    // Compute the landscape for the main agent the same way
+    // `augment_shadow_prompt_with_landscape` does for the shadow lanes —
+    // single-agent mode uses the active editor buffer as the scope. The
+    // main agent's id isn't a shadow lane id, so the dispatch-time augment
+    // helper skips it; injecting it here ensures the main agent has raw
+    // metric data even when the shadows' digests don't cite numbers.
+    let landscape = landscape_for_main(state);
+    let prompt = build_final_prompt(run, landscape.as_deref());
     let agent_id = run.main_agent_id.clone();
     let mission_id = run.mission_id.clone();
     let prompt_msg_idx = run.prompt_msg_idx;
@@ -358,6 +365,17 @@ fn finalize_main_dispatch(run: &mut ShadowRun) -> Vec<ShadowDispatch> {
         mission_id,
         prompt_msg_idx,
     }]
+}
+
+fn landscape_for_main(state: &AppState) -> Option<String> {
+    let path = state.editor_buffer().path()?;
+    let rel = path
+        .strip_prefix(&state.workspace_root)
+        .unwrap_or(path)
+        .to_string_lossy()
+        .into_owned();
+    let scope: Vec<String> = vec![rel];
+    crate::app::build_propose_genome_landscape(state, &scope, Some("integrate"))
 }
 
 // ---------------------------------------------------------------------------
@@ -552,19 +570,63 @@ fn shadow_preamble() -> String {
     )
 }
 
+/// Variant-specific framing for Shadow-Proposer A and B. Identical prompts
+/// produce near-identical output (LLM sampling only nudges the text, not the
+/// strategy), so A and B are asked to optimise for genuinely different axes.
+/// The judge then has meaningful tradeoffs to weigh instead of picking one
+/// of two coin-flip duplicates.
+fn proposer_lens(variant: &str) -> &'static str {
+    match variant {
+        "A" => {
+            "LENS A — minimal-diff, focused: favor the smallest change that \
+             solves the request. Avoid introducing new abstractions, new \
+             modules, new types, or new dependencies unless they're strictly \
+             required. Prefer in-place refactors and local cleanups. Your \
+             blast radius should be as small as possible."
+        }
+        "B" => {
+            "LENS B — architectural coherence: if the shape of the code is \
+             what's causing the problem, propose the consolidation, split, \
+             or abstraction the system is asking for. A larger diff is fine \
+             when it lands on a better overall shape. Prefer moves that \
+             unlock parsimony-capped tiers or reduce structural bottlenecks."
+        }
+        _ => {
+            "LENS — draft one concrete solution candidate; be opinionated \
+             about the tradeoffs you took."
+        }
+    }
+}
+
+fn render_role_contract(role: &str) -> String {
+    // Pull the same role contract the swarm parallel template uses. Shadow
+    // proposers/judges/reviewers need the SAME genome-awareness, coverage,
+    // and landscape-grounding constraints as their swarm counterparts — any
+    // divergence here means single-agent mode produces weaker proposals
+    // than parallel mode for the same user request.
+    let mut out = String::from("## ROLE CONTRACT\n");
+    out.push_str("- Act strictly as the assigned role for this task.\n");
+    for line in crate::swarm::role_contract_lines(role) {
+        out.push_str(&format!("- {line}\n"));
+    }
+    out
+}
+
 fn build_propose_prompt(variant: &str, user_prompt: &str) -> String {
     format!(
         "{preamble}## YOUR ROLE\n\
          You are Shadow-Proposer-{variant}, a hidden support agent drafting \
-         one candidate approach for the following user request. Work \
-         independently; do NOT coordinate with other proposers. Be concrete \
-         and opinionated. Your proposal must respect nit's parsimony rules.\n\n\
-         Deliverable (≤ 300 words, text only):\n\
-         1. One-sentence summary of your approach.\n\
-         2. Step-by-step plan, naming concrete file paths where possible.\n\
-         3. Key tradeoffs or risks, including any tier/parsimony concerns.\n\n\
-         User request:\n{user_prompt}",
+         ONE concrete solution candidate for the following user request. \
+         Work independently; do NOT coordinate with the other proposer. A \
+         judge will compare your proposal against the other variant after \
+         both land, then a reviewer stress-tests the winner. The main agent \
+         executes the final plan.\n\n\
+         {lens}\n\n\
+         {role_contract}\n\n\
+         ## USER REQUEST\n{user_prompt}\n",
         preamble = shadow_preamble(),
+        lens = proposer_lens(variant),
+        role_contract = render_role_contract("propose"),
     )
 }
 
@@ -572,19 +634,27 @@ fn build_judge_prompt(user_prompt: &str, proposal_a: &str, proposal_b: &str) -> 
     format!(
         "{preamble}## YOUR ROLE\n\
          You are Shadow-Judge, a hidden support agent. Two proposers drafted \
-         independent approaches to the user's request. Compare them, pick \
-         the stronger one (or synthesise a better hybrid), and produce a \
-         SINGLE recommended plan. Reject any step that would violate nit's \
-         parsimony rules.\n\n\
-         Deliverable (≤ 300 words, text only):\n\
-         1. Which proposal is stronger and why (one sentence).\n\
-         2. The final recommended plan (numbered steps).\n\
-         3. Explicit callouts: what was dropped from the weaker proposal \
-         and why, including any parsimony/tier concerns.\n\n\
-         User request:\n{user_prompt}\n\n\
-         Proposal A:\n{proposal_a}\n\n\
-         Proposal B:\n{proposal_b}",
+         independent approaches under DIFFERENT framings: Proposal A optimises \
+         for minimal diff, Proposal B optimises for architectural coherence. \
+         Compare them on the axes below and produce a SINGLE binding plan \
+         for the main agent to execute.\n\n\
+         DECISION AXES:\n\
+         - Correctness: does the approach actually solve the user's request?\n\
+         - Landscape fit: does it target the lowest-tier / highest-leverage \
+           files surfaced in the GENOME LANDSCAPE?\n\
+         - Parsimony: does it avoid gaming metrics through over-engineering?\n\
+         - Blast radius: is the diff scoped to what the user asked for?\n\n\
+         Do NOT silently pick Proposal A (position bias is the most common \
+         judge failure). If the proposals agree, identify risks neither \
+         addressed. If they disagree, name the disagreement, name the axis, \
+         and rule on it with a cited reason.\n\n\
+         {role_contract}\n\n\
+         ## USER REQUEST\n{user_prompt}\n\n\
+         ## PROPOSALS TO EVALUATE (2 — read ALL carefully before ruling)\n\n\
+         ### Proposal A (minimal-diff lens)\n{proposal_a}\n\n\
+         ### Proposal B (architectural-coherence lens)\n{proposal_b}\n",
         preamble = shadow_preamble(),
+        role_contract = render_role_contract("judge"),
     )
 }
 
@@ -596,39 +666,44 @@ fn build_review_prompt(user_prompt: &str, judged_plan: &str) -> String {
          unstated dependencies, and concrete file paths the plan should \
          touch but doesn't. Flag anything that risks tripping nit's \
          parsimony detector or dropping the tier below III.\n\n\
-         Deliverable (≤ 300 words, text only):\n\
-         1. Risks / holes you found (bullets).\n\
-         2. Suggested additions or corrections.\n\
-         3. A short \"do / don't\" list for the executing agent, including \
-         parsimony reminders.\n\n\
-         User request:\n{user_prompt}\n\n\
-         Judged plan:\n{judged_plan}",
+         {role_contract}\n\n\
+         ## USER REQUEST\n{user_prompt}\n\n\
+         ## JUDGED PLAN (stress-test this)\n{judged_plan}\n",
         preamble = shadow_preamble(),
+        role_contract = render_role_contract("review"),
     )
 }
 
-fn build_final_prompt(run: &ShadowRun) -> String {
+fn build_final_prompt(run: &ShadowRun, landscape_section: Option<&str>) -> String {
     let empty = String::new();
     let propose_a = run.outputs.get("propose-a").unwrap_or(&empty);
     let propose_b = run.outputs.get("propose-b").unwrap_or(&empty);
     let judge = run.outputs.get("judge").unwrap_or(&empty);
     let review = run.outputs.get("review").unwrap_or(&empty);
+    let landscape_block = landscape_section
+        .filter(|s| !s.trim().is_empty())
+        .map(|s| format!("{s}\n"))
+        .unwrap_or_default();
     format!(
-        "## SHADOW CONTEXT (hidden support agents)\n\
-         The following analysis was produced by four hidden support agents \
-         (propose-a, propose-b, judge, review) to help you answer the user. \
-         Treat it as advisory context — you may override any suggestion you \
-         disagree with, but when you do, briefly say *which* recommendation \
-         you overrode and *why* in your reply so the user can evaluate the \
-         call. Silent override defeats the point of having the shadows. \
-         Cite the risks the reviewer surfaced when relevant. The shadows \
-         have already been briefed on nit's tier ladder and parsimony \
-         detector, so their plans should be quality-aware.\n\n\
-         ### Proposal A\n{propose_a}\n\n\
-         ### Proposal B\n{propose_b}\n\n\
-         ### Judge's recommended plan\n{judge}\n\n\
-         ### Reviewer's risks and corrections\n{review}\n\n\
-         ## USER REQUEST\n{user_prompt}\n",
+        "## IMPLEMENTATION PLAN (BINDING — follow verbatim unless technically impossible)\n\
+         Four hidden support agents (propose-a, propose-b, judge, review) \
+         analysed your request before this turn. The judge's plan below is \
+         the authoritative plan for this task. Treat specific file paths, \
+         identifiers, constants, and ordering as fixed requirements, not \
+         suggestions.\n\n\
+         You MAY deviate ONLY when (a) the judge's recommendation directly \
+         contradicts the user's request, or (b) it is genuinely technically \
+         impossible (non-existent type, broken compile invariant). \
+         \"It might break tests\", \"it's risky\", \"it's too ambitious\", \
+         \"I'll do a safer subset\" are NOT valid deviations.\n\n\
+         If you do override, briefly state *which* recommendation you \
+         overrode and *why* in your reply so the user can evaluate the call. \
+         Silent override defeats the point of having the shadows.\n\n\
+         ### Judge's recommended plan (BINDING)\n{judge}\n\n\
+         ### Reviewer's risks and corrections (MUST address or rebut)\n{review}\n\n\
+         ### Proposal A — minimal-diff lens (input, for reference)\n{propose_a}\n\n\
+         ### Proposal B — architectural-coherence lens (input, for reference)\n{propose_b}\n\n\
+         {landscape_block}## USER REQUEST\n{user_prompt}\n",
         user_prompt = run.main_prompt,
     )
 }

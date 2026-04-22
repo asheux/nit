@@ -229,7 +229,9 @@ fn full_dag_proposers_then_judge_then_review_then_main() {
     assert_eq!(out.dispatches.len(), 1);
     let final_dispatch = &out.dispatches[0];
     assert_eq!(final_dispatch.agent_id, "codex-main");
-    assert!(final_dispatch.prompt.contains("SHADOW CONTEXT"));
+    assert!(final_dispatch
+        .prompt
+        .contains("IMPLEMENTATION PLAN (BINDING"));
     assert!(final_dispatch.prompt.contains("plan A"));
     assert!(final_dispatch.prompt.contains("plan B"));
     assert!(final_dispatch.prompt.contains("judged plan"));
@@ -409,7 +411,7 @@ fn reviewer_completion_defers_when_main_is_busy() {
     assert_eq!(out.dispatches.len(), 1);
     let d = &out.dispatches[0];
     assert_eq!(d.agent_id, "codex-main");
-    assert!(d.prompt.contains("SHADOW CONTEXT"));
+    assert!(d.prompt.contains("IMPLEMENTATION PLAN (BINDING"));
     assert!(d.prompt.contains("plan A"));
     assert!(d.prompt.contains("plan B"));
     assert!(d.prompt.contains("judged"));
@@ -465,4 +467,188 @@ fn main_completion_during_proposing_does_not_clean_up() {
         let id = shadow_lane_id("codex-main", "01", role);
         assert!(state.agents.agents.iter().any(|l| l.id == id));
     }
+}
+
+// Proposer A and B must get DISTINCT framings ("LENS A" vs "LENS B") so
+// their outputs diverge on a real axis instead of relying on LLM sampling
+// for variety. Before this fix the two proposers shared identical prompts
+// except for the letter, which led to near-duplicate proposals.
+#[test]
+fn proposer_a_and_b_receive_distinct_lens_framings() {
+    let mut state = make_state_with_main_agent("codex-main");
+    let mut rt = ShadowRuntime::new();
+    let dispatches = rt
+        .start(
+            &mut state,
+            "codex-main".into(),
+            "refactor the swarm module".into(),
+            None,
+            None,
+        )
+        .expect("start succeeds");
+
+    let dispatch_a = dispatches
+        .iter()
+        .find(|d| d.agent_id.contains("propose-a"))
+        .expect("propose-a dispatch");
+    let dispatch_b = dispatches
+        .iter()
+        .find(|d| d.agent_id.contains("propose-b"))
+        .expect("propose-b dispatch");
+
+    assert!(
+        dispatch_a.prompt.contains("LENS A"),
+        "propose-a must carry the minimal-diff lens framing"
+    );
+    assert!(
+        dispatch_a.prompt.contains("minimal-diff"),
+        "propose-a should spell out its lens axis in plain language"
+    );
+    assert!(
+        dispatch_b.prompt.contains("LENS B"),
+        "propose-b must carry the architectural-coherence lens framing"
+    );
+    assert!(
+        dispatch_b.prompt.contains("architectural coherence"),
+        "propose-b should spell out its lens axis"
+    );
+
+    // Sanity: the two prompts must differ — identical prompts produce
+    // convergent outputs regardless of the letter suffix.
+    assert_ne!(
+        dispatch_a.prompt, dispatch_b.prompt,
+        "A and B prompts must differ to force divergent proposals"
+    );
+}
+
+// Swarm parallel's role contract is the strongest part of the prompt —
+// GENOME-AWARE PROPOSAL, RECOMMENDATION COVERAGE, MANDATORY STRUCTURAL
+// SPLITS. Shadow proposers must inherit the same clauses so single-agent
+// mode doesn't produce weaker proposals than parallel mode for the same
+// request.
+#[test]
+fn proposer_prompts_include_swarm_role_contract_clauses() {
+    let mut state = make_state_with_main_agent("codex-main");
+    let mut rt = ShadowRuntime::new();
+    let dispatches = rt
+        .start(
+            &mut state,
+            "codex-main".into(),
+            "do something".into(),
+            None,
+            None,
+        )
+        .expect("start");
+
+    for d in &dispatches {
+        assert!(
+            d.prompt.contains("GENOME-AWARE PROPOSAL"),
+            "proposer prompt missing GENOME-AWARE PROPOSAL clause"
+        );
+        assert!(
+            d.prompt.contains("RECOMMENDATION COVERAGE"),
+            "proposer prompt missing RECOMMENDATION COVERAGE clause"
+        );
+        assert!(
+            d.prompt.contains("MANDATORY STRUCTURAL SPLITS"),
+            "proposer prompt missing MANDATORY STRUCTURAL SPLITS clause"
+        );
+    }
+}
+
+// Judge prompt must match swarm's landscape-aware judging discipline —
+// explicit decision axes, anti-position-bias reminder, reference to
+// GENOME LANDSCAPE, and both proposals inlined.
+#[test]
+fn judge_prompt_matches_swarm_landscape_aware_contract() {
+    let mut state = make_state_with_main_agent("codex-main");
+    let mut rt = ShadowRuntime::new();
+    rt.start(
+        &mut state,
+        "codex-main".into(),
+        "refactor".into(),
+        None,
+        None,
+    )
+    .expect("start");
+
+    let a_id = shadow_lane_id("codex-main", "01", "propose-a");
+    let b_id = shadow_lane_id("codex-main", "01", "propose-b");
+    let _ = rt.handle_event_outcome(&mut state, &completed_event(&a_id, "A proposal body"));
+    let out = rt.handle_event_outcome(&mut state, &completed_event(&b_id, "B proposal body"));
+
+    let judge_dispatch = out.dispatches.first().expect("judge dispatch");
+    let prompt = &judge_dispatch.prompt;
+
+    // Swarm's judge role contract clauses.
+    assert!(
+        prompt.contains("LANDSCAPE-AWARE JUDGING"),
+        "judge prompt missing LANDSCAPE-AWARE JUDGING clause"
+    );
+    assert!(
+        prompt.contains("ROLE CONTRACT"),
+        "judge prompt missing ROLE CONTRACT section"
+    );
+    // Anti-position-bias guard.
+    assert!(
+        prompt.contains("Do NOT silently pick Proposal A"),
+        "judge prompt missing position-bias guard"
+    );
+    // Decision axes enumerated.
+    assert!(prompt.contains("DECISION AXES"));
+    // Both proposals inlined with lens labels.
+    assert!(prompt.contains("A proposal body"));
+    assert!(prompt.contains("B proposal body"));
+    assert!(prompt.contains("minimal-diff lens"));
+    assert!(prompt.contains("architectural-coherence lens"));
+}
+
+// The main agent's final prompt must frame the judge's plan as BINDING,
+// mirroring the swarm integrate role. Before this change the prompt said
+// "advisory context — you may override any suggestion" which encouraged
+// the main agent to dismiss the whole shadow pipeline.
+#[test]
+fn final_main_prompt_treats_judge_plan_as_binding() {
+    let mut state = make_state_with_main_agent("codex-main");
+    let mut rt = ShadowRuntime::new();
+    rt.start(
+        &mut state,
+        "codex-main".into(),
+        "refactor foo.rs".into(),
+        None,
+        Some(0),
+    )
+    .expect("start");
+
+    let a_id = shadow_lane_id("codex-main", "01", "propose-a");
+    let b_id = shadow_lane_id("codex-main", "01", "propose-b");
+    let j_id = shadow_lane_id("codex-main", "01", "judge");
+    let r_id = shadow_lane_id("codex-main", "01", "review");
+
+    let _ = rt.handle_event_outcome(&mut state, &completed_event(&a_id, "A"));
+    let _ = rt.handle_event_outcome(&mut state, &completed_event(&b_id, "B"));
+    let _ = rt.handle_event_outcome(&mut state, &completed_event(&j_id, "JUDGE RULING"));
+    let out = rt.handle_event_outcome(&mut state, &completed_event(&r_id, "REVIEW NOTES"));
+
+    let final_dispatch = out.dispatches.first().expect("final dispatch");
+    let prompt = &final_dispatch.prompt;
+
+    assert!(
+        prompt.contains("IMPLEMENTATION PLAN (BINDING"),
+        "main prompt must treat the judge plan as binding, not advisory"
+    );
+    assert!(
+        prompt.contains("Judge's recommended plan (BINDING)"),
+        "main prompt must label the judge section as binding"
+    );
+    assert!(
+        prompt.contains("MUST address or rebut"),
+        "main prompt must frame reviewer risks as a must-address checklist"
+    );
+    // Both proposals still included as reference so the main agent can
+    // trace the reasoning.
+    assert!(prompt.contains("Proposal A"));
+    assert!(prompt.contains("Proposal B"));
+    // User request stays at the end.
+    assert!(prompt.contains("refactor foo.rs"));
 }

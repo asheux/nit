@@ -344,7 +344,7 @@ pub(super) fn build_planner_prompt(
     out
 }
 
-pub(super) fn role_contract_lines(role: &str) -> &'static [&'static str] {
+pub(crate) fn role_contract_lines(role: &str) -> &'static [&'static str] {
     match role {
         "propose" => &[
             "Advance one concrete solution candidate from your assigned lens.",
