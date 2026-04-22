@@ -834,6 +834,100 @@ fn in_flight_snapshot_is_empty_when_idle() {
 }
 
 #[test]
+fn session_touched_persists_after_completion() {
+    // LIVE view relies on session_touched outliving in_flight_snapshot so
+    // evaluated files don't vanish the moment their result lands. Seed a
+    // few files, drain the scan, and confirm session_touched still lists
+    // every path while in_flight is empty.
+    let root = temp_workspace();
+    for idx in 0..4 {
+        write_file(
+            &root,
+            &format!("src/f{idx}.rs"),
+            &format!("fn f{idx}() {{}}\n"),
+        );
+    }
+
+    let mut state = make_state(root.clone());
+    let mut scan = WorkspaceScanRuntime::new();
+    let worker = GenomeWorker::new();
+
+    scan.hydrate(&mut state);
+    assert_eq!(scan.session_touched().len(), 4);
+
+    drain_until_idle(&mut state, &mut scan, &worker, Duration::from_secs(30));
+
+    assert!(
+        scan.in_flight_snapshot().is_empty(),
+        "in-flight snapshot drains on completion"
+    );
+    assert_eq!(
+        scan.session_touched().len(),
+        4,
+        "session_touched must persist completed paths for the LIVE log"
+    );
+
+    cleanup(&root);
+}
+
+#[test]
+fn note_change_of_new_file_is_tracked_in_session() {
+    // A mid-session file edit (no cache, or stale cache) must enter
+    // session_touched so the operator sees it in LIVE even after its
+    // eval completes.
+    let root = temp_workspace();
+    let file = write_file(&root, "src/lib.rs", "fn main() {}\n");
+
+    let mut state = make_state(root.clone());
+    let mut scan = WorkspaceScanRuntime::new();
+    scan.note_change(&mut state, file.clone());
+
+    assert!(scan.session_touched().contains(&file));
+
+    cleanup(&root);
+}
+
+#[test]
+fn note_change_skip_path_does_not_touch_session() {
+    // When a fresh cache and a pre-session mtime combine to skip
+    // invalidation (the discovery-burst case), the path should NOT be
+    // recorded as session-touched — nothing actually got queued.
+    let root = temp_workspace();
+    let file = write_file(&root, "src/lib.rs", "fn main() {}\n");
+
+    let mut state = make_state(root.clone());
+    let report = GenomeReport {
+        file_path: file.clone(),
+        encoder_scores: Vec::new(),
+        cross_encoder_consistency: 0.0,
+        tier: nit_core::GenomeTier::StillLife,
+        recommendations: Vec::new(),
+        // `u64::MAX` forces the mtime-vs-cache check to favor the cache,
+        // AND the file mtime is well below session_start_ms since the
+        // test created the file before the scan's construction.
+        timestamp_ms: u64::MAX,
+        grid_size: 32,
+        parsimony: Default::default(),
+    };
+    state.genome_reports.insert(file.clone(), report);
+
+    // Sleep briefly before constructing so session_start_ms is strictly
+    // after the file mtime — the skip path is only taken when
+    // `mtime < session_start_ms`.
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    let mut scan = WorkspaceScanRuntime::new();
+    scan.note_change(&mut state, file.clone());
+
+    assert_eq!(scan.pending_count(), 0);
+    assert!(
+        !scan.session_touched().contains(&file),
+        "skipped discovery events must not bloat session log"
+    );
+
+    cleanup(&root);
+}
+
+#[test]
 fn in_flight_snapshot_orders_evaluating_first() {
     use crate::workspace_scan::WorkspaceScanItemState;
 

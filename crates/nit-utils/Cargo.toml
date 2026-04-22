@@ -1,10 +1,10 @@
 [package]
 name = "nit-utils"
 version = "0.1.0"
-edition = "2021"
-rust-version.workspace = true
 description = "Atomic filesystem writes, stable hashing, and project paths for the nit workspace"
+edition = "2021"
 license = "MIT"
+rust-version.workspace = true
 publish = false
 
 [dependencies]

@@ -104,6 +104,18 @@ pub struct WorkspaceScanRuntime {
     /// Max concurrent eval threads — computed once at construction so tests
     /// can override via `with_max_in_flight` without touching globals.
     max_in_flight: usize,
+    /// Unix-ms at construction time. Splits file-watcher events into
+    /// "discovery" (file mtime < session_start_ms, pre-existing file just
+    /// getting tracked) vs "genuine change" (mtime >= session_start_ms,
+    /// edited in this session). Discovery events may skip invalidation
+    /// when the cache is fresh; genuine changes must always invalidate.
+    session_start_ms: u64,
+    /// Every path that's been queued, dispatched, or completed in this
+    /// session. Persists through `note_completed` so the LIVE view can show
+    /// a running log of what was evaluated — entries change from
+    /// "evaluating" to "done" rather than vanishing. Reset only by process
+    /// restart.
+    session_touched: HashSet<PathBuf>,
 }
 
 impl Default for WorkspaceScanRuntime {
@@ -115,8 +127,17 @@ impl Default for WorkspaceScanRuntime {
             done: 0,
             hydrated: false,
             max_in_flight: workspace_scan_max_in_flight(),
+            session_start_ms: now_ms(),
+            session_touched: HashSet::new(),
         }
     }
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 impl WorkspaceScanRuntime {
@@ -190,6 +211,7 @@ impl WorkspaceScanRuntime {
                 continue;
             }
             if Self::needs_eval(state, &path) {
+                self.session_touched.insert(path.clone());
                 self.pending.push_back(path);
             }
         }
@@ -278,11 +300,14 @@ impl WorkspaceScanRuntime {
         // fires for every source file on startup (and on its 2s rescan). A
         // discovery event for a file whose cached report is newer than its
         // mtime is not a real change — treating it as one invalidates the
-        // cache and forces a full rescan on every launch. Skip unless the
-        // file actually moved forward in time relative to the cached report.
+        // cache and forces a full rescan on every launch. Only skip when
+        // the file hasn't been touched in this session (mtime < session
+        // start); mid-session edits always advance mtime past session_start,
+        // so they fall through and invalidate normally even if the authoritative
+        // agent-turn eval already repopulated the cache in the race window.
         if let Some(report) = state.genome_reports.get(&path) {
             let mtime = file_mtime_ms(&path).unwrap_or(0);
-            if mtime <= report.timestamp_ms {
+            if mtime < self.session_start_ms && mtime <= report.timestamp_ms {
                 return;
             }
         }
@@ -296,6 +321,7 @@ impl WorkspaceScanRuntime {
         if self.dispatched.contains(&path) || self.pending.contains(&path) {
             return;
         }
+        self.session_touched.insert(path.clone());
         self.pending.push_back(path);
         self.total = self.total.saturating_add(1);
     }
@@ -332,6 +358,14 @@ impl WorkspaceScanRuntime {
                 .map(|p| (p.clone(), WorkspaceScanItemState::Queued)),
         );
         out
+    }
+
+    /// Every path the scan has touched this session — including files
+    /// whose evaluation already landed. LIVE view uses this to keep a
+    /// running log (items transition from "evaluating" to "done" rather
+    /// than vanishing on completion).
+    pub fn session_touched(&self) -> &HashSet<PathBuf> {
+        &self.session_touched
     }
 
     #[cfg(test)]

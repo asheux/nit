@@ -18,6 +18,7 @@ pub trait Fingerprint {
 }
 
 impl<T: AsRef<[u8]> + ?Sized> Fingerprint for T {
+    #[inline]
     fn fingerprint(&self) -> u64 {
         stable_hash_bytes(self.as_ref())
     }

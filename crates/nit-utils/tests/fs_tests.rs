@@ -90,8 +90,11 @@ fn ensure_dir_creates_nested() {
     let dir = ScratchDir::new("fs_ensure");
     let nested = dir.join("a").join("b");
 
-    let returned = nit_utils::ensure_dir(&nested).expect("ensure_dir failed");
-    assert!(returned.is_dir(), "returned path should be a directory");
+    nit_utils::ensure_dir(&nested).expect("ensure_dir failed");
+    assert!(
+        nested.is_dir(),
+        "nested directory should exist after ensure_dir"
+    );
 }
 
 #[test]

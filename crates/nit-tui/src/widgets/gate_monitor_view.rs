@@ -1450,6 +1450,68 @@ fn relative_file_path(path: &std::path::Path, workspace: &std::path::Path) -> St
 // LIVE sub-view: workspace-scan queue (evaluating + queued, session-local)
 // ---------------------------------------------------------------------------
 
+/// Rendering-local state tag: unifies workspace-scan queue items with
+/// in-flight agent-turn evaluations, current-turn file edits, and
+/// already-completed entries from this session. The enum doesn't leak
+/// into `WorkspaceScanRuntime` because the runtime itself doesn't know
+/// about agent turns — the unification happens at display time so the
+/// LIVE view shows "what nit is doing right now" PLUS "what nit has
+/// evaluated this session".
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum LiveItemKind {
+    /// In workspace_scan.dispatched — background eval thread running.
+    ScanEvaluating,
+    /// In workspace_scan.pending — waiting for an in-flight slot.
+    ScanQueued,
+    /// Agent turn's authoritative eval batch is still draining for this file.
+    AgentEvaluating,
+    /// Agent is currently editing this file — the turn is active and wrote
+    /// to it, but the post-turn eval hasn't dispatched yet.
+    AgentEditing,
+    /// Session-touched but no longer in any active pipeline — the eval has
+    /// landed and the file sits in `state.genome_reports`. Kept visible so
+    /// the operator can see a running log of what was evaluated.
+    Done,
+}
+
+impl LiveItemKind {
+    fn label(self) -> &'static str {
+        match self {
+            LiveItemKind::ScanEvaluating => "evaluating",
+            LiveItemKind::ScanQueued => "queued",
+            LiveItemKind::AgentEvaluating => "agent-eval",
+            LiveItemKind::AgentEditing => "editing",
+            LiveItemKind::Done => "done",
+        }
+    }
+
+    fn marker(self) -> &'static str {
+        match self {
+            // ●: actively running work
+            LiveItemKind::ScanEvaluating | LiveItemKind::AgentEvaluating => "\u{25cf}",
+            // ◐: agent-modified but not yet evaluated
+            LiveItemKind::AgentEditing => "\u{25d0}",
+            // ○: queued
+            LiveItemKind::ScanQueued => "\u{25cb}",
+            // ✓: done
+            LiveItemKind::Done => "\u{2713}",
+        }
+    }
+}
+
+/// Precedence when the same path appears in multiple sources. Higher number
+/// wins — show the most-active state so the operator sees what's happening
+/// now, not a stale lower-priority tag.
+fn live_item_priority(kind: LiveItemKind) -> u8 {
+    match kind {
+        LiveItemKind::ScanEvaluating => 5,
+        LiveItemKind::AgentEvaluating => 4,
+        LiveItemKind::AgentEditing => 3,
+        LiveItemKind::ScanQueued => 2,
+        LiveItemKind::Done => 1,
+    }
+}
+
 fn build_lines_live(
     state: &AppState,
     workspace_scan: &WorkspaceScanRuntime,
@@ -1465,9 +1527,75 @@ fn build_lines_live(
         .add_modifier(Modifier::BOLD);
 
     let mut lines: Vec<Line<'static>> = Vec::new();
-    let items = workspace_scan.in_flight_snapshot();
 
-    if items.is_empty() {
+    // Unify all in-flight sources into a single deduped map keyed by path.
+    // Higher-priority state wins when the same file appears in multiple
+    // sources (e.g., an agent-eval batch is running on a path the background
+    // scan also queued — show "agent-eval", not "queued").
+    let mut combined: std::collections::HashMap<std::path::PathBuf, LiveItemKind> =
+        std::collections::HashMap::new();
+    let upsert = |combined: &mut std::collections::HashMap<_, LiveItemKind>,
+                  path: std::path::PathBuf,
+                  kind: LiveItemKind| {
+        let entry = combined.entry(path).or_insert(kind);
+        if live_item_priority(kind) > live_item_priority(*entry) {
+            *entry = kind;
+        }
+    };
+
+    // 1. Workspace-scan pending + dispatched.
+    for (path, scan_state) in workspace_scan.in_flight_snapshot() {
+        let kind = match scan_state {
+            WorkspaceScanItemState::Evaluating => LiveItemKind::ScanEvaluating,
+            WorkspaceScanItemState::Queued => LiveItemKind::ScanQueued,
+        };
+        upsert(&mut combined, path, kind);
+    }
+
+    // 2. Agent-turn authoritative eval batches that are still draining.
+    for (agent_id, batch) in &state.genome_eval_batches {
+        if batch.pending == 0 {
+            continue;
+        }
+        if let Some(paths) = state.genome_turn_modified.get(agent_id) {
+            for path in paths {
+                upsert(&mut combined, path.clone(), LiveItemKind::AgentEvaluating);
+            }
+        }
+    }
+
+    // 3. Files an agent is currently editing mid-turn (no batch yet because
+    //    the turn hasn't completed). These give the operator immediate
+    //    feedback the moment a FileWrite event fires, without waiting for
+    //    the 200 ms file-watcher poll or the post-turn dispatch.
+    for agent_id in &state.genome_turn_active {
+        let batch_empty = state
+            .genome_eval_batches
+            .get(agent_id)
+            .map(|b| b.pending == 0)
+            .unwrap_or(true);
+        if !batch_empty {
+            // Already covered by AgentEvaluating above — skip to avoid
+            // downgrading the state tag.
+            continue;
+        }
+        if let Some(paths) = state.genome_turn_modified.get(agent_id) {
+            for path in paths {
+                upsert(&mut combined, path.clone(), LiveItemKind::AgentEditing);
+            }
+        }
+    }
+
+    // 4. Session log: every path the scan has ever touched this session
+    //    that isn't already tagged as active. These show up as "done" —
+    //    the eval landed, but the entry stays visible for the session so
+    //    the operator gets a running log instead of rows that vanish on
+    //    completion.
+    for path in workspace_scan.session_touched() {
+        combined.entry(path.clone()).or_insert(LiveItemKind::Done);
+    }
+
+    if combined.is_empty() {
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
             "No files are being evaluated",
@@ -1475,26 +1603,50 @@ fn build_lines_live(
         )));
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
-            "Files will appear here in real time as the workspace scan",
+            "Files appear here in real time as agents edit code or the",
             dim_style,
         )));
         lines.push(Line::from(Span::styled(
-            "picks up new edits from the file watcher.",
+            "workspace scan picks up file-watcher events.",
             dim_style,
         )));
         return lines;
     }
 
-    let (done, total) = workspace_scan.progress();
-    let evaluating_count = items
-        .iter()
-        .filter(|(_, s)| matches!(s, WorkspaceScanItemState::Evaluating))
-        .count();
-    let queued_count = items.len().saturating_sub(evaluating_count);
+    // Sort: highest priority first, then alphabetically so rows stay stable
+    // across ticks.
+    let mut items: Vec<(std::path::PathBuf, LiveItemKind)> = combined.into_iter().collect();
+    items.sort_by(|a, b| {
+        live_item_priority(b.1)
+            .cmp(&live_item_priority(a.1))
+            .then_with(|| a.0.cmp(&b.0))
+    });
 
-    let header_text = format!(
-        "Live Scan ({evaluating_count} evaluating, {queued_count} queued — {done}/{total} done) "
-    );
+    let (_scan_done, scan_total) = workspace_scan.progress();
+    let scan_eval = items
+        .iter()
+        .filter(|(_, k)| matches!(k, LiveItemKind::ScanEvaluating))
+        .count();
+    let agent_eval = items
+        .iter()
+        .filter(|(_, k)| matches!(k, LiveItemKind::AgentEvaluating))
+        .count();
+    let editing = items
+        .iter()
+        .filter(|(_, k)| matches!(k, LiveItemKind::AgentEditing))
+        .count();
+    let queued = items
+        .iter()
+        .filter(|(_, k)| matches!(k, LiveItemKind::ScanQueued))
+        .count();
+    let done_count = items
+        .iter()
+        .filter(|(_, k)| matches!(k, LiveItemKind::Done))
+        .count();
+    let active = scan_eval + agent_eval + editing + queued;
+
+    let header_text =
+        format!("Live Session ({active} active, {done_count} done / {scan_total} scanned) ");
     lines.push(Line::from(vec![
         Span::styled(header_text.clone(), label_style),
         Span::styled(
@@ -1503,7 +1655,9 @@ fn build_lines_live(
         ),
     ]));
 
-    // Columns: FILE | STATUS | PREVIOUS TIER (if any cached report existed).
+    // Columns: FILE | STATUS | TIER. For active entries the tier shows
+    // whatever's left of the previous run's cache (before invalidation);
+    // for Done entries it's the freshly-computed tier from this session.
     let status_w = 12;
     let prev_w = 12;
     let data_w = status_w + prev_w + 2;
@@ -1515,44 +1669,54 @@ fn build_lines_live(
             header_style,
         ),
         Span::styled(format!("{:<status_w$}", "STATUS"), header_style),
-        Span::styled(format!("{:<prev_w$}", "PREV TIER"), header_style),
+        Span::styled(format!("{:<prev_w$}", "TIER"), header_style),
     ]));
     lines.push(Line::from(Span::styled(
         "\u{2500}".repeat(width),
         dim_style,
     )));
 
-    for (path, item_state) in &items {
+    for (path, kind) in &items {
         let rel = relative_file_path(path, &state.workspace_root);
         let display_name = truncate_with_ellipsis(&rel, name_w.saturating_sub(2));
-        let marker = match item_state {
-            WorkspaceScanItemState::Evaluating => "\u{25cf}", // ●
-            WorkspaceScanItemState::Queued => "\u{25cb}",     // ○
+        let marker = kind.marker();
+        let status_color = match kind {
+            LiveItemKind::ScanEvaluating | LiveItemKind::AgentEvaluating => theme.accent,
+            LiveItemKind::AgentEditing => theme.title_focused,
+            LiveItemKind::ScanQueued => theme.title,
+            LiveItemKind::Done => theme.success,
         };
-        let status_color = match item_state {
-            WorkspaceScanItemState::Evaluating => theme.accent,
-            WorkspaceScanItemState::Queued => theme.title,
-        };
-        // The cache was invalidated before the eval dispatched, so state
-        // won't have a current report. Fall back to the session baseline
-        // so the operator can see what tier the file WAS at.
-        let prev_tier = state
-            .genome_baselines
+        // Done entries show the current tier (evaluated this session);
+        // in-flight entries fall back to the session baseline since their
+        // cache was invalidated when they entered the queue.
+        let tier_display = state
+            .genome_reports
             .get(path)
+            .or_else(|| state.genome_baselines.get(path))
             .map(|r| format!("tier {}", r.tier.numeral()))
             .unwrap_or_else(|| "\u{2014}".to_string()); // —
+
+        // Dim the whole row for completed entries so the eye finds active
+        // work first.
+        let name_style = if matches!(kind, LiveItemKind::Done) {
+            Style::default()
+                .fg(theme.foreground)
+                .add_modifier(Modifier::DIM)
+        } else {
+            Style::default().fg(theme.foreground)
+        };
 
         lines.push(Line::from(vec![
             Span::styled(
                 format!("{marker} {display_name:<width$}", width = name_w - 2),
-                Style::default().fg(theme.foreground),
+                name_style,
             ),
             Span::styled(
-                format!("{:<status_w$}", item_state.label()),
+                format!("{:<status_w$}", kind.label()),
                 Style::default().fg(status_color),
             ),
             Span::styled(
-                format!("{prev_tier:<prev_w$}"),
+                format!("{tier_display:<prev_w$}"),
                 Style::default().fg(theme.border),
             ),
         ]));
