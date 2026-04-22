@@ -1,18 +1,20 @@
-//! Back-channel client — the side of the UDS (Unix domain socket) connection
-//! living inside the `nit-mcp-server` binary.  Each `tools/call` opens a fresh
-//! connection, writes one NDJSON request line, and reads one NDJSON response.
-//!
-//! The `Backchannel` trait exists so tests can inject a mock in place of the
-//! real socket transport.
+//! Back-channel client inside `nit-mcp-server`. Each `tools/call` opens a
+//! fresh connection, writes one NDJSON request line, reads one NDJSON
+//! response. The `Backchannel` trait exists so tests can inject a mock in
+//! place of the real socket transport.
 
 use std::io::{BufRead, BufReader, Write};
 use std::time::Duration;
 
 use crate::protocol::{BackchannelRequest, BackchannelResponse};
 
-/// Transport abstraction for forwarding tool calls to nit-tui.  The real
-/// implementation round-trips over a Unix socket (or TCP on non-Unix); tests
-/// supply a mock that captures requests without any I/O.
+const IO_TIMEOUT: Duration = Duration::from_secs(2);
+
+#[cfg(unix)]
+type Stream = std::os::unix::net::UnixStream;
+#[cfg(not(unix))]
+type Stream = std::net::TcpStream;
+
 pub trait Backchannel {
     fn send(&self, req: &BackchannelRequest) -> anyhow::Result<BackchannelResponse>;
 }
@@ -40,29 +42,24 @@ impl BackchannelClient {
             Ok(Self { tcp_port: port })
         }
     }
+
+    fn connect(&self) -> anyhow::Result<Stream> {
+        #[cfg(unix)]
+        let stream = Stream::connect(&self.socket_path)?;
+        #[cfg(not(unix))]
+        let stream = Stream::connect(("127.0.0.1", self.tcp_port))?;
+        stream.set_read_timeout(Some(IO_TIMEOUT))?;
+        stream.set_write_timeout(Some(IO_TIMEOUT))?;
+        Ok(stream)
+    }
 }
 
 impl Backchannel for BackchannelClient {
     fn send(&self, req: &BackchannelRequest) -> anyhow::Result<BackchannelResponse> {
-        #[cfg(unix)]
-        let stream = {
-            use std::os::unix::net::UnixStream;
-            let s = UnixStream::connect(&self.socket_path)?;
-            s.set_read_timeout(Some(Duration::from_secs(2)))?;
-            s.set_write_timeout(Some(Duration::from_secs(2)))?;
-            s
-        };
-        #[cfg(not(unix))]
-        let stream = {
-            use std::net::TcpStream;
-            let s = TcpStream::connect(("127.0.0.1", self.tcp_port))?;
-            s.set_read_timeout(Some(Duration::from_secs(2)))?;
-            s.set_write_timeout(Some(Duration::from_secs(2)))?;
-            s
-        };
+        let stream = self.connect()?;
         let line = serde_json::to_string(req)?;
-        // Writing and reading use two halves of the same stream; keep a
-        // mutable handle for the write then wrap the read side in a BufReader.
+        // Half-close the write side so the server's line read terminates:
+        // writeln! on a cloned handle, flush, then drop it before reading.
         let mut write_half = stream.try_clone()?;
         writeln!(write_half, "{line}")?;
         write_half.flush()?;
@@ -70,7 +67,6 @@ impl Backchannel for BackchannelClient {
         let mut reader = BufReader::new(stream);
         let mut response = String::new();
         reader.read_line(&mut response)?;
-        let resp: BackchannelResponse = serde_json::from_str(response.trim())?;
-        Ok(resp)
+        Ok(serde_json::from_str(response.trim())?)
     }
 }

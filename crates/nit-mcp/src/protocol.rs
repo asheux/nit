@@ -1,9 +1,7 @@
-//! Wire types shared between the `nit-mcp-server` binary (spawned as a child
-//! of `codex mcp-server`) and the listener thread inside nit-tui.
+//! Wire types shared between `nit-mcp-server` and nit-tui's listener thread.
 //!
-//! Uses nit-core substrate types directly — nit-core is already a dep, and
-//! reusing the Serde-derived enums means target/kind values cross the UDS
-//! boundary without a bespoke intermediate schema.
+//! Reuses nit-core substrate enums directly so target/kind values cross the
+//! UDS boundary without a bespoke intermediate schema.
 
 use serde::{Deserialize, Serialize};
 

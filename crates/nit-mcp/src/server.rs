@@ -1,26 +1,24 @@
-//! MCP stdio JSON-RPC 2.0 server.  Consumes NDJSON requests on stdin,
-//! emits NDJSON responses on stdout.  Supports exactly three methods:
-//! `initialize`, `tools/list`, `tools/call` — enough for Codex to discover
-//! and invoke the three nit substrate tools.
-//!
-//! `tools/call` delegates to an injected [`Backchannel`] so tests can run
-//! the server end-to-end without touching the real socket transport.
+//! MCP stdio JSON-RPC 2.0 server. Consumes NDJSON requests on stdin, emits
+//! NDJSON responses on stdout. Supports exactly three methods — `initialize`,
+//! `tools/list`, `tools/call` — enough for Codex to discover and invoke the
+//! nit substrate tools. `tools/call` delegates to an injected [`Backchannel`]
+//! so tests can exercise the server end-to-end without real socket I/O.
 
 use std::io::{BufRead, Write};
 
+use serde::de::DeserializeOwned;
 use serde_json::{json, Value};
 
 use crate::backchannel::Backchannel;
 use crate::protocol::BackchannelRequest;
 
-/// JSON-RPC error codes per spec.
+// JSON-RPC 2.0 error codes.
 const PARSE_ERROR: i64 = -32700;
 const INVALID_REQUEST: i64 = -32600;
-const METHOD_NOT_FOUND: i64 = -32601;
-const INVALID_PARAMS: i64 = -32602;
+pub const METHOD_NOT_FOUND: i64 = -32601;
+pub const INVALID_PARAMS: i64 = -32602;
 const INTERNAL_ERROR: i64 = -32603;
 
-/// Minimal JSON-RPC error — serialised into the `error` slot of a response.
 #[derive(Debug)]
 pub struct JsonRpcError {
     pub code: i64,
@@ -33,10 +31,9 @@ impl JsonRpcError {
     }
 }
 
-/// Entry point: read one JSON-RPC request per line, dispatch, write one
-/// response per line.  Exits when stdin reaches EOF.  A single per-process
-/// request counter keeps synthetic `request_id`s collision-free on the
-/// back-channel wire.
+/// Read one JSON-RPC request per line, dispatch, write one response per line.
+/// Exits cleanly on stdin EOF or closed stdout. The per-process counter keeps
+/// synthetic `request_id`s collision-free on the back-channel wire.
 pub fn run<R: BufRead, W: Write, B: Backchannel>(
     mut reader: R,
     mut writer: W,
@@ -57,8 +54,7 @@ pub fn run<R: BufRead, W: Write, B: Backchannel>(
             continue;
         }
         let response = handle_line(raw, bc, agent_id, &mut counter);
-        // Avoid panicking the server on a closed stdout — the parent may have
-        // exited mid-conversation; just return cleanly.
+        // Parent may have exited mid-conversation; don't panic on closed stdout.
         if writeln!(writer, "{response}").is_err() {
             return Ok(());
         }
@@ -66,10 +62,6 @@ pub fn run<R: BufRead, W: Write, B: Backchannel>(
     }
 }
 
-/// Parse one NDJSON line and dispatch; returns the response as a JSON string.
-/// Notifications (no `id`) still get a response written in the error path so
-/// operators never see silent drops — production MCP clients ignore spurious
-/// responses, and Codex in practice always sends an `id`.
 pub fn handle_line<B: Backchannel>(raw: &str, bc: &B, agent_id: &str, counter: &mut u64) -> String {
     let value: Value = match serde_json::from_str(raw) {
         Ok(v) => v,
@@ -100,11 +92,9 @@ pub fn handle_line<B: Backchannel>(raw: &str, bc: &B, agent_id: &str, counter: &
 
     let result = match method.as_str() {
         "initialize" => handle_initialize(params),
-        "initialized" | "notifications/initialized" => {
-            // Pure notification — no response content needed, but we still
-            // emit a minimal ack so line-oriented clients stay in lockstep.
-            Ok(json!({}))
-        }
+        // Minimal ack keeps line-oriented clients in lockstep; real MCP
+        // notifications carry no `id`, so clients tolerate a spurious reply.
+        "initialized" | "notifications/initialized" => Ok(json!({})),
         "tools/list" => handle_tools_list(),
         "tools/call" => handle_tools_call(params, bc, agent_id, counter),
         other => Err(JsonRpcError {
@@ -137,10 +127,8 @@ fn handle_initialize(_params: Value) -> Result<Value, JsonRpcError> {
     }))
 }
 
-/// Tool schemas published to Codex.  Kept minimal — the substrate enums
-/// themselves live in nit-core and round-trip through `serde_json` at the
-/// handler boundary, so the JSON-Schema `target` / `kind` descriptions
-/// are informational only.
+// Substrate enums round-trip through `serde_json` at the handler boundary,
+// so the JSON-Schema `target` / `kind` descriptions are informational only.
 fn handle_tools_list() -> Result<Value, JsonRpcError> {
     Ok(json!({
         "tools": [
@@ -235,263 +223,64 @@ fn handle_tools_call<B: Backchannel>(
     }
 }
 
-/// Translate an MCP `tools/call` argument bag into the typed `BackchannelRequest`
-/// that travels over the UDS to nit-tui.  Extracted so tests can drive it
-/// directly without routing through a whole `handle_line` cycle.
+/// Deserialise a required typed field from a `tools/call` argument bag,
+/// mapping serde errors to `INVALID_PARAMS` with a field-tagged message.
+fn parse_arg<T: DeserializeOwned>(args: &Value, field: &str) -> Result<T, JsonRpcError> {
+    serde_json::from_value(args.get(field).cloned().unwrap_or(Value::Null)).map_err(|e| {
+        JsonRpcError {
+            code: INVALID_PARAMS,
+            message: format!("invalid {field}: {e}"),
+        }
+    })
+}
+
+/// Translate a `tools/call` argument bag into a typed `BackchannelRequest`.
+/// Extracted so tests can drive it directly without a full `handle_line` cycle.
 pub fn build_backchannel_request(
     tool: &str,
     request_id: u64,
     agent_id: &str,
     args: &Value,
 ) -> Result<BackchannelRequest, JsonRpcError> {
+    let agent_id = agent_id.to_string();
+    let ttl_gens = || args.get("ttl_gens").and_then(|v| v.as_u64()).unwrap_or(3);
+    let rationale = || {
+        args.get("rationale")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string()
+    };
     match tool {
-        "emit_signal" => {
-            let kind = serde_json::from_value(args.get("kind").cloned().unwrap_or(Value::Null))
-                .map_err(|e| JsonRpcError {
-                    code: INVALID_PARAMS,
-                    message: format!("invalid kind: {e}"),
-                })?;
-            let target = serde_json::from_value(args.get("target").cloned().unwrap_or(Value::Null))
-                .map_err(|e| JsonRpcError {
-                    code: INVALID_PARAMS,
-                    message: format!("invalid target: {e}"),
-                })?;
-            let payload = args.get("payload").cloned().unwrap_or(Value::Null);
-            let strength = args
+        "emit_signal" => Ok(BackchannelRequest::EmitSignal {
+            request_id,
+            agent_id,
+            kind: parse_arg(args, "kind")?,
+            target: parse_arg(args, "target")?,
+            payload: args.get("payload").cloned().unwrap_or(Value::Null),
+            strength: args
                 .get("strength")
                 .and_then(|v| v.as_f64())
-                .map(|f| f as f32);
-            Ok(BackchannelRequest::EmitSignal {
-                request_id,
-                agent_id: agent_id.to_string(),
-                kind,
-                target,
-                payload,
-                strength,
-            })
-        }
-        "assert_claim" => {
-            let kind = serde_json::from_value(args.get("kind").cloned().unwrap_or(Value::Null))
-                .map_err(|e| JsonRpcError {
-                    code: INVALID_PARAMS,
-                    message: format!("invalid kind: {e}"),
-                })?;
-            let target = serde_json::from_value(args.get("target").cloned().unwrap_or(Value::Null))
-                .map_err(|e| JsonRpcError {
-                    code: INVALID_PARAMS,
-                    message: format!("invalid target: {e}"),
-                })?;
-            let ttl_gens = args.get("ttl_gens").and_then(|v| v.as_u64()).unwrap_or(3);
-            let rationale = args
-                .get("rationale")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-            Ok(BackchannelRequest::AssertClaim {
-                request_id,
-                agent_id: agent_id.to_string(),
-                kind,
-                target,
-                ttl_gens,
-                rationale,
-            })
-        }
-        "assert_assumption" => {
-            let target = serde_json::from_value(args.get("target").cloned().unwrap_or(Value::Null))
-                .map_err(|e| JsonRpcError {
-                    code: INVALID_PARAMS,
-                    message: format!("invalid target: {e}"),
-                })?;
-            let fact = args.get("fact").cloned().unwrap_or(Value::Null);
-            let ttl_gens = args.get("ttl_gens").and_then(|v| v.as_u64()).unwrap_or(3);
-            let rationale = args
-                .get("rationale")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-            Ok(BackchannelRequest::AssertAssumption {
-                request_id,
-                agent_id: agent_id.to_string(),
-                target,
-                fact,
-                ttl_gens,
-                rationale,
-            })
-        }
+                .map(|f| f as f32),
+        }),
+        "assert_claim" => Ok(BackchannelRequest::AssertClaim {
+            request_id,
+            agent_id,
+            kind: parse_arg(args, "kind")?,
+            target: parse_arg(args, "target")?,
+            ttl_gens: ttl_gens(),
+            rationale: rationale(),
+        }),
+        "assert_assumption" => Ok(BackchannelRequest::AssertAssumption {
+            request_id,
+            agent_id,
+            target: parse_arg(args, "target")?,
+            fact: args.get("fact").cloned().unwrap_or(Value::Null),
+            ttl_gens: ttl_gens(),
+            rationale: rationale(),
+        }),
         other => Err(JsonRpcError {
             code: METHOD_NOT_FOUND,
             message: format!("unknown tool: {other}"),
         }),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::protocol::BackchannelResponse;
-    use std::sync::Mutex;
-
-    /// Mock that captures requests and replies with a canned response.
-    /// Uses Mutex for interior mutability so the trait can stay `&self`.
-    struct MockBackchannel {
-        captured: Mutex<Vec<BackchannelRequest>>,
-        reply_ok: bool,
-    }
-
-    impl MockBackchannel {
-        fn new() -> Self {
-            Self {
-                captured: Mutex::new(Vec::new()),
-                reply_ok: true,
-            }
-        }
-    }
-
-    impl Backchannel for MockBackchannel {
-        fn send(&self, req: &BackchannelRequest) -> anyhow::Result<BackchannelResponse> {
-            let request_id = match req {
-                BackchannelRequest::EmitSignal { request_id, .. }
-                | BackchannelRequest::AssertClaim { request_id, .. }
-                | BackchannelRequest::AssertAssumption { request_id, .. } => *request_id,
-            };
-            self.captured.lock().unwrap().push(req.clone());
-            Ok(BackchannelResponse {
-                request_id,
-                ok: self.reply_ok,
-                error: None,
-            })
-        }
-    }
-
-    fn run_once(mock: &MockBackchannel, request: &str) -> Value {
-        let mut counter = 0u64;
-        let resp_line = handle_line(request, mock, "test-agent", &mut counter);
-        serde_json::from_str(&resp_line).unwrap()
-    }
-
-    #[test]
-    fn initialize_returns_capabilities() {
-        let mock = MockBackchannel::new();
-        let resp = run_once(
-            &mock,
-            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#,
-        );
-        assert_eq!(resp["id"], 1);
-        let result = &resp["result"];
-        assert_eq!(result["protocolVersion"], "2024-11-05");
-        assert!(result["capabilities"]["tools"].is_object());
-        assert_eq!(result["serverInfo"]["name"], "nit-mcp");
-    }
-
-    #[test]
-    fn tools_list_returns_three_tools() {
-        let mock = MockBackchannel::new();
-        let resp = run_once(
-            &mock,
-            r#"{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}"#,
-        );
-        let tools = resp["result"]["tools"].as_array().expect("tools array");
-        assert_eq!(tools.len(), 3);
-        let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
-        assert!(names.contains(&"emit_signal"));
-        assert!(names.contains(&"assert_claim"));
-        assert!(names.contains(&"assert_assumption"));
-    }
-
-    #[test]
-    fn tools_call_emit_signal_builds_backchannel_request() {
-        let mock = MockBackchannel::new();
-        let body = r#"{
-            "jsonrpc":"2.0","id":3,"method":"tools/call","params":{
-                "name":"emit_signal",
-                "arguments":{
-                    "kind":"warning",
-                    "target":{"kind":"global"},
-                    "payload":{"msg":"hello"},
-                    "strength":0.8
-                }
-            }
-        }"#;
-        let resp = run_once(&mock, body);
-        assert!(resp["error"].is_null(), "unexpected error: {resp}");
-        let captured = mock.captured.lock().unwrap();
-        assert_eq!(captured.len(), 1);
-        match &captured[0] {
-            BackchannelRequest::EmitSignal {
-                agent_id,
-                kind,
-                target,
-                payload,
-                strength,
-                ..
-            } => {
-                assert_eq!(agent_id, "test-agent");
-                assert_eq!(*kind, nit_core::substrate::SignalKind::Warning);
-                assert_eq!(*target, nit_core::substrate::SignalTarget::Global);
-                assert_eq!(payload["msg"], "hello");
-                assert!((strength.unwrap() - 0.8).abs() < f32::EPSILON * 10.0);
-            }
-            other => panic!("expected EmitSignal, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn tools_call_assert_claim_builds_request() {
-        let mock = MockBackchannel::new();
-        let body = r#"{
-            "jsonrpc":"2.0","id":4,"method":"tools/call","params":{
-                "name":"assert_claim",
-                "arguments":{
-                    "kind":"exclusive_write",
-                    "target":{"kind":"file","path":"/tmp/foo"},
-                    "ttl_gens":5,
-                    "rationale":"integration mission"
-                }
-            }
-        }"#;
-        let resp = run_once(&mock, body);
-        assert!(resp["error"].is_null(), "unexpected error: {resp}");
-        let captured = mock.captured.lock().unwrap();
-        match &captured[0] {
-            BackchannelRequest::AssertClaim {
-                agent_id,
-                kind,
-                ttl_gens,
-                rationale,
-                ..
-            } => {
-                assert_eq!(agent_id, "test-agent");
-                assert_eq!(*kind, nit_core::substrate::ClaimKind::ExclusiveWrite);
-                assert_eq!(*ttl_gens, 5);
-                assert_eq!(rationale, "integration mission");
-            }
-            other => panic!("expected AssertClaim, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn tools_call_malformed_args_returns_invalid_params() {
-        let mock = MockBackchannel::new();
-        // `kind` is not a valid SignalKind variant.
-        let body = r#"{
-            "jsonrpc":"2.0","id":5,"method":"tools/call","params":{
-                "name":"emit_signal",
-                "arguments":{"kind":"nonsense","target":{"kind":"global"}}
-            }
-        }"#;
-        let resp = run_once(&mock, body);
-        assert_eq!(resp["error"]["code"], INVALID_PARAMS);
-    }
-
-    #[test]
-    fn tools_call_unknown_tool_returns_method_not_found() {
-        let mock = MockBackchannel::new();
-        let body = r#"{
-            "jsonrpc":"2.0","id":6,"method":"tools/call","params":{
-                "name":"nope","arguments":{}
-            }
-        }"#;
-        let resp = run_once(&mock, body);
-        assert_eq!(resp["error"]["code"], METHOD_NOT_FOUND);
     }
 }
