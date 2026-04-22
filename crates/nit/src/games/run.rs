@@ -1,7 +1,5 @@
-//! Headless tournament runner: single-config batch execution with artifact output.
-//!
-//! Loads a games configuration, validates it, executes a deterministic tournament,
-//! writes output artifacts (config snapshot, definitions, results), and emits a summary.
+//! Headless tournament runner: load a games config, execute the tournament,
+//! write artifacts, and emit a summary.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -15,7 +13,7 @@ use nit_games::tournament::TournamentKernel;
 use nit_games::{config::EngineMode, NormalizedConfig};
 use nit_utils::hashing::stable_hash_bytes;
 
-use crate::cli::OutputFormat;
+use crate::cli::{OutputFormat, RunArgs};
 
 const SAVE_DATA_REQUIRED_MSG: &str = "`save_data = false` is not supported for `games run`.";
 
@@ -30,219 +28,206 @@ struct PreparedBatchConfig {
     deterministic_run_id: String,
 }
 
-/// Run a single headless tournament, write output artifacts, and emit a summary.
-pub(super) fn run_games_headless(
-    config_path: Option<PathBuf>,
-    strategies_path: Option<PathBuf>,
-    out_dir: Option<PathBuf>,
-    seed_override: Option<u64>,
-    output_format: OutputFormat,
-    suppress_stdout: bool,
-    verbose_logging: bool,
-) -> anyhow::Result<()> {
-    // Phase 1: load and validate configuration.
-    let batch_cfg = prepare_batch_config(config_path, strategies_path, seed_override)?;
-    let artifact_root = super::resolve_output_dir(&batch_cfg.resolved_path, out_dir)?;
+pub(super) fn run_games_headless(args: RunArgs) -> anyhow::Result<()> {
+    let RunArgs {
+        config,
+        strategies,
+        out,
+        seed,
+        output,
+    } = args;
+    let format = output.format;
+    let quiet = output.quiet;
+    let verbose = output.verbose;
 
-    // Phase 2: determine on-disk layout when data saving is enabled.
-    let storage_layout = batch_cfg.normalized.save_data.then(|| {
+    let prep = prepare_batch_config(config, strategies, seed)?;
+    let artifact_root = super::resolve_output_dir(&prep.resolved_path, out)?;
+
+    let layout = prep.normalized.save_data.then(|| {
         RunLayout::for_base(
             &artifact_root,
-            &batch_cfg.batch_timestamp,
-            batch_cfg.effective_seed,
-            &batch_cfg.deterministic_run_id,
+            &prep.batch_timestamp,
+            prep.effective_seed,
+            &prep.deterministic_run_id,
         )
     });
 
-    if let Some(ref layout_ref) = storage_layout {
-        fs::create_dir_all(&layout_ref.run_dir)
-            .with_context(|| format!("failed to create {}", layout_ref.run_dir.display()))?;
+    if let Some(disk) = layout.as_ref() {
+        fs::create_dir_all(&disk.run_dir)
+            .with_context(|| format!("failed to create {}", disk.run_dir.display()))?;
     }
 
-    if verbose_logging {
-        log_run_preamble(&batch_cfg.resolved_path, &storage_layout);
+    if verbose {
+        log_run_preamble(&prep.resolved_path, layout.as_ref());
     }
 
-    // Phase 3: build and execute the tournament kernel.
-    if verbose_logging {
-        eprintln!("[execution] Starting tournament execution");
-    }
-    let engine = TournamentKernel::new(batch_cfg.normalized.clone());
-    let snapshot_config = engine.config().clone();
-    let emit_events = batch_cfg.normalized.save_data && batch_cfg.normalized.event_log.enabled;
-    let emit_history = batch_cfg.normalized.save_data && batch_cfg.normalized.history.enabled;
+    let engine = TournamentKernel::new(prep.normalized.clone());
+    let frozen_config = engine.config().clone();
+    let emit_events = prep.normalized.save_data && prep.normalized.event_log.enabled;
+    let emit_history = prep.normalized.save_data && prep.normalized.history.enabled;
 
-    let execution_output = super::execute_tournament(
+    let outcome = super::execute_tournament(
         &engine,
         emit_events
-            .then(|| storage_layout.as_ref().map(|dl| dl.events_path.clone()))
+            .then(|| layout.as_ref().map(|disk| disk.events_path.clone()))
             .flatten(),
         emit_history
-            .then(|| storage_layout.as_ref().map(|dl| dl.history_path.clone()))
+            .then(|| layout.as_ref().map(|disk| disk.history_path.clone()))
             .flatten(),
     )?;
 
-    // Phase 4: write artifacts to the run directory.
-    if verbose_logging {
-        eprintln!("[artifact-write] Writing run artifacts");
-    }
-    if let Some(ref artifact_layout) = storage_layout {
+    if let Some(disk) = layout.as_ref() {
         super::write_run_artifacts(
-            &artifact_layout.config_path,
-            &batch_cfg.source_text,
-            &artifact_layout.definitions_path,
+            &disk.config_path,
+            &prep.source_text,
+            &disk.definitions_path,
             engine.definitions(),
-            &artifact_layout.results_path,
-            &execution_output.results,
+            &disk.results_path,
+            &outcome.results,
         );
     }
 
-    // Phase 5: assemble and emit the summary.
-    let final_summary = build_headless_summary(
-        &batch_cfg,
-        snapshot_config,
-        &storage_layout,
+    let report = build_headless_summary(
+        prep,
+        frozen_config,
+        layout.as_ref(),
         engine.definitions(),
-        execution_output,
+        outcome,
     );
 
-    persist_and_emit_summary(
-        &final_summary,
-        &storage_layout,
-        output_format,
-        suppress_stdout,
-        verbose_logging,
-    )
+    persist_and_emit_summary(&report, layout.as_ref(), format, quiet, verbose)
 }
 
 fn prepare_batch_config(
     toml_source: Option<PathBuf>,
     sidecar_source: Option<PathBuf>,
-    explicit_seed_value: Option<u64>,
+    explicit_seed: Option<u64>,
 ) -> anyhow::Result<PreparedBatchConfig> {
-    let (canonical_path, raw_toml, mut parsed_cfg) =
+    let (canonical_path, raw_toml, mut parsed) =
         super::load_games_config(toml_source, sidecar_source)?;
 
-    if !parsed_cfg.save_data {
+    if !parsed.save_data {
         anyhow::bail!(SAVE_DATA_REQUIRED_MSG);
     }
 
-    // Apply explicit seed if provided; force batch engine mode.
-    if let Some(user_seed) = explicit_seed_value {
-        parsed_cfg.seed = Some(user_seed);
+    if let Some(user_seed) = explicit_seed {
+        parsed.seed = Some(user_seed);
     }
-    parsed_cfg.engine.mode = EngineMode::Batch;
+    parsed.engine.mode = EngineMode::Batch;
 
-    // Resolve the effective seed: use the explicit value or derive one deterministically.
-    let creation_stamp = EventWriter::timestamp();
-    let resolved_seed = parsed_cfg
+    let stamp = EventWriter::timestamp();
+    let resolved_seed = parsed
         .seed
-        .unwrap_or_else(|| stable_hash_bytes(format!("{creation_stamp}\n{raw_toml}").as_bytes()));
-    parsed_cfg.seed = Some(resolved_seed);
+        .unwrap_or_else(|| stable_hash_bytes(format!("{stamp}\n{raw_toml}").as_bytes()));
+    parsed.seed = Some(resolved_seed);
 
-    parsed_cfg = super::finalize_config(parsed_cfg)?;
+    parsed = super::finalize_config(parsed)?;
 
-    let content_hash_id = nit_games::run_id_from_seed_config(resolved_seed, &raw_toml);
+    let run_id = nit_games::run_id_from_seed_config(resolved_seed, &raw_toml);
 
     Ok(PreparedBatchConfig {
         resolved_path: canonical_path,
         source_text: raw_toml,
-        normalized: parsed_cfg,
-        batch_timestamp: creation_stamp,
+        normalized: parsed,
+        batch_timestamp: stamp,
         effective_seed: resolved_seed,
-        deterministic_run_id: content_hash_id,
+        deterministic_run_id: run_id,
     })
 }
 
-fn log_run_preamble(toml_location: &Path, storage_layout: &Option<RunLayout>) {
+fn log_run_preamble(toml_location: &Path, disk: Option<&RunLayout>) {
     eprintln!("[config-prep] Games config: {}", toml_location.display());
-    match storage_layout.as_ref() {
-        Some(available_layout) => {
-            eprintln!(
-                "[summary-emit] Games summary: {}",
-                available_layout.summary_path.display(),
-            );
-        }
+    match disk {
+        Some(layout) => eprintln!(
+            "[summary-emit] Games summary: {}",
+            layout.summary_path.display(),
+        ),
         None => eprintln!("[summary-emit] Games summary: disabled (`save_data = false`)"),
     }
 }
 
-fn build_run_paths(
-    storage_layout: &Option<RunLayout>,
-    tournament_output: &super::TournamentRun,
-) -> RunPaths {
-    let layout = storage_layout.as_ref();
-    RunPaths {
-        summary: layout.map(|l| l.summary_path.display().to_string()),
-        definitions: layout.map(|l| l.definitions_path.display().to_string()),
-        results: layout.map(|l| l.results_path.display().to_string()),
-        config: layout.map(|l| l.config_path.display().to_string()),
-        analysis_dir: layout.map(|l| l.analysis_dir.display().to_string()),
-        events: tournament_output.event_log_path.clone(),
-        history: tournament_output.history_log_path.clone(),
+fn build_run_paths(disk: Option<&RunLayout>, outcome: &super::TournamentRun) -> RunPaths {
+    let mut paths = RunPaths {
+        summary: None,
+        definitions: None,
+        results: None,
+        config: None,
+        analysis_dir: None,
+        events: outcome.event_log_path.clone(),
+        history: outcome.history_log_path.clone(),
+    };
+    if let Some(layout) = disk {
+        paths.summary = Some(layout.summary_path.display().to_string());
+        paths.definitions = Some(layout.definitions_path.display().to_string());
+        paths.results = Some(layout.results_path.display().to_string());
+        paths.config = Some(layout.config_path.display().to_string());
+        paths.analysis_dir = Some(layout.analysis_dir.display().to_string());
     }
+    paths
 }
 
 fn build_headless_summary(
-    batch_cfg: &PreparedBatchConfig,
+    prep: PreparedBatchConfig,
     engine_snapshot: NormalizedConfig,
-    storage_layout: &Option<RunLayout>,
-    compiled_strategies: &[StrategyDefinition],
-    tournament_output: super::TournamentRun,
+    disk: Option<&RunLayout>,
+    definitions: &[StrategyDefinition],
+    outcome: super::TournamentRun,
 ) -> RunSummary {
+    let PreparedBatchConfig {
+        source_text,
+        batch_timestamp,
+        effective_seed,
+        deterministic_run_id,
+        ..
+    } = prep;
+    let paths = build_run_paths(disk, &outcome);
+    let run_dir = disk.map(|layout| layout.run_dir.display().to_string());
     RunSummary {
         schema_version: RUN_SUMMARY_SCHEMA_VERSION,
-        timestamp: batch_cfg.batch_timestamp.clone(),
-        run_id: batch_cfg.deterministic_run_id.clone(),
-        seed: batch_cfg.effective_seed,
-        config_text: batch_cfg.source_text.clone(),
+        timestamp: batch_timestamp,
+        run_id: deterministic_run_id,
+        seed: effective_seed,
+        config_text: source_text,
         config: engine_snapshot,
-        paths: build_run_paths(storage_layout, &tournament_output),
-        strategies: compiled_strategies.to_vec(),
-        results: tournament_output.results,
-        event_log: tournament_output.event_log_path,
-        history_log: tournament_output.history_log_path,
-        runtime: tournament_output.runtime,
-        run_dir: storage_layout
-            .as_ref()
-            .map(|fs_layout| fs_layout.run_dir.display().to_string()),
+        paths,
+        strategies: definitions.to_vec(),
+        results: outcome.results,
+        event_log: outcome.event_log_path,
+        history_log: outcome.history_log_path,
+        runtime: outcome.runtime,
+        run_dir,
     }
 }
 
-/// Write the completed summary to disk and optionally emit it to stdout.
 fn persist_and_emit_summary(
-    final_report: &RunSummary,
-    storage_layout: &Option<RunLayout>,
-    serialization_format: OutputFormat,
+    report: &RunSummary,
+    disk: Option<&RunLayout>,
+    output_format: OutputFormat,
     suppress_stdout: bool,
     verbose: bool,
 ) -> anyhow::Result<()> {
-    if let Some(ref writable_layout) = storage_layout {
-        let report_destination = &writable_layout.summary_path;
-        nit_games::output::write_summary(report_destination, final_report)
-            .with_context(|| format!("failed to write {}", report_destination.display()))?;
+    if let Some(layout) = disk {
+        let target = &layout.summary_path;
+        nit_games::output::write_summary(target, report)
+            .with_context(|| format!("failed to write {}", target.display()))?;
     }
 
     if verbose {
-        emit_diagnostic_paths(final_report);
+        if let Some(events) = report.paths.events.as_deref() {
+            eprintln!("Events: {events}");
+        }
+        if let Some(history) = report.paths.history.as_deref() {
+            eprintln!("History: {history}");
+        }
     }
 
     if !suppress_stdout {
-        let serialized_output = match serialization_format {
-            OutputFormat::Json => serde_json::to_string(final_report)?,
-            OutputFormat::Pretty => serde_json::to_string_pretty(final_report)?,
+        let serialized = match output_format {
+            OutputFormat::Json => serde_json::to_string(report)?,
+            OutputFormat::Pretty => serde_json::to_string_pretty(report)?,
         };
-        println!("{serialized_output}");
+        println!("{serialized}");
     }
 
     Ok(())
-}
-
-fn emit_diagnostic_paths(report: &RunSummary) {
-    if let Some(ref event_path) = report.paths.events {
-        eprintln!("Events: {event_path}");
-    }
-    if let Some(ref history_path) = report.paths.history {
-        eprintln!("History: {history_path}");
-    }
 }

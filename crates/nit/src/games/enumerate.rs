@@ -1,6 +1,6 @@
 use std::fs;
 use std::io::{BufWriter, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::Context;
 use nit_games::{enumerate_fsms, FsmDefinition, InputMode};
@@ -28,17 +28,7 @@ fn run_games_enumerate_fsm(
 ) -> anyhow::Result<()> {
     let range = parse_states_range(states)?;
     let mode = parse_input_mode_arg(input_mode.as_deref())?;
-
-    let out_path = if out.extension().is_some_and(|ext| ext == "ndjson") {
-        out.to_path_buf()
-    } else {
-        fs::create_dir_all(out)?;
-        let filename = format!(
-            "fsm_enumeration__states-{}.ndjson",
-            states.replace("..", "-")
-        );
-        out.join(filename)
-    };
+    let out_path = resolve_enumeration_path(out, states)?;
 
     let mut writer = BufWriter::new(
         fs::File::create(&out_path)
@@ -62,6 +52,18 @@ fn run_games_enumerate_fsm(
     writer.flush()?;
     eprintln!("FSM enumeration written: {}", out_path.display());
     Ok(())
+}
+
+fn resolve_enumeration_path(out: &Path, states: &str) -> anyhow::Result<PathBuf> {
+    if out.extension().is_some_and(|ext| ext == "ndjson") {
+        return Ok(out.to_path_buf());
+    }
+    fs::create_dir_all(out).with_context(|| format!("failed to create {}", out.display()))?;
+    let filename = format!(
+        "fsm_enumeration__states-{}.ndjson",
+        states.replace("..", "-")
+    );
+    Ok(out.join(filename))
 }
 
 fn parse_states_range(input: &str) -> anyhow::Result<std::ops::RangeInclusive<usize>> {

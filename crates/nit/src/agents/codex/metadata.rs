@@ -1,87 +1,9 @@
-use std::fs;
-use std::path::PathBuf;
+use super::cache::CodexModelEntry;
 
-use anyhow::Context;
-use serde::Deserialize;
-
-#[derive(Deserialize)]
-struct CodexModelsCache {
-    models: Vec<CodexModelEntry>,
-}
-
-#[derive(Deserialize)]
-struct CodexModelEntry {
-    slug: String,
-    #[serde(default)]
-    display_name: Option<String>,
-    #[serde(default)]
-    description: Option<String>,
-    #[serde(default)]
-    visibility: Option<String>,
-    #[serde(default)]
-    priority: Option<i64>,
-    #[serde(default)]
-    context_window: Option<u32>,
-    #[serde(default)]
-    effective_context_window_percent: Option<u8>,
-    #[serde(default)]
-    default_reasoning_level: Option<String>,
-    #[serde(default)]
-    supported_reasoning_levels: Option<Vec<CodexReasoningLevel>>,
-}
-
-#[derive(Deserialize)]
-struct CodexReasoningLevel {
-    effort: String,
-}
-
-pub(super) fn load_agents_from_codex_models_cache() -> anyhow::Result<nit_core::AgentsState> {
-    let home = std::env::var("HOME").context("HOME not set")?;
-    let path = PathBuf::from(home).join(".codex").join("models_cache.json");
-    let raw = fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
-    let cache: CodexModelsCache =
-        serde_json::from_str(&raw).context("parse ~/.codex/models_cache.json")?;
-
-    let mut entries: Vec<_> = cache
-        .models
-        .into_iter()
-        .filter(|m| m.visibility.as_deref().unwrap_or("list") == "list")
-        .collect();
-    entries.sort_by(|a, b| {
-        a.priority
-            .unwrap_or(i64::MAX)
-            .cmp(&b.priority.unwrap_or(i64::MAX))
-            .then_with(|| a.slug.cmp(&b.slug))
-    });
-
-    let mut agents = nit_core::AgentsState::default();
-    agents.mcp.state = nit_core::McpConnectionState::Connected;
-    agents.mcp.endpoint = format!("codex://cache ({})", path.display());
-    agents.mcp.latency_ms = None;
-    agents.mcp.last_error = None;
-
-    populate_codex_metadata(&mut agents, &entries);
-    agents.agents = build_codex_lanes(entries);
-
-    agents.selected_agent = agents.agents.first().map(|lane| lane.id.clone());
-    agents.roster_selected = 0;
-    Ok(agents)
-}
-
-pub(super) fn load_only_codex_agents() -> nit_core::AgentsState {
-    load_agents_from_codex_models_cache().unwrap_or_else(|err| {
-        let mut agents = nit_core::AgentsState::default();
-        agents.alerts.push(nit_core::AgentAlert {
-            severity: nit_core::AgentAlertSeverity::Warn,
-            source: "codex".into(),
-            message: format!("Failed to load Codex models: {err}"),
-            at: "t+0".into(),
-        });
-        agents
-    })
-}
-
-fn populate_codex_metadata(agents: &mut nit_core::AgentsState, entries: &[CodexModelEntry]) {
+pub(super) fn populate_codex_metadata(
+    agents: &mut nit_core::AgentsState,
+    entries: &[CodexModelEntry],
+) {
     for entry in entries {
         if let Some(window) = entry.context_window {
             let pct = entry.effective_context_window_percent.unwrap_or(100) as u64;
@@ -121,7 +43,7 @@ fn populate_codex_metadata(agents: &mut nit_core::AgentsState, entries: &[CodexM
     }
 }
 
-fn build_codex_lanes(entries: Vec<CodexModelEntry>) -> Vec<nit_core::AgentLane> {
+pub(super) fn build_codex_lanes(entries: Vec<CodexModelEntry>) -> Vec<nit_core::AgentLane> {
     entries
         .into_iter()
         .map(|entry| {

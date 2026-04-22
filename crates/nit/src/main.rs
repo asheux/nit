@@ -7,10 +7,11 @@ mod graph;
 mod logging;
 mod workspace;
 
+use std::path::Path;
 use std::sync::mpsc;
 
 use clap::Parser;
-use nit_core::{AppKind, Mode, PaneId};
+use nit_core::{AppKind, AppState, LabId, Mode, PaneId, SubstrateState};
 use nit_tui::claude_runner::ClaudeRunnerConfig;
 use nit_tui::codex_runner::{CodexRunnerConfig, CodexRuntimeMode};
 use nit_tui::{run, Theme};
@@ -25,7 +26,6 @@ use crate::workspace::{
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse_from(cli::normalize_lab_args(std::env::args()));
 
-    // Headless games subcommands — early return, no TUI.
     if let Some(Command::Games {
         command: Some(games_cmd),
         ..
@@ -34,29 +34,9 @@ fn main() -> anyhow::Result<()> {
         return games::dispatch_subcommand(games_cmd);
     }
 
-    // Build runner configs while `cli` is fully intact (before partial moves).
-    let runtime_mode = CodexRuntimeMode::from(cli.codex_runtime);
-    let max_turns = cli.codex_max_parallel_turns as usize;
-    let codex_runner_config = CodexRunnerConfig {
-        sandbox: cli.codex_sandbox.map(|s| s.as_str().to_string()),
-        approval_policy: Some(cli.codex_approval_policy.as_str().to_string()),
-        max_parallel_turns: max_turns,
-        // Filled in by nit-tui's app::run once the back-channel listener
-        // has bound its UDS path.
-        mcp_backchannel_socket: None,
-    };
-    let claude_runner_config = ClaudeRunnerConfig {
-        max_parallel_turns: max_turns,
-        permission_mode: None,
-    };
+    let (runtime_mode, codex_runner_config, claude_runner_config) = build_runner_configs(&cli);
     let backend_selection = cli.agents;
-
-    // Resolve the application mode and filesystem target.
-    let (app_kind, target_path) = match cli.command {
-        Some(Command::Gol { path }) => (AppKind::Gol, path),
-        Some(Command::Games { path, .. }) => (AppKind::Games, path),
-        None => (nit_core::LabId::from(cli.lab), cli.path),
-    };
+    let (app_kind, target_path) = resolve_app_target(cli.command, cli.lab, cli.path);
 
     let (workspace_root, editor_buffer) = match app_kind {
         AppKind::Gol => open_target_gol(target_path.as_deref())?,
@@ -70,8 +50,8 @@ fn main() -> anyhow::Result<()> {
     install_panic_hook();
 
     let notes_buffer = load_notes(&workspace_root);
-    let mut app_state = nit_core::AppState::new(workspace_root, editor_buffer, notes_buffer);
-    app_state.substrate = nit_core::SubstrateState::load(&app_state.workspace_root);
+    let mut app_state = AppState::new(workspace_root, editor_buffer, notes_buffer);
+    app_state.substrate = SubstrateState::load(&app_state.workspace_root);
     configure_app_state(
         &mut app_state,
         backend_selection,
@@ -94,18 +74,48 @@ fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
+fn build_runner_configs(cli: &Cli) -> (CodexRuntimeMode, CodexRunnerConfig, ClaudeRunnerConfig) {
+    let runtime_mode = CodexRuntimeMode::from(cli.codex_runtime);
+    let max_turns = cli.codex_max_parallel_turns as usize;
+    let codex = CodexRunnerConfig {
+        sandbox: cli.codex_sandbox.map(|s| s.as_str().to_string()),
+        approval_policy: Some(cli.codex_approval_policy.as_str().to_string()),
+        max_parallel_turns: max_turns,
+        // mcp_backchannel_socket is filled in by nit-tui's app::run once the
+        // back-channel listener has bound its UDS path.
+        mcp_backchannel_socket: None,
+    };
+    let claude = ClaudeRunnerConfig {
+        max_parallel_turns: max_turns,
+        permission_mode: None,
+    };
+    (runtime_mode, codex, claude)
+}
+
+fn resolve_app_target(
+    command: Option<Command>,
+    lab: cli::LabArg,
+    fallback_path: Option<std::path::PathBuf>,
+) -> (AppKind, Option<std::path::PathBuf>) {
+    match command {
+        Some(Command::Gol { path }) => (AppKind::Gol, path),
+        Some(Command::Games { path, .. }) => (AppKind::Games, path),
+        None => (LabId::from(lab), fallback_path),
+    }
+}
+
 fn configure_app_state(
-    state: &mut nit_core::AppState,
+    state: &mut AppState,
     agent_selection: Option<AgentsArg>,
     requested_kind: AppKind,
-    target_path: Option<&std::path::Path>,
+    target_path: Option<&Path>,
 ) {
     state.agents = agents::init_agents(agent_selection.unwrap_or(AgentsArg::All));
     state.app_kind = requested_kind;
     state.visualizer.seed = stable_hash_bytes(state.editor_buffer().content_as_string().as_bytes());
     state.mode = Mode::Normal;
 
-    check_legacy_notes(state);
+    migrate_legacy_notes(state);
 
     // Open the file tree when launching into a directory rather than a single file.
     if target_path.is_none_or(|p| p.is_dir()) {
@@ -115,7 +125,7 @@ fn configure_app_state(
     }
 }
 
-fn check_legacy_notes(state: &mut nit_core::AppState) {
+fn migrate_legacy_notes(state: &mut AppState) {
     if let Some(snapshot_path) =
         export_legacy_notes_snapshot(&state.workspace_root, state.notes_buffer())
     {
@@ -126,39 +136,42 @@ fn check_legacy_notes(state: &mut nit_core::AppState) {
     }
 }
 
-fn init_gol_rules(state: &mut nit_core::AppState) {
-    let persisted = nit_core::load_rule_config(&state.workspace_root);
+fn init_gol_rules(state: &mut AppState) {
+    let nit_core::RuleConfigLoad {
+        rule: prefs,
+        rules,
+        workspace_rule,
+        global_path,
+        workspace_path,
+        warnings,
+    } = nit_core::load_rule_config(&state.workspace_root);
 
-    let (catalog, mut diagnostics) = nit_core::load_rule_catalog(&persisted.rules.user);
-    diagnostics.extend(persisted.warnings);
+    let (catalog, mut diagnostics) = nit_core::load_rule_catalog(&rules.user);
+    diagnostics.extend(warnings);
     for message in diagnostics {
         tracing::warn!("{message}");
     }
 
     // Workspace-level override takes priority over the global default.
-    let prefs = &persisted.rule;
-    let selected_key = if prefs.workspace_override {
-        persisted
-            .workspace_rule
-            .clone()
-            .unwrap_or_else(|| prefs.default.clone())
-    } else {
-        prefs.default.clone()
-    };
+    let chosen_key = prefs
+        .workspace_override
+        .then_some(workspace_rule)
+        .flatten()
+        .unwrap_or_else(|| prefs.default.clone());
 
-    let resolved_rule = catalog.select(&selected_key).unwrap_or_else(|err| {
-        tracing::warn!("invalid GoL rule '{selected_key}': {err}");
+    let resolved_rule = catalog.select(&chosen_key).unwrap_or_else(|err| {
+        tracing::warn!("invalid GoL rule '{chosen_key}': {err}");
         nit_core::SelectedRule::default()
     });
 
     state.settings.gol.rule = prefs.clone();
-    state.settings.gol.rules = persisted.rules.clone();
+    state.settings.gol.rules = rules;
     state.init_rules(
         catalog,
         resolved_rule,
         nit_core::RulePersistence {
-            global_path: persisted.global_path,
-            workspace_path: persisted.workspace_path,
+            global_path,
+            workspace_path,
             workspace_override: prefs.workspace_override,
         },
     );
