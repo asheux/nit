@@ -10,17 +10,16 @@ use nit_mcp::protocol::{BackchannelRequest, BackchannelResponse};
 use nit_mcp::server::handle_line;
 use nit_mcp::Backchannel;
 
+pub const TEST_AGENT_ID: &str = "test-agent";
+
+#[derive(Default)]
 pub struct MockBackchannel {
     captured: Mutex<Vec<BackchannelRequest>>,
-    reply_ok: bool,
 }
 
 impl MockBackchannel {
     pub fn new() -> Self {
-        Self {
-            captured: Mutex::new(Vec::new()),
-            reply_ok: true,
-        }
+        Self::default()
     }
 
     pub fn captured(&self) -> Vec<BackchannelRequest> {
@@ -38,14 +37,14 @@ impl Backchannel for MockBackchannel {
         self.captured.lock().unwrap().push(req.clone());
         Ok(BackchannelResponse {
             request_id,
-            ok: self.reply_ok,
+            ok: true,
             error: None,
         })
     }
 }
 
-pub fn run_once(mock: &MockBackchannel, request: &str) -> Value {
+pub fn run_once(mock: &impl Backchannel, request: &str) -> Value {
     let mut counter = 0u64;
-    let line = handle_line(request, mock, "test-agent", &mut counter);
+    let line = handle_line(request, mock, TEST_AGENT_ID, &mut counter);
     serde_json::from_str(&line).unwrap()
 }

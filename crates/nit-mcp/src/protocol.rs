@@ -1,7 +1,6 @@
-//! Wire types shared between `nit-mcp-server` and nit-tui's listener thread.
-//!
 //! Reuses nit-core substrate enums directly so target/kind values cross the
-//! UDS boundary without a bespoke intermediate schema.
+//! UDS boundary between `nit-mcp-server` and nit-tui's listener thread
+//! without a bespoke intermediate schema.
 
 use serde::{Deserialize, Serialize};
 

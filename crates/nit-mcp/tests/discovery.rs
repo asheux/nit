@@ -1,6 +1,9 @@
 mod common;
 
 use common::{run_once, MockBackchannel};
+use nit_mcp::server::METHOD_NOT_FOUND;
+
+const MCP_PROTOCOL_VERSION: &str = "2024-11-05";
 
 #[test]
 fn initialize_returns_capabilities() {
@@ -10,7 +13,7 @@ fn initialize_returns_capabilities() {
     );
     assert_eq!(resp["id"], 1);
     let result = &resp["result"];
-    assert_eq!(result["protocolVersion"], "2024-11-05");
+    assert_eq!(result["protocolVersion"], MCP_PROTOCOL_VERSION);
     assert!(result["capabilities"]["tools"].is_object());
     assert_eq!(result["serverInfo"]["name"], "nit-mcp");
 }
@@ -35,5 +38,5 @@ fn unknown_method_returns_method_not_found() {
         &MockBackchannel::new(),
         r#"{"jsonrpc":"2.0","id":9,"method":"does_not_exist","params":{}}"#,
     );
-    assert_eq!(resp["error"]["code"], nit_mcp::server::METHOD_NOT_FOUND);
+    assert_eq!(resp["error"]["code"], METHOD_NOT_FOUND);
 }

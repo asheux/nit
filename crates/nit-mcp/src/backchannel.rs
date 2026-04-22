@@ -20,34 +20,31 @@ pub trait Backchannel {
 }
 
 pub struct BackchannelClient {
-    #[cfg(unix)]
-    socket_path: String,
-    #[cfg(not(unix))]
-    tcp_port: u16,
+    /// On unix, the socket path; on other platforms, the TCP port as a string
+    /// (validated to be a `u16` in [`Self::from_env`]).
+    addr: String,
 }
 
 impl BackchannelClient {
     pub fn from_env() -> anyhow::Result<Self> {
         #[cfg(unix)]
-        {
-            let path = std::env::var("NIT_MCP_BACKCHANNEL_SOCKET")
-                .map_err(|_| anyhow::anyhow!("NIT_MCP_BACKCHANNEL_SOCKET not set"))?;
-            Ok(Self { socket_path: path })
-        }
+        let addr = std::env::var("NIT_MCP_BACKCHANNEL_SOCKET")
+            .map_err(|_| anyhow::anyhow!("NIT_MCP_BACKCHANNEL_SOCKET not set"))?;
         #[cfg(not(unix))]
-        {
-            let port: u16 = std::env::var("NIT_MCP_BACKCHANNEL_PORT")
-                .map_err(|_| anyhow::anyhow!("NIT_MCP_BACKCHANNEL_PORT not set"))?
-                .parse()?;
-            Ok(Self { tcp_port: port })
-        }
+        let addr = {
+            let raw = std::env::var("NIT_MCP_BACKCHANNEL_PORT")
+                .map_err(|_| anyhow::anyhow!("NIT_MCP_BACKCHANNEL_PORT not set"))?;
+            let _: u16 = raw.parse()?;
+            raw
+        };
+        Ok(Self { addr })
     }
 
     fn connect(&self) -> anyhow::Result<Stream> {
         #[cfg(unix)]
-        let stream = Stream::connect(&self.socket_path)?;
+        let stream = Stream::connect(&self.addr)?;
         #[cfg(not(unix))]
-        let stream = Stream::connect(("127.0.0.1", self.tcp_port))?;
+        let stream = Stream::connect(("127.0.0.1", self.addr.parse::<u16>()?))?;
         stream.set_read_timeout(Some(IO_TIMEOUT))?;
         stream.set_write_timeout(Some(IO_TIMEOUT))?;
         Ok(stream)

@@ -1,0 +1,64 @@
+{
+  "tools": [
+    {
+      "name": "emit_signal",
+      "description": "Emit a stigmergic signal into nit's substrate. Visible to observers, arbiters, and other agents.",
+      "inputSchema": {
+        "type": "object",
+        "required": ["kind", "target"],
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": [
+              "warning",
+              "lead",
+              "deadend",
+              "help_needed",
+              "claim_violation",
+              "done_marker",
+              "intervention_emitted"
+            ],
+            "description": "Signal kind — see nit-core SignalKind."
+          },
+          "target": {
+            "type": "object",
+            "description": "SignalTarget: {\"kind\":\"file\",\"path\":...} | {\"kind\":\"agent\",\"agent_id\":...} | {\"kind\":\"global\"}."
+          },
+          "payload": { "description": "Opaque JSON payload; schema is signal-kind specific." },
+          "strength": { "type": "number", "description": "Initial strength override; defaults to 1.0." }
+        }
+      }
+    },
+    {
+      "name": "assert_claim",
+      "description": "Assert a claim over a substrate resource. Conflicts emit ClaimViolation signals; ttl is mood-adjusted at apply time.",
+      "inputSchema": {
+        "type": "object",
+        "required": ["kind", "target", "ttl_gens", "rationale"],
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": ["exclusive_write", "shared_read", "append_only", "soft"]
+          },
+          "target": { "type": "object" },
+          "ttl_gens": { "type": "integer", "minimum": 1 },
+          "rationale": { "type": "string" }
+        }
+      }
+    },
+    {
+      "name": "assert_assumption",
+      "description": "Assert a read-time belief about a resource. Invalidated automatically on overlapping FileWrite.",
+      "inputSchema": {
+        "type": "object",
+        "required": ["target", "ttl_gens", "rationale"],
+        "properties": {
+          "target": { "type": "object" },
+          "fact": { "description": "Opaque JSON fact the assumption asserts." },
+          "ttl_gens": { "type": "integer", "minimum": 1 },
+          "rationale": { "type": "string" }
+        }
+      }
+    }
+  ]
+}

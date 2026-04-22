@@ -1,6 +1,6 @@
 mod common;
 
-use common::{run_once, MockBackchannel};
+use common::{run_once, MockBackchannel, TEST_AGENT_ID};
 use nit_core::substrate::{ClaimKind, SignalKind, SignalTarget};
 use nit_mcp::protocol::BackchannelRequest;
 use nit_mcp::server::{INVALID_PARAMS, METHOD_NOT_FOUND};
@@ -36,7 +36,7 @@ fn emit_signal_forwards_fields_to_backchannel() {
     else {
         panic!("expected EmitSignal, got {:?}", captured.first());
     };
-    assert_eq!(agent_id, "test-agent");
+    assert_eq!(agent_id, TEST_AGENT_ID);
     assert_eq!(*kind, SignalKind::Warning);
     assert_eq!(*target, SignalTarget::Global);
     assert_eq!(payload["msg"], "hello");
@@ -73,7 +73,7 @@ fn assert_claim_forwards_ttl_and_rationale() {
     else {
         panic!("expected AssertClaim, got {:?}", captured.first());
     };
-    assert_eq!(agent_id, "test-agent");
+    assert_eq!(agent_id, TEST_AGENT_ID);
     assert_eq!(*kind, ClaimKind::ExclusiveWrite);
     assert_eq!(*ttl_gens, 5);
     assert_eq!(rationale, "integration mission");
