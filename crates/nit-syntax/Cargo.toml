@@ -8,10 +8,12 @@ publish = false
 rust-version.workspace = true
 
 [dependencies]
+# Workspace deps
 anyhow = { workspace = true }
 tracing = { workspace = true }
 
 nit-core = { path = "../nit-core" }
+nit-utils = { path = "../nit-utils" }
 
 # Tree-sitter runtime
 tree-sitter = "0.20.10"

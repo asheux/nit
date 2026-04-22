@@ -984,6 +984,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "nit-core",
+ "nit-utils",
  "tracing",
  "tree-sitter",
  "tree-sitter-bash",

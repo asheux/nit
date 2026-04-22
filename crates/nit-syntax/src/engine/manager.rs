@@ -1,102 +1,14 @@
-//! Syntax engine trait, configuration, and manager that multiplexes
-//! between the plain-text fallback and the tree-sitter worker.
+//! Multiplexes syntax requests across the plain-text and tree-sitter engines,
+//! holding per-buffer metadata so status reporting stays engine-aware.
 
 use std::collections::HashMap;
-use std::path::Path;
-
-use nit_core::BufferEdit;
 
 use crate::highlight::{EngineKind, HighlightSnapshot, SyntaxStatus};
-use crate::registry::{LanguageId, LanguageRegistry};
-use crate::tree_sitter_engine::TreeSitterEngine;
+use crate::language::LanguageId;
 
-#[derive(Clone, Debug)]
-pub struct SyntaxConfig {
-    pub enabled: bool,
-    pub engine: EngineKind,
-    pub debounce_ms: u64,
-    pub max_file_bytes: usize,
-    pub max_spans_per_line: usize,
-}
-
-impl Default for SyntaxConfig {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            engine: EngineKind::TreeSitter,
-            debounce_ms: 50,
-            max_file_bytes: 2_000_000,
-            max_spans_per_line: 256,
-        }
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct ViewportRange {
-    pub first_line: usize,
-    pub last_line: usize,
-    pub total_lines: usize,
-}
-
-#[derive(Clone, Debug)]
-pub struct HighlightRequest {
-    pub buffer_id: usize,
-    pub version: u64,
-    pub language: LanguageId,
-    pub text: String,
-    pub edits: Vec<BufferEdit>,
-    pub full_reparse: bool,
-    pub max_spans_per_line: usize,
-    pub viewport: Option<ViewportRange>,
-}
-
-pub trait SyntaxEngine {
-    fn detect_language(
-        &self,
-        path: Option<&Path>,
-        first_line: Option<&str>,
-        override_lang: Option<LanguageId>,
-    ) -> LanguageId {
-        LanguageRegistry::detect(path, first_line, override_lang)
-    }
-
-    fn schedule_rehighlight(&mut self, request: HighlightRequest);
-
-    fn try_get_highlights(&mut self, buffer_id: usize, version: u64) -> Option<HighlightSnapshot>;
-}
-
-#[derive(Default)]
-pub struct PlainTextEngine {
-    snapshots: HashMap<usize, HighlightSnapshot>,
-}
-
-impl PlainTextEngine {
-    #[must_use]
-    pub fn new() -> Self {
-        Self::default()
-    }
-}
-
-impl SyntaxEngine for PlainTextEngine {
-    fn schedule_rehighlight(&mut self, request: HighlightRequest) {
-        let snapshot = HighlightSnapshot::plain(
-            request.buffer_id,
-            request.version,
-            request.language,
-            EngineKind::Plain,
-            SyntaxStatus::Ok(EngineKind::Plain),
-            &request.text,
-        );
-        self.snapshots.insert(request.buffer_id, snapshot);
-    }
-
-    fn try_get_highlights(&mut self, buffer_id: usize, version: u64) -> Option<HighlightSnapshot> {
-        self.snapshots
-            .get(&buffer_id)
-            .filter(|s| s.version == version)
-            .cloned()
-    }
-}
+use super::plain::PlainTextEngine;
+use super::tree_sitter::TreeSitterEngine;
+use super::{HighlightRequest, SyntaxConfig, SyntaxEngine};
 
 struct BufferMeta {
     engine: EngineKind,
