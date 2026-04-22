@@ -105,12 +105,6 @@ pub struct WorkspaceScanRuntime {
     /// Max concurrent eval threads — computed once at construction so tests
     /// can override via `with_max_in_flight` without touching globals.
     max_in_flight: usize,
-    /// Every path that's been queued, dispatched, or completed in this
-    /// session. Persists through `note_completed` so the LIVE view can show
-    /// a running log of what was evaluated — entries change from
-    /// "evaluating" to "done" rather than vanishing. Reset only by process
-    /// restart.
-    session_touched: HashSet<PathBuf>,
 }
 
 impl Default for WorkspaceScanRuntime {
@@ -122,7 +116,6 @@ impl Default for WorkspaceScanRuntime {
             done: 0,
             hydrated: false,
             max_in_flight: workspace_scan_max_in_flight(),
-            session_touched: HashSet::new(),
         }
     }
 }
@@ -192,13 +185,18 @@ impl WorkspaceScanRuntime {
         let files = walk_source_files(&workspace_root, &gitignored);
 
         // 4. Queue everything missing or stale (mtime newer than the
-        //    cached report's timestamp).
+        //    cached report's timestamp). The launch-time backfill is
+        //    visible in LIVE as active (scan-evaluating / scan-queued)
+        //    while it runs, but intentionally does NOT populate
+        //    `session_touched`: the operator's mental model for LIVE is
+        //    "what nit is doing THIS session", and pre-session files
+        //    hydrate happens to re-evaluate should not look like
+        //    carry-over from a previous run.
         for path in files {
             if !is_code_file(&path) {
                 continue;
             }
             if Self::needs_eval(state, &path) {
-                self.session_touched.insert(path.clone());
                 self.pending.push_back(path);
             }
         }
@@ -321,14 +319,6 @@ impl WorkspaceScanRuntime {
                 .map(|p| (p.clone(), WorkspaceScanItemState::Queued)),
         );
         out
-    }
-
-    /// Every path the scan has touched this session — including files
-    /// whose evaluation already landed. LIVE view uses this to keep a
-    /// running log (items transition from "evaluating" to "done" rather
-    /// than vanishing on completion).
-    pub fn session_touched(&self) -> &HashSet<PathBuf> {
-        &self.session_touched
     }
 
     #[cfg(test)]

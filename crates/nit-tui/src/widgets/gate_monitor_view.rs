@@ -1592,13 +1592,16 @@ fn build_lines_live(
         }
     }
 
-    // 4. Session log: every path the scan has ever touched this session
-    //    that isn't already tagged as active. These show up as "done" —
-    //    the eval landed, but the entry stays visible for the session so
-    //    the operator gets a running log instead of rows that vanish on
-    //    completion.
-    for path in workspace_scan.session_touched() {
-        combined.entry(path.clone()).or_insert(LiveItemKind::Done);
+    // 4. Session log: every path agents have touched this session. These
+    //    show up as "done" once their eval batch drains — the entry stays
+    //    visible for the rest of the session so the operator gets a
+    //    running log of what was actually modified. `genome_turn_modified`
+    //    is runtime-only (#[serde(skip)]) so it resets on every nit
+    //    launch: LIVE is truly session-scoped, not carried across runs.
+    for paths in state.genome_turn_modified.values() {
+        for path in paths {
+            combined.entry(path.clone()).or_insert(LiveItemKind::Done);
+        }
     }
 
     if combined.is_empty() {

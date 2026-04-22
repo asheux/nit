@@ -965,11 +965,14 @@ fn in_flight_snapshot_is_empty_when_idle() {
 }
 
 #[test]
-fn session_touched_persists_after_completion() {
-    // LIVE view relies on session_touched outliving in_flight_snapshot so
-    // evaluated files don't vanish the moment their result lands. Seed a
-    // few files, drain the scan, and confirm session_touched still lists
-    // every path while in_flight is empty.
+fn backfill_completions_drain_from_live_and_do_not_persist() {
+    // Hydrate queues files that need re-eval at launch. Those files show
+    // up in LIVE as active while the scan runs (scan-evaluating /
+    // scan-queued), but once each result lands the path leaves the
+    // pending/dispatched sets and has no session log entry — LIVE goes
+    // empty as the scan drains. This is what "only persist as long as
+    // the session is active" means for backfill: entries are live while
+    // work is in-flight, not accumulated into a historical log.
     let root = temp_workspace();
     for idx in 0..4 {
         write_file(
@@ -984,39 +987,62 @@ fn session_touched_persists_after_completion() {
     let worker = GenomeWorker::new();
 
     scan.hydrate(&mut state);
-    assert_eq!(scan.session_touched().len(), 4);
+    assert_eq!(
+        scan.pending_count() + scan.dispatched_count(),
+        4,
+        "backfill enqueues the 4 uncached files"
+    );
 
     drain_until_idle(&mut state, &mut scan, &worker, Duration::from_secs(30));
 
     assert!(
         scan.in_flight_snapshot().is_empty(),
-        "in-flight snapshot drains on completion"
-    );
-    assert_eq!(
-        scan.session_touched().len(),
-        4,
-        "session_touched must persist completed paths for the LIVE log"
+        "backfill drains to empty on completion"
     );
 
     cleanup(&root);
 }
 
 #[test]
-fn note_change_never_touches_session_log_for_existing_files() {
-    // LIVE's session log (session_touched) records what nit EVALUATED
-    // this session. External edit events don't trigger evaluation, so
-    // they shouldn't appear in the session log either.
+fn fresh_runtime_starts_empty_after_prior_activity() {
+    // Regression: LIVE's "persist during session only" invariant means a
+    // brand-new WorkspaceScanRuntime (simulates nit relaunch) must not
+    // inherit any state from a prior instance. The runtime owns no
+    // serialized fields and is always constructed via `new()` in
+    // `run_loop`, so this test proves the dataflow stays session-scoped
+    // even if someone adds a field to the struct later.
     let root = temp_workspace();
-    let file = write_file(&root, "src/lib.rs", "fn main() {}\n");
+    for idx in 0..3 {
+        write_file(
+            &root,
+            &format!("src/f{idx}.rs"),
+            &format!("fn f{idx}() {{}}\n"),
+        );
+    }
 
     let mut state = make_state(root.clone());
-    let mut scan = WorkspaceScanRuntime::new();
-    scan.note_change(&mut state, file.clone());
+    let worker = GenomeWorker::new();
 
-    assert!(
-        !scan.session_touched().contains(&file),
-        "external change events must not appear in the session log"
-    );
+    // Session A: run a scan to completion.
+    {
+        let mut scan = WorkspaceScanRuntime::new();
+        scan.hydrate(&mut state);
+        drain_until_idle(&mut state, &mut scan, &worker, Duration::from_secs(30));
+        let (done_a, total_a) = scan.progress();
+        assert_eq!(done_a, total_a, "session A drains fully");
+        assert!(done_a > 0, "session A actually did some work");
+    } // scan dropped — simulates process exit.
+
+    // Session B: construct a fresh runtime. No in-flight, no queued, no
+    // progress carried over. The persisted .nit/genome/ cache is already
+    // warm from session A, so hydrate enqueues nothing.
+    let scan_b = WorkspaceScanRuntime::new();
+    assert_eq!(scan_b.pending_count(), 0);
+    assert_eq!(scan_b.dispatched_count(), 0);
+    let (done_b, total_b) = scan_b.progress();
+    assert_eq!(done_b, 0);
+    assert_eq!(total_b, 0);
+    assert!(!scan_b.is_scanning());
 
     cleanup(&root);
 }
