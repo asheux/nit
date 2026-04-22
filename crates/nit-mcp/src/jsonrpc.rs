@@ -49,8 +49,7 @@ pub fn handle_line<B: Backchannel>(raw: &str, bc: &B, agent_id: &str, counter: &
     let params = value.get("params").cloned().unwrap_or(Value::Null);
     let outcome = match method {
         "initialize" => handle_initialize(params),
-        // Real MCP notifications carry no `id`, so clients tolerate the
-        // spurious reply; emitting one keeps line-oriented test clients in lockstep.
+        // Notifications carry no id; emitting `{}` keeps line-oriented test clients in lockstep.
         "initialized" | "notifications/initialized" => Ok(json!({})),
         "tools/list" => handle_tools_list(),
         "tools/call" => handle_tools_call(params, bc, agent_id, counter),

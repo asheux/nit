@@ -5540,6 +5540,137 @@ fn artifact_popup_queues_when_artifact_agent_is_busy() {
     assert_eq!(state.agents.queued_codex_turns[0].agent_id, "agent-b");
 }
 
+// Shadow single-agent retry must fire the same way swarm-parallel retries
+// fire for writer agents: keyed on the agent's id, driven by
+// `genome_turn_modified[agent_id]` + `genome_quality_deltas[agent_id]`,
+// bounded by `genome_retry_counts[agent_id]`. The shadow pipeline doesn't
+// change any of that — the main agent is just another writer from the
+// retry mechanism's perspective.
+#[test]
+fn shadow_main_agent_retry_fires_like_swarm_writer() {
+    let mut state = state_for_test_in_workspace("shadow-main-retry");
+    state.settings.genome.genome_context_enabled = true;
+
+    let main_agent = "codex-main".to_string();
+
+    // Seed a >=120-line code file (retry threshold) on disk. Synthetic body
+    // with enough lines to pass GENOME_RETRY_MIN_LINES.
+    let file_path = state.workspace_root.join("src").join("big.rs");
+    fs::create_dir_all(file_path.parent().unwrap()).unwrap();
+    let body: String = (0..200)
+        .map(|i| format!("fn f{i}() {{ let _ = {i}; }}\n"))
+        .collect();
+    fs::write(&file_path, body).unwrap();
+
+    // Simulate the post-turn state: the main agent modified this file
+    // during its shadow-augmented turn.
+    state.genome_turn_modified.insert(
+        main_agent.clone(),
+        [file_path.clone()].into_iter().collect(),
+    );
+
+    // Baseline at Spaceship (III), post-turn at Oscillator (II) — tier drop.
+    let baseline = nit_core::GenomeReport {
+        file_path: file_path.clone(),
+        encoder_scores: Vec::new(),
+        cross_encoder_consistency: 0.6,
+        tier: nit_core::GenomeTier::Spaceship,
+        recommendations: Vec::new(),
+        timestamp_ms: 1,
+        grid_size: 32,
+        parsimony: Default::default(),
+    };
+    let post_turn = nit_core::GenomeReport {
+        file_path: file_path.clone(),
+        encoder_scores: Vec::new(),
+        cross_encoder_consistency: 0.4,
+        tier: nit_core::GenomeTier::Oscillator,
+        recommendations: Vec::new(),
+        timestamp_ms: 2,
+        grid_size: 32,
+        parsimony: Default::default(),
+    };
+    state.genome_baselines.insert(file_path.clone(), baseline);
+    state.genome_reports.insert(file_path.clone(), post_turn);
+
+    // This is what `drain_genome_results` would have written after the
+    // authoritative eval batch finalised: delta = -1 (degraded).
+    state.genome_quality_deltas.insert(main_agent.clone(), -1);
+
+    // Build the retry prompt exactly the way the swarm-parallel integrator
+    // retry path does.
+    let result = super::build_genome_retry_prompt(&mut state, &main_agent);
+    let (prompt, degraded) = result.expect("shadow main retry should fire for a tier drop");
+
+    assert_eq!(degraded.len(), 1);
+    assert_eq!(degraded[0], file_path);
+    assert!(prompt.contains("GENOME QUALITY DEGRADED"));
+    assert!(prompt.contains("automatic retry 1/3"));
+    assert!(prompt.contains("src/big.rs"));
+
+    // Budget advances per-agent, same as swarm.
+    assert_eq!(
+        state.genome_retry_counts.get(&main_agent).copied(),
+        Some(1),
+        "per-agent retry count increments on main-agent retry"
+    );
+}
+
+// Complement: once the main agent's retry budget is exhausted, the
+// mechanism stops firing — matches swarm parallel behaviour where each
+// writer has its own budget capped at GENOME_RETRY_LIMIT.
+#[test]
+fn shadow_main_agent_retry_respects_per_agent_budget() {
+    let mut state = state_for_test_in_workspace("shadow-main-retry-budget");
+    state.settings.genome.genome_context_enabled = true;
+
+    let main_agent = "codex-main".to_string();
+    let file_path = state.workspace_root.join("src").join("big.rs");
+    fs::create_dir_all(file_path.parent().unwrap()).unwrap();
+    let body: String = (0..200)
+        .map(|i| format!("fn f{i}() {{ let _ = {i}; }}\n"))
+        .collect();
+    fs::write(&file_path, body).unwrap();
+
+    state.genome_turn_modified.insert(
+        main_agent.clone(),
+        [file_path.clone()].into_iter().collect(),
+    );
+    let baseline = nit_core::GenomeReport {
+        file_path: file_path.clone(),
+        encoder_scores: Vec::new(),
+        cross_encoder_consistency: 0.6,
+        tier: nit_core::GenomeTier::Spaceship,
+        recommendations: Vec::new(),
+        timestamp_ms: 1,
+        grid_size: 32,
+        parsimony: Default::default(),
+    };
+    let post_turn = nit_core::GenomeReport {
+        file_path: file_path.clone(),
+        encoder_scores: Vec::new(),
+        cross_encoder_consistency: 0.4,
+        tier: nit_core::GenomeTier::Oscillator,
+        recommendations: Vec::new(),
+        timestamp_ms: 2,
+        grid_size: 32,
+        parsimony: Default::default(),
+    };
+    state.genome_baselines.insert(file_path.clone(), baseline);
+    state.genome_reports.insert(file_path.clone(), post_turn);
+    state.genome_quality_deltas.insert(main_agent.clone(), -1);
+
+    // Already at the retry limit — no more firings.
+    state
+        .genome_retry_counts
+        .insert(main_agent.clone(), super::GENOME_RETRY_LIMIT);
+
+    assert!(
+        super::build_genome_retry_prompt(&mut state, &main_agent).is_none(),
+        "retry at the budget ceiling must not fire"
+    );
+}
+
 /// Regression: overlapping `TurnCompleted` events from parallel swarm agents
 /// must not clobber each other's genome-eval state. Before per-agent batches,
 /// a second `dispatch_turn_genome_evals` overwrote the single-slot pending

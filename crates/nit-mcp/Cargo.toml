@@ -6,10 +6,6 @@ edition = "2021"
 license = "MIT"
 rust-version.workspace = true
 
-[lib]
-name = "nit_mcp"
-path = "src/lib.rs"
-
 [[bin]]
 name = "nit-mcp-server"
 path = "src/main.rs"

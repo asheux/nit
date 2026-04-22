@@ -6,8 +6,8 @@ use std::sync::Mutex;
 
 use serde_json::Value;
 
+use nit_mcp::jsonrpc::handle_line;
 use nit_mcp::protocol::{BackchannelRequest, BackchannelResponse};
-use nit_mcp::server::handle_line;
 use nit_mcp::Backchannel;
 
 pub const TEST_AGENT_ID: &str = "test-agent";

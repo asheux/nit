@@ -8,11 +8,6 @@ use std::io::{BufRead, Write};
 use crate::backchannel::Backchannel;
 use crate::jsonrpc;
 
-// Re-exports keep integration tests reaching through a single module path
-// (`nit_mcp::server::...`) even though implementations moved out.
-pub use crate::jsonrpc::{handle_line, JsonRpcError, INVALID_PARAMS, METHOD_NOT_FOUND};
-pub use crate::tools::build_backchannel_request;
-
 pub fn run<R: BufRead, W: Write, B: Backchannel>(
     mut reader: R,
     mut writer: W,

@@ -1,6 +1,4 @@
-//! Reuses nit-core substrate enums directly so target/kind values cross the
-//! UDS boundary between `nit-mcp-server` and nit-tui's listener thread
-//! without a bespoke intermediate schema.
+//! Back-channel wire schema. Reuses nit-core substrate enums so target/kind round-trip without a bespoke schema.
 
 use serde::{Deserialize, Serialize};
 

@@ -1,7 +1,7 @@
 mod common;
 
 use common::{run_once, MockBackchannel};
-use nit_mcp::server::METHOD_NOT_FOUND;
+use nit_mcp::jsonrpc::METHOD_NOT_FOUND;
 
 const MCP_PROTOCOL_VERSION: &str = "2024-11-05";
 

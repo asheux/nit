@@ -20,8 +20,7 @@ pub trait Backchannel {
 }
 
 pub struct BackchannelClient {
-    /// On unix, the socket path; on other platforms, the TCP port as a string
-    /// (validated to be a `u16` in [`Self::from_env`]).
+    /// Unix socket path, or decimal TCP port (validated to `u16` in [`Self::from_env`]).
     addr: String,
 }
 

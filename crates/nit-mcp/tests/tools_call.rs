@@ -2,8 +2,8 @@ mod common;
 
 use common::{run_once, MockBackchannel, TEST_AGENT_ID};
 use nit_core::substrate::{ClaimKind, SignalKind, SignalTarget};
+use nit_mcp::jsonrpc::{INVALID_PARAMS, METHOD_NOT_FOUND};
 use nit_mcp::protocol::BackchannelRequest;
-use nit_mcp::server::{INVALID_PARAMS, METHOD_NOT_FOUND};
 
 #[test]
 fn emit_signal_forwards_fields_to_backchannel() {
