@@ -2119,7 +2119,7 @@ pub struct AppState {
 }
 
 /// Sub-view toggle for the CODE STRUCTURAL QUALITY pane.
-#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum GateMonitorSubView {
     #[default]
     Stats,
@@ -2980,6 +2980,12 @@ pub fn apply_action(state: &mut AppState, action: Action) -> ActionOutcome {
                 GateMonitorSubView::Live => GateMonitorSubView::Stats,
             };
             state.gate_monitor_scroll = 0;
+        }
+        Action::GateMonitorSetSubView(target) => {
+            if state.gate_monitor_sub_view != target {
+                state.gate_monitor_sub_view = target;
+                state.gate_monitor_scroll = 0;
+            }
         }
         Action::ShowSubstrate => {
             state.show_substrate_overlay = true;

@@ -92,6 +92,7 @@ pub enum Action {
     VisualizerInspectToggle,
     VisualizerInspectJump(u64),
     GateMonitorToggleSubView,
+    GateMonitorSetSubView(crate::state::GateMonitorSubView),
     ShowSubstrate,
     HideSubstrate,
     SubstrateOverlayToggleTab,

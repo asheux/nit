@@ -35,7 +35,10 @@ const GAUGE_MID_THRESHOLD: f32 = 0.3;
 const TIER_LEVELS: usize = 5;
 const LOADING_PERIOD_MS: f64 = 1600.0;
 
-// `title_prefix_len` is the byte length of the dynamic prefix (varies with grid size).
+// `title_prefix_len` is the byte length of the dynamic prefix (varies with
+// grid size). Each button returns a direct-set action — returning a single
+// "toggle" action for all three collapses to a cycle and takes the user to
+// the wrong tab when they click a non-adjacent one.
 pub fn title_button_hit(col_in_rect: u16, title_prefix_len: u16) -> Option<Action> {
     let col = col_in_rect.saturating_sub(1); // border offset
     let stats_start = title_prefix_len + 1; // space separator
@@ -44,11 +47,14 @@ pub fn title_button_hit(col_in_rect: u16, title_prefix_len: u16) -> Option<Actio
     let fs_end = fs_start + BTN_FILESCORES_LABEL.len() as u16;
     let live_start = fs_end + 1;
     let live_end = live_start + BTN_LIVE_LABEL.len() as u16;
-    if (stats_start..stats_end).contains(&col)
-        || (fs_start..fs_end).contains(&col)
-        || (live_start..live_end).contains(&col)
-    {
-        Some(Action::GateMonitorToggleSubView)
+    if (stats_start..stats_end).contains(&col) {
+        Some(Action::GateMonitorSetSubView(GateMonitorSubView::Stats))
+    } else if (fs_start..fs_end).contains(&col) {
+        Some(Action::GateMonitorSetSubView(
+            GateMonitorSubView::FileScores,
+        ))
+    } else if (live_start..live_end).contains(&col) {
+        Some(Action::GateMonitorSetSubView(GateMonitorSubView::Live))
     } else {
         None
     }

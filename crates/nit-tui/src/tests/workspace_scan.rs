@@ -778,6 +778,72 @@ fn sanity_hashset_compiles() {
 }
 
 #[test]
+fn gate_monitor_tab_clicks_set_target_sub_view_directly() {
+    // Regression: the three tabs (STATS / FILESCORES / LIVE) used to share
+    // a single cycle action, so clicking a non-adjacent tab from the current
+    // view stepped once through the cycle rather than jumping to the clicked
+    // target. Verify each button returns the correct direct-set action and
+    // that applying it from any starting state lands on the requested tab.
+    use crate::widgets::gate_monitor_view::title_button_hit;
+    use nit_core::{Action, GateMonitorSubView};
+
+    // Title prefix is always " CODE STRUCTURAL QUALITY " (25 bytes) when no
+    // genome report is rendered — mirror that layout in the test.
+    let prefix = " CODE STRUCTURAL QUALITY ".len() as u16;
+
+    // STATS button spans [prefix+1 .. prefix+1+7].
+    // FILESCORES spans the next window; LIVE spans the one after.
+    // Sample one column inside each button.
+    let stats_col = prefix + 1 + 3; // middle of " STATS "
+    let fs_col = prefix + 1 + 7 + 1 + 5; // middle of " FILESCORES "
+    let live_col = prefix + 1 + 7 + 1 + 12 + 1 + 2; // middle of " LIVE "
+
+    // Offset by +1 because title_button_hit subtracts the border byte.
+    assert_eq!(
+        title_button_hit(stats_col + 1, prefix),
+        Some(Action::GateMonitorSetSubView(GateMonitorSubView::Stats))
+    );
+    assert_eq!(
+        title_button_hit(fs_col + 1, prefix),
+        Some(Action::GateMonitorSetSubView(
+            GateMonitorSubView::FileScores
+        ))
+    );
+    assert_eq!(
+        title_button_hit(live_col + 1, prefix),
+        Some(Action::GateMonitorSetSubView(GateMonitorSubView::Live))
+    );
+
+    // Driving the action from each starting state must land on the
+    // requested tab — NOT cycle past it.
+    let root = temp_workspace();
+    let mut state = make_state(root.clone());
+
+    state.gate_monitor_sub_view = GateMonitorSubView::Stats;
+    nit_core::apply_action(
+        &mut state,
+        Action::GateMonitorSetSubView(GateMonitorSubView::Live),
+    );
+    assert_eq!(state.gate_monitor_sub_view, GateMonitorSubView::Live);
+
+    state.gate_monitor_sub_view = GateMonitorSubView::Live;
+    nit_core::apply_action(
+        &mut state,
+        Action::GateMonitorSetSubView(GateMonitorSubView::Stats),
+    );
+    assert_eq!(state.gate_monitor_sub_view, GateMonitorSubView::Stats);
+
+    state.gate_monitor_sub_view = GateMonitorSubView::Live;
+    nit_core::apply_action(
+        &mut state,
+        Action::GateMonitorSetSubView(GateMonitorSubView::FileScores),
+    );
+    assert_eq!(state.gate_monitor_sub_view, GateMonitorSubView::FileScores);
+
+    cleanup(&root);
+}
+
+#[test]
 fn in_flight_snapshot_separates_evaluating_from_queued() {
     use crate::workspace_scan::WorkspaceScanItemState;
 
