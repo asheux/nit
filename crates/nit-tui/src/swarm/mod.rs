@@ -111,7 +111,14 @@ use constants::{
     MAX_SWARM_SIZE, SWARM_DEP_OUTPUT_MAX_CHARS, SWARM_DEP_OUTPUT_MAX_CHARS_FULL,
     SWARM_DEP_OUTPUT_TOTAL_MAX_CHARS_FULL, SWARM_VERIFY_MAX_CHARS,
 };
-pub(crate) use constants::{NO_PADDING_CLAUSE, NO_REVERT_CLAUSE, TEST_DISCIPLINE_CLAUSE};
+pub(crate) use constants::{
+    LARGE_SWARM_WARN_THRESHOLD, NO_PADDING_CLAUSE, NO_REVERT_CLAUSE, TEST_DISCIPLINE_CLAUSE,
+};
+
+mod limits;
+pub(crate) use limits::{
+    current_fd_soft_limit, effective_max_swarm_size, large_swarm_warn_threshold,
+};
 use dag::{analyze_swarm_dag, ensure_deps_resolve, find_swarm_cycle_path, repair_swarm_dag};
 use dashboard::{
     blocked_on, dashboard_gate_rows, derive_cargo_packages, gate_bundle_label, run_effective_gates,

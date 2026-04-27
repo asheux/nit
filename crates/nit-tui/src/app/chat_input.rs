@@ -9,10 +9,11 @@ use crate::claude_runner::ClaudeRunner;
 use crate::codex_runner::{CodexRunner, CodexRunnerConfig};
 use crate::shadow::{parse_shadow_command, should_auto_enable_shadows, ShadowRuntime};
 use crate::swarm::{
-    create_chat_clone, detect_swarm_mission_kind_from_prompt,
-    explicit_swarm_mission_kind_from_prompt, is_agent_busy, is_agent_family_busy,
-    is_chat_clone_agent_id, parse_swarm_command, parse_swarm_mission_kind, select_swarm_agents,
-    SwarmCommand, SwarmMissionKind, SwarmRuntime, SwarmSize,
+    create_chat_clone, current_fd_soft_limit, detect_swarm_mission_kind_from_prompt,
+    effective_max_swarm_size, explicit_swarm_mission_kind_from_prompt, is_agent_busy,
+    is_agent_family_busy, is_chat_clone_agent_id, large_swarm_warn_threshold, parse_swarm_command,
+    parse_swarm_mission_kind, push_system_message_to_mission, select_swarm_agents,
+    SwarmCommand, SwarmMissionKind, SwarmRuntime, SwarmSize, LARGE_SWARM_WARN_THRESHOLD,
 };
 use crate::vitals::VitalsState;
 
@@ -524,7 +525,8 @@ pub(super) fn submit_chat_input_and_dispatch(
 
         if let Some(planner) = planner {
             let agents = select_swarm_agents(state, &planner, cmd.size, cmd.template.as_deref());
-            if let Some((_mission_id, dispatches)) = swarm.start(
+            let agent_count = agents.len();
+            if let Some((mission_id, dispatches)) = swarm.start(
                 state,
                 planner.clone(),
                 agents,
@@ -539,6 +541,29 @@ pub(super) fn submit_chat_input_and_dispatch(
                 state.agents.chat_input = cmd.prompt.clone();
                 sync_cursor_to_input_end(state);
                 let _ = push_chat_message(state);
+                let warn_threshold = large_swarm_warn_threshold();
+                if agent_count >= warn_threshold {
+                    let fd_limit = current_fd_soft_limit();
+                    let ceiling = effective_max_swarm_size();
+                    let msg = if ceiling < LARGE_SWARM_WARN_THRESHOLD {
+                        // FD-bound host (e.g. macOS default `ulimit -n 256`):
+                        // surface the actual numbers so the operator can fix
+                        // it with one shell command instead of guessing.
+                        format!(
+                            "Large swarm ({agent_count} agents). Process FD limit \
+                             is {fd_limit} (`ulimit -n`); effective swarm ceiling \
+                             ~{ceiling}. Run `ulimit -n 4096` and restart nit for \
+                             more headroom."
+                        )
+                    } else {
+                        format!(
+                            "Large swarm ({agent_count} agents). Each agent spawns a \
+                             Codex/Claude subprocess (~4 fds, ~50–200 MB each). \
+                             Verify the host has spare RAM/CPU before continuing."
+                        )
+                    };
+                    push_system_message_to_mission(state, &mission_id, msg);
+                }
                 for dispatch in dispatches {
                     apply_swarm_task_role(state, &dispatch);
                     dispatch_agent_prompt(

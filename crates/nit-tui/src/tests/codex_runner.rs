@@ -1,10 +1,14 @@
+use super::append_stdout_line_capped;
 use super::build_codex_exec_args;
 use super::build_codex_mcp_tool_call;
 use super::codex_model_slug_for_agent_id;
 use super::extract_thread_id_from_jsonl;
 use super::extract_token_count_from_jsonl;
 use super::handle_codex_mcp_notification;
+use super::push_json_error_capped;
 use super::CodexRunnerConfig;
+use super::JSON_ERRORS_CAP;
+use super::STDOUT_TAIL_CAP_BYTES;
 use nit_core::AgentBusEvent;
 use nit_core::AgentTokenCount;
 use serde_json::json;
@@ -339,4 +343,130 @@ fn mcp_token_count_notifications_emit_agent_bus_token_count() {
         }
     }
     assert!(saw_token_count);
+}
+
+// --- append_stdout_line_capped ---------------------------------------------
+//
+// These tests exist to guarantee the cap path can never panic, OOB, or
+// silently drop the wrong bytes — it runs inside the spawn_turn_worker
+// stdout reader thread and a bug here would corrupt every Codex turn.
+
+#[test]
+fn cap_is_noop_when_under_threshold() {
+    let mut buf = Vec::new();
+    append_stdout_line_capped(&mut buf, b"hello\n");
+    append_stdout_line_capped(&mut buf, b"world\n");
+    assert_eq!(buf, b"hello\nworld\n");
+}
+
+#[test]
+fn cap_handles_empty_input_safely() {
+    let mut buf = Vec::new();
+    append_stdout_line_capped(&mut buf, b"");
+    assert!(buf.is_empty());
+    append_stdout_line_capped(&mut buf, b"a\n");
+    append_stdout_line_capped(&mut buf, b"");
+    assert_eq!(buf, b"a\n");
+}
+
+#[test]
+fn cap_drains_at_newline_boundary_on_overflow() {
+    // Build a buffer just over the cap with frequent newlines, then push
+    // one more line to trip the drain. The result must still parse as JSONL
+    // (every retained line bounded by '\n').
+    let line: Vec<u8> = {
+        let mut v = vec![b'x'; 1023];
+        v.push(b'\n');
+        v
+    };
+    let mut buf = Vec::with_capacity(STDOUT_TAIL_CAP_BYTES + 4096);
+    while buf.len() + line.len() <= STDOUT_TAIL_CAP_BYTES {
+        buf.extend_from_slice(&line);
+    }
+    let pre_overflow_len = buf.len();
+    assert!(pre_overflow_len <= STDOUT_TAIL_CAP_BYTES);
+    append_stdout_line_capped(&mut buf, &line);
+    // Must have shrunk to ≤75% of the cap.
+    assert!(buf.len() <= STDOUT_TAIL_CAP_BYTES);
+    assert!(buf.len() >= STDOUT_TAIL_CAP_BYTES * 3 / 4 - line.len());
+    // Must START on a record boundary (first byte is start of a line, i.e.
+    // the previous byte before the drain was '\n'). Equivalently: the
+    // remaining buffer ends in '\n' and contains only complete records.
+    assert_eq!(buf.last().copied(), Some(b'\n'));
+    // Every byte that isn't '\n' is 'x' from our padding — proves no record
+    // got split mid-way.
+    assert!(buf.iter().all(|&b| b == b'x' || b == b'\n'));
+}
+
+#[test]
+fn cap_truncates_single_mega_line_with_no_newline() {
+    // A pathological subprocess emits a single huge unbroken byte stream.
+    // The cap can't preserve any record boundary because there isn't one,
+    // so it must drain everything rather than leave a half-record. Critical:
+    // no panic and final size is bounded.
+    let mut buf = Vec::with_capacity(STDOUT_TAIL_CAP_BYTES + 1);
+    let huge: Vec<u8> = vec![b'A'; STDOUT_TAIL_CAP_BYTES + 1];
+    append_stdout_line_capped(&mut buf, &huge);
+    assert!(buf.is_empty(), "no newline ⇒ drain everything");
+}
+
+#[test]
+fn cap_truncates_single_mega_line_with_terminal_newline() {
+    let mut buf = Vec::with_capacity(STDOUT_TAIL_CAP_BYTES + 1);
+    let mut huge: Vec<u8> = vec![b'A'; STDOUT_TAIL_CAP_BYTES];
+    huge.push(b'\n');
+    append_stdout_line_capped(&mut buf, &huge);
+    // Single line bigger than the cap: only the terminating '\n' is in
+    // the trailing 75% slice, so drain runs through end-of-buffer. Result
+    // is empty (correct — nothing to preserve).
+    assert!(buf.is_empty());
+}
+
+#[test]
+fn cap_stays_bounded_under_repeated_overflow() {
+    // Append 4× the cap worth of data and confirm the buffer never exceeds
+    // the cap and always ends on a newline.
+    let line: Vec<u8> = {
+        let mut v = vec![b'y'; 4095];
+        v.push(b'\n');
+        v
+    };
+    let mut buf = Vec::with_capacity(STDOUT_TAIL_CAP_BYTES + 4096);
+    let target = STDOUT_TAIL_CAP_BYTES * 4;
+    let mut written = 0usize;
+    while written < target {
+        append_stdout_line_capped(&mut buf, &line);
+        written += line.len();
+        assert!(
+            buf.len() <= STDOUT_TAIL_CAP_BYTES,
+            "buf grew past cap: {} > {}",
+            buf.len(),
+            STDOUT_TAIL_CAP_BYTES
+        );
+    }
+    assert_eq!(buf.last().copied(), Some(b'\n'));
+}
+
+// --- push_json_error_capped ------------------------------------------------
+
+#[test]
+fn json_errors_cap_keeps_size_bounded() {
+    let mut errors: Vec<String> = Vec::new();
+    for i in 0..(JSON_ERRORS_CAP * 4) {
+        push_json_error_capped(&mut errors, format!("err{i}"));
+    }
+    assert!(errors.len() <= JSON_ERRORS_CAP);
+    // Most-recent must always be retained.
+    assert_eq!(errors.last().unwrap(), &format!("err{}", JSON_ERRORS_CAP * 4 - 1));
+}
+
+#[test]
+fn json_errors_cap_drains_oldest_half_on_overflow() {
+    let mut errors: Vec<String> = (0..JSON_ERRORS_CAP).map(|i| format!("e{i}")).collect();
+    push_json_error_capped(&mut errors, "new".into());
+    // After the drain (oldest 128) + push (1), len = 256 - 128 + 1 = 129.
+    assert_eq!(errors.len(), JSON_ERRORS_CAP / 2 + 1);
+    assert_eq!(errors.last().unwrap(), "new");
+    // The oldest entries (e0..e127) are gone; e128 is now the front.
+    assert_eq!(errors.first().unwrap(), &format!("e{}", JSON_ERRORS_CAP / 2));
 }

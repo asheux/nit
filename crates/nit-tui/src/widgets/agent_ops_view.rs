@@ -547,10 +547,26 @@ struct MissionBodyMeta {
     agent_row: Option<usize>,
 }
 
+/// Cap on how many `assigned_agents` rows a single mission renders. Beyond
+/// this we render one "(+N more)" row so a 256-agent mission doesn't blow
+/// up the missions tab. Both `mission_body_meta` and `mission_lines_for_state`
+/// must agree on this; use `mission_visible_agent_lines` everywhere.
+const MISSION_VISIBLE_AGENTS_MAX: usize = 8;
+
+fn mission_visible_agent_lines(mission: &nit_core::MissionRecord) -> usize {
+    let n = mission.assigned_agents.len();
+    if n <= MISSION_VISIBLE_AGENTS_MAX {
+        n.max(1)
+    } else {
+        // First MISSION_VISIBLE_AGENTS_MAX agents + 1 "(+N more)" row.
+        MISSION_VISIBLE_AGENTS_MAX + 1
+    }
+}
+
 fn mission_body_meta(state: &AppState, body_line: usize) -> Option<MissionBodyMeta> {
     let mut cursor = 0usize;
     for (mission_idx, mission) in state.agents.missions.iter().enumerate() {
-        let agent_lines = mission.assigned_agents.len().max(1);
+        let agent_lines = mission_visible_agent_lines(mission);
         let block_height = agent_lines + 2; // top + bottom border
         if body_line < cursor + block_height {
             let row_in_block = body_line - cursor;
@@ -913,6 +929,14 @@ fn roster_backend_group_label(kind: AgentLaneKind) -> &'static str {
     }
 }
 
+/// Cap on how many agent rows we render per backend group. With swarms of
+/// up to `MAX_SWARM_SIZE` (256) clones, the roster would otherwise grow to
+/// hundreds of rows in a single backend. The selected agent is always kept
+/// visible (replacing the last shown slot when needed) so keyboard
+/// navigation never lands on a hidden lane. Total count is surfaced in the
+/// backend header label.
+const ROSTER_VISIBLE_AGENTS_PER_BACKEND: usize = 12;
+
 fn roster_grouped_agent_indices(state: &AppState) -> Vec<(AgentLaneKind, Vec<usize>)> {
     let mut codex: Vec<usize> = Vec::new();
     let mut claude: Vec<usize> = Vec::new();
@@ -933,20 +957,78 @@ fn roster_grouped_agent_indices(state: &AppState) -> Vec<(AgentLaneKind, Vec<usi
         }
     }
 
+    let selected = state.agents.roster_selected;
+    let cap_visible = |mut v: Vec<usize>| -> Vec<usize> {
+        if v.len() <= ROSTER_VISIBLE_AGENTS_PER_BACKEND {
+            return v;
+        }
+        // Preserve selection visibility: if the selected agent is in this
+        // group but past the cap, swap it into the last visible slot before
+        // truncating.
+        if let Some(sel_pos) = v.iter().position(|i| *i == selected) {
+            if sel_pos >= ROSTER_VISIBLE_AGENTS_PER_BACKEND {
+                let last = ROSTER_VISIBLE_AGENTS_PER_BACKEND - 1;
+                v.swap(last, sel_pos);
+            }
+        }
+        v.truncate(ROSTER_VISIBLE_AGENTS_PER_BACKEND);
+        v
+    };
+
     let mut out: Vec<(AgentLaneKind, Vec<usize>)> = Vec::with_capacity(5);
     if !codex.is_empty() {
-        out.push((AgentLaneKind::Codex, codex));
+        out.push((AgentLaneKind::Codex, cap_visible(codex)));
     }
     if !claude.is_empty() {
-        out.push((AgentLaneKind::Claude, claude));
+        out.push((AgentLaneKind::Claude, cap_visible(claude)));
     }
     if !gemini.is_empty() {
-        out.push((AgentLaneKind::Gemini, gemini));
+        out.push((AgentLaneKind::Gemini, cap_visible(gemini)));
     }
     if !local.is_empty() {
-        out.push((AgentLaneKind::Mock, local));
+        out.push((AgentLaneKind::Mock, cap_visible(local)));
     }
     if !other.is_empty() {
+        out.push((AgentLaneKind::Unknown, cap_visible(other)));
+    }
+    out
+}
+
+/// Total agent count per backend group BEFORE the per-group display cap.
+/// Used to render "Codex (12 of 48)" in the roster header so operators can
+/// see how many lanes a busy backend actually has.
+fn roster_backend_total_counts(state: &AppState) -> Vec<(AgentLaneKind, usize)> {
+    let mut codex = 0usize;
+    let mut claude = 0usize;
+    let mut gemini = 0usize;
+    let mut local = 0usize;
+    let mut other = 0usize;
+    for agent in state.agents.agents.iter() {
+        if agent.shadow {
+            continue;
+        }
+        match roster_backend_group_for_agent(agent) {
+            AgentLaneKind::Codex => codex += 1,
+            AgentLaneKind::Claude => claude += 1,
+            AgentLaneKind::Gemini => gemini += 1,
+            AgentLaneKind::Mock => local += 1,
+            AgentLaneKind::Unknown => other += 1,
+        }
+    }
+    let mut out = Vec::with_capacity(5);
+    if codex > 0 {
+        out.push((AgentLaneKind::Codex, codex));
+    }
+    if claude > 0 {
+        out.push((AgentLaneKind::Claude, claude));
+    }
+    if gemini > 0 {
+        out.push((AgentLaneKind::Gemini, gemini));
+    }
+    if local > 0 {
+        out.push((AgentLaneKind::Mock, local));
+    }
+    if other > 0 {
         out.push((AgentLaneKind::Unknown, other));
     }
     out
@@ -1032,10 +1114,20 @@ fn roster_lines(state: &AppState, swarm: Option<&SwarmRuntime>, width: usize) ->
         String,
         Option<SwarmDashboardView>,
     > = std::collections::HashMap::new();
+    let backend_totals: std::collections::HashMap<AgentLaneKind, usize> =
+        roster_backend_total_counts(state).into_iter().collect();
     for (backend, agent_indices) in roster_grouped_agent_indices(state) {
         let backend_selected = selected_row == Some(RosterSelectableRow::Backend { backend });
+        let total = backend_totals.get(&backend).copied().unwrap_or(0);
+        let count_suffix = if total > agent_indices.len() {
+            format!(" ({} of {total})", agent_indices.len())
+        } else if total > 1 {
+            format!(" ({total})")
+        } else {
+            String::new()
+        };
         let label = format!(
-            "{} {}",
+            "{} {}{count_suffix}",
             if roster_backend_is_expanded(state, backend) {
                 tree_open_glyph()
             } else {
@@ -1264,7 +1356,13 @@ fn mission_lines(state: &AppState, width: usize) -> Vec<String> {
             empty3,
             agent_pane_top(widths[4]),
         ));
-        let agent_lines = mission.assigned_agents.len().max(1);
+        let agent_lines = mission_visible_agent_lines(mission);
+        let total_agents = mission.assigned_agents.len();
+        let overflow_row_idx = if total_agents > MISSION_VISIBLE_AGENTS_MAX {
+            Some(MISSION_VISIBLE_AGENTS_MAX)
+        } else {
+            None
+        };
         for agent_idx in 0..agent_lines {
             let marker = if idx == state.agents.mission_selected {
                 if agent_idx == 0 {
@@ -1275,11 +1373,18 @@ fn mission_lines(state: &AppState, width: usize) -> Vec<String> {
             } else {
                 arrow_glyph()
             };
-            let agent_label = mission
-                .assigned_agents
-                .get(agent_idx)
-                .map(|s| swarm_clone_display_label(s.as_str(), None).unwrap_or_else(|| s.clone()))
-                .unwrap_or_else(|| "--".into());
+            let agent_label = if Some(agent_idx) == overflow_row_idx {
+                let hidden = total_agents - MISSION_VISIBLE_AGENTS_MAX;
+                format!("(+{hidden} more)")
+            } else {
+                mission
+                    .assigned_agents
+                    .get(agent_idx)
+                    .map(|s| {
+                        swarm_clone_display_label(s.as_str(), None).unwrap_or_else(|| s.clone())
+                    })
+                    .unwrap_or_else(|| "--".into())
+            };
             if agent_idx == 0 {
                 out.push(format!(
                     "{marker}{} {} {} {} {}",

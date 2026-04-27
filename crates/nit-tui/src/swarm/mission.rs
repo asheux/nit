@@ -3,9 +3,9 @@ use std::collections::HashMap;
 use nit_core::{AgentMessage, AgentStatus, AppState, MissionPhase};
 
 use super::{
-    chat_clone_base_id, is_chat_clone_agent_id, is_swarm_clone_agent_id, parse_swarm_template,
-    swarm_clone_base_id, tasks_terminal_count, ParsedSwarmPlan, SwarmMissionKind, SwarmRun,
-    SwarmSize, SwarmStage, SwarmTemplate, DEFAULT_SWARM_SIZE, MAX_SWARM_SIZE,
+    chat_clone_base_id, effective_max_swarm_size, is_chat_clone_agent_id, is_swarm_clone_agent_id,
+    parse_swarm_template, swarm_clone_base_id, tasks_terminal_count, ParsedSwarmPlan,
+    SwarmMissionKind, SwarmRun, SwarmSize, SwarmStage, SwarmTemplate, DEFAULT_SWARM_SIZE,
 };
 
 pub(super) fn next_mission_id(state: &AppState) -> String {
@@ -161,7 +161,7 @@ pub fn select_swarm_agents(
         SwarmSize::All => usize::MAX,
         SwarmSize::Count(n) => n,
     }
-    .clamp(1, MAX_SWARM_SIZE);
+    .clamp(1, effective_max_swarm_size());
     let take = target.saturating_sub(1);
     if take == 0 {
         return agents;

@@ -1,5 +1,16 @@
 pub(super) const DEFAULT_SWARM_SIZE: usize = 4;
-pub(super) const MAX_SWARM_SIZE: usize = 16;
+/// Hard ceiling on roster size for a single swarm mission. Sized so the worst
+/// case (every agent spawning a Codex/Claude subprocess concurrently, each
+/// holding ~4 file descriptors) fits under typical OS ulimits — ~250 agents
+/// on Linux's 1024-fd default, comfortably within macOS's 10240. Beyond this,
+/// the FD ceiling is the real limit, not nit. Soft warning surfaces at
+/// `LARGE_SWARM_WARN_THRESHOLD`.
+pub(super) const MAX_SWARM_SIZE: usize = 256;
+/// At or above this roster size, push a one-line system message warning the
+/// operator to bump `ulimit -n` and confirm machine has enough RAM/CPU.
+/// Picked so the warning fires well before subprocess spawn starts failing
+/// from FD exhaustion on Linux defaults.
+pub(crate) const LARGE_SWARM_WARN_THRESHOLD: usize = 64;
 pub(super) const SWARM_VERIFY_MAX_CHARS: usize = 12_000;
 pub(super) const SWARM_DEP_OUTPUT_MAX_CHARS: usize = 8_000;
 /// Per-dep ceiling for roles that need full dependency output (judge,

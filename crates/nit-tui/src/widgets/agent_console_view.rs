@@ -2449,6 +2449,19 @@ fn breather_rows_for_user_prompt(
         _ => base_label,
     };
 
+    // Cap the breather agent table to a manageable height. With swarms of
+    // up to `MAX_SWARM_SIZE` clones, this view would otherwise dominate the
+    // chat pane (each agent occupies a status row + sub-row = 2 lines, so
+    // 30+ agents pushes everything else off-screen). `ordered_ids` is
+    // sorted with swarm-assigned and primary (in-context) agents first, so
+    // the visible window naturally shows what the operator cares about.
+    // Predicate computations above (`any_active`, `any_queued`, `label`)
+    // still see the full list — only the rendered table is truncated.
+    const BREATHER_VISIBLE_AGENTS: usize = 6;
+    let visible_count = ordered_ids.len().min(BREATHER_VISIBLE_AGENTS);
+    let hidden_agent_count = ordered_ids.len() - visible_count;
+    let visible_ids = &ordered_ids[..visible_count];
+
     let seed_id = primary_ids
         .first()
         .or_else(|| secondary_ids.first())
@@ -2475,7 +2488,7 @@ fn breather_rows_for_user_prompt(
 
     if agent_w < 6 {
         // Narrow fallback: keep it readable without a strict column layout.
-        for id in ordered_ids.iter() {
+        for id in visible_ids.iter() {
             let agent = state
                 .agents
                 .agents
@@ -2566,6 +2579,15 @@ fn breather_rows_for_user_prompt(
                 kind: ThreadRowKind::StatusSubRow,
             });
         }
+        if hidden_agent_count > 0 {
+            rows.push(ThreadRow {
+                text: pad_to_width(
+                    &format!("{indent_str}↳ (+{hidden_agent_count} more)"),
+                    width,
+                ),
+                kind: ThreadRowKind::StatusSubRow,
+            });
+        }
         if let Some(mission_id) = swarm_mission_id {
             append_swarm_meta_footer_rows(
                 &mut rows,
@@ -2593,7 +2615,7 @@ fn breather_rows_for_user_prompt(
         ),
         kind: ThreadRowKind::StatusHeader,
     });
-    for id in ordered_ids.iter() {
+    for id in visible_ids.iter() {
         let agent = state
             .agents
             .agents
@@ -2697,6 +2719,21 @@ fn breather_rows_for_user_prompt(
                 width,
             ),
             kind: ThreadRowKind::StatusSubRow,
+        });
+    }
+    if hidden_agent_count > 0 {
+        rows.push(ThreadRow {
+            text: pad_to_width(
+                &format!(
+                    "{indent_str}{} {} {} {}",
+                    fit_left(&format!("↳ (+{hidden_agent_count} more)"), agent_w),
+                    fit_right("", elap_w),
+                    fit_right("", hb_w),
+                    fit_right("", out_w),
+                ),
+                width,
+            ),
+            kind: ThreadRowKind::StatusRow,
         });
     }
 

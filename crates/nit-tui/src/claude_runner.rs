@@ -262,6 +262,32 @@ struct StdoutCapture {
     json_errors: Vec<String>,
 }
 
+/// See `codex_runner::STDOUT_TAIL_CAP_BYTES` — same rationale. 100 MB tail
+/// window, drop from front at newline boundary on overflow.
+const STDOUT_TAIL_CAP_BYTES: usize = 100 * 1024 * 1024;
+const JSON_ERRORS_CAP: usize = 256;
+
+fn append_stdout_line_capped(buf: &mut Vec<u8>, line: &[u8]) {
+    buf.extend_from_slice(line);
+    if buf.len() <= STDOUT_TAIL_CAP_BYTES {
+        return;
+    }
+    let want_drop = buf.len() - STDOUT_TAIL_CAP_BYTES * 3 / 4;
+    let drop_to = buf[want_drop..]
+        .iter()
+        .position(|&b| b == b'\n')
+        .map(|i| want_drop + i + 1)
+        .unwrap_or(buf.len());
+    buf.drain(0..drop_to);
+}
+
+fn push_json_error_capped(errors: &mut Vec<String>, msg: String) {
+    if errors.len() >= JSON_ERRORS_CAP {
+        errors.drain(0..JSON_ERRORS_CAP / 2);
+    }
+    errors.push(msg);
+}
+
 #[allow(clippy::too_many_arguments)]
 fn spawn_turn_worker(
     event_tx: &Sender<AgentBusEvent>,
@@ -402,7 +428,7 @@ fn run_turn(
                     match reader.read_line(&mut line) {
                         Ok(0) => break,
                         Ok(_) => {
-                            buf.extend_from_slice(line.as_bytes());
+                            append_stdout_line_capped(&mut buf, line.as_bytes());
                             let raw = line.trim();
                             if raw.is_empty() {
                                 continue;
@@ -491,7 +517,7 @@ fn run_turn(
                                     .and_then(|v| v.as_str())
                                     .or_else(|| value.get("message").and_then(|v| v.as_str()));
                                 if let Some(msg) = msg {
-                                    json_errors.push(msg.to_string());
+                                    push_json_error_capped(&mut json_errors, msg.to_string());
                                     let _ = event_tx.send(AgentBusEvent::TurnLog {
                                         agent_id: model.clone(),
                                         message: msg.to_string(),

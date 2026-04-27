@@ -146,3 +146,82 @@ fn test_shorten_id() {
     assert_eq!(shorten_id("abcdefghij"), "abcdefgh…");
     assert_eq!(shorten_id("short"), "short");
 }
+
+// --- append_stdout_line_capped ---------------------------------------------
+//
+// Mirrors codex_runner cap tests; the helper has its own copy in this
+// module and runs in the spawn_turn_worker stdout reader thread.
+
+#[test]
+fn cap_is_noop_when_under_threshold() {
+    let mut buf = Vec::new();
+    append_stdout_line_capped(&mut buf, b"hello\n");
+    append_stdout_line_capped(&mut buf, b"world\n");
+    assert_eq!(buf, b"hello\nworld\n");
+}
+
+#[test]
+fn cap_handles_empty_input_safely() {
+    let mut buf = Vec::new();
+    append_stdout_line_capped(&mut buf, b"");
+    assert!(buf.is_empty());
+    append_stdout_line_capped(&mut buf, b"a\n");
+    append_stdout_line_capped(&mut buf, b"");
+    assert_eq!(buf, b"a\n");
+}
+
+#[test]
+fn cap_drains_at_newline_boundary_on_overflow() {
+    let line: Vec<u8> = {
+        let mut v = vec![b'x'; 1023];
+        v.push(b'\n');
+        v
+    };
+    let mut buf = Vec::with_capacity(STDOUT_TAIL_CAP_BYTES + 4096);
+    while buf.len() + line.len() <= STDOUT_TAIL_CAP_BYTES {
+        buf.extend_from_slice(&line);
+    }
+    append_stdout_line_capped(&mut buf, &line);
+    assert!(buf.len() <= STDOUT_TAIL_CAP_BYTES);
+    assert_eq!(buf.last().copied(), Some(b'\n'));
+    assert!(buf.iter().all(|&b| b == b'x' || b == b'\n'));
+}
+
+#[test]
+fn cap_truncates_single_mega_line_with_no_newline() {
+    let mut buf = Vec::with_capacity(STDOUT_TAIL_CAP_BYTES + 1);
+    let huge: Vec<u8> = vec![b'A'; STDOUT_TAIL_CAP_BYTES + 1];
+    append_stdout_line_capped(&mut buf, &huge);
+    assert!(buf.is_empty());
+}
+
+#[test]
+fn cap_stays_bounded_under_repeated_overflow() {
+    let line: Vec<u8> = {
+        let mut v = vec![b'y'; 4095];
+        v.push(b'\n');
+        v
+    };
+    let mut buf = Vec::with_capacity(STDOUT_TAIL_CAP_BYTES + 4096);
+    let target = STDOUT_TAIL_CAP_BYTES * 4;
+    let mut written = 0usize;
+    while written < target {
+        append_stdout_line_capped(&mut buf, &line);
+        written += line.len();
+        assert!(buf.len() <= STDOUT_TAIL_CAP_BYTES);
+    }
+    assert_eq!(buf.last().copied(), Some(b'\n'));
+}
+
+#[test]
+fn json_errors_cap_keeps_size_bounded() {
+    let mut errors: Vec<String> = Vec::new();
+    for i in 0..(JSON_ERRORS_CAP * 4) {
+        push_json_error_capped(&mut errors, format!("err{i}"));
+    }
+    assert!(errors.len() <= JSON_ERRORS_CAP);
+    assert_eq!(
+        errors.last().unwrap(),
+        &format!("err{}", JSON_ERRORS_CAP * 4 - 1)
+    );
+}
