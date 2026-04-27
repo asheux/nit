@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::time::Instant;
 
 use nit_core::{AgentAlertSeverity, AgentBusEvent, AgentDiagnosticEvent, AgentStatus, AppState};
@@ -7,6 +8,22 @@ use crate::claude_runner::{ClaudeCommand, ClaudeRunner};
 use crate::codex_runner::{CodexCommand, CodexRunner};
 use crate::swarm::{is_agent_busy, SwarmDispatch};
 use crate::vitals::VitalsState;
+
+/// Resolve the working directory for a runner dispatch keyed on
+/// `agent_id`. In multipane mode, returns the matching pane's `cwd`; in
+/// every other mode (and as fallback for unknown ids) returns
+/// `state.workspace_root`. The lookup runs at dispatch leaf time, not at
+/// enqueue time — so a queued multipane prompt picks up the pane's
+/// CURRENT cwd at dequeue, which is the semantics Phase 4 dir-search
+/// relies on.
+pub(crate) fn resolve_dispatch_cwd(state: &AppState, agent_id: &str) -> PathBuf {
+    state
+        .multipane
+        .as_ref()
+        .and_then(|mp| mp.panes.iter().find(|p| p.agent_id == agent_id))
+        .map(|p| p.cwd.clone())
+        .unwrap_or_else(|| state.workspace_root.clone())
+}
 
 fn remove_from_mission_map<V>(
     maps: &mut HashMap<String, HashMap<String, V>>,
@@ -382,9 +399,10 @@ pub(super) fn maybe_dispatch_codex_turn(
         .unwrap_or_else(|| "medium".into());
 
     let read_only = crate::shadow::parse_shadow_lane_id(&model).is_some();
+    let cwd = resolve_dispatch_cwd(state, &model);
     let ok = codex.send(CodexCommand::RunTurn {
         model: model.clone(),
-        cwd: state.workspace_root.clone(),
+        cwd,
         mission_id: mission_id.clone(),
         resume_thread_id,
         persist_session,
@@ -803,9 +821,10 @@ pub(super) fn maybe_dispatch_claude_turn(
                 }
             }
         });
+    let cwd = resolve_dispatch_cwd(state, &model);
     let ok = claude.send(ClaudeCommand::RunTurn {
         model: model.clone(),
-        cwd: state.workspace_root.clone(),
+        cwd,
         mission_id: mission_id.clone(),
         resume_session_id,
         persist_session,
@@ -1268,7 +1287,7 @@ fn build_genome_context(state: &AppState, agent_id: &str) -> Option<String> {
     Some(ctx)
 }
 
-pub(super) fn dispatch_agent_prompt(
+pub(crate) fn dispatch_agent_prompt(
     state: &mut AppState,
     vitals: &mut VitalsState,
     codex: Option<&CodexRunner>,
@@ -1359,5 +1378,83 @@ pub(super) fn clear_claude_session_context_for_agent(
         }
     } else {
         state.agents.claude_session_ids.remove(agent_id);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nit_core::{Buffer, MultipaneState, PaneSession};
+    use std::path::PathBuf;
+
+    fn fixture_state() -> AppState {
+        AppState::new(
+            PathBuf::from("/workspace"),
+            Buffer::empty("scratch", None),
+            Buffer::empty("notes", None),
+        )
+    }
+
+    #[test]
+    fn resolve_dispatch_cwd_falls_back_to_workspace_root_when_not_multipane() {
+        let state = fixture_state();
+        assert_eq!(
+            resolve_dispatch_cwd(&state, "any-agent"),
+            PathBuf::from("/workspace")
+        );
+    }
+
+    #[test]
+    fn resolve_dispatch_cwd_returns_pane_cwd_in_multipane() {
+        let mut state = fixture_state();
+        state.multipane = Some(MultipaneState {
+            backend_agent_id: "claude-haiku-4-5".into(),
+            panes: vec![
+                PaneSession {
+                    pane_id: 0,
+                    agent_id: "claude-haiku-4-5#mp-pane-00".into(),
+                    cwd: PathBuf::from("/pane0"),
+                    ..PaneSession::default()
+                },
+                PaneSession {
+                    pane_id: 1,
+                    agent_id: "claude-haiku-4-5#mp-pane-01".into(),
+                    cwd: PathBuf::from("/pane1"),
+                    ..PaneSession::default()
+                },
+            ],
+            focused: 0,
+            grid_cols: 2,
+            grid_rows: 1,
+        });
+        assert_eq!(
+            resolve_dispatch_cwd(&state, "claude-haiku-4-5#mp-pane-00"),
+            PathBuf::from("/pane0")
+        );
+        assert_eq!(
+            resolve_dispatch_cwd(&state, "claude-haiku-4-5#mp-pane-01"),
+            PathBuf::from("/pane1")
+        );
+    }
+
+    #[test]
+    fn resolve_dispatch_cwd_unknown_agent_falls_back() {
+        let mut state = fixture_state();
+        state.multipane = Some(MultipaneState {
+            backend_agent_id: "claude-haiku-4-5".into(),
+            panes: vec![PaneSession {
+                pane_id: 0,
+                agent_id: "claude-haiku-4-5#mp-pane-00".into(),
+                cwd: PathBuf::from("/pane0"),
+                ..PaneSession::default()
+            }],
+            focused: 0,
+            grid_cols: 1,
+            grid_rows: 1,
+        });
+        assert_eq!(
+            resolve_dispatch_cwd(&state, "non-pane-agent"),
+            PathBuf::from("/workspace")
+        );
     }
 }

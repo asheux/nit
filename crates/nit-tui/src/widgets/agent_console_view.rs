@@ -1,7 +1,7 @@
 use nit_core::{
     AgentConsoleRow as ThreadRow, AgentConsoleRowKind as ThreadRowKind, AgentConsoleRowsCacheKey,
-    AgentLane, AgentLaneKind, AgentMessage, AgentStatus, AppState, PaneId, UiSelectionPane,
-    CONSOLE_SCROLL_BOTTOM,
+    AgentLane, AgentLaneKind, AgentMessage, AgentStatus, AppState, PaneId, PaneSession,
+    UiSelectionPane, CONSOLE_SCROLL_BOTTOM,
 };
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
@@ -588,6 +588,289 @@ pub fn render(
         }
     }
     None
+}
+
+/// Per-pane render entry point used by multipane mode. Renders chat
+/// thread + hint + chat input box for a single `PaneSession` inside
+/// `area`. Caller paints any outer chrome (border + cwd title) and passes
+/// the inner rect.
+///
+/// Sibling-not-wrapper relationship to `render`: see the deviation note in
+/// the multipane integration plan. This function bypasses the global
+/// `console_rows_cache` (the cache key is keyed off
+/// `selected_context_agent`, which is shared across panes); rebuilds
+/// thread rows directly from `state.agents.messages` filtered by
+/// `pane.agent_id`. Acceptable v1 cost: messages per pane are bounded.
+pub fn render_pane(
+    frame: &mut Frame,
+    area: Rect,
+    state: &mut AppState,
+    swarm: Option<&SwarmRuntime>,
+    theme: &Theme,
+    pane: &PaneSession,
+    focused: bool,
+) -> Option<ChatCursor> {
+    let layout = compute_pane_layout(area, &pane.chat_input, pane.chat_input_cursor)?;
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Min(1),
+            Constraint::Length(layout.input_chunk.height),
+        ])
+        .split(area);
+
+    let agent = Some(pane.agent_id.as_str());
+    let mission = pane.mission_id.as_deref();
+    let codex_ctx_pct = agent.and_then(|id| resolve_context_pct(state, id, mission));
+    let codex_ctx_used = agent.and_then(|id| resolve_context_used(state, id, mission));
+    let codex_ctx_max = agent.and_then(|agent_id| {
+        state
+            .agents
+            .codex_effective_context_window_tokens
+            .get(agent_id)
+            .or_else(|| {
+                state
+                    .agents
+                    .claude_effective_context_window_tokens
+                    .get(agent_id)
+            })
+            .copied()
+    });
+    let label_style = Style::default()
+        .fg(theme.border)
+        .add_modifier(Modifier::DIM);
+    let mission_style = if mission.is_some() {
+        Style::default()
+            .fg(theme.title_focused)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        label_style
+    };
+    let ctx_text = format_context_text(codex_ctx_pct, codex_ctx_used, codex_ctx_max);
+    let ctx_any = codex_ctx_pct.is_some() || codex_ctx_used.is_some() || codex_ctx_max.is_some();
+    let ctx_style = if ctx_any {
+        Style::default()
+            .fg(theme.accent)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        label_style
+    };
+    let context_line = Line::from(vec![
+        Span::styled("agent=", label_style),
+        Span::styled(pane.agent_id.clone(), mission_style),
+        Span::styled("     ", label_style),
+        Span::styled("ctx=", label_style),
+        Span::styled(ctx_text, ctx_style),
+    ]);
+    frame.render_widget(Paragraph::new(context_line), chunks[0]);
+
+    let thread_width = layout.thread_area.width.max(1) as usize;
+    let thread_height = layout.thread_area.height.max(1) as usize;
+
+    let thread_rows = build_pane_thread_rows(state, swarm, agent, mission, thread_width);
+
+    let total_rows = thread_rows.len();
+    let max_scroll = total_rows.saturating_sub(thread_height);
+    let scroll = pane.chat_input_scroll.min(max_scroll);
+    let visible_rows = thread_rows.iter().skip(scroll).take(thread_height);
+    let visible: Vec<Line<'static>> = thread_lines(visible_rows, theme);
+    frame.render_widget(
+        Paragraph::new(visible).style(Style::default().bg(theme.background)),
+        layout.thread_area,
+    );
+
+    if layout.hint_chunk.height > 0 && layout.hint_chunk.width >= 4 {
+        let hint_text = "/abort  ·  Ctrl+C  ·  Esc Esc";
+        let hint_style = Style::default()
+            .fg(theme.border)
+            .add_modifier(Modifier::ITALIC | Modifier::DIM);
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(hint_text, hint_style))),
+            layout.hint_chunk,
+        );
+    }
+
+    let input_visible: Vec<Line<'static>> = layout
+        .input_lines_all
+        .iter()
+        .skip(layout.input_window_start)
+        .take(layout.input_inner_height)
+        .cloned()
+        .map(Line::from)
+        .collect();
+    let input_max_row = layout.input_inner_height.saturating_sub(1);
+    if layout.input_boxed {
+        let queued_count = state
+            .agents
+            .agents
+            .iter()
+            .find(|a| a.id == pane.agent_id)
+            .map(|agent_lane| {
+                let running = state.agents.active_turns.contains_key(&agent_lane.id);
+                agent_lane.queue_len.saturating_sub(usize::from(running))
+            })
+            .unwrap_or(0);
+        let mut title_spans = Vec::new();
+        title_spans.push(Span::styled(
+            "CHAT BOX".to_string(),
+            Style::default()
+                .fg(if focused {
+                    theme.border_focused
+                } else {
+                    theme.border
+                })
+                .add_modifier(Modifier::BOLD),
+        ));
+        if queued_count > 0 {
+            title_spans.push(Span::raw("  "));
+            let label = if queued_count > 1 {
+                format!(" Queued {queued_count} ")
+            } else {
+                " Queued ".to_string()
+            };
+            title_spans.push(Span::styled(
+                label,
+                Style::default()
+                    .fg(theme.background)
+                    .bg(theme.seed.accent_2)
+                    .add_modifier(Modifier::BOLD),
+            ));
+        }
+        let input_block = Block::default()
+            .borders(Borders::ALL)
+            .title(Line::from(title_spans))
+            .border_style(if focused {
+                Style::default().fg(theme.border_focused)
+            } else {
+                Style::default().fg(theme.border)
+            })
+            .border_type(if focused {
+                BorderType::Rounded
+            } else {
+                BorderType::Plain
+            })
+            .style(Style::default().bg(theme.background));
+        frame.render_widget(input_block, layout.input_chunk);
+    }
+    let input_bg = if focused {
+        let mut bg = dim_bg_towards(theme.cursor_line_bg, theme.background, 75);
+        if bg == theme.selection_bg {
+            bg = theme.cursor_line_bg;
+        }
+        if bg == theme.selection_bg {
+            bg = theme.background;
+        }
+        bg
+    } else {
+        let mut bg = dim_bg_towards(theme.cursor_line_bg, theme.background, 85);
+        if bg == theme.selection_bg {
+            bg = theme.background;
+        }
+        bg
+    };
+    frame.render_widget(
+        Paragraph::new(input_visible)
+            .style(Style::default().fg(theme.foreground).bg(input_bg))
+            .wrap(Wrap { trim: false }),
+        layout.input_area,
+    );
+
+    if focused {
+        let cursor_visible_in_window = layout.cursor_line_all >= layout.input_window_start
+            && layout.cursor_line_all
+                < layout
+                    .input_window_start
+                    .saturating_add(layout.input_inner_height);
+        if cursor_visible_in_window {
+            let cursor_line_visible = layout
+                .cursor_line_all
+                .saturating_sub(layout.input_window_start);
+            let max_col = layout.input_area.width.saturating_sub(1) as usize;
+            let col = layout.cursor_col_all.min(max_col) as u16;
+            let row = cursor_line_visible.min(input_max_row) as u16;
+            return Some(ChatCursor {
+                x: layout.input_area.x + col,
+                y: layout.input_area.y + row,
+            });
+        }
+    }
+    None
+}
+
+fn compute_pane_layout(
+    area: Rect,
+    chat_input: &str,
+    cursor_char_idx: usize,
+) -> Option<ConsoleLayout> {
+    if area.width < 4 || area.height < 3 {
+        return None;
+    }
+    let inner = area;
+    let input_boxed = inner.height >= 5 && inner.width >= 8;
+    let input_wrap_width = if input_boxed {
+        inner.width.saturating_sub(2) as usize
+    } else {
+        inner.width as usize
+    };
+    let cursor_char_idx = cursor_char_idx.min(chat_input.chars().count());
+    let (input_lines_all, cursor_line_all, cursor_col_all) =
+        wrap_input_with_cursor("", chat_input, cursor_char_idx, input_wrap_width);
+    let input_inner_height = input_inner_height_for(inner, input_boxed, input_lines_all.len());
+    let input_height = if input_boxed {
+        input_inner_height + 2
+    } else {
+        input_inner_height
+    };
+    let want_hint = inner.height as usize >= input_height + 4;
+    let hint_height = if want_hint { 1u16 } else { 0u16 };
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Min(1),
+            Constraint::Length(hint_height),
+            Constraint::Length(input_height as u16),
+        ])
+        .split(inner);
+    let input_area = if input_boxed {
+        Block::default().borders(Borders::ALL).inner(chunks[3])
+    } else {
+        chunks[3]
+    };
+    let input_window_start = chat_input_window_start(
+        CHAT_INPUT_SCROLL_AUTO,
+        input_lines_all.len(),
+        input_inner_height,
+        cursor_line_all,
+    );
+    Some(ConsoleLayout {
+        thread_area: chunks[1],
+        hint_chunk: chunks[2],
+        input_chunk: chunks[3],
+        input_area,
+        input_boxed,
+        input_lines_all,
+        cursor_line_all,
+        cursor_col_all,
+        input_inner_height,
+        input_window_start,
+    })
+}
+
+fn build_pane_thread_rows(
+    state: &AppState,
+    swarm: Option<&SwarmRuntime>,
+    agent: Option<&str>,
+    mission: Option<&str>,
+    width: usize,
+) -> Vec<ThreadRow> {
+    let ordered = visible_messages_grouped(state, mission, agent);
+    let mut rows = Vec::new();
+    for (_, msg) in ordered {
+        rows.extend(format_message_rows(state, swarm, msg, width));
+    }
+    rows
 }
 
 pub fn thread_text_area(area: Rect, state: &AppState) -> Option<Rect> {

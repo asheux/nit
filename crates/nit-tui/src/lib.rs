@@ -13,6 +13,7 @@ pub mod widgets;
 
 pub mod claude_runner;
 pub mod codex_runner;
+pub mod multipane;
 pub mod shadow;
 pub mod swarm;
 

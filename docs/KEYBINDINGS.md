@@ -244,3 +244,17 @@
 - :games ca [run|config] <input> [steps] [strategy_id]: CA simulator
 - :games ca {n,k,r} <input> [steps]: CA rule tuple simulator
 - :games analyze [path] [tail=N] [samples=N]: Analyze history log
+
+## Multipane mode (`nit multipane --backend <model> [--panes N] [--cwd PATH]`)
+- Tab: Cycle focus to next pane (wraps)
+- Shift+Tab: Cycle focus to previous pane (wraps)
+- Mouse click in pane: Focus that pane
+- Enter (in focused pane chat input): Send prompt; agent runs in pane's cwd
+- /abort, @abort (typed in focused pane): Cancel focused pane's in-flight + queued turns
+- /abort all: Cancel every pane's in-flight + queued turns
+- /abort <agent-id>: Cancel a specific pane's agent (e.g. `claude-haiku-4-5#mp-pane-03`)
+- Ctrl+C with empty chat input: Cancel focused pane
+- Esc Esc within ~500ms: Cancel focused pane
+- Backspace / Left / Right / Home / End / printable chars: Edit focused pane's chat input
+- Up / Down: Walk focused pane's prompt history
+- Editor / file-tree / visualizer / agent-ops keys: No-op in multipane mode (use plain `nit` for those)

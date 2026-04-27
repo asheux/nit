@@ -21,6 +21,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+pub mod multipane;
+pub use multipane::{DirSearchState, MultipaneState, PaneSession};
+
 const DEFAULT_LOG_CAPACITY: usize = 512;
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -2116,6 +2119,11 @@ pub struct AppState {
     pub substrate_overlay_last_max_scroll: usize,
     #[serde(default)]
     pub substrate: crate::substrate::SubstrateState,
+    /// Multipane launch mode state. When `Some`, the standard single-pane
+    /// run loop is never entered — the multipane event loop owns rendering
+    /// and input. Per-launch only; not persisted.
+    #[serde(skip)]
+    pub multipane: Option<MultipaneState>,
 }
 
 /// Sub-view toggle for the CODE STRUCTURAL QUALITY pane.
@@ -2352,6 +2360,7 @@ impl AppState {
             substrate_overlay_scroll: 0,
             substrate_overlay_last_max_scroll: usize::MAX,
             substrate: crate::substrate::SubstrateState::default(),
+            multipane: None,
         }
     }
 

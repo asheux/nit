@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 
 mod agents;
 mod codex;
@@ -73,6 +73,25 @@ pub(crate) enum Command {
         #[command(subcommand)]
         command: Option<GamesCommand>,
     },
+    /// Multipane mode: a grid of independent chat panes, one cwd each.
+    Multipane(MultipaneArgs),
+}
+
+#[derive(Args, Debug)]
+pub(crate) struct MultipaneArgs {
+    /// Backend model id used for every pane (required).
+    #[arg(long)]
+    pub backend: String,
+
+    /// Number of panes to open. Clamped to [1, 32]. Grid is roughly
+    /// square: ceil(sqrt(N)) columns × ceil(N / cols) rows.
+    #[arg(long, default_value_t = 8u8, value_parser = clap::value_parser!(u8).range(1..=32))]
+    pub panes: u8,
+
+    /// Starting directory for every pane. Defaults to the current
+    /// working directory.
+    #[arg(long)]
+    pub cwd: Option<PathBuf>,
 }
 
 /// Fuse `--lab <value>` into `--lab=<value>` so clap's subcommand_precedence_over_arg
@@ -106,4 +125,92 @@ where
 
 fn is_lab_name(value: &str) -> bool {
     value.eq_ignore_ascii_case("gol") || value.eq_ignore_ascii_case("games")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    fn parse(args: &[&str]) -> Result<Cli, clap::Error> {
+        Cli::try_parse_from(args.iter().copied())
+    }
+
+    #[test]
+    fn multipane_args_parses_with_backend() {
+        let cli = parse(&[
+            "nit",
+            "multipane",
+            "--backend",
+            "claude-haiku-4-5",
+            "--panes",
+            "4",
+            "--cwd",
+            "/tmp",
+        ])
+        .expect("parses");
+        match cli.command {
+            Some(Command::Multipane(args)) => {
+                assert_eq!(args.backend, "claude-haiku-4-5");
+                assert_eq!(args.panes, 4);
+                assert_eq!(args.cwd, Some(PathBuf::from("/tmp")));
+            }
+            other => panic!("expected Multipane, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn multipane_defaults_eight_panes_and_no_cwd() {
+        let cli = parse(&["nit", "multipane", "--backend", "gpt-5"]).expect("parses");
+        match cli.command {
+            Some(Command::Multipane(args)) => {
+                assert_eq!(args.panes, 8);
+                assert_eq!(args.cwd, None);
+            }
+            other => panic!("expected Multipane, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn multipane_missing_backend_errors() {
+        let err = parse(&["nit", "multipane"]).expect_err("must require --backend");
+        let rendered = err.to_string();
+        assert!(
+            rendered.contains("backend") || rendered.contains("--backend"),
+            "error must mention backend: {rendered}"
+        );
+    }
+
+    #[test]
+    fn multipane_panes_zero_rejected() {
+        let err = parse(&["nit", "multipane", "--backend", "x", "--panes", "0"])
+            .expect_err("--panes 0 must be rejected");
+        assert!(err.to_string().contains("0"));
+    }
+
+    #[test]
+    fn multipane_panes_thirtythree_rejected() {
+        let err = parse(&["nit", "multipane", "--backend", "x", "--panes", "33"])
+            .expect_err("--panes 33 must be rejected");
+        assert!(err.to_string().contains("33"));
+    }
+
+    #[test]
+    fn multipane_panes_at_bounds_accepted() {
+        for p in [1u8, 32u8] {
+            let cli = parse(&[
+                "nit",
+                "multipane",
+                "--backend",
+                "x",
+                "--panes",
+                &p.to_string(),
+            ])
+            .expect("parses at bound");
+            match cli.command {
+                Some(Command::Multipane(args)) => assert_eq!(args.panes, p),
+                _ => panic!("expected Multipane"),
+            }
+        }
+    }
 }

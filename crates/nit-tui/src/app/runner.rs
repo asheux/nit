@@ -113,6 +113,22 @@ pub fn run(
     terminal.hide_cursor()?;
     guard.mark_cursor_hidden(true);
 
+    if state.multipane.is_some() {
+        let result = crate::multipane::run_loop(
+            &mut terminal,
+            &mut state,
+            &theme,
+            log_rx,
+            codex_runtime,
+            codex_config,
+            claude_config,
+        );
+        terminal.show_cursor()?;
+        guard.mark_cursor_hidden(false);
+        guard.restore();
+        return result;
+    }
+
     let mut syntax = SyntaxRuntime::new(state.settings.highlight.clone());
     let editor_id = state.active_editor_buffer_id;
     let notes_id = state.notes_buffer_id;

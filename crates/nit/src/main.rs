@@ -14,10 +14,11 @@ use clap::Parser;
 use nit_core::{AppKind, AppState, LabId, Mode, PaneId, SubstrateState};
 use nit_tui::claude_runner::ClaudeRunnerConfig;
 use nit_tui::codex_runner::{CodexRunnerConfig, CodexRuntimeMode};
+use nit_tui::multipane;
 use nit_tui::{run, Theme};
 use nit_utils::hashing::stable_hash_bytes;
 
-use crate::cli::{AgentsArg, Cli, Command};
+use crate::cli::{AgentsArg, Cli, Command, MultipaneArgs};
 use crate::logging::{init_tracing, install_panic_hook, log_path_for_workspace};
 use crate::workspace::{
     export_legacy_notes_snapshot, find_theme, load_notes, open_target_games, open_target_gol,
@@ -36,7 +37,18 @@ fn main() -> anyhow::Result<()> {
 
     let (runtime_mode, codex_runner_config, claude_runner_config) = build_runner_configs(&cli);
     let backend_selection = cli.agents;
-    let (app_kind, target_path) = resolve_app_target(cli.command, cli.lab, cli.path);
+    let resolved = match cli.command {
+        Some(Command::Multipane(args)) => {
+            return run_multipane(
+                args,
+                runtime_mode,
+                codex_runner_config,
+                claude_runner_config,
+            );
+        }
+        other => other,
+    };
+    let (app_kind, target_path) = resolve_app_target(resolved, cli.lab, cli.path);
 
     let (workspace_root, editor_buffer) = match app_kind {
         AppKind::Gol => open_target_gol(target_path.as_deref())?,
@@ -100,6 +112,12 @@ fn resolve_app_target(
     match command {
         Some(Command::Gol { path }) => (AppKind::Gol, path),
         Some(Command::Games { path, .. }) => (AppKind::Games, path),
+        Some(Command::Multipane(_)) => {
+            // Unreachable: the Multipane arm short-circuits in `main` before
+            // resolve_app_target is called. Kept exhaustive for future
+            // refactors that pipe everything through this resolver.
+            (LabId::from(lab), fallback_path)
+        }
         None => (LabId::from(lab), fallback_path),
     }
 }
@@ -175,6 +193,72 @@ fn init_gol_rules(state: &mut AppState) {
             workspace_override: prefs.workspace_override,
         },
     );
+}
+
+fn run_multipane(
+    args: MultipaneArgs,
+    runtime_mode: CodexRuntimeMode,
+    codex_config: CodexRunnerConfig,
+    claude_config: ClaudeRunnerConfig,
+) -> anyhow::Result<()> {
+    let roster = agents::init_agents(AgentsArg::All);
+    let known: Vec<String> = sorted_backend_ids(&roster);
+    if !known.iter().any(|id| id == &args.backend) {
+        report_unknown_backend(&args.backend, &known);
+        std::process::exit(2);
+    }
+
+    let pane_count = usize::from(args.panes);
+    let cwd = args
+        .cwd
+        .clone()
+        .map(Ok)
+        .unwrap_or_else(std::env::current_dir)?;
+
+    let (workspace_root, editor_buffer) = open_target_gol(Some(&cwd))?;
+    let theme = Theme::load(find_theme().as_deref());
+    let (log_sender, log_receiver) = mpsc::channel::<String>();
+    init_tracing(log_sender, log_path_for_workspace(&workspace_root))?;
+    install_panic_hook();
+    let notes_buffer = load_notes(&workspace_root);
+
+    let mut state = AppState::new(workspace_root, editor_buffer, notes_buffer);
+    state.substrate = SubstrateState::load(&state.workspace_root);
+    state.agents = roster;
+    state.app_kind = AppKind::Gol;
+    state.mode = Mode::Normal;
+    state.focus = PaneId::Editor;
+
+    multipane::setup::install(&mut state, &args.backend, pane_count, cwd)
+        .map_err(|err| anyhow::anyhow!(err))?;
+
+    run(
+        state,
+        theme,
+        log_receiver,
+        runtime_mode,
+        codex_config,
+        claude_config,
+    )?;
+    Ok(())
+}
+
+fn sorted_backend_ids(roster: &nit_core::AgentsState) -> Vec<String> {
+    let mut ids: Vec<String> = roster.agents.iter().map(|lane| lane.id.clone()).collect();
+    ids.sort();
+    ids
+}
+
+fn report_unknown_backend(backend: &str, known: &[String]) {
+    eprintln!("error: unknown --backend '{backend}'");
+    if known.is_empty() {
+        eprintln!("no backends available — install codex / claude / gemini and retry");
+        return;
+    }
+    eprintln!("available backends:");
+    for id in known {
+        eprintln!("  {id}");
+    }
 }
 
 #[cfg(test)]

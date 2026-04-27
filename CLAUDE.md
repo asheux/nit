@@ -90,6 +90,19 @@ MSRV: Rust 1.88.0 (pinned in `rust-toolchain.toml`).
 - `@queue` / `@q` — legacy alias for queued prompt (now same as default queueing)
 - `/abort` (or `@abort`) — abort the active swarm mission. `/abort all` cancels every running swarm + clears both runner queues. `/abort <agent-id>` is a surgical strike that kills one agent's in-flight + queued turns. See `docs/SWARM.md` "Aborting a swarm".
 
+## Multipane mode
+
+`nit multipane --backend <model> [--panes N] [--cwd PATH]` opens a grid of
+N independent chat panes (default 8, range 1..=32; grid is `ceil(sqrt(N))`
+columns × `ceil(N / cols)` rows), each a self-contained chat session
+anchored at its own working directory. The chosen backend applies to
+every pane; per-pane agent ids use the form `<base>#mp-pane-NN` so they
+coexist with `#swarm-` and `#chat-clone-` conventions. Editor / agent ops
+/ visualizer panes are unavailable; only chat dispatch is wired. Tab and
+Shift+Tab cycle focus, mouse click focuses a pane directly, and `/abort`
+/ Ctrl+C / Esc-Esc target the focused pane only. See `docs/MULTIPANE.md`
+for the full spec and Phase 4+ follow-ups.
+
 ## Aborting in-flight work
 
 Five triggers, all routed through `chat_input::handle_abort`. When an
