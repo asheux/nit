@@ -3972,3 +3972,66 @@ fn intended_size_all_clamps_empty_roster_to_one() {
                              // (intended > started) doesn't underflow downstream.
     assert_eq!(swarm_intended_size(&state, SwarmSize::All), 1);
 }
+
+// --- per_dep_budget --------------------------------------------------------
+//
+// The DAG dashboard surfaces the per-dep character budget so operators see
+// when their bulk proposers are getting truncated. These tests pin the
+// formula so any tweak to the underlying constants surfaces in every
+// consumer that depends on them.
+
+#[test]
+fn per_dep_budget_caps_at_full_ceiling_for_few_deps() {
+    // 1 dep on a full-output role gets the per-dep ceiling (48k), not the
+    // total budget (240k). The min() in the formula enforces this.
+    assert_eq!(per_dep_budget(Some("integrate"), false, 1), 48_000);
+    assert_eq!(per_dep_budget(Some("judge"), false, 1), 48_000);
+    assert_eq!(per_dep_budget(Some("integrate"), false, 5), 48_000);
+}
+
+#[test]
+fn per_dep_budget_splits_total_above_5_deps() {
+    // Past 5 deps the total budget (240k) starts dividing. 6 → 40k each,
+    // 12 → 20k, 50 → 4.8k, 256 → ~937 chars.
+    assert_eq!(per_dep_budget(Some("integrate"), false, 6), 40_000);
+    assert_eq!(per_dep_budget(Some("integrate"), false, 12), 20_000);
+    assert_eq!(per_dep_budget(Some("integrate"), false, 50), 4_800);
+    assert!(per_dep_budget(Some("integrate"), false, 256) < 1_000);
+}
+
+#[test]
+fn per_dep_budget_treats_writes_as_full_output() {
+    // A custom write-role task (writes=true, role unknown) shares the same
+    // budget path as judge/integrate.
+    assert_eq!(
+        per_dep_budget(Some("custom-write"), true, 12),
+        per_dep_budget(Some("integrate"), false, 12)
+    );
+}
+
+#[test]
+fn per_dep_budget_uses_compact_cap_for_non_full_roles() {
+    // Compact-artifact roles (propose, review, test, …) get a flat 8k per
+    // dep regardless of fan-in, because their payloads are summarised.
+    assert_eq!(per_dep_budget(Some("propose"), false, 1), 8_000);
+    assert_eq!(per_dep_budget(Some("propose"), false, 50), 8_000);
+    assert_eq!(per_dep_budget(Some("review"), false, 100), 8_000);
+    assert_eq!(per_dep_budget(None, false, 50), 8_000);
+}
+
+#[test]
+fn per_dep_budget_handles_zero_deps_safely() {
+    // No deps → effective dep_count of 1 (the .max(1) in the formula).
+    // No panic, returns the per-dep ceiling.
+    assert_eq!(per_dep_budget(Some("integrate"), false, 0), 48_000);
+}
+
+#[test]
+fn task_uses_full_output_budget_classifies_correctly() {
+    assert!(task_uses_full_output_budget(Some("judge"), false));
+    assert!(task_uses_full_output_budget(Some("integrate"), false));
+    assert!(task_uses_full_output_budget(Some("anything"), true));
+    assert!(!task_uses_full_output_budget(Some("propose"), false));
+    assert!(!task_uses_full_output_budget(Some("review"), false));
+    assert!(!task_uses_full_output_budget(None, false));
+}

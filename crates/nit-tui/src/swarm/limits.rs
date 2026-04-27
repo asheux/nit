@@ -14,6 +14,35 @@
 
 use super::constants::{LARGE_SWARM_WARN_THRESHOLD, MAX_SWARM_SIZE};
 
+/// Past this swarm size, lightweight planner models start producing
+/// shallow / repetitive role assignments because nit doesn't do
+/// hierarchical planning — the whole DAG is generated in one pass. Used
+/// only for the operator advisory; doesn't affect what actually runs.
+pub(crate) const LIGHT_PLANNER_SWARM_THRESHOLD: usize = 20;
+
+/// Heuristic detector for "lightweight" planner models — token match
+/// against the agent id, split on `-` / `.` / `_` / `/`. Bare substring
+/// search misfires (e.g. "geMINI" contains "mini"), so we require the
+/// tier marker to appear as its own segment. Picks up haiku / mini /
+/// nano / flash-tier models across Anthropic, OpenAI, and Google.
+/// Conservative: false positives just produce an extra advisory line,
+/// never block the run.
+pub(crate) fn is_light_planner(agent_id: &str) -> bool {
+    let lower = agent_id.to_ascii_lowercase();
+    // Strip swarm/chat-clone suffix so the suffix tokens (clone, swarm,
+    // mis-NNN) can't influence detection.
+    let base = lower.split('#').next().unwrap_or(lower.as_str());
+    base.split(['-', '.', '_', '/'])
+        .any(|tok| matches!(tok, "haiku" | "mini" | "nano" | "flash"))
+}
+
+/// Bulk template's per-dep budget collapses past ~10 proposers because
+/// `SWARM_DEP_OUTPUT_TOTAL_MAX_CHARS_FULL` (240k) is split across deps —
+/// at 12 proposers each gets ~20k chars (still meaningful), at 20 each
+/// gets 12k, at 50 only 4.8k. Hard-cap at 12 with an advisory rather
+/// than silently degrading proposal quality.
+pub(crate) const BULK_PRACTICAL_MAX: usize = 12;
+
 /// Per-agent file descriptor cost. Each Codex/Claude exec turn opens 4 fds
 /// from nit's side (stdin/stdout/stderr pipes + the tmp out_file). Codex
 /// MCP-mode is cheaper because all turns multiplex through one shared
@@ -153,5 +182,41 @@ mod tests {
         // Smoke test: on any host this is supposed to run on, the soft
         // limit must be > the baseline.
         assert!(current_fd_soft_limit() > NIT_BASELINE_FDS);
+    }
+
+    #[test]
+    fn is_light_planner_matches_known_lightweight_tiers() {
+        // Anthropic.
+        assert!(is_light_planner("claude-haiku-4-5"));
+        assert!(is_light_planner("claude-haiku-3-5"));
+        // OpenAI lightweight variants.
+        assert!(is_light_planner("gpt-5-mini"));
+        assert!(is_light_planner("gpt-5-nano"));
+        assert!(is_light_planner("o4-mini"));
+        // Google.
+        assert!(is_light_planner("gemini-2.5-flash"));
+        // Case-insensitive.
+        assert!(is_light_planner("Claude-HAIKU-4-5"));
+        assert!(is_light_planner("GPT-5-MINI"));
+    }
+
+    #[test]
+    fn is_light_planner_excludes_heavy_tiers() {
+        assert!(!is_light_planner("claude-opus-4-7"));
+        assert!(!is_light_planner("claude-sonnet-4-6"));
+        assert!(!is_light_planner("gpt-5"));
+        assert!(!is_light_planner("gpt-5.4"));
+        assert!(!is_light_planner("gemini-2.5-pro"));
+        // Empty / odd inputs don't crash and report not-light.
+        assert!(!is_light_planner(""));
+        assert!(!is_light_planner("custom-model"));
+    }
+
+    #[test]
+    fn is_light_planner_strips_clone_suffix() {
+        // Swarm clone suffix shouldn't change the answer — substring match
+        // catches the base model name regardless of suffix.
+        assert!(is_light_planner("claude-haiku-4-5#swarm-mis-001-clone-01"));
+        assert!(!is_light_planner("claude-opus-4-7#swarm-mis-001-clone-01"));
     }
 }

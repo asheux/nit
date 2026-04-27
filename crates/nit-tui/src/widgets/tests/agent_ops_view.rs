@@ -1241,6 +1241,126 @@ fn mission_visible_agent_lines_caps_above_threshold() {
 }
 
 #[test]
+fn dag_lines_show_per_dep_budget_for_full_output_with_high_fanin() {
+    // Regression: bulk-template judge/integrate tasks with many deps get
+    // their per-dep budget compressed below the per-dep ceiling, but the
+    // operator can't see that without running the swarm and watching
+    // proposals get truncated. The DAG dashboard now surfaces the budget
+    // directly so the cost is visible at plan time.
+    let dashboard = SwarmDashboardView {
+        mission_id: "mis-bulk-stress".into(),
+        template: "bulk".into(),
+        phase: "EXEC".into(),
+        done: 0,
+        failed: 0,
+        skipped: 0,
+        running: 1,
+        queued: 0,
+        pending: 12,
+        tasks: vec![SwarmTaskDashboardRow {
+            id: "judge-1".into(),
+            title: "Compare proposals".into(),
+            role: Some("judge".into()),
+            agent_id: "claude-opus-4-7".into(),
+            state: "Pending".into(),
+            deps: (0..12).map(|i| format!("propose-{i:02}")).collect(),
+            blocked_on: Vec::new(),
+            writes: false,
+            done_when: Some("Best proposal selected".into()),
+            output_present: false,
+        }],
+        gate_bundle: None,
+        gates: Vec::new(),
+    };
+    let lines = dag_lines_for_dashboard(&dashboard, 80);
+    // 12 deps on a judge role → 240_000 / 12 = 20_000 chars/dep = ~20KB.
+    assert!(
+        lines.iter().any(|l| l.contains("budget: ~20KB/dep")),
+        "expected per-dep budget annotation in DAG output, got: {lines:#?}"
+    );
+}
+
+#[test]
+fn dag_lines_flag_shallow_budget_when_critical() {
+    // 50 proposers compresses the per-dep budget to 4.8KB — well below the
+    // 8KB threshold where proposals carry usable reasoning. Surface the
+    // "shallow" warning so the operator knows the bulk run will be
+    // dominated by headers, not analysis.
+    let dashboard = SwarmDashboardView {
+        mission_id: "mis-bulk-overscale".into(),
+        template: "bulk".into(),
+        phase: "EXEC".into(),
+        done: 0,
+        failed: 0,
+        skipped: 0,
+        running: 1,
+        queued: 0,
+        pending: 50,
+        tasks: vec![SwarmTaskDashboardRow {
+            id: "integrate-1".into(),
+            title: "Integrate proposals".into(),
+            role: Some("integrate".into()),
+            agent_id: "claude-opus-4-7".into(),
+            state: "Pending".into(),
+            deps: (0..50).map(|i| format!("propose-{i:02}")).collect(),
+            blocked_on: Vec::new(),
+            writes: true,
+            done_when: Some("Changes integrated".into()),
+            output_present: false,
+        }],
+        gate_bundle: None,
+        gates: Vec::new(),
+    };
+    let lines = dag_lines_for_dashboard(&dashboard, 80);
+    assert!(
+        lines.iter().any(|l| l.contains("shallow")),
+        "expected shallow-budget warning in DAG output, got: {lines:#?}"
+    );
+}
+
+#[test]
+fn dag_lines_omit_budget_for_few_deps() {
+    // With ≤ 5 deps, the per-dep budget hits the per-dep ceiling (48KB).
+    // Showing "budget: ~48KB/dep" then would be noise — every dep gets
+    // the maximum, no truncation. Annotation must be suppressed.
+    let dashboard = SwarmDashboardView {
+        mission_id: "mis-small-bulk".into(),
+        template: "bulk".into(),
+        phase: "EXEC".into(),
+        done: 0,
+        failed: 0,
+        skipped: 0,
+        running: 1,
+        queued: 0,
+        pending: 4,
+        tasks: vec![SwarmTaskDashboardRow {
+            id: "judge-1".into(),
+            title: "Compare proposals".into(),
+            role: Some("judge".into()),
+            agent_id: "claude-opus-4-7".into(),
+            state: "Pending".into(),
+            deps: vec![
+                "propose-01".into(),
+                "propose-02".into(),
+                "propose-03".into(),
+                "propose-04".into(),
+            ],
+            blocked_on: Vec::new(),
+            writes: false,
+            done_when: Some("Best selected".into()),
+            output_present: false,
+        }],
+        gate_bundle: None,
+        gates: Vec::new(),
+    };
+    let lines = dag_lines_for_dashboard(&dashboard, 80);
+    assert!(
+        !lines.iter().any(|l| l.contains("budget:")),
+        "no budget annotation expected for small bulk runs, got: {lines:#?}"
+    );
+}
+
+#[test]
 fn parse_roster_truncation_disabled_handles_common_inputs() {
     // Treated as "still truncate":
     assert!(!parse_roster_truncation_disabled(None));

@@ -18,7 +18,7 @@ pub(super) const SWARM_DEP_OUTPUT_MAX_CHARS: usize = 8_000;
 /// refactoring proposal can reach 20–30K chars; giving the downstream agent
 /// the full reasoning chain materially improves decisions. Biased toward
 /// preserving information.
-pub(super) const SWARM_DEP_OUTPUT_MAX_CHARS_FULL: usize = 48_000;
+pub(crate) const SWARM_DEP_OUTPUT_MAX_CHARS_FULL: usize = 48_000;
 
 // Shared role-contract clauses.
 //

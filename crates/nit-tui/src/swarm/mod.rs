@@ -113,7 +113,7 @@ use constants::{
 };
 pub(crate) use constants::{
     DEFAULT_SWARM_SIZE, LARGE_SWARM_WARN_THRESHOLD, NO_PADDING_CLAUSE, NO_REVERT_CLAUSE,
-    TEST_DISCIPLINE_CLAUSE,
+    SWARM_DEP_OUTPUT_MAX_CHARS_FULL as DEP_BUDGET_PER_DEP_CEILING, TEST_DISCIPLINE_CLAUSE,
 };
 
 mod limits;
@@ -129,9 +129,11 @@ use graph_exec::{
     maybe_resolve_deadlock, refresh_task_readiness, structural_compliance_missing_files,
     tasks_terminal_count,
 };
+pub(crate) use graph_exec::{per_dep_budget, task_uses_full_output_budget};
 use json::{extract_json_code_block, extract_json_code_blocks};
 pub(crate) use limits::{
-    current_fd_soft_limit, effective_max_swarm_size, large_swarm_warn_threshold,
+    current_fd_soft_limit, effective_max_swarm_size, is_light_planner, large_swarm_warn_threshold,
+    BULK_PRACTICAL_MAX, LIGHT_PLANNER_SWARM_THRESHOLD,
 };
 use plan_parser::{
     apply_role_dependency_ordering, assign_clone_roles_for_parallel_coverage,

@@ -19,8 +19,9 @@ use std::{
 use time::OffsetDateTime;
 
 use crate::swarm::{
-    chat_clone_base_id, is_chat_clone_agent_id, normalize_role_label, GateReportGate,
-    SwarmDashboardView, SwarmPersistenceView, SwarmRuntime, SwarmTaskArtifacts,
+    chat_clone_base_id, is_chat_clone_agent_id, normalize_role_label, per_dep_budget,
+    task_uses_full_output_budget, GateReportGate, SwarmDashboardView, SwarmPersistenceView,
+    SwarmRuntime, SwarmTaskArtifacts, DEP_BUDGET_PER_DEP_CEILING,
 };
 use crate::theme::Theme;
 use crate::widgets::text_selection::apply_ui_selection;
@@ -1895,6 +1896,35 @@ done_when: {done_when}"
                     empty_state,
                     fit_left(&line, task_widths[2]),
                 ));
+            }
+
+            // Surface the per-dep character budget for full-output roles
+            // (judge / integrate / writes=true) when the fan-in compresses
+            // each dep below the per-dep ceiling. Below ~8KB the truncated
+            // payload typically conveys headers but not reasoning, so the
+            // hint is upgraded to a "shallow" warning.
+            if task_uses_full_output_budget(task.role.as_deref(), task.writes)
+                && !task.deps.is_empty()
+            {
+                let per_dep = per_dep_budget(task.role.as_deref(), task.writes, task.deps.len());
+                if per_dep < DEP_BUDGET_PER_DEP_CEILING {
+                    let kb = per_dep / 1000;
+                    let detail = if per_dep < 8_000 {
+                        format!("budget: ~{kb}KB/dep — shallow (proposer reasoning truncated)")
+                    } else {
+                        format!("budget: ~{kb}KB/dep")
+                    };
+                    let chunks = wrap_cell_text(&detail, task_widths[2].saturating_sub(2));
+                    for chunk in chunks {
+                        let line = format!("{} {chunk}", arrow_glyph());
+                        out.push(format!(
+                            " {} {} {}",
+                            empty_id,
+                            empty_state,
+                            fit_left(&line, task_widths[2]),
+                        ));
+                    }
+                }
             }
         }
     }

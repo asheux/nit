@@ -399,26 +399,44 @@ fn select_dispatchable_ready_task_indices(run: &SwarmRun) -> Vec<usize> {
     indices
 }
 
+/// Returns the per-dep character cap a task with the given role / writes /
+/// dep count would receive when its dependency payloads are collated. Same
+/// formula as `collect_dependency_payload` — extracted so the DAG dashboard
+/// can show the operator what budget each task is operating under at a
+/// glance, and so any future change to the budget rule lives in one place.
+pub(crate) fn per_dep_budget(role: Option<&str>, writes: bool, dep_count: usize) -> usize {
+    let needs_full = matches!(
+        role.and_then(normalize_role_label).as_deref(),
+        Some("judge" | "integrate")
+    ) || writes;
+    let n = dep_count.max(1);
+    if needs_full {
+        (SWARM_DEP_OUTPUT_TOTAL_MAX_CHARS_FULL / n).min(SWARM_DEP_OUTPUT_MAX_CHARS_FULL)
+    } else {
+        SWARM_DEP_OUTPUT_MAX_CHARS
+    }
+}
+
+/// Returns true when a task's role uses the full-output budget path. Used
+/// by the DAG dashboard to decide whether to show a per-dep budget hint
+/// at all (compact-artifact roles share the full ceiling regardless of
+/// fan-in, so the hint would just be noise for them).
+pub(crate) fn task_uses_full_output_budget(role: Option<&str>, writes: bool) -> bool {
+    matches!(
+        role.and_then(normalize_role_label).as_deref(),
+        Some("judge" | "integrate")
+    ) || writes
+}
+
 fn collect_dependency_payload(run: &SwarmRun, task: &SwarmTask) -> Vec<(String, String)> {
-    let role = task.role.as_deref().and_then(normalize_role_label);
     // Tasks that must ACT on dependency outputs need the full raw text —
     // compact artifact summaries strip reasoning and implementation details,
     // causing agents to describe changes instead of executing them.
     //
     // Full output for: judge (comparing proposals), integrate (implementing),
     // and any task with `writes: true` (custom write-role tasks from planner).
-    let needs_full_output = matches!(role.as_deref(), Some("judge" | "integrate")) || task.writes;
-
-    // Full-output roles share a total budget across deps so a fan-in from
-    // many proposers can't blow past the downstream model's context window.
-    // Non-full roles keep the per-dep cap (their payloads are already
-    // compact artifact summaries).
-    let dep_count = task.deps.len().max(1);
-    let per_dep_cap = if needs_full_output {
-        (SWARM_DEP_OUTPUT_TOTAL_MAX_CHARS_FULL / dep_count).min(SWARM_DEP_OUTPUT_MAX_CHARS_FULL)
-    } else {
-        SWARM_DEP_OUTPUT_MAX_CHARS
-    };
+    let needs_full_output = task_uses_full_output_budget(task.role.as_deref(), task.writes);
+    let per_dep_cap = per_dep_budget(task.role.as_deref(), task.writes, task.deps.len());
 
     let mut out = Vec::new();
     for dep_id in task.deps.iter() {

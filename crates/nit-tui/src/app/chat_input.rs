@@ -11,10 +11,11 @@ use crate::shadow::{parse_shadow_command, should_auto_enable_shadows, ShadowRunt
 use crate::swarm::{
     create_chat_clone, current_fd_soft_limit, detect_swarm_mission_kind_from_prompt,
     effective_max_swarm_size, explicit_swarm_mission_kind_from_prompt, is_agent_busy,
-    is_agent_family_busy, is_chat_clone_agent_id, large_swarm_warn_threshold, parse_swarm_command,
-    parse_swarm_mission_kind, push_system_alert_to_mission, select_swarm_agents,
-    swarm_intended_size, SwarmCommand, SwarmMissionKind, SwarmRuntime, SwarmSize,
-    DEFAULT_SWARM_SIZE, LARGE_SWARM_WARN_THRESHOLD,
+    is_agent_family_busy, is_chat_clone_agent_id, is_light_planner, large_swarm_warn_threshold,
+    parse_swarm_command, parse_swarm_mission_kind, push_system_alert_to_mission,
+    select_swarm_agents, swarm_intended_size, SwarmCommand, SwarmMissionKind, SwarmRuntime,
+    SwarmSize, BULK_PRACTICAL_MAX, DEFAULT_SWARM_SIZE, LARGE_SWARM_WARN_THRESHOLD,
+    LIGHT_PLANNER_SWARM_THRESHOLD,
 };
 use crate::vitals::VitalsState;
 
@@ -525,9 +526,32 @@ pub(super) fn submit_chat_input_and_dispatch(
             });
 
         if let Some(planner) = planner {
+            // Capture the operator's *original* size request before any
+            // template-specific clamping, so the advisory below can report
+            // "Requested 50, started 12" verbatim.
+            let original_size = cmd.size;
+            // Bulk template caps proposer count: past ~BULK_PRACTICAL_MAX
+            // the per-dep budget for the judge collapses (240k / N chars
+            // per dep), so additional proposers contribute headers, not
+            // reasoning. Hard-cap here before select_swarm_agents so the
+            // downstream pipeline never sees the original oversized request.
+            let bulk_template = matches!(cmd.template.as_deref(), Some("bulk") | Some("bo"));
+            let bulk_capped_from: Option<usize> = if bulk_template {
+                let intended = swarm_intended_size(state, original_size);
+                if intended > BULK_PRACTICAL_MAX {
+                    cmd.size = SwarmSize::Count(BULK_PRACTICAL_MAX);
+                    Some(intended)
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
             let agents = select_swarm_agents(state, &planner, cmd.size, cmd.template.as_deref());
             let agent_count = agents.len();
-            let intended_count = swarm_intended_size(state, cmd.size);
+            // Intended count uses the original request so messages reflect
+            // what the operator typed, not the post-clamp value.
+            let intended_count = swarm_intended_size(state, original_size);
             if let Some((mission_id, dispatches)) = swarm.start(
                 state,
                 planner.clone(),
@@ -559,14 +583,27 @@ pub(super) fn submit_chat_input_and_dispatch(
                     SwarmSize::All => agent_count,
                     SwarmSize::Count(n) => n.clamp(1, ceiling),
                 };
-                // An explicit clamp message takes priority over the generic
-                // "large swarm" advisory: when the operator asked for N and
-                // got fewer, that's a workflow surprise and the message
-                // should say so directly. Only fall through to the generic
-                // warning when the request landed at exactly what was asked.
+                // Advisory ordering: bulk-template cap > FD-bound clamp >
+                // pool-bound clamp > generic large-swarm warning. Only one
+                // fires; whichever explains the surprise the operator most
+                // needs to see.
                 let was_clamped = intended_count > final_size;
-                let fd_bound_clamp = was_clamped && final_size == ceiling;
-                if fd_bound_clamp {
+                let fd_bound_clamp =
+                    was_clamped && bulk_capped_from.is_none() && final_size == ceiling;
+                if let Some(intended_bulk) = bulk_capped_from {
+                    push_system_alert_to_mission(
+                        state,
+                        &mission_id,
+                        format!(
+                            "Bulk template capped at {BULK_PRACTICAL_MAX} proposers \
+                             (requested {intended_bulk}, started {final_size}). The \
+                             judge's per-dep budget is 240KB total / N proposers; past \
+                             {BULK_PRACTICAL_MAX} each proposal is truncated below ~20KB \
+                             and contributes headers, not reasoning. Use `template=parallel` \
+                             for larger fan-outs where each agent owns its own write region."
+                        ),
+                    );
+                } else if fd_bound_clamp {
                     push_system_alert_to_mission(
                         state,
                         &mission_id,
@@ -601,6 +638,25 @@ pub(super) fn submit_chat_input_and_dispatch(
                         )
                     };
                     push_system_alert_to_mission(state, &mission_id, msg);
+                }
+                // Independent advisory: nit's planner produces the entire
+                // task DAG in one pass (no hierarchical planning). Past
+                // ~20 task assignments, lightweight models (haiku / mini
+                // / nano / flash) start producing repetitive or shallow
+                // role assignments. Surface this as a separate message so
+                // operators can swap the planner before paying for a run
+                // that won't be coherent.
+                if final_size > LIGHT_PLANNER_SWARM_THRESHOLD && is_light_planner(&planner) {
+                    push_system_alert_to_mission(
+                        state,
+                        &mission_id,
+                        format!(
+                            "Planner `{planner}` is a lightweight model — coherently \
+                             planning {final_size} task assignments may exceed its \
+                             reasoning depth. Consider re-running with a sonnet/opus-tier \
+                             planner for swarms past ~{LIGHT_PLANNER_SWARM_THRESHOLD} agents."
+                        ),
+                    );
                 }
                 for dispatch in dispatches {
                     apply_swarm_task_role(state, &dispatch);
