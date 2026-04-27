@@ -2326,7 +2326,7 @@ fn roster_enter_toggles_selected_backend() {
     });
 
     let mut vitals = VitalsState::default();
-    let swarm = SwarmRuntime::default();
+    let mut swarm = SwarmRuntime::default();
 
     assert_eq!(
         agent_ops_view::roster_selected_row(&state),
@@ -2340,7 +2340,7 @@ fn roster_enter_toggles_selected_backend() {
         &mut vitals,
         None,
         None,
-        &swarm,
+        &mut swarm,
     ));
     assert!(state
         .agents
@@ -2357,7 +2357,7 @@ fn roster_enter_toggles_selected_backend() {
         &mut vitals,
         None,
         None,
-        &swarm,
+        &mut swarm,
     ));
     assert!(!state
         .agents
@@ -6155,4 +6155,53 @@ fn swarm_review_role_receives_genome_landscape() {
         .prompt
         .contains("cite these metrics when flagging issues"));
     assert!(dispatch.prompt.contains("tier II"));
+}
+
+// --- parse_abort_command ---------------------------------------------------
+//
+// The parser is pure (no state, no IO), so a tight unit-test pass is
+// the right place to lock the grammar. Whitespace handling, casing of
+// `all`, agent-id passthrough, and substring rejection (`/abortif` is
+// NOT abort) are the surface we care about.
+
+#[test]
+fn parse_abort_handles_plain_command() {
+    use super::chat_input::{parse_abort_command, AbortScope};
+    assert_eq!(parse_abort_command("/abort"), Some(AbortScope::Current));
+    assert_eq!(parse_abort_command("@abort"), Some(AbortScope::Current));
+    assert_eq!(parse_abort_command("/abort   "), Some(AbortScope::Current));
+    // Leading whitespace tolerated.
+    assert_eq!(parse_abort_command("   /abort"), Some(AbortScope::Current));
+}
+
+#[test]
+fn parse_abort_handles_all_argument() {
+    use super::chat_input::{parse_abort_command, AbortScope};
+    assert_eq!(parse_abort_command("/abort all"), Some(AbortScope::All));
+    assert_eq!(parse_abort_command("/abort ALL"), Some(AbortScope::All));
+    assert_eq!(parse_abort_command("@abort All"), Some(AbortScope::All));
+}
+
+#[test]
+fn parse_abort_handles_agent_id_argument() {
+    use super::chat_input::{parse_abort_command, AbortScope};
+    assert_eq!(
+        parse_abort_command("/abort claude-haiku-4-5"),
+        Some(AbortScope::Agent("claude-haiku-4-5".into()))
+    );
+    assert_eq!(
+        parse_abort_command("@abort gpt-5.4#swarm-mis-001-clone-03"),
+        Some(AbortScope::Agent("gpt-5.4#swarm-mis-001-clone-03".into()))
+    );
+}
+
+#[test]
+fn parse_abort_rejects_substring_matches() {
+    use super::chat_input::parse_abort_command;
+    // Substring traps: `/abortif`, `@abortion` must NOT be commands.
+    assert_eq!(parse_abort_command("/abortif you can"), None);
+    assert_eq!(parse_abort_command("@abortion"), None);
+    // Unrelated prompts pass through.
+    assert_eq!(parse_abort_command("hello"), None);
+    assert_eq!(parse_abort_command(""), None);
 }

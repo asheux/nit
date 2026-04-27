@@ -4035,3 +4035,160 @@ fn task_uses_full_output_budget_classifies_correctly() {
     assert!(!task_uses_full_output_budget(Some("review"), false));
     assert!(!task_uses_full_output_budget(None, false));
 }
+
+// --- abort_mission / abort_all --------------------------------------------
+//
+// The abort feature must: return the agent ids the caller should send
+// CancelTurn to, mark the mission ABORTED in the run state, drain
+// queued turns from `state.agents`, push a system alert with
+// SYSTEM_ALERT_KIND so the chat console renders it, and remain
+// idempotent for unknown / completed missions.
+
+fn lane_for_abort(id: &str) -> AgentLane {
+    AgentLane {
+        id: id.into(),
+        role: id.into(),
+        lane: id.into(),
+        kind: AgentLaneKind::Codex,
+        status: nit_core::AgentStatus::Idle,
+        heartbeat_age_secs: 0,
+        queue_len: 0,
+        current_mission: Some("mis-001".into()),
+        shadow: false,
+        last_message: String::new(),
+    }
+}
+
+/// Builds a `SwarmRuntime` (via the existing `test_runtime_with_running_tasks`
+/// fixture) and seeds the AppState with matching agent lanes + a mission
+/// record so the abort path has everything to operate on.
+fn build_active_swarm_run(
+    state: &mut nit_core::AppState,
+    mission_id: &str,
+    agent_ids: &[&str],
+) -> SwarmRuntime {
+    for id in agent_ids {
+        state.agents.agents.push(lane_for_abort(id));
+    }
+    state.agents.missions.push(nit_core::MissionRecord {
+        id: mission_id.into(),
+        title: "test mission".into(),
+        phase: nit_core::MissionPhase::Execute,
+        status: "in progress".into(),
+        swarm: true,
+        updated_at: "now".into(),
+        assigned_agents: agent_ids.iter().map(|s| s.to_string()).collect(),
+    });
+    test_runtime_with_running_tasks(
+        mission_id,
+        &agent_ids
+            .iter()
+            .enumerate()
+            .map(|(i, id)| (*id, if i == 0 { "propose" } else { "integrate" }))
+            .collect::<Vec<_>>(),
+    )
+}
+
+#[test]
+fn abort_mission_returns_agent_ids_and_marks_aborted() {
+    let mut state = new_state();
+    let mut runtime = build_active_swarm_run(&mut state, "mis-001", &["a-1", "a-2", "a-3"]);
+
+    let agents = runtime.abort_mission(&mut state, "mis-001");
+    assert_eq!(agents.len(), 3, "all assigned agents must be returned");
+    for id in &["a-1", "a-2", "a-3"] {
+        assert!(agents.iter().any(|a| a == id));
+    }
+
+    // Mission record reflects the abort.
+    let mission = state
+        .agents
+        .missions
+        .iter()
+        .find(|m| m.id == "mis-001")
+        .expect("mission record");
+    assert_eq!(mission.status, "ABORTED");
+    // Mission moved out of active runs.
+    assert!(!runtime.is_active_mission("mis-001"));
+    assert!(runtime.mission_is_complete("mis-001"));
+}
+
+#[test]
+fn abort_mission_drains_queued_turns_for_assigned_agents() {
+    let mut state = new_state();
+    let mut runtime = build_active_swarm_run(&mut state, "mis-001", &["a-1", "a-2"]);
+
+    state
+        .agents
+        .queued_codex_turns
+        .push_back(nit_core::QueuedCodexTurn {
+            agent_id: "a-1".into(),
+            mission_id: Some("mis-001".into()),
+            prompt: "stale".into(),
+            prompt_msg_idx: None,
+        });
+    // Bystander queue entry for an unrelated agent must NOT be dropped.
+    state
+        .agents
+        .queued_codex_turns
+        .push_back(nit_core::QueuedCodexTurn {
+            agent_id: "outsider".into(),
+            mission_id: Some("mis-other".into()),
+            prompt: "keep me".into(),
+            prompt_msg_idx: None,
+        });
+    state.agents.agents.push(lane_for_abort("outsider"));
+
+    runtime.abort_mission(&mut state, "mis-001");
+
+    assert_eq!(state.agents.queued_codex_turns.len(), 1);
+    assert_eq!(state.agents.queued_codex_turns[0].agent_id, "outsider");
+}
+
+#[test]
+fn abort_mission_pushes_system_alert_visible_in_chat() {
+    let mut state = new_state();
+    let mut runtime = build_active_swarm_run(&mut state, "mis-001", &["a-1"]);
+
+    let n_messages_before = state.agents.messages.len();
+    runtime.abort_mission(&mut state, "mis-001");
+
+    let new_messages: Vec<&nit_core::AgentMessage> =
+        state.agents.messages[n_messages_before..].iter().collect();
+    let alert = new_messages
+        .iter()
+        .find(|m| m.kind.as_deref() == Some(SYSTEM_ALERT_KIND))
+        .expect("expected SYSTEM_ALERT_KIND message after abort");
+    assert!(alert.text.contains("aborted"));
+    assert_eq!(alert.mission_id.as_deref(), Some("mis-001"));
+}
+
+#[test]
+fn abort_mission_unknown_id_is_idempotent() {
+    let mut state = new_state();
+    let mut runtime = SwarmRuntime::default();
+    let agents = runtime.abort_mission(&mut state, "mis-does-not-exist");
+    assert!(agents.is_empty());
+    // No spurious messages for unknown missions.
+    assert!(state.agents.messages.is_empty());
+}
+
+#[test]
+fn abort_all_aborts_every_active_run() {
+    let mut state = new_state();
+    // Build two missions in two separate runtimes, then merge runs into
+    // one via direct field access (test_fixtures gives us pub(crate)
+    // SwarmRun; this is the simplest way to seed two missions).
+    let mut runtime = build_active_swarm_run(&mut state, "mis-001", &["a-1"]);
+    let runtime_002 = build_active_swarm_run(&mut state, "mis-002", &["b-1", "b-2"]);
+    for (id, run) in runtime_002.runs {
+        runtime.runs.insert(id, run);
+    }
+
+    let agents = runtime.abort_all(&mut state);
+    assert_eq!(agents.len(), 3);
+    assert!(!runtime.is_active_mission("mis-001"));
+    assert!(!runtime.is_active_mission("mis-002"));
+    assert!(runtime.mission_is_complete("mis-001"));
+    assert!(runtime.mission_is_complete("mis-002"));
+}

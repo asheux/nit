@@ -137,12 +137,34 @@ impl SwarmRuntime {
         self.runs.contains_key(mission_id)
     }
 
+    /// Mission ids of every still-running swarm, in insertion order. Used
+    /// by the abort orchestrator to find a fallback target when the
+    /// operator's "current" mission has already terminated — e.g. after
+    /// they aborted once, started a new swarm, then triggered abort
+    /// again. Without this fallback, `selected_mission` keeps pointing
+    /// at the *first* aborted mission and `/abort` keeps replying "not
+    /// active" instead of killing the actual running work.
+    pub fn active_mission_ids(&self) -> Vec<String> {
+        self.runs.keys().cloned().collect()
+    }
+
     /// True once the planner's synthesis step has moved the run into
     /// `completed_runs`. Use this as the source of truth for "is the swarm
     /// done" — per-agent message scans can miss clones whose tasks were
     /// skipped or never dispatched.
     pub fn mission_is_complete(&self, mission_id: &str) -> bool {
         self.completed_runs.contains_key(mission_id)
+    }
+
+    /// True when the mission was terminated by an explicit operator
+    /// abort (`/abort`, Ctrl+C, Esc-Esc, Mission-tab `x`) rather than
+    /// finishing naturally. Used by the chat-console breather to show
+    /// "Aborted" instead of "Done", so the operator can tell at a
+    /// glance whether the run completed or was cancelled.
+    pub fn mission_was_aborted(&self, mission_id: &str) -> bool {
+        self.completed_runs
+            .get(mission_id)
+            .is_some_and(|run| run.report_status.as_deref() == Some("ABORTED"))
     }
 
     /// Returns the current swarm stage label (e.g. "VERIFY", "SYNTH") for a mission.
@@ -709,5 +731,80 @@ impl SwarmRuntime {
         self.runs
             .get(mission_id)
             .or_else(|| self.completed_runs.get(mission_id))
+    }
+
+    /// Abort a single in-flight swarm mission. Marks the run as cancelled
+    /// (moving it from `runs` to `completed_runs` with a synthetic
+    /// "ABORTED" status), drains the state-side queued turns for every
+    /// agent in the run, pushes a `SYSTEM_ALERT_KIND` message to the
+    /// mission console, and returns the list of agent ids whose
+    /// in-flight subprocess turns the caller still needs to kill via
+    /// the runner-level `CancelTurn` commands.
+    ///
+    /// Idempotent: returns an empty Vec when the mission is unknown or
+    /// already complete. Doesn't tear down clones — keep them around so
+    /// the operator can inspect what happened. The next swarm dispatch
+    /// or `cleanup_swarm_clones_for_mission` call (already triggered on
+    /// natural completion) handles teardown.
+    pub fn abort_mission(&mut self, state: &mut AppState, mission_id: &str) -> Vec<String> {
+        let Some(mut run) = self.runs.remove(mission_id) else {
+            return Vec::new();
+        };
+        let agent_ids: Vec<String> = run.agent_ids.clone();
+        run.report_status = Some("ABORTED".into());
+        // Mark every non-terminal task as Skipped so the dashboard reflects
+        // the abort instead of leaving them in Running/Pending.
+        for task in run.tasks.iter_mut() {
+            if !task.state.is_terminal() {
+                task.state = SwarmTaskState::Skipped;
+            }
+        }
+        self.completed_runs.insert(mission_id.to_string(), run);
+
+        // Drop every queued turn for this mission's agents and bring
+        // their queue_len counters back to zero — otherwise the UI shows
+        // ghost queues for cancelled agents.
+        super::clones::drain_queued_turns_for_mission_agents(state, &agent_ids);
+
+        // Update the mission record in state for the UI. Compute the
+        // timestamp first to release the &mut state borrow before
+        // grabbing the mission record.
+        let now = timestamp_label(state);
+        if let Some(mission) = state
+            .agents
+            .missions
+            .iter_mut()
+            .find(|m| m.id == mission_id)
+        {
+            mission.status = "ABORTED".into();
+            mission.phase = MissionPhase::Report;
+            mission.updated_at = now;
+        }
+
+        super::push_system_alert_to_mission(
+            state,
+            mission_id,
+            "Mission aborted by operator. In-flight turns are being killed; \
+             queued turns dropped."
+                .into(),
+        );
+
+        agent_ids
+    }
+
+    /// Abort every active swarm mission. Returns the union of agent ids
+    /// across all aborted runs so the caller can dispatch a single
+    /// `CancelAll` per runner instead of N CancelTurn calls.
+    pub fn abort_all(&mut self, state: &mut AppState) -> Vec<String> {
+        let mission_ids: Vec<String> = self.runs.keys().cloned().collect();
+        let mut all_agents: Vec<String> = Vec::new();
+        for mid in mission_ids {
+            for agent in self.abort_mission(state, &mid) {
+                if !all_agents.contains(&agent) {
+                    all_agents.push(agent);
+                }
+            }
+        }
+        all_agents
     }
 }

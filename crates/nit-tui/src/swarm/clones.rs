@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use nit_core::{AgentStatus, AppState};
 
@@ -168,10 +168,44 @@ pub(crate) fn insert_swarm_clone_lane(
     state.agents.agents.insert(insert_pos, clone_lane);
 }
 
+/// Bulk version of `drain_queued_turns_for_agent` for the abort path —
+/// drains queued turns for every agent in the slice in one pass so a
+/// large-mission abort doesn't do N separate Vec scans. Mirrors the
+/// queue_len bookkeeping in the single-agent function.
+pub(super) fn drain_queued_turns_for_mission_agents(state: &mut AppState, agent_ids: &[String]) {
+    if agent_ids.is_empty() {
+        return;
+    }
+    let target: HashSet<&str> = agent_ids.iter().map(|s| s.as_str()).collect();
+
+    let mut removed_per_agent: HashMap<String, usize> = HashMap::new();
+    state.agents.queued_codex_turns.retain(|t| {
+        if target.contains(t.agent_id.as_str()) {
+            *removed_per_agent.entry(t.agent_id.clone()).or_insert(0) += 1;
+            false
+        } else {
+            true
+        }
+    });
+    state.agents.queued_claude_turns.retain(|t| {
+        if target.contains(t.agent_id.as_str()) {
+            *removed_per_agent.entry(t.agent_id.clone()).or_insert(0) += 1;
+            false
+        } else {
+            true
+        }
+    });
+    for (agent_id, count) in removed_per_agent {
+        if let Some(agent) = state.agents.agents.iter_mut().find(|a| a.id == agent_id) {
+            agent.queue_len = agent.queue_len.saturating_sub(count);
+        }
+    }
+}
+
 /// Drain all queued Codex and Claude turns for a specific agent, decrementing
 /// `queue_len` for each removed turn. Used when a task agent fails during
 /// swarm execution so that orphaned queued turns don't leak.
-pub(super) fn drain_queued_turns_for_agent(state: &mut AppState, agent_id: &str) {
+pub(crate) fn drain_queued_turns_for_agent(state: &mut AppState, agent_id: &str) {
     let codex_removed = state
         .agents
         .queued_codex_turns

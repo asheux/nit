@@ -117,8 +117,8 @@ pub(super) fn handle_agent_ops_key(
     state: &mut AppState,
     vitals: &mut VitalsState,
     codex: Option<&CodexRunner>,
-    _claude: Option<&ClaudeRunner>,
-    swarm: &SwarmRuntime,
+    claude: Option<&ClaudeRunner>,
+    swarm: &mut SwarmRuntime,
 ) -> bool {
     if state.agents.dock_tab == AgentOpsTab::Scratchpad {
         match key {
@@ -267,6 +267,45 @@ pub(super) fn handle_agent_ops_key(
             ..
         } if state.agents.dock_tab == AgentOpsTab::Roster => {
             changed = reset_roster_context(state, swarm);
+        }
+        // Missions tab: `x` aborts the highlighted mission. Targeted
+        // counterpart to `/abort` and Ctrl+C — kills only the selected
+        // mission's in-flight + queued turns and leaves any other
+        // missions in the dock untouched. No-op when the highlighted
+        // mission is already terminal.
+        KeyEvent {
+            code: KeyCode::Char('x'),
+            modifiers: KeyModifiers::NONE,
+            ..
+        } if state.agents.dock_tab == AgentOpsTab::Missions => {
+            if let Some(mission) = state
+                .agents
+                .missions
+                .get(state.agents.mission_selected)
+                .cloned()
+            {
+                let agent_ids = swarm.abort_mission(state, &mission.id);
+                if agent_ids.is_empty() {
+                    state.status = Some(format!(
+                        "Mission `{}` is not active (already complete).",
+                        mission.id
+                    ));
+                } else {
+                    for agent_id in &agent_ids {
+                        if let Some(c) = codex {
+                            let _ = c.send(crate::codex_runner::CodexCommand::CancelTurn {
+                                agent_id: agent_id.clone(),
+                            });
+                        }
+                        if let Some(c) = claude {
+                            let _ = c.send(crate::claude_runner::ClaudeCommand::CancelTurn {
+                                agent_id: agent_id.clone(),
+                            });
+                        }
+                    }
+                    changed = true;
+                }
+            }
         }
         KeyEvent {
             code: KeyCode::Char('1'),
@@ -1350,9 +1389,60 @@ pub(super) fn handle_agent_console_key(
                     submit_chat_input_and_dispatch(state, vitals, codex, claude, swarm, shadow);
                 follow_chat_cursor = changed;
             }
+            // Ctrl+C with empty chat input → abort the active mission.
+            // (Cmd/Super+C and Ctrl+Shift+C are caught earlier in the
+            // shared editor as copy.) Two key shapes match: KeyCode::Char('c')
+            // with CONTROL modifier (most terminals) and KeyCode::Char('\u{3}')
+            // with no modifier (terminals that pre-translate the ETX byte).
+            // Only fires on empty input so users can still type "c" naturally.
+            KeyEvent {
+                code: KeyCode::Char('c'),
+                modifiers,
+                ..
+            } if modifiers == KeyModifiers::CONTROL
+                && state.agents.chat_input.trim().is_empty() =>
+            {
+                handled = true;
+                changed = super::chat_input::handle_abort(
+                    state,
+                    codex,
+                    claude,
+                    swarm,
+                    super::chat_input::AbortScope::Current,
+                );
+            }
+            KeyEvent {
+                code: KeyCode::Char('\u{3}'),
+                modifiers: KeyModifiers::NONE,
+                ..
+            } if state.agents.chat_input.trim().is_empty() => {
+                handled = true;
+                changed = super::chat_input::handle_abort(
+                    state,
+                    codex,
+                    claude,
+                    swarm,
+                    super::chat_input::AbortScope::Current,
+                );
+            }
             KeyEvent {
                 code: KeyCode::Esc, ..
             } => {
+                // Second Esc within ESC_ESC_ABORT_WINDOW → abort the
+                // active mission. First Esc still runs the existing
+                // selection-clear paths below.
+                let double_esc = super::chat_input::record_chat_esc_press();
+                if double_esc {
+                    handled = true;
+                    changed = super::chat_input::handle_abort(
+                        state,
+                        codex,
+                        claude,
+                        swarm,
+                        super::chat_input::AbortScope::Current,
+                    );
+                    super::chat_input::clear_chat_esc_state();
+                }
                 if matches!(
                     state.ui_selection,
                     Some(nit_core::UiSelection {

@@ -39,6 +39,11 @@ const USER_PROMPT_BG_BACKGROUND_PCT: u8 = 80;
 
 struct ConsoleLayout {
     thread_area: Rect,
+    /// 1-row strip above the input box for a context-aware hint
+    /// (italicised, dimmed). Empty rect when the pane is too short to
+    /// afford it — the layout swallows the hint rather than crowd out
+    /// the thread area.
+    hint_chunk: Rect,
     input_chunk: Rect,
     input_area: Rect,
     input_boxed: bool,
@@ -218,6 +223,54 @@ pub fn render(
         Span::styled(ctx_text, ctx_style),
     ]);
     frame.render_widget(Paragraph::new(context_line), chunks[0]);
+
+    // Italic, dimmed hint strip above the input box. Always shown when
+    // there's room (compute_console_layout zeros `hint_chunk.height`
+    // below a small height threshold). Content is context-aware: when a
+    // swarm is mid-flight we promote the abort triggers; when idle we
+    // promote the dispatch grammar so first-time operators see how to
+    // spawn one. Single line, Unicode-width-aware so a narrow terminal
+    // never wraps it onto a second row.
+    if layout.hint_chunk.height > 0 && layout.hint_chunk.width >= 4 {
+        let any_mission_active = !state.agents.missions.is_empty()
+            && state
+                .agents
+                .missions
+                .iter()
+                .any(|m| !matches!(m.status.as_str(), "DONE" | "ABORTED" | "FAILED" | ""));
+        let hint_text = if any_mission_active {
+            "/abort  ·  Ctrl+C  ·  Esc Esc  ·  x in Missions tab"
+        } else {
+            "@swarm <N> t=lab|parallel|bulk <prompt>  ·  /abort to cancel"
+        };
+        let hint_style = Style::default()
+            .fg(theme.border)
+            .add_modifier(Modifier::ITALIC | Modifier::DIM);
+        let max_width = layout.hint_chunk.width as usize;
+        let truncated = if UnicodeWidthStr::width(hint_text) > max_width {
+            // Cheap byte-level cut + ellipsis is fine here — hint is
+            // ASCII so chars and bytes align, and we never want the
+            // hint to push other rows around.
+            let mut acc = String::new();
+            let mut w = 0usize;
+            for ch in hint_text.chars() {
+                let cw = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+                if w + cw + 1 > max_width {
+                    break;
+                }
+                acc.push(ch);
+                w += cw;
+            }
+            acc.push('…');
+            acc
+        } else {
+            hint_text.to_string()
+        };
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(truncated, hint_style))),
+            layout.hint_chunk,
+        );
+    }
 
     let pulse_on = pulse_on(state);
     let thread_width = layout.thread_area.width.max(1) as usize;
@@ -784,18 +837,25 @@ fn compute_console_layout(area: Rect, state: &AppState) -> Option<ConsoleLayout>
     } else {
         input_inner_height
     };
+    // Reserve one row above the input for the hint strip when the
+    // pane has at least a few rows of thread area to spare. Below that
+    // threshold (very short windows, popups), drop the hint so the
+    // thread itself stays visible.
+    let want_hint = inner.height as usize >= input_height + 4;
+    let hint_height = if want_hint { 1u16 } else { 0u16 };
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(1),
             Constraint::Min(1),
+            Constraint::Length(hint_height),
             Constraint::Length(input_height as u16),
         ])
         .split(inner);
     let input_area = if input_boxed {
-        Block::default().borders(Borders::ALL).inner(chunks[2])
+        Block::default().borders(Borders::ALL).inner(chunks[3])
     } else {
-        chunks[2]
+        chunks[3]
     };
     let input_window_start = chat_input_window_start(
         state.agents.chat_input_scroll,
@@ -805,7 +865,8 @@ fn compute_console_layout(area: Rect, state: &AppState) -> Option<ConsoleLayout>
     );
     Some(ConsoleLayout {
         thread_area: chunks[1],
-        input_chunk: chunks[2],
+        hint_chunk: chunks[2],
+        input_chunk: chunks[3],
         input_area,
         input_boxed,
         input_lines_all,
@@ -2477,6 +2538,12 @@ fn breather_rows_for_user_prompt(
                 })
         }
     });
+    // Distinguish a normal completion ("Done") from an operator abort
+    // ("Aborted") so the breather doesn't lie about the run's outcome.
+    // `mission_is_complete` is true for both — abort moves the run into
+    // `completed_runs` too — so we need the dedicated accessor.
+    let swarm_was_aborted =
+        swarm_mission_id.is_some_and(|mid| swarm.is_some_and(|s| s.mission_was_aborted(mid)));
     let working = any_active || any_queued;
     let swarm_phase = swarm_mission_id.and_then(|mid| swarm.and_then(|s| s.swarm_stage_label(mid)));
     let swarm_hint = swarm_mission_id.and_then(|mid| swarm.and_then(|s| s.swarm_stage_hint(mid)));
@@ -2509,6 +2576,8 @@ fn breather_rows_for_user_prompt(
             Some("SYNTH") => "Synthesizing ...".into(),
             _ => "Waiting ...".into(),
         }
+    } else if is_swarm && swarm_was_aborted {
+        "Aborted".into()
     } else if is_swarm && all_swarm_done {
         "Done".into()
     } else if is_swarm {
@@ -2551,10 +2620,10 @@ fn breather_rows_for_user_prompt(
         .or_else(|| secondary_ids.first())
         .or_else(|| ordered_ids.first())
         .map(String::as_str);
-    // Animate whenever the label isn't "Done" — even transitional states
-    // like "Waiting ..." between swarm stages should breathe so the UI
-    // doesn't look frozen to the user.
-    let animating = label.as_ref() != "Done";
+    // Animate whenever the label isn't a terminal state ("Done" /
+    // "Aborted") — transitional states like "Waiting ..." between
+    // swarm stages should still breathe so the UI doesn't look frozen.
+    let animating = !matches!(label.as_ref(), "Done" | "Aborted");
     let ecg = ecg_indicator(state.metrics.frame_count, seed_id, pulse_on, animating);
 
     let mut rows = Vec::new();

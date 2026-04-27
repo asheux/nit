@@ -66,6 +66,17 @@ pub enum CodexCommand {
     McpStop,
     McpReconnect,
     Shutdown,
+    /// Cancel any in-flight turn for `agent_id` (kills the subprocess via
+    /// the per-turn `cancel` AtomicBool) and drop matching queued turns
+    /// from this runner's pending queue. Idempotent — no-op if the agent
+    /// has no in-flight or queued work.
+    CancelTurn {
+        agent_id: String,
+    },
+    /// Cancel every in-flight turn and drop the entire queue. Used by the
+    /// global `/abort all` path. Cheaper than enumerating agents when the
+    /// caller wants to clear the runner wholesale.
+    CancelAll,
 }
 
 pub struct CodexRunner {
@@ -182,6 +193,28 @@ fn runner_loop_exec(
                 CodexCommand::Shutdown => {
                     shutting_down = true;
                     shutdown_deadline = Some(Instant::now() + Duration::from_millis(400));
+                    queue.clear();
+                    for turn in active.iter() {
+                        turn.cancel.store(true, Ordering::Relaxed);
+                    }
+                }
+                CodexCommand::CancelTurn { agent_id } => {
+                    // Kill any in-flight turn for this agent: the worker
+                    // checks `cancel` between try_wait polls and calls
+                    // child.kill() within ~50ms.
+                    for turn in active.iter() {
+                        if turn.agent_id == agent_id {
+                            turn.cancel.store(true, Ordering::Relaxed);
+                        }
+                    }
+                    // Drop pending RunTurn commands for the same agent so
+                    // a queued turn doesn't fire after the user aborted.
+                    queue.retain(|cmd| match cmd {
+                        CodexCommand::RunTurn { model, .. } => model.as_str() != agent_id,
+                        _ => true,
+                    });
+                }
+                CodexCommand::CancelAll => {
                     queue.clear();
                     for turn in active.iter() {
                         turn.cancel.store(true, Ordering::Relaxed);
@@ -607,6 +640,46 @@ fn runner_loop_mcp(
                 CodexCommand::Shutdown => {
                     shutting_down = true;
                     queue.clear();
+                }
+                CodexCommand::CancelTurn { agent_id } => {
+                    // MCP turns multiplex through the shared mcp-server
+                    // process; cancellation is per-RPC by request id.
+                    // Find every in-flight turn for this agent, fail it,
+                    // and free its slot.
+                    let ids_to_cancel: Vec<u64> = in_flight
+                        .iter()
+                        .filter(|(_, t)| t.agent_id == agent_id)
+                        .map(|(id, _)| *id)
+                        .collect();
+                    for id in ids_to_cancel {
+                        if let Some(turn) = in_flight.remove(&id) {
+                            in_flight_by_agent.remove(&turn.agent_id);
+                            let _ = event_tx.send(AgentBusEvent::TurnFailed {
+                                agent_id: turn.agent_id,
+                                mission_id: turn.mission_id,
+                                thread_id: turn.resume_thread_id,
+                                token_count: turn.last_token_count,
+                                message: nit_core::OPERATOR_CANCEL_TURN_MESSAGE.into(),
+                            });
+                        }
+                    }
+                    queue.retain(|cmd| match cmd {
+                        CodexCommand::RunTurn { model, .. } => model.as_str() != agent_id,
+                        _ => true,
+                    });
+                }
+                CodexCommand::CancelAll => {
+                    queue.clear();
+                    for (_id, turn) in in_flight.drain() {
+                        let _ = event_tx.send(AgentBusEvent::TurnFailed {
+                            agent_id: turn.agent_id,
+                            mission_id: turn.mission_id,
+                            thread_id: turn.resume_thread_id,
+                            token_count: turn.last_token_count,
+                            message: nit_core::OPERATOR_CANCEL_TURN_MESSAGE.into(),
+                        });
+                    }
+                    in_flight_by_agent.clear();
                 }
             },
             Err(mpsc::RecvTimeoutError::Timeout) => {}
@@ -1742,6 +1815,18 @@ fn run_turn(
 
     if killed {
         let _ = std::fs::remove_file(&out_file);
+        // Emit a TurnFailed so AppState releases this active turn and the
+        // breather/UI stop showing the agent as Running. The bus handler
+        // detects the OPERATOR_CANCEL_TURN_MESSAGE sentinel and routes
+        // this down a "soft" path (Idle status, Info diag) rather than
+        // the "Error" path that genuine subprocess failures take.
+        let _ = event_tx.send(AgentBusEvent::TurnFailed {
+            agent_id: model,
+            mission_id,
+            thread_id: resume_thread_id.clone(),
+            token_count: None,
+            message: nit_core::OPERATOR_CANCEL_TURN_MESSAGE.into(),
+        });
         return;
     }
 

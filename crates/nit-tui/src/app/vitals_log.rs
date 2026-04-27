@@ -115,6 +115,12 @@ pub(super) fn append_log_to_agent_diagnostics(state: &mut AppState, line: &str) 
 pub(super) fn record_agent_bus_vitals(vitals: &mut VitalsState, event: &AgentBusEvent) {
     let now = Instant::now();
     match event {
+        // Operator-initiated abort rides TurnFailed but isn't an error,
+        // so it shouldn't push the LAB indicator into WARN. Match on the
+        // OPERATOR_CANCEL_TURN_MESSAGE sentinel and skip recording — the
+        // bus handler already logs it as an Info diag.
+        AgentBusEvent::TurnFailed { message, .. }
+            if message == nit_core::OPERATOR_CANCEL_TURN_MESSAGE => {}
         AgentBusEvent::TurnFailed { .. } => vitals.record_diag_event(now, DiagSeverity::Error),
         AgentBusEvent::TurnLog { message, .. } => {
             let lowered = message.to_ascii_lowercase();

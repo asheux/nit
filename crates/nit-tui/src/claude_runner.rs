@@ -49,6 +49,14 @@ pub enum ClaudeCommand {
         max_turns: Option<u32>,
     },
     Shutdown,
+    /// Cancel any in-flight turn for `agent_id` (kills the subprocess via
+    /// the per-turn `cancel` AtomicBool) and drop matching queued turns.
+    /// Idempotent — no-op if the agent has no in-flight or queued work.
+    CancelTurn {
+        agent_id: String,
+    },
+    /// Cancel every in-flight turn and drop the entire queue.
+    CancelAll,
 }
 
 pub const DEFAULT_MAX_TURNS: u32 = 50;
@@ -153,6 +161,26 @@ fn runner_loop(
                 ClaudeCommand::Shutdown => {
                     shutting_down = true;
                     shutdown_deadline = Some(Instant::now() + Duration::from_millis(400));
+                    queue.clear();
+                    for turn in active.iter() {
+                        turn.cancel.store(true, Ordering::Relaxed);
+                    }
+                }
+                ClaudeCommand::CancelTurn { agent_id } => {
+                    // Kill in-flight turn for this agent; worker checks
+                    // `cancel` between try_wait polls and child.kill()s
+                    // within ~50ms.
+                    for turn in active.iter() {
+                        if turn.agent_id == agent_id {
+                            turn.cancel.store(true, Ordering::Relaxed);
+                        }
+                    }
+                    queue.retain(|cmd| match cmd {
+                        ClaudeCommand::RunTurn { model, .. } => model.as_str() != agent_id,
+                        _ => true,
+                    });
+                }
+                ClaudeCommand::CancelAll => {
                     queue.clear();
                     for turn in active.iter() {
                         turn.cancel.store(true, Ordering::Relaxed);
@@ -641,6 +669,17 @@ fn run_turn(
 
     if killed {
         let _ = std::fs::remove_file(&out_file);
+        // Emit a TurnFailed so AppState releases this active turn. The
+        // bus handler detects the OPERATOR_CANCEL_TURN_MESSAGE sentinel
+        // and routes this down a "soft" path (Idle status, Info diag)
+        // instead of the Error path used by genuine subprocess failures.
+        let _ = event_tx.send(AgentBusEvent::TurnFailed {
+            agent_id: model,
+            mission_id,
+            thread_id: resume_session_id.clone(),
+            token_count: None,
+            message: nit_core::OPERATOR_CANCEL_TURN_MESSAGE.into(),
+        });
         return;
     }
 

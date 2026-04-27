@@ -91,6 +91,7 @@ use bulk_plan::{
     normalize_lab_plan, validate_bulk_plan, ParsedSwarmPlan, SwarmPlanTaskV2, SwarmPlanV1,
     SwarmPlanV2,
 };
+pub(crate) use clones::drain_queued_turns_for_agent as drain_queued_turns_for_agent_pub;
 pub use clones::{
     chat_clone_base_id, cleanup_idle_chat_clone, compact_agent_display_id, create_chat_clone,
     is_any_clone_agent_id, is_chat_clone_agent_id,

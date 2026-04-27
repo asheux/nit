@@ -27,6 +27,14 @@ pub struct AgentTokenCount {
     pub context_window: u32,
 }
 
+/// Sentinel `TurnFailed.message` set by the codex/claude runners when the
+/// operator triggers `/abort`, Ctrl+C, Esc-Esc, or Mission-tab `x`. The
+/// bus handler matches on this exact string to route the event down the
+/// soft "cancelled" path (Idle status, Info diag) instead of the error
+/// path (Error status, alert banner, substrate Warning). Keep the runner
+/// emit-side and bus match-side in sync via this single constant.
+pub const OPERATOR_CANCEL_TURN_MESSAGE: &str = "Cancelled by operator";
+
 /// Event protocol for driving the Agent Station UI from an external runtime (Codex, Claude, etc.).
 ///
 /// Transported as NDJSON over stdio or a socket; each variant maps to a single state mutation.
@@ -444,8 +452,19 @@ impl AgentBusEvent {
                     apply_codex_token_count(state, agent_id, mission_id.as_deref(), token_count);
                 }
                 let at = timestamp_label(state);
+                // Operator-initiated cancels (`/abort`, Ctrl+C, Esc-Esc,
+                // Mission-tab `x`) ride the same TurnFailed event because
+                // they kill the subprocess, but they're NOT errors. Detect
+                // the sentinel message the runners emit on cancel and
+                // route to the soft path: Idle status, Info diag, no
+                // substrate warning, no "Codex failed: …" status banner.
+                let is_operator_cancel = message == OPERATOR_CANCEL_TURN_MESSAGE;
                 if let Some(agent) = state.agents.agents.iter_mut().find(|a| a.id == *agent_id) {
-                    agent.status = AgentStatus::Error;
+                    agent.status = if is_operator_cancel {
+                        AgentStatus::Idle
+                    } else {
+                        AgentStatus::Error
+                    };
                     agent.queue_len = agent.queue_len.saturating_sub(1);
                     agent.heartbeat_age_secs = 0;
                     agent.current_mission = mission_id.clone();
@@ -473,7 +492,13 @@ impl AgentBusEvent {
                         .iter_mut()
                         .find(|mission| mission.id == mission_id)
                     {
-                        mission.status = "ERROR".into();
+                        // Don't clobber an existing "ABORTED" status with
+                        // "ERROR" when this TurnFailed is the abort itself.
+                        // The swarm runtime already set "ABORTED" before we
+                        // got here.
+                        if !is_operator_cancel {
+                            mission.status = "ERROR".into();
+                        }
                         mission.updated_at = at.clone();
                     }
                 }
@@ -484,38 +509,57 @@ impl AgentBusEvent {
                     "local" => "Local",
                     _ => "Codex",
                 };
-                state.agents.alerts.push(AgentAlert {
-                    severity: AgentAlertSeverity::Error,
-                    source: source.into(),
-                    message: format!("[{agent_id}] {message}"),
-                    at: at.clone(),
-                });
-                state.agents.diag_events.push(AgentDiagnosticEvent {
-                    severity: AgentAlertSeverity::Error,
-                    source: source.into(),
-                    message: format!("[{agent_id}] {message}"),
-                    at: at.clone(),
-                });
-                state.agents.console_scroll = CONSOLE_SCROLL_BOTTOM;
+                if is_operator_cancel {
+                    // Soft path: a single Info diag is enough — the swarm
+                    // runtime already pushed a SYSTEM_ALERT_KIND chat
+                    // message explaining the abort. No alert, no signal,
+                    // no error banner.
+                    state.agents.diag_events.push(AgentDiagnosticEvent {
+                        severity: AgentAlertSeverity::Info,
+                        source: source.into(),
+                        message: format!("[{agent_id}] cancelled by operator"),
+                        at: at.clone(),
+                    });
+                } else {
+                    state.agents.alerts.push(AgentAlert {
+                        severity: AgentAlertSeverity::Error,
+                        source: source.into(),
+                        message: format!("[{agent_id}] {message}"),
+                        at: at.clone(),
+                    });
+                    state.agents.diag_events.push(AgentDiagnosticEvent {
+                        severity: AgentAlertSeverity::Error,
+                        source: source.into(),
+                        message: format!("[{agent_id}] {message}"),
+                        at: at.clone(),
+                    });
+                    state.agents.console_scroll = CONSOLE_SCROLL_BOTTOM;
 
-                let current_gen = state.substrate.current_generation();
-                let id = state.substrate.next_signal_id(agent_id);
-                state.substrate.emit_signal(crate::substrate::Signal {
-                    id,
-                    kind: crate::substrate::SignalKind::Warning,
-                    posted_by: agent_id.clone(),
-                    posted_at_gen: current_gen,
-                    target: crate::substrate::SignalTarget::Agent {
-                        agent_id: agent_id.clone(),
-                    },
-                    initial_strength: crate::substrate::SubstrateState::DEFAULT_INITIAL_STRENGTH,
-                    payload: serde_json::json!({
-                        "message": &message,
-                        "thread_id": &thread_id,
-                        "mission_id": &mission_id,
-                    }),
-                });
-                let _ = state.substrate.save(&state.workspace_root);
+                    let current_gen = state.substrate.current_generation();
+                    let id = state.substrate.next_signal_id(agent_id);
+                    state.substrate.emit_signal(crate::substrate::Signal {
+                        id,
+                        kind: crate::substrate::SignalKind::Warning,
+                        posted_by: agent_id.clone(),
+                        posted_at_gen: current_gen,
+                        target: crate::substrate::SignalTarget::Agent {
+                            agent_id: agent_id.clone(),
+                        },
+                        initial_strength:
+                            crate::substrate::SubstrateState::DEFAULT_INITIAL_STRENGTH,
+                        payload: serde_json::json!({
+                            "message": &message,
+                            "thread_id": &thread_id,
+                            "mission_id": &mission_id,
+                        }),
+                    });
+                    let _ = state.substrate.save(&state.workspace_root);
+
+                    state.status = Some(format!(
+                        "{source_label} failed: {}",
+                        summarize_agent_error(message)
+                    ));
+                }
 
                 // TurnFailed does not advance the generation, but we still
                 // clear expired claims so stale holds don't linger when turns
@@ -523,11 +567,6 @@ impl AgentBusEvent {
                 state
                     .substrate
                     .expire_claims(state.substrate.current_generation());
-
-                state.status = Some(format!(
-                    "{source_label} failed: {}",
-                    summarize_agent_error(message)
-                ));
             }
             AgentBusEvent::TurnCompleted {
                 agent_id,

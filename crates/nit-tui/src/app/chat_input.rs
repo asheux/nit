@@ -5,16 +5,17 @@ use nit_core::{
     CONSOLE_SCROLL_BOTTOM,
 };
 
-use crate::claude_runner::ClaudeRunner;
-use crate::codex_runner::{CodexRunner, CodexRunnerConfig};
+use crate::claude_runner::{ClaudeCommand, ClaudeRunner};
+use crate::codex_runner::{CodexCommand, CodexRunner, CodexRunnerConfig};
 use crate::shadow::{parse_shadow_command, should_auto_enable_shadows, ShadowRuntime};
 use crate::swarm::{
     create_chat_clone, current_fd_soft_limit, detect_swarm_mission_kind_from_prompt,
-    effective_max_swarm_size, explicit_swarm_mission_kind_from_prompt, is_agent_busy,
-    is_agent_family_busy, is_chat_clone_agent_id, is_light_planner, large_swarm_warn_threshold,
-    parse_swarm_command, parse_swarm_mission_kind, push_system_alert_to_mission,
-    select_swarm_agents, swarm_intended_size, SwarmCommand, SwarmMissionKind, SwarmRuntime,
-    SwarmSize, BULK_PRACTICAL_MAX, DEFAULT_SWARM_SIZE, LARGE_SWARM_WARN_THRESHOLD,
+    drain_queued_turns_for_agent_pub, effective_max_swarm_size,
+    explicit_swarm_mission_kind_from_prompt, is_agent_busy, is_agent_family_busy,
+    is_chat_clone_agent_id, is_light_planner, large_swarm_warn_threshold, parse_swarm_command,
+    parse_swarm_mission_kind, push_system_alert_to_mission, select_swarm_agents,
+    swarm_intended_size, SwarmCommand, SwarmMissionKind, SwarmRuntime, SwarmSize,
+    BULK_PRACTICAL_MAX, DEFAULT_SWARM_SIZE, LARGE_SWARM_WARN_THRESHOLD,
     LIGHT_PLANNER_SWARM_THRESHOLD,
 };
 use crate::vitals::VitalsState;
@@ -202,11 +203,15 @@ pub(super) fn handle_chat_input_editing_key(
             modifiers,
             ..
         } if modifiers.contains(KeyModifiers::CONTROL) => {
-            handled = true;
+            // Copy selection if any, else clear non-empty input. When
+            // BOTH branches no-op (no selection AND empty input), leave
+            // `handled = false` so the agent-console-level Ctrl+C
+            // handler (added for the abort feature) gets a turn.
             if copy_chat_input_selection(state, clipboard) {
-                // Copied.
+                handled = true;
             } else if !state.agents.chat_input.is_empty() {
                 reset_chat_input_and_history_nav(state);
+                handled = true;
                 changed = true;
                 follow_cursor = true;
             }
@@ -216,11 +221,14 @@ pub(super) fn handle_chat_input_editing_key(
             modifiers: KeyModifiers::NONE,
             ..
         } => {
-            handled = true;
+            // Same as above for terminals that send Ctrl+C as the raw
+            // ETX byte — fall through when nothing to do so the abort
+            // path can pick it up.
             if copy_chat_input_selection(state, clipboard) {
-                // Copied.
+                handled = true;
             } else if !state.agents.chat_input.is_empty() {
                 reset_chat_input_and_history_nav(state);
+                handled = true;
                 changed = true;
                 follow_cursor = true;
             }
@@ -459,6 +467,163 @@ pub(super) fn handle_chat_input_editing_key(
     }
 }
 
+/// Maximum gap between two Esc presses for them to count as Esc-Esc.
+/// Tuned above typical double-press latency (~300ms) and below the
+/// threshold where the operator could plausibly hit two unrelated
+/// Escs in a row.
+pub(super) const ESC_ESC_ABORT_WINDOW: std::time::Duration = std::time::Duration::from_millis(500);
+
+// Per-thread state for the Esc-Esc trigger. Thread-local (not a
+// process-wide static) so parallel `cargo test` runs don't pollute
+// each other through shared state — an Esc in test A would otherwise
+// bleed into test B if their threads were close enough in time. Lives
+// here (not on `InputState`) because `handle_agent_console_key`
+// doesn't take an `InputState` and threading one through every key
+// path for this single bit is more surgery than it's worth.
+thread_local! {
+    static LAST_CHAT_ESC_AT: std::cell::Cell<Option<std::time::Instant>>
+        = const { std::cell::Cell::new(None) };
+}
+
+/// Returns true when an Esc key event lands within `ESC_ESC_ABORT_WINDOW`
+/// of the previous one. Updates the timestamp regardless. Caller resets
+/// (via `clear_chat_esc_state`) once the abort fires so a third Esc
+/// doesn't immediately re-trigger.
+pub(super) fn record_chat_esc_press() -> bool {
+    let now = std::time::Instant::now();
+    LAST_CHAT_ESC_AT.with(|cell| {
+        let prev = cell.get();
+        cell.set(Some(now));
+        prev.is_some_and(|t| now.duration_since(t) <= ESC_ESC_ABORT_WINDOW)
+    })
+}
+
+pub(super) fn clear_chat_esc_state() {
+    LAST_CHAT_ESC_AT.with(|cell| cell.set(None));
+}
+
+/// Scope of an `/abort` (or `@abort`) request.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) enum AbortScope {
+    /// Abort the mission currently in chat context. Most common form;
+    /// `/abort` alone resolves to this.
+    Current,
+    /// Abort every active swarm mission and clear both runner queues.
+    /// Triggered by `/abort all`.
+    All,
+    /// Cancel any in-flight + queued turns for a single agent id, leave
+    /// the rest of the mission running. Surgical strike for `/abort
+    /// <agent-id>` when one clone is hung.
+    Agent(String),
+}
+
+/// Parser for the abort command. Accepts `/abort`, `@abort` (the latter
+/// for symmetry with the `@swarm` family even though `@` usually
+/// dispatches new work). Forms: bare → Current, `all` → All, anything
+/// else → Agent(literal). Trailing whitespace tolerated.
+pub(super) fn parse_abort_command(raw: &str) -> Option<AbortScope> {
+    let trimmed = raw.trim_start();
+    let after = trimmed
+        .strip_prefix("/abort")
+        .or_else(|| trimmed.strip_prefix("@abort"))?;
+    // Reject substring matches like `/abortif` so the parser doesn't
+    // hijack a real prompt that happens to start with the same letters.
+    if !after.is_empty() && !after.starts_with(char::is_whitespace) {
+        return None;
+    }
+    let arg = after.trim();
+    if arg.is_empty() {
+        return Some(AbortScope::Current);
+    }
+    if arg.eq_ignore_ascii_case("all") {
+        return Some(AbortScope::All);
+    }
+    Some(AbortScope::Agent(arg.to_string()))
+}
+
+/// Single entry point for every abort trigger (`/abort`, `@abort`,
+/// Ctrl+C, Esc-Esc, Mission-tab `x`). Resolves the scope into a list of
+/// agent ids whose runners need a `CancelTurn`, sends the runner-side
+/// commands, and posts a system alert. Returns `true` when something was
+/// aborted, `false` when the request was a no-op (e.g. `/abort` with no
+/// active mission).
+pub(super) fn handle_abort(
+    state: &mut AppState,
+    codex: Option<&CodexRunner>,
+    claude: Option<&ClaudeRunner>,
+    swarm: &mut SwarmRuntime,
+    scope: AbortScope,
+) -> bool {
+    let agents_to_cancel: Vec<String> = match scope {
+        AbortScope::Current => {
+            // Resolve the abort target with a fallback: prefer the
+            // selected/context mission, but if it's already terminal
+            // (a common case — operator aborts once, starts a new
+            // swarm, then triggers abort again without re-selecting
+            // the mission tab), fall back to any still-running swarm
+            // mission. Otherwise `/abort` would keep replying "not
+            // active" and the live swarm would survive.
+            let selected = state
+                .agents
+                .selected_context_mission()
+                .map(|s| s.to_string())
+                .filter(|mid| swarm.is_active_mission(mid));
+            let target = selected.or_else(|| swarm.active_mission_ids().into_iter().next());
+            let Some(mission_id) = target else {
+                state.status = Some(
+                    "/abort: no active swarm mission. Use `/abort all` for runner-wide cancel."
+                        .into(),
+                );
+                return false;
+            };
+            let aborted = swarm.abort_mission(state, &mission_id);
+            if aborted.is_empty() {
+                // Should be unreachable now (we filtered to active), but
+                // keep the message for diagnostics if a mission terminates
+                // between the filter and the abort call.
+                state.status = Some(format!(
+                    "/abort: mission `{mission_id}` is not active (already complete or unknown)."
+                ));
+                return false;
+            }
+            aborted
+        }
+        AbortScope::All => {
+            let aborted = swarm.abort_all(state);
+            // Belt-and-braces: also send CancelAll to runners so any
+            // non-swarm chat turns or shadow agents in flight die too.
+            if let Some(c) = codex {
+                let _ = c.send(CodexCommand::CancelAll);
+            }
+            if let Some(c) = claude {
+                let _ = c.send(ClaudeCommand::CancelAll);
+            }
+            aborted
+        }
+        AbortScope::Agent(agent_id) => {
+            // Surgical: drain state-side queues for this one agent and
+            // forward CancelTurn to the runners. Doesn't touch swarm
+            // mission state — the rest of the mission keeps running.
+            drain_queued_turns_for_agent_pub(state, &agent_id);
+            vec![agent_id]
+        }
+    };
+
+    for agent_id in &agents_to_cancel {
+        if let Some(c) = codex {
+            let _ = c.send(CodexCommand::CancelTurn {
+                agent_id: agent_id.clone(),
+            });
+        }
+        if let Some(c) = claude {
+            let _ = c.send(ClaudeCommand::CancelTurn {
+                agent_id: agent_id.clone(),
+            });
+        }
+    }
+    !agents_to_cancel.is_empty()
+}
+
 // Submit the chat input, dispatch to agents, and return whether a prompt was sent.
 // Shared between the main Agent Chat Enter handler and the Artifacts popup input.
 pub(super) fn submit_chat_input_and_dispatch(
@@ -472,6 +637,16 @@ pub(super) fn submit_chat_input_and_dispatch(
     let raw = state.agents.chat_input.clone();
     if raw.trim().is_empty() {
         return false;
+    }
+    // `/abort` and `@abort` short-circuit before any other parsing —
+    // they're never a prompt, never a swarm/shadow command, and the
+    // operator wants the side-effect (kill in-flight work), not a
+    // dispatch. Always clear the input regardless of outcome so the
+    // operator doesn't accidentally re-submit the abort string.
+    if let Some(scope) = parse_abort_command(&raw) {
+        let aborted = handle_abort(state, codex, claude, swarm, scope);
+        reset_chat_input_and_history_nav(state);
+        return aborted;
     }
     // `@shadow <prompt>` — explicit opt-in to the single-agent shadow pipeline.
     // Strip the prefix so `push_chat_message` sees just the user's text.
