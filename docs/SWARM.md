@@ -288,9 +288,9 @@ Integrator must be the only writer (writes=true) and must implement + run the co
 
 Explicit:
 
-- `@swarm <prompt>` defaults to 4 agents (planner + 3), capped at 16.
-- `@swarm N <prompt>` uses N agents total (1–16).
-- `@swarm all <prompt>` uses all available Codex agents (cap 16).
+- `@swarm <prompt>` defaults to 4 agents (planner + 3).
+- `@swarm N <prompt>` uses N agents total (1–256, FD-bound — see below).
+- `@swarm all <prompt>` uses all available Codex/Claude agents in the roster, clamped to the FD ceiling.
 - For `parallel`/`bulk`, if the selected pool is smaller than `N`, nit fills the remainder with
   mission-scoped clones of the selected models (or clones of the planner model if none are
   priority-marked).
@@ -301,6 +301,144 @@ Implicit launches:
 - If `--codex-max-parallel-turns` is set to a non-default value, nit uses it as a *size hint* for
   implicit launches (so “bulk without @swarm” scales to your configured parallelism).
 - You can always override by typing `@swarm 3 ...` / `@swarm 5 ...`.
+
+### Static and effective ceilings
+
+- **Static cap**: `MAX_SWARM_SIZE = 256`. Hard upper bound regardless of host.
+- **Effective cap**: read at runtime from `RLIMIT_NOFILE` and clamped to the static cap.
+  Each in-flight Codex/Claude exec turn opens **4 fds** (stdin + stdout + stderr + tmp out_file),
+  plus a baseline reserved for nit (terminal, log, MCP backchannel, etc.). The math:
+
+  `effective = clamp((fd_limit − 32) / 4, 1, 256)`
+
+  | `ulimit -n` | Effective ceiling | Soft warning fires at |
+  |---|---|---|
+  | **256** (macOS default) | 56 agents | 42 agents (75% of ceiling) |
+  | **1024** (Linux default) | 248 agents | 64 agents (`LARGE_SWARM_WARN_THRESHOLD`) |
+  | **4096** (recommended) | 256 agents (saturated) | 64 agents |
+  | **65536** | 256 agents | 64 agents |
+
+- To lift the ceiling on macOS: `ulimit -n 4096` then restart nit. The soft limit is per-process,
+  inherited at fork; bumping it after nit started has no effect on the running process.
+
+### Soft advisories
+
+When you request a swarm, nit pushes context-aware system messages to the mission console — they
+inform but never block:
+
+| Trigger | Message shape |
+|---|---|
+| `@swarm N` where the request was clamped by the FD ceiling | `Requested N agents, started M (effective ceiling M; ulimit -n is …). Bump …` |
+| `@swarm N` where `N` exceeds the available roster (no FD clamp) | `Requested N agents, started M (only M eligible agents in the roster).` |
+| `@swarm bulk N` with `N > BULK_PRACTICAL_MAX (12)` | Bulk template auto-clamps to 12 with `Bulk template capped at 12 proposers (requested N, started 12). The judge's per-dep budget …` |
+| Lightweight planner (haiku / mini / nano / flash) with `N > 20` | `Planner '<id>' is a lightweight model — coherently planning N task assignments may exceed its reasoning depth. Consider a sonnet/opus-tier planner.` |
+| Final size ≥ warn threshold and not clamped | `Large swarm (N agents). Each agent spawns a Codex/Claude subprocess (~4 fds, ~50–200 MB each). Verify the host has spare RAM/CPU before continuing.` |
+
+The planner advisory is **independent** — it can fire alongside any of the others.
+
+### DAG view annotation
+
+For tasks that use the full-output dependency budget (`role=judge`, `role=integrate`, or
+`writes=true`), the DAG dashboard appends a per-dep budget hint when the per-dep cap drops below
+`SWARM_DEP_OUTPUT_MAX_CHARS_FULL` (48 KB) — i.e. when fan-in compresses each dep's payload:
+
+```
+↳ budget: ~20KB/dep
+↳ budget: ~4KB/dep — shallow (proposer reasoning truncated)
+```
+
+The "shallow" warning fires below 8 KB/dep, where each proposer effectively contributes headers
+rather than reasoning. This hint is what motivates the bulk-template hard cap at 12.
+
+### UI truncation for large swarms
+
+Three views truncate the displayed agent list when the swarm is large:
+
+- **Roster (Agent Ops)**: per backend group, max 12 visible. Header shows `(visible of total)` —
+  e.g. `Codex (12 of 58)`. The currently-selected agent is auto-promoted into the visible window
+  so keyboard navigation never lands on a hidden lane. Running agents (`active_turns`) sort first,
+  followed by queued, idle, error.
+- **Missions tab**: max 8 agent rows per mission, then a `(+N more)` overflow row.
+- **Chat-pane breather table**: max 6 visible. Sorted running-first.
+
+`NIT_ROSTER_NO_TRUNCATE=1` disables all three caps when you need to inspect every clone.
+
+---
+
+## Aborting a swarm
+
+When a swarm goes off the rails — wrong direction, runaway tool calls,
+hung MCP server, or just "I changed my mind" — five triggers cancel
+in-flight work:
+
+| Trigger | Where you press it | Scope |
+|---|---|---|
+| `/abort` (or `@abort`) | Chat input + Enter | Current mission |
+| `/abort all` | Chat input + Enter | Every active swarm + clears both runner queues |
+| `/abort <agent-id>` | Chat input + Enter | One agent (surgical strike) |
+| **Ctrl+C** | Chat input (must be empty) | Current mission |
+| **Esc Esc** (within ~500 ms) | Chat pane focused | Current mission |
+| **`x`** | Missions tab, with a mission highlighted | That mission specifically |
+
+### What "abort" actually does
+
+Hard cancel. The swarm runtime moves the mission to `completed_runs`
+with `report_status = "ABORTED"`, drains queued turns from the runner
+queues, and pushes a system message to the chat:
+
+> ↳ [swarm] Mission aborted by operator. In-flight turns are being
+> killed; queued turns dropped.
+
+The runner-side `CancelTurn` then sets a per-turn `AtomicBool`. The
+worker thread sees it within ~50 ms (`try_wait` poll interval) and calls
+`child.kill()`. The subprocess receives SIGTERM and exits.
+
+### Resolving "the current mission"
+
+`/abort`, Ctrl+C, and Esc-Esc all target whatever the chat is showing —
+`state.agents.selected_mission`. There's a fallback: if the selected
+mission has already terminated (e.g. you aborted once, then started
+another swarm without re-selecting it), the orchestrator falls back to
+the most recently started **active** mission. So a second `/abort` after
+starting a new swarm always hits the live work, not the stale aborted
+one.
+
+### What you'll see after abort
+
+- **Roster status**: agents flip to `IDLE` (not `ERROR`). Operator
+  cancellation isn't an error — the bus handler routes the
+  `OPERATOR_CANCEL_TURN_MESSAGE` sentinel down a soft path: no alert
+  panel, no LAB→WARN promotion, no "Codex failed: …" status banner. The
+  Diag tab gets one Info-level entry.
+- **Mission status**: `ABORTED` in the Missions tab.
+- **Chat-pane breather**: shows `Aborted` (instead of `Done`).
+- **DAG view**: non-terminal tasks marked `Skipped`.
+
+### Soft cancel? No.
+
+There is no graceful drain. Abort kills the subprocess immediately so
+half-written files may exist on disk if the agent was mid-write. The
+substrate's claim lattice will surface inconsistencies on the next
+swarm.
+
+### Esc-Esc edge cases
+
+The Esc-Esc detector lives in a thread-local timestamp (chat input
+specific). A single Esc still does its existing job (drop selection,
+exit insert mode); only a second Esc within 500 ms of the first
+triggers abort. The window resets after every abort and naturally
+times out, so a stale half-press from yesterday can't fire today.
+
+### Hint strip
+
+Above the chat input, an italic dimmed line surfaces the relevant
+triggers:
+
+- When a swarm is mid-flight: `↳ /abort · Ctrl+C · Esc Esc · x in Missions tab`
+- When idle: `↳ @swarm <N> t=lab|parallel|bulk <prompt>  ·  /abort to cancel`
+
+The hint shows only when the chat pane has ≥4 rows of headroom above
+the input box, and ellipsizes when the terminal is too narrow.
 
 ---
 

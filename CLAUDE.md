@@ -54,6 +54,7 @@ MSRV: Rust 1.88.0 (pinned in `rust-toolchain.toml`).
 |----------|---------|---------|
 | `NIT_LOG_PATH` | `<state_dir>/logs/<hash>.log` | Override the log file path |
 | `NIT_ASCII_FALLBACK` | unset | Use ASCII glyphs instead of Unicode in the agent ops UI |
+| `NIT_ROSTER_NO_TRUNCATE` | unset | Disable per-backend / per-mission / chat-pane breather row truncation. Set to `1`/`true` to inspect every clone in large swarms. |
 | `NIT_SNAPSHOT_QUEUE` | `64` | Snapshot writer channel capacity |
 | `NIT_SNAPSHOT_DEBUG` | unset | Enable verbose snapshot debug logging to stderr |
 | `NIT_SNAPSHOT_CYCLE` | unset | Force a snapshot when an attractor cycle is detected |
@@ -62,6 +63,24 @@ MSRV: Rust 1.88.0 (pinned in `rust-toolchain.toml`).
 | `NIT_MCP_TURN_TIMEOUT_SECS` | none | Hard timeout for an MCP turn (0 or unset = no limit) |
 | `NIT_MCP_TURN_IDLE_TIMEOUT_SECS` | disabled | Idle timeout for an MCP turn (set to enable, e.g. `600`; 0 or unset = disabled) |
 
+## Swarm size limits
+
+- Static cap: `MAX_SWARM_SIZE = 256` (`crates/nit-tui/src/swarm/constants.rs`).
+- Effective cap: clamped at runtime by the host's `RLIMIT_NOFILE`. Each
+  in-flight Codex/Claude exec turn opens 4 fds, so the formula is
+  `min(MAX_SWARM_SIZE, max(1, (fd_limit - 32) / 4))` — defined in
+  `crates/nit-tui/src/swarm/limits.rs::compute_effective_max_swarm_size`.
+- macOS default `ulimit -n 256` → effective ceiling **56 agents**. Bump
+  with `ulimit -n 4096` and restart nit to lift it.
+- Bulk template caps proposers at `BULK_PRACTICAL_MAX = 12` (per-dep
+  budget collapses past that; see `docs/SWARM.md` "Aborting and limits").
+- Soft advisories pushed to the mission console when triggered:
+  - `agents >= LARGE_SWARM_WARN_THRESHOLD (64)` or the FD-bound 75% of
+    the effective ceiling, whichever is smaller.
+  - Lightweight planner (haiku / mini / nano / flash) with N > 20.
+  - Operator-explicit clamp ("requested X, started Y").
+  - Bulk template proposer cap.
+
 ## Agent commands (in Agent Chat)
 
 - `@all <prompt>` — fan-out to multiple agents (Codex and Claude)
@@ -69,3 +88,29 @@ MSRV: Rust 1.88.0 (pinned in `rust-toolchain.toml`).
 - `@shadow <prompt>` — single-agent dispatch with hidden propose/judge/review support agents; auto-enables for heavy prompts when no prefix is present (see `docs/SHADOWS.md`)
 - `@new <prompt>` — spawn fresh-context clone when agent is busy
 - `@queue` / `@q` — legacy alias for queued prompt (now same as default queueing)
+- `/abort` (or `@abort`) — abort the active swarm mission. `/abort all` cancels every running swarm + clears both runner queues. `/abort <agent-id>` is a surgical strike that kills one agent's in-flight + queued turns. See `docs/SWARM.md` "Aborting a swarm".
+
+## Aborting in-flight work
+
+Five triggers, all routed through `chat_input::handle_abort`. When an
+operator triggers an abort, the swarm runtime moves the run to
+`completed_runs` with `report_status = "ABORTED"`, drains queued turns,
+and pushes a `SYSTEM_ALERT_KIND` message to the chat. The runner-side
+`CancelTurn { agent_id }` command then sets the per-turn cancel
+`AtomicBool`; the worker thread sees it within ~50ms and calls
+`child.kill()` on the subprocess.
+
+| Trigger | Scope | Where wired |
+|---|---|---|
+| `/abort` (or `@abort`) typed in chat | Current mission | `app/chat_input.rs::parse_abort_command` |
+| `/abort all` | Every active swarm + runner queues | same |
+| `/abort <agent-id>` | One agent only | same |
+| Ctrl+C with empty chat input | Current mission | `app/agent_station.rs` (KeyCode::Char('c') + CONTROL, plus `\u{3}` raw ETX) |
+| Esc-Esc within ~500ms | Current mission | `chat_input::record_chat_esc_press` (thread-local) |
+| `x` in Missions tab | Highlighted mission | `app/agent_station.rs` |
+
+Operator cancels ride the same `TurnFailed` event but use the
+`OPERATOR_CANCEL_TURN_MESSAGE` sentinel (in `nit-core::agent_bus`) so the
+bus handler routes them to the soft path: `AgentStatus::Idle` (not
+Error), no alert/signal, Info-level diag, no LAB→WARN promotion. See
+`docs/SWARM.md` for the operator-facing description.

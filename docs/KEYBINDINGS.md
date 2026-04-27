@@ -139,20 +139,25 @@
   - j/k or Up/Down: Scroll popup content (when open)
 - r / s / x: MCP reconnect / start / stop (MCP tab; default runtime for Codex, override with `--codex-runtime exec`)
   - Note: MCP reconnect preserves thread context; MCP stop clears it. If Codex reports “Session not found for thread_id …”, nit drops that agent’s saved thread id.
+- Missions tab:
+  - **x**: Abort the highlighted mission (kills its in-flight + queued turns, leaves other missions running). No-op when the highlighted mission is already terminal.
 - Ctrl+Space / F6: Pause/resume active Petri/tournament runtime (global)
 
 ## Agent Chat
-- Type message, Enter to send, Esc or Ctrl+C to clear input
+- Type message, Enter to send, Esc or Ctrl+C to clear input (with text); Ctrl+C with empty input aborts the active swarm mission instead
   - Note: agent reply bodies are captured in Agent Ops → ARTIFACTS; the thread shows `done (see ARTIFACTS)` placeholders.
   - `@all <msg>`: broadcast (same prompt) to multiple agents (Codex and Claude)
   - `@swarm [all|N] [template=lab|parallel|bulk] [mission=general|research|computational-research] <msg>`: orchestrated multi-agent workflow (`t=` and `m=` are accepted as shorthands)
   - `@shadow <msg>`: single-agent dispatch with hidden propose/judge/review pipeline (also auto-enables for heavy prompts, see `docs/SHADOWS.md`)
   - `@new <msg>`: spawn a fresh-context clone when the agent is busy
   - `@queue` / `@q <msg>`: explicit queue (same as the implicit behaviour below)
+  - `/abort` (or `@abort`): cancel the active swarm mission. `/abort all` cancels every running swarm. `/abort <agent-id>` is a surgical strike on one agent. See `docs/SWARM.md` "Aborting a swarm".
   - Prompts sent while an agent is busy are automatically queued and dispatched when it becomes idle
 - Left/Right/Home/End: Move input cursor
 - Up/Down: Move input cursor between lines
 - Ctrl+Up/Ctrl+Down: Scroll chat thread
+- **Esc Esc** (within ~500 ms): Abort the active swarm mission. A single Esc still does its normal selection-clear job; only a fast double-press triggers abort.
+- **Ctrl+C** (with empty input): Abort the active swarm mission. With non-empty input, behaves as before (clear / copy selection).
 
 ## Visualizer (GoL)
 
