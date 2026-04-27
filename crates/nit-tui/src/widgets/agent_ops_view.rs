@@ -1419,13 +1419,12 @@ fn mission_lines(state: &AppState, width: usize) -> Vec<String> {
         // With truncation disabled, mission_visible_agent_lines returns
         // total_agents, so every row maps to a real assigned agent — the
         // "(+N more)" overflow indicator must stay off in that case.
-        let overflow_row_idx = if !roster_truncation_disabled()
-            && total_agents > MISSION_VISIBLE_AGENTS_MAX
-        {
-            Some(MISSION_VISIBLE_AGENTS_MAX)
-        } else {
-            None
-        };
+        let overflow_row_idx =
+            if !roster_truncation_disabled() && total_agents > MISSION_VISIBLE_AGENTS_MAX {
+                Some(MISSION_VISIBLE_AGENTS_MAX)
+            } else {
+                None
+            };
         for agent_idx in 0..agent_lines {
             let marker = if idx == state.agents.mission_selected {
                 if agent_idx == 0 {

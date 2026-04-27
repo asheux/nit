@@ -303,6 +303,28 @@ pub fn push_system_message_to_mission(state: &mut AppState, mission_id: &str, te
     });
 }
 
+/// Marker `kind` used by `push_system_alert_to_mission`. The chat console
+/// hides ordinary `agent_id == "swarm"` broadcasts as redundant with
+/// per-agent callouts; messages tagged `SYSTEM_ALERT_KIND` bypass that
+/// filter so operator-facing warnings (FD-bound clamp, pool-bound clamp,
+/// large-swarm advisory) always render.
+pub const SYSTEM_ALERT_KIND: &str = "system-alert";
+
+/// Like `push_system_message_to_mission` but tagged `SYSTEM_ALERT_KIND`
+/// so the chat console renders it instead of filtering. Reserve for
+/// alerts the operator must see (clamp warnings, ulimit advice).
+pub fn push_system_alert_to_mission(state: &mut AppState, mission_id: &str, text: String) {
+    state.agents.messages.push(AgentMessage {
+        at: timestamp_label(state),
+        channel: nit_core::AgentChannel::Broadcast,
+        agent_id: Some("swarm".into()),
+        mission_id: Some(mission_id.to_string()),
+        text,
+        prompt_msg_idx: None,
+        kind: Some(SYSTEM_ALERT_KIND.into()),
+    });
+}
+
 pub(super) fn tag_last_agent_message_kind(
     state: &mut AppState,
     agent_id: &str,

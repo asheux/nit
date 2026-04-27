@@ -1973,8 +1973,54 @@ fn format_message_rows(
     if msg.agent_id.as_deref() == Some("swarm") && msg.text.starts_with("Swarm ") {
         return Vec::new();
     }
+    // Operator-facing system alerts (clamp warnings, ulimit advisories)
+    // render their full text inline. The default agent-reply path below
+    // collapses messages into a "done (see ARTIFACTS)" callout, which
+    // would silently swallow the actual warning text — exactly what we
+    // need to avoid for these.
+    if msg.kind.as_deref() == Some(crate::swarm::SYSTEM_ALERT_KIND) {
+        let prefix = "\u{21b3} [swarm] ";
+        let continuation = "  [swarm] ";
+        // Reserve column space for the per-line prefix so wrap_visual_line
+        // produces fragments that fit *after* "↳ [swarm] " (or the
+        // continuation indent on subsequent rows). Without this the text
+        // overruns the pane and gets visually clipped at the right edge.
+        let first_avail = width.saturating_sub(UnicodeWidthStr::width(prefix)).max(1);
+        let cont_avail = width
+            .saturating_sub(UnicodeWidthStr::width(continuation))
+            .max(1);
+        let mut out = Vec::new();
+        for line in text_lines.iter() {
+            let wrapped = wrap_visual_line(line, first_avail);
+            // Re-wrap continuation rows at their own (smaller) width so
+            // the indented "[swarm] ..." lines don't overflow either.
+            let mut iter = wrapped.into_iter();
+            if let Some(first) = iter.next() {
+                out.push(ThreadRow {
+                    text: pad_line_right(&format!("{prefix}{first}"), width),
+                    kind: ThreadRowKind::StatusSubRow,
+                });
+                let rest: String = iter.collect::<Vec<_>>().join(" ");
+                if !rest.is_empty() {
+                    for cont in wrap_visual_line(&rest, cont_avail) {
+                        out.push(ThreadRow {
+                            text: pad_line_right(&format!("{continuation}{cont}"), width),
+                            kind: ThreadRowKind::StatusSubRow,
+                        });
+                    }
+                }
+            }
+        }
+        out.push(ThreadRow {
+            text: String::new(),
+            kind: ThreadRowKind::Agent,
+        });
+        return out;
+    }
+
     // Swarm broadcast messages are redundant when individual agent callouts
-    // already cover each clone's completion.
+    // already cover each clone's completion. (System alerts above already
+    // returned, so this filter only affects routine swarm broadcasts.)
     if msg.agent_id.as_deref() == Some("swarm")
         && matches!(msg.channel, nit_core::AgentChannel::Broadcast)
     {

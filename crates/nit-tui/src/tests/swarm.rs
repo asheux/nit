@@ -3968,7 +3968,7 @@ fn intended_size_all_excludes_swarm_and_chat_clones() {
 #[test]
 fn intended_size_all_clamps_empty_roster_to_one() {
     let state = new_state(); // no agents
-    // "all" on an empty roster returns 1 so the comparison
-    // (intended > started) doesn't underflow downstream.
+                             // "all" on an empty roster returns 1 so the comparison
+                             // (intended > started) doesn't underflow downstream.
     assert_eq!(swarm_intended_size(&state, SwarmSize::All), 1);
 }

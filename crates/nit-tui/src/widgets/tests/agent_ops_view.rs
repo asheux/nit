@@ -1100,10 +1100,11 @@ fn make_state_with_codex_lanes(count: usize) -> AppState {
     );
     state.agents.agents.clear();
     for i in 0..count {
-        state
-            .agents
-            .agents
-            .push(idle_lane(&format!("codex-{i:02}"), "codex", AgentLaneKind::Codex));
+        state.agents.agents.push(idle_lane(
+            &format!("codex-{i:02}"),
+            "codex",
+            AgentLaneKind::Codex,
+        ));
     }
     state
 }

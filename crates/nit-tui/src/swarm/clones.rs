@@ -2,7 +2,9 @@ use std::collections::HashSet;
 
 use nit_core::{AgentStatus, AppState};
 
-use super::{effective_max_swarm_size, SwarmSize, SwarmTemplate, DEFAULT_SWARM_SIZE, MAX_SWARM_SIZE};
+use super::{
+    effective_max_swarm_size, SwarmSize, SwarmTemplate, DEFAULT_SWARM_SIZE, MAX_SWARM_SIZE,
+};
 
 pub(super) fn swarm_clone_base_id(agent_id: &str) -> Option<&str> {
     agent_id.split_once("#swarm-").map(|(base_id, _)| base_id)

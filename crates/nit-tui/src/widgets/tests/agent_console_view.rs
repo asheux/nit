@@ -1461,3 +1461,88 @@ fn swarm_exec_label_ignores_queued_tasks_for_active_agents() {
     );
     assert_eq!(label, "Proposing ...");
 }
+
+#[test]
+fn ordinary_swarm_broadcast_is_filtered_from_chat() {
+    // Regression: the chat console hides agent_id="swarm" + Broadcast as
+    // redundant with per-agent callouts. Routine system messages
+    // ("Starting VERIFY", "Dispatching genome review", etc.) must still
+    // be filtered so we don't double-up notifications.
+    let state = test_state();
+    let msg = AgentMessage {
+        at: "10:00:00".into(),
+        channel: AgentChannel::Broadcast,
+        agent_id: Some("swarm".into()),
+        mission_id: Some("mis-001".into()),
+        text: "Dispatching genome review".into(),
+        prompt_msg_idx: None,
+        kind: None,
+    };
+    let rows = format_message_rows(&state, None, &msg, 80);
+    assert!(rows.is_empty(), "ordinary swarm broadcast should be hidden");
+}
+
+#[test]
+fn system_alert_swarm_broadcast_is_rendered_in_chat() {
+    // Regression: clamp / FD-warning messages route through
+    // push_system_alert_to_mission, which tags the message with
+    // SYSTEM_ALERT_KIND. Those MUST render so the operator actually sees
+    // "Requested 1000 agents, started 56 ..." instead of the broadcast
+    // being silently dropped by the redundancy filter.
+    let state = test_state();
+    let msg = AgentMessage {
+        at: "10:00:00".into(),
+        channel: AgentChannel::Broadcast,
+        agent_id: Some("swarm".into()),
+        mission_id: Some("mis-001".into()),
+        text: "Requested 1000 agents, started 56 (effective ceiling 56)".into(),
+        prompt_msg_idx: None,
+        kind: Some(crate::swarm::SYSTEM_ALERT_KIND.into()),
+    };
+    let rows = format_message_rows(&state, None, &msg, 80);
+    assert!(
+        !rows.is_empty(),
+        "system-alert swarm broadcast must render — operator-facing warnings cannot be silently dropped"
+    );
+    assert!(
+        rows.iter()
+            .any(|r| r.text.contains("Requested 1000 agents")),
+        "alert text must appear in rendered rows: {:?}",
+        rows.iter().map(|r| r.text.as_str()).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn system_alert_long_message_wraps_within_pane_width() {
+    // Regression: alert text was overflowing the pane because the wrap
+    // width didn't account for the "↳ [swarm] " prefix, so visible chars
+    // got clipped at the right edge. The operator's screenshot showed
+    // "...; `uli" / "is 256). Bump..." cut mid-word — exactly this bug.
+    // Every rendered row's visible width must fit in the pane.
+    let state = test_state();
+    let long = "Requested 1000 agents, started 56 (effective ceiling 56; \
+                `ulimit -n` is 256). Bump `ulimit -n 4096` and restart \
+                nit for more headroom.";
+    let msg = AgentMessage {
+        at: "10:00:00".into(),
+        channel: AgentChannel::Broadcast,
+        agent_id: Some("swarm".into()),
+        mission_id: Some("mis-001".into()),
+        text: long.into(),
+        prompt_msg_idx: None,
+        kind: Some(crate::swarm::SYSTEM_ALERT_KIND.into()),
+    };
+    let pane_width = 60;
+    let rows = format_message_rows(&state, None, &msg, pane_width);
+    for row in &rows {
+        let visible = UnicodeWidthStr::width(row.text.as_str());
+        assert!(
+            visible <= pane_width,
+            "row exceeds pane width ({visible} > {pane_width}): {:?}",
+            row.text
+        );
+    }
+    // Sanity: the message must have actually rendered (not been swallowed
+    // by an earlier-returning branch with empty `out`).
+    assert!(rows.iter().any(|r| r.text.contains("Requested 1000")));
+}

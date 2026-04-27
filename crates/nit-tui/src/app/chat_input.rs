@@ -12,9 +12,9 @@ use crate::swarm::{
     create_chat_clone, current_fd_soft_limit, detect_swarm_mission_kind_from_prompt,
     effective_max_swarm_size, explicit_swarm_mission_kind_from_prompt, is_agent_busy,
     is_agent_family_busy, is_chat_clone_agent_id, large_swarm_warn_threshold, parse_swarm_command,
-    parse_swarm_mission_kind, push_system_message_to_mission, select_swarm_agents,
+    parse_swarm_mission_kind, push_system_alert_to_mission, select_swarm_agents,
     swarm_intended_size, SwarmCommand, SwarmMissionKind, SwarmRuntime, SwarmSize,
-    LARGE_SWARM_WARN_THRESHOLD,
+    DEFAULT_SWARM_SIZE, LARGE_SWARM_WARN_THRESHOLD,
 };
 use crate::vitals::VitalsState;
 
@@ -546,48 +546,61 @@ pub(super) fn submit_chat_input_and_dispatch(
                 let warn_threshold = large_swarm_warn_threshold();
                 let ceiling = effective_max_swarm_size();
                 let fd_limit = current_fd_soft_limit();
+                // `agent_count` is the pre-clone pool size returned by
+                // `select_swarm_agents`. The actual swarm size emerges
+                // after `ensure_size_clones` runs inside `swarm.start`,
+                // padding the roster up to the requested target (capped
+                // at the FD ceiling). For `All` no cloning happens, so
+                // the final size matches the pool. Compute the final
+                // size deterministically here so the clamp message
+                // reflects what the operator will actually see.
+                let final_size = match cmd.size {
+                    SwarmSize::Default => DEFAULT_SWARM_SIZE.min(ceiling).max(1),
+                    SwarmSize::All => agent_count,
+                    SwarmSize::Count(n) => n.clamp(1, ceiling),
+                };
                 // An explicit clamp message takes priority over the generic
                 // "large swarm" advisory: when the operator asked for N and
                 // got fewer, that's a workflow surprise and the message
                 // should say so directly. Only fall through to the generic
                 // warning when the request landed at exactly what was asked.
-                let was_clamped = intended_count > agent_count;
-                let fd_bound_clamp = was_clamped && agent_count == ceiling;
+                let was_clamped = intended_count > final_size;
+                let fd_bound_clamp = was_clamped && final_size == ceiling;
                 if fd_bound_clamp {
-                    push_system_message_to_mission(
+                    push_system_alert_to_mission(
                         state,
                         &mission_id,
                         format!(
-                            "Requested {intended_count} agents, started {agent_count} \
+                            "Requested {intended_count} agents, started {final_size} \
                              (effective ceiling {ceiling}; `ulimit -n` is {fd_limit}). \
                              Bump `ulimit -n 4096` and restart nit for more headroom."
                         ),
                     );
                 } else if was_clamped {
-                    push_system_message_to_mission(
+                    push_system_alert_to_mission(
                         state,
                         &mission_id,
                         format!(
-                            "Requested {intended_count} agents, started {agent_count} \
-                             (only {agent_count} eligible agents in the roster)."
+                            "Requested {intended_count} agents, started {final_size} \
+                             (only {final_size} eligible agents in the roster)."
                         ),
                     );
-                } else if agent_count >= warn_threshold {
+                } else if final_size >= warn_threshold {
                     let msg = if ceiling < LARGE_SWARM_WARN_THRESHOLD {
                         format!(
-                            "Large swarm ({agent_count} agents). Process FD limit \
+                            "Large swarm ({final_size} agents). Process FD limit \
                              is {fd_limit} (`ulimit -n`); effective swarm ceiling \
                              ~{ceiling}. Run `ulimit -n 4096` and restart nit for \
                              more headroom."
                         )
                     } else {
                         format!(
-                            "Large swarm ({agent_count} agents). Each agent spawns a \
+                            "Large swarm ({final_size} agents). Each agent spawns a \
                              Codex/Claude subprocess (~4 fds, ~50–200 MB each). \
                              Verify the host has spare RAM/CPU before continuing."
                         )
                     };
-                    push_system_message_to_mission(state, &mission_id, msg);
+                    push_system_alert_to_mission(state, &mission_id, msg);
                 }
                 for dispatch in dispatches {
                     apply_swarm_task_role(state, &dispatch);

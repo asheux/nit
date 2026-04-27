@@ -457,7 +457,10 @@ fn json_errors_cap_keeps_size_bounded() {
     }
     assert!(errors.len() <= JSON_ERRORS_CAP);
     // Most-recent must always be retained.
-    assert_eq!(errors.last().unwrap(), &format!("err{}", JSON_ERRORS_CAP * 4 - 1));
+    assert_eq!(
+        errors.last().unwrap(),
+        &format!("err{}", JSON_ERRORS_CAP * 4 - 1)
+    );
 }
 
 #[test]
@@ -468,5 +471,8 @@ fn json_errors_cap_drains_oldest_half_on_overflow() {
     assert_eq!(errors.len(), JSON_ERRORS_CAP / 2 + 1);
     assert_eq!(errors.last().unwrap(), "new");
     // The oldest entries (e0..e127) are gone; e128 is now the front.
-    assert_eq!(errors.first().unwrap(), &format!("e{}", JSON_ERRORS_CAP / 2));
+    assert_eq!(
+        errors.first().unwrap(),
+        &format!("e{}", JSON_ERRORS_CAP / 2)
+    );
 }

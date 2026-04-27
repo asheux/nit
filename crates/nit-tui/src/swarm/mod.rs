@@ -107,18 +107,16 @@ use config::{
     read_workspace_custom_gates, read_workspace_dag_validation_mode, read_workspace_gate_default,
 };
 use constants::{
-    COMPUTATIONAL_RESEARCH_ROLE, COMPUTATIONAL_RESEARCH_ROLE_LEGACY, DEFAULT_SWARM_SIZE,
-    MAX_SWARM_SIZE, SWARM_DEP_OUTPUT_MAX_CHARS, SWARM_DEP_OUTPUT_MAX_CHARS_FULL,
+    COMPUTATIONAL_RESEARCH_ROLE, COMPUTATIONAL_RESEARCH_ROLE_LEGACY, MAX_SWARM_SIZE,
+    SWARM_DEP_OUTPUT_MAX_CHARS, SWARM_DEP_OUTPUT_MAX_CHARS_FULL,
     SWARM_DEP_OUTPUT_TOTAL_MAX_CHARS_FULL, SWARM_VERIFY_MAX_CHARS,
 };
 pub(crate) use constants::{
-    LARGE_SWARM_WARN_THRESHOLD, NO_PADDING_CLAUSE, NO_REVERT_CLAUSE, TEST_DISCIPLINE_CLAUSE,
+    DEFAULT_SWARM_SIZE, LARGE_SWARM_WARN_THRESHOLD, NO_PADDING_CLAUSE, NO_REVERT_CLAUSE,
+    TEST_DISCIPLINE_CLAUSE,
 };
 
 mod limits;
-pub(crate) use limits::{
-    current_fd_soft_limit, effective_max_swarm_size, large_swarm_warn_threshold,
-};
 use dag::{analyze_swarm_dag, ensure_deps_resolve, find_swarm_cycle_path, repair_swarm_dag};
 use dashboard::{
     blocked_on, dashboard_gate_rows, derive_cargo_packages, gate_bundle_label, run_effective_gates,
@@ -132,6 +130,9 @@ use graph_exec::{
     tasks_terminal_count,
 };
 use json::{extract_json_code_block, extract_json_code_blocks};
+pub(crate) use limits::{
+    current_fd_soft_limit, effective_max_swarm_size, large_swarm_warn_threshold,
+};
 use plan_parser::{
     apply_role_dependency_ordering, assign_clone_roles_for_parallel_coverage,
     classify_swarm_mission_kind, deduplicate_inherited_role_hints, direct_role_hint_for_agent,
@@ -171,8 +172,9 @@ use mission::{
     update_mission_status,
 };
 pub use mission::{
-    is_agent_busy, is_agent_family_busy, push_system_message_to_mission, resolve_base_agent_id,
-    select_swarm_agents, swarm_intended_size,
+    is_agent_busy, is_agent_family_busy, push_system_alert_to_mission,
+    push_system_message_to_mission, resolve_base_agent_id, select_swarm_agents,
+    swarm_intended_size, SYSTEM_ALERT_KIND,
 };
 
 #[cfg(test)]

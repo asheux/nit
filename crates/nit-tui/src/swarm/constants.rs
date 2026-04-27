@@ -1,4 +1,4 @@
-pub(super) const DEFAULT_SWARM_SIZE: usize = 4;
+pub(crate) const DEFAULT_SWARM_SIZE: usize = 4;
 /// Hard ceiling on roster size for a single swarm mission. Sized so the worst
 /// case (every agent spawning a Codex/Claude subprocess concurrently, each
 /// holding ~4 file descriptors) fits under typical OS ulimits — ~250 agents
