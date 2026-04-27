@@ -2256,6 +2256,35 @@ fn inline_breather_rows(
     rows
 }
 
+/// Sort key for the breather agent table: smaller = higher priority. Used
+/// to promote actively-running agents to the front so the truncated table
+/// always shows the live work. Mirrors `agent_ops_view::roster_running_priority`
+/// but operates on agent ids since the breather works in id-space.
+fn breather_running_priority(state: &AppState, agent_id: &str) -> u8 {
+    if state.agents.active_turns.contains_key(agent_id) {
+        return 0;
+    }
+    let queued = state
+        .agents
+        .queued_codex_turns
+        .iter()
+        .any(|turn| turn.agent_id == agent_id)
+        || state
+            .agents
+            .queued_claude_turns
+            .iter()
+            .any(|turn| turn.agent_id == agent_id);
+    if queued {
+        return 1;
+    }
+    let agent = state.agents.agents.iter().find(|a| a.id == agent_id);
+    match agent.map(|a| a.status) {
+        Some(AgentStatus::Running) | Some(AgentStatus::Waiting) => 2,
+        Some(AgentStatus::Idle) => 3,
+        Some(AgentStatus::Error) | None => 4,
+    }
+}
+
 fn breather_rows_for_user_prompt(
     state: &AppState,
     swarm: Option<&SwarmRuntime>,
@@ -2452,13 +2481,22 @@ fn breather_rows_for_user_prompt(
     // Cap the breather agent table to a manageable height. With swarms of
     // up to `MAX_SWARM_SIZE` clones, this view would otherwise dominate the
     // chat pane (each agent occupies a status row + sub-row = 2 lines, so
-    // 30+ agents pushes everything else off-screen). `ordered_ids` is
-    // sorted with swarm-assigned and primary (in-context) agents first, so
-    // the visible window naturally shows what the operator cares about.
-    // Predicate computations above (`any_active`, `any_queued`, `label`)
-    // still see the full list — only the rendered table is truncated.
+    // 30+ agents pushes everything else off-screen). Predicate computations
+    // above (`any_active`, `any_queued`, `label`) still see the full list —
+    // only the rendered table is truncated.
+    // `NIT_ROSTER_NO_TRUNCATE=1` opts out of the cap entirely.
     const BREATHER_VISIBLE_AGENTS: usize = 6;
-    let visible_count = ordered_ids.len().min(BREATHER_VISIBLE_AGENTS);
+    // Promote running agents to the front so the visible window always
+    // shows the live work, regardless of where they landed in the
+    // mission/primary/secondary ordering. Stable sort preserves the
+    // existing tiebreak (swarm-assigned, then in-context, then others).
+    ordered_ids.sort_by_key(|id| breather_running_priority(state, id.as_str()));
+    let cap = if super::agent_ops_view::roster_truncation_disabled() {
+        ordered_ids.len()
+    } else {
+        BREATHER_VISIBLE_AGENTS
+    };
+    let visible_count = ordered_ids.len().min(cap);
     let hidden_agent_count = ordered_ids.len() - visible_count;
     let visible_ids = &ordered_ids[..visible_count];
 

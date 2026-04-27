@@ -207,6 +207,33 @@ pub fn select_swarm_agents(
     agents
 }
 
+/// What the operator would have gotten if the FD ceiling and roster pool
+/// were both unbounded — i.e. the literal numeric request behind the
+/// `SwarmSize` enum. Used by the `chat_input` flow to detect when an
+/// explicit `@swarm N` got silently clamped to a smaller fan-out, so the
+/// operator gets a "requested X, started Y" message instead of a confusing
+/// reduced swarm.
+///
+/// For `All`: the count of non-clone codex/claude lanes currently in the
+/// roster. For `Count(n)`: just `n`. For `Default`: `DEFAULT_SWARM_SIZE`.
+pub fn swarm_intended_size(state: &AppState, size: SwarmSize) -> usize {
+    match size {
+        SwarmSize::Default => DEFAULT_SWARM_SIZE,
+        SwarmSize::All => state
+            .agents
+            .agents
+            .iter()
+            .filter(|lane| lane.is_codex() || lane.is_claude())
+            .filter(|lane| {
+                !is_swarm_clone_agent_id(lane.id.as_str())
+                    && !is_chat_clone_agent_id(lane.id.as_str())
+            })
+            .count()
+            .max(1),
+        SwarmSize::Count(n) => n.max(1),
+    }
+}
+
 pub fn is_agent_busy(state: &AppState, agent_id: &str) -> bool {
     state.agents.active_turns.contains_key(agent_id)
         || state

@@ -172,7 +172,7 @@ use mission::{
 };
 pub use mission::{
     is_agent_busy, is_agent_family_busy, push_system_message_to_mission, resolve_base_agent_id,
-    select_swarm_agents,
+    select_swarm_agents, swarm_intended_size,
 };
 
 #[cfg(test)]

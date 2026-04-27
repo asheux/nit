@@ -13,7 +13,8 @@ use crate::swarm::{
     effective_max_swarm_size, explicit_swarm_mission_kind_from_prompt, is_agent_busy,
     is_agent_family_busy, is_chat_clone_agent_id, large_swarm_warn_threshold, parse_swarm_command,
     parse_swarm_mission_kind, push_system_message_to_mission, select_swarm_agents,
-    SwarmCommand, SwarmMissionKind, SwarmRuntime, SwarmSize, LARGE_SWARM_WARN_THRESHOLD,
+    swarm_intended_size, SwarmCommand, SwarmMissionKind, SwarmRuntime, SwarmSize,
+    LARGE_SWARM_WARN_THRESHOLD,
 };
 use crate::vitals::VitalsState;
 
@@ -526,6 +527,7 @@ pub(super) fn submit_chat_input_and_dispatch(
         if let Some(planner) = planner {
             let agents = select_swarm_agents(state, &planner, cmd.size, cmd.template.as_deref());
             let agent_count = agents.len();
+            let intended_count = swarm_intended_size(state, cmd.size);
             if let Some((mission_id, dispatches)) = swarm.start(
                 state,
                 planner.clone(),
@@ -542,13 +544,36 @@ pub(super) fn submit_chat_input_and_dispatch(
                 sync_cursor_to_input_end(state);
                 let _ = push_chat_message(state);
                 let warn_threshold = large_swarm_warn_threshold();
-                if agent_count >= warn_threshold {
-                    let fd_limit = current_fd_soft_limit();
-                    let ceiling = effective_max_swarm_size();
+                let ceiling = effective_max_swarm_size();
+                let fd_limit = current_fd_soft_limit();
+                // An explicit clamp message takes priority over the generic
+                // "large swarm" advisory: when the operator asked for N and
+                // got fewer, that's a workflow surprise and the message
+                // should say so directly. Only fall through to the generic
+                // warning when the request landed at exactly what was asked.
+                let was_clamped = intended_count > agent_count;
+                let fd_bound_clamp = was_clamped && agent_count == ceiling;
+                if fd_bound_clamp {
+                    push_system_message_to_mission(
+                        state,
+                        &mission_id,
+                        format!(
+                            "Requested {intended_count} agents, started {agent_count} \
+                             (effective ceiling {ceiling}; `ulimit -n` is {fd_limit}). \
+                             Bump `ulimit -n 4096` and restart nit for more headroom."
+                        ),
+                    );
+                } else if was_clamped {
+                    push_system_message_to_mission(
+                        state,
+                        &mission_id,
+                        format!(
+                            "Requested {intended_count} agents, started {agent_count} \
+                             (only {agent_count} eligible agents in the roster)."
+                        ),
+                    );
+                } else if agent_count >= warn_threshold {
                     let msg = if ceiling < LARGE_SWARM_WARN_THRESHOLD {
-                        // FD-bound host (e.g. macOS default `ulimit -n 256`):
-                        // surface the actual numbers so the operator can fix
-                        // it with one shell command instead of guessing.
                         format!(
                             "Large swarm ({agent_count} agents). Process FD limit \
                              is {fd_limit} (`ulimit -n`); effective swarm ceiling \

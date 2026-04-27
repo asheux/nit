@@ -3894,3 +3894,81 @@ fn detect_incomplete_signoff_ignores_early_interrogatives_in_body() {
     message.push_str("\n```json\n{\"type\":\"swarm_artifacts\"}\n```\n<SWARM_TASK_COMPLETE>\n");
     assert!(detect_incomplete_signoff(&message).is_none());
 }
+
+// --- swarm_intended_size ---------------------------------------------------
+//
+// Underpins the "requested X, started Y" clamp message in chat_input. We
+// need to detect three classes of clamp:
+//   * Count(n) where n exceeds the FD ceiling     -> fd-bound clamp
+//   * Count(n) where n exceeds the roster pool    -> pool-bound clamp
+//   * All on a host where pool > FD ceiling       -> fd-bound clamp
+// The helper only computes the *intended* count; the comparison against
+// `started` lives at the call site in chat_input.
+
+fn make_lane_for_intended_size(id: &str, kind: AgentLaneKind) -> AgentLane {
+    AgentLane {
+        id: id.into(),
+        role: id.into(),
+        lane: id.into(),
+        kind,
+        status: nit_core::AgentStatus::Idle,
+        heartbeat_age_secs: 0,
+        queue_len: 0,
+        current_mission: None,
+        shadow: false,
+        last_message: String::new(),
+    }
+}
+
+#[test]
+fn intended_size_count_returns_user_request() {
+    let state = new_state();
+    assert_eq!(swarm_intended_size(&state, SwarmSize::Count(100)), 100);
+    assert_eq!(swarm_intended_size(&state, SwarmSize::Count(1)), 1);
+    // Zero coerces up to 1: a swarm of zero agents would be a no-op, so
+    // the intended count is at least the planner.
+    assert_eq!(swarm_intended_size(&state, SwarmSize::Count(0)), 1);
+}
+
+#[test]
+fn intended_size_default_returns_constant() {
+    let state = new_state();
+    // SwarmSize::Default should resolve to the static DEFAULT_SWARM_SIZE
+    // (currently 4) regardless of roster contents.
+    assert_eq!(swarm_intended_size(&state, SwarmSize::Default), 4);
+}
+
+#[test]
+fn intended_size_all_counts_eligible_lanes() {
+    let mut state = new_state();
+    state.agents.agents = vec![
+        make_lane_for_intended_size("codex-1", AgentLaneKind::Codex),
+        make_lane_for_intended_size("codex-2", AgentLaneKind::Codex),
+        make_lane_for_intended_size("claude-1", AgentLaneKind::Claude),
+        // Mock lane is not codex/claude → excluded from the swarm pool.
+        make_lane_for_intended_size("local", AgentLaneKind::Mock),
+    ];
+    assert_eq!(swarm_intended_size(&state, SwarmSize::All), 3);
+}
+
+#[test]
+fn intended_size_all_excludes_swarm_and_chat_clones() {
+    let mut state = new_state();
+    state.agents.agents = vec![
+        make_lane_for_intended_size("codex-1", AgentLaneKind::Codex),
+        make_lane_for_intended_size("codex-1#swarm-mis-001-clone-01", AgentLaneKind::Codex),
+        make_lane_for_intended_size("codex-1#chat-clone-02", AgentLaneKind::Codex),
+        make_lane_for_intended_size("claude-1", AgentLaneKind::Claude),
+    ];
+    // Only the two real lanes count — clones are not part of the
+    // "intended pool" because the planner spawns them on demand.
+    assert_eq!(swarm_intended_size(&state, SwarmSize::All), 2);
+}
+
+#[test]
+fn intended_size_all_clamps_empty_roster_to_one() {
+    let state = new_state(); // no agents
+    // "all" on an empty roster returns 1 so the comparison
+    // (intended > started) doesn't underflow downstream.
+    assert_eq!(swarm_intended_size(&state, SwarmSize::All), 1);
+}

@@ -7,11 +7,13 @@ use super::{
     append_swarm_artifact_lines, arrow_glyph, artifacts_history_entries,
     artifacts_history_visible_entries, current_lines_for_width, cursor_glyph,
     dag_lines_for_dashboard, diagnostics_lines, format_saved_run_relative_label_from_micros,
-    ops_styled_line, roster_column_widths, roster_inventory_backend_accent,
-    roster_lane_backend_accent, roster_styled_line, roster_swarm_mission_hit,
-    roster_swarm_mission_line_idx, roster_swarm_template_hit, roster_swarm_template_line_idx,
-    saved_run_detail_label, swarm_clone_display_label, table_role_label, tree_closed_glyph,
-    tree_open_glyph, BackendInventoryBackend,
+    mission_visible_agent_lines, ops_styled_line, parse_roster_truncation_disabled,
+    roster_backend_total_counts, roster_column_widths, roster_grouped_agent_indices,
+    roster_inventory_backend_accent, roster_lane_backend_accent, roster_running_priority,
+    roster_styled_line, roster_swarm_mission_hit, roster_swarm_mission_line_idx,
+    roster_swarm_template_hit, roster_swarm_template_line_idx, saved_run_detail_label,
+    swarm_clone_display_label, table_role_label, tree_closed_glyph, tree_open_glyph,
+    BackendInventoryBackend, MISSION_VISIBLE_AGENTS_MAX, ROSTER_VISIBLE_AGENTS_PER_BACKEND,
 };
 use crate::swarm::{
     GateReport, GateReportGate, SwarmDashboardView, SwarmGateDashboardRow, SwarmPersistenceView,
@@ -1081,4 +1083,177 @@ fn artifacts_view_uses_selected_archived_run_over_live_context() {
     assert!(lines.iter().any(|line| line.contains("saved ")));
     assert!(lines.iter().any(|line| line.contains("archived reply")));
     assert!(!lines.iter().any(|line| line.contains("live reply")));
+}
+
+// --- Roster + mission truncation -------------------------------------------
+//
+// These tests cover the truncation logic added so a 256-clone swarm doesn't
+// blow out the dock: per-backend cap, total-count surfacing,
+// selection-preservation, mission "(+N more)" row, the running-first
+// priority sort, and the env-var escape hatch.
+
+fn make_state_with_codex_lanes(count: usize) -> AppState {
+    let mut state = AppState::new(
+        std::env::temp_dir(),
+        Buffer::empty("x", None),
+        Buffer::empty("n", None),
+    );
+    state.agents.agents.clear();
+    for i in 0..count {
+        state
+            .agents
+            .agents
+            .push(idle_lane(&format!("codex-{i:02}"), "codex", AgentLaneKind::Codex));
+    }
+    state
+}
+
+#[test]
+fn roster_grouped_agent_indices_caps_visible_per_backend() {
+    let state = make_state_with_codex_lanes(20);
+    let groups = roster_grouped_agent_indices(&state);
+    let codex = groups
+        .iter()
+        .find(|(kind, _)| *kind == AgentLaneKind::Codex)
+        .expect("codex group present");
+    assert_eq!(codex.1.len(), ROSTER_VISIBLE_AGENTS_PER_BACKEND);
+}
+
+#[test]
+fn roster_grouped_agent_indices_returns_full_list_when_under_cap() {
+    let state = make_state_with_codex_lanes(5);
+    let groups = roster_grouped_agent_indices(&state);
+    let codex = groups
+        .iter()
+        .find(|(kind, _)| *kind == AgentLaneKind::Codex)
+        .expect("codex group present");
+    assert_eq!(codex.1.len(), 5);
+}
+
+#[test]
+fn roster_backend_total_counts_returns_full_count() {
+    let state = make_state_with_codex_lanes(20);
+    let counts = roster_backend_total_counts(&state);
+    let codex_count = counts
+        .iter()
+        .find_map(|(kind, n)| (*kind == AgentLaneKind::Codex).then_some(*n))
+        .expect("codex total");
+    assert_eq!(codex_count, 20);
+}
+
+#[test]
+fn roster_grouped_agent_indices_keeps_selected_agent_visible() {
+    let mut state = make_state_with_codex_lanes(20);
+    // Select an agent past the cap (index 18, well beyond the 12-visible
+    // window). Truncation must still produce a list that contains 18.
+    state.agents.roster_selected = 18;
+    let groups = roster_grouped_agent_indices(&state);
+    let codex = &groups
+        .iter()
+        .find(|(kind, _)| *kind == AgentLaneKind::Codex)
+        .expect("codex group present")
+        .1;
+    assert_eq!(codex.len(), ROSTER_VISIBLE_AGENTS_PER_BACKEND);
+    assert!(
+        codex.contains(&18),
+        "selected agent index 18 must be retained when truncating; got {codex:?}"
+    );
+}
+
+fn fake_active_turn() -> nit_core::AgentTurnState {
+    let now = std::time::Instant::now();
+    nit_core::AgentTurnState {
+        started_at: now,
+        last_heartbeat_at: now,
+        last_output_at: now,
+        stage: None,
+    }
+}
+
+#[test]
+fn roster_grouped_agent_indices_promotes_running_agents_first() {
+    let mut state = make_state_with_codex_lanes(20);
+    // Mark agent at index 15 as having an active turn. Truncation should
+    // bubble it into the visible window even though it sits past the cap
+    // in roster order.
+    state
+        .agents
+        .active_turns
+        .insert("codex-15".to_string(), fake_active_turn());
+    let groups = roster_grouped_agent_indices(&state);
+    let codex = &groups
+        .iter()
+        .find(|(kind, _)| *kind == AgentLaneKind::Codex)
+        .expect("codex group present")
+        .1;
+    assert!(
+        codex.contains(&15),
+        "running agent (idx 15) must surface in visible window; got {codex:?}"
+    );
+}
+
+#[test]
+fn roster_running_priority_orders_states_correctly() {
+    let mut state = make_state_with_codex_lanes(4);
+    state.agents.agents[0].status = AgentStatus::Idle;
+    state.agents.agents[1].status = AgentStatus::Running;
+    state.agents.agents[2].status = AgentStatus::Idle;
+    state.agents.agents[3].status = AgentStatus::Error;
+    state
+        .agents
+        .active_turns
+        .insert("codex-02".to_string(), fake_active_turn());
+    // codex-02 has an active turn ⇒ priority 0 (highest).
+    assert_eq!(roster_running_priority(&state, 2), 0);
+    // codex-01 has Running status, no active turn ⇒ priority 2.
+    assert_eq!(roster_running_priority(&state, 1), 2);
+    // codex-00 is Idle ⇒ priority 3.
+    assert_eq!(roster_running_priority(&state, 0), 3);
+    // codex-03 is Error ⇒ priority 4 (lowest).
+    assert_eq!(roster_running_priority(&state, 3), 4);
+}
+
+#[test]
+fn mission_visible_agent_lines_caps_above_threshold() {
+    let mut mission = MissionRecord {
+        id: "mis-001".into(),
+        title: "test".into(),
+        phase: MissionPhase::Plan,
+        status: "in progress".into(),
+        swarm: true,
+        updated_at: String::new(),
+        assigned_agents: (0..20).map(|i| format!("codex-{i:02}")).collect(),
+    };
+    // 20 agents → 8 visible + 1 (+N more) = 9 rows.
+    assert_eq!(
+        mission_visible_agent_lines(&mission),
+        MISSION_VISIBLE_AGENTS_MAX + 1
+    );
+
+    mission.assigned_agents.truncate(5);
+    // 5 agents (under the cap) → 5 rows, no overflow indicator.
+    assert_eq!(mission_visible_agent_lines(&mission), 5);
+
+    mission.assigned_agents.clear();
+    // Empty mission still reserves a row for the "--" placeholder.
+    assert_eq!(mission_visible_agent_lines(&mission), 1);
+}
+
+#[test]
+fn parse_roster_truncation_disabled_handles_common_inputs() {
+    // Treated as "still truncate":
+    assert!(!parse_roster_truncation_disabled(None));
+    assert!(!parse_roster_truncation_disabled(Some("")));
+    assert!(!parse_roster_truncation_disabled(Some("   ")));
+    assert!(!parse_roster_truncation_disabled(Some("0")));
+    assert!(!parse_roster_truncation_disabled(Some("false")));
+    assert!(!parse_roster_truncation_disabled(Some("FALSE")));
+    assert!(!parse_roster_truncation_disabled(Some("False")));
+
+    // Treated as "disable truncation":
+    assert!(parse_roster_truncation_disabled(Some("1")));
+    assert!(parse_roster_truncation_disabled(Some("true")));
+    assert!(parse_roster_truncation_disabled(Some("yes")));
+    assert!(parse_roster_truncation_disabled(Some("anything-else")));
+    assert!(parse_roster_truncation_disabled(Some(" 1 "))); // whitespace stripped
 }

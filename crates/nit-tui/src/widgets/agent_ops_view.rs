@@ -555,7 +555,7 @@ const MISSION_VISIBLE_AGENTS_MAX: usize = 8;
 
 fn mission_visible_agent_lines(mission: &nit_core::MissionRecord) -> usize {
     let n = mission.assigned_agents.len();
-    if n <= MISSION_VISIBLE_AGENTS_MAX {
+    if roster_truncation_disabled() || n <= MISSION_VISIBLE_AGENTS_MAX {
         n.max(1)
     } else {
         // First MISSION_VISIBLE_AGENTS_MAX agents + 1 "(+N more)" row.
@@ -937,6 +937,58 @@ fn roster_backend_group_label(kind: AgentLaneKind) -> &'static str {
 /// backend header label.
 const ROSTER_VISIBLE_AGENTS_PER_BACKEND: usize = 12;
 
+/// Set `NIT_ROSTER_NO_TRUNCATE=1` to disable per-backend, per-mission, and
+/// chat-pane breather row truncation. Useful when diagnosing a specific
+/// hidden clone or auditing a large swarm — caller accepts the
+/// taller-than-screen UI as the trade-off.
+pub(crate) fn roster_truncation_disabled() -> bool {
+    parse_roster_truncation_disabled(std::env::var("NIT_ROSTER_NO_TRUNCATE").ok().as_deref())
+}
+
+/// Pure parser split out so the env-var policy is unit-testable without
+/// mutating process state. Treats blank, `0`, and `false` (any case) as
+/// "truncation enabled" — anything else opts out.
+fn parse_roster_truncation_disabled(value: Option<&str>) -> bool {
+    match value {
+        Some(v) => {
+            let v = v.trim();
+            !v.is_empty() && v != "0" && !v.eq_ignore_ascii_case("false")
+        }
+        None => false,
+    }
+}
+
+/// Sort key for roster truncation: smaller = higher priority = front of
+/// list. Running agents (active turn) come first so the visible window
+/// always shows what's live; queued agents next; then idle; errored last.
+/// Stable sort preserves original roster order among ties.
+fn roster_running_priority(state: &AppState, agent_idx: usize) -> u8 {
+    let Some(agent) = state.agents.agents.get(agent_idx) else {
+        return 4;
+    };
+    if state.agents.active_turns.contains_key(&agent.id) {
+        0
+    } else if state
+        .agents
+        .queued_codex_turns
+        .iter()
+        .any(|turn| turn.agent_id == agent.id)
+        || state
+            .agents
+            .queued_claude_turns
+            .iter()
+            .any(|turn| turn.agent_id == agent.id)
+    {
+        1
+    } else {
+        match agent.status {
+            AgentStatus::Running | AgentStatus::Waiting => 2,
+            AgentStatus::Idle => 3,
+            AgentStatus::Error => 4,
+        }
+    }
+}
+
 fn roster_grouped_agent_indices(state: &AppState) -> Vec<(AgentLaneKind, Vec<usize>)> {
     let mut codex: Vec<usize> = Vec::new();
     let mut claude: Vec<usize> = Vec::new();
@@ -958,10 +1010,16 @@ fn roster_grouped_agent_indices(state: &AppState) -> Vec<(AgentLaneKind, Vec<usi
     }
 
     let selected = state.agents.roster_selected;
+    let truncate = !roster_truncation_disabled();
     let cap_visible = |mut v: Vec<usize>| -> Vec<usize> {
-        if v.len() <= ROSTER_VISIBLE_AGENTS_PER_BACKEND {
+        if !truncate || v.len() <= ROSTER_VISIBLE_AGENTS_PER_BACKEND {
             return v;
         }
+        // Promote running agents to the front so the visible window always
+        // reflects the live work. Stable sort means same-priority agents
+        // keep their original roster order, so the planner / first
+        // assigned clone remains where the operator expects.
+        v.sort_by_key(|idx| roster_running_priority(state, *idx));
         // Preserve selection visibility: if the selected agent is in this
         // group but past the cap, swap it into the last visible slot before
         // truncating.
@@ -1358,7 +1416,12 @@ fn mission_lines(state: &AppState, width: usize) -> Vec<String> {
         ));
         let agent_lines = mission_visible_agent_lines(mission);
         let total_agents = mission.assigned_agents.len();
-        let overflow_row_idx = if total_agents > MISSION_VISIBLE_AGENTS_MAX {
+        // With truncation disabled, mission_visible_agent_lines returns
+        // total_agents, so every row maps to a real assigned agent — the
+        // "(+N more)" overflow indicator must stay off in that case.
+        let overflow_row_idx = if !roster_truncation_disabled()
+            && total_agents > MISSION_VISIBLE_AGENTS_MAX
+        {
             Some(MISSION_VISIBLE_AGENTS_MAX)
         } else {
             None
