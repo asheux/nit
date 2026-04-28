@@ -154,22 +154,56 @@ When the user commits a directory, the pane:
 
 ### Roster mode keymap
 
-When a pane has no committed selection, the body of the pane renders a
-filtered roster of available agent lanes (grouped by backend family).
+When a pane has no committed selection, the body of the pane renders the
+same tree the Agent OPS Roster tab does:
+
+```
+ Template:  lab   parallel   bulk
+ Mission:   auto   general   research   computational
+
+ ▾ Codex
+   ↳ gpt-5  [Codex]
+       [x] medium
+       [ ] high
+ ▸ Claude
+ ▸ Gemini
+ ▸ Local
+```
+
+- The `Template:` and `Mission:` rows control swarm defaults
+  (`state.agents.swarm_default_template` /
+  `state.agents.swarm_default_mission`). Click a word to set it. These
+  writes are global — clicking from one pane affects all panes and the
+  Agent OPS dock.
+- Backend headers expand / collapse per pane. Expansion lives in
+  `PaneSession.roster_expanded_backends` so two panes can hold different
+  open groups.
+- Each agent under an expanded backend shows a `↳ Size` branch with one
+  `[x]` checkbox per supported reasoning effort. Toggling sets the
+  effort in the global `codex_selected_reasoning_effort` /
+  `claude_selected_effort` map (matching Agent OPS behaviour).
 
 | Key | Action |
 |---|---|
-| `↑` / `↓` | Move the per-pane cursor through visible lanes (skips backend headers). |
-| `Enter` | Commit the highlighted lane: lazily clones it as `<base>#mp-pane-NN`, copies runtime metadata, switches the pane to chat mode. |
+| `↑` / `k`, `↓` / `j` | Move the per-pane cursor through selectable rows (Backend, Agent, SizeBranch, SizeLeaf). Template / Mission rows are skipped — they are click-only. |
+| `→` / `l` | Expand the focused row: opens a Backend group, un-collapses an Agent's tree, etc. |
+| `←` / `h` | Collapse: closes a Backend group, hides an Agent's Size leaves. |
+| `PgUp` / `PgDn` | Jump the cursor by a page (8 rows). |
+| `g` / `G` | Jump cursor to the first / last selectable row. |
+| `Space` | Toggle the checkbox under the cursor when it sits on a SizeLeaf. |
+| `Enter` | Commit: Backend → toggle expand; Agent → materialise `<base>#mp-pane-NN` and switch the pane to chat mode; SizeBranch → toggle agent tree collapse; SizeLeaf → toggle the checkbox. |
 | `Tab` / `Shift+Tab` | Cycle focus between panes (never moves the roster cursor). |
+| `Mouse left-click` | Focuses the clicked pane and routes to the row under the cursor: Template/Mission word → set the global default; Backend → toggle expand; Agent → materialise + switch to chat; SizeBranch → toggle tree; SizeLeaf → toggle checkbox. |
+| `Mouse wheel` | Scrolls the pane's roster viewport (`PaneSession.roster_scroll`). |
 | `Ctrl+C`, `Esc Esc` | Emits the no-op "no agent selected — nothing to abort" notice. |
-| `Mouse click` | Focuses the clicked pane (no per-row selection in v1). |
 
 When a pane is already in chat mode:
 
 | Key | Action |
 |---|---|
-| `Ctrl+R` | Revert the focused pane back to roster mode. Clears `selected_agent_id`, the chat input buffer, and the active mission. The original roster cursor position is preserved per pane. |
+| `Ctrl+R` | Revert the focused pane back to roster mode. Clears `selected_agent_id`, the chat input buffer, and the active mission. The original roster cursor / expansion state are preserved per pane. |
+| `PgUp` / `PgDn` | Scroll the chat thread (`PaneSession.chat_thread_scroll`). The auto-stick-to-bottom default returns when the operator scrolls back to 0. |
+| `Mouse wheel` | Scrolls the focused pane's chat thread. Wheel events on a different pane don't steal focus — the wheel always targets the pane under the cursor. |
 
 The four reserved family aliases (`codex`, `claude`, `gemini`, `local`)
 filter the roster to a single backend family. If the filter matches no
@@ -206,6 +240,11 @@ pub struct PaneSession {
     pub dir_search: Option<DirSearchState>,   // Some when search is active
     pub mission_id: Option<String>,           // current mission anchored to this pane
     pub roster_cursor: usize,                 // position inside the per-pane roster
+    pub roster_scroll: usize,                 // viewport top row inside the roster body
+    pub roster_expanded_backends: HashSet<AgentLaneKind>, // pane-local expand set
+    pub roster_collapsed_agent_ids: HashSet<String>,      // pane-local Size/Role collapse
+    pub roster_tree_selected: Option<RosterTreeSelection>, // leaf cursor inside Size branch
+    pub chat_thread_scroll: usize,            // separate from chat_input_scroll
     pub selected_agent_id: Option<String>,    // None ⇒ render roster picker
 }
 

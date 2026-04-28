@@ -672,7 +672,7 @@ pub fn render_pane(
 
     let total_rows = thread_rows.len();
     let max_scroll = total_rows.saturating_sub(thread_height);
-    let scroll = pane.chat_input_scroll.min(max_scroll);
+    let scroll = pane.chat_thread_scroll.min(max_scroll);
     let visible_rows = thread_rows.iter().skip(scroll).take(thread_height);
     let visible: Vec<Line<'static>> = thread_lines(visible_rows, theme);
     frame.render_widget(

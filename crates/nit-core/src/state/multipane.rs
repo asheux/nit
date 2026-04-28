@@ -1,6 +1,9 @@
+use std::collections::HashSet;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
+
+use crate::state::{AgentLaneKind, RosterTreeSelection};
 
 /// Per-pane chat session anchored at its own working directory. When a
 /// pane has a chosen agent (`selected_agent_id == Some`), the pane renders
@@ -31,6 +34,31 @@ pub struct PaneSession {
     /// focus changes (lives on the pane, not in any global state).
     #[serde(default)]
     pub roster_cursor: usize,
+    /// Top visible row of the per-pane roster viewport. Lets the operator
+    /// scroll a tall roster (Backend → Agent → Size leaves) inside a small
+    /// pane. Clamped each render to `total_rows.saturating_sub(height)`.
+    #[serde(default)]
+    pub roster_scroll: usize,
+    /// Backend groups expanded in this pane's roster. Pane-local so panes
+    /// can show different families without bleeding selection into each
+    /// other or into Agent OPS.
+    #[serde(skip)]
+    pub roster_expanded_backends: HashSet<AgentLaneKind>,
+    /// Per-pane set of agent ids whose Size/Role tree branches are
+    /// collapsed. Pane-local for the same reason as
+    /// `roster_expanded_backends`.
+    #[serde(skip)]
+    pub roster_collapsed_agent_ids: HashSet<String>,
+    /// Selected leaf inside the focused agent's Size/Role tree. `None`
+    /// while the cursor is on a Backend or Agent row.
+    #[serde(skip)]
+    pub roster_tree_selected: Option<RosterTreeSelection>,
+    /// Vertical scroll offset for the chat thread, separate from
+    /// `chat_input_scroll` (which is reserved for input-box scrolling).
+    /// Auto-sticks to bottom while zero; the wheel/keyboard handlers bump
+    /// it upward and the renderer clamps to the max scroll each frame.
+    #[serde(default)]
+    pub chat_thread_scroll: usize,
     /// Lane id chosen for this pane. `None` ⇒ render roster picker; `Some`
     /// ⇒ render chat for that lane (the lane is materialised lazily as
     /// `<base>#mp-pane-NN` on selection commit). Pre-picked at install
@@ -112,6 +140,11 @@ mod tests {
         assert!(pane.chat_prompt_history.is_empty());
         assert!(pane.selected_agent_id.is_none());
         assert_eq!(pane.roster_cursor, 0);
+        assert_eq!(pane.roster_scroll, 0);
+        assert!(pane.roster_expanded_backends.is_empty());
+        assert!(pane.roster_collapsed_agent_ids.is_empty());
+        assert!(pane.roster_tree_selected.is_none());
+        assert_eq!(pane.chat_thread_scroll, 0);
     }
 
     #[test]

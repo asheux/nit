@@ -172,12 +172,19 @@ fn render_one_pane(
             .multipane
             .as_ref()
             .and_then(|mp| mp.backend_filter.clone());
+        clamp_roster_scroll(state, idx, inner.height as usize);
+        let updated_pane = state
+            .multipane
+            .as_ref()
+            .and_then(|mp| mp.panes.get(idx))
+            .cloned()
+            .unwrap_or(pane);
         roster_view::render(
             frame,
             inner,
             state,
+            &updated_pane,
             backend_filter.as_deref(),
-            pane.roster_cursor,
             focused,
             theme,
         );
@@ -185,6 +192,36 @@ fn render_one_pane(
     }
 
     agent_console_view::render_pane(frame, inner, state, None, theme, &pane, focused)
+}
+
+fn clamp_roster_scroll(state: &mut AppState, pane_idx: usize, height: usize) {
+    let backend_filter = state
+        .multipane
+        .as_ref()
+        .and_then(|mp| mp.backend_filter.clone());
+    let Some(pane_clone) = pane_at(state, pane_idx).cloned() else {
+        return;
+    };
+    let rows = roster_view::compute_rows(state, &pane_clone, backend_filter.as_deref());
+    let max_scroll = rows.len().saturating_sub(height);
+    let stops = roster_view::selectable_count(&rows);
+    let Some(pane) = pane_at_mut(state, pane_idx) else {
+        return;
+    };
+    pane.roster_scroll = pane.roster_scroll.min(max_scroll);
+    pane.roster_cursor = if stops == 0 {
+        0
+    } else {
+        pane.roster_cursor.min(stops - 1)
+    };
+}
+
+fn pane_at(state: &AppState, pane_idx: usize) -> Option<&nit_core::PaneSession> {
+    state.multipane.as_ref()?.panes.get(pane_idx)
+}
+
+fn pane_at_mut(state: &mut AppState, pane_idx: usize) -> Option<&mut nit_core::PaneSession> {
+    state.multipane.as_mut()?.panes.get_mut(pane_idx)
 }
 
 fn paint_pane_chrome(
@@ -254,9 +291,9 @@ fn paint_hint_line(frame: &mut ratatui::Frame, inner: Rect, in_roster: bool, the
         return;
     }
     let hint_text = if in_roster {
-        " ↑/↓ select · Enter commit · Tab next pane "
+        " ↑/↓ j/k · h/l fold · Space check · Enter commit · Tab pane "
     } else {
-        " /abort · Ctrl+C · Esc Esc · Ctrl+R roster "
+        " /abort · Ctrl+C · Esc Esc · Ctrl+R roster · PgUp/PgDn scroll "
     };
     let hint = Line::from(Span::styled(
         hint_text,
@@ -332,8 +369,6 @@ fn handle_roster_key(
 
     match key.code {
         KeyCode::Char('c') if is_ctrl => {
-            // No selection means there's nothing in flight; emit the
-            // friendly no-op so the operator sees the keystroke land.
             push_pane_system_message(state, "no agent selected — nothing to abort".into());
             false
         }
@@ -350,12 +385,40 @@ fn handle_roster_key(
             }
             false
         }
-        KeyCode::Up => {
+        KeyCode::Up | KeyCode::Char('k') => {
             move_roster_cursor(state, -1);
             false
         }
-        KeyCode::Down => {
+        KeyCode::Down | KeyCode::Char('j') => {
             move_roster_cursor(state, 1);
+            false
+        }
+        KeyCode::PageUp => {
+            move_roster_cursor(state, -ROSTER_PAGE_STEP);
+            false
+        }
+        KeyCode::PageDown => {
+            move_roster_cursor(state, ROSTER_PAGE_STEP);
+            false
+        }
+        KeyCode::Char('g') => {
+            jump_roster_cursor_to_top(state);
+            false
+        }
+        KeyCode::Char('G') => {
+            jump_roster_cursor_to_bottom(state);
+            false
+        }
+        KeyCode::Left | KeyCode::Char('h') => {
+            collapse_at_cursor(state);
+            false
+        }
+        KeyCode::Right | KeyCode::Char('l') => {
+            expand_at_cursor(state);
+            false
+        }
+        KeyCode::Char(' ') => {
+            toggle_size_at_cursor(state);
             false
         }
         KeyCode::Enter => {
@@ -365,6 +428,8 @@ fn handle_roster_key(
         _ => false,
     }
 }
+
+const ROSTER_PAGE_STEP: i32 = 8;
 
 fn handle_chat_key(
     state: &mut AppState,
@@ -438,10 +503,27 @@ fn handle_chat_key(
             walk_history(state, false);
             false
         }
+        KeyCode::PageUp => {
+            scroll_chat_thread(state, -CHAT_THREAD_PAGE_STEP);
+            false
+        }
+        KeyCode::PageDown => {
+            scroll_chat_thread(state, CHAT_THREAD_PAGE_STEP);
+            false
+        }
         other => {
             edit_focused_chat_input(state, other);
             false
         }
+    }
+}
+
+const CHAT_THREAD_PAGE_STEP: i32 = 8;
+
+fn scroll_chat_thread(state: &mut AppState, delta: i32) {
+    if let Some(pane) = focused_pane_mut(state) {
+        let current = pane.chat_thread_scroll as i32;
+        pane.chat_thread_scroll = (current + delta).max(0) as usize;
     }
 }
 
@@ -481,52 +563,166 @@ fn edit_focused_chat_input(state: &mut AppState, code: KeyCode) {
     pane.chat_input_selection_anchor = None;
 }
 
-fn move_roster_cursor(state: &mut AppState, delta: i32) {
+fn focused_pane_rows(state: &AppState) -> (Option<usize>, Vec<roster_view::PaneRosterRow>) {
     let backend_filter = state
         .multipane
         .as_ref()
         .and_then(|mp| mp.backend_filter.clone());
-    let lane_count = roster_view::lane_count(&roster_view::compute_rows(
-        &state.agents,
-        backend_filter.as_deref(),
-    ));
-    if lane_count == 0 {
+    let pane_clone = state
+        .multipane
+        .as_ref()
+        .and_then(|mp| mp.panes.get(mp.focused))
+        .cloned();
+    let pane_idx = state.multipane.as_ref().map(|mp| mp.focused);
+    let Some(pane) = pane_clone else {
+        return (pane_idx, Vec::new());
+    };
+    let rows = roster_view::compute_rows(state, &pane, backend_filter.as_deref());
+    (pane_idx, rows)
+}
+
+fn move_roster_cursor(state: &mut AppState, delta: i32) {
+    let (_, rows) = focused_pane_rows(state);
+    let stops = roster_view::selectable_count(&rows);
+    if stops == 0 {
         return;
     }
+    let cursor = focused_pane_mut(state)
+        .map(|p| p.roster_cursor as i32)
+        .unwrap_or(0);
+    let next = (cursor + delta).clamp(0, stops as i32 - 1) as usize;
+    let row = roster_view::row_at_cursor(&rows, next).cloned();
     if let Some(pane) = focused_pane_mut(state) {
-        let current = pane.roster_cursor as i32;
-        let next = (current + delta).clamp(0, lane_count as i32 - 1);
-        pane.roster_cursor = next as usize;
+        pane.roster_cursor = next;
+        roster_view::sync_tree_selection(pane, row.as_ref());
     }
 }
 
-fn commit_roster_selection(state: &mut AppState, codex: &CodexRunner, claude: &ClaudeRunner) {
-    let _ = (codex, claude);
-    let backend_filter = state
-        .multipane
-        .as_ref()
-        .and_then(|mp| mp.backend_filter.clone());
-    let rows = roster_view::compute_rows(&state.agents, backend_filter.as_deref());
+fn jump_roster_cursor_to_top(state: &mut AppState) {
+    let (_, rows) = focused_pane_rows(state);
+    let row = roster_view::row_at_cursor(&rows, 0).cloned();
+    if let Some(pane) = focused_pane_mut(state) {
+        pane.roster_cursor = 0;
+        pane.roster_scroll = 0;
+        roster_view::sync_tree_selection(pane, row.as_ref());
+    }
+}
+
+fn jump_roster_cursor_to_bottom(state: &mut AppState) {
+    let (_, rows) = focused_pane_rows(state);
+    let stops = roster_view::selectable_count(&rows);
+    if stops == 0 {
+        return;
+    }
+    let cursor = stops - 1;
+    let row = roster_view::row_at_cursor(&rows, cursor).cloned();
+    if let Some(pane) = focused_pane_mut(state) {
+        pane.roster_cursor = cursor;
+        roster_view::sync_tree_selection(pane, row.as_ref());
+    }
+}
+
+fn collapse_at_cursor(state: &mut AppState) {
+    let Some(row) = row_under_focused_cursor(state) else {
+        return;
+    };
+    let Some(pane) = focused_pane_mut(state) else {
+        return;
+    };
+    match row {
+        roster_view::PaneRosterRow::Backend { kind } => {
+            pane.roster_expanded_backends.remove(&kind);
+        }
+        roster_view::PaneRosterRow::Agent { agent_id, .. }
+        | roster_view::PaneRosterRow::SizeBranch { agent_id }
+        | roster_view::PaneRosterRow::SizeLeaf { agent_id, .. } => {
+            pane.roster_collapsed_agent_ids.insert(agent_id);
+        }
+        _ => {}
+    }
+}
+
+fn expand_at_cursor(state: &mut AppState) {
+    let Some(row) = row_under_focused_cursor(state) else {
+        return;
+    };
+    let Some(pane) = focused_pane_mut(state) else {
+        return;
+    };
+    match row {
+        roster_view::PaneRosterRow::Backend { kind } => {
+            pane.roster_expanded_backends.insert(kind);
+        }
+        roster_view::PaneRosterRow::Agent { agent_id, .. }
+        | roster_view::PaneRosterRow::SizeBranch { agent_id }
+        | roster_view::PaneRosterRow::SizeLeaf { agent_id, .. } => {
+            pane.roster_collapsed_agent_ids.remove(&agent_id);
+        }
+        _ => {}
+    }
+}
+
+fn row_under_focused_cursor(state: &AppState) -> Option<roster_view::PaneRosterRow> {
+    let (_, rows) = focused_pane_rows(state);
     let cursor = state
         .multipane
         .as_ref()
         .and_then(|mp| mp.panes.get(mp.focused))
         .map(|p| p.roster_cursor)
         .unwrap_or(0);
-    let selected_base = roster_view::lane_at_cursor(&rows, cursor).map(str::to_string);
-    let Some(selected_base) = selected_base else {
+    roster_view::row_at_cursor(&rows, cursor).cloned()
+}
+
+fn toggle_size_at_cursor(state: &mut AppState) {
+    let Some(roster_view::PaneRosterRow::SizeLeaf {
+        agent_id, leaf_idx, ..
+    }) = row_under_focused_cursor(state)
+    else {
+        return;
+    };
+    roster_view::toggle_size_leaf(state, &agent_id, leaf_idx);
+}
+
+fn commit_roster_selection(state: &mut AppState, codex: &CodexRunner, claude: &ClaudeRunner) {
+    let _ = (codex, claude);
+    let (pane_idx, rows) = focused_pane_rows(state);
+    let cursor = focused_pane_mut(state)
+        .map(|p| p.roster_cursor)
+        .unwrap_or(0);
+    let Some(row) = roster_view::row_at_cursor(&rows, cursor).cloned() else {
         push_pane_system_message(state, "no agents available to select".into());
         return;
     };
-    let pane_idx = state.multipane.as_ref().map(|mp| mp.focused).unwrap_or(0);
-    let materialised = materialise_pane_lane(state, pane_idx, &selected_base);
-    if let Some(id) = materialised {
-        push_pane_system_message(state, format!("selected agent → {id}"));
-    } else {
-        push_pane_system_message(
-            state,
-            format!("could not materialise pane lane for {selected_base}"),
-        );
+    let pane_idx = pane_idx.unwrap_or(0);
+    dispatch_commit(state, pane_idx, row);
+}
+
+fn dispatch_commit(state: &mut AppState, pane_idx: usize, row: roster_view::PaneRosterRow) {
+    match row {
+        roster_view::PaneRosterRow::Backend { kind } => {
+            let Some(pane) = pane_at_mut(state, pane_idx) else {
+                return;
+            };
+            roster_view::toggle_backend_expansion(pane, kind);
+        }
+        roster_view::PaneRosterRow::SizeBranch { agent_id } => {
+            let Some(pane) = pane_at_mut(state, pane_idx) else {
+                return;
+            };
+            roster_view::toggle_agent_tree_collapse(pane, &agent_id);
+        }
+        roster_view::PaneRosterRow::SizeLeaf {
+            agent_id, leaf_idx, ..
+        } => {
+            roster_view::toggle_size_leaf(state, &agent_id, leaf_idx);
+        }
+        roster_view::PaneRosterRow::Agent { agent_id, .. } => {
+            commit_agent_to_pane(state, pane_idx, &agent_id);
+        }
+        roster_view::PaneRosterRow::Template
+        | roster_view::PaneRosterRow::Mission
+        | roster_view::PaneRosterRow::Empty(_)
+        | roster_view::PaneRosterRow::Spacer => {}
     }
 }
 
@@ -543,12 +739,166 @@ fn revert_focused_pane_to_roster(state: &mut AppState) {
 }
 
 fn handle_mouse(state: &mut AppState, area: Rect, mouse: MouseEvent) {
-    if !matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+    match mouse.kind {
+        MouseEventKind::Down(MouseButton::Left) => {
+            handle_mouse_left_down(state, area, mouse.column, mouse.row);
+        }
+        MouseEventKind::ScrollUp => {
+            handle_mouse_scroll(state, area, mouse.column, mouse.row, -1);
+        }
+        MouseEventKind::ScrollDown => {
+            handle_mouse_scroll(state, area, mouse.column, mouse.row, 1);
+        }
+        _ => {}
+    }
+}
+
+fn handle_mouse_left_down(state: &mut AppState, area: Rect, x: u16, y: u16) {
+    let Some(target) = resolve_left_click_target(state, area, x, y) else {
         return;
+    };
+    apply_roster_click(state, target);
+}
+
+struct RosterClickTarget {
+    pane_idx: usize,
+    rows: Vec<roster_view::PaneRosterRow>,
+    row_idx: usize,
+    row: roster_view::PaneRosterRow,
+    local_x: usize,
+}
+
+fn resolve_left_click_target(
+    state: &mut AppState,
+    area: Rect,
+    x: u16,
+    y: u16,
+) -> Option<RosterClickTarget> {
+    let mp = state.multipane.as_mut()?;
+    let pane_idx = focus::focus_at_point(mp, area, x, y)?;
+    let pane_rect = grid::pane_rect(area, mp.grid_cols, mp.grid_rows, pane_idx);
+    let backend_filter = mp.backend_filter.clone();
+    let pane = mp.panes.get(pane_idx).cloned()?;
+    if !(pane.selected_agent_id.is_none() && pane.agent_id.is_empty()) {
+        return None; // chat panes ignore left-clicks beyond focus
     }
-    if let Some(mp) = state.multipane.as_mut() {
-        focus::focus_at_point(mp, area, mouse.column, mouse.row);
+    let inner = pane_inner_after_chrome(pane_rect);
+    if inner.width == 0 || inner.height == 0 {
+        return None;
     }
+    if x < inner.x || y < inner.y || x >= inner.x + inner.width || y >= inner.y + inner.height {
+        return None;
+    }
+    let local_x = (x - inner.x) as usize;
+    let local_y = (y - inner.y) as usize;
+    let rows = roster_view::compute_rows(state, &pane, backend_filter.as_deref());
+    let row_idx = roster_view::row_index_at_y(&rows, pane.roster_scroll, local_y)?;
+    let row = rows.get(row_idx).cloned()?;
+    Some(RosterClickTarget {
+        pane_idx,
+        rows,
+        row_idx,
+        row,
+        local_x,
+    })
+}
+
+fn apply_roster_click(state: &mut AppState, target: RosterClickTarget) {
+    let RosterClickTarget {
+        pane_idx,
+        rows,
+        row_idx,
+        row,
+        local_x,
+    } = target;
+    match row {
+        roster_view::PaneRosterRow::Template => {
+            if let Some(value) = roster_view::template_word_at_x(local_x) {
+                state.agents.swarm_default_template = value.into();
+            }
+        }
+        roster_view::PaneRosterRow::Mission => {
+            if let Some(value) = roster_view::mission_word_at_x(local_x) {
+                state.agents.swarm_default_mission = value.into();
+            }
+        }
+        roster_view::PaneRosterRow::Backend { kind } => {
+            seek_pane_cursor_to(state, pane_idx, &rows, row_idx);
+            if let Some(pane) = pane_at_mut(state, pane_idx) {
+                roster_view::toggle_backend_expansion(pane, kind);
+            }
+        }
+        roster_view::PaneRosterRow::Agent { agent_id, .. } => {
+            seek_pane_cursor_to(state, pane_idx, &rows, row_idx);
+            commit_agent_to_pane(state, pane_idx, &agent_id);
+        }
+        roster_view::PaneRosterRow::SizeBranch { agent_id } => {
+            seek_pane_cursor_to(state, pane_idx, &rows, row_idx);
+            if let Some(pane) = pane_at_mut(state, pane_idx) {
+                roster_view::toggle_agent_tree_collapse(pane, &agent_id);
+            }
+        }
+        roster_view::PaneRosterRow::SizeLeaf {
+            agent_id, leaf_idx, ..
+        } => {
+            seek_pane_cursor_to(state, pane_idx, &rows, row_idx);
+            roster_view::toggle_size_leaf(state, &agent_id, leaf_idx);
+        }
+        roster_view::PaneRosterRow::Empty(_) | roster_view::PaneRosterRow::Spacer => {}
+    }
+}
+
+fn seek_pane_cursor_to(
+    state: &mut AppState,
+    pane_idx: usize,
+    rows: &[roster_view::PaneRosterRow],
+    row_idx: usize,
+) {
+    let Some(cursor) = roster_view::cursor_for_row_index(rows, row_idx) else {
+        return;
+    };
+    if let Some(pane) = pane_at_mut(state, pane_idx) {
+        pane.roster_cursor = cursor;
+    }
+}
+
+fn commit_agent_to_pane(state: &mut AppState, pane_idx: usize, agent_id: &str) {
+    let message = match materialise_pane_lane(state, pane_idx, agent_id) {
+        Some(id) => format!("selected agent → {id}"),
+        None => format!("could not materialise pane lane for {agent_id}"),
+    };
+    push_pane_system_message(state, message);
+}
+
+fn handle_mouse_scroll(state: &mut AppState, area: Rect, x: u16, y: u16, delta: i32) {
+    let Some(mp) = state.multipane.as_ref() else {
+        return;
+    };
+    let Some(pane_idx) = grid::pane_at_point(area, mp.grid_cols, mp.grid_rows, x, y) else {
+        return;
+    };
+    let Some(pane) = mp.panes.get(pane_idx).cloned() else {
+        return;
+    };
+    let in_roster = pane.selected_agent_id.is_none() && pane.agent_id.is_empty();
+    let Some(p) = pane_at_mut(state, pane_idx) else {
+        return;
+    };
+    if in_roster {
+        let current = p.roster_scroll as i32;
+        p.roster_scroll = (current + delta).max(0) as usize;
+    } else {
+        let current = p.chat_thread_scroll as i32;
+        p.chat_thread_scroll = (current + delta).max(0) as usize;
+    }
+}
+
+fn pane_inner_after_chrome(rect: Rect) -> Rect {
+    if rect.width < 2 || rect.height < 2 {
+        return Rect::new(rect.x, rect.y, 0, 0);
+    }
+    let inner = Rect::new(rect.x + 1, rect.y + 1, rect.width - 2, rect.height - 2);
+    inner_rect_after_hint(inner)
 }
 
 fn focused_pane_mut(state: &mut AppState) -> Option<&mut nit_core::PaneSession> {
@@ -893,5 +1243,171 @@ mod tests {
         if agent_ids.is_empty() {
             push_pane_system_message(state, "no agent selected — nothing to abort".into());
         }
+    }
+
+    fn fixture_with_efforts() -> AppState {
+        let mut state = fixture_state_no_backend();
+        state.agents.codex_supported_reasoning_efforts.insert(
+            "gpt-5".into(),
+            vec!["low".into(), "medium".into(), "high".into()],
+        );
+        state
+            .agents
+            .claude_supported_efforts
+            .insert("claude-haiku-4-5".into(), vec!["low".into(), "max".into()]);
+        state
+    }
+
+    #[test]
+    fn expand_at_cursor_expands_focused_backend() {
+        let mut state = fixture_with_efforts();
+        // Cursor lands on the first selectable row (Backend Codex).
+        expand_at_cursor(&mut state);
+        let expanded = &state.multipane.as_ref().unwrap().panes[0].roster_expanded_backends;
+        assert!(expanded.contains(&AgentLaneKind::Codex));
+
+        collapse_at_cursor(&mut state);
+        let expanded = &state.multipane.as_ref().unwrap().panes[0].roster_expanded_backends;
+        assert!(!expanded.contains(&AgentLaneKind::Codex));
+    }
+
+    #[test]
+    fn move_roster_cursor_walks_through_expanded_size_leaves() {
+        let mut state = fixture_with_efforts();
+        // Expand Codex and move cursor down so we land on gpt-5, then SizeBranch, then leaves.
+        expand_at_cursor(&mut state);
+        // After expansion: cursor=0 (Backend Codex), 1=Agent gpt-5, 2=SizeBranch, 3=low, 4=medium, 5=high, 6=Backend Claude.
+        move_roster_cursor(&mut state, 1);
+        assert_eq!(state.multipane.as_ref().unwrap().panes[0].roster_cursor, 1);
+        move_roster_cursor(&mut state, 1);
+        assert_eq!(state.multipane.as_ref().unwrap().panes[0].roster_cursor, 2);
+        move_roster_cursor(&mut state, 1);
+        // Now on a SizeLeaf — sync_tree_selection should populate the leaf cursor.
+        assert!(state.multipane.as_ref().unwrap().panes[0]
+            .roster_tree_selected
+            .is_some());
+    }
+
+    #[test]
+    fn toggle_size_at_cursor_writes_codex_selected_effort() {
+        let mut state = fixture_with_efforts();
+        expand_at_cursor(&mut state); // expand Codex
+                                      // Walk: Backend Codex (0) → Agent gpt-5 (1) → SizeBranch (2) → low (3) → medium (4)
+        for _ in 0..4 {
+            move_roster_cursor(&mut state, 1);
+        }
+        toggle_size_at_cursor(&mut state);
+        assert_eq!(
+            state.agents.codex_selected_reasoning_effort.get("gpt-5"),
+            Some(&"medium".to_string())
+        );
+    }
+
+    #[test]
+    fn jump_roster_cursor_to_top_resets_scroll() {
+        let mut state = fixture_with_efforts();
+        if let Some(pane) = state.multipane.as_mut().unwrap().panes.get_mut(0) {
+            pane.roster_cursor = 1;
+            pane.roster_scroll = 5;
+        }
+        jump_roster_cursor_to_top(&mut state);
+        let pane = &state.multipane.as_ref().unwrap().panes[0];
+        assert_eq!(pane.roster_cursor, 0);
+        assert_eq!(pane.roster_scroll, 0);
+    }
+
+    #[test]
+    fn jump_roster_cursor_to_bottom_lands_on_last_selectable() {
+        let mut state = fixture_with_efforts();
+        jump_roster_cursor_to_bottom(&mut state);
+        let cursor = state.multipane.as_ref().unwrap().panes[0].roster_cursor;
+        // Two backends collapsed → 2 selectable rows.
+        assert_eq!(cursor, 1);
+    }
+
+    #[test]
+    fn scroll_chat_thread_clamps_at_zero() {
+        let mut state = fixture_state_no_backend();
+        if let Some(pane) = state.multipane.as_mut().unwrap().panes.get_mut(0) {
+            pane.selected_agent_id = Some("claude-haiku-4-5#mp-pane-00".into());
+            pane.agent_id = "claude-haiku-4-5#mp-pane-00".into();
+        }
+        scroll_chat_thread(&mut state, -3);
+        assert_eq!(
+            state.multipane.as_ref().unwrap().panes[0].chat_thread_scroll,
+            0
+        );
+        scroll_chat_thread(&mut state, 4);
+        assert_eq!(
+            state.multipane.as_ref().unwrap().panes[0].chat_thread_scroll,
+            4
+        );
+        scroll_chat_thread(&mut state, -1);
+        assert_eq!(
+            state.multipane.as_ref().unwrap().panes[0].chat_thread_scroll,
+            3
+        );
+    }
+
+    #[test]
+    fn handle_mouse_scroll_targets_roster_or_chat_per_pane_mode() {
+        let mut state = fixture_state_no_backend();
+        // Pane 0 stays in roster mode; pane 1 becomes a chat pane.
+        if let Some(pane) = state.multipane.as_mut().unwrap().panes.get_mut(1) {
+            pane.selected_agent_id = Some("claude-haiku-4-5#mp-pane-01".into());
+            pane.agent_id = "claude-haiku-4-5#mp-pane-01".into();
+        }
+        let area = Rect::new(0, 0, 80, 30);
+        let pane0_rect = grid::pane_rect(area, 2, 1, 0);
+        let pane1_rect = grid::pane_rect(area, 2, 1, 1);
+
+        // Wheel down inside pane 0 → roster_scroll bumps.
+        handle_mouse_scroll(&mut state, area, pane0_rect.x + 5, pane0_rect.y + 5, 1);
+        assert_eq!(state.multipane.as_ref().unwrap().panes[0].roster_scroll, 1);
+
+        // Wheel down inside pane 1 → chat_thread_scroll bumps.
+        handle_mouse_scroll(&mut state, area, pane1_rect.x + 5, pane1_rect.y + 5, 1);
+        assert_eq!(
+            state.multipane.as_ref().unwrap().panes[1].chat_thread_scroll,
+            1
+        );
+    }
+
+    #[test]
+    fn apply_roster_click_on_template_writes_swarm_default() {
+        let mut state = fixture_state_no_backend();
+        let pane = state.multipane.as_ref().unwrap().panes[0].clone();
+        let rows = roster_view::compute_rows(&state, &pane, None);
+        let lab_col = " Template: ".chars().count() + 1;
+        apply_roster_click(
+            &mut state,
+            RosterClickTarget {
+                pane_idx: 0,
+                rows,
+                row_idx: 0,
+                row: roster_view::PaneRosterRow::Template,
+                local_x: lab_col,
+            },
+        );
+        assert_eq!(state.agents.swarm_default_template, "lab");
+    }
+
+    #[test]
+    fn apply_roster_click_on_mission_writes_swarm_default() {
+        let mut state = fixture_state_no_backend();
+        let pane = state.multipane.as_ref().unwrap().panes[0].clone();
+        let rows = roster_view::compute_rows(&state, &pane, None);
+        let general_col = " Mission:  ".chars().count() + " auto ".chars().count() + 1 + 1;
+        apply_roster_click(
+            &mut state,
+            RosterClickTarget {
+                pane_idx: 0,
+                rows,
+                row_idx: 1,
+                row: roster_view::PaneRosterRow::Mission,
+                local_x: general_col,
+            },
+        );
+        assert_eq!(state.agents.swarm_default_mission, "general");
     }
 }
