@@ -10,6 +10,7 @@ pub mod agent_id;
 pub mod dispatch;
 pub mod focus;
 pub mod grid;
+pub mod roster_view;
 pub mod setup;
 
 mod runtime;

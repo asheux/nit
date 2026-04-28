@@ -79,9 +79,12 @@ pub(crate) enum Command {
 
 #[derive(Args, Debug)]
 pub(crate) struct MultipaneArgs {
-    /// Backend model id used for every pane (required).
+    /// Backend model id (specific lane like `claude-haiku-4-5`) or family
+    /// alias (`codex` / `claude` / `gemini` / `local`). Optional — when
+    /// omitted, every pane opens in roster mode showing every available
+    /// backend; the operator picks per pane via Up/Down + Enter.
     #[arg(long)]
-    pub backend: String,
+    pub backend: Option<String>,
 
     /// Number of panes to open. Clamped to [1, 32]. Grid is roughly
     /// square: ceil(sqrt(N)) columns × ceil(N / cols) rows.
@@ -151,7 +154,7 @@ mod tests {
         .expect("parses");
         match cli.command {
             Some(Command::Multipane(args)) => {
-                assert_eq!(args.backend, "claude-haiku-4-5");
+                assert_eq!(args.backend.as_deref(), Some("claude-haiku-4-5"));
                 assert_eq!(args.panes, 4);
                 assert_eq!(args.cwd, Some(PathBuf::from("/tmp")));
             }
@@ -172,13 +175,28 @@ mod tests {
     }
 
     #[test]
-    fn multipane_missing_backend_errors() {
-        let err = parse(&["nit", "multipane"]).expect_err("must require --backend");
-        let rendered = err.to_string();
-        assert!(
-            rendered.contains("backend") || rendered.contains("--backend"),
-            "error must mention backend: {rendered}"
-        );
+    fn multipane_no_backend_now_accepted() {
+        let cli = parse(&["nit", "multipane"]).expect("parses without --backend");
+        match cli.command {
+            Some(Command::Multipane(args)) => {
+                assert!(args.backend.is_none());
+                assert_eq!(args.panes, 8);
+                assert_eq!(args.cwd, None);
+            }
+            other => panic!("expected Multipane, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn multipane_with_backend_family() {
+        let cli = parse(&["nit", "multipane", "--backend", "claude"]).expect("parses");
+        match cli.command {
+            Some(Command::Multipane(args)) => {
+                assert_eq!(args.backend.as_deref(), Some("claude"));
+                assert_eq!(args.panes, 8);
+            }
+            other => panic!("expected Multipane, got {other:?}"),
+        }
     }
 
     #[test]

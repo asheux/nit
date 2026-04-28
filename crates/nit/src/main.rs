@@ -203,8 +203,11 @@ fn run_multipane(
 ) -> anyhow::Result<()> {
     let roster = agents::init_agents(AgentsArg::All);
     let known: Vec<String> = sorted_backend_ids(&roster);
-    if !known.iter().any(|id| id == &args.backend) {
-        report_unknown_backend(&args.backend, &known);
+    let unknown = args.backend.as_deref().filter(|value| {
+        !multipane::setup::is_backend_family(value) && !known.iter().any(|id| id == *value)
+    });
+    if let Some(value) = unknown {
+        report_unknown_backend(value, &known);
         std::process::exit(2);
     }
 
@@ -229,7 +232,7 @@ fn run_multipane(
     state.mode = Mode::Normal;
     state.focus = PaneId::Editor;
 
-    multipane::setup::install(&mut state, &args.backend, pane_count, cwd)
+    multipane::setup::install_filtered(&mut state, args.backend.as_deref(), pane_count, cwd)
         .map_err(|err| anyhow::anyhow!(err))?;
 
     run(

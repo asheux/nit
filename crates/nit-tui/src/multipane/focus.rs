@@ -49,6 +49,7 @@ mod tests {
             focused: 0,
             grid_cols: cols,
             grid_rows: rows,
+            backend_filter: Some("test".into()),
         }
     }
 

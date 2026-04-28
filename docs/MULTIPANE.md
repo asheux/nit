@@ -31,8 +31,11 @@ from one terminal. Like `tmux` for AI agents.
 
 ## Hard requirements (from operator brief)
 
-- **Backend MUST be specified** at launch. Error and exit if missing.
-- The chosen backend applies to **every pane** — no per-pane backend.
+- **`--backend` is optional**. When supplied (specific lane id or family
+  alias), the chosen backend applies to **every pane** — no per-pane
+  backend override is allowed. When omitted, every pane opens in
+  **roster mode** showing every available backend, and the operator
+  picks per pane independently.
 - Each pane is **its own session** (chat history, mission state, queued
   turns, in-flight work) anchored at its own **cwd**.
 - Agent dispatches from a pane operate inside that pane's cwd —
@@ -58,19 +61,30 @@ from one terminal. Like `tmux` for AI agents.
 New subcommand on the existing `clap` enum:
 
 ```bash
-nit multipane --backend <model>                    # 8 panes default
-nit multipane --backend <model> --panes 4          # custom count
-nit multipane --backend gpt-5.4 --panes 6          # 3×2 grid
-nit multipane --backend claude-sonnet-4-6 --panes 16  # 4×4 grid
-nit multipane                                      # → ERROR: --backend required
+nit multipane                                          # 8 panes, full roster per pane
+nit multipane --panes 4                                # 4 panes, full roster per pane
+nit multipane --backend claude                         # 8 panes, all locked to Claude family
+nit multipane --backend gpt-5 --panes 6                # 3×2 grid, all pre-picked to gpt-5
+nit multipane --backend claude-haiku-4-5 --panes 4     # 4 panes, all pre-picked
+nit multipane --backend claude --panes 8 --cwd /work   # full composition
 ```
+
+Note: the operator's shorthand `nit multipane --backend claude 5 --panes 8`
+includes a stray positional `5` that clap rejects. The CLI surface is
+strictly `--backend <id-or-family>` + `--panes <N>` + `--cwd <path>`.
 
 `--panes` clamps to `[1, 32]`. The grid layout chooses dimensions to
 keep panes roughly square (computed as `ceil(sqrt(N))` columns).
 
-`--backend` validates against the known model registry (Codex slugs +
-Claude family + Gemini family). Reject unknown values with a clear
-message listing the available ones.
+`--backend` accepts either a specific lane id (`claude-haiku-4-5`,
+`gpt-5`, …) or one of four reserved family aliases — `codex`, `claude`,
+`gemini`, `local` — case-insensitive. A specific lane id pre-picks every
+pane (the lane is cloned into `state.agents.agents` as
+`<id>#mp-pane-NN` and the pane lands directly in chat). A family alias
+filters the per-pane roster but leaves panes unselected; the operator
+picks within that family. Omitting `--backend` shows the full roster
+with per-pane independence. Unknown specific ids exit with the available
+ones listed.
 
 ## UX spec
 
@@ -125,11 +139,43 @@ When the user commits a directory, the pane:
 ### Focus & input routing
 
 - One pane has focus at any time, drawn with a brighter border.
-- Tab cycles forward, Shift+Tab cycles backward.
+- Tab cycles forward, Shift+Tab cycles backward. Tab/Shift+Tab never
+  move the per-pane roster cursor — they only switch which pane has
+  focus.
 - Mouse click anywhere inside a pane focuses it.
 - Only the focused pane receives keyboard input. Background panes
   still update (turn output streams in, "Working..." breather animates,
   etc.).
+- `/abort`, `/abort all`, `/abort <agent-id>`, Ctrl+C with empty input,
+  and Esc-Esc within ~500 ms target the focused pane (or every pane,
+  for `all`). Issuing them in a roster-mode pane (no committed
+  selection) emits a one-line "no agent selected — nothing to abort"
+  notice in the pane's chat history rather than a silent drop.
+
+### Roster mode keymap
+
+When a pane has no committed selection, the body of the pane renders a
+filtered roster of available agent lanes (grouped by backend family).
+
+| Key | Action |
+|---|---|
+| `↑` / `↓` | Move the per-pane cursor through visible lanes (skips backend headers). |
+| `Enter` | Commit the highlighted lane: lazily clones it as `<base>#mp-pane-NN`, copies runtime metadata, switches the pane to chat mode. |
+| `Tab` / `Shift+Tab` | Cycle focus between panes (never moves the roster cursor). |
+| `Ctrl+C`, `Esc Esc` | Emits the no-op "no agent selected — nothing to abort" notice. |
+| `Mouse click` | Focuses the clicked pane (no per-row selection in v1). |
+
+When a pane is already in chat mode:
+
+| Key | Action |
+|---|---|
+| `Ctrl+R` | Revert the focused pane back to roster mode. Clears `selected_agent_id`, the chat input buffer, and the active mission. The original roster cursor position is preserved per pane. |
+
+The four reserved family aliases (`codex`, `claude`, `gemini`, `local`)
+filter the roster to a single backend family. If the filter matches no
+installed lanes (e.g. `--backend gemini` on a host without the Gemini
+CLI), the pane shows a single "No <family> agents detected — install
+the CLI" line instead of crashing or exiting.
 
 ### Disabled features
 
@@ -144,12 +190,12 @@ In multipane mode:
 
 ## State model
 
-### New core types (in `nit-core/src/state.rs`)
+### New core types (in `nit-core/src/state/multipane.rs`)
 
 ```rust
 pub struct PaneSession {
     pub pane_id: usize,                       // 0..N-1; stable for the run
-    pub agent_id: String,                     // e.g. "claude-haiku-4-5#pane-3"
+    pub agent_id: String,                     // empty until selection commits
     pub cwd: PathBuf,                         // working directory for this session
     pub chat_input: String,
     pub chat_input_cursor: usize,
@@ -159,6 +205,8 @@ pub struct PaneSession {
     pub chat_prompt_history_pos: Option<usize>,
     pub dir_search: Option<DirSearchState>,   // Some when search is active
     pub mission_id: Option<String>,           // current mission anchored to this pane
+    pub roster_cursor: usize,                 // position inside the per-pane roster
+    pub selected_agent_id: Option<String>,    // None ⇒ render roster picker
 }
 
 pub struct DirSearchState {
@@ -172,11 +220,12 @@ pub struct DirSearchState {
 }
 
 pub struct MultipaneState {
-    pub backend_agent_id: String,             // e.g. "claude-haiku-4-5" — applies to all panes
+    pub backend_agent_id: String,             // operator's --backend verbatim (or "")
     pub panes: Vec<PaneSession>,
     pub focused: usize,                       // 0..panes.len()-1
     pub grid_cols: usize,                     // computed at launch
     pub grid_rows: usize,
+    pub backend_filter: Option<String>,       // family alias / specific id / None
 }
 ```
 
@@ -227,9 +276,11 @@ pub enum Command {
 
 #[derive(Args, Debug)]
 pub struct MultipaneArgs {
-    /// Backend model id used for every pane (required).
+    /// Backend model id (specific lane like `claude-haiku-4-5`) or
+    /// family alias (`codex` / `claude` / `gemini` / `local`). Optional —
+    /// when omitted, every pane opens in roster mode.
     #[arg(long)]
-    pub backend: String,
+    pub backend: Option<String>,
 
     /// Number of panes to open. Clamped to [1, 32]. Grid is roughly
     /// square: ceil(sqrt(N)) columns × ceil(N / cols) rows.
@@ -445,13 +496,18 @@ Reference this doc as the source of truth.
 > follow-up work items.
 >
 > **Verification**:
-> - `nit multipane --backend claude-haiku-4-5` launches a 4×2 grid.
-> - Tab cycles, mouse click focuses, focused pane has a brighter
->   border.
+> - `nit multipane --backend claude-haiku-4-5 --panes 4` launches 4 panes
+>   already pre-picked to that lane and ready for chat.
+> - `nit multipane --backend claude --panes 4` launches 4 panes whose
+>   roster is filtered to the Claude family; operator picks per pane.
+> - `nit multipane --panes 4` launches 4 panes showing the full roster;
+>   each pane picks independently with `↑/↓` + `Enter`.
+> - Tab cycles pane focus, mouse click focuses, focused pane has a
+>   brighter border. Up/Down stays scoped to the focused pane's roster
+>   cursor.
 > - Typing a prompt in pane 0, then pane 3, runs them in their own
 >   cwd (default to `--cwd` arg or process cwd for v1; dir search
 >   wires up real switching in Phase 4).
-> - `nit multipane` (no backend) errors with a clear message.
 > - `nit` (without multipane) opens the standard editor exactly as
 >   before — multipane is purely additive.
 >

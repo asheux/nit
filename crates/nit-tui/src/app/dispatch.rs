@@ -20,7 +20,11 @@ pub(crate) fn resolve_dispatch_cwd(state: &AppState, agent_id: &str) -> PathBuf 
     state
         .multipane
         .as_ref()
-        .and_then(|mp| mp.panes.iter().find(|p| p.agent_id == agent_id))
+        .and_then(|mp| {
+            mp.panes.iter().find(|p| {
+                p.agent_id == agent_id || p.selected_agent_id.as_deref() == Some(agent_id)
+            })
+        })
         .map(|p| p.cwd.clone())
         .unwrap_or_else(|| state.workspace_root.clone())
 }
@@ -1426,6 +1430,7 @@ mod tests {
             focused: 0,
             grid_cols: 2,
             grid_rows: 1,
+            backend_filter: Some("claude-haiku-4-5".into()),
         });
         assert_eq!(
             resolve_dispatch_cwd(&state, "claude-haiku-4-5#mp-pane-00"),
@@ -1451,10 +1456,38 @@ mod tests {
             focused: 0,
             grid_cols: 1,
             grid_rows: 1,
+            backend_filter: Some("claude-haiku-4-5".into()),
         });
         assert_eq!(
             resolve_dispatch_cwd(&state, "non-pane-agent"),
             PathBuf::from("/workspace")
+        );
+    }
+
+    #[test]
+    fn resolve_dispatch_cwd_walks_lazy_no_backend_pane_lane() {
+        let mut state = fixture_state();
+        state.multipane = Some(MultipaneState {
+            backend_agent_id: String::new(),
+            panes: vec![PaneSession {
+                pane_id: 0,
+                agent_id: "claude-haiku-4-5#mp-pane-00".into(),
+                cwd: PathBuf::from("/pane-lazy"),
+                selected_agent_id: Some("claude-haiku-4-5#mp-pane-00".into()),
+                ..PaneSession::default()
+            }],
+            focused: 0,
+            grid_cols: 1,
+            grid_rows: 1,
+            backend_filter: None,
+        });
+        // The pane was born without a binding; once a roster selection
+        // commits, both `agent_id` and `selected_agent_id` carry the
+        // pane-suffixed lane id, and resolve_dispatch_cwd routes it to
+        // the pane's cwd.
+        assert_eq!(
+            resolve_dispatch_cwd(&state, "claude-haiku-4-5#mp-pane-00"),
+            PathBuf::from("/pane-lazy")
         );
     }
 }
