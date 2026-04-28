@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
@@ -88,6 +88,31 @@ pub struct PaneSession {
     /// `(see ARTIFACTS)` link before any mission has run.
     #[serde(default)]
     pub has_run_mission: bool,
+    /// Per-pane reasoning-effort overrides keyed by base agent id (e.g.
+    /// `gpt-5`). Roster checkbox reads here first; falls back to the
+    /// global `AgentsState` defaults so freshly-spawned panes still seed
+    /// a sensible value. Writing through the per-pane roster click
+    /// stores here only — the global maps are untouched until dispatch
+    /// time.
+    #[serde(default)]
+    pub selected_effort: BTreeMap<String, String>,
+    /// Active text selection inside the pane's chat thread. Coordinates
+    /// are LOGICAL pane-thread row indices (pre-`chat_thread_scroll`).
+    /// `#[serde(skip)]` because selections are ephemeral.
+    #[serde(skip)]
+    pub selection: Option<PaneSelection>,
+}
+
+/// Pane-local text selection. `anchor_*` is the mouse-down origin;
+/// `end_*` follows the drag. Coordinates are pane-thread row indices
+/// and column character offsets — independent of viewport scroll so
+/// the highlight survives `chat_thread_scroll` changes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PaneSelection {
+    pub anchor_line: usize,
+    pub anchor_col: usize,
+    pub end_line: usize,
+    pub end_col: usize,
 }
 
 fn default_swarm_template() -> String {
@@ -124,6 +149,8 @@ impl Default for PaneSession {
             swarm_template: default_swarm_template(),
             swarm_mission: default_swarm_mission(),
             has_run_mission: false,
+            selected_effort: BTreeMap::new(),
+            selection: None,
         }
     }
 }
@@ -209,6 +236,8 @@ mod tests {
         assert!(pane.auto_expanded_backend.is_none());
         assert!(pane.auto_expanded_agent.is_none());
         assert!(!pane.has_run_mission);
+        assert!(pane.selected_effort.is_empty());
+        assert!(pane.selection.is_none());
     }
 
     #[test]

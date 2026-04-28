@@ -2413,6 +2413,21 @@ fn format_message_rows(
             .collect();
     }
 
+    // Multipane system messages (e.g. "selected agent → ...") carry an
+    // agent_id but reflect roster-side actions, not agent turns. Render
+    // them inline as plain status rows so the chat doesn't show a
+    // phantom "↳ [agent] done" header before any mission has run.
+    if msg.kind.as_deref() == Some("multipane-system") {
+        return msg
+            .text
+            .lines()
+            .map(|line| ThreadRow {
+                text: pad_line_right(line, width),
+                kind: ThreadRowKind::StatusSubRow,
+            })
+            .collect();
+    }
+
     let src = msg.agent_id.as_deref().unwrap_or("agent");
     let agent_badge = agent_identity_badge(state, src);
     let mut header = format!("[{agent_badge}]");
@@ -2423,24 +2438,15 @@ fn format_message_rows(
     let indent_str = "";
 
     let mut out = Vec::new();
-    // Multipane roster acknowledgements ("selected agent → ...") carry an
-    // agent_id but never an artifact — keep them out of the artifact-link
-    // codepath so a freshly-selected agent doesn't show "(see ARTIFACTS)"
-    // before any mission has run.
-    let is_multipane_system_msg = msg.kind.as_deref() == Some("multipane-system");
-    let artifact_target = if is_multipane_system_msg {
-        None
-    } else {
-        state
-            .agents
-            .messages
-            .iter()
-            .enumerate()
-            .find_map(|(idx, candidate)| std::ptr::eq(candidate, msg).then_some(idx))
-            .and_then(|message_idx| {
-                agent_ops_view::artifacts_popup_ref_for_message(state, swarm, width, message_idx)
-            })
-    };
+    let artifact_target = state
+        .agents
+        .messages
+        .iter()
+        .enumerate()
+        .find_map(|(idx, candidate)| std::ptr::eq(candidate, msg).then_some(idx))
+        .and_then(|message_idx| {
+            agent_ops_view::artifacts_popup_ref_for_message(state, swarm, width, message_idx)
+        });
     if artifact_target.is_some() {
         let callout = format!("{indent_str}\u{21b3} {header} done (see ARTIFACTS)");
         out.push(ThreadRow {

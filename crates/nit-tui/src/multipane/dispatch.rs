@@ -1,9 +1,11 @@
-use nit_core::AppState;
+use nit_core::{AgentLaneKind, AppState};
 
 use crate::app::dispatch_agent_prompt;
 use crate::claude_runner::ClaudeRunner;
 use crate::codex_runner::CodexRunner;
 use crate::vitals::VitalsState;
+
+const MP_PANE_SUFFIX: &str = "#mp-pane-";
 
 /// Outcome of `dispatch_pane_prompt`. The roster runtime turns
 /// `NoSelection` into a one-line system message in the pane's chat
@@ -55,6 +57,7 @@ pub(crate) fn dispatch_pane_prompt(
     // `dispatch_agent_prompt` shortcut.
     let _template_snapshot = pane.swarm_template.clone();
     let _mission_snapshot = pane.swarm_mission.clone();
+    bridge_pane_effort_to_runner(state, pane_idx, &agent_id);
     dispatch_agent_prompt(state, vitals, codex, claude, agent_id, mission_id, prompt);
     if let Some(mp) = state.multipane.as_mut() {
         if let Some(pane) = mp.panes.get_mut(pane_idx) {
@@ -62,6 +65,43 @@ pub(crate) fn dispatch_pane_prompt(
         }
     }
     DispatchOutcome::Dispatched
+}
+
+/// Mirror the focused pane's `selected_effort[base_id]` into the global
+/// per-clone effort map under the materialised lane id so the runner
+/// reads the pane-local choice without the dispatch contract changing.
+/// One-way: late operator size-clicks won't reach an in-flight turn,
+/// matching the pre-fix behavior.
+fn bridge_pane_effort_to_runner(state: &mut AppState, pane_idx: usize, materialised_id: &str) {
+    let base_id = match materialised_id.split_once(MP_PANE_SUFFIX) {
+        Some((base, _)) => base.to_string(),
+        None => materialised_id.to_string(),
+    };
+    let effort = state
+        .multipane
+        .as_ref()
+        .and_then(|mp| mp.panes.get(pane_idx))
+        .and_then(|p| p.selected_effort.get(&base_id))
+        .cloned();
+    let Some(effort) = effort else { return };
+    let kind = state
+        .agents
+        .agents
+        .iter()
+        .find(|l| l.id == materialised_id || l.id == base_id)
+        .map(|l| (l.is_codex(), l.kind));
+    let Some((is_codex, kind)) = kind else { return };
+    if is_codex || matches!(kind, AgentLaneKind::Codex) {
+        state
+            .agents
+            .codex_selected_reasoning_effort
+            .insert(materialised_id.to_string(), effort);
+    } else if matches!(kind, AgentLaneKind::Claude) {
+        state
+            .agents
+            .claude_selected_effort
+            .insert(materialised_id.to_string(), effort);
+    }
 }
 
 #[cfg(test)]

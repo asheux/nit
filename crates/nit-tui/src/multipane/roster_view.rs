@@ -143,7 +143,7 @@ pub fn compute_rows(
             rows.push(PaneRosterRow::SizeBranch {
                 agent_id: lane.id.clone(),
             });
-            let chosen = chosen_effort(state, &lane.id);
+            let chosen = chosen_effort(state, pane, &lane.id);
             for (leaf_idx, effort) in efforts.iter().enumerate() {
                 rows.push(PaneRosterRow::SizeLeaf {
                     agent_id: lane.id.clone(),
@@ -200,7 +200,8 @@ pub fn render(
         .take(height)
         .map(|(idx, row)| render_row(&ctx, idx, row))
         .collect();
-    let para = Paragraph::new(lines).style(Style::default().bg(theme.background));
+    let para = Paragraph::new(lines)
+        .style(Style::default().bg(crate::widgets::agent_ops_view::ops_table_bg(theme)));
     frame.render_widget(para, area);
 }
 
@@ -415,7 +416,7 @@ fn size_branch_line(
             .fg(theme.border)
             .add_modifier(Modifier::DIM)
     };
-    let chosen = chosen_effort(state, agent_id).unwrap_or_default();
+    let chosen = chosen_effort(state, pane, agent_id).unwrap_or_default();
     let summary = if chosen.is_empty() {
         String::new()
     } else {
@@ -575,7 +576,10 @@ fn supported_efforts(state: &AppState, agent_id: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
-fn chosen_effort(state: &AppState, agent_id: &str) -> Option<String> {
+fn chosen_effort(state: &AppState, pane: &PaneSession, agent_id: &str) -> Option<String> {
+    if let Some(value) = pane.selected_effort.get(agent_id) {
+        return Some(value.clone());
+    }
     state
         .agents
         .codex_selected_reasoning_effort
@@ -586,11 +590,18 @@ fn chosen_effort(state: &AppState, agent_id: &str) -> Option<String> {
         .cloned()
 }
 
-/// Toggle the checkbox on a Size leaf. Sets the chosen effort in the
-/// global selected-effort map for whichever backend the agent belongs
-/// to. Returns `true` if any state was changed (false when the lane is
-/// missing or the effort isn't in the supported list).
-pub fn toggle_size_leaf(state: &mut AppState, agent_id: &str, leaf_idx: usize) -> bool {
+/// Toggle the checkbox on a Size leaf for the pane at `pane_idx`. Writes
+/// only to the pane-local `selected_effort` map; the global
+/// `*_selected_effort` maps stay untouched until `dispatch_pane_prompt`
+/// bridges the pane choice into the materialised lane id at dispatch
+/// time. Returns `true` if any state was changed (false when the lane
+/// is missing or the effort isn't in the supported list).
+pub fn toggle_size_leaf(
+    state: &mut AppState,
+    pane_idx: usize,
+    agent_id: &str,
+    leaf_idx: usize,
+) -> bool {
     let efforts = supported_efforts(state, agent_id);
     let Some(effort) = efforts.get(leaf_idx).cloned() else {
         return false;
@@ -598,21 +609,19 @@ pub fn toggle_size_leaf(state: &mut AppState, agent_id: &str, leaf_idx: usize) -
     let Some(lane) = state.agents.agents.iter().find(|l| l.id == agent_id) else {
         return false;
     };
-    if lane.is_codex() || matches!(lane.kind, AgentLaneKind::Codex) {
-        state
-            .agents
-            .codex_selected_reasoning_effort
-            .insert(agent_id.to_string(), effort);
-        true
-    } else if matches!(lane.kind, AgentLaneKind::Claude) {
-        state
-            .agents
-            .claude_selected_effort
-            .insert(agent_id.to_string(), effort);
-        true
-    } else {
-        false
+    let is_codex = lane.is_codex() || matches!(lane.kind, AgentLaneKind::Codex);
+    let is_claude = matches!(lane.kind, AgentLaneKind::Claude);
+    if !(is_codex || is_claude) {
+        return false;
     }
+    let Some(mp) = state.multipane.as_mut() else {
+        return false;
+    };
+    let Some(pane) = mp.panes.get_mut(pane_idx) else {
+        return false;
+    };
+    pane.selected_effort.insert(agent_id.to_string(), effort);
+    true
 }
 
 /// Toggle the expand state of `kind` in the focused pane's roster. Used
@@ -725,6 +734,14 @@ mod tests {
             "claude-haiku-4-5".into(),
             vec!["low".into(), "medium".into(), "high".into(), "max".into()],
         );
+        state.multipane = Some(nit_core::MultipaneState {
+            backend_agent_id: String::new(),
+            panes: vec![PaneSession::default(), PaneSession::default()],
+            focused: 0,
+            grid_cols: 2,
+            grid_rows: 1,
+            backend_filter: None,
+        });
         state
     }
 
@@ -903,23 +920,49 @@ mod tests {
     #[test]
     fn toggle_size_leaf_writes_to_codex_selected_effort() {
         let mut state = fixture_state();
-        let toggled = toggle_size_leaf(&mut state, "gpt-5", 2);
+        let toggled = toggle_size_leaf(&mut state, 0, "gpt-5", 2);
         assert!(toggled);
         assert_eq!(
-            state.agents.codex_selected_reasoning_effort.get("gpt-5"),
+            state.multipane.as_ref().unwrap().panes[0]
+                .selected_effort
+                .get("gpt-5"),
             Some(&"high".to_string())
+        );
+        assert_eq!(
+            state.agents.codex_selected_reasoning_effort.get("gpt-5"),
+            Some(&"medium".to_string()),
+            "global default seeded by fixture must stay untouched"
         );
     }
 
     #[test]
     fn toggle_size_leaf_writes_to_claude_selected_effort() {
         let mut state = fixture_state();
-        let toggled = toggle_size_leaf(&mut state, "claude-haiku-4-5", 3);
+        let toggled = toggle_size_leaf(&mut state, 0, "claude-haiku-4-5", 3);
         assert!(toggled);
         assert_eq!(
-            state.agents.claude_selected_effort.get("claude-haiku-4-5"),
+            state.multipane.as_ref().unwrap().panes[0]
+                .selected_effort
+                .get("claude-haiku-4-5"),
             Some(&"max".to_string())
         );
+        assert!(
+            !state
+                .agents
+                .claude_selected_effort
+                .contains_key("claude-haiku-4-5"),
+            "global claude_selected_effort must stay untouched"
+        );
+    }
+
+    #[test]
+    fn two_panes_pick_independent_sizes() {
+        let mut state = fixture_state();
+        assert!(toggle_size_leaf(&mut state, 0, "gpt-5", 0));
+        assert!(toggle_size_leaf(&mut state, 1, "gpt-5", 2));
+        let panes = &state.multipane.as_ref().unwrap().panes;
+        assert_eq!(panes[0].selected_effort.get("gpt-5"), Some(&"low".into()));
+        assert_eq!(panes[1].selected_effort.get("gpt-5"), Some(&"high".into()));
     }
 
     #[test]

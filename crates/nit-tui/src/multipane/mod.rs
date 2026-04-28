@@ -11,6 +11,7 @@ pub mod dispatch;
 pub mod focus;
 pub mod grid;
 pub mod roster_view;
+pub mod selection;
 pub mod setup;
 
 mod runtime;

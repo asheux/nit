@@ -1574,4 +1574,21 @@ fn multipane_system_message_not_an_artifact_callout() {
         rows.iter().all(|row| !row.text.contains("(see ARTIFACTS)")),
         "system roster ack must not get the (see ARTIFACTS) suffix"
     );
+    assert!(
+        rows.iter().all(|row| !row.text.contains(" done")),
+        "system roster ack must not produce a `done` callout"
+    );
+    assert!(
+        rows.iter().all(|row| !row.text.contains('[')),
+        "system roster ack must not include an agent badge in brackets"
+    );
+    assert!(
+        rows.iter().any(|row| row.text.contains("selected agent")),
+        "the rendered text should still surface the message body"
+    );
+    assert!(
+        rows.iter()
+            .all(|row| matches!(row.kind, ThreadRowKind::StatusSubRow)),
+        "all rendered rows must be StatusSubRow"
+    );
 }

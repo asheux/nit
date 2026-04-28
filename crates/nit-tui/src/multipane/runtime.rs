@@ -1,4 +1,5 @@
 use std::io::{self, Stdout};
+use std::path::Path;
 use std::sync::mpsc::Receiver;
 use std::time::{Duration, Instant};
 
@@ -20,6 +21,7 @@ use super::dispatch::{dispatch_pane_prompt, DispatchOutcome};
 use super::focus;
 use super::grid;
 use super::roster_view;
+use super::selection;
 use super::setup::materialise_pane_lane;
 use crate::app::popup_keys::maybe_open_artifact_popup_from_console_line;
 use crate::claude_runner::{ClaudeCommand, ClaudeRunner, ClaudeRunnerConfig};
@@ -54,6 +56,7 @@ pub fn run_loop(
     let swarm_stub = SwarmRuntime::default();
     let mut vitals = VitalsState::default();
     let mut last_esc_at: Option<Instant> = None;
+    let mut clipboard: Option<arboard::Clipboard> = arboard::Clipboard::new().ok();
 
     loop {
         for log_line in log_rx.try_iter() {
@@ -83,14 +86,24 @@ pub fn run_loop(
         if !event::poll(TICK_RATE)? {
             continue;
         }
+        let area = terminal_size(terminal)?;
         match event::read()? {
             Event::Key(key) if key.kind == KeyEventKind::Press => {
-                if handle_key(state, &mut vitals, &codex, &claude, key, &mut last_esc_at) {
+                if handle_key(
+                    state,
+                    &mut vitals,
+                    &codex,
+                    &claude,
+                    key,
+                    &mut last_esc_at,
+                    &mut clipboard,
+                    area,
+                ) {
                     return Ok(());
                 }
             }
             Event::Mouse(mouse) => {
-                handle_mouse(state, terminal_size(terminal)?, mouse);
+                handle_mouse(state, area, mouse);
             }
             Event::Resize(_, _) => {}
             _ => {}
@@ -274,7 +287,7 @@ fn paint_pane_chrome(
     let Some(pane) = mp.panes.get(idx) else {
         return rect;
     };
-    let cwd_text = pane.cwd.display().to_string();
+    let cwd_text = pane_path_label(state, &pane.cwd);
     let mode_label = if pane.selected_agent_id.is_none() && pane.agent_id.is_empty() {
         "roster"
     } else {
@@ -310,6 +323,35 @@ fn paint_pane_chrome(
     frame.render_widget(block, rect);
     paint_hint_line(frame, inner, pane_in_roster_mode(state, idx), theme);
     inner_rect_after_hint(inner)
+}
+
+fn pane_path_label(state: &AppState, cwd: &Path) -> String {
+    let workspace_root = state.workspace_root.as_path();
+    if let Ok(rel) = cwd.strip_prefix(workspace_root) {
+        let rel_str = rel.to_string_lossy();
+        let project = workspace_root
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned());
+        return match (project, rel_str.is_empty()) {
+            (Some(name), true) => name,
+            (Some(name), false) => format!("{name}/{rel_str}"),
+            (None, false) => rel_str.into_owned(),
+            (None, true) => cwd.display().to_string(),
+        };
+    }
+    let Some(home) = std::env::var_os("HOME") else {
+        return cwd.display().to_string();
+    };
+    let home_path = std::path::PathBuf::from(home);
+    let Ok(rel) = cwd.strip_prefix(&home_path) else {
+        return cwd.display().to_string();
+    };
+    let rel_str = rel.to_string_lossy();
+    if rel_str.is_empty() {
+        "~".into()
+    } else {
+        format!("~/{rel_str}")
+    }
 }
 
 fn pane_in_roster_mode(state: &AppState, idx: usize) -> bool {
@@ -348,6 +390,7 @@ fn inner_rect_after_hint(inner: Rect) -> Rect {
 }
 
 /// Handle a key event. Returns `true` to exit the loop.
+#[allow(clippy::too_many_arguments)]
 fn handle_key(
     state: &mut AppState,
     vitals: &mut VitalsState,
@@ -355,6 +398,8 @@ fn handle_key(
     claude: &ClaudeRunner,
     key: KeyEvent,
     last_esc_at: &mut Option<Instant>,
+    clipboard: &mut Option<arboard::Clipboard>,
+    area: Rect,
 ) -> bool {
     let modifiers = key.modifiers;
 
@@ -395,7 +440,16 @@ fn handle_key(
     if focused_pane_in_roster_mode(state) {
         return handle_roster_key(state, codex, claude, key, last_esc_at);
     }
-    handle_chat_key(state, vitals, codex, claude, key, last_esc_at)
+    handle_chat_key(
+        state,
+        vitals,
+        codex,
+        claude,
+        key,
+        last_esc_at,
+        clipboard,
+        area,
+    )
 }
 
 fn handle_roster_key(
@@ -472,6 +526,7 @@ fn handle_roster_key(
 
 const ROSTER_PAGE_STEP: i32 = 8;
 
+#[allow(clippy::too_many_arguments)]
 fn handle_chat_key(
     state: &mut AppState,
     vitals: &mut VitalsState,
@@ -479,16 +534,29 @@ fn handle_chat_key(
     claude: &ClaudeRunner,
     key: KeyEvent,
     last_esc_at: &mut Option<Instant>,
+    clipboard: &mut Option<arboard::Clipboard>,
+    area: Rect,
 ) -> bool {
     let modifiers = key.modifiers;
     let is_ctrl = modifiers.contains(KeyModifiers::CONTROL);
+    let is_super = modifiers.contains(KeyModifiers::SUPER);
 
     match key.code {
         KeyCode::Char('r') if is_ctrl => {
             revert_focused_pane_to_roster(state);
             false
         }
+        KeyCode::Char('c') if is_super => {
+            // Best-effort macOS Cmd+C: only fires on terminals that
+            // forward SUPER (Kitty / WezTerm / iTerm with CSI-u).
+            // Default Terminal.app does not deliver this.
+            try_copy_focused_pane_selection(state, clipboard, area);
+            false
+        }
         KeyCode::Char('c') if is_ctrl => {
+            if try_copy_focused_pane_selection(state, clipboard, area) {
+                return false;
+            }
             let empty = focused_chat_input_is_empty(state);
             if empty {
                 abort_focused_pane(state, codex, claude);
@@ -720,7 +788,8 @@ fn toggle_size_at_cursor(state: &mut AppState) {
     else {
         return;
     };
-    roster_view::toggle_size_leaf(state, &agent_id, leaf_idx);
+    let pane_idx = state.multipane.as_ref().map(|mp| mp.focused).unwrap_or(0);
+    roster_view::toggle_size_leaf(state, pane_idx, &agent_id, leaf_idx);
 }
 
 fn commit_roster_selection(state: &mut AppState, codex: &CodexRunner, claude: &ClaudeRunner) {
@@ -754,7 +823,7 @@ fn dispatch_commit(state: &mut AppState, pane_idx: usize, row: roster_view::Pane
         roster_view::PaneRosterRow::SizeLeaf {
             agent_id, leaf_idx, ..
         } => {
-            roster_view::toggle_size_leaf(state, &agent_id, leaf_idx);
+            roster_view::toggle_size_leaf(state, pane_idx, &agent_id, leaf_idx);
         }
         roster_view::PaneRosterRow::Agent { agent_id, .. } => {
             commit_agent_to_pane(state, pane_idx, &agent_id);
@@ -783,6 +852,12 @@ fn handle_mouse(state: &mut AppState, area: Rect, mouse: MouseEvent) {
         MouseEventKind::Down(MouseButton::Left) => {
             handle_mouse_left_down(state, area, mouse.column, mouse.row);
         }
+        MouseEventKind::Drag(MouseButton::Left) => {
+            handle_mouse_left_drag(state, area, mouse.column, mouse.row);
+        }
+        MouseEventKind::Up(MouseButton::Left) => {
+            handle_mouse_left_up(state, area, mouse.column, mouse.row);
+        }
         MouseEventKind::ScrollUp => {
             handle_mouse_scroll(state, area, mouse.column, mouse.row, -1);
         }
@@ -800,13 +875,101 @@ fn handle_mouse_left_down(state: &mut AppState, area: Rect, x: u16, y: u16) {
         state.agents.artifacts_popup_open = false;
         return;
     }
-    if try_open_chat_pane_artifact(state, area, x, y) {
+    // Drag-to-select takes precedence over artifact-popup open: seed
+    // the selection anchor on Down, defer popup-open to Up so a single
+    // click without drag still opens the popup. Selection lives on the
+    // pane that owns the click — never the focused pane — so dragging
+    // inside an unfocused pane creates a per-pane selection.
+    if let Some((pane_idx, line_idx, col_idx)) = resolve_chat_thread_hit(state, area, x, y) {
+        let Some(pane) = pane_at_mut(state, pane_idx) else {
+            return;
+        };
+        selection::clear(pane);
+        selection::extend_to(pane, line_idx, col_idx);
         return;
     }
     let Some(target) = resolve_left_click_target(state, area, x, y) else {
         return;
     };
     apply_roster_click(state, target);
+}
+
+fn handle_mouse_left_drag(state: &mut AppState, area: Rect, x: u16, y: u16) {
+    let Some((pane_idx, line_idx, col_idx)) = resolve_chat_thread_hit(state, area, x, y) else {
+        return;
+    };
+    let owns_anchor = pane_at(state, pane_idx)
+        .and_then(|p| p.selection.as_ref().map(|_| ()))
+        .is_some();
+    if !owns_anchor {
+        return;
+    }
+    if let Some(pane) = pane_at_mut(state, pane_idx) {
+        selection::extend_to(pane, line_idx, col_idx);
+    }
+}
+
+fn handle_mouse_left_up(state: &mut AppState, area: Rect, x: u16, y: u16) {
+    let Some((pane_idx, _, _)) = resolve_chat_thread_hit(state, area, x, y) else {
+        return;
+    };
+    let collapsed = pane_at(state, pane_idx)
+        .and_then(|p| p.selection.as_ref())
+        .map(|s| (s.anchor_line, s.anchor_col) == (s.end_line, s.end_col))
+        .unwrap_or(true);
+    if !collapsed {
+        // Real drag: keep the selection — Ctrl/Cmd+C copies it later.
+        return;
+    }
+    if let Some(pane) = pane_at_mut(state, pane_idx) {
+        selection::clear(pane);
+    }
+    if try_open_chat_pane_artifact(state, area, x, y) {
+        return;
+    }
+    if let Some(target) = resolve_left_click_target(state, area, x, y) {
+        apply_roster_click(state, target);
+    }
+}
+
+/// Resolve a screen `(x, y)` to `(pane_idx, logical_line, char_col)`
+/// inside that pane's chat thread. `logical_line` already includes
+/// `chat_thread_scroll`, so it's directly usable as a row index into
+/// `build_pane_thread_rows`. Returns `None` if the click lands outside
+/// the pane's chat thread area, or the pane is in roster mode.
+fn resolve_chat_thread_hit(
+    state: &AppState,
+    area: Rect,
+    x: u16,
+    y: u16,
+) -> Option<(usize, usize, usize)> {
+    let mp = state.multipane.as_ref()?;
+    let pane_idx = grid::pane_at_point(area, mp.grid_cols, mp.grid_rows, x, y)?;
+    let pane = mp.panes.get(pane_idx)?;
+    let in_chat_mode = pane.selected_agent_id.is_some() || !pane.agent_id.is_empty();
+    if !in_chat_mode {
+        return None;
+    }
+    let pane_rect = grid::pane_rect(area, mp.grid_cols, mp.grid_rows, pane_idx);
+    let inner = pane_inner_after_chrome(pane_rect);
+    if inner.width == 0 || inner.height == 0 {
+        return None;
+    }
+    let thread_area = agent_console_view::pane_thread_text_area(inner, pane)?;
+    if x < thread_area.x
+        || y < thread_area.y
+        || x >= thread_area.x + thread_area.width
+        || y >= thread_area.y + thread_area.height
+    {
+        return None;
+    }
+    let local_y = (y - thread_area.y) as usize;
+    let local_x = (x - thread_area.x) as usize;
+    Some((
+        pane_idx,
+        pane.chat_thread_scroll.saturating_add(local_y),
+        local_x,
+    ))
 }
 
 /// If `(x, y)` lands on a chat-pane thread row that the artifact-popup
@@ -938,7 +1101,7 @@ fn apply_roster_click(state: &mut AppState, target: RosterClickTarget) {
             agent_id, leaf_idx, ..
         } => {
             seek_pane_cursor_to(state, pane_idx, &rows, row_idx);
-            roster_view::toggle_size_leaf(state, &agent_id, leaf_idx);
+            roster_view::toggle_size_leaf(state, pane_idx, &agent_id, leaf_idx);
         }
         roster_view::PaneRosterRow::Empty(_) | roster_view::PaneRosterRow::Spacer => {}
     }
@@ -998,6 +1161,60 @@ fn pane_inner_after_chrome(rect: Rect) -> Rect {
     }
     let inner = Rect::new(rect.x + 1, rect.y + 1, rect.width - 2, rect.height - 2);
     inner_rect_after_hint(inner)
+}
+
+/// Copy the focused pane's active chat-thread selection to the
+/// clipboard. Returns `true` when a non-empty selection was copied (and
+/// cleared); `false` otherwise so the caller can fall through to the
+/// abort path. Width is computed from the focused pane's render area
+/// so wrap boundaries match what the operator saw at drag time.
+fn try_copy_focused_pane_selection(
+    state: &mut AppState,
+    clipboard: &mut Option<arboard::Clipboard>,
+    area: Rect,
+) -> bool {
+    let Some(mp) = state.multipane.as_ref() else {
+        return false;
+    };
+    let pane_idx = mp.focused;
+    let Some(pane) = mp.panes.get(pane_idx).cloned() else {
+        return false;
+    };
+    if pane.selection.is_none() {
+        return false;
+    }
+    let in_chat_mode = pane.selected_agent_id.is_some() || !pane.agent_id.is_empty();
+    if !in_chat_mode {
+        return false;
+    }
+    let pane_rect = grid::pane_rect(area, mp.grid_cols, mp.grid_rows, pane_idx);
+    let inner = pane_inner_after_chrome(pane_rect);
+    let Some(thread_area) = agent_console_view::pane_thread_text_area(inner, &pane) else {
+        return false;
+    };
+    let width = thread_area.width.max(1) as usize;
+    let rows = agent_console_view::build_pane_thread_rows(
+        state,
+        None,
+        Some(pane.agent_id.as_str()),
+        pane.mission_id.as_deref(),
+        width,
+        !pane.has_run_mission,
+    );
+    let text = selection::resolve_text(&pane, &rows);
+    let Some(text) = text else {
+        if let Some(p) = pane_at_mut(state, pane_idx) {
+            selection::clear(p);
+        }
+        return false;
+    };
+    if let Some(cb) = clipboard.as_mut() {
+        let _ = cb.set_text(text);
+    }
+    if let Some(p) = pane_at_mut(state, pane_idx) {
+        selection::clear(p);
+    }
+    true
 }
 
 fn focused_pane_mut(state: &mut AppState) -> Option<&mut nit_core::PaneSession> {
@@ -1453,7 +1670,9 @@ mod tests {
             },
         );
         assert_eq!(
-            state.agents.codex_selected_reasoning_effort.get("gpt-5"),
+            state.multipane.as_ref().unwrap().panes[0]
+                .selected_effort
+                .get("gpt-5"),
             Some(&"medium".to_string())
         );
     }

@@ -6290,7 +6290,7 @@ fn diagnostics_runtime_line(rest: &str, theme: &Theme) -> Line<'static> {
     ])
 }
 
-fn ops_table_bg(theme: &Theme) -> Color {
+pub(crate) fn ops_table_bg(theme: &Theme) -> Color {
     dim_bg_towards(theme.border, theme.background, 85)
 }
 

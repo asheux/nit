@@ -22,7 +22,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 pub mod multipane;
-pub use multipane::{DirSearchState, MultipaneState, PaneSession};
+pub use multipane::{DirSearchState, MultipaneState, PaneSelection, PaneSession};
 
 const DEFAULT_LOG_CAPACITY: usize = 512;
 
