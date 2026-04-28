@@ -16,7 +16,7 @@ use crate::state::{AgentLaneKind, RosterTreeSelection};
 /// `--backend <specific-id>` flow (every pane lands in chat with that
 /// lane already cloned). When `--backend` is omitted or names a family,
 /// `agent_id` is empty until the operator commits a roster selection.
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PaneSession {
     pub pane_id: usize,
     pub agent_id: String,
@@ -65,6 +65,67 @@ pub struct PaneSession {
     /// when `--backend <specific-id>` is supplied.
     #[serde(default)]
     pub selected_agent_id: Option<String>,
+    /// Backend kind auto-expanded by the cursor's current position.
+    /// Cleared and re-set on every cursor move so only one group is
+    /// ever auto-expanded at a time.
+    #[serde(skip)]
+    pub auto_expanded_backend: Option<AgentLaneKind>,
+    /// Agent id whose Size leaves are auto-expanded by the cursor's
+    /// current position. Cleared when the cursor leaves the agent row.
+    #[serde(skip)]
+    pub auto_expanded_agent: Option<String>,
+    /// Per-pane swarm template selection. Defaults to `"lab"`; seeded
+    /// from `AgentsState::swarm_default_template` at pane construction.
+    #[serde(default = "default_swarm_template")]
+    pub swarm_template: String,
+    /// Per-pane swarm mission selection. Defaults to `"auto"`; seeded
+    /// from `AgentsState::swarm_default_mission` at pane construction.
+    #[serde(default = "default_swarm_mission")]
+    pub swarm_mission: String,
+    /// Watermark flipped to `true` the first time this pane successfully
+    /// dispatches a prompt. Gates the artifact-callout decoration in the
+    /// pane's chat thread so a freshly-selected agent doesn't show a
+    /// `(see ARTIFACTS)` link before any mission has run.
+    #[serde(default)]
+    pub has_run_mission: bool,
+}
+
+fn default_swarm_template() -> String {
+    "lab".into()
+}
+
+fn default_swarm_mission() -> String {
+    "auto".into()
+}
+
+impl Default for PaneSession {
+    fn default() -> Self {
+        Self {
+            pane_id: 0,
+            agent_id: String::new(),
+            cwd: PathBuf::new(),
+            chat_input: String::new(),
+            chat_input_cursor: 0,
+            chat_input_selection_anchor: None,
+            chat_input_scroll: 0,
+            chat_prompt_history: Vec::new(),
+            chat_prompt_history_pos: None,
+            dir_search: None,
+            mission_id: None,
+            roster_cursor: 0,
+            roster_scroll: 0,
+            roster_expanded_backends: HashSet::new(),
+            roster_collapsed_agent_ids: HashSet::new(),
+            roster_tree_selected: None,
+            chat_thread_scroll: 0,
+            selected_agent_id: None,
+            auto_expanded_backend: None,
+            auto_expanded_agent: None,
+            swarm_template: default_swarm_template(),
+            swarm_mission: default_swarm_mission(),
+            has_run_mission: false,
+        }
+    }
 }
 
 /// Directory-search overlay carried by an active pane. Stubbed for Phase
@@ -145,6 +206,21 @@ mod tests {
         assert!(pane.roster_collapsed_agent_ids.is_empty());
         assert!(pane.roster_tree_selected.is_none());
         assert_eq!(pane.chat_thread_scroll, 0);
+        assert!(pane.auto_expanded_backend.is_none());
+        assert!(pane.auto_expanded_agent.is_none());
+        assert!(!pane.has_run_mission);
+    }
+
+    #[test]
+    fn pane_session_default_template_is_lab() {
+        let pane = PaneSession::default();
+        assert_eq!(pane.swarm_template, "lab");
+    }
+
+    #[test]
+    fn pane_session_default_mission_is_auto() {
+        let pane = PaneSession::default();
+        assert_eq!(pane.swarm_mission, "auto");
     }
 
     #[test]

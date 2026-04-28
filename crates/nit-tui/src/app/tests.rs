@@ -3155,7 +3155,10 @@ fn non_artifact_swarm_console_row_does_not_open_artifact_popup() {
         .expect("plain done row");
 
     assert!(!maybe_open_artifact_popup_from_console_line(
-        &mut state, &swarm, 120, line_idx
+        &mut state,
+        Some(&swarm),
+        120,
+        line_idx
     ));
     assert!(!state.agents.artifacts_popup_open);
 }

@@ -47,7 +47,20 @@ pub(crate) fn dispatch_pane_prompt(
         return DispatchOutcome::NoSelection;
     };
     let mission_id = pane.mission_id.clone();
+    // Snapshot the pane's template/mission AT DISPATCH TIME so a later
+    // operator switch in the roster doesn't perturb an in-flight mission.
+    // TODO(multipane phase 4+): thread `_template_snapshot` /
+    // `_mission_snapshot` into the swarm orchestrator once multipane
+    // routes through `parse_swarm_command` instead of the direct
+    // `dispatch_agent_prompt` shortcut.
+    let _template_snapshot = pane.swarm_template.clone();
+    let _mission_snapshot = pane.swarm_mission.clone();
     dispatch_agent_prompt(state, vitals, codex, claude, agent_id, mission_id, prompt);
+    if let Some(mp) = state.multipane.as_mut() {
+        if let Some(pane) = mp.panes.get_mut(pane_idx) {
+            pane.has_run_mission = true;
+        }
+    }
     DispatchOutcome::Dispatched
 }
 

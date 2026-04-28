@@ -1162,7 +1162,7 @@ pub(super) fn handle_mouse_down_with_swarm(
         if let Some(text_area) = agent_console_view::thread_text_area(layout.notes, state) {
             if maybe_open_artifact_popup_from_console_line(
                 state,
-                swarm,
+                Some(swarm),
                 text_area.width as usize,
                 line_idx,
             ) {

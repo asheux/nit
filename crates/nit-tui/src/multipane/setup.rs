@@ -55,6 +55,8 @@ pub fn install_filtered(
         _ => None,
     };
 
+    let seed_template = state.agents.swarm_default_template.clone();
+    let seed_mission = state.agents.swarm_default_mission.clone();
     let mut pane_sessions = Vec::with_capacity(panes);
     if let Some(base_lane) = pre_pick_lane {
         let mut pane_lanes = Vec::with_capacity(panes);
@@ -69,6 +71,8 @@ pub fn install_filtered(
                 agent_id: agent_id.clone(),
                 cwd: cwd.clone(),
                 selected_agent_id: Some(agent_id),
+                swarm_template: seed_template.clone(),
+                swarm_mission: seed_mission.clone(),
                 ..PaneSession::default()
             });
         }
@@ -83,6 +87,8 @@ pub fn install_filtered(
             pane_sessions.push(PaneSession {
                 pane_id: k,
                 cwd: cwd.clone(),
+                swarm_template: seed_template.clone(),
+                swarm_mission: seed_mission.clone(),
                 ..PaneSession::default()
             });
         }

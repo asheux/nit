@@ -88,7 +88,7 @@ mod key_predicates;
 mod layout_rects;
 mod mouse;
 mod mouse_mappers;
-mod popup_keys;
+pub(crate) mod popup_keys;
 mod provenance;
 mod runner;
 mod scroll;

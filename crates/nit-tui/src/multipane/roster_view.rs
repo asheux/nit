@@ -85,13 +85,15 @@ pub enum PaneRosterRow {
 }
 
 impl PaneRosterRow {
+    /// Cursor stops only on Backend and Agent rows. Size / Role leaves
+    /// remain rendered (and click-toggleable) but the j/k cursor walker
+    /// skips them — auto-expand under the cursor reveals them, and a
+    /// click on an Agent row commits the selection. Template / Mission
+    /// stay click-only by design.
     pub fn is_selectable(&self) -> bool {
         matches!(
             self,
-            PaneRosterRow::Backend { .. }
-                | PaneRosterRow::Agent { .. }
-                | PaneRosterRow::SizeBranch { .. }
-                | PaneRosterRow::SizeLeaf { .. }
+            PaneRosterRow::Backend { .. } | PaneRosterRow::Agent { .. }
         )
     }
 }
@@ -118,7 +120,9 @@ pub fn compute_rows(
 
     for (kind, lanes) in groups {
         rows.push(PaneRosterRow::Backend { kind });
-        if !pane.roster_expanded_backends.contains(&kind) {
+        let backend_expanded = pane.roster_expanded_backends.contains(&kind)
+            || pane.auto_expanded_backend == Some(kind);
+        if !backend_expanded {
             continue;
         }
         for lane in lanes {
@@ -127,7 +131,9 @@ pub fn compute_rows(
                 kind,
                 lane_label: lane.lane.clone(),
             });
-            if pane.roster_collapsed_agent_ids.contains(&lane.id) {
+            let agent_expanded = pane.auto_expanded_agent.as_deref() == Some(lane.id.as_str())
+                && !pane.roster_collapsed_agent_ids.contains(&lane.id);
+            if !agent_expanded {
                 continue;
             }
             let efforts = supported_efforts(state, &lane.id);
@@ -261,8 +267,8 @@ fn render_row(ctx: &RenderCtx<'_>, row_idx: usize, row: &PaneRosterRow) -> Line<
         && row.is_selectable()
         && cursor_for_row_index(ctx.rows, row_idx) == Some(ctx.cursor_idx);
     match row {
-        PaneRosterRow::Template => template_line(ctx.state, ctx.theme),
-        PaneRosterRow::Mission => mission_line(ctx.state, ctx.theme),
+        PaneRosterRow::Template => template_line(ctx.pane, ctx.theme),
+        PaneRosterRow::Mission => mission_line(ctx.pane, ctx.theme),
         PaneRosterRow::Backend { kind } => backend_line(*kind, ctx.pane, highlight, ctx.theme),
         PaneRosterRow::Agent {
             agent_id,
@@ -300,22 +306,17 @@ fn word_hit(
     None
 }
 
-fn template_line(state: &AppState, theme: &Theme) -> Line<'static> {
+fn template_line(pane: &PaneSession, theme: &Theme) -> Line<'static> {
     word_toggle_line(
         TEMPLATE_LABEL,
         &TEMPLATE_OPTIONS,
-        &state.agents.swarm_default_template,
+        &pane.swarm_template,
         theme,
     )
 }
 
-fn mission_line(state: &AppState, theme: &Theme) -> Line<'static> {
-    word_toggle_line(
-        MISSION_LABEL,
-        &MISSION_OPTIONS,
-        &state.agents.swarm_default_mission,
-        theme,
-    )
+fn mission_line(pane: &PaneSession, theme: &Theme) -> Line<'static> {
+    word_toggle_line(MISSION_LABEL, &MISSION_OPTIONS, &pane.swarm_mission, theme)
 }
 
 fn word_toggle_line(
@@ -643,6 +644,30 @@ pub fn sync_tree_selection(pane: &mut PaneSession, row: Option<&PaneRosterRow>) 
     };
 }
 
+/// Drive cursor-driven auto-expansion. Cleared and re-set on every
+/// cursor move: a Backend row auto-expands its own group; an Agent row
+/// auto-expands both its parent backend and its own Size branch.
+/// Anything else (or a None cursor) collapses both auto-fields back to
+/// `None`. This is the per-pane single-element latch that gives the
+/// "every pass through the roster auto-expandable, leaving collapses"
+/// behavior the operator asked for.
+pub fn sync_auto_expansion(pane: &mut PaneSession, row: Option<&PaneRosterRow>) {
+    match row {
+        Some(PaneRosterRow::Backend { kind }) => {
+            pane.auto_expanded_backend = Some(*kind);
+            pane.auto_expanded_agent = None;
+        }
+        Some(PaneRosterRow::Agent { agent_id, kind, .. }) => {
+            pane.auto_expanded_backend = Some(*kind);
+            pane.auto_expanded_agent = Some(agent_id.clone());
+        }
+        _ => {
+            pane.auto_expanded_backend = None;
+            pane.auto_expanded_agent = None;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -714,6 +739,14 @@ mod tests {
         pane
     }
 
+    fn pane_auto_expanded(kind: AgentLaneKind, agent_id: &str) -> PaneSession {
+        PaneSession {
+            auto_expanded_backend: Some(kind),
+            auto_expanded_agent: Some(agent_id.to_string()),
+            ..PaneSession::default()
+        }
+    }
+
     #[test]
     fn compute_rows_starts_with_template_mission_spacer() {
         let state = fixture_state();
@@ -744,7 +777,9 @@ mod tests {
     #[test]
     fn compute_rows_expand_codex_shows_lanes_and_size_leaves() {
         let state = fixture_state();
-        let pane = pane_with_expansions(&[AgentLaneKind::Codex], &[]);
+        // Auto-expand both the Codex backend and the gpt-5 agent so size
+        // leaves render under the new cursor-driven semantics.
+        let pane = pane_auto_expanded(AgentLaneKind::Codex, "gpt-5");
         let rows = compute_rows(&state, &pane, None);
         let agent_ids: Vec<&str> = rows
             .iter()
@@ -772,6 +807,29 @@ mod tests {
             })
             .collect();
         assert_eq!(checked, [false, true, false], "medium is the chosen effort");
+    }
+
+    #[test]
+    fn compute_rows_auto_expanded_backend_alone_hides_size_leaves() {
+        let state = fixture_state();
+        let pane = PaneSession {
+            auto_expanded_backend: Some(AgentLaneKind::Codex),
+            ..PaneSession::default()
+        };
+        let rows = compute_rows(&state, &pane, None);
+        let agent_count = rows
+            .iter()
+            .filter(|r| matches!(r, PaneRosterRow::Agent { .. }))
+            .count();
+        assert_eq!(agent_count, 1, "agents render when backend auto-expanded");
+        let leaf_count = rows
+            .iter()
+            .filter(|r| matches!(r, PaneRosterRow::SizeLeaf { .. }))
+            .count();
+        assert_eq!(
+            leaf_count, 0,
+            "size leaves stay hidden until the agent itself is auto-expanded"
+        );
     }
 
     #[test]

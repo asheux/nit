@@ -668,7 +668,14 @@ pub fn render_pane(
     let thread_width = layout.thread_area.width.max(1) as usize;
     let thread_height = layout.thread_area.height.max(1) as usize;
 
-    let thread_rows = build_pane_thread_rows(state, swarm, agent, mission, thread_width);
+    let thread_rows = build_pane_thread_rows(
+        state,
+        swarm,
+        agent,
+        mission,
+        thread_width,
+        !pane.has_run_mission,
+    );
 
     let total_rows = thread_rows.len();
     let max_scroll = total_rows.saturating_sub(thread_height);
@@ -858,23 +865,46 @@ fn compute_pane_layout(
     })
 }
 
-fn build_pane_thread_rows(
+/// Build a pane's chat-thread rows. When `suppress_artifacts` is true,
+/// any `(see ARTIFACTS)` callouts are demoted to plain Agent rows with
+/// the suffix stripped — used by multipane while the pane has not yet
+/// dispatched a mission so a freshly-selected agent doesn't display a
+/// dangling artifact link.
+pub fn build_pane_thread_rows(
     state: &AppState,
     swarm: Option<&SwarmRuntime>,
     agent: Option<&str>,
     mission: Option<&str>,
     width: usize,
+    suppress_artifacts: bool,
 ) -> Vec<ThreadRow> {
     let ordered = visible_messages_grouped(state, mission, agent);
     let mut rows = Vec::new();
     for (_, msg) in ordered {
         rows.extend(format_message_rows(state, swarm, msg, width));
     }
+    if suppress_artifacts {
+        for row in &mut rows {
+            if matches!(row.kind, ThreadRowKind::ArtifactLink) {
+                row.text = row.text.replace(" (see ARTIFACTS)", "");
+                row.kind = ThreadRowKind::Agent;
+            }
+        }
+    }
     rows
 }
 
 pub fn thread_text_area(area: Rect, state: &AppState) -> Option<Rect> {
     compute_console_layout(area, state).map(|layout| layout.thread_area)
+}
+
+/// Multipane analog of [`thread_text_area`]. Mirrors the pane-render
+/// layout used by [`render_pane`] so a click handler can map a screen
+/// coordinate back to a thread row index without duplicating the layout
+/// arithmetic.
+pub fn pane_thread_text_area(area: Rect, pane: &PaneSession) -> Option<Rect> {
+    compute_pane_layout(area, &pane.chat_input, pane.chat_input_cursor)
+        .map(|layout| layout.thread_area)
 }
 
 pub fn chat_input_text_area(area: Rect, state: &AppState) -> Option<Rect> {
@@ -2393,15 +2423,24 @@ fn format_message_rows(
     let indent_str = "";
 
     let mut out = Vec::new();
-    let artifact_target = state
-        .agents
-        .messages
-        .iter()
-        .enumerate()
-        .find_map(|(idx, candidate)| std::ptr::eq(candidate, msg).then_some(idx))
-        .and_then(|message_idx| {
-            agent_ops_view::artifacts_popup_ref_for_message(state, swarm, width, message_idx)
-        });
+    // Multipane roster acknowledgements ("selected agent → ...") carry an
+    // agent_id but never an artifact — keep them out of the artifact-link
+    // codepath so a freshly-selected agent doesn't show "(see ARTIFACTS)"
+    // before any mission has run.
+    let is_multipane_system_msg = msg.kind.as_deref() == Some("multipane-system");
+    let artifact_target = if is_multipane_system_msg {
+        None
+    } else {
+        state
+            .agents
+            .messages
+            .iter()
+            .enumerate()
+            .find_map(|(idx, candidate)| std::ptr::eq(candidate, msg).then_some(idx))
+            .and_then(|message_idx| {
+                agent_ops_view::artifacts_popup_ref_for_message(state, swarm, width, message_idx)
+            })
+    };
     if artifact_target.is_some() {
         let callout = format!("{indent_str}\u{21b3} {header} done (see ARTIFACTS)");
         out.push(ThreadRow {

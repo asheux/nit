@@ -759,17 +759,14 @@ pub(super) fn maybe_follow_swarm_artifact_in_popup(
     }
 }
 
-pub(super) fn maybe_open_artifact_popup_from_console_line(
+pub fn maybe_open_artifact_popup_from_console_line(
     state: &mut AppState,
-    swarm: &SwarmRuntime,
+    swarm: Option<&SwarmRuntime>,
     text_width: usize,
     line_idx: usize,
 ) -> bool {
     let Some(message_idx) = agent_console_view::artifact_message_index_for_line_with_swarm(
-        state,
-        Some(swarm),
-        text_width,
-        line_idx,
+        state, swarm, text_width, line_idx,
     ) else {
         return false;
     };
@@ -780,20 +777,13 @@ pub(super) fn maybe_open_artifact_popup_from_console_line(
     // Look up the card BEFORE mutating selected_agent/selected_mission.
     // Setting the context first would cause the clicked message itself to appear
     // as an artifact card, creating a self-fulfilling match.
-    let selected = agent_ops_view::artifacts_popup_ref_for_message(
-        state,
-        Some(swarm),
-        text_width,
-        message_idx,
-    )
-    .and_then(|popup_ref| {
-        agent_ops_view::artifacts_card_index_for_popup_ref(
-            state,
-            Some(swarm),
-            text_width,
-            &popup_ref,
-        )
-    });
+    let selected =
+        agent_ops_view::artifacts_popup_ref_for_message(state, swarm, text_width, message_idx)
+            .and_then(|popup_ref| {
+                agent_ops_view::artifacts_card_index_for_popup_ref(
+                    state, swarm, text_width, &popup_ref,
+                )
+            });
     let Some(card_idx) = selected else {
         return false;
     };

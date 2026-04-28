@@ -21,11 +21,14 @@ use super::focus;
 use super::grid;
 use super::roster_view;
 use super::setup::materialise_pane_lane;
+use crate::app::popup_keys::maybe_open_artifact_popup_from_console_line;
 use crate::claude_runner::{ClaudeCommand, ClaudeRunner, ClaudeRunnerConfig};
 use crate::codex_runner::{CodexCommand, CodexRunner, CodexRunnerConfig, CodexRuntimeMode};
+use crate::swarm::SwarmRuntime;
 use crate::theme::Theme;
 use crate::vitals::VitalsState;
 use crate::widgets::agent_console_view::{self, ChatCursor};
+use crate::widgets::artifacts_popup;
 
 const TICK_RATE: Duration = Duration::from_millis(50);
 const ESC_ESC_ABORT_WINDOW: Duration = Duration::from_millis(500);
@@ -48,6 +51,7 @@ pub fn run_loop(
     state.agents.claude_max_parallel_turns = claude_config.max_parallel_turns;
     let codex = CodexRunner::spawn(codex_runtime, codex_config, None);
     let claude = ClaudeRunner::spawn(claude_config);
+    let swarm_stub = SwarmRuntime::default();
     let mut vitals = VitalsState::default();
     let mut last_esc_at: Option<Instant> = None;
 
@@ -67,6 +71,10 @@ pub fn run_loop(
         terminal.draw(|frame| {
             let area = frame.size();
             let cursor = render_grid(frame, area, state, theme);
+            if state.agents.artifacts_popup_open {
+                let popup_area = popup_rect_for(area, artifacts_popup::preferred_size(area));
+                artifacts_popup::render(frame, popup_area, state, &swarm_stub, theme);
+            }
             if let Some(c) = cursor {
                 frame.set_cursor(c.x, c.y);
             }
@@ -93,6 +101,33 @@ pub fn run_loop(
 fn terminal_size(terminal: &Terminal<CrosstermBackend<Stdout>>) -> io::Result<Rect> {
     let size = terminal.size()?;
     Ok(Rect::new(0, 0, size.width, size.height))
+}
+
+/// Centered popup rect, matching `app::layout_rects::dynamic_popup_rect`
+/// (which is `pub(super)`). Local copy keeps the multipane crate
+/// independent of the single-pane app module's private layout helpers.
+fn popup_rect_for(screen: Rect, desired: (u16, u16)) -> Rect {
+    use ratatui::layout::{Constraint, Direction, Layout};
+    let max_w = screen.width.saturating_sub(4).max(10);
+    let max_h = screen.height.saturating_sub(2).max(5);
+    let width = desired.0.min(max_w);
+    let height = desired.1.min(max_h);
+    let vertical = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length((screen.height.saturating_sub(height)) / 2),
+            Constraint::Length(height),
+            Constraint::Min(0),
+        ])
+        .split(screen)[1];
+    Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Length((screen.width.saturating_sub(width)) / 2),
+            Constraint::Length(width),
+            Constraint::Min(0),
+        ])
+        .split(vertical)[1]
 }
 
 /// Each `dispatch_pane_prompt` allocates a mission inside the standard
@@ -322,6 +357,12 @@ fn handle_key(
     last_esc_at: &mut Option<Instant>,
 ) -> bool {
     let modifiers = key.modifiers;
+
+    if state.agents.artifacts_popup_open && matches!(key.code, KeyCode::Esc) {
+        state.agents.artifacts_popup_open = false;
+        *last_esc_at = None;
+        return false;
+    }
 
     if !matches!(key.code, KeyCode::Esc) {
         *last_esc_at = None;
@@ -595,6 +636,7 @@ fn move_roster_cursor(state: &mut AppState, delta: i32) {
     if let Some(pane) = focused_pane_mut(state) {
         pane.roster_cursor = next;
         roster_view::sync_tree_selection(pane, row.as_ref());
+        roster_view::sync_auto_expansion(pane, row.as_ref());
     }
 }
 
@@ -605,6 +647,7 @@ fn jump_roster_cursor_to_top(state: &mut AppState) {
         pane.roster_cursor = 0;
         pane.roster_scroll = 0;
         roster_view::sync_tree_selection(pane, row.as_ref());
+        roster_view::sync_auto_expansion(pane, row.as_ref());
     }
 }
 
@@ -619,6 +662,7 @@ fn jump_roster_cursor_to_bottom(state: &mut AppState) {
     if let Some(pane) = focused_pane_mut(state) {
         pane.roster_cursor = cursor;
         roster_view::sync_tree_selection(pane, row.as_ref());
+        roster_view::sync_auto_expansion(pane, row.as_ref());
     }
 }
 
@@ -633,9 +677,7 @@ fn collapse_at_cursor(state: &mut AppState) {
         roster_view::PaneRosterRow::Backend { kind } => {
             pane.roster_expanded_backends.remove(&kind);
         }
-        roster_view::PaneRosterRow::Agent { agent_id, .. }
-        | roster_view::PaneRosterRow::SizeBranch { agent_id }
-        | roster_view::PaneRosterRow::SizeLeaf { agent_id, .. } => {
+        roster_view::PaneRosterRow::Agent { agent_id, .. } => {
             pane.roster_collapsed_agent_ids.insert(agent_id);
         }
         _ => {}
@@ -653,9 +695,7 @@ fn expand_at_cursor(state: &mut AppState) {
         roster_view::PaneRosterRow::Backend { kind } => {
             pane.roster_expanded_backends.insert(kind);
         }
-        roster_view::PaneRosterRow::Agent { agent_id, .. }
-        | roster_view::PaneRosterRow::SizeBranch { agent_id }
-        | roster_view::PaneRosterRow::SizeLeaf { agent_id, .. } => {
+        roster_view::PaneRosterRow::Agent { agent_id, .. } => {
             pane.roster_collapsed_agent_ids.remove(&agent_id);
         }
         _ => {}
@@ -754,10 +794,62 @@ fn handle_mouse(state: &mut AppState, area: Rect, mouse: MouseEvent) {
 }
 
 fn handle_mouse_left_down(state: &mut AppState, area: Rect, x: u16, y: u16) {
+    if state.agents.artifacts_popup_open {
+        // ESC and a click outside the popup close it; clicks inside are
+        // ignored — popup keyboard navigation is the primary interaction.
+        state.agents.artifacts_popup_open = false;
+        return;
+    }
+    if try_open_chat_pane_artifact(state, area, x, y) {
+        return;
+    }
     let Some(target) = resolve_left_click_target(state, area, x, y) else {
         return;
     };
     apply_roster_click(state, target);
+}
+
+/// If `(x, y)` lands on a chat-pane thread row that the artifact-popup
+/// resolver recognises, open the popup and return `true`. Otherwise
+/// returns `false` so the caller can fall through to roster click
+/// resolution. Mirrors the layout arithmetic used by
+/// [`agent_console_view::render_pane`] so the row index lines up with
+/// what the renderer painted.
+fn try_open_chat_pane_artifact(state: &mut AppState, area: Rect, x: u16, y: u16) -> bool {
+    let (pane_rect, pane) = {
+        let Some(mp) = state.multipane.as_ref() else {
+            return false;
+        };
+        let Some(idx) = grid::pane_at_point(area, mp.grid_cols, mp.grid_rows, x, y) else {
+            return false;
+        };
+        let Some(p) = mp.panes.get(idx).cloned() else {
+            return false;
+        };
+        let rect = grid::pane_rect(area, mp.grid_cols, mp.grid_rows, idx);
+        (rect, p)
+    };
+    let in_chat_mode = pane.selected_agent_id.is_some() || !pane.agent_id.is_empty();
+    if !in_chat_mode {
+        return false;
+    }
+    let inner = pane_inner_after_chrome(pane_rect);
+    if inner.width == 0 || inner.height == 0 {
+        return false;
+    }
+    let Some(thread_area) = agent_console_view::pane_thread_text_area(inner, &pane) else {
+        return false;
+    };
+    if x < thread_area.x
+        || y < thread_area.y
+        || x >= thread_area.x + thread_area.width
+        || y >= thread_area.y + thread_area.height
+    {
+        return false;
+    }
+    let local_y = (y - thread_area.y) as usize;
+    let line_idx = pane.chat_thread_scroll.saturating_add(local_y);
+    maybe_open_artifact_popup_from_console_line(state, None, thread_area.width as usize, line_idx)
 }
 
 struct RosterClickTarget {
@@ -814,12 +906,16 @@ fn apply_roster_click(state: &mut AppState, target: RosterClickTarget) {
     match row {
         roster_view::PaneRosterRow::Template => {
             if let Some(value) = roster_view::template_word_at_x(local_x) {
-                state.agents.swarm_default_template = value.into();
+                if let Some(pane) = pane_at_mut(state, pane_idx) {
+                    pane.swarm_template = value.into();
+                }
             }
         }
         roster_view::PaneRosterRow::Mission => {
             if let Some(value) = roster_view::mission_word_at_x(local_x) {
-                state.agents.swarm_default_mission = value.into();
+                if let Some(pane) = pane_at_mut(state, pane_idx) {
+                    pane.swarm_mission = value.into();
+                }
             }
         }
         roster_view::PaneRosterRow::Backend { kind } => {
@@ -857,8 +953,11 @@ fn seek_pane_cursor_to(
     let Some(cursor) = roster_view::cursor_for_row_index(rows, row_idx) else {
         return;
     };
+    let row = rows.get(row_idx).cloned();
     if let Some(pane) = pane_at_mut(state, pane_idx) {
         pane.roster_cursor = cursor;
+        roster_view::sync_tree_selection(pane, row.as_ref());
+        roster_view::sync_auto_expansion(pane, row.as_ref());
     }
 }
 
@@ -1272,31 +1371,87 @@ mod tests {
     }
 
     #[test]
-    fn move_roster_cursor_walks_through_expanded_size_leaves() {
+    fn cursor_walk_skips_size_leaves() {
         let mut state = fixture_with_efforts();
-        // Expand Codex and move cursor down so we land on gpt-5, then SizeBranch, then leaves.
+        // Expand Codex manually so the rows include gpt-5; cursor walk
+        // must hop Backend → Agent → next Backend, never landing on a
+        // SizeBranch / SizeLeaf.
         expand_at_cursor(&mut state);
-        // After expansion: cursor=0 (Backend Codex), 1=Agent gpt-5, 2=SizeBranch, 3=low, 4=medium, 5=high, 6=Backend Claude.
+        let cursor0 = state.multipane.as_ref().unwrap().panes[0].roster_cursor;
+        assert_eq!(cursor0, 0, "starts on Backend Codex");
         move_roster_cursor(&mut state, 1);
         assert_eq!(state.multipane.as_ref().unwrap().panes[0].roster_cursor, 1);
         move_roster_cursor(&mut state, 1);
+        // Two stops in (Backend Codex → Agent gpt-5 → Backend Claude),
+        // never on a SizeBranch — leaves are inert under cursor walk.
         assert_eq!(state.multipane.as_ref().unwrap().panes[0].roster_cursor, 2);
-        move_roster_cursor(&mut state, 1);
-        // Now on a SizeLeaf — sync_tree_selection should populate the leaf cursor.
+        // The cursor sits on a Backend, so roster_tree_selected stays None.
         assert!(state.multipane.as_ref().unwrap().panes[0]
             .roster_tree_selected
-            .is_some());
+            .is_none());
     }
 
     #[test]
-    fn toggle_size_at_cursor_writes_codex_selected_effort() {
+    fn auto_expand_on_cursor_move_to_backend() {
         let mut state = fixture_with_efforts();
-        expand_at_cursor(&mut state); // expand Codex
-                                      // Walk: Backend Codex (0) → Agent gpt-5 (1) → SizeBranch (2) → low (3) → medium (4)
-        for _ in 0..4 {
-            move_roster_cursor(&mut state, 1);
-        }
-        toggle_size_at_cursor(&mut state);
+        let pane = &state.multipane.as_ref().unwrap().panes[0];
+        assert_eq!(pane.roster_cursor, 0, "starts on first selectable");
+        // Trigger auto-expansion by re-seating the cursor at 0 via a 0-delta move.
+        move_roster_cursor(&mut state, 0);
+        let pane = &state.multipane.as_ref().unwrap().panes[0];
+        assert_eq!(pane.auto_expanded_backend, Some(AgentLaneKind::Codex));
+        assert!(pane.auto_expanded_agent.is_none());
+    }
+
+    #[test]
+    fn auto_collapse_on_cursor_leave() {
+        let mut state = fixture_with_efforts();
+        // Land on Backend Codex → auto_expanded_backend = Codex.
+        move_roster_cursor(&mut state, 0);
+        let pane = &state.multipane.as_ref().unwrap().panes[0];
+        assert_eq!(pane.auto_expanded_backend, Some(AgentLaneKind::Codex));
+        // Walk down to the next selectable row — Agent under Codex
+        // (because compute_rows now considers auto_expanded_backend).
+        move_roster_cursor(&mut state, 1);
+        let pane = &state.multipane.as_ref().unwrap().panes[0];
+        // After moving onto the Agent row, auto_expanded_agent latches
+        // and the auto-expanded backend stays set.
+        assert_eq!(pane.auto_expanded_backend, Some(AgentLaneKind::Codex));
+        assert_eq!(pane.auto_expanded_agent.as_deref(), Some("gpt-5"));
+        // Walk to next selectable — leaves the Codex group entirely
+        // (cursor lands on Backend Claude). Codex auto-fields collapse.
+        move_roster_cursor(&mut state, 1);
+        let pane = &state.multipane.as_ref().unwrap().panes[0];
+        assert_eq!(pane.auto_expanded_backend, Some(AgentLaneKind::Claude));
+        assert!(pane.auto_expanded_agent.is_none());
+    }
+
+    #[test]
+    fn size_leaf_click_writes_codex_selected_effort() {
+        let mut state = fixture_with_efforts();
+        // Manually drive size selection via the click path — the cursor
+        // never stops on size rows under the new gating.
+        let mut pane_clone = state.multipane.as_ref().unwrap().panes[0].clone();
+        pane_clone
+            .roster_expanded_backends
+            .insert(AgentLaneKind::Codex);
+        pane_clone.auto_expanded_agent = Some("gpt-5".into());
+        let rows = roster_view::compute_rows(&state, &pane_clone, None);
+        let target_idx = rows
+            .iter()
+            .position(|r| matches!(r, roster_view::PaneRosterRow::SizeLeaf { effort, .. } if effort == "medium"))
+            .expect("medium leaf");
+        let leaf_row = rows[target_idx].clone();
+        apply_roster_click(
+            &mut state,
+            RosterClickTarget {
+                pane_idx: 0,
+                rows,
+                row_idx: target_idx,
+                row: leaf_row,
+                local_x: 12,
+            },
+        );
         assert_eq!(
             state.agents.codex_selected_reasoning_effort.get("gpt-5"),
             Some(&"medium".to_string())
@@ -1374,11 +1529,12 @@ mod tests {
     }
 
     #[test]
-    fn apply_roster_click_on_template_writes_swarm_default() {
+    fn template_click_writes_to_focused_pane_only() {
         let mut state = fixture_state_no_backend();
         let pane = state.multipane.as_ref().unwrap().panes[0].clone();
         let rows = roster_view::compute_rows(&state, &pane, None);
-        let lab_col = " Template: ".chars().count() + 1;
+        // Click on the " parallel " word (after " lab " + 1 separator).
+        let parallel_col = " Template: ".chars().count() + " lab ".chars().count() + 1 + 1;
         apply_roster_click(
             &mut state,
             RosterClickTarget {
@@ -1386,14 +1542,45 @@ mod tests {
                 rows,
                 row_idx: 0,
                 row: roster_view::PaneRosterRow::Template,
-                local_x: lab_col,
+                local_x: parallel_col,
             },
         );
-        assert_eq!(state.agents.swarm_default_template, "lab");
+        assert_eq!(
+            state.multipane.as_ref().unwrap().panes[0].swarm_template,
+            "parallel"
+        );
+        assert_eq!(
+            state.agents.swarm_default_template, "lab",
+            "global default must stay untouched by per-pane clicks"
+        );
     }
 
     #[test]
-    fn apply_roster_click_on_mission_writes_swarm_default() {
+    fn template_click_on_pane_zero_does_not_touch_pane_one() {
+        let mut state = fixture_state_no_backend();
+        let pane = state.multipane.as_ref().unwrap().panes[0].clone();
+        let rows = roster_view::compute_rows(&state, &pane, None);
+        let parallel_col = " Template: ".chars().count() + " lab ".chars().count() + 1 + 1;
+        apply_roster_click(
+            &mut state,
+            RosterClickTarget {
+                pane_idx: 0,
+                rows,
+                row_idx: 0,
+                row: roster_view::PaneRosterRow::Template,
+                local_x: parallel_col,
+            },
+        );
+        let panes = &state.multipane.as_ref().unwrap().panes;
+        assert_eq!(panes[0].swarm_template, "parallel");
+        assert_eq!(
+            panes[1].swarm_template, "lab",
+            "sibling pane's template must not change"
+        );
+    }
+
+    #[test]
+    fn mission_click_writes_to_focused_pane_only() {
         let mut state = fixture_state_no_backend();
         let pane = state.multipane.as_ref().unwrap().panes[0].clone();
         let rows = roster_view::compute_rows(&state, &pane, None);
@@ -1408,6 +1595,48 @@ mod tests {
                 local_x: general_col,
             },
         );
-        assert_eq!(state.agents.swarm_default_mission, "general");
+        let panes = &state.multipane.as_ref().unwrap().panes;
+        assert_eq!(panes[0].swarm_mission, "general");
+        assert_eq!(
+            panes[1].swarm_mission, "auto",
+            "sibling pane's mission must not change"
+        );
+        assert_eq!(
+            state.agents.swarm_default_mission, "auto",
+            "global default must stay untouched"
+        );
+    }
+
+    #[test]
+    fn fresh_pane_first_render_no_artifact_callout() {
+        // Documentary regression for the screenshot bug: a freshly-
+        // selected pane (no dispatch yet) must keep `has_run_mission`
+        // false, which the renderer uses to suppress artifact callouts.
+        let state = fixture_state_no_backend();
+        let pane = &state.multipane.as_ref().unwrap().panes[0];
+        assert!(!pane.has_run_mission);
+    }
+
+    #[test]
+    fn dispatch_sets_has_run_mission_true() {
+        let mut state = fixture_state_no_backend();
+        if let Some(p) = state.multipane.as_mut().unwrap().panes.get_mut(0) {
+            p.selected_agent_id = Some("claude-haiku-4-5#mp-pane-00".into());
+            p.agent_id = "claude-haiku-4-5#mp-pane-00".into();
+        }
+        let mut vitals = VitalsState::default();
+        let outcome = crate::multipane::dispatch::dispatch_pane_prompt(
+            &mut state,
+            &mut vitals,
+            None,
+            None,
+            0,
+            "ping".into(),
+        );
+        assert_eq!(
+            outcome,
+            crate::multipane::dispatch::DispatchOutcome::Dispatched
+        );
+        assert!(state.multipane.as_ref().unwrap().panes[0].has_run_mission);
     }
 }

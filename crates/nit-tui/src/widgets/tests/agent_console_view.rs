@@ -1546,3 +1546,32 @@ fn system_alert_long_message_wraps_within_pane_width() {
     // by an earlier-returning branch with empty `out`).
     assert!(rows.iter().any(|r| r.text.contains("Requested 1000")));
 }
+
+#[test]
+fn multipane_system_message_not_an_artifact_callout() {
+    // Reproduces the screenshot bug: a `multipane-system` roster
+    // acknowledgement carries an `agent_id`, which used to drag it
+    // through `artifacts_popup_ref_for_message` and emit a `(see
+    // ARTIFACTS)` callout before any mission had run. The kind-based
+    // filter inside `format_message_rows` keeps the row plain.
+    let state = test_state();
+    let msg = AgentMessage {
+        at: "t+1".into(),
+        channel: AgentChannel::Agent,
+        agent_id: Some("claude-haiku-4-5#mp-pane-00".into()),
+        mission_id: None,
+        text: "selected agent → claude-haiku-4-5#mp-pane-00".into(),
+        prompt_msg_idx: None,
+        kind: Some("multipane-system".into()),
+    };
+    let rows = format_message_rows(&state, None, &msg, 80);
+    assert!(
+        rows.iter()
+            .all(|row| !matches!(row.kind, ThreadRowKind::ArtifactLink)),
+        "system roster ack must not produce an artifact link"
+    );
+    assert!(
+        rows.iter().all(|row| !row.text.contains("(see ARTIFACTS)")),
+        "system roster ack must not get the (see ARTIFACTS) suffix"
+    );
+}
