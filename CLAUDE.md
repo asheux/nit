@@ -62,6 +62,7 @@ MSRV: Rust 1.88.0 (pinned in `rust-toolchain.toml`).
 | `NIT_GOL_IO_STACK_MB` | `256` | Stack size (MB) for snapshot-stress I/O threads (falls back to `NIT_GOL_STACK_MB`) |
 | `NIT_MCP_TURN_TIMEOUT_SECS` | none | Hard timeout for an MCP turn (0 or unset = no limit) |
 | `NIT_MCP_TURN_IDLE_TIMEOUT_SECS` | disabled | Idle timeout for an MCP turn (set to enable, e.g. `600`; 0 or unset = disabled) |
+| `NIT_CLAUDE_TURN_IDLE_TIMEOUT_SECS` | `900` (15 min) | Idle-output reaper for Claude turns. Kills the subprocess when no stream-json line has been read for N seconds and tries to recover the final message from buffered stream-json so the swarm can still proceed. **Only fires on read-only / verifier-style turns** — any turn that invokes a write-capable tool (Write/Edit/MultiEdit/NotebookEdit) is exempted on the assumption that writers are productive. Set to `0` to disable. The runner also exits early as soon as a stream-json `result` event is observed (regardless of writer status), even before this timeout fires. |
 
 ## Swarm size limits
 

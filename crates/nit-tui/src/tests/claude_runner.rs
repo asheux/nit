@@ -225,3 +225,71 @@ fn json_errors_cap_keeps_size_bounded() {
         &format!("err{}", JSON_ERRORS_CAP * 4 - 1)
     );
 }
+
+// --- idle-output reaper helpers --------------------------------------------
+
+#[test]
+fn is_stream_result_event_matches_only_result_type() {
+    let result = serde_json::json!({"type": "result", "result": "ok"});
+    let assistant = serde_json::json!({"type": "assistant", "message": {}});
+    let untyped = serde_json::json!({"foo": "bar"});
+    let wrong_kind = serde_json::json!({"type": 7});
+    assert!(is_stream_result_event(&result));
+    assert!(!is_stream_result_event(&assistant));
+    assert!(!is_stream_result_event(&untyped));
+    assert!(!is_stream_result_event(&wrong_kind));
+}
+
+// `claude_turn_idle_timeout` reads a process-wide env var, so these tests
+// must run serially (cargo runs `#[test]` items in parallel by default).
+// Bracketing the env var with set-then-remove around each assertion keeps
+// the polluted state contained; the `_lock` mutex serializes against
+// concurrent invocations of this single test entry.
+#[test]
+fn claude_turn_idle_timeout_env_parsing() {
+    use std::sync::Mutex;
+    static LOCK: Mutex<()> = Mutex::new(());
+    let _guard = LOCK.lock().unwrap();
+    const VAR: &str = "NIT_CLAUDE_TURN_IDLE_TIMEOUT_SECS";
+
+    // Snapshot whatever the caller had set so we can restore it.
+    let prior = std::env::var(VAR).ok();
+
+    // Unset → default-on at 15 min.
+    std::env::remove_var(VAR);
+    assert_eq!(
+        claude_turn_idle_timeout(),
+        Some(std::time::Duration::from_secs(15 * 60))
+    );
+
+    // Empty / whitespace → default.
+    std::env::set_var(VAR, "   ");
+    assert_eq!(
+        claude_turn_idle_timeout(),
+        Some(std::time::Duration::from_secs(15 * 60))
+    );
+
+    // "0" → explicit disable.
+    std::env::set_var(VAR, "0");
+    assert_eq!(claude_turn_idle_timeout(), None);
+
+    // Positive integer → that many seconds.
+    std::env::set_var(VAR, "300");
+    assert_eq!(
+        claude_turn_idle_timeout(),
+        Some(std::time::Duration::from_secs(300))
+    );
+
+    // Garbage → fall back to default rather than disabling.
+    std::env::set_var(VAR, "not-a-number");
+    assert_eq!(
+        claude_turn_idle_timeout(),
+        Some(std::time::Duration::from_secs(15 * 60))
+    );
+
+    // Restore caller's environment.
+    match prior {
+        Some(value) => std::env::set_var(VAR, value),
+        None => std::env::remove_var(VAR),
+    }
+}

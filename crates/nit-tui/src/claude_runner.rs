@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -438,10 +438,30 @@ fn run_turn(
         let _ = stdin.write_all(b"\n");
     }
 
+    // Shared liveness signals between the stdout reader and the wait loop.
+    // `last_stdout_at` advances on every successful line read so the wait
+    // loop can fire an idle reaper independent of the heartbeat clock.
+    // `result_seen` flips true when a stream-json `{"type":"result", ...}`
+    // event is observed, which lets the wait loop exit early once the
+    // model is done — even if the Claude CLI lingers waiting on its own
+    // backgrounded subshells.
+    // `turn_did_writes` flips true the first time the model invokes a
+    // write-capable tool (Write/Edit/MultiEdit/NotebookEdit). The idle
+    // reaper skips any turn that has done writes — a writer turn is
+    // presumed productive even during long stream silences (e.g.
+    // building a large file or running a verify gate after editing).
+    // Operators retain `/abort` for the rare case where a writer wedges.
+    let last_stdout_at = Arc::new(Mutex::new(Instant::now()));
+    let result_seen = Arc::new(AtomicBool::new(false));
+    let turn_did_writes = Arc::new(AtomicBool::new(false));
+
     let stdout_handle = child.stdout.take().map(|stdout| {
         let event_tx = event_tx.clone();
         let model = model.clone();
         let mission_id = mission_id.clone();
+        let last_stdout_at = Arc::clone(&last_stdout_at);
+        let result_seen = Arc::clone(&result_seen);
+        let turn_did_writes = Arc::clone(&turn_did_writes);
         thread::Builder::new()
             .name(format!("nit-claude-stdout-{seq}"))
             .spawn(move || {
@@ -456,6 +476,12 @@ fn run_turn(
                     match reader.read_line(&mut line) {
                         Ok(0) => break,
                         Ok(_) => {
+                            // Bump on every successful read so the wait
+                            // loop's idle reaper measures stream silence,
+                            // not heartbeat cadence.
+                            if let Ok(mut guard) = last_stdout_at.lock() {
+                                *guard = Instant::now();
+                            }
                             append_stdout_line_capped(&mut buf, line.as_bytes());
                             let raw = line.trim();
                             if raw.is_empty() {
@@ -468,6 +494,15 @@ fn run_turn(
                                 });
                                 continue;
                             };
+
+                            // Stream-json `result` is the canonical
+                            // end-of-turn marker. Flag it so the wait
+                            // loop can exit even if the Claude CLI is
+                            // still alive holding open backgrounded
+                            // subshells.
+                            if is_stream_result_event(&value) {
+                                result_seen.store(true, Ordering::Release);
+                            }
 
                             // Extract token usage from Claude stream-json events.
                             if let Some(token_count) = claude_token_count_from_value(&value) {
@@ -583,6 +618,12 @@ fn run_turn(
                                         if !is_write_tool {
                                             continue;
                                         }
+                                        // Flag the turn as a writer so the
+                                        // idle reaper skips it. Set this
+                                        // even if no `file_path` parses
+                                        // below — the model showed write
+                                        // intent, that's what matters.
+                                        turn_did_writes.store(true, Ordering::Release);
                                         for key in ["file_path", "path", "file"] {
                                             if let Some(p) = block
                                                 .get("input")
@@ -628,19 +669,42 @@ fn run_turn(
             .expect("spawn claude stderr reader")
     });
 
-    let mut killed = false;
+    let mut kill_reason: Option<TurnKillReason> = None;
     let mut last_heartbeat_at = Instant::now();
+    let idle_timeout = claude_turn_idle_timeout();
     let status = loop {
-        if !killed && last_heartbeat_at.elapsed() >= Duration::from_secs(2) {
+        if kill_reason.is_none() && last_heartbeat_at.elapsed() >= Duration::from_secs(2) {
             let _ = event_tx.send(AgentBusEvent::TurnHeartbeat {
                 agent_id: model.clone(),
                 mission_id: mission_id.clone(),
             });
             last_heartbeat_at = Instant::now();
         }
-        if cancel.load(Ordering::Relaxed) && !killed {
-            let _ = child.kill();
-            killed = true;
+        if kill_reason.is_none() {
+            if cancel.load(Ordering::Relaxed) {
+                let _ = child.kill();
+                kill_reason = Some(TurnKillReason::OperatorCancel);
+            } else if result_seen.load(Ordering::Acquire) {
+                // Model emitted its `result` event; the CLI may still
+                // be holding the session open on backgrounded subshells.
+                // Kill it so the gate report reaches nit immediately.
+                let _ = child.kill();
+                kill_reason = Some(TurnKillReason::ResultSeen);
+            } else if let Some(timeout) = idle_timeout {
+                // Skip writer turns: any turn that has invoked a
+                // write-capable tool is presumed productive even
+                // during long stream silences.
+                if !turn_did_writes.load(Ordering::Acquire) {
+                    let elapsed = last_stdout_at
+                        .lock()
+                        .map(|guard| guard.elapsed())
+                        .unwrap_or_else(|_| Duration::from_secs(0));
+                    if elapsed >= timeout {
+                        let _ = child.kill();
+                        kill_reason = Some(TurnKillReason::IdleTimeout);
+                    }
+                }
+            }
         }
         match child.try_wait() {
             Ok(Some(status)) => break status,
@@ -667,7 +731,7 @@ fn run_turn(
         .and_then(|handle| handle.join().ok())
         .unwrap_or_default();
 
-    if killed {
+    if kill_reason == Some(TurnKillReason::OperatorCancel) {
         let _ = std::fs::remove_file(&out_file);
         // Emit a TurnFailed so AppState releases this active turn. The
         // bus handler detects the OPERATOR_CANCEL_TURN_MESSAGE sentinel
@@ -683,6 +747,26 @@ fn run_turn(
         return;
     }
 
+    // Diagnostic for runner-driven kills so the operator can see why a
+    // turn ended early in the agent ops log.
+    if let Some(reason) = kill_reason {
+        let elapsed_secs = started_at.elapsed().as_secs();
+        let msg = match reason {
+            TurnKillReason::ResultSeen => format!(
+                "Claude turn closed after `result` event (Claude CLI was still alive after {elapsed_secs}s; killed to release the swarm)"
+            ),
+            TurnKillReason::IdleTimeout => format!(
+                "Claude turn killed by idle timeout after {}s of stream silence; attempting to recover the final message from buffered stream-json",
+                idle_timeout.map(|d| d.as_secs()).unwrap_or_default(),
+            ),
+            TurnKillReason::OperatorCancel => unreachable!(),
+        };
+        let _ = event_tx.send(AgentBusEvent::TurnLog {
+            agent_id: model.clone(),
+            message: msg,
+        });
+    }
+
     let stderr_text = String::from_utf8_lossy(&stderr);
     for line in stderr_text.lines() {
         let line = line.trim();
@@ -694,7 +778,11 @@ fn run_turn(
         }
     }
 
-    if !status.success() {
+    // Skip the subprocess-error path when WE killed the child — the
+    // non-zero status is from our `child.kill()`, not from Claude
+    // genuinely crashing.  The buffered stream-json still holds the
+    // model's final assistant message and can be extracted below.
+    if kill_reason.is_none() && !status.success() {
         // Persist raw stdout + stderr to a debug log so the failure can be
         // inspected even when the subprocess dies without emitting any JSON
         // error events or stderr text (e.g. fast-exit rate limit / resource
@@ -764,12 +852,19 @@ fn run_turn(
     if message.is_empty() {
         let session_id = extract_session_id_from_jsonl(&stdout);
         let token_count = extract_token_count_from_jsonl(&stdout);
+        let failure_message = match kill_reason {
+            Some(TurnKillReason::IdleTimeout) => format!(
+                "Claude turn killed by idle timeout after {}s of stream silence; no extractable result.",
+                idle_timeout.map(|d| d.as_secs()).unwrap_or_default(),
+            ),
+            _ => "Claude finished but produced an empty last message.".into(),
+        };
         let _ = event_tx.send(AgentBusEvent::TurnFailed {
             agent_id: model,
             mission_id,
             thread_id: session_id,
             token_count,
-            message: "Claude finished but produced an empty last message.".into(),
+            message: failure_message,
         });
         return;
     }
@@ -1086,6 +1181,58 @@ fn claude_token_count_from_value(value: &serde_json::Value) -> Option<AgentToken
         total_tokens: total as u32,
         context_window: context_window as u32,
     })
+}
+
+/// Why the runner killed the Claude subprocess before it exited on its own.
+/// Drives post-loop dispatch: operator cancel goes down the soft-cancel path,
+/// while runner-driven kills (`ResultSeen` / `IdleTimeout`) try to recover the
+/// final message from the buffered stream-json so the swarm can still proceed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TurnKillReason {
+    OperatorCancel,
+    ResultSeen,
+    IdleTimeout,
+}
+
+/// Idle-output reaper for stuck Claude turns. Mirrors `mcp_turn_idle_timeout`
+/// in `codex_runner.rs` but defaults to **on** at 15 minutes — Claude CLI can
+/// linger indefinitely waiting on backgrounded tool subshells even after the
+/// model has emitted its final `result` event, and there is no upstream
+/// reaper to catch that.
+///
+/// The reaper only fires on read-only / verifier-style turns: any turn that
+/// invokes a write-capable tool (Write/Edit/MultiEdit/NotebookEdit) is
+/// flagged as a writer and exempted, on the assumption that writers are
+/// productive even during long stream silences. Operators retain `/abort`
+/// for the rare case where a writer turn genuinely wedges.
+///
+/// - Unset env var → `Some(900s)` (default-on safety net).
+/// - Empty / unparseable value → `Some(900s)`.
+/// - `"0"` → `None` (explicit disable).
+/// - Positive integer → `Some(N seconds)`.
+fn claude_turn_idle_timeout() -> Option<Duration> {
+    const DEFAULT_IDLE_TIMEOUT_SECS: u64 = 15 * 60;
+    let default = Duration::from_secs(DEFAULT_IDLE_TIMEOUT_SECS);
+    match std::env::var("NIT_CLAUDE_TURN_IDLE_TIMEOUT_SECS") {
+        Ok(raw) => {
+            let raw = raw.trim();
+            if raw.is_empty() {
+                return Some(default);
+            }
+            match raw.parse::<u64>() {
+                Ok(0) => None,
+                Ok(secs) => Some(Duration::from_secs(secs)),
+                Err(_) => Some(default),
+            }
+        }
+        Err(_) => Some(default),
+    }
+}
+
+/// `true` when `value` is a Claude stream-json `{"type":"result", ...}`
+/// envelope — the canonical end-of-turn marker.
+fn is_stream_result_event(value: &serde_json::Value) -> bool {
+    value.get("type").and_then(|v| v.as_str()) == Some("result")
 }
 
 #[cfg(test)]
