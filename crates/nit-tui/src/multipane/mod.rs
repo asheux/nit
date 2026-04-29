@@ -7,6 +7,8 @@
 //! single-app `run_loop` is never entered in multipane mode.
 
 pub mod agent_id;
+pub mod dir_search;
+pub mod dir_search_runner;
 pub mod dispatch;
 pub mod focus;
 pub mod grid;

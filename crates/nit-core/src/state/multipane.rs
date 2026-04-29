@@ -39,14 +39,9 @@ pub struct PaneSession {
     /// pane. Clamped each render to `total_rows.saturating_sub(height)`.
     #[serde(default)]
     pub roster_scroll: usize,
-    /// Backend groups expanded in this pane's roster. Pane-local so panes
-    /// can show different families without bleeding selection into each
-    /// other or into Agent OPS.
-    #[serde(skip)]
-    pub roster_expanded_backends: HashSet<AgentLaneKind>,
     /// Per-pane set of agent ids whose Size/Role tree branches are
-    /// collapsed. Pane-local for the same reason as
-    /// `roster_expanded_backends`.
+    /// collapsed. Pane-local so panes can show different folds without
+    /// bleeding into each other or into Agent OPS.
     #[serde(skip)]
     pub roster_collapsed_agent_ids: HashSet<String>,
     /// Selected leaf inside the focused agent's Size/Role tree. `None`
@@ -139,7 +134,6 @@ impl Default for PaneSession {
             mission_id: None,
             roster_cursor: 0,
             roster_scroll: 0,
-            roster_expanded_backends: HashSet::new(),
             roster_collapsed_agent_ids: HashSet::new(),
             roster_tree_selected: None,
             chat_thread_scroll: 0,
@@ -155,8 +149,10 @@ impl Default for PaneSession {
     }
 }
 
-/// Directory-search overlay carried by an active pane. Stubbed for Phase
-/// 1–3; populated and rendered in Phase 4.
+/// Directory-search overlay carried by an active pane. The runner
+/// matches `generation` on inbound results so a stale walk can never
+/// overwrite a newer query; `show_hidden` flips the `f` toggle from
+/// the search bar.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct DirSearchState {
     pub query: String,
@@ -164,6 +160,10 @@ pub struct DirSearchState {
     pub results: Vec<PathBuf>,
     pub selected: usize,
     pub base: PathBuf,
+    #[serde(default)]
+    pub generation: u64,
+    #[serde(default)]
+    pub show_hidden: bool,
 }
 
 /// Top-level state for the multipane launch mode. When `AppState.multipane`
@@ -229,7 +229,6 @@ mod tests {
         assert!(pane.selected_agent_id.is_none());
         assert_eq!(pane.roster_cursor, 0);
         assert_eq!(pane.roster_scroll, 0);
-        assert!(pane.roster_expanded_backends.is_empty());
         assert!(pane.roster_collapsed_agent_ids.is_empty());
         assert!(pane.roster_tree_selected.is_none());
         assert_eq!(pane.chat_thread_scroll, 0);
@@ -238,6 +237,16 @@ mod tests {
         assert!(!pane.has_run_mission);
         assert!(pane.selected_effort.is_empty());
         assert!(pane.selection.is_none());
+    }
+
+    #[test]
+    fn dir_search_state_default_zeroes_generation_and_hidden() {
+        let s = DirSearchState::default();
+        assert_eq!(s.generation, 0);
+        assert!(!s.show_hidden);
+        assert!(s.query.is_empty());
+        assert_eq!(s.selected, 0);
+        assert!(s.results.is_empty());
     }
 
     #[test]

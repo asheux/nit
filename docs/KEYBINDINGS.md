@@ -257,4 +257,10 @@
 - Esc Esc within ~500ms: Cancel focused pane
 - Backspace / Left / Right / Home / End / printable chars: Edit focused pane's chat input
 - Up / Down: Walk focused pane's prompt history
+- Ctrl+/ (or F2 fallback): Toggle the per-pane dir-search overlay; some terminals (default macOS Terminal.app) drop Ctrl+/ — use F2 there
+- (in dir search) Up / Down: Move selection within the 10-row results dropdown
+- (in dir search) Enter: Commit — set the focused pane's cwd to the chosen directory and push a `cwd → /new/path` system alert
+- (in dir search) Esc: Close the dir-search overlay (chat input buffer is preserved); a second Esc within ~500 ms still aborts the focused pane
+- (in dir search) Alt+f: Toggle "show hidden directories" (`.git`, `.cache`, etc.) for the current overlay
+- (in dir search) Tab / Shift+Tab: Switch pane focus and close the overlay (re-open in the new pane with Ctrl+/ or F2)
 - Editor / file-tree / visualizer / agent-ops keys: No-op in multipane mode (use plain `nit` for those)

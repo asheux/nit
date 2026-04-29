@@ -120,9 +120,7 @@ pub fn compute_rows(
 
     for (kind, lanes) in groups {
         rows.push(PaneRosterRow::Backend { kind });
-        let backend_expanded = pane.roster_expanded_backends.contains(&kind)
-            || pane.auto_expanded_backend == Some(kind);
-        if !backend_expanded {
+        if pane.auto_expanded_backend != Some(kind) {
             continue;
         }
         for lane in lanes {
@@ -358,7 +356,7 @@ fn backend_line(
     highlight: bool,
     theme: &Theme,
 ) -> Line<'static> {
-    let expanded = pane.roster_expanded_backends.contains(&kind);
+    let expanded = pane.auto_expanded_backend == Some(kind);
     let chevron = if expanded { '▾' } else { '▸' };
     let marker = if highlight { '➜' } else { ' ' };
     let label = backend_label(kind);
@@ -624,14 +622,6 @@ pub fn toggle_size_leaf(
     true
 }
 
-/// Toggle the expand state of `kind` in the focused pane's roster. Used
-/// by the Backend row and the Backend chevron click.
-pub fn toggle_backend_expansion(pane: &mut PaneSession, kind: AgentLaneKind) {
-    if !pane.roster_expanded_backends.insert(kind) {
-        pane.roster_expanded_backends.remove(&kind);
-    }
-}
-
 /// Toggle the per-agent tree collapse for `agent_id`. Used by the
 /// SizeBranch row (Enter / click).
 pub fn toggle_agent_tree_collapse(pane: &mut PaneSession, agent_id: &str) {
@@ -745,21 +735,17 @@ mod tests {
         state
     }
 
-    fn pane_with_expansions(expand: &[AgentLaneKind], collapse: &[&str]) -> PaneSession {
-        let mut pane = PaneSession::default();
-        for k in expand {
-            pane.roster_expanded_backends.insert(*k);
-        }
-        for id in collapse {
-            pane.roster_collapsed_agent_ids.insert((*id).into());
-        }
-        pane
-    }
-
     fn pane_auto_expanded(kind: AgentLaneKind, agent_id: &str) -> PaneSession {
         PaneSession {
             auto_expanded_backend: Some(kind),
             auto_expanded_agent: Some(agent_id.to_string()),
+            ..PaneSession::default()
+        }
+    }
+
+    fn pane_auto_backend(kind: AgentLaneKind) -> PaneSession {
+        PaneSession {
+            auto_expanded_backend: Some(kind),
             ..PaneSession::default()
         }
     }
@@ -852,7 +838,11 @@ mod tests {
     #[test]
     fn compute_rows_collapsed_agent_skips_size_leaves() {
         let state = fixture_state();
-        let pane = pane_with_expansions(&[AgentLaneKind::Codex], &["gpt-5"]);
+        // Cursor on the agent (auto_expanded_agent latches), but the
+        // operator has explicitly collapsed the Size branch — leaves
+        // must stay hidden.
+        let mut pane = pane_auto_expanded(AgentLaneKind::Codex, "gpt-5");
+        pane.roster_collapsed_agent_ids.insert("gpt-5".into());
         let rows = compute_rows(&state, &pane, None);
         let leaf_count = rows
             .iter()
@@ -873,7 +863,7 @@ mod tests {
     #[test]
     fn cursor_for_row_index_skips_non_selectable() {
         let state = fixture_state();
-        let pane = pane_with_expansions(&[AgentLaneKind::Codex], &[]);
+        let pane = pane_auto_backend(AgentLaneKind::Codex);
         let rows = compute_rows(&state, &pane, None);
         // Find the Agent { gpt-5 } row.
         let target_idx = rows
@@ -963,19 +953,6 @@ mod tests {
         let panes = &state.multipane.as_ref().unwrap().panes;
         assert_eq!(panes[0].selected_effort.get("gpt-5"), Some(&"low".into()));
         assert_eq!(panes[1].selected_effort.get("gpt-5"), Some(&"high".into()));
-    }
-
-    #[test]
-    fn toggle_backend_expansion_round_trips() {
-        let mut pane = PaneSession::default();
-        toggle_backend_expansion(&mut pane, AgentLaneKind::Codex);
-        assert!(pane
-            .roster_expanded_backends
-            .contains(&AgentLaneKind::Codex));
-        toggle_backend_expansion(&mut pane, AgentLaneKind::Codex);
-        assert!(!pane
-            .roster_expanded_backends
-            .contains(&AgentLaneKind::Codex));
     }
 
     #[test]

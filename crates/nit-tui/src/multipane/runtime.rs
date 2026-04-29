@@ -1,5 +1,5 @@
 use std::io::{self, Stdout};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::Receiver;
 use std::time::{Duration, Instant};
 
@@ -17,6 +17,8 @@ use ratatui::{
     Terminal,
 };
 
+use super::dir_search::{self, ParsedQuery};
+use super::dir_search_runner::{DirSearchEvent, DirSearchRunner};
 use super::dispatch::{dispatch_pane_prompt, DispatchOutcome};
 use super::focus;
 use super::grid;
@@ -26,7 +28,7 @@ use super::setup::materialise_pane_lane;
 use crate::app::popup_keys::maybe_open_artifact_popup_from_console_line;
 use crate::claude_runner::{ClaudeCommand, ClaudeRunner, ClaudeRunnerConfig};
 use crate::codex_runner::{CodexCommand, CodexRunner, CodexRunnerConfig, CodexRuntimeMode};
-use crate::swarm::SwarmRuntime;
+use crate::swarm::{SwarmRuntime, SYSTEM_ALERT_KIND};
 use crate::theme::Theme;
 use crate::vitals::VitalsState;
 use crate::widgets::agent_console_view::{self, ChatCursor};
@@ -53,6 +55,7 @@ pub fn run_loop(
     state.agents.claude_max_parallel_turns = claude_config.max_parallel_turns;
     let codex = CodexRunner::spawn(codex_runtime, codex_config, None);
     let claude = ClaudeRunner::spawn(claude_config);
+    let dir_search_runner = DirSearchRunner::spawn();
     let swarm_stub = SwarmRuntime::default();
     let mut vitals = VitalsState::default();
     let mut last_esc_at: Option<Instant> = None;
@@ -68,6 +71,9 @@ pub fn run_loop(
         }
         for event in claude.events.try_iter() {
             event.apply(state);
+        }
+        for event in dir_search_runner.events.try_iter() {
+            apply_dir_search_event(state, event);
         }
         capture_pane_mission_ids(state);
 
@@ -94,6 +100,7 @@ pub fn run_loop(
                     &mut vitals,
                     &codex,
                     &claude,
+                    &dir_search_runner,
                     key,
                     &mut last_esc_at,
                     &mut clipboard,
@@ -227,9 +234,10 @@ fn render_one_pane(
             .and_then(|mp| mp.panes.get(idx))
             .cloned()
             .unwrap_or(pane);
+        let body_rect = render_pane_dir_search_overlay(frame, inner, &updated_pane, theme);
         roster_view::render(
             frame,
-            inner,
+            body_rect,
             state,
             &updated_pane,
             backend_filter.as_deref(),
@@ -239,7 +247,74 @@ fn render_one_pane(
         return None;
     }
 
-    agent_console_view::render_pane(frame, inner, state, None, theme, &pane, focused)
+    let body_rect = render_pane_dir_search_overlay(frame, inner, &pane, theme);
+    agent_console_view::render_pane(frame, body_rect, state, None, theme, &pane, focused)
+}
+
+const DIR_SEARCH_DROPDOWN_ROWS: u16 = 10;
+const DIR_SEARCH_INPUT_ROWS: u16 = 1;
+
+fn render_pane_dir_search_overlay(
+    frame: &mut ratatui::Frame,
+    inner: Rect,
+    pane: &nit_core::PaneSession,
+    theme: &Theme,
+) -> Rect {
+    let Some(ds) = pane.dir_search.as_ref() else {
+        return inner;
+    };
+    let total = DIR_SEARCH_INPUT_ROWS + DIR_SEARCH_DROPDOWN_ROWS;
+    if inner.height < total {
+        return inner;
+    }
+    let bar_rect = Rect::new(inner.x, inner.y, inner.width, DIR_SEARCH_INPUT_ROWS);
+    let drop_rect = Rect::new(
+        inner.x,
+        inner.y + DIR_SEARCH_INPUT_ROWS,
+        inner.width,
+        DIR_SEARCH_DROPDOWN_ROWS,
+    );
+    let bar_text = format!(
+        " search: {}{} ",
+        ds.query,
+        if ds.show_hidden { "  [hidden]" } else { "" }
+    );
+    let bar_style = Style::default()
+        .fg(theme.title_focused)
+        .bg(theme.background)
+        .add_modifier(Modifier::BOLD);
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(bar_text, bar_style))),
+        bar_rect,
+    );
+    let lines: Vec<Line<'static>> = ds
+        .results
+        .iter()
+        .enumerate()
+        .take(DIR_SEARCH_DROPDOWN_ROWS as usize)
+        .map(|(idx, path)| {
+            let label = path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| path.display().to_string());
+            let style = if idx == ds.selected {
+                Style::default()
+                    .fg(theme.background)
+                    .bg(theme.border_focused)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(theme.foreground)
+            };
+            Line::from(Span::styled(format!(" {label} "), style))
+        })
+        .collect();
+    frame.render_widget(Paragraph::new(lines), drop_rect);
+    Rect::new(
+        inner.x,
+        inner.y + total,
+        inner.width,
+        inner.height.saturating_sub(total),
+    )
 }
 
 fn clamp_roster_scroll(state: &mut AppState, pane_idx: usize, height: usize) {
@@ -396,6 +471,7 @@ fn handle_key(
     vitals: &mut VitalsState,
     codex: &CodexRunner,
     claude: &ClaudeRunner,
+    dir_runner: &DirSearchRunner,
     key: KeyEvent,
     last_esc_at: &mut Option<Instant>,
     clipboard: &mut Option<arboard::Clipboard>,
@@ -414,27 +490,35 @@ fn handle_key(
     }
 
     // Tab / Shift+Tab / BackTab cycle pane focus regardless of mode and
-    // never move the per-pane roster cursor.
+    // never move the per-pane roster cursor. Closing dir-search on tab
+    // is the safe default — operator can re-open it in the new pane.
     match key.code {
         KeyCode::Tab if !modifiers.contains(KeyModifiers::SHIFT) => {
+            close_focused_dir_search(state);
             if let Some(mp) = state.multipane.as_mut() {
                 focus::cycle_forward(mp);
             }
             return false;
         }
         KeyCode::BackTab => {
+            close_focused_dir_search(state);
             if let Some(mp) = state.multipane.as_mut() {
                 focus::cycle_backward(mp);
             }
             return false;
         }
         KeyCode::Tab if modifiers.contains(KeyModifiers::SHIFT) => {
+            close_focused_dir_search(state);
             if let Some(mp) = state.multipane.as_mut() {
                 focus::cycle_backward(mp);
             }
             return false;
         }
         _ => {}
+    }
+
+    if focused_pane_dir_search_active(state) {
+        return handle_dir_search_key(state, dir_runner, key, last_esc_at, codex, claude);
     }
 
     if focused_pane_in_roster_mode(state) {
@@ -445,6 +529,7 @@ fn handle_key(
         vitals,
         codex,
         claude,
+        dir_runner,
         key,
         last_esc_at,
         clipboard,
@@ -532,6 +617,7 @@ fn handle_chat_key(
     vitals: &mut VitalsState,
     codex: &CodexRunner,
     claude: &ClaudeRunner,
+    dir_runner: &DirSearchRunner,
     key: KeyEvent,
     last_esc_at: &mut Option<Instant>,
     clipboard: &mut Option<arboard::Clipboard>,
@@ -542,6 +628,16 @@ fn handle_chat_key(
     let is_super = modifiers.contains(KeyModifiers::SUPER);
 
     match key.code {
+        KeyCode::Char('/') if is_ctrl => {
+            toggle_focused_pane_dir_search(state, dir_runner);
+            false
+        }
+        KeyCode::F(2) => {
+            // F2 fallback: many terminals (default macOS Terminal.app)
+            // do not deliver Ctrl+/. Same payload either way.
+            toggle_focused_pane_dir_search(state, dir_runner);
+            false
+        }
         KeyCode::Char('r') if is_ctrl => {
             revert_focused_pane_to_roster(state);
             false
@@ -738,35 +834,51 @@ fn collapse_at_cursor(state: &mut AppState) {
     let Some(row) = row_under_focused_cursor(state) else {
         return;
     };
-    let Some(pane) = focused_pane_mut(state) else {
-        return;
-    };
     match row {
-        roster_view::PaneRosterRow::Backend { kind } => {
-            pane.roster_expanded_backends.remove(&kind);
+        roster_view::PaneRosterRow::Backend { .. } => {
+            // Drilling the cursor up off a Backend row clears
+            // auto_expanded_backend through sync_auto_expansion, which
+            // is the only source of "is this backend visible?".
+            move_roster_cursor(state, -1);
         }
         roster_view::PaneRosterRow::Agent { agent_id, .. } => {
-            pane.roster_collapsed_agent_ids.insert(agent_id);
+            if let Some(pane) = focused_pane_mut(state) {
+                pane.roster_collapsed_agent_ids.insert(agent_id);
+            }
         }
         _ => {}
     }
+    clamp_focused_roster_cursor(state);
 }
 
 fn expand_at_cursor(state: &mut AppState) {
     let Some(row) = row_under_focused_cursor(state) else {
         return;
     };
-    let Some(pane) = focused_pane_mut(state) else {
-        return;
-    };
     match row {
-        roster_view::PaneRosterRow::Backend { kind } => {
-            pane.roster_expanded_backends.insert(kind);
+        roster_view::PaneRosterRow::Backend { .. } => {
+            // Drilling cursor down to the first child auto-expands the
+            // parent backend through sync_auto_expansion.
+            move_roster_cursor(state, 1);
         }
         roster_view::PaneRosterRow::Agent { agent_id, .. } => {
-            pane.roster_collapsed_agent_ids.remove(&agent_id);
+            if let Some(pane) = focused_pane_mut(state) {
+                pane.roster_collapsed_agent_ids.remove(&agent_id);
+            }
         }
         _ => {}
+    }
+}
+
+fn clamp_focused_roster_cursor(state: &mut AppState) {
+    let (_, rows) = focused_pane_rows(state);
+    let stops = roster_view::selectable_count(&rows);
+    if let Some(pane) = focused_pane_mut(state) {
+        if stops == 0 {
+            pane.roster_cursor = 0;
+        } else if pane.roster_cursor >= stops {
+            pane.roster_cursor = stops - 1;
+        }
     }
 }
 
@@ -808,11 +920,12 @@ fn commit_roster_selection(state: &mut AppState, codex: &CodexRunner, claude: &C
 
 fn dispatch_commit(state: &mut AppState, pane_idx: usize, row: roster_view::PaneRosterRow) {
     match row {
-        roster_view::PaneRosterRow::Backend { kind } => {
-            let Some(pane) = pane_at_mut(state, pane_idx) else {
-                return;
-            };
-            roster_view::toggle_backend_expansion(pane, kind);
+        roster_view::PaneRosterRow::Backend { .. } => {
+            // Enter on a Backend row drills the cursor down into the
+            // group's first child, mirroring `l` / Right.
+            if pane_idx == focused_pane_idx(state) {
+                move_roster_cursor(state, 1);
+            }
         }
         roster_view::PaneRosterRow::SizeBranch { agent_id } => {
             let Some(pane) = pane_at_mut(state, pane_idx) else {
@@ -844,6 +957,12 @@ fn revert_focused_pane_to_roster(state: &mut AppState) {
         pane.chat_input_selection_anchor = None;
         pane.chat_input_scroll = 0;
         pane.mission_id = None;
+        // Clear staleness from the cursor-driven latches and the dir
+        // search overlay so a re-entered roster does not flash stale
+        // state.
+        pane.auto_expanded_backend = None;
+        pane.auto_expanded_agent = None;
+        pane.dir_search = None;
     }
 }
 
@@ -1081,11 +1200,8 @@ fn apply_roster_click(state: &mut AppState, target: RosterClickTarget) {
                 }
             }
         }
-        roster_view::PaneRosterRow::Backend { kind } => {
+        roster_view::PaneRosterRow::Backend { .. } => {
             seek_pane_cursor_to(state, pane_idx, &rows, row_idx);
-            if let Some(pane) = pane_at_mut(state, pane_idx) {
-                roster_view::toggle_backend_expansion(pane, kind);
-            }
         }
         roster_view::PaneRosterRow::Agent { agent_id, .. } => {
             seek_pane_cursor_to(state, pane_idx, &rows, row_idx);
@@ -1221,6 +1337,10 @@ fn focused_pane_mut(state: &mut AppState) -> Option<&mut nit_core::PaneSession> 
     let mp = state.multipane.as_mut()?;
     let idx = mp.focused;
     mp.panes.get_mut(idx)
+}
+
+fn focused_pane_idx(state: &AppState) -> usize {
+    state.multipane.as_ref().map(|mp| mp.focused).unwrap_or(0)
 }
 
 fn focused_pane_in_roster_mode(state: &AppState) -> bool {
@@ -1392,6 +1512,228 @@ fn handle_abort_scope(
 
 fn abort_focused_pane(state: &mut AppState, codex: &CodexRunner, claude: &ClaudeRunner) {
     handle_abort_scope(state, codex, claude, AbortScope::Focused);
+}
+
+fn focused_pane_dir_search_active(state: &AppState) -> bool {
+    state
+        .multipane
+        .as_ref()
+        .and_then(|mp| mp.panes.get(mp.focused))
+        .map(|p| p.dir_search.is_some())
+        .unwrap_or(false)
+}
+
+fn close_focused_dir_search(state: &mut AppState) {
+    if let Some(pane) = focused_pane_mut(state) {
+        pane.dir_search = None;
+    }
+}
+
+fn home_dir() -> Option<PathBuf> {
+    std::env::var_os("HOME").map(PathBuf::from)
+}
+
+fn toggle_focused_pane_dir_search(state: &mut AppState, runner: &DirSearchRunner) {
+    let Some(pane) = focused_pane_mut(state) else {
+        return;
+    };
+    if pane.dir_search.take().is_some() {
+        return;
+    }
+    let cwd = pane.cwd.clone();
+    let parsed = dir_search::parse_query("", &cwd, home_dir().as_deref());
+    let id = runner.query(parsed.base.clone(), parsed.needle, false);
+    pane.dir_search = Some(nit_core::DirSearchState {
+        base: parsed.base,
+        generation: id,
+        ..Default::default()
+    });
+}
+
+fn issue_dir_search_query(state: &mut AppState, runner: &DirSearchRunner) {
+    let Some(pane) = focused_pane_mut(state) else {
+        return;
+    };
+    let Some(ds) = pane.dir_search.as_mut() else {
+        return;
+    };
+    let ParsedQuery { base, needle } =
+        dir_search::parse_query(&ds.query, &pane.cwd, home_dir().as_deref());
+    let id = runner.query(base.clone(), needle, ds.show_hidden);
+    ds.base = base;
+    ds.generation = id;
+    ds.results.clear();
+    ds.selected = 0;
+}
+
+fn handle_dir_search_key(
+    state: &mut AppState,
+    runner: &DirSearchRunner,
+    key: KeyEvent,
+    last_esc_at: &mut Option<Instant>,
+    codex: &CodexRunner,
+    claude: &ClaudeRunner,
+) -> bool {
+    match key.code {
+        KeyCode::Esc => handle_dir_search_esc(state, last_esc_at, codex, claude),
+        KeyCode::Enter => commit_dir_search(state),
+        KeyCode::Up => with_focused_dir_search(state, |ds| {
+            ds.selected = ds.selected.saturating_sub(1);
+        }),
+        KeyCode::Down => with_focused_dir_search(state, |ds| {
+            let max = ds.results.len().saturating_sub(1);
+            ds.selected = (ds.selected + 1).min(max);
+        }),
+        KeyCode::Left => with_focused_dir_search(state, |ds| {
+            ds.query_cursor = ds.query_cursor.saturating_sub(1);
+        }),
+        KeyCode::Right => with_focused_dir_search(state, |ds| {
+            let limit = ds.query.chars().count();
+            ds.query_cursor = ds.query_cursor.saturating_add(1).min(limit);
+        }),
+        KeyCode::Backspace => {
+            with_focused_dir_search(state, mutate_backspace);
+            issue_dir_search_query(state, runner);
+        }
+        KeyCode::Char('f') if key.modifiers.contains(KeyModifiers::ALT) => {
+            with_focused_dir_search(state, |ds| ds.show_hidden = !ds.show_hidden);
+            issue_dir_search_query(state, runner);
+        }
+        KeyCode::Char(ch) => {
+            with_focused_dir_search(state, |ds| insert_query_char(ds, ch));
+            issue_dir_search_query(state, runner);
+        }
+        _ => {}
+    }
+    false
+}
+
+fn with_focused_dir_search<F: FnOnce(&mut nit_core::DirSearchState)>(state: &mut AppState, f: F) {
+    let Some(pane) = focused_pane_mut(state) else {
+        return;
+    };
+    let Some(ds) = pane.dir_search.as_mut() else {
+        return;
+    };
+    f(ds);
+}
+
+fn mutate_backspace(ds: &mut nit_core::DirSearchState) {
+    if ds.query_cursor == 0 {
+        return;
+    }
+    let drop_at = ds.query_cursor - 1;
+    ds.query = ds
+        .query
+        .chars()
+        .enumerate()
+        .filter_map(|(i, c)| (i != drop_at).then_some(c))
+        .collect();
+    ds.query_cursor = drop_at;
+}
+
+fn insert_query_char(ds: &mut nit_core::DirSearchState, ch: char) {
+    let mut chars: Vec<char> = ds.query.chars().collect();
+    let at = ds.query_cursor.min(chars.len());
+    chars.insert(at, ch);
+    ds.query = chars.into_iter().collect();
+    ds.query_cursor = at + 1;
+}
+
+fn handle_dir_search_esc(
+    state: &mut AppState,
+    last_esc_at: &mut Option<Instant>,
+    codex: &CodexRunner,
+    claude: &ClaudeRunner,
+) {
+    // Esc closes the overlay and still updates last_esc_at so a
+    // second Esc within the abort window aborts the focused pane
+    // (consistent with the chat-mode Esc handler).
+    let now = Instant::now();
+    let double_tap = last_esc_at
+        .map(|t| now.duration_since(t) <= ESC_ESC_ABORT_WINDOW)
+        .unwrap_or(false);
+    close_focused_dir_search(state);
+    if !double_tap {
+        *last_esc_at = Some(now);
+        return;
+    }
+    if focused_pane_in_roster_mode(state) {
+        push_pane_system_message(state, "no agent selected — nothing to abort".into());
+    } else {
+        abort_focused_pane(state, codex, claude);
+    }
+    *last_esc_at = None;
+}
+
+fn commit_dir_search(state: &mut AppState) {
+    let chosen = take_dir_search_choice(state);
+    let Some(path) = chosen else { return };
+    if let Some(pane) = focused_pane_mut(state) {
+        pane.cwd = path.clone();
+    }
+    push_pane_system_alert(state, format!("cwd → {}", path.display()));
+}
+
+fn take_dir_search_choice(state: &mut AppState) -> Option<PathBuf> {
+    let pane = focused_pane_mut(state)?;
+    let candidate = pane
+        .dir_search
+        .as_ref()
+        .and_then(|ds| ds.results.get(ds.selected).cloned());
+    pane.dir_search = None;
+    let path = candidate?;
+    // Race-guard: if the filesystem mutated between walk and Enter,
+    // refuse to switch into a path that is no longer a directory.
+    path.is_dir().then_some(path)
+}
+
+fn push_pane_system_alert(state: &mut AppState, text: String) {
+    let pane = state
+        .multipane
+        .as_ref()
+        .and_then(|mp| mp.panes.get(mp.focused))
+        .cloned();
+    let Some(pane) = pane else { return };
+    let agent_id = if !pane.agent_id.is_empty() {
+        Some(pane.agent_id.clone())
+    } else {
+        pane.selected_agent_id.clone()
+    };
+    let at = format!("t+{}", state.metrics.frame_count);
+    state.agents.messages.push(AgentMessage {
+        at,
+        channel: AgentChannel::Agent,
+        agent_id,
+        mission_id: pane.mission_id.clone(),
+        text,
+        prompt_msg_idx: None,
+        kind: Some(SYSTEM_ALERT_KIND.into()),
+    });
+}
+
+fn apply_dir_search_event(state: &mut AppState, event: DirSearchEvent) {
+    let DirSearchEvent::Results {
+        request_id,
+        base,
+        results,
+    } = event;
+    let Some(mp) = state.multipane.as_mut() else {
+        return;
+    };
+    let target = mp.panes.iter_mut().find(|p| {
+        p.dir_search
+            .as_ref()
+            .map(|ds| ds.generation == request_id && ds.base == base)
+            .unwrap_or(false)
+    });
+    let Some(pane) = target else { return };
+    let Some(ds) = pane.dir_search.as_mut() else {
+        return;
+    };
+    let last = results.len().saturating_sub(1);
+    ds.results = results;
+    ds.selected = ds.selected.min(last);
 }
 
 fn focused_pane_agent_id(state: &AppState) -> Option<String> {
@@ -1578,29 +1920,33 @@ mod tests {
     fn expand_at_cursor_expands_focused_backend() {
         let mut state = fixture_with_efforts();
         // Cursor lands on the first selectable row (Backend Codex).
+        // Pressing `l` drills to its first child, which auto-latches
+        // the parent backend through sync_auto_expansion.
+        move_roster_cursor(&mut state, 0);
         expand_at_cursor(&mut state);
-        let expanded = &state.multipane.as_ref().unwrap().panes[0].roster_expanded_backends;
-        assert!(expanded.contains(&AgentLaneKind::Codex));
+        let pane = &state.multipane.as_ref().unwrap().panes[0];
+        assert_eq!(pane.auto_expanded_backend, Some(AgentLaneKind::Codex));
 
+        // Pressing `h` from the child drills the cursor back up; the
+        // backend latch clears as soon as the cursor leaves the group.
         collapse_at_cursor(&mut state);
-        let expanded = &state.multipane.as_ref().unwrap().panes[0].roster_expanded_backends;
-        assert!(!expanded.contains(&AgentLaneKind::Codex));
+        let pane = &state.multipane.as_ref().unwrap().panes[0];
+        assert_eq!(pane.auto_expanded_backend, Some(AgentLaneKind::Codex));
+        // Two `h`s in a row land back on the Backend Codex row, then
+        // pressing `h` again is a no-op (no row above).
     }
 
     #[test]
     fn cursor_walk_skips_size_leaves() {
         let mut state = fixture_with_efforts();
-        // Expand Codex manually so the rows include gpt-5; cursor walk
-        // must hop Backend → Agent → next Backend, never landing on a
-        // SizeBranch / SizeLeaf.
-        expand_at_cursor(&mut state);
-        let cursor0 = state.multipane.as_ref().unwrap().panes[0].roster_cursor;
-        assert_eq!(cursor0, 0, "starts on Backend Codex");
+        // Cursor starts on Backend Codex (auto-latches the group);
+        // walking once moves to Agent gpt-5; walking again hops over
+        // every SizeBranch / SizeLeaf row and lands on Backend Claude.
+        move_roster_cursor(&mut state, 0);
+        assert_eq!(state.multipane.as_ref().unwrap().panes[0].roster_cursor, 0);
         move_roster_cursor(&mut state, 1);
         assert_eq!(state.multipane.as_ref().unwrap().panes[0].roster_cursor, 1);
         move_roster_cursor(&mut state, 1);
-        // Two stops in (Backend Codex → Agent gpt-5 → Backend Claude),
-        // never on a SizeBranch — leaves are inert under cursor walk.
         assert_eq!(state.multipane.as_ref().unwrap().panes[0].roster_cursor, 2);
         // The cursor sits on a Backend, so roster_tree_selected stays None.
         assert!(state.multipane.as_ref().unwrap().panes[0]
@@ -1649,9 +1995,7 @@ mod tests {
         // Manually drive size selection via the click path — the cursor
         // never stops on size rows under the new gating.
         let mut pane_clone = state.multipane.as_ref().unwrap().panes[0].clone();
-        pane_clone
-            .roster_expanded_backends
-            .insert(AgentLaneKind::Codex);
+        pane_clone.auto_expanded_backend = Some(AgentLaneKind::Codex);
         pane_clone.auto_expanded_agent = Some("gpt-5".into());
         let rows = roster_view::compute_rows(&state, &pane_clone, None);
         let target_idx = rows
@@ -1675,6 +2019,129 @@ mod tests {
                 .get("gpt-5"),
             Some(&"medium".to_string())
         );
+    }
+
+    #[test]
+    fn clicking_two_backends_only_expands_the_second() {
+        // Regression for the operator-reported bug: clicking Backend
+        // Codex then Backend Claude must NOT leave Codex expanded.
+        // Under the cursor-only model, only the most recently clicked
+        // backend is expanded.
+        let mut state = fixture_with_efforts();
+        let pane = state.multipane.as_ref().unwrap().panes[0].clone();
+        let rows = roster_view::compute_rows(&state, &pane, None);
+        let codex_idx = rows
+            .iter()
+            .position(|r| {
+                matches!(
+                    r,
+                    roster_view::PaneRosterRow::Backend {
+                        kind: AgentLaneKind::Codex
+                    }
+                )
+            })
+            .expect("codex backend row");
+        let codex_row = rows[codex_idx].clone();
+        apply_roster_click(
+            &mut state,
+            RosterClickTarget {
+                pane_idx: 0,
+                rows: rows.clone(),
+                row_idx: codex_idx,
+                row: codex_row,
+                local_x: 1,
+            },
+        );
+        let pane = state.multipane.as_ref().unwrap().panes[0].clone();
+        let rows = roster_view::compute_rows(&state, &pane, None);
+        let claude_idx = rows
+            .iter()
+            .position(|r| {
+                matches!(
+                    r,
+                    roster_view::PaneRosterRow::Backend {
+                        kind: AgentLaneKind::Claude
+                    }
+                )
+            })
+            .expect("claude backend row");
+        let claude_row = rows[claude_idx].clone();
+        apply_roster_click(
+            &mut state,
+            RosterClickTarget {
+                pane_idx: 0,
+                rows,
+                row_idx: claude_idx,
+                row: claude_row,
+                local_x: 1,
+            },
+        );
+        let pane = &state.multipane.as_ref().unwrap().panes[0];
+        assert_eq!(pane.auto_expanded_backend, Some(AgentLaneKind::Claude));
+        let rows = roster_view::compute_rows(&state, pane, None);
+        let codex_visible = rows.iter().any(|r| {
+            matches!(
+                r,
+                roster_view::PaneRosterRow::Agent {
+                    kind: AgentLaneKind::Codex,
+                    ..
+                }
+            )
+        });
+        let claude_visible = rows.iter().any(|r| {
+            matches!(
+                r,
+                roster_view::PaneRosterRow::Agent {
+                    kind: AgentLaneKind::Claude,
+                    ..
+                }
+            )
+        });
+        assert!(
+            claude_visible,
+            "Claude group expanded after the second click"
+        );
+        assert!(
+            !codex_visible,
+            "Codex group must collapse when click moves to Claude"
+        );
+    }
+
+    #[test]
+    fn cursor_clamps_after_h_collapse() {
+        // After h on a child row drills the cursor up off the backend,
+        // the cursor index stays in [0, selectable_count).
+        let mut state = fixture_with_efforts();
+        // Land on Backend Codex, drill into gpt-5, then collapse — the
+        // cursor must clamp to the new selectable range.
+        move_roster_cursor(&mut state, 0);
+        expand_at_cursor(&mut state); // cursor → gpt-5 (idx 1)
+        assert_eq!(state.multipane.as_ref().unwrap().panes[0].roster_cursor, 1);
+        collapse_at_cursor(&mut state); // cursor drills back up to idx 0
+        let pane = &state.multipane.as_ref().unwrap().panes[0];
+        let rows = roster_view::compute_rows(&state, pane, None);
+        let stops = roster_view::selectable_count(&rows);
+        assert!(pane.roster_cursor < stops);
+    }
+
+    #[test]
+    fn revert_to_roster_clears_auto_fields_and_dir_search() {
+        let mut state = fixture_state_no_backend();
+        if let Some(pane) = state.multipane.as_mut().unwrap().panes.get_mut(0) {
+            pane.selected_agent_id = Some("claude-haiku-4-5#mp-pane-00".into());
+            pane.agent_id = "claude-haiku-4-5#mp-pane-00".into();
+            pane.auto_expanded_backend = Some(AgentLaneKind::Claude);
+            pane.auto_expanded_agent = Some("claude-haiku-4-5".into());
+            pane.dir_search = Some(nit_core::DirSearchState {
+                query: "abc".into(),
+                ..Default::default()
+            });
+        }
+        revert_focused_pane_to_roster(&mut state);
+        let pane = &state.multipane.as_ref().unwrap().panes[0];
+        assert!(pane.auto_expanded_backend.is_none());
+        assert!(pane.auto_expanded_agent.is_none());
+        assert!(pane.dir_search.is_none());
     }
 
     #[test]
@@ -1857,5 +2324,144 @@ mod tests {
             crate::multipane::dispatch::DispatchOutcome::Dispatched
         );
         assert!(state.multipane.as_ref().unwrap().panes[0].has_run_mission);
+    }
+
+    fn open_dir_search_with_results(state: &mut AppState, results: Vec<PathBuf>) {
+        if let Some(pane) = state.multipane.as_mut().and_then(|mp| mp.panes.get_mut(0)) {
+            pane.dir_search = Some(nit_core::DirSearchState {
+                query: String::new(),
+                query_cursor: 0,
+                results,
+                selected: 0,
+                base: PathBuf::from("/tmp"),
+                generation: 1,
+                show_hidden: false,
+            });
+        }
+    }
+
+    #[test]
+    fn focused_pane_dir_search_active_reflects_overlay() {
+        let mut state = fixture_state_no_backend();
+        assert!(!focused_pane_dir_search_active(&state));
+        open_dir_search_with_results(&mut state, Vec::new());
+        assert!(focused_pane_dir_search_active(&state));
+    }
+
+    #[test]
+    fn close_focused_dir_search_drops_overlay() {
+        let mut state = fixture_state_no_backend();
+        open_dir_search_with_results(&mut state, Vec::new());
+        close_focused_dir_search(&mut state);
+        assert!(state.multipane.as_ref().unwrap().panes[0]
+            .dir_search
+            .is_none());
+    }
+
+    #[test]
+    fn commit_dir_search_with_empty_results_is_noop() {
+        let mut state = fixture_state_no_backend();
+        let cwd_before = state.multipane.as_ref().unwrap().panes[0].cwd.clone();
+        open_dir_search_with_results(&mut state, Vec::new());
+        commit_dir_search(&mut state);
+        let pane = &state.multipane.as_ref().unwrap().panes[0];
+        assert_eq!(pane.cwd, cwd_before);
+        assert!(pane.dir_search.is_none());
+    }
+
+    #[test]
+    fn commit_dir_search_changes_cwd_and_emits_system_alert() {
+        let mut state = fixture_state_no_backend();
+        let tmp = std::env::temp_dir().join(format!(
+            "nit-mp-commit-{}",
+            Instant::now().elapsed().as_nanos()
+        ));
+        std::fs::create_dir_all(&tmp).unwrap();
+        open_dir_search_with_results(&mut state, vec![tmp.clone()]);
+        let before = state.agents.messages.len();
+        commit_dir_search(&mut state);
+        let pane = &state.multipane.as_ref().unwrap().panes[0];
+        assert_eq!(pane.cwd, tmp);
+        assert!(pane.dir_search.is_none());
+        assert_eq!(state.agents.messages.len(), before + 1);
+        let last = state.agents.messages.last().unwrap();
+        assert_eq!(last.kind.as_deref(), Some(SYSTEM_ALERT_KIND));
+        assert!(last.text.starts_with("cwd → "), "text was {:?}", last.text);
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn commit_dir_search_rejects_path_that_is_not_a_dir() {
+        let mut state = fixture_state_no_backend();
+        let cwd_before = state.multipane.as_ref().unwrap().panes[0].cwd.clone();
+        open_dir_search_with_results(
+            &mut state,
+            vec![PathBuf::from("/this/path/does/not/exist/abc")],
+        );
+        commit_dir_search(&mut state);
+        let pane = &state.multipane.as_ref().unwrap().panes[0];
+        assert_eq!(pane.cwd, cwd_before);
+        assert!(pane.dir_search.is_none());
+    }
+
+    #[test]
+    fn apply_dir_search_event_writes_results_when_generation_matches() {
+        let mut state = fixture_state_no_backend();
+        let base = PathBuf::from("/tmp");
+        if let Some(pane) = state.multipane.as_mut().and_then(|mp| mp.panes.get_mut(0)) {
+            pane.dir_search = Some(nit_core::DirSearchState {
+                query: "foo".into(),
+                query_cursor: 3,
+                results: Vec::new(),
+                selected: 0,
+                base: base.clone(),
+                generation: 7,
+                show_hidden: false,
+            });
+        }
+        let want = vec![PathBuf::from("/tmp/alpha")];
+        apply_dir_search_event(
+            &mut state,
+            DirSearchEvent::Results {
+                request_id: 7,
+                base: base.clone(),
+                results: want.clone(),
+            },
+        );
+        let ds = state.multipane.as_ref().unwrap().panes[0]
+            .dir_search
+            .as_ref()
+            .unwrap();
+        assert_eq!(ds.results, want);
+    }
+
+    #[test]
+    fn apply_dir_search_event_drops_results_for_stale_generation() {
+        let mut state = fixture_state_no_backend();
+        let base = PathBuf::from("/tmp");
+        if let Some(pane) = state.multipane.as_mut().and_then(|mp| mp.panes.get_mut(0)) {
+            pane.dir_search = Some(nit_core::DirSearchState {
+                query: "foo".into(),
+                query_cursor: 3,
+                results: Vec::new(),
+                selected: 0,
+                base: base.clone(),
+                generation: 7,
+                show_hidden: false,
+            });
+        }
+        apply_dir_search_event(
+            &mut state,
+            DirSearchEvent::Results {
+                request_id: 6,
+                base,
+                results: vec![PathBuf::from("/tmp/old")],
+            },
+        );
+        let ds = state.multipane.as_ref().unwrap().panes[0]
+            .dir_search
+            .as_ref()
+            .unwrap();
+        assert!(ds.results.is_empty());
     }
 }
