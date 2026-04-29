@@ -1,7 +1,8 @@
 # Multipane Mode
 
-> **Status**: design proposal. Not yet implemented. This doc is the
-> authoritative plan + the prompt to feed coding agents.
+> **Status**: shipped. Phase 1–6 are live. Outstanding follow-ups
+> (cross-pane @all-panes broadcast, Ctrl+Q confirm dialog) are tracked
+> as out-of-scope items at the bottom of this document.
 
 ## Vision
 
@@ -443,30 +444,43 @@ Acceptance:
 - Tests: parser for prefix counting, fuzzy-rank ordering, cwd-switch
   state mutation.
 
-### Phase 5 — Disable non-pane keys + polish
+### Phase 5 — Disable non-pane keys + polish [SHIPPED]
 
-Files:
-- `crates/nit-tui/src/multipane/key_dispatch.rs` (new) — gate the
-  global key handler so unrelated keys (Editor focus, Visualizer,
-  etc.) become no-ops.
-- `crates/nit-tui/src/widgets/top_bar.rs` (or its multipane variant)
-  — hide LAB / GOL / MOOD chrome in this mode.
+What landed:
+- `crates/nit-tui/src/multipane/runtime.rs::handle_key` allow-lists
+  Tab / Shift+Tab / Enter / Ctrl+/ / F2 / Ctrl+R / Ctrl+C / Esc /
+  Ctrl+Q / F1 / `?` / character / mouse and silently swallows
+  everything else. The Phase-5 spec's standalone `key_dispatch.rs` was
+  collapsed into the runtime once the allow-list was small enough that
+  a separate module was over-engineering.
+- A 1-row top status strip and 1-row bottom indicator render around
+  the pane grid: `MULTIPANE  pane K/N  cwd=…  STATUS:…` on top, brief
+  hint on the bottom.
+- Multipane help overlay (`F1` / `?` toggle) lists every supported
+  binding plus the `@swarm` / `@shadow` / `@new` / `@queue` / `@all` /
+  `/abort` family.
+- Window-too-small fallback: when the per-pane width drops below 20
+  cells or height below 10 rows, the grid is replaced by a single
+  centered `Terminal too small for N panes…` paragraph.
+- Ctrl+Q quits multipane cleanly (no confirm dialog; deviation from
+  the original spec — see "Resolved decisions" below).
 
-Acceptance:
-- Pressing keys that would normally focus the editor or
-  visualizer in regular nit do nothing in multipane mode.
-- Status bar reflects multipane mode.
+### Phase 6 — Persistence + tests + docs [SHIPPED]
 
-### Phase 6 — Tests + docs
-
-- Unit tests for: backend validation, grid math, dir-search parser,
-  fuzzy ranking, per-pane dispatch, focus cycling, message
-  filtering.
-- Integration test: launch headless multipane, dispatch a prompt to
-  each of 4 panes with mock runners, assert each saw its own cwd.
-- Update `docs/KEYBINDINGS.md` with multipane-specific bindings.
-- Update `CLAUDE.md` with the new subcommand and env vars (none new
-  expected, but flag presence).
+What landed:
+- `crates/nit-tui/src/multipane/persistence.rs` writes
+  `<state_dir>/multipane/session-<workspace-hash>.json` on focus
+  change (debounced 1s) and on Ctrl+Q. Loaded by
+  `multipane::run_loop` before the first frame and merged onto the
+  freshly-installed pane layout when the pane count matches.
+  `chat_input` is capped at 4 KB on save. A "fresh" Ctrl+Q (no pane
+  has run a mission and no prior session existed) drops the file
+  rather than persisting an empty layout.
+- `crates/nit-tui/src/tests/multipane_integration.rs` (5 tests:
+  per-pane cwd dispatch, focused-pane abort isolation, no-agent-
+  selected notice, dir-search cwd commit, persistence roundtrip).
+- `docs/KEYBINDINGS.md` updated with the multipane keymap including
+  Ctrl+Q and F1 help. `CLAUDE.md` reconciled.
 
 ## Performance budget
 
@@ -481,25 +495,31 @@ Acceptance:
 The chat-thread render path is already ratatui — fast. The dominant
 cost is the dir walk, which is why we cache and amortise.
 
-## Open questions (to resolve during implementation)
+## Resolved decisions
 
-1. **Agent identity collisions**: if the user has `claude-haiku-4-5`
-   in their roster already, our pane agent_id `claude-haiku-4-5#pane-0`
-   collides with naming conventions for swarm/chat clones. Pick a
-   different separator (e.g. `:pane:`) or namespace (`mp-pane-0`)?
-2. **Persistence**: should `pane.cwd` and chat history persist across
-   nit restarts? Probably yes — write to
-   `<state_dir>/multipane/session-<hash>.json`. Nice-to-have, not
-   blocking.
-3. **Backend specificity**: `--backend claude-haiku-4-5` (specific
-   model) vs `--backend claude` (family, pick default)? Start with
-   specific; add family as a convenience later.
-4. **Single mission across panes vs per-pane mission**: each pane is
-   independent — one mission per pane, max. Cross-pane swarms are out
-   of scope.
-5. **Resize handling**: when the terminal resizes below the minimum
-   per-pane size, show a single "terminal too small" message rather
-   than rendering broken panes.
+1. **Agent-id namespace**: pane lanes use `<base>#mp-pane-NN`
+   (zero-padded, two digits). Distinct from `#chat-clone-` and
+   `#swarm-` separators so the runner's id-keyed maps never collide.
+2. **Persistence**: shipped. `<state_dir>/multipane/session-<hash>.json`
+   stores per-pane `cwd`, `chat_input`, history, swarm_template /
+   swarm_mission, `selected_agent_id`, and the focused index. UI-only
+   fields (`help_open`, dir-search overlay, roster auto-expansion
+   latches) are `#[serde(skip)]` and start fresh on each launch.
+3. **Backend specificity**: `--backend <specific-id>` pre-picks every
+   pane; `--backend <family>` filters the per-pane roster to that
+   family; omitting the flag shows the full roster. All three modes
+   ship.
+4. **Mission scope**: per-pane mission, no cross-pane swarms. Each
+   pane carries its own `mission_id` field on `PaneSession`.
+5. **Resize handling**: when per-pane width drops below 20 cells or
+   height below 10 rows, the runtime renders a single centered
+   "Terminal too small for N panes — resize or relaunch with
+   --panes <smaller>" paragraph instead of the grid.
+6. **Ctrl+Q without confirm dialog (deviation)**: the original spec
+   asked for a confirmation prompt before exiting. v1 ships without
+   one — multipane has no popup state machine yet, and persistence
+   already preserves typed prompts on disk so an accidental Ctrl+Q is
+   recoverable. A confirm dialog can land as a follow-up.
 
 ## Out of scope (v1)
 

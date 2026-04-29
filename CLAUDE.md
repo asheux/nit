@@ -94,16 +94,36 @@ MSRV: Rust 1.88.0 (pinned in `rust-toolchain.toml`).
 
 ## Multipane mode
 
-`nit multipane --backend <model> [--panes N] [--cwd PATH]` opens a grid of
-N independent chat panes (default 8, range 1..=32; grid is `ceil(sqrt(N))`
-columns × `ceil(N / cols)` rows), each a self-contained chat session
-anchored at its own working directory. The chosen backend applies to
-every pane; per-pane agent ids use the form `<base>#mp-pane-NN` so they
-coexist with `#swarm-` and `#chat-clone-` conventions. Editor / agent ops
-/ visualizer panes are unavailable; only chat dispatch is wired. Tab and
-Shift+Tab cycle focus, mouse click focuses a pane directly, and `/abort`
-/ Ctrl+C / Esc-Esc target the focused pane only. See `docs/MULTIPANE.md`
-for the full spec and Phase 4+ follow-ups.
+`nit multipane [--backend <model>] [--panes N] [--cwd PATH]` opens a grid
+of N independent chat panes (default 8, range 1..=32; grid is
+`ceil(sqrt(N))` columns × `ceil(N / cols)` rows), each a self-contained
+chat session anchored at its own working directory. `--backend` is
+optional: omit it for a per-pane roster picker, name a family
+(`claude` / `codex`) to filter the per-pane roster, or name a specific
+lane id to pre-pick every pane. Per-pane agent ids use the form
+`<base>#mp-pane-NN` so they coexist with `#swarm-` and `#chat-clone-`
+conventions. Editor / agent ops / visualizer panes are unavailable;
+only chat dispatch is wired.
+
+Chat-pane parity: every pane runs the canonical
+`app::chat_input::submit_chat_input_and_dispatch` via a Lens-B
+alias-and-restore wrapper in `multipane::dispatch::with_pane_aliased`,
+so `@swarm` / `@shadow` / `@all` / `@new` / `@queue` / `@q` /
+`/abort` / queueing / broadcast / swarm-followup re-activation all
+work per pane. Operator prompts land in `state.agents.messages`
+tagged with the pane's `mission_id`, and `agent_console_view::render_pane`
+renders inline-breather + agent-table rows scoped to the pane.
+
+Keymap: Tab / Shift+Tab cycle focus, mouse click focuses a pane
+directly, `Ctrl+Q` quits cleanly, `F1` / `?` toggles the multipane
+help overlay, `/abort` / Ctrl+C empty / Esc-Esc target the focused
+pane only, `Ctrl+R` reverts the focused pane to its roster picker.
+Per-pane sessions persist to
+`<state_dir>/multipane/session-<workspace-hash>.json` on Ctrl+Q and
+on focus change (debounced ≤ 1 write/sec); `chat_input` is capped at
+4 KB; a "fresh" Ctrl+Q with no prior file drops the session instead
+of writing an empty layout. See `docs/MULTIPANE.md` for the full
+spec.
 
 ## Aborting in-flight work
 

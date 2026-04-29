@@ -12,6 +12,7 @@ pub mod dir_search_runner;
 pub mod dispatch;
 pub mod focus;
 pub mod grid;
+pub mod persistence;
 pub mod roster_view;
 pub mod selection;
 pub mod setup;
@@ -19,3 +20,7 @@ pub mod setup;
 mod runtime;
 
 pub use runtime::run_loop;
+
+#[cfg(test)]
+#[path = "../tests/multipane_integration.rs"]
+mod integration_tests;

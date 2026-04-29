@@ -249,15 +249,26 @@
 - Tab: Cycle focus to next pane (wraps)
 - Shift+Tab: Cycle focus to previous pane (wraps)
 - Mouse click in pane: Focus that pane
+- Ctrl+Q: Quit multipane cleanly (no confirm; per-pane state persists to `<state_dir>/multipane/session-<hash>.json`)
+- F1 or `?` (chat empty): Toggle the multipane help overlay
 - Enter (in focused pane chat input): Send prompt; agent runs in pane's cwd
-- /abort, @abort (typed in focused pane): Cancel focused pane's in-flight + queued turns
-- /abort all: Cancel every pane's in-flight + queued turns
-- /abort <agent-id>: Cancel a specific pane's agent (e.g. `claude-haiku-4-5#mp-pane-03`)
+- @swarm [all|N] [template=lab|parallel|bulk] [mission=…] <prompt>: Start a per-pane swarm mission (planner = pane's agent)
+- @shadow <prompt>: Single-agent dispatch with hidden propose/judge/review pipeline
+- @new <prompt>: Spawn a fresh-context chat clone of the pane's base agent
+- @queue / @q <prompt>: Enqueue behind the pane's in-flight turn (legacy alias for default queueing)
+- @all <prompt>: Broadcast to every dispatchable agent in the focused pane's mission
+- /abort, @abort (typed in focused pane): Cancel the focused pane's mission via `swarm.abort_mission` (rolls over to `completed_runs`, posts SYSTEM_ALERT)
+- /abort all: Cancel every active swarm + clear runner queues
+- /abort <agent-id>: Surgical cancel of one agent's in-flight + queued turns
 - Ctrl+C with empty chat input: Cancel focused pane
 - Esc Esc within ~500ms: Cancel focused pane
 - Backspace / Left / Right / Home / End / printable chars: Edit focused pane's chat input
-- Up / Down: Walk focused pane's prompt history
+- Ctrl+A select all, Ctrl+C / Ctrl+V / Ctrl+X clipboard, Shift+Enter newline-with-indent, Ctrl+Backspace word-delete, Ctrl+Left / Ctrl+Right word-nav: Same as the standard chat input (delegated to the canonical chat_input editor)
+- Up / Down: Walk focused pane's prompt history (Up preserves the in-flight draft and restores it on Down past the newest entry)
+- PgUp / PgDn: Scroll the focused pane's chat thread
+- Ctrl+R: Revert focused pane to roster picker
 - Ctrl+/ (or F2 fallback): Toggle the per-pane dir-search overlay; some terminals (default macOS Terminal.app) drop Ctrl+/ — use F2 there
+- (in roster mode) Up/Down/k/j, PgUp/PgDn, g/G, h/l (or Left/Right), Space, Enter: Move cursor / fold subtree / toggle Size leaf / commit selection
 - (in dir search) Up / Down: Move selection within the 10-row results dropdown
 - (in dir search) Enter: Commit — set the focused pane's cwd to the chosen directory and push a `cwd → /new/path` system alert
 - (in dir search) Esc: Close the dir-search overlay (chat input buffer is preserved); a second Esc within ~500 ms still aborts the focused pane

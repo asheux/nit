@@ -104,6 +104,7 @@ pub fn install_filtered(
         grid_cols,
         grid_rows,
         backend_filter,
+        help_open: false,
     });
 
     Ok(())

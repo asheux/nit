@@ -668,7 +668,7 @@ pub fn render_pane(
     let thread_width = layout.thread_area.width.max(1) as usize;
     let thread_height = layout.thread_area.height.max(1) as usize;
 
-    let thread_rows = build_pane_thread_rows(
+    let thread_rows = build_pane_thread_rows_with_breathers(
         state,
         swarm,
         agent,
@@ -728,6 +728,20 @@ pub fn render_pane(
                     theme.border
                 })
                 .add_modifier(Modifier::BOLD),
+        ));
+        let badge_style = Style::default()
+            .fg(theme.background)
+            .bg(theme.seed.accent)
+            .add_modifier(Modifier::BOLD);
+        title_spans.push(Span::raw("  "));
+        title_spans.push(Span::styled(
+            format!(" t={} ", pane.swarm_template),
+            badge_style,
+        ));
+        title_spans.push(Span::raw(" "));
+        title_spans.push(Span::styled(
+            format!(" m={} ", pane.swarm_mission),
+            badge_style,
         ));
         if queued_count > 0 {
             title_spans.push(Span::raw("  "));
@@ -892,6 +906,105 @@ pub fn build_pane_thread_rows(
         }
     }
     rows
+}
+
+/// Same as [`build_pane_thread_rows`] but interleaves the inline-breather
+/// "Working..." status table after each user prompt and appends the
+/// global swarm roster table when relevant. Mirrors what the standard
+/// chat console does in [`render`] but bypasses `console_rows_cache`
+/// (the cache key is `selected_context_agent`, shared across panes —
+/// reading it would bleed one pane's rows into another).
+///
+/// Pane-scoping comes from the caller setting
+/// `state.agents.selected_agent` / `selected_mission` to this pane's
+/// values before invoking. `inline_breather_rows` and
+/// `breather_rows_for_user_prompt` read those via `selected_context_*`,
+/// so the resulting rows only contain pending lanes for this pane.
+pub fn build_pane_thread_rows_with_breathers(
+    state: &AppState,
+    swarm: Option<&SwarmRuntime>,
+    agent: Option<&str>,
+    mission: Option<&str>,
+    width: usize,
+    suppress_artifacts: bool,
+) -> Vec<ThreadRow> {
+    let ordered = visible_messages_grouped(state, mission, agent);
+    let pulse_on = pulse_on(state);
+
+    let mut pending_by_prompt: std::collections::HashMap<usize, Vec<String>> =
+        std::collections::HashMap::new();
+    for (agent_id, &prompt_idx) in state
+        .agents
+        .codex_turn_prompt_idx
+        .iter()
+        .chain(state.agents.claude_turn_prompt_idx.iter())
+    {
+        let is_active = state.agents.active_turns.contains_key(agent_id)
+            || state
+                .agents
+                .queued_codex_turns
+                .iter()
+                .any(|t| t.agent_id == *agent_id)
+            || state
+                .agents
+                .queued_claude_turns
+                .iter()
+                .any(|t| t.agent_id == *agent_id);
+        if is_active {
+            pending_by_prompt
+                .entry(prompt_idx)
+                .or_default()
+                .push(agent_id.clone());
+        }
+    }
+
+    let mut inline_shown = std::collections::HashSet::<String>::new();
+    let mut combined: Vec<ThreadRow> = Vec::new();
+    for (msg_idx, msg) in ordered {
+        let msg_rows = format_message_rows(state, swarm, msg, width);
+        combined.extend(msg_rows);
+        let is_user_prompt = msg.agent_id.is_none();
+        if !is_user_prompt {
+            continue;
+        }
+        let Some(agent_ids) = pending_by_prompt.get(&msg_idx) else {
+            continue;
+        };
+        combined.extend(inline_breather_rows(state, agent_ids, pulse_on, width));
+        for id in agent_ids {
+            inline_shown.insert(id.clone());
+        }
+    }
+
+    let any_remaining = state.agents.agents.iter().any(|a| {
+        !inline_shown.contains(&a.id)
+            && (state.agents.active_turns.contains_key(&a.id)
+                || state
+                    .agents
+                    .queued_codex_turns
+                    .iter()
+                    .any(|t| t.agent_id == a.id)
+                || state
+                    .agents
+                    .queued_claude_turns
+                    .iter()
+                    .any(|t| t.agent_id == a.id))
+    });
+    let has_swarm_context =
+        mission.is_some_and(|mid| state.agents.missions.iter().any(|m| m.id == mid && m.swarm));
+    if any_remaining || (has_swarm_context && inline_shown.is_empty()) {
+        combined.extend(breather_rows_for_user_prompt(state, swarm, pulse_on, width));
+    }
+
+    if suppress_artifacts {
+        for row in &mut combined {
+            if matches!(row.kind, ThreadRowKind::ArtifactLink) {
+                row.text = row.text.replace(" (see ARTIFACTS)", "");
+                row.kind = ThreadRowKind::Agent;
+            }
+        }
+    }
+    combined
 }
 
 pub fn thread_text_area(area: Rect, state: &AppState) -> Option<Rect> {

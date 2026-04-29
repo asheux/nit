@@ -50,6 +50,7 @@ mod tests {
             grid_cols: cols,
             grid_rows: rows,
             backend_filter: Some("test".into()),
+            help_open: false,
         }
     }
 

@@ -209,12 +209,12 @@ pub(super) fn insert_text_into_focused_buffer(
     true
 }
 
-pub(super) fn chat_history_reset_nav(state: &mut AppState) {
+pub(crate) fn chat_history_reset_nav(state: &mut AppState) {
     state.agents.chat_prompt_history_pos = None;
     state.agents.chat_prompt_history_draft = None;
 }
 
-pub(super) fn chat_history_prev(state: &mut AppState) -> bool {
+pub(crate) fn chat_history_prev(state: &mut AppState) -> bool {
     if state.agents.chat_prompt_history.is_empty() {
         return false;
     }
@@ -240,7 +240,7 @@ pub(super) fn chat_history_prev(state: &mut AppState) -> bool {
     true
 }
 
-pub(super) fn chat_history_next(state: &mut AppState) -> bool {
+pub(crate) fn chat_history_next(state: &mut AppState) -> bool {
     let Some(pos) = state.agents.chat_prompt_history_pos else {
         return false;
     };

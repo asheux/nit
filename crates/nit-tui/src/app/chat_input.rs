@@ -33,10 +33,10 @@ use super::{
 
 const CHAT_PROMPT_HISTORY_MAX: usize = 200;
 
-pub(super) struct ChatInputEditResult {
-    pub(super) handled: bool,
-    pub(super) changed: bool,
-    pub(super) follow_cursor: bool,
+pub(crate) struct ChatInputEditResult {
+    pub(crate) handled: bool,
+    pub(crate) changed: bool,
+    pub(crate) follow_cursor: bool,
 }
 
 fn reset_chat_input_and_history_nav(state: &mut AppState) {
@@ -63,7 +63,7 @@ fn update_chat_selection_anchor(state: &mut AppState, selecting: bool, cursor: u
 // Handles text manipulation keys (characters, backspace, delete, cursor movement,
 // selection, clipboard). Does NOT handle Enter-submit, Esc, or Up/Down — those are
 // context-specific and left to the caller.
-pub(super) fn handle_chat_input_editing_key(
+pub(crate) fn handle_chat_input_editing_key(
     key: &KeyEvent,
     state: &mut AppState,
     clipboard: &mut Option<Clipboard>,
@@ -471,7 +471,7 @@ pub(super) fn handle_chat_input_editing_key(
 /// Tuned above typical double-press latency (~300ms) and below the
 /// threshold where the operator could plausibly hit two unrelated
 /// Escs in a row.
-pub(super) const ESC_ESC_ABORT_WINDOW: std::time::Duration = std::time::Duration::from_millis(500);
+pub(crate) const ESC_ESC_ABORT_WINDOW: std::time::Duration = std::time::Duration::from_millis(500);
 
 // Per-thread state for the Esc-Esc trigger. Thread-local (not a
 // process-wide static) so parallel `cargo test` runs don't pollute
@@ -489,7 +489,7 @@ thread_local! {
 /// of the previous one. Updates the timestamp regardless. Caller resets
 /// (via `clear_chat_esc_state`) once the abort fires so a third Esc
 /// doesn't immediately re-trigger.
-pub(super) fn record_chat_esc_press() -> bool {
+pub(crate) fn record_chat_esc_press() -> bool {
     let now = std::time::Instant::now();
     LAST_CHAT_ESC_AT.with(|cell| {
         let prev = cell.get();
@@ -498,13 +498,13 @@ pub(super) fn record_chat_esc_press() -> bool {
     })
 }
 
-pub(super) fn clear_chat_esc_state() {
+pub(crate) fn clear_chat_esc_state() {
     LAST_CHAT_ESC_AT.with(|cell| cell.set(None));
 }
 
 /// Scope of an `/abort` (or `@abort`) request.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) enum AbortScope {
+pub(crate) enum AbortScope {
     /// Abort the mission currently in chat context. Most common form;
     /// `/abort` alone resolves to this.
     Current,
@@ -521,7 +521,7 @@ pub(super) enum AbortScope {
 /// for symmetry with the `@swarm` family even though `@` usually
 /// dispatches new work). Forms: bare → Current, `all` → All, anything
 /// else → Agent(literal). Trailing whitespace tolerated.
-pub(super) fn parse_abort_command(raw: &str) -> Option<AbortScope> {
+pub(crate) fn parse_abort_command(raw: &str) -> Option<AbortScope> {
     let trimmed = raw.trim_start();
     let after = trimmed
         .strip_prefix("/abort")
@@ -547,7 +547,7 @@ pub(super) fn parse_abort_command(raw: &str) -> Option<AbortScope> {
 /// commands, and posts a system alert. Returns `true` when something was
 /// aborted, `false` when the request was a no-op (e.g. `/abort` with no
 /// active mission).
-pub(super) fn handle_abort(
+pub(crate) fn handle_abort(
     state: &mut AppState,
     codex: Option<&CodexRunner>,
     claude: Option<&ClaudeRunner>,
@@ -626,7 +626,7 @@ pub(super) fn handle_abort(
 
 // Submit the chat input, dispatch to agents, and return whether a prompt was sent.
 // Shared between the main Agent Chat Enter handler and the Artifacts popup input.
-pub(super) fn submit_chat_input_and_dispatch(
+pub(crate) fn submit_chat_input_and_dispatch(
     state: &mut AppState,
     vitals: &mut VitalsState,
     codex: Option<&CodexRunner>,
@@ -1168,7 +1168,7 @@ fn augment_with_module_file_checklist(state: &AppState, prompt: String) -> Strin
     out
 }
 
-pub(super) fn chat_history_remember(state: &mut AppState, raw: &str) {
+pub(crate) fn chat_history_remember(state: &mut AppState, raw: &str) {
     super::chat_history_reset_nav(state);
     if raw.trim().is_empty() {
         return;
@@ -1199,7 +1199,7 @@ pub(super) fn chat_input_byte_index(input: &str, char_idx: usize) -> usize {
         .unwrap_or(input.len())
 }
 
-pub(super) fn broadcast_target_agents(state: &AppState, mission_id: Option<&str>) -> Vec<String> {
+pub(crate) fn broadcast_target_agents(state: &AppState, mission_id: Option<&str>) -> Vec<String> {
     if let Some(mission_id) = mission_id {
         if let Some(mission) = state.agents.missions.iter().find(|m| m.id == mission_id) {
             let mut targets = Vec::new();
@@ -1238,7 +1238,7 @@ pub(super) fn broadcast_target_agents(state: &AppState, mission_id: Option<&str>
         .collect()
 }
 
-pub(super) fn parse_chat_input_channel(raw: &str) -> (AgentChannel, String) {
+pub(crate) fn parse_chat_input_channel(raw: &str) -> (AgentChannel, String) {
     if let Some(after) = raw.strip_prefix("@all") {
         if after.is_empty() || after.starts_with(char::is_whitespace) {
             return (AgentChannel::Broadcast, after.trim_start().to_string());
@@ -1247,7 +1247,7 @@ pub(super) fn parse_chat_input_channel(raw: &str) -> (AgentChannel, String) {
     (AgentChannel::Agent, raw.to_string())
 }
 
-pub(super) fn push_chat_message(state: &mut AppState) -> Option<(AgentChannel, String)> {
+pub(crate) fn push_chat_message(state: &mut AppState) -> Option<(AgentChannel, String)> {
     let raw = state.agents.chat_input.clone();
     if raw.trim().is_empty() {
         return None;

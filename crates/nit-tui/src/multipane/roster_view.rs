@@ -731,6 +731,7 @@ mod tests {
             grid_cols: 2,
             grid_rows: 1,
             backend_filter: None,
+            help_open: false,
         });
         state
     }

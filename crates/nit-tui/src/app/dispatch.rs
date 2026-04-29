@@ -1431,6 +1431,7 @@ mod tests {
             grid_cols: 2,
             grid_rows: 1,
             backend_filter: Some("claude-haiku-4-5".into()),
+            help_open: false,
         });
         assert_eq!(
             resolve_dispatch_cwd(&state, "claude-haiku-4-5#mp-pane-00"),
@@ -1457,6 +1458,7 @@ mod tests {
             grid_cols: 1,
             grid_rows: 1,
             backend_filter: Some("claude-haiku-4-5".into()),
+            help_open: false,
         });
         assert_eq!(
             resolve_dispatch_cwd(&state, "non-pane-agent"),
@@ -1480,6 +1482,7 @@ mod tests {
             grid_cols: 1,
             grid_rows: 1,
             backend_filter: None,
+            help_open: false,
         });
         // The pane was born without a binding; once a roster selection
         // commits, both `agent_id` and `selected_agent_id` carry the

@@ -104,7 +104,7 @@ pub(super) fn is_global_run_key(key: &KeyEvent) -> bool {
     )
 }
 
-pub(super) fn is_global_quit_key(key: &KeyEvent) -> bool {
+pub(crate) fn is_global_quit_key(key: &KeyEvent) -> bool {
     matches!(
         key,
         KeyEvent {

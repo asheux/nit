@@ -27,6 +27,12 @@ pub struct PaneSession {
     pub chat_input_scroll: usize,
     pub chat_prompt_history: Vec<String>,
     pub chat_prompt_history_pos: Option<usize>,
+    /// In-flight draft preserved while the operator walks history with
+    /// Up/Down. Mirrors `AgentsState::chat_prompt_history_draft`. The
+    /// Lens-B aliasing wrapper snaps it to/from `state.agents` for each
+    /// keystroke so per-pane history nav matches single-pane semantics.
+    #[serde(default)]
+    pub chat_prompt_history_draft: Option<String>,
     // TODO(multipane phase 4): dir search
     pub dir_search: Option<DirSearchState>,
     pub mission_id: Option<String>,
@@ -130,6 +136,7 @@ impl Default for PaneSession {
             chat_input_scroll: 0,
             chat_prompt_history: Vec::new(),
             chat_prompt_history_pos: None,
+            chat_prompt_history_draft: None,
             dir_search: None,
             mission_id: None,
             roster_cursor: 0,
@@ -200,6 +207,11 @@ pub struct MultipaneState {
     /// filter (operator picks per pane).
     #[serde(default)]
     pub backend_filter: Option<String>,
+    /// Multipane help overlay visibility. Toggled by F1 / `?` (chat
+    /// mode, empty input). `#[serde(skip)]` because UI state should
+    /// not survive a relaunch.
+    #[serde(skip)]
+    pub help_open: bool,
 }
 
 #[cfg(test)]
@@ -222,6 +234,7 @@ mod tests {
             grid_cols: 2,
             grid_rows: 2,
             backend_filter: Some("test-model".into()),
+            help_open: false,
         };
 
         mp.panes[1].chat_input = "hello pane 1".into();
