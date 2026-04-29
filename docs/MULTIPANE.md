@@ -41,9 +41,9 @@ from one terminal. Like `tmux` for AI agents.
 - Agent dispatches from a pane operate inside that pane's cwd —
   subprocess `Command::current_dir(pane.cwd)`.
 - A **dir search** at the top of each pane:
-  - Plain text → fuzzy-match subdirectories of `pane.cwd`.
-  - `../<query>` → search siblings of `pane.cwd` (one level up).
-  - `../../<query>` → search siblings of parent (two levels up).
+  - Plain text → fuzzy-match subdirectories of `pane.cwd` recursively.
+  - `../<query>` → search children of `pane.cwd`'s parent (one level up).
+  - `../../<query>` → search children of grandparent (two levels up).
   - … and so on for `../../../`.
   - Enter / select → switch the pane's cwd to the matched directory.
 - **Search must be fast** — feels instant on directory trees of 10k+
@@ -118,18 +118,33 @@ the prefix:
 
 | Input | Meaning |
 |---|---|
-| `(empty)` | Show siblings of cwd (same as `../`) |
-| `foo` | Fuzzy match subdirectories of cwd whose name contains "foo" |
-| `../` | Show siblings of cwd |
-| `../foo` | Fuzzy match siblings of cwd containing "foo" |
-| `../../` | Show siblings of cwd's parent |
-| `../../foo` | Fuzzy match siblings of cwd's parent containing "foo" |
+| `(empty)` | Show children of cwd (the immediate subdirectories) |
+| `foo` | Recursive fuzzy match of subdirectories under cwd, displayed as `parent/foo/match/` breadcrumbs |
+| `../` | Show children of cwd's parent |
+| `../foo` | Recursive fuzzy match under cwd's parent containing "foo" |
+| `../../` | Show children of cwd's grandparent |
+| `../../foo` | Recursive fuzzy match under cwd's grandparent containing "foo" |
 | `/abs/path` | Treat as absolute, match descendants |
 | `~/foo` | Expand `~` and search |
 
-Results render below the search bar as a small dropdown (max 10 rows).
-Up/Down to move, Enter to commit, Esc to cancel and resume the chat
-thread underneath. Typing more characters narrows the list live.
+Gitignored bare-name directories (read from the workspace `.gitignore`
+at startup) and the heavyweight build dirs (`node_modules`, `target`,
+`.venv`, `dist`, `build`) are filtered at the walker source so they
+never reach the dropdown.
+
+Results render below the search bar as a dynamically sized dropdown
+(3 to 16 rows, sized to fit the pane). Up/Down or Ctrl+J/Ctrl+K move
+the highlight; passing the bottom row scrolls the viewport, and the
+inverse at the top. Right or Ctrl+L expands the highlighted directory
+in place (its children indent one level beneath it); Left or Ctrl+H
+collapses. Enter commits the highlighted entry as the new pane cwd;
+Esc cancels and resumes the chat thread underneath. Home / End jump
+the input cursor to the start / end of the query. Typing more
+characters narrows the list live; the recursive walk runs on a
+background thread, and a fresh keystroke supersedes any in-flight walk
+so the UI never blocks. Length penalty in the fuzzy ranker means a
+short relative path (`nit-tui/`) outranks a deeper match
+(`crates/nit-tui/`); refine with a deeper prefix when needed.
 
 When the user commits a directory, the pane:
 1. Updates `pane.cwd`.

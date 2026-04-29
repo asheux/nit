@@ -164,6 +164,19 @@ pub struct DirSearchState {
     pub generation: u64,
     #[serde(default)]
     pub show_hidden: bool,
+    /// Index of the first row rendered in the dropdown viewport.
+    /// `selected - view_offset` is the visual row of the highlight.
+    #[serde(default)]
+    pub view_offset: usize,
+    /// Last rendered visible row count (cached so move-helpers can
+    /// clamp the viewport without access to the layout rect).
+    #[serde(skip)]
+    pub last_visible: u16,
+    /// Bookmark set of paths the operator has expanded in browse mode
+    /// (empty needle). The walker inlines one level of children for
+    /// each path here so the renderer can show an in-place tree.
+    #[serde(skip)]
+    pub expanded: HashSet<PathBuf>,
 }
 
 /// Top-level state for the multipane launch mode. When `AppState.multipane`
@@ -247,6 +260,33 @@ mod tests {
         assert!(s.query.is_empty());
         assert_eq!(s.selected, 0);
         assert!(s.results.is_empty());
+        assert_eq!(s.view_offset, 0);
+        assert_eq!(s.last_visible, 0);
+        assert!(s.expanded.is_empty());
+    }
+
+    #[test]
+    fn dir_search_state_serde_skips_expanded_and_last_visible() {
+        let mut s = DirSearchState {
+            query: "foo".into(),
+            view_offset: 7,
+            last_visible: 12,
+            ..Default::default()
+        };
+        s.expanded.insert(PathBuf::from("/tmp/a"));
+        s.expanded.insert(PathBuf::from("/tmp/b"));
+        let json = serde_json::to_string(&s).expect("serialize");
+        assert!(!json.contains("expanded"), "expanded must be skipped");
+        assert!(
+            !json.contains("last_visible"),
+            "last_visible must be skipped"
+        );
+        assert!(json.contains("view_offset"), "view_offset must persist");
+        let round: DirSearchState = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(round.view_offset, 7);
+        assert_eq!(round.last_visible, 0, "last_visible defaults on load");
+        assert!(round.expanded.is_empty(), "expanded defaults on load");
+        assert_eq!(round.query, "foo");
     }
 
     #[test]

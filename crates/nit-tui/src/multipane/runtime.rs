@@ -53,6 +53,9 @@ pub fn run_loop(
 ) -> io::Result<()> {
     state.agents.codex_max_parallel_turns = codex_config.max_parallel_turns;
     state.agents.claude_max_parallel_turns = claude_config.max_parallel_turns;
+    if state.gitignored_dirs.is_empty() {
+        state.gitignored_dirs = crate::file_watcher::parse_gitignore_dirs(&state.workspace_root);
+    }
     let codex = CodexRunner::spawn(codex_runtime, codex_config, None);
     let claude = ClaudeRunner::spawn(claude_config);
     let dir_search_runner = DirSearchRunner::spawn();
@@ -216,6 +219,7 @@ fn render_one_pane(
     if inner.width == 0 || inner.height == 0 {
         return None;
     }
+    sync_dir_search_viewport(state, idx, inner.height);
     let pane = state
         .multipane
         .as_ref()
@@ -251,8 +255,55 @@ fn render_one_pane(
     agent_console_view::render_pane(frame, body_rect, state, None, theme, &pane, focused)
 }
 
-const DIR_SEARCH_DROPDOWN_ROWS: u16 = 10;
+/// Stash the current visible-row count on `DirSearchState.last_visible`
+/// (so key handlers can clamp the viewport without the layout rect) and
+/// clamp `view_offset` to keep the highlight in view.
+fn sync_dir_search_viewport(state: &mut AppState, idx: usize, inner_height: u16) {
+    let Some(pane) = pane_at_mut(state, idx) else {
+        return;
+    };
+    let Some(ds) = pane.dir_search.as_mut() else {
+        return;
+    };
+    let visible = compute_dropdown_rows(inner_height, ds.results.len());
+    ds.last_visible = visible;
+    clamp_viewport(ds, visible as usize);
+}
+
+/// Walk the highlight back into the visible window after a results
+/// refresh, a Down/Up key, or a viewport-height change. Idempotent.
+fn clamp_viewport(ds: &mut nit_core::DirSearchState, visible: usize) {
+    let len = ds.results.len();
+    if len == 0 {
+        ds.view_offset = 0;
+        ds.selected = 0;
+        return;
+    }
+    if ds.selected >= len {
+        ds.selected = len - 1;
+    }
+    let visible = visible.max(1);
+    let max_offset = len.saturating_sub(visible);
+    if ds.selected < ds.view_offset {
+        ds.view_offset = ds.selected;
+    }
+    if ds.selected >= ds.view_offset + visible {
+        ds.view_offset = ds.selected + 1 - visible;
+    }
+    if ds.view_offset > max_offset {
+        ds.view_offset = max_offset;
+    }
+}
+
+const DIR_SEARCH_DROPDOWN_MIN_ROWS: u16 = 3;
+const DIR_SEARCH_DROPDOWN_MAX_ROWS: u16 = 16;
 const DIR_SEARCH_INPUT_ROWS: u16 = 1;
+
+fn compute_dropdown_rows(inner_height: u16, results_len: usize) -> u16 {
+    let budget = inner_height.saturating_sub(DIR_SEARCH_INPUT_ROWS) / 2;
+    let clamped = budget.clamp(DIR_SEARCH_DROPDOWN_MIN_ROWS, DIR_SEARCH_DROPDOWN_MAX_ROWS);
+    clamped.min(results_len.max(1) as u16)
+}
 
 fn render_pane_dir_search_overlay(
     frame: &mut ratatui::Frame,
@@ -263,8 +314,9 @@ fn render_pane_dir_search_overlay(
     let Some(ds) = pane.dir_search.as_ref() else {
         return inner;
     };
-    let total = DIR_SEARCH_INPUT_ROWS + DIR_SEARCH_DROPDOWN_ROWS;
-    if inner.height < total {
+    let visible_rows = compute_dropdown_rows(inner.height, ds.results.len());
+    let total = DIR_SEARCH_INPUT_ROWS + visible_rows;
+    if inner.height < DIR_SEARCH_INPUT_ROWS + DIR_SEARCH_DROPDOWN_MIN_ROWS {
         return inner;
     }
     let bar_rect = Rect::new(inner.x, inner.y, inner.width, DIR_SEARCH_INPUT_ROWS);
@@ -272,7 +324,7 @@ fn render_pane_dir_search_overlay(
         inner.x,
         inner.y + DIR_SEARCH_INPUT_ROWS,
         inner.width,
-        DIR_SEARCH_DROPDOWN_ROWS,
+        visible_rows,
     );
     let bar_text = format!(
         " search: {}{} ",
@@ -287,17 +339,25 @@ fn render_pane_dir_search_overlay(
         Paragraph::new(Line::from(Span::styled(bar_text, bar_style))),
         bar_rect,
     );
-    let lines: Vec<Line<'static>> = ds
-        .results
+    let visible_usize = visible_rows as usize;
+    let end = ds
+        .view_offset
+        .saturating_add(visible_usize)
+        .min(ds.results.len());
+    let slice_start = ds.view_offset.min(end);
+    let lines: Vec<Line<'static>> = ds.results[slice_start..end]
         .iter()
         .enumerate()
-        .take(DIR_SEARCH_DROPDOWN_ROWS as usize)
-        .map(|(idx, path)| {
-            let label = path
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_else(|| path.display().to_string());
-            let style = if idx == ds.selected {
+        .map(|(rel_idx, path)| {
+            let abs_idx = slice_start + rel_idx;
+            let label = breadcrumb_label(&ds.base, path);
+            let depth = path
+                .strip_prefix(&ds.base)
+                .ok()
+                .map(|rel| rel.components().count().saturating_sub(1))
+                .unwrap_or(0);
+            let indent = "  ".repeat(depth);
+            let style = if abs_idx == ds.selected {
                 Style::default()
                     .fg(theme.background)
                     .bg(theme.border_focused)
@@ -305,7 +365,7 @@ fn render_pane_dir_search_overlay(
             } else {
                 Style::default().fg(theme.foreground)
             };
-            Line::from(Span::styled(format!(" {label} "), style))
+            Line::from(Span::styled(format!(" {indent}{label} "), style))
         })
         .collect();
     frame.render_widget(Paragraph::new(lines), drop_rect);
@@ -315,6 +375,27 @@ fn render_pane_dir_search_overlay(
         inner.width,
         inner.height.saturating_sub(total),
     )
+}
+
+/// Render a path as `parent/child/.../leaf/` relative to `base`. Uses
+/// `Path::components()` joined with literal `/` so cross-platform output
+/// stays stable; falls back to the absolute path display when the entry
+/// isn't actually under base (e.g. symlink hop).
+fn breadcrumb_label(base: &Path, path: &Path) -> String {
+    let Ok(rel) = path.strip_prefix(base) else {
+        return path.display().to_string();
+    };
+    let joined: Vec<String> = rel
+        .components()
+        .map(|c| c.as_os_str().to_string_lossy().into_owned())
+        .collect();
+    if joined.is_empty() {
+        return path
+            .file_name()
+            .map(|n| format!("{}/", n.to_string_lossy()))
+            .unwrap_or_else(|| path.display().to_string());
+    }
+    format!("{}/", joined.join("/"))
 }
 
 fn clamp_roster_scroll(state: &mut AppState, pane_idx: usize, height: usize) {
@@ -396,8 +477,23 @@ fn paint_pane_chrome(
         .style(Style::default().bg(theme.background));
     let inner = block.inner(rect);
     frame.render_widget(block, rect);
-    paint_hint_line(frame, inner, pane_in_roster_mode(state, idx), theme);
+    paint_hint_line(
+        frame,
+        inner,
+        pane_in_roster_mode(state, idx),
+        pane_dir_search_active(state, idx),
+        theme,
+    );
     inner_rect_after_hint(inner)
+}
+
+fn pane_dir_search_active(state: &AppState, idx: usize) -> bool {
+    state
+        .multipane
+        .as_ref()
+        .and_then(|mp| mp.panes.get(idx))
+        .map(|p| p.dir_search.is_some())
+        .unwrap_or(false)
 }
 
 fn pane_path_label(state: &AppState, cwd: &Path) -> String {
@@ -438,11 +534,19 @@ fn pane_in_roster_mode(state: &AppState, idx: usize) -> bool {
         .unwrap_or(false)
 }
 
-fn paint_hint_line(frame: &mut ratatui::Frame, inner: Rect, in_roster: bool, theme: &Theme) {
+fn paint_hint_line(
+    frame: &mut ratatui::Frame,
+    inner: Rect,
+    in_roster: bool,
+    in_dir_search: bool,
+    theme: &Theme,
+) {
     if inner.height == 0 {
         return;
     }
-    let hint_text = if in_roster {
+    let hint_text = if in_dir_search {
+        " ↑/↓ Ctrl+J/K · ←/→ Ctrl+H/L expand · Enter cd · Alt+F hidden · Esc close "
+    } else if in_roster {
         " ↑/↓ j/k · h/l fold · Space check · Enter commit · Tab pane "
     } else {
         " /abort · Ctrl+C · Esc Esc · Ctrl+R roster · PgUp/PgDn scroll "
@@ -1534,6 +1638,7 @@ fn home_dir() -> Option<PathBuf> {
 }
 
 fn toggle_focused_pane_dir_search(state: &mut AppState, runner: &DirSearchRunner) {
+    let gitignored = state.gitignored_dirs.clone();
     let Some(pane) = focused_pane_mut(state) else {
         return;
     };
@@ -1542,7 +1647,7 @@ fn toggle_focused_pane_dir_search(state: &mut AppState, runner: &DirSearchRunner
     }
     let cwd = pane.cwd.clone();
     let parsed = dir_search::parse_query("", &cwd, home_dir().as_deref());
-    let id = runner.query(parsed.base.clone(), parsed.needle, false);
+    let id = runner.query(parsed.base.clone(), parsed.needle, false, gitignored);
     pane.dir_search = Some(nit_core::DirSearchState {
         base: parsed.base,
         generation: id,
@@ -1551,6 +1656,7 @@ fn toggle_focused_pane_dir_search(state: &mut AppState, runner: &DirSearchRunner
 }
 
 fn issue_dir_search_query(state: &mut AppState, runner: &DirSearchRunner) {
+    let gitignored = state.gitignored_dirs.clone();
     let Some(pane) = focused_pane_mut(state) else {
         return;
     };
@@ -1559,11 +1665,16 @@ fn issue_dir_search_query(state: &mut AppState, runner: &DirSearchRunner) {
     };
     let ParsedQuery { base, needle } =
         dir_search::parse_query(&ds.query, &pane.cwd, home_dir().as_deref());
-    let id = runner.query(base.clone(), needle, ds.show_hidden);
+    if base != ds.base {
+        ds.expanded.clear();
+    }
+    let expanded = ds.expanded.clone();
+    let id = runner.query_with_expanded(base.clone(), needle, ds.show_hidden, gitignored, expanded);
     ds.base = base;
     ds.generation = id;
     ds.results.clear();
     ds.selected = 0;
+    ds.view_offset = 0;
 }
 
 fn handle_dir_search_key(
@@ -1574,22 +1685,36 @@ fn handle_dir_search_key(
     codex: &CodexRunner,
     claude: &ClaudeRunner,
 ) -> bool {
+    let is_ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     match key.code {
         KeyCode::Esc => handle_dir_search_esc(state, last_esc_at, codex, claude),
         KeyCode::Enter => commit_dir_search(state),
-        KeyCode::Up => with_focused_dir_search(state, |ds| {
-            ds.selected = ds.selected.saturating_sub(1);
-        }),
-        KeyCode::Down => with_focused_dir_search(state, |ds| {
-            let max = ds.results.len().saturating_sub(1);
-            ds.selected = (ds.selected + 1).min(max);
-        }),
-        KeyCode::Left => with_focused_dir_search(state, |ds| {
-            ds.query_cursor = ds.query_cursor.saturating_sub(1);
-        }),
-        KeyCode::Right => with_focused_dir_search(state, |ds| {
-            let limit = ds.query.chars().count();
-            ds.query_cursor = ds.query_cursor.saturating_add(1).min(limit);
+        KeyCode::Up => with_focused_dir_search(state, move_selected_up),
+        KeyCode::Down => with_focused_dir_search(state, move_selected_down),
+        // IMPORTANT: Ctrl+chord arms must precede the catch-all
+        // KeyCode::Char(ch) below — otherwise the char inserts into the
+        // query and the chord silently fails.
+        KeyCode::Char('j') if is_ctrl => with_focused_dir_search(state, move_selected_down),
+        KeyCode::Char('k') if is_ctrl => with_focused_dir_search(state, move_selected_up),
+        KeyCode::Right => {
+            expand_dir_search_at_cursor(state);
+            issue_dir_search_query(state, runner);
+        }
+        KeyCode::Char('l') if is_ctrl => {
+            expand_dir_search_at_cursor(state);
+            issue_dir_search_query(state, runner);
+        }
+        KeyCode::Left => {
+            collapse_dir_search_at_cursor(state);
+            issue_dir_search_query(state, runner);
+        }
+        KeyCode::Char('h') if is_ctrl => {
+            collapse_dir_search_at_cursor(state);
+            issue_dir_search_query(state, runner);
+        }
+        KeyCode::Home => with_focused_dir_search(state, |ds| ds.query_cursor = 0),
+        KeyCode::End => with_focused_dir_search(state, |ds| {
+            ds.query_cursor = ds.query.chars().count();
         }),
         KeyCode::Backspace => {
             with_focused_dir_search(state, mutate_backspace);
@@ -1606,6 +1731,51 @@ fn handle_dir_search_key(
         _ => {}
     }
     false
+}
+
+fn move_selected_up(ds: &mut nit_core::DirSearchState) {
+    if ds.results.is_empty() {
+        return;
+    }
+    ds.selected = ds.selected.saturating_sub(1);
+    clamp_viewport(ds, ds.last_visible as usize);
+}
+
+fn move_selected_down(ds: &mut nit_core::DirSearchState) {
+    if ds.results.is_empty() {
+        return;
+    }
+    let max = ds.results.len() - 1;
+    ds.selected = (ds.selected + 1).min(max);
+    clamp_viewport(ds, ds.last_visible as usize);
+}
+
+fn expand_dir_search_at_cursor(state: &mut AppState) {
+    with_focused_dir_search(state, |ds| {
+        if let Some(path) = ds.results.get(ds.selected).cloned() {
+            if path.is_dir() {
+                ds.expanded.insert(path);
+            }
+        }
+    });
+}
+
+fn collapse_dir_search_at_cursor(state: &mut AppState) {
+    with_focused_dir_search(state, |ds| {
+        let Some(path) = ds.results.get(ds.selected).cloned() else {
+            return;
+        };
+        if ds.expanded.remove(&path) {
+            return;
+        }
+        let mut current: Option<&Path> = path.parent();
+        while let Some(p) = current {
+            if ds.expanded.remove(p) {
+                return;
+            }
+            current = p.parent();
+        }
+    });
 }
 
 fn with_focused_dir_search<F: FnOnce(&mut nit_core::DirSearchState)>(state: &mut AppState, f: F) {
@@ -1734,6 +1904,7 @@ fn apply_dir_search_event(state: &mut AppState, event: DirSearchEvent) {
     let last = results.len().saturating_sub(1);
     ds.results = results;
     ds.selected = ds.selected.min(last);
+    ds.view_offset = 0;
 }
 
 fn focused_pane_agent_id(state: &AppState) -> Option<String> {
@@ -2329,13 +2500,10 @@ mod tests {
     fn open_dir_search_with_results(state: &mut AppState, results: Vec<PathBuf>) {
         if let Some(pane) = state.multipane.as_mut().and_then(|mp| mp.panes.get_mut(0)) {
             pane.dir_search = Some(nit_core::DirSearchState {
-                query: String::new(),
-                query_cursor: 0,
                 results,
-                selected: 0,
                 base: PathBuf::from("/tmp"),
                 generation: 1,
-                show_hidden: false,
+                ..Default::default()
             });
         }
     }
@@ -2412,11 +2580,9 @@ mod tests {
             pane.dir_search = Some(nit_core::DirSearchState {
                 query: "foo".into(),
                 query_cursor: 3,
-                results: Vec::new(),
-                selected: 0,
                 base: base.clone(),
                 generation: 7,
-                show_hidden: false,
+                ..Default::default()
             });
         }
         let want = vec![PathBuf::from("/tmp/alpha")];
@@ -2435,6 +2601,171 @@ mod tests {
         assert_eq!(ds.results, want);
     }
 
+    fn open_dir_search_with(state: &mut AppState, results: Vec<PathBuf>, last_visible: u16) {
+        if let Some(pane) = state.multipane.as_mut().and_then(|mp| mp.panes.get_mut(0)) {
+            pane.dir_search = Some(nit_core::DirSearchState {
+                results,
+                base: PathBuf::from("/tmp"),
+                generation: 1,
+                last_visible,
+                ..Default::default()
+            });
+        }
+    }
+
+    #[test]
+    fn ctrl_j_advances_dir_search_selection() {
+        let mut state = fixture_state_no_backend();
+        let results = vec![
+            PathBuf::from("/tmp/a"),
+            PathBuf::from("/tmp/b"),
+            PathBuf::from("/tmp/c"),
+        ];
+        open_dir_search_with(&mut state, results, 10);
+        with_focused_dir_search(&mut state, move_selected_down);
+        let ds = state.multipane.as_ref().unwrap().panes[0]
+            .dir_search
+            .as_ref()
+            .unwrap();
+        assert_eq!(ds.selected, 1);
+    }
+
+    #[test]
+    fn ctrl_k_recedes_dir_search_selection() {
+        let mut state = fixture_state_no_backend();
+        let results = vec![
+            PathBuf::from("/tmp/a"),
+            PathBuf::from("/tmp/b"),
+            PathBuf::from("/tmp/c"),
+        ];
+        open_dir_search_with(&mut state, results, 10);
+        with_focused_dir_search(&mut state, |ds| ds.selected = 2);
+        with_focused_dir_search(&mut state, move_selected_up);
+        let ds = state.multipane.as_ref().unwrap().panes[0]
+            .dir_search
+            .as_ref()
+            .unwrap();
+        assert_eq!(ds.selected, 1);
+    }
+
+    #[test]
+    fn ctrl_l_expands_focused_dir() {
+        let tmp = std::env::temp_dir().join(format!(
+            "nit-mp-expand-{}",
+            Instant::now().elapsed().as_nanos()
+        ));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let mut state = fixture_state_no_backend();
+        open_dir_search_with(&mut state, vec![tmp.clone()], 10);
+        expand_dir_search_at_cursor(&mut state);
+        let ds = state.multipane.as_ref().unwrap().panes[0]
+            .dir_search
+            .as_ref()
+            .unwrap();
+        assert!(ds.expanded.contains(&tmp));
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn ctrl_h_collapses_focused_dir() {
+        let tmp = std::env::temp_dir().join(format!(
+            "nit-mp-collapse-{}",
+            Instant::now().elapsed().as_nanos()
+        ));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let mut state = fixture_state_no_backend();
+        open_dir_search_with(&mut state, vec![tmp.clone()], 10);
+        with_focused_dir_search(&mut state, |ds| {
+            ds.expanded.insert(tmp.clone());
+        });
+        collapse_dir_search_at_cursor(&mut state);
+        let ds = state.multipane.as_ref().unwrap().panes[0]
+            .dir_search
+            .as_ref()
+            .unwrap();
+        assert!(!ds.expanded.contains(&tmp));
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn view_offset_advances_when_selected_passes_window() {
+        let mut state = fixture_state_no_backend();
+        let results: Vec<PathBuf> = (0..25)
+            .map(|i| PathBuf::from(format!("/tmp/d{i}")))
+            .collect();
+        open_dir_search_with(&mut state, results, 10);
+        for _ in 0..12 {
+            with_focused_dir_search(&mut state, move_selected_down);
+        }
+        let ds = state.multipane.as_ref().unwrap().panes[0]
+            .dir_search
+            .as_ref()
+            .unwrap();
+        assert_eq!(ds.selected, 12);
+        assert_eq!(ds.view_offset, 3);
+    }
+
+    #[test]
+    fn view_offset_recedes_when_selected_above_window() {
+        let mut state = fixture_state_no_backend();
+        let results: Vec<PathBuf> = (0..25)
+            .map(|i| PathBuf::from(format!("/tmp/d{i}")))
+            .collect();
+        open_dir_search_with(&mut state, results, 10);
+        with_focused_dir_search(&mut state, |ds| {
+            ds.selected = 11;
+            ds.view_offset = 10;
+        });
+        for _ in 0..7 {
+            with_focused_dir_search(&mut state, move_selected_up);
+        }
+        let ds = state.multipane.as_ref().unwrap().panes[0]
+            .dir_search
+            .as_ref()
+            .unwrap();
+        assert_eq!(ds.selected, 4);
+        assert_eq!(ds.view_offset, 4);
+    }
+
+    #[test]
+    fn apply_dir_search_event_resets_view_offset() {
+        let mut state = fixture_state_no_backend();
+        let base = PathBuf::from("/tmp");
+        if let Some(pane) = state.multipane.as_mut().and_then(|mp| mp.panes.get_mut(0)) {
+            pane.dir_search = Some(nit_core::DirSearchState {
+                base: base.clone(),
+                generation: 7,
+                view_offset: 12,
+                ..Default::default()
+            });
+        }
+        apply_dir_search_event(
+            &mut state,
+            DirSearchEvent::Results {
+                request_id: 7,
+                base,
+                results: vec![PathBuf::from("/tmp/a"), PathBuf::from("/tmp/b")],
+            },
+        );
+        let ds = state.multipane.as_ref().unwrap().panes[0]
+            .dir_search
+            .as_ref()
+            .unwrap();
+        assert_eq!(ds.view_offset, 0);
+    }
+
+    #[test]
+    fn compute_dropdown_rows_clamps_to_results_len() {
+        assert_eq!(compute_dropdown_rows(40, 2), 2);
+        assert_eq!(compute_dropdown_rows(40, 0), 1);
+    }
+
+    #[test]
+    fn compute_dropdown_rows_min_three_max_sixteen() {
+        assert_eq!(compute_dropdown_rows(2, 30), 3);
+        assert_eq!(compute_dropdown_rows(200, 30), 16);
+    }
+
     #[test]
     fn apply_dir_search_event_drops_results_for_stale_generation() {
         let mut state = fixture_state_no_backend();
@@ -2443,11 +2774,9 @@ mod tests {
             pane.dir_search = Some(nit_core::DirSearchState {
                 query: "foo".into(),
                 query_cursor: 3,
-                results: Vec::new(),
-                selected: 0,
                 base: base.clone(),
                 generation: 7,
-                show_hidden: false,
+                ..Default::default()
             });
         }
         apply_dir_search_event(

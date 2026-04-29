@@ -39,12 +39,8 @@ pub fn rank(name: &str, needle: &str) -> Option<i64> {
 }
 
 fn parse_empty(pane_cwd: &Path) -> ParsedQuery {
-    let base = pane_cwd
-        .parent()
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| pane_cwd.to_path_buf());
     ParsedQuery {
-        base,
+        base: pane_cwd.to_path_buf(),
         needle: String::new(),
     }
 }
@@ -143,13 +139,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn empty_or_whitespace_input_resolves_to_parent_with_empty_needle() {
+    fn empty_or_whitespace_input_resolves_to_cwd_with_empty_needle() {
         let project = PathBuf::from("/Users/me/code/nit/crates");
         let from_empty = parse_query("", &project, None);
         let from_whitespace = parse_query("   ", &project, None);
         let from_root = parse_query("", Path::new("/"), None);
 
-        assert_eq!(from_empty.base, PathBuf::from("/Users/me/code/nit"));
+        assert_eq!(from_empty.base, project);
         assert_eq!(from_empty, from_whitespace);
         assert!(from_empty.needle.is_empty());
         assert_eq!(from_root.base, PathBuf::from("/"));
