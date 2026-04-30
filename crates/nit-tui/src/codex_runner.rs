@@ -890,41 +890,34 @@ fn runner_loop_mcp(
             }
         }
 
-        // Per-turn idle timeouts: if a turn stops producing any events, restart the server and
-        // fail all turns so the UI doesn't get pinned in "Working ..." indefinitely.
+        // Per-turn idle timeouts: a single tool call that stops producing
+        // events is a model-side stall, not a server-side failure. Fail
+        // only the stalled turn(s) and keep the multiplexed server alive
+        // for the other in-flight turns.
         if let Some(idle_timeout) = idle_timeout {
             let now = Instant::now();
-            let stalled = in_flight
-                .values()
-                .any(|turn| now.duration_since(turn.last_activity_at) >= idle_timeout);
-            if stalled {
+            let stalled_ids: Vec<u64> = in_flight
+                .iter()
+                .filter(|(_, turn)| now.duration_since(turn.last_activity_at) >= idle_timeout)
+                .map(|(id, _)| *id)
+                .collect();
+            if !stalled_ids.is_empty() {
                 let msg = format!(
                     "MCP tool call stalled after {}s without events",
                     idle_timeout.as_secs()
                 );
-                if let Some(mut srv) = server.take() {
-                    srv.stop();
+                for id in stalled_ids {
+                    if let Some(turn) = in_flight.remove(&id) {
+                        in_flight_by_agent.remove(&turn.agent_id);
+                        let _ = event_tx.send(AgentBusEvent::TurnFailed {
+                            agent_id: turn.agent_id,
+                            mission_id: turn.mission_id,
+                            thread_id: turn.resume_thread_id,
+                            token_count: turn.last_token_count,
+                            message: msg.clone(),
+                        });
+                    }
                 }
-                for (_id, turn) in in_flight.drain() {
-                    let _ = event_tx.send(AgentBusEvent::TurnFailed {
-                        agent_id: turn.agent_id,
-                        mission_id: turn.mission_id,
-                        thread_id: turn.resume_thread_id,
-                        token_count: turn.last_token_count,
-                        message: msg.clone(),
-                    });
-                }
-                in_flight_by_agent.clear();
-                let _ = event_tx.send(AgentBusEvent::McpStatus {
-                    status: McpStatus {
-                        state: McpConnectionState::Error,
-                        endpoint: "codex mcp-server".into(),
-                        latency_ms: None,
-                        last_error: Some(msg),
-                    },
-                });
-                next_connect_attempt_at = Instant::now() + Duration::from_secs(2);
-                continue;
             }
         }
 
@@ -2086,10 +2079,10 @@ fn build_codex_exec_args(
 // discover the back-channel MCP server via a TOML inline table. The agent id
 // propagates via env so signals/claims carry the right `posted_by`.
 //
-// TODO: the exact TOML-inline-table escaping Codex expects for `-c` overrides
-// hasn't been empirically verified — if Codex rejects this override at
-// runtime the in-process nit-mcp side still works; only the Codex-discoverable
-// tool bridge is affected.
+// Note: Codex's exact TOML inline-table escaping for `-c` overrides hasn't
+// been empirically verified — if Codex rejects this override at runtime the
+// in-process nit-mcp side still works; only the Codex-discoverable tool
+// bridge is affected.
 fn push_nit_mcp_config_args(args: &mut Vec<String>, config: &CodexRunnerConfig, agent_id: &str) {
     let Some(socket_path) = config
         .mcp_backchannel_socket

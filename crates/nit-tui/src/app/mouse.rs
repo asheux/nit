@@ -13,7 +13,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::swarm::{
     chat_clone_base_id, normalize_role_label, GateReport, GateReportGate, SwarmArtifactFocus,
-    SwarmRuntime,
+    SwarmRuntime, SWARM_CLONE_INFIX,
 };
 use crate::{
     claude_runner::{ClaudeRunner, ClaudeRunnerConfig},
@@ -1441,7 +1441,7 @@ pub(super) fn apply_agent_ops_click_selection(
             if matches!(meta.node, agent_ops_view::RosterBodyNode::Agent) {
                 if let Some(agent) = state.agents.agents.get(agent_idx) {
                     let checkbox_hit = agent.supports_swarm_priority()
-                        && !agent.id.contains("#swarm-")
+                        && !agent.id.contains(SWARM_CLONE_INFIX)
                         && (1..5).contains(&col);
                     if checkbox_hit {
                         if state.agents.swarm_priority_agent_ids.remove(&agent.id) {

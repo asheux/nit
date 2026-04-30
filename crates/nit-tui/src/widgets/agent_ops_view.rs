@@ -21,7 +21,7 @@ use time::OffsetDateTime;
 use crate::swarm::{
     chat_clone_base_id, is_chat_clone_agent_id, normalize_role_label, per_dep_budget,
     task_uses_full_output_budget, GateReportGate, SwarmDashboardView, SwarmPersistenceView,
-    SwarmRuntime, SwarmTaskArtifacts, DEP_BUDGET_PER_DEP_CEILING,
+    SwarmRuntime, SwarmTaskArtifacts, DEP_BUDGET_PER_DEP_CEILING, SWARM_CLONE_INFIX,
 };
 use crate::theme::Theme;
 use crate::widgets::text_selection::apply_ui_selection;
@@ -331,11 +331,11 @@ fn tree_open_glyph() -> char {
 }
 
 fn is_swarm_clone_agent_id(agent_id: &str) -> bool {
-    agent_id.split_once("#swarm-").is_some()
+    agent_id.split_once(SWARM_CLONE_INFIX).is_some()
 }
 
 fn swarm_clone_label_parts(agent_id: &str) -> Option<(&str, &str)> {
-    let (_base, rest) = agent_id.split_once("#swarm-")?;
+    let (_base, rest) = agent_id.split_once(SWARM_CLONE_INFIX)?;
     let rest = rest.trim();
     if rest.is_empty() {
         return None;
@@ -397,7 +397,7 @@ fn swarm_assigned_roles_for_agent(
 }
 
 fn swarm_clone_display_label(agent_id: &str, role: Option<&str>) -> Option<String> {
-    let (_base, rest) = agent_id.split_once("#swarm-")?;
+    let (_base, rest) = agent_id.split_once(SWARM_CLONE_INFIX)?;
     let rest = rest.trim();
     if rest.is_empty() {
         return None;

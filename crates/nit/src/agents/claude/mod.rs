@@ -38,6 +38,7 @@ pub(super) fn load_only_claude_agents(cli_available: bool) -> nit_core::AgentsSt
         return agents;
     }
     agents.agents.push(claude_lane());
+    agents.rebuild_agents_index();
     agents.selected_agent = Some("claude".into());
     agents.roster_selected = 0;
     agents

@@ -13,7 +13,7 @@ use ratatui::{
 use std::time::{Duration, Instant};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::swarm::{chat_clone_base_id, SwarmRuntime};
+use crate::swarm::{chat_clone_base_id, SwarmRuntime, SWARM_CLONE_INFIX};
 use crate::theme::Theme;
 use crate::widgets::{agent_ops_view, text_selection::apply_ui_selection};
 
@@ -375,6 +375,7 @@ pub fn render(
             Some(swarm),
             pulse_on,
             thread_width,
+            false,
         ));
     }
 
@@ -475,7 +476,7 @@ pub fn render(
         let queued_count = state
             .agents
             .selected_context_agent()
-            .and_then(|agent_id| state.agents.agents.iter().find(|a| a.id == agent_id))
+            .and_then(|agent_id| state.agents.agents_get(agent_id))
             .map(|agent| {
                 let running = state.agents.active_turns.contains_key(&agent.id);
                 agent.queue_len.saturating_sub(usize::from(running))
@@ -993,7 +994,16 @@ pub fn build_pane_thread_rows_with_breathers(
     let has_swarm_context =
         mission.is_some_and(|mid| state.agents.missions.iter().any(|m| m.id == mid && m.swarm));
     if any_remaining || (has_swarm_context && inline_shown.is_empty()) {
-        combined.extend(breather_rows_for_user_prompt(state, swarm, pulse_on, width));
+        // pane_isolate=true: drop secondary_ids so a running agent in
+        // pane A doesn't show up in pane B's breather. Each multipane
+        // pane is its own session — they must not see each other's
+        // active turns. The caller (multipane render) has already
+        // aliased state.agents.selected_agent / selected_mission to
+        // this pane's values, so primary_ids is exactly the agents
+        // belonging to this pane.
+        combined.extend(breather_rows_for_user_prompt(
+            state, swarm, pulse_on, width, true,
+        ));
     }
 
     if suppress_artifacts {
@@ -2301,7 +2311,9 @@ fn thread_rows(
     let has_swarm_context =
         mission.is_some_and(|mid| state.agents.missions.iter().any(|m| m.id == mid && m.swarm));
     if any_remaining || has_swarm_context {
-        rows.extend(breather_rows_for_user_prompt(state, swarm, pulse_on, width));
+        rows.extend(breather_rows_for_user_prompt(
+            state, swarm, pulse_on, width, false,
+        ));
     }
 
     // Ensure artifact/done callouts never appear after the last breather.
@@ -2613,7 +2625,7 @@ fn agent_identity_badge(state: &AppState, agent_id: &str) -> String {
 }
 
 fn compact_swarm_clone_label(agent_id: &str) -> Option<String> {
-    let (_base, rest) = agent_id.split_once("#swarm-")?;
+    let (_base, rest) = agent_id.split_once(SWARM_CLONE_INFIX)?;
     let rest = rest.trim();
     if rest.is_empty() {
         return None;
@@ -2641,7 +2653,7 @@ fn compact_swarm_clone_label(agent_id: &str) -> Option<String> {
 }
 
 fn swarm_clone_source_label(agent_id: &str) -> Option<String> {
-    let (base, rest) = agent_id.split_once("#swarm-")?;
+    let (base, rest) = agent_id.split_once(SWARM_CLONE_INFIX)?;
     let base = base.trim();
     let rest = rest.trim();
     if base.is_empty() || rest.is_empty() {
@@ -2663,7 +2675,7 @@ fn swarm_clone_source_label(agent_id: &str) -> Option<String> {
 // `agent_ops_view::swarm_clone_label_parts` so the breather and the roster
 // panel resolve roles via the same lookup path.
 fn swarm_clone_mission_id(agent_id: &str) -> Option<&str> {
-    let (_base, rest) = agent_id.split_once("#swarm-")?;
+    let (_base, rest) = agent_id.split_once(SWARM_CLONE_INFIX)?;
     let rest = rest.trim();
     if rest.is_empty() {
         return None;
@@ -2742,7 +2754,7 @@ fn inline_breather_rows(
         kind: ThreadRowKind::StatusHeader,
     });
     for id in agent_ids {
-        let agent = state.agents.agents.iter().find(|a| a.id == id.as_str());
+        let agent = state.agents.agents_get(id.as_str());
         let badge = agent
             .map(agent_roster_label)
             .unwrap_or_else(|| id.to_string());
@@ -2825,7 +2837,7 @@ fn breather_running_priority(state: &AppState, agent_id: &str) -> u8 {
     if queued {
         return 1;
     }
-    let agent = state.agents.agents.iter().find(|a| a.id == agent_id);
+    let agent = state.agents.agents_get(agent_id);
     match agent.map(|a| a.status) {
         Some(AgentStatus::Running) | Some(AgentStatus::Waiting) => 2,
         Some(AgentStatus::Idle) => 3,
@@ -2838,6 +2850,14 @@ fn breather_rows_for_user_prompt(
     swarm: Option<&SwarmRuntime>,
     pulse_on: bool,
     width: usize,
+    // When true, agents that don't match the current selected_agent /
+    // selected_mission context are dropped instead of being shown in
+    // the secondary ("other agents") block. Multipane sets this so a
+    // running agent in pane A doesn't bleed into pane B's breather; the
+    // single-pane chat-console intentionally keeps it false so the
+    // operator still sees background activity from agents they aren't
+    // currently looking at.
+    pane_isolate: bool,
 ) -> Vec<ThreadRow> {
     let mission_ctx = state.agents.selected_context_mission();
     let agent_ctx = state.agents.selected_context_agent();
@@ -2903,7 +2923,12 @@ fn breather_rows_for_user_prompt(
 
     let mut ordered_ids = Vec::new();
     ordered_ids.extend(swarm_assigned_ids.iter().cloned());
-    for id in primary_ids.iter().chain(secondary_ids.iter()) {
+    let secondary_iter: &mut dyn Iterator<Item = &String> = if pane_isolate {
+        &mut std::iter::empty()
+    } else {
+        &mut secondary_ids.iter()
+    };
+    for id in primary_ids.iter().chain(secondary_iter) {
         if ordered_ids.iter().any(|existing: &String| existing == id) {
             continue;
         }
@@ -2985,12 +3010,28 @@ fn breather_rows_for_user_prompt(
     // `completed_runs` too — so we need the dedicated accessor.
     let swarm_was_aborted =
         swarm_mission_id.is_some_and(|mid| swarm.is_some_and(|s| s.mission_was_aborted(mid)));
+    // Whether the swarm run has been moved to `completed_runs`. Used to
+    // relabel clones that never received a turn from "swarm_pending"
+    // (which implies "still working") to "swarm_skipped" (which is the
+    // truthful state for a clone the planner never dispatched).
+    let swarm_mission_complete =
+        swarm_mission_id.is_some_and(|mid| swarm.is_some_and(|s| s.mission_is_complete(mid)));
     let working = any_active || any_queued;
     let swarm_phase = swarm_mission_id.and_then(|mid| swarm.and_then(|s| s.swarm_stage_label(mid)));
     let swarm_hint = swarm_mission_id.and_then(|mid| swarm.and_then(|s| s.swarm_stage_hint(mid)));
     let is_swarm = swarm_mission_id.is_some();
     let shadow_stage = crate::shadow::shadow_stage_label_from_state(state, agent_ctx);
-    let base_label: std::borrow::Cow<'_, str> = if !is_swarm && shadow_stage.is_some() {
+    // Aborted takes priority over every other stage label. After
+    // `/abort`, runner CancelTurn commands take ~50 ms to kill the
+    // subprocesses and emit TurnFailed; during that window the
+    // active_turns / queued_*_turns vectors aren't fully drained, so
+    // `any_active || any_queued` would otherwise mask the abort and
+    // leave the breather on "Executing ...". Surface "Aborted" the
+    // moment `mission_was_aborted` flips, regardless of in-flight
+    // kill latency.
+    let base_label: std::borrow::Cow<'_, str> = if is_swarm && swarm_was_aborted {
+        "Aborted".into()
+    } else if !is_swarm && shadow_stage.is_some() {
         // Shadow pipeline is running for a single agent — surface the stage
         // explicitly so the user has real feedback while the hidden agents work.
         format!("{} ...", shadow_stage.unwrap()).into()
@@ -3017,8 +3058,6 @@ fn breather_rows_for_user_prompt(
             Some("SYNTH") => "Synthesizing ...".into(),
             _ => "Waiting ...".into(),
         }
-    } else if is_swarm && swarm_was_aborted {
-        "Aborted".into()
     } else if is_swarm && all_swarm_done {
         "Done".into()
     } else if is_swarm {
@@ -3126,6 +3165,8 @@ fn breather_rows_for_user_prompt(
             } else if swarm_assigned_ids.iter().any(|assigned| assigned == id) {
                 if has_message {
                     "swarm_done"
+                } else if swarm_mission_complete {
+                    "swarm_skipped"
                 } else {
                     "swarm_pending"
                 }
@@ -3254,6 +3295,8 @@ fn breather_rows_for_user_prompt(
         } else if swarm_assigned_ids.iter().any(|assigned| assigned == id) {
             if has_message {
                 "swarm_done"
+            } else if swarm_mission_complete {
+                "swarm_skipped"
             } else {
                 "swarm_pending"
             }
@@ -4015,7 +4058,7 @@ fn swarm_exec_label<'a>(
             // and would break the uniformity check below.
             continue;
         }
-        if let Some(agent) = state.agents.agents.iter().find(|a| a.id == *id) {
+        if let Some(agent) = state.agents.agents_get(id.as_str()) {
             let r = agent.role.trim();
             if !r.is_empty() {
                 roles.push(r.to_string());

@@ -1,11 +1,10 @@
 use nit_core::{AgentLaneKind, AppState};
 
+use super::agent_id::PANE_SEPARATOR;
 use crate::app::dispatch_agent_prompt;
 use crate::claude_runner::ClaudeRunner;
 use crate::codex_runner::CodexRunner;
 use crate::vitals::VitalsState;
-
-const MP_PANE_SUFFIX: &str = "#mp-pane-";
 
 /// Outcome of `dispatch_pane_prompt`. The roster runtime turns
 /// `NoSelection` into a one-line system message in the pane's chat
@@ -175,7 +174,7 @@ pub(crate) fn bridge_pane_effort_to_runner_focused(state: &mut AppState, pane_id
 /// One-way: late operator size-clicks won't reach an in-flight turn,
 /// matching the pre-fix behavior.
 fn bridge_pane_effort_to_runner(state: &mut AppState, pane_idx: usize, materialised_id: &str) {
-    let base_id = match materialised_id.split_once(MP_PANE_SUFFIX) {
+    let base_id = match materialised_id.split_once(PANE_SEPARATOR) {
         Some((base, _)) => base.to_string(),
         None => materialised_id.to_string(),
     };

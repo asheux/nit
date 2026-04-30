@@ -316,6 +316,54 @@ fn push_json_error_capped(errors: &mut Vec<String>, msg: String) {
     errors.push(msg);
 }
 
+/// Decide whether a `tool_use` block represents productive write-like work
+/// for the idle-reaper writer-exemption. Recognises the four built-in
+/// editors, write-like Bash commands (redirection, mv/cp/tee, common
+/// build/test runners), and `mcp__<server>__<verb>` tools whose verb
+/// signals creation/update/upload/edit. Conservative on Bash — false
+/// positives keep an unproductive turn alive past the timeout, but
+/// false negatives kill genuinely productive work mid-run.
+fn tool_invokes_writes(name: Option<&str>, input: Option<&serde_json::Value>) -> bool {
+    let Some(name) = name else { return false };
+    if matches!(name, "Write" | "Edit" | "MultiEdit" | "NotebookEdit") {
+        return true;
+    }
+    if name == "Bash" {
+        let cmd = input
+            .and_then(|v| v.get("command"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        return bash_command_writes(cmd);
+    }
+    if let Some(rest) = name.strip_prefix("mcp__") {
+        if let Some((_, action)) = rest.rsplit_once("__") {
+            let head = action.split('_').next().unwrap_or(action);
+            return matches!(
+                head,
+                "create" | "update" | "write" | "upload" | "edit" | "put"
+            );
+        }
+    }
+    false
+}
+
+fn bash_command_writes(cmd: &str) -> bool {
+    if cmd.contains('>') {
+        return true;
+    }
+    cmd.split([';', '|', '&']).any(|segment| {
+        let mut tokens = segment.split_whitespace();
+        match tokens.next() {
+            Some("tee" | "mv" | "cp" | "rm" | "mkdir" | "touch") => true,
+            Some("cargo") => matches!(
+                tokens.next(),
+                Some("build" | "test" | "fix" | "fmt" | "clippy" | "check")
+            ),
+            _ => false,
+        }
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 fn spawn_turn_worker(
     event_tx: &Sender<AgentBusEvent>,
@@ -587,15 +635,18 @@ fn run_turn(
                                     });
                                 }
                             }
-                            // Detect file writes for per-agent genome attribution
-                            // AND the substrate claim lattice. Claude CLI
-                            // stream-json nests tool_use blocks inside
-                            // `assistant.message.content[]` — there is no
-                            // top-level `content_block_start` event. Filter to
-                            // write-capable tools so Read/Glob/Grep don't
-                            // spuriously emit FileWrite. Do NOT gate on
-                            // path.exists() — Write creating a new file
-                            // legitimately targets a path that doesn't exist yet.
+                            // Detect productive tool use for two purposes:
+                            //   1. Flag the turn as a writer so the idle reaper
+                            //      skips it (covers Write/Edit/MultiEdit/
+                            //      NotebookEdit, write-like Bash commands, and
+                            //      mcp__*__(create|update|write|upload|edit|put)
+                            //      tools — the bare four-tool allowlist used to
+                            //      kill long `cargo build` runs and any swarm
+                            //      relying on MCP write tools).
+                            //   2. Emit FileWrite for genome attribution where a
+                            //      path is recoverable from the input. Bash and
+                            //      MCP writes have no canonical path key, so they
+                            //      set the writer flag without a FileWrite event.
                             if kind == Some("assistant") {
                                 if let Some(content) = value
                                     .get("message")
@@ -608,25 +659,13 @@ fn run_turn(
                                             continue;
                                         }
                                         let tool_name = block.get("name").and_then(|v| v.as_str());
-                                        let is_write_tool = matches!(
-                                            tool_name,
-                                            Some("Write")
-                                                | Some("Edit")
-                                                | Some("MultiEdit")
-                                                | Some("NotebookEdit")
-                                        );
-                                        if !is_write_tool {
+                                        let input = block.get("input");
+                                        if !tool_invokes_writes(tool_name, input) {
                                             continue;
                                         }
-                                        // Flag the turn as a writer so the
-                                        // idle reaper skips it. Set this
-                                        // even if no `file_path` parses
-                                        // below — the model showed write
-                                        // intent, that's what matters.
                                         turn_did_writes.store(true, Ordering::Release);
                                         for key in ["file_path", "path", "file"] {
-                                            if let Some(p) = block
-                                                .get("input")
+                                            if let Some(p) = input
                                                 .and_then(|v| v.get(key))
                                                 .and_then(|v| v.as_str())
                                             {

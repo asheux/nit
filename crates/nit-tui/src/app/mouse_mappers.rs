@@ -174,7 +174,7 @@ pub(super) fn map_help_popup_mouse(
     Some((line_idx, col, text_lines))
 }
 
-pub(super) fn map_artifacts_popup_mouse_with_swarm(
+pub(crate) fn map_artifacts_popup_mouse_with_swarm(
     swarm: &SwarmRuntime,
     mouse: MouseEvent,
     screen: ratatui::layout::Rect,

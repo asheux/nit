@@ -812,6 +812,15 @@ pub struct AgentsState {
     #[serde(skip, default = "claude_max_parallel_turns_default")]
     pub claude_max_parallel_turns: usize,
     pub agents: Vec<AgentLane>,
+    /// Cache of `agents[i].id -> i` so per-event handlers and per-frame
+    /// renderers can look an agent up in O(1) instead of scanning the
+    /// roster vec. Maintained explicitly when the production write paths
+    /// (`agent_bus::upsert_agent`, `swarm::clones`, `multipane::setup`)
+    /// mutate the vec; lookups via `agents_get` / `agents_get_mut`
+    /// fall back to a linear scan if the entry is stale, so test code
+    /// doing `agents.push` directly stays correct.
+    #[serde(skip, default)]
+    pub agents_index: HashMap<String, usize>,
     pub missions: Vec<MissionRecord>,
     pub patches: Vec<PatchProposal>,
     pub messages: Vec<AgentMessage>,
@@ -1213,6 +1222,11 @@ impl AgentsState {
             swarm_priority_agent_ids: HashSet::new(),
             codex_max_parallel_turns: codex_max_parallel_turns_default(),
             claude_max_parallel_turns: claude_max_parallel_turns_default(),
+            agents_index: agents
+                .iter()
+                .enumerate()
+                .map(|(idx, lane)| (lane.id.clone(), idx))
+                .collect(),
             agents,
             missions,
             patches,
@@ -1325,6 +1339,41 @@ impl AgentsState {
     pub fn note_event(&mut self) {
         self.event_epoch = self.event_epoch.wrapping_add(1);
     }
+
+    /// Look an agent up by id in O(1) via `agents_index`. Falls back to
+    /// a linear scan if the index is stale (e.g. test code mutated the
+    /// vec without going through the helpers); the next mutating event
+    /// that calls `rebuild_agents_index` repairs it.
+    pub fn agents_get(&self, id: &str) -> Option<&AgentLane> {
+        if let Some(&idx) = self.agents_index.get(id) {
+            if let Some(lane) = self.agents.get(idx) {
+                if lane.id == id {
+                    return Some(lane);
+                }
+            }
+        }
+        self.agents.iter().find(|a| a.id == id)
+    }
+
+    pub fn agents_get_mut(&mut self, id: &str) -> Option<&mut AgentLane> {
+        if let Some(&idx) = self.agents_index.get(id) {
+            if matches!(self.agents.get(idx), Some(lane) if lane.id == id) {
+                return self.agents.get_mut(idx);
+            }
+        }
+        self.agents.iter_mut().find(|a| a.id == id)
+    }
+
+    /// Rebuild `agents_index` from the current `agents` vec. Cheap; call
+    /// after any code path that pushes / removes / reorders agents
+    /// outside of `agents_push` / `agents_remove_id`.
+    pub fn rebuild_agents_index(&mut self) {
+        self.agents_index.clear();
+        self.agents_index.reserve(self.agents.len());
+        for (idx, lane) in self.agents.iter().enumerate() {
+            self.agents_index.insert(lane.id.clone(), idx);
+        }
+    }
 }
 
 impl Default for AgentsState {
@@ -1349,6 +1398,7 @@ impl Default for AgentsState {
             codex_max_parallel_turns: codex_max_parallel_turns_default(),
             claude_max_parallel_turns: claude_max_parallel_turns_default(),
             agents: Vec::new(),
+            agents_index: HashMap::new(),
             missions: Vec::new(),
             patches: Vec::new(),
             messages: Vec::new(),

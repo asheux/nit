@@ -1,5 +1,8 @@
 use super::*;
-use crate::state::{AgentLane, AgentLaneKind, AgentStatus, AgentTurnState, AppState};
+use crate::state::{
+    AgentAlertSeverity, AgentLane, AgentLaneKind, AgentStatus, AgentTurnState, AppState,
+    MissionRecord,
+};
 
 fn test_state() -> AppState {
     let editor = crate::Buffer::from_str("editor", "", None);
@@ -215,6 +218,123 @@ fn turn_failed_source_label_matches_backend() {
     // The status bar message should say "Claude failed:".
     let status = state.status.as_deref().unwrap();
     assert!(status.starts_with("Claude failed:"), "got: {status}");
+}
+
+#[test]
+fn turn_failed_with_operator_cancel_routes_soft_path() {
+    // Pins the OPERATOR_CANCEL_TURN_MESSAGE soft-cancel branch in
+    // agent_bus.rs. A typo on either side (the const, the runner emit
+    // sites in claude_runner.rs / codex_runner.rs, or the bus match)
+    // would silently flip operator cancels into the hard error path:
+    // red status banner, substrate Warning, mission ERROR overwrite,
+    // alert noise. This test fails loudly if any of those drift.
+    let mut state = test_state();
+    add_claude_agent(&mut state, "claude-opus");
+    state.agents.missions.push(MissionRecord {
+        id: "mis-001".into(),
+        title: "test".into(),
+        phase: crate::state::MissionPhase::Execute,
+        swarm: true,
+        assigned_agents: vec!["claude-opus".into()],
+        status: "ABORTED".into(),
+        updated_at: String::new(),
+    });
+    let alerts_before = state.agents.alerts.len();
+    let signals_before = state.substrate.signals.len();
+
+    AgentBusEvent::TurnFailed {
+        agent_id: "claude-opus".into(),
+        mission_id: Some("mis-001".into()),
+        thread_id: None,
+        token_count: None,
+        message: OPERATOR_CANCEL_TURN_MESSAGE.into(),
+    }
+    .apply(&mut state);
+
+    let agent = state
+        .agents
+        .agents
+        .iter()
+        .find(|a| a.id == "claude-opus")
+        .expect("claude-opus still in roster");
+    assert_eq!(agent.status, AgentStatus::Idle);
+
+    assert_eq!(
+        state.agents.alerts.len(),
+        alerts_before,
+        "soft-cancel must not push an alert"
+    );
+    assert!(
+        state.status.is_none(),
+        "soft-cancel must not set the failure status banner, got: {:?}",
+        state.status
+    );
+
+    let new_warnings = state
+        .substrate
+        .signals
+        .values()
+        .filter(|s| s.kind == crate::substrate::SignalKind::Warning)
+        .count();
+    assert_eq!(
+        state.substrate.signals.len() - signals_before,
+        0,
+        "soft-cancel must not emit substrate signals; got {new_warnings} new warnings"
+    );
+
+    let mission = state
+        .agents
+        .missions
+        .iter()
+        .find(|m| m.id == "mis-001")
+        .unwrap();
+    assert_eq!(
+        mission.status, "ABORTED",
+        "soft-cancel must not clobber an ABORTED mission status with ERROR"
+    );
+
+    let diag = state
+        .agents
+        .diag_events
+        .last()
+        .expect("soft-cancel must record an Info diag entry");
+    assert_eq!(diag.severity, AgentAlertSeverity::Info);
+    assert!(
+        diag.message.contains("cancelled by operator"),
+        "diag message should reflect operator cancel, got: {}",
+        diag.message
+    );
+}
+
+#[test]
+fn turn_failed_with_runner_internal_cancel_routes_soft_path() {
+    // The other half of the soft-cancel branch: MCP-driven runner
+    // cancels (`Cancelled (MCP stop)` / `Cancelled (MCP reconnect)`)
+    // ride the same path so the operator does not see an alert when
+    // they reconfigure MCP.
+    let mut state = test_state();
+    add_codex_agent(&mut state, "gpt-test");
+    let signals_before = state.substrate.signals.len();
+
+    AgentBusEvent::TurnFailed {
+        agent_id: "gpt-test".into(),
+        mission_id: None,
+        thread_id: None,
+        token_count: None,
+        message: "Cancelled (MCP reconnect)".into(),
+    }
+    .apply(&mut state);
+
+    assert!(state.agents.alerts.is_empty());
+    assert!(state.status.is_none());
+    assert_eq!(state.substrate.signals.len(), signals_before);
+    let agent = state
+        .agents
+        .agents
+        .iter()
+        .find(|a| a.id == "gpt-test")
+        .unwrap();
+    assert_eq!(agent.status, AgentStatus::Idle);
 }
 
 #[test]

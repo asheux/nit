@@ -13,7 +13,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::swarm::{
     chat_clone_base_id, normalize_role_label, GateReport, GateReportGate, SwarmArtifactFocus,
-    SwarmRuntime,
+    SwarmRuntime, SWARM_CLONE_INFIX,
 };
 use crate::{
     claude_runner::{ClaudeRunner, ClaudeRunnerConfig},
@@ -1156,7 +1156,7 @@ pub(super) fn toggle_roster_priority(state: &mut AppState) -> bool {
     if !agent.supports_swarm_priority() {
         return false;
     }
-    if agent.id.contains("#swarm-") {
+    if agent.id.contains(SWARM_CLONE_INFIX) {
         return false;
     }
     if state.agents.swarm_priority_agent_ids.remove(&agent.id) {

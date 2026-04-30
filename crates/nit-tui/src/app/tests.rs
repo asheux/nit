@@ -5674,6 +5674,22 @@ fn shadow_main_agent_retry_respects_per_agent_budget() {
     );
 }
 
+// nit-tui's GENOME_RETRY_LIMIT and nit-core's ARBITER_RETRY_LIMIT both
+// cap the per-agent retry budget. They are duplicated because nit-core
+// can't depend on nit-tui, but the runtime invariants only hold when
+// they agree: arbiter interventions must not outlive an agent's genome
+// retries, and vice versa. This test pins the equality so a drift
+// triggers a CI failure, not a silent behaviour change.
+#[test]
+fn genome_retry_limit_matches_arbiter_retry_limit() {
+    assert_eq!(
+        super::GENOME_RETRY_LIMIT,
+        nit_core::ARBITER_RETRY_LIMIT,
+        "GENOME_RETRY_LIMIT (app/genome_retry.rs) and ARBITER_RETRY_LIMIT \
+         (nit-core/arbiters/mod.rs) must stay in sync"
+    );
+}
+
 /// Regression: overlapping `TurnCompleted` events from parallel swarm agents
 /// must not clobber each other's genome-eval state. Before per-agent batches,
 /// a second `dispatch_turn_genome_evals` overwrote the single-slot pending

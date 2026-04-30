@@ -68,8 +68,11 @@ fn observe(state: &AppState) -> Vec<InterventionProposal> {
             continue;
         }
         // Pick the target as lexicographically-larger agent for deterministic tiebreak.
-        let target_agent = if a > b { a.clone() } else { b.clone() };
-        let other = if a > b { b.clone() } else { a.clone() };
+        let (target_agent, other) = if a > b {
+            (a.clone(), b.clone())
+        } else {
+            (b.clone(), a.clone())
+        };
         let paths_list = if paths.is_empty() {
             "shared resources".to_string()
         } else {

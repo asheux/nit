@@ -13,6 +13,7 @@ pub(in crate::agents) fn load_agents_from_codex_models_cache(
 
     metadata::populate_codex_metadata(&mut agents, &entries);
     agents.agents = metadata::build_codex_lanes(entries);
+    agents.rebuild_agents_index();
 
     agents.selected_agent = agents.agents.first().map(|lane| lane.id.clone());
     agents.roster_selected = 0;

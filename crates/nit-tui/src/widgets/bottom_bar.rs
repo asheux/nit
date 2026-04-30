@@ -95,7 +95,7 @@ fn build_metrics_line(
         Span::styled("Ln ", styles.label),
         Span::styled(format!("{line}, "), styles.coord),
         Span::styled("Col ", styles.label),
-        Span::styled(format!("{col}"), styles.coord),
+        Span::styled(col.to_string(), styles.coord),
         Span::styled(" | ", styles.sep),
         Span::styled("CPU ", styles.label),
         Span::styled(format!("{cpu:02}%"), styles.cpu),

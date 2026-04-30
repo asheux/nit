@@ -604,7 +604,7 @@ pub fn toggle_size_leaf(
     let Some(effort) = efforts.get(leaf_idx).cloned() else {
         return false;
     };
-    let Some(lane) = state.agents.agents.iter().find(|l| l.id == agent_id) else {
+    let Some(lane) = state.agents.agents_get(agent_id) else {
         return false;
     };
     let is_codex = lane.is_codex() || matches!(lane.kind, AgentLaneKind::Codex);

@@ -151,8 +151,6 @@ struct CachedNode {
     label: String,
     is_start: bool,
     is_halt: bool,
-    // Keep for future; circuit renderer doesn't currently use output for color.
-    #[allow(dead_code)]
     output: Option<char>,
 }
 

@@ -6,8 +6,15 @@ use super::{
     effective_max_swarm_size, SwarmSize, SwarmTemplate, DEFAULT_SWARM_SIZE, MAX_SWARM_SIZE,
 };
 
+/// Infix in a swarm clone's agent_id: `<base>#swarm-<mission_id>-clone-NN`.
+/// Single source of truth — every site that splits or matches the swarm
+/// clone naming convention should reference this constant.
+pub const SWARM_CLONE_INFIX: &str = "#swarm-";
+
 pub(super) fn swarm_clone_base_id(agent_id: &str) -> Option<&str> {
-    agent_id.split_once("#swarm-").map(|(base_id, _)| base_id)
+    agent_id
+        .split_once(SWARM_CLONE_INFIX)
+        .map(|(base_id, _)| base_id)
 }
 
 pub(super) fn is_swarm_clone_agent_id(agent_id: &str) -> bool {
@@ -28,7 +35,7 @@ pub fn is_any_clone_agent_id(agent_id: &str) -> bool {
 
 /// Display-only: compact `base#swarm-mis-XXX-clone-NN` to `base#clone-NN`.
 pub fn compact_agent_display_id(agent_id: &str) -> String {
-    if let Some((base, rest)) = agent_id.split_once("#swarm-") {
+    if let Some((base, rest)) = agent_id.split_once(SWARM_CLONE_INFIX) {
         // rest is e.g. "mis-002-clone-01"; extract "clone-NN" suffix.
         if let Some(clone_pos) = rest.find("clone-") {
             return format!("{base}#{}", &rest[clone_pos..]);
@@ -38,7 +45,7 @@ pub fn compact_agent_display_id(agent_id: &str) -> String {
 }
 
 pub(super) fn is_swarm_clone_for_mission(agent_id: &str, mission_id: &str) -> bool {
-    let Some((_base_id, rest)) = agent_id.split_once("#swarm-") else {
+    let Some((_base_id, rest)) = agent_id.split_once(SWARM_CLONE_INFIX) else {
         return false;
     };
     rest.strip_prefix(mission_id)
@@ -135,12 +142,7 @@ pub(crate) fn insert_swarm_clone_lane(
     base_id: &str,
     clone_lane: nit_core::AgentLane,
 ) {
-    if state
-        .agents
-        .agents
-        .iter()
-        .any(|existing| existing.id == clone_lane.id)
-    {
+    if state.agents.agents_get(clone_lane.id.as_str()).is_some() {
         return;
     }
 
@@ -151,6 +153,7 @@ pub(crate) fn insert_swarm_clone_lane(
         .position(|lane| lane.id == base_id)
     else {
         state.agents.agents.push(clone_lane);
+        state.agents.rebuild_agents_index();
         return;
     };
 
@@ -166,6 +169,7 @@ pub(crate) fn insert_swarm_clone_lane(
         }
     }
     state.agents.agents.insert(insert_pos, clone_lane);
+    state.agents.rebuild_agents_index();
 }
 
 /// Bulk version of `drain_queued_turns_for_agent` for the abort path —
@@ -196,7 +200,7 @@ pub(super) fn drain_queued_turns_for_mission_agents(state: &mut AppState, agent_
         }
     });
     for (agent_id, count) in removed_per_agent {
-        if let Some(agent) = state.agents.agents.iter_mut().find(|a| a.id == agent_id) {
+        if let Some(agent) = state.agents.agents_get_mut(&agent_id) {
             agent.queue_len = agent.queue_len.saturating_sub(count);
         }
     }
@@ -230,7 +234,7 @@ pub(crate) fn drain_queued_turns_for_agent(state: &mut AppState, agent_id: &str)
 
     let total_removed = codex_removed + claude_removed;
     if total_removed > 0 {
-        if let Some(agent) = state.agents.agents.iter_mut().find(|a| a.id == agent_id) {
+        if let Some(agent) = state.agents.agents_get_mut(agent_id) {
             agent.queue_len = agent.queue_len.saturating_sub(total_removed);
         }
     }
@@ -249,16 +253,16 @@ pub(super) fn cleanup_swarm_clones_for_mission(state: &mut AppState, mission_id:
     }
 
     // Decrement queue_len for each Codex turn that will be removed, while agents still exist.
-    for turn in state.agents.queued_codex_turns.iter() {
-        if clone_ids.contains(turn.agent_id.as_str()) {
-            if let Some(agent) = state
-                .agents
-                .agents
-                .iter_mut()
-                .find(|a| a.id == turn.agent_id)
-            {
-                agent.queue_len = agent.queue_len.saturating_sub(1);
-            }
+    let codex_decrements: Vec<String> = state
+        .agents
+        .queued_codex_turns
+        .iter()
+        .filter(|turn| clone_ids.contains(turn.agent_id.as_str()))
+        .map(|turn| turn.agent_id.clone())
+        .collect();
+    for agent_id in codex_decrements {
+        if let Some(agent) = state.agents.agents_get_mut(&agent_id) {
+            agent.queue_len = agent.queue_len.saturating_sub(1);
         }
     }
     state
@@ -267,16 +271,16 @@ pub(super) fn cleanup_swarm_clones_for_mission(state: &mut AppState, mission_id:
         .retain(|turn| !clone_ids.contains(turn.agent_id.as_str()));
 
     // Decrement queue_len for each Claude turn that will be removed, while agents still exist.
-    for turn in state.agents.queued_claude_turns.iter() {
-        if clone_ids.contains(turn.agent_id.as_str()) {
-            if let Some(agent) = state
-                .agents
-                .agents
-                .iter_mut()
-                .find(|a| a.id == turn.agent_id)
-            {
-                agent.queue_len = agent.queue_len.saturating_sub(1);
-            }
+    let claude_decrements: Vec<String> = state
+        .agents
+        .queued_claude_turns
+        .iter()
+        .filter(|turn| clone_ids.contains(turn.agent_id.as_str()))
+        .map(|turn| turn.agent_id.clone())
+        .collect();
+    for agent_id in claude_decrements {
+        if let Some(agent) = state.agents.agents_get_mut(&agent_id) {
+            agent.queue_len = agent.queue_len.saturating_sub(1);
         }
     }
     state
@@ -483,6 +487,7 @@ pub fn cleanup_idle_chat_clone(state: &mut AppState, clone_id: &str) {
     let old_roster_selected = state.agents.roster_selected;
 
     state.agents.agents.retain(|lane| lane.id != clone_id);
+    state.agents.rebuild_agents_index();
 
     if state.agents.agents.is_empty() {
         state.agents.selected_agent = None;

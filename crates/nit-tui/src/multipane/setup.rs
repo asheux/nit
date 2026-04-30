@@ -77,6 +77,7 @@ pub fn install_filtered(
             });
         }
         state.agents.agents.extend(pane_lanes);
+        state.agents.rebuild_agents_index();
         state.agents.selected_agent = pane_sessions.first().map(|p| p.agent_id.clone());
         for pane in &pane_sessions {
             copy_codex_runtime_metadata(state, &base_lane.id, &pane.agent_id);
@@ -130,12 +131,17 @@ pub fn materialise_pane_lane(
         .iter()
         .find(|l| l.id == selected_base)
         .cloned()?;
-    let already_present = state.agents.agents.iter().any(|l| l.id == pane_id_value);
+    let already_present = state.agents.agents_get(&pane_id_value).is_some();
     if !already_present {
         let mut lane = base_lane.clone();
         lane.id = pane_id_value.clone();
         lane.role = pane_id_value.clone();
+        let new_idx = state.agents.agents.len();
         state.agents.agents.push(lane);
+        state
+            .agents
+            .agents_index
+            .insert(pane_id_value.clone(), new_idx);
         copy_codex_runtime_metadata(state, selected_base, &pane_id_value);
         copy_claude_runtime_metadata(state, selected_base, &pane_id_value);
     }

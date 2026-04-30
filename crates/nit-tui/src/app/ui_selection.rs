@@ -122,7 +122,7 @@ pub(super) fn update_ui_selection_text(
     }
 }
 
-pub(super) fn selection_text(lines: &[String], selection: UiSelection) -> String {
+pub(crate) fn selection_text(lines: &[String], selection: UiSelection) -> String {
     if lines.is_empty() {
         return String::new();
     }

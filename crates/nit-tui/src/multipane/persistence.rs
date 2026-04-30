@@ -59,7 +59,12 @@ pub fn save_session(state: &MultipaneState, workspace: &Path) -> io::Result<()> 
     }
     let json = serde_json::to_string_pretty(&snapshot)
         .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
-    fs::write(&path, json)?;
+    // Write-then-rename so a crash mid-write can't corrupt the live
+    // session file. A leftover `.tmp` is harmless; load_session only
+    // reads the canonical path.
+    let tmp = path.with_extension("json.tmp");
+    fs::write(&tmp, json)?;
+    fs::rename(&tmp, &path)?;
     Ok(())
 }
 

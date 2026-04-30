@@ -4,10 +4,10 @@
 //! `format_message_rows`.
 
 use super::{
-    artifact_message_index_for_line, chat_input_scroll_metrics, chat_input_text_area,
-    ecg_indicator, format_message_rows, map_chat_input_point_to_cursor, swarm_exec_label,
-    thread_lines, thread_rows, user_prompt_bg, wrap_input_with_cursor, wrap_visual_line, ThreadRow,
-    ThreadRowKind,
+    artifact_message_index_for_line, build_pane_thread_rows_with_breathers,
+    chat_input_scroll_metrics, chat_input_text_area, ecg_indicator, format_message_rows,
+    map_chat_input_point_to_cursor, swarm_exec_label, thread_lines, thread_rows, user_prompt_bg,
+    wrap_input_with_cursor, wrap_visual_line, ThreadRow, ThreadRowKind,
 };
 use crate::swarm::{test_runtime_with_running_tasks, SwarmRuntime, SwarmSize};
 use crate::theme::Theme;
@@ -1215,6 +1215,153 @@ fn breather_rows_show_done_when_swarm_idle_and_all_assigned_reported() {
         matches!(row.kind, ThreadRowKind::Breather) && row.text.contains("▁▁▁▁▁▁ Done")
     }));
     assert!(!rows.iter().any(|row| row.text.contains("Working ...")));
+}
+
+#[test]
+fn swarm_clones_without_message_render_as_skipped_after_mission_complete() {
+    // Regression: clones the planner never dispatched would stay
+    // "Swarm pending" forever once the run finished, because the per-agent
+    // status check fell back to "did this agent emit a message?". Once
+    // `mission_is_complete(mid)` is true, those clones should render as
+    // "Swarm skipped" instead.
+    let mut state = AppState::new(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")),
+        Buffer::empty("editor", None),
+        Buffer::empty("notes", None),
+    );
+    state.agents.messages.clear();
+    state.agents.missions.clear();
+    state.agents.agents.clear();
+    state.agents.agents.push(make_lane(
+        "planner",
+        "Planner",
+        "Codex",
+        AgentLaneKind::Codex,
+        AgentStatus::Idle,
+    ));
+
+    let mut swarm = SwarmRuntime::default();
+    let (mission_id, _dispatches) = swarm
+        .start(
+            &mut state,
+            "planner".into(),
+            vec!["planner".into()],
+            SwarmSize::Count(3),
+            Some("parallel".into()),
+            None,
+            "root".into(),
+        )
+        .expect("swarm start");
+
+    // Only clone-01 emits a message. clone-02 was never dispatched.
+    let clone_one = format!("planner#swarm-{mission_id}-clone-01");
+    state.agents.messages.push(AgentMessage {
+        at: "10:00:01".into(),
+        channel: AgentChannel::Agent,
+        agent_id: Some(clone_one.clone()),
+        mission_id: Some(mission_id.clone()),
+        text: "clone-01 output".into(),
+        prompt_msg_idx: None,
+        kind: None,
+    });
+
+    // Move the run into `completed_runs` so `mission_is_complete` flips on.
+    // Using abort here — the production "synth" path also lands in
+    // `completed_runs`; the per-clone label logic doesn't care which.
+    let _ = swarm.abort_mission(&mut state, &mission_id);
+
+    state.agents.selected_mission = Some(mission_id.clone());
+    state.agents.selected_agent = Some("planner".into());
+
+    let rows = thread_rows(&state, Some(&swarm), 120, true);
+    let flat = rows
+        .iter()
+        .map(|r| r.text.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        flat.contains("Swarm skipped"),
+        "expected a 'Swarm skipped' row for the never-dispatched clone, got:\n{flat}"
+    );
+    assert!(
+        !flat.contains("Swarm pending"),
+        "no clone should still be 'Swarm pending' once the mission is in completed_runs:\n{flat}"
+    );
+}
+
+#[test]
+fn pane_breather_does_not_leak_active_turn_from_other_pane() {
+    // Regression: in multipane, a running agent in pane A used to bleed
+    // into pane B's chat-thread breather because
+    // `breather_rows_for_user_prompt` always merged the
+    // out-of-context "secondary" agents into the breather table.
+    // `build_pane_thread_rows_with_breathers` now passes
+    // `pane_isolate=true`, which drops secondary_ids — so pane B
+    // (idle) should render no breather rows even though pane A is
+    // mid-turn.
+    let mut state = AppState::new(
+        PathBuf::new(),
+        Buffer::empty("editor", None),
+        Buffer::empty("notes", None),
+    );
+    state.agents.messages.clear();
+    state.agents.missions.clear();
+    state.agents.agents.clear();
+
+    let pane_a = "claude-opus-4-7#mp-pane-01";
+    let pane_b = "claude-opus-4-7#mp-pane-02";
+    state.agents.agents.push(make_lane(
+        pane_a,
+        "Claude (pane A)",
+        "Claude",
+        AgentLaneKind::Claude,
+        AgentStatus::Running,
+    ));
+    state.agents.agents.push(make_lane(
+        pane_b,
+        "Claude (pane B)",
+        "Claude",
+        AgentLaneKind::Claude,
+        AgentStatus::Idle,
+    ));
+
+    let now = Instant::now();
+    state.agents.active_turns.insert(
+        pane_a.into(),
+        nit_core::state::AgentTurnState {
+            started_at: now,
+            last_heartbeat_at: now,
+            last_output_at: now,
+            stage: Some("starting".into()),
+        },
+    );
+
+    // Render pane B's chat thread (mimic the multipane render flow:
+    // selected_agent / selected_mission aliased to pane B's values).
+    state.agents.selected_agent = Some(pane_b.into());
+    state.agents.selected_mission = None;
+
+    let rows = build_pane_thread_rows_with_breathers(
+        &state,
+        None,
+        Some(pane_b),
+        None,
+        120,
+        false,
+    );
+    let flat = rows
+        .iter()
+        .map(|r| r.text.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        !flat.contains(pane_a),
+        "pane B must not show pane A's agent id in its breather table:\n{flat}"
+    );
+    assert!(
+        !flat.contains("Working ..."),
+        "pane B is idle — no 'Working ...' breather should render even when pane A is busy:\n{flat}"
+    );
 }
 
 #[test]

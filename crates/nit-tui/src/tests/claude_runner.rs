@@ -4,6 +4,63 @@ fn has_arg(args: &[String], expected: &str) -> bool {
     args.iter().any(|a| a == expected)
 }
 
+// Pins propose-03 important #3: when the runner-internal queue is
+// non-empty (`max_parallel_turns` clamped) and the operator triggers a
+// `CancelAll` / `CancelTurn`, today's `runner_loop` calls `queue.clear()`
+// or `queue.retain(...)` without emitting `TurnFailed` for the dropped
+// queued commands. State-side `queue_len` was incremented by
+// `enqueue_claude_turn` at dispatch time; without a matching
+// `TurnFailed`, the bus-side decrement at `agent_bus.rs:482` never
+// runs and the roster carries ghost queue rows until the agent is
+// reaped. The fix lives in `claude_runner.rs`'s `CancelAll` /
+// `CancelTurn` arms — once they emit `TurnFailed { message:
+// OPERATOR_CANCEL_TURN_MESSAGE, ... }` per dropped queued turn, this
+// test passes and `#[ignore]` should be removed.
+#[test]
+#[ignore = "fails until claude_runner::CancelAll emits TurnFailed for dropped queued items"]
+fn queue_len_returns_to_zero_after_cancel_all_with_queued_turns() {
+    use nit_core::state::{AgentLane, AgentLaneKind, AgentStatus, AppState};
+    use nit_core::{AgentBusEvent, OPERATOR_CANCEL_TURN_MESSAGE};
+
+    let editor = nit_core::Buffer::from_str("editor", "", None);
+    let notes = nit_core::Buffer::from_str("notes", "", None);
+    let mut state = AppState::new(std::path::PathBuf::from("."), editor, notes);
+    state.agents.agents.push(AgentLane {
+        id: "claude-opus".into(),
+        role: "claude-opus".into(),
+        lane: "Claude".into(),
+        kind: AgentLaneKind::Claude,
+        status: AgentStatus::Running,
+        heartbeat_age_secs: 0,
+        // 3 queue increments from dispatch: 1 active + 2 in the
+        // runner-internal queue (assuming max_parallel_turns = 1).
+        queue_len: 3,
+        current_mission: None,
+        last_message: String::new(),
+        shadow: false,
+    });
+    state.agents.rebuild_agents_index();
+
+    // Today CancelAll only kills the active turn → exactly one
+    // TurnFailed is emitted. Simulate that single event:
+    AgentBusEvent::TurnFailed {
+        agent_id: "claude-opus".into(),
+        mission_id: None,
+        thread_id: None,
+        token_count: None,
+        message: OPERATOR_CANCEL_TURN_MESSAGE.into(),
+    }
+    .apply(&mut state);
+
+    let agent = state.agents.agents_get("claude-opus").unwrap();
+    assert_eq!(
+        agent.queue_len, 0,
+        "after CancelAll every queue_len increment must be paired with a \
+         TurnFailed decrement; currently leaks because runner does not \
+         emit TurnFailed for runner-queued turns"
+    );
+}
+
 #[test]
 fn test_claude_model_slug_for_agent_id() {
     let cases = [

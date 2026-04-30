@@ -138,7 +138,7 @@ pub(super) fn enqueue_codex_turn(
 
     // Increment queue_len only after all validation checks pass, right before
     // the turn is pushed so the two stay in sync.
-    if let Some(agent) = state.agents.agents.iter_mut().find(|a| a.id == model) {
+    if let Some(agent) = state.agents.agents_get_mut(&model) {
         let is_running = matches!(agent.status, AgentStatus::Running);
         agent.queue_len = agent.queue_len.saturating_add(1);
         agent.heartbeat_age_secs = 0;
@@ -349,7 +349,7 @@ pub(super) fn maybe_dispatch_codex_turn(
     }
 
     // Immediate UI feedback: mark the model as queued and show the loader/breather row.
-    let Some(agent) = state.agents.agents.iter_mut().find(|a| a.id == model) else {
+    let Some(agent) = state.agents.agents_get_mut(&model) else {
         return;
     };
     // The Codex runner may still be at its global parallel cap, so treat the turn as queued
@@ -515,7 +515,7 @@ pub(super) fn enqueue_claude_turn(
 
     // Increment queue_len only after all validation checks pass, right before
     // the turn is pushed so the two stay in sync.
-    if let Some(agent) = state.agents.agents.iter_mut().find(|a| a.id == model) {
+    if let Some(agent) = state.agents.agents_get_mut(&model) {
         let is_running = matches!(agent.status, AgentStatus::Running);
         agent.queue_len = agent.queue_len.saturating_add(1);
         agent.heartbeat_age_secs = 0;
@@ -605,7 +605,7 @@ pub(super) fn maybe_dispatch_next_queued_claude_turn(
 // dequeued, flipping Waiting → Idle when the queue empties. Separated so the
 // drain paths stay identical across Codex and Claude.
 fn release_queued_slot(state: &mut AppState, agent_id: &str) {
-    let Some(agent) = state.agents.agents.iter_mut().find(|a| a.id == agent_id) else {
+    let Some(agent) = state.agents.agents_get_mut(agent_id) else {
         return;
     };
     agent.queue_len = agent.queue_len.saturating_sub(1);
@@ -745,7 +745,7 @@ pub(super) fn maybe_dispatch_claude_turn(
         state.agents.claude_context_remaining_pct.remove(&model);
     }
 
-    let Some(agent) = state.agents.agents.iter_mut().find(|a| a.id == model) else {
+    let Some(agent) = state.agents.agents_get_mut(&model) else {
         return;
     };
     // Preserve Running/Error — see the matching guard in maybe_dispatch_codex_turn

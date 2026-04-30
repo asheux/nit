@@ -842,7 +842,9 @@ pub(super) fn handle_artifacts_popup_key(
                         lane.queue_len = 0;
                         lane.heartbeat_age_secs = 0;
                         lane.current_mission = None;
+                        let new_idx = state.agents.agents.len();
                         state.agents.agents.push(lane);
+                        state.agents.agents_index.insert(agent_id.clone(), new_idx);
                     }
                 }
             }

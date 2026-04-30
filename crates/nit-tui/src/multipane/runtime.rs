@@ -7,7 +7,7 @@ use crossterm::event::{
     self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent,
     MouseEventKind,
 };
-use nit_core::{AgentChannel, AgentMessage, AppState};
+use nit_core::{AgentChannel, AgentMessage, AppState, UiSelection, UiSelectionPane};
 use ratatui::{
     backend::CrosstermBackend,
     layout::Rect,
@@ -136,11 +136,7 @@ pub fn run_loop(
         // through the same `apply_swarm_task_role` + `dispatch_agent_prompt`
         // pipeline `app/runner.rs` uses.
         for mut dispatch in swarm.poll_genome_gates(state) {
-            crate::app::augment_dispatch_prompt_with_landscape(
-                state,
-                &swarm,
-                &mut dispatch,
-            );
+            crate::app::augment_dispatch_prompt_with_landscape(state, &swarm, &mut dispatch);
             crate::app::apply_swarm_task_role(state, &dispatch);
             crate::app::dispatch_agent_prompt(
                 state,
@@ -153,11 +149,7 @@ pub fn run_loop(
             );
         }
         for mut dispatch in swarm.poll_genome_reviews(state) {
-            crate::app::augment_dispatch_prompt_with_landscape(
-                state,
-                &swarm,
-                &mut dispatch,
-            );
+            crate::app::augment_dispatch_prompt_with_landscape(state, &swarm, &mut dispatch);
             crate::app::apply_swarm_task_role(state, &dispatch);
             crate::app::dispatch_agent_prompt(
                 state,
@@ -171,6 +163,13 @@ pub fn run_loop(
         }
 
         capture_pane_mission_ids(state);
+
+        // Animate the breather. The single-pane runner ticks
+        // `frame_count` in `app/draw.rs:408`; multipane has its own draw
+        // path so we have to do it explicitly. Without this, the histogram
+        // glyph next to "Working ..." / "Verifying ..." stays frozen on a
+        // single frame regardless of how long an agent runs.
+        state.metrics.frame_count = state.metrics.frame_count.wrapping_add(1);
 
         terminal.draw(|frame| {
             let area = frame.size();
@@ -201,6 +200,7 @@ pub fn run_loop(
             &mut shadow,
             &dir_search_runner,
             &mut clipboard,
+            theme,
             area,
         )?;
         if should_quit {
@@ -238,6 +238,7 @@ fn drain_input_burst(
     shadow: &mut ShadowRuntime,
     dir_runner: &DirSearchRunner,
     clipboard: &mut Option<arboard::Clipboard>,
+    theme: &Theme,
     area: Rect,
 ) -> io::Result<bool> {
     for _ in 0..32 {
@@ -249,7 +250,7 @@ fn drain_input_burst(
                     return Ok(true);
                 }
             }
-            Event::Mouse(mouse) => handle_mouse(state, swarm, area, mouse),
+            Event::Mouse(mouse) => handle_mouse(state, swarm, theme, clipboard, area, mouse),
             _ => {}
         }
         if !event::poll(Duration::from_millis(0))? {
@@ -322,7 +323,7 @@ fn capture_pane_mission_ids(state: &mut AppState) {
             .filter(|s| !s.is_empty())
             .or(pane.selected_agent_id.as_deref());
         let Some(lookup_id) = lookup_id else { continue };
-        if let Some(lane) = state.agents.agents.iter().find(|l| l.id == lookup_id) {
+        if let Some(lane) = state.agents.agents_get(lookup_id) {
             pane.mission_id = lane.current_mission.clone();
         }
     }
@@ -1249,9 +1250,33 @@ fn scroll_chat_thread(state: &mut AppState, swarm: &SwarmRuntime, area: Rect, de
     };
     let max_scroll = focused_pane_chat_thread_max_scroll(state, swarm, &pane, area, focused_idx);
     if let Some(p) = focused_pane_mut(state) {
-        let current = p.chat_thread_scroll as i32;
-        let next = (current + delta).max(0) as usize;
-        p.chat_thread_scroll = next.min(max_scroll);
+        // Resolve the "stick to bottom" sentinel before applying delta —
+        // otherwise PgUp from the bottom jumps to row 0 instead of one
+        // page above the bottom (sentinel `as i32` wraps to -1 and
+        // `(-1 + delta).max(0) = 0`).
+        let resolved = resolve_chat_scroll_sentinel(p.chat_thread_scroll, max_scroll);
+        let next = (resolved as i32 + delta).max(0) as usize;
+        // Re-engage the sentinel when the user scrolls back to (or past)
+        // the bottom — keeps "follow new content" working without an
+        // explicit reattach key.
+        p.chat_thread_scroll = if next >= max_scroll {
+            nit_core::CONSOLE_SCROLL_BOTTOM
+        } else {
+            next
+        };
+    }
+}
+
+/// Translate the "follow bottom" sentinel into a concrete row offset
+/// for arithmetic. Other values pass through. Used by both the
+/// keyboard PgUp/PgDn path and the mouse wheel path so they stay in
+/// lockstep with each other and with the `min(max_scroll)` clamp the
+/// renderer applies.
+fn resolve_chat_scroll_sentinel(scroll: usize, max_scroll: usize) -> usize {
+    if scroll == nit_core::CONSOLE_SCROLL_BOTTOM {
+        max_scroll
+    } else {
+        scroll.min(max_scroll)
     }
 }
 
@@ -1493,7 +1518,14 @@ fn revert_focused_pane_to_roster(state: &mut AppState) {
     }
 }
 
-fn handle_mouse(state: &mut AppState, swarm: &SwarmRuntime, area: Rect, mouse: MouseEvent) {
+fn handle_mouse(
+    state: &mut AppState,
+    swarm: &SwarmRuntime,
+    theme: &Theme,
+    clipboard: &mut Option<arboard::Clipboard>,
+    area: Rect,
+    mouse: MouseEvent,
+) {
     // The renderer reserves the top status strip and bottom hint row
     // before painting panes (see `render_grid`). Click hit-tests must
     // strip the same chrome — without this, `pane_at_point` returns the
@@ -1506,10 +1538,10 @@ fn handle_mouse(state: &mut AppState, swarm: &SwarmRuntime, area: Rect, mouse: M
     };
     match mouse.kind {
         MouseEventKind::Down(MouseButton::Left) => {
-            handle_mouse_left_down(state, grid_area, mouse.column, mouse.row);
+            handle_mouse_left_down(state, swarm, theme, clipboard, grid_area, mouse);
         }
         MouseEventKind::Drag(MouseButton::Left) => {
-            handle_mouse_left_drag(state, grid_area, mouse.column, mouse.row);
+            handle_mouse_left_drag(state, swarm, theme, clipboard, grid_area, mouse);
         }
         MouseEventKind::Up(MouseButton::Left) => {
             handle_mouse_left_up(state, swarm, grid_area, mouse.column, mouse.row);
@@ -1524,16 +1556,133 @@ fn handle_mouse(state: &mut AppState, swarm: &SwarmRuntime, area: Rect, mouse: M
     }
 }
 
-fn handle_mouse_left_down(state: &mut AppState, area: Rect, x: u16, y: u16) {
+// Per-thread anchor for an in-progress popup body selection. Mirrors
+// `InputState::mouse_select_anchor` from the single-pane handler. Stored
+// here rather than on `AppState` because the anchor's lifetime is bounded
+// by a single mouse-down → drag → up gesture, so leaking it across
+// multipane / single-pane boundaries would just be noise.
+thread_local! {
+    static POPUP_BODY_ANCHOR: std::cell::Cell<Option<(usize, usize)>>
+        = const { std::cell::Cell::new(None) };
+}
+
+fn record_popup_anchor(line: usize, col: usize) {
+    POPUP_BODY_ANCHOR.with(|cell| cell.set(Some((line, col))));
+}
+
+fn read_popup_anchor() -> Option<(usize, usize)> {
+    POPUP_BODY_ANCHOR.with(|cell| cell.get())
+}
+
+fn clear_popup_anchor() {
+    POPUP_BODY_ANCHOR.with(|cell| cell.set(None));
+}
+
+/// Lightweight equivalent of `app::ui_selection::update_ui_selection_text`
+/// without the `InputState`-backed dedup. Multipane's popup selection
+/// gesture is bounded (down → drag → up), and writing the same text
+/// twice in a row to the clipboard is harmless, so we skip the
+/// signature cache and copy on every selection change.
+fn copy_popup_selection_to_clipboard(
+    state: &mut AppState,
+    lines: &[String],
+    clipboard: &mut Option<arboard::Clipboard>,
+) {
+    let Some(selection) = state.ui_selection else {
+        return;
+    };
+    if selection.pane != UiSelectionPane::ArtifactsPopup {
+        return;
+    }
+    let text = crate::app::selection_text(lines, selection);
+    if text.is_empty() {
+        return;
+    }
+    state.yank = Some(text.clone());
+    state.yank_kind = if text.contains('\n') {
+        nit_core::YankKind::Line
+    } else {
+        nit_core::YankKind::Char
+    };
+    if let Some(cb) = clipboard.as_mut() {
+        let _ = cb.set_text(text);
+    }
+}
+
+fn handle_mouse_left_down(
+    state: &mut AppState,
+    swarm: &SwarmRuntime,
+    theme: &Theme,
+    clipboard: &mut Option<arboard::Clipboard>,
+    area: Rect,
+    mouse: MouseEvent,
+) {
+    let x = mouse.column;
+    let y = mouse.row;
     if state.agents.artifacts_popup_open {
-        // Match the single-pane behaviour (`app/mouse.rs`): clicks
-        // INSIDE the popup don't close it (the popup absorbs them so
-        // text selection / link click / etc. can be wired in a
-        // follow-up); only an OUTSIDE click closes. Esc on the
-        // keyboard is wired separately to close.
+        // Mirror the single-pane handler at `app/mouse.rs:779-836`:
+        //   1. Click inside popup body → seed a text-selection anchor
+        //      and start a single-point UiSelection. Drag extends it.
+        //   2. Click on the popup chat input → cursor positioning +
+        //      input-buffer selection anchor.
+        //   3. Click outside the popup → close popup.
+        // Multipane stores the body anchor in a thread_local
+        // (`POPUP_BODY_ANCHOR`) instead of `InputState`, but the
+        // selection state lives on `AppState.ui_selection` like the
+        // single-pane case, so the renderer highlights identically.
         let popup_area = popup_rect_for(area, artifacts_popup::preferred_size(area));
-        if !point_in_rect(x, y, popup_area) {
-            state.agents.artifacts_popup_open = false;
+
+        // Chat input within the popup — cursor positioning + selection
+        // anchor on the input buffer (matches single-pane behaviour).
+        if let Some(cursor_char_idx) =
+            artifacts_popup::map_chat_input_point_to_cursor(state, swarm, popup_area, x, y, false)
+        {
+            let total_chars = state.agents.artifacts_popup_chat_input.chars().count();
+            let new_cursor = cursor_char_idx.min(total_chars);
+            if mouse.modifiers.contains(KeyModifiers::SHIFT) {
+                if state.agents.artifacts_popup_chat_selection_anchor.is_none() {
+                    state.agents.artifacts_popup_chat_selection_anchor =
+                        Some(state.agents.artifacts_popup_chat_cursor.min(total_chars));
+                }
+            } else {
+                state.agents.artifacts_popup_chat_selection_anchor = Some(new_cursor);
+            }
+            state.agents.artifacts_popup_chat_cursor = new_cursor;
+            // Body anchor reset — clicking the input clears any pending
+            // body drag.
+            clear_popup_anchor();
+            // The popup chat input has its own selection-text path
+            // separate from `ui_selection`; leave that to keypath
+            // handlers for now (out of scope this round).
+            return;
+        }
+
+        // Click on a body line → start a body selection.
+        if let Some((line_idx, col, lines)) = crate::app::map_artifacts_popup_mouse_with_swarm(
+            swarm, mouse, area, state, theme, false,
+        ) {
+            state.ui_selection = Some(UiSelection {
+                pane: UiSelectionPane::ArtifactsPopup,
+                start_line: line_idx,
+                start_col: col,
+                end_line: line_idx,
+                end_col: col,
+            });
+            record_popup_anchor(line_idx, col);
+            copy_popup_selection_to_clipboard(state, &lines, clipboard);
+            return;
+        }
+
+        // Inside popup but neither chat-input nor body — likely a
+        // border / padding click. No-op (don't close).
+        if point_in_rect(x, y, popup_area) {
+            return;
+        }
+        // Outside the popup → close.
+        state.agents.artifacts_popup_open = false;
+        clear_popup_anchor();
+        if matches!(state.ui_selection, Some(s) if s.pane == UiSelectionPane::ArtifactsPopup) {
+            state.ui_selection = None;
         }
         return;
     }
@@ -1556,7 +1705,40 @@ fn handle_mouse_left_down(state: &mut AppState, area: Rect, x: u16, y: u16) {
     apply_roster_click(state, target);
 }
 
-fn handle_mouse_left_drag(state: &mut AppState, area: Rect, x: u16, y: u16) {
+fn handle_mouse_left_drag(
+    state: &mut AppState,
+    swarm: &SwarmRuntime,
+    theme: &Theme,
+    clipboard: &mut Option<arboard::Clipboard>,
+    area: Rect,
+    mouse: MouseEvent,
+) {
+    let x = mouse.column;
+    let y = mouse.row;
+
+    // Popup body drag: extend the anchor → current point UiSelection
+    // and re-copy to clipboard. Mirrors the single-pane drag handler
+    // (`app/mouse.rs::handle_mouse_drag_with_swarm` UiSelectionPane
+    // branch) but reads the anchor from the multipane thread_local
+    // since `InputState` isn't plumbed here.
+    if state.agents.artifacts_popup_open {
+        if let Some((anchor_line, anchor_col)) = read_popup_anchor() {
+            if let Some((line_idx, col, lines)) = crate::app::map_artifacts_popup_mouse_with_swarm(
+                swarm, mouse, area, state, theme, true,
+            ) {
+                state.ui_selection = Some(UiSelection {
+                    pane: UiSelectionPane::ArtifactsPopup,
+                    start_line: anchor_line,
+                    start_col: anchor_col,
+                    end_line: line_idx,
+                    end_col: col,
+                });
+                copy_popup_selection_to_clipboard(state, &lines, clipboard);
+            }
+        }
+        return;
+    }
+
     let Some((pane_idx, line_idx, col_idx)) = resolve_chat_thread_hit(state, area, x, y) else {
         return;
     };
@@ -1572,6 +1754,13 @@ fn handle_mouse_left_drag(state: &mut AppState, area: Rect, x: u16, y: u16) {
 }
 
 fn handle_mouse_left_up(state: &mut AppState, swarm: &SwarmRuntime, area: Rect, x: u16, y: u16) {
+    // Popup body anchor lives only for the duration of the gesture.
+    // Drop it on Up regardless of pane hit so a stray release outside
+    // the popup doesn't leak the anchor across gestures.
+    if state.agents.artifacts_popup_open {
+        clear_popup_anchor();
+        return;
+    }
     let Some((pane_idx, _, _)) = resolve_chat_thread_hit(state, area, x, y) else {
         return;
     };
@@ -1605,6 +1794,23 @@ fn resolve_chat_thread_hit(
     x: u16,
     y: u16,
 ) -> Option<(usize, usize, usize)> {
+    resolve_chat_thread_hit_with_swarm(state, None, area, x, y)
+}
+
+/// Same as `resolve_chat_thread_hit` but takes an optional `SwarmRuntime`
+/// so the chat-thread row count (and therefore `max_scroll`) can be
+/// computed correctly. Required for sentinel-resolution: when
+/// `pane.chat_thread_scroll == CONSOLE_SCROLL_BOTTOM`, we must
+/// translate it to `max_scroll` BEFORE adding `local_y` — otherwise
+/// the logical row ends up at `usize::MAX` and the artifact-popup
+/// resolver fails to find anything at that line.
+fn resolve_chat_thread_hit_with_swarm(
+    state: &AppState,
+    swarm: Option<&SwarmRuntime>,
+    area: Rect,
+    x: u16,
+    y: u16,
+) -> Option<(usize, usize, usize)> {
     let mp = state.multipane.as_ref()?;
     let pane_idx = grid::pane_at_point(area, mp.grid_cols, mp.grid_rows, x, y)?;
     let pane = mp.panes.get(pane_idx)?;
@@ -1617,11 +1823,19 @@ fn resolve_chat_thread_hit(
     }
     let local_y = (y - thread_area.y) as usize;
     let local_x = (x - thread_area.x) as usize;
-    Some((
-        pane_idx,
-        pane.chat_thread_scroll.saturating_add(local_y),
-        local_x,
-    ))
+    // Resolve the sentinel "follow bottom" to a concrete row offset.
+    // Falls back to a clamp against the renderer's max_scroll when a
+    // swarm runtime is available; without one, treat the sentinel as
+    // 0 so the click maps somewhere reasonable rather than overflowing.
+    let scroll = if pane.chat_thread_scroll == nit_core::CONSOLE_SCROLL_BOTTOM {
+        match swarm {
+            Some(s) => focused_pane_chat_thread_max_scroll(state, s, pane, area, pane_idx),
+            None => 0,
+        }
+    } else {
+        pane.chat_thread_scroll
+    };
+    Some((pane_idx, scroll.saturating_add(local_y), local_x))
 }
 
 fn point_in_rect(x: u16, y: u16, rect: Rect) -> bool {
@@ -1641,7 +1855,13 @@ fn try_open_chat_pane_artifact(
     x: u16,
     y: u16,
 ) -> bool {
-    let Some((pane_idx, line_idx, _col)) = resolve_chat_thread_hit(state, area, x, y) else {
+    // Use the swarm-aware resolver: when `chat_thread_scroll` holds
+    // the "follow bottom" sentinel, this translates it to the actual
+    // max_scroll so the resulting `line_idx` lines up with what the
+    // renderer painted (and what the artifact-popup resolver expects).
+    let Some((pane_idx, line_idx, _col)) =
+        resolve_chat_thread_hit_with_swarm(state, Some(swarm), area, x, y)
+    else {
         return false;
     };
     let Some(pane) = pane_at(state, pane_idx).cloned() else {
@@ -1871,9 +2091,15 @@ fn handle_mouse_scroll(
         let next = (current + delta).max(0) as usize;
         p.roster_scroll = next.min(max_scroll);
     } else {
-        let current = p.chat_thread_scroll as i32;
-        let next = (current + delta).max(0) as usize;
-        p.chat_thread_scroll = next.min(max_scroll);
+        // Wheel uses the same sentinel-resolution path as the keyboard
+        // scroll — see `resolve_chat_scroll_sentinel`.
+        let resolved = resolve_chat_scroll_sentinel(p.chat_thread_scroll, max_scroll);
+        let next = (resolved as i32 + delta).max(0) as usize;
+        p.chat_thread_scroll = if next >= max_scroll {
+            nit_core::CONSOLE_SCROLL_BOTTOM
+        } else {
+            next
+        };
     }
 }
 
@@ -2746,9 +2972,10 @@ mod tests {
         }
         let swarm = SwarmRuntime::default();
         let area = Rect::new(0, 0, 80, 30);
-        // The bare-fixture pane has no rendered messages, so max_scroll
-        // is 0 — every positive bump clamps to 0. Override the cap to
-        // verify the negative-clamp path independently.
+        // Bare fixture has no rendered messages, so max_scroll is 0.
+        // After PgUp from the sentinel "follow bottom", we land at
+        // (max_scroll + delta).max(0) = 0 → which `>= max_scroll`
+        // re-engages the sentinel for "stick to bottom".
         let mp = state.multipane.as_mut().unwrap();
         if let Some(pane) = mp.panes.get_mut(0) {
             pane.chat_thread_scroll = 0;
@@ -2756,7 +2983,8 @@ mod tests {
         scroll_chat_thread(&mut state, &swarm, area, -3);
         assert_eq!(
             state.multipane.as_ref().unwrap().panes[0].chat_thread_scroll,
-            0
+            nit_core::CONSOLE_SCROLL_BOTTOM,
+            "scrolling past the bottom must re-engage the follow-bottom sentinel"
         );
     }
 
@@ -2771,9 +2999,11 @@ mod tests {
         let swarm = SwarmRuntime::default();
         let area = Rect::new(0, 0, 80, 30);
         let pane1_rect = grid::pane_rect(area, 2, 1, 1);
-        // Wheel down on a short thread MUST clamp the stored scroll
-        // back down to max_scroll (== 0 here, with no messages) — not
-        // leave the runaway 999 + delta in place.
+        // Wheel down on a short thread MUST clear the runaway 999 +
+        // delta. With the "stick to bottom" sentinel semantics, the
+        // resolved scroll lands at max_scroll (==0 here, no messages)
+        // and `next >= max_scroll` re-engages the sentinel — exactly
+        // what the operator wants for "follow new content".
         handle_mouse_scroll(
             &mut state,
             &swarm,
@@ -2784,7 +3014,8 @@ mod tests {
         );
         assert_eq!(
             state.multipane.as_ref().unwrap().panes[1].chat_thread_scroll,
-            0
+            nit_core::CONSOLE_SCROLL_BOTTOM,
+            "wheel-down past max_scroll must re-engage the follow-bottom sentinel"
         );
     }
 
@@ -2817,8 +3048,8 @@ mod tests {
             "roster_scroll should bump or clamp, got {roster}"
         );
 
-        // Wheel down inside pane 1 (chat mode, empty thread) — clamps
-        // at max_scroll = 0.
+        // Wheel down inside pane 1 (chat mode, empty thread) — re-engages
+        // the follow-bottom sentinel because next >= max_scroll(=0).
         handle_mouse_scroll(
             &mut state,
             &swarm,
@@ -2829,7 +3060,7 @@ mod tests {
         );
         assert_eq!(
             state.multipane.as_ref().unwrap().panes[1].chat_thread_scroll,
-            0
+            nit_core::CONSOLE_SCROLL_BOTTOM,
         );
     }
 
@@ -3319,9 +3550,11 @@ mod tests {
             modifiers: KeyModifiers::empty(),
         };
         let swarm = SwarmRuntime::default();
+        let theme = crate::theme::Theme::default();
+        let mut clipboard: Option<arboard::Clipboard> = None;
         // Just call handle_mouse — no panic / no out-of-bounds means
         // the chrome strip and downstream resolver agreed on the rect.
-        handle_mouse(&mut state, &swarm, area, mouse);
+        handle_mouse(&mut state, &swarm, &theme, &mut clipboard, area, mouse);
         // The pane should still exist and not have been corrupted.
         assert_eq!(state.multipane.as_ref().unwrap().panes.len(), 1);
     }

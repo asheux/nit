@@ -84,10 +84,7 @@ fn multipane_pane_agent_ids_resolve_to_base_model_slug() {
     // multipane-spawned turns went out with the full agent_id as the
     // CLI model name and Codex/Claude rejected with "selected model
     // (… #mp-pane-NN) does not exist". Now strips on the FIRST `#`.
-    assert_eq!(
-        codex_model_slug_for_agent_id("gpt-5#mp-pane-00"),
-        "gpt-5"
-    );
+    assert_eq!(codex_model_slug_for_agent_id("gpt-5#mp-pane-00"), "gpt-5");
     assert_eq!(
         codex_model_slug_for_agent_id("gpt-5.4#mp-pane-12"),
         "gpt-5.4"
@@ -506,5 +503,54 @@ fn json_errors_cap_drains_oldest_half_on_overflow() {
     assert_eq!(
         errors.first().unwrap(),
         &format!("e{}", JSON_ERRORS_CAP / 2)
+    );
+}
+
+// Codex-side companion to claude_runner's queue_len parity test.
+// Pins propose-03 important #3: when codex_runner's CancelAll /
+// CancelTurn drops queued commands, today it does NOT emit
+// TurnFailed for them. State-side queue_len was incremented at
+// dispatch but the bus-side decrement at agent_bus.rs:482 never
+// runs without TurnFailed — ghost queue rows remain.
+#[test]
+#[ignore = "fails until codex_runner::CancelAll emits TurnFailed for dropped queued items"]
+fn queue_len_returns_to_zero_after_cancel_all_with_queued_turns() {
+    use nit_core::state::{AgentLane, AgentLaneKind, AgentStatus, AppState};
+    use nit_core::OPERATOR_CANCEL_TURN_MESSAGE;
+
+    let editor = nit_core::Buffer::from_str("editor", "", None);
+    let notes = nit_core::Buffer::from_str("notes", "", None);
+    let mut state = AppState::new(std::path::PathBuf::from("."), editor, notes);
+    state.agents.agents.push(AgentLane {
+        id: "gpt-test".into(),
+        role: "gpt-test".into(),
+        lane: "Codex".into(),
+        kind: AgentLaneKind::Codex,
+        status: AgentStatus::Running,
+        heartbeat_age_secs: 0,
+        // 3 dispatch increments: 1 active + 2 runner-queued.
+        queue_len: 3,
+        current_mission: None,
+        last_message: String::new(),
+        shadow: false,
+    });
+    state.agents.rebuild_agents_index();
+
+    // Today CancelAll emits a single TurnFailed (active only).
+    AgentBusEvent::TurnFailed {
+        agent_id: "gpt-test".into(),
+        mission_id: None,
+        thread_id: None,
+        token_count: None,
+        message: OPERATOR_CANCEL_TURN_MESSAGE.into(),
+    }
+    .apply(&mut state);
+
+    let agent = state.agents.agents_get("gpt-test").unwrap();
+    assert_eq!(
+        agent.queue_len, 0,
+        "after CancelAll every queue_len increment must be paired with a \
+         TurnFailed decrement; currently leaks because the runner does \
+         not emit TurnFailed for runner-queued turns"
     );
 }

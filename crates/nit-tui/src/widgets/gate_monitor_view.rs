@@ -583,7 +583,7 @@ fn build_encoder_line(
 ) -> Line<'static> {
     let name = encoder_short_name(score.encoder);
     let gen = score.generations_survived;
-    let gen_str = format!("{gen}");
+    let gen_str = gen.to_string();
     let stats_str = format!(
         " density={:.2} components={}",
         score.density, score.components

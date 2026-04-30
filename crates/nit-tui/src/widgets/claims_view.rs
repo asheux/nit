@@ -8,6 +8,7 @@ use ratatui::{
     Frame,
 };
 
+use crate::swarm::SWARM_CLONE_INFIX;
 use crate::theme::Theme;
 use crate::widgets::text_utils::truncate_with_ellipsis as truncate;
 
@@ -186,7 +187,7 @@ fn compact_path(p: &str) -> String {
 // Drop the mission middle segment from clone ids:
 // `claude-opus-4-7#swarm-mis-001-clone-01` → `claude-opus-4-7#clone-01`.
 fn compact_agent_id(id: &str) -> String {
-    let Some((base, rest)) = id.split_once("#swarm-") else {
+    let Some((base, rest)) = id.split_once(SWARM_CLONE_INFIX) else {
         return id.to_string();
     };
     let Some(first_dash) = rest.find('-') else {

@@ -9,9 +9,7 @@ use std::time::Instant;
 fn backend_source_for_agent(state: &AppState, agent_id: &str) -> &'static str {
     state
         .agents
-        .agents
-        .iter()
-        .find(|a| a.id == agent_id)
+        .agents_get(agent_id)
         .map(|a| match a.kind {
             AgentLaneKind::Claude => "claude",
             AgentLaneKind::Gemini => "gemini",
@@ -34,6 +32,19 @@ pub struct AgentTokenCount {
 /// path (Error status, alert banner, substrate Warning). Keep the runner
 /// emit-side and bus match-side in sync via this single constant.
 pub const OPERATOR_CANCEL_TURN_MESSAGE: &str = "Cancelled by operator";
+
+/// Recognise runner-internal cancel messages emitted by `codex_runner`
+/// when an operator reconfigures MCP transport (`McpStop`, `McpReconnect`).
+/// These are deliberate cancels, not errors — they should follow the same
+/// soft path as `OPERATOR_CANCEL_TURN_MESSAGE`. Server-exit /
+/// disconnect messages stay on the error path so MCP health issues
+/// remain visible.
+fn is_runner_internal_cancel(message: &str) -> bool {
+    matches!(
+        message,
+        "Cancelled (MCP stop)" | "Cancelled (MCP reconnect)"
+    )
+}
 
 /// Event protocol for driving the Agent Station UI from an external runtime (Codex, Claude, etc.).
 ///
@@ -215,7 +226,7 @@ impl AgentBusEvent {
                     },
                 );
                 let at = timestamp_label(state);
-                if let Some(agent) = state.agents.agents.iter_mut().find(|a| a.id == *agent_id) {
+                if let Some(agent) = state.agents.agents_get_mut(agent_id) {
                     agent.status = AgentStatus::Running;
                     agent.queue_len = agent.queue_len.max(1);
                     agent.heartbeat_age_secs = 0;
@@ -271,7 +282,7 @@ impl AgentBusEvent {
                 if let Some(turn) = state.agents.active_turns.get_mut(agent_id) {
                     turn.last_heartbeat_at = Instant::now();
                 }
-                if let Some(agent) = state.agents.agents.iter_mut().find(|a| a.id == *agent_id) {
+                if let Some(agent) = state.agents.agents_get_mut(agent_id) {
                     agent.heartbeat_age_secs = 0;
                     // Mission context is authoritative (including clearing it).
                     agent.current_mission = mission_id.clone();
@@ -286,7 +297,7 @@ impl AgentBusEvent {
                     turn.last_output_at = Instant::now();
                     turn.stage = Some(stage.clone());
                 }
-                if let Some(agent) = state.agents.agents.iter_mut().find(|a| a.id == *agent_id) {
+                if let Some(agent) = state.agents.agents_get_mut(agent_id) {
                     // Mission context is authoritative (including clearing it).
                     agent.current_mission = mission_id.clone();
                 }
@@ -453,14 +464,15 @@ impl AgentBusEvent {
                 }
                 let at = timestamp_label(state);
                 // Operator-initiated cancels (`/abort`, Ctrl+C, Esc-Esc,
-                // Mission-tab `x`) ride the same TurnFailed event because
-                // they kill the subprocess, but they're NOT errors. Detect
-                // the sentinel message the runners emit on cancel and
-                // route to the soft path: Idle status, Info diag, no
-                // substrate warning, no "Codex failed: …" status banner.
+                // Mission-tab `x`) and runner-internal cancels (MCP stop,
+                // reconnect) ride the same TurnFailed event because they
+                // kill the subprocess, but they're NOT errors. Route them
+                // down the soft path: Idle status, Info diag, no substrate
+                // warning, no "Codex failed: …" status banner.
                 let is_operator_cancel = message == OPERATOR_CANCEL_TURN_MESSAGE;
-                if let Some(agent) = state.agents.agents.iter_mut().find(|a| a.id == *agent_id) {
-                    agent.status = if is_operator_cancel {
+                let is_soft_cancel = is_operator_cancel || is_runner_internal_cancel(message);
+                if let Some(agent) = state.agents.agents_get_mut(agent_id) {
+                    agent.status = if is_soft_cancel {
                         AgentStatus::Idle
                     } else {
                         AgentStatus::Error
@@ -492,11 +504,12 @@ impl AgentBusEvent {
                         .iter_mut()
                         .find(|mission| mission.id == mission_id)
                     {
-                        // Don't clobber an existing "ABORTED" status with
-                        // "ERROR" when this TurnFailed is the abort itself.
-                        // The swarm runtime already set "ABORTED" before we
-                        // got here.
-                        if !is_operator_cancel {
+                        // Don't clobber "ABORTED" with "ERROR" when this
+                        // TurnFailed is the abort itself OR when an MCP
+                        // server exit/disconnect races with /abort all.
+                        // The swarm runtime sets "ABORTED" before the
+                        // runner's cancel TurnFailed reaches us.
+                        if !is_soft_cancel && mission.status != "ABORTED" {
                             mission.status = "ERROR".into();
                         }
                         mission.updated_at = at.clone();
@@ -509,15 +522,20 @@ impl AgentBusEvent {
                     "local" => "Local",
                     _ => "Codex",
                 };
-                if is_operator_cancel {
-                    // Soft path: a single Info diag is enough — the swarm
-                    // runtime already pushed a SYSTEM_ALERT_KIND chat
-                    // message explaining the abort. No alert, no signal,
-                    // no error banner.
+                if is_soft_cancel {
+                    // Soft path: a single Info diag is enough — for operator
+                    // cancels the swarm runtime already pushed a
+                    // SYSTEM_ALERT_KIND chat message explaining the abort.
+                    // No alert, no signal, no error banner.
+                    let diag_msg = if is_operator_cancel {
+                        format!("[{agent_id}] cancelled by operator")
+                    } else {
+                        format!("[{agent_id}] {message}")
+                    };
                     state.agents.diag_events.push(AgentDiagnosticEvent {
                         severity: AgentAlertSeverity::Info,
                         source: source.into(),
-                        message: format!("[{agent_id}] cancelled by operator"),
+                        message: diag_msg,
                         at: at.clone(),
                     });
                 } else {
@@ -581,7 +599,7 @@ impl AgentBusEvent {
                     apply_codex_token_count(state, agent_id, mission_id.as_deref(), token_count);
                 }
                 let at = timestamp_label(state);
-                if let Some(agent) = state.agents.agents.iter_mut().find(|a| a.id == *agent_id) {
+                if let Some(agent) = state.agents.agents_get_mut(agent_id) {
                     agent.queue_len = agent.queue_len.saturating_sub(1);
                     agent.status = if agent.queue_len > 0 {
                         AgentStatus::Waiting
@@ -889,15 +907,25 @@ impl AgentBusEvent {
 }
 
 fn upsert_agent(state: &mut AppState, agent: AgentLane) {
-    let Some(existing_idx) = state.agents.agents.iter().position(|a| a.id == agent.id) else {
+    let existing_idx = state.agents.agents_index.get(&agent.id).copied().or_else(|| {
+        state
+            .agents
+            .agents
+            .iter()
+            .position(|a| a.id == agent.id)
+    });
+    let Some(idx) = existing_idx else {
+        let new_idx = state.agents.agents.len();
+        let id = agent.id.clone();
         state.agents.agents.push(agent);
+        state.agents.agents_index.insert(id, new_idx);
         if state.agents.selected_agent.is_none() {
             state.agents.selected_agent = state.agents.agents.last().map(|a| a.id.clone());
             state.agents.roster_selected = state.agents.agents.len().saturating_sub(1);
         }
         return;
     };
-    state.agents.agents[existing_idx] = agent;
+    state.agents.agents[idx] = agent;
     if state.agents.selected_agent.is_none() {
         state.agents.selected_agent = state.agents.agents.first().map(|a| a.id.clone());
     }

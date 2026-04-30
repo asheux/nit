@@ -13,7 +13,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::swarm::{
     chat_clone_base_id, normalize_role_label, GateReport, GateReportGate, SwarmArtifactFocus,
-    SwarmRuntime,
+    SwarmRuntime, SWARM_CLONE_INFIX,
 };
 use crate::{
     claude_runner::{ClaudeRunner, ClaudeRunnerConfig},
@@ -147,7 +147,7 @@ pub(super) fn record_agent_bus_vitals(vitals: &mut VitalsState, event: &AgentBus
 // `claude-opus-4-7#swarm-mis-001-clone-01`. Mirrors the compaction used in
 // the signals/claims overlay.
 pub(super) fn compact_agent_id_for_log(id: &str) -> String {
-    let Some((base, rest)) = id.split_once("#swarm-") else {
+    let Some((base, rest)) = id.split_once(SWARM_CLONE_INFIX) else {
         return id.to_string();
     };
     let Some(first_dash) = rest.find('-') else {

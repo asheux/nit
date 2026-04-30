@@ -301,14 +301,14 @@ pub(super) struct SelectionSignature {
 }
 
 #[derive(Copy, Clone, Debug)]
-pub(super) struct MouseSelectAnchor {
-    pub(super) target: MouseSelectTarget,
-    pub(super) line: usize,
-    pub(super) col: usize,
+pub(crate) struct MouseSelectAnchor {
+    pub(crate) target: MouseSelectTarget,
+    pub(crate) line: usize,
+    pub(crate) col: usize,
 }
 
 #[derive(Copy, Clone, Debug)]
-pub(super) enum MouseSelectTarget {
+pub(crate) enum MouseSelectTarget {
     Buffer(PaneId),
     Ui(UiSelectionPane),
     ChatInput,

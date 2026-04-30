@@ -94,7 +94,7 @@ use bulk_plan::{
 pub(crate) use clones::drain_queued_turns_for_agent as drain_queued_turns_for_agent_pub;
 pub use clones::{
     chat_clone_base_id, cleanup_idle_chat_clone, compact_agent_display_id, create_chat_clone,
-    is_any_clone_agent_id, is_chat_clone_agent_id,
+    is_any_clone_agent_id, is_chat_clone_agent_id, SWARM_CLONE_INFIX,
 };
 use clones::{
     cleanup_swarm_clones_for_mission, drain_queued_turns_for_agent, ensure_size_clones,

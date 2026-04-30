@@ -108,8 +108,6 @@ enum ShadowStage {
 }
 
 struct ShadowRun {
-    #[allow(dead_code)] // kept for debug prints / future logging
-    run_id: String,
     main_agent_id: String,
     main_prompt: String,
     mission_id: Option<String>,
@@ -198,7 +196,6 @@ impl ShadowRuntime {
         ];
 
         let run = ShadowRun {
-            run_id: run_id.clone(),
             main_agent_id: main_agent_id.clone(),
             main_prompt,
             mission_id,

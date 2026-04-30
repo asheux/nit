@@ -88,7 +88,7 @@ fn framework_invokes_all_registered_arbiters_empty_state() {
     let raw = run_all(&state);
     assert!(raw.is_empty());
     // At least one arbiter is registered so `run_all` really does loop.
-    assert!(arbiters::REGISTERED_ARBITERS.iter().next().is_some());
+    assert!(!arbiters::REGISTERED_ARBITERS.is_empty());
 }
 
 #[test]

@@ -8,6 +8,7 @@ use ratatui::{
     Frame,
 };
 
+use crate::swarm::SWARM_CLONE_INFIX;
 use crate::theme::Theme;
 
 // Width breakpoints for the row formatter — drop ID below WIDTH_SHOW_ID,
@@ -218,7 +219,7 @@ fn compact_agent_id(id: &str) -> String {
 }
 
 fn parse_swarm_clone_id(id: &str) -> Option<(&str, &str)> {
-    let (base, rest) = id.split_once("#swarm-")?;
+    let (base, rest) = id.split_once(SWARM_CLONE_INFIX)?;
     let suffix = rest.splitn(3, '-').nth(2).filter(|s| !s.is_empty())?;
     Some((base, suffix))
 }

@@ -33,7 +33,6 @@ pub struct PaneSession {
     /// keystroke so per-pane history nav matches single-pane semantics.
     #[serde(default)]
     pub chat_prompt_history_draft: Option<String>,
-    // TODO(multipane phase 4): dir search
     pub dir_search: Option<DirSearchState>,
     pub mission_id: Option<String>,
     /// Cursor row inside the per-pane roster while in roster mode. Survives
@@ -56,9 +55,14 @@ pub struct PaneSession {
     pub roster_tree_selected: Option<RosterTreeSelection>,
     /// Vertical scroll offset for the chat thread, separate from
     /// `chat_input_scroll` (which is reserved for input-box scrolling).
-    /// Auto-sticks to bottom while zero; the wheel/keyboard handlers bump
-    /// it upward and the renderer clamps to the max scroll each frame.
-    #[serde(default)]
+    /// Defaults to `crate::state::CONSOLE_SCROLL_BOTTOM` (`usize::MAX`)
+    /// — the sentinel "stick to bottom". The renderer clamps to
+    /// `max_scroll` so the sentinel always shows the most recent rows
+    /// even as the thread grows. Wheel / PgUp / PgDn handlers must
+    /// resolve the sentinel to `max_scroll` BEFORE applying delta so
+    /// scrolling up from the bottom moves one page, not all the way
+    /// to row 0.
+    #[serde(default = "chat_thread_scroll_default")]
     pub chat_thread_scroll: usize,
     /// Lane id chosen for this pane. `None` ⇒ render roster picker; `Some`
     /// ⇒ render chat for that lane (the lane is materialised lazily as
@@ -116,6 +120,10 @@ pub struct PaneSelection {
     pub end_col: usize,
 }
 
+fn chat_thread_scroll_default() -> usize {
+    crate::state::CONSOLE_SCROLL_BOTTOM
+}
+
 fn default_swarm_template() -> String {
     "lab".into()
 }
@@ -143,7 +151,7 @@ impl Default for PaneSession {
             roster_scroll: 0,
             roster_collapsed_agent_ids: HashSet::new(),
             roster_tree_selected: None,
-            chat_thread_scroll: 0,
+            chat_thread_scroll: chat_thread_scroll_default(),
             selected_agent_id: None,
             auto_expanded_backend: None,
             auto_expanded_agent: None,
@@ -257,7 +265,9 @@ mod tests {
         assert_eq!(pane.roster_scroll, 0);
         assert!(pane.roster_collapsed_agent_ids.is_empty());
         assert!(pane.roster_tree_selected.is_none());
-        assert_eq!(pane.chat_thread_scroll, 0);
+        // Default is the "stick to bottom" sentinel so newly created
+        // panes follow new chat content automatically.
+        assert_eq!(pane.chat_thread_scroll, crate::state::CONSOLE_SCROLL_BOTTOM);
         assert!(pane.auto_expanded_backend.is_none());
         assert!(pane.auto_expanded_agent.is_none());
         assert!(!pane.has_run_mission);

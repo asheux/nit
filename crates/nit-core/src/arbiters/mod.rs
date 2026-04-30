@@ -24,7 +24,9 @@ pub const ARBITER_MAX_PER_TICK: usize = 2;
 /// Mirror of nit-tui's `GENOME_RETRY_LIMIT` (3). Kept here so
 /// `agent_bus` and `metabolism` can pass a retry cap into
 /// `reduce_proposals` without depending on nit-tui. Must stay in sync
-/// with `crates/nit-tui/src/app/mod.rs::GENOME_RETRY_LIMIT`.
+/// with `crates/nit-tui/src/app/genome_retry.rs::GENOME_RETRY_LIMIT`;
+/// the `genome_retry_limit_matches_arbiter_retry_limit` test in
+/// `crates/nit-tui/src/app/tests.rs` enforces equality.
 pub const ARBITER_RETRY_LIMIT: u8 = 3;
 
 #[derive(Clone, Debug)]

@@ -861,22 +861,24 @@ pub(crate) fn submit_chat_input_and_dispatch(
     }
 
     if !swarm_handled {
+        let prefix_isolated = |prefix: &str| -> bool {
+            raw.starts_with(prefix)
+                && (raw.len() == prefix.len()
+                    || raw[prefix.len()..].starts_with(char::is_whitespace))
+        };
         // @new: spawn a clone with fresh context when the agent family is busy.
-        let force_new = raw.starts_with("@new")
-            && (raw.len() == 4 || raw[4..].starts_with(char::is_whitespace));
+        let force_new = prefix_isolated("@new");
         // @q / @queue: legacy alias — now the same as the default (queue to base).
-        let legacy_queue = (raw.starts_with("@queue")
-            && (raw.len() == 6 || raw[6..].starts_with(char::is_whitespace)))
-            || (raw.starts_with("@q")
-                && (raw.len() == 2 || raw[2..].starts_with(char::is_whitespace)));
+        let legacy_queue = prefix_isolated("@queue") || prefix_isolated("@q");
 
         if force_new {
-            state.agents.chat_input = raw[4..].trim_start().to_string();
+            state.agents.chat_input = raw["@new".len()..].trim_start().to_string();
             sync_cursor_to_input_end(state);
         } else if legacy_queue {
             let stripped = raw
                 .strip_prefix("@queue")
-                .unwrap_or_else(|| raw.strip_prefix("@q").unwrap_or(&raw));
+                .or_else(|| raw.strip_prefix("@q"))
+                .unwrap_or(&raw);
             state.agents.chat_input = stripped.trim_start().to_string();
             sync_cursor_to_input_end(state);
         }
