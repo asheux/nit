@@ -1072,7 +1072,7 @@ pub(crate) fn augment_dispatch_prompt_with_landscape(
 
 // Mirror the swarm task role onto the clone's lane for the UI. Original roster
 // agents keep their display name — only clones get their role overwritten.
-pub(super) fn apply_swarm_task_role(state: &mut AppState, dispatch: &SwarmDispatch) {
+pub(crate) fn apply_swarm_task_role(state: &mut AppState, dispatch: &SwarmDispatch) {
     let Some(role) = dispatch.task_role.as_deref() else {
         return;
     };

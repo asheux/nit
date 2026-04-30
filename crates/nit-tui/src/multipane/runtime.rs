@@ -125,6 +125,51 @@ pub fn run_loop(
         for event in dir_search_runner.events.try_iter() {
             apply_dir_search_event(state, event);
         }
+
+        // Poll background genome work the same way the single-pane
+        // runner does (`app/runner.rs`). Without these, the per-pane
+        // swarm runs spawn their genome gate / review worker threads,
+        // the workers complete and post their result on an mpsc, and
+        // nobody ever reads the channel — so the breather sticks at
+        // "Verifying (genome gate) ..." forever and the verifier never
+        // dispatches. Each poll returns ready dispatches; we send them
+        // through the same `apply_swarm_task_role` + `dispatch_agent_prompt`
+        // pipeline `app/runner.rs` uses.
+        for mut dispatch in swarm.poll_genome_gates(state) {
+            crate::app::augment_dispatch_prompt_with_landscape(
+                state,
+                &swarm,
+                &mut dispatch,
+            );
+            crate::app::apply_swarm_task_role(state, &dispatch);
+            crate::app::dispatch_agent_prompt(
+                state,
+                &mut vitals,
+                Some(&codex),
+                Some(&claude),
+                dispatch.agent_id,
+                Some(dispatch.mission_id),
+                dispatch.prompt,
+            );
+        }
+        for mut dispatch in swarm.poll_genome_reviews(state) {
+            crate::app::augment_dispatch_prompt_with_landscape(
+                state,
+                &swarm,
+                &mut dispatch,
+            );
+            crate::app::apply_swarm_task_role(state, &dispatch);
+            crate::app::dispatch_agent_prompt(
+                state,
+                &mut vitals,
+                Some(&codex),
+                Some(&claude),
+                dispatch.agent_id,
+                Some(dispatch.mission_id),
+                dispatch.prompt,
+            );
+        }
+
         capture_pane_mission_ids(state);
 
         terminal.draw(|frame| {
@@ -1481,9 +1526,15 @@ fn handle_mouse(state: &mut AppState, swarm: &SwarmRuntime, area: Rect, mouse: M
 
 fn handle_mouse_left_down(state: &mut AppState, area: Rect, x: u16, y: u16) {
     if state.agents.artifacts_popup_open {
-        // ESC and a click outside the popup close it; clicks inside are
-        // ignored — popup keyboard navigation is the primary interaction.
-        state.agents.artifacts_popup_open = false;
+        // Match the single-pane behaviour (`app/mouse.rs`): clicks
+        // INSIDE the popup don't close it (the popup absorbs them so
+        // text selection / link click / etc. can be wired in a
+        // follow-up); only an OUTSIDE click closes. Esc on the
+        // keyboard is wired separately to close.
+        let popup_area = popup_rect_for(area, artifacts_popup::preferred_size(area));
+        if !point_in_rect(x, y, popup_area) {
+            state.agents.artifacts_popup_open = false;
+        }
         return;
     }
     // Drag-to-select takes precedence over artifact-popup open: seed
@@ -1783,6 +1834,20 @@ fn handle_mouse_scroll(
     y: u16,
     delta: i32,
 ) {
+    // Modal: wheel events while the artifacts popup is open scroll the
+    // popup, not the chat thread underneath. Match `app/mouse.rs`.
+    if state.agents.artifacts_popup_open {
+        let popup_area = popup_rect_for(area, artifacts_popup::preferred_size(area));
+        if point_in_rect(x, y, popup_area) {
+            let max_scroll = state.agents.artifacts_popup_last_max_scroll;
+            // The renderer re-clamps each frame, so a stale scroll value
+            // self-corrects on next draw — safe to advance optimistically.
+            let current = state.agents.artifacts_popup_scroll as i32;
+            let next = (current + delta).max(0) as usize;
+            state.agents.artifacts_popup_scroll = next.min(max_scroll.max(0));
+        }
+        return;
+    }
     let Some(mp) = state.multipane.as_ref() else {
         return;
     };

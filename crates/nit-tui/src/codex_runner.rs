@@ -1927,17 +1927,16 @@ fn codex_exec_endpoint_label(agent_id: &str, resume_thread_id: Option<&str>) -> 
 }
 
 fn codex_model_slug_for_agent_id(agent_id: &str) -> &str {
-    const CLONE_SUFFIXES: &[&str] = &["#swarm-", "#chat-clone-", "#shadow-"];
-    for suffix in CLONE_SUFFIXES {
-        if let Some((base, _)) = agent_id.split_once(suffix) {
-            return if base.trim().is_empty() {
-                agent_id
-            } else {
-                base
-            };
-        }
+    // Strip every clone-style suffix in one go: split on the first '#'.
+    // All known suffix conventions (`#swarm-…`, `#chat-clone-…`,
+    // `#shadow-…`, `#mp-pane-…`) start with `#`, and base model slugs
+    // never contain `#`. This also handles nested suffixes like
+    // `claude-opus-4-7#mp-pane-01#swarm-mis-001-clone-01` — the FIRST
+    // `#` always separates the model slug from the lane decoration.
+    match agent_id.split_once('#') {
+        Some((base, _)) if !base.trim().is_empty() => base,
+        _ => agent_id,
     }
-    agent_id
 }
 
 fn build_codex_mcp_tool_call(

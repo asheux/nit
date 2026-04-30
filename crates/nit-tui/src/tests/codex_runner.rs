@@ -79,6 +79,38 @@ fn shadow_clone_agent_ids_resolve_to_base_model_slug() {
 }
 
 #[test]
+fn multipane_pane_agent_ids_resolve_to_base_model_slug() {
+    // Regression: the original suffix table omitted `#mp-pane-`, so
+    // multipane-spawned turns went out with the full agent_id as the
+    // CLI model name and Codex/Claude rejected with "selected model
+    // (… #mp-pane-NN) does not exist". Now strips on the FIRST `#`.
+    assert_eq!(
+        codex_model_slug_for_agent_id("gpt-5#mp-pane-00"),
+        "gpt-5"
+    );
+    assert_eq!(
+        codex_model_slug_for_agent_id("gpt-5.4#mp-pane-12"),
+        "gpt-5.4"
+    );
+}
+
+#[test]
+fn nested_multipane_swarm_clone_agent_ids_resolve_to_base_model_slug() {
+    // Multipane lane spawns a swarm — pane suffix prepended, swarm
+    // suffix appended on top: `<base>#mp-pane-NN#swarm-mis-…-clone-NN`.
+    // The slug stripper must split on the FIRST `#` to peel both at
+    // once.
+    assert_eq!(
+        codex_model_slug_for_agent_id("gpt-5#mp-pane-01#swarm-mis-001-clone-01"),
+        "gpt-5"
+    );
+    assert_eq!(
+        codex_model_slug_for_agent_id("gpt-5#mp-pane-01#chat-clone-02"),
+        "gpt-5"
+    );
+}
+
+#[test]
 fn mcp_new_session_uses_base_model_slug_for_swarm_clone() {
     let config = custom_config();
 

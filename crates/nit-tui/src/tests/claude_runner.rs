@@ -12,6 +12,22 @@ fn test_claude_model_slug_for_agent_id() {
         ("claude-sonnet-4-6#chat-clone-02", "claude-sonnet-4-6"),
         ("claude-opus-4-6#shadow-01-propose-a", "claude-opus-4-6"),
         ("claude-sonnet-4-6#shadow-07-judge", "claude-sonnet-4-6"),
+        // Regression: the original suffix table missed `#mp-pane-`.
+        // Multipane turns ran out with the full agent_id as the CLI
+        // model name, and Claude rejected ("selected model (…) does
+        // not exist"). The slug stripper now splits on the FIRST `#`.
+        ("claude-haiku-4-5#mp-pane-00", "claude-haiku-4-5"),
+        ("claude-opus-4-7#mp-pane-12", "claude-opus-4-7"),
+        // Nested: multipane lane spawns a swarm. Pane suffix
+        // prepended, swarm suffix appended; both peel on first `#`.
+        (
+            "claude-opus-4-7#mp-pane-01#swarm-mis-001-clone-01",
+            "claude-opus-4-7",
+        ),
+        (
+            "claude-haiku-4-5#mp-pane-03#shadow-07-judge",
+            "claude-haiku-4-5",
+        ),
     ];
     for (input, expected) in cases {
         assert_eq!(claude_model_slug_for_agent_id(input), expected);

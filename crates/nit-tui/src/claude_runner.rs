@@ -908,18 +908,17 @@ fn claude_endpoint_label(agent_id: &str, resume_session_id: Option<&str>) -> Str
 }
 
 pub fn claude_model_slug_for_agent_id(agent_id: &str) -> &str {
-    agent_id
-        .split_once("#swarm-")
-        .or_else(|| agent_id.split_once("#chat-clone-"))
-        .or_else(|| agent_id.split_once("#shadow-"))
-        .map(|(base, _)| {
-            if base.trim().is_empty() {
-                agent_id
-            } else {
-                base
-            }
-        })
-        .unwrap_or(agent_id)
+    // Same approach as `codex_runner::codex_model_slug_for_agent_id`:
+    // every clone/lane suffix (`#swarm-…`, `#chat-clone-…`, `#shadow-…`,
+    // `#mp-pane-…`) starts with `#`, and base model slugs never contain
+    // one. Splitting on the FIRST `#` handles nested suffixes like
+    // `claude-opus-4-7#mp-pane-01#swarm-mis-001-clone-01` correctly —
+    // the multipane layer prepends its suffix and swarm later appends
+    // its own.
+    match agent_id.split_once('#') {
+        Some((base, _)) if !base.trim().is_empty() => base,
+        _ => agent_id,
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
