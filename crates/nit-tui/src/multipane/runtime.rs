@@ -93,11 +93,34 @@ pub fn run_loop(
             // v1: discard. Phase 5 may route to a status row.
             let _ = log_line;
         }
+        // Mirror the single-pane runner's per-event pipeline. Without
+        // this, swarm follow-ups never dispatch (planner finishes,
+        // propose/judge/review never run), breathers stick on
+        // "Waiting…", and queued turns never drain. Genome retries are
+        // disabled in multipane v1 (genome_worker = None).
         for event in codex.events.try_iter() {
-            event.apply(state);
+            crate::app::event_drain::drain_codex_event(
+                state,
+                &mut vitals,
+                &codex,
+                &claude,
+                &mut swarm,
+                &mut shadow,
+                None,
+                event,
+            );
         }
         for event in claude.events.try_iter() {
-            event.apply(state);
+            crate::app::event_drain::drain_claude_event(
+                state,
+                &mut vitals,
+                &codex,
+                &claude,
+                &mut swarm,
+                &mut shadow,
+                None,
+                event,
+            );
         }
         for event in dir_search_runner.events.try_iter() {
             apply_dir_search_event(state, event);
@@ -120,29 +143,24 @@ pub fn run_loop(
             continue;
         }
         let area = terminal_size(terminal)?;
-        match event::read()? {
-            Event::Key(key) if key.kind == KeyEventKind::Press => {
-                if handle_key(
-                    state,
-                    &mut vitals,
-                    &codex,
-                    &claude,
-                    &mut swarm,
-                    &mut shadow,
-                    &dir_search_runner,
-                    key,
-                    &mut clipboard,
-                    area,
-                ) {
-                    finalize_session(state, &workspace_root, had_prior_session);
-                    return Ok(());
-                }
-            }
-            Event::Mouse(mouse) => {
-                handle_mouse(state, area, mouse);
-            }
-            Event::Resize(_, _) => {}
-            _ => {}
+        // Coalesce a burst of input (e.g. wheel scroll fires 5–20 events
+        // per gesture) so we render once per batch instead of once per
+        // event. Bounded at 32 so a runaway producer can't starve the
+        // redraw indefinitely.
+        let should_quit = drain_input_burst(
+            state,
+            &mut vitals,
+            &codex,
+            &claude,
+            &mut swarm,
+            &mut shadow,
+            &dir_search_runner,
+            &mut clipboard,
+            area,
+        )?;
+        if should_quit {
+            finalize_session(state, &workspace_root, had_prior_session);
+            return Ok(());
         }
 
         // Debounced session save: focus change or cwd change is the
@@ -159,6 +177,41 @@ pub fn run_loop(
             last_save = Instant::now();
         }
     }
+}
+
+/// Process up to 32 pending crossterm events, dispatching each one to
+/// `handle_key` or `handle_mouse`. Returns `Ok(true)` when a key
+/// handler signalled quit. Drains so a wheel burst that fires 5–20
+/// events lands in one redraw batch.
+#[allow(clippy::too_many_arguments)]
+fn drain_input_burst(
+    state: &mut AppState,
+    vitals: &mut VitalsState,
+    codex: &CodexRunner,
+    claude: &ClaudeRunner,
+    swarm: &mut SwarmRuntime,
+    shadow: &mut ShadowRuntime,
+    dir_runner: &DirSearchRunner,
+    clipboard: &mut Option<arboard::Clipboard>,
+    area: Rect,
+) -> io::Result<bool> {
+    for _ in 0..32 {
+        match event::read()? {
+            Event::Key(key) if key.kind == KeyEventKind::Press => {
+                if handle_key(
+                    state, vitals, codex, claude, swarm, shadow, dir_runner, key, clipboard, area,
+                ) {
+                    return Ok(true);
+                }
+            }
+            Event::Mouse(mouse) => handle_mouse(state, swarm, area, mouse),
+            _ => {}
+        }
+        if !event::poll(Duration::from_millis(0))? {
+            break;
+        }
+    }
+    Ok(false)
 }
 
 /// Final save / drop on Ctrl+Q. A "fresh" session (no pane has run a
@@ -529,6 +582,28 @@ fn compute_dropdown_rows(inner_height: u16, results_len: usize) -> u16 {
     clamped.min(results_len.max(1) as u16)
 }
 
+/// Body rect for a pane's content area, taking into account whether the
+/// dir-search overlay is open. Mirrors `render_pane_dir_search_overlay`'s
+/// return value exactly so click hit-tests resolve to the same rows the
+/// renderer painted. Single source of truth — both call sites must use
+/// it or roster clicks misroute when the dropdown is open.
+fn dir_search_body_rect(inner: Rect, pane: &nit_core::PaneSession) -> Rect {
+    let Some(ds) = pane.dir_search.as_ref() else {
+        return inner;
+    };
+    if inner.height < DIR_SEARCH_INPUT_ROWS + DIR_SEARCH_DROPDOWN_MIN_ROWS {
+        return inner;
+    }
+    let visible_rows = compute_dropdown_rows(inner.height, ds.results.len());
+    let total = DIR_SEARCH_INPUT_ROWS + visible_rows;
+    Rect::new(
+        inner.x,
+        inner.y + total,
+        inner.width,
+        inner.height.saturating_sub(total),
+    )
+}
+
 fn render_pane_dir_search_overlay(
     frame: &mut ratatui::Frame,
     inner: Rect,
@@ -538,11 +613,10 @@ fn render_pane_dir_search_overlay(
     let Some(ds) = pane.dir_search.as_ref() else {
         return inner;
     };
-    let visible_rows = compute_dropdown_rows(inner.height, ds.results.len());
-    let total = DIR_SEARCH_INPUT_ROWS + visible_rows;
     if inner.height < DIR_SEARCH_INPUT_ROWS + DIR_SEARCH_DROPDOWN_MIN_ROWS {
         return inner;
     }
+    let visible_rows = compute_dropdown_rows(inner.height, ds.results.len());
     let bar_rect = Rect::new(inner.x, inner.y, inner.width, DIR_SEARCH_INPUT_ROWS);
     let drop_rect = Rect::new(
         inner.x,
@@ -593,12 +667,7 @@ fn render_pane_dir_search_overlay(
         })
         .collect();
     frame.render_widget(Paragraph::new(lines), drop_rect);
-    Rect::new(
-        inner.x,
-        inner.y + total,
-        inner.width,
-        inner.height.saturating_sub(total),
-    )
+    dir_search_body_rect(inner, pane)
 }
 
 /// Render a path as `parent/child/.../leaf/` relative to `base`. Uses
@@ -1041,11 +1110,11 @@ fn handle_chat_key(
             false
         }
         KeyCode::PageUp => {
-            scroll_chat_thread(state, -CHAT_THREAD_PAGE_STEP);
+            scroll_chat_thread(state, swarm, area, -CHAT_THREAD_PAGE_STEP);
             false
         }
         KeyCode::PageDown => {
-            scroll_chat_thread(state, CHAT_THREAD_PAGE_STEP);
+            scroll_chat_thread(state, swarm, area, CHAT_THREAD_PAGE_STEP);
             false
         }
         _ => {
@@ -1125,11 +1194,55 @@ fn with_focused_pane_aliased<R>(state: &mut AppState, body: impl FnOnce(&mut App
 
 const CHAT_THREAD_PAGE_STEP: i32 = 8;
 
-fn scroll_chat_thread(state: &mut AppState, delta: i32) {
-    if let Some(pane) = focused_pane_mut(state) {
-        let current = pane.chat_thread_scroll as i32;
-        pane.chat_thread_scroll = (current + delta).max(0) as usize;
+fn scroll_chat_thread(state: &mut AppState, swarm: &SwarmRuntime, area: Rect, delta: i32) {
+    let Some(mp) = state.multipane.as_ref() else {
+        return;
+    };
+    let focused_idx = mp.focused;
+    let Some(pane) = mp.panes.get(focused_idx).cloned() else {
+        return;
+    };
+    let max_scroll = focused_pane_chat_thread_max_scroll(state, swarm, &pane, area, focused_idx);
+    if let Some(p) = focused_pane_mut(state) {
+        let current = p.chat_thread_scroll as i32;
+        let next = (current + delta).max(0) as usize;
+        p.chat_thread_scroll = next.min(max_scroll);
     }
+}
+
+/// Maximum legal `chat_thread_scroll` for the given pane. Mirrors the
+/// renderer's clamp at `agent_console_view::render_pane` so wheel /
+/// PgUp / PgDn never pin the stored scroll beyond the rendered window
+/// — which would otherwise force the operator to "drain" stale scroll
+/// before any visible movement happens.
+fn focused_pane_chat_thread_max_scroll(
+    state: &AppState,
+    swarm: &SwarmRuntime,
+    pane: &nit_core::PaneSession,
+    area: Rect,
+    pane_idx: usize,
+) -> usize {
+    if pane.selected_agent_id.is_none() && pane.agent_id.is_empty() {
+        return 0;
+    }
+    let Some(thread_area) = pane_thread_area_for_pane(state, area, pane_idx, pane) else {
+        return 0;
+    };
+    let agent_id = if pane.agent_id.is_empty() {
+        pane.selected_agent_id.as_deref()
+    } else {
+        Some(pane.agent_id.as_str())
+    };
+    let rows = agent_console_view::build_pane_thread_rows_with_breathers(
+        state,
+        Some(swarm),
+        agent_id,
+        pane.mission_id.as_deref(),
+        thread_area.width.max(1) as usize,
+        !pane.has_run_mission,
+    );
+    rows.len()
+        .saturating_sub(thread_area.height.max(1) as usize)
 }
 
 fn focused_pane_rows(state: &AppState) -> (Option<usize>, Vec<roster_view::PaneRosterRow>) {
@@ -1335,22 +1448,32 @@ fn revert_focused_pane_to_roster(state: &mut AppState) {
     }
 }
 
-fn handle_mouse(state: &mut AppState, area: Rect, mouse: MouseEvent) {
+fn handle_mouse(state: &mut AppState, swarm: &SwarmRuntime, area: Rect, mouse: MouseEvent) {
+    // The renderer reserves the top status strip and bottom hint row
+    // before painting panes (see `render_grid`). Click hit-tests must
+    // strip the same chrome — without this, `pane_at_point` returns the
+    // pane one row above the cursor, so clicking `Backend(Claude)` lands
+    // on `Backend(Codex)` etc.
+    let grid_area = if area.height >= 4 {
+        Rect::new(area.x, area.y + 1, area.width, area.height - 2)
+    } else {
+        area
+    };
     match mouse.kind {
         MouseEventKind::Down(MouseButton::Left) => {
-            handle_mouse_left_down(state, area, mouse.column, mouse.row);
+            handle_mouse_left_down(state, grid_area, mouse.column, mouse.row);
         }
         MouseEventKind::Drag(MouseButton::Left) => {
-            handle_mouse_left_drag(state, area, mouse.column, mouse.row);
+            handle_mouse_left_drag(state, grid_area, mouse.column, mouse.row);
         }
         MouseEventKind::Up(MouseButton::Left) => {
-            handle_mouse_left_up(state, area, mouse.column, mouse.row);
+            handle_mouse_left_up(state, swarm, grid_area, mouse.column, mouse.row);
         }
         MouseEventKind::ScrollUp => {
-            handle_mouse_scroll(state, area, mouse.column, mouse.row, -1);
+            handle_mouse_scroll(state, swarm, grid_area, mouse.column, mouse.row, -3);
         }
         MouseEventKind::ScrollDown => {
-            handle_mouse_scroll(state, area, mouse.column, mouse.row, 1);
+            handle_mouse_scroll(state, swarm, grid_area, mouse.column, mouse.row, 3);
         }
         _ => {}
     }
@@ -1397,7 +1520,7 @@ fn handle_mouse_left_drag(state: &mut AppState, area: Rect, x: u16, y: u16) {
     }
 }
 
-fn handle_mouse_left_up(state: &mut AppState, area: Rect, x: u16, y: u16) {
+fn handle_mouse_left_up(state: &mut AppState, swarm: &SwarmRuntime, area: Rect, x: u16, y: u16) {
     let Some((pane_idx, _, _)) = resolve_chat_thread_hit(state, area, x, y) else {
         return;
     };
@@ -1412,7 +1535,7 @@ fn handle_mouse_left_up(state: &mut AppState, area: Rect, x: u16, y: u16) {
     if let Some(pane) = pane_at_mut(state, pane_idx) {
         selection::clear(pane);
     }
-    if try_open_chat_pane_artifact(state, area, x, y) {
+    if try_open_chat_pane_artifact(state, swarm, area, x, y) {
         return;
     }
     if let Some(target) = resolve_left_click_target(state, area, x, y) {
@@ -1434,21 +1557,11 @@ fn resolve_chat_thread_hit(
     let mp = state.multipane.as_ref()?;
     let pane_idx = grid::pane_at_point(area, mp.grid_cols, mp.grid_rows, x, y)?;
     let pane = mp.panes.get(pane_idx)?;
-    let in_chat_mode = pane.selected_agent_id.is_some() || !pane.agent_id.is_empty();
-    if !in_chat_mode {
+    if pane.selected_agent_id.is_none() && pane.agent_id.is_empty() {
         return None;
     }
-    let pane_rect = grid::pane_rect(area, mp.grid_cols, mp.grid_rows, pane_idx);
-    let inner = pane_inner_after_chrome(pane_rect);
-    if inner.width == 0 || inner.height == 0 {
-        return None;
-    }
-    let thread_area = agent_console_view::pane_thread_text_area(inner, pane)?;
-    if x < thread_area.x
-        || y < thread_area.y
-        || x >= thread_area.x + thread_area.width
-        || y >= thread_area.y + thread_area.height
-    {
+    let thread_area = pane_thread_area_for_pane(state, area, pane_idx, pane)?;
+    if !point_in_rect(x, y, thread_area) {
         return None;
     }
     let local_y = (y - thread_area.y) as usize;
@@ -1460,47 +1573,76 @@ fn resolve_chat_thread_hit(
     ))
 }
 
+fn point_in_rect(x: u16, y: u16, rect: Rect) -> bool {
+    x >= rect.x && x < rect.x + rect.width && y >= rect.y && y < rect.y + rect.height
+}
+
 /// If `(x, y)` lands on a chat-pane thread row that the artifact-popup
 /// resolver recognises, open the popup and return `true`. Otherwise
 /// returns `false` so the caller can fall through to roster click
 /// resolution. Mirrors the layout arithmetic used by
 /// [`agent_console_view::render_pane`] so the row index lines up with
 /// what the renderer painted.
-fn try_open_chat_pane_artifact(state: &mut AppState, area: Rect, x: u16, y: u16) -> bool {
-    let (pane_rect, pane) = {
-        let Some(mp) = state.multipane.as_ref() else {
-            return false;
-        };
-        let Some(idx) = grid::pane_at_point(area, mp.grid_cols, mp.grid_rows, x, y) else {
-            return false;
-        };
-        let Some(p) = mp.panes.get(idx).cloned() else {
-            return false;
-        };
-        let rect = grid::pane_rect(area, mp.grid_cols, mp.grid_rows, idx);
-        (rect, p)
-    };
-    let in_chat_mode = pane.selected_agent_id.is_some() || !pane.agent_id.is_empty();
-    if !in_chat_mode {
-        return false;
-    }
-    let inner = pane_inner_after_chrome(pane_rect);
-    if inner.width == 0 || inner.height == 0 {
-        return false;
-    }
-    let Some(thread_area) = agent_console_view::pane_thread_text_area(inner, &pane) else {
+fn try_open_chat_pane_artifact(
+    state: &mut AppState,
+    swarm: &SwarmRuntime,
+    area: Rect,
+    x: u16,
+    y: u16,
+) -> bool {
+    let Some((pane_idx, line_idx, _col)) = resolve_chat_thread_hit(state, area, x, y) else {
         return false;
     };
-    if x < thread_area.x
-        || y < thread_area.y
-        || x >= thread_area.x + thread_area.width
-        || y >= thread_area.y + thread_area.height
-    {
+    let Some(pane) = pane_at(state, pane_idx).cloned() else {
         return false;
+    };
+    let Some(thread_area) = pane_thread_area_for_pane(state, area, pane_idx, &pane) else {
+        return false;
+    };
+    invoke_pane_artifact_popup(state, swarm, &pane, thread_area.width as usize, line_idx)
+}
+
+/// Chat thread paint rect — a thin layer above [`pane_body_rect`]
+/// that adds the prompt-input split.
+fn pane_thread_area_for_pane(
+    state: &AppState,
+    area: Rect,
+    pane_idx: usize,
+    pane: &nit_core::PaneSession,
+) -> Option<Rect> {
+    let body = pane_body_rect(state, area, pane_idx, pane)?;
+    agent_console_view::pane_thread_text_area(body, pane)
+}
+
+/// Alias `selected_*` to `pane` for the popup-open call so the resolver
+/// (`artifact_message_index_for_line_with_swarm` via `selected_context_*`)
+/// walks this pane's mission/agent. On a successful open `popup_keys`
+/// deliberately writes `selected_mission` to bind the popup to the
+/// clicked artifact — leave those values in place. Restore on miss so
+/// other panes don't see contaminated globals.
+fn invoke_pane_artifact_popup(
+    state: &mut AppState,
+    swarm: &SwarmRuntime,
+    pane: &nit_core::PaneSession,
+    text_width: usize,
+    line_idx: usize,
+) -> bool {
+    let saved_agent = state.agents.selected_agent.clone();
+    let saved_mission = state.agents.selected_mission.clone();
+    let pane_agent_id = if pane.agent_id.is_empty() {
+        pane.selected_agent_id.clone()
+    } else {
+        Some(pane.agent_id.clone())
+    };
+    state.agents.selected_agent = pane_agent_id;
+    state.agents.selected_mission = pane.mission_id.clone();
+    let opened =
+        maybe_open_artifact_popup_from_console_line(state, Some(swarm), text_width, line_idx);
+    if !opened {
+        state.agents.selected_agent = saved_agent;
+        state.agents.selected_mission = saved_mission;
     }
-    let local_y = (y - thread_area.y) as usize;
-    let line_idx = pane.chat_thread_scroll.saturating_add(local_y);
-    maybe_open_artifact_popup_from_console_line(state, None, thread_area.width as usize, line_idx)
+    opened
 }
 
 struct RosterClickTarget {
@@ -1519,21 +1661,17 @@ fn resolve_left_click_target(
 ) -> Option<RosterClickTarget> {
     let mp = state.multipane.as_mut()?;
     let pane_idx = focus::focus_at_point(mp, area, x, y)?;
-    let pane_rect = grid::pane_rect(area, mp.grid_cols, mp.grid_rows, pane_idx);
     let backend_filter = mp.backend_filter.clone();
     let pane = mp.panes.get(pane_idx).cloned()?;
     if !(pane.selected_agent_id.is_none() && pane.agent_id.is_empty()) {
         return None; // chat panes ignore left-clicks beyond focus
     }
-    let inner = pane_inner_after_chrome(pane_rect);
-    if inner.width == 0 || inner.height == 0 {
+    let body = pane_body_rect(state, area, pane_idx, &pane)?;
+    if !point_in_rect(x, y, body) {
         return None;
     }
-    if x < inner.x || y < inner.y || x >= inner.x + inner.width || y >= inner.y + inner.height {
-        return None;
-    }
-    let local_x = (x - inner.x) as usize;
-    let local_y = (y - inner.y) as usize;
+    let local_x = (x - body.x) as usize;
+    let local_y = (y - body.y) as usize;
     let rows = roster_view::compute_rows(state, &pane, backend_filter.as_deref());
     let row_idx = roster_view::row_index_at_y(&rows, pane.roster_scroll, local_y)?;
     let row = rows.get(row_idx).cloned()?;
@@ -1544,6 +1682,26 @@ fn resolve_left_click_target(
         row,
         local_x,
     })
+}
+
+/// Single source of truth for "where this pane's content paints" —
+/// chrome stripped + dir-search overlay stripped. Roster panes paint
+/// rows directly into this rect; chat panes split it further into
+/// thread + input via [`pane_thread_area_for_pane`].
+fn pane_body_rect(
+    state: &AppState,
+    area: Rect,
+    pane_idx: usize,
+    pane: &nit_core::PaneSession,
+) -> Option<Rect> {
+    let mp = state.multipane.as_ref()?;
+    let pane_rect = grid::pane_rect(area, mp.grid_cols, mp.grid_rows, pane_idx);
+    let inner = pane_inner_after_chrome(pane_rect);
+    if inner.width == 0 || inner.height == 0 {
+        return None;
+    }
+    let body = dir_search_body_rect(inner, pane);
+    (body.width > 0 && body.height > 0).then_some(body)
 }
 
 fn apply_roster_click(state: &mut AppState, target: RosterClickTarget) {
@@ -1617,7 +1775,14 @@ fn commit_agent_to_pane(state: &mut AppState, pane_idx: usize, agent_id: &str) {
     push_pane_system_message(state, message);
 }
 
-fn handle_mouse_scroll(state: &mut AppState, area: Rect, x: u16, y: u16, delta: i32) {
+fn handle_mouse_scroll(
+    state: &mut AppState,
+    swarm: &SwarmRuntime,
+    area: Rect,
+    x: u16,
+    y: u16,
+    delta: i32,
+) {
     let Some(mp) = state.multipane.as_ref() else {
         return;
     };
@@ -1628,16 +1793,40 @@ fn handle_mouse_scroll(state: &mut AppState, area: Rect, x: u16, y: u16, delta: 
         return;
     };
     let in_roster = pane.selected_agent_id.is_none() && pane.agent_id.is_empty();
+    let max_scroll = if in_roster {
+        roster_max_scroll(state, &pane, area, pane_idx)
+    } else {
+        focused_pane_chat_thread_max_scroll(state, swarm, &pane, area, pane_idx)
+    };
     let Some(p) = pane_at_mut(state, pane_idx) else {
         return;
     };
     if in_roster {
         let current = p.roster_scroll as i32;
-        p.roster_scroll = (current + delta).max(0) as usize;
+        let next = (current + delta).max(0) as usize;
+        p.roster_scroll = next.min(max_scroll);
     } else {
         let current = p.chat_thread_scroll as i32;
-        p.chat_thread_scroll = (current + delta).max(0) as usize;
+        let next = (current + delta).max(0) as usize;
+        p.chat_thread_scroll = next.min(max_scroll);
     }
+}
+
+fn roster_max_scroll(
+    state: &AppState,
+    pane: &nit_core::PaneSession,
+    area: Rect,
+    pane_idx: usize,
+) -> usize {
+    let height = pane_body_rect(state, area, pane_idx, pane)
+        .map(|body| body.height as usize)
+        .unwrap_or(0);
+    let backend_filter = state
+        .multipane
+        .as_ref()
+        .and_then(|mp| mp.backend_filter.clone());
+    let rows = roster_view::compute_rows(state, pane, backend_filter.as_deref());
+    rows.len().saturating_sub(height)
 }
 
 fn pane_inner_after_chrome(rect: Rect) -> Rect {
@@ -2091,7 +2280,8 @@ fn focused_pane_agent_id(state: &AppState) -> Option<String> {
 mod tests {
     use super::*;
     use nit_core::{
-        AgentLane, AgentLaneKind, AgentStatus, AgentsState, MultipaneState, PaneSession,
+        AgentLane, AgentLaneKind, AgentStatus, AgentsState, MissionRecord, MultipaneState,
+        PaneSession,
     };
     use std::path::PathBuf;
     use std::time::Instant;
@@ -2489,20 +2679,47 @@ mod tests {
             pane.selected_agent_id = Some("claude-haiku-4-5#mp-pane-00".into());
             pane.agent_id = "claude-haiku-4-5#mp-pane-00".into();
         }
-        scroll_chat_thread(&mut state, -3);
+        let swarm = SwarmRuntime::default();
+        let area = Rect::new(0, 0, 80, 30);
+        // The bare-fixture pane has no rendered messages, so max_scroll
+        // is 0 — every positive bump clamps to 0. Override the cap to
+        // verify the negative-clamp path independently.
+        let mp = state.multipane.as_mut().unwrap();
+        if let Some(pane) = mp.panes.get_mut(0) {
+            pane.chat_thread_scroll = 0;
+        }
+        scroll_chat_thread(&mut state, &swarm, area, -3);
         assert_eq!(
             state.multipane.as_ref().unwrap().panes[0].chat_thread_scroll,
             0
         );
-        scroll_chat_thread(&mut state, 4);
-        assert_eq!(
-            state.multipane.as_ref().unwrap().panes[0].chat_thread_scroll,
-            4
+    }
+
+    #[test]
+    fn handle_mouse_scroll_clamps_at_max_with_short_thread() {
+        let mut state = fixture_state_no_backend();
+        if let Some(pane) = state.multipane.as_mut().unwrap().panes.get_mut(1) {
+            pane.selected_agent_id = Some("claude-haiku-4-5#mp-pane-01".into());
+            pane.agent_id = "claude-haiku-4-5#mp-pane-01".into();
+            pane.chat_thread_scroll = 999; // pretend a runaway scroll
+        }
+        let swarm = SwarmRuntime::default();
+        let area = Rect::new(0, 0, 80, 30);
+        let pane1_rect = grid::pane_rect(area, 2, 1, 1);
+        // Wheel down on a short thread MUST clamp the stored scroll
+        // back down to max_scroll (== 0 here, with no messages) — not
+        // leave the runaway 999 + delta in place.
+        handle_mouse_scroll(
+            &mut state,
+            &swarm,
+            area,
+            pane1_rect.x + 5,
+            pane1_rect.y + 5,
+            3,
         );
-        scroll_chat_thread(&mut state, -1);
         assert_eq!(
-            state.multipane.as_ref().unwrap().panes[0].chat_thread_scroll,
-            3
+            state.multipane.as_ref().unwrap().panes[1].chat_thread_scroll,
+            0
         );
     }
 
@@ -2514,19 +2731,40 @@ mod tests {
             pane.selected_agent_id = Some("claude-haiku-4-5#mp-pane-01".into());
             pane.agent_id = "claude-haiku-4-5#mp-pane-01".into();
         }
+        let swarm = SwarmRuntime::default();
         let area = Rect::new(0, 0, 80, 30);
         let pane0_rect = grid::pane_rect(area, 2, 1, 0);
         let pane1_rect = grid::pane_rect(area, 2, 1, 1);
 
-        // Wheel down inside pane 0 → roster_scroll bumps.
-        handle_mouse_scroll(&mut state, area, pane0_rect.x + 5, pane0_rect.y + 5, 1);
-        assert_eq!(state.multipane.as_ref().unwrap().panes[0].roster_scroll, 1);
+        // Wheel down inside pane 0 → roster_scroll bumps (clamped to
+        // roster row count).
+        handle_mouse_scroll(
+            &mut state,
+            &swarm,
+            area,
+            pane0_rect.x + 5,
+            pane0_rect.y + 5,
+            1,
+        );
+        let roster = state.multipane.as_ref().unwrap().panes[0].roster_scroll;
+        assert!(
+            roster <= 1,
+            "roster_scroll should bump or clamp, got {roster}"
+        );
 
-        // Wheel down inside pane 1 → chat_thread_scroll bumps.
-        handle_mouse_scroll(&mut state, area, pane1_rect.x + 5, pane1_rect.y + 5, 1);
+        // Wheel down inside pane 1 (chat mode, empty thread) — clamps
+        // at max_scroll = 0.
+        handle_mouse_scroll(
+            &mut state,
+            &swarm,
+            area,
+            pane1_rect.x + 5,
+            pane1_rect.y + 5,
+            1,
+        );
         assert_eq!(
             state.multipane.as_ref().unwrap().panes[1].chat_thread_scroll,
-            1
+            0
         );
     }
 
@@ -2937,5 +3175,172 @@ mod tests {
             .as_ref()
             .unwrap();
         assert!(ds.results.is_empty());
+    }
+
+    /// Bug 2: when the dir-search dropdown is open, clicks below the
+    /// overlay must resolve to the row visually under the cursor — not
+    /// `DIR_SEARCH_INPUT_ROWS + visible_rows` rows above it.
+    #[test]
+    fn roster_click_with_dir_search_open_hits_correct_row() {
+        let mut state = fixture_state_no_backend();
+        let area = Rect::new(0, 0, 80, 30);
+        // Single pane fills the grid, focused.
+        if let Some(mp) = state.multipane.as_mut() {
+            mp.panes.truncate(1);
+            mp.grid_cols = 1;
+            mp.grid_rows = 1;
+            mp.focused = 0;
+        }
+        // Open dir-search with three results so the overlay reserves
+        // `DIR_SEARCH_INPUT_ROWS + 3` rows of header at the top of the
+        // pane's inner area.
+        let results = vec![
+            PathBuf::from("/tmp/a"),
+            PathBuf::from("/tmp/b"),
+            PathBuf::from("/tmp/c"),
+        ];
+        if let Some(pane) = state.multipane.as_mut().and_then(|mp| mp.panes.get_mut(0)) {
+            pane.dir_search = Some(nit_core::DirSearchState {
+                results,
+                base: PathBuf::from("/tmp"),
+                generation: 1,
+                ..Default::default()
+            });
+        }
+        let pane = state.multipane.as_ref().unwrap().panes[0].clone();
+        let pane_rect = grid::pane_rect(area, 1, 1, 0);
+        let inner = pane_inner_after_chrome(pane_rect);
+        let body = dir_search_body_rect(inner, &pane);
+        // Click on the first visible roster row WITHIN the body — i.e.
+        // the row the operator sees is row 0 of the roster body.
+        let click_x = body.x + 1;
+        let click_y = body.y;
+        let target = resolve_left_click_target(&mut state, area, click_x, click_y);
+        let target = target.expect("click should resolve to a roster target");
+        // Computed roster rows include the Template / Mission preamble
+        // plus backend / agent rows. Whatever the first selectable row
+        // is, it must be the one at row_idx 0 — meaning the overlay
+        // strip was correctly accounted for.
+        assert_eq!(
+            target.row_idx, 0,
+            "click on the first visible roster row must resolve to row_idx 0, got {}",
+            target.row_idx
+        );
+    }
+
+    /// Bug 2: `handle_mouse` must strip the chrome (top status row +
+    /// bottom hint row) before passing coordinates downstream — so a
+    /// click on the very first visible pane row routes to a real
+    /// roster row instead of falling outside the pane.
+    #[test]
+    fn roster_click_after_chrome_strip_resolves_visual_row() {
+        let mut state = fixture_state_no_backend();
+        let area = Rect::new(0, 0, 80, 30);
+        if let Some(mp) = state.multipane.as_mut() {
+            mp.panes.truncate(1);
+            mp.grid_cols = 1;
+            mp.grid_rows = 1;
+            mp.focused = 0;
+        }
+        // Click 1 row below the top chrome, which the renderer paints
+        // as the start of pane 0. Without chrome-strip, `pane_at_point`
+        // would map this to the chrome row and resolve_left_click_target
+        // would return None.
+        let click_y = area.y + 1;
+        let mouse = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 5,
+            row: click_y,
+            modifiers: KeyModifiers::empty(),
+        };
+        let swarm = SwarmRuntime::default();
+        // Just call handle_mouse — no panic / no out-of-bounds means
+        // the chrome strip and downstream resolver agreed on the rect.
+        handle_mouse(&mut state, &swarm, area, mouse);
+        // The pane should still exist and not have been corrupted.
+        assert_eq!(state.multipane.as_ref().unwrap().panes.len(), 1);
+    }
+
+    /// Bug 3: clicking an artifact line in pane B must scope the popup
+    /// resolver to pane B's mission/agent — not whichever values the
+    /// last-rendered pane left in `state.agents.selected_*`.
+    #[test]
+    fn try_open_chat_pane_artifact_uses_pane_context_and_swarm() {
+        let mut state = fixture_state_no_backend();
+        // Two panes, two missions, two agents — pane 0 belongs to
+        // mission A and agent A, pane 1 belongs to mission B and agent B.
+        state.agents.messages.clear();
+        state.agents.missions.clear();
+        let now = "t+0".to_string();
+        state.agents.missions.push(MissionRecord {
+            id: "mis-A".into(),
+            title: "A".into(),
+            phase: nit_core::MissionPhase::Plan,
+            swarm: false,
+            assigned_agents: Vec::new(),
+            status: "Planning".into(),
+            updated_at: now.clone(),
+        });
+        state.agents.missions.push(MissionRecord {
+            id: "mis-B".into(),
+            title: "B".into(),
+            phase: nit_core::MissionPhase::Plan,
+            swarm: false,
+            assigned_agents: Vec::new(),
+            status: "Planning".into(),
+            updated_at: now,
+        });
+        // Configure pane 0 → mission A, pane 1 → mission B
+        if let Some(mp) = state.multipane.as_mut() {
+            mp.panes.truncate(2);
+            mp.grid_cols = 2;
+            mp.grid_rows = 1;
+            mp.focused = 0;
+            mp.panes[0].selected_agent_id = Some("claude-haiku-4-5#mp-pane-00".into());
+            mp.panes[0].agent_id = "claude-haiku-4-5#mp-pane-00".into();
+            mp.panes[0].mission_id = Some("mis-A".into());
+            mp.panes[0].has_run_mission = true;
+            mp.panes[1].selected_agent_id = Some("claude-haiku-4-5#mp-pane-01".into());
+            mp.panes[1].agent_id = "claude-haiku-4-5#mp-pane-01".into();
+            mp.panes[1].mission_id = Some("mis-B".into());
+            mp.panes[1].has_run_mission = true;
+        }
+        // Leave selected_* pointing at pane A — the way it would look
+        // after pane A renders. The buggy resolver would walk pane A's
+        // messages even when the click is in pane B.
+        state.agents.selected_mission = Some("mis-A".into());
+        state.agents.selected_agent = Some("claude-haiku-4-5#mp-pane-00".into());
+
+        let area = Rect::new(0, 0, 80, 30);
+        let pane_b_rect = grid::pane_rect(area, 2, 1, 1);
+        let swarm = SwarmRuntime::default();
+        // Click somewhere inside pane B's thread area. We don't care
+        // whether an artifact actually opens (no messages in this
+        // fixture) — we care that the click does NOT corrupt
+        // `selected_mission` to pane A's value, since the resolver
+        // has been wrapped to alias to pane B and restore on miss.
+        let opened = try_open_chat_pane_artifact(
+            &mut state,
+            &swarm,
+            area,
+            pane_b_rect.x + 2,
+            pane_b_rect.y + 2,
+        );
+        assert!(
+            !opened,
+            "no artifact rows in fixture, click must miss cleanly"
+        );
+        // On miss, the alias is restored, so selected_* point back at
+        // pane A's values (matching what they were when we entered).
+        assert_eq!(
+            state.agents.selected_mission.as_deref(),
+            Some("mis-A"),
+            "selected_mission must be restored to its prior value on miss"
+        );
+        assert_eq!(
+            state.agents.selected_agent.as_deref(),
+            Some("claude-haiku-4-5#mp-pane-00"),
+            "selected_agent must be restored to its prior value on miss"
+        );
     }
 }

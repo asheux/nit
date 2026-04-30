@@ -769,229 +769,36 @@ pub(super) fn run_loop(
 
         // codex runner events
         while let Ok(event) = codex_runner.events.try_recv() {
-            record_agent_bus_vitals(&mut vitals, &event);
-            let finished = matches!(
-                event,
-                AgentBusEvent::TurnCompleted { .. } | AgentBusEvent::TurnFailed { .. }
-            );
-            // Snapshot the currently-viewed artifact so we can re-resolve
-            // the index after the card list changes.
-            let pinned_popup_ref = if state.agents.artifacts_popup_open {
-                agent_ops_view::artifacts_popup_ref(state, &swarm, state.agents.ops_viewport_width)
-            } else {
-                None
-            };
-            let clear_invalid_thread_context = match &event {
-                AgentBusEvent::TurnFailed {
-                    agent_id,
-                    mission_id,
-                    message,
-                    ..
-                } if codex_thread_context_not_found(message) => {
-                    Some((agent_id.clone(), mission_id.clone()))
-                }
-                _ => None,
-            };
-            event.apply(state);
-            if let Some((agent_id, mission_id)) = clear_invalid_thread_context {
-                clear_codex_thread_context_for_agent(
-                    state,
-                    agent_id.as_str(),
-                    mission_id.as_deref(),
-                );
-            }
-            drain_pending_claim_retries(state, &mut vitals, &codex_runner, &claude_runner);
-            drain_pending_interventions(state, &mut vitals, &codex_runner, &claude_runner);
-            let swarm_outcome = swarm.handle_event_outcome(state, &event);
-            maybe_follow_swarm_artifact_in_popup(
+            let outcome = super::event_drain::drain_codex_event(
                 state,
-                &swarm,
-                swarm_outcome.artifact_focus.as_ref(),
+                &mut vitals,
+                &codex_runner,
+                &claude_runner,
+                &mut swarm,
+                &mut shadow,
+                Some(&genome_worker),
+                event,
             );
-            for mut dispatch in swarm_outcome.dispatches {
-                augment_dispatch_prompt_with_landscape(state, &swarm, &mut dispatch);
-                apply_swarm_task_role(state, &dispatch);
-                dispatch_agent_prompt(
-                    state,
-                    &mut vitals,
-                    Some(&codex_runner),
-                    Some(&claude_runner),
-                    dispatch.agent_id,
-                    Some(dispatch.mission_id),
-                    dispatch.prompt,
-                );
+            if outcome.redraw {
+                needs_redraw = true;
             }
-            let shadow_outcome = shadow.handle_event_outcome(state, &event);
-            for dispatch in shadow_outcome.dispatches {
-                dispatch_shadow_outcome(
-                    state,
-                    &mut vitals,
-                    &codex_runner,
-                    &claude_runner,
-                    dispatch,
-                );
-            }
-            if finished {
-                maybe_dispatch_next_queued_codex_turn(state, &mut vitals, Some(&codex_runner));
-                maybe_dispatch_next_queued_claude_turn(state, &mut vitals, Some(&claude_runner));
-                // Clean up chat clones that are done.
-                if let AgentBusEvent::TurnCompleted { agent_id, .. }
-                | AgentBusEvent::TurnFailed { agent_id, .. } = &event
-                {
-                    crate::swarm::cleanup_idle_chat_clone(state, agent_id);
-                }
-                // Dispatch genome evaluations to background threads.
-                // Also fires on TurnFailed when the agent wrote files
-                // before crashing: integrators often hit max-turns or exit
-                // non-zero during cosmetic cleanup after the real work is
-                // already on disk. Without this, failed-but-wrote runs
-                // silently skip the entire genome retry pipeline.
-                match &event {
-                    AgentBusEvent::TurnCompleted {
-                        agent_id,
-                        mission_id,
-                        ..
-                    } => {
-                        dispatch_turn_genome_evals(state, &genome_worker, agent_id, mission_id);
-                    }
-                    AgentBusEvent::TurnFailed {
-                        agent_id,
-                        mission_id,
-                        ..
-                    } if state
-                        .genome_turn_modified
-                        .get(agent_id)
-                        .is_some_and(|s| !s.is_empty()) =>
-                    {
-                        dispatch_turn_genome_evals(state, &genome_worker, agent_id, mission_id);
-                    }
-                    _ => {}
-                }
-            }
-            // Re-resolve the pinned artifact so the popup stays on the
-            // same card even when new cards shift the indices.
-            if let Some(ref pinned) = pinned_popup_ref {
-                if let Some(idx) = agent_ops_view::artifacts_card_index_for_popup_ref(
-                    state,
-                    Some(&swarm),
-                    state.agents.ops_viewport_width,
-                    pinned,
-                ) {
-                    state.agents.artifacts_selected = idx;
-                }
-            }
-            needs_redraw = true;
         }
 
         // claude runner events
         while let Ok(event) = claude_runner.events.try_recv() {
-            record_agent_bus_vitals(&mut vitals, &event);
-            let finished = matches!(
-                event,
-                AgentBusEvent::TurnCompleted { .. } | AgentBusEvent::TurnFailed { .. }
-            );
-            let pinned_popup_ref = if state.agents.artifacts_popup_open {
-                agent_ops_view::artifacts_popup_ref(state, &swarm, state.agents.ops_viewport_width)
-            } else {
-                None
-            };
-            let clear_invalid_session_context = match &event {
-                AgentBusEvent::TurnFailed {
-                    agent_id,
-                    mission_id,
-                    message,
-                    ..
-                } if claude_session_context_not_found(message) => {
-                    Some((agent_id.clone(), mission_id.clone()))
-                }
-                _ => None,
-            };
-            apply_claude_event(state, &event);
-            if let Some((agent_id, mission_id)) = clear_invalid_session_context {
-                clear_claude_session_context_for_agent(
-                    state,
-                    agent_id.as_str(),
-                    mission_id.as_deref(),
-                );
-            }
-            drain_pending_claim_retries(state, &mut vitals, &codex_runner, &claude_runner);
-            drain_pending_interventions(state, &mut vitals, &codex_runner, &claude_runner);
-            let swarm_outcome = swarm.handle_event_outcome(state, &event);
-            maybe_follow_swarm_artifact_in_popup(
+            let outcome = super::event_drain::drain_claude_event(
                 state,
-                &swarm,
-                swarm_outcome.artifact_focus.as_ref(),
+                &mut vitals,
+                &codex_runner,
+                &claude_runner,
+                &mut swarm,
+                &mut shadow,
+                Some(&genome_worker),
+                event,
             );
-            for mut dispatch in swarm_outcome.dispatches {
-                augment_dispatch_prompt_with_landscape(state, &swarm, &mut dispatch);
-                apply_swarm_task_role(state, &dispatch);
-                dispatch_agent_prompt(
-                    state,
-                    &mut vitals,
-                    Some(&codex_runner),
-                    Some(&claude_runner),
-                    dispatch.agent_id,
-                    Some(dispatch.mission_id),
-                    dispatch.prompt,
-                );
+            if outcome.redraw {
+                needs_redraw = true;
             }
-            let shadow_outcome = shadow.handle_event_outcome(state, &event);
-            for dispatch in shadow_outcome.dispatches {
-                dispatch_shadow_outcome(
-                    state,
-                    &mut vitals,
-                    &codex_runner,
-                    &claude_runner,
-                    dispatch,
-                );
-            }
-            if finished {
-                maybe_dispatch_next_queued_codex_turn(state, &mut vitals, Some(&codex_runner));
-                maybe_dispatch_next_queued_claude_turn(state, &mut vitals, Some(&claude_runner));
-                if let AgentBusEvent::TurnCompleted { agent_id, .. }
-                | AgentBusEvent::TurnFailed { agent_id, .. } = &event
-                {
-                    crate::swarm::cleanup_idle_chat_clone(state, agent_id);
-                }
-                // Dispatch genome evaluations to background threads.
-                // Also fires on TurnFailed when the agent wrote files
-                // before crashing: integrators often hit max-turns or exit
-                // non-zero during cosmetic cleanup after the real work is
-                // already on disk. Without this, failed-but-wrote runs
-                // silently skip the entire genome retry pipeline.
-                match &event {
-                    AgentBusEvent::TurnCompleted {
-                        agent_id,
-                        mission_id,
-                        ..
-                    } => {
-                        dispatch_turn_genome_evals(state, &genome_worker, agent_id, mission_id);
-                    }
-                    AgentBusEvent::TurnFailed {
-                        agent_id,
-                        mission_id,
-                        ..
-                    } if state
-                        .genome_turn_modified
-                        .get(agent_id)
-                        .is_some_and(|s| !s.is_empty()) =>
-                    {
-                        dispatch_turn_genome_evals(state, &genome_worker, agent_id, mission_id);
-                    }
-                    _ => {}
-                }
-            }
-            if let Some(ref pinned) = pinned_popup_ref {
-                if let Some(idx) = agent_ops_view::artifacts_card_index_for_popup_ref(
-                    state,
-                    Some(&swarm),
-                    state.agents.ops_viewport_width,
-                    pinned,
-                ) {
-                    state.agents.artifacts_selected = idx;
-                }
-            }
-            needs_redraw = true;
         }
 
         if file_tree_tick(state, &file_tree_runner) {
